@@ -2,8 +2,10 @@ use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::pdms_inst::save_instance_data;
-use crate::fast_model::{booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model, process_meshes_update_db_deep, resolve_desi_comp, shared};
-use std::collections::HashSet;
+use crate::fast_model::{
+    booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
+    process_meshes_update_db_deep, resolve_desi_comp, shared,
+};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{PlantGeoData, ShapeInstancesData};
@@ -14,11 +16,14 @@ use aios_core::prim_geo::tubing::TubiSize;
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::hash_tool::hash_two_str;
-use aios_core::{query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB};
-use aios_core::{pdms_types::*, RefU64};
+use aios_core::{pdms_types::*, RefnoEnum};
 use aios_core::{prim_geo::*, DBType};
+use aios_core::{
+    query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB,
+};
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use glam::DVec3;
 use glam::{DMat4, Vec3};
@@ -26,6 +31,7 @@ use nom::complete::bool;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Isometry;
 use rayon::iter::ParallelIterator;
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryFrom;
 use std::io::Read;
@@ -33,15 +39,14 @@ use std::mem::take;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use futures::stream::FuturesUnordered;
 
 ///一个db生成模型里，汇总的参考号集合
 #[derive(Debug, Clone, Default)]
 pub struct DbModelInstRefnos {
-    pub bran_hanger_refnos: Arc<Vec<RefU64>>,
-    pub use_cate_refnos: Arc<Vec<RefU64>>,
-    pub loop_owner_refnos: Arc<Vec<RefU64>>,
-    pub prim_refnos: Arc<Vec<RefU64>>,
+    pub bran_hanger_refnos: Arc<Vec<RefnoEnum>>,
+    pub use_cate_refnos: Arc<Vec<RefnoEnum>>,
+    pub loop_owner_refnos: Arc<Vec<RefnoEnum>>,
+    pub prim_refnos: Arc<Vec<RefnoEnum>>,
 }
 
 impl DbModelInstRefnos {
@@ -74,9 +79,7 @@ impl DbModelInstRefnos {
         handles.push(tokio::spawn(async move {
             for bran_refnos in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
-                let target_refnos = query_multi_children_refnos(&bran_refnos)
-                    .await
-                    .unwrap();
+                let target_refnos = query_multi_children_refnos(&bran_refnos).await.unwrap();
                 gen_meshes_in_db(db_option_clone, &target_refnos)
                     .await
                     .expect("更新bran_hanger模型数据失败");
@@ -114,10 +117,10 @@ impl DbModelInstRefnos {
         handles.push(tokio::spawn(async move {
             for chunk in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
-                let target_refnos = query_multi_children_refnos(&chunk)
+                let target_refnos = query_multi_children_refnos(&chunk).await.unwrap();
+                booleans_meshes_in_db(db_option_clone, &target_refnos)
                     .await
-                    .unwrap();
-                booleans_meshes_in_db(db_option_clone, &target_refnos).await.expect("布尔运算bran_hanger模型数据失败");
+                    .expect("布尔运算bran_hanger模型数据失败");
             }
         }));
         while let Some(_) = handles.next().await {}
@@ -126,7 +129,7 @@ impl DbModelInstRefnos {
 
 ///生成几何体数据
 pub async fn gen_all_geos_data(
-    manual_refnos: Vec<RefU64>,
+    manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
@@ -146,7 +149,14 @@ pub async fn gen_all_geos_data(
                 println!("Insert manual shape insts: {}", shape_insts.inst_cnt());
             }
         });
-        let target_root_refnos = gen_geos_data(None, manual_refnos.clone(), db_option, incr_updates.clone(), sender.clone()).await?;
+        let target_root_refnos = gen_geos_data(
+            None,
+            manual_refnos.clone(),
+            db_option,
+            incr_updates.clone(),
+            sender.clone(),
+        )
+        .await?;
         drop(sender);
         insert_task.await.unwrap();
         if db_option.gen_mesh {
@@ -172,11 +182,8 @@ pub async fn gen_all_geos_data(
                     println!("Insert shape insts: {}", shape_insts.inst_info_map.len());
                 }
             });
-            let db_refnos = gen_geos_data_by_dbnum(
-                dbno,
-                db_option_arc.clone(),
-                sender.clone(),
-            ).await?;
+            let db_refnos =
+                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone()).await?;
             drop(sender);
             insert_task.await.unwrap();
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
@@ -216,14 +223,15 @@ pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> any
     Ok(())
 }
 
-
 pub async fn gen_geos_data_by_dbnum(
     dbno: u32,
     db_option_arc: Arc<DbOption>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<DbModelInstRefnos> {
-    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true)).await.unwrap_or_default();
-    if zones.is_empty(){
+    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true))
+        .await
+        .unwrap_or_default();
+    if zones.is_empty() {
         return Ok(Default::default());
     }
     let mut all_handles = FuturesUnordered::new();
@@ -243,13 +251,14 @@ pub async fn gen_geos_data_by_dbnum(
     let loop_sjus_map = DashMap::new();
     {
         //查找到子节点的所有PLOO类型
-        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true)).await.unwrap_or_default();
+        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true))
+            .await
+            .unwrap_or_default();
         #[cfg(debug_assertions)]
         if !target_ploo_refnos.is_empty() {
             println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
         }
-        if gen_model
-        {
+        if gen_model {
             for r in target_ploo_refnos.chunks(200) {
                 let sql = format!(
                     "select value [OWNER, HEIG, SJUS] from [{}] where SJUS!=0",
@@ -259,7 +268,7 @@ pub async fn gen_geos_data_by_dbnum(
                         .join(",")
                 );
                 let mut response = SUL_DB.query(sql).await?;
-                let tuples: Vec<(RefU64, f32, String)> = response.take(0)?;
+                let tuples: Vec<(RefnoEnum, f32, String)> = response.take(0)?;
                 // dbg!(&tuples[0]);
                 for (owner, height, sjus) in tuples {
                     let off_z = cata_model::cal_sjus_value(&sjus, height);
@@ -281,10 +290,8 @@ pub async fn gen_geos_data_by_dbnum(
         target_bran_hanger_refnos.len()
     );
 
-
     //打印管道/支吊架的使用数量
     if !target_bran_hanger_refnos.is_empty() && gen_cata_flag && gen_model {
-
         //查询出branch 和 branch 下的子节点
         let mut branch_refnos_map = DashMap::new();
         let mut bran_comp_eles = HashSet::new();
@@ -299,10 +306,10 @@ pub async fn gen_geos_data_by_dbnum(
             let map = aios_core::query_group_by_cata_hash(target_bran_hanger_refnos.as_slice())
                 .await
                 .unwrap_or_default();
-            if let Some(t_refno) = test_refno{
-                if bran_comp_eles.contains(&t_refno){
-                    for kv in &map{
-                        if kv.value().group_refnos.contains(&t_refno){
+            if let Some(t_refno) = test_refno {
+                if bran_comp_eles.contains(&t_refno) {
+                    for kv in &map {
+                        if kv.value().group_refnos.contains(&t_refno) {
                             dbg!(kv.value());
                         }
                     }
@@ -313,7 +320,7 @@ pub async fn gen_geos_data_by_dbnum(
 
         //元件库的模型计算
         //bran，hanger下需要重用的模型
-        if gen_model && ( !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty()) {
+        if gen_model && (!target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty()) {
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
@@ -325,8 +332,8 @@ pub async fn gen_geos_data_by_dbnum(
                     sjus_map_clone,
                     sender,
                 )
-                    .await
-                    .unwrap();
+                .await
+                .unwrap();
             });
             all_handles.push(handle);
         }
@@ -334,12 +341,11 @@ pub async fn gen_geos_data_by_dbnum(
     let mut use_cate_refnos = vec![];
     for cate_names in USE_CATE_NOUN_NAMES.chunks(4) {
         let refnos = query_use_cate_refnos_by_dbnum(cate_names, dbno).await?;
-        if refnos.is_empty(){
+        if refnos.is_empty() {
             continue;
         }
         use_cate_refnos.extend(refnos.clone());
-        let cur_cate_refnos =
-            Arc::new(refnos);
+        let cur_cate_refnos = Arc::new(refnos);
         // dbg!(cur_cate_refnos.len());
         //查询单个使用元件库的数量
         let target_single_cata_map = {
@@ -350,10 +356,7 @@ pub async fn gen_geos_data_by_dbnum(
             map
         };
 
-        println!(
-            "当前分段使用元件库数量: {}",
-            cur_cate_refnos.len()
-        );
+        println!("当前分段使用元件库数量: {}", cur_cate_refnos.len());
         if gen_model && gen_cata_flag && !target_single_cata_map.is_empty() {
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
@@ -366,17 +369,18 @@ pub async fn gen_geos_data_by_dbnum(
                     sjus_map_clone,
                     sender,
                 )
-                    .await
-                    .unwrap();
+                .await
+                .unwrap();
             });
             all_handles.push(handle);
         }
-
     }
 
-
-    let target_loop_owner_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true)).await.unwrap_or_default());
+    let target_loop_owner_refnos = Arc::new(
+        query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true))
+            .await
+            .unwrap_or_default(),
+    );
     println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
     if gen_model && gen_loop_flag && !target_loop_owner_refnos.is_empty() {
         let sjus_map_clone = loop_sjus_map_arc.clone();
@@ -390,14 +394,17 @@ pub async fn gen_geos_data_by_dbnum(
                 sjus_map_clone,
                 sender,
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
         });
         all_handles.push(handle);
     }
 
-    let target_prim_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None).await.unwrap_or_default());
+    let target_prim_refnos = Arc::new(
+        query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None)
+            .await
+            .unwrap_or_default(),
+    );
 
     println!("当前分段使用基本体数量: {}", target_prim_refnos.len());
     //基本元件的生成
@@ -430,14 +437,15 @@ pub async fn gen_geos_data_by_dbnum(
 
     Ok(db_refnos)
 }
+
 ///生成几何体数据
 pub async fn gen_geos_data(
     dbno: Option<u32>,
-    manual_refnos: Vec<RefU64>,
+    manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<ShapeInstancesData>,
-) -> anyhow::Result<Vec<RefU64>> {
+) -> anyhow::Result<Vec<RefnoEnum>> {
     let skip_exist = !db_option.is_replace_mesh();
     let mut all_handles = FuturesUnordered::new();
     // dbg!(&incr_updates);
@@ -482,7 +490,10 @@ pub async fn gen_geos_data(
             debug_root_refnos.clone()
         };
     } else if dbno.is_some() {
-        target_root_refnos = query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true)).await?;
+        target_root_refnos =
+            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true)).await?
+            .into_iter()
+            .collect();
     }
     if dbno.is_some() {
         println!("总共 {} 个SITE", target_root_refnos.len());
@@ -518,12 +529,12 @@ pub async fn gen_geos_data(
         //TODO 检查两个类型是否有可能在一个层级树里，如果不需要可以跳过
         {
             //查找到子节点的所有PLOO类型
-            let Ok(target_ploo_refnos) = aios_core::query_multi_deep_children_filter_inst(
+            let Ok(target_ploo_refnos) = aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &["PLOO"],
                 skip_exist,
             )
-                .await
+            .await
             else {
                 continue;
             };
@@ -550,20 +561,20 @@ pub async fn gen_geos_data(
 
         //Step 2、按类目先逐个分好类的参考号集合
         //2.1 管道或者支吊架的分类
-        let target_bran_hanger_refnos: Vec<RefU64> = if is_incr_update {
+        let target_bran_hanger_refnos: Vec<RefnoEnum> = if is_incr_update {
             incr_updates_log_arc
                 .bran_hanger_refnos
                 .iter()
                 .cloned()
                 .collect()
         } else {
-            let r = aios_core::query_multi_deep_children_filter_inst(
+            let r = aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &["BRAN", "HANG"],
                 skip_exist,
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             r.into_iter().collect()
         };
         let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
@@ -604,7 +615,7 @@ pub async fn gen_geos_data(
             );
             let mut response = SUL_DB.query(sql).await.unwrap();
 
-            let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
+            let Ok(bran_children_refnos) = response.take::<Vec<RefnoEnum>>(0) else {
                 dbg!("查询BRAN, HANG出错");
                 continue;
             };
@@ -654,18 +665,15 @@ pub async fn gen_geos_data(
                         sjus_map_clone,
                         sender,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 all_handles.push(handle);
             }
         }
 
         if gen_cata_flag && !target_single_cata_map.is_empty() {
-            println!(
-                "当前分段使用独立的元件库数量: {}",
-                use_cata_refnos.len()
-            );
+            println!("当前分段使用独立的元件库数量: {}", use_cata_refnos.len());
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
@@ -677,26 +685,26 @@ pub async fn gen_geos_data(
                     sjus_map_clone,
                     sender,
                 )
-                    .await
-                    .unwrap();
+                .await
+                .unwrap();
             });
             all_handles.push(handle);
         }
 
-        let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
+        let target_loop_owner_refnos: Vec<RefnoEnum> = if is_incr_update {
             incr_updates_log_arc
                 .loop_owner_refnos
                 .iter()
                 .cloned()
                 .collect()
         } else {
-            let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
+            let mut loop_owner_refnos = aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &GNERAL_LOOP_OWNER_NOUN_NAMES,
                 skip_exist,
             )
-                .await
-                .unwrap_or_default();
+            .await
+            .unwrap_or_default();
             loop_owner_refnos.into_iter().collect()
         };
         if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
@@ -711,22 +719,22 @@ pub async fn gen_geos_data(
                     sjus_map_clone,
                     sender,
                 )
-                    .await
-                    .unwrap();
+                .await
+                .unwrap();
             });
             all_handles.push(handle);
         }
 
-        let target_prim_refnos: Vec<RefU64> = if is_incr_update {
+        let target_prim_refnos: Vec<RefnoEnum> = if is_incr_update {
             incr_updates_log_arc.prim_refnos.iter().cloned().collect()
         } else {
-            let mut prim_refnos = aios_core::query_multi_deep_children_filter_inst(
+            let mut prim_refnos = aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &GNERAL_PRIM_NOUN_NAMES,
                 skip_exist,
             )
-                .await
-                .unwrap_or_default();
+            .await
+            .unwrap_or_default();
             prim_refnos.into_iter().collect()
         };
 
@@ -761,8 +769,8 @@ pub async fn gen_geos_data(
 
 ///查询tubi的大小
 pub async fn query_tubi_size(
-    refno: RefU64,
-    tubi_cat_ref: RefU64,
+    refno: RefnoEnum,
+    tubi_cat_ref: RefnoEnum,
     is_hang: bool,
 ) -> anyhow::Result<TubiSize> {
     let tubi_geoms_info = resolve_desi_comp(refno, Some(tubi_cat_ref))

@@ -27,13 +27,13 @@ pub async fn sync_system_db(mgr: &AiosDBMgr) -> anyhow::Result<()> {
             let mut team_name_map: HashMap<RefU64, String> = HashMap::new();
             for refno in db_refnos {
                 // 找到所属的team
-                let team = query_filter_ancestors(refno, &vec!["TEAM"]).await?;
+                let team = query_filter_ancestors(refno.into(), &vec!["TEAM"]).await?;
                 if team.is_empty() { continue; };
-                let team_refno = team[0];
+                let team_refno = team[0].refno();
                 let team_name = if team_name_map.contains_key(&team_refno) {
                     team_name_map.get(&team_refno).unwrap().to_string()
                 } else {
-                    let Ok(team_name) = mgr.get_name(team[0]).await else { continue; };
+                    let Ok(team_name) = mgr.get_name(team_refno).await else { continue; };
                     team_name_map.entry(team_refno).or_insert(team_name.clone());
                     team_name
                 };

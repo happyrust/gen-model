@@ -1,6 +1,6 @@
 use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::pdms_types::*;
-use aios_core::{AttrMap, RefU64Vec};
+use aios_core::{AttrMap, RefnoEnum};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -21,19 +21,15 @@ pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IncrGeoUpdateLog {
     //基本体模型修改了的参考号
-    #[serde_as(as = "HashSet<DisplayFromStr>")]
-    pub prim_refnos: HashSet<RefU64>,
+    pub prim_refnos: HashSet<RefnoEnum>,
     //拉伸体模型修改了的参考号
-    #[serde_as(as = "HashSet<DisplayFromStr>")]
-    pub loop_owner_refnos: HashSet<RefU64>,
+    pub loop_owner_refnos: HashSet<RefnoEnum>,
     //元件库模型的属性修改了的参考号
-    #[serde_as(as = "HashSet<DisplayFromStr>")]
-    pub bran_hanger_refnos: HashSet<RefU64>,
+    pub bran_hanger_refnos: HashSet<RefnoEnum>,
     //元件库模型的属性修改了的参考号
-    #[serde_as(as = "HashSet<DisplayFromStr>")]
-    pub basic_cata_refnos: HashSet<RefU64>,
+    pub basic_cata_refnos: HashSet<RefnoEnum>,
     //删除了的模型
-    pub delete_refnos: HashSet<RefU64>,
+    pub delete_refnos: HashSet<RefnoEnum>,
 
     //属性时间戳
     pub att_timestamp: surrealdb::sql::Datetime,
@@ -51,7 +47,7 @@ impl IncrGeoUpdateLog {
     }
 
     #[inline]
-    pub fn get_all_visible_refnos(&self) -> HashSet<RefU64> {
+    pub fn get_all_visible_refnos(&self) -> HashSet<RefnoEnum> {
         let mut refnos = HashSet::new();
         refnos.extend(self.prim_refnos.iter());
         refnos.extend(self.loop_owner_refnos.iter());
@@ -61,7 +57,7 @@ impl IncrGeoUpdateLog {
     }
 
     #[inline]
-    pub async fn get_all_visible_refnos_deep(&self) -> HashSet<RefU64> {
+    pub async fn get_all_visible_refnos_deep(&self) -> HashSet<RefnoEnum> {
         let mut refnos = HashSet::new();
         refnos.extend(self.prim_refnos.iter());
         refnos.extend(self.loop_owner_refnos.iter());
@@ -76,15 +72,12 @@ impl IncrGeoUpdateLog {
 
 //各个db的信息记录，需要跟踪起来？
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct IncrEleUpdateLog {
-    #[serde_as(as = "DisplayFromStr")]
-    pub refno: RefU64,
+    pub refno: RefnoEnum,
     pub data_operate: EleOperation,
     pub numbdb: i32,
-    // #[serde_as(as = "Vec<DisplayFromStr>")]
-    pub children: RefU64Vec,
+    // pub children: RefnoEnumVec,
     pub old_attr: AttrMap,
     pub new_attr: AttrMap,
     pub new_version: u32,
@@ -195,10 +188,10 @@ pub async fn query_key_data(
     let sql = gen_query_key_data_sql(key, numbdb);
     let val = sqlx::query(&sql).fetch_one(pool).await?;
     // let id = val.get::<String, _>("ID");
-    let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
+    let refno = RefnoEnum(val.get::<i64, _>("REFNO") as u64);
     let operate = val.get::<i32, _>("OPERATE");
     let numb_db = val.get::<i32, _>("NUMBDB");
-    let children: RefU64Vec =
+    let children: RefnoEnumVec =
         bincode::deserialize(&val.get::<Vec<u8>, _>("CHILDREN")).unwrap_or_default();
     let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
     let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;

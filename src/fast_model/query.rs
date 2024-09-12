@@ -2,9 +2,9 @@ use std::str::FromStr;
 use aios_core::expression::query_cata::query_gm_param;
 use aios_core::pdms_data::GmParam;
 use aios_core::pdms_types::{PdmsGenericType, TOTAL_CATA_GEO_NOUN_NAMES};
-use aios_core::RefU64;
+use aios_core::{RefU64, RefnoEnum};
 
-pub async fn query_gm_params(refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
+pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
     let mut children = vec![];
     for c in aios_core::get_children_named_attmaps(refno).await? {
@@ -37,7 +37,7 @@ pub async fn query_gm_params(refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
 
 
 #[inline]
-pub async fn get_generic_type(refno: RefU64) -> anyhow::Result<PdmsGenericType> {
+pub async fn get_generic_type(refno: RefnoEnum) -> anyhow::Result<PdmsGenericType> {
     let types = aios_core::get_ancestor_types(refno).await?;
     for t in types{
         if let Ok(generic) = PdmsGenericType::from_str(&t){

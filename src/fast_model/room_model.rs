@@ -1,5 +1,5 @@
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
-use aios_core::init_test_surreal;
+use aios_core::{init_test_surreal, RefnoEnum};
 use aios_core::options::DbOption;
 use aios_core::room::algorithm::match_room_name;
 use aios_core::room::room::{load_aabb_tree, load_room_aabb_tree, GLOBAL_AABB_TREE};
@@ -105,8 +105,8 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
 }
 
 async fn save_room_relate(
-    panel_refno: RefU64,
-    within_refnos: &HashSet<RefU64>,
+    panel_refno: RefnoEnum,
+    within_refnos: &HashSet<RefnoEnum>,
     room_num: &str,
 ) -> anyhow::Result<()> {
     let mut final_sql = "".to_string();
@@ -126,7 +126,7 @@ async fn save_room_relate(
 
 async fn build_room_panels_relate(
     room_key_word: &Vec<String>,
-) -> anyhow::Result<Vec<(RefU64, String, Vec<RefU64>)>> {
+) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>> {
     // 拼接判断条件
     let filter = room_key_word
         .iter()
@@ -140,7 +140,7 @@ async fn build_room_panels_relate(
     "#
     );
     let mut response = SUL_DB.query(sql).await?;
-    let room_groups: Vec<(RefU64, String, Vec<RefU64>)> = response.take(0)?;
+    let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
     let mut sql_string = String::new();
     for (room_refno, room_num, panel_refnos) in &room_groups {
         // 判断 room_num是否符合规则
@@ -161,10 +161,10 @@ async fn build_room_panels_relate(
 
 pub async fn cal_room_refnos(
     mesh_dir: &PathBuf,
-    panel_refno: RefU64,
-    exclude_refnos: &HashSet<RefU64>,
+    panel_refno: RefnoEnum,
+    exclude_refnos: &HashSet<RefnoEnum>,
     inside_tol: f32,
-) -> anyhow::Result<HashSet<RefU64>> {
+) -> anyhow::Result<HashSet<RefnoEnum>> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
     let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno])
         .await

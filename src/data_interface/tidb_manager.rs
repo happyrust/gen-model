@@ -76,7 +76,7 @@ impl PdmsDataInterface for AiosDBManager {
             let k = PDMS_ATT_MAP_CACHE.get(&refno).unwrap();
             Ok(k.value().clone())
         } else {
-            let attr = aios_core::get_named_attmap(refno).await?;
+            let attr = aios_core::get_named_attmap(refno.into()).await?;
             PDMS_ATT_MAP_CACHE
                 .insert(refno, &attr)
                 .expect("PDMS_ATT_MAP_CACHE save error.");
@@ -86,47 +86,24 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得类型名称
     async fn get_type_name(&self, refno: RefU64) -> String {
-        aios_core::get_type_name(refno).await.unwrap_or_default()
+        aios_core::get_type_name(refno.into()).await.unwrap_or_default()
     }
 
     ///获得下一个构件的参考号
     async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
-        let owner = self.get_owner(refno);
-        let children_refnos = aios_core::get_children_refnos(owner).await?;
-        let pos = children_refnos
-            .iter()
-            .position(|x| *x == refno)
-            .unwrap_or_default();
-        if pos == children_refnos.len() - 1 {
-            self.get_next(owner).await
-        } else {
-            Ok(children_refnos[pos + 1])
-        }
+        Ok(Default::default())
     }
 
     ///获得上一个构件的参考号
     async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
-        let owner = self.get_owner(refno);
-        let children_refnos = aios_core::get_children_refnos(owner).await?;
-        let pos = children_refnos
-            .iter()
-            .position(|x| *x == refno)
-            .unwrap_or_default();
-        if pos == 0 {
-            Ok(owner)
-        } else {
-            Ok(children_refnos[pos - 1])
-        }
+        Ok(Default::default())
     }
 
     //todo 修改为图数据库，尽可能避免使用TIDB
     ///获取owner的参考号，从缓存读取
     #[inline]
     fn get_owner(&self, refno: RefU64) -> RefU64 {
-        CACHED_REFNO_BASIC_MAP
-            .get(&refno)
-            .map(|x| x.value().get_owner())
-            .unwrap_or_default()
+       Default::default() 
     }
 
     /// t_types 为目标的类型
@@ -322,9 +299,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        aios_core::get_children_refnos(refno)
-            .await
-            .map(|x| x.into())
+        Ok(Default::default())
     }
 
     ///获得参考号的name
@@ -581,7 +556,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///使用cache，需要从db manager里移除出来
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
-        aios_core::get_world_transform(refno).await
+        aios_core::get_world_transform(refno.into()).await
     }
 
     #[inline]
@@ -630,15 +605,16 @@ impl PdmsDataInterface for AiosDBManager {
         pos: Vec3,
         distance: f32,
     ) -> anyhow::Result<Vec<RefU64>> {
-        let rtree = self
-            .rtree
-            .as_ref()
-            .ok_or(anyhow::anyhow!("空间树未生成。"))?;
-        let target_refnos = rtree
-            .query_within_distance(pos, distance)
-            .map(|x| x.0)
-            .collect();
-        Ok(target_refnos)
+        // let rtree = self
+        //     .rtree
+        //     .as_ref()
+        //     .ok_or(anyhow::anyhow!("空间树未生成。"))?;
+        // let target_refnos = rtree
+        //     .query_within_distance(pos, distance)
+        //     .map(|x| x.0)
+        //     .collect();
+        // Ok(target_refnos)
+        Ok(vec![])
     }
 
     ///获取对应的截面sweep 线，包含了sctn的处理情况
@@ -716,36 +692,33 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得外键的属性
     #[inline]
     async fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64> {
-        let att = aios_core::get_named_attmap(refno).await.ok()?;
-        att.get_foreign_refno(foreign)
+        None
     }
 
     ///获得外键的属性
     #[inline]
     async fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<NamedAttrMap> {
-        if let Some(f) = self.get_foreign_refno(refno, foreign).await {
-            aios_core::get_named_attmap(f).await.ok()
-        } else {
-            None
-        }
+        None
     }
 
     ///获得元件库的spre参考号
     #[inline]
     async fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64> {
-        self.get_foreign_refno(refno, "SPRE").await
+        None
     }
 
     ///获得元件库的catr参考号
     #[inline]
     async fn get_cat_refno(&self, refno: RefU64) -> Option<RefU64> {
-        aios_core::get_cat_refno(refno).await.ok().flatten()
+        // aios_core::get_cat_refno(refno.into()).await.ok().flatten()
+        None
     }
 
     ///获得元件库的catr属性数据
     #[inline]
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap> {
-        aios_core::get_cat_attmap(refno).await.ok()
+        // aios_core::get_cat_attmap(refno.into()).await.ok()
+        None
     }
 
 

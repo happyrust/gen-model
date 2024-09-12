@@ -12,7 +12,7 @@ use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
-    query_deep_visible_inst_refnos, RefU64, SUL_DB,
+    query_deep_visible_inst_refnos, RefnoEnum, SUL_DB,
 };
 use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
@@ -42,7 +42,7 @@ pub async fn test_gen_geos() -> anyhow::Result<()> {
 ///生成模型的部分，update aabb
 pub async fn gen_meshes_in_db(
     option: Option<Arc<DbOption>>,
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
 ) -> anyhow::Result<()> {
     if refnos.is_empty() {
         return Ok(());
@@ -80,7 +80,7 @@ pub async fn gen_meshes_in_db(
 ///执行布尔运算的部分
 pub async fn booleans_meshes_in_db(
     option: Option<Arc<DbOption>>,
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
 ) -> anyhow::Result<()> {
     if refnos.is_empty() {
         return Ok(());
@@ -110,7 +110,7 @@ pub async fn booleans_meshes_in_db(
 
 pub async fn process_meshes_update_db(
     option: Option<Arc<DbOption>>,
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
 ) -> anyhow::Result<()> {
     if refnos.is_empty() {
         return Ok(());
@@ -156,14 +156,14 @@ pub async fn process_meshes_update_db(
     Ok(())
 }
 
-pub async fn process_meshes_update_db_deep_default(refnos: &[RefU64]) -> anyhow::Result<()> {
+pub async fn process_meshes_update_db_deep_default(refnos: &[RefnoEnum]) -> anyhow::Result<()> {
     let dboption = get_db_option();
     process_meshes_update_db_deep(&dboption, refnos).await
 }
 
 pub async fn process_meshes_update_db_deep(
     dboption: &DbOption,
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
 ) -> anyhow::Result<()> {
     if !refnos.is_empty() {
         let dir = dboption.get_meshes_path();
@@ -248,7 +248,7 @@ struct QueryGeoParam {
 
 ///生成meshes
 pub async fn gen_inst_meshes(
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
@@ -503,7 +503,7 @@ pub async fn gen_inst_meshes(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryAabbParam {
     pub id: Thing,
-    pub refno: RefU64,
+    pub refno: RefnoEnum,
     pub noun: String,
     pub geo_aabbs: Vec<GeoAabbTrans>,
     pub world_trans: Transform,
@@ -517,7 +517,7 @@ struct GeoAabbTrans {
 
 ///刷新inst_relate 的 aabb
 pub async fn update_inst_relate_aabbs_by_refnos(
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
     replace_exist: bool,
 ) -> anyhow::Result<()> {
     const CHUNK: usize = 100;
@@ -611,12 +611,12 @@ pub struct NegInfo {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ManiGeoTransQuery {
-    pub refno: RefU64,
+    pub refno: RefnoEnum,
     pub noun: String,
     pub wt: Transform,
     pub aabb: Aabb,
     pub ts: Vec<(String, Transform)>,
-    pub neg_ts: Vec<(RefU64, Transform, Vec<NegInfo>)>,
+    pub neg_ts: Vec<(RefnoEnum, Transform, Vec<NegInfo>)>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -631,12 +631,12 @@ pub struct ParamNegInfo {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct OccGeoTransQuery {
-    pub refno: RefU64,
+    pub refno: RefnoEnum,
     pub noun: String,
     pub wt: Transform,
     pub aabb: Aabb,
     pub ts: Vec<(PdmsGeoParam, Transform)>,
-    pub neg_ts: Vec<(RefU64, Transform, Vec<ParamNegInfo>)>,
+    pub neg_ts: Vec<(RefnoEnum, Transform, Vec<ParamNegInfo>)>,
 }
 
 #[inline]
@@ -650,7 +650,7 @@ fn round_dmat4(m: DMat4) -> DMat4 {
 }
 
 pub async fn apply_insts_boolean_occ(
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
@@ -851,15 +851,15 @@ pub async fn apply_insts_boolean_occ(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CataNegGroup {
-    pub refno: RefU64,
+    pub refno: RefnoEnum,
     pub inst_info_id: Thing,
-    pub boolean_group: Vec<Vec<RefU64>>,
+    pub boolean_group: Vec<Vec<RefnoEnum>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GmGeoData {
     pub id: String,
-    pub geom_refno: RefU64,
+    pub geom_refno: RefnoEnum,
     pub trans: Transform,
     pub param: PdmsGeoParam,
     //暂时aabb 不变

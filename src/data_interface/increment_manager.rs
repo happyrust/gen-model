@@ -113,11 +113,12 @@ impl AiosDBManager {
             let refnos: Vec<RefU64> = resp.take(0).unwrap();
             exist_refnos.extend(refnos);
             for (&refno, _) in &eles_map {
-                clear_all_caches(refno).await;
+                clear_all_caches(refno.into()).await;
             }
 
             let mut processed_owner_set = HashSet::new();
-            for (&refno, ele) in &eles_map {
+            for (&r, ele) in &eles_map {
+                let refno: RefnoEnum = r.into();
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 let owner = attmap.get_owner();
                 let type_name = attmap.get_type();
@@ -128,9 +129,9 @@ impl AiosDBManager {
                 let mut need_update_all_relate_after_add = false;
                 //需要处理虽然存在，但是owner关系还没建立的情况
                 if exist_refnos.contains(&ele.refno) {
-                    let old_children = aios_core::get_children_refnos(ele.refno).await?;
+                    let old_children = aios_core::get_children_refnos(ele.refno.into()).await?;
                     for (i, child) in old_children.into_iter().enumerate() {
-                        if !ele.children.contains(&child) {
+                        if !ele.children.contains(&child.refno()) {
                             //index current delete refno, owner refno
                             //需要get deep children
                             let deep_children =
@@ -154,11 +155,11 @@ impl AiosDBManager {
                     let mut is_last_add = false;
                     #[cfg(feature = "debug_parse")]
                     dbg!(ele.refno);
-                    if let Some(owner_ele) = eles_map.get(&owner) {
+                    if let Some(owner_ele) = eles_map.get(&owner.refno()) {
                         index = owner_ele
                             .children
                             .iter()
-                            .position(|&x| x == refno)
+                            .position(|&x| x == refno.refno())
                             .unwrap_or(0);
                         is_last_add = index == owner_ele.children.len() - 1;
 
@@ -206,12 +207,12 @@ impl AiosDBManager {
                         processed_owner_set.insert(refno);
                     }
                 }
-                if eles_map.get(&owner).is_none() {
+                if eles_map.get(&owner.refno()).is_none() {
                     //如果有未发现的element 就需要去数据文件里找出这个element，然后添加
                     // dbg!(ele);
                     //找到这个owner，然后把最新的结果更新进来
                     if !processed_owner_set.contains(&owner) {
-                        if let Ok(owner_ele) = io.auto_get_element(owner).await {
+                        if let Ok(owner_ele) = io.auto_get_element(owner.refno()).await {
                             //始终维持最新的情况
                             delete_relate_sqls.push(format!(
                                 "delete pe_owner:[{0}, 0]..[{0}, 100];",
@@ -260,7 +261,7 @@ impl AiosDBManager {
                     }
                 }
                 let increment_info = IncrementInfo {
-                    refno,
+                    refno: refno.refno(),
                     db_no: basic_info.pdms_header.db_num,
                     attr: attmap,
                     children: ele.children.clone(),
@@ -335,7 +336,7 @@ impl AiosDBManager {
                 let mut update_att_sql_str = String::new();
                 let mut history_refnos_set = Vec::new();
                 for k in chunk {
-                    let refno = k.refno;
+                    let refno = k.refno.into();
                     history_refnos_set.push(refno);
                     let name = k.attr.get_name();
                     let pe = SPdmsElement {
@@ -421,7 +422,7 @@ impl AiosDBManager {
         // futures::future::join_all(att_pe_handles).await;
 
         //删除模型的处理
-        let deleted_refnos: Vec<RefU64> = deleted_refnos_set.into_iter().collect::<Vec<_>>();
+        let deleted_refnos: Vec<RefnoEnum> = deleted_refnos_set.into_iter().collect::<Vec<_>>();
         //备份需要删除的模型数据，还是暂时保留在原来的地方？
         backup_att_and_pe_to_history_tables(&deleted_refnos)
             .await

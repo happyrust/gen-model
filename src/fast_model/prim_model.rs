@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, RwLock};
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
     db_option: Arc<DbOption>,
-    prim_refnos: &[RefU64],
+    prim_refnos: &[RefnoEnum],
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();

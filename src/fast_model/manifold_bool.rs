@@ -3,7 +3,7 @@ use aios_core::csg::manifold::ManifoldRust;
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{get_inst_relate_keys, init_test_surreal, RefU64, SUL_DB};
+use aios_core::{get_inst_relate_keys, init_test_surreal, RefnoEnum, SUL_DB};
 use anyhow::anyhow;
 use glam::DMat4;
 use nalgebra::Isometry;
@@ -33,7 +33,7 @@ fn load_manifold(
 
 //处理元件库有负实体的布尔运算
 pub async fn apply_cata_neg_boolean_manifold(
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
@@ -185,7 +185,7 @@ pub async fn apply_cata_neg_boolean_manifold(
 }
 
 pub async fn apply_insts_boolean_manifold(
-    refnos: &[RefU64],
+    refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
@@ -196,7 +196,7 @@ pub async fn apply_insts_boolean_manifold(
 }
 
 pub async fn apply_insts_boolean_manifold_single(
-    refno: RefU64,
+    refno: RefnoEnum,
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
@@ -379,7 +379,7 @@ async fn test_json_refno_parse_error() {
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub(crate) struct TestJson {
-        pub refno: RefU64,
+        pub refno: RefnoEnum,
         // pub noun: String,
         // pub wt: Transform,
         // pub aabb: Aabb,
@@ -446,7 +446,7 @@ async fn test_json_refno_parse_error() {
     let result = serde_json::from_str::<TestJson>(test_json);
     dbg!(result);
 
-    // let refno:RefU64 = "17496_172792".into();
+    // let refno:RefnoEnum = "17496_172792".into();
     // let path: PathBuf = "assets/meshes".into();
     // apply_insts_boolean_manifold_single(refno, false, path).await.unwrap();
 }
@@ -455,7 +455,7 @@ async fn test_json_refno_parse_error() {
 async fn test_boolean_refno_parse_error() {
     init_test_surreal().await;
 
-    let refno:RefU64 = "17496_172792".into();
+    let refno:RefnoEnum = "17496_172792".into();
     let path: PathBuf = "assets/meshes".into();
     apply_insts_boolean_manifold_single(refno, false, path).await.unwrap();
 }

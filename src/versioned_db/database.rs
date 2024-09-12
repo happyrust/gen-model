@@ -494,7 +494,7 @@ pub async fn sync_total_async_threaded(
                                         let att = total_attr_map_arc.get(refno).unwrap();
                                         //调试时，只解析这个单独的refno
                                         if is_debug {
-                                            if debug_refnos.contains(&att.get_refno().unwrap()) {
+                                            if debug_refnos.contains(&att.get_refno_or_default().refno()) {
                                                 dbg!(att.value());
                                             }
                                             continue;

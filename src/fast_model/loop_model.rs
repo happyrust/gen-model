@@ -22,8 +22,8 @@ use tokio::sync::{Mutex, RwLock};
 ///处理带有loop的元件
 pub async fn gen_loop_geos(
     db_option: Arc<DbOption>,
-    loop_owner_refnos: &[RefU64],
-    sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
+    loop_owner_refnos: &[RefnoEnum],
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();

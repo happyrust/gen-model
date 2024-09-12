@@ -3,7 +3,7 @@ use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
-use crate::fast_model::{get_generic_type, resolve_desi_comp, SEND_INST_SIZE, shared};
+use crate::fast_model::{get_generic_type, resolve_desi_comp, shared, SEND_INST_SIZE};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
@@ -19,10 +19,12 @@ use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::math_tool::to_pdms_vec_str;
 use aios_core::{
-    gen_bytes_hash, NamedAttrMap, NamedAttrValue, RefU64, HASH_PSEUDO_ATT_MAPS, SUL_DB,
+    gen_bytes_hash, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, HASH_PSEUDO_ATT_MAPS, SUL_DB,
 };
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -31,8 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
@@ -52,9 +52,9 @@ pub enum NgmrRemovedType {
 
 ///获取单个元件的模型数据
 pub async fn gen_cata_single_geoms(
-    design_refno: RefU64,
+    design_refno: RefnoEnum,
     brep_shape_map: &CateBrepShapeMap,
-    design_axis_map: &DashMap<RefU64, PlantAxisMap>,
+    design_axis_map: &DashMap<RefnoEnum, PlantAxisMap>,
 ) -> anyhow::Result<bool> {
     let desi_att = aios_core::get_named_attmap(design_refno).await?;
     let type_name = desi_att.get_type_str();
@@ -115,8 +115,8 @@ pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 pub async fn gen_cata_geos(
     db_option: Arc<DbOption>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
-    branch_map: Arc<DashMap<RefU64, Vec<SPdmsElement>>>,
-    sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
+    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
@@ -184,8 +184,8 @@ pub async fn gen_cata_geos(
                             &["->GMRE", "->GSTR"],
                             &["REFNO"],
                         )
-                            .await
-                            .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
+                        .await
+                        .map(|x| x.get_refno_or_default()) else {
                             continue;
                         };
                         // dbg!(gmse_refno);
@@ -281,16 +281,16 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
-
                             // #[cfg(debug_assertions)]
                             // dbg!((ele_refno, gmse_refno));
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
-                            let mut pos_neg_map: HashMap<RefU64, Vec<RefU64>> = aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
-                                .await
-                                .unwrap_or_default();
-                            let mut neg_own_pos_map: HashMap<RefU64, RefU64> = pos_neg_map
+                            let mut pos_neg_map: HashMap<RefnoEnum, Vec<RefnoEnum>> =
+                                aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
+                                    .await
+                                    .unwrap_or_default();
+                            let mut neg_own_pos_map: HashMap<RefnoEnum, RefnoEnum> = pos_neg_map
                                 .iter()
                                 .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
                                 .flatten()
@@ -492,13 +492,14 @@ pub async fn gen_cata_geos(
                             is_solid: true, //TODO 这里是不是需要取查一下？
                             ..Default::default()
                         };
-                        if let Some(r_refno) = test_refno && r_refno == ele_refno{
+                        if let Some(r_refno) = test_refno
+                            && r_refno == ele_refno
+                        {
                             dbg!(&geos_info);
                         }
                         shape_insts_data.insert_info(ele_refno, geos_info);
-
                     }
-                    if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                    if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                         sender
                             .send(std::mem::take(&mut shape_insts_data))
                             .expect("send cate shape_insts_data error");
@@ -515,8 +516,7 @@ pub async fn gen_cata_geos(
             handles.push(handle);
         }
     }
-    while let Some(_) = handles.next().await {
-    }
+    while let Some(_) = handles.next().await {}
 
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
     //直段需要插入一个单位的cylinder
@@ -625,13 +625,13 @@ pub async fn gen_cata_geos(
                             dist
                         );
                         tubi_relates.push(format!(
-                                "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                branch_refno,
+                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
-                                current_tubing.leave_refno,
-                                current_tubing.arrive_refno,
+                                current_tubing.leave_refno.to_pe_key(),
+                                current_tubing.arrive_refno.to_pe_key(),
                                 gen_bytes_hash::<_, 64>(&aabb),
                                 gen_bytes_hash::<_, 64>(&t),
                                 current_tubing.tubi_size.to_string(),
@@ -731,7 +731,7 @@ pub async fn gen_cata_geos(
                                             &["REFNO"],
                                         )
                                         .await
-                                        .map(|x| x.get_refno_lossy().unwrap_or_default())
+                                        .map(|x| x.get_refno_or_default())
                                         .unwrap_or_default();
                                         // dbg!((current_tubing.leave_refno, lstube_cat_ref));
                                         current_tubing.tubi_size = fast_model::query_tubi_size(
@@ -787,13 +787,23 @@ pub async fn gen_cata_geos(
                                             dist
                                         );
                                         let sql = format!(
-                                            "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                            branch_refno,
+                                            // "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                            //                 set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                            // branch_refno,
+                                            // branch_refno.to_pe_key(),
+                                            // current_tubing.index,
+                                            // current_tubing.leave_refno,
+                                            // current_tubing.arrive_refno,
+                                            // gen_bytes_hash::<_, 64>(&aabb),
+                                            // gen_bytes_hash::<_, 64>(&t),
+                                            // current_tubing.tubi_size.to_string(),
+                                            "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                            branch_refno.to_pe_key(),
                                             branch_refno.to_pe_key(),
                                             current_tubing.index,
-                                            current_tubing.leave_refno,
-                                            current_tubing.arrive_refno,
+                                            current_tubing.leave_refno.to_pe_key(),
+                                            current_tubing.arrive_refno.to_pe_key(),
                                             gen_bytes_hash::<_, 64>(&aabb),
                                             gen_bytes_hash::<_, 64>(&t),
                                             current_tubing.tubi_size.to_string(),
@@ -869,7 +879,7 @@ pub async fn gen_cata_geos(
                                 &["REFNO"],
                             )
                             .await
-                            .map(|x| x.get_refno_lossy().unwrap_or_default())
+                            .map(|x| x.get_refno_or_default())
                             .unwrap_or_default();
                             // dbg!((current_tubing.leave_refno, lstube_cat_ref));
                             current_tubing.tubi_size = fast_model::query_tubi_size(
@@ -911,13 +921,24 @@ pub async fn gen_cata_geos(
                                 last_dist
                             );
                             tubi_relates.push(format!(
-                                "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                branch_refno,
+                                // "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                //                 set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                // branch_refno,
+                                // branch_refno.to_pe_key(),
+                                // current_tubing.index,
+                                // current_tubing.leave_refno,
+                                // current_tubing.arrive_refno,
+                                // gen_bytes_hash::<_, 64>(&aabb),
+                                // gen_bytes_hash::<_, 64>(&t),
+                                // current_tubing.tubi_size.to_string(),
+
+                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
-                                current_tubing.leave_refno,
-                                current_tubing.arrive_refno,
+                                current_tubing.leave_refno.to_pe_key(),
+                                current_tubing.arrive_refno.to_pe_key(),
                                 gen_bytes_hash::<_, 64>(&aabb),
                                 gen_bytes_hash::<_, 64>(&t),
                                 current_tubing.tubi_size.to_string(),
@@ -955,9 +976,9 @@ pub async fn gen_cata_geos(
 
 //收集ngmr的信息
 pub async fn query_ngmr_owner(
-    refno: RefU64,
-    ngmr_geo_refno: RefU64,
-) -> anyhow::Result<Vec<RefU64>> {
+    refno: RefnoEnum,
+    ngmr_geo_refno: RefnoEnum,
+) -> anyhow::Result<Vec<RefnoEnum>> {
     // dbg!((refno, ngmr_geo_refno));
     let att = aios_core::get_named_attmap(refno).await.unwrap_or_default();
     let owner = att.get_owner();

@@ -21,8 +21,8 @@ project_code = 1516
 surreal_ns = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = false
-gen_mesh = false
+gen_model = true
+gen_mesh = true
 replace_mesh = false
 save_db = true
 apply_boolean_operation = true
@@ -98,7 +98,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["ams8000_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
- manual_db_nums = [1112]
+manual_db_nums = [1112]
 plat_url = ""
 
 #puhua
@@ -117,7 +117,8 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 #调试ngmr两边打孔
 #debug_root_refnos = ["23713/2440"]
 #debug_root_refnos = ["17496/276094"]
-# debug_root_refnos = ["24384_30876"]
+debug_root_refnos = ["17496/171640"]
+gen_history_model = true
 
 # debug_root_refnos = ["24383/66457", "9304/2", "17496/229978"]
 # debug_root_refnos = ["23713/2510", "24383/66457"]

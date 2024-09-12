@@ -3,12 +3,12 @@ use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
 use aios_core::expression::resolve::{resolve_axis_param, SCOM_INFO_MAP};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{PlinParam, ScomInfo};
-use aios_core::{CataContext, RefU64};
+use aios_core::{CataContext, RefU64, RefnoEnum};
 use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
 
 ///收集SCOM的信息, 暂时慎用缓存
-pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
+pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) -> anyhow::Result<ScomInfo> {
     let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
         info.value().clone()
     } else {
@@ -29,7 +29,7 @@ pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomI
         let gmse_refno =
             aios_core::query_single_by_paths(cata_refno, &["->GMRE", "->GSTR"], &["REFNO"])
                 .await
-                .map(|x| x.get_refno_lossy().unwrap_or_default())?;
+                .map(|x| x.get_refno_or_default())?;
         // #[cfg(debug_assertions)]
         // dbg!(gmse_refno);
         let gm_params = query_gm_params(gmse_refno).await?;
@@ -83,7 +83,7 @@ pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomI
 
 /// 求解axis的数值
 pub async fn resolve_axis_params(
-    refno: RefU64,
+    refno: RefnoEnum,
     context: Option<CataContext>,
 ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
     let mut map = BTreeMap::new();
@@ -102,8 +102,8 @@ pub async fn resolve_axis_params(
 
 ///求解design component
 pub async fn resolve_desi_comp(
-    desi_refno: RefU64,
-    mut tubi_scom: Option<RefU64>,
+    desi_refno: RefnoEnum,
+    mut tubi_scom: Option<RefnoEnum>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let desi_att = aios_core::get_named_attmap(desi_refno).await?;
     let is_tubi = tubi_scom.is_some();

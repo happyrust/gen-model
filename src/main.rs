@@ -24,8 +24,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-// use regex::internal::Input;
-use aios_core::material::save_all_material_data;
+// use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
@@ -187,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
-        save_all_material_data().await?;
+        // save_all_material_data().await?;
     }
     // 生成 TEAM_DATA数据
     if db_option.only_sync_sys {

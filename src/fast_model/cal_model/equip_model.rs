@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use aios_core::{gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir, RefU64, SUL_DB};
+use aios_core::{gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir, RefU64, RefnoEnum, SUL_DB};
 use bevy_transform::components::Transform;
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
@@ -19,7 +19,7 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
     let mut response = SUL_DB
         .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
         .await?;
-    let equips: Vec<RefU64> = response.take(0)?;
+    let equips: Vec<RefnoEnum> = response.take(0)?;
     if equips.is_empty() {
         return Ok(());
     }
@@ -48,7 +48,7 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
     let mut response = SUL_DB
         .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
         .await?;
-    let equips: Vec<RefU64> = response.take(0)?;
+    let equips: Vec<RefnoEnum> = response.take(0)?;
     if equips.is_empty() {
         return Ok(());
     }
@@ -78,7 +78,8 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
             if let Ok(Some((nearest, dist))) = query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR")
                 .await {
                 // dbg!((btm_pt, nearest, dist));
-                equip_sql.push_str(&format!("relate pe:{equip}->nearest_relate->FLOOR:{nearest} set dist={dist};"));
+                equip_sql.push_str(&format!("relate {}->nearest_relate->FLOOR:{} set dist={};",
+                 equip.to_pe_key(), nearest.to_string(), dist));
                 break;
             }
         }
