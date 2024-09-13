@@ -174,7 +174,7 @@ pub async fn cal_room_refnos(
         return Ok(Default::default());
     }
 
-    let mut within_refnos = HashSet::new();
+    let mut within_refnos: HashSet<RefnoEnum> = HashSet::new();
     //将panel的 plant mesh 转换成TriMesh
     for geom_inst in geom_insts {
         for inst in geom_inst.insts {
@@ -205,7 +205,8 @@ pub async fn cal_room_refnos(
                     return false;
                 }
                 //排除自己
-                if exclude_refnos.contains(refno) || panel_refno == *refno {
+                let r: RefnoEnum = (*refno).into();
+                if exclude_refnos.contains(&r) || panel_refno.refno() == *refno {
                     return false;
                 }
                 // dbg!(&bbox);
@@ -230,7 +231,10 @@ pub async fn cal_room_refnos(
             // if !contains_query.is_empty() {
             //     dbg!(&contains_query);
             // }
-            within_refnos.extend(contains_query.iter().map(|r| r.refno));
+            within_refnos.extend(contains_query.iter().map(|r| {
+                let r: RefnoEnum = r.refno.into();
+                r
+            }));
             // if within_refnos.len() > 1 {
             //     dbg!(&within_refnos);
             // }
@@ -253,7 +257,7 @@ pub async fn cal_room_refnos(
                 // dbg!(&repsonse);
                 let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
                 // dbg!(&geom_pts);
-                let mut intersect_set = DashSet::new();
+                let mut intersect_set: DashSet<RefnoEnum> = DashSet::new();
                 geom_pts.par_iter().for_each(|g| {
                     if g.pts_group
                         .par_iter()

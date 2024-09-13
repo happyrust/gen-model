@@ -615,8 +615,8 @@ pub async fn gen_cata_geos(
                         #[cfg(feature = "debug_model")]
                         println!(
                             "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
-                            current_tubing.leave_refno.to_slash_string(),
-                            current_tubing.arrive_refno.to_slash_string(),
+                            current_tubing.leave_refno.to_e3d_id(),
+                            current_tubing.arrive_refno.to_e3d_id(),
                             to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
                             to_pdms_vec_str(
                                 &current_tubing.leave_ref_dir.unwrap_or_default(),
@@ -774,8 +774,8 @@ pub async fn gen_cata_geos(
                                         #[cfg(feature = "debug_model")]
                                         println!(
                                             "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
-                                            current_tubing.leave_refno.to_slash_string(),
-                                            current_tubing.arrive_refno.to_slash_string(),
+                                            current_tubing.leave_refno.to_e3d_id(),
+                                            current_tubing.arrive_refno.to_e3d_id(),
                                             to_pdms_vec_str(
                                                 &current_tubing.desire_leave_dir,
                                                 false
@@ -911,8 +911,8 @@ pub async fn gen_cata_geos(
                             #[cfg(feature = "debug_model")]
                             println!(
                                 "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
-                                current_tubing.leave_refno.to_slash_string(),
-                                current_tubing.arrive_refno.to_slash_string(),
+                                current_tubing.leave_refno.to_e3d_id(),
+                                current_tubing.arrive_refno.to_e3d_id(),
                                 to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
                                 to_pdms_vec_str(
                                     &current_tubing.leave_ref_dir.unwrap_or_default(),

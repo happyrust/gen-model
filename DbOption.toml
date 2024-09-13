@@ -1,6 +1,7 @@
 #同步文件配置
 total_sync = false
 incr_sync = false
+sync_history = true
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -95,10 +96,10 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-# included_db_files = ["ams8000_0001"]
+ included_db_files = ["ams8000_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]
+manual_db_nums = [7997]
 plat_url = ""
 
 #puhua
@@ -117,7 +118,7 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 #调试ngmr两边打孔
 #debug_root_refnos = ["23713/2440"]
 #debug_root_refnos = ["17496/276094"]
-debug_root_refnos = ["17496/171640"]
+#debug_root_refnos = ["17496_171606"]
 gen_history_model = true
 
 # debug_root_refnos = ["24383/66457", "9304/2", "17496/229978"]

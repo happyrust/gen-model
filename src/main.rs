@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     // initialize_global_db_sender().await;
 
     /// 是否全部同步模型
-    if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
+    if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys || db_option.is_sync_history() {
         println!("开始同步解析数据。");
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         // tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
         // return Ok(());
     }
+
 
 
     if db_option.build_cate_relate() {

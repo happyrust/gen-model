@@ -136,6 +136,11 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 保存pes到mysql #[cfg(target_os = "macos")]
+//     let db_path = "/Users/dongpengcheng/Documents/models/e3d_models/AvevaMarineSample/ams000/ams1112_0001";
+//     crate::io::scan_all_history_data(db_path).await.unwrap();
+
+
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 开始同步pdms/E3D项目的数据
@@ -155,6 +160,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         aios_core::create_geom_index().await.unwrap();
         // aios_core::define_fullname_index().await.unwrap();
         aios_core::define_pe_index().await.unwrap();
+    }
+    if db_option.is_sync_history(){
+        aios_core::define_ses_index().await.unwrap();
     }
 
     let mut dbno_set = Arc::new(DashSet::new());
@@ -347,6 +355,7 @@ pub async fn sync_total_async_threaded(
         .collect::<Vec<_>>();
     let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
+    let is_sync_history = db_option.is_sync_history();
 
     let sender_clone = sender.clone();
     tokio::spawn(async move {
@@ -394,6 +403,11 @@ pub async fn sync_total_async_threaded(
                 {
                     let mut io = PdmsIO::new(&project, path.clone(), true);
                     if io.open().is_ok(){
+                        if is_sync_history{
+                            io.sync_history().await.unwrap();
+                            //同步完历史纪录就返回
+                            continue;
+                        }
                         ses_range_map = io.ses_range_map;
                     }
                 }

@@ -173,6 +173,7 @@ pub async fn gen_all_geos_data(
         dbg!(&dbnos);
         let db_option_arc = Arc::new(db_option.clone());
         for dbno in dbnos.clone() {
+            println!("开始{}的模型生成", dbno);
             let time = Instant::now();
             let (sender, receiver) = flume::unbounded();
             let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
@@ -213,8 +214,9 @@ pub async fn gen_all_geos_data(
 
 pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
+    let include_history = db_option.is_gen_history_model();
     for &dbno in dbnos {
-        let sites = query_type_refnos_by_dbnum(&["SITE"], dbno, None).await?;
+        let sites = query_type_refnos_by_dbnum(&["SITE"], dbno, None, include_history).await?;
         process_meshes_update_db_deep(db_option, &sites)
             .await
             .expect("更新模型数据失败");
@@ -228,7 +230,8 @@ pub async fn gen_geos_data_by_dbnum(
     db_option_arc: Arc<DbOption>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<DbModelInstRefnos> {
-    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true))
+    let gen_history = db_option_arc.is_gen_history_model();
+    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
         .await
         .unwrap_or_default();
     if zones.is_empty() {
@@ -251,7 +254,7 @@ pub async fn gen_geos_data_by_dbnum(
     let loop_sjus_map = DashMap::new();
     {
         //查找到子节点的所有PLOO类型
-        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true))
+        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true), gen_history)
             .await
             .unwrap_or_default();
         #[cfg(debug_assertions)]
@@ -284,7 +287,7 @@ pub async fn gen_geos_data_by_dbnum(
     //Step 2、按类目先逐个分好类的参考号集合
     //2.1 管道或者支吊架的分类
     let target_bran_hanger_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None).await?);
+        Arc::new(query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None, gen_history).await?);
     println!(
         "当前分段使用管道或者支吊架元件库数量: {}",
         target_bran_hanger_refnos.len()
@@ -340,7 +343,7 @@ pub async fn gen_geos_data_by_dbnum(
     }
     let mut use_cate_refnos = vec![];
     for cate_names in USE_CATE_NOUN_NAMES.chunks(4) {
-        let refnos = query_use_cate_refnos_by_dbnum(cate_names, dbno).await?;
+        let refnos = query_use_cate_refnos_by_dbnum(cate_names, dbno, gen_history).await?;
         if refnos.is_empty() {
             continue;
         }
@@ -377,7 +380,7 @@ pub async fn gen_geos_data_by_dbnum(
     }
 
     let target_loop_owner_refnos = Arc::new(
-        query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true))
+        query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true), gen_history)
             .await
             .unwrap_or_default(),
     );
@@ -401,7 +404,7 @@ pub async fn gen_geos_data_by_dbnum(
     }
 
     let target_prim_refnos = Arc::new(
-        query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None)
+        query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None, gen_history)
             .await
             .unwrap_or_default(),
     );
@@ -455,11 +458,11 @@ pub async fn gen_geos_data(
     let has_manual_refnos = !manual_refnos.is_empty();
     //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
     let debug_root_refnos = db_option.get_all_debug_refnos().await;
+    // dbg!(&debug_root_refnos);
     if !is_incr_update
         //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
         && (db_option.debug_root_refnos.is_some() && debug_root_refnos.is_empty())
-        && (!has_manual_refnos)
-    {
+        && (!has_manual_refnos){
         return Ok(vec![]);
     }
     if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
@@ -468,6 +471,7 @@ pub async fn gen_geos_data(
     let db_option_arc = Arc::new(db_option.clone());
     let is_debug = debug_root_refnos.len() > 0;
 
+    let include_history = db_option_arc.is_gen_history_model();
     let is_replace_mesh = db_option_arc.is_replace_mesh();
     let incr_count = if is_incr_update {
         incr_updates.as_ref().unwrap().count()
@@ -491,7 +495,7 @@ pub async fn gen_geos_data(
         };
     } else if dbno.is_some() {
         target_root_refnos =
-            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true)).await?
+            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history).await?
             .into_iter()
             .collect();
     }

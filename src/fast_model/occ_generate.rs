@@ -544,6 +544,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         };
         let mut update_sql = String::new();
         for r in result {
+            // dbg!(&r);
             let mut aabb = Aabb::new_invalid();
             for g in r.geo_aabbs {
                 let t = r.world_trans * g.trans;
@@ -565,15 +566,13 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
             let sql = format!(
                 "update {} set aabb = aabb:⟨{}⟩;",
-                r.id.to_string(),
+                r.refno.to_inst_relate_key(),
                 aabb_hash,
             );
             //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
             // dbg!(&sql);
             update_sql.push_str(&sql);
         }
-        //rstar_objs
-        // utils::save_aabb_to_surreal(&aabb_map).await;
         if !update_sql.is_empty() {
             // dbg!(&update_sql);
             SUL_DB.query(&update_sql).await.unwrap();
@@ -581,13 +580,6 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         //更新Rstar
         GLOBAL_AABB_TREE.write().await.update_aabbs(rstar_objs);
     }
-
-    // match futures::future::try_join_all(tasks).await {
-    //     Ok(_) => {}
-    //     Err(e) => {
-    //         dbg!(e);
-    //     }
-    // }
     utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(())
