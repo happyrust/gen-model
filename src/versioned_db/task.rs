@@ -1,10 +1,10 @@
-use crate::{fast_model::pdms_inst::save_instance_data, versioned_db::database::SenderSql};
+use crate::{fast_model::pdms_inst::save_instance_data, versioned_db::database::SenderJsonsData};
 use aios_core::{geometry::ShapeInstancesData, SUL_DB};
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
-static GLOBAL_SENDER: Lazy<Mutex<Option<flume::Sender<SenderSql>>>> =
+static GLOBAL_SENDER: Lazy<Mutex<Option<flume::Sender<SenderJsonsData>>>> =
     Lazy::new(|| Mutex::new(None));
 static GLOBAL_INST_SENDER: Lazy<Mutex<Option<flume::Sender<ShapeInstancesData>>>> =
     Lazy::new(|| Mutex::new(None));
@@ -48,7 +48,7 @@ async fn background_save_inst_task(receiver: flume::Receiver<ShapeInstancesData>
     futures::future::join_all(all_handles).await;
 }
 
-pub async fn get_global_db_sender() -> flume::Sender<SenderSql> {
+pub async fn get_global_db_sender() -> flume::Sender<SenderJsonsData> {
     GLOBAL_SENDER
         .lock()
         .await
@@ -57,7 +57,7 @@ pub async fn get_global_db_sender() -> flume::Sender<SenderSql> {
         .clone()
 }
 
-async fn background_save_task(receiver: flume::Receiver<SenderSql>) {
+async fn background_save_task(receiver: flume::Receiver<SenderJsonsData>) {
     const CHUNK_SIZE: usize = 1;
     let mut all_handles = vec![];
 
@@ -72,13 +72,13 @@ async fn background_save_task(receiver: flume::Receiver<SenderSql>) {
                 // println!("thread {i} Imported records: {}", sqls.len());
                 for sql in sqls {
                     match sql {
-                        SenderSql::SurrealSql(sql) => {
-                            if !sql.is_empty() {
-                                SUL_DB.query(sql).await.expect("insert db failed");
-                            }
-                        }
+                        // SenderJsonsData::PESql(sql) => {
+                        //     if !sql.is_empty() {
+                        //         SUL_DB.query(sql).await.expect("insert db failed");
+                        //     }
+                        // }
                         // #[cfg(feature = "sql")]
-                        // SenderSql::MysqlSql((project, sql)) => {
+                        // SenderJsonsData::MysqlSql((project, sql)) => {
                         //     let Some(pool) = pools_clone.get(&project) else {
                         //         continue;
                         //     };

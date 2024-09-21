@@ -1,13 +1,20 @@
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::get_default_pdms_db_info;
+use aios_core::helper::normalize_sql_string;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
+use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
 use aios_core::SUL_DB;
 use dashmap::{DashMap, DashSet};
+use futures::channel::mpsc::unbounded;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
+use pdms_io::io::PdmsIO;
+use pe::SPdmsElement;
 use petgraph::prelude::DiGraph;
 #[cfg(feature = "sql")]
 use sea_orm::{ConnectionTrait, Schema, Statement};
@@ -24,26 +31,22 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::helper::normalize_sql_string;
-use aios_core::tool::hash_tool::hash_str;
-use futures::stream::FuturesUnordered;
-use pdms_io::io::PdmsIO;
 use tokio::fs;
-use tokio::io::AsyncReadExt;
 use tokio::fs::{create_dir_all, File};
+use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
-use crate::versioned_db::database::SenderSql::SurrealSql;
 use crate::versioned_db::pe::*;
 use crate::versioned_db::task::get_global_db_sender;
 
-pub enum SenderSql {
-    SurrealSql(String),
+pub enum SenderJsonsData {
+    PEJson(Vec<String>),
+    PERelateJson(Vec<String>),
+    AttJson((String, Vec<String>)),
     // 项目名 , sql
     MysqlSql((String, String)),
 }
@@ -64,8 +67,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&pool)
-        .await?;
+    .execute(&pool)
+    .await?;
     Ok(())
 }
 
@@ -79,9 +82,9 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-            .as_str(),
+        .as_str(),
     )
-        .await?;
+    .await?;
 
     //todo 改成一对多的实现
     let mut sql = String::new();
@@ -123,9 +126,7 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
         }
     }
     let pool = aios_mgr.get_project_pool().await?;
-    let result = pool
-        .execute(gen_create_element_tables_sql().as_str())
-        .await;
+    let result = pool.execute(gen_create_element_tables_sql().as_str()).await;
     match result {
         Ok(_) => {}
         Err(e) => {
@@ -139,7 +140,6 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
 /// 保存pes到mysql #[cfg(target_os = "macos")]
 //     let db_path = "/Users/dongpengcheng/Documents/models/e3d_models/AvevaMarineSample/ams000/ams1112_0001";
 //     crate::io::scan_all_history_data(db_path).await.unwrap();
-
 
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
@@ -161,7 +161,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         // aios_core::define_fullname_index().await.unwrap();
         aios_core::define_pe_index().await.unwrap();
     }
-    if db_option.is_sync_history(){
+    if db_option.is_sync_history() {
         aios_core::define_ses_index().await.unwrap();
     }
 
@@ -184,8 +184,13 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
         if is_debug || (!db_option.incr_sync) || db_option.only_sync_sys {
-            match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DICT", "SYST", "GLB", "GLOB"])
-                .await
+            match sync_total_async_threaded(
+                &db_option,
+                project,
+                cur_dbno_set,
+                &["DICT", "SYST", "GLB", "GLOB"],
+            )
+            .await
             {
                 Ok(_) => {
                     // 同步数据成功
@@ -202,7 +207,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             continue;
         }
         let cur_dbno_set = dbno_set.clone();
-        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await {
+        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await
+        {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -233,7 +239,8 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -245,9 +252,6 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
         }
     };
 }
-
-
-
 
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
@@ -296,7 +300,7 @@ pub async fn sync_total_async_threaded(
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
     let b_replace_types = replace_types.is_some(); // 是否存在替换的类型列表
-    // 是否保存到tidb
+                                                   // 是否保存到tidb
     let b_save_mysql = db_option_arc.sync_tidb.unwrap_or(false);
     if b_replace_types {
         is_replace = true;
@@ -307,42 +311,69 @@ pub async fn sync_total_async_threaded(
     let pool = mgr.get_project_pools().await?;
 
     const CHUNK_SIZE: usize = 500;
-    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    let (sender, receiver) = flume::unbounded();
 
     let mut insert_handles = FuturesUnordered::new();
-    for i in 0..16 {
-        let receiver: flume::Receiver<SenderSql> = receiver.clone();
+    for i in 0..1 {
+        let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
         let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
-            let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
-            while let Some(sqls) = record_stream.next().await {
-                println!("thread {i} Imported records: {}", sqls.len());
-                for sql in sqls {
-                    match sql {
-                        SenderSql::SurrealSql(sql) => {
-                            if !sql.is_empty() {
-                                // println!("{}", format!("thread {i} inserting {}.", sql.len()));
-                                SUL_DB.query(sql).await.expect("insert db failed");
-                                // println!("{}", format!("thread {i} finished."));
+            // let mut record_stream = receiver.into_stream().chunks(10);
+            let mut cnt = 0;
+            // while let Some(stream) = record_stream.next().await {
+            while let Ok(data) = receiver.recv_async().await {
+                match data {
+                    SenderJsonsData::PEJson(pes) => {
+                        if !pes.is_empty() {
+                            cnt += pes.len();
+                            let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
+                            // println!("pe sql: {}", sql);
+                            let mut response = SUL_DB.query(&sql).await.expect("insert pes failed");
+                            let errors = response.take_errors();
+                            if !errors.is_empty() {
+                                //write to file
+                                // let mut file = std::fs::File::create("pe.sql").unwrap();
+                                // use std::io::Write;
+                                // file.write_all(sql.as_bytes()).unwrap();
+                                dbg!(&errors);
                             }
                         }
-                        #[cfg(feature = "sql")]
-                        SenderSql::MysqlSql((project, sql)) => {
-                            let Some(pool) = pools_clone.get(&project) else { continue; };
-                            let mut conn = pool.acquire().await.expect("get pool failed");
-                            match conn.execute(sql.as_str()).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(e.to_string());
-                                    dbg!(&sql);
-                                }
-                            }
-                        }
-                        _ => {}
                     }
+                    SenderJsonsData::PERelateJson(relates) => {
+                        if !relates.is_empty() {
+                            let sql =
+                                format!("INSERT RELATION INTO pe_owner [{}]", relates.join(","));
+                            SUL_DB.query(sql).await.expect("insert pe_owner failed");
+                        }
+                    }
+                    SenderJsonsData::AttJson((table, atts)) => {
+                        if !atts.is_empty() {
+                            let sql = format!("INSERT INTO {} [{}]", table, atts.join(","));
+                            SUL_DB.query(sql).await.expect("insert atts failed");
+                        }
+                    }
+                    #[cfg(feature = "sql")]
+                    SenderJsonsData::MysqlSql((project, sql)) => {
+                        let Some(pool) = pools_clone.get(&project) else {
+                            continue;
+                        };
+                        let mut conn = pool.acquire().await.expect("get pool failed");
+                        match conn.execute(sql.as_str()).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(e.to_string());
+                                dbg!(&sql);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
+            }
+            if cnt > 0 {
+                println!("thread {i} Imported records: {}", cnt);
             }
             // }
         });
@@ -423,11 +454,7 @@ pub async fn sync_total_async_threaded(
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
-                    if cfg!(feature = "surreal_v2") {
-                        save_pe_relates_by_insert(&db_basic, sender_clone.clone()).await;
-                    } else {
-                        save_pe_relates(&db_basic, sender_clone.clone()).await;
-                    }
+                    save_pe_relates(&db_basic, sender_clone.clone()).await;
                 }
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
@@ -449,23 +476,23 @@ pub async fn sync_total_async_threaded(
                 let debug_refnos = Arc::new(debug_refnos);
                 let ses_range_map = Arc::new(ses_range_map);
                 //按照SITE划分？
+                let mut total_cnt = 0;
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
-                    let chunk_refnos = chunk.to_vec();
                     let db_option_clone = db_option_arc.clone();
                     let file_name_clone = file_name.clone();
-                    let chunk_refnos_clone = chunk_refnos.to_vec();
+                    let chunk_refnos = chunk.to_vec();
                     let project_name_clone = project_name.clone();
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
                     let ses_range_map_clone = ses_range_map.clone();
-                    // let sender_clone = sender.clone();
-                    // let handle = tokio::spawn(async move {
+                    let ignore_world_refno = true;
                     match parse_file_with_chunk(
                         db_basic_clone.clone(),
                         &file_name_clone,
                         project_name_clone.as_str(),
-                        &chunk_refnos_clone,
+                        &chunk_refnos,
                         &ses_range_map_clone,
+                        ignore_world_refno,
                     ).await {
                         Ok(PdmsDbData {
                                total_attr_map,
@@ -475,8 +502,9 @@ pub async fn sync_total_async_threaded(
                            }) => {
                             //类型暂时不多线程
                             let total_attr_map_arc = Arc::new(total_attr_map);
+                            total_cnt += total_attr_map_arc.len();
                             //开始执行保存数据
-                            // dbg!("开始保存pdms_element数据");
+                            println!("开始保存pe数量: {}", total_attr_map_arc.len());
                             if !is_debug && is_save_db {
                                 save_pes(
                                     &db_basic_clone,
@@ -527,20 +555,13 @@ pub async fn sync_total_async_threaded(
                                     }
                                     if is_save_db {
                                         if !json_vec.is_empty() {
-                                            let sql = format!(
-                                                "INSERT IGNORE INTO {} [{}]",
-                                                &type_name,
-                                                json_vec.join(",")
-                                            );
-                                            sender_clone.send(SurrealSql(sql)).expect("send attmap sql failed");
+                                            sender_clone.send(SenderJsonsData::AttJson((type_name.clone(), json_vec)))
+                                                        .expect("send attmap sql failed");
                                         }
 
                                         if !uda_json_vec.is_empty() {
-                                            let sql = format!(
-                                                "INSERT IGNORE INTO ATT_UDA [{}]",
-                                                uda_json_vec.join(",")
-                                            );
-                                            sender_clone.send(SurrealSql(sql)).expect("send usa sql failed");
+                                            sender_clone.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec)))
+                                                        .expect("send attmap sql failed");
                                         }
                                     }
                                 }
@@ -552,7 +573,7 @@ pub async fn sync_total_async_threaded(
                     }
                 }
 
-                println!("解析任务完成, 耗时: {} s", time.elapsed().as_secs_f32());
+                println!("解析任务完成, 耗时: {} s, 总数量: {}", time.elapsed().as_secs_f32(), total_cnt);
             }
             //单个文件多线程
             // if !handles.is_empty() {
@@ -573,8 +594,10 @@ pub async fn sync_total_async_threaded(
         }
     }).await.unwrap();
     drop(sender);
+    // insert_handles.push(parse_handle);
     while let Some(result) = insert_handles.next().await {
         // 处理每个完成的 future 的结果
+        // dbg!(&result);
     }
     // all_handles.push(parse_handle);
     // futures::future::join_all(take(&mut all_handles)).await;

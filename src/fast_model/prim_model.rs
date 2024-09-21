@@ -148,10 +148,11 @@ pub async fn gen_prim_geos(
                         // dbg!(loop_atts.len());
                         let loops_map = loop_atts.iter().fold(HashMap::new(), |mut map, x| {
                             let owner = x.get_owner();
-                            let index_refnos = index_map.get(&x.get_refno_or_default()).unwrap();
-                            // dbg!(index_refnos.len());
-                            //同一个分组下的，直接融合就可以
-                            map.entry(owner).or_insert_with(Vec::new).push(index_refnos);
+                            if let Some(index_refnos) = index_map.get(&x.get_refno_or_default()) {
+                                // dbg!(index_refnos.len());
+                                //同一个分组下的，直接融合就可以
+                                map.entry(owner).or_insert_with(Vec::new).push(index_refnos);
+                            }
                             map
                         });
                         for (_, v) in loops_map {

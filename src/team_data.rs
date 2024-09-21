@@ -148,7 +148,7 @@ fn gen_save_team_data_sql(data: Vec<SysDBData>) -> String {
 async fn test_ancestor() -> anyhow::Result<()> {
     init_test_surreal().await;
     let refno = RefU64::from_str("24575/2195").unwrap();
-    let team = query_filter_ancestors(refno, &vec!["TEAM"]).await?;
+    let team = query_filter_ancestors(refno.into(), &vec!["TEAM"]).await?;
     dbg!(&team);
     Ok(())
 }
