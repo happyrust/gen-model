@@ -345,7 +345,7 @@ pub async fn sync_total_async_threaded(
                     SenderJsonsData::PERelateJson(relates) => {
                         if !relates.is_empty() {
                             let sql =
-                                format!("INSERT IGNORE RELATION INTO pe_owner [{}]", relates.join(","));
+                                format!("INSERT RELATION INTO pe_owner [{}]", relates.join(","));
                             SUL_DB.query(sql).await.expect("insert pe_owner failed");
                         }
                     }
