@@ -71,7 +71,7 @@ dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.28.0", features = ["rkyv"] }
+glam = { version = "0.28.0", features = ["serde", "rkyv"]}
 cached = "0.50.0"
 rkyv = { version = "0.7.44", features = ["hashbrown"] }
 
