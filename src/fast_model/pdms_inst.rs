@@ -102,13 +102,8 @@ pub async fn save_instance_data(
                 "".to_string()
             };
             //如果是replace, 直接这里需要先删除之前的sql语句
-            let relate_sql = format!(
-                r#"
-                        {{
-                            in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩,
-                            geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}
-                        }}
-                    "#,
+            let mut relate_json = format!(
+                r#"in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩, geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}"#,
                 v.id(),
                 inst.geo_hash,
                 transform_hash,
@@ -118,8 +113,12 @@ pub async fn save_instance_data(
                 inst.visible,
                 cat_negs_str
             );
+            //将 string 转成一个 hash id
+            let id = gen_bytes_hash::<_, 64>(&relate_json);
+            let final_json = format!("{{ {relate_json}, id: '{id}' }}");
             // dbg!(&relate_sql);
-            geo_relate_vec.push(relate_sql);
+            // println!("geo relate json: {}", &final_json);
+            geo_relate_vec.push(final_json);
             //保存 unit shape 的几何参数
             inst_geo_vec.push(inst.gen_unit_geo_sur_json());
             // EXIST_MESH_GEOS.insert(inst.geo_hash);
@@ -145,7 +144,12 @@ pub async fn save_instance_data(
             for chunk in geo_relate_vec.chunks(chunk_size) {
                 let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
                 //
-                SUL_DB.query(sql).await.unwrap();
+                println!("geo relate sql: {}", &sql);
+                let mut response = SUL_DB.query(sql).await.unwrap();
+                let mut error = response.take_errors();
+                if !error.is_empty() {
+                    dbg!(&error);
+                }
             }
         // });
         // insert_handles.push(handle);

@@ -316,6 +316,7 @@ pub async fn gen_inst_meshes(
                 "select <string> record::id(id) as id, param from [{}] where param != NONE",
                 ids
             );
+            // println!("sql is {}", &sql);
             match SUL_DB.query(&sql).await {
                 Ok(mut response) => {
                     let r = response.take::<Vec<QueryGeoParam>>(0);
@@ -333,7 +334,7 @@ pub async fn gen_inst_meshes(
                         return;
                     }
                     i += 1;
-                    // dbg!(&result);
+                    dbg!(&result);
                     for g in result {
                         //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
