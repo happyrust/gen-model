@@ -144,12 +144,12 @@ pub async fn save_instance_data(
             for chunk in geo_relate_vec.chunks(chunk_size) {
                 let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
                 //
-                println!("geo relate sql: {}", &sql);
+                // println!("geo relate sql: {}", &sql);
                 let mut response = SUL_DB.query(sql).await.unwrap();
-                let mut error = response.take_errors();
-                if !error.is_empty() {
-                    dbg!(&error);
-                }
+                // let mut error = response.take_errors();
+                // if !error.is_empty() {
+                //     dbg!(&error);
+                // }
             }
         // });
         // insert_handles.push(handle);
