@@ -592,8 +592,8 @@ pub async fn sync_total_async_threaded(
         if !db_info_sql.is_empty() {
             SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         }
+        drop(sender);
     }).await.unwrap();
-    drop(sender);
     // insert_handles.push(parse_handle);
     while let Some(result) = insert_handles.next().await {
         // 处理每个完成的 future 的结果
