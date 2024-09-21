@@ -310,71 +310,73 @@ pub async fn sync_total_async_threaded(
     #[cfg(feature = "sql")]
     let pool = mgr.get_project_pools().await?;
 
-    const CHUNK_SIZE: usize = 500;
+    // const CHUNK_SIZE: usize = 500;
     // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
     let (sender, receiver) = flume::unbounded();
 
     let mut insert_handles = FuturesUnordered::new();
-    for i in 0..1 {
+    for i in 0..16 {
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
         let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
-            // let mut record_stream = receiver.into_stream().chunks(10);
-            let mut cnt = 0;
-            // while let Some(stream) = record_stream.next().await {
-            while let Ok(data) = receiver.recv_async().await {
-                match data {
-                    SenderJsonsData::PEJson(pes) => {
-                        if !pes.is_empty() {
-                            cnt += pes.len();
-                            let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
-                            // println!("pe sql: {}", sql);
-                            let mut response = SUL_DB.query(&sql).await.expect("insert pes failed");
-                            let errors = response.take_errors();
-                            if !errors.is_empty() {
-                                //write to file
-                                // let mut file = std::fs::File::create("pe.sql").unwrap();
-                                // use std::io::Write;
-                                // file.write_all(sql.as_bytes()).unwrap();
-                                dbg!(&errors);
+            let mut record_stream = receiver.into_stream().chunks(200);
+            // let mut cnt = 0;
+            while let Some(stream) = record_stream.next().await {
+                // while let Ok(data) = receiver.recv_async().await {
+                for data in stream {
+                    match data {
+                        SenderJsonsData::PEJson(pes) => {
+                            if !pes.is_empty() {
+                                // cnt += pes.len();
+                                let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
+                                // println!("pe sql: {}", sql);
+                                let mut response = SUL_DB.query(&sql).await.expect("insert pes failed");
+                                let errors = response.take_errors();
+                                if !errors.is_empty() {
+                                //     //write to file
+                                //     // let mut file = std::fs::File::create("pe.sql").unwrap();
+                                //     // use std::io::Write;
+                                //     // file.write_all(sql.as_bytes()).unwrap();
+                                    dbg!(&errors);
+                                }
                             }
                         }
-                    }
-                    SenderJsonsData::PERelateJson(relates) => {
-                        if !relates.is_empty() {
-                            let sql =
-                                format!("INSERT RELATION INTO pe_owner [{}]", relates.join(","));
-                            SUL_DB.query(sql).await.expect("insert pe_owner failed");
-                        }
-                    }
-                    SenderJsonsData::AttJson((table, atts)) => {
-                        if !atts.is_empty() {
-                            let sql = format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
-                            SUL_DB.query(sql).await.expect("insert atts failed");
-                        }
-                    }
-                    #[cfg(feature = "sql")]
-                    SenderJsonsData::MysqlSql((project, sql)) => {
-                        let Some(pool) = pools_clone.get(&project) else {
-                            continue;
-                        };
-                        let mut conn = pool.acquire().await.expect("get pool failed");
-                        match conn.execute(sql.as_str()).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(e.to_string());
-                                dbg!(&sql);
+                        SenderJsonsData::PERelateJson(relates) => {
+                            if !relates.is_empty() {
+                                let sql =
+                                    format!("INSERT RELATION INTO pe_owner [{}]", relates.join(","));
+                                SUL_DB.query(sql).await.expect("insert pe_owner failed");
                             }
                         }
+                        SenderJsonsData::AttJson((table, atts)) => {
+                            if !atts.is_empty() {
+                                let sql = format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
+                                SUL_DB.query(sql).await.expect("insert atts failed");
+                            }
+                        }
+                        #[cfg(feature = "sql")]
+                        SenderJsonsData::MysqlSql((project, sql)) => {
+                            let Some(pool) = pools_clone.get(&project) else {
+                                continue;
+                            };
+                            let mut conn = pool.acquire().await.expect("get pool failed");
+                            match conn.execute(sql.as_str()).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(e.to_string());
+                                    dbg!(&sql);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-            if cnt > 0 {
-                println!("thread {i} Imported records: {}", cnt);
-            }
+            // if cnt > 0 {
+            //     println!("thread {i} Imported records: {}", cnt);
+            // }
             // }
         });
         insert_handles.push(insert_handle);
@@ -592,8 +594,8 @@ pub async fn sync_total_async_threaded(
         if !db_info_sql.is_empty() {
             SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         }
-        drop(sender);
     }).await.unwrap();
+    drop(sender);
     // insert_handles.push(parse_handle);
     while let Some(result) = insert_handles.next().await {
         // 处理每个完成的 future 的结果
