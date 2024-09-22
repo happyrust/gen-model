@@ -203,7 +203,7 @@ impl AiosDBManager {
                                     //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
                                     SUL_DB
                                         .query(format!(
-                                            "INSERT INTO e3d_sync {} ",
+                                            "INSERT IGNORE INTO e3d_sync {} ",
                                             serde_json::to_string(&sync_e3d).unwrap()
                                         ))
                                         .await

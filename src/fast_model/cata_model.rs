@@ -787,16 +787,6 @@ pub async fn gen_cata_geos(
                                             dist
                                         );
                                         let sql = format!(
-                                            // "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                            //                 set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                            // branch_refno,
-                                            // branch_refno.to_pe_key(),
-                                            // current_tubing.index,
-                                            // current_tubing.leave_refno,
-                                            // current_tubing.arrive_refno,
-                                            // gen_bytes_hash::<_, 64>(&aabb),
-                                            // gen_bytes_hash::<_, 64>(&t),
-                                            // current_tubing.tubi_size.to_string(),
                                             "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
                                             set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
                                             branch_refno.to_pe_key(),

@@ -256,7 +256,7 @@ pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyho
 }
 
 pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    let mut sql = "INSERT INTO `工艺布置专业_大宗材料`(`参考号`,`编码`,`类型`,`长度`) VALUES ".to_string();
+    let mut sql = "INSERT IGNORE INTO `工艺布置专业_大宗材料`(`参考号`,`编码`,`类型`,`长度`) VALUES ".to_string();
     let b_empty = tubi_map.is_empty();
     for tubi in tubi_map.into_iter() {
         let refno = tubi.0.0;

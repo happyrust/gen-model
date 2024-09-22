@@ -310,9 +310,9 @@ pub async fn sync_total_async_threaded(
     #[cfg(feature = "sql")]
     let pool = mgr.get_project_pools().await?;
 
-    // const CHUNK_SIZE: usize = 500;
-    // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-    let (sender, receiver) = flume::unbounded();
+    const CHUNK_SIZE: usize = 500;
+    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    // let (sender, receiver) = flume::unbounded();
 
     let mut insert_handles = FuturesUnordered::new();
     for i in 0..16 {
@@ -333,14 +333,14 @@ pub async fn sync_total_async_threaded(
                                 let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
                                 // println!("pe sql: {}", sql);
                                 let mut response = SUL_DB.query(&sql).await.expect("insert pes failed");
-                                let errors = response.take_errors();
-                                if !errors.is_empty() {
-                                //     //write to file
-                                //     // let mut file = std::fs::File::create("pe.sql").unwrap();
-                                //     // use std::io::Write;
-                                //     // file.write_all(sql.as_bytes()).unwrap();
-                                    dbg!(&errors);
-                                }
+                                // let errors = response.take_errors();
+                                // if !errors.is_empty() {
+                                // //     //write to file
+                                // //     // let mut file = std::fs::File::create("pe.sql").unwrap();
+                                // //     // use std::io::Write;
+                                // //     // file.write_all(sql.as_bytes()).unwrap();
+                                //     dbg!(&errors);
+                                // }
                             }
                         }
                         SenderJsonsData::PERelateJson(relates) => {
@@ -376,7 +376,6 @@ pub async fn sync_total_async_threaded(
             }
             // if cnt > 0 {
             //     println!("thread {i} Imported records: {}", cnt);
-            // }
             // }
         });
         insert_handles.push(insert_handle);

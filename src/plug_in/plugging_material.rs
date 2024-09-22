@@ -84,7 +84,7 @@ fn create_plugging_setting_table_sql() -> String {
 
 fn init_plugging_setting_table_sql() -> String {
     format!("
-    INSERT INTO plugging_setting (plugging_type,material_type,water_level,plugging_thickness, unit_usage)
+    INSERT IGNORE INTO plugging_setting (plugging_type,material_type,water_level,plugging_thickness, unit_usage)
     VALUES ('AFW', '低密硅酮', '<2m','200mm','1'),
            ('AFW', '高密硅酮', '>2m','墙厚','1'),
            ('AFWB', '高密硅酮', '不限','墙厚','1'),

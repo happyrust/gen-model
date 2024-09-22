@@ -304,7 +304,7 @@ pub async fn save_instance_data(
                 let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
                 jsons.push(json);
             }
-            let sql = format!("INSERT INTO aabb [{}];", jsons.join(","));
+            let sql = format!("INSERT IGNORE INTO aabb [{}];", jsons.join(","));
             SUL_DB.query(sql).await.unwrap();
         }
     }

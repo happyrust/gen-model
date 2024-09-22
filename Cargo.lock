@@ -811,6 +811,7 @@ dependencies = [
  "fixedbitset 0.5.7",
  "nonmax",
  "petgraph",
+ "smallvec",
  "thiserror",
 ]
 
@@ -6301,7 +6302,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arrayvec",
  "async-channel 1.9.0",
@@ -6326,6 +6327,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "trice",
  "url",
@@ -6337,7 +6339,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "addr",
  "ahash 0.8.11",
@@ -6693,6 +6695,7 @@ checksum = "9cf6b47b3771c49ac75ad09a6162f53ad4b8088b76ac60e8ec1455b31a189fe1"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
