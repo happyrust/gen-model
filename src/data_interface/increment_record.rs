@@ -57,7 +57,7 @@ impl IncrGeoUpdateLog {
     }
 
     #[inline]
-    pub async fn get_all_visible_refnos_deep(&self) -> HashSet<RefnoEnum> {
+    pub async fn get_all_geom_refnos_deep(&self) -> HashSet<RefnoEnum> {
         let mut refnos = HashSet::new();
         refnos.extend(self.prim_refnos.iter());
         refnos.extend(self.loop_owner_refnos.iter());

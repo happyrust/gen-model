@@ -207,6 +207,7 @@ pub async fn apply_insts_boolean_manifold_single(
         r#"
         select
                 in as refno,
+                in.sesno as sesno,
                 in.noun as noun,
                 world_trans.d as wt,
                 aabb.d as aabb,
@@ -220,9 +221,9 @@ pub async fn apply_insts_boolean_manifold_single(
              from inst_relate:{refno} where in.id != none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#
     );
-    if !replace_exist {
-        sql.push_str(" and !booled");
-    }
+    // if !replace_exist {
+    //     sql.push_str(" and booled_id != none");
+    // }
     match SUL_DB.query(&sql).await {
         Ok(mut response) => {
             match response.take::<Vec<ManiGeoTransQuery>>(0) {
@@ -319,14 +320,17 @@ pub async fn apply_insts_boolean_manifold_single(
                                     let mesh = PlantMesh::from(&final_manifold);
                                     #[cfg(feature = "debug_model")]
                                     mesh.export_obj(false, &format!("{}.obj", b.refno));
+                                    let mesh_id = format!("{}_{}", b.refno.latest(), b.sesno);
+                                    dbg!(&mesh_id);
                                     //保存到文件到dir下
                                     if mesh
-                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
+                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", mesh_id)))
                                         .is_ok()
                                     {
                                         update_sql.push_str(&format!(
-                                            "update {} set booled=true;",
-                                            &inst_relate_id
+                                            "update {} set booled_id='{}';",
+                                            &inst_relate_id,
+                                            mesh_id
                                         ));
                                         success = true;
                                     }

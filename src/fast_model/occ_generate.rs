@@ -605,6 +605,7 @@ pub struct NegInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ManiGeoTransQuery {
     pub refno: RefnoEnum,
+    pub sesno: u32,
     pub noun: String,
     pub wt: Transform,
     pub aabb: Aabb,

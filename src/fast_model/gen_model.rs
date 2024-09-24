@@ -271,6 +271,7 @@ pub async fn gen_geos_data_by_dbnum(
                         .join(",")
                 );
                 let mut response = SUL_DB.query(sql).await?;
+                // response.take_errors()
                 let tuples: Vec<(RefnoEnum, f32, String)> = response.take(0)?;
                 // dbg!(&tuples[0]);
                 for (owner, height, sjus) in tuples {
@@ -517,15 +518,15 @@ pub async fn gen_geos_data(
         println!("处理db: {}", dbno.unwrap());
     }
     let d_types = db_option_arc.debug_refno_types.clone();
-    let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA");
-    let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP");
-    let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM");
+    let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA") || is_incr_update || has_manual_refnos;
+    let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP") || is_incr_update || has_manual_refnos;
+    let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM") || is_incr_update || has_manual_refnos;
 
     // dbg!(origin_root_refnos.len());
     let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
     //需要在这里把origin_root_refnos 打断成小块
     let mut chunked_root_refnos = origin_root_refnos.chunks(CHUNK_SIZE);
-    let gen_model = db_option_arc.gen_model;
+    let gen_model = db_option_arc.gen_model || is_incr_update || has_manual_refnos;
     //遍历小块
     while gen_model && let Some(target_refnos) = chunked_root_refnos.next() {
         //Step 1、提前缓存ploo, 得到对齐方式的偏移

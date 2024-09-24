@@ -230,8 +230,6 @@ pub async fn save_instance_data(
         let mut inst_relate_vec = vec![];
         for k in keys {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
-
-
             if v.world_transform.is_nan() {
                 continue;
             }
@@ -261,7 +259,6 @@ pub async fn save_instance_data(
                 }
             }
             inst_relate_vec.push(relate_sql);
-
         }
 
         if !inst_info_vec.is_empty() {

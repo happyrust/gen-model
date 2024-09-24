@@ -52,7 +52,7 @@ pub async fn save_pes(
         let mut insert_jsons = Vec::new();
         for &refno in chunk {
             let att_map = total_attr_map.get(&refno).unwrap();
-            let json = att_map.pe(db_num).gen_sur_json(None);
+            let json = att_map.pe(db_num).gen_sur_json(None, Some(refno.to_pe_key()));
             insert_jsons.push(json);
         }
         output.send_async(SenderJsonsData::PEJson(insert_jsons)).await.expect("send pes error");
@@ -134,7 +134,6 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Sende
             .map(|(i, child)| {
                 let cp = child.to_pe_key();
                 let op = owner.to_pe_key();
-                // format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op, )
                 format!("{{ id: pe_owner:[{1}, {i}], in: {0}, out: {1} }}", cp, op)
             })
             .collect::<Vec<String>>();
