@@ -29,7 +29,7 @@ pub struct PdmsEleDataVersioned {
     pub dbnum: i32,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_tag: Option<String>,
+    pub status_code: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cata_hash: Option<String>,
@@ -67,7 +67,7 @@ impl PdmsEleDataVersioned {
             "@type": "Optional"
         },
         "dbnum"    : "xsd:integer",
-        "status_tag": {
+        "status_code": {
             "@class": "xsd:string",
             "@type": "Optional"
         },

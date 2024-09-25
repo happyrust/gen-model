@@ -311,8 +311,8 @@ pub async fn sync_total_async_threaded(
     let pool = mgr.get_project_pools().await?;
 
     const CHUNK_SIZE: usize = 500;
-    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-    // let (sender, receiver) = flume::unbounded();
+    // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    let (sender, receiver) = flume::unbounded();
 
     let mut insert_handles = FuturesUnordered::new();
     for i in 0..16 {

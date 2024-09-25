@@ -279,6 +279,8 @@ impl AiosDBManager {
                         final_check_geom_refnos.insert(pe.refno);
                         need_backup_geom_refnos.insert(pe.refno);
                     }
+                } else {
+                    final_check_geom_refnos.insert(pe_data.owner);
                 }
 
                 //保存 pe 数据到数据库
@@ -379,7 +381,11 @@ impl AiosDBManager {
                         final_check_geom_refnos.insert(pe.refno);
                         need_backup_geom_refnos.insert(pe.refno);
                     }
+                } else {
+                    //检查是否是 pipe 一类的
+                    final_check_geom_refnos.insert(pe_data.owner);
                 }
+
                 #[cfg(feature = "debug_model")]
                 dbg!(refno);
                 let children_updated = children_changed_map.get(&refno.into()).map(|x| x.2);
@@ -454,10 +460,7 @@ impl AiosDBManager {
 
         //几何体的处理
         {
-            dbg!(&need_backup_geom_refnos);
-            backup_data(need_backup_geom_refnos.iter().map(|x| x.ref_refno()), false, start_sesno as _)
-                .await
-                .unwrap();
+            
             //是否需要往上查找上面一点的层级来确定是否是几何体
             if let Ok(nouns) = aios_core::get_type_names(final_check_geom_refnos.iter()).await {
                 for (&refno, noun) in final_check_geom_refnos.iter().zip(nouns) {
@@ -467,13 +470,21 @@ impl AiosDBManager {
                     } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&noun) {
                         geo_update_log.loop_owner_refnos.insert(refno);
                     } else if CATA_HAS_TUBI_GEO_NAMES.contains(&noun) {
+                        //如果发现是bran/hang， 需要备份之前的数据
+                        dbg!(&refno);
+                        need_backup_geom_refnos.insert(refno);
                         geo_update_log.bran_hanger_refnos.insert(refno);
                     } else if CATA_GEO_NAMES.contains(&noun) {
                         geo_update_log.basic_cata_refnos.insert(refno);
                     }
                 }
             }
-            #[cfg(feature = "debug_model")]
+            dbg!(&need_backup_geom_refnos);
+            backup_data(need_backup_geom_refnos.iter().map(|x| x.ref_refno()), false, start_sesno as _)
+                .await
+                .unwrap();
+
+            // #[cfg(feature = "debug_model")]
             dbg!(&geo_update_log);
             let all_deep_refnos = geo_update_log
                 .get_all_geom_refnos_deep()
