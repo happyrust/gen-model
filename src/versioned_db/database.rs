@@ -332,7 +332,8 @@ pub async fn sync_total_async_threaded(
                                 // cnt += pes.len();
                                 let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
                                 // println!("pe sql: {}", sql);
-                                let mut response = SUL_DB.query(&sql).await.expect("insert pes failed");
+                                let mut response =
+                                    SUL_DB.query(&sql).await.expect("insert pes failed");
                                 // let errors = response.take_errors();
                                 // if !errors.is_empty() {
                                 // //     //write to file
@@ -345,14 +346,17 @@ pub async fn sync_total_async_threaded(
                         }
                         SenderJsonsData::PERelateJson(relates) => {
                             if !relates.is_empty() {
-                                let sql =
-                                    format!("INSERT RELATION INTO pe_owner [{}]", relates.join(","));
+                                let sql = format!(
+                                    "INSERT RELATION INTO pe_owner [{}]",
+                                    relates.join(",")
+                                );
                                 SUL_DB.query(sql).await.expect("insert pe_owner failed");
                             }
                         }
                         SenderJsonsData::AttJson((table, atts)) => {
                             if !atts.is_empty() {
-                                let sql = format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
+                                let sql =
+                                    format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
                                 SUL_DB.query(sql).await.expect("insert atts failed");
                             }
                         }
@@ -434,11 +438,14 @@ pub async fn sync_total_async_threaded(
                 let mut ses_range_map = BTreeMap::new();
                 {
                     let mut io = PdmsIO::new(&project, path.clone(), true);
+
                     if io.open().is_ok(){
                         if is_sync_history{
                             io.sync_history().await.unwrap();
                             //同步完历史纪录就返回
                             continue;
+                        }else{
+                            io.store_all_refno_sesno_map().await.unwrap();
                         }
                         ses_range_map = io.ses_range_map;
                     }

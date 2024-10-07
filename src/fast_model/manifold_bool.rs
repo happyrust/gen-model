@@ -321,7 +321,7 @@ pub async fn apply_insts_boolean_manifold_single(
                                     #[cfg(feature = "debug_model")]
                                     mesh.export_obj(false, &format!("{}.obj", b.refno));
                                     let mesh_id = format!("{}_{}", b.refno.latest(), b.sesno);
-                                    dbg!(&mesh_id);
+                                    // dbg!(&mesh_id);
                                     //保存到文件到dir下
                                     if mesh
                                         .ser_to_file(&dir_clone.join(format!("{}.mesh", mesh_id)))

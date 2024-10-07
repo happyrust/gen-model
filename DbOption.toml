@@ -1,14 +1,14 @@
 #同步文件配置
 total_sync = false
 incr_sync = false
-sync_history = true
+sync_history = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
 sync_live = true
 replace_dbs = false
-sync_chunk_size = 1_0000
+sync_chunk_size = 10_0000
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
@@ -56,7 +56,7 @@ user = "root"
 password = ""
 port = "3306"
 #port = "4000"
-sql_threads_number = 50
+sql_threads_number = 10
 batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
@@ -64,10 +64,10 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 v_ip = "localhost"
 #v_port = "8004"
 #v_port = "8003"
-v_port = "8008"
+v_port = "8009"
 v_user = "root"
 v_password = "root"
-pe_chunk = 500
+pe_chunk = 300
 att_chunk = 200
 
 
@@ -95,11 +95,10 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP", "PRIM"]
-#debug_refno_types = ["CATA"]
- included_db_files = ["ams8000_0001"]
+included_db_files = ["ams1112_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [7997]
+manual_db_nums = [1112]
 plat_url = ""
 
 #puhua
@@ -112,14 +111,14 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 
 #test_refno = "17496/170587"
 
-#debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
-#debug_root_refnos = ["24381/36155", "24383/67004"]
-# debug_root_refnos = ["=17496/274057"]
-#调试ngmr两边打孔
-#debug_root_refnos = ["23713/2440"]
-#debug_root_refnos = ["17496/276094"]
-#debug_root_refnos = ["17496_171606"]
+# debug_root_refnos = ["17496/496604"]
 gen_history_model = true
 
 # debug_root_refnos = ["24383/66457", "9304/2", "17496/229978"]
 # debug_root_refnos = ["23713/2510", "24383/66457"]
+#debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
+#debug_root_refnos = ["24381/36155", "24383/67004"]
+debug_root_refnos = ["24381_101421"]
+#调试ngmr两边打孔
+#debug_root_refnos = ["23713/2440"]
+#debug_root_refnos = ["17496_171606"]

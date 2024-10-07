@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{execute_clone, CloneOptions};
+// use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
 use rumqttc::Event::Incoming;
@@ -116,18 +116,18 @@ impl AiosDBManager {
             };
             let e3d_file: PathBuf = pb.value().clone();
             let mut clone_time = Instant::now();
-            let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
-            if let Ok(r) = execute_clone(remote_clone_opt).await {
-                if r {
-                    //需要保存更新记录
-                    println!(
-                        "Clone {} cost: {:?}s",
-                        file_name,
-                        clone_time.elapsed().as_secs_f64()
-                    );
-                    //clone完了,再执行增量更新
-                }
-            }
+            // let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
+            // if let Ok(r) = execute_clone(remote_clone_opt).await {
+            //     if r {
+            //         //需要保存更新记录
+            //         println!(
+            //             "Clone {} cost: {:?}s",
+            //             file_name,
+            //             clone_time.elapsed().as_secs_f64()
+            //         );
+            //         //clone完了,再执行增量更新
+            //     }
+            // }
         }
 
         Ok(true)

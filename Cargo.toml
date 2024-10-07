@@ -4,7 +4,7 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "debug_model"] #
+default = ["ws", "gen_model", "manifold", "occ"] #
 truck = []
 local = []
 ws = []
@@ -51,8 +51,8 @@ chrono = "0.4.22"
 nalgebra = { path = "../new-crates/nalgebra", features = [
     "serde",
     "rkyv",
-    "glam028",
-    "convert-glam028"
+    "glam029",
+    "convert-glam029"
 ] }
 parry3d = { path = "../new-crates/parry/crates/parry3d", features = [
     "serde-serialize",
@@ -71,8 +71,8 @@ dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.28.0", features = ["serde", "rkyv"]}
-cached = "0.50.0"
+glam = { version = "0.29.0", features = ["serde", "rkyv"]}
+cached = "0.53.1"
 rkyv = { version = "0.7.44", features = ["hashbrown"] }
 
 

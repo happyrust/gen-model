@@ -141,16 +141,16 @@ pub async fn save_instance_data(
     }
     if !geo_relate_vec.is_empty() {
         // let handle = tokio::spawn(async move {
-            for chunk in geo_relate_vec.chunks(chunk_size) {
-                let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
-                //
-                // println!("geo relate sql: {}", &sql);
-                let mut response = SUL_DB.query(sql).await.unwrap();
-                // let mut error = response.take_errors();
-                // if !error.is_empty() {
-                //     dbg!(&error);
-                // }
-            }
+        for chunk in geo_relate_vec.chunks(chunk_size) {
+            let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
+            //
+            // println!("geo relate sql: {}", &sql);
+            let mut response = SUL_DB.query(sql).await.unwrap();
+            // let mut error = response.take_errors();
+            // if !error.is_empty() {
+            //     dbg!(&error);
+            // }
+        }
         // });
         // insert_handles.push(handle);
     }
@@ -252,7 +252,7 @@ pub async fn save_instance_data(
                 v.has_cata_neg,
                 v.is_solid
             );
-            if let Some(t_refno) = test_refno{
+            if let Some(t_refno) = test_refno {
                 if *k == t_refno.into() {
                     dbg!(v);
                     println!("inst relate sql: {}", &relate_sql);
@@ -278,11 +278,11 @@ pub async fn save_instance_data(
         if !inst_relate_vec.is_empty() {
             //使用surreal 保存NamedAttrMap
             // let handle = tokio::spawn(async move {
-                for chunk in inst_relate_vec.chunks(chunk_size) {
-                    let inst_relate_sql =
-                        format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-                    SUL_DB.query(inst_relate_sql).await.unwrap();
-                }
+            for chunk in inst_relate_vec.chunks(chunk_size) {
+                let inst_relate_sql =
+                    format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
+                SUL_DB.query(inst_relate_sql).await.unwrap();
+            }
             // });
             // insert_handles.push(handle);
         }
