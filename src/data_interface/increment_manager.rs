@@ -265,28 +265,28 @@ impl AiosDBManager {
                 let pe_data = ele.att_map().pe(dbnum);
                 //处理几何体的筛选
                 let noun = ele.att_map().get_type();
-                let noun = noun.as_str();
+                let noun_str = noun.as_str();
                 let refno_enum = refno.into();
-                if PRIMITIVE_NOUN_NAMES.contains(&noun) {
+                if PRIMITIVE_NOUN_NAMES.contains(&noun_str) {
                     geo_update_log.prim_refnos.insert(refno_enum);
-                } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&noun) {
+                } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&noun_str) {
                     geo_update_log.loop_owner_refnos.insert(refno_enum);
-                } else if CATA_HAS_TUBI_GEO_NAMES.contains(&noun) {
+                } else if CATA_HAS_TUBI_GEO_NAMES.contains(&noun_str) {
                     geo_update_log.bran_hanger_refnos.insert(refno_enum);
-                } else if CATA_GEO_NAMES.contains(&noun) {
+                } else if CATA_GEO_NAMES.contains(&noun_str) {
                     geo_update_log.basic_cata_refnos.insert(refno_enum);
-                } else if TOTAL_NEG_NOUN_NAMES.contains(&noun) {
-                    if GENRAL_NEG_NOUN_NAMES.contains(&noun) {
+                } else if TOTAL_NEG_NOUN_NAMES.contains(&noun_str) {
+                    if GENRAL_NEG_NOUN_NAMES.contains(&noun_str) {
                         geo_update_log.prim_refnos.insert(refno_enum);
-                    } else if CATE_NEG_NOUN_NAMES.contains(&noun) {
+                    } else if CATE_NEG_NOUN_NAMES.contains(&noun_str) {
                         geo_update_log.basic_cata_refnos.insert(refno_enum);
                     }
                     need_backup_geom_refnos.insert(pe_data.owner);
                     final_check_geom_refnos.insert(pe_data.owner);
-                } else if TOTAL_LOOP_NOUN_NAMES.contains(&noun) {
+                } else if TOTAL_LOOP_NOUN_NAMES.contains(&noun_str) {
                     need_backup_geom_refnos.insert(pe_data.owner);
                     final_check_geom_refnos.insert(pe_data.owner);
-                } else if TOTAL_VERT_NOUN_NAMES.contains(&noun) {
+                } else if TOTAL_VERT_NOUN_NAMES.contains(&noun_str) {
                     if let Some(pe) = aios_core::get_pe(pe_data.owner).await.unwrap() {
                         final_check_geom_refnos.insert(pe.refno);
                         need_backup_geom_refnos.insert(pe.refno);
@@ -348,13 +348,6 @@ impl AiosDBManager {
                 }
             }
         }
-
-        //执行 added， todo use batch insert
-        // let final_refnos = added_refnos_set.union(&modified_refnos_set).collect::<HashSet<_>>();
-        // added_refnos_set.extend(modified_refnos_set);
-        // let mut final_refnos = vec![];
-        // final_refnos.extend(added_refnos_set.into_iter());
-        // final_refnos.extend(modified_refnos_set.into_iter());
         if !added_refnos_set.is_empty() {
             #[cfg(feature = "debug_model")]
             dbg!(&added_refnos_set);
@@ -415,12 +408,14 @@ impl AiosDBManager {
                         .unwrap();
                 }
             }
-            let sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
-            // println!("{}", sql);
-            let mut response = SUL_DB.query(sql).await.unwrap();
-            let erros = response.take_errors();
-            if !erros.is_empty() {
-                dbg!(&erros);
+            if !pe_json_vec.is_empty(){
+                let sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
+                println!("{}", sql);
+                let mut response = SUL_DB.query(sql).await.unwrap();
+                let erros = response.take_errors();
+                if !erros.is_empty() {
+                    dbg!(&erros);
+                }
             }
         }
 
@@ -457,12 +452,8 @@ impl AiosDBManager {
                 SUL_DB.query(sql).await.unwrap();
             }
         }
-
-
-
         //几何体的处理
         {
-            
             //是否需要往上查找上面一点的层级来确定是否是几何体
             if let Ok(nouns) = aios_core::get_type_names(final_check_geom_refnos.iter()).await {
                 for (&refno, noun) in final_check_geom_refnos.iter().zip(nouns) {

@@ -91,7 +91,7 @@ dependencies = [
  "clap",
  "config 0.13.4",
  "dashmap",
- "derive_more",
+ "derive_more 0.99.18",
  "dotenv",
  "downcast-rs",
  "flume",
@@ -164,7 +164,7 @@ dependencies = [
  "dashmap",
  "deku",
  "derivative",
- "derive_more",
+ "derive_more 0.99.18",
  "downcast-rs",
  "dyn-clone",
  "evalexpr",
@@ -761,8 +761,8 @@ dependencies = [
  "bevy_utils",
  "console_error_panic_hook",
  "ctrlc",
+ "derive_more 1.0.0",
  "downcast-rs",
- "thiserror",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -799,12 +799,12 @@ dependencies = [
  "bevy_utils",
  "bitflags 2.6.0",
  "concurrent-queue",
+ "derive_more 1.0.0",
  "disqualified",
  "fixedbitset 0.5.7",
  "nonmax",
  "petgraph",
  "smallvec",
- "thiserror",
 ]
 
 [[package]]
@@ -845,13 +845,13 @@ name = "bevy_math"
 version = "0.15.0-dev"
 dependencies = [
  "bevy_reflect",
+ "derive_more 1.0.0",
  "glam",
  "itertools 0.13.0",
  "rand",
  "rand_distr",
  "serde",
  "smallvec",
- "thiserror",
 ]
 
 [[package]]
@@ -866,6 +866,7 @@ dependencies = [
  "bevy_ptr",
  "bevy_reflect_derive",
  "bevy_utils",
+ "derive_more 1.0.0",
  "disqualified",
  "downcast-rs",
  "erased-serde 0.4.5",
@@ -873,7 +874,6 @@ dependencies = [
  "serde",
  "smallvec",
  "smol_str",
- "thiserror",
 ]
 
 [[package]]
@@ -907,6 +907,7 @@ dependencies = [
  "bevy_hierarchy",
  "bevy_math",
  "bevy_reflect",
+ "derive_more 1.0.0",
  "rkyv",
  "serde",
  "thiserror",
@@ -1958,6 +1959,27 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.79",
+]
+
+[[package]]
+name = "derive_more"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9b99b9cbbe49445b21764dc0625032a89b145a2642e67603e1c936f5458d05"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7330aeadfbe296029522e6c40f315320aba36fc43a5b3632f3795348f3bd22"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.79",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -6200,7 +6222,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb"
-version = "2.0.2"
+version = "2.0.4"
 dependencies = [
  "arrayvec",
  "async-channel 1.9.0",
@@ -6237,7 +6259,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-core"
-version = "2.0.2"
+version = "2.0.4"
 dependencies = [
  "addr",
  "ahash 0.8.11",

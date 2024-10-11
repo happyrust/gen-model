@@ -30,11 +30,6 @@ pub struct IncrGeoUpdateLog {
     pub basic_cata_refnos: HashSet<RefnoEnum>,
     //删除了的模型
     pub delete_refnos: HashSet<RefnoEnum>,
-
-    //属性时间戳
-    pub att_timestamp: surrealdb::sql::Datetime,
-    //模型时间戳
-    pub mesh_timestamp: Option<surrealdb::sql::Datetime>,
 }
 
 impl IncrGeoUpdateLog {

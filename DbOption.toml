@@ -62,9 +62,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-#v_port = "8004"
-#v_port = "8003"
-v_port = "8009"
+v_port = "8008"
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
@@ -112,13 +110,14 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 #test_refno = "17496/170587"
 
 # debug_root_refnos = ["17496/496604"]
-gen_history_model = true
+gen_history_model = false
 
 # debug_root_refnos = ["24383/66457", "9304/2", "17496/229978"]
 # debug_root_refnos = ["23713/2510", "24383/66457"]
 #debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
 #debug_root_refnos = ["24381/36155", "24383/67004"]
-debug_root_refnos = ["24381_101421"]
+debug_root_refnos = []
+#debug_root_refnos = ["24381_101421"]
 #调试ngmr两边打孔
 #debug_root_refnos = ["23713/2440"]
 #debug_root_refnos = ["17496_171606"]
