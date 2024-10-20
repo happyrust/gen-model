@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync =  false
 incr_sync = false
 sync_history = false
 enable_log = false
@@ -8,6 +8,7 @@ sync_versioned = false
 sync_tidb = false
 sync_live = true
 replace_dbs = false
+enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
@@ -62,11 +63,14 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = "8008"
+v_port = "8009"
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
 att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
 
 
 #mqtt 事件 ip
@@ -93,7 +97,7 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP", "PRIM"]
-included_db_files = ["ams1112_0001"]
+# included_db_files = ["ams1112_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]

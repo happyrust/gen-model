@@ -228,7 +228,7 @@ pub async fn save_instance_data(
     {
         let mut inst_info_vec = vec![];
         let mut inst_relate_vec = vec![];
-        for k in keys {
+        for k in keys.clone() {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
             if v.world_transform.is_nan() {
                 continue;
@@ -250,7 +250,8 @@ pub async fn save_instance_data(
                 transform_hash,
                 v.generic_type.to_string(),
                 v.has_cata_neg,
-                v.is_solid
+                v.is_solid,
+                // v.dt.and_utc().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
             );
             if let Some(t_refno) = test_refno {
                 if *k == t_refno.into() {
@@ -276,15 +277,18 @@ pub async fn save_instance_data(
         }
         //inst relate 放到最后保存, 因为是被监控的
         if !inst_relate_vec.is_empty() {
-            //使用surreal 保存NamedAttrMap
-            // let handle = tokio::spawn(async move {
             for chunk in inst_relate_vec.chunks(chunk_size) {
                 let inst_relate_sql =
                     format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
                 SUL_DB.query(inst_relate_sql).await.unwrap();
             }
-            // });
-            // insert_handles.push(handle);
+            for chunk in keys.to_vec().chunks(chunk_size) {
+                let mut update_date_sql = String::new();
+                for &k in chunk {
+                    update_date_sql.push_str(&format!("update inst_relate:{k} set dt=fn::ses_date(pe:{k});"));
+                }
+                SUL_DB.query(update_date_sql).await.unwrap();
+            }
         }
     }
 

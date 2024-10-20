@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     /// 创建db manager
     if sync_live {
         let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-        mgr.init_watcher().await.unwrap();
+        mgr.init_watcher().await?;
         cur_mgr = Some(mgr);
     }
 

@@ -101,11 +101,7 @@ impl AiosDBManager {
         let mut geo_update_log = IncrGeoUpdateLog::default();
         let mut has_changed = false;
         let project = get_db_option().project_name.clone();
-        //TODO: 多历史情况的处理，现在先暂时只处理单个的历史情况
-        //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
-        // for (path, (basic_info, start_sesno)) in increment_ranges_map
 
-        //sesno_range 按递增 1 去执行
         let mut io = PdmsIO::new(&project, path, true);
         io.open()?;
         let cur_ses_data = io.get_ses_data(start_sesno as _)?.clone();
@@ -309,7 +305,7 @@ impl AiosDBManager {
                     }
                 }
                 //保存 pe 数据到数据库
-                let pe_json = pe_data.gen_sur_json(m_children_updated, None);
+                let pe_json = pe_data.gen_sur_json(None);
                 let sql = format!("UPSERT {} MERGE {}", refno.to_pe_key(), pe_json);
                 // println!("{}", sql);
                 SUL_DB.query(sql).await.unwrap();
@@ -327,7 +323,7 @@ impl AiosDBManager {
 
             //执行 modifed 的 owner relate
             if !modifed_owner_map.is_empty() {
-                #[cfg(feature = "debug_model")]
+                // #[cfg(feature = "debug_model")]
                 dbg!(&modifed_owner_map);
                 backup_owner_relate(modifed_owner_map.keys()).await.unwrap();
                 for (owner, children) in modifed_owner_map {
@@ -393,8 +389,8 @@ impl AiosDBManager {
 
                 #[cfg(feature = "debug_model")]
                 dbg!(refno);
-                let children_updated = children_changed_map.get(&refno.into()).map(|x| x.2);
-                let pe_json = pe_data.gen_sur_json(children_updated, Some(refno.to_pe_key()));
+                // let children_updated = children_changed_map.get(&refno.into()).map(|x| x.2);
+                let pe_json = pe_data.gen_sur_json(Some(refno.to_pe_key()));
                 pe_json_vec.push(pe_json);
 
                 if let Some(att_json) = ele.att_map().gen_sur_json() {
@@ -428,7 +424,7 @@ impl AiosDBManager {
             .filter(|x| x.1 .1 > 0)
             .map(|x| x.0.refno())
             .collect::<Vec<_>>();
-        #[cfg(feature = "debug_model")]
+        // #[cfg(feature = "debug_model")]
         dbg!(&owner_changed_refnos);
         if !owner_changed_refnos.is_empty() {
             backup_owner_relate(owner_changed_refnos.iter())
@@ -563,7 +559,7 @@ impl AiosDBManager {
                 // });
 
                 let mut io = PdmsIO::new(&project, path, true);
-                io.open().unwrap();
+                io.open()?;
                 //每个path 都要检查一遍
                 if let Ok(basic_info) = io.get_page_basic_info() {
                     if db_latest_sesno != 0 {

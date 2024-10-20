@@ -155,7 +155,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     }
 
     //只有重新同步时，才需要定义index
-    if db_option.total_sync {
+    if db_option.enable_index.unwrap_or(false) {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
         // aios_core::define_fullname_index().await.unwrap();
@@ -207,8 +207,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             continue;
         }
         let cur_dbno_set = dbno_set.clone();
-        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await
-        {
+        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await{
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -310,7 +309,7 @@ pub async fn sync_total_async_threaded(
     #[cfg(feature = "sql")]
     let pool = mgr.get_project_pools().await?;
 
-    const CHUNK_SIZE: usize = 500;
+    const CHUNK_SIZE: usize = 100;
     // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
     let (sender, receiver) = flume::unbounded();
 
@@ -529,6 +528,8 @@ pub async fn sync_total_async_threaded(
                                 save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
                                                &db_option_clone, db_no as i32, &sender_clone).await;
                             }
+                            //temp disable save att data
+                            continue;
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
                                 let type_name = db1_dehash(noun as _);

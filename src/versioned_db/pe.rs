@@ -52,7 +52,7 @@ pub async fn save_pes(
         let mut insert_jsons = Vec::new();
         for &refno in chunk {
             let att_map = total_attr_map.get(&refno).unwrap();
-            let json = att_map.pe(db_num).gen_sur_json(None, Some(refno.to_pe_key()));
+            let json = att_map.pe(db_num).gen_sur_json(Some(refno.to_pe_key()));
             insert_jsons.push(json);
         }
         output.send_async(SenderJsonsData::PEJson(insert_jsons)).await.expect("send pes error");

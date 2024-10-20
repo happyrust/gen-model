@@ -212,6 +212,7 @@ pub async fn gen_all_geos_data(
     Ok(true)
 }
 
+///更新模型数据
 pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let include_history = db_option.is_gen_history_model();
@@ -225,12 +226,14 @@ pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> any
     Ok(())
 }
 
+///生成几何体数据
 pub async fn gen_geos_data_by_dbnum(
     dbno: u32,
     db_option_arc: Arc<DbOption>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<DbModelInstRefnos> {
     let gen_history = db_option_arc.is_gen_history_model();
+    //判断有空的层级，不用去生成
     let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
         .await
         .unwrap_or_default();
