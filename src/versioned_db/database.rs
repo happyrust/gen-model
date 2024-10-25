@@ -155,7 +155,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     }
 
     //只有重新同步时，才需要定义index
-    if db_option.enable_index.unwrap_or(false) {
+    if db_option.enable_index.unwrap_or(true) {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
         // aios_core::define_fullname_index().await.unwrap();
@@ -528,8 +528,6 @@ pub async fn sync_total_async_threaded(
                                 save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
                                                &db_option_clone, db_no as i32, &sender_clone).await;
                             }
-                            //temp disable save att data
-                            continue;
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
                                 let type_name = db1_dehash(noun as _);

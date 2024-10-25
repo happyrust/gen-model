@@ -179,11 +179,12 @@ pub async fn process_meshes_update_db_deep(
                 .await
                 .unwrap_or_default();
             target_visible_refnos.extend(update_refnos.clone());
+            dbg!(&target_visible_refnos);
 
             let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
             update_refnos.extend(neg_refnos);
 
-            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+            // #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
             println!("实际需要更新模型结点数量: {}", update_refnos.len());
 
             if update_refnos.is_empty() {

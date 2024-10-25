@@ -126,7 +126,7 @@ impl AiosDBManager {
         //批量检测是否存在这些eles
         let mut exist_refnos_map = BTreeMap::new();
         let pes = eles_map.keys().map(|x| x.to_pe_key()).join(",");
-        let sql = format!("SELECT VALUE [id, (select value in from <-pe_owner)] FROM [{pes}] where record::exists(id)");
+        let sql = format!("SELECT VALUE [id, (select value in from <-pe_owner)] FROM [{pes}] where record::exists(id) && !deleted");
         // println!("{}", sql);
         let mut resp = SUL_DB.query(sql).await?;
         let refnos: Vec<(RefU64, Vec<RefU64>)> = resp.take(0).unwrap();
@@ -161,7 +161,11 @@ impl AiosDBManager {
                 if !children_eq {
                     children_changed_map.insert(
                         refno,
-                        (ele.children.clone(), old_children.len(), !children_eq),
+                        (
+                            ele.children.clone(),
+                            RefU64Vec(old_children.clone()),
+                            !children_eq,
+                        ),
                     );
                     //找出删除的children
                     for (i, &child) in old_children.into_iter().enumerate() {
@@ -216,7 +220,8 @@ impl AiosDBManager {
                 ele_op = EleOperation::Add;
                 added_refnos_set.insert(refno.refno());
                 if ele.children.len() > 0 {
-                    children_changed_map.insert(refno, (ele.children.clone(), 0, true));
+                    children_changed_map
+                        .insert(refno, (ele.children.clone(), RefU64Vec::default(), true));
                 }
             }
         }
@@ -293,12 +298,12 @@ impl AiosDBManager {
 
                 //保存 pe 数据到数据库
                 let mut m_children_updated = None;
-                if let Some((chidlren, _, children_updated)) =
+                if let Some((chidlren, old_chidlren, children_updated)) =
                     children_changed_map.remove(&refno.into())
                 {
                     if children_updated {
                         //需要更新 children
-                        modifed_owner_map.insert(refno, chidlren);
+                        modifed_owner_map.insert(refno, (chidlren, old_chidlren));
                         m_children_updated = Some(true);
                     } else {
                         m_children_updated = Some(false);
@@ -325,23 +330,53 @@ impl AiosDBManager {
             if !modifed_owner_map.is_empty() {
                 // #[cfg(feature = "debug_model")]
                 dbg!(&modifed_owner_map);
-                backup_owner_relate(modifed_owner_map.keys()).await.unwrap();
-                for (owner, children) in modifed_owner_map {
-                    let relate_json = children
+                SUL_DB.query("BEGIN TRANSACTION;").await.unwrap();
+                // backup_owner_relate(modifed_owner_map.keys()).await.unwrap();
+                for (owner, (new_children, old_children)) in modifed_owner_map {
+                    // 删除owner的relate关系
+                    let sql = format!(
+                        "select value in from (DELETE select value id FROM {}<-pe_owner RETURN BEFORE)",
+                        owner.to_pe_key()
+                    );
+                    let mut resp = SUL_DB.query(sql).await.unwrap();
+                    let mut merged_children: Vec<RefU64> = resp.take(0).unwrap();
+
+                    // 合并 children 和 old_children，维持 old_children 的顺序
+                    let mut insert_pos = 0;
+                    for child in new_children {
+                        if !merged_children.contains(&child) {
+                            // 找到合适的位置插入
+                            merged_children.insert(insert_pos, child);
+                        } else {
+                            insert_pos =
+                                merged_children.iter().position(|&o| o == child).unwrap() + 1;
+                        }
+                    }
+
+                    dbg!(&merged_children);
+
+                    // 生成 relate_json, 如果是被删除的，需要加上deleted 标签
+                    let relate_json = merged_children
                         .iter()
                         .enumerate()
                         .map(|(i, child)| {
                             let cp = child.to_pe_key();
                             let op = owner.to_pe_key();
-                            format!("{{ id: pe_owner:[{1}, {i}], in: {0}, out: {1} }}", cp, op)
+                            let deleted = deleted_refnos_set.contains(child);
+                            if deleted {
+                                format!("{{ id: pe_owner:[{1}, {i}], in: {0}, out: {1}, deleted: true }}", cp, op)
+                            } else {
+                                format!("{{ id: pe_owner:[{1}, {i}], in: {0}, out: {1} }}", cp, op)
+                            }
                         })
                         .collect::<Vec<String>>();
                     for chunk in relate_json.chunks(200) {
                         let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-                        println!("{}", sql);
+                        // println!("{}", sql);
                         SUL_DB.query(sql).await.unwrap();
                     }
                 }
+                SUL_DB.query("COMMIT TRANSACTION;").await.unwrap();
             }
         }
         if !added_refnos_set.is_empty() {
@@ -389,7 +424,6 @@ impl AiosDBManager {
 
                 #[cfg(feature = "debug_model")]
                 dbg!(refno);
-                // let children_updated = children_changed_map.get(&refno.into()).map(|x| x.2);
                 let pe_json = pe_data.gen_sur_json(Some(refno.to_pe_key()));
                 pe_json_vec.push(pe_json);
 
@@ -404,9 +438,9 @@ impl AiosDBManager {
                         .unwrap();
                 }
             }
-            if !pe_json_vec.is_empty(){
+            if !pe_json_vec.is_empty() {
                 let sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
-                println!("{}", sql);
+                // println!("{}", sql);
                 let mut response = SUL_DB.query(sql).await.unwrap();
                 let erros = response.take_errors();
                 if !erros.is_empty() {
@@ -415,23 +449,24 @@ impl AiosDBManager {
             }
         }
 
-        //新的 owner relate ，旧的 owner relate 要重新创建
-        #[cfg(feature = "debug_model")]
+        //新的 owner relate
+        // #[cfg(feature = "debug_model")]
         dbg!(&children_changed_map);
         //最后执行backup_owner_relate，然后添加新的 owner relate
-        let owner_changed_refnos = children_changed_map
-            .iter()
-            .filter(|x| x.1 .1 > 0)
-            .map(|x| x.0.refno())
-            .collect::<Vec<_>>();
-        // #[cfg(feature = "debug_model")]
-        dbg!(&owner_changed_refnos);
-        if !owner_changed_refnos.is_empty() {
-            backup_owner_relate(owner_changed_refnos.iter())
-                .await
-                .unwrap();
-        }
-        for (&owner, (children, _, children_updated)) in &children_changed_map {
+        // let owner_changed_refnos = children_changed_map
+        //     .iter()
+        //     .filter(|x| x.1 .1 > 0)
+        //     .map(|x| x.0.refno())
+        //     .collect::<Vec<_>>();
+        // // #[cfg(feature = "debug_model")]
+        // dbg!(&owner_changed_refnos);
+        // if !owner_changed_refnos.is_empty() {
+        //     // backup_owner_relate(owner_changed_refnos.iter())
+        //     //     .await
+        //     //     .unwrap();
+        // }
+
+        for (&owner, (children, old_children, children_updated)) in &children_changed_map {
             let relate_json = children
                 .iter()
                 .enumerate()
@@ -443,7 +478,8 @@ impl AiosDBManager {
                 .collect::<Vec<String>>();
             for chunk in relate_json.chunks(200) {
                 let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-                #[cfg(feature = "debug_sql")]
+                // #[cfg(feature = "debug_sql")]
+                dbg!("save children_changed_map");
                 println!("{}", sql);
                 SUL_DB.query(sql).await.unwrap();
             }
@@ -468,13 +504,19 @@ impl AiosDBManager {
                     }
                 }
             }
+            //modified_refnos_set 里已经包含的，就不需要备份了
+            need_backup_geom_refnos.retain(|x| !modified_refnos_set.contains(&x.refno()));
             dbg!(&need_backup_geom_refnos);
-            backup_data(need_backup_geom_refnos.iter().map(|x| x.ref_refno()), false, start_sesno as _)
-                .await
-                .unwrap();
+            backup_data(
+                need_backup_geom_refnos.iter().map(|x| x.ref_refno()),
+                false,
+                start_sesno as _,
+            )
+            .await
+            .unwrap();
 
             // #[cfg(feature = "debug_model")]
-            dbg!(&geo_update_log);
+            // dbg!(&geo_update_log);
             let all_deep_refnos = geo_update_log
                 .get_all_geom_refnos_deep()
                 .await
@@ -487,7 +529,7 @@ impl AiosDBManager {
             gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
                 .await
                 .unwrap();
-            #[cfg(feature="debug_model")]
+            #[cfg(feature = "debug_model")]
             dbg!(&all_deep_refnos);
             process_meshes_update_db(Some(Arc::new(self.db_option.clone())), &all_deep_refnos)
                 .await
