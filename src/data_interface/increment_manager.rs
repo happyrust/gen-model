@@ -18,9 +18,11 @@ use notify::{RecursiveMode, Watcher};
 use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::PdmsIO;
+use pdms_io::sync::compress::{execute_compress, CompressOptions};
 // use pdms_io::sync::compress::{execute_compress, CompressOptions};
 use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
+use rumqttc::QoS;
 use tokio::fs::create_dir_all;
 use walkdir::WalkDir;
 
@@ -178,7 +180,7 @@ impl AiosDBManager {
                                 .map(|x| x.refno())
                                 .collect::<HashSet<_>>();
                             let t = (i, child, refno);
-                            println!("Delete: {:?}", t);
+                            // println!("Delete: {:?}", t);
                             //删除需要扩展到所有的子节点
                             total_deleted_len += deep_children.len();
                             // total_deleted_len += 1;
@@ -228,7 +230,7 @@ impl AiosDBManager {
 
         //执行 backup deleted
         if !deleted_refnos_set.is_empty() {
-            dbg!(&deleted_refnos_set);
+            // dbg!(&deleted_refnos_set);
             //删除的几何体处理，需要判断是否是几何体
             for &refno in &deleted_refnos_set {
                 final_check_geom_refnos.insert(refno.into());
@@ -328,7 +330,7 @@ impl AiosDBManager {
 
             //执行 modifed 的 owner relate
             if !modifed_owner_map.is_empty() {
-                // #[cfg(feature = "debug_model")]
+                #[cfg(feature = "debug_model")]
                 dbg!(&modifed_owner_map);
                 SUL_DB.query("BEGIN TRANSACTION;").await.unwrap();
                 // backup_owner_relate(modifed_owner_map.keys()).await.unwrap();
@@ -353,7 +355,7 @@ impl AiosDBManager {
                         }
                     }
 
-                    dbg!(&merged_children);
+                    // dbg!(&merged_children);
 
                     // 生成 relate_json, 如果是被删除的，需要加上deleted 标签
                     let relate_json = merged_children
@@ -439,18 +441,20 @@ impl AiosDBManager {
                 }
             }
             if !pe_json_vec.is_empty() {
-                let sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
-                // println!("{}", sql);
-                let mut response = SUL_DB.query(sql).await.unwrap();
-                let erros = response.take_errors();
-                if !erros.is_empty() {
-                    dbg!(&erros);
+                for chunk in pe_json_vec.chunks(300) {
+                    let sql = format!("INSERT IGNORE INTO pe [{}]", chunk.join(","));
+                    // println!("{}", sql);
+                    let mut response = SUL_DB.query(sql).await.unwrap();
+                    let erros = response.take_errors();
+                    if !erros.is_empty() {
+                        dbg!(&erros);
+                    }
                 }
             }
         }
 
         //新的 owner relate
-        // #[cfg(feature = "debug_model")]
+        #[cfg(feature = "debug_model")]
         dbg!(&children_changed_map);
         //最后执行backup_owner_relate，然后添加新的 owner relate
         // let owner_changed_refnos = children_changed_map
@@ -478,8 +482,7 @@ impl AiosDBManager {
                 .collect::<Vec<String>>();
             for chunk in relate_json.chunks(200) {
                 let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-                // #[cfg(feature = "debug_sql")]
-                dbg!("save children_changed_map");
+                #[cfg(feature = "debug_sql")]
                 println!("{}", sql);
                 SUL_DB.query(sql).await.unwrap();
             }
@@ -506,6 +509,7 @@ impl AiosDBManager {
             }
             //modified_refnos_set 里已经包含的，就不需要备份了
             need_backup_geom_refnos.retain(|x| !modified_refnos_set.contains(&x.refno()));
+            #[cfg(feature = "debug_model")]
             dbg!(&need_backup_geom_refnos);
             backup_data(
                 need_backup_geom_refnos.iter().map(|x| x.ref_refno()),
@@ -528,15 +532,15 @@ impl AiosDBManager {
             //有可能没更新完，就update了模型？
             gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
                 .await
-                .unwrap();
+                .expect("gen_all_geos_data failed");
             #[cfg(feature = "debug_model")]
             dbg!(&all_deep_refnos);
-            process_meshes_update_db(Some(Arc::new(self.db_option.clone())), &all_deep_refnos)
-                .await
-                .unwrap();
-            // process_meshes_update_db_deep(&self.db_option, &all_deep_refnos)
+            // process_meshes_update_db(Some(Arc::new(self.db_option.clone())), &all_deep_refnos)
             //     .await
             //     .unwrap();
+            process_meshes_update_db_deep(&self.db_option, &all_deep_refnos)
+                .await
+                .expect("process_meshes_update_db_deep failed");
             println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
         }
         Ok(true)
@@ -545,7 +549,7 @@ impl AiosDBManager {
     //初始化监测
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
-        fs::create_dir_all("asset/archives")?;
+        fs::create_dir_all("assets/archives")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
         let db_option = get_db_option();
@@ -588,17 +592,22 @@ impl AiosDBManager {
                     continue;
                 };
                 dbg!(db_latest_sesno);
-                // self.watcher
-                //     .file_name_full_path_map
-                //     .insert(file_name.to_owned(), path.to_path_buf());
-                //初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
-                //是否需要完全初始化
-                // let input = path.to_path_buf();
-                // let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
-                // join_set.spawn(async move {
-                //     // let compress_opt = CompressOptions::new(input, output);
-                //     // execute_compress(compress_opt).await.unwrap();
-                // });
+                //初始化异地更新压缩数据包
+                {
+                    self.watcher
+                        .file_name_full_path_map
+                        .insert(file_name.to_owned(), path.to_path_buf());
+                    // 初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
+                    // 是否需要完全初始化
+                    let input = path.to_path_buf();
+                    let output: PathBuf = format!("assets/archives/{}.cba", file_name).into();
+                    // join_set.spawn(async move {
+                    let compress_opt = CompressOptions::new(input, output, "assets/temp");
+                    execute_compress(compress_opt)
+                        .await
+                        .expect("compress failed");
+                    // });
+                }
 
                 let mut io = PdmsIO::new(&project, path, true);
                 io.open()?;
@@ -711,6 +720,7 @@ impl AiosDBManager {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
+                                    let dbno = new_header.pdms_header.db_num as u32;
                                     if path.is_dir() {
                                         continue;
                                     }
@@ -733,39 +743,46 @@ impl AiosDBManager {
                                         //发生修改的文件，重新生成archive
                                         // dbg!(&path);
                                         let output: PathBuf =
-                                            format!("asset/archives/{}.cba", file_name).into();
+                                            format!("assets/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
 
-                                        // let compress_opt = CompressOptions::new(
-                                        //     path.clone(),
-                                        //     output,
-                                        //     "asset/temp",
-                                        // );
-                                        // let file_hash = execute_compress(compress_opt)
-                                        //     .await
-                                        //     .unwrap()
-                                        //     .to_string();
-                                        // // dbg!(&file_hash);
-                                        //
-                                        // //数据库里不存在这个file hash的记录，才需要发送
-                                        // //是自己创建的，在记录里还没有的，才能发送消息出去
-                                        // //如果是别的创建的，就应该调过
-                                        // let sql = format!(
-                                        //     "select value id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
-                                        //     get_db_option().location.as_str(),
-                                        //     file_name,
-                                        //     &file_hash
-                                        // );
-                                        // // dbg!(&sql);
-                                        // let mut response = SUL_DB.query(&sql).await.unwrap();
-                                        // // dbg!(&response);
-                                        // let id = response.take::<Vec<String>>(0).unwrap();
-                                        // // dbg!(id.len());
-                                        // if id.is_empty() {
-                                        //     println!("发生了增量更新，推送：{}", &file_name);
-                                        //     notify_file_hashes.push(file_hash);
-                                        //     notify_file_names.push(file_name.to_owned());
-                                        // }
+                                        let compress_opt = CompressOptions::new(
+                                            path.clone(),
+                                            output,
+                                            "assets/temp",
+                                        );
+                                        let file_hash = execute_compress(compress_opt)
+                                            .await
+                                            .unwrap()
+                                            .to_string();
+                                        // dbg!(&file_hash);
+
+                                        //必须要是地区对应的dbnos才能推送
+                                        if !get_db_option().location_dbs.contains(&dbno) {
+                                            continue;
+                                        }
+
+                                        //数据库里不存在这个file hash的记录，才需要发送
+                                        //是自己创建的，在记录里还没有的，才能发送消息出去
+                                        //如果是别的创建的，就应该调过
+                                        let sql = format!(
+                                            "select value <string>\
+                                            id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
+                                            get_db_option().location.as_str(),
+                                            file_name,
+                                            &file_hash
+                                        );
+                                        // dbg!(&sql);
+                                        // println!("sql is {}", &sql);
+                                        let mut response = SUL_DB.query(&sql).await.unwrap();
+                                        // dbg!(&response);
+                                        let id = response.take::<Vec<String>>(0).unwrap();
+                                        // dbg!(id.len());
+                                        if id.is_empty() {
+                                            println!("发生了增量更新，推送：{}", &file_name);
+                                            notify_file_hashes.push(file_hash);
+                                            notify_file_names.push(file_name.to_owned());
+                                        }
                                     }
                                 }
                                 //now save the watch.json
@@ -781,22 +798,26 @@ impl AiosDBManager {
                         }
                         //publish notify db file updates
                         dbg!(&notify_file_names);
-                        let payload = SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
-                        //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
-                        SUL_DB
-                            .query(format!(
-                                "INSERT IGNORE INTO e3d_sync {} ",
-                                serde_json::to_string(&payload).unwrap()
-                            ))
-                            .await
-                            .unwrap();
-                        //todo 检查是否只是发生了claim page的变化，如果只是claim修改，是需要每次都同步？
-                        //会导致出现循环
-                        // self.mqtt_client
-                        //     .clone()
-                        //     .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
-                        //     .await
-                        //     .unwrap();
+                        if !notify_file_names.is_empty() {
+                            let payload =
+                                SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
+                            //自己本地也要保存
+                            // todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
+                            SUL_DB
+                                .query(format!(
+                                    "INSERT IGNORE INTO e3d_sync {} ",
+                                    serde_json::to_string(&payload).unwrap()
+                                ))
+                                .await
+                                .unwrap();
+                            //todo 检查是否只是发生了claim page的变化，如果只是claim修改，是需要每次都同步？
+                            //会导致出现循环
+                            self.mqtt_client
+                                .clone()
+                                .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
+                                .await
+                                .unwrap();
+                        }
                     }
                 }
                 Err(e) => println!("watch error: {:?}", e),

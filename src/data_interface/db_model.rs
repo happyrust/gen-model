@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
+use pdms_io::sync::clone::{execute_clone, CloneOptions};
 // use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
@@ -102,32 +103,43 @@ impl AiosDBManager {
         if sync_msg.file_names.is_empty() {
             return Ok(false);
         }
-        println!(
-            "Start delta clone db files num: {} from {}",
-            sync_msg.file_names.len(),
-            sync_msg.file_server_host
-        );
+        let dbs = &get_db_option().location_dbs;
         let remote_url = sync_msg.file_server_host.as_str();
         for file_name in &sync_msg.file_names {
             let url = format!("{}/{}.cba", remote_url, file_name);
+            dbg!(&file_name);
             //todo 如果没有需要新加数据
             let Some(pb) = watcher.file_name_full_path_map.get(file_name) else {
                 continue;
             };
+
+            //还需要检查location dbnum，如果不一致，就需要clone
+            //必须不是当前区域的db 才能clone, 只能clone别的区域的数据
+            if let Some(dbno) = watcher.get_dbno(&pb) {
+                if !dbs.contains(&dbno) {
+                    continue;
+                }
+            }
+
+            println!(
+                "Start delta clone db files num: {} from {}",
+                sync_msg.file_names.len(),
+                &url
+            );
             let e3d_file: PathBuf = pb.value().clone();
             let mut clone_time = Instant::now();
-            // let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
-            // if let Ok(r) = execute_clone(remote_clone_opt).await {
-            //     if r {
-            //         //需要保存更新记录
-            //         println!(
-            //             "Clone {} cost: {:?}s",
-            //             file_name,
-            //             clone_time.elapsed().as_secs_f64()
-            //         );
-            //         //clone完了,再执行增量更新
-            //     }
-            // }
+            let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
+            if let Ok(r) = execute_clone(remote_clone_opt).await {
+                if r {
+                    //需要保存更新记录
+                    println!(
+                        "Clone {} cost: {:?}s",
+                        file_name,
+                        clone_time.elapsed().as_secs_f64()
+                    );
+                    //clone完了,再执行增量更新
+                }
+            }
         }
 
         Ok(true)
@@ -149,7 +161,8 @@ impl AiosDBManager {
                 let test_data = SyncE3dFileMsg {
                     file_names: vec![format!("Hello-{}", i)],
                     file_hashes: vec![],
-                    file_server_host: "http://50c170h624.zicp.vip:56785/asset/archives".to_string(),
+                    file_server_host: "http://50c170h624.zicp.vip:56785/assets/archives"
+                        .to_string(),
                     location: "bj".to_string(),
                     timestamp: Default::default(),
                 };
@@ -198,7 +211,7 @@ impl AiosDBManager {
                             Incoming(Packet::Publish(p)) => {
                                 let sync_e3d = SyncE3dFileMsg::from(p.payload.to_vec());
                                 // println!("payload = {:?}", &sync_e3d);
-                                //检查是否和本地的location一致，如果一致，就不用更新
+                                //检查是否和本地的location一致，如果不一致，才发生更新
                                 if sync_e3d.location != location {
                                     //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
                                     SUL_DB
@@ -220,7 +233,7 @@ impl AiosDBManager {
                         }
                     }
                     Err(e) => {
-                        // println!("Error = {e:?}");
+                        println!("Error = {e:?}");
                         // return Ok(());
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }

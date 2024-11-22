@@ -1,9 +1,9 @@
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
-use aios_core::{init_test_surreal, RefnoEnum};
 use aios_core::options::DbOption;
 use aios_core::room::algorithm::match_room_name;
 use aios_core::room::room::{load_aabb_tree, load_room_aabb_tree, GLOBAL_AABB_TREE};
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::{init_test_surreal, RefnoEnum};
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
 use bevy_transform::components::Transform;
 use bevy_transform::TransformPoint;
@@ -42,7 +42,7 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
 pub async fn test_cal_distance() -> anyhow::Result<()> {
     init_test_surreal().await;
     let panel_refno = "24381/34303".into();
-    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno])
+    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno], true)
         .await
         .unwrap_or_default();
     // dbg!(&geom_insts);
@@ -135,8 +135,10 @@ async fn build_room_panels_relate(
     //属于room的panel
     let sql = format!(
         r#"
-        select value [id, array::last(string::split(NAME, '-')),
-         array::flatten([REFNO<-pe_owner<-pe[?noun='PANE'].id, REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id])] from FRMW where {filter}
+        select value [  id, 
+                        array::last(string::split(NAME, '-')),
+                        array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
+                    ] from FRMW where {filter}
     "#
     );
     let mut response = SUL_DB.query(sql).await?;
@@ -166,7 +168,7 @@ pub async fn cal_room_refnos(
     inside_tol: f32,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
-    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno])
+    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno], true)
         .await
         .unwrap_or_default();
     // dbg!(&geom_insts);

@@ -148,10 +148,12 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 计时器开始
     let mut time = tokio::time::Instant::now();
     // 获取默认的数据库连接字符串
-    let aios_mgr = AiosDBMgr::init_from_db_option().await?;
     if db_option.sync_tidb.unwrap_or(false) {
         #[cfg(feature = "sql")]
-        create_info_database(&aios_mgr).await?;
+        {
+            let aios_mgr = AiosDBMgr::init_from_db_option().await?;
+            create_info_database(&aios_mgr).await?;
+        }
     }
 
     //只有重新同步时，才需要定义index
@@ -183,7 +185,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         //debug 不保存数据，只复杂查看属性值
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
-        if is_debug || (!db_option.incr_sync) || db_option.only_sync_sys {
+        if is_debug || db_option.only_sync_sys || db_option.total_sync {
             match sync_total_async_threaded(
                 &db_option,
                 project,
@@ -260,8 +262,8 @@ pub async fn sync_total_async_threaded(
     cur_dbno_set: Arc<DashSet<u32>>,
     db_types: &[&str],
 ) -> anyhow::Result<()> {
-    let pg_dir = "assets/pg";
-    create_dir_all(pg_dir).await.unwrap();
+    // let pg_dir = "assets/pg";
+    // create_dir_all(pg_dir).await.unwrap();
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
@@ -356,6 +358,7 @@ pub async fn sync_total_async_threaded(
                             if !atts.is_empty() {
                                 let sql =
                                     format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
+                                // println!("att sql is {}", &sql);
                                 SUL_DB.query(sql).await.expect("insert atts failed");
                             }
                         }
@@ -388,9 +391,10 @@ pub async fn sync_total_async_threaded(
         .into_iter()
         .map(|&x| x.to_string())
         .collect::<Vec<_>>();
-    let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
+    let is_parse_sys = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
     let is_sync_history = db_option.is_sync_history();
+    let is_total_sync = db_option.total_sync;
 
     let sender_clone = sender.clone();
     tokio::spawn(async move {
@@ -404,8 +408,8 @@ pub async fn sync_total_async_threaded(
             let dbno_set = cur_dbno_set.clone();
             let mut time = Instant::now();
             // dbg!(&file_name);
-            if is_sys_parse
-                || db_option_arc.included_db_files.is_none()
+            if (is_parse_sys && is_total_sync) ||
+                db_option_arc.included_db_files.is_none()
                 || db_option_arc
                 .included_db_files
                 .as_ref()
@@ -423,6 +427,10 @@ pub async fn sync_total_async_threaded(
                     file_name_hash, db_type, file_version, db_no, file_name
                 ));
                 // dbg!(&db_type);
+                // if is_parse_sys{
+                //    //pass 允许sys数据重复解析，方便增量更新
+                // } else
+                //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
                 }
@@ -545,8 +553,9 @@ pub async fn sync_total_async_threaded(
                                         if is_debug {
                                             if debug_refnos.contains(&att.get_refno_or_default().refno()) {
                                                 dbg!(att.value());
+                                            }else{
+                                                continue;
                                             }
-                                            continue;
                                         }
                                         if !is_save_db {
                                             continue;
@@ -567,6 +576,7 @@ pub async fn sync_total_async_threaded(
                                         }
 
                                         if !uda_json_vec.is_empty() {
+                                            // dbg!(&uda_json_vec);
                                             sender_clone.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec)))
                                                         .expect("send attmap sql failed");
                                         }

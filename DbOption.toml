@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync =  false
+total_sync = false
 incr_sync = false
 sync_history = false
 enable_log = false
@@ -12,7 +12,7 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+project_path = "D:/AVEVA/Projects/E3D2.1"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
@@ -37,7 +37,7 @@ gen_model_batch_size = 16
 
 build_cate_relate = false
 
-meshes_path = "/Users/dongpengcheng/work/rs-plant3-d/assets/meshes"
+meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -63,7 +63,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = "8009"
+v_port = 8008
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
@@ -74,17 +74,18 @@ kv_port = "8010"
 
 
 #mqtt 事件 ip
-mqtt_host = "192.168.31.60"
-mqtt_port = 8883
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
 
-location = "SJZ1"
+location = "SJZ"
+location_dbs = [1112]
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
 # hash文件的站点
 remote_file_server_hosts = []
-file_server_host = "http://192.168.31.38:8100/asset/archives"
+file_server_host = "http://192.168.31.58:8000/assets/archives"
 
 
 #调试选项
@@ -97,9 +98,9 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP", "PRIM"]
-# included_db_files = ["ams1112_0001"]
+#included_db_files = ["ams7997_0001"]
 #included_db_files = ["zdj7600_0001"]
-#manual_db_nums = [7999, 7997, 1112, 8000]
+#manual_db_nums = [7999, 7997, 8000]
 manual_db_nums = [1112]
 plat_url = ""
 
@@ -111,17 +112,9 @@ puhua_database_password = ""
 
 room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 
-#test_refno = "17496/170587"
+#test_refno = "24381_46952"
 
-# debug_root_refnos = ["17496/496604"]
+#debug_root_refnos = ["24381_46952"]
 gen_history_model = false
 
-# debug_root_refnos = ["24383/66457", "9304/2", "17496/229978"]
-# debug_root_refnos = ["23713/2510", "24383/66457"]
-#debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
-#debug_root_refnos = ["24381/36155", "24383/67004"]
 debug_root_refnos = []
-#debug_root_refnos = ["24381_101421"]
-#调试ngmr两边打孔
-#debug_root_refnos = ["23713/2440"]
-#debug_root_refnos = ["17496_171606"]

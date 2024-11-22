@@ -41,20 +41,20 @@ impl From<String> for RString {
     }
 }
 
-impl Into<sled::IVec> for RString {
-    fn into(self) -> sled::IVec {
-        bincode::serialize(&self).unwrap().into()
-    }
-}
-
-impl Into<sled::IVec> for &RString {
-    fn into(self) -> sled::IVec {
-        bincode::serialize(self).unwrap().into()
-    }
-}
-
-impl From<sled::IVec> for RString {
-    fn from(d: sled::IVec) -> Self {
-        bincode::deserialize(&d).unwrap()
-    }
-}
+// impl Into<sled::IVec> for RString {
+//     fn into(self) -> sled::IVec {
+//         bincode::serialize(&self).unwrap().into()
+//     }
+// }
+// 
+// impl Into<sled::IVec> for &RString {
+//     fn into(self) -> sled::IVec {
+//         bincode::serialize(self).unwrap().into()
+//     }
+// }
+// 
+// impl From<sled::IVec> for RString {
+//     fn from(d: sled::IVec) -> Self {
+//         bincode::deserialize(&d).unwrap()
+//     }
+// }
