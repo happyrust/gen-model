@@ -1,0 +1,142 @@
+{
+  "version": 5,
+  "center": {
+    "panel_name": "StackPanel",
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "children": [
+          {
+            "panel_name": "StoryContainer",
+            "children": [],
+            "info": {
+              "panel": {
+                "story_klass": "ConfigPanelStory"
+              }
+            }
+          }
+        ],
+        "info": {
+          "tabs": {
+            "active_index": 0
+          }
+        }
+      }
+    ],
+    "info": {
+      "stack": {
+        "sizes": [
+          737.0
+        ],
+        "axis": 1
+      }
+    }
+  },
+  "left_dock": {
+    "panel": {
+      "panel_name": "StackPanel",
+      "children": [
+        {
+          "panel_name": "TabPanel",
+          "children": [
+            {
+              "panel_name": "TabPanel",
+              "children": [],
+              "info": {
+                "panel": null
+              }
+            }
+          ],
+          "info": {
+            "tabs": {
+              "active_index": 0
+            }
+          }
+        }
+      ],
+      "info": {
+        "stack": {
+          "sizes": [
+            766.0
+          ],
+          "axis": 1
+        }
+      }
+    },
+    "placement": "left",
+    "size": 350.0,
+    "open": false
+  },
+  "right_dock": {
+    "panel": {
+      "panel_name": "StackPanel",
+      "children": [
+        {
+          "panel_name": "TabPanel",
+          "children": [
+            {
+              "panel_name": "StoryContainer",
+              "children": [],
+              "info": {
+                "panel": {
+                  "story_klass": "ConfigPanelStory"
+                }
+              }
+            }
+          ],
+          "info": {
+            "tabs": {
+              "active_index": 0
+            }
+          }
+        }
+      ],
+      "info": {
+        "stack": {
+          "sizes": [
+            766.0
+          ],
+          "axis": 1
+        }
+      }
+    },
+    "placement": "right",
+    "size": 320.0,
+    "open": false
+  },
+  "bottom_dock": {
+    "panel": {
+      "panel_name": "StackPanel",
+      "children": [
+        {
+          "panel_name": "TabPanel",
+          "children": [
+            {
+              "panel_name": "TabPanel",
+              "children": [],
+              "info": {
+                "panel": null
+              }
+            }
+          ],
+          "info": {
+            "tabs": {
+              "active_index": 0
+            }
+          }
+        }
+      ],
+      "info": {
+        "stack": {
+          "sizes": [
+            100.0
+          ],
+          "axis": 1
+        }
+      }
+    },
+    "placement": "bottom",
+    "size": 200.0,
+    "open": false
+  }
+}
