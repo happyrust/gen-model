@@ -34,6 +34,8 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::fs::{create_dir_all, File};
 use tokio::io::AsyncReadExt;
+// use tokio::sync::mpsc::Sender;
+use std::sync::mpsc::Sender;
 use tokio::time::Instant;
 
 use crate::consts::*;
@@ -142,7 +144,10 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
 //     crate::io::scan_all_history_data(db_path).await.unwrap();
 
 /// 初始化同步pdms数据到数据
-pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
+pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
+    if db_option.included_projects.is_empty() {
+        return Err(anyhow::anyhow!("没有包含的项目"));
+    }
     // 开始同步pdms/E3D项目的数据
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     // 计时器开始
@@ -171,6 +176,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut create_tables_elapse = 0;
     // 执行多线程解析
     dbg!("执行多线程解析");
+    let proj_progress_chunk = 80 / db_option.included_projects.len();
     // 遍历所有包含的项目
     for project in &db_option.included_projects {
         let debug_refnos: Vec<RefU64> = db_option
@@ -186,11 +192,14 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
         if is_debug || db_option.only_sync_sys || db_option.total_sync {
+            let progress_sender = progress_sender.clone();
             match sync_total_async_threaded(
                 &db_option,
                 project,
                 cur_dbno_set,
                 &["DICT", "SYST", "GLB", "GLOB"],
+                progress_sender,
+                proj_progress_chunk,
             )
             .await
             {
@@ -208,8 +217,18 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         if db_option.only_sync_sys {
             continue;
         }
+        let progress_sender = progress_sender.clone();
         let cur_dbno_set = dbno_set.clone();
-        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await{
+        match sync_total_async_threaded(
+            &db_option,
+            project,
+            cur_dbno_set,
+            &["DESI", "CATA"],
+            progress_sender,
+            proj_progress_chunk,
+        )
+        .await
+        {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -261,6 +280,8 @@ pub async fn sync_total_async_threaded(
     project: &str,
     cur_dbno_set: Arc<DashSet<u32>>,
     db_types: &[&str],
+    progress_sender: Sender<i32>,
+    proj_progress_chunk: usize,
 ) -> anyhow::Result<()> {
     // let pg_dir = "assets/pg";
     // create_dir_all(pg_dir).await.unwrap();
@@ -397,6 +418,9 @@ pub async fn sync_total_async_threaded(
     let is_total_sync = db_option.total_sync;
 
     let sender_clone = sender.clone();
+    let children_files_len = children_files.len();
+    let db_file_progress_chunk = (proj_progress_chunk as f32 / children_files_len as f32) as usize;
+    let progress_sender_clone = progress_sender.clone();
     tokio::spawn(async move {
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         let mut db_info_sql = vec![];
@@ -416,6 +440,9 @@ pub async fn sync_total_async_threaded(
                 .unwrap()
                 .contains(&file_name)
             {
+                if !is_total_sync{
+                    // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
+                }
                 let mut file = File::open(&path).await.unwrap();
                 let mut buf = vec![0u8; 60];
                 file.read_exact(&mut buf).await.unwrap();

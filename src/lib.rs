@@ -45,6 +45,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use surrealdb::opt::auth::Root;
 use team_data::sync_system_db;
+// use tokio::sync::mpsc::Sender;
+use std::sync::mpsc::Sender;
 use versioned_db::database::sync_pdms;
 
 use log::{error, LevelFilter};
@@ -79,28 +81,32 @@ extern crate nom;
 #[macro_use]
 extern crate strum_macros;
 
-pub async fn start_sync_task(db_option: Arc<DbOption>) -> anyhow::Result<()> {
-    if db_option.total_sync
-        || db_option.incr_sync
-        || db_option.only_sync_sys
-        || db_option.is_sync_history()
-    {
-        // println!("开始同步解析数据。");
-        // tokio::spawn(async move {
-        if let Err(e) = sync_pdms(&db_option).await {
-            eprintln!("同步PDMS数据失败: {}", e);
-        }
-        // });
-    }
+// pub async fn start_sync_task(
+//     db_option: Arc<DbOption>,
+//     progress_sender: Sender<f32>,
+// ) -> anyhow::Result<()> {
+//     if db_option.total_sync
+//         || db_option.incr_sync
+//         || db_option.only_sync_sys
+//         || db_option.is_sync_history()
+//     {
+//         // println!("开始同步解析数据。");
+//         // tokio::spawn(async move {
+//         if let Err(e) = sync_pdms(&db_option).await {
+//             eprintln!("同步PDMS数据失败: {}", e);
+//         }
+//         //记录进度
+//         progress_sender.send(50.0).await?;
+//     }
 
-    if db_option.build_cate_relate() {
-        println!("初始化创建Cate relate关系");
-        build_cate_relate(false).await?;
-    }
-    Ok(())
-}
+//     if db_option.build_cate_relate() {
+//         println!("初始化创建Cate relate关系");
+//         build_cate_relate(false).await?;
+//     }
+//     Ok(())
+// }
 
-pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
+pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
     dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -163,6 +169,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 .await?;
         }
     }
+    // progress_sender.send(5).await?;
+    progress_sender.send(5)?;
     println!(
         "数据库已经连接到 {}, 站点: {}",
         db_option.project_name,
@@ -176,19 +184,38 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let db_option = Arc::new(db_option.clone());
     // initialize_global_db_sender().await;
 
-    start_sync_task(db_option.clone()).await?;
+    // start_sync_task(db_option.clone(), progress_sender.clone()).await?;
+    //如果是解析任务，运行完就应该跳出
+    if db_option.total_sync
+        || db_option.incr_sync
+        || db_option.only_sync_sys
+        || db_option.is_sync_history()
+    {
+        // println!("开始同步解析数据。");
+        // tokio::spawn(async move {
+        if let Err(e) = sync_pdms(&db_option, progress_sender.clone()).await {
+            eprintln!("同步PDMS数据失败: {}", e);
+        }
+        //记录进度
+        progress_sender.send(90)?;
+        if db_option.build_cate_relate() {
+            println!("初始化创建Cate relate关系");
+            build_cate_relate(false).await?;
+        }
+        progress_sender.send(100)?;
+        return Ok(());
+    }
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     /// 创建db manager
     if sync_live {
         mgr.init_watcher().await?;
-        // cur_mgr = Some(mgr);
     }
 
     load_aabb_tree().await.unwrap();
+    progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
-    #[cfg(feature = "gen_model")]
     if db_option.is_gen_mesh_or_model() {
         println!("正在生成模型");
         let mut time = Instant::now();

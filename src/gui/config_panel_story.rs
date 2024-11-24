@@ -5,9 +5,14 @@ use aios_core::options::DbOption;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, rems, AnyElement, FocusHandle, FocusableView, IntoElement, ParentElement, Render,
-    SharedString, Styled, View, ViewContext, VisualContext, WindowContext,
+    SharedString, Styled, Task, Timer, View, ViewContext, VisualContext, WindowContext,
 };
 use std::borrow::Borrow;
+// use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::{
+    sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
+};
 use ui::button::ButtonStyled;
 use ui::ContextModal;
 use ui::{
@@ -17,6 +22,7 @@ use ui::{
     input::TextInput,
     label::Label,
     notification::{Notification, NotificationType},
+    progress::Progress,
     switch::Switch,
     // tabs::{Tab, Tabs},
     theme::ActiveTheme,
@@ -45,6 +51,10 @@ pub struct ConfigPanelStory {
     live_update: bool,
     remote_sync: bool,
     active_tab: SharedString,
+    progress_value: i32,
+    task_running: bool,
+    progress_tx: Sender<i32>,
+    _progress_task: Option<Task<()>>,
 }
 
 impl Story for ConfigPanelStory {
@@ -99,6 +109,35 @@ impl ConfigPanelStory {
         let remote_sync = db_option.sync_graph_db.unwrap_or(false);
         let parse_all = db_option.total_sync;
         let parse_part = db_option.incr_sync;
+        let (tx, mut rx) = mpsc::channel::<i32>();
+        // Spawn progress update task
+        let task = cx.spawn(|this, mut cx| async move {
+            loop {
+                if let Ok(value) = rx.try_recv() {
+                    // dbg!(&value);
+                    if let Some(this) = this.upgrade() {
+                        this.update(&mut cx, |this, cx| {
+                            this.progress_value = value as i32;
+                            if value == 100 {
+                                this.task_running = false;
+                            }
+                            // this.slider1
+                            //     .update(cx, |slider, _| slider.set_value(value, cx));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    // this.update(cx, |this, _cx| {
+                    //     this.progress_value = value;
+                    //     if value == 100 {
+                    //         this.task_running = false;
+                    //     }
+                    // });
+                    // cx.notify();
+                }
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        });
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -118,6 +157,10 @@ impl ConfigPanelStory {
             live_update: false,
             remote_sync: false,
             active_tab: "parse".into(),
+            progress_value: 0,
+            progress_tx: tx,
+            _progress_task: Some(task),
+            task_running: false,
         }
     }
 
@@ -363,7 +406,6 @@ impl FocusableView for ConfigPanelStory {
 impl Render for ConfigPanelStory {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        // let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(100);
 
         h_flex()
             .w(px(800.))
@@ -413,6 +455,10 @@ impl Render for ConfigPanelStory {
                         "generate" => self.render_generate_tab(cx).into_any_element(),
                         "update" => self.render_update_tab(cx).into_any_element(),
                         _ => div().into_any_element(),
+                    })
+                    .child(div().h(px(10.)))
+                    .when(self.task_running, |flex| {
+                        flex.child(Progress::new().value(self.progress_value as _))
                     }),
             )
             .child(
@@ -431,24 +477,33 @@ impl Render for ConfigPanelStory {
                             })),
                     )
                     .child(
-                        Button::new("confirm")
+                        Button::new("run_task")
                             .style(ButtonStyle::Primary)
+                            .disabled(self.task_running)
                             .label("运行任务")
                             .on_click(cx.listener(|this, _event, cx| {
+                                let tx = this.progress_tx.clone();
+                                this.task_running = true;
                                 let db_option = this.get_overwrite_config(cx);
+                                // cx.spawn(|this, mut cx| async move {
+                                //     if let Err(e) = tx.send(50) {
+                                //         dbg!(&e);
+                                //     }
+                                // })
+                                // .detach();
 
                                 // Spawn main task
                                 cx.spawn(|this, mut cx| async move {
-                                    if let Err(e) = run_cli(db_option).await {
+                                    if let Err(e) = run_cli(db_option, tx).await {
                                         cx.update(|cx| {
                                             cx.push_notification(
                                                 Notification::new(e.to_string())
                                                     .with_type(NotificationType::Error)
                                                     .title("任务运行失败"),
                                             );
+                                            this.update(cx, |this, _| this.task_running = false);
                                         })
                                         .ok();
-                                        // log::error!("运行任务失败: {}", e);
                                     }
                                 })
                                 .detach();

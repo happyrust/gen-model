@@ -15,7 +15,7 @@ extern crate strum;
 extern crate strum_macros;
 
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_database::{gui, start_sync_task};
+use aios_database::gui;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
