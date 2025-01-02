@@ -7,6 +7,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
 use aios_core::SUL_DB;
+use chrono::Local;
 use dashmap::{DashMap, DashSet};
 use futures::channel::mpsc::unbounded;
 use futures::stream::FuturesUnordered;
@@ -162,7 +163,8 @@ pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> an
     }
 
     //只有重新同步时，才需要定义index
-    if db_option.enable_index.unwrap_or(true) {
+    let enable_index = db_option.total_sync || db_option.enable_index.unwrap_or(true);
+    if enable_index {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
         // aios_core::define_fullname_index().await.unwrap();
@@ -423,7 +425,7 @@ pub async fn sync_total_async_threaded(
     let progress_sender_clone = progress_sender.clone();
     tokio::spawn(async move {
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
-        let mut db_info_sql = vec![];
+        // let mut db_info_sql = vec![];
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
             if file_name.contains(".") {
@@ -446,13 +448,14 @@ pub async fn sync_total_async_threaded(
                 let mut file = File::open(&path).await.unwrap();
                 let mut buf = vec![0u8; 60];
                 file.read_exact(&mut buf).await.unwrap();
-                let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+                let db_basic_info = parse_file_basic_info(&buf);
+                let db_type = db_basic_info.db_type;
+                let db_no = db_basic_info.db_no;
+                let ses_pgno = db_basic_info.ses_pgno;
 
                 let file_name_hash = hash_str(&file_name);
-                db_info_sql.push(format!(
-                    "INSERT IGNORE INTO db_info (id, db_type, file_version, dbnum, file_name) VALUES ('{}', '{}', '{}', '{}', '{}')",
-                    file_name_hash, db_type, file_version, db_no, file_name
-                ));
+                
+                // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 // dbg!(&db_type);
                 // if is_parse_sys{
                 //    //pass 允许sys数据重复解析，方便增量更新
@@ -470,19 +473,39 @@ pub async fn sync_total_async_threaded(
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
                 let mut ses_range_map = BTreeMap::new();
+                let mut sesno = 0;
+                let mut dt = Local::now().naive_local();
                 {
                     let mut io = PdmsIO::new(&project, path.clone(), true);
 
+                    //打开文件
                     if io.open().is_ok(){
                         if is_sync_history{
+                            //同步历史纪录
                             io.sync_history().await.unwrap();
                             //同步完历史纪录就返回
                             continue;
                         }else{
+                            //存储所有refno sesno map
                             io.store_all_refno_sesno_map().await.unwrap();
                         }
+                         //获取最新sesno
+                        sesno = io.get_latest_sesno().unwrap_or_default();
+                        //获取时间
+                        dt = io.get_latest_dt().unwrap().naive_local();
+                        //获取sesno range
                         ses_range_map = io.ses_range_map;
+                       
                     }
+                }
+                if sesno > 0 {
+                    let sql = format!(
+                        "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', '{}', '{}', '{}');",
+                        file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
+                    );
+                    SUL_DB.query(&sql).await.expect("save db_info failed");
+                }else{
+                    continue;
                 }
 
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
@@ -632,10 +655,10 @@ pub async fn sync_total_async_threaded(
         }
 
         //执行保存db_info sql
-        let db_info_sql = db_info_sql.join(";");
-        if !db_info_sql.is_empty() {
-            SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
-        }
+        // let db_info_sql = db_info_sql.join(";");
+        // if !db_info_sql.is_empty() {
+        //     SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
+        // }
     }).await.unwrap();
     drop(sender);
     // insert_handles.push(parse_handle);

@@ -27,8 +27,6 @@ fn init(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
     Ok(())
 }
 
-
-
 pub fn run_gui() {
     let app_state = Arc::new(AppState {});
 

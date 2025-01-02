@@ -15,6 +15,7 @@ extern crate strum;
 extern crate strum_macros;
 
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+#[cfg(feature = "gui")]
 use aios_database::gui;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -47,6 +48,7 @@ use aios_database::fast_model::{
 };
 use aios_database::versioned_db::database::*;
 // use aios_database::versioned_db::task::initialize_global_db_sender;
+use aios_database::run_cli;
 use aios_database::team_data::sync_system_db;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
@@ -66,8 +68,11 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use std::sync::mpsc;
+
     let db_option: DbOption = get_db_option().clone();
-    run_cli(db_option).await
+    let (tx, mut rx) = mpsc::channel::<i32>();
+    run_cli(db_option, tx).await
 }
 
 #[test]

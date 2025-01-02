@@ -188,8 +188,15 @@ pub async fn gen_cata_geos(
                         .map(|x| x.get_refno_or_default()) else {
                             continue;
                         };
+                        let Ok(ngmr_refno) =
+                            aios_core::query_single_by_paths(cata_refno, &["->NGMR"], &["REFNO"])
+                                .await
+                                .map(|x| x.get_refno_or_default())
+                        else {
+                            continue;
+                        };
                         // dbg!(gmse_refno);
-                        if !gmse_refno.is_valid() {
+                        if !gmse_refno.is_valid() && !ngmr_refno.is_valid() {
                             continue;
                         }
                         //在这里直接处理完所有需要处理的transform
@@ -213,8 +220,8 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
-                        // #[cfg(debug_assertions)]
-                        // dbg!(&brep_shapes_map);
+                        #[cfg(feature = "debug_model")]
+                        dbg!(&brep_shapes_map);
                         {
                             // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
                             let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
@@ -286,10 +293,15 @@ pub async fn gen_cata_geos(
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
-                            let mut pos_neg_map: HashMap<RefnoEnum, Vec<RefnoEnum>> =
+                            let mut pos_neg_map: HashMap<RefnoEnum, Vec<RefnoEnum>> = if gmse_refno
+                                .is_valid()
+                            {
                                 aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
                                     .await
-                                    .unwrap_or_default();
+                                    .unwrap_or_default()
+                            } else {
+                                HashMap::new()
+                            };
                             let mut neg_own_pos_map: HashMap<RefnoEnum, RefnoEnum> = pos_neg_map
                                 .iter()
                                 .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))

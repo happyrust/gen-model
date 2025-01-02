@@ -4,8 +4,8 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "mqtt", "gui"]
-gui = []
+default = ["ws", "gen_model", "manifold", "occ", "mqtt"]
+gui = ["dep:gpui", "dep:ui"]
 truck = []
 local = []
 ws = []
@@ -109,9 +109,9 @@ downcast-rs = "1.2.0"
 flume = "0.11.0"
 rust-embed = "8"
 
-gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window" }
+gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window", optional = true }
 #story = { path = "../new-crates/gpui-compoents/crates/story" }
-ui = { path = "../new-crates/gpui-compoents/crates/ui" }
+ui = { path = "../new-crates/gpui-compoents/crates/ui", optional = true }
 toml = "0.8.19"
 
 [build-dependencies]

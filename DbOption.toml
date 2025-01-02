@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 incr_sync = false
 sync_history = false
 enable_log = false
@@ -98,10 +98,10 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP", "PRIM"]
-#included_db_files = ["ams7997_0001"]
+included_db_files = ["ams7997_0001"]
 #included_db_files = ["zdj7600_0001"]
-#manual_db_nums = [7999, 7997, 8000]
-manual_db_nums = [1112]
+#manual_db_nums = [7999, 7997, 8000, 1112]
+#manual_db_nums = [1112]
 plat_url = ""
 
 #puhua
@@ -116,5 +116,6 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 
 #debug_root_refnos = ["24381_46952"]
 gen_history_model = false
-
 debug_root_refnos = []
+
+# debug_root_refnos = ["17496_195578"]

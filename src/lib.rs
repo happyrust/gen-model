@@ -46,6 +46,7 @@ use std::time::Instant;
 use surrealdb::opt::auth::Root;
 use team_data::sync_system_db;
 // use tokio::sync::mpsc::Sender;
+use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use versioned_db::database::sync_pdms;
 
@@ -63,6 +64,7 @@ pub mod team_data;
 
 pub mod graph_db;
 
+#[cfg(feature = "gui")]
 pub mod gui;
 
 #[cfg(feature = "gen_model")]
@@ -107,7 +109,7 @@ extern crate strum_macros;
 // }
 
 pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
-    dbg!("begin run task");
+    // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
         let now = Local::now();

@@ -39,6 +39,7 @@ pub struct ConfigPanelStory {
     parse_part: bool,
     parse_part_input: View<TextInput>,
     project_path: View<TextInput>,
+    included_projects: View<TextInput>,
     project_name: View<TextInput>,
     mdb_name: View<TextInput>,
     db_ip: View<TextInput>,
@@ -74,9 +75,10 @@ impl ConfigPanelStory {
 
     fn new(cx: &mut ViewContext<Self>) -> Self {
         let parse_part_input =
-            cx.new_view(|cx| TextInput::new(cx).placeholder("请输入数据库号, 多个用逗号分隔"));
+            cx.new_view(|cx| TextInput::new(cx).placeholder("请输入数据库文件名, 多个用逗号分隔"));
         let project_path = cx.new_view(|cx| TextInput::new(cx));
         let project_name = cx.new_view(|cx| TextInput::new(cx));
+        let included_projects = cx.new_view(|cx| TextInput::new(cx));
         let mdb_name = cx.new_view(|cx| TextInput::new(cx));
         let db_ip = cx.new_view(|cx| TextInput::new(cx).placeholder("127.0.0.1"));
         let db_port = cx.new_view(|cx| TextInput::new(cx).placeholder("8008"));
@@ -91,6 +93,9 @@ impl ConfigPanelStory {
         });
         project_name.update(cx, |input, cx| {
             input.set_text(db_option.project_name.clone(), cx)
+        });
+        included_projects.update(cx, |input, cx| {
+            input.set_text(db_option.included_projects.join(","), cx)
         });
         mdb_name.update(cx, |input, cx| {
             input.set_text(db_option.mdb_name.clone(), cx)
@@ -161,6 +166,7 @@ impl ConfigPanelStory {
             progress_tx: tx,
             _progress_task: Some(task),
             task_running: false,
+            included_projects,
         }
     }
 
@@ -177,8 +183,17 @@ impl ConfigPanelStory {
         db_option.sync_graph_db = Some(self.remote_sync);
         db_option.total_sync = self.parse_all;
         db_option.incr_sync = self.parse_part;
-        db_option.manual_db_nums = {
+        db_option.included_db_files = {
             let text = self.parse_part_input.read(cx).text();
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        };
+        db_option.gen_model = self.generate_all | self.generate_part;
+        db_option.manual_db_nums = {
+            let text = self.generate_part_input.read(cx).text();
             if text.trim().is_empty() {
                 None
             } else {
@@ -241,7 +256,7 @@ impl ConfigPanelStory {
                                 .gap_2()
                                 .text_size(px(12.0))
                                 .pl_4()
-                                .child(Label::new("数据库号"))
+                                .child(Label::new("数据库名称"))
                                 .child(div().flex_1().child(self.parse_part_input.clone())),
                         )
                     }),
@@ -282,6 +297,12 @@ impl ConfigPanelStory {
                     .gap_2()
                     .child(Label::new("项目名称"))
                     .child(self.project_name.clone()),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(Label::new("包含项目"))
+                    .child(self.included_projects.clone()),
             )
             .child(
                 v_flex()
@@ -408,8 +429,8 @@ impl Render for ConfigPanelStory {
         let theme = cx.theme();
 
         h_flex()
-            .w(px(800.))
-            .h(px(600.))
+            .w(px(900.))
+            .h(px(800.))
             .bg(theme.background)
             .rounded_lg()
             .shadow_lg()

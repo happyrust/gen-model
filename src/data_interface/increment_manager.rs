@@ -31,6 +31,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
+use parse_pdms_db::parse::DbBasicInfo;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -71,10 +72,24 @@ impl AiosDBManager {
         for (path, (basic_info, sesno_range)) in increment_ranges_map {
             //call execute_incr_update_single_sesno
             //一步一步执行更新
+            let new_sesno = sesno_range.end().clone();
             for sesno in sesno_range {
                 self.execute_incr_update_single_sesno(&path, &basic_info, sesno)
                     .await?;
+                //执行完后，需要更新sesno 到最新的 db_file_info 中
+                // let db_num = basic_info.pdms_header.db_num;
+                //更新 sesno 到 db_file_info 中
+
+                // let latest_sesno = query_latest_sesno(db_num).await?;
+                // update_latest_sesno(db_num, sesno).await?;
             }
+            //更新 sesno 到 db_file_info 中
+            let file_name = path.file_stem().unwrap().to_str().unwrap();
+            dbg!(&file_name);
+            //更新 sesno 到 db_file_info 中的sql
+            let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, new_sesno);
+            //执行更新
+            SUL_DB.query(sql).await.unwrap();
         }
 
         Ok(true)
@@ -546,7 +561,8 @@ impl AiosDBManager {
         Ok(true)
     }
 
-    //初始化监测
+    ///初始化监测
+    /// 启动时监测数据文件夹里的文件变化
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
         fs::create_dir_all("assets/archives")?;
@@ -572,25 +588,32 @@ impl AiosDBManager {
                     continue;
                 }
 
-                let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
+                let DbBasicInfo {
+                    db_type,
+                    ses_pgno,
+                    db_no,
+                } = parse_db_basic_info(path.to_path_buf());
                 //是否调试里有筛选
-                if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_num) {
+                if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_no) {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
-                    .get_latest_att_sesno()
+                    .get_latest_sesno()
                     .unwrap_or_default();
-                dbg!((db_num, file_latest_sesno));
+                dbg!((db_no, file_latest_sesno));
 
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_sesno) = aios_core::query_db_latest_sesno(db_num).await else {
+                let Ok(db_latest_sesno) = aios_core::query_latest_sesno(db_no).await else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
+                if db_latest_sesno == 0 {
+                    continue;
+                }
                 dbg!(db_latest_sesno);
                 //初始化异地更新压缩数据包
                 {
@@ -618,7 +641,7 @@ impl AiosDBManager {
                         dbg!((db_num, db_latest_sesno));
                         //暂时先跳过更新比较大的
                         if file_latest_sesno > db_latest_sesno
-                            && (file_latest_sesno - db_latest_sesno < 1000)
+                        // && (file_latest_sesno - db_latest_sesno < 1000)
                         {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno}, 文件属性对应pgno: {file_latest_sesno}", &file_name);
                             params.insert(
@@ -744,7 +767,7 @@ impl AiosDBManager {
                                         // dbg!(&path);
                                         let output: PathBuf =
                                             format!("assets/archives/{}.cba", file_name).into();
-                                        // dbg!(&output);
+                                        dbg!(&output);
 
                                         let compress_opt = CompressOptions::new(
                                             path.clone(),
@@ -755,11 +778,15 @@ impl AiosDBManager {
                                             .await
                                             .unwrap()
                                             .to_string();
-                                        // dbg!(&file_hash);
+                                        dbg!(&file_hash);
 
+                                        //如果location_dbs为空，则不进行筛选
+                                        //说明是所有地区都推送，跳过检查
                                         //必须要是地区对应的dbnos才能推送
-                                        if !get_db_option().location_dbs.contains(&dbno) {
-                                            continue;
+                                        if let Some(location_dbs) = &get_db_option().location_dbs {
+                                            if !location_dbs.contains(&dbno) {
+                                                continue;
+                                            }
                                         }
 
                                         //数据库里不存在这个file hash的记录，才需要发送
@@ -773,7 +800,7 @@ impl AiosDBManager {
                                             &file_hash
                                         );
                                         // dbg!(&sql);
-                                        // println!("sql is {}", &sql);
+                                        println!("sql is {}", &sql);
                                         let mut response = SUL_DB.query(&sql).await.unwrap();
                                         // dbg!(&response);
                                         let id = response.take::<Vec<String>>(0).unwrap();

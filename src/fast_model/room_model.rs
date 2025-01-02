@@ -249,15 +249,21 @@ pub async fn cal_room_refnos(
                 //首先判断，如果是包围盒完全不在里面，直接跳过
                 //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
                 let pes = need_check_refnos.iter().map(|x| x.to_pe_key()).join(",");
-                let mut repsonse = SUL_DB.query(format!(
+                let Ok(mut repsonse) = SUL_DB.query(format!(
                     r#"select
                          in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
                          (select value [trans.d, array::flatten(->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
                        from array::flatten([{}]->inst_relate)  where !booled
                     "#,
-                    pes)).await?;
+                    pes
+                ))
+                .await else {
+                    continue;
+                };
                 // dbg!(&repsonse);
-                let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
+                let Ok(geom_pts) = repsonse.take::<Vec<GeomPtsQuery>>(0) else {
+                    continue;
+                };
                 // dbg!(&geom_pts);
                 let mut intersect_set: DashSet<RefnoEnum> = DashSet::new();
                 geom_pts.par_iter().for_each(|g| {
