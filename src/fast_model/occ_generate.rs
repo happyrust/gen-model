@@ -56,6 +56,11 @@ pub async fn gen_meshes_in_db(
         .as_ref()
         .map(|x| x.get_meshes_path())
         .unwrap_or("assets/meshes".into());
+
+    // Check if the directory exists, if not, create it
+    if !std::path::Path::new(&dir).exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
     for chunk in refnos.chunks(100) {
         // 生成模型文件
         gen_inst_meshes(chunk, replace_exist, dir.clone())
