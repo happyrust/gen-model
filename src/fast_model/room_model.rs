@@ -19,6 +19,7 @@ use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use regex::Regex;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
@@ -150,6 +151,16 @@ async fn build_room_panels_relate(
 }
 
 
+/// hd 正则匹配是否满足房间命名规则
+pub fn match_room_name_hd(room_name: &str) -> bool {
+    let regex = Regex::new(r"^[A-Z]\d{3}$").unwrap();
+    regex.is_match(room_name)
+}
+
+/// hh 正则匹配是否满足房间命名规则
+pub fn match_room_name_hh(room_name: &str) -> bool {
+    true
+}
 
 
 /// 构建房间和面板之间的关联关系
