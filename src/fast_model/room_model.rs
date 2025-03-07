@@ -1,9 +1,9 @@
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
-use aios_core::room::algorithm::match_room_name;
+use aios_core::room::algorithm::*;
 use aios_core::room::room::{load_aabb_tree, load_room_aabb_tree, GLOBAL_AABB_TREE};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{init_test_surreal, RefnoEnum};
+use aios_core::{init_demo_test_surreal, init_test_surreal, RefnoEnum};
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
 use bevy_transform::components::Transform;
 use bevy_transform::TransformPoint;
@@ -124,15 +124,59 @@ async fn save_room_relate(
     Ok(())
 }
 
+
+/// 构建房间和面板之间的关联关系
+///
+/// # 参数
+/// * `room_key_word` - 房间关键词列表,用于匹配房间名称
+///
+/// # 返回值
+/// 返回一个元组列表,每个元组包含:
+/// * 房间的引用号(RefnoEnum)
+/// * 房间号(String)
+/// * 该房间关联的面板引用号列表(Vec<RefnoEnum>)
+///
+/// # 功能说明
+/// 根据不同的项目特性(project_hd或project_hh)调用对应的房间名称匹配函数,
+/// 通过 build_room_panels_relate_common 函数构建房间和面板的关联关系
 async fn build_room_panels_relate(
     room_key_word: &Vec<String>,
-) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>> {
+) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>>{
+    #[cfg(feature="project_hd")]
+    return build_room_panels_relate_common(room_key_word, match_room_name_hd).await;
+
+    #[cfg(feature="project_hh")]
+    return build_room_panels_relate_common(room_key_word, match_room_name_hh).await;
+}
+
+
+
+
+/// 构建房间和面板之间的关联关系
+/// 
+/// # 参数
+/// * `room_key_word` - 用于匹配房间的关键词列表
+/// * `match_room_fn` - 用于匹配房间号的函数
+/// 
+/// # 返回值
+/// 返回一个元组列表,每个元组包含:
+/// * 房间的引用号(RefnoEnum)
+/// * 房间号(String) 
+/// * 该房间关联的面板引用号列表(Vec<RefnoEnum>)
+async fn build_room_panels_relate_common<F>(
+    room_key_word: &Vec<String>,
+    match_room_fn: F,
+) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>>
+where
+    F: Fn(&str) -> bool,
+{
     // 拼接判断条件
     let filter = room_key_word
         .iter()
         .map(|x| format!("'{}' in NAME", x))
         .join(" or ");
     //属于room的panel
+    #[cfg(feature="project_hd")]
     let sql = format!(
         r#"
         select value [  id, 
@@ -141,19 +185,29 @@ async fn build_room_panels_relate(
                     ] from FRMW where {filter}
     "#
     );
+    #[cfg(feature="project_hh")]
+    let sql = format!(
+        r#"
+        select value [  id, 
+                        array::last(string::split(NAME, '-')),
+                        array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
+                    ] from SBFR where {filter}
+    "#
+    );
+
     let mut response = SUL_DB.query(sql).await?;
     let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
     let mut sql_string = String::new();
-    for (room_refno, room_num, panel_refnos) in &room_groups {
+    for (room_refno, room_num_str, panel_refnos) in &room_groups {
         // 判断 room_num是否符合规则
-        if !match_room_name(room_num) {
+        if !match_room_fn(room_num_str) {
             continue;
         }
         let sql = format!(
             "relate {}->room_panel_relate->[{}] set room_num='{}';",
             room_refno.to_pe_key(),
             panel_refnos.iter().map(|x| x.to_pe_key()).join(","),
-            room_num
+            room_num_str
         );
         sql_string.push_str(&sql);
     }
@@ -309,4 +363,76 @@ pub async fn cal_room_refnos(
     }
 
     Ok(within_refnos)
+}
+
+
+#[tokio::test]
+async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
+    // Initialize test database
+    init_demo_test_surreal().await;
+
+    // Create test hierarchy data
+    let create_sql = r#"
+        -- Create FRMW node
+        CREATE FRMW SET 
+            id = "FRMW_AE_AC01_R",
+            NAME = "AE-AC01-R",
+            REFNO = "1000";
+
+        -- Create SBFR nodes under FRMW
+        CREATE SBFR SET 
+            id = "SBFR_AE01055A",
+            NAME = "AE-AC01-R-AE01055A",
+            REFNO = "1001";
+        CREATE SBFR SET
+            id = "SBFR_AE01911A", 
+            NAME = "AE-AC01-R-AE01911A",
+            REFNO = "1002";
+        CREATE SBFR SET
+            id = "SBFR_AE01945A",
+            NAME = "AE-AC01-R-AE01945A", 
+            REFNO = "1003";
+        CREATE SBFR SET
+            id = "SBFR_AE01907G",
+            NAME = "AE-AC01-R-AE01907G",
+            REFNO = "1004";
+        CREATE SBFR SET
+            id = "SBFR_AE01906G",
+            NAME = "AE-AC01-R-AE01906G",
+            REFNO = "1005";
+        CREATE SBFR SET
+            id = "SBFR_AE01910A",
+            NAME = "AE-AC01-R-AE01910A",
+            REFNO = "1006";
+
+        -- Create pe_owner relationships
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01055A;
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01911A;
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01945A;
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01907G;
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01906G;
+        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01910A;
+    "#;
+
+    SUL_DB.query(create_sql).await?;
+
+    // Test build_room_panels_relate_common
+    let room_key_words = vec!["AE-AC01-R".to_string()];
+    let match_room_fn = |room_num: &str| room_num.contains("AE");
+    
+    let result = build_room_panels_relate_common(&room_key_words, match_room_fn).await?;
+
+    // Verify results
+    assert_eq!(result.len(), 6, "Should return 6 room relationships");
+
+    dbg!(&result);
+
+    // Clean up test data
+    // let cleanup_sql = r#"
+    //     DELETE FRMW;
+    //     DELETE SBFR;
+    // "#;
+    // SUL_DB.query(cleanup_sql).await?;
+
+    Ok(())
 }

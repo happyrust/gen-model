@@ -4,7 +4,7 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "mqtt"]
+default = ["ws", "gen_model", "manifold", "occ", "mqtt", "project_hh"]
 #gui = [ "dep:ui"]  #"dep:gpui",
 truck = []
 local = []
@@ -21,6 +21,8 @@ manifold = ["aios_core/manifold"]
 sql = ["dep:sea-orm", "dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
 surreal_v2 = []
+project_hd = []
+project_hh = []
 
 [dependencies]
 config = "0.14.1"
