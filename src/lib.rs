@@ -138,16 +138,19 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
         .unwrap();
     }
 
+    let config = surrealdb::opt::Config::default()
+        .ast_payload()  // 启用AST格式
+        ;  // 设置容量
     #[cfg(feature = "local")]
     SUL_DB
-        .connect(format!("rocksdb://{}.rdb", db_option.project_name))
+        .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
         .with_capacity(1000)
         .await?;
     #[cfg(feature = "ws")]
     {
         let mut need_login = true;
         if let Err(e) = SUL_DB
-            .connect(db_option.get_version_db_conn_str())
+            .connect((db_option.get_version_db_conn_str(), config))
             .with_capacity(1000)
             .await
         {
