@@ -80,7 +80,7 @@ rfd = "0.15.1"
 
 
 #造型功能，先在database测试
-opencascade = { path = "../new-crates/opencascade-rs/crates/opencascade", optional = true }
+opencascade = { git = "https://gitee.com/happydpc/occt-rs.git", package = "opencascade", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
 indexmap = "2.2.6"

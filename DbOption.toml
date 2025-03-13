@@ -64,7 +64,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = 8010
+v_port = 8009
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
