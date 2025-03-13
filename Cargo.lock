@@ -77,7 +77,6 @@ dependencies = [
  "anyhow",
  "approx 0.5.1",
  "async-once-cell",
- "async-trait",
  "bevy_reflect",
  "bevy_transform",
  "bincode",
@@ -91,7 +90,6 @@ dependencies = [
  "config",
  "dashmap 6.1.0",
  "derive_more",
- "dotenv",
  "downcast-rs 1.2.1",
  "dpcsync",
  "flume",
@@ -100,7 +98,7 @@ dependencies = [
  "hex",
  "id_tree 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "indexmap 2.7.0",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "jsonxf",
  "lazy_static",
  "log",
@@ -111,7 +109,7 @@ dependencies = [
  "notify",
  "num_enum",
  "once_cell",
- "opencascade",
+ "opencascade 0.2.0",
  "parry2d",
  "parry3d",
  "parse_pdms_db",
@@ -131,7 +129,7 @@ dependencies = [
  "smol_str 0.3.2",
  "sqlx 0.8.2",
  "strum 0.26.3",
- "strum_macros 0.26.4",
+ "strum_macros 0.27.1",
  "surrealdb",
  "tokio",
  "toml",
@@ -144,6 +142,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
+source = "git+https://gitee.com/happydpc/rs-core.git#1da283a69f12e06aa8d67e0afe1e32956597d26c"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -174,7 +173,7 @@ dependencies = [
  "glam",
  "hash32",
  "hexasphere",
- "id_tree 1.8.0",
+ "id_tree 1.8.0 (git+https://gitee.com/happydpc/id_tree)",
  "indexmap 2.7.0",
  "itertools 0.13.0",
  "jsonxf",
@@ -188,7 +187,7 @@ dependencies = [
  "num_enum",
  "once_cell",
  "once_cell_serde",
- "opencascade",
+ "opencascade 0.2.0 (git+https://gitee.com/happydpc/occt-rs)",
  "ordered-float 4.5.0",
  "parry2d",
  "parry3d",
@@ -200,7 +199,6 @@ dependencies = [
  "rkyv",
  "rstar 0.11.0",
  "serde",
- "serde-content 0.1.0",
  "serde_derive",
  "serde_json",
  "serde_repr",
@@ -439,7 +437,7 @@ checksum = "f548ad2c4031f2902e3edc1f29c29e835829437de49562d8eb5dc5584d3a1043"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -560,7 +558,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strum 0.26.3",
- "syn 2.0.90",
+ "syn 2.0.100",
  "thiserror 1.0.69",
 ]
 
@@ -691,7 +689,7 @@ checksum = "3b43422f69d8ff38f95f1b2bb76517c91589a924d1559a0e935d7c8ce0274c11"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -757,7 +755,7 @@ checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -777,7 +775,7 @@ checksum = "721cae7de5c34fbb2acd27e21e6d2cf7b886dce0c27388d46c4e6c47ea4318dd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -875,6 +873,7 @@ dependencies = [
 [[package]]
 name = "bevy_app"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_derive",
  "bevy_ecs",
@@ -882,6 +881,7 @@ dependencies = [
  "bevy_reflect",
  "bevy_tasks",
  "bevy_utils",
+ "cfg-if",
  "console_error_panic_hook",
  "ctrlc",
  "downcast-rs 2.0.1",
@@ -895,15 +895,17 @@ dependencies = [
 [[package]]
 name = "bevy_derive"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_macro_utils",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
 name = "bevy_ecs"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "arrayvec",
  "bevy_ecs_macros",
@@ -930,16 +932,18 @@ dependencies = [
 [[package]]
 name = "bevy_ecs_macros"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
 name = "bevy_log"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "android_log-sys",
  "bevy_app",
@@ -955,16 +959,19 @@ dependencies = [
 [[package]]
 name = "bevy_macro_utils"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
- "cargo-manifest-proc-macros",
+ "parking_lot",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
+ "toml_edit 0.22.22",
 ]
 
 [[package]]
 name = "bevy_math"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "approx 0.5.1",
  "bevy_reflect",
@@ -982,13 +989,15 @@ dependencies = [
 [[package]]
 name = "bevy_platform_support"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
+ "cfg-if",
  "critical-section",
  "foldhash",
  "getrandom 0.2.15",
  "hashbrown 0.15.2",
  "portable-atomic",
- "portable-atomic-util 0.2.4",
+ "portable-atomic-util",
  "spin",
  "web-time",
 ]
@@ -996,10 +1005,12 @@ dependencies = [
 [[package]]
 name = "bevy_ptr"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 
 [[package]]
 name = "bevy_reflect"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "assert_type_match",
  "bevy_platform_support",
@@ -1024,25 +1035,31 @@ dependencies = [
 [[package]]
 name = "bevy_reflect_derive"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "uuid",
 ]
 
 [[package]]
 name = "bevy_tasks"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "async-executor",
  "async-task",
+ "atomic-waker",
  "bevy_platform_support",
+ "cfg-if",
+ "crossbeam-queue",
  "derive_more",
- "edge-executor",
  "futures-channel",
  "futures-lite 2.5.0",
+ "heapless",
+ "once_cell",
  "pin-project",
  "wasm-bindgen-futures",
 ]
@@ -1050,6 +1067,7 @@ dependencies = [
 [[package]]
 name = "bevy_transform"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -1067,6 +1085,7 @@ dependencies = [
 [[package]]
 name = "bevy_utils"
 version = "0.16.0-dev"
+source = "git+https://gitee.com/happydpc/bevy.git#822c9b9867215037aeefdb75b618ce59ad89a62d"
 dependencies = [
  "bevy_platform_support",
  "thread_local",
@@ -1134,7 +1153,7 @@ dependencies = [
  "regex",
  "rustc-hash 1.1.0",
  "shlex",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1262,7 +1281,7 @@ dependencies = [
  "proc-macro-crate 3.2.0",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1362,7 +1381,7 @@ dependencies = [
  "darling 0.20.10",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1387,18 +1406,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-manifest-proc-macros"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ed191761ca1126cd62a534e5887e58cf99cbb93265b3349348fd2f958d89c34"
-dependencies = [
- "syn 2.0.90",
- "thiserror 2.0.4",
- "toml_edit 0.22.22",
- "tracing",
-]
-
-[[package]]
 name = "castaway"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1410,6 +1417,7 @@ dependencies = [
 [[package]]
 name = "cavalier_contours"
 version = "0.4.0"
+source = "git+https://gitee.com/happydpc/cavalier_contours#d2d0db137836b672bf7493c047425a146aeb9266"
 dependencies = [
  "num-traits",
  "serde",
@@ -1599,7 +1607,7 @@ dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1877,7 +1885,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "scratch",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1890,7 +1898,7 @@ dependencies = [
  "codespan-reporting",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1908,7 +1916,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1956,7 +1964,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strsim 0.11.1",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1978,7 +1986,7 @@ checksum = "d336a2a514f6ccccaa3e09b02d41d35330c07ddf03a62165fcec10bb561c7806"
 dependencies = [
  "darling_core 0.20.10",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -2079,7 +2087,7 @@ checksum = "30542c1ad912e0e3d22a1935c290e12e8a29d704a420177a31faad4a601a0800"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -2099,7 +2107,7 @@ checksum = "cb7330aeadfbe296029522e6c40f315320aba36fc43a5b3632f3795348f3bd22"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "unicode-xid",
 ]
 
@@ -2156,7 +2164,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -2199,12 +2207,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2225,6 +2227,7 @@ checksum = "ea8a8b81cacc08888170eef4d13b775126db426d0b348bee9d18c2c1eaf123cf"
 [[package]]
 name = "dpcsync"
 version = "0.1.0"
+source = "git+https://gitee.com/happydpc/dpc-sync.git#1432df6b714b6ff1c4c51224cb5fc8d6ce3c8f5b"
 dependencies = [
  "async-trait",
  "blake2",
@@ -2269,22 +2272,6 @@ checksum = "79127ed59a85d7687c409e9978547cffb7dc79675355ed22da6b66fd5f6ead01"
 dependencies = [
  "itertools 0.11.0",
  "num-traits",
-]
-
-[[package]]
-name = "edge-executor"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d3b954195d71ebc4eb6e7a2059c9037ace9a0ea3b2942d3ca808caa84ddc0b"
-dependencies = [
- "async-task",
- "atomic-waker",
- "crossbeam-queue",
- "futures-lite 1.13.0",
- "heapless",
- "once_cell",
- "portable-atomic",
- "portable-atomic-util 0.1.5",
 ]
 
 [[package]]
@@ -2344,7 +2331,7 @@ checksum = "de0d48a183585823424a4ce1aa132d174a6a81bd540895822eb4c8373a8e49e8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -2649,7 +2636,7 @@ checksum = "162ee34ebcb7c64a8abebc059ce0fee27c2262618d7b60ed8faf72fef13c3650"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -3014,7 +3001,7 @@ dependencies = [
  "markup5ever",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -3244,12 +3231,14 @@ checksum = "1ec89e9337638ecdc08744df490b221a7399bf8d164eb52a665454e60e075ad6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
 name = "id_tree"
 version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcd9db8dd5be8bde5a2624ed4b2dfb74368fe7999eb9c4940fd3ca344b61071a"
 dependencies = [
  "serde",
  "serde_derive",
@@ -3259,8 +3248,7 @@ dependencies = [
 [[package]]
 name = "id_tree"
 version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcd9db8dd5be8bde5a2624ed4b2dfb74368fe7999eb9c4940fd3ca344b61071a"
+source = "git+https://gitee.com/happydpc/id_tree#483f2ec03fc107b9195a8c2be6dec5532891b507"
 dependencies = [
  "serde",
  "serde_derive",
@@ -3324,7 +3312,7 @@ checksum = "0122b7114117e64a63ac49f752a5ca4624d534c7b1c7de796ac196381cd2d947"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -3497,6 +3485,15 @@ dependencies = [
 [[package]]
 name = "kicad-parser"
 version = "0.1.0"
+dependencies = [
+ "sexp",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "kicad-parser"
+version = "0.1.0"
+source = "git+https://gitee.com/happydpc/occt-rs#9073f3ca622b54e52705838a2cce0af2f02393b6"
 dependencies = [
  "sexp",
  "thiserror 1.0.69",
@@ -3703,6 +3700,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 [[package]]
 name = "manifold-sys"
 version = "0.1.0"
+source = "git+https://gitee.com/happydpc/manifold-sys#109843f2be9411ca74f60abc138981bb1b8f408e"
 dependencies = [
  "bindgen 0.64.0",
  "cmake",
@@ -3792,7 +3790,7 @@ checksum = "49e7bc1560b95a3c4a25d03de42fe76ca718ab92d1a22a55b9b4cf67b3ae635c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -3854,6 +3852,7 @@ checksum = "defc4c55412d89136f966bbb339008b474350e5e6e78d2714439c386b3137a03"
 [[package]]
 name = "nalgebra"
 version = "0.33.0"
+source = "git+https://gitee.com/happydpc/nalgebra.git#f8f406aaabacc366519903c917ea753b0e43056b"
 dependencies = [
  "approx 0.5.1",
  "glam",
@@ -3871,10 +3870,11 @@ dependencies = [
 [[package]]
 name = "nalgebra-macros"
 version = "0.2.2"
+source = "git+https://gitee.com/happydpc/nalgebra.git#f8f406aaabacc366519903c917ea753b0e43056b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4097,7 +4097,7 @@ checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4169,7 +4169,7 @@ dependencies = [
  "proc-macro-crate 3.2.0",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4316,6 +4316,10 @@ name = "once_cell"
 version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "once_cell_serde"
@@ -4330,14 +4334,37 @@ dependencies = [
  "anyhow",
  "cxx",
  "glam",
- "kicad-parser",
- "opencascade-sys",
+ "kicad-parser 0.1.0",
+ "opencascade-sys 0.2.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "opencascade"
+version = "0.2.0"
+source = "git+https://gitee.com/happydpc/occt-rs#9073f3ca622b54e52705838a2cce0af2f02393b6"
+dependencies = [
+ "anyhow",
+ "cxx",
+ "glam",
+ "kicad-parser 0.1.0 (git+https://gitee.com/happydpc/occt-rs)",
+ "opencascade-sys 0.2.0 (git+https://gitee.com/happydpc/occt-rs)",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "opencascade-sys"
 version = "0.2.0"
+dependencies = [
+ "cmake",
+ "cxx",
+ "cxx-build",
+]
+
+[[package]]
+name = "opencascade-sys"
+version = "0.2.0"
+source = "git+https://gitee.com/happydpc/occt-rs#9073f3ca622b54e52705838a2cce0af2f02393b6"
 dependencies = [
  "cmake",
  "cxx",
@@ -4410,7 +4437,7 @@ dependencies = [
  "proc-macro2",
  "proc-macro2-diagnostics",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4451,6 +4478,7 @@ dependencies = [
 [[package]]
 name = "parry2d"
 version = "0.17.0"
+source = "git+https://gitee.com/happydpc/parry.git#06fd686fcb9e58d535735a0f9bc2fa220cbe8b27"
 dependencies = [
  "approx 0.5.1",
  "arrayvec",
@@ -4475,6 +4503,7 @@ dependencies = [
 [[package]]
 name = "parry3d"
 version = "0.17.0"
+source = "git+https://gitee.com/happydpc/parry.git#06fd686fcb9e58d535735a0f9bc2fa220cbe8b27"
 dependencies = [
  "approx 0.5.1",
  "arrayvec",
@@ -4500,6 +4529,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "1.0.0"
+source = "git+https://gitee.com/happydpc/aios-parse-pdms.git#f29e191c8bdf2a799aebc4eb70dcb17bdaffa415"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4519,7 +4549,6 @@ dependencies = [
  "hash32",
  "hash32-derive",
  "hex",
- "id_tree 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "instant",
  "itertools 0.13.0",
  "lazy_static",
@@ -4583,6 +4612,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
+source = "git+https://gitee.com/happydpc/pdms-io.git#b6373b47a71acd954f2e6cb6abe7c675d94f4f36"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4677,7 +4707,7 @@ dependencies = [
  "pest_meta",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4763,7 +4793,7 @@ dependencies = [
  "phf_shared 0.11.2",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "unicase",
 ]
 
@@ -4809,7 +4839,7 @@ checksum = "3c0f5fad0874fc7abcd4d750e76917eaebbecaa2c20bde22e1dbeeba8beb758c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4907,15 +4937,6 @@ checksum = "280dc24453071f1b63954171985a0b0d30058d287960968b9b2aca264c8d4ee6"
 
 [[package]]
 name = "portable-atomic-util"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1a7411625b38d51b41421c6333976adffd4674a925a978856734a2dc853449b"
-dependencies = [
- "portable-atomic",
-]
-
-[[package]]
-name = "portable-atomic-util"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
@@ -4957,7 +4978,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64d1ec885c64d0457d564db4ec299b2dae3f9c02808b8ad9c3a089c591b18033"
 dependencies = [
  "proc-macro2",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4998,7 +5019,7 @@ dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -5018,7 +5039,7 @@ checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "version_check",
  "yansi",
 ]
@@ -5050,7 +5071,7 @@ dependencies = [
  "prost",
  "prost-types",
  "regex",
- "syn 2.0.90",
+ "syn 2.0.100",
  "tempfile",
 ]
 
@@ -5064,7 +5085,7 @@ dependencies = [
  "itertools 0.12.1",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -5292,7 +5313,7 @@ checksum = "bcc303e793d3734489387d205e9b186fac9c6cfacedd98cbb2e8a5943595f3e6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -5414,7 +5435,7 @@ checksum = "d3415e1bc838c36f9a0a2ac60c0fa0851c72297685e66592c44870d82834dfa2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -5555,6 +5576,7 @@ dependencies = [
 [[package]]
 name = "rstar"
 version = "0.11.0"
+source = "git+https://gitee.com/happydpc/rstar#13be3c257c5f66eaf67753adbbd76209a6927a92"
 dependencies = [
  "heapless",
  "num-traits",
@@ -5611,7 +5633,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
- "syn 2.0.90",
+ "syn 2.0.100",
  "walkdir",
 ]
 
@@ -5923,7 +5945,7 @@ dependencies = [
  "proc-macro-error2",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -5964,7 +5986,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sea-bae",
- "syn 2.0.90",
+ "syn 2.0.100",
  "unicode-ident",
 ]
 
@@ -6056,13 +6078,6 @@ dependencies = [
 [[package]]
 name = "serde-content"
 version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde-content"
-version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e255eaf9f3814135df4f959c9f404ebb2e67238bae0ed412da10518d0629e7c9"
 dependencies = [
@@ -6077,7 +6092,7 @@ checksum = "ad1e866f866923f252f05c889987993144fb74e722403468a4ebd70c3cd756c0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6101,7 +6116,7 @@ checksum = "6c64451ba24fc7a6a2d60fc75dd9c83c90903b19028d4eff35e88fc1e86564e9"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6152,7 +6167,7 @@ dependencies = [
  "darling 0.20.10",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6547,7 +6562,7 @@ dependencies = [
  "quote",
  "sqlx-core 0.8.2",
  "sqlx-macros-core 0.8.2",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6596,7 +6611,7 @@ dependencies = [
  "sqlx-mysql 0.8.2",
  "sqlx-postgres 0.8.2",
  "sqlx-sqlite",
- "syn 2.0.90",
+ "syn 2.0.100",
  "tempfile",
  "url",
 ]
@@ -6929,7 +6944,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6942,7 +6957,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.90",
+ "syn 2.0.100",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c77a8c5abcaf0f9ce05d62342b7d298c346515365c36b673df4ebe3ced01fde8"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -6954,6 +6982,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "surrealdb"
 version = "2.1.4"
+source = "git+https://gitee.com/happydpc/surrealdb.git#bc368697a45619db0c58a75d7f73013e128d6acc"
 dependencies = [
  "arrayvec",
  "async-channel 2.3.1",
@@ -6972,7 +7001,7 @@ dependencies = [
  "rustls-pki-types",
  "semver",
  "serde",
- "serde-content 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde-content",
  "serde_json",
  "surrealdb-core",
  "thiserror 1.0.69",
@@ -6991,6 +7020,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-core"
 version = "2.1.4"
+source = "git+https://gitee.com/happydpc/surrealdb.git#bc368697a45619db0c58a75d7f73013e128d6acc"
 dependencies = [
  "addr",
  "ahash 0.8.11",
@@ -7049,7 +7079,7 @@ dependencies = [
  "scrypt",
  "semver",
  "serde",
- "serde-content 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde-content",
  "serde_json",
  "sha1",
  "sha2",
@@ -7085,9 +7115,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.90"
+version = "2.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "919d3b74a5dd0ccd15aeb8f93e7006bd9e14c295087c9896a110f490752bcf31"
+checksum = "b09a44accad81e1ba1cd74a32461ba89dee89095ba17b32f5d03683b1b1fc2a0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7108,7 +7138,7 @@ checksum = "c8af7666ab7b6390ab78131fb5b0fce11d6b7a6951602017c35fa82800708971"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7222,7 +7252,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7233,7 +7263,7 @@ checksum = "8381894bb3efe0c4acac3ded651301ceee58a15d47c2e34885ed1908ad667061"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7339,7 +7369,7 @@ checksum = "693d596312e88961bc67d7f1f97af8a70227d9f90c31bba5806eec004978d752"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7460,7 +7490,7 @@ checksum = "395ae124c09f9e6918a2310af6038fba074bcf474ac352496d5910dd59a2226d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7758,7 +7788,7 @@ checksum = "41b6d82be61465f97d42bd1d15bf20f3b0a3a0905018f38f9d6f6962055b0b5c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7847,7 +7877,7 @@ dependencies = [
  "log",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "wasm-bindgen-shared",
 ]
 
@@ -7882,7 +7912,7 @@ checksum = "8ae87ea40c9f689fc23f209965b6fb8a99ad69aeeb0231408be24920604395de"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "wasm-bindgen-backend",
  "wasm-bindgen-shared",
 ]
@@ -8020,6 +8050,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "24.0.0"
+source = "git+https://gitee.com/happydpc/wgpu#d7dfe4494670cb569feb329d1115862264cef49c"
 dependencies = [
  "bitflags 2.9.0",
  "js-sys",
@@ -8130,7 +8161,7 @@ checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -8141,7 +8172,7 @@ checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -8431,7 +8462,7 @@ checksum = "2380878cad4ac9aac1e2435f3eb4020e8374b5f13c296cb75b4620ff8e229154"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "synstructure",
 ]
 
@@ -8480,7 +8511,7 @@ dependencies = [
  "proc-macro-crate 3.2.0",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "zbus_names",
  "zvariant",
  "zvariant_utils",
@@ -8516,7 +8547,7 @@ checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -8536,7 +8567,7 @@ checksum = "595eed982f7d355beb85837f651fa22e90b3c044842dc7f2c2842c086f295808"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "synstructure",
 ]
 
@@ -8565,7 +8596,7 @@ checksum = "6eafa6dfb17584ea3e2bd6e76e0cc15ad7af12b09abdd1ca55961bed9b1063c6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -8624,7 +8655,7 @@ dependencies = [
  "proc-macro-crate 3.2.0",
  "proc-macro2",
  "quote",
- "syn 2.0.90",
+ "syn 2.0.100",
  "zvariant_utils",
 ]
 
@@ -8638,6 +8669,6 @@ dependencies = [
  "quote",
  "serde",
  "static_assertions",
- "syn 2.0.90",
+ "syn 2.0.100",
  "winnow 0.6.20",
 ]

@@ -11,9 +11,6 @@ extern crate nom;
 
 extern crate strum;
 
-#[macro_use]
-extern crate strum_macros;
-
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 #[cfg(feature = "gui")]
 use aios_database::gui;
