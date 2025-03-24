@@ -16,7 +16,7 @@ use crate::fast_model::room_model::build_room_relations;
 use crate::fast_model::{gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::get_db_option;
+use aios_core::{get_db_option, init_demo_test_surreal, init_surreal};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
 use aios_core::pdms_types::*;
@@ -135,12 +135,12 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
             ),
             WriteLogger::new(LevelFilter::Info, Config::default(), file),
         ])
-        .unwrap();
+            .unwrap();
     }
 
     let config = surrealdb::opt::Config::default()
         .ast_payload()  // 启用AST格式
-        ;  // 设置容量
+        ;  // 设置容
     #[cfg(feature = "local")]
     SUL_DB
         .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
@@ -148,30 +148,11 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
         .await?;
     #[cfg(feature = "ws")]
     {
-        let mut need_login = true;
-        if let Err(e) = SUL_DB
-            .connect((db_option.get_version_db_conn_str(), config))
-            .with_capacity(1000)
-            .await
-        {
-            if e.to_string().contains("Already connected") {
-                println!("SurrealDB is already connected.");
-                need_login = false;
-            } else {
-                return Err(e.into());
+        match init_surreal().await {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e.to_string());
             }
-        }
-        if need_login {
-            SUL_DB
-                .use_ns(&db_option.surreal_ns)
-                .use_db(&db_option.project_name)
-                .await?;
-            SUL_DB
-                .signin(Root {
-                    username: &db_option.v_user,
-                    password: &db_option.v_password,
-                })
-                .await?;
         }
     }
     // progress_sender.send(5).await?;
