@@ -7,12 +7,11 @@ use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{GmParam, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::Spine3D;
-use async_trait::async_trait;
 use bevy_transform::prelude::*;
 use dashmap::mapref::one::Ref;
 use glam::Vec3;
 
-#[async_trait]
+// #[async_trait]
 pub trait PdmsDataInterface: Send + Sync {
     ///同步整个项目
     async fn sync_total_project(&self) -> anyhow::Result<bool> {

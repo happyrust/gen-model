@@ -23,7 +23,7 @@ use regex::Regex;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
-    let option = init_test_surreal().await;
+    let option = init_test_surreal().await?;
     let refno = "24381/35844".into();
     // process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
     //     .await

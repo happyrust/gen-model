@@ -13,7 +13,6 @@ use aios_core::types::AttrVal::*;
 use aios_core::{CataContext, rs_surreal};
 use aios_core::{AttrMap, RefU64Vec};
 use anyhow::anyhow;
-use async_trait::async_trait;
 
 use bevy_transform::prelude::Transform;
 use dashmap::mapref::one::Ref;
@@ -68,7 +67,6 @@ impl Debug for AiosDBManager {
     }
 }
 
-#[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
