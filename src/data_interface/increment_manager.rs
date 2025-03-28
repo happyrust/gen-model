@@ -601,7 +601,7 @@ impl AiosDBManager {
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_latest_sesno()
                     .unwrap_or_default();
-                dbg!((db_no, file_latest_sesno));
+                // dbg!((db_no, file_latest_sesno));
 
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;

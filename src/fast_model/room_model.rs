@@ -264,7 +264,7 @@ pub async fn cal_room_refnos(
                 continue;
             }
             // dbg!(&contains_query);
-            let mut need_check_refnos = vec![];
+            let mut need_check_refnos: HashSet<RefU64> = HashSet::default();
             contains_query.retain(|RStarBoundingBox { refno, aabb, .. }| {
                 //filter the wrong aabb
                 if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
@@ -288,7 +288,7 @@ pub async fn cal_room_refnos(
                 } else {
                     //只要有一个点在mesh里面，就需要继续检查是否真的相交
                     if contains.iter().any(|&x| x) {
-                        need_check_refnos.push(*refno);
+                        need_check_refnos.insert(*refno);
                     }
                     return false;
                 }
@@ -317,7 +317,7 @@ pub async fn cal_room_refnos(
                 let Ok(mut repsonse) = SUL_DB.query(format!(
                     r#"select
                          in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
-                         (select value [trans.d, array::flatten(->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
+                         (select value [trans.d, (->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
                        from array::flatten([{}]->inst_relate)  where !booled
                     "#,
                     pes
@@ -325,7 +325,6 @@ pub async fn cal_room_refnos(
                 .await else {
                     continue;
                 };
-                // dbg!(&repsonse);
                 let Ok(geom_pts) = repsonse.take::<Vec<GeomPtsQuery>>(0) else {
                     continue;
                 };
