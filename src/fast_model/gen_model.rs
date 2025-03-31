@@ -199,10 +199,12 @@ pub async fn gen_all_geos_data(
                 db_refnos
                     .execute_gen_inst_meshes(Some(db_option_arc.clone()))
                     .await;
+                println!("生成insts三角模型时间: {}ms", time.elapsed().as_millis());
+                let time = Instant::now();
                 db_refnos
                     .execute_boolean_meshes(Some(db_option_arc.clone()))
                     .await;
-                println!("生成mesh时间: {}ms", time.elapsed().as_millis());
+                println!("布尔运算时间: {}ms", time.elapsed().as_millis());
             }
         }
     }

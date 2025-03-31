@@ -113,6 +113,16 @@ pub async fn booleans_meshes_in_db(
     Ok(())
 }
 
+
+
+/// 处理网格并更新数据库
+/// 
+/// # 参数
+/// * `option` - 数据库选项，包含网格路径和是否替换现有网格等配置
+/// * `refnos` - 需要处理的引用号列表
+/// 
+/// # 返回值
+/// * `anyhow::Result<()>` - 执行结果
 pub async fn process_meshes_update_db(
     option: Option<Arc<DbOption>>,
     refnos: &[RefnoEnum],
@@ -161,11 +171,30 @@ pub async fn process_meshes_update_db(
     Ok(())
 }
 
+/// 使用默认数据库选项更新深层模型网格数据
+///
+/// # 参数
+///
+/// * `refnos` - 参考号数组
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示更新是否成功
 pub async fn process_meshes_update_db_deep_default(refnos: &[RefnoEnum]) -> anyhow::Result<()> {
     let dboption = get_db_option();
     process_meshes_update_db_deep(&dboption, refnos).await
 }
 
+/// 使用指定数据库选项更新深层模型网格数据
+///
+/// # 参数
+///
+/// * `dboption` - 数据库选项
+/// * `refnos` - 参考号数组
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示更新是否成功
 pub async fn process_meshes_update_db_deep(
     dboption: &DbOption,
     refnos: &[RefnoEnum],
@@ -245,13 +274,29 @@ pub async fn process_meshes_update_db_deep(
     Ok(())
 }
 
+/// 几何参数查询结构体
+/// 
+/// # 字段
+/// 
+/// * `id` - 几何体ID
+/// * `param` - PDMS几何体参数
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryGeoParam {
     pub id: String,
     pub param: PdmsGeoParam,
 }
 
-///生成meshes
+/// 生成实例的网格数据
+/// 
+/// # 参数
+/// 
+/// * `refnos` - 参考号数组
+/// * `replace_exist` - 是否替换已存在的网格数据
+/// * `dir` - 模型文件目录路径
+/// 
+/// # 返回值
+/// 
+/// 返回 `anyhow::Result<()>` 表示生成是否成功
 pub async fn gen_inst_meshes(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -704,6 +749,7 @@ pub async fn apply_insts_boolean_occ(
                             let inst_relate_id = b.refno.to_table_key("inst_relate");
                             //没有实体的情况，下次就不要再继续计算布尔运算了
                             let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
+                                println!("布尔运算失败: 无法生成正实体形状, refno: {}", &b.refno);
                                 update_sql.push_str(&format!(
                                     "update {} set bad_bool=true;",
                                     &inst_relate_id
@@ -711,8 +757,8 @@ pub async fn apply_insts_boolean_occ(
                                 continue;
                             };
                             let pos_matrix = pos_t.compute_matrix().as_dmat4();
-                            // dbg!(pos_matrix);
                             let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
+                                println!("布尔运算失败: 无法转换正实体形状, refno: {}", &b.refno);
                                 update_sql.push_str(&format!(
                                     "update {} set bad_bool=true;",
                                     &inst_relate_id
@@ -807,6 +853,7 @@ pub async fn apply_insts_boolean_occ(
                                     }
                                 }
                                 if !success {
+                                    println!("布尔运算失败: 无法保存结果 mesh, refno: {}", &b.refno);
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id
