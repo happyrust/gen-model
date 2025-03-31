@@ -4,8 +4,8 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "mqtt"]
-gui = ["dep:gpui", "dep:ui"]
+default = ["ws", "gen_model", "manifold", "occ", "mqtt", "project_hh"]
+#gui = [ "dep:ui"]  #"dep:gpui",
 truck = []
 local = []
 ws = []
@@ -21,6 +21,8 @@ manifold = ["aios_core/manifold"]
 sql = ["dep:sea-orm", "dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
 surreal_v2 = []
+project_hd = []
+project_hh = []
 
 [dependencies]
 config = "0.14.1"
@@ -31,10 +33,8 @@ hex = "0.4.3"
 once_cell = "1.12.0"
 futures = "0.3.21"
 smol_str = "0.3.2"
-itertools = "0.13.0"
+itertools = "0.14.0"
 lazy_static = "1.4.0"
-async-trait = "0.1.52"
-dotenv = "0.15.0"
 approx = "0.5.1"
 #flate2 = "1.0.23"
 log = "0.4.17"
@@ -49,23 +49,23 @@ derive_more = { version = "1.0.0", features = ["deref", "deref_mut"] }
 bitflags = "2.4.0"
 bitvec = "1.0.0"
 chrono = "0.4.22"
-nalgebra = { path = "../new-crates/nalgebra", features = [
+nalgebra = { git = "https://gitee.com/happydpc/nalgebra.git", features = [
     "serde",
     "rkyv",
     "glam029",
     "convert-glam029",
 ] }
-parry3d = { path = "../new-crates/parry/crates/parry3d", features = [
+parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", features = [
     "serde-serialize",
     "rkyv",
 ] }
-parry2d = { path = "../new-crates/parry/crates/parry2d" }
-parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../new-crates/aios-core", default-features = false }
-bevy_transform = { path = "../new-crates/bevy/crates/bevy_transform" }
-bevy_reflect = { path = "../new-crates/bevy/crates/bevy_reflect" }
-pdms_io = { path = "../pdms-io" }
-dpcsync = { path = "../dpc-sync" }
+parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
+parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
+aios_core = { git = "https://gitee.com/happydpc/rs-core.git", default-features = false }
+bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
+bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
+pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
+dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -80,7 +80,7 @@ rfd = "0.15.1"
 
 
 #造型功能，先在database测试
-opencascade = { path = "../new-crates/opencascade-rs/crates/opencascade", optional = true }
+opencascade = { git = "https://gitee.com/happydpc/occt-rs.git", package = "opencascade", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
 indexmap = "2.2.6"
@@ -93,7 +93,7 @@ sea-orm = { version = "1.1.1", features = [
     "sqlx-mysql",
     "runtime-async-std",
 ], optional = true }
-surrealdb = { path = "../surrealdb/crates/sdk", default-features = false, features = [
+surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features = false, features = [
     "protocol-ws",
     #    "kv-rocksdb",
 ] }
@@ -103,15 +103,15 @@ petgraph = { version = "0.6.4", features = ["serde-1"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 strum = { version = "0.26.3", features = ["derive"] }
-strum_macros = "0.26.4"
+strum_macros = "0.27.1"
 simplelog = "0.12.2"
 downcast-rs = "1.2.0"
 flume = "0.11.0"
 rust-embed = "8"
 
-gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window", optional = true }
+#gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window", optional = true }
 #story = { path = "../new-crates/gpui-compoents/crates/story" }
-ui = { path = "../new-crates/gpui-compoents/crates/ui", optional = true }
+#ui = { path = "../new-crates/gpui-compoents/crates/ui", optional = true }
 toml = "0.8.19"
 
 [build-dependencies]

@@ -12,7 +12,8 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1"
+#project_path = "D:/AVEVA/Projects/E3D2.1"
+project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
@@ -37,7 +38,7 @@ gen_model_batch_size = 16
 
 build_cate_relate = false
 
-meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
+#meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -63,7 +64,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = 8008
+v_port = 8009
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
@@ -110,7 +111,8 @@ puhua_database_user = ""
 puhua_database_password = ""
 
 
-room_keyword = "-RM" # 2016  K-R-K100   (-R-)
+# room_keyword = "-RM" # 2016  K-R-K100   (-R-)
+room_keyword = "-R-" # 2016  K-R-K100   (-R-)
 
 #test_refno = "24381_46952"
 
