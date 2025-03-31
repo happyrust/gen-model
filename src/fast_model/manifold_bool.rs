@@ -5,20 +5,41 @@ use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{get_inst_relate_keys, init_test_surreal, RefnoEnum, SUL_DB};
 use anyhow::anyhow;
+use bevy_transform::prelude::Transform;
 use glam::DMat4;
 use nalgebra::Isometry;
 use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use bevy_transform::prelude::Transform;
 
+/// 从文件加载网格数据
+///
+/// # 参数
+///
+/// * `id` - 网格文件的ID
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<PlantMesh>` 表示加载是否成功以及加载的网格数据
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
     let mesh = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", id))?;
     Ok(mesh)
 }
 
+/// 从文件加载流形数据
+///
+/// # 参数
+///
+/// * `dir` - 模型文件目录路径
+/// * `id` - 网格文件的ID
+/// * `mat` - 变换矩阵
+/// * `more_precision` - 是否需要更高精度
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<ManifoldRust>` 表示加载是否成功以及加载的流形数据
 #[inline]
 fn load_manifold(
     dir: &PathBuf,
@@ -31,7 +52,13 @@ fn load_manifold(
     Ok(manifold)
 }
 
-//处理元件库有负实体的布尔运算
+/// 处理元件库有负实体的布尔运算
+///
+/// # 参数
+///
+/// * `refnos` - 参考号数组
+/// * `replace_exist` - 是否替换已存在的布尔运算结果
+/// * `dir` - 模型文件目录路径
 pub async fn apply_cata_neg_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -112,6 +139,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                         pos.trans.compute_matrix().as_dmat4(),
                         false,
                     ) else {
+                        println!("布尔运算失败: 无法加载正实体 manifold, refno: {}", &g.refno);
                         update_sql.push_str(&format!(
                             "update {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,
@@ -184,6 +212,17 @@ pub async fn apply_cata_neg_boolean_manifold(
     Ok(())
 }
 
+/// 对多个实例进行布尔运算
+///
+/// # 参数
+///
+/// * `refnos` - 参考号数组
+/// * `replace_exist` - 是否替换已存在的布尔运算结果
+/// * `dir` - 模型文件目录路径
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示布尔运算是否成功
 pub async fn apply_insts_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -195,6 +234,17 @@ pub async fn apply_insts_boolean_manifold(
     Ok(())
 }
 
+/// 对实例进行布尔运算
+///
+/// # 参数
+///
+/// * `refnos` - 参考号数组
+/// * `replace_exist` - 是否替换已存在的布尔运算结果
+/// * `dir` - 模型文件目录路径
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示布尔运算是否成功
 pub async fn apply_insts_boolean_manifold_single(
     refno: RefnoEnum,
     replace_exist: bool,
@@ -239,7 +289,10 @@ pub async fn apply_insts_boolean_manifold_single(
                             for mut b in group {
                                 let mut pos_manifolds = vec![];
                                 for (pos_id, pos_t) in b.ts.iter() {
-                                    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                                    #[cfg(any(
+                                        feature = "debug_model",
+                                        feature = "debug_model_no_obj"
+                                    ))]
                                     println!("正在负实体计算的mesh hash: {}", &pos_id);
                                     if let Ok(manifold) = load_manifold(
                                         &dir_clone,
@@ -253,6 +306,10 @@ pub async fn apply_insts_boolean_manifold_single(
                                 //没有实体的情况，下次就不要再继续计算布尔运算了
                                 let inst_relate_id = b.refno.to_table_key("inst_relate");
                                 if pos_manifolds.is_empty() {
+                                    println!(
+                                        "布尔运算失败: 没有找到正实体 manifold, refno: {}",
+                                        &b.refno
+                                    );
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id
@@ -263,6 +320,10 @@ pub async fn apply_insts_boolean_manifold_single(
                                 let mut pos_manifold =
                                     ManifoldRust::batch_boolean(&pos_manifolds, 0);
                                 if pos_manifold.num_tri() == 0 {
+                                    println!(
+                                        "布尔运算失败: 正实体 manifold 没有三角形, refno: {}",
+                                        &b.refno
+                                    );
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id
@@ -329,13 +390,16 @@ pub async fn apply_insts_boolean_manifold_single(
                                     {
                                         update_sql.push_str(&format!(
                                             "update {} set booled_id='{}';",
-                                            &inst_relate_id,
-                                            mesh_id
+                                            &inst_relate_id, mesh_id
                                         ));
                                         success = true;
                                     }
 
                                     if !success {
+                                        println!(
+                                            "布尔运算失败: 无法保存结果 mesh, refno: {}",
+                                            &b.refno
+                                        );
                                         update_sql.push_str(&format!(
                                             "update {} set bad_bool=true;",
                                             &inst_relate_id
@@ -375,7 +439,6 @@ pub async fn apply_insts_boolean_manifold_single(
     println!("design的负实体计算{}完成", refno);
     Ok(())
 }
-
 
 #[tokio::test]
 async fn test_json_refno_parse_error() {
@@ -459,7 +522,9 @@ async fn test_json_refno_parse_error() {
 async fn test_boolean_refno_parse_error() {
     init_test_surreal().await;
 
-    let refno:RefnoEnum = "17496_172792".into();
+    let refno: RefnoEnum = "17496_172792".into();
     let path: PathBuf = "assets/meshes".into();
-    apply_insts_boolean_manifold_single(refno, false, path).await.unwrap();
+    apply_insts_boolean_manifold_single(refno, false, path)
+        .await
+        .unwrap();
 }
