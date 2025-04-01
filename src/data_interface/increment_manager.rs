@@ -586,7 +586,9 @@ impl AiosDBManager {
         dbg!(&self.watcher.watch_dirs);
         let db_option = get_db_option();
         let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
+        let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
         dbg!(&manual_dbnums);
+        dbg!(&exclude_dbnums);
         // let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
@@ -611,6 +613,10 @@ impl AiosDBManager {
                 } = parse_db_basic_info(path.to_path_buf());
                 //是否调试里有筛选
                 if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_no) {
+                    continue;
+                }
+                //过滤掉排除的数据库编号
+                if !exclude_dbnums.is_empty() && exclude_dbnums.contains(&db_no) {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();

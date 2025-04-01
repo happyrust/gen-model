@@ -142,7 +142,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
-source = "git+https://gitee.com/happydpc/rs-core.git#502a93f8da031b539d8ee0bd0037d84259ba7448"
+source = "git+https://gitee.com/happydpc/rs-core.git#ee4b66fdd6b8531f339802bf41dd2306a803c5de"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -5675,9 +5675,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e56a18552996ac8d29ecc3b190b4fdbb2d91ca4ec396de7bbffaf43f3d637e96"
+checksum = "7a04a32fb43fcdef85b977ce7f77a150805e4b2ea1f2656898d4a547dde78df6"
 dependencies = [
  "bitflags 2.9.0",
  "errno",
@@ -7129,7 +7129,7 @@ dependencies = [
  "fastrand 2.3.0",
  "getrandom 0.3.2",
  "once_cell",
- "rustix 1.0.3",
+ "rustix 1.0.4",
  "windows-sys 0.59.0",
 ]
 
