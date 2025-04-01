@@ -1,4 +1,4 @@
-pub const ARANGODB_SAVE_AMOUNT:usize = 10000;
+pub const ARANGODB_SAVE_AMOUNT: usize = 10000;
 pub const PDMS_INFO_DB: &'static str = "PDMS_INFO_DB";
 
 pub const PDMS_EXPLICIT_TABLE: &'static str = "EXPLICIT_ATT";
@@ -81,7 +81,5 @@ pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
 pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
 pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 pub const AQL_WATER_CALCULATION_COLLECTION: &'static str = "water_calculation";
-
-
 
 pub const DESI: &'static str = "DESI";
