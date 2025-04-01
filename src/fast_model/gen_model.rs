@@ -170,6 +170,17 @@ pub async fn gen_all_geos_data(
         } else {
             aios_core::query_mdb_db_nums(DBType::DESI).await?
         };
+
+        // 过滤掉exclude_db_nums中的数据库编号
+        let dbnos = if let Some(exclude_nums) = &db_option.exclude_db_nums {
+            dbnos
+                .into_iter()
+                .filter(|dbno| !exclude_nums.contains(dbno))
+                .collect::<Vec<_>>()
+        } else {
+            dbnos
+        };
+
         dbg!(&dbnos);
         let db_option_arc = Arc::new(db_option.clone());
         for dbno in dbnos.clone() {
@@ -222,7 +233,19 @@ pub async fn gen_all_geos_data(
 pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let include_history = db_option.is_gen_history_model();
-    for &dbno in dbnos {
+
+    // 过滤掉exclude_db_nums中的数据库编号
+    let filtered_dbnos = if let Some(exclude_nums) = &db_option.exclude_db_nums {
+        dbnos
+            .iter()
+            .filter(|&&dbno| !exclude_nums.contains(&dbno))
+            .copied()
+            .collect::<Vec<_>>()
+    } else {
+        dbnos.to_vec()
+    };
+
+    for &dbno in &filtered_dbnos {
         let sites = query_type_refnos_by_dbnum(&["SITE"], dbno, None, include_history).await?;
         process_meshes_update_db_deep(db_option, &sites)
             .await
@@ -263,9 +286,10 @@ pub async fn gen_geos_data_by_dbnum(
     let loop_sjus_map = DashMap::new();
     {
         //查找到子节点的所有PLOO类型
-        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true), gen_history)
-            .await
-            .unwrap_or_default();
+        let target_ploo_refnos =
+            query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true), gen_history)
+                .await
+                .unwrap_or_default();
         #[cfg(debug_assertions)]
         if !target_ploo_refnos.is_empty() {
             println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
@@ -472,7 +496,8 @@ pub async fn gen_geos_data(
     if !is_incr_update
         //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
         && (db_option.debug_root_refnos.is_some() && debug_root_refnos.is_empty())
-        && (!has_manual_refnos){
+        && (!has_manual_refnos)
+    {
         return Ok(vec![]);
     }
     if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
@@ -505,9 +530,10 @@ pub async fn gen_geos_data(
         };
     } else if dbno.is_some() {
         target_root_refnos =
-            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history).await?
-            .into_iter()
-            .collect();
+            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history)
+                .await?
+                .into_iter()
+                .collect();
     }
     if dbno.is_some() {
         println!("总共 {} 个SITE", target_root_refnos.len());
@@ -527,9 +553,12 @@ pub async fn gen_geos_data(
         println!("处理db: {}", dbno.unwrap());
     }
     let d_types = db_option_arc.debug_refno_types.clone();
-    let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA") || is_incr_update || has_manual_refnos;
-    let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP") || is_incr_update || has_manual_refnos;
-    let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM") || is_incr_update || has_manual_refnos;
+    let mut gen_cata_flag =
+        d_types.iter().any(|x| x == "CATA") || is_incr_update || has_manual_refnos;
+    let mut gen_loop_flag =
+        d_types.iter().any(|x| x == "LOOP") || is_incr_update || has_manual_refnos;
+    let mut gen_prim_flag =
+        d_types.iter().any(|x| x == "PRIM") || is_incr_update || has_manual_refnos;
 
     // dbg!(origin_root_refnos.len());
     let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
@@ -543,12 +572,13 @@ pub async fn gen_geos_data(
         //TODO 检查两个类型是否有可能在一个层级树里，如果不需要可以跳过
         {
             //查找到子节点的所有PLOO类型
-            let Ok(target_ploo_refnos) = aios_core::query_multi_deep_versioned_children_filter_inst(
-                target_refnos,
-                &["PLOO"],
-                skip_exist,
-            )
-            .await
+            let Ok(target_ploo_refnos) =
+                aios_core::query_multi_deep_versioned_children_filter_inst(
+                    target_refnos,
+                    &["PLOO"],
+                    skip_exist,
+                )
+                .await
             else {
                 continue;
             };

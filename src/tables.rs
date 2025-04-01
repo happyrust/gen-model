@@ -1,17 +1,19 @@
+use crate::consts::*;
+use aios_core::helper::table::{qualified_column_name, qualified_table_name};
+use aios_core::helper::*;
+use aios_core::helper::*;
+use aios_core::AttrVal;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use aios_core::AttrVal;
-use aios_core::helper::*;
-use crate::consts::*;
-use aios_core::helper::*;
-use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 
 #[inline]
 pub fn gen_create_explicit_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_EXPLICIT_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_EXPLICIT_TABLE} ("#
+    ));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID")); //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
@@ -25,19 +27,22 @@ pub fn gen_create_explicit_tables_sql() -> String {
 pub fn gen_create_uda_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_UDA_ATT_TABLE} ("#));
-    sql.push_str(&format!(r#"{} INT NOT NULL PRIMARY KEY,"#, "TYPE"));  //refno 的64位
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_UDA_ATT_TABLE} ("#
+    ));
+    sql.push_str(&format!(r#"{} INT NOT NULL PRIMARY KEY,"#, "TYPE")); //refno 的64位
     sql.push_str(&format!(r#"{} BLOB"#, "DATA"));
     sql.push_str(");");
 
     sql
 }
 
-
 #[inline]
 pub fn gen_create_dbno_infos_tables_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DBNO_INFOS_TABLE} ("#));
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_DBNO_INFOS_TABLE} ("#
+    ));
     sql.push_str(&format!(r#"{} VARCHAR(100) PRIMARY KEY,"#, "id"));
     sql.push_str(&format!(r#"{} INT,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "FILENAME"));
@@ -55,8 +60,10 @@ pub fn gen_create_dbno_infos_tables_sql() -> String {
 pub fn gen_create_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_ELEMENTS_TABLE} ("#
+    ));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID")); //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
@@ -69,9 +76,15 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
-    sql.push_str(&format!("CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
-    sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
+    sql.push_str(&format!(
+        "CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"
+    ));
+    sql.push_str(&format!(
+        "CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"
+    ));
+    sql.push_str(&format!(
+        "CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"
+    ));
     sql
 }
 
@@ -79,8 +92,10 @@ pub fn gen_create_element_tables_sql() -> String {
 pub fn gen_create_ssc_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT AUTO_INCREMENT PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#
+    ));
+    sql.push_str(&format!(r#"{} BIGINT AUTO_INCREMENT PRIMARY KEY,"#, "ID")); //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
@@ -97,7 +112,9 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
 /// 创建 数据状态表
 pub fn gen_create_data_state_tables_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DATA_STATE} ("#));
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_DATA_STATE} ("#
+    ));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));
     // sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     // sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
@@ -106,11 +123,12 @@ pub fn gen_create_data_state_tables_sql() -> String {
     sql
 }
 
-
 #[inline]
 pub fn gen_create_project_mdb_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#));
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#
+    ));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));
     sql.push_str(&format!(r#"{} INT,"#, "DB_NUM"));
     sql.push_str(&format!(r#"{} VARCHAR(100) ,"#, "MDB_NAME"));
@@ -126,7 +144,9 @@ pub fn gen_create_project_mdb_sql() -> String {
 #[inline]
 pub fn gen_create_project_mdb_json_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE_JSON} ("#));
+    sql.push_str(&format!(
+        r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE_JSON} ("#
+    ));
     sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "MDB_NAME"));
     sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
     sql.push_str(&format!(r#"{} VARCHAR(1000) "#, "DATA"));
@@ -137,14 +157,17 @@ pub fn gen_create_project_mdb_json_sql() -> String {
 }
 
 #[inline]
-pub fn gen_create_implicit_tables_sql(type_name: &str, att_map: &BTreeMap<u32, (String, AttrVal)>) -> String {
+pub fn gen_create_implicit_tables_sql(
+    type_name: &str,
+    att_map: &BTreeMap<u32, (String, AttrVal)>,
+) -> String {
     let mut sql = String::new();
     let table_name = qualified_table_name(type_name);
     let table_name = table_name.as_str();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, table_name));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));   //refno
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID")); //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO")); //refno
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "OWNER"));
 
@@ -167,7 +190,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_map: &BTreeMap<u32, (
                 sql.push_str(&format!(r#"{} BLOB,"#, att_name));
             }
             AttrVal::StringArrayType(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(300),"#, att_name));  //暂时用blob来表示，至于需不需要分表，看情况
+                sql.push_str(&format!(r#"{} VARCHAR(300),"#, att_name)); //暂时用blob来表示，至于需不需要分表，看情况
             }
             AttrVal::BoolArrayType(_) => {
                 sql.push_str(&format!(r#"{} INT,"#, att_name));
@@ -240,7 +263,9 @@ pub fn gen_create_pdms_version_table_sql() -> String {
 /// 创建存储每个文件的版本号表
 pub fn gen_create_file_version_table_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_FILE_VERSION_TABLE} ("));
+    sql.push_str(&format!(
+        "CREATE TABLE IF NOT EXISTS {PDMS_FILE_VERSION_TABLE} ("
+    ));
     sql.push_str(&format!("{} VARCHAR(20) ,", "FILENAME"));
     sql.push_str(&format!("{} INT", "VERSION"));
     sql.push_str(");");

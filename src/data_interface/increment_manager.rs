@@ -65,6 +65,22 @@ pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "
 
 impl AiosDBManager {
     /// 执行增量更新
+    /// 执行增量更新操作
+    ///
+    /// 该函数处理多个数据库文件的增量更新。
+    ///
+    /// # 参数
+    ///
+    /// * `increment_ranges_map` - 包含路径和对应的数据库页面基本信息及会话号范围的映射
+    ///   键为数据库文件路径，值为元组，包含数据库页面基本信息和需要更新的会话号范围
+    ///
+    /// # 返回值
+    ///
+    /// * `anyhow::Result<bool>` - 成功返回Ok(true)，失败返回错误
+    ///
+    /// # 错误
+    ///
+    /// 当数据库操作失败时会返回错误
     pub async fn execute_incr_update(
         &self,
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>)>,
@@ -570,7 +586,9 @@ impl AiosDBManager {
         dbg!(&self.watcher.watch_dirs);
         let db_option = get_db_option();
         let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
+        let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
         dbg!(&manual_dbnums);
+        dbg!(&exclude_dbnums);
         // let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
@@ -595,6 +613,10 @@ impl AiosDBManager {
                 } = parse_db_basic_info(path.to_path_buf());
                 //是否调试里有筛选
                 if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_no) {
+                    continue;
+                }
+                //过滤掉排除的数据库编号
+                if !exclude_dbnums.is_empty() && exclude_dbnums.contains(&db_no) {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();
