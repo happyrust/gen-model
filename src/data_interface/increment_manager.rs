@@ -601,9 +601,6 @@ impl AiosDBManager {
         let db_option = get_db_option();
         let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
         let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
-        // dbg!(&manual_dbnums);
-        // dbg!(&exclude_dbnums);
-        // let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
@@ -647,6 +644,7 @@ impl AiosDBManager {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
+                // dbg!((db_no, db_latest_sesno));
                 if db_latest_sesno == 0 {
                     continue;
                 }
@@ -669,17 +667,15 @@ impl AiosDBManager {
                     // });
                 }
 
-                let mut io = PdmsIO::new(&project, path, true);
-                io.open()?;
                 //每个path 都要检查一遍
-                if let Ok(basic_info) = io.get_page_basic_info() {
-                    if db_latest_sesno != 0 {
-                        #[cfg(feature = "debug_parse")]
-                        dbg!((basic_info.pdms_header.db_num, db_latest_sesno));
-                        //暂时先跳过更新比较大的
-                        if file_latest_sesno > db_latest_sesno
-                        // && (file_latest_sesno - db_latest_sesno < 1000)
-                        {
+                if db_latest_sesno != 0 {
+                    // #[cfg(feature = "debug_parse")]
+                    dbg!((db_no, db_latest_sesno));
+                    //暂时先跳过更新比较大的
+                    if file_latest_sesno > db_latest_sesno {
+                        let mut io = PdmsIO::new(&project, path, true);
+                        io.open()?;
+                        if let Ok(basic_info) = io.get_page_basic_info() {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno},\
                                         文件属性对应pgno: {file_latest_sesno}", &file_name);
                             params.insert(
@@ -689,8 +685,8 @@ impl AiosDBManager {
                                     (db_latest_sesno as i32 + 1)..=file_latest_sesno as i32,
                                 ),
                             );
+                            self.watcher.headers.insert(path.to_path_buf(), basic_info);
                         }
-                        self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
                 }
             }
@@ -698,6 +694,7 @@ impl AiosDBManager {
 
         //等所有的文件都检查同步完毕，才执行更新
         //按每个单独的 sesno
+        dbg!(params.len());
         match self.execute_incr_update(params).await {
             Ok(true) => {
                 println!("执行启动后的自动增量完成。")
