@@ -5,8 +5,17 @@ git-fetch-with-cli = true
 linker = "rust-lld.exe"
 rustdocflags = ["-Clinker=rust-lld.exe"]
 
-[build]
-rustflags = ["-Z", "threads=8"]
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "llvm"
+
+# [build]
+# rustflags = ["-Z", "threads=8"]
 
 #[target.x86_64-unknown-linux-musl]
 #linker = "x86_64-linux-musl-gcc"

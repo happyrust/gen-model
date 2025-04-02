@@ -418,6 +418,7 @@ pub async fn sync_total_async_threaded(
     let is_save_db = db_option.is_save_db();
     let is_sync_history = db_option.is_sync_history();
     let is_total_sync = db_option.total_sync;
+    let sync_versioned = db_option.sync_versioned.unwrap_or(false);
 
     let sender_clone = sender.clone();
     let children_files_len = children_files.len();
@@ -451,15 +452,6 @@ pub async fn sync_total_async_threaded(
                 let db_basic_info = parse_file_basic_info(&buf);
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
-                let ses_pgno = db_basic_info.ses_pgno;
-
-                let file_name_hash = hash_str(&file_name);
-                
-                // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
-                // dbg!(&db_type);
-                // if is_parse_sys{
-                //    //pass 允许sys数据重复解析，方便增量更新
-                // } else
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
@@ -500,10 +492,13 @@ pub async fn sync_total_async_threaded(
                 }
                 if sesno > 0 {
                     let sql = format!(
-                        "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', '{}', '{}', '{}');",
+                        "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', {}, {}, '{}');",
                         file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
                     );
                     SUL_DB.query(&sql).await.expect("save db_info failed");
+                    if sync_versioned {
+                        continue;
+                    }
                 }else{
                     continue;
                 }

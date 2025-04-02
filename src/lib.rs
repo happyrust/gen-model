@@ -295,13 +295,13 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
 
         //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
         //是否需要重构下面的这行代码？
-        // #[cfg(feature = "mqtt")]
+        #[cfg(feature = "mqtt")]
         tokio::join!(
-            // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
             mgr.async_watch(),
             AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
-            // AiosDBManager::demo_mqtt_requests(),
         );
+        #[cfg(not(feature = "mqtt"))]
+        mgr.async_watch().await;
     }
 
     Ok(())
