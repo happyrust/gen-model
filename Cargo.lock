@@ -142,7 +142,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
-source = "git+https://gitee.com/happydpc/rs-core.git#ee4b66fdd6b8531f339802bf41dd2306a803c5de"
+source = "git+https://gitee.com/happydpc/rs-core.git#0a9591e8ca59b970042cf9a7c81b3e7cfd091462"
 dependencies = [
  "anyhow",
  "approx 0.5.1",

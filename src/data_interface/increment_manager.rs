@@ -101,7 +101,7 @@ impl AiosDBManager {
             }
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
-            dbg!(&file_name);
+            // dbg!(&file_name);
             //更新 sesno 到 db_file_info 中的sql
             let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, new_sesno);
             //执行更新
@@ -141,6 +141,7 @@ impl AiosDBManager {
         let mut eles_map = io
             .collect_increment_eles((start_sesno..=start_sesno))
             .await?;
+        // dbg!(&eles_map);
         let sync_refnos = self.db_option.get_manual_sync_refnos();
         if !sync_refnos.is_empty() {
             for r in sync_refnos {
@@ -297,8 +298,9 @@ impl AiosDBManager {
                     continue;
                 };
                 let pe_data = ele.att_map().pe(dbnum);
+                let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 //处理几何体的筛选
-                let noun = ele.att_map().get_type();
+                let noun = attmap.get_type();
                 let noun_str = noun.as_str();
                 let refno_enum = refno.into();
                 if PRIMITIVE_NOUN_NAMES.contains(&noun_str) {
@@ -343,18 +345,30 @@ impl AiosDBManager {
                     }
                 }
                 //保存 pe 数据到数据库
-                let pe_json = pe_data.gen_sur_json(None);
+                let pe_json = pe_data.gen_sur_json(Some(refno.to_pe_key()));
                 let sql = format!("UPSERT {} MERGE {}", refno.to_pe_key(), pe_json);
                 // println!("{}", sql);
                 SUL_DB.query(sql).await.unwrap();
-                if let Some(att_json) = ele.att_map().gen_sur_json_exclude(&["id"], None) {
+                //保存 att 数据到数据库
+                if let Some(att_json) = attmap.gen_sur_json_exclude(&["id"], None) {
                     let sql = format!(
                         "UPSERT {}:{} CONTENT {}",
-                        ele.att_map().get_type(),
+                        attmap.get_type(),
                         refno.to_string(),
                         att_json
                     );
                     // println!("{}", sql);
+                    SUL_DB.query(sql).await.unwrap();
+                }
+                //保存 UDA 数据到数据库
+                if let Some(uda_json) = attmap.gen_sur_json_uda(&[]) {
+                    let normalized_uda_json = aios_core::helper::normalize_sql_string(&uda_json);
+                    // dbg!(&normalized_uda_json);
+                    let sql = format!(
+                        "UPSERT ATT_UDA:{} CONTENT {}",
+                        refno.to_string(),
+                        normalized_uda_json
+                    );
                     SUL_DB.query(sql).await.unwrap();
                 }
             }
@@ -587,9 +601,6 @@ impl AiosDBManager {
         let db_option = get_db_option();
         let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
         let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
-        dbg!(&manual_dbnums);
-        dbg!(&exclude_dbnums);
-        // let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
@@ -633,15 +644,17 @@ impl AiosDBManager {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
+                // dbg!((db_no, db_latest_sesno));
                 if db_latest_sesno == 0 {
                     continue;
                 }
-                dbg!(db_latest_sesno);
-                //初始化异地更新压缩数据包
+                self.watcher
+                    .file_name_full_path_map
+                    .insert(file_name.to_owned(), path.to_path_buf());
+                // dbg!(db_latest_sesno);
+                //只有开启异地同步时，才需要初始化异地更新压缩数据包
+                #[cfg(feature = "mqtt")]
                 {
-                    self.watcher
-                        .file_name_full_path_map
-                        .insert(file_name.to_owned(), path.to_path_buf());
                     // 初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
                     // 是否需要完全初始化
                     let input = path.to_path_buf();
@@ -654,18 +667,17 @@ impl AiosDBManager {
                     // });
                 }
 
-                let mut io = PdmsIO::new(&project, path, true);
-                io.open()?;
                 //每个path 都要检查一遍
-                if let Ok(basic_info) = io.get_page_basic_info() {
-                    if db_latest_sesno != 0 {
-                        #[cfg(feature = "debug_parse")]
-                        dbg!((db_num, db_latest_sesno));
-                        //暂时先跳过更新比较大的
-                        if file_latest_sesno > db_latest_sesno
-                        // && (file_latest_sesno - db_latest_sesno < 1000)
-                        {
-                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno}, 文件属性对应pgno: {file_latest_sesno}", &file_name);
+                if db_latest_sesno != 0 {
+                    // #[cfg(feature = "debug_parse")]
+                    dbg!((db_no, db_latest_sesno));
+                    //暂时先跳过更新比较大的
+                    if file_latest_sesno > db_latest_sesno {
+                        let mut io = PdmsIO::new(&project, path, true);
+                        io.open()?;
+                        if let Ok(basic_info) = io.get_page_basic_info() {
+                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno},\
+                                        文件属性对应pgno: {file_latest_sesno}", &file_name);
                             params.insert(
                                 path.to_path_buf(),
                                 (
@@ -673,8 +685,8 @@ impl AiosDBManager {
                                     (db_latest_sesno as i32 + 1)..=file_latest_sesno as i32,
                                 ),
                             );
+                            self.watcher.headers.insert(path.to_path_buf(), basic_info);
                         }
-                        self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
                 }
             }
@@ -682,6 +694,7 @@ impl AiosDBManager {
 
         //等所有的文件都检查同步完毕，才执行更新
         //按每个单独的 sesno
+        dbg!(params.len());
         match self.execute_incr_update(params).await {
             Ok(true) => {
                 println!("执行启动后的自动增量完成。")
@@ -732,11 +745,11 @@ impl AiosDBManager {
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
-                            // dbg!(new_header.pdms_header.page_no);
+                            // dbg!(&new_header.pdms_header);
                             // dbg!(path);
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 // dbg!(path);
-                                // dbg!(old.pdms_header.page_no);
+                                // dbg!(&old.pdms_header);
                                 //未发生修改，直接跳过
                                 if old.latest_ses_data.sesno == new_header.latest_ses_data.sesno {
                                     continue;
@@ -769,14 +782,14 @@ impl AiosDBManager {
                                     if path.is_dir() {
                                         continue;
                                     }
-                                    dbg!(&file_name);
+                                    // dbg!(&file_name);
                                     //这个地方是不是需要直接去读取文件，然后更新headers，不能太依赖json数据
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
-                                        dbg!((
-                                            old.latest_ses_data.sesno,
-                                            new_header.latest_ses_data.sesno
-                                        ));
+                                        // dbg!((
+                                        //     old.latest_ses_data.sesno,
+                                        //     new_header.latest_ses_data.sesno
+                                        // ));
                                         //未发生修改，直接跳过
                                         if old.latest_ses_data.sesno
                                             >= new_header.latest_ses_data.sesno
@@ -789,7 +802,7 @@ impl AiosDBManager {
                                         // dbg!(&path);
                                         let output: PathBuf =
                                             format!("assets/archives/{}.cba", file_name).into();
-                                        dbg!(&output);
+                                        // dbg!(&output);
 
                                         let compress_opt = CompressOptions::new(
                                             path.clone(),
@@ -800,7 +813,7 @@ impl AiosDBManager {
                                             .await
                                             .unwrap()
                                             .to_string();
-                                        dbg!(&file_hash);
+                                        // dbg!(&file_hash);
 
                                         //如果location_dbs为空，则不进行筛选
                                         //说明是所有地区都推送，跳过检查
@@ -822,7 +835,7 @@ impl AiosDBManager {
                                             &file_hash
                                         );
                                         // dbg!(&sql);
-                                        println!("sql is {}", &sql);
+                                        // println!("sql is {}", &sql);
                                         let mut response = SUL_DB.query(&sql).await.unwrap();
                                         // dbg!(&response);
                                         let id = response.take::<Vec<String>>(0).unwrap();
@@ -847,6 +860,7 @@ impl AiosDBManager {
                         }
                         //publish notify db file updates
                         dbg!(&notify_file_names);
+                        #[cfg(feature = "mqtt")]
                         if !notify_file_names.is_empty() {
                             let payload =
                                 SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
