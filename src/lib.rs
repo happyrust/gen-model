@@ -287,3 +287,12 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
 
     Ok(())
 }
+
+/// 检测到增量更新，就修改 datacenter_handle表中的数据
+///
+/// datacenter_handle 表结构 DataCenterRecord
+pub async fn update_inc_data_datacenter() {
+    // 插入 datacenter_handle 测试数据sql
+    // insert ignore into datacenter_handle (id, owner, status)values (datacenter_handle:24383_66476, pe:0_0, 'Insert'),(datacenter_handle:24383_66470,pe:0_0,'Insert');
+    todo!()
+}
