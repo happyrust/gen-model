@@ -164,6 +164,12 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
         .await
         .unwrap();
     println!("预加载方法完成。");
+    
+    // 初始化数据库索引
+    if let Err(e) = crate::fast_model::pdms_inst::init_inst_relate_indices().await {
+        eprintln!("初始化inst_relate索引失败: {}", e);
+    }
+    
     let sync_live = db_option.sync_live.unwrap_or(false);
     let db_option = Arc::new(db_option.clone());
     // initialize_global_db_sender().await;

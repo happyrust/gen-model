@@ -12,6 +12,16 @@ use itertools::Itertools;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::fast_model::EXIST_MESH_GEOS;
 
+/// 初始化数据库的 inst_relate 表的索引
+pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
+    // 创建 zone_refno 字段的索引
+    let create_index_sql = "
+        DEFINE INDEX idx_inst_relate_zone_refno ON TABLE inst_relate COLUMNS zone_refno TYPE BTREE;
+    ";
+    let _ = SUL_DB.query(create_index_sql).await;
+    Ok(())
+}
+
 ///保存instance 数据到数据库
 pub async fn save_instance_data(
     inst_mgr: &ShapeInstancesData,
@@ -242,6 +252,7 @@ pub async fn save_instance_data(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
+            
             let relate_sql = format!(
                 "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
                 k.to_inst_relate_key(),
@@ -269,10 +280,7 @@ pub async fn save_instance_data(
                     stringify!(inst_info),
                     chunk.join(",")
                 );
-                // let handle = tokio::spawn(async move {
                 SUL_DB.query(sql_string).await.unwrap();
-                // });
-                // insert_handles.push(handle);
             }
         }
         //inst relate 放到最后保存, 因为是被监控的
@@ -282,6 +290,19 @@ pub async fn save_instance_data(
                     format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
                 SUL_DB.query(inst_relate_sql).await.unwrap();
             }
+            
+            // 使用SQL函数更新zone_refno
+            let update_zone_sql = "
+                LET $records = SELECT * FROM inst_relate WHERE zone_refno = NONE;
+                FOR $record IN $records {
+                    LET $zone = fn::find_ancestor_type($record.in, 'ZONE');
+                    IF $zone != NONE {
+                        UPDATE $record SET zone_refno = $zone[0].refno;
+                    }
+                };
+            ";
+            SUL_DB.query(update_zone_sql).await.unwrap();
+            
             for chunk in keys.to_vec().chunks(chunk_size) {
                 let mut update_date_sql = String::new();
                 for &k in chunk {

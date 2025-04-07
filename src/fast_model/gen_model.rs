@@ -127,7 +127,15 @@ impl DbModelInstRefnos {
     }
 }
 
-///生成几何体数据
+/// 生成几何体数据
+/// 
+/// # 参数
+/// * `manual_refnos` - 手动指定的引用号列表
+/// * `db_option` - 数据库选项配置
+/// * `incr_updates` - 增量更新日志，用于增量生成几何体数据
+///
+/// # 返回值
+/// * `anyhow::Result<bool>` - 返回生成结果，成功返回true，失败返回错误
 pub async fn gen_all_geos_data(
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
