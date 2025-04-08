@@ -316,6 +316,23 @@ pub async fn sync_total_async_threaded(
             })
             .collect::<Vec<PathBuf>>()
     };
+    // 处理文件名_0001和文件名同时存在的情况
+    let mut file_map = HashMap::new();
+    for path in children_files.iter() {
+        let file_name = path.file_stem().unwrap().to_str().unwrap();
+        if let Some(base_name) = file_name.strip_suffix("_0001") {
+            file_map.insert(base_name.to_string(), path.clone());
+        } else {
+            // 只有当没有_0001版本时才插入普通版本
+            if !file_map.contains_key(file_name) {
+                file_map.insert(file_name.to_string(), path.clone());
+            }
+        }
+    }
+    
+    // 更新children_files只包含需要处理的文件
+    children_files = file_map.into_values().collect();
+    // println!("需要处理的文件: {:?}", &children_files);
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
@@ -476,8 +493,10 @@ pub async fn sync_total_async_threaded(
                          sesno = io.get_latest_sesno().unwrap_or_default();
                          if sesno > 0 {
                             let sql = format!(
-                                "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', {}, {}, '{}');",
-                                file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
+                                "
+                                DELETE db_file_info:{0};
+                                INSERT INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{0}', '{1}', {2}, {3}, '{4}');",
+                                &file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
                             );
                             SUL_DB.query(&sql).await.expect("save db_info failed");
                             if sync_versioned {
@@ -504,7 +523,6 @@ pub async fn sync_total_async_threaded(
                     }
                 }
               
-
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
                 let mut db_basic = parse_file_db_basic_data(
                     &path,

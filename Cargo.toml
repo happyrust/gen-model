@@ -64,7 +64,8 @@ parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
 aios_core = { git = "https://gitee.com/happydpc/rs-core.git", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
+#pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
+pdms_io = { path = "pdms-io" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 

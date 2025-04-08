@@ -86,6 +86,7 @@ impl AiosDBManager {
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>)>,
     ) -> anyhow::Result<bool> {
         for (path, (basic_info, sesno_range)) in increment_ranges_map {
+            println!("Path: {:?}, Sesno Range: {:?}", path, sesno_range);
             //call execute_incr_update_single_sesno
             //一步一步执行更新
             let new_sesno = sesno_range.end().clone();
@@ -141,7 +142,7 @@ impl AiosDBManager {
         let mut eles_map = io
             .collect_increment_eles((start_sesno..=start_sesno))
             .await?;
-        // dbg!(&eles_map);
+        dbg!(&eles_map.len());
         let sync_refnos = self.db_option.get_manual_sync_refnos();
         if !sync_refnos.is_empty() {
             for r in sync_refnos {
@@ -501,19 +502,6 @@ impl AiosDBManager {
         //新的 owner relate
         #[cfg(feature = "debug_model")]
         dbg!(&children_changed_map);
-        //最后执行backup_owner_relate，然后添加新的 owner relate
-        // let owner_changed_refnos = children_changed_map
-        //     .iter()
-        //     .filter(|x| x.1 .1 > 0)
-        //     .map(|x| x.0.refno())
-        //     .collect::<Vec<_>>();
-        // // #[cfg(feature = "debug_model")]
-        // dbg!(&owner_changed_refnos);
-        // if !owner_changed_refnos.is_empty() {
-        //     // backup_owner_relate(owner_changed_refnos.iter())
-        //     //     .await
-        //     //     .unwrap();
-        // }
 
         for (&owner, (children, old_children, children_updated)) in &children_changed_map {
             let relate_json = children
@@ -676,13 +664,15 @@ impl AiosDBManager {
                         let mut io = PdmsIO::new(&project, path, true);
                         io.open()?;
                         if let Ok(basic_info) = io.get_page_basic_info() {
-                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno},\
-                                        文件属性对应pgno: {file_latest_sesno}", &file_name);
+                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
+                                        文件属性对应sesno: {file_latest_sesno}", &file_name);
+                            let nearest_sesno = io.get_nearest_sesno(db_latest_sesno as i32 + 1)?;
                             params.insert(
                                 path.to_path_buf(),
                                 (
                                     basic_info.clone(),
-                                    (db_latest_sesno as i32 + 1)..=file_latest_sesno as i32,
+                                    //warning : db_latest_sesno as i32 + 1 不一定存在，需要找离他最近的sesno
+                                    nearest_sesno..=file_latest_sesno as i32,
                                 ),
                             );
                             self.watcher.headers.insert(path.to_path_buf(), basic_info);
