@@ -472,6 +472,20 @@ pub async fn sync_total_async_threaded(
 
                     //打开文件
                     if io.open().is_ok(){
+                         //获取最新sesno
+                         sesno = io.get_latest_sesno().unwrap_or_default();
+                         if sesno > 0 {
+                            let sql = format!(
+                                "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', {}, {}, '{}');",
+                                file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
+                            );
+                            SUL_DB.query(&sql).await.expect("save db_info failed");
+                            if sync_versioned {
+                                continue;
+                            }
+                        }else{
+                            continue;
+                        }
                         if is_sync_history{
                             //同步历史纪录
                             io.sync_history().await.unwrap();
@@ -481,8 +495,7 @@ pub async fn sync_total_async_threaded(
                             //存储所有refno sesno map
                             io.store_all_refno_sesno_map().await.unwrap();
                         }
-                         //获取最新sesno
-                        sesno = io.get_latest_sesno().unwrap_or_default();
+                        
                         //获取时间
                         dt = io.get_latest_dt().unwrap().naive_local();
                         //获取sesno range
@@ -490,18 +503,7 @@ pub async fn sync_total_async_threaded(
                        
                     }
                 }
-                if sesno > 0 {
-                    let sql = format!(
-                        "INSERT IGNORE INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{}', '{}', {}, {}, '{}');",
-                        file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
-                    );
-                    SUL_DB.query(&sql).await.expect("save db_info failed");
-                    if sync_versioned {
-                        continue;
-                    }
-                }else{
-                    continue;
-                }
+              
 
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
                 let mut db_basic = parse_file_db_basic_data(

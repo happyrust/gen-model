@@ -670,7 +670,7 @@ impl AiosDBManager {
                 //每个path 都要检查一遍
                 if db_latest_sesno != 0 {
                     // #[cfg(feature = "debug_parse")]
-                    dbg!((db_no, db_latest_sesno));
+                    // dbg!((db_no, db_latest_sesno));
                     //暂时先跳过更新比较大的
                     if file_latest_sesno > db_latest_sesno {
                         let mut io = PdmsIO::new(&project, path, true);

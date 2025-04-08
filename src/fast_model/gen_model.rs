@@ -238,6 +238,16 @@ pub async fn gen_all_geos_data(
 }
 
 ///更新模型数据
+/// 根据数据库编号处理网格数据
+///
+/// # 参数
+///
+/// * `dbnos` - 数据库编号数组
+/// * `db_option` - 数据库选项配置
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示处理是否成功
 pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let include_history = db_option.is_gen_history_model();
@@ -264,6 +274,17 @@ pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> any
 }
 
 ///生成几何体数据
+/// 根据数据库编号生成几何体数据
+///
+/// # 参数
+///
+/// * `dbno` - 数据库编号
+/// * `db_option_arc` - 数据库选项的Arc指针
+/// * `sender` - 形状实例数据的发送通道
+///
+/// # 返回值
+///
+/// 返回 `Result<DbModelInstRefnos>` 表示生成是否成功以及生成的模型实例引用号
 pub async fn gen_geos_data_by_dbnum(
     dbno: u32,
     db_option_arc: Arc<DbOption>,
