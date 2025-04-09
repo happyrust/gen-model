@@ -136,30 +136,10 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
             .unwrap();
     }
 
-    let config = surrealdb::opt::Config::default()
-        .ast_payload()  // 启用AST格式
-        ;  // 设置容
-    #[cfg(feature = "local")]
-    SUL_DB
-        .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-        .with_capacity(1000)
-        .await?;
-    #[cfg(feature = "ws")]
-    {
-        match init_surreal().await {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e.to_string());
-            }
-        }
-    }
+
     // progress_sender.send(5).await?;
     progress_sender.send(5)?;
-    println!(
-        "数据库已经连接到 {}, 站点: {}",
-        db_option.project_name,
-        db_option.get_version_db_conn_str()
-    );
+    
     aios_core::function::define_common_functions()
         .await
         .unwrap();

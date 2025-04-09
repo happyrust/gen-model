@@ -567,6 +567,16 @@ struct GeoAabbTrans {
 }
 
 ///刷新inst_relate 的 aabb
+/// 更新实例关联的包围盒数据
+///
+/// # 参数
+///
+/// * `refnos` - 参考号数组
+/// * `replace_exist` - 是否替换已存在的包围盒数据
+///
+/// # 返回值
+///
+/// 返回 `anyhow::Result<()>` 表示更新是否成功
 pub async fn update_inst_relate_aabbs_by_refnos(
     refnos: &[RefnoEnum],
     replace_exist: bool,

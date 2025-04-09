@@ -24,6 +24,8 @@ pub mod query;
 
 pub mod utils;
 
+pub mod aabb_tree;
+
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 use once_cell::sync::Lazy;

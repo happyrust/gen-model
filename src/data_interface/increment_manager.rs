@@ -90,15 +90,12 @@ impl AiosDBManager {
             //call execute_incr_update_single_sesno
             //一步一步执行更新
             let new_sesno = sesno_range.end().clone();
-            for sesno in sesno_range {
-                self.execute_incr_update_single_sesno(&path, &basic_info, sesno)
+            let mut start_sesno = sesno_range.start().clone();
+            while start_sesno <= new_sesno && start_sesno != 0 {
+                let sesno = start_sesno;
+                start_sesno = self
+                    .execute_incr_update_single_sesno(&path, &basic_info, sesno)
                     .await?;
-                //执行完后，需要更新sesno 到最新的 db_file_info 中
-                // let db_num = basic_info.pdms_header.db_num;
-                //更新 sesno 到 db_file_info 中
-
-                // let latest_sesno = query_latest_sesno(db_num).await?;
-                // update_latest_sesno(db_num, sesno).await?;
             }
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
@@ -120,10 +117,10 @@ impl AiosDBManager {
         path: &PathBuf,
         basic_info: &DbPageBasicInfo,
         start_sesno: i32,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<i32> {
         //没有增量更新的数据，直接返回
         if start_sesno == 0 {
-            return Ok(false);
+            return Ok(0);
         }
         let dbnum = basic_info.pdms_header.db_num;
         let mut deleted_refnos_set: HashSet<RefU64> = HashSet::new();
@@ -140,13 +137,15 @@ impl AiosDBManager {
 
         let mut io = PdmsIO::new(&project, path, true);
         io.open()?;
+        //需要找到最近的sesno
+        let start_sesno = io.get_nearest_sesno(start_sesno)?;
         let cur_ses_data = io.get_ses_data(start_sesno as _)?.clone();
         //收集哪些数据放生增删改
         let mut eles_map = io
             .collect_increment_eles((start_sesno..=start_sesno))
             .await?;
         if eles_map.is_empty() {
-            return Ok(true);
+            return Ok(start_sesno);
         }
         dbg!(&eles_map.len());
         let sync_refnos = self.db_option.get_manual_sync_refnos();
@@ -159,7 +158,7 @@ impl AiosDBManager {
             }
         }
         if eles_map.is_empty() {
-            return Ok(false);
+            return Ok(start_sesno);
         }
         #[cfg(feature = "debug_model")]
         dbg!((start_sesno, eles_map.len()));
@@ -578,7 +577,7 @@ impl AiosDBManager {
                 .expect("process_meshes_update_db_deep failed");
             println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
         }
-        Ok(true)
+        Ok(start_sesno)
     }
 
     async fn query_latest_sesno_by_file_name(file_name: &str) -> anyhow::Result<u32> {

@@ -73,10 +73,6 @@ pub async fn save_instance_data(
     for k in keys {
         let v = inst_mgr.inst_geos_map.get(k).unwrap();
         for inst in &v.insts {
-            // dbg!(&inst);
-            // if EXIST_MESH_GEOS.contains(&inst.geo_hash){
-            //     continue;
-            // }
             if inst.transform.is_nan() {
                 dbg!(&inst);
                 continue;
