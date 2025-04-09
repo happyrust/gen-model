@@ -112,6 +112,8 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    /// 增删改能否在 e3d db数据里就进行判断，而不是在数据库里去重新比较
+    /// 修改的情况：比较二进制数据？找到upsert的地方？
     /// 执行单个sesno的增量更新
     pub async fn execute_incr_update_single_sesno(
         &self,
@@ -139,9 +141,13 @@ impl AiosDBManager {
         let mut io = PdmsIO::new(&project, path, true);
         io.open()?;
         let cur_ses_data = io.get_ses_data(start_sesno as _)?.clone();
+        //收集哪些数据放生增删改
         let mut eles_map = io
             .collect_increment_eles((start_sesno..=start_sesno))
             .await?;
+        if eles_map.is_empty() {
+            return Ok(true);
+        }
         dbg!(&eles_map.len());
         let sync_refnos = self.db_option.get_manual_sync_refnos();
         if !sync_refnos.is_empty() {
@@ -176,7 +182,6 @@ impl AiosDBManager {
         let mut final_check_geom_refnos: BTreeSet<RefnoEnum> = BTreeSet::new();
 
         //处理删除的增量更新
-        // let mut processed_owner_set = HashSet::new();
         for (&r, ele) in &eles_map {
             let refno: RefnoEnum = r.into();
             let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
@@ -238,11 +243,6 @@ impl AiosDBManager {
                                 //几何体，需要往上找
                                 final_check_geom_refnos.insert(child_enum);
                             }
-                            // else if TOTAL_VERT_NOUN_NAMES.contains(&noun) {
-                            //     if let Some(pe) = aios_core::get_pe(owner).await.unwrap() {
-                            //         final_check_geom_refnos.insert(pe.refno);
-                            //     }
-                            // }
                             deleted_refnos_set.extend(deep_children);
                         }
                     }
@@ -523,6 +523,7 @@ impl AiosDBManager {
         //几何体的处理
         {
             //是否需要往上查找上面一点的层级来确定是否是几何体
+            //todo 需要检查修改的属性，是否导致几何体变化，否则不重构几何体
             if let Ok(nouns) = aios_core::get_type_names(final_check_geom_refnos.iter()).await {
                 for (&refno, noun) in final_check_geom_refnos.iter().zip(nouns) {
                     let noun = noun.as_str();
@@ -532,6 +533,7 @@ impl AiosDBManager {
                         geo_update_log.loop_owner_refnos.insert(refno);
                     } else if CATA_HAS_TUBI_GEO_NAMES.contains(&noun) {
                         //如果发现是bran/hang， 需要备份之前的数据
+                        //todo 并不是所有的数据更新都需要更新模型
                         dbg!(&refno);
                         need_backup_geom_refnos.insert(refno);
                         geo_update_log.bran_hanger_refnos.insert(refno);
@@ -577,6 +579,19 @@ impl AiosDBManager {
             println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
         }
         Ok(true)
+    }
+
+    async fn query_latest_sesno_by_file_name(file_name: &str) -> anyhow::Result<u32> {
+        let mut response = SUL_DB
+            .query(format!(
+                r#"
+                select value sesno from only db_file_info:{} limit 1;
+                "#,
+                file_name
+            ))
+            .await?;
+        let sesno: Option<u32> = response.take(0)?;
+        Ok(sesno.unwrap_or_default())
     }
 
     ///初始化监测
@@ -628,7 +643,7 @@ impl AiosDBManager {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_sesno) = aios_core::query_latest_sesno(db_no).await else {
+                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_file_name(file_name).await else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
@@ -684,7 +699,9 @@ impl AiosDBManager {
 
         //等所有的文件都检查同步完毕，才执行更新
         //按每个单独的 sesno
-        dbg!(params.len());
+        if !params.is_empty() {
+            dbg!(params.len());
+        }
         match self.execute_incr_update(params).await {
             Ok(true) => {
                 println!("执行启动后的自动增量完成。")

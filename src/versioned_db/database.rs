@@ -285,8 +285,7 @@ pub async fn sync_total_async_threaded(
     progress_sender: Sender<i32>,
     proj_progress_chunk: usize,
 ) -> anyhow::Result<()> {
-    // let pg_dir = "assets/pg";
-    // create_dir_all(pg_dir).await.unwrap();
+
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
