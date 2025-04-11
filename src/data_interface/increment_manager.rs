@@ -33,26 +33,49 @@ use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
 
+/// 增量更新信息结构体
+/// 
+/// 用于存储和跟踪数据库中元素的增量变化信息
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
+    /// 元素的引用编号
     pub refno: RefU64,
+    /// 数据库编号
     pub db_no: i32,
+    /// 元素的属性映射
     pub attr: NamedAttrMap,
+    /// 子元素的引用编号列表
     pub children: RefU64Vec,
+    /// 元素的操作类型(增加/修改/删除)
     pub operation: EleOperation,
 }
 
 impl IncrementInfo {
+    /// 检查元素是否被修改
+    /// 
+    /// # 返回值
+    /// 
+    /// * `bool` - 如果元素被修改返回true，否则返回false
     #[inline]
     pub fn is_modified(&self) -> bool {
         matches!(self.operation, EleOperation::Modified)
     }
 
+    /// 检查元素是否被删除
+    /// 
+    /// # 返回值
+    /// 
+    /// * `bool` - 如果元素被删除返回true，否则返回false
     #[inline]
     pub fn is_deleted(&self) -> bool {
         matches!(self.operation, EleOperation::Deleted)
     }
 
+    /// 检查元素是否为新增
+    /// 
+    /// # 返回值
+    /// 
+    /// * `bool` - 如果元素是新增的返回true，否则返回false
     #[inline]
     pub fn is_added(&self) -> bool {
         matches!(self.operation, EleOperation::Add)
@@ -147,7 +170,7 @@ impl AiosDBManager {
         if eles_map.is_empty() {
             return Ok(start_sesno);
         }
-        dbg!(&eles_map.len());
+        // dbg!(&eles_map.len());
         let sync_refnos = self.db_option.get_manual_sync_refnos();
         if !sync_refnos.is_empty() {
             for r in sync_refnos {

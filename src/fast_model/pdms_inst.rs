@@ -284,6 +284,7 @@ pub async fn save_instance_data_single(
             for chunk in inst_relate_vec.chunks(chunk_size) {
                 let inst_relate_sql =
                     format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
+                // println!("inst relate sql: {}", &inst_relate_sql);
                 SUL_DB.query(inst_relate_sql).await.unwrap();
             }
 
@@ -597,6 +598,16 @@ pub async fn save_instance_data(
             }
         }
         inst_relate_vec.push(relate_sql);
+    }
+
+    if !inst_relate_vec.is_empty() {
+        for chunk in inst_relate_vec.chunks(chunk_size) {
+            let inst_relate_sql =
+                format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
+            let db = SUL_DB.clone();
+            let future = tokio::spawn(async move { db.query(inst_relate_sql).await });
+            db_futures.push(future);
+        }
     }
 
     // 并发保存inst_info数据

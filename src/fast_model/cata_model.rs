@@ -35,9 +35,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{instrument, Level};
 
-#[cfg(feature = "profile")]
+// #[cfg(feature = "profile")]
 use tracing::{info_span, instrument, Level};
 
 // For Chrome tracing
@@ -269,7 +268,7 @@ pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 /// 生成元件库的branch型几何体
 /// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
 /// 先暂时整个重新生成？
-#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender), level = Level::INFO)]
+#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender))]
 pub async fn gen_cata_geos(
     db_option: Arc<DbOption>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
