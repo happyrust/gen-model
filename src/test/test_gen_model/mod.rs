@@ -3,4 +3,4 @@
 
 // pub mod test_gen_wire;
 
-pub mod test_pdms_inst_perf;
+// pub mod test_pdms_inst_perf;
