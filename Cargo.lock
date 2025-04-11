@@ -144,6 +144,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
+source = "git+https://gitee.com/happydpc/rs-core.git#b1923e4b8b9bd8495a163dfd9f6cf83925304464"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -4552,6 +4553,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
+source = "git+https://gitee.com/happydpc/pdms-io.git#be271aebbaacb132b32cb4db14c546c09964ca12"
 dependencies = [
  "aios_core",
  "anyhow",
