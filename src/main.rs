@@ -149,3 +149,83 @@ fn test_turn_bin_into_json() {
     let mut new_file = File::create("all_attr_info_1.json").unwrap();
     new_file.write_all(&json.into_bytes()).unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use dashmap::DashMap;
+    use flume::unbounded;
+    use glam::Vec3;
+    use aios_database::fast_model::cata_model::gen_cata_geos_with_tracing;
+    use aios_core::options::DbOption;
+    use aios_core::pdms_types::{CataHashRefnoKV, RefnoEnum};
+    use aios_core::geometry::ShapeInstancesData;
+    use aios_core::pe::SPdmsElement;
+
+    #[tokio::test]
+    #[cfg(feature = "profile")]
+    async fn test_gen_cata_geos_with_tracing() {
+        println!("Starting gen_cata_geos tracing test with profile feature enabled");
+
+        // Initialize sample data for testing
+        let db_option = Arc::new(DbOption::default());
+        let target_cata_map = Arc::new(DashMap::new());
+        
+        // Add some sample data to test with
+        // This is just an example - you'll need to replace with real data for your test
+        target_cata_map.insert("sample_hash".to_string(), CataHashRefnoKV {
+            cata_hash: "sample_hash".to_string(),
+            group_refnos: vec![RefnoEnum::default()],
+            exist_inst: false,
+            ptset: None,
+        });
+        
+        let branch_map = Arc::new(DashMap::new());
+        let sjus_map_arc = Arc::new(DashMap::new());
+        
+        // Create a channel to receive shape instances data
+        let (sender, receiver) = unbounded();
+        
+        // Run gen_cata_geos with tracing enabled
+        let result = gen_cata_geos_with_tracing(
+            db_option,
+            target_cata_map,
+            branch_map,
+            sjus_map_arc,
+            sender
+        ).await;
+        
+        println!("gen_cata_geos result: {:?}", result);
+        
+        // For testing purposes, drain the receiver
+        while let Ok(_) = receiver.try_recv() {}
+        
+        println!("Trace file generated at chrome_trace_cata_model.json");
+        println!("You can open this file in Chrome at chrome://tracing");
+    }
+    
+    #[tokio::test]
+    #[cfg(not(feature = "profile"))]
+    async fn test_gen_cata_geos_with_tracing() {
+        println!("Starting gen_cata_geos tracing test without profile feature");
+        println!("Note: For full tracing functionality, enable the 'profile' feature");
+        
+        // Initialize minimal test data
+        let db_option = Arc::new(DbOption::default());
+        let target_cata_map = Arc::new(DashMap::new());
+        let branch_map = Arc::new(DashMap::new());
+        let sjus_map_arc = Arc::new(DashMap::new());
+        let (sender, _) = unbounded();
+        
+        // Run gen_cata_geos with tracing disabled
+        let result = gen_cata_geos_with_tracing(
+            db_option,
+            target_cata_map, 
+            branch_map,
+            sjus_map_arc,
+            sender
+        ).await;
+        
+        println!("gen_cata_geos result: {:?}", result);
+    }
+}

@@ -23,6 +23,7 @@ debug_parse = ["pdms_io/debug_parse"]
 surreal_v2 = []
 project_hd = []
 project_hh = []
+profile = []                                                          #性能分析，包含tracing功能
 
 [dependencies]
 config = "0.14.1"
@@ -102,12 +103,14 @@ async-once-cell = "0.5.3"
 rumqttc = "0.24.0"
 petgraph = { version = "0.6.4", features = ["serde-1"] }
 tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
+tracing-subscriber = { version = "0.3.18", features = ["registry", "json"] }
+tracing-chrome = "0.7.1"
 strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.27.1"
 simplelog = "0.12.2"
 downcast-rs = "1.2.0"
 flume = "0.11.0"
+rand = "0.9.0"
 rust-embed = "8"
 
 #gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window", optional = true }
@@ -117,6 +120,8 @@ toml = "0.8.19"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
+
+
 
 [dependencies.sqlx]
 version = "0.8.2"
@@ -143,3 +148,6 @@ features = [
 #opt-level = 3
 #panic = 'abort'
 #codegen-units = 1
+
+#[patch."https://gitee.com/happydpc/rs-core.git"]
+#aios_core = { path = "../new-crates/rs-core" }

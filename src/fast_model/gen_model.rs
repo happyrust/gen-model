@@ -1,7 +1,7 @@
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::pdms_inst::save_instance_data;
+use crate::fast_model::pdms_inst::{save_instance_data};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
     process_meshes_update_db_deep, resolve_desi_comp, shared,
@@ -198,11 +198,10 @@ pub async fn gen_all_geos_data(
             let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
             let insert_task = tokio::task::spawn(async move {
                 while let Ok(shape_insts) = receiver.recv_async().await {
-                    // if shape_insts.inst_info_map.len() == 0 {
-                    //     println!("Skipping save_instance_data as the inst_info_map is empty.");
-                    //     continue;
-                    // }
+                    let time = Instant::now();
+                    // save_instance_data(&shape_insts, false).await.unwrap();
                     save_instance_data(&shape_insts, false).await.unwrap();
+                    println!("save_instance_data time: {}ms", time.elapsed().as_millis());
                     println!("Insert shape insts: {}", shape_insts.inst_info_map.len());
                 }
             });
@@ -298,7 +297,7 @@ pub async fn gen_geos_data_by_dbnum(
     if zones.is_empty() {
         return Ok(Default::default());
     }
-    let mut all_handles = FuturesUnordered::new();
+    // let mut all_handles = FuturesUnordered::new();
 
     println!("gen_geos_data_by_dbnum 处理db: {}", dbno);
     let d_types = db_option_arc.debug_refno_types.clone();
@@ -390,18 +389,20 @@ pub async fn gen_geos_data_by_dbnum(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = tokio::spawn(async move {
-                cata_model::gen_cata_geos(
-                    db_option,
-                    Arc::new(target_bran_reuse_cata_map),
-                    Arc::new(branch_refnos_map),
-                    sjus_map_clone,
-                    sender,
-                )
-                .await
-                .unwrap();
-            });
-            all_handles.push(handle);
+            // let handle = tokio::spawn(async move {
+            let start_time = Instant::now();
+            cata_model::gen_cata_geos(
+                db_option,
+                Arc::new(target_bran_reuse_cata_map),
+                Arc::new(branch_refnos_map),
+                sjus_map_clone,
+                sender,
+            )
+            .await
+            .unwrap();
+            println!("BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+            // });
+            // all_handles.push(handle);
         }
     }
     let mut use_cate_refnos = vec![];
@@ -427,18 +428,20 @@ pub async fn gen_geos_data_by_dbnum(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = tokio::spawn(async move {
-                cata_model::gen_cata_geos(
-                    db_option,
-                    Arc::new(target_single_cata_map),
-                    Arc::new(Default::default()),
-                    sjus_map_clone,
-                    sender,
-                )
-                .await
-                .unwrap();
-            });
-            all_handles.push(handle);
+            // let handle = tokio::spawn(async move {
+            let start_time = Instant::now();
+            cata_model::gen_cata_geos(
+                db_option,
+                Arc::new(target_single_cata_map),
+                Arc::new(Default::default()),
+                sjus_map_clone,
+                sender,
+            )
+            .await
+            .unwrap();
+            println!("单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+            // });
+            // all_handles.push(handle);
         }
     }
 
@@ -453,7 +456,7 @@ pub async fn gen_geos_data_by_dbnum(
         let sender = sender.clone();
         let db_option = db_option_arc.clone();
         let target_loop_owner_refnos_arc = target_loop_owner_refnos.clone();
-        let handle = tokio::spawn(async move {
+        // let handle = tokio::spawn(async move {
             loop_model::gen_loop_geos(
                 db_option,
                 &target_loop_owner_refnos_arc,
@@ -462,8 +465,8 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-        });
-        all_handles.push(handle);
+        // }); 
+        // all_handles.push(handle);
     }
 
     let target_prim_refnos = Arc::new(
@@ -479,18 +482,18 @@ pub async fn gen_geos_data_by_dbnum(
         let db_option = db_option_arc.clone();
         let sender = sender.clone();
         let target_prim_refnos_arc = target_prim_refnos.clone();
-        let handle = tokio::spawn(async move {
+        // let hand le = tokio::spawn(async move {
             prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender)
                 .await
                 .unwrap();
-        });
-        all_handles.push(handle);
+        // });
+        // all_handles.push(handle);
     }
 
     //Ok::<_, anyhow::Error>(())
-    while let Some(result) = all_handles.next().await {
-        // 处理每个完成的 future 的结果
-    }
+    // while let Some(result) = all_handles.next().await {
+    //     // 处理每个完成的 future 的结果
+    // }
 
     let db_refnos = DbModelInstRefnos {
         bran_hanger_refnos: target_bran_hanger_refnos,
@@ -731,6 +734,7 @@ pub async fn gen_geos_data(
                 let db_option = db_option_arc.clone();
                 let sender = sender.clone();
                 let handle = tokio::spawn(async move {
+                    let start_time = Instant::now();
                     cata_model::gen_cata_geos(
                         db_option,
                         Arc::new(target_bran_reuse_cata_map),
@@ -740,6 +744,7 @@ pub async fn gen_geos_data(
                     )
                     .await
                     .unwrap();
+                    println!("异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
                 });
                 all_handles.push(handle);
             }
@@ -751,6 +756,7 @@ pub async fn gen_geos_data(
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
             let handle = tokio::spawn(async move {
+                let start_time = Instant::now();
                 cata_model::gen_cata_geos(
                     db_option,
                     Arc::new(target_single_cata_map),
@@ -760,6 +766,7 @@ pub async fn gen_geos_data(
                 )
                 .await
                 .unwrap();
+                println!("异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
             });
             all_handles.push(handle);
         }

@@ -63,6 +63,7 @@ pub mod defines;
 pub mod team_data;
 
 pub mod graph_db;
+pub mod test;
 
 #[cfg(feature = "gui")]
 pub mod gui;

@@ -25,7 +25,7 @@ async fn test_query_ancestor_by_refno() -> anyhow::Result<()> {
         .await
         .unwrap_or_default();
     dbg!(&type_name);
-    let ancestor = aios_core::get_ancestor("17496_107068".into())
+    let ancestor = aios_core::query_ancestor_refnos("17496_107068".into())
         .await
         .unwrap();
     dbg!(ancestor);

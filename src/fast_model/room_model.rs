@@ -79,6 +79,18 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
     return Ok(());
 }
 
+/// 构建房间关系
+/// 
+/// 该函数用于构建房间之间的空间关系,包括:
+/// 1. 根据房间关键词匹配房间和面板的对应关系
+/// 2. 计算每个面板内包含的构件
+/// 3. 保存房间和构件的关联关系
+///
+/// # 参数
+/// * `db_option` - 数据库配置选项,包含房间关键词等参数
+///
+/// # 返回值
+/// * `anyhow::Result<()>` - 返回构建结果,成功返回Ok(()),失败返回错误信息
 pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     let mesh_dir = db_option.get_meshes_path();
     let room_key_words = db_option.get_room_key_word();
@@ -105,6 +117,15 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 保存房间关联关系到数据库
+/// 
+/// # 参数
+/// * `panel_refno` - 面板的引用号
+/// * `within_refnos` - 面板内包含的构件引用号集合
+/// * `room_num` - 房间号
+/// 
+/// # 返回值
+/// * `anyhow::Result<()>` - 成功返回Ok(()), 失败返回错误信息
 async fn save_room_relate(
     panel_refno: RefnoEnum,
     within_refnos: &HashSet<RefnoEnum>,
@@ -112,9 +133,11 @@ async fn save_room_relate(
 ) -> anyhow::Result<()> {
     let mut final_sql = "".to_string();
     for refno in within_refnos {
+        let relation_id = format!("{}_{}", panel_refno, refno);
         let sql = format!(
-            "relate {}->room_relate->{} set room_num='{}';",
+            "relate {}->room_relate:{}->{}  set room_num='{}';",
             panel_refno.to_pe_key(),
+            relation_id,
             refno.to_pe_key(),
             room_num
         );
