@@ -140,9 +140,6 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 保存pes到mysql #[cfg(target_os = "macos")]
-//     let db_path = "/Users/dongpengcheng/Documents/models/e3d_models/AvevaMarineSample/ams000/ams1112_0001";
-//     crate::io::scan_all_history_data(db_path).await.unwrap();
 
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
@@ -275,6 +272,20 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     };
 }
 
+pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
+    let sql = format!("SELECT value id FROM only pe WHERE dbnum = {} limit 1", db_no);
+    let mut response = SUL_DB.query(&sql).await.expect("check db exists failed");
+    use surrealdb::sql::Thing;
+    let db_exists: Option<Thing> = response.take(0).unwrap();
+    if db_exists.is_some() {
+        println!("Database with dbnum {} already exists in pe table. Will override with new data.", db_no);
+        println!("开始删除已有的dbnum {db_no} 的数据");
+        let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no}); DELETE select id from pe where dbnum = {db_no};");
+        SUL_DB.query(&sql).await.expect("clear db failed");
+    }
+    Ok(())
+}
+
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
@@ -369,19 +380,9 @@ pub async fn sync_total_async_threaded(
                     match data {
                         SenderJsonsData::PEJson(pes) => {
                             if !pes.is_empty() {
-                                // cnt += pes.len();
                                 let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
-                                // println!("pe sql: {}", sql);
                                 let mut response =
                                     SUL_DB.query(&sql).await.expect("insert pes failed");
-                                // let errors = response.take_errors();
-                                // if !errors.is_empty() {
-                                // //     //write to file
-                                // //     // let mut file = std::fs::File::create("pe.sql").unwrap();
-                                // //     // use std::io::Write;
-                                // //     // file.write_all(sql.as_bytes()).unwrap();
-                                //     dbg!(&errors);
-                                // }
                             }
                         }
                         SenderJsonsData::PERelateJson(relates) => {
@@ -468,6 +469,8 @@ pub async fn sync_total_async_threaded(
                 let db_basic_info = parse_file_basic_info(&buf);
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
+                //todo 需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
+                check_and_clear_db(db_no).await.unwrap();
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;

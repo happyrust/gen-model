@@ -6,12 +6,9 @@
 // mod test_api;
 // mod test_spatial;
 mod test_gen_model;
+mod test_performance;
 // mod test_incr_update;
 
 // mod test_data_state;
 
-
 // mod test_query;
-
-
-
