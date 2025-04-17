@@ -283,3 +283,49 @@ pub async fn update_inc_data_datacenter() {
     // insert ignore into datacenter_handle (id, owner, status)values (datacenter_handle:24383_66476, pe:0_0, 'Insert'),(datacenter_handle:24383_66470,pe:0_0,'Insert');
     todo!()
 }
+
+/// 运行app
+pub async fn run_app() -> anyhow::Result<()> {
+    use std::sync::mpsc;
+
+    use aios_core::init_surreal;
+    use crate::fast_model::aabb_tree::manual_update_aabbs;
+    let db_option: DbOption = get_db_option().clone();
+    let config = surrealdb::opt::Config::default()
+    .ast_payload()  // 启用AST格式
+    ; // 设置容
+    #[cfg(feature = "local")]
+    SUL_DB
+        .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
+        .with_capacity(1000)
+        .await?;
+    #[cfg(feature = "ws")]
+    {
+        match init_surreal().await {
+            Ok(_) => {
+                println!(
+                    "数据库已经连接到 {}, 站点: {}",
+                    db_option.project_name,
+                    db_option.get_version_db_conn_str()
+                );
+            }
+            Err(e) => {
+                dbg!(&e.to_string());
+            }
+        }
+    }
+
+    if db_option.gen_spatial_tree {
+        // Try to load existing AABB tree first
+        load_aabb_tree().await?;
+
+        // Check if tree is empty after loading
+        if GLOBAL_AABB_TREE.read().await.is_empty() {
+            println!("AABB tree is empty after loading, performing manual update...");
+            manual_update_aabbs(true).await?;
+            println!("Manual update aabb tree completed");
+        }
+    }
+    let (tx, mut rx) = mpsc::channel::<i32>();
+    run_cli(db_option, tx).await
+}

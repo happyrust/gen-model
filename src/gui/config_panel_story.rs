@@ -9,22 +9,28 @@ use gpui_component::{
     h_flex,
     input::TextInput,
     label::Label,
+    list::List,
     notification::{Notification, NotificationType},
     progress::Progress,
+    scroll::ScrollbarShow,
     switch::Switch,
     theme::ActiveTheme,
     v_flex, Disableable, Sizable,
 };
+use crate::gui::logs::{add_global_log, log_from_thread, LogLevel, LogListDelegate, GLOBAL_LOGS, LogUpdateEvent};
 use story::Story;
 
 // 使用gpui_component中的View类型
 use gpui_component::form::FieldBuilder::View;
 
 use std::borrow::Borrow;
-use std::{
-    sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
-};
+use std::time::Duration;
+
+// 已经不需要额外的UpdateLogEvent，直接使用logs模块中的LogUpdateEvent
+// #[derive(Debug, Clone)]
+// pub struct UpdateLogEvent;
+
+// impl EventEmitter<UpdateLogEvent> for ConfigPanelStory {}
 
 pub struct ConfigPanelStory {
     focus_handle: FocusHandle,
@@ -45,9 +51,11 @@ pub struct ConfigPanelStory {
     live_update: bool,
     remote_sync: bool,
     active_tab: SharedString,
-    progress_value: i32,
-    task_running: bool,
-    progress_tx: Sender<i32>,
+    show_logs: bool,
+    log_list: Entity<List<LogListDelegate>>,
+    log_subscription: Option<Subscription>,
+    // 移除定时器句柄
+    // timer_handle: Option<gpui::Task<()>>,
 }
 
 impl Story for ConfigPanelStory {
@@ -77,6 +85,12 @@ impl ConfigPanelStory {
         let db_username = cx.new(|cx| TextInput::new(window, cx).placeholder("root"));
         let db_password = cx.new(|cx| TextInput::new(window, cx).placeholder("password"));
         let generate_part_input = cx.new(|cx| TextInput::new(window, cx));
+
+        // 创建日志列表
+        let delegate = LogListDelegate::new();
+        let log_list = cx.new(|cx| {
+            List::new(delegate, window, cx)
+        });
 
         let db_option = get_db_option();
         // Initialize text inputs with values from db_option
@@ -110,9 +124,8 @@ impl ConfigPanelStory {
         let remote_sync = db_option.sync_graph_db.unwrap_or(false);
         let parse_all = db_option.total_sync;
         let parse_part = db_option.incr_sync;
-        let (tx, rx) = mpsc::channel::<i32>();
 
-        Self {
+        let instance = Self {
             focus_handle: cx.focus_handle(),
             parse_all,
             parse_part,
@@ -130,11 +143,15 @@ impl ConfigPanelStory {
             live_update,
             remote_sync,
             active_tab: "parse".into(),
-            progress_value: 0,
-            progress_tx: tx,
-            task_running: false,
             included_projects,
-        }
+            show_logs: true,
+            log_list,
+            log_subscription: None,
+            // 移除定时器句柄
+            // timer_handle: None,
+        };
+
+        instance
     }
 
     const ID: usize = 0;
@@ -194,6 +211,43 @@ impl ConfigPanelStory {
         std::fs::write("DbOption.toml", toml).unwrap();
     }
 
+    // 添加更新日志的方法
+    fn update_logs(&mut self, cx: &mut Context<Self>) {
+        if let Ok(logs) = GLOBAL_LOGS.lock() {
+            if logs.is_empty() {
+                return;
+            }
+            
+            self.log_list.update(cx, |list, cx| {
+                let mut delegate = list.delegate_mut();
+                let current_count = delegate.logs.len();
+                
+                // 只添加新日志
+                if current_count < logs.len() {
+                    for i in current_count..logs.len() {
+                        if let Some(log) = logs.get(i) {
+                            delegate.logs.push(log.clone());
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    // 添加示例日志的方法（用于测试）
+    fn add_example_logs(&mut self, cx: &mut Context<Self>) {
+        // 添加一些示例日志
+        add_global_log("初始化应用程序...".to_string(), LogLevel::Info);
+        add_global_log("正在加载配置...".to_string(), LogLevel::Info);
+        add_global_log("部分配置文件缺失".to_string(), LogLevel::Warning);
+        add_global_log("正在连接数据库...".to_string(), LogLevel::Info);
+        add_global_log("数据库连接失败，尝试重连".to_string(), LogLevel::Error);
+        add_global_log("重新连接成功".to_string(), LogLevel::Info);
+        
+        // 直接更新日志列表（无需通过事件，因为已在同一上下文中）
+        self.update_logs(cx);
+    }
+
     fn render_parse_tab(
         &mut self,
         window: &mut Window,
@@ -235,10 +289,11 @@ impl ConfigPanelStory {
                         flex.child(
                             h_flex()
                                 .gap_2()
+                                .w_full()
                                 .text_size(px(12.0))
                                 .pl_4()
                                 .child(Label::new("数据库名称"))
-                                .child(div().flex_1().child(self.parse_part_input.clone())),
+                                .child(self.parse_part_input.clone()),
                         )
                     }),
             )
@@ -246,15 +301,29 @@ impl ConfigPanelStory {
                 v_flex().gap_2().child(Label::new("项目路径")).child(
                     h_flex()
                         .gap_2()
-                        .child(div().flex_1().child(self.project_path.clone()))
+                        .items_center()
+                        .w_full()
+                        .child(self.project_path.clone())
                         .child(
                             Button::new("path_file_sel")
                                 .label("选择")
+                                .w(px(60.))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    println!("选择路径按钮已点击");
-                                    this.project_path.update(cx, |input, cx| {
-                                        input.set_text("C:/默认路径", window, cx);
-                                    });
+                                    // 使用rfd库打开目录选择对话框
+                                    cx.spawn_in(window, async move |this, mut cx| {
+                                        if let Some(folder) =
+                                            rfd::AsyncFileDialog::new().pick_folder().await
+                                        {
+                                            let path = folder.path().to_string_lossy().to_string();
+                                            // cx.spawn_in(window, |cx| {
+                                                this.update_in(cx, |config, window, cx| {
+                                                    config.project_path.update(cx, |input, cx| {
+                                                        input.set_text(path, window, cx);
+                                                    });
+                                                });
+                                        }
+                                    })
+                                    .detach()
                                 })),
                         ),
                 ),
@@ -414,69 +483,179 @@ impl Focusable for ConfigPanelStory {
 impl Render for ConfigPanelStory {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let border = theme.border.clone();
+        let radius = theme.radius.clone();
+        
+        // 首次渲染时，添加示例日志
+        if self.log_subscription.is_none() {
+            // 添加示例日志
+            // self.add_example_logs(cx);
+            
+            // 标记为已初始化，避免重复添加示例日志
+            self.log_subscription = None;
+        }
+        
+        // 每次渲染时检查是否有新日志
+        // self.update_logs(cx);
 
-        h_flex()
-            .w(px(900.))
-            .h(px(800.))
-            .bg(theme.background)
-            .rounded_lg()
-            .shadow_lg()
-            .relative() // 添加relative以支持absolute定位
-            .child(
-                // 侧边栏
-                v_flex()
-                    .w(px(192.))
-                    .border_r(px(1.))
-                    .border_color(theme.border)
-                    .p_4()
-                    .gap_2()
-                    .children(
-                        vec![
-                            ("parse", "解析模块"),
-                            ("database", "数据库配置"),
-                            ("generate", "模型生成"),
-                            ("update", "自动增量更新"),
-                        ]
-                        .into_iter()
-                        .map(|(id, label)| {
-                            let btn = Button::new(id).label(label);
-                            let btn = if self.active_tab == id { btn } else { btn };
+        div().p_4().size_full().child(
+            h_flex()
+                .size_full()
+                .bg(theme.background)
+                .rounded_lg()
+                .shadow_lg()
+                .relative() // 添加relative以支持absolute定位
+                .child(
+                    // 侧边栏
+                    v_flex()
+                        .w(px(192.))
+                        .border_r(px(1.))
+                        .border_color(border)
+                        .p_4()
+                        .gap_2()
+                        .children(
+                            vec![
+                                ("parse", "解析模块"),
+                                ("database", "数据库配置"),
+                                ("generate", "模型生成"),
+                                ("update", "自动增量更新"),
+                            ]
+                            .into_iter()
+                            .map(|(id, label)| {
+                                let btn = Button::new(id).label(label);
+                                let btn = if self.active_tab == id { btn } else { btn };
 
-                            btn.on_click(cx.listener(move |this, _, window, cx| {
-                                this.active_tab = id.into();
-                                this.notify(cx);
-                            }))
-                        }),
-                    ),
-            )
-            .child(
-                // 主内容区域
-                v_flex()
-                    .flex_1()
-                    .p_6()
-                    .child(match self.active_tab.borrow() {
-                        "parse" => self.render_parse_tab(window, cx).into_any_element(),
-                        "database" => self.render_database_tab(window, cx).into_any_element(),
-                        "generate" => self.render_generate_tab(window, cx).into_any_element(),
-                        "update" => self.render_update_tab(window, cx).into_any_element(),
-                        _ => div().into_any_element(),
-                    })
-                    .child(div().h(px(10.))),
-            )
-            .child(
-                // 底部按钮
-                h_flex()
-                    .absolute()
-                    .bottom(px(24.))
-                    .right(px(24.))
-                    .gap_3()
-                    .child(
-                        Button::new("save_config")
-                            .label("保存配置")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save(cx);
-                            })),
-                    ),
-            )
+                                btn.on_click(cx.listener(move |this, _, window, cx| {
+                                    this.active_tab = id.into();
+                                    this.notify(cx);
+                                }))
+                            }),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_4()
+                                .mt_6()
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .child(Label::new("显示日志"))
+                                        .child(
+                                            Switch::new("show_logs")
+                                                .checked(self.show_logs)
+                                                .on_click(cx.listener(|this, checked, window, cx| {
+                                                    this.show_logs = *checked;
+                                                    this.notify(cx);
+                                                })),
+                                        ),
+                                )
+                        ),
+                )
+                .child(
+                    // 主内容区域
+                    v_flex()
+                        .flex_1()
+                        .p_6()
+                        .child(match self.active_tab.borrow() {
+                            "parse" => self.render_parse_tab(window, cx).into_any_element(),
+                            "database" => self.render_database_tab(window, cx).into_any_element(),
+                            "generate" => self.render_generate_tab(window, cx).into_any_element(),
+                            "update" => self.render_update_tab(window, cx).into_any_element(),
+                            _ => div().into_any_element(),
+                        })
+                )
+                .when(self.show_logs, |flex| {
+                    // 添加日志查看区域（右侧）
+                    flex.child(
+                        v_flex()
+                            .w(px(350.))
+                            .border_l(px(1.))
+                            .border_color(border)
+                            .child(
+                                v_flex()
+                                    .p_2()
+                                    .size_full()
+                                    .child(Label::new("日志输出").text_lg().text_center())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .border(px(1.))
+                                            .border_color(border)
+                                            .rounded(radius)
+                                            .child(self.log_list.clone())
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .mt_2()
+                                            .child(
+                                                Button::new("clear_logs")
+                                                    .label("清空日志")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        // 清空日志
+                                                        if let Ok(mut logs) = GLOBAL_LOGS.lock() {
+                                                            logs.clear();
+                                                        }
+                                                        this.log_list.update(cx, |list, cx| {
+                                                            let mut delegate = list.delegate_mut();
+                                                            delegate.logs.clear();
+                                                            delegate.selected_index = None;
+                                                        });
+                                                    }))
+                                            )
+                                    )
+                            )
+                    )
+                })
+                .child(
+                    // 底部按钮
+                    h_flex()
+                        .absolute()
+                        .bottom(px(24.))
+                        .right(px(24.))
+                        .gap_3()
+                        // 添加执行按钮
+                        .child(
+                            Button::new("execute_button")
+                                .label("开始执行")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    // 保存当前配置
+                                    this.save(cx);
+                                    
+                                    // 添加执行开始日志
+                                    add_global_log("开始执行任务...", LogLevel::Info);
+                                    // 立即更新日志显示
+                                    this.update_logs(cx);
+                                    
+                                    // 启动任务
+                                    std::thread::spawn(|| {
+                                        // 使用阻塞方式运行
+                                        let rt = tokio::runtime::Runtime::new().unwrap();
+                                        rt.block_on(async {
+                                            match crate::run_app().await {
+                                                Ok(_) => {
+                                                    log_from_thread("执行成功！", LogLevel::Info);
+                                                },
+                                                Err(e) => {
+                                                    log_from_thread(format!("执行出错: {}", e), LogLevel::Error);
+                                                },
+                                            }
+                                        });
+                                    });
+                                })),
+                        )
+                        .child(
+                            Button::new("save_config")
+                                .label("保存配置")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.save(cx);
+                                    add_global_log("配置已保存", LogLevel::Info);
+                                    // 立即更新日志显示
+                                    this.update_logs(cx);
+                                })),
+                        ),
+                ),
+        )
     }
 }

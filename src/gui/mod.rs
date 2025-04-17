@@ -7,8 +7,10 @@ use gpui_component::input::{Copy, Cut, Paste, Redo, Undo};
 
 mod assets;
 mod config_panel_story;
+mod logs;
 
 pub use config_panel_story::ConfigPanelStory;
+pub use logs::{add_global_log, log_from_thread, LogLevel};
 use gpui::*;
 use story::AppState;
 
@@ -29,6 +31,6 @@ pub fn run_gui() {
         story::init(cx);
         cx.activate(true);
 
-        story::create_new_window("布置平台部署工具", ConfigPanelStory::view, cx);
+        let window = story::create_new_window("布置平台部署工具", ConfigPanelStory::view, cx);
     });
 }

@@ -44,8 +44,7 @@ use aios_database::fast_model::{
     gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES,
 };
 use aios_database::versioned_db::database::*;
-// use aios_database::versioned_db::task::initialize_global_db_sender;
-use aios_database::run_cli;
+use aios_database::{run_cli, run_app};
 use aios_database::team_data::sync_system_db;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
@@ -65,49 +64,9 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use std::sync::mpsc;
-
-    use aios_core::init_surreal;
-    use aios_database::fast_model::aabb_tree::manual_update_aabbs;
-    let db_option: DbOption = get_db_option().clone();
-    let config = surrealdb::opt::Config::default()
-    .ast_payload()  // 启用AST格式
-    ; // 设置容
-    #[cfg(feature = "local")]
-    SUL_DB
-        .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-        .with_capacity(1000)
-        .await?;
-    #[cfg(feature = "ws")]
-    {
-        match init_surreal().await {
-            Ok(_) => {
-                println!(
-                    "数据库已经连接到 {}, 站点: {}",
-                    db_option.project_name,
-                    db_option.get_version_db_conn_str()
-                );
-            }
-            Err(e) => {
-                dbg!(&e.to_string());
-            }
-        }
-    }
-
-    if db_option.gen_spatial_tree {
-        // Try to load existing AABB tree first
-        load_aabb_tree().await?;
-
-        // Check if tree is empty after loading
-        if GLOBAL_AABB_TREE.read().await.is_empty() {
-            println!("AABB tree is empty after loading, performing manual update...");
-            manual_update_aabbs(true).await?;
-            println!("Manual update aabb tree completed");
-        }
-    }
-    let (tx, mut rx) = mpsc::channel::<i32>();
-    run_cli(db_option, tx).await
+    run_app().await
 }
+
 
 #[test]
 fn get_noun_hash() {
