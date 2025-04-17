@@ -1,61 +1,53 @@
-use super::story::Story;
 use crate::run_cli;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use gpui::prelude::FluentBuilder as _;
-use gpui::{
-    div, px, rems, AnyElement, FocusHandle, FocusableView, IntoElement, ParentElement, Render,
-    SharedString, Styled, Task, Timer, View, ViewContext, VisualContext, WindowContext,
-};
-use std::borrow::Borrow;
-// use tokio::sync::mpsc::{self, Receiver, Sender};
-use std::{
-    sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
-};
-use ui::button::ButtonStyled;
-use ui::ContextModal;
-use ui::{
-    button::{Button, ButtonStyle},
-    divider::Divider,
+use gpui::*;
+use gpui_component::button::Button;
+use gpui_component::{
+    form::FieldBuilder,
     h_flex,
     input::TextInput,
     label::Label,
     notification::{Notification, NotificationType},
     progress::Progress,
     switch::Switch,
-    // tabs::{Tab, Tabs},
     theme::ActiveTheme,
-    v_flex,
-    Disableable,
-    IconName,
-    Sizable,
-    StyledExt,
+    v_flex, Disableable, Sizable,
+};
+use story::Story;
+
+// 使用gpui_component中的View类型
+use gpui_component::form::FieldBuilder::View;
+
+use std::borrow::Borrow;
+use std::{
+    sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
 };
 
 pub struct ConfigPanelStory {
     focus_handle: FocusHandle,
     parse_all: bool,
     parse_part: bool,
-    parse_part_input: View<TextInput>,
-    project_path: View<TextInput>,
-    included_projects: View<TextInput>,
-    project_name: View<TextInput>,
-    mdb_name: View<TextInput>,
-    db_ip: View<TextInput>,
-    db_port: View<TextInput>,
-    db_username: View<TextInput>,
-    db_password: View<TextInput>,
+    parse_part_input: Entity<TextInput>,
+    project_path: Entity<TextInput>,
+    included_projects: Entity<TextInput>,
+    project_name: Entity<TextInput>,
+    mdb_name: Entity<TextInput>,
+    db_ip: Entity<TextInput>,
+    db_port: Entity<TextInput>,
+    db_username: Entity<TextInput>,
+    db_password: Entity<TextInput>,
     generate_all: bool,
     generate_part: bool,
-    generate_part_input: View<TextInput>,
+    generate_part_input: Entity<TextInput>,
     live_update: bool,
     remote_sync: bool,
     active_tab: SharedString,
     progress_value: i32,
     task_running: bool,
     progress_tx: Sender<i32>,
-    _progress_task: Option<Task<()>>,
 }
 
 impl Story for ConfigPanelStory {
@@ -63,50 +55,54 @@ impl Story for ConfigPanelStory {
         "配置面板"
     }
 
-    fn new_view(cx: &mut WindowContext) -> View<impl FocusableView> {
-        Self::view(cx)
+    fn new_view(window: &mut Window, cx: &mut App) -> Entity<impl Render + Focusable> {
+        Self::view(window, cx)
     }
 }
 
 impl ConfigPanelStory {
-    pub fn view(cx: &mut WindowContext) -> View<Self> {
-        cx.new_view(Self::new)
+    pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| Self::new(window, cx))
     }
 
-    fn new(cx: &mut ViewContext<Self>) -> Self {
-        let parse_part_input =
-            cx.new_view(|cx| TextInput::new(cx).placeholder("请输入数据库文件名, 多个用逗号分隔"));
-        let project_path = cx.new_view(|cx| TextInput::new(cx));
-        let project_name = cx.new_view(|cx| TextInput::new(cx));
-        let included_projects = cx.new_view(|cx| TextInput::new(cx));
-        let mdb_name = cx.new_view(|cx| TextInput::new(cx));
-        let db_ip = cx.new_view(|cx| TextInput::new(cx).placeholder("127.0.0.1"));
-        let db_port = cx.new_view(|cx| TextInput::new(cx).placeholder("8008"));
-        let db_username = cx.new_view(|cx| TextInput::new(cx).placeholder("root"));
-        let db_password = cx.new_view(|cx| TextInput::new(cx).placeholder("password"));
-        let generate_part_input = cx.new_view(|cx| TextInput::new(cx));
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let parse_part_input = cx
+            .new(|cx| TextInput::new(window, cx).placeholder("请输入数据库文件名, 多个用逗号分隔"));
+        let project_path = cx.new(|cx| TextInput::new(window, cx));
+        let project_name = cx.new(|cx| TextInput::new(window, cx));
+        let included_projects = cx.new(|cx| TextInput::new(window, cx));
+        let mdb_name = cx.new(|cx| TextInput::new(window, cx));
+        let db_ip = cx.new(|cx| TextInput::new(window, cx).placeholder("127.0.0.1"));
+        let db_port = cx.new(|cx| TextInput::new(window, cx).placeholder("8008"));
+        let db_username = cx.new(|cx| TextInput::new(window, cx).placeholder("root"));
+        let db_password = cx.new(|cx| TextInput::new(window, cx).placeholder("password"));
+        let generate_part_input = cx.new(|cx| TextInput::new(window, cx));
 
         let db_option = get_db_option();
         // Initialize text inputs with values from db_option
         project_path.update(cx, |input, cx| {
-            input.set_text(db_option.project_path.clone(), cx)
+            input.set_text(db_option.project_path.clone(), window, cx)
         });
         project_name.update(cx, |input, cx| {
-            input.set_text(db_option.project_name.clone(), cx)
+            input.set_text(db_option.project_name.clone(), window, cx)
         });
         included_projects.update(cx, |input, cx| {
-            input.set_text(db_option.included_projects.join(","), cx)
+            input.set_text(db_option.included_projects.join(","), window, cx)
         });
         mdb_name.update(cx, |input, cx| {
-            input.set_text(db_option.mdb_name.clone(), cx)
+            input.set_text(db_option.mdb_name.clone(), window, cx)
         });
-        db_ip.update(cx, |input, cx| input.set_text(db_option.v_ip.clone(), cx));
+        db_ip.update(cx, |input, cx| {
+            input.set_text(db_option.v_ip.clone(), window, cx)
+        });
         db_port.update(cx, |input, cx| {
-            input.set_text(db_option.v_port.to_string(), cx)
+            input.set_text(db_option.v_port.to_string(), window, cx)
         });
-        db_username.update(cx, |input, cx| input.set_text(db_option.v_user.clone(), cx));
+        db_username.update(cx, |input, cx| {
+            input.set_text(db_option.v_user.clone(), window, cx)
+        });
         db_password.update(cx, |input, cx| {
-            input.set_text(db_option.v_password.clone(), cx)
+            input.set_text(db_option.v_password.clone(), window, cx)
         });
 
         // Initialize switches
@@ -114,40 +110,12 @@ impl ConfigPanelStory {
         let remote_sync = db_option.sync_graph_db.unwrap_or(false);
         let parse_all = db_option.total_sync;
         let parse_part = db_option.incr_sync;
-        let (tx, mut rx) = mpsc::channel::<i32>();
-        // Spawn progress update task
-        let task = cx.spawn(|this, mut cx| async move {
-            loop {
-                if let Ok(value) = rx.try_recv() {
-                    // dbg!(&value);
-                    if let Some(this) = this.upgrade() {
-                        this.update(&mut cx, |this, cx| {
-                            this.progress_value = value as i32;
-                            if value == 100 {
-                                this.task_running = false;
-                            }
-                            // this.slider1
-                            //     .update(cx, |slider, _| slider.set_value(value, cx));
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                    // this.update(cx, |this, _cx| {
-                    //     this.progress_value = value;
-                    //     if value == 100 {
-                    //         this.task_running = false;
-                    //     }
-                    // });
-                    // cx.notify();
-                }
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        });
+        let (tx, rx) = mpsc::channel::<i32>();
 
         Self {
             focus_handle: cx.focus_handle(),
-            parse_all: false,
-            parse_part: false,
+            parse_all,
+            parse_part,
             parse_part_input,
             project_path,
             project_name,
@@ -159,19 +127,21 @@ impl ConfigPanelStory {
             generate_all: false,
             generate_part: false,
             generate_part_input,
-            live_update: false,
-            remote_sync: false,
+            live_update,
+            remote_sync,
             active_tab: "parse".into(),
             progress_value: 0,
             progress_tx: tx,
-            _progress_task: Some(task),
             task_running: false,
             included_projects,
         }
     }
 
-    fn get_overwrite_config(&self, cx: &mut ViewContext<Self>) -> DbOption {
+    const ID: usize = 0;
+
+    fn get_overwrite_config(&self, cx: &mut Context<Self>) -> DbOption {
         let mut db_option = get_db_option().clone();
+
         db_option.project_path = self.project_path.read(cx).text().to_string();
         db_option.project_name = self.project_name.read(cx).text().to_string();
         db_option.mdb_name = self.mdb_name.read(cx).text().to_string();
@@ -179,10 +149,12 @@ impl ConfigPanelStory {
         db_option.v_port = self.db_port.read(cx).text().parse().unwrap_or(8008);
         db_option.v_user = self.db_username.read(cx).text().to_string();
         db_option.v_password = self.db_password.read(cx).text().to_string();
+
         db_option.sync_live = Some(self.live_update);
         db_option.sync_graph_db = Some(self.remote_sync);
         db_option.total_sync = self.parse_all;
         db_option.incr_sync = self.parse_part;
+
         db_option.included_db_files = {
             let text = self.parse_part_input.read(cx).text();
             if text.trim().is_empty() {
@@ -191,35 +163,42 @@ impl ConfigPanelStory {
                 Some(text.split(',').map(|s| s.trim().to_string()).collect())
             }
         };
+
         db_option.gen_model = self.generate_all | self.generate_part;
+
         db_option.manual_db_nums = {
             let text = self.generate_part_input.read(cx).text();
             if text.trim().is_empty() {
                 None
             } else {
-                let nums: Vec<u32> = text
+                let parsed_nums: Vec<u32> = text
                     .split(',')
                     .filter_map(|s| s.trim().parse().ok())
                     .collect();
-                if nums.is_empty() {
+                if parsed_nums.is_empty() {
                     None
                 } else {
-                    Some(nums)
+                    Some(parsed_nums)
                 }
             }
         };
+
         dbg!(&db_option.manual_db_nums);
         db_option
     }
 
-    fn save(&self, cx: &mut ViewContext<Self>) {
+    fn save(&self, cx: &mut Context<Self>) {
         let db_option = self.get_overwrite_config(cx);
         // 将配置写入DbOption.toml文件
         let toml = toml::to_string(&db_option).unwrap();
         std::fs::write("DbOption.toml", toml).unwrap();
     }
 
-    fn render_parse_tab(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_parse_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .gap_6()
             .child(Label::new("解析模块配置").text_lg())
@@ -231,8 +210,9 @@ impl ConfigPanelStory {
                     .child(
                         Switch::new("parse_all")
                             .checked(self.parse_all)
-                            .on_click(cx.listener(|this, checked, _cx| {
+                            .on_click(cx.listener(|this, checked, window, cx| {
                                 this.parse_all = *checked;
+                                this.notify(cx);
                             })),
                     ),
             )
@@ -245,8 +225,9 @@ impl ConfigPanelStory {
                             .items_center()
                             .child(Label::new("部分解析"))
                             .child(Switch::new("parse_part").checked(self.parse_part).on_click(
-                                cx.listener(|this, checked, _cx| {
+                                cx.listener(|this, checked, window, cx| {
                                     this.parse_part = *checked;
+                                    this.notify(cx);
                                 }),
                             )),
                     )
@@ -269,26 +250,12 @@ impl ConfigPanelStory {
                         .child(
                             Button::new("path_file_sel")
                                 .label("选择")
-                                .on_click(cx.listener(|this, _event, cx| {
-                                    cx.spawn(|this, mut cx| async move {
-                                        if let Some(folder) =
-                                            rfd::AsyncFileDialog::new().pick_folder().await
-                                        {
-                                            let path = folder.path().to_string_lossy().to_string();
-                                            cx.update(|cx| {
-                                                this.update(cx, |config, cx| {
-                                                    config.project_path.update(cx, |input, cx| {
-                                                        input.set_text(path, cx);
-                                                    });
-                                                })
-                                                .ok();
-                                            })
-                                            .ok();
-                                        }
-                                    })
-                                    .detach();
-                                }))
-                                .style(ButtonStyle::Secondary),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    println!("选择路径按钮已点击");
+                                    this.project_path.update(cx, |input, cx| {
+                                        input.set_text("C:/默认路径", window, cx);
+                                    });
+                                })),
                         ),
                 ),
             )
@@ -312,7 +279,11 @@ impl ConfigPanelStory {
             )
     }
 
-    fn render_database_tab(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_database_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .gap_6()
             .child(Label::new("数据库配置").text_lg())
@@ -346,7 +317,11 @@ impl ConfigPanelStory {
             )
     }
 
-    fn render_generate_tab(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_generate_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .gap_6()
             .child(Label::new("模型生成配置").text_lg())
@@ -358,8 +333,9 @@ impl ConfigPanelStory {
                     .child(
                         Switch::new("generate_all")
                             .checked(self.generate_all)
-                            .on_click(cx.listener(|this, checked, _cx| {
+                            .on_click(cx.listener(|this, checked, window, cx| {
                                 this.generate_all = *checked;
+                                this.notify(cx);
                             })),
                     ),
             )
@@ -374,8 +350,9 @@ impl ConfigPanelStory {
                             .child(
                                 Switch::new("generate_part")
                                     .checked(self.generate_part)
-                                    .on_click(cx.listener(|this, checked, _cx| {
+                                    .on_click(cx.listener(|this, checked, window, cx| {
                                         this.generate_part = *checked;
+                                        this.notify(cx);
                                     })),
                             ),
                     )
@@ -385,7 +362,11 @@ impl ConfigPanelStory {
             )
     }
 
-    fn render_update_tab(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_update_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .gap_6()
             .child(Label::new("自动增量更新配置").text_lg())
@@ -397,8 +378,9 @@ impl ConfigPanelStory {
                     .child(
                         Switch::new("live_update")
                             .checked(self.live_update)
-                            .on_click(cx.listener(|this, checked, _cx| {
+                            .on_click(cx.listener(|this, checked, window, cx| {
                                 this.live_update = *checked;
+                                this.notify(cx);
                             })),
                     ),
             )
@@ -410,22 +392,27 @@ impl ConfigPanelStory {
                     .child(
                         Switch::new("remote_sync")
                             .checked(self.remote_sync)
-                            .on_click(cx.listener(|this, checked, _cx| {
+                            .on_click(cx.listener(|this, checked, window, cx| {
                                 this.remote_sync = *checked;
+                                this.notify(cx);
                             })),
                     ),
             )
     }
+
+    fn notify(&mut self, cx: &mut Context<Self>) {
+        cx.notify()
+    }
 }
 
-impl FocusableView for ConfigPanelStory {
-    fn focus_handle(&self, _: &gpui::AppContext) -> FocusHandle {
+impl Focusable for ConfigPanelStory {
+    fn focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
         self.focus_handle.clone()
     }
 }
 
 impl Render for ConfigPanelStory {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         h_flex()
@@ -452,16 +439,13 @@ impl Render for ConfigPanelStory {
                         ]
                         .into_iter()
                         .map(|(id, label)| {
-                            Button::new(id)
-                                .style(if self.active_tab == id {
-                                    ButtonStyle::Primary
-                                } else {
-                                    ButtonStyle::Ghost
-                                })
-                                .label(label)
-                                .on_click(cx.listener(move |this, _event, _cx| {
-                                    this.active_tab = id.into();
-                                }))
+                            let btn = Button::new(id).label(label);
+                            let btn = if self.active_tab == id { btn } else { btn };
+
+                            btn.on_click(cx.listener(move |this, _, window, cx| {
+                                this.active_tab = id.into();
+                                this.notify(cx);
+                            }))
                         }),
                     ),
             )
@@ -471,16 +455,13 @@ impl Render for ConfigPanelStory {
                     .flex_1()
                     .p_6()
                     .child(match self.active_tab.borrow() {
-                        "parse" => self.render_parse_tab(cx).into_any_element(),
-                        "database" => self.render_database_tab(cx).into_any_element(),
-                        "generate" => self.render_generate_tab(cx).into_any_element(),
-                        "update" => self.render_update_tab(cx).into_any_element(),
+                        "parse" => self.render_parse_tab(window, cx).into_any_element(),
+                        "database" => self.render_database_tab(window, cx).into_any_element(),
+                        "generate" => self.render_generate_tab(window, cx).into_any_element(),
+                        "update" => self.render_update_tab(window, cx).into_any_element(),
                         _ => div().into_any_element(),
                     })
-                    .child(div().h(px(10.)))
-                    .when(self.task_running, |flex| {
-                        flex.child(Progress::new().value(self.progress_value as _))
-                    }),
+                    .child(div().h(px(10.))),
             )
             .child(
                 // 底部按钮
@@ -490,44 +471,10 @@ impl Render for ConfigPanelStory {
                     .right(px(24.))
                     .gap_3()
                     .child(
-                        Button::new("cancel")
-                            .style(ButtonStyle::Secondary)
+                        Button::new("save_config")
                             .label("保存配置")
-                            .on_click(cx.listener(|this, _event, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.save(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("run_task")
-                            .style(ButtonStyle::Primary)
-                            .disabled(self.task_running)
-                            .label("运行任务")
-                            .on_click(cx.listener(|this, _event, cx| {
-                                let tx = this.progress_tx.clone();
-                                this.task_running = true;
-                                let db_option = this.get_overwrite_config(cx);
-                                // cx.spawn(|this, mut cx| async move {
-                                //     if let Err(e) = tx.send(50) {
-                                //         dbg!(&e);
-                                //     }
-                                // })
-                                // .detach();
-
-                                // Spawn main task
-                                cx.spawn(|this, mut cx| async move {
-                                    if let Err(e) = run_cli(db_option, tx).await {
-                                        cx.update(|cx| {
-                                            cx.push_notification(
-                                                Notification::new(e.to_string())
-                                                    .with_type(NotificationType::Error)
-                                                    .title("任务运行失败"),
-                                            );
-                                            this.update(cx, |this, _| this.task_running = false);
-                                        })
-                                        .ok();
-                                    }
-                                })
-                                .detach();
                             })),
                     ),
             )
