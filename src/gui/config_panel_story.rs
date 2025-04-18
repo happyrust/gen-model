@@ -156,6 +156,7 @@ impl ConfigPanelStory {
 
     const ID: usize = 0;
 
+    /// 获取覆盖配置
     fn get_overwrite_config(&self, cx: &mut Context<Self>) -> DbOption {
         let mut db_option = get_db_option().clone();
 
@@ -200,7 +201,9 @@ impl ConfigPanelStory {
             }
         };
 
-        dbg!(&db_option.manual_db_nums);
+        if db_option.manual_db_nums.is_some() {
+            dbg!(&db_option.manual_db_nums);
+        }
         db_option
     }
 
@@ -621,7 +624,9 @@ impl Render for ConfigPanelStory {
                                 .label("开始执行")
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     // 保存当前配置
-                                    this.save(cx);
+                                    // this.save(cx);
+
+                                    let db_option = this.get_overwrite_config(cx);
                                     
                                     // 添加执行开始日志
                                     add_global_log("开始执行任务...", LogLevel::Info);
@@ -629,20 +634,16 @@ impl Render for ConfigPanelStory {
                                     this.update_logs(cx);
                                     
                                     // 启动任务
-                                    std::thread::spawn(|| {
-                                        // 使用阻塞方式运行
-                                        let rt = tokio::runtime::Runtime::new().unwrap();
-                                        rt.block_on(async {
-                                            match crate::run_app().await {
-                                                Ok(_) => {
-                                                    log_from_thread("执行成功！", LogLevel::Info);
-                                                },
-                                                Err(e) => {
-                                                    log_from_thread(format!("执行出错: {}", e), LogLevel::Error);
-                                                },
-                                            }
-                                        });
-                                    });
+                                    cx.spawn(async move |_cx, _window| {
+                                        match crate::run_app(Some(db_option)).await {
+                                            Ok(_) => {
+                                                log_from_thread("执行成功！", LogLevel::Info);
+                                            },
+                                            Err(e) => {
+                                                log_from_thread(format!("执行出错: {}", e), LogLevel::Error);
+                                            },
+                                        }
+                                    }).detach();
                                 })),
                         )
                         .child(

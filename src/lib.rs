@@ -285,12 +285,12 @@ pub async fn update_inc_data_datacenter() {
 }
 
 /// 运行app
-pub async fn run_app() -> anyhow::Result<()> {
+pub async fn run_app(option: Option<DbOption>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
     use aios_core::init_surreal;
     use crate::fast_model::aabb_tree::manual_update_aabbs;
-    let db_option: DbOption = get_db_option().clone();
+    let db_option: DbOption = option.unwrap_or(get_db_option().clone());
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容

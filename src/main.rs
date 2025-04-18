@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run_app().await
+    run_app(None).await
 }
 
 
