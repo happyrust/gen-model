@@ -54,6 +54,8 @@ pub struct ConfigPanelStory {
     show_logs: bool,
     log_list: Entity<List<LogListDelegate>>,
     log_subscription: Option<Subscription>,
+    // 添加运行状态标志
+    is_running: bool,
     // 移除定时器句柄
     // timer_handle: Option<gpui::Task<()>>,
 }
@@ -147,6 +149,8 @@ impl ConfigPanelStory {
             show_logs: true,
             log_list,
             log_subscription: None,
+            // 添加运行状态初始值为false
+            is_running: false,
             // 移除定时器句柄
             // timer_handle: None,
         };
@@ -618,11 +622,21 @@ impl Render for ConfigPanelStory {
                         .bottom(px(24.))
                         .right(px(24.))
                         .gap_3()
-                        // 添加执行按钮
+                        // 添加执行按钮，根据运行状态禁用
                         .child(
                             Button::new("execute_button")
                                 .label("开始执行")
+                                .disabled(self.is_running)
                                 .on_click(cx.listener(|this, _, _window, cx| {
+                                    // 已在运行中，不执行任何操作
+                                    if this.is_running {
+                                        return;
+                                    }
+                                    
+                                    // 设置为运行状态
+                                    this.is_running = true;
+                                    this.notify(cx);
+                                    
                                     // 保存当前配置
                                     // this.save(cx);
 
@@ -634,7 +648,7 @@ impl Render for ConfigPanelStory {
                                     this.update_logs(cx);
                                     
                                     // 启动任务
-                                    cx.spawn(async move |_cx, _window| {
+                                    cx.spawn(async move |this, cx| {
                                         match crate::run_app(Some(db_option)).await {
                                             Ok(_) => {
                                                 log_from_thread("执行成功！", LogLevel::Info);
@@ -643,6 +657,12 @@ impl Render for ConfigPanelStory {
                                                 log_from_thread(format!("执行出错: {}", e), LogLevel::Error);
                                             },
                                         }
+                                        
+                                        // 执行完成，恢复按钮状态
+                                        this.update(cx, |this, cx| {
+                                            this.is_running = false;
+                                            this.notify(cx);
+                                        });
                                     }).detach();
                                 })),
                         )

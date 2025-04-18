@@ -34,7 +34,7 @@ use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
 
 /// 增量更新信息结构体
-/// 
+///
 /// 用于存储和跟踪数据库中元素的增量变化信息
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -52,9 +52,9 @@ pub struct IncrementInfo {
 
 impl IncrementInfo {
     /// 检查元素是否被修改
-    /// 
+    ///
     /// # 返回值
-    /// 
+    ///
     /// * `bool` - 如果元素被修改返回true，否则返回false
     #[inline]
     pub fn is_modified(&self) -> bool {
@@ -62,9 +62,9 @@ impl IncrementInfo {
     }
 
     /// 检查元素是否被删除
-    /// 
+    ///
     /// # 返回值
-    /// 
+    ///
     /// * `bool` - 如果元素被删除返回true，否则返回false
     #[inline]
     pub fn is_deleted(&self) -> bool {
@@ -72,9 +72,9 @@ impl IncrementInfo {
     }
 
     /// 检查元素是否为新增
-    /// 
+    ///
     /// # 返回值
-    /// 
+    ///
     /// * `bool` - 如果元素是新增的返回true，否则返回false
     #[inline]
     pub fn is_added(&self) -> bool {
@@ -112,19 +112,25 @@ impl AiosDBManager {
             println!("Path: {:?}, Sesno Range: {:?}", path, sesno_range);
             //call execute_incr_update_single_sesno
             //一步一步执行更新
-            let new_sesno = sesno_range.end().clone();
+            let end_sesno = sesno_range.end().clone();
             let mut start_sesno = sesno_range.start().clone();
-            while start_sesno <= new_sesno && start_sesno != 0 {
+            let mut is_same = start_sesno == end_sesno;
+            while start_sesno <= end_sesno && start_sesno != 0 {
                 let sesno = start_sesno;
                 start_sesno = self
                     .execute_incr_update_single_sesno(&path, &basic_info, sesno)
                     .await?;
+                dbg!((start_sesno, end_sesno));
+                if is_same {
+                    break;
+                }
+                is_same = start_sesno == end_sesno;
             }
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
             // dbg!(&file_name);
             //更新 sesno 到 db_file_info 中的sql
-            let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, new_sesno);
+            let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, end_sesno);
             //执行更新
             SUL_DB.query(sql).await.unwrap();
         }
@@ -576,30 +582,29 @@ impl AiosDBManager {
             .await
             .unwrap();
 
-            // #[cfg(feature = "debug_model")]
-            // dbg!(&geo_update_log);
-            let all_deep_refnos = geo_update_log
-                .get_all_geom_refnos_deep()
-                .await
-                .into_iter()
-                .collect::<Vec<_>>();
-            #[cfg(feature = "debug_model")]
-            dbg!(&all_deep_refnos);
-
             //有可能没更新完，就update了模型？
-            gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
-                .await
-                .expect("gen_all_geos_data failed");
-            #[cfg(feature = "debug_model")]
-            dbg!(&all_deep_refnos);
-            // process_meshes_update_db(Some(Arc::new(self.db_option.clone())), &all_deep_refnos)
-            //     .await
-            //     .unwrap();
-            process_meshes_update_db_deep(&self.db_option, &all_deep_refnos)
-                .await
-                .expect("process_meshes_update_db_deep failed");
-            println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
+            {
+                // #[cfg(feature = "debug_model")]
+                // dbg!(&geo_update_log);
+                // let all_deep_refnos = geo_update_log
+                //     .get_all_geom_refnos_deep()
+                //     .await
+                //     .into_iter()
+                //     .collect::<Vec<_>>();
+                // #[cfg(feature = "debug_model")]
+                // dbg!(&all_deep_refnos);
+                // gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
+                // .await
+                // .expect("gen_all_geos_data failed");
+                // #[cfg(feature = "debug_model")]
+                // dbg!(&all_deep_refnos);
+                // process_meshes_update_db_deep(&self.db_option, &all_deep_refnos)
+                //     .await
+                //     .expect("process_meshes_update_db_deep failed");
+                // println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
+            }
         }
+        let start_sesno = io.get_nearest_sesno(start_sesno + 1)?;
         Ok(start_sesno)
     }
 
@@ -665,7 +670,8 @@ impl AiosDBManager {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_file_name(file_name).await else {
+                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_file_name(file_name).await
+                else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
@@ -769,7 +775,7 @@ impl AiosDBManager {
                         continue;
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
-                    // println!("changed: {:?}", &event);
+                    println!("changed: {:?}", &event);
                     // dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
@@ -777,7 +783,8 @@ impl AiosDBManager {
                             // dbg!(&new_header.pdms_header);
                             // dbg!(path);
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
-                                // dbg!(path);
+                                dbg!(path);
+                                dbg!(new_header.latest_ses_data.sesno);
                                 // dbg!(&old.pdms_header);
                                 //未发生修改，直接跳过
                                 if old.latest_ses_data.sesno == new_header.latest_ses_data.sesno {
