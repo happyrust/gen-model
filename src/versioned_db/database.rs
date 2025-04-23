@@ -348,7 +348,7 @@ pub async fn sync_total_async_threaded(
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
-    let mgr = AiosDBMgr::init_from_db_option().await?;
+    // let mgr = AiosDBMgr::init_from_db_option().await?;
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
@@ -360,8 +360,8 @@ pub async fn sync_total_async_threaded(
     }
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
-    #[cfg(feature = "sql")]
-    let pool = mgr.get_project_pools().await?;
+    // #[cfg(feature = "sql")]
+    // let pool = mgr.get_project_pools().await?;
 
     const CHUNK_SIZE: usize = 100;
     // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
@@ -371,8 +371,8 @@ pub async fn sync_total_async_threaded(
     for i in 0..16 {
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
-        let pools_clone = pool.clone();
-
+        let pool = AiosDBManager::get_project_pool().await.unwrap().clone();
+        
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(200);
             // let mut cnt = 0;
@@ -406,9 +406,9 @@ pub async fn sync_total_async_threaded(
                         }
                         #[cfg(feature = "sql")]
                         SenderJsonsData::MysqlSql((project, sql)) => {
-                            let Some(pool) = pools_clone.get(&project) else {
-                                continue;
-                            };
+                            // let Some(pool) = pools_clone.get(&project) else {
+                            //     continue;
+                            // };
                             let mut conn = pool.acquire().await.expect("get pool failed");
                             match conn.execute(sql.as_str()).await {
                                 Ok(_) => {}
@@ -465,14 +465,17 @@ pub async fn sync_total_async_threaded(
                 if !is_total_sync{
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
                 }
+                // dbg!(&file_name);
                 let mut file = File::open(&path).await.unwrap();
                 let mut buf = vec![0u8; 60];
                 file.read_exact(&mut buf).await.unwrap();
                 let db_basic_info = parse_file_basic_info(&buf);
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
-                //todo 需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
-                check_and_clear_db(db_no).await.unwrap();
+                //需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
+                if is_replace{
+                    check_and_clear_db(db_no).await.unwrap();
+                }
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
