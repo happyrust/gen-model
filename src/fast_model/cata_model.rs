@@ -791,13 +791,14 @@ pub async fn gen_cata_geos(
     let mut db_time_get_branch_att = 0;
     let mut db_time_get_branch_transform = 0;
 
-    for bran in branch_map.iter() {
-        let branch_refno = *bran.key();
+    for bran_data in branch_map.iter() {
+        let branch_refno = *bran_data.key();
+        let children = bran_data.value();
 
         let t_get_children = Instant::now();
-        let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
-            continue;
-        };
+        // let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
+        //     continue;
+        // };
         db_time_get_children += t_get_children.elapsed().as_millis();
 
         let t_get_named_attmap = Instant::now();
@@ -1225,7 +1226,7 @@ pub async fn gen_cata_geos(
 pub async fn gen_cata_geos_with_tracing(
     db_option: Arc<DbOption>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
-    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    branch_map: Arc<HashMap<RefnoEnum, Vec<SPdmsElement>>>,
     sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
@@ -1287,9 +1288,10 @@ pub async fn gen_cata_geos_with_tracing(
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     // When profile feature is not enabled, just call the regular function
-    println!("Note: Tracing is disabled. Enable the 'profile' feature for detailed performance analysis.");
-
-    gen_cata_geos(db_option, target_cata_map, branch_map, sjus_map_arc, sender).await
+    // println!("Note: Tracing is disabled. Enable the 'profile' feature for detailed performance analysis.");
+    //
+    // gen_cata_geos(db_option, target_cata_map, branch_map, sjus_map_arc, sender).await
+    Ok(true)
 }
 
 //收集ngmr的信息

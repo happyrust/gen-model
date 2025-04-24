@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use surrealdb::opt::auth::Root;
-use team_data::sync_system_db;
+use team_data::sync_team_data;
 // use tokio::sync::mpsc::Sender;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
@@ -107,7 +107,7 @@ extern crate nom;
 //     Ok(())
 // }
 
-pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
+pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -139,7 +139,7 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
 
 
     // progress_sender.send(5).await?;
-    progress_sender.send(5)?;
+    // progress_sender.send(5)?;
     
     aios_core::function::define_common_functions()
         .await
@@ -164,16 +164,16 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
     {
         // println!("开始同步解析数据。");
         // tokio::spawn(async move {
-        if let Err(e) = sync_pdms(&db_option, progress_sender.clone()).await {
+        if let Err(e) = sync_pdms(&db_option).await {
             eprintln!("同步PDMS数据失败: {}", e);
         }
         //记录进度
-        progress_sender.send(90)?;
+        // progress_sender.send(90)?;
         if db_option.build_cate_relate() {
             println!("初始化创建Cate relate关系");
             build_cate_relate(false).await?;
         }
-        progress_sender.send(100)?;
+        // progress_sender.send(100)?;
         return Ok(());
     }
 
@@ -184,7 +184,7 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
     }
 
     load_aabb_tree().await.unwrap();
-    progress_sender.send(10)?;
+    // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
     if db_option.is_gen_mesh_or_model() {
@@ -235,9 +235,10 @@ pub async fn run_cli(db_option: DbOption, progress_sender: Sender<i32>) -> anyho
     if gen_material {
         // save_all_material_data().await?;
     }
-    // 生成 TEAM_DATA数据
+    // sync TEAM_DATA数据
     if db_option.only_sync_sys {
-        match sync_system_db(&aios_mgr).await {
+        println!("开始生成SYS DATA");
+        match sync_team_data(&aios_mgr).await {
             Ok(_) => {
                 println!("TEAM DATA生成完成");
             }
@@ -326,6 +327,6 @@ pub async fn run_app(option: Option<DbOption>) -> anyhow::Result<()> {
             println!("Manual update aabb tree completed");
         }
     }
-    let (tx, mut rx) = mpsc::channel::<i32>();
-    run_cli(db_option, tx).await
+    // let (tx, mut rx) = mpsc::channel::<i32>();
+    run_cli(db_option).await
 }

@@ -142,7 +142,8 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
 
 
 /// 初始化同步pdms数据到数据
-pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> anyhow::Result<()> {
+/// , progress_sender: Sender<i32>
+pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     if db_option.included_projects.is_empty() {
         return Err(anyhow::anyhow!("没有包含的项目"));
     }
@@ -191,13 +192,13 @@ pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> an
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
         if is_debug || db_option.only_sync_sys || db_option.total_sync {
-            let progress_sender = progress_sender.clone();
+            // let progress_sender = progress_sender.clone();
             match sync_total_async_threaded(
                 &db_option,
                 project,
                 cur_dbno_set,
                 &["DICT", "SYST", "GLB", "GLOB"],
-                progress_sender,
+                // progress_sender,
                 proj_progress_chunk,
             )
             .await
@@ -216,14 +217,14 @@ pub async fn sync_pdms(db_option: &DbOption, progress_sender: Sender<i32>) -> an
         if db_option.only_sync_sys {
             continue;
         }
-        let progress_sender = progress_sender.clone();
+        // let progress_sender = progress_sender.clone();
         let cur_dbno_set = dbno_set.clone();
         match sync_total_async_threaded(
             &db_option,
             project,
             cur_dbno_set,
             &["DESI", "CATA"],
-            progress_sender,
+            // progress_sender,
             proj_progress_chunk,
         )
         .await
@@ -295,7 +296,7 @@ pub async fn sync_total_async_threaded(
     project: &str,
     cur_dbno_set: Arc<DashSet<u32>>,
     db_types: &[&str],
-    progress_sender: Sender<i32>,
+    // progress_sender: Sender<i32>,
     proj_progress_chunk: usize,
 ) -> anyhow::Result<()> {
 
@@ -442,7 +443,7 @@ pub async fn sync_total_async_threaded(
     let sender_clone = sender.clone();
     let children_files_len = children_files.len();
     let db_file_progress_chunk = (proj_progress_chunk as f32 / children_files_len as f32) as usize;
-    let progress_sender_clone = progress_sender.clone();
+    // let progress_sender_clone = progress_sender.clone();
     tokio::spawn(async move {
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         // let mut db_info_sql = vec![];

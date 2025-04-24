@@ -648,8 +648,22 @@ impl Render for ConfigPanelStory {
                                     this.update_logs(cx);
                                     
                                     // 启动任务
-                                    cx.spawn(async move |this, cx| {
-                                        match crate::run_app(Some(db_option)).await {
+                                    cx.background_executor().spawn(async move {
+                                        // 创建一个新的 Tokio 运行时
+                                        let runtime = match tokio::runtime::Runtime::new() {
+                                            Ok(rt) => rt,
+                                            Err(e) => {
+                                                log_from_thread(format!("创建 Tokio 运行时失败: {}", e), LogLevel::Error);
+                                                return;
+                                            }
+                                        };
+                                        
+                                        // 在 Tokio 运行时内执行异步任务
+                                        let result = runtime.block_on(async {
+                                            crate::run_app(Some(db_option)).await
+                                        });
+                                        
+                                        match result {
                                             Ok(_) => {
                                                 log_from_thread("执行成功！", LogLevel::Info);
                                             },
@@ -659,10 +673,10 @@ impl Render for ConfigPanelStory {
                                         }
                                         
                                         // 执行完成，恢复按钮状态
-                                        this.update(cx, |this, cx| {
-                                            this.is_running = false;
-                                            this.notify(cx);
-                                        });
+                                        // this.update(cx, |this, cx| {
+                                        //     this.is_running = false;
+                                        //     this.notify(cx);
+                                        // });
                                     }).detach();
                                 })),
                         )

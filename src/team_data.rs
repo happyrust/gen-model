@@ -20,7 +20,7 @@ pub struct SysDBData {
 }
 
 ///同步system db的信息
-pub async fn sync_system_db(mgr: &AiosDBMgr) -> anyhow::Result<()> {
+pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
     match query_all_db_refnos().await {
         Ok(db_refnos) => {
             let mut r = vec![];

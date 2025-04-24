@@ -195,11 +195,14 @@ impl AiosDBManager {
         //批量检测是否存在这些eles
         let mut exist_refnos_map = BTreeMap::new();
         let pes = eles_map.keys().map(|x| x.to_pe_key()).join(",");
+        //todo 改成直接在读取e3e时，就能判断出增删改，减少对当前数据库的检查
+        //todo 需要判断是否内容相同，只是refno不同的情况
         let sql = format!("SELECT VALUE [id, (select value in from <-pe_owner)] FROM [{pes}] where record::exists(id) && !deleted");
         // println!("{}", sql);
         let mut resp = SUL_DB.query(sql).await?;
         let refnos: Vec<(RefU64, Vec<RefU64>)> = resp.take(0).unwrap();
         //这里需要把所有的children都添加进来
+        //只有发生修改的数据，需要在这里清楚缓存
         for (refno, children) in refnos {
             clear_all_caches(refno.into()).await;
             exist_refnos_map.insert(refno, children);
@@ -664,7 +667,7 @@ impl AiosDBManager {
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_latest_sesno()
                     .unwrap_or_default();
-                // dbg!((db_no, file_latest_sesno));
+                dbg!((db_no, file_latest_sesno));
 
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;
@@ -675,7 +678,7 @@ impl AiosDBManager {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
-                // dbg!((db_no, db_latest_sesno));
+                dbg!((db_no, db_latest_sesno));
                 if db_latest_sesno == 0 {
                     continue;
                 }

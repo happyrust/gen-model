@@ -45,7 +45,7 @@ use aios_database::fast_model::{
 };
 use aios_database::versioned_db::database::*;
 use aios_database::{run_cli, run_app};
-use aios_database::team_data::sync_system_db;
+use aios_database::team_data::sync_team_data;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
