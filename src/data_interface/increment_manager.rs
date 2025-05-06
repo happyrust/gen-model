@@ -146,7 +146,7 @@ impl AiosDBManager {
         path: &PathBuf,
         basic_info: &DbPageBasicInfo,
         start_sesno: i32,
-    ) -> anyhow::Result<i32> {
+    ) -> Option<i32> {
         //没有增量更新的数据，直接返回
         if start_sesno == 0 {
             return Ok(0);
@@ -165,10 +165,10 @@ impl AiosDBManager {
         let project = get_db_option().project_name.clone();
 
         let mut io = PdmsIO::new(&project, path, true);
-        io.open()?;
+        io.open().ok()?;
         //需要找到最近的sesno
-        let start_sesno = io.get_nearest_sesno(start_sesno)?;
-        let cur_ses_data = io.get_ses_data(start_sesno as _)?.clone();
+        let start_sesno = io.get_nearest_large_sesno(start_sesno).unwrap_or_default();
+        let cur_ses_data = io.get_ses_data(start_sesno as _).ok()?.clone();
         //收集哪些数据放生增删改
         let mut eles_map = io
             .collect_increment_eles((start_sesno..=start_sesno))
@@ -712,7 +712,7 @@ impl AiosDBManager {
                         if let Ok(basic_info) = io.get_page_basic_info() {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
                                         文件属性对应sesno: {file_latest_sesno}", &file_name);
-                            let nearest_sesno = io.get_nearest_sesno(db_latest_sesno as i32 + 1)?;
+                            let nearest_sesno = io.get_nearest_large_sesno(db_latest_sesno as i32 + 1)?;
                             params.insert(
                                 path.to_path_buf(),
                                 (

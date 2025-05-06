@@ -70,7 +70,7 @@ dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 
 clap = { version = "4.3.5", features = ["derive"] }
-dashmap = { version = "6.1.0", features = ["serde", "rayon"] }
+dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
@@ -149,8 +149,11 @@ features = [
 #panic = 'abort'
 #codegen-units = 1
 
-#[patch."https://gitee.com/happydpc/rs-core.git"]
-#aios_core = { path = "../new-crates/rs-core" }
-#
-#[patch."https://gitee.com/happydpc/pdms-io.git"]
-#pdms_io = { path = "pdms-io" }
+[patch."https://gitee.com/happydpc/rs-core.git"]
+aios_core = { path = "../new-crates/aios-core" }
+
+[patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
+parse_pdms_db = { path = "../aios-parse-pdms" }
+
+[patch."https://gitee.com/happydpc/pdms-io.git"]
+pdms_io = { path = "../pdms-io" }

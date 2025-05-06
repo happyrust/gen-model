@@ -648,13 +648,13 @@ impl Render for ConfigPanelStory {
                                     this.update_logs(cx);
                                     
                                     // 启动任务
-                                    cx.background_executor().spawn(async move {
+                                    let task = cx.background_executor().spawn(async move {
                                         // 创建一个新的 Tokio 运行时
                                         let runtime = match tokio::runtime::Runtime::new() {
                                             Ok(rt) => rt,
                                             Err(e) => {
                                                 log_from_thread(format!("创建 Tokio 运行时失败: {}", e), LogLevel::Error);
-                                                return;
+                                                return false;
                                             }
                                         };
                                         
@@ -666,17 +666,45 @@ impl Render for ConfigPanelStory {
                                         match result {
                                             Ok(_) => {
                                                 log_from_thread("执行成功！", LogLevel::Info);
+                                                true
                                             },
                                             Err(e) => {
-                                                log_from_thread(format!("执行出错: {}", e), LogLevel::Error);
+                                                let error_msg = format!("执行出错: {}", e);
+                                                log_from_thread(error_msg, LogLevel::Error);
+                                                false
                                             },
                                         }
+                                    });
+                                    
+                                    // 启动一个定时器来检查任务是否完成并更新日志
+                                    cx.spawn_timer(Duration::from_millis(500), move |this, cx| {
+                                        // 更新日志显示
+                                        this.update_logs(cx);
                                         
-                                        // 执行完成，恢复按钮状态
-                                        // this.update(cx, |this, cx| {
-                                        //     this.is_running = false;
-                                        //     this.notify(cx);
-                                        // });
+                                        // 检查任务是否完成
+                                        if let Some(success) = task.completed() {
+                                            // 任务完成，恢复按钮状态
+                                            this.is_running = false;
+                                            this.notify(cx);
+                                            
+                                            // 根据结果添加最终日志
+                                            if *success {
+                                                // 任务成功，在日志中显示
+                                                add_global_log("✅ 任务执行成功，执行完毕!", LogLevel::Info);
+                                            } else {
+                                                // 任务失败，在日志中显示
+                                                add_global_log("❌ 任务执行失败，请查看错误日志!", LogLevel::Error);
+                                            }
+                                            
+                                            // 再次更新日志显示
+                                            this.update_logs(cx);
+                                            
+                                            // 停止定时器
+                                            return false;
+                                        }
+                                        
+                                        // 继续定时器
+                                        true
                                     }).detach();
                                 })),
                         )
