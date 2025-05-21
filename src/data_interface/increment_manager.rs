@@ -17,7 +17,7 @@ use itertools::Itertools;
 use notify::{RecursiveMode, Watcher};
 use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::io::{EleOperationDetail, PdmsIO};
+use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 use pdms_io::sync::compress::{execute_compress, CompressOptions};
 // use pdms_io::sync::compress::{execute_compress, CompressOptions};
 use pdms_io::watch::PdmsWatcher;
@@ -978,18 +978,31 @@ impl AiosDBManager {
         Ok(())
     }
 
+    /// 将元素更新到数据库中
+    /// 
+    /// # 参数
+    /// 
+    /// * `io` - PDMS IO 对象
+    /// * `range_eles` - 元素操作数据的映射,key为sesno,value为元素操作数据列表
+    /// * `dbnum` - 数据库编号
+    /// 
+    /// # 返回值
+    /// 
+    /// 返回 Result<()>,成功返回 Ok(()),失败返回 Err
     pub async fn update_elements_to_database(
         &self,
         io: &PdmsIO,
-        range_eles: HashMap<RefU64, EleOperationDetail>,
+        range_eles: HashMap<u32, Vec<EleOperationData>>,
         dbnum: i32,
     ) -> anyhow::Result<()> {
         // 分类元素
         // 收集所有SQL语句
         let mut sqls = Vec::with_capacity(range_eles.len());
-        for (&refno, ele) in &range_eles {
-            let sql = ele.to_surql(&refno.to_string());
-            sqls.push(sql);
+        for (sesno, ele_vec) in &range_eles {
+            for ele in ele_vec {
+                let sql = ele.detail.to_surql(&sesno.to_string());
+                sqls.push(sql);
+            }
         }
 
         // 批量执行SQL

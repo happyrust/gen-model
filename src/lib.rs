@@ -75,6 +75,12 @@ pub mod versioned_db;
 
 pub mod mqtt_service;
 
+pub mod options;
+
+// 添加options模块的重导出
+pub use options::DbOptionExt;
+pub use options::get_db_option_ext;
+
 #[macro_use]
 extern crate derive_more;
 
@@ -286,12 +292,13 @@ pub async fn update_inc_data_datacenter() {
 }
 
 /// 运行app
-pub async fn run_app(option: Option<DbOption>) -> anyhow::Result<()> {
+pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
     use aios_core::init_surreal;
     use crate::fast_model::aabb_tree::manual_update_aabbs;
-    let db_option: DbOption = option.unwrap_or(get_db_option().clone());
+    // 如果传入的是DbOptionExt，则取其内部的DbOption
+    let db_option: DbOption = option.map(|o| o.inner).unwrap_or_else(|| get_db_option().clone());
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容
@@ -300,6 +307,7 @@ pub async fn run_app(option: Option<DbOption>) -> anyhow::Result<()> {
         .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
         .with_capacity(1000)
         .await?;
+    println!("数据库连接中...");
     #[cfg(feature = "ws")]
     {
         match init_surreal().await {

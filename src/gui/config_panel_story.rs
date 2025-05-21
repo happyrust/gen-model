@@ -19,6 +19,7 @@ use gpui_component::{
 };
 use crate::gui::logs::{add_global_log, log_from_thread, LogLevel, LogListDelegate, GLOBAL_LOGS, LogUpdateEvent};
 use story::Story;
+use crate::options::{DbOptionExt, get_db_option_ext};
 
 // 使用gpui_component中的View类型
 use gpui_component::form::FieldBuilder::View;
@@ -56,6 +57,13 @@ pub struct ConfigPanelStory {
     log_subscription: Option<Subscription>,
     // 添加运行状态标志
     is_running: bool,
+    // 异地部署页面相关属性
+    mqtt_server: Entity<TextInput>,
+    mqtt_port: Entity<TextInput>,
+    http_server: Entity<TextInput>,
+    http_port: Entity<TextInput>,
+    mqtt_running: bool,
+    http_running: bool,
     // 移除定时器句柄
     // timer_handle: Option<gpui::Task<()>>,
 }
@@ -87,6 +95,12 @@ impl ConfigPanelStory {
         let db_username = cx.new(|cx| TextInput::new(window, cx).placeholder("root"));
         let db_password = cx.new(|cx| TextInput::new(window, cx).placeholder("password"));
         let generate_part_input = cx.new(|cx| TextInput::new(window, cx));
+        
+        // 异地部署页面相关输入框
+        let mqtt_server = cx.new(|cx| TextInput::new(window, cx).placeholder("192.168.1.100"));
+        let mqtt_port = cx.new(|cx| TextInput::new(window, cx).placeholder("1883"));
+        let http_server = cx.new(|cx| TextInput::new(window, cx).placeholder("192.168.1.100"));
+        let http_port = cx.new(|cx| TextInput::new(window, cx).placeholder("8080"));
 
         // 创建日志列表
         let delegate = LogListDelegate::new();
@@ -94,7 +108,7 @@ impl ConfigPanelStory {
             List::new(delegate, window, cx)
         });
 
-        let db_option = get_db_option();
+        let db_option = get_db_option_ext();
         // Initialize text inputs with values from db_option
         project_path.update(cx, |input, cx| {
             input.set_text(db_option.project_path.clone(), window, cx)
@@ -120,6 +134,28 @@ impl ConfigPanelStory {
         db_password.update(cx, |input, cx| {
             input.set_text(db_option.v_password.clone(), window, cx)
         });
+        
+        // 初始化异地部署相关输入框
+        if let Some(server) = &db_option.mqtt_server {
+            mqtt_server.update(cx, |input, cx| {
+                input.set_text(server.clone(), window, cx)
+            });
+        }
+        if let Some(port) = db_option.mqtt_port {
+            mqtt_port.update(cx, |input, cx| {
+                input.set_text(port.to_string(), window, cx)
+            });
+        }
+        if let Some(server) = &db_option.http_server {
+            http_server.update(cx, |input, cx| {
+                input.set_text(server.clone(), window, cx)
+            });
+        }
+        if let Some(port) = db_option.http_port {
+            http_port.update(cx, |input, cx| {
+                input.set_text(port.to_string(), window, cx)
+            });
+        }
 
         // Initialize switches
         let live_update = db_option.sync_live.unwrap_or(false);
@@ -151,6 +187,13 @@ impl ConfigPanelStory {
             log_subscription: None,
             // 添加运行状态初始值为false
             is_running: false,
+            // 异地部署页面相关属性
+            mqtt_server,
+            mqtt_port,
+            http_server,
+            http_port,
+            mqtt_running: false,
+            http_running: false,
             // 移除定时器句柄
             // timer_handle: None,
         };
@@ -161,8 +204,8 @@ impl ConfigPanelStory {
     const ID: usize = 0;
 
     /// 获取覆盖配置
-    fn get_overwrite_config(&self, cx: &mut Context<Self>) -> DbOption {
-        let mut db_option = get_db_option().clone();
+    fn get_overwrite_config(&self, cx: &mut Context<Self>) -> DbOptionExt {
+        let mut db_option = get_db_option_ext();
 
         db_option.project_path = self.project_path.read(cx).text().to_string();
         db_option.project_name = self.project_name.read(cx).text().to_string();
@@ -176,6 +219,23 @@ impl ConfigPanelStory {
         db_option.sync_graph_db = Some(self.remote_sync);
         db_option.total_sync = self.parse_all;
         db_option.incr_sync = self.parse_part;
+
+        // 添加异地部署设置
+        if self.remote_sync {
+            // 添加mqtt服务器配置
+            db_option.mqtt_server = Some(self.mqtt_server.read(cx).text().to_string());
+            db_option.mqtt_port = self.mqtt_port.read(cx).text().parse().ok();
+            
+            // 添加http服务器配置
+            db_option.http_server = Some(self.http_server.read(cx).text().to_string());
+            db_option.http_port = self.http_port.read(cx).text().parse().ok();
+        } else {
+            // 如果未启用异地同步，清空相关配置
+            db_option.mqtt_server = None;
+            db_option.mqtt_port = None;
+            db_option.http_server = None;
+            db_option.http_port = None;
+        }
 
         db_option.included_db_files = {
             let text = self.parse_part_input.read(cx).text();
@@ -292,7 +352,7 @@ impl ConfigPanelStory {
                                 }),
                             )),
                     )
-                    .when(self.parse_part, |flex| {
+                    .when(self.parse_part || self.parse_all, |flex| {
                         flex.child(
                             h_flex()
                                 .gap_2()
@@ -476,6 +536,164 @@ impl ConfigPanelStory {
             )
     }
 
+    // 添加异地部署页面渲染方法
+    fn render_remote_deploy_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_6()
+            .child(Label::new("异地部署配置").text_lg())
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("启用异地更新"))
+                    .child(
+                        Switch::new("remote_sync")
+                            .checked(self.remote_sync)
+                            .on_click(cx.listener(|this, checked, window, cx| {
+                                this.remote_sync = *checked;
+                                this.notify(cx);
+                            })),
+                    ),
+            )
+            .when(self.remote_sync, |flex| {
+                flex.child(
+                    v_flex()
+                        .gap_4()
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(Label::new("MQTT服务配置").text_lg())
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .w_full()
+                                        .child(
+                                            v_flex()
+                                                .child(Label::new("服务器").text_sm())
+                                                .child(self.mqtt_server.clone()),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .child(Label::new("端口").text_sm())
+                                                .child(self.mqtt_port.clone())
+                                                .w(px(100.0)),
+                                        )
+                                )
+                                .child(
+                                    Button::new("start_mqtt")
+                                        .label(if self.mqtt_running { "停止MQTT服务" } else { "启动MQTT服务" })
+                                        .on_click(cx.listener(|this, _, new_window, cx| {
+                                            let server = this.mqtt_server.read(cx).text().to_string();
+                                            let port = this.mqtt_port.read(cx).text().to_string();
+                                            
+                                            if this.mqtt_running {
+                                                // 停止服务
+                                                add_global_log("正在停止MQTT服务...", LogLevel::Info);
+                                                this.mqtt_running = false;
+                                                this.notify(cx);
+                                                
+                                                cx.background_executor()
+                                                    .spawn(async {
+                                                        let _ = std::process::Command::new("cmd")
+                                                            .args(["/C", "taskkill /F /IM mqtt-server.exe"])
+                                                            .spawn();
+                                                    })
+                                                    .detach();
+                                            } else {
+                                                // 启动服务
+                                                add_global_log(format!("正在启动MQTT服务 ({}:{})...", server, port), LogLevel::Info);
+                                                this.mqtt_running = true;
+                                                this.notify(cx);
+                                                
+                                                let server_copy = server.clone();
+                                                let port_copy = port.clone();
+                                                cx.background_executor()
+                                                    .spawn(async move {
+                                                        let _ = std::process::Command::new("cmd")
+                                                            // .args(["/C", &format!("start /B mosquitto -h {} -p {}", server_copy, port_copy)])
+                                                            .args(["/C", &format!("start /B mqtt-server -h {} -p {}", server_copy, port_copy)])
+                                                            .spawn();
+                                                    })
+                                                    .detach();
+                                            }
+                                            this.update_logs(cx);
+                                        }))
+                                )
+                        )
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(Label::new("数据HTTP服务配置").text_lg())
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .w_full()
+                                        .child(
+                                            v_flex()
+                                                .child(Label::new("服务器").text_sm())
+                                                .child(self.http_server.clone()),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .child(Label::new("端口").text_sm())
+                                                .child(self.http_port.clone())
+                                                .w(px(100.0)),
+                                        )
+                                )
+                                .child(
+                                    Button::new("start_http")
+                                        .label(if self.http_running { "停止HTTP服务" } else { "启动HTTP服务" })
+                                        .on_click(cx.listener(|this, _, new_window, cx| {
+                                            let server = this.http_server.read(cx).text().to_string();
+                                            let port = this.http_port.read(cx).text().to_string();
+                                            
+                                            if this.http_running {
+                                                // 停止服务
+                                                add_global_log("正在停止HTTP服务...", LogLevel::Info);
+                                                this.http_running = false;
+                                                this.notify(cx);
+                                                
+                                                cx.background_executor()
+                                                    .spawn(async {
+                                                        let _ = std::process::Command::new("cmd")
+                                                            .args(["/C", "taskkill /F /IM simple-http-server.exe"])
+                                                            .spawn();
+                                                        
+                                                        // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
+                                                        log_from_thread("已停止HTTP服务", LogLevel::Info);
+                                                    })
+                                                    .detach();
+                                            } else {
+                                                // 启动服务
+                                                add_global_log(format!("正在启动HTTP服务 ({}:{})...", server, port), LogLevel::Info);
+                                                this.http_running = true;
+                                                this.notify(cx);
+                                                
+                                                let server_copy = server.clone();
+                                                let port_copy = port.clone();
+                                                cx.background_executor()
+                                                    .spawn(async move {
+                                                        let _ = std::process::Command::new("cmd")
+                                                            .args(["/C", &format!("start /B simple-http-server --ip {} --port {}", server_copy, port_copy)])
+                                                            .spawn();
+                                                        
+                                                        // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
+                                                        log_from_thread("已启动HTTP服务", LogLevel::Info);
+                                                    })
+                                                    .detach();
+                                            }
+                                            this.update_logs(cx);
+                                        }))
+                                )
+                        )
+                )
+            })
+    }
+
     fn notify(&mut self, cx: &mut Context<Self>) {
         cx.notify()
     }
@@ -526,6 +744,7 @@ impl Render for ConfigPanelStory {
                                 ("database", "数据库配置"),
                                 ("generate", "模型生成"),
                                 ("update", "自动增量更新"),
+                                ("remote_deploy", "异地部署"),
                             ]
                             .into_iter()
                             .map(|(id, label)| {
@@ -568,6 +787,7 @@ impl Render for ConfigPanelStory {
                             "database" => self.render_database_tab(window, cx).into_any_element(),
                             "generate" => self.render_generate_tab(window, cx).into_any_element(),
                             "update" => self.render_update_tab(window, cx).into_any_element(),
+                            "remote_deploy" => self.render_remote_deploy_tab(window, cx).into_any_element(),
                             _ => div().into_any_element(),
                         })
                 )
@@ -662,50 +882,53 @@ impl Render for ConfigPanelStory {
                                         let result = runtime.block_on(async {
                                             crate::run_app(Some(db_option)).await
                                         });
+
+                                        true
                                         
-                                        match result {
-                                            Ok(_) => {
-                                                log_from_thread("执行成功！", LogLevel::Info);
-                                                true
-                                            },
-                                            Err(e) => {
-                                                let error_msg = format!("执行出错: {}", e);
-                                                log_from_thread(error_msg, LogLevel::Error);
-                                                false
-                                            },
-                                        }
-                                    });
+                                        // match result {
+                                        //     Ok(_) => {
+                                        //         // log_from_thread("执行成功！", LogLevel::Info);
+                                        //         println!("执行成功！");
+                                        //         true
+                                        //     },
+                                        //     Err(e) => {
+                                        //         log_from_thread(error_msg, LogLevel::Error);
+                                        //         false
+                                        //     },
+                                        // };
+                                       
+                                    }).detach();
                                     
                                     // 启动一个定时器来检查任务是否完成并更新日志
-                                    cx.spawn_timer(Duration::from_millis(500), move |this, cx| {
-                                        // 更新日志显示
-                                        this.update_logs(cx);
+                                    // cx.spawn_timer(Duration::from_millis(500), move |this, cx| {
+                                    //     // 更新日志显示
+                                    //     this.update_logs(cx);
                                         
-                                        // 检查任务是否完成
-                                        if let Some(success) = task.completed() {
-                                            // 任务完成，恢复按钮状态
-                                            this.is_running = false;
-                                            this.notify(cx);
+                                    //     // 检查任务是否完成
+                                    //     if let Some(success) = task.completed() {
+                                    //         // 任务完成，恢复按钮状态
+                                    //         this.is_running = false;
+                                    //         this.notify(cx);
                                             
-                                            // 根据结果添加最终日志
-                                            if *success {
-                                                // 任务成功，在日志中显示
-                                                add_global_log("✅ 任务执行成功，执行完毕!", LogLevel::Info);
-                                            } else {
-                                                // 任务失败，在日志中显示
-                                                add_global_log("❌ 任务执行失败，请查看错误日志!", LogLevel::Error);
-                                            }
+                                    //         // 根据结果添加最终日志
+                                    //         if *success {
+                                    //             // 任务成功，在日志中显示
+                                    //             add_global_log("✅ 任务执行成功，执行完毕!", LogLevel::Info);
+                                    //         } else {
+                                    //             // 任务失败，在日志中显示
+                                    //             add_global_log("❌ 任务执行失败，请查看错误日志!", LogLevel::Error);
+                                    //         }
                                             
-                                            // 再次更新日志显示
-                                            this.update_logs(cx);
+                                    //         // 再次更新日志显示
+                                    //         this.update_logs(cx);
                                             
-                                            // 停止定时器
-                                            return false;
-                                        }
+                                    //         // 停止定时器
+                                    //         return false;
+                                    //     }
                                         
-                                        // 继续定时器
-                                        true
-                                    }).detach();
+                                    //     // 继续定时器
+                                    //     true
+                                    // }).detach();
                                 })),
                         )
                         .child(

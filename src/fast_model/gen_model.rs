@@ -79,10 +79,23 @@ impl DbModelInstRefnos {
         handles.push(tokio::spawn(async move {
             for bran_refnos in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
-                let target_refnos = query_multi_children_refnos(&bran_refnos).await.unwrap();
-                gen_meshes_in_db(db_option_clone, &target_refnos)
-                    .await
-                    .expect("更新bran_hanger模型数据失败");
+                // let refnos_str = bran_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                let target_refnos = match query_multi_children_refnos(&bran_refnos).await {
+                    Ok(refnos) => refnos,
+                    Err(e) => {
+                        eprintln!("查询bran_hanger子节点refnos失败：{}", e);
+                        return;
+                    }
+                };
+                
+                match gen_meshes_in_db(db_option_clone, &target_refnos).await {
+                    Ok(()) => {},
+                    Err(e) => {
+                        let target_str = target_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                        eprintln!("更新bran_hanger模型数据失败：{}，相关refnos: {}", e, target_str);
+                        return;
+                    }
+                }
             }
         }));
         while let Some(_) = handles.next().await {}
@@ -117,10 +130,22 @@ impl DbModelInstRefnos {
         handles.push(tokio::spawn(async move {
             for chunk in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
-                let target_refnos = query_multi_children_refnos(&chunk).await.unwrap();
-                booleans_meshes_in_db(db_option_clone, &target_refnos)
-                    .await
-                    .expect("布尔运算bran_hanger模型数据失败");
+                let chunk_str = chunk.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                let target_refnos = match query_multi_children_refnos(&chunk).await {
+                    Ok(refnos) => refnos,
+                    Err(e) => {
+                        eprintln!("查询bran_hanger子节点refnos失败：{}，相关refnos: {}", e, chunk_str);
+                        continue;
+                    }
+                };
+                match booleans_meshes_in_db(db_option_clone, &target_refnos).await {
+                    Ok(_) => {},
+                    Err(e) => {
+                        let target_str = target_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                        eprintln!("布尔运算bran_hanger模型数据失败：{}，相关refnos: {}", e, target_str);
+                        continue;
+                    }
+                }
             }
         }));
         while let Some(_) = handles.next().await {}
