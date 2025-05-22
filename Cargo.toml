@@ -133,7 +133,7 @@ version = "0.8.2"
 default-features = false
 optional = true
 features = [
-    "runtime-async-std-rustls",
+    # "runtime-async-std-rustls",
     #    "runtime-async-std-native-tls",
     "macros",
     "mysql",

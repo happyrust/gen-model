@@ -1,3 +1,7 @@
+use crate::gui::logs::{
+    add_global_log, log_from_thread, LogLevel, LogListDelegate, LogUpdateEvent, GLOBAL_LOGS,
+};
+use crate::options::{get_db_option_ext, DbOptionExt};
 use crate::run_cli;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
@@ -17,9 +21,7 @@ use gpui_component::{
     theme::ActiveTheme,
     v_flex, Disableable, Sizable,
 };
-use crate::gui::logs::{add_global_log, log_from_thread, LogLevel, LogListDelegate, GLOBAL_LOGS, LogUpdateEvent};
 use story::Story;
-use crate::options::{DbOptionExt, get_db_option_ext};
 
 // 使用gpui_component中的View类型
 use gpui_component::form::FieldBuilder::View;
@@ -95,7 +97,7 @@ impl ConfigPanelStory {
         let db_username = cx.new(|cx| TextInput::new(window, cx).placeholder("root"));
         let db_password = cx.new(|cx| TextInput::new(window, cx).placeholder("password"));
         let generate_part_input = cx.new(|cx| TextInput::new(window, cx));
-        
+
         // 异地部署页面相关输入框
         let mqtt_server = cx.new(|cx| TextInput::new(window, cx).placeholder("192.168.1.100"));
         let mqtt_port = cx.new(|cx| TextInput::new(window, cx).placeholder("1883"));
@@ -104,9 +106,7 @@ impl ConfigPanelStory {
 
         // 创建日志列表
         let delegate = LogListDelegate::new();
-        let log_list = cx.new(|cx| {
-            List::new(delegate, window, cx)
-        });
+        let log_list = cx.new(|cx| List::new(delegate, window, cx));
 
         let db_option = get_db_option_ext();
         // Initialize text inputs with values from db_option
@@ -134,27 +134,19 @@ impl ConfigPanelStory {
         db_password.update(cx, |input, cx| {
             input.set_text(db_option.v_password.clone(), window, cx)
         });
-        
+
         // 初始化异地部署相关输入框
         if let Some(server) = &db_option.mqtt_server {
-            mqtt_server.update(cx, |input, cx| {
-                input.set_text(server.clone(), window, cx)
-            });
+            mqtt_server.update(cx, |input, cx| input.set_text(server.clone(), window, cx));
         }
         if let Some(port) = db_option.mqtt_port {
-            mqtt_port.update(cx, |input, cx| {
-                input.set_text(port.to_string(), window, cx)
-            });
+            mqtt_port.update(cx, |input, cx| input.set_text(port.to_string(), window, cx));
         }
         if let Some(server) = &db_option.http_server {
-            http_server.update(cx, |input, cx| {
-                input.set_text(server.clone(), window, cx)
-            });
+            http_server.update(cx, |input, cx| input.set_text(server.clone(), window, cx));
         }
         if let Some(port) = db_option.http_port {
-            http_port.update(cx, |input, cx| {
-                input.set_text(port.to_string(), window, cx)
-            });
+            http_port.update(cx, |input, cx| input.set_text(port.to_string(), window, cx));
         }
 
         // Initialize switches
@@ -225,7 +217,7 @@ impl ConfigPanelStory {
             // 添加mqtt服务器配置
             db_option.mqtt_server = Some(self.mqtt_server.read(cx).text().to_string());
             db_option.mqtt_port = self.mqtt_port.read(cx).text().parse().ok();
-            
+
             // 添加http服务器配置
             db_option.http_server = Some(self.http_server.read(cx).text().to_string());
             db_option.http_port = self.http_port.read(cx).text().parse().ok();
@@ -284,11 +276,11 @@ impl ConfigPanelStory {
             if logs.is_empty() {
                 return;
             }
-            
+
             self.log_list.update(cx, |list, cx| {
                 let mut delegate = list.delegate_mut();
                 let current_count = delegate.logs.len();
-                
+
                 // 只添加新日志
                 if current_count < logs.len() {
                     for i in current_count..logs.len() {
@@ -310,7 +302,7 @@ impl ConfigPanelStory {
         add_global_log("正在连接数据库...".to_string(), LogLevel::Info);
         add_global_log("数据库连接失败，尝试重连".to_string(), LogLevel::Error);
         add_global_log("重新连接成功".to_string(), LogLevel::Info);
-        
+
         // 直接更新日志列表（无需通过事件，因为已在同一上下文中）
         self.update_logs(cx);
     }
@@ -383,11 +375,11 @@ impl ConfigPanelStory {
                                         {
                                             let path = folder.path().to_string_lossy().to_string();
                                             // cx.spawn_in(window, |cx| {
-                                                this.update_in(cx, |config, window, cx| {
-                                                    config.project_path.update(cx, |input, cx| {
-                                                        input.set_text(path, window, cx);
-                                                    });
+                                            this.update_in(cx, |config, window, cx| {
+                                                config.project_path.update(cx, |input, cx| {
+                                                    input.set_text(path, window, cx);
                                                 });
+                                            });
                                         }
                                     })
                                     .detach()
@@ -569,19 +561,12 @@ impl ConfigPanelStory {
                                 .child(Label::new("MQTT服务配置").text_lg())
                                 .child(
                                     h_flex()
-                                        .gap_2()
-                                        .w_full()
-                                        .child(
-                                            v_flex()
-                                                .child(Label::new("服务器").text_sm())
-                                                .child(self.mqtt_server.clone()),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .child(Label::new("端口").text_sm())
-                                                .child(self.mqtt_port.clone())
-                                                .w(px(100.0)),
-                                        )
+                                    .gap_2()
+                                    .w_full()
+                                    .items_center()
+                                    .child(Label::new("服务器").text_sm())
+                                    .child(self.mqtt_server.clone()).flex_grow()
+                                    .child(self.mqtt_port.clone()).flex_grow()
                                 )
                                 .child(
                                     Button::new("start_mqtt")
@@ -589,13 +574,13 @@ impl ConfigPanelStory {
                                         .on_click(cx.listener(|this, _, new_window, cx| {
                                             let server = this.mqtt_server.read(cx).text().to_string();
                                             let port = this.mqtt_port.read(cx).text().to_string();
-                                            
+
                                             if this.mqtt_running {
                                                 // 停止服务
                                                 add_global_log("正在停止MQTT服务...", LogLevel::Info);
                                                 this.mqtt_running = false;
                                                 this.notify(cx);
-                                                
+
                                                 cx.background_executor()
                                                     .spawn(async {
                                                         let _ = std::process::Command::new("cmd")
@@ -608,7 +593,7 @@ impl ConfigPanelStory {
                                                 add_global_log(format!("正在启动MQTT服务 ({}:{})...", server, port), LogLevel::Info);
                                                 this.mqtt_running = true;
                                                 this.notify(cx);
-                                                
+
                                                 let server_copy = server.clone();
                                                 let port_copy = port.clone();
                                                 cx.background_executor()
@@ -632,17 +617,10 @@ impl ConfigPanelStory {
                                     h_flex()
                                         .gap_2()
                                         .w_full()
-                                        .child(
-                                            v_flex()
-                                                .child(Label::new("服务器").text_sm())
-                                                .child(self.http_server.clone()),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .child(Label::new("端口").text_sm())
-                                                .child(self.http_port.clone())
-                                                .w(px(100.0)),
-                                        )
+                                        .items_center()
+                                        .child(Label::new("服务器").text_sm())
+                                        .child(self.http_server.clone()).flex_grow()
+                                        .child(self.http_port.clone()).flex_grow()
                                 )
                                 .child(
                                     Button::new("start_http")
@@ -650,19 +628,19 @@ impl ConfigPanelStory {
                                         .on_click(cx.listener(|this, _, new_window, cx| {
                                             let server = this.http_server.read(cx).text().to_string();
                                             let port = this.http_port.read(cx).text().to_string();
-                                            
+
                                             if this.http_running {
                                                 // 停止服务
                                                 add_global_log("正在停止HTTP服务...", LogLevel::Info);
                                                 this.http_running = false;
                                                 this.notify(cx);
-                                                
+
                                                 cx.background_executor()
                                                     .spawn(async {
                                                         let _ = std::process::Command::new("cmd")
                                                             .args(["/C", "taskkill /F /IM simple-http-server.exe"])
                                                             .spawn();
-                                                        
+
                                                         // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
                                                         log_from_thread("已停止HTTP服务", LogLevel::Info);
                                                     })
@@ -672,7 +650,7 @@ impl ConfigPanelStory {
                                                 add_global_log(format!("正在启动HTTP服务 ({}:{})...", server, port), LogLevel::Info);
                                                 this.http_running = true;
                                                 this.notify(cx);
-                                                
+
                                                 let server_copy = server.clone();
                                                 let port_copy = port.clone();
                                                 cx.background_executor()
@@ -680,7 +658,7 @@ impl ConfigPanelStory {
                                                         let _ = std::process::Command::new("cmd")
                                                             .args(["/C", &format!("start /B simple-http-server --ip {} --port {}", server_copy, port_copy)])
                                                             .spawn();
-                                                        
+
                                                         // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
                                                         log_from_thread("已启动HTTP服务", LogLevel::Info);
                                                     })
@@ -710,16 +688,16 @@ impl Render for ConfigPanelStory {
         let theme = cx.theme();
         let border = theme.border.clone();
         let radius = theme.radius.clone();
-        
+
         // 首次渲染时，添加示例日志
         if self.log_subscription.is_none() {
             // 添加示例日志
             // self.add_example_logs(cx);
-            
+
             // 标记为已初始化，避免重复添加示例日志
             self.log_subscription = None;
         }
-        
+
         // 每次渲染时检查是否有新日志
         // self.update_logs(cx);
 
@@ -758,23 +736,20 @@ impl Render for ConfigPanelStory {
                             }),
                         )
                         .child(
-                            v_flex()
-                                .gap_4()
-                                .mt_6()
-                                .child(
-                                    h_flex()
-                                        .justify_between()
-                                        .items_center()
-                                        .child(Label::new("显示日志"))
-                                        .child(
-                                            Switch::new("show_logs")
-                                                .checked(self.show_logs)
-                                                .on_click(cx.listener(|this, checked, window, cx| {
-                                                    this.show_logs = *checked;
-                                                    this.notify(cx);
-                                                })),
+                            v_flex().gap_4().mt_6().child(
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(Label::new("显示日志"))
+                                    .child(
+                                        Switch::new("show_logs").checked(self.show_logs).on_click(
+                                            cx.listener(|this, checked, window, cx| {
+                                                this.show_logs = *checked;
+                                                this.notify(cx);
+                                            }),
                                         ),
-                                )
+                                    ),
+                            ),
                         ),
                 )
                 .child(
@@ -787,9 +762,11 @@ impl Render for ConfigPanelStory {
                             "database" => self.render_database_tab(window, cx).into_any_element(),
                             "generate" => self.render_generate_tab(window, cx).into_any_element(),
                             "update" => self.render_update_tab(window, cx).into_any_element(),
-                            "remote_deploy" => self.render_remote_deploy_tab(window, cx).into_any_element(),
+                            "remote_deploy" => {
+                                self.render_remote_deploy_tab(window, cx).into_any_element()
+                            }
                             _ => div().into_any_element(),
-                        })
+                        }),
                 )
                 .when(self.show_logs, |flex| {
                     // 添加日志查看区域（右侧）
@@ -810,29 +787,24 @@ impl Render for ConfigPanelStory {
                                             .border(px(1.))
                                             .border_color(border)
                                             .rounded(radius)
-                                            .child(self.log_list.clone())
+                                            .child(self.log_list.clone()),
                                     )
-                                    .child(
-                                        h_flex()
-                                            .justify_end()
-                                            .mt_2()
-                                            .child(
-                                                Button::new("clear_logs")
-                                                    .label("清空日志")
-                                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                                        // 清空日志
-                                                        if let Ok(mut logs) = GLOBAL_LOGS.lock() {
-                                                            logs.clear();
-                                                        }
-                                                        this.log_list.update(cx, |list, cx| {
-                                                            let mut delegate = list.delegate_mut();
-                                                            delegate.logs.clear();
-                                                            delegate.selected_index = None;
-                                                        });
-                                                    }))
-                                            )
-                                    )
-                            )
+                                    .child(h_flex().justify_end().mt_2().child(
+                                        Button::new("clear_logs").label("清空日志").on_click(
+                                            cx.listener(|this, _, _window, cx| {
+                                                // 清空日志
+                                                if let Ok(mut logs) = GLOBAL_LOGS.lock() {
+                                                    logs.clear();
+                                                }
+                                                this.log_list.update(cx, |list, cx| {
+                                                    let mut delegate = list.delegate_mut();
+                                                    delegate.logs.clear();
+                                                    delegate.selected_index = None;
+                                                });
+                                            }),
+                                        ),
+                                    )),
+                            ),
                     )
                 })
                 .child(
@@ -852,64 +824,69 @@ impl Render for ConfigPanelStory {
                                     if this.is_running {
                                         return;
                                     }
-                                    
+
                                     // 设置为运行状态
                                     this.is_running = true;
                                     this.notify(cx);
-                                    
+
                                     // 保存当前配置
                                     // this.save(cx);
 
                                     let db_option = this.get_overwrite_config(cx);
-                                    
+
                                     // 添加执行开始日志
                                     add_global_log("开始执行任务...", LogLevel::Info);
                                     // 立即更新日志显示
                                     this.update_logs(cx);
-                                    
-                                    // 启动任务
-                                    let task = cx.background_executor().spawn(async move {
-                                        // 创建一个新的 Tokio 运行时
-                                        let runtime = match tokio::runtime::Runtime::new() {
-                                            Ok(rt) => rt,
-                                            Err(e) => {
-                                                log_from_thread(format!("创建 Tokio 运行时失败: {}", e), LogLevel::Error);
-                                                return false;
-                                            }
-                                        };
-                                        
-                                        // 在 Tokio 运行时内执行异步任务
-                                        let result = runtime.block_on(async {
-                                            crate::run_app(Some(db_option)).await
-                                        });
 
-                                        true
-                                        
-                                        // match result {
-                                        //     Ok(_) => {
-                                        //         // log_from_thread("执行成功！", LogLevel::Info);
-                                        //         println!("执行成功！");
-                                        //         true
-                                        //     },
-                                        //     Err(e) => {
-                                        //         log_from_thread(error_msg, LogLevel::Error);
-                                        //         false
-                                        //     },
-                                        // };
-                                       
-                                    }).detach();
-                                    
+                                    // 启动任务
+                                    let task = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            // 创建一个新的 Tokio 运行时
+                                            let runtime = match tokio::runtime::Runtime::new() {
+                                                Ok(rt) => rt,
+                                                Err(e) => {
+                                                    log_from_thread(
+                                                        format!("创建 Tokio 运行时失败: {}", e),
+                                                        LogLevel::Error,
+                                                    );
+                                                    return false;
+                                                }
+                                            };
+
+                                            // 在 Tokio 运行时内执行异步任务
+                                            let result = runtime.block_on(async {
+                                                crate::run_app(Some(db_option)).await
+                                            });
+
+                                            true
+
+                                            // match result {
+                                            //     Ok(_) => {
+                                            //         // log_from_thread("执行成功！", LogLevel::Info);
+                                            //         println!("执行成功！");
+                                            //         true
+                                            //     },
+                                            //     Err(e) => {
+                                            //         log_from_thread(error_msg, LogLevel::Error);
+                                            //         false
+                                            //     },
+                                            // };
+                                        })
+                                        .detach();
+
                                     // 启动一个定时器来检查任务是否完成并更新日志
                                     // cx.spawn_timer(Duration::from_millis(500), move |this, cx| {
                                     //     // 更新日志显示
                                     //     this.update_logs(cx);
-                                        
+
                                     //     // 检查任务是否完成
                                     //     if let Some(success) = task.completed() {
                                     //         // 任务完成，恢复按钮状态
                                     //         this.is_running = false;
                                     //         this.notify(cx);
-                                            
+
                                     //         // 根据结果添加最终日志
                                     //         if *success {
                                     //             // 任务成功，在日志中显示
@@ -918,14 +895,14 @@ impl Render for ConfigPanelStory {
                                     //             // 任务失败，在日志中显示
                                     //             add_global_log("❌ 任务执行失败，请查看错误日志!", LogLevel::Error);
                                     //         }
-                                            
+
                                     //         // 再次更新日志显示
                                     //         this.update_logs(cx);
-                                            
+
                                     //         // 停止定时器
                                     //         return false;
                                     //     }
-                                        
+
                                     //     // 继续定时器
                                     //     true
                                     // }).detach();

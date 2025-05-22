@@ -1,21 +1,21 @@
 [net]
 git-fetch-with-cli = true
 
-[target.x86_64-pc-windows-msvc]
-linker = "rust-lld.exe"
-rustdocflags = ["-Clinker=rust-lld.exe"]
+# [target.x86_64-pc-windows-msvc]
+# linker = "rust-lld.exe"
+# rustdocflags = ["-Clinker=rust-lld.exe"]
 
-#[unstable]
-#codegen-backend = true
-#
-#[profile.dev]
-#codegen-backend = "cranelift"
-#
-#[profile.dev.package."*"]
-#codegen-backend = "llvm"
+[unstable]
+codegen-backend = true
 
-# [build]
-# rustflags = ["-Z", "threads=8"]
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "cranelift"
+
+[build]
+rustflags = ["-Z", "threads=8"]
 
 #[target.x86_64-unknown-linux-musl]
 #linker = "x86_64-linux-musl-gcc"
