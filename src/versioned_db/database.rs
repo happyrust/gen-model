@@ -269,8 +269,43 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 定义dbnum_info_table的更新事件
+
 pub async fn define_dbnum_event() -> anyhow::Result<()> {
+    let event_sql = r#"
+    DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
+            -- 获取当前记录的 dbnum
+            LET $dbnum = $value.dbnum;
+            LET $id = record::id($value.id);
+            let $id_parts = string::split($id, "_");
+            let $ref_0 = array::at($id_parts, 0);
+            let $ref_1 = array::at($id_parts, 1);
+            let $is_delete = $value.deleted and $event = "UPDATE";
+            let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
+            -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
+            IF $event = "CREATE"   {
+                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
+                    dbnum: $dbnum,
+                    count: count?:0 + 1,
+                    sesno: $max_sesno,
+                    max_ref1: $ref_1
+                };
+            } ELSE IF $event = "DELETE" OR $is_delete  {
+                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
+                    count: count - 1,
+                    sesno: $max_sesno,
+                    max_ref1: $ref_1
+                }
+                WHERE count > 0;
+            };
+        };
+    "#;
+    
+    SUL_DB.query(event_sql).await?;
+    Ok(())
+}
+
+/// 定义dbnum_info_table的更新事件, pe 的id 为array的情况
+pub async fn define_dbnum_event_array_id() -> anyhow::Result<()> {
     let event_sql = r#"
 DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
             -- 获取当前记录的 dbnum
@@ -282,16 +317,18 @@ DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event
             let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
             -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
             IF $event = "CREATE"   {
-                UPSERT type::thing('dbnum_info_table', $ref_0) SET
-                    dbnum = $dbnum,
-                    count = count?:0 + 1,
-                    sesno = $max_sesno,
-                    max_ref1 = $ref_1;
+                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
+                    dbnum: $dbnum,
+                    count: count?:0 + 1,
+                    sesno: $max_sesno,
+                    max_ref1: $ref_1
+                };
             } ELSE IF $event = "DELETE" OR $is_delete  {
-                UPSERT type::thing('dbnum_info_table', $ref_0) SET
-                    count = count - 1,
-                    sesno = $max_sesno,
-                    max_ref1 = $ref_1
+                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
+                    count: count - 1,
+                    sesno: $max_sesno,
+                    max_ref1: $ref_1
+                }
                 WHERE count > 0;
             };
         };
