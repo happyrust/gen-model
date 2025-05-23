@@ -115,8 +115,7 @@ impl AiosDBManager {
                 .map_err(|e| anyhow::anyhow!("Failed to open PdmsIO: {}", e))?;
             let end_sesno = sesno_range.end().clone();
             let range_eles = io.collect_increment_eles(Some(sesno_range))?;
-            io.update_elements_to_database(&range_eles)
-                .await?;
+            io.update_elements_to_database(&range_eles).await?;
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
             // dbg!(&file_name);
@@ -141,7 +140,7 @@ impl AiosDBManager {
     ///
     /// # 错误
     ///
-    /// 当数据库查询失败时会返回错误 
+    /// 当数据库查询失败时会返回错误
     async fn query_latest_sesno_by_file_name(file_name: &str) -> anyhow::Result<u32> {
         let mut response = SUL_DB
             .query(format!(
@@ -167,7 +166,7 @@ impl AiosDBManager {
     ///
     /// # 错误
     ///
-    /// 当数据库查询失败时会返回错误 
+    /// 当数据库查询失败时会返回错误
     async fn query_latest_sesno_by_dbnum(dbnum: u32) -> anyhow::Result<u32> {
         // 从dbnum_info_table中查询对应dbnum的最大sesno
         // 使用更高效的查询，直接获取该dbnum的最大sesno值
@@ -241,8 +240,7 @@ impl AiosDBManager {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_dbnum(db_no).await
-                else {
+                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_dbnum(db_no).await else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
@@ -270,27 +268,32 @@ impl AiosDBManager {
                 }
 
                 //每个path 都要检查一遍
-                if db_latest_sesno != 0 {
+                // if db_latest_sesno != 0
+                {
                     // #[cfg(feature = "debug_parse")]
                     // dbg!((db_no, db_latest_sesno));
                     //暂时先跳过更新比较大的
-                    if file_latest_sesno > db_latest_sesno {
+                    //
+                    {
                         let mut io = PdmsIO::new(&project, path, true);
                         io.open()?;
                         if let Ok(basic_info) = io.get_page_basic_info() {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
                                         文件属性对应sesno: {file_latest_sesno}", &file_name);
-                            let nearest_sesno = io
-                                .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
-                                .unwrap_or_default();
-                            params.insert(
-                                path.to_path_buf(),
-                                (
-                                    basic_info.clone(),
-                                    //warning : db_latest_sesno as i32 + 1 不一定存在，需要找离他最近的sesno
-                                    nearest_sesno..=file_latest_sesno as i32,
-                                ),
-                            );
+                            if file_latest_sesno > db_latest_sesno {
+                                let nearest_sesno = io
+                                    .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
+                                    .unwrap_or_default();
+                                params.insert(
+                                    path.to_path_buf(),
+                                    (
+                                        basic_info.clone(),
+                                        //warning : db_latest_sesno as i32 + 1 不一定存在，需要找离他最近的sesno
+                                        nearest_sesno..=file_latest_sesno as i32,
+                                    ),
+                                );
+                            }
+                            // 初始化监听的headers
                             self.watcher.headers.insert(path.to_path_buf(), basic_info);
                         }
                     }
@@ -366,17 +369,18 @@ impl AiosDBManager {
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 dbg!(path);
                                 dbg!(new_header.latest_ses_data.sesno);
-                                
+
                                 // 从数据库获取最新的sesno，而不是使用缓存的值
                                 let db_num = new_header.pdms_header.db_num;
-                                let db_latest_sesno = match Self::query_latest_sesno_by_dbnum(db_num as _).await {
-                                    Ok(sesno) => sesno,
-                                    Err(e) => {
-                                        println!("查询数据库最新sesno失败: {:?}", e);
-                                        continue;
-                                    }
-                                };
-                                
+                                let db_latest_sesno =
+                                    match Self::query_latest_sesno_by_dbnum(db_num as _).await {
+                                        Ok(sesno) => sesno,
+                                        Err(e) => {
+                                            println!("查询数据库最新sesno失败: {:?}", e);
+                                            continue;
+                                        }
+                                    };
+
                                 // dbg!(&old.pdms_header);
                                 //未发生修改，直接跳过
                                 if db_latest_sesno as i32 == new_header.latest_ses_data.sesno {
@@ -392,6 +396,7 @@ impl AiosDBManager {
                                     ),
                                 );
                             } else {
+                                println!("watcher.headers: {:?}", self.watcher.headers);
                                 println!("在 watcher.headers 中找不到路径: {:?}", path);
                             }
                         }
@@ -450,7 +455,7 @@ impl AiosDBManager {
                                         //必须要是地区对应的dbnos才能推送
                                         if let Some(location_dbs) = &get_db_option().location_dbs {
                                             if !location_dbs.contains(&dbno) {
-                                                continue;
+                                                // continue;
                                             }
                                         }
 
@@ -523,15 +528,15 @@ impl AiosDBManager {
     }
 
     /// 将元素更新到数据库中
-    /// 
+    ///
     /// # 参数
-    /// 
+    ///
     /// * `io` - PDMS IO 对象
     /// * `range_eles` - 元素操作数据的映射,key为sesno,value为元素操作数据列表
     /// * `dbnum` - 数据库编号
-    /// 
+    ///
     /// # 返回值
-    /// 
+    ///
     /// 返回 Result<()>,成功返回 Ok(()),失败返回 Err
     pub async fn update_elements_to_database(
         &self,
@@ -560,4 +565,3 @@ impl AiosDBManager {
         Ok(())
     }
 }
-

@@ -277,8 +277,8 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
             LET $dbnum = $value.dbnum;
             LET $id = record::id($value.id);
             let $id_parts = string::split($id, "_");
-            let $ref_0 = array::at($id_parts, 0);
-            let $ref_1 = array::at($id_parts, 1);
+            let $ref_0 = <int>array::at($id_parts, 0);
+            let $ref_1 = <int>array::at($id_parts, 1);
             let $is_delete = $value.deleted and $event = "UPDATE";
             let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
             -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
@@ -287,15 +287,22 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
                     dbnum: $dbnum,
                     count: count?:0 + 1,
                     sesno: $max_sesno,
-                    max_ref1: $ref_1
+                    max_ref1: $ref_1,
+                    updated_at: time::now()
                 };
             } ELSE IF $event = "DELETE" OR $is_delete  {
                 UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
                     count: count - 1,
                     sesno: $max_sesno,
-                    max_ref1: $ref_1
+                    max_ref1: $ref_1,
+                    updated_at: time::now()
                 }
                 WHERE count > 0;
+            }  ELSE IF $event = "UPDATE" {
+                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
+                    sesno: $max_sesno,
+                    updated_at: time::now()
+                };
             };
         };
     "#;
