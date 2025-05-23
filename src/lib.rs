@@ -16,7 +16,6 @@ use crate::fast_model::room_model::build_room_relations;
 use crate::fast_model::{gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::{get_db_option, init_demo_test_surreal, init_surreal};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
 use aios_core::pdms_types::*;
@@ -28,6 +27,7 @@ use aios_core::ssc_setting::{
 };
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::{build_cate_relate, pdms_types::*, SUL_DB};
+use aios_core::{get_db_option, init_demo_test_surreal, init_surreal};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, Timelike};
 use dashmap::mapref::one::Ref;
@@ -48,7 +48,7 @@ use team_data::sync_team_data;
 // use tokio::sync::mpsc::Sender;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
-use versioned_db::database::sync_pdms;
+use versioned_db::database::{define_dbnum_event, sync_pdms};
 
 use log::{error, LevelFilter};
 use simplelog::*;
@@ -78,15 +78,14 @@ pub mod mqtt_service;
 pub mod options;
 
 // 添加options模块的重导出
-pub use options::DbOptionExt;
 pub use options::get_db_option_ext;
+pub use options::DbOptionExt;
 
 #[macro_use]
 extern crate derive_more;
 
 #[macro_use]
 extern crate nom;
-
 
 // pub async fn start_sync_task(
 //     db_option: Arc<DbOption>,
@@ -140,23 +139,28 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             ),
             WriteLogger::new(LevelFilter::Info, Config::default(), file),
         ])
-            .unwrap();
+        .unwrap();
     }
-
 
     // progress_sender.send(5).await?;
     // progress_sender.send(5)?;
-    
+
     aios_core::function::define_common_functions()
         .await
         .unwrap();
+    // 解析完成后重新定义EVENT
+    println!("正在重新定义dbnum_event...");
+    match define_dbnum_event().await {
+        Ok(_) => println!("成功重新定义update_dbnum_event"),
+        Err(e) => println!("重新定义update_dbnum_event失败: {:?}", e),
+    }
     println!("预加载方法完成。");
-    
+
     // 初始化数据库索引
     if let Err(e) = crate::fast_model::pdms_inst::init_inst_relate_indices().await {
         eprintln!("初始化inst_relate索引失败: {}", e);
     }
-    
+
     let sync_live = db_option.sync_live.unwrap_or(false);
     let db_option = Arc::new(db_option.clone());
     // initialize_global_db_sender().await;
@@ -295,10 +299,12 @@ pub async fn update_inc_data_datacenter() {
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
-    use aios_core::init_surreal;
     use crate::fast_model::aabb_tree::manual_update_aabbs;
+    use aios_core::init_surreal;
     // 如果传入的是DbOptionExt，则取其内部的DbOption
-    let db_option: DbOption = option.map(|o| o.inner).unwrap_or_else(|| get_db_option().clone());
+    let db_option: DbOption = option
+        .map(|o| o.inner)
+        .unwrap_or_else(|| get_db_option().clone());
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容

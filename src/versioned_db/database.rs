@@ -52,6 +52,8 @@ pub enum SenderJsonsData {
     AttJson((String, Vec<String>)),
     // 项目名 , sql
     MysqlSql((String, String)),
+    // 新增：用于更新dbnum_info_table
+    DbnumInfoUpdate(Vec<String>),
 }
 
 #[cfg(feature = "sql")]
@@ -151,6 +153,15 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     // 计时器开始
     let mut time = tokio::time::Instant::now();
+    
+    // 解析前移除EVENT，防止大量的event触发
+    println!("正在移除dbnum_event以提高解析性能...");
+    let remove_event_sql = "REMOVE EVENT update_dbnum_event ON pe;";
+    match SUL_DB.query(remove_event_sql).await {
+        Ok(_) => println!("成功移除update_dbnum_event"),
+        Err(e) => println!("移除update_dbnum_event失败（可能不存在）: {:?}", e),
+    }
+    
     // 获取默认的数据库连接字符串
     if db_option.sync_tidb.unwrap_or(false) {
         #[cfg(feature = "sql")]
@@ -240,6 +251,13 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
     }
 
+    // 解析完成后重新定义EVENT
+    println!("正在重新定义dbnum_event...");
+    match define_dbnum_event().await {
+        Ok(_) => println!("成功重新定义update_dbnum_event"),
+        Err(e) => println!("重新定义update_dbnum_event失败: {:?}", e),
+    }
+
     // 输出创建表所花费的时间
     println!("创建表花费时间: {} ms", create_tables_elapse);
     // 输出初始化数据库所花费的时间
@@ -248,6 +266,38 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         time.elapsed().as_millis() - create_tables_elapse
     );
 
+    Ok(())
+}
+
+/// 定义dbnum_info_table的更新事件
+pub async fn define_dbnum_event() -> anyhow::Result<()> {
+    let event_sql = r#"
+DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
+            -- 获取当前记录的 dbnum
+            LET $dbnum = $value.dbnum;
+            LET $id = record::id($value.id);
+            let $ref_0 = array::at($id, 0);
+            let $ref_1 = array::at($id, 1);
+            let $is_delete = $value.deleted and $event = "UPDATE";
+            let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
+            -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
+            IF $event = "CREATE"   {
+                UPSERT type::thing('dbnum_info_table', $ref_0) SET
+                    dbnum = $dbnum,
+                    count = count?:0 + 1,
+                    sesno = $max_sesno,
+                    max_ref1 = $ref_1;
+            } ELSE IF $event = "DELETE" OR $is_delete  {
+                UPSERT type::thing('dbnum_info_table', $ref_0) SET
+                    count = count - 1,
+                    sesno = $max_sesno,
+                    max_ref1 = $ref_1
+                WHERE count > 0;
+            };
+        };
+    "#;
+    
+    SUL_DB.query(event_sql).await?;
     Ok(())
 }
 
@@ -403,6 +453,14 @@ pub async fn sync_total_async_threaded(
                                     format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
                                 // println!("att sql is {}", &sql);
                                 SUL_DB.query(sql).await.expect("insert atts failed");
+                            }
+                        }
+                        SenderJsonsData::DbnumInfoUpdate(updates) => {
+                            if !updates.is_empty() {
+                                // 使用UPSERT语法来更新或插入dbnum_info_table记录
+                                for update in updates {
+                                    SUL_DB.query(update).await.expect("upsert dbnum_info failed");
+                                }
                             }
                         }
                         #[cfg(feature = "sql")]
@@ -598,6 +656,8 @@ pub async fn sync_total_async_threaded(
                                     &db_basic_clone,
                                     &total_attr_map_arc,
                                     db_no as i32,
+                                    &file_name_clone,
+                                    &db_type,
                                     &db_option_clone,
                                     sender_clone.clone(),
                                 )

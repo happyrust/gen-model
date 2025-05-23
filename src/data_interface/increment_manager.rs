@@ -129,6 +129,19 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    /// 通过文件名查询数据库中最新的会话号
+    ///
+    /// # 参数
+    ///
+    /// * `file_name` - 要查询的数据库文件名
+    ///
+    /// # 返回值
+    ///
+    /// * `anyhow::Result<u32>` - 成功则返回最新会话号,失败返回错误
+    ///
+    /// # 错误
+    ///
+    /// 当数据库查询失败时会返回错误 
     async fn query_latest_sesno_by_file_name(file_name: &str) -> anyhow::Result<u32> {
         let mut response = SUL_DB
             .query(format!(
@@ -136,6 +149,36 @@ impl AiosDBManager {
                 select value sesno from only db_file_info:{} limit 1;
                 "#,
                 file_name
+            ))
+            .await?;
+        let sesno: Option<u32> = response.take(0)?;
+        Ok(sesno.unwrap_or_default())
+    }
+
+    /// 通过数据库编号查询数据库中最新的会话号
+    ///
+    /// # 参数
+    ///
+    /// * `dbnum` - 要查询的数据库编号
+    ///
+    /// # 返回值
+    ///
+    /// * `anyhow::Result<u32>` - 成功则返回最新会话号,失败返回错误
+    ///
+    /// # 错误
+    ///
+    /// 当数据库查询失败时会返回错误 
+    async fn query_latest_sesno_by_dbnum(dbnum: u32) -> anyhow::Result<u32> {
+        // 从dbnum_info_table中查询对应dbnum的最大sesno
+        // 使用更高效的查询，直接获取该dbnum的最大sesno值
+        let mut response = SUL_DB
+            .query(format!(
+                r#"
+                math::max(array::flatten([
+                    SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {}
+                ]));
+                "#,
+                dbnum
             ))
             .await?;
         let sesno: Option<u32> = response.take(0)?;
@@ -198,7 +241,7 @@ impl AiosDBManager {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_file_name(file_name).await
+                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_dbnum(db_no).await
                 else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
@@ -310,18 +353,33 @@ impl AiosDBManager {
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
                     println!("changed: {:?}", &event);
+                    // 添加调试信息
+                    println!("开始扫描数据库头部信息，路径: {:?}", &event.paths);
                     // dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
+                        println!("成功扫描到 {} 个数据库头部", new_headers.len());
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
+                            println!("正在处理路径: {:?}", path);
                             // dbg!(&new_header.pdms_header);
                             // dbg!(path);
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 dbg!(path);
                                 dbg!(new_header.latest_ses_data.sesno);
+                                
+                                // 从数据库获取最新的sesno，而不是使用缓存的值
+                                let db_num = new_header.pdms_header.db_num;
+                                let db_latest_sesno = match Self::query_latest_sesno_by_dbnum(db_num as _).await {
+                                    Ok(sesno) => sesno,
+                                    Err(e) => {
+                                        println!("查询数据库最新sesno失败: {:?}", e);
+                                        continue;
+                                    }
+                                };
+                                
                                 // dbg!(&old.pdms_header);
                                 //未发生修改，直接跳过
-                                if old.latest_ses_data.sesno == new_header.latest_ses_data.sesno {
+                                if db_latest_sesno as i32 == new_header.latest_ses_data.sesno {
                                     continue;
                                 }
                                 //比如给出准确的范围next_sesno..=end_sesno
@@ -329,10 +387,12 @@ impl AiosDBManager {
                                     path.clone(),
                                     (
                                         new_header.clone(),
-                                        (old.latest_ses_data.sesno + 1)
+                                        (db_latest_sesno as i32 + 1)
                                             ..=new_header.latest_ses_data.sesno,
                                     ),
                                 );
+                            } else {
+                                println!("在 watcher.headers 中找不到路径: {:?}", path);
                             }
                         }
                         // dbg!(&params);
@@ -451,6 +511,8 @@ impl AiosDBManager {
                                 .await
                                 .unwrap();
                         }
+                    } else {
+                        println!("扫描数据库头部失败，错误路径: {:?}", &event.paths);
                     }
                 }
                 Err(e) => println!("watch error: {:?}", e),
@@ -498,3 +560,4 @@ impl AiosDBManager {
         Ok(())
     }
 }
+

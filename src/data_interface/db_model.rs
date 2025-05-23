@@ -235,7 +235,7 @@ impl AiosDBManager {
                         }
                     }
                     Err(e) => {
-                        println!("Error = {e:?}");
+                        // println!("Error = {e:?}");
                         // return Ok(());
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }

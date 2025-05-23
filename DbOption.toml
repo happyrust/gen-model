@@ -31,7 +31,7 @@ save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
@@ -99,10 +99,10 @@ only_rebuild_pdms_element = false
 
 #debug_refno_types = ["CATA", "LOOP", "PRIM"]
 debug_refno_types = ["LOOP", "PRIM"]
-included_db_files = ["ams1112_0001"]
+included_db_files = ["ams8000_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 8000, 1112]
-manual_db_nums = [1112]
+manual_db_nums = [8000]
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""
 
