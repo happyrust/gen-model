@@ -1,6 +1,9 @@
+#[cfg(feature = "sql")]
 use aios_core::data_state::RefnoStatusInfo;
+#[cfg(feature = "sql")]
 use sqlx::{Executor, MySql, Pool};
 
+#[cfg(feature = "sql")]
 pub async fn save_data_state(data: Vec<RefnoStatusInfo>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let create_table_sql = create_data_state_table_sql();
     let mut conn = pool.clone().acquire().await?;
@@ -14,7 +17,7 @@ pub async fn save_data_state(data: Vec<RefnoStatusInfo>, pool: &Pool<MySql>) -> 
     Ok(())
 }
 
-
+#[cfg(feature = "sql")]
 fn create_data_state_table_sql() -> String {
     format!("CREATE TABLE IF NOT EXISTS data_status(
         refno VARCHAR(255) NOT NULL,
@@ -25,7 +28,7 @@ fn create_data_state_table_sql() -> String {
     );")
 }
 
-
+#[cfg(feature = "sql")]
 fn gen_insert_data_state_sql(data: Vec<RefnoStatusInfo>) -> String {
     let mut insert_sql = String::from("INSERT IGNORE INTO data_status (refno, status,user,time,note) VALUES ");
     for i in data {

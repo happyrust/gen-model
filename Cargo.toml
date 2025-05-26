@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [features]
 default = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt", "gui"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
+console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
 truck = []
 local = []
 ws = []
@@ -73,6 +74,11 @@ bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_re
 pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
+# XKT 格式生成相关依赖
+uuid = { version = "1.0", features = ["v4", "serde"] }
+base64 = "0.22"
+flate2 = "1.0"
+byteorder = "1.5"
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }

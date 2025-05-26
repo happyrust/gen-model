@@ -455,7 +455,7 @@ impl AiosDBManager {
                                         //必须要是地区对应的dbnos才能推送
                                         if let Some(location_dbs) = &get_db_option().location_dbs {
                                             if !location_dbs.contains(&dbno) {
-                                                // continue;
+                                                continue;
                                             }
                                         }
 

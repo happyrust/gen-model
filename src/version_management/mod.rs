@@ -4,7 +4,7 @@ use serde::{Serialize,Deserialize};
 
 pub mod update_log;
 pub mod set_status;
-pub mod query_status;
+// pub mod query_status;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SetStatusData {
