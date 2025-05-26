@@ -11,7 +11,7 @@ use gpui_component::button::Button;
 use gpui_component::{
     form::FieldBuilder,
     h_flex,
-    input::TextInput,
+    input::{InputState, TextInput},
     label::Label,
     list::List,
     notification::{Notification, NotificationType},
@@ -39,18 +39,18 @@ pub struct ConfigPanelStory {
     focus_handle: FocusHandle,
     parse_all: bool,
     parse_part: bool,
-    parse_part_input: Entity<TextInput>,
-    project_path: Entity<TextInput>,
-    included_projects: Entity<TextInput>,
-    project_name: Entity<TextInput>,
-    mdb_name: Entity<TextInput>,
-    db_ip: Entity<TextInput>,
-    db_port: Entity<TextInput>,
-    db_username: Entity<TextInput>,
-    db_password: Entity<TextInput>,
+    parse_part_input: Entity<InputState>,
+    project_path: Entity<InputState>,
+    included_projects: Entity<InputState>,
+    project_name: Entity<InputState>,
+    mdb_name: Entity<InputState>,
+    db_ip: Entity<InputState>,
+    db_port: Entity<InputState>,
+    db_username: Entity<InputState>,
+    db_password: Entity<InputState>,
     generate_all: bool,
     generate_part: bool,
-    generate_part_input: Entity<TextInput>,
+    generate_part_input: Entity<InputState>,
     live_update: bool,
     remote_sync: bool,
     active_tab: SharedString,
@@ -60,10 +60,10 @@ pub struct ConfigPanelStory {
     // 添加运行状态标志
     is_running: bool,
     // 异地部署页面相关属性
-    mqtt_server: Entity<TextInput>,
-    mqtt_port: Entity<TextInput>,
-    http_server: Entity<TextInput>,
-    http_port: Entity<TextInput>,
+    mqtt_server: Entity<InputState>,
+    mqtt_port: Entity<InputState>,
+    http_server: Entity<InputState>,
+    http_port: Entity<InputState>,
     mqtt_running: bool,
     http_running: bool,
     // 移除定时器句柄
@@ -86,67 +86,69 @@ impl ConfigPanelStory {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let parse_part_input = cx
-            .new(|cx| TextInput::new(window, cx).placeholder("请输入数据库文件名, 多个用逗号分隔"));
-        let project_path = cx.new(|cx| TextInput::new(window, cx));
-        let project_name = cx.new(|cx| TextInput::new(window, cx));
-        let included_projects = cx.new(|cx| TextInput::new(window, cx));
-        let mdb_name = cx.new(|cx| TextInput::new(window, cx));
-        let db_ip = cx.new(|cx| TextInput::new(window, cx).placeholder("127.0.0.1"));
-        let db_port = cx.new(|cx| TextInput::new(window, cx).placeholder("8008"));
-        let db_username = cx.new(|cx| TextInput::new(window, cx).placeholder("root"));
-        let db_password = cx.new(|cx| TextInput::new(window, cx).placeholder("password"));
-        let generate_part_input = cx.new(|cx| TextInput::new(window, cx));
+        let parse_part_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("请输入数据库文件名, 多个用逗号分隔")
+        });
+        let project_path = cx.new(|cx| InputState::new(window, cx));
+        let project_name = cx.new(|cx| InputState::new(window, cx));
+        let included_projects = cx.new(|cx| InputState::new(window, cx));
+        let mdb_name = cx.new(|cx| InputState::new(window, cx));
+        let db_ip = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
+        let db_port = cx.new(|cx| InputState::new(window, cx).placeholder("8008"));
+        let db_username = cx.new(|cx| InputState::new(window, cx).placeholder("root"));
+        let db_password = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
+        let generate_part_input = cx.new(|cx| InputState::new(window, cx));
 
         // 异地部署页面相关输入框
-        let mqtt_server = cx.new(|cx| TextInput::new(window, cx).placeholder("192.168.1.100"));
-        let mqtt_port = cx.new(|cx| TextInput::new(window, cx).placeholder("1883"));
-        let http_server = cx.new(|cx| TextInput::new(window, cx).placeholder("192.168.1.100"));
-        let http_port = cx.new(|cx| TextInput::new(window, cx).placeholder("8080"));
+        let mqtt_server = cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.100"));
+        let mqtt_port = cx.new(|cx| InputState::new(window, cx).placeholder("1883"));
+        let http_server = cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.100"));
+        let http_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
 
         // 创建日志列表
         let delegate = LogListDelegate::new();
         let log_list = cx.new(|cx| List::new(delegate, window, cx));
 
         let db_option = get_db_option_ext();
+        
         // Initialize text inputs with values from db_option
         project_path.update(cx, |input, cx| {
-            input.set_text(db_option.project_path.clone(), window, cx)
+            input.set_value(db_option.project_path.clone(), window, cx)
         });
         project_name.update(cx, |input, cx| {
-            input.set_text(db_option.project_name.clone(), window, cx)
+            input.set_value(db_option.project_name.clone(), window, cx)
         });
         included_projects.update(cx, |input, cx| {
-            input.set_text(db_option.included_projects.join(","), window, cx)
+            input.set_value(db_option.included_projects.join(","), window, cx)
         });
         mdb_name.update(cx, |input, cx| {
-            input.set_text(db_option.mdb_name.clone(), window, cx)
+            input.set_value(db_option.mdb_name.clone(), window, cx)
         });
         db_ip.update(cx, |input, cx| {
-            input.set_text(db_option.v_ip.clone(), window, cx)
+            input.set_value(db_option.v_ip.clone(), window, cx)
         });
         db_port.update(cx, |input, cx| {
-            input.set_text(db_option.v_port.to_string(), window, cx)
+            input.set_value(db_option.v_port.to_string(), window, cx)
         });
         db_username.update(cx, |input, cx| {
-            input.set_text(db_option.v_user.clone(), window, cx)
+            input.set_value(db_option.v_user.clone(), window, cx)
         });
         db_password.update(cx, |input, cx| {
-            input.set_text(db_option.v_password.clone(), window, cx)
+            input.set_value(db_option.v_password.clone(), window, cx)
         });
 
         // 初始化异地部署相关输入框
         if let Some(server) = &db_option.mqtt_server {
-            mqtt_server.update(cx, |input, cx| input.set_text(server.clone(), window, cx));
+            mqtt_server.update(cx, |input, cx| input.set_value(server.clone(), window, cx));
         }
         if let Some(port) = db_option.mqtt_port {
-            mqtt_port.update(cx, |input, cx| input.set_text(port.to_string(), window, cx));
+            mqtt_port.update(cx, |input, cx| input.set_value(port.to_string(), window, cx));
         }
         if let Some(server) = &db_option.http_server {
-            http_server.update(cx, |input, cx| input.set_text(server.clone(), window, cx));
+            http_server.update(cx, |input, cx| input.set_value(server.clone(), window, cx));
         }
         if let Some(port) = db_option.http_port {
-            http_port.update(cx, |input, cx| input.set_text(port.to_string(), window, cx));
+            http_port.update(cx, |input, cx| input.set_value(port.to_string(), window, cx));
         }
 
         // Initialize switches
@@ -199,13 +201,13 @@ impl ConfigPanelStory {
     fn get_overwrite_config(&self, cx: &mut Context<Self>) -> DbOptionExt {
         let mut db_option = get_db_option_ext();
 
-        db_option.project_path = self.project_path.read(cx).text().to_string();
-        db_option.project_name = self.project_name.read(cx).text().to_string();
-        db_option.mdb_name = self.mdb_name.read(cx).text().to_string();
-        db_option.v_ip = self.db_ip.read(cx).text().to_string();
-        db_option.v_port = self.db_port.read(cx).text().parse().unwrap_or(8008);
-        db_option.v_user = self.db_username.read(cx).text().to_string();
-        db_option.v_password = self.db_password.read(cx).text().to_string();
+        db_option.project_path = self.project_path.read(cx).value().to_string();
+        db_option.project_name = self.project_name.read(cx).value().to_string();
+        db_option.mdb_name = self.mdb_name.read(cx).value().to_string();
+        db_option.v_ip = self.db_ip.read(cx).value().to_string();
+        db_option.v_port = self.db_port.read(cx).value().parse().unwrap_or(8008);
+        db_option.v_user = self.db_username.read(cx).value().to_string();
+        db_option.v_password = self.db_password.read(cx).value().to_string();
 
         db_option.sync_live = Some(self.live_update);
         db_option.sync_graph_db = Some(self.remote_sync);
@@ -215,12 +217,12 @@ impl ConfigPanelStory {
         // 添加异地部署设置
         if self.remote_sync {
             // 添加mqtt服务器配置
-            db_option.mqtt_server = Some(self.mqtt_server.read(cx).text().to_string());
-            db_option.mqtt_port = self.mqtt_port.read(cx).text().parse().ok();
+            db_option.mqtt_server = Some(self.mqtt_server.read(cx).value().to_string());
+            db_option.mqtt_port = self.mqtt_port.read(cx).value().parse().ok();
 
             // 添加http服务器配置
-            db_option.http_server = Some(self.http_server.read(cx).text().to_string());
-            db_option.http_port = self.http_port.read(cx).text().parse().ok();
+            db_option.http_server = Some(self.http_server.read(cx).value().to_string());
+            db_option.http_port = self.http_port.read(cx).value().parse().ok();
         } else {
             // 如果未启用异地同步，清空相关配置
             db_option.mqtt_server = None;
@@ -230,7 +232,7 @@ impl ConfigPanelStory {
         }
 
         db_option.included_db_files = {
-            let text = self.parse_part_input.read(cx).text();
+            let text = self.parse_part_input.read(cx).value();
             if text.trim().is_empty() {
                 None
             } else {
@@ -241,7 +243,7 @@ impl ConfigPanelStory {
         db_option.gen_model = self.generate_all | self.generate_part;
 
         db_option.manual_db_nums = {
-            let text = self.generate_part_input.read(cx).text();
+            let text = self.generate_part_input.read(cx).value();
             if text.trim().is_empty() {
                 None
             } else {
@@ -352,7 +354,7 @@ impl ConfigPanelStory {
                                 .text_size(px(12.0))
                                 .pl_4()
                                 .child(Label::new("数据库名称"))
-                                .child(self.parse_part_input.clone()),
+                                .child(TextInput::new(&self.parse_part_input)),
                         )
                     }),
             )
@@ -362,22 +364,20 @@ impl ConfigPanelStory {
                         .gap_2()
                         .items_center()
                         .w_full()
-                        .child(self.project_path.clone())
+                        .child(TextInput::new(&self.project_path))
                         .child(
                             Button::new("path_file_sel")
                                 .label("选择")
                                 .w(px(60.))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    // 使用rfd库打开目录选择对话框
                                     cx.spawn_in(window, async move |this, mut cx| {
                                         if let Some(folder) =
                                             rfd::AsyncFileDialog::new().pick_folder().await
                                         {
                                             let path = folder.path().to_string_lossy().to_string();
-                                            // cx.spawn_in(window, |cx| {
                                             this.update_in(cx, |config, window, cx| {
                                                 config.project_path.update(cx, |input, cx| {
-                                                    input.set_text(path, window, cx);
+                                                    input.set_value(path, window, cx);
                                                 });
                                             });
                                         }
@@ -391,19 +391,19 @@ impl ConfigPanelStory {
                 v_flex()
                     .gap_2()
                     .child(Label::new("项目名称"))
-                    .child(self.project_name.clone()),
+                    .child(TextInput::new(&self.project_name)),
             )
             .child(
                 v_flex()
                     .gap_2()
                     .child(Label::new("包含项目"))
-                    .child(self.included_projects.clone()),
+                    .child(TextInput::new(&self.included_projects)),
             )
             .child(
                 v_flex()
                     .gap_2()
                     .child(Label::new("MDB名称"))
-                    .child(self.mdb_name.clone()),
+                    .child(TextInput::new(&self.mdb_name)),
             )
     }
 
@@ -422,25 +422,25 @@ impl ConfigPanelStory {
                         h_flex()
                             .gap_2()
                             .child(Label::new("IP地址").w(px(80.)))
-                            .child(self.db_ip.clone()),
+                            .child(TextInput::new(&self.db_ip)),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .child(Label::new("端口").w(px(80.)))
-                            .child(self.db_port.clone()),
+                            .child(TextInput::new(&self.db_port)),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .child(Label::new("用户名").w(px(80.)))
-                            .child(self.db_username.clone()),
+                            .child(TextInput::new(&self.db_username)),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .child(Label::new("密码").w(px(80.)))
-                            .child(self.db_password.clone()),
+                            .child(TextInput::new(&self.db_password)),
                     ),
             )
     }
@@ -485,7 +485,7 @@ impl ConfigPanelStory {
                             ),
                     )
                     .when(self.generate_part, |flex| {
-                        flex.child(self.generate_part_input.clone())
+                        flex.child(TextInput::new(&self.generate_part_input))
                     }),
             )
     }
@@ -565,15 +565,15 @@ impl ConfigPanelStory {
                                     .w_full()
                                     .items_center()
                                     .child(Label::new("服务器").text_sm())
-                                    .child(self.mqtt_server.clone()).flex_grow()
-                                    .child(self.mqtt_port.clone()).flex_grow()
+                                    .child(TextInput::new(&self.mqtt_server)).flex_grow()
+                                    .child(TextInput::new(&self.mqtt_port)).flex_grow()
                                 )
                                 .child(
                                     Button::new("start_mqtt")
                                         .label(if self.mqtt_running { "停止MQTT服务" } else { "启动MQTT服务" })
                                         .on_click(cx.listener(|this, _, new_window, cx| {
-                                            let server = this.mqtt_server.read(cx).text().to_string();
-                                            let port = this.mqtt_port.read(cx).text().to_string();
+                                            let server = this.mqtt_server.read(cx).value().to_string();
+                                            let port = this.mqtt_port.read(cx).value().to_string();
 
                                             if this.mqtt_running {
                                                 // 停止服务
@@ -599,7 +599,6 @@ impl ConfigPanelStory {
                                                 cx.background_executor()
                                                     .spawn(async move {
                                                         let _ = std::process::Command::new("cmd")
-                                                            // .args(["/C", &format!("start /B mosquitto -h {} -p {}", server_copy, port_copy)])
                                                             .args(["/C", &format!("start /B mqtt-server -h {} -p {}", server_copy, port_copy)])
                                                             .spawn();
                                                     })
@@ -619,15 +618,15 @@ impl ConfigPanelStory {
                                         .w_full()
                                         .items_center()
                                         .child(Label::new("服务器").text_sm())
-                                        .child(self.http_server.clone()).flex_grow()
-                                        .child(self.http_port.clone()).flex_grow()
+                                        .child(TextInput::new(&self.http_server)).flex_grow()
+                                        .child(TextInput::new(&self.http_port)).flex_grow()
                                 )
                                 .child(
                                     Button::new("start_http")
                                         .label(if self.http_running { "停止HTTP服务" } else { "启动HTTP服务" })
                                         .on_click(cx.listener(|this, _, new_window, cx| {
-                                            let server = this.http_server.read(cx).text().to_string();
-                                            let port = this.http_port.read(cx).text().to_string();
+                                            let server = this.http_server.read(cx).value().to_string();
+                                            let port = this.http_port.read(cx).value().to_string();
 
                                             if this.http_running {
                                                 // 停止服务
@@ -641,7 +640,6 @@ impl ConfigPanelStory {
                                                             .args(["/C", "taskkill /F /IM simple-http-server.exe"])
                                                             .spawn();
 
-                                                        // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
                                                         log_from_thread("已停止HTTP服务", LogLevel::Info);
                                                     })
                                                     .detach();
@@ -659,7 +657,6 @@ impl ConfigPanelStory {
                                                             .args(["/C", &format!("start /B simple-http-server --ip {} --port {}", server_copy, port_copy)])
                                                             .spawn();
 
-                                                        // 这里可以添加日志，但由于异步执行，需要考虑线程安全性
                                                         log_from_thread("已启动HTTP服务", LogLevel::Info);
                                                     })
                                                     .detach();
