@@ -103,7 +103,7 @@ impl AiosDBManager {
         if sync_msg.file_names.is_empty() {
             return Ok(false);
         }
-        let dbs = &get_db_option().location_dbs;
+        let loc_dbs = &get_db_option().location_dbs;
         let remote_url = sync_msg.file_server_host.as_str();
         for file_name in &sync_msg.file_names {
             let url = format!("{}/{}.cba", remote_url, file_name);
@@ -112,12 +112,15 @@ impl AiosDBManager {
             let Some(pb) = watcher.file_name_full_path_map.get(file_name) else {
                 continue;
             };
+            dbg!(&pb);
 
             //还需要检查location dbnum，如果不一致，就需要clone
             //必须不是当前区域的db 才能clone, 只能clone别的区域的数据
             if let Some(dbno) = watcher.get_dbno(&pb) {
-                if let Some(dbs) = dbs {
-                    if !dbs.contains(&dbno) {
+                dbg!(dbno);
+                //跳过当前区域的dbnos
+                if let Some(dbs) = loc_dbs {
+                    if dbs.contains(&dbno) {
                         continue;
                     }
                 }

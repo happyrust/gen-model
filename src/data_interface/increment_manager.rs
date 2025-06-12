@@ -278,9 +278,9 @@ impl AiosDBManager {
                         let mut io = PdmsIO::new(&project, path, true);
                         io.open()?;
                         if let Ok(basic_info) = io.get_page_basic_info() {
-                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
-                                        文件属性对应sesno: {file_latest_sesno}", &file_name);
                             if file_latest_sesno > db_latest_sesno {
+                                println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
+                                        文件属性对应sesno: {file_latest_sesno}", &file_name);
                                 let nearest_sesno = io
                                     .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
                                     .unwrap_or_default();

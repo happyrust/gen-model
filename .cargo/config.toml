@@ -5,14 +5,14 @@ git-fetch-with-cli = true
 # linker = "rust-lld.exe"
 # rustdocflags = ["-Clinker=rust-lld.exe"]
 
-[unstable]
-codegen-backend = true
-
-[profile.dev]
-codegen-backend = "cranelift"
-
-[profile.dev.package."*"]
-codegen-backend = "cranelift"
+#[unstable]
+#codegen-backend = true
+#
+#[profile.dev]
+#codegen-backend = "cranelift"
+#
+#[profile.dev.package."*"]
+#codegen-backend = "cranelift"
 
 [build]
 rustflags = ["-Z", "threads=8"]
