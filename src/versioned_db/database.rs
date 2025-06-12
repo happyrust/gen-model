@@ -18,8 +18,6 @@ use pdms_io::io::PdmsIO;
 use pe::SPdmsElement;
 use petgraph::prelude::DiGraph;
 #[cfg(feature = "sql")]
-use sea_orm::{ConnectionTrait, Schema, Statement};
-#[cfg(feature = "sql")]
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 #[cfg(feature = "sql")]
 use sqlx::{Error, Executor};
@@ -80,7 +78,7 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
 /// 初始化 info 库和表
 #[cfg(feature = "sql")]
 pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
-    let pool = aios_mgr.get_global_pool().await?;
+    let pool = AiosDBMgr::get_global_pool().await?;
     let project_name = aios_mgr.db_option.project_name.clone();
     pool.execute(
         format!(
@@ -130,12 +128,14 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
             dbg!(&e);
         }
     }
-    let pool = aios_mgr.get_project_pool().await?;
-    let result = pool.execute(gen_create_element_tables_sql().as_str()).await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(&e);
+    let pools = aios_mgr.get_project_pools().await?;
+    for (_, pool) in pools {
+        let result = pool.execute(gen_create_element_tables_sql().as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+            }
         }
     }
 
@@ -443,7 +443,7 @@ pub async fn sync_total_async_threaded(
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
-    // let mgr = AiosDBMgr::init_from_db_option().await?;
+    let mgr = AiosDBMgr::init_from_db_option().await?;
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
@@ -455,8 +455,8 @@ pub async fn sync_total_async_threaded(
     }
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
-    // #[cfg(feature = "sql")]
-    // let pool = mgr.get_project_pools().await?;
+    #[cfg(feature = "sql")]
+        let pool = mgr.get_project_pools().await.unwrap_or_default();
 
     const CHUNK_SIZE: usize = 100;
     // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
@@ -466,8 +466,8 @@ pub async fn sync_total_async_threaded(
     for i in 0..16 {
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
-        let pool = AiosDBManager::get_project_pool().await.unwrap().clone();
-        
+            let pools_clone = pool.clone();
+
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(200);
             // let mut cnt = 0;
@@ -478,8 +478,11 @@ pub async fn sync_total_async_threaded(
                         SenderJsonsData::PEJson(pes) => {
                             if !pes.is_empty() {
                                 let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
-                                let mut response =
-                                    SUL_DB.query(&sql).await.expect("insert pes failed");
+                                // println!("pe sql: {}", sql);
+                                if let Err(e) = SUL_DB.query(&sql).await {
+                                    dbg!(sql);
+                                    dbg!(&e);
+                                }
                             }
                         }
                         SenderJsonsData::PERelateJson(relates) => {
@@ -488,7 +491,10 @@ pub async fn sync_total_async_threaded(
                                     "INSERT RELATION INTO pe_owner [{}]",
                                     relates.join(",")
                                 );
-                                SUL_DB.query(sql).await.expect("insert pe_owner failed");
+                                if let Err(e) = SUL_DB.query(&sql).await {
+                                    dbg!(sql);
+                                    dbg!(&e);
+                                }
                             }
                         }
                         SenderJsonsData::AttJson((table, atts)) => {
@@ -496,7 +502,10 @@ pub async fn sync_total_async_threaded(
                                 let sql =
                                     format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
                                 // println!("att sql is {}", &sql);
-                                SUL_DB.query(sql).await.expect("insert atts failed");
+                                if let Err(e) = SUL_DB.query(&sql).await {
+                                    dbg!(sql);
+                                    dbg!(&e);
+                                }
                             }
                         }
                         SenderJsonsData::DbnumInfoUpdate(updates) => {
@@ -509,9 +518,9 @@ pub async fn sync_total_async_threaded(
                         }
                         #[cfg(feature = "sql")]
                         SenderJsonsData::MysqlSql((project, sql)) => {
-                            // let Some(pool) = pools_clone.get(&project) else {
-                            //     continue;
-                            // };
+                            let Some(pool) = pools_clone.get(&project) else {
+                                continue;
+                            };
                             let mut conn = pool.acquire().await.expect("get pool failed");
                             match conn.execute(sql.as_str()).await {
                                 Ok(_) => {}
@@ -706,7 +715,7 @@ pub async fn sync_total_async_threaded(
                             if b_save_mysql {
                                 #[cfg(feature = "sql")]
                                 save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
-                                               &db_option_clone, db_no as i32, &sender_clone).await;
+                                               &db_option_clone, db_no as i32).await;
                             }
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;

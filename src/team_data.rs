@@ -68,7 +68,7 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
             // 保存数据
             #[cfg(feature = "sql")]
             {
-                let pool = mgr.get_project_pool().await?;
+                let pool = AiosDBMgr::get_project_pool().await?;
                 let table_sql = gen_create_team_data_sql();
                 let result = sqlx::query(&table_sql).execute(&pool).await;
                 if let Err(e) = result { dbg!(&e); }

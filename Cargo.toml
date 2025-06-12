@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
+default = ["ws", "gen_model", "manifold", "occ", "project_hd","sql"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
 truck = []
@@ -24,7 +24,7 @@ viewer = []                                                           #是否开
 gen_model = ["aios_core/gen_model"]
 occ = ["aios_core/occ", "dep:opencascade"]
 manifold = ["aios_core/manifold"]
-sql = ["dep:sea-orm", "dep:sqlx"]
+sql = ["dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
 surreal_v2 = []
 project_hd = []
@@ -101,10 +101,10 @@ notify = "8.0.0"
 walkdir = "2.5.0"
 num_enum = "0.7.2"
 jsonxf = "1.1.1"
-sea-orm = { version = "1.1.1", features = [
-    "sqlx-mysql",
-    "runtime-async-std",
-], optional = true }
+#sea-orm = { version = "1.1.1", features = [
+#    "sqlx-mysql",
+#    "runtime-async-std",
+#], optional = true }
 surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features = false, features = [
     "protocol-ws",
     #    "kv-rocksdb",
@@ -135,11 +135,11 @@ cc = { version = "1.0", features = ["parallel"] }
 
 
 [dependencies.sqlx]
-version = "0.8.2"
+version = "0.7.2"
 default-features = false
 optional = true
 features = [
-    # "runtime-async-std-rustls",
+    "runtime-async-std-rustls",
     #    "runtime-async-std-native-tls",
     "macros",
     "mysql",
