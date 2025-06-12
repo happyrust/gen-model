@@ -593,7 +593,7 @@ pub async fn sync_total_async_threaded(
                 println!("path={:?}", &file_name); // 打印文件路径
                 let mut ses_range_map = BTreeMap::new();
                 let mut sesno = 0;
-                let mut dt = Local::now().naive_local();
+                // let mut dt = Local::now().naive_local();
                 {
                     let mut io = PdmsIO::new(&project, path.clone(), true);
 
@@ -602,16 +602,16 @@ pub async fn sync_total_async_threaded(
                          //获取最新sesno
                          sesno = io.get_latest_sesno().unwrap_or_default();
                          if sesno > 0 {
-                            let sql = format!(
-                                "
-                                DELETE db_file_info:{0};
-                                INSERT INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{0}', '{1}', {2}, {3}, '{4}');",
-                                &file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
-                            );
-                            SUL_DB.query(&sql).await.expect("save db_info failed");
-                            if sync_versioned {
-                                continue;
-                            }
+                            // let sql = format!(
+                            //     "
+                            //     DELETE db_file_info:{0};
+                            //     INSERT INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{0}', '{1}', {2}, {3}, '{4}');",
+                            //     &file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
+                            // );
+                            // SUL_DB.query(&sql).await.expect("save db_info failed");
+                            // if sync_versioned {
+                            //     continue;
+                            // }
                         }else{
                             continue;
                         }
@@ -624,12 +624,8 @@ pub async fn sync_total_async_threaded(
                             //存储所有refno sesno map
                             io.store_all_refno_sesno_map().await.unwrap();
                         }
-                        
-                        //获取时间
-                        dt = io.get_latest_dt().unwrap().naive_local();
                         //获取sesno range
                         ses_range_map = io.ses_range_map;
-                       
                     }
                 }
               
@@ -664,7 +660,6 @@ pub async fn sync_total_async_threaded(
                     }
                 }
                 let debug_refnos = Arc::new(debug_refnos);
-                let ses_range_map = Arc::new(ses_range_map);
                 //按照SITE划分？
                 let mut total_cnt = 0;
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
