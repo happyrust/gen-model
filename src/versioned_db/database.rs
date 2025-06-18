@@ -70,8 +70,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&pool)
-    .await?;
+        .execute(&pool)
+        .await?;
     Ok(())
 }
 
@@ -85,9 +85,9 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-        .as_str(),
+            .as_str(),
     )
-    .await?;
+        .await?;
 
     //todo 改成一对多的实现
     let mut sql = String::new();
@@ -137,6 +137,13 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
                 dbg!(&e);
             }
         }
+        let result = pool.execute(gen_create_project_mdb_sql().as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+            }
+        }
     }
 
     Ok(())
@@ -153,7 +160,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     // 计时器开始
     let mut time = tokio::time::Instant::now();
-    
+
     // 解析前移除EVENT，防止大量的event触发
     println!("正在移除dbnum_event以提高解析性能...");
     let remove_event_sql = "REMOVE EVENT update_dbnum_event ON pe;";
@@ -161,7 +168,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         Ok(_) => println!("成功移除update_dbnum_event"),
         Err(e) => println!("移除update_dbnum_event失败（可能不存在）: {:?}", e),
     }
-    
+
     // 获取默认的数据库连接字符串
     if db_option.sync_tidb.unwrap_or(false) {
         #[cfg(feature = "sql")]
@@ -212,7 +219,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 // progress_sender,
                 proj_progress_chunk,
             )
-            .await
+                .await
             {
                 Ok(_) => {
                     // 同步数据成功
@@ -238,7 +245,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // progress_sender,
             proj_progress_chunk,
         )
-        .await
+            .await
         {
             Ok(_) => {
                 // 同步数据成功
@@ -306,7 +313,7 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
             };
         };
     "#;
-    
+
     SUL_DB.query(event_sql).await?;
     Ok(())
 }
@@ -340,7 +347,7 @@ DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event
             };
         };
     "#;
-    
+
     SUL_DB.query(event_sql).await?;
     Ok(())
 }
@@ -353,8 +360,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
+                    if error.code() == Some(Cow::from("42000")) {} else {
                         dbg!(sql);
                     }
                 }
@@ -375,8 +381,9 @@ pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
     if db_exists.is_some() {
         println!("Database with dbnum {} already exists in pe table. Will override with new data.", db_no);
         println!("开始删除已有的dbnum {db_no} 的数据");
-        let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
-                                    delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
+        let sql = format!("delete array::flatten(select value ->inst_relate from pe where dbnum = {db_no});
+                                  delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
+                                  delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
                                     ");
         SUL_DB.query(&sql).await.expect("clear db failed");
     }
@@ -393,7 +400,6 @@ pub async fn sync_total_async_threaded(
     // progress_sender: Sender<i32>,
     proj_progress_chunk: usize,
 ) -> anyhow::Result<()> {
-
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
@@ -436,7 +442,7 @@ pub async fn sync_total_async_threaded(
             }
         }
     }
-    
+
     // 更新children_files只包含需要处理的文件
     children_files = file_map.into_values().collect();
     // println!("需要处理的文件: {:?}", &children_files);
@@ -448,7 +454,7 @@ pub async fn sync_total_async_threaded(
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
     let b_replace_types = replace_types.is_some(); // 是否存在替换的类型列表
-                                                   // 是否保存到tidb
+    // 是否保存到tidb
     let b_save_mysql = db_option_arc.sync_tidb.unwrap_or(false);
     if b_replace_types {
         is_replace = true;
@@ -574,7 +580,7 @@ pub async fn sync_total_async_threaded(
                 .unwrap()
                 .contains(&file_name)
             {
-                if !is_total_sync{
+                if !is_total_sync {
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
                 }
                 // dbg!(&file_name);
@@ -585,7 +591,7 @@ pub async fn sync_total_async_threaded(
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
                 //需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
-                if is_replace{
+                if is_replace {
                     check_and_clear_db(db_no).await.unwrap();
                 }
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
@@ -607,10 +613,10 @@ pub async fn sync_total_async_threaded(
                     let mut io = PdmsIO::new(&project, path.clone(), true);
 
                     //打开文件
-                    if io.open().is_ok(){
-                         //获取最新sesno
-                         sesno = io.get_latest_sesno().unwrap_or_default();
-                         if sesno > 0 {
+                    if io.open().is_ok() {
+                        //获取最新sesno
+                        sesno = io.get_latest_sesno().unwrap_or_default();
+                        if sesno > 0 {
                             // let sql = format!(
                             //     "
                             //     DELETE db_file_info:{0};
@@ -621,15 +627,15 @@ pub async fn sync_total_async_threaded(
                             // if sync_versioned {
                             //     continue;
                             // }
-                        }else{
+                        } else {
                             continue;
                         }
-                        if is_sync_history{
+                        if is_sync_history {
                             //同步历史纪录
                             io.sync_history().await.unwrap();
                             //同步完历史纪录就返回
                             continue;
-                        }else{
+                        } else {
                             //存储所有refno sesno map
                             io.store_all_refno_sesno_map().await.unwrap();
                         }
@@ -637,7 +643,7 @@ pub async fn sync_total_async_threaded(
                         ses_range_map = io.ses_range_map;
                     }
                 }
-              
+
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
                 let mut db_basic = parse_file_db_basic_data(
                     &path,
@@ -734,7 +740,7 @@ pub async fn sync_total_async_threaded(
                                         if is_debug {
                                             if debug_refnos.contains(&att.get_refno_or_default().refno()) {
                                                 dbg!(att.value());
-                                            }else{
+                                            } else {
                                                 continue;
                                             }
                                         }
@@ -753,13 +759,13 @@ pub async fn sync_total_async_threaded(
                                     if is_save_db {
                                         if !json_vec.is_empty() {
                                             sender_clone.send(SenderJsonsData::AttJson((type_name.clone(), json_vec)))
-                                                        .expect("send attmap sql failed");
+                                                .expect("send attmap sql failed");
                                         }
 
                                         if !uda_json_vec.is_empty() {
                                             // dbg!(&uda_json_vec);
                                             sender_clone.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec)))
-                                                        .expect("send attmap sql failed");
+                                                .expect("send attmap sql failed");
                                         }
                                     }
                                 }

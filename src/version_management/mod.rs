@@ -38,3 +38,4 @@ pub struct RefnoStatusDifference {
     // 新版本的数据
     pub new_content: AttrMap,
 }
+

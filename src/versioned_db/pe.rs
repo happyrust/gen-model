@@ -36,6 +36,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use std::collections::BTreeMap;
+use crate::tables::gen_insert_project_mdb_sql;
 
 /// 保存element数据到版本管理
 pub async fn save_pes(
@@ -48,14 +49,14 @@ pub async fn save_pes(
     output: flume::Sender<SenderJsonsData>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    
+
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
     let mut chunk_index = 0;
     let mut sql = String::new();
-    
+
     // 用于收集dbnum_info_table的数据
     let mut dbnum_info_map: BTreeMap<u64, (i32, i32, i32, u64)> = BTreeMap::new(); // ref_0 -> (dbnum, count, max_sesno, max_ref1)
-    
+
     for chunk in keys.chunks(option.pe_chunk as _) {
         let mut insert_jsons = Vec::new();
         for &refno in chunk {
@@ -63,16 +64,16 @@ pub async fn save_pes(
             let pe_data = att_map.pe(db_num);
             let json = pe_data.gen_sur_json(Some(refno.to_pe_key()));
             insert_jsons.push(json);
-            
+
             // 从refno中提取ref_0和ref_1
             // RefU64内部是u64，在pe:ref_0_ref_1格式中，ref_0是高32位，ref_1是低32位
             let refno_u64 = refno.0;
             let ref_0 = (refno_u64 >> 32) as u64;
             let ref_1 = (refno_u64 & 0xFFFFFFFF) as u64;
-            
+
             // 获取sesno，从pe_data中获取
             let sesno = pe_data.sesno as i32;
-            
+
             // 更新dbnum_info_map
             dbnum_info_map.entry(ref_0)
                 .and_modify(|(_, count, max_sesno, max_ref1)| {
@@ -82,11 +83,11 @@ pub async fn save_pes(
                 })
                 .or_insert((db_num, 1, sesno, ref_1));
         }
-        
+
         output.send_async(SenderJsonsData::PEJson(insert_jsons)).await.expect("send pes error");
         chunk_index += 1;
     }
-    
+
     // 生成dbnum_info_table的更新数据
     if !dbnum_info_map.is_empty() {
         let mut dbnum_info_updates = Vec::new();
@@ -98,13 +99,13 @@ pub async fn save_pes(
             );
             dbnum_info_updates.push(sql);
         }
-        
+
         // 分批发送dbnum_info更新
         for chunk in dbnum_info_updates.chunks(option.pe_chunk as _) {
             output.send_async(SenderJsonsData::DbnumInfoUpdate(chunk.to_vec())).await.expect("send dbnum_info error");
         }
     }
-    
+
     Ok(())
 }
 
@@ -134,14 +135,24 @@ pub async fn save_pes_mysql(
 
     for chunk in keys.chunks(option.pe_chunk as _) {
         let mut insert_sql = String::new();
+        let mut insert_mdb_sql = String::new();
         for &refno in chunk {
             if is_debug && !debug_refnos.contains(&refno) {
                 continue;
             }
             let att_map = total_attr_map.get(&refno).unwrap();
+            let noun = att_map.get_type();
+            if noun == "DATA".to_string() { continue; };
             let sql = gen_pdms_element_insert_sql(att_map.value(), db_num, children_map);
             if !sql.is_empty() {
                 insert_sql.push_str(&sql);
+            }
+            // 保存mdb数据
+            if noun == "MDB".to_string() {
+                let mdb_sql = gen_insert_project_mdb_sql(att_map.value());
+                if !sql.is_empty() {
+                    insert_mdb_sql.push_str(&mdb_sql);
+                }
             }
         }
         let mut sql = format!(
@@ -160,6 +171,16 @@ pub async fn save_pes_mysql(
             Err(e) => {
                 dbg!(e.to_string());
                 dbg!(&sql);
+            }
+        }
+        // 保存mdb
+        if !insert_mdb_sql.is_empty() {
+            match conn.execute(insert_mdb_sql.as_str()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(e.to_string());
+                    dbg!(&insert_mdb_sql);
+                }
             }
         }
     }

@@ -2,7 +2,7 @@ use crate::consts::*;
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::helper::*;
 use aios_core::helper::*;
-use aios_core::AttrVal;
+use aios_core::{AttrVal, NamedAttrMap};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -130,15 +130,16 @@ pub fn gen_create_project_mdb_sql() -> String {
         r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#
     ));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));
-    sql.push_str(&format!(r#"{} INT,"#, "DB_NUM"));
     sql.push_str(&format!(r#"{} VARCHAR(100) ,"#, "MDB_NAME"));
-    sql.push_str(&format!(r#"{} VARCHAR(50) ,"#, "REFNO"));
-    sql.push_str(&format!(r#"{} VARCHAR(100) ,"#, "PROJECT"));
-    sql.push_str(&format!(r#"{} VARCHAR(50) ,"#, "WORLD_REFNO"));
-    sql.push_str(&format!(r#"{} VARCHAR(50) ,"#, "DB_TYPE"));
-    sql.push_str(&format!(r#"{} INT"#, "ORDER_NUM"));
+    sql.push_str(&format!(r#"{} VARCHAR(50) "#, "REFNO"));
     sql.push_str(");");
     sql
+}
+
+pub fn gen_insert_project_mdb_sql(att_map: &NamedAttrMap) -> String {
+    let Some(refno) = att_map.get_refno().map(|x| x.refno()) else { return "".to_string(); };
+    let name = att_map.get_name().unwrap_or("".to_string());
+    format!("insert ignore into {PDMS_PROJECT_MDB_TABLE} (ID, MDB_NAME, REFNO) values ({},'{}','`{}`');", refno.0, name, refno.to_pdms_str())
 }
 
 #[inline]
