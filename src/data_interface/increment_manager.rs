@@ -9,7 +9,7 @@ use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
-use aios_core::{clear_all_caches, SUL_DB};
+use aios_core::{clear_all_caches, get_pe, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec};
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
@@ -564,4 +564,28 @@ impl AiosDBManager {
 
         Ok(())
     }
+
+    /// 更新元数据版本表
+    async fn update_datacenter_version(&self, data: &Vec<EleOperationData>) -> anyhow::Result<()> {
+        for d in data {
+            match &d.detail {
+                EleOperationDetail::Deleted => {}
+                EleOperationDetail::Modified(data) => {
+                    let unit = vec!["SUPPO", "BRAN", "EQUI", "ZONE"];
+                    // 最小交付单元，直接修改对应的值
+                    if unit.contains(&data.noun.as_str()) {
+
+                    } else {
+                        // 其他的找owner
+
+                    }
+
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
+
+
