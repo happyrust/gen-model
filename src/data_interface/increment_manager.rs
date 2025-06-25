@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::btree_map::BTreeMap;
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
 use aios_core::{clear_all_caches, get_pe, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec};
+use aios_core::data_center::DataCenterRecordOperate;
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -32,6 +34,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
+use tracing_subscriber::fmt::format;
+
+const DATACENTER_VERSION: &'static str = "datacenter_version";
 
 /// 增量更新信息结构体
 ///
@@ -123,6 +128,13 @@ impl AiosDBManager {
             let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, end_sesno);
             //执行更新
             SUL_DB.query(sql).await.unwrap();
+            // 更新元数据增量发布
+            match self.update_datacenter_version(&range_eles).await {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                }
+            }
         }
 
         Ok(true)
@@ -566,22 +578,44 @@ impl AiosDBManager {
     }
 
     /// 更新元数据版本表
-    async fn update_datacenter_version(&self, data: &Vec<EleOperationData>) -> anyhow::Result<()> {
-        for d in data {
-            match &d.detail {
-                EleOperationDetail::Deleted => {}
-                EleOperationDetail::Modified(data) => {
-                    let unit = vec!["SUPPO", "BRAN", "EQUI", "ZONE"];
-                    // 最小交付单元，直接修改对应的值
-                    if unit.contains(&data.noun.as_str()) {
-
-                    } else {
-                        // 其他的找owner
-
+    async fn update_datacenter_version(&self, data: &BTreeMap<u32, Vec<EleOperationData>>) -> anyhow::Result<()> {
+        let unit = vec!["SUPPO", "BRAN", "EQUI", "ZONE"];
+        for (_, data) in data {
+            for d in data {
+                match &d.detail {
+                    EleOperationDetail::Deleted => {
+                        // 删除操作
+                        let sql = format!("let $pe = {};
+                                            let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};
+                                            update type::thing('{}',$pe) set status = '{:?}'",
+                                          d.refno.to_pe_key(), DATACENTER_VERSION, DataCenterRecordOperate::Delete);
+                        match SUL_DB.query(&sql).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e.to_string());
+                                dbg!(&sql);
+                            }
+                        }
                     }
-
+                    EleOperationDetail::Modified(modify_data) => {
+                        // 最小交付单元，直接修改对应的值
+                        let sql = if unit.contains(&modify_data.noun.as_str()) {
+                            format!("update {} set status = '{:?}'", d.refno.to_table_key(DATACENTER_VERSION), DataCenterRecordOperate::Modify)
+                        } else {
+                            // 其他的找owner
+                            format!("let $pe = record::id({}.owner);
+                                        update type::thing('{}',$pe) set status = '{:?}';", d.refno.to_pe_key(), DATACENTER_VERSION, DataCenterRecordOperate::Modify)
+                        };
+                        match SUL_DB.query(&sql).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e.to_string());
+                                dbg!(&sql);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         Ok(())
