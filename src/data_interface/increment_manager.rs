@@ -604,8 +604,9 @@ impl AiosDBManager {
                             format!("update {} set status = '{:?}'", d.refno.to_table_key(DATACENTER_VERSION), DataCenterRecordOperate::Modify)
                         } else {
                             // 其他的找owner
+                            let unit_str = unit.iter().map(|unit| format!("'{}'", unit)).collect::<Vec<String>>().join(",");
                             format!("let $pe = fn::find_ancestor_types({},[{}])[0];
-                                        update type::thing('{}',$pe) set status = '{:?}';", d.refno.to_pe_key(), unit.join(","), DATACENTER_VERSION, DataCenterRecordOperate::Modify)
+                                        update type::thing('{}',$pe) set status = '{:?}';", d.refno.to_pe_key(), unit_str, DATACENTER_VERSION, DataCenterRecordOperate::Modify)
                         };
                         match SUL_DB.query(&sql).await {
                             Ok(_) => {}
