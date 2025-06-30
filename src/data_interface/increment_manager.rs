@@ -587,8 +587,9 @@ impl AiosDBManager {
                         // 删除操作
                         let sql = format!("let $pe = {};
                                             let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};
-                                            update type::thing('{}',$pe) set status = '{:?}'",
+                                            update type::thing('{}',$pe) set status = '{:?}',belong_zone = $belong_zone;",
                                           d.refno.to_pe_key(), DATACENTER_VERSION, DataCenterRecordOperate::Delete);
+                        dbg!(&sql);
                         match SUL_DB.query(&sql).await {
                             Ok(_) => {}
                             Err(e) => {
