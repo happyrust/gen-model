@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 incr_sync =  false
 sync_history = false
 enable_log = false

@@ -231,6 +231,7 @@ dependencies = [
  "regex",
  "rkyv",
  "rstar 0.11.0",
+ "rust-ploop-processor",
  "serde",
  "serde_derive",
  "serde_json",
@@ -1227,7 +1228,7 @@ dependencies = [
 [[package]]
 name = "bevy_app"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_derive",
  "bevy_ecs",
@@ -1249,7 +1250,7 @@ dependencies = [
 [[package]]
 name = "bevy_derive"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_macro_utils",
  "quote",
@@ -1259,7 +1260,7 @@ dependencies = [
 [[package]]
 name = "bevy_ecs"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "arrayvec",
  "bevy_ecs_macros",
@@ -1286,7 +1287,7 @@ dependencies = [
 [[package]]
 name = "bevy_ecs_macros"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -1297,11 +1298,12 @@ dependencies = [
 [[package]]
 name = "bevy_log"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "android_log-sys",
  "bevy_app",
  "bevy_ecs",
+ "bevy_platform",
  "bevy_utils",
  "tracing",
  "tracing-log",
@@ -1313,7 +1315,7 @@ dependencies = [
 [[package]]
 name = "bevy_macro_utils"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "parking_lot",
  "proc-macro2",
@@ -1325,7 +1327,7 @@ dependencies = [
 [[package]]
 name = "bevy_math"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "approx 0.5.1",
  "bevy_reflect",
@@ -1343,7 +1345,7 @@ dependencies = [
 [[package]]
 name = "bevy_platform"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "critical-section",
  "foldhash",
@@ -1359,12 +1361,12 @@ dependencies = [
 [[package]]
 name = "bevy_ptr"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 
 [[package]]
 name = "bevy_reflect"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "assert_type_match",
  "bevy_platform",
@@ -1389,7 +1391,7 @@ dependencies = [
 [[package]]
 name = "bevy_reflect_derive"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -1401,7 +1403,7 @@ dependencies = [
 [[package]]
 name = "bevy_tasks"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "async-executor",
  "async-task",
@@ -1420,7 +1422,7 @@ dependencies = [
 [[package]]
 name = "bevy_transform"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -1438,7 +1440,7 @@ dependencies = [
 [[package]]
 name = "bevy_utils"
 version = "0.16.0-dev"
-source = "git+https://gitee.com/happydpc/bevy.git#020872463b2bc83dc7ded2da98cf2f3b5f0fcb71"
+source = "git+https://gitee.com/happydpc/bevy.git#9d8f7921e79255a88b489d3211f6599b15a0e309"
 dependencies = [
  "bevy_platform",
  "thread_local",
@@ -1491,26 +1493,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.70.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
-dependencies = [
- "bitflags 2.9.1",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex",
- "syn 2.0.101",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
@@ -1518,7 +1500,7 @@ dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1959,7 +1941,7 @@ dependencies = [
 [[package]]
 name = "calamine"
 version = "0.26.1"
-source = "git+https://gitee.com/happydpc/calamine.git#c87989aaebc9b1aa32a9dfb9bbef8cff792bad54"
+source = "git+https://gitee.com/happydpc/calamine.git#f35ae176fa9f763851b236f7166e38a884efc8d6"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -2829,7 +2811,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa 1.0.15",
- "phf 0.11.3",
+ "phf 0.8.0",
  "smallvec",
 ]
 
@@ -5239,7 +5221,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -7027,7 +7009,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
 dependencies = [
- "proc-macro-crate 3.3.0",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.101",
@@ -7751,7 +7733,7 @@ dependencies = [
 
 [[package]]
 name = "parse_pdms_db"
-version = "1.0.0"
+version = "3.0.0"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -8693,7 +8675,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.9",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9492,6 +9474,20 @@ checksum = "3e0698206bcb8882bf2a9ecb4c1e7785db57ff052297085a6efd4fe42302068a"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
+]
+
+[[package]]
+name = "rust-ploop-processor"
+version = "0.1.0"
+source = "git+https://gitee.com/happydpc/rust-ploop-processor#479c51a60d7ae592e5097bb336156a24dd7f6661"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "glam",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -12109,15 +12105,12 @@ dependencies = [
 
 [[package]]
 name = "tracing-oslog"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528bdd1f0e27b5dd9a4ededf154e824b0532731e4af73bb531de46276e0aab1e"
+checksum = "d76902d2a8d5f9f55a81155c08971734071968c90f2d9bfe645fe700579b2950"
 dependencies = [
- "bindgen 0.70.1",
  "cc",
  "cfg-if",
- "once_cell",
- "parking_lot",
  "tracing-core",
  "tracing-subscriber",
 ]
@@ -14130,9 +14123,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "3.0.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12598812502ed0105f607f941c386f43d441e00148fce9dec3ca5ffb0bde9308"
+checksum = "153a6fff49d264c4babdcfa6b4d534747f520e56e8f0f384f3b808c4b64cc1fd"
 dependencies = [
  "arbitrary",
  "crc32fast",

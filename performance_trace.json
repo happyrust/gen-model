@@ -1,0 +1,4 @@
+[
+{"ph":"M","pid":1,"name":"thread_name","tid":0,"args":{"name":"main"}},
+{"ph":"i","pid":1,"ts":144.4,"name":"event src\\test\\test_performance.rs:129","cat":"aios_database::test::test_performance","tid":0,"s":"t",".file":"src\\test\\test_performance.rs",".line":129}
+]
