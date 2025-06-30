@@ -377,6 +377,7 @@ pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
         println!("开始删除已有的dbnum {db_no} 的数据");
         let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
                                     delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
+                                   delete array::flatten(select value ->inst_relate from pe where dbnum = {db_no}); 
                                     ");
         SUL_DB.query(&sql).await.expect("clear db failed");
     }

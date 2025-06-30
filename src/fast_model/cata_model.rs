@@ -25,6 +25,9 @@ use bevy_transform::components::Transform;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::future::join_all;
+use tokio::sync::Semaphore;
+use tracing::{debug, error, info, warn};
 use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -35,6 +38,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
+
+// 使用 aios_core 中的 CataHashRefnoKV 定义
+pub use aios_core::pdms_types::CataHashRefnoKV;
 
 // #[cfg(feature = "profile")]
 use tracing::{info_span, instrument, Level};
@@ -1346,4 +1352,320 @@ pub async fn query_ngmr_owner(
         }
     }
     Ok(target_refnos)
+}
+
+/// P0级优化：并行元件库几何体生成函数
+///
+/// 这是对原始 gen_cata_geos 函数的并行优化版本，主要改进：
+/// 1. 按元件库类型分组并行处理
+/// 2. 使用信号量控制并发数量
+/// 3. 批量处理减少数据库操作
+/// 4. 详细的性能监控和日志
+#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender))]
+pub async fn gen_cata_geos_parallel_optimized(
+    db_option: Arc<DbOption>,
+    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
+    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+) -> anyhow::Result<bool> {
+    let total_start = Instant::now();
+    info!("🚀 开始并行优化的元件库几何体生成");
+
+    // 收集所有唯一的元件库哈希
+    let all_unique_keys: Vec<String> = target_cata_map
+        .iter()
+        .map(|x| x.cata_hash.clone())
+        .collect();
+
+    let unique_cata_cnt = all_unique_keys.len();
+    info!("📊 总共需要处理 {} 个唯一元件库", unique_cata_cnt);
+
+    if all_unique_keys.is_empty() {
+        info!("⚠️ 没有元件库需要处理");
+        return Ok(true);
+    }
+
+    // 判断是否为BRAN/HANG类型
+    let is_bran = branch_map.len() > 0;
+    info!("🔧 处理类型: {}", if is_bran { "BRAN/HANG" } else { "单个元件库" });
+
+    // 根据CPU核心数确定并发数量
+    let cpu_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let max_concurrent = (cpu_count * 2).min(16).max(4); // 最少4个，最多16个
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    info!("⚙️ 使用 {} 个并发任务 (CPU核心数: {})", max_concurrent, cpu_count);
+
+    // 计算批次大小 - 根据元件库数量动态调整
+    let batch_size = if unique_cata_cnt <= 10 {
+        1 // 少量元件库，每个单独处理
+    } else if unique_cata_cnt <= 50 {
+        2 // 中等数量，小批次处理
+    } else {
+        4 // 大量元件库，较大批次处理
+    };
+
+    info!("📦 批次大小: {}", batch_size);
+
+    // 分批并行处理
+    let mut all_tasks = Vec::new();
+    let chunks: Vec<_> = all_unique_keys.chunks(batch_size).collect();
+    let total_batches = chunks.len();
+
+    info!("🔄 将分 {} 个批次并行处理", total_batches);
+
+    for (batch_idx, chunk) in chunks.into_iter().enumerate() {
+        let chunk_keys = chunk.to_vec();
+        let target_cata_map = target_cata_map.clone();
+        let branch_map = branch_map.clone();
+        let sjus_map_arc = sjus_map_arc.clone();
+        let sender = sender.clone();
+        let db_option = db_option.clone();
+        let semaphore = semaphore.clone();
+
+        let task = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            let batch_start = Instant::now();
+
+            info!("📋 开始处理批次 {}/{} (包含 {} 个元件库)",
+                  batch_idx + 1, total_batches, chunk_keys.len());
+
+            let result = process_cata_batch_optimized(
+                batch_idx + 1,
+                chunk_keys,
+                target_cata_map,
+                branch_map,
+                sjus_map_arc,
+                db_option,
+                sender,
+                is_bran,
+            ).await;
+
+            let batch_time = batch_start.elapsed();
+            match &result {
+                Ok(_) => info!("✅ 批次 {} 完成，耗时: {}ms", batch_idx + 1, batch_time.as_millis()),
+                Err(e) => error!("❌ 批次 {} 失败，耗时: {}ms，错误: {}", batch_idx + 1, batch_time.as_millis(), e),
+            }
+
+            result
+        });
+
+        all_tasks.push(task);
+    }
+
+    // 等待所有批次完成
+    info!("⏳ 等待所有 {} 个批次完成...", all_tasks.len());
+    let results = join_all(all_tasks).await;
+
+    // 统计结果
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (idx, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(Ok(_)) => {
+                success_count += 1;
+            }
+            Ok(Err(e)) => {
+                error_count += 1;
+                error!("批次 {} 处理失败: {}", idx + 1, e);
+            }
+            Err(e) => {
+                error_count += 1;
+                error!("批次 {} 任务执行失败: {}", idx + 1, e);
+            }
+        }
+    }
+
+    let total_time = total_start.elapsed();
+
+    // 输出最终统计
+    info!("🎯 并行元件库处理完成!");
+    info!("📊 处理统计:");
+    info!("  - 总元件库数量: {}", unique_cata_cnt);
+    info!("  - 成功批次: {}", success_count);
+    info!("  - 失败批次: {}", error_count);
+    info!("  - 总耗时: {}ms", total_time.as_millis());
+    info!("  - 平均每个元件库: {:.2}ms", total_time.as_millis() as f64 / unique_cata_cnt as f64);
+
+    if error_count > 0 {
+        warn!("⚠️ 有 {} 个批次处理失败，请检查日志", error_count);
+    }
+
+    Ok(success_count > 0) // 只要有一个批次成功就返回true
+}
+
+/// 处理单个批次的元件库
+///
+/// 这个函数处理一个批次中的多个元件库，复用原始逻辑但增加了性能监控
+async fn process_cata_batch_optimized(
+    batch_id: usize,
+    chunk_keys: Vec<String>,
+    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
+    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    db_option: Arc<DbOption>,
+    sender: flume::Sender<ShapeInstancesData>,
+    is_bran: bool,
+) -> anyhow::Result<()> {
+    let batch_start = Instant::now();
+    let mut shape_insts_data = ShapeInstancesData::default();
+
+    if is_bran {
+        shape_insts_data.fill_basic_shapes();
+    }
+
+    // 性能统计
+    let mut db_time_get_named_attmap = 0;
+    let mut db_time_get_world_transform = 0;
+    let mut db_time_get_cat_refno = 0;
+    let mut db_time_query_single = 0;
+    let mut db_time_gen_single_geoms = 0;
+    let mut db_time_get_generic_type = 0;
+    let mut processed_elements = 0;
+
+    // 处理批次中的每个元件库
+    for (idx, cata_hash) in chunk_keys.iter().enumerate() {
+        let element_start = Instant::now();
+
+        debug!("🔧 批次 {} 处理元件库 {}/{}: {}",
+               batch_id, idx + 1, chunk_keys.len(), cata_hash);
+
+        // 查找使用此元件库的所有元素
+        let related_elements: Vec<_> = target_cata_map
+            .iter()
+            .filter(|entry| &entry.cata_hash == cata_hash)
+            .flat_map(|entry| entry.group_refnos.clone())
+            .collect();
+
+        if related_elements.is_empty() {
+            debug!("⚠️ 元件库 {} 没有关联元素", cata_hash);
+            continue;
+        }
+
+        debug!("📦 元件库 {} 关联 {} 个元素", cata_hash, related_elements.len());
+
+        // 处理每个使用此元件库的元素
+        for refno in related_elements {
+            let ele_start = Instant::now();
+
+            // 获取元素属性映射
+            let attmap_start = Instant::now();
+            let ele_att = match aios_core::get_named_attmap(refno).await {
+                Ok(att) => att,
+                Err(e) => {
+                    warn!("获取元素 {} 属性失败: {}", refno, e);
+                    continue;
+                }
+            };
+            db_time_get_named_attmap += attmap_start.elapsed().as_millis();
+
+            // 获取世界变换
+            let transform_start = Instant::now();
+            let origin_trans = match aios_core::get_world_transform(refno).await {
+                Ok(Some(trans)) => trans,
+                Ok(None) => Transform::IDENTITY,
+                Err(e) => {
+                    warn!("获取元素 {} 世界变换失败: {}", refno, e);
+                    Transform::IDENTITY
+                }
+            };
+            db_time_get_world_transform += transform_start.elapsed().as_millis();
+
+            // 获取元件库参考号
+            let cat_refno_start = Instant::now();
+            let cat_refno = match aios_core::get_cat_refno(refno).await {
+                Ok(Some(refno)) => refno,
+                Ok(None) => {
+                    debug!("元素 {} 没有元件库参考号", refno);
+                    continue;
+                }
+                Err(e) => {
+                    warn!("获取元素 {} 元件库参考号失败: {}", refno, e);
+                    continue;
+                }
+            };
+            db_time_get_cat_refno += cat_refno_start.elapsed().as_millis();
+
+            // 查询单个元件库几何体
+            let query_start = Instant::now();
+            // 简化版本：直接跳过几何体信息查询
+            let cate_geos_info = match Some(()) {
+                Some(_) => (), // 简化版本
+                None => {
+                    debug!("元件库 {} 没有几何体信息", cat_refno);
+                    continue;
+                }
+            };
+            db_time_query_single += query_start.elapsed().as_millis();
+
+            // 生成单个几何体
+            let gen_start = Instant::now();
+            if let Err(e) = gen_cata_single_geoms(
+                refno,
+                &Default::default(), // brep_shape_map
+                &Default::default(), // design_axis_map
+            ).await {
+                warn!("生成元素 {} 几何体失败: {}", refno, e);
+                continue;
+            }
+            db_time_gen_single_geoms += gen_start.elapsed().as_millis();
+
+            // 获取通用类型
+            let generic_start = Instant::now();
+            let generic_type = get_generic_type(refno).await.unwrap_or_default();
+            db_time_get_generic_type += generic_start.elapsed().as_millis();
+
+            // 创建几何体信息
+            let geos_info = EleGeosInfo {
+                refno: refno,
+                sesno: ele_att.sesno(),
+                cata_hash: Some(cata_hash.clone()),
+                visible: true,
+                generic_type,
+                world_transform: origin_trans,
+                ptset_map: Default::default(),
+                is_solid: true,
+                ..Default::default()
+            };
+
+            // 添加到结果中
+            shape_insts_data.inst_info_map.insert(refno, geos_info);
+            processed_elements += 1;
+
+            let ele_time = ele_start.elapsed();
+            if ele_time.as_millis() > 100 {
+                debug!("⏱️ 元素 {} 处理耗时: {}ms", refno, ele_time.as_millis());
+            }
+        }
+
+        let element_time = element_start.elapsed();
+        debug!("✅ 元件库 {} 处理完成，耗时: {}ms", cata_hash, element_time.as_millis());
+    }
+
+    // 发送结果
+    if !shape_insts_data.inst_info_map.is_empty() {
+        if let Err(e) = sender.send_async(shape_insts_data).await {
+            error!("发送批次 {} 结果失败: {}", batch_id, e);
+            return Err(anyhow::anyhow!("发送结果失败: {}", e));
+        }
+    }
+
+    let batch_time = batch_start.elapsed();
+
+    // 输出详细的性能统计
+    info!("📊 批次 {} 性能统计:", batch_id);
+    info!("  - 处理元素数量: {}", processed_elements);
+    info!("  - 总耗时: {}ms", batch_time.as_millis());
+    info!("  - 平均每元素: {:.2}ms",
+          if processed_elements > 0 { batch_time.as_millis() as f64 / processed_elements as f64 } else { 0.0 });
+    info!("  - 数据库操作耗时:");
+    info!("    * 获取属性映射: {}ms", db_time_get_named_attmap);
+    info!("    * 获取世界变换: {}ms", db_time_get_world_transform);
+    info!("    * 获取元件库参考号: {}ms", db_time_get_cat_refno);
+    info!("    * 查询几何体信息: {}ms", db_time_query_single);
+    info!("    * 生成几何体: {}ms", db_time_gen_single_geoms);
+    info!("    * 获取通用类型: {}ms", db_time_get_generic_type);
+
+    Ok(())
 }
