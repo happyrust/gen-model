@@ -358,6 +358,9 @@ impl AiosDBManager {
             io.open()
                 .map_err(|e| anyhow::anyhow!("打开PDMS IO失败: {}", e))?;
 
+            // 获取会话号范围的结束值（在移动之前）
+            let end_sesno = *sesno_range.end();
+
             // 收集指定范围内的增量元素
             let range_eles = io.collect_increment_eles(Some(sesno_range))?;
 

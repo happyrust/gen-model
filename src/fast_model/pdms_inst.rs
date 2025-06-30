@@ -161,15 +161,18 @@ pub async fn save_instance_data_single(
         // insert_handles.push(handle);
     }
 
-    //保存tubi的数据
+    //保存tubi的数据 - 创建inst_relate记录
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
+    let mut tubi_inst_relate_vec = vec![];
+
     for chunk in keys.chunks(chunk_size) {
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
-            //更新aabb 和 transform，保存relate已经在别的地方加了，这里后面需要重构
             let aabb = v.aabb.unwrap();
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
             let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
+
+            // 保存aabb和transform到映射中
             if !aabb_map.contains_key(&aabb_hash) {
                 aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
             }
@@ -179,6 +182,36 @@ pub async fn save_instance_data_single(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
+
+            // 为TUBI创建inst_relate记录
+            let tubi_relate_sql = format!(
+                "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, aabb: aabb:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
+                k.to_inst_relate_key(),
+                k.to_pe_key(),
+                v.id_str(),
+                transform_hash,
+                aabb_hash,
+                v.generic_type.to_string(),
+                v.has_cata_neg,
+                v.is_solid,
+            );
+
+            if let Some(t_refno) = test_refno {
+                if *k == t_refno.into() {
+                    println!("TUBI inst relate sql: {}", &tubi_relate_sql);
+                }
+            }
+
+            tubi_inst_relate_vec.push(tubi_relate_sql);
+        }
+    }
+
+    // 保存TUBI的inst_relate记录
+    if !tubi_inst_relate_vec.is_empty() {
+        for chunk in tubi_inst_relate_vec.chunks(chunk_size) {
+            let inst_relate_sql =
+                format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
+            SUL_DB.query(inst_relate_sql).await.unwrap();
         }
     }
 
@@ -491,15 +524,18 @@ pub async fn save_instance_data(
         }
     }
 
-    // 处理tubi数据
+    // 处理tubi数据 - 创建inst_relate记录
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
+    let mut tubi_inst_relate_vec = vec![];
+
     for chunk in keys.chunks(chunk_size) {
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
-            //更新aabb 和 transform，保存relate已经在别的地方加了，这里后面需要重构
             let aabb = v.aabb.unwrap();
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
             let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
+
+            // 保存aabb和transform到映射中
             if !aabb_map.contains_key(&aabb_hash) {
                 aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
             }
@@ -509,6 +545,38 @@ pub async fn save_instance_data(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
+
+            // 为TUBI创建inst_relate记录
+            let tubi_relate_sql = format!(
+                "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, aabb: aabb:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
+                k.to_inst_relate_key(),
+                k.to_pe_key(),
+                v.id_str(),
+                transform_hash,
+                aabb_hash,
+                v.generic_type.to_string(),
+                v.has_cata_neg,
+                v.is_solid,
+            );
+
+            if let Some(t_refno) = test_refno {
+                if *k == t_refno.into() {
+                    println!("TUBI inst relate sql: {}", &tubi_relate_sql);
+                }
+            }
+
+            tubi_inst_relate_vec.push(tubi_relate_sql);
+        }
+    }
+
+    // 并发保存TUBI的inst_relate记录
+    if !tubi_inst_relate_vec.is_empty() {
+        for chunk in tubi_inst_relate_vec.chunks(chunk_size) {
+            let inst_relate_sql =
+                format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
+            let db = SUL_DB.clone();
+            let future = tokio::spawn(async move { db.query(inst_relate_sql).await });
+            db_futures.push(future);
         }
     }
 
