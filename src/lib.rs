@@ -48,6 +48,7 @@ use team_data::sync_team_data;
 // use tokio::sync::mpsc::Sender;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
+use aios_core::material::save_all_material_data;
 use versioned_db::database::{define_dbnum_event, sync_pdms};
 
 use log::{error, LevelFilter};
@@ -243,7 +244,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
-        // save_all_material_data().await?;
+        save_all_material_data().await?;
     }
     // sync TEAM_DATA数据
     if db_option.only_sync_sys {

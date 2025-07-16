@@ -312,10 +312,10 @@ DEFINE FUNCTION fn::last_child_exclude_type($pe:record, $exclude_type: string) {
 remove function fn::prev_pe;
 DEFINE FUNCTION fn::prev_pe($pe:record) {
     if $pe == none || !record::exists($pe) {
-        return none;
-    };
-    let $a = (record::id($pe->pe_owner.id[0])[1]) - 1;
-    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
+                return none;
+        };
+        let $a = (record::id($pe->pe_owner.id[0])[1]);
+        return (select value in from ($pe->pe_owner->pe<-pe_owner)[..$a]).last();
 };
 
 remove function fn::prev_pe_exclude_type;
@@ -334,11 +334,11 @@ DEFINE FUNCTION fn::last_child_exclude_type($pe:record, $exclude_type: string) {
 
 remove function fn::next_pe;
 DEFINE FUNCTION fn::next_pe($pe:record) {
-    if $pe == none || !record::exists($pe) {
-        return none;
-    };
-    let $a = (record::id($pe->pe_owner.id[0])[1]) + 1;
-    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
+     if $pe == none || !record::exists($pe) {
+                return none;
+            };
+        let $a = (record::id($pe->pe_owner.id[0])[1]) + 1;
+        return select value in from only ($pe->pe_owner->pe<-pe_owner)[$a..] limit 1;
 };
 
 remove function fn::next_pe_exclude_type;

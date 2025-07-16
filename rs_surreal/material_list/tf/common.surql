@@ -79,18 +79,6 @@ DEFINE FUNCTION fn::next_is_type($pe:record,$type:string) {
     return fn::next_type($pe)==$type;
 };
 
-remove function fn::prev_pe;
-DEFINE FUNCTION fn::prev_pe($pe:record) {
-    let $a = ($pe->pe_owner.id[1])[0] -1;
-    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
-};
-
-remove function fn::next_pe;
-DEFINE FUNCTION fn::next_pe($pe:record) {
-    let $a = ($pe->pe_owner.id[1])[0] + 1;
-    return select value (out<-pe_owner[$a].in) from only $pe->pe_owner limit 1;
-};
-
 remove function fn::prev_type;
 DEFINE FUNCTION fn::prev_type($pe:record) {
     return fn::prev_pe($pe).noun;

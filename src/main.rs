@@ -23,7 +23,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-// use aios_core::material::save_all_material_data;
+use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};

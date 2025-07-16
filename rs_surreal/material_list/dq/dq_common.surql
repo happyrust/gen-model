@@ -22,12 +22,12 @@ DEFINE FUNCTION fn::dq_horizontal_or_vertical($pe:record) {
 
 remove FUNCTION fn::get_unit_number;
 DEFINE FUNCTION fn::get_unit_number($id:record) {
-    RETURN string::slice(fn::find_ancestor_type($id, "SITE")[0].refno.NAME, 1, 1);
+    RETURN string::slice(fn::find_ancestor_type($id, "SITE")[0].refno.NAME?:'', 1, 1);
 };
 
 remove FUNCTION fn::get_project_number;
 DEFINE FUNCTION fn::get_project_number($id:record) {
-    RETURN string::slice(string::split(fn::find_ancestor_type($id, "SITE")[0].refno.NAME, '-')[0], 2);
+    RETURN string::slice(string::split(fn::find_ancestor_type($id, "SITE")[0].refno.NAME?:'', '-')[0], 2);
 };
 
 remove FUNCTION fn::get_major_type;
