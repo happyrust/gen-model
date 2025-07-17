@@ -31,7 +31,7 @@ DEFINE FUNCTION fn::fggd_STIF($pes: array<record>) {
     fn::hvac_bolt_qty(id) as nut_count,  //螺母数量
     fn::hvac_bolt_qty(id) * 2 as nut_count_b, // 螺母数量_2
 
-    fn::room_code(id)?:'' as room_num,
+    fn::room_code(id)[0]?:'' as room_num,
     fn::hvac_system(id) as system_name
 
 

@@ -9,7 +9,7 @@ define function fn::fggd_ofst($pes:array<record>) {
         string::concat(array::at(string::split(owner.name,'-'),4),'P') as pressure_level, // 压力等级
         string::concat(<string>refno.DESP[5],'-',<string>refno.DESP[9]) as l, // 风管长度
         string::replace(if fn::hvac_shape($this.id) == 'RECT' { <string>refno.DESP[1] } else if fn::hvac_shape($this.id) == 'CIRC' { string::concat('φ',<string>refno.DESP[1]) } else { '' },'f','') as w, // 宽
-        if fn::hvac_shape($this.id) == 'RECT' { string::replace(<string>refno.DESP[2],'f','') } else if fn::hvac_shape($this.id) == 'CIRC' { } else { '' } as h, // 高
+        if fn::hvac_shape($this.id) == 'RECT' { string::replace(<string>refno.DESP[2],'f','') } else if fn::hvac_shape($this.id) == 'CIRC' { '' } else { '' } as h, // 高
         (->inst_relate.world_trans.d.translation[0])[0]?:0.0 as x, // 坐标 x
         (->inst_relate.world_trans.d.translation[1])[0]?:0.0 as y, // 坐标 y
         (->inst_relate.world_trans.d.translation[2])[0]?:0.0 as z, // 坐标 z
@@ -19,7 +19,7 @@ define function fn::fggd_ofst($pes:array<record>) {
         '' as steel, // 风管加强 型钢
         '0' as hvac_length, // 风管加强 长度
         '0' as hvac_weight, //// 风管加强 重量
-        array::first(fn::strt_flan_size($this.id)).size as flan_steel, // 法兰 型钢 
+        array::first(fn::strt_flan_size($this.id)).size?:'' as flan_steel, // 法兰 型钢
         math::fixed(array::first(fn::flex_flan_length($this.id)).length?:0.0,2) as flan_length, //法兰 长度
         <string>math::fixed(array::first(fn::flex_flan_weight($this.id)).weight?:0.0,2) as flan_weight, ////法兰 总重
         // fn::tape_gask_size($this.id) as gask_size, //垫片类型

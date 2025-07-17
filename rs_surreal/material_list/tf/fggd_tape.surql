@@ -19,7 +19,7 @@ define function fn::fggd_tape($pes:array<record>) {
         '' as stif_sctn, // 风管加强 型钢
         '0' as stif_len, // 风管加强 长度
         '0' as stif_wei, //// 风管加强 重量
-        array::first(fn::strt_flan_size($this.id)).size as flan_steel, // 法兰 型钢
+        array::first(fn::strt_flan_size($this.id)).size?:'' as flan_steel, // 法兰 型钢
         fn::tape_flan_length($this.id) as flan_length,//法兰 长度
         array::first(fn::tape_flan_weight($this.id)).weight as flan_weight, //法兰 总重
         //fn::tape_gask_size($this.id) as gask_size, //垫片类型

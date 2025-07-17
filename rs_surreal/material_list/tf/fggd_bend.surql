@@ -19,7 +19,7 @@ define function fn::fggd_bend($pes:array<record>) {
         '' as steel, // 风管加强 型钢
         '0' as hvac_length, // 风管加强 长度
         '0' as hvac_weight, //// 风管加强 重量
-        array::first(fn::strt_flan_size($this.id)).size as flan_steel, // 法兰 型钢
+        array::first(fn::strt_flan_size($this.id)).size?:'' as flan_steel, // 法兰 型钢
         array::first(fn::flex_flan_length($this.id)).length as flan_length, //法兰 长度
         <string>math::fixed(array::first(fn::flex_flan_weight($this.id)).weight?:0.0,2) as flan_weight, ////法兰 总重
         // fn::bend_gask_size($this.id) as gask_size, //垫片类型

@@ -27,12 +27,12 @@ define function fn::fggd_strt($pes:array<record>) {
         (->inst_relate.world_trans.d.translation[1])[0]?:0.0 as y, // 坐标 y
         (->inst_relate.world_trans.d.translation[2])[0]?:0.0 as z, // 坐标 z
         if array::first(fn::pre_or_next_b_type(id,'DAMP')) { 3 } else { refno.DESP[32]?:0.0 } as thickness, // 风管壁厚
-        if array::first(fn::pre_or_next_b_type(id,'DAMP')) { math::fixed(refno.DESP[80] / 1000000,2) } else { math::fixed(refno.DESP[1] * refno.DESP[2] / 1000000 * 150,2) } as area, // 风管面积
-        if array::first(fn::pre_or_next_b_type(id,'DAMP')) { math::fixed((refno.DESP[1] * refno.DESP[2] * 150 * (if array::first(fn::pre_or_next_b_type(refno,'DAMP')) { 3 } else { refno.DESP[32] }) * 7.85) / 1000000,2) } else { math::fixed(refno.DESP[84]?:0.0,2) } as weight,  // 风管总重
+        if array::first(fn::pre_or_next_b_type(id,'DAMP')) { math::fixed(refno.DESP[80]?:0.0 / 1000000,2) } else { math::fixed(refno.DESP[1]?:0.0 * refno.DESP[2]?:0.0 / 1000000 * 150,2) } as area, // 风管面积
+        if array::first(fn::pre_or_next_b_type(id,'DAMP')) { math::fixed((refno.DESP[1]?:0.0 * refno.DESP[2]?:0.0 * 150 * (if array::first(fn::pre_or_next_b_type(id,'DAMP')) { 3 } else { refno.DESP[32]?:0.0 }) * 7.85) / 1000000,2) } else { math::fixed(refno.DESP[84]?:0.0,2) } as weight,  // 风管总重
         array::first(fn::hvac_size($this.id,fn::hvac_shape($this.id),array::at(string::split(owner.name,'-'),4)?:'')).size as stif_sctn, // 风管加强 型钢
         math::fixed(array::first(fn::hvac_length($this.id,fn::hvac_shape($this.id),array::at(string::split(owner.name,'-'),4)?:'',refno.DESP[5]?:0.0,refno.DESP[1]?:0.0,refno.DESP[2]?:0.0)) / 1000,2) as stif_len, // 风管加强 长度
         math::fixed(array::first(fn::hvac_weight($this.id,fn::hvac_shape($this.id),array::at(string::split(owner.name,'-'),4)?:'',refno.DESP[5]?:0.0,refno.DESP[1]?:0.0,refno.DESP[2]?:0.0)) / 1000,2) as stif_wei, //// 风管加强 重量
-        array::first(fn::strt_flan_size($this.id)).size as flan_steel, // 法兰 型钢
+        array::first(fn::strt_flan_size($this.id)).size?:'' as flan_steel, // 法兰 型钢
         math::fixed(array::first(fn::strt_flan_length($this.id)).length,2) as flan_length,//法兰 长度
         math::fixed(array::first(fn::strt_flan_weight($this.id)).weight,2) as flan_weight, //法兰 总重
         array::first(fn::strt_gask_size($this.id)).size as gask_size, //垫片类型

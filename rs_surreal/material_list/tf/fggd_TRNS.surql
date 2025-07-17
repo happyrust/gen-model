@@ -38,7 +38,7 @@ DEFINE FUNCTION fn::fggd_TRNS($pes: array<record>) {
 
 
     fn::hvac_system(id) as system_name,
-    fn::room_code(id)?:'' as room_num
+    fn::room_code(id)[0]?:'' as room_num
 
     from $pes;
 }

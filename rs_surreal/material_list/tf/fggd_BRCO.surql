@@ -38,7 +38,7 @@ DEFINE FUNCTION fn::fggd_BRCO($pes: array<record>) {
 
 
        fn::hvac_system(id) as system_name, // 系统
-       fn::room_code(id)?:'' as room_num, // 所在房间号
+       fn::room_code(id)[0]?:'' as room_num, // 所在房间号
        array::join([array::first(fn::hvac_material($this.id)).r,fn::get_ispec_material($this.id)],';') as material // 材质
 
    from $pes;

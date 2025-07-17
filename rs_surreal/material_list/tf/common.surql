@@ -94,7 +94,6 @@ DEFINE FUNCTION fn::children($pe:record) {
     return (select value <-pe_owner.in from $pe)[0];;
 };
 
-
 // 获取ipara
 remove function fn::get_ipara;
 DEFINE FUNCTION fn::get_ipara($pe:record) {
