@@ -3,16 +3,16 @@
 remove function fn::code;
 define function fn::code($pe: record, $opt: option<number>){
     return if $opt == none {
-        string::split(string::split($pe.refno.SPRE.name?:'', '/')[2]?:'', ':')[0]?:''
+        (string::split((string::split($pe.refno.SPRE.name?:'', '/')?:[])[2]?:'', ':')?:[])[0]?:''
     } else {
-        string::split(string::split($pe.refno.SPRE.name?:'', '/')[2]?:'', ':')[0]?:''
+        (string::split((string::split($pe.refno.SPRE.name?:'', '/')?:[])[2]?:'', ':')?:[])[0]?:''
     };
 };
 
 //将pe转换为refno
 remove function fn::pe_to_refno;
 define function fn::pe_to_refno($pe:record){
-    return string::replace(record::id($pe), '_', '/');
+    return string::replace(record::id($pe?:''), '_', '/');
 };
 
 -- let $refno = [pe:24383_84092];
@@ -23,28 +23,28 @@ define function fn::pe_to_refno($pe:record){
 remove function fn::pre_or_next_b_type;
 DEFINE FUNCTION fn::pre_or_next_b_type($pe:record,$type:string){
     return
-    select value fn::prev_pe($pe).noun == $type || fn::next_pe($pe) == $type from $pe
+    select value (fn::prev_pe($pe).noun?:'') == $type || (fn::next_pe($pe).noun?:'') == $type from $pe
 };
 
 remove function fn::get_world_pos;
 DEFINE FUNCTION fn::get_world_pos($pe:record) {
-    let $noun = $pe.noun;
+    let $noun = $pe.noun?:'';
     return
     if $noun == 'EQUI' {
-        return select value world_trans.d.translation from type::thing('cal_equi',record::id($pe))
+        return select value world_trans.d.translation?:[] from type::thing('cal_equi',record::id($pe?:''))
     } else {
-        return select value ->inst_relate.world_trans.d.translation from $pe
+        return select value (->inst_relate.world_trans.d.translation)?:[] from $pe
     }
 };
 
 remove function fn::refno;
 DEFINE FUNCTION fn::refno($pe: record){
-    return string::replace(record::id($pe), '_', '/');
+    return string::replace(record::id($pe?:''), '_', '/');
 };
 
 remove function fn::type;
 DEFINE FUNCTION fn::type($pe:record) {
-    return $pe.noun;
+    return $pe.noun?:'';
 };
 
 // 判断上一个或下一个节点是否为 $type类型

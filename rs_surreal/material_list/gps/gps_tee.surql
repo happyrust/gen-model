@@ -3,12 +3,12 @@
 
 remove function fn::gps_tee;
 DEFINE FUNCTION fn::gps_tee($refnos: array<record>) {
-    return select 
+    return select
         fn::pe_to_refno(id) as id,
         fn::code(id) as code, // 编码
-        refno.TYPE as type, // 部件
-        array::join([math::fixed(refno.SPRE.refno.CATR.refno.PARA[6]?:0, 3),
-            math::fixed(refno.SPRE.refno.CATR.refno.PARA[7]?:0, 3)],';') as radius // 外径
+        refno.TYPE?:'' as type, // 部件
+        array::join([math::fixed((refno.SPRE.refno.CATR.refno.PARA?:[])[6]?:0, 3),
+            math::fixed((refno.SPRE.refno.CATR.refno.PARA?:[])[7]?:0, 3)],';') as radius // 外径
     from $refnos;
 };
 

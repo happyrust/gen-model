@@ -1,52 +1,52 @@
 
 DEFINE FUNCTION fn::hvac_stype($pe: record){
-    return $pe.refno.DESP[0];
+    return ($pe.refno.DESP?:[])[0]?:0;
 };
 
 DEFINE FUNCTION fn::hvac_mat_number($pe: record){
-    return <int>array::at(string::split(($pe->pe_owner->pe.name)[0], '-'), 3);
+    return <int>(string::split(($pe->pe_owner->pe.name?:[])[0]?:'', '-')?:[])[3]?:0;
 };
 
 
 DEFINE FUNCTION fn::hvac_mat_id($pe: record){
-    return type::thing('hvac_mat', <int>array::at(string::split(($pe->pe_owner->pe.name)[0], '-'), 3));
+    return type::thing('hvac_mat', <int>(string::split(($pe->pe_owner->pe.name?:[])[0]?:'', '-')?:[])[3]?:0);
 };
 
 //获得风管系统
 DEFINE FUNCTION fn::hvac_system($pe: record){
-    return array::at(string::split(($pe->pe_owner->pe.name)[0], '-'), 1);
+    return (string::split(($pe->pe_owner->pe.name?:[])[0]?:'', '-')?:[])[1]?:'';
 };
 
 
 DEFINE FUNCTION fn::hvac_number($pe: record){
-    let $v = (select value <int>v from type::thing('ATT_UDA', record::id($pe)).udas where u.NAME='/H-SECTCODE')[0];
+    let $v = (select value <int>v from type::thing('ATT_UDA', record::id($pe?:'')).udas?:[] where (u.NAME?:'')='/H-SECTCODE')?:[0];
     return if $v == none {
         return "unset";
     } else {
-        return $v;
+        return $v?:'';
     };
 };
 
 DEFINE FUNCTION fn::hvac_bran_name_splits($pe: record){
-    return array::complement((select value string::split((->pe_owner->pe.name)[0], '-') from $pe)[0], ['']);
+    return array::complement((select value string::split((->pe_owner->pe.name?:[])[0]?:'', '-') from $pe)?:[0]?:[], ['']);
 };
 
 DEFINE FUNCTION fn::hvac_zone_name_splits($pe: record){
-    return (select value string::split((->pe_owner->pe->pe_owner->pe->pe_owner->pe.name)[0], '-') from $pe)[0];
+    return (select value string::split((->pe_owner->pe->pe_owner->pe->pe_owner->pe.name?:[])[0]?:'', '-') from $pe)?:[0]?:[];
 };
 
 DEFINE FUNCTION fn::hvac_seg_code($pe: record){
-    let $s = fn::hvac_bran_name_splits($pe);
-    return string::join('/', string::concat($s[2], $s[5]), fn::hvac_number($pe));
+    let $s = fn::hvac_bran_name_splits($pe)?:[];
+    return string::join('/', string::concat(($s[2])?:'', ($s[5])?:''), fn::hvac_number($pe)?:'');
 };
 
 DEFINE FUNCTION fn::hvac_sub_code($pe: record){
-    let $s = fn::hvac_zone_name_splits($pe);
-    return $s[2];
+    let $s = fn::hvac_zone_name_splits($pe)?:[];
+    return ($s[2])?:'';
 };
 
 DEFINE FUNCTION fn::hvac_shape($pe: record){
-    return if $pe.refno.DESP[29] == 927441 {
+    return if (($pe.refno.DESP?:[])[29]?:0) == 927441 {
         return "RECT";
     } else if $pe.refno.DESP[29] == 603858 {
         return "CIRC";

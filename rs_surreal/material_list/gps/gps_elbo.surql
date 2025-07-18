@@ -3,11 +3,11 @@
 
 remove function fn::gps_elbo;
 define function fn::gps_elbo($refnos: array<record>){
-    return select 
+    return select
         fn::pe_to_refno(id) as id,
         fn::code(id) as code, // 编码
-        refno.TYPE as type ,// 部件
-        math::fixed(refno.SPRE.refno.CATR.refno.PARA[3]?:0,3) as radius // 外径
+        refno.TYPE?:'' as type ,// 部件
+        math::fixed((refno.SPRE.refno.CATR.refno.PARA?:[])[3]?:0,3) as radius // 外径
     from $refnos;
 }
 
