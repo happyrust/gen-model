@@ -3,8 +3,8 @@ remove function fn::fggd_CAP;
 DEFINE FUNCTION fn::fggd_CAP($pes: array<record>) {
     return select
     fn::pe_to_refno(id) as id, // 参考号
-    string::concat(fn::shape_name(id), "封头") as desc, // 描述
-    fn::fggd_bran_code(id)[0] as bran_seg_code, // 管段编号
+    string::concat(fn::shape_name(id)?:'', "封头") as desc, // 描述
+    (fn::fggd_bran_code(id)?:[])[0]?:'' as bran_seg_code, // 管段编号
     fn::hvac_sub_code(id) as sub_code, // 子项号
     fn::hvac_mats(id) as material, // 材质
     fn::hvac_pressure(id) as pressure_level, // 压力等级
@@ -23,12 +23,12 @@ DEFINE FUNCTION fn::fggd_CAP($pes: array<record>) {
     fn::common_washer_types(id) as gask_size, // 垫片类型
     fn::common_washer_len(id) as shim_width, // 垫片长度
 
-    fn::hvac_bolt_qtys_1(id) as nut_qty,  //螺母数量
-    fn::hvac_washer_bolt_qtys_1(id) as gask_count, // 垫片数量
+    fn::hvac_bolt_qtys_1(id)?:[] as nut_qty,  //螺母数量
+    fn::hvac_washer_bolt_qtys_1(id)?:[] as gask_count, // 垫片数量
 
     fn::hvac_system(id) as system_name, // 系统
-    fn::room_code(id)[0]?:'' as room_num, // 所在房间号
-    array::join([array::first(fn::hvac_material($this.id)).r,fn::get_ispec_material($this.id)],';') as material // 材质
+    (fn::room_code(id)?:[])[0]?:'' as room_num, // 所在房间号
+    array::join([(array::first(fn::hvac_material($this.id)?:[])?:{}).r?:'',fn::get_ispec_material($this.id)?:''],';') as material // 材质
 
    from $pes;
 }

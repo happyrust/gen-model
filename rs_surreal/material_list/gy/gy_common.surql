@@ -59,6 +59,6 @@ remove function fn::bran_len;
 define function fn::bran_len($pe:record) {
    //首先查询所有 tubi 的长度
    let $tubi_len = fn::bran_tubi_len($pe);
-   let $len = math::sum(select value fn::bran_comp_len(in) from $pe<-pe_owner?:[]);
+   let $len = math::sum(select value fn::bran_comp_len(in) from $pe<-pe_owner);
    return ($tubi_len?:0) + ($len?:0);
 };
