@@ -2,9 +2,9 @@
 remove function fn::gy_bran;
 define function fn::gy_bran($refnos: array<record>, $filter_noun: string) {
     let $children = return if $filter_noun == '' {
-        return select value in from array::flatten($refnos<-pe_owner);
+        return select value in from array::flatten($refnos<-pe_owner?:[]);
     } else {
-        return select value in from array::flatten($refnos<-pe_owner) where in.noun == $filter_noun;
+        return select value in from array::flatten($refnos<-pe_owner?:[]) where in.noun == $filter_noun;
     };
     // return $children;
     return if $filter_noun == 'BEND' {
@@ -24,7 +24,7 @@ define function fn::gy_bran($refnos: array<record>, $filter_noun: string) {
 remove function fn::gy_single;
 define function fn::gy_single($refno: record) {
     let $pes = [$refno];
-    let $filter_noun = $refno.noun;
+    let $filter_noun = $refno.noun?:'';
     return if $filter_noun == 'BEND' {
         return fn::gy_bend($pes);
     } else if $filter_noun == 'TUBI' {

@@ -7,7 +7,7 @@ define function fn::gy_bend($refnos: array<record>) {
         fn::pe_to_refno(id) as id,
         fn::code(id) as code, // 编码
         refno.TYPE as noun, // 部件
-        math::fixed((refno.ANGL?:0.0 / 360) * 2 *3.1415 * refno.SPRE.refno.CATR.refno.PARA[1]?:0.0, 2) as length // 长度
+        math::fixed((refno.ANGL?:0.0 / 360) * 2 *3.1415 * (refno.SPRE.refno.CATR.refno.PARA?:[])[1]?:0.0, 2) as length // 长度
     from $refnos where noun == 'BEND';
 };
 

@@ -123,5 +123,11 @@ DEFINE FUNCTION fn::array_distance($x: array<array>) {
     return vector::distance::euclidean($x[0], $x[1]);
 };
 
+// 去掉name 开头的 /
+remove function fn::remove_name_first_char;
+DEFINE FUNCTION fn::remove_name_first_char($name: string) {
+    return if string::starts_with($name,'/') { string::slice($name,1) } else { $name };
+};
+
 -- let $x = [[1,2,3],[4,5,6]];
 -- return fn::array_distance($x);
