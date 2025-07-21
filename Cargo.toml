@@ -12,6 +12,7 @@ path = "src/lib.rs"
 default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util"]  #GRPC服务功能
 truck = []
 local = []
 ws = []
@@ -130,8 +131,17 @@ toml = "0.8.19"
 pollster = "0.4.0"
 async-std = "1.13.1"
 
+# GRPC 相关依赖
+tonic = { version = "0.12", optional = true, features = ["tls", "tls-roots"] }
+prost = { version = "0.13", optional = true }
+tonic-reflection = { version = "0.12", optional = true }
+tokio-util = { version = "0.7", optional = true, features = ["codec"] }
+thiserror = "1.0"
+
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
+tonic-build = "0.12"
+prost-build = "0.13"
 
 
 [dependencies.sqlx]

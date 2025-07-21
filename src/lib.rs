@@ -77,9 +77,38 @@ pub mod mqtt_service;
 
 pub mod options;
 
+#[cfg(feature = "grpc")]
+pub mod grpc_service;
+
 // 添加options模块的重导出
 pub use options::get_db_option_ext;
 pub use options::DbOptionExt;
+
+// 重新导出MDB相关函数供GRPC服务使用
+// pub use crate::api::element::query_types_refnos_names;
+// pub use crate::api::attr::{query_explicit_attr, query_numbdbs_by_mdb};
+
+// // 添加get_project_mdb函数的重新导出
+// #[cfg(feature = "grpc")]
+// pub async fn get_project_mdb(project_pool: &sqlx::Pool<sqlx::MySql>) -> anyhow::Result<dashmap::DashMap<String, Vec<u32>>> {
+//     use crate::api::attr::{query_explicit_attr, query_numbdbs_by_mdb};
+//     use crate::api::element::query_types_refnos_names;
+//     use dashmap::DashMap;
+    
+//     let mut result = DashMap::new();
+//     // 获取到所有的 mdb
+//     let mdb = query_types_refnos_names(&vec!["MDB"], project_pool, None).await?;
+//     for (mdb_refno, mut mdb_name) in mdb {
+//         if mdb_name.starts_with("/") { mdb_name.remove(0); }
+//         let mdb_attr = query_explicit_attr(mdb_refno, project_pool).await?;
+//         let dbs = mdb_attr.get_refu64_vec("CURD");
+//         if dbs.is_none() { continue; }
+//         let dbs = dbs.unwrap();
+//         let numbdbs = query_numbdbs_by_mdb(dbs, project_pool).await?;
+//         result.entry(mdb_name).or_insert(numbdbs);
+//     }
+//     Ok(result)
+// }
 
 #[macro_use]
 extern crate derive_more;

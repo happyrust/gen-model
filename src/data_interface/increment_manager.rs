@@ -114,8 +114,11 @@ impl AiosDBManager {
             io.open()
                 .map_err(|e| anyhow::anyhow!("Failed to open PdmsIO: {}", e))?;
             let end_sesno = sesno_range.end().clone();
-            let range_eles = io.collect_increment_eles(Some(sesno_range))?;
-            io.update_elements_to_database(&range_eles).await?;
+            let range_update_eles = io.collect_increment_eles(Some(sesno_range))?;
+            io.update_elements_to_database(&range_update_eles).await?;
+            
+            //执行逻辑
+            
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
             // dbg!(&file_name);
