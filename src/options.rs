@@ -23,6 +23,10 @@ pub struct DbOptionExt {
     /// HTTP数据服务器端口，用于异地部署
     #[serde(default)]
     pub http_port: Option<u16>,
+
+    /// 目标会话号，用于历史模型生成
+    #[serde(default)]
+    pub target_sesno: Option<u32>,
 }
 
 impl Deref for DbOptionExt {
@@ -47,6 +51,7 @@ impl From<DbOption> for DbOptionExt {
             mqtt_port: None,
             http_server: None,
             http_port: None,
+            target_sesno: None,
         }
     }
 }

@@ -186,7 +186,7 @@ pub async fn query_key_data(
     let refno = RefnoEnum(val.get::<i64, _>("REFNO") as u64);
     let operate = val.get::<i32, _>("OPERATE");
     let numb_db = val.get::<i32, _>("NUMBDB");
-    let children: RefnoEnumVec =
+    let children: Vec<RefnoEnum> =
         bincode::deserialize(&val.get::<Vec<u8>, _>("CHILDREN")).unwrap_or_default();
     let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
     let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;

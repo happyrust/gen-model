@@ -1,4 +1,6 @@
 pub mod gen_model;
+// pub mod gen_model_refactored;
+// pub mod gen_model_impl;
 
 pub mod cata_model;
 
@@ -26,11 +28,14 @@ pub mod utils;
 
 pub mod aabb_tree;
 
+pub mod incremental;
+
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 pub use gen_model::*;
+// pub use gen_model_refactored::DbModelInstRefnos;
 pub use occ_generate::*;
 pub use query::*;
 pub use resolve::*;

@@ -88,6 +88,9 @@ pub use options::DbOptionExt;
 // pub use crate::api::element::query_types_refnos_names;
 // pub use crate::api::attr::{query_explicit_attr, query_numbdbs_by_mdb};
 
+#[cfg(feature = "sql")]
+pub use mdb::get_project_mdb;
+
 // // 添加get_project_mdb函数的重新导出
 // #[cfg(feature = "grpc")]
 // pub async fn get_project_mdb(project_pool: &sqlx::Pool<sqlx::MySql>) -> anyhow::Result<dashmap::DashMap<String, Vec<u32>>> {
@@ -248,7 +251,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         //         EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
         //     }
         // }
-        gen_all_geos_data(vec![], &db_option, None).await?;
+        gen_all_geos_data(vec![], &db_option, None, None).await?;
         //保存
         // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
     }
@@ -322,19 +325,59 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     use crate::fast_model::aabb_tree::manual_update_aabbs;
     use aios_core::init_surreal;
+    
     // 如果传入的是DbOptionExt，则取其内部的DbOption
-    let db_option: DbOption = option
-        .map(|o| o.inner)
-        .unwrap_or_else(|| get_db_option().clone());
+    let db_option_ext = option.unwrap_or_else(|| get_db_option_ext());
+    let db_option: DbOption = db_option_ext.inner.clone();
+    
+    // 检查是否需要启动GRPC服务器
+    #[cfg(feature = "grpc")]
+    let start_grpc = std::env::var("AIOS_GRPC_ENABLED")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+    
+    #[cfg(feature = "grpc")]
+    if start_grpc {
+        // 在后台启动GRPC服务器
+        let grpc_handle = tokio::spawn(async {
+            if let Err(e) = crate::grpc_service::start_grpc_server().await {
+                eprintln!("GRPC server error: {}", e);
+            }
+        });
+        
+        // 继续执行正常的应用逻辑，但不阻塞GRPC服务器
+        let app_handle = tokio::spawn(async move {
+            run_app_internal(db_option).await
+        });
+        
+        // 等待任一任务完成
+        tokio::select! {
+            result = app_handle => result?,
+            _ = grpc_handle => {},
+        }
+        
+        return Ok(());
+    }
+    // 调用内部实现
+    run_app_internal(db_option).await
+}
+
+/// 内部应用运行逻辑
+async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
+    use crate::fast_model::aabb_tree::manual_update_aabbs;
+    use aios_core::init_surreal;
+    
     let config = surrealdb::opt::Config::default()
-    .ast_payload()  // 启用AST格式
-    ; // 设置容
+        .ast_payload(); // 启用AST格式
+    
     #[cfg(feature = "local")]
     SUL_DB
         .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
         .with_capacity(1000)
         .await?;
+    
     println!("数据库连接中...");
+    
     #[cfg(feature = "ws")]
     {
         match init_surreal().await {
@@ -362,7 +405,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
             println!("Manual update aabb tree completed");
         }
     }
-    // let (tx, mut rx) = mpsc::channel::<i32>();
+    
     run_cli(db_option).await
 }
 

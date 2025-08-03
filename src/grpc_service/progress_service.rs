@@ -49,14 +49,29 @@ impl ProgressService for ProgressServiceImpl {
         &self,
         request: Request<ProgressRequest>,
     ) -> Result<Response<Self::GetProgressStreamStream>, Status> {
+        use crate::grpc_service::logging::{GrpcRequestLogger, PERFORMANCE_METRICS};
+        
+        let mut logger = GrpcRequestLogger::new("GetProgressStream");
+        PERFORMANCE_METRICS.increment_requests();
+        
         let req = request.into_inner();
-        let task_id = req.task_id;
+        let task_id = req.task_id.clone();
+        logger.add_metadata("task_id", &task_id);
 
         // 创建进度接收器
-        let mut progress_receiver = self.progress_manager
+        let mut progress_receiver = match self.progress_manager
             .create_task(task_id.clone())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .await {
+            Ok(receiver) => {
+                logger.log_success();
+                receiver
+            }
+            Err(e) => {
+                logger.log_error(&e.to_string());
+                PERFORMANCE_METRICS.increment_failed_requests();
+                return Err(Status::internal(e.to_string()));
+            }
+        };
 
         let (tx, rx) = mpsc::channel(128);
 
@@ -190,11 +205,11 @@ impl ProgressService for ProgressServiceImpl {
         };
 
         // 转换任务优先级
-        let priority = match req.priority() {
-            TaskPriority::TaskPriorityLow => crate::grpc_service::types::TaskPriority::Low,
-            TaskPriority::TaskPriorityNormal => crate::grpc_service::types::TaskPriority::Normal,
-            TaskPriority::TaskPriorityHigh => crate::grpc_service::types::TaskPriority::High,
-            TaskPriority::TaskPriorityCritical => crate::grpc_service::types::TaskPriority::Critical,
+        let priority = match proto::TaskPriority::try_from(req.priority).unwrap_or(proto::TaskPriority::Normal) {
+            proto::TaskPriority::Low => crate::grpc_service::types::TaskPriority::Low,
+            proto::TaskPriority::Normal => crate::grpc_service::types::TaskPriority::Normal,
+            proto::TaskPriority::High => crate::grpc_service::types::TaskPriority::High,
+            proto::TaskPriority::Critical => crate::grpc_service::types::TaskPriority::Critical,
         };
 
         // 转换任务选项

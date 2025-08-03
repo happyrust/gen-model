@@ -38,7 +38,7 @@ impl AiosDBManager {
         let db_option = &self.db_option;
         let mut target_refnos = vec![];
         for &db_no in db_nos {
-            let refnos = self
+            let refnos: RefU64Vec = self
                 .get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], &[db_no])
                 .await?;
             target_refnos.extend_from_slice(&refnos);

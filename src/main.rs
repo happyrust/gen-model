@@ -64,7 +64,67 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use clap::{Arg, Command};
+    
+    let matches = Command::new("aios-database")
+        .version("0.1.3")
+        .about("AIOS Database Processing Tool")
+        .arg(
+            Arg::new("grpc-server")
+                .long("grpc-server")
+                .help("Start GRPC server")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("grpc-port")
+                .long("grpc-port")
+                .help("GRPC server port")
+                .value_name("PORT")
+                .default_value("50051")
+        )
+        .get_matches();
+
+    // 如果指定了启动GRPC服务器
+    #[cfg(feature = "grpc")]
+    if matches.get_flag("grpc-server") {
+        return start_grpc_server_mode(&matches).await;
+    }
+    
+    // 否则运行正常的应用程序
     run_app(None).await
+}
+
+#[cfg(feature = "grpc")]
+async fn start_grpc_server_mode(matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    use aios_database::grpc_service::{
+        start_grpc_server, init_grpc_logging, 
+        server::GrpcServerConfig
+    };
+    
+    // 初始化日志
+    init_grpc_logging()?;
+    
+    // 获取端口配置
+    let port: u16 = matches.get_one::<String>("grpc-port")
+        .unwrap()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid port number"))?;
+    
+    // 创建服务器配置
+    let config = GrpcServerConfig {
+        host: "0.0.0.0".to_string(),
+        port,
+        max_concurrent_tasks: 4,
+        enable_reflection: true,
+    };
+    
+    println!("Starting AIOS Database GRPC Server...");
+    println!("Server will listen on {}:{}", config.host, config.port);
+    
+    // 启动GRPC服务器
+    aios_database::grpc_service::server::start_grpc_server_with_config(config).await?;
+    
+    Ok(())
 }
 
 

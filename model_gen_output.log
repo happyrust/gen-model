@@ -1,0 +1,54 @@
+数据库连接中...
+载入surreal init_status.surql
+载入surreal get_room_nodes.surql
+载入surreal material_common.surql
+载入surreal common.surql
+载入surreal gy_common.surql
+载入surreal fn_query_room_code.surql
+载入surreal fn_query_room_code_hh.surql
+数据库已经连接到 AvevaMarineSample, 站点: ws://localhost:8009
+载入surreal init_status.surql
+载入surreal get_room_nodes.surql
+载入surreal material_common.surql
+载入surreal common.surql
+载入surreal gy_common.surql
+载入surreal fn_query_room_code.surql
+载入surreal fn_query_room_code_hh.surql
+正在重新定义dbnum_event...
+成功重新定义update_dbnum_event
+预加载方法完成。
+正在生成模型
+[src/fast_model/gen_model.rs:218:9] &dbnos = [
+    1112,
+]
+开始1112的模型生成
+gen_geos_data_by_dbnum 处理db: 1112
+当前分段使用管道或者支吊架元件库数量: 70
+save_instance_data time: 482ms
+Insert shape insts: 254
+save_instance_data time: 306ms
+Insert shape insts: 284
+save_instance_data time: 216ms
+Insert shape insts: 193
+save_instance_data time: 171ms
+Insert shape insts: 225
+save_instance_data time: 50ms
+Insert shape insts: 0
+
+==== 数据库操作总耗时统计 (ms) ====
+处理元件库几何体: 326 花费总时间: 76443 ms
+BRAN/HANG cata_model::gen_cata_geos执行时间: 76445ms
+当前分段使用元件库数量: 1279
+save_instance_data time: 291ms
+Insert shape insts: 233
+save_instance_data time: 331ms
+Insert shape insts: 246
+save_instance_data time: 307ms
+Insert shape insts: 229
+
+==== 数据库操作总耗时统计 (ms) ====
+处理元件库几何体: 1952 花费总时间: 155258 ms
+单个使用元件库 cata_model::gen_cata_geos执行时间: 155262ms
+save_instance_data time: 263ms
+Insert shape insts: 259
+当前分段使用元件库数量: 3586

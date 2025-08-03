@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 incr_sync = false
 sync_history = false
 enable_log = false
@@ -10,6 +10,9 @@ sync_live = false
 replace_dbs = false
 enable_index = false
 sync_chunk_size = 10_0000
+
+#数据库类型设置
+db_type = "surrealdb"
 
 #项目设置
 #project_path = "D:/AVEVA/Projects/E3D2.1"

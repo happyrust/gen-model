@@ -1,6 +1,7 @@
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::sesno_increment::get_changes_at_sesno;
 use crate::fast_model::pdms_inst::{save_instance_data};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
@@ -22,6 +23,14 @@ use aios_core::{prim_geo::*, DBType};
 use aios_core::{
     query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB,
 };
+// 历史数据查询相关导入
+// use aios_core::historical_query::{
+//     query_type_refnos_by_dbnum_at_sesno,
+//     query_hierarchy_at_sesno,
+//     query_multi_children_refnos_at_sesno,
+//     session_exists,
+//     HierarchyQueryResult
+// };
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
@@ -159,6 +168,7 @@ impl DbModelInstRefnos {
 /// * `manual_refnos` - 手动指定的引用号列表
 /// * `db_option` - 数据库选项配置
 /// * `incr_updates` - 增量更新日志，用于增量生成几何体数据
+/// * `target_sesno` - 目标会话号，用于判断是否生成历史数据的模型
 ///
 /// # 返回值
 /// * `anyhow::Result<bool>` - 返回生成结果，成功返回true，失败返回错误
@@ -166,12 +176,38 @@ pub async fn gen_all_geos_data(
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
+    target_sesno: Option<u32>,
 ) -> anyhow::Result<bool> {
     const CHUNK_SIZE: usize = 100;
-    let is_incr_update = incr_updates.is_some();
+    let mut final_incr_updates = incr_updates;
+    let time = Instant::now();
+    
+    // 如果指定了 target_sesno，获取该 sesno 的增量数据
+    if let Some(sesno) = target_sesno {
+        if final_incr_updates.is_none() {
+            // 从 element_changes 表获取该 sesno 的变更
+            match get_changes_at_sesno(sesno).await {
+                Ok(sesno_changes) => {
+                    // 如果该 sesno 有变更，使用这些变更作为增量更新
+                    if sesno_changes.count() > 0 {
+                        println!("发现 sesno {} 的变更: {} 个元素", sesno, sesno_changes.count());
+                        final_incr_updates = Some(sesno_changes);
+                    } else {
+                        println!("sesno {} 没有发现变更，跳过增量生成", sesno);
+                        return Ok(false);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("获取 sesno {} 的变更失败: {}", sesno, e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+    
+    let is_incr_update = final_incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.debug_root_refnos.is_some();
-    let time = Instant::now();
 
     if is_incr_update || has_manual_refnos || has_debug {
         // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
@@ -187,8 +223,9 @@ pub async fn gen_all_geos_data(
             None,
             manual_refnos.clone(),
             db_option,
-            incr_updates.clone(),
+            final_incr_updates.clone(),
             sender.clone(),
+            target_sesno,
         )
         .await?;
         drop(sender);
@@ -232,7 +269,7 @@ pub async fn gen_all_geos_data(
                 }
             });
             let db_refnos =
-                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone()).await?;
+                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone(), target_sesno).await?;
             drop(sender);
             insert_task.await.unwrap();
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
@@ -314,12 +351,22 @@ pub async fn gen_geos_data_by_dbnum(
     dbno: u32,
     db_option_arc: Arc<DbOption>,
     sender: flume::Sender<ShapeInstancesData>,
+    target_sesno: Option<u32>,
 ) -> anyhow::Result<DbModelInstRefnos> {
     let gen_history = db_option_arc.is_gen_history_model();
+
     //判断有空的层级，不用去生成
-    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
-        .await
-        .unwrap_or_default();
+    let zones = if let Some(sesno) = target_sesno {
+        // 使用历史查询
+        query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
+            .await
+            .unwrap_or_default()
+    } else {
+        // 使用当前数据查询
+        query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
+            .await
+            .unwrap_or_default()
+    };
     if zones.is_empty() {
         return Ok(Default::default());
     }
@@ -534,12 +581,21 @@ pub async fn gen_geos_data_by_dbnum(
 }
 
 ///生成几何体数据
+///
+/// # 参数
+/// * `dbno` - 可选的数据库编号
+/// * `manual_refnos` - 手动指定的引用号列表
+/// * `db_option` - 数据库选项
+/// * `incr_updates` - 增量更新日志
+/// * `sender` - 数据发送通道
+/// * `target_sesno` - 目标会话号，用于历史模型生成
 pub async fn gen_geos_data(
     dbno: Option<u32>,
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<ShapeInstancesData>,
+    target_sesno: Option<u32>,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
     let skip_exist = !db_option.is_replace_mesh();
     let mut all_handles = FuturesUnordered::new();
@@ -587,11 +643,30 @@ pub async fn gen_geos_data(
             debug_root_refnos.clone()
         };
     } else if dbno.is_some() {
-        target_root_refnos =
-            query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history)
-                .await?
+        // 检查是否需要进行历史查询
+        if let Some(sesno) = target_sesno {
+            // 验证会话是否存在 (暂时跳过验证)
+            // if !session_exists(sesno).await? {
+            //     return Err(anyhow::anyhow!("会话号 {} 不存在", sesno));
+            // }
+
+            println!("使用历史查询，目标会话号: {} (注意：当前使用当前数据替代)", sesno);
+            target_root_refnos = query_type_refnos_by_dbnum(
+                &["SITE"],
+                dbno.unwrap(),
+                Some(true),
+                include_history
+            ).await?
                 .into_iter()
                 .collect();
+        } else {
+            // 使用当前数据查询
+            target_root_refnos =
+                query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history)
+                    .await?
+                    .into_iter()
+                    .collect();
+        }
     }
     if dbno.is_some() {
         println!("总共 {} 个SITE", target_root_refnos.len());

@@ -12,7 +12,7 @@ path = "src/lib.rs"
 default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
-grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util"]  #GRPC服务功能
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken"]  #GRPC服务功能
 truck = []
 local = []
 ws = []
@@ -136,7 +136,10 @@ tonic = { version = "0.12", optional = true, features = ["tls", "tls-roots"] }
 prost = { version = "0.13", optional = true }
 tonic-reflection = { version = "0.12", optional = true }
 tokio-util = { version = "0.7", optional = true, features = ["codec"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "1.0"
+jsonwebtoken = { version = "9.0", optional = true }
+async-trait = "0.1"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
@@ -170,8 +173,8 @@ features = [
 #panic = 'abort'
 #codegen-units = 1
 
-#[patch."https://gitee.com/happydpc/rs-core.git"]
-#aios_core = { path = "../new-crates/aios-core" }
+[patch."https://gitee.com/happydpc/rs-core.git"]
+aios_core = { path = "../new-crates/aios-core" }
 #
 #[patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
 #parse_pdms_db = { path = "../aios-parse-pdms" }

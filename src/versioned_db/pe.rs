@@ -116,7 +116,7 @@ pub async fn save_pes_mysql(
     project_maps: &HashMap<String, Pool<MySql>>,
     option: &DbOption,
     db_num: i32,
-    output: &flume::Sender<SenderSql>,
+    output: &flume::Sender<String>,
 ) {
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
     let debug_refnos: Vec<RefU64> = option

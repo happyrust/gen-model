@@ -20,9 +20,31 @@ pub mod managers;
 #[cfg(feature = "grpc")]
 pub mod integration;
 
+#[cfg(feature = "grpc")]
+pub mod logging;
+
+#[cfg(feature = "grpc")]
+pub mod auth;
+
+#[cfg(feature = "grpc")]
+pub mod health;
+
+#[cfg(feature = "grpc")]
+#[cfg(test)]
+pub mod tests;
+
 // 重新导出主要类型
 #[cfg(feature = "grpc")]
 pub use error::ServiceError;
 
 #[cfg(feature = "grpc")]
 pub use server::start_grpc_server;
+
+#[cfg(feature = "grpc")]
+pub use logging::{init_grpc_logging, GrpcRequestLogger, TaskExecutionLogger, PERFORMANCE_METRICS};
+
+#[cfg(feature = "grpc")]
+pub use auth::{AuthService, AuthConfig, AuthInterceptor, RateLimiter, InputValidator};
+
+#[cfg(feature = "grpc")]
+pub use health::{HealthMonitorService, HealthChecker, HealthStatus};
