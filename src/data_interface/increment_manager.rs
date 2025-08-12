@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // AIOS核心模块导入
+use aios_core::data_center::DataCenterRecordOperate;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
-use aios_core::{clear_all_caches, get_pe, SUL_DB};
+use aios_core::{clear_all_caches, get_default_name, get_pe, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec, RefnoEnum};
-use aios_core::data_center::DataCenterRecordOperate;
 
 // 异步和工具库导入
 use futures::StreamExt;
@@ -63,8 +63,8 @@ mod tests {
                         let ext_lower = ext_str.to_lowercase();
 
                         let excluded_extensions = [
-                            "com", "exe", "dll", "sys", "tmp", "temp", "log", "bak",
-                            "backup", "old", "cache", "lock", "pid", "swp", "swo", "~",
+                            "com", "exe", "dll", "sys", "tmp", "temp", "log", "bak", "backup",
+                            "old", "cache", "lock", "pid", "swp", "swo", "~",
                         ];
 
                         if excluded_extensions.contains(&ext_lower.as_str()) {
@@ -77,9 +77,7 @@ mod tests {
                     if let Some(name_str) = file_name.to_str() {
                         let name_lower = name_str.to_lowercase();
 
-                        let excluded_patterns = [
-                            "thumbs.db", "desktop.ini", ".ds_store",
-                        ];
+                        let excluded_patterns = ["thumbs.db", "desktop.ini", ".ds_store"];
 
                         for pattern in &excluded_patterns {
                             if name_lower == *pattern {
@@ -194,6 +192,32 @@ const JSON_CHUNK_COUNT: usize = 200;
 pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
 
 impl AiosDBManager {
+    /// 简化的MySQL pdms_element表更新方法
+    ///
+    /// 这是一个简化版本的方法，只需要传入range_eles参数即可完成MySQL数据库的更新。
+    /// 该方法会自动处理数据库连接、元素分类和批量更新操作。
+    ///
+    /// # 参数
+    ///
+    /// * `range_eles` - 从collect_increment_eles方法获取的增量元素数据
+    ///
+    /// # 返回值
+    ///
+    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
+    ///
+    /// # 使用示例
+    ///
+    /// ```rust
+    /// // 在增量更新流程中使用
+    /// let range_eles = io.collect_increment_eles(Some(sesno_range))?;
+    /// aios_db_manager.update_mysql_pdms_elements_simple(&range_eles).await?;
+    /// ```
+    pub async fn update_mysql_pdms_elements_simple(
+        &self,
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    ) -> anyhow::Result<()> {
+        self.update_mysql_pdms_elements(range_eles).await
+    }
     /// 检查文件是否应该被排除在监控之外
     ///
     /// 根据文件扩展名和文件名模式检查文件是否应该被排除在监控范围之外。
@@ -219,22 +243,22 @@ impl AiosDBManager {
 
                 // 排除的文件扩展名列表
                 let excluded_extensions = [
-                    "com",      // COM可执行文件
-                    "exe",      // Windows可执行文件
-                    "dll",      // 动态链接库
-                    "sys",      // 系统文件
-                    "tmp",      // 临时文件
-                    "temp",     // 临时文件
-                    "log",      // 日志文件
-                    "bak",      // 备份文件
-                    "backup",   // 备份文件
-                    "old",      // 旧文件
-                    "cache",    // 缓存文件
-                    "lock",     // 锁文件
-                    "pid",      // 进程ID文件
-                    "swp",      // Vim交换文件
-                    "swo",      // Vim交换文件
-                    "~",        // 临时备份文件
+                    "com",    // COM可执行文件
+                    "exe",    // Windows可执行文件
+                    "dll",    // 动态链接库
+                    "sys",    // 系统文件
+                    "tmp",    // 临时文件
+                    "temp",   // 临时文件
+                    "log",    // 日志文件
+                    "bak",    // 备份文件
+                    "backup", // 备份文件
+                    "old",    // 旧文件
+                    "cache",  // 缓存文件
+                    "lock",   // 锁文件
+                    "pid",    // 进程ID文件
+                    "swp",    // Vim交换文件
+                    "swo",    // Vim交换文件
+                    "~",      // 临时备份文件
                 ];
 
                 if excluded_extensions.contains(&ext_lower.as_str()) {
@@ -251,10 +275,10 @@ impl AiosDBManager {
 
                 // 排除的文件名模式
                 let excluded_patterns = [
-                    "thumbs.db",        // Windows缩略图缓存
-                    "desktop.ini",      // Windows桌面配置
-                    ".ds_store",        // macOS文件夹配置
-                    "~$",               // Office临时文件前缀
+                    "thumbs.db",   // Windows缩略图缓存
+                    "desktop.ini", // Windows桌面配置
+                    ".ds_store",   // macOS文件夹配置
+                    "~$",          // Office临时文件前缀
                 ];
 
                 // 检查是否匹配排除模式
@@ -366,6 +390,17 @@ impl AiosDBManager {
 
             // 将元素更新到数据库
             io.update_elements_to_database(&range_eles).await?;
+
+            // 更新MySQL pdms_element表
+            match self.update_mysql_pdms_elements(&range_eles).await {
+                Ok(_) => {
+                    println!("MySQL pdms_element表更新成功");
+                }
+                Err(e) => {
+                    println!("MySQL pdms_element表更新失败: {}", e);
+                    // 注意：这里不返回错误，避免影响其他处理流程
+                }
+            }
 
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
@@ -482,20 +517,15 @@ impl AiosDBManager {
                 let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
                 b_len.cmp(&a_len)
             }) {
-                let dir_entry =
-                    entry.map_err(|e| anyhow::anyhow!("获取目录条目失败: {}", e))?;
+                let dir_entry = entry.map_err(|e| anyhow::anyhow!("获取目录条目失败: {}", e))?;
                 let path = dir_entry.path();
 
                 // 获取文件名(不含扩展名)
                 let file_name = path
                     .file_stem()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("无法从路径获取文件名: {}", path.display())
-                    })?
+                    .ok_or_else(|| anyhow::anyhow!("无法从路径获取文件名: {}", path.display()))?
                     .to_str()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("文件名转换为字符串失败: {}", path.display())
-                    })?;
+                    .ok_or_else(|| anyhow::anyhow!("文件名转换为字符串失败: {}", path.display()))?;
 
                 // 跳过目录
                 if path.is_dir() {
@@ -550,9 +580,7 @@ impl AiosDBManager {
                     let input = path.to_path_buf();
                     let output: PathBuf = format!("assets/archives/{}.cba", file_name).into();
                     let compress_opt = CompressOptions::new(input, output, "assets/temp");
-                    execute_compress(compress_opt)
-                        .await
-                        .expect("压缩失败");
+                    execute_compress(compress_opt).await.expect("压缩失败");
                 }
 
                 // 检查每个文件是否需要增量更新
@@ -574,10 +602,7 @@ impl AiosDBManager {
                             // 添加到待更新参数列表
                             params.insert(
                                 path.to_path_buf(),
-                                (
-                                    basic_info.clone(),
-                                    nearest_sesno..=file_latest_sesno as i32,
-                                ),
+                                (basic_info.clone(), nearest_sesno..=file_latest_sesno as i32),
                             );
                         }
                         // 注意：不再初始化缓存，因为我们已经移除了对缓存的依赖
@@ -667,7 +692,9 @@ impl AiosDBManager {
                     println!("检测到文件变化: {:?}", &event);
 
                     // 预过滤：检查事件中的文件路径，排除不需要监控的文件
-                    let filtered_paths: Vec<_> = event.paths.iter()
+                    let filtered_paths: Vec<_> = event
+                        .paths
+                        .iter()
                         .filter(|path| !self.should_exclude_file(path))
                         .cloned()
                         .collect();
@@ -710,34 +737,46 @@ impl AiosDBManager {
 
                             // 使用统一的过滤方法检查是否应该处理此数据库
                             if !self.should_process_database(db_type, db_num) {
-                                println!("根据过滤规则跳过数据库: 类型={}, 编号={}", db_type, db_num);
+                                println!(
+                                    "根据过滤规则跳过数据库: 类型={}, 编号={}",
+                                    db_type, db_num
+                                );
                                 continue;
                             }
 
-                            println!("检查文件: {}, 数据库编号: {}, 文件会话号: {}",
-                                    file_name, db_num, new_header.latest_ses_data.sesno);
+                            println!(
+                                "检查文件: {}, 数据库编号: {}, 文件会话号: {}",
+                                file_name, db_num, new_header.latest_ses_data.sesno
+                            );
 
                             // 直接从数据库获取最新的会话号，不依赖缓存
-                            let db_latest_sesno = match Self::query_latest_sesno_by_dbnum(db_num).await {
-                                Ok(sesno) => sesno,
-                                Err(e) => {
-                                    println!("查询数据库最新sesno失败: {:?}", e);
-                                    continue;
-                                }
-                            };
+                            let db_latest_sesno =
+                                match Self::query_latest_sesno_by_dbnum(db_num).await {
+                                    Ok(sesno) => sesno,
+                                    Err(e) => {
+                                        println!("查询数据库最新sesno失败: {:?}", e);
+                                        continue;
+                                    }
+                                };
 
-                            println!("数据库最新会话号: {}, 文件会话号: {}",
-                                    db_latest_sesno, new_header.latest_ses_data.sesno);
+                            println!(
+                                "数据库最新会话号: {}, 文件会话号: {}",
+                                db_latest_sesno, new_header.latest_ses_data.sesno
+                            );
 
                             // 如果数据库中的会话号与文件中的会话号相同，说明未发生修改
                             if db_latest_sesno as i32 >= new_header.latest_ses_data.sesno {
-                                println!("文件 {} 无需更新，数据库会话号({}) >= 文件会话号({})",
-                                        file_name, db_latest_sesno, new_header.latest_ses_data.sesno);
+                                println!(
+                                    "文件 {} 无需更新，数据库会话号({}) >= 文件会话号({})",
+                                    file_name, db_latest_sesno, new_header.latest_ses_data.sesno
+                                );
                                 continue;
                             }
 
-                            println!("发现需要增量更新的文件: {}, 数据库会话号: {}, 文件会话号: {}",
-                                    file_name, db_latest_sesno, new_header.latest_ses_data.sesno);
+                            println!(
+                                "发现需要增量更新的文件: {}, 数据库会话号: {}, 文件会话号: {}",
+                                file_name, db_latest_sesno, new_header.latest_ses_data.sesno
+                            );
 
                             // 构建增量更新参数，指定准确的会话号范围
                             params.insert(
@@ -762,7 +801,8 @@ impl AiosDBManager {
                             Ok(true) => {
                                 // 增量更新成功，处理文件同步（不再依赖缓存）
                                 for (path, new_header) in new_headers {
-                                    let file_name = match path.file_stem().and_then(|s| s.to_str()) {
+                                    let file_name = match path.file_stem().and_then(|s| s.to_str())
+                                    {
                                         Some(name) => name,
                                         None => {
                                             println!("无法获取文件名: {:?}", path);
@@ -782,22 +822,20 @@ impl AiosDBManager {
                                     let output: PathBuf =
                                         format!("assets/archives/{}.cba", file_name).into();
 
-                                    let compress_opt = CompressOptions::new(
-                                        path.clone(),
-                                        output,
-                                        "assets/temp",
-                                    );
-                                    let file_hash = execute_compress(compress_opt)
-                                        .await
-                                        .unwrap()
-                                        .to_string();
+                                    let compress_opt =
+                                        CompressOptions::new(path.clone(), output, "assets/temp");
+                                    let file_hash =
+                                        execute_compress(compress_opt).await.unwrap().to_string();
 
                                     // 检查地区数据库配置
                                     // 如果location_dbs为空，则所有地区都推送
                                     // 否则只有指定地区对应的数据库编号才能推送
                                     if let Some(location_dbs) = &get_db_option().location_dbs {
                                         if !location_dbs.contains(&dbno) {
-                                            println!("数据库编号 {} 不在地区配置中，跳过推送", dbno);
+                                            println!(
+                                                "数据库编号 {} 不在地区配置中，跳过推送",
+                                                dbno
+                                            );
                                             continue;
                                         }
                                     }
@@ -840,7 +878,8 @@ impl AiosDBManager {
                         #[cfg(feature = "mqtt")]
                         if !notify_file_names.is_empty() {
                             // 创建同步消息载荷
-                            let payload = SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
+                            let payload =
+                                SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
 
                             // 在本地数据库中保存同步记录
                             // TODO: 后续需要配置哪些数据库可以修改，哪些不能修改
@@ -933,8 +972,311 @@ impl AiosDBManager {
         Ok(())
     }
 
+    /// 更新MySQL pdms_element表数据
+    ///
+    /// 该方法专门用于将增量元素数据更新到MySQL的pdms_element表中。
+    /// 根据元素操作类型（新增、修改、删除）执行相应的数据库操作。
+    ///
+    /// # 参数
+    ///
+    /// * `range_eles` - 元素操作数据的映射
+    ///   - key: 会话号(sesno)
+    ///   - value: 该会话号下的元素操作数据列表
+    ///
+    /// # 返回值
+    ///
+    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
+    ///
+    /// # 处理逻辑
+    ///
+    /// 1. **新增操作**: 插入新的元素记录到pdms_element表
+    /// 2. **修改操作**: 更新现有元素的相关字段
+    /// 3. **删除操作**: 将IS_DEL字段设置为1，标记为已删除
+    ///
+    /// # 性能优化
+    ///
+    /// - 使用批量SQL操作减少数据库连接开销
+    /// - 按操作类型分组处理，提高执行效率
+    /// - 分批处理避免SQL语句过长
+    pub async fn update_mysql_pdms_elements(
+        &self,
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    ) -> anyhow::Result<()> {
+        use crate::consts::PDMS_ELEMENTS_TABLE;
+        use aios_core::get_db_option;
+        use std::collections::HashMap;
+
+        // 获取数据库连接配置
+        let db_option = get_db_option();
+        let project_name = &db_option.project_name;
+
+        // 获取MySQL连接池
+        let connection_str =
+            crate::data_interface::tidb_manager::AiosDBManager::get_default_conn_str(&db_option);
+        let pool = crate::data_interface::tidb_manager::AiosDBManager::get_db_pool(
+            &connection_str,
+            project_name,
+        )
+            .await?;
+
+        // 分类收集不同操作类型的元素
+        let mut insert_elements = Vec::new(); // 新增元素
+        let mut update_elements = Vec::new(); // 修改元素
+        let mut delete_elements = Vec::new(); // 删除元素
+
+        // 遍历所有会话号下的元素操作数据
+        for (sesno, ele_vec) in range_eles {
+            for ele_data in ele_vec {
+                match &ele_data.detail {
+                    EleOperationDetail::Add(add_data) => {
+                        insert_elements.push((ele_data.refno, *sesno, add_data));
+                    }
+                    EleOperationDetail::Modified(modify_data) => {
+                        update_elements.push((ele_data.refno, *sesno, modify_data));
+                    }
+                    EleOperationDetail::Deleted => {
+                        delete_elements.push((ele_data.refno, *sesno));
+                    }
+                    EleOperationDetail::None => {
+                        // 跳过无操作类型
+                        continue;
+                    }
+                }
+            }
+        }
+
+        println!(
+            "MySQL更新统计: 新增{}个, 修改{}个, 删除{}个元素",
+            insert_elements.len(),
+            update_elements.len(),
+            delete_elements.len()
+        );
+
+        // 处理新增元素
+        if !insert_elements.is_empty() {
+            self.process_mysql_insert_elements(&pool, &insert_elements)
+                .await?;
+        }
+
+        // 处理修改元素
+        if !update_elements.is_empty() {
+            self.process_mysql_update_elements(&pool, &update_elements)
+                .await?;
+        }
+
+        // 处理删除元素
+        if !delete_elements.is_empty() {
+            self.process_mysql_delete_elements(&pool, &delete_elements)
+                .await?;
+        }
+
+        println!("MySQL pdms_element表更新完成");
+        Ok(())
+    }
+
+    /// 处理MySQL新增元素操作
+    ///
+    /// 批量插入新增的元素到pdms_element表中
+    ///
+    /// # 参数
+    ///
+    /// * `pool` - MySQL连接池
+    /// * `insert_elements` - 新增元素列表，包含(refno, sesno, add_data)
+    async fn process_mysql_insert_elements(
+        &self,
+        pool: &sqlx::Pool<sqlx::MySql>,
+        insert_elements: &[(RefU64, u32, &parse_pdms_db::parse::EleData)],
+    ) -> anyhow::Result<()> {
+        use crate::api::element::gen_pdms_element_insert_sql;
+        use crate::consts::PDMS_ELEMENTS_TABLE;
+        use std::collections::HashMap;
+
+        if insert_elements.is_empty() {
+            return Ok(());
+        }
+
+        println!("开始处理{}个新增元素", insert_elements.len());
+
+        // 分批处理，避免SQL语句过长
+        const BATCH_SIZE: usize = 100;
+
+        for chunk in insert_elements.chunks(BATCH_SIZE) {
+            let mut insert_sql = String::new();
+            let mut has_valid_elements = false;
+
+            for (refno, _sesno, add_data) in chunk {
+                // 使用EleData中的属性信息
+                let attr_map = add_data.whole_attmap.att_map();
+
+                // 构建children_map（使用EleData中的children信息）
+                let mut children_map = HashMap::new();
+                if !add_data.children.is_empty() {
+                    // 将RefU64Vec转换为Vec<RefU64>
+                    let children_vec: Vec<RefU64> = add_data.children.iter().cloned().collect();
+                    children_map.insert(*refno, children_vec);
+                }
+
+                // 从属性映射中获取数据库编号，如果没有则使用默认值0
+                let dbnum = attr_map.get_i32("DBNO").unwrap_or(0);
+
+                // 生成插入SQL片段
+                let sql_fragment = gen_pdms_element_insert_sql(attr_map, dbnum, &children_map);
+                if !sql_fragment.is_empty() {
+                    insert_sql.push_str(&sql_fragment);
+                    has_valid_elements = true;
+                }
+            }
+
+            // 执行批量插入
+            if has_valid_elements {
+                // 构建完整的INSERT语句
+                let mut full_sql = format!(
+                    "INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB, ORDER_NUM, CHILDREN_COUNT, IS_DEL) VALUES {}",
+                    PDMS_ELEMENTS_TABLE, insert_sql
+                );
+
+                // 移除最后的逗号
+                if full_sql.ends_with(",") {
+                    full_sql.truncate(full_sql.len() - 1);
+                }
+
+                // 执行SQL
+                match sqlx::query(&full_sql).execute(pool).await {
+                    Ok(result) => {
+                        println!("成功插入{}行记录", result.rows_affected());
+                    }
+                    Err(e) => {
+                        println!("插入元素失败: {}", e);
+                        println!("SQL: {}", full_sql);
+                        return Err(anyhow::anyhow!("插入元素失败: {}", e));
+                    }
+                }
+            }
+        }
+
+        println!("新增元素处理完成");
+        Ok(())
+    }
+
+    /// 处理MySQL修改元素操作
+    ///
+    /// 更新已存在元素的相关字段
+    ///
+    /// # 参数
+    ///
+    /// * `pool` - MySQL连接池
+    /// * `update_elements` - 修改元素列表，包含(refno, sesno, modify_data)
+    async fn process_mysql_update_elements(
+        &self,
+        pool: &sqlx::Pool<sqlx::MySql>,
+        update_elements: &[(RefU64, u32, &pdms_io::io::ModifiedElement)],
+    ) -> anyhow::Result<()> {
+        use crate::consts::PDMS_ELEMENTS_TABLE;
+
+        if update_elements.is_empty() {
+            return Ok(());
+        }
+
+        println!("开始处理{}个修改元素", update_elements.len());
+
+        // 分批处理
+        const BATCH_SIZE: usize = 50;
+
+        for chunk in update_elements.chunks(BATCH_SIZE) {
+            let mut update_sqls = Vec::new();
+
+            for (refno, _sesno, modify_data) in chunk {
+                // todo 暂时通过查询surreal来获取最终得值
+                if let Some(pe) = get_pe((*refno).into()).await? {
+                    let name = if !pe.name.is_empty() { pe.name } else { get_default_name((*refno).into()).await?.unwrap_or("".to_string()) };
+                    // 构建UPDATE语句
+                    let update_sql = format!(
+                        "UPDATE {} SET OWNER={}, NAME='{}' WHERE ID={}",
+                        PDMS_ELEMENTS_TABLE, pe.owner.refno().0, name, pe.refno.refno().0
+                    );
+                    update_sqls.push(update_sql);
+                }
+            }
+
+            // 批量执行UPDATE语句
+            for sql in update_sqls {
+                match sqlx::query(&sql).execute(pool).await {
+                    Ok(result) => {
+                        if result.rows_affected() == 0 {
+                            println!("警告: 更新元素时未找到对应记录: {}", sql);
+                        }
+                    }
+                    Err(e) => {
+                        println!("更新元素失败: {}", e);
+                        println!("SQL: {}", sql);
+                        return Err(anyhow::anyhow!("更新元素失败: {}", e));
+                    }
+                }
+            }
+        }
+
+        println!("修改元素处理完成");
+        Ok(())
+    }
+
+    /// 处理MySQL删除元素操作
+    ///
+    /// 将删除的元素标记为已删除（IS_DEL=1）
+    ///
+    /// # 参数
+    ///
+    /// * `pool` - MySQL连接池
+    /// * `delete_elements` - 删除元素列表，包含(refno, sesno)
+    async fn process_mysql_delete_elements(
+        &self,
+        pool: &sqlx::Pool<sqlx::MySql>,
+        delete_elements: &[(RefU64, u32)],
+    ) -> anyhow::Result<()> {
+        use crate::consts::PDMS_ELEMENTS_TABLE;
+
+        if delete_elements.is_empty() {
+            return Ok(());
+        }
+
+        println!("开始处理{}个删除元素", delete_elements.len());
+
+        // 分批处理
+        const BATCH_SIZE: usize = 100;
+
+        for chunk in delete_elements.chunks(BATCH_SIZE) {
+            // 构建批量UPDATE语句，将IS_DEL设置为1
+            let refno_list: Vec<String> = chunk
+                .iter()
+                .map(|(refno, _sesno)| refno.0.to_string())
+                .collect();
+
+            let delete_sql = format!(
+                "UPDATE {} SET IS_DEL=1 WHERE ID IN ({})",
+                PDMS_ELEMENTS_TABLE,
+                refno_list.join(",")
+            );
+
+            match sqlx::query(&delete_sql).execute(pool).await {
+                Ok(result) => {
+                    println!("成功标记{}行记录为已删除", result.rows_affected());
+                }
+                Err(e) => {
+                    println!("删除元素失败: {}", e);
+                    println!("SQL: {}", delete_sql);
+                    return Err(anyhow::anyhow!("删除元素失败: {}", e));
+                }
+            }
+        }
+
+        println!("删除元素处理完成");
+        Ok(())
+    }
+
     /// 更新元数据版本表
-    async fn update_datacenter_version(&self, data: &BTreeMap<u32, Vec<EleOperationData>>) -> anyhow::Result<()> {
+    async fn update_datacenter_version(
+        &self,
+        data: &BTreeMap<u32, Vec<EleOperationData>>,
+    ) -> anyhow::Result<()> {
         let unit = vec!["SUPPO", "BRAN", "EQUI", "ZONE"];
         for (_, data) in data {
             for d in data {
@@ -945,7 +1287,6 @@ impl AiosDBManager {
                                             let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};
                                             update type::thing('{}',$pe) set status = '{:?}',belong_zone = $belong_zone;",
                                           d.refno.to_pe_key(), DATACENTER_VERSION, DataCenterRecordOperate::Delete);
-                        dbg!(&sql);
                         match SUL_DB.query(&sql).await {
                             Ok(_) => {}
                             Err(e) => {
@@ -957,12 +1298,26 @@ impl AiosDBManager {
                     EleOperationDetail::Modified(modify_data) => {
                         // 最小交付单元，直接修改对应的值
                         let sql = if unit.contains(&modify_data.noun.as_str()) {
-                            format!("update {} set status = '{:?}'", d.refno.to_table_key(DATACENTER_VERSION), DataCenterRecordOperate::Modify)
+                            format!(
+                                "update {} set status = '{:?}'",
+                                d.refno.to_table_key(DATACENTER_VERSION),
+                                DataCenterRecordOperate::Modify
+                            )
                         } else {
                             // 其他的找owner
-                            let unit_str = unit.iter().map(|unit| format!("'{}'", unit)).collect::<Vec<String>>().join(",");
-                            format!("let $pe = fn::find_ancestor_types({},[{}])[0];
-                                        update type::thing('{}',$pe) set status = '{:?}';", d.refno.to_pe_key(), unit_str, DATACENTER_VERSION, DataCenterRecordOperate::Modify)
+                            let unit_str = unit
+                                .iter()
+                                .map(|unit| format!("'{}'", unit))
+                                .collect::<Vec<String>>()
+                                .join(",");
+                            format!(
+                                "let $pe = fn::find_ancestor_types({},[{}])[0];
+                                        update type::thing('{}',$pe) set status = '{:?}';",
+                                d.refno.to_pe_key(),
+                                unit_str,
+                                DATACENTER_VERSION,
+                                DataCenterRecordOperate::Modify
+                            )
                         };
                         match SUL_DB.query(&sql).await {
                             Ok(_) => {}
@@ -1015,10 +1370,10 @@ impl AiosDBManager {
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
         db_num: i32,
     ) -> anyhow::Result<()> {
-        use std::collections::HashSet;
         use crate::fast_model::occ_generate::process_meshes_update_db_deep;
         use crate::get_db_option;
         use crate::SUL_DB;
+        use std::collections::HashSet;
 
         // 收集需要生成模型的参考号集合
         let mut refnos_to_generate: HashSet<RefnoEnum> = HashSet::new();
@@ -1042,18 +1397,18 @@ impl AiosDBManager {
                         EleOperationDetail::Deleted => {
                             // 删除操作：PE已添加删除标记，无需额外的模型处理
                             println!("元素 {} 被删除，PE已加删除标记，无需额外处理", refno);
-                        },
+                        }
                         EleOperationDetail::Modified(_) => {
                             // 修改操作：需要先清理旧数据，再重新生成模型
                             println!("元素 {} 被修改，需要重新生成模型", refno);
                             refnos_to_delete_inst_relate.insert(refno);
                             refnos_to_generate.insert(refno);
-                        },
+                        }
                         EleOperationDetail::Add(_) => {
                             // 新增操作：直接生成新的模型数据
                             println!("元素 {} 新增，需要生成模型", refno);
                             refnos_to_generate.insert(refno);
-                        },
+                        }
                         EleOperationDetail::None => {
                             // 无操作类型，跳过处理
                             continue;
@@ -1075,13 +1430,17 @@ impl AiosDBManager {
 
         // 处理几何体相关的更新任务
         if has_delete_tasks || has_generate_tasks {
-            println!("需要删除inst_relate的元素数量: {}", refnos_to_delete_inst_relate.len());
+            println!(
+                "需要删除inst_relate的元素数量: {}",
+                refnos_to_delete_inst_relate.len()
+            );
             println!("需要生成模型的元素数量: {}", refnos_to_generate.len());
 
             // 第一步：删除修改元素的旧inst_relate数据
             // 这是必要的清理步骤，确保不会有残留的旧数据影响新模型
             if has_delete_tasks {
-                self.delete_inst_relate_data(&refnos_to_delete_inst_relate).await?;
+                self.delete_inst_relate_data(&refnos_to_delete_inst_relate)
+                    .await?;
             }
 
             // 第二步：批量生成新的模型数据
@@ -1099,8 +1458,12 @@ impl AiosDBManager {
         // 处理变换相关的更新任务
         // 当元素的位置、旋转或缩放发生变化时，需要更新其世界变换矩阵
         if has_transform_tasks {
-            println!("需要更新world transform的元素数量: {}", refnos_to_update_transform.len());
-            self.update_world_transforms(&refnos_to_update_transform).await?;
+            println!(
+                "需要更新world transform的元素数量: {}",
+                refnos_to_update_transform.len()
+            );
+            self.update_world_transforms(&refnos_to_update_transform)
+                .await?;
         }
 
         // 如果没有任何更新任务，记录日志信息
@@ -1164,10 +1527,10 @@ impl AiosDBManager {
                     delete array::flatten(select value out->geo_relate from {});
                     delete array::flatten(select value out from {});
                     delete {};"#,
-                    refno.to_inst_relate_key(),  // 删除geo_relate指向的几何数据
-                    refno.to_inst_relate_key(),  // 删除geo_relate关系数据
-                    refno.to_inst_relate_key(),  // 删除inst_relate的输出关系
-                    refno.to_inst_relate_key()   // 删除inst_relate记录本身
+                    refno.to_inst_relate_key(), // 删除geo_relate指向的几何数据
+                    refno.to_inst_relate_key(), // 删除geo_relate关系数据
+                    refno.to_inst_relate_key(), // 删除inst_relate的输出关系
+                    refno.to_inst_relate_key()  // 删除inst_relate记录本身
                 );
                 delete_sqls.push(delete_sql);
             }
@@ -1176,7 +1539,9 @@ impl AiosDBManager {
             if !delete_sqls.is_empty() {
                 let batch_sql = delete_sqls.join("");
                 println!("执行删除SQL，批次大小: {}", chunk.len());
-                SUL_DB.query(batch_sql).await
+                SUL_DB
+                    .query(batch_sql)
+                    .await
                     .map_err(|e| anyhow::anyhow!("删除inst_relate数据失败: {}", e))?;
             }
         }
@@ -1211,8 +1576,8 @@ impl AiosDBManager {
     /// - **内存友好**: 分批处理避免大量数据同时加载到内存
     /// - **错误容忍**: 单个节点计算失败不影响其他节点的更新
     async fn update_world_transforms(&self, refnos: &HashSet<RefnoEnum>) -> anyhow::Result<()> {
-        use aios_core::get_world_transform;
         use crate::SUL_DB;
+        use aios_core::get_world_transform;
 
         // 如果没有需要更新的节点，直接返回
         if refnos.is_empty() {
@@ -1229,7 +1594,10 @@ impl AiosDBManager {
             return Ok(());
         }
 
-        println!("子树中有inst_relate数据的节点数量: {}", refnos_with_inst_relate.len());
+        println!(
+            "子树中有inst_relate数据的节点数量: {}",
+            refnos_with_inst_relate.len()
+        );
 
         // 第二步：分批处理 - 避免单次处理过多数据
         const BATCH_SIZE: usize = 50;
@@ -1259,7 +1627,9 @@ impl AiosDBManager {
             if !update_sqls.is_empty() {
                 let batch_sql = update_sqls.join("");
                 println!("执行world transform更新SQL，批次大小: {}", chunk.len());
-                SUL_DB.query(batch_sql).await
+                SUL_DB
+                    .query(batch_sql)
+                    .await
                     .map_err(|e| anyhow::anyhow!("更新world transform失败: {}", e))?;
             }
         }
@@ -1295,7 +1665,10 @@ impl AiosDBManager {
     /// - 递归检查所有子节点（最多10层）
     /// - 过滤掉已删除的节点
     /// - 返回去重后的结果集
-    async fn get_inst_relate_nodes_in_subtree(&self, refnos: &HashSet<RefnoEnum>) -> anyhow::Result<HashSet<RefnoEnum>> {
+    async fn get_inst_relate_nodes_in_subtree(
+        &self,
+        refnos: &HashSet<RefnoEnum>,
+    ) -> anyhow::Result<HashSet<RefnoEnum>> {
         use crate::SUL_DB;
 
         // 如果输入为空，直接返回空结果
@@ -1311,7 +1684,8 @@ impl AiosDBManager {
 
         for chunk in refnos_vec.chunks(BATCH_SIZE) {
             // 构建PE键列表，用于SQL查询
-            let pe_keys: String = chunk.iter()
+            let pe_keys: String = chunk
+                .iter()
                 .map(|refno| refno.to_pe_key())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -1349,13 +1723,17 @@ impl AiosDBManager {
                         println!("找到 {} 个有inst_relate的节点", refnos_result.len());
                         result.extend(refnos_result);
                     }
-                },
+                }
                 Err(e) => {
                     println!("批量查询inst_relate节点失败: {}", e);
                     // 容错机制：如果复杂查询失败，回退到逐个检查的方式
                     // 这确保了系统的健壮性，即使在极端情况下也能正常工作
                     for &refno in chunk {
-                        if self.check_single_inst_relate_exists(refno).await.unwrap_or(false) {
+                        if self
+                            .check_single_inst_relate_exists(refno)
+                            .await
+                            .unwrap_or(false)
+                        {
                             result.insert(*refno);
                         }
                     }
@@ -1413,7 +1791,7 @@ impl AiosDBManager {
                     // 如果无法解析结果，认为记录不存在
                     Ok(false)
                 }
-            },
+            }
             Err(_) => {
                 // 如果查询失败，可能的原因：
                 // 1. 表不存在
@@ -1424,7 +1802,4 @@ impl AiosDBManager {
             }
         }
     }
-
 }
-
-
