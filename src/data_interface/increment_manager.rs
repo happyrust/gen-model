@@ -42,6 +42,9 @@ use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
 use tracing_subscriber::fmt::format;
+use crate::api::element::gen_pdms_element_insert_sql;
+
+use crate::consts::PDMS_ELEMENTS_TABLE;
 
 const DATACENTER_VERSION: &'static str = "datacenter_version";
 
@@ -376,21 +379,16 @@ impl AiosDBManager {
         // 遍历所有需要增量更新的文件
         for (path, (basic_info, sesno_range)) in increment_ranges_map {
             println!("正在处理文件: {:?}, 会话号范围: {:?}", path, &sesno_range);
-
             // 创建并打开PDMS IO对象
             let mut io = PdmsIO::new("", path.clone(), true);
             io.open()
                 .map_err(|e| anyhow::anyhow!("打开PDMS IO失败: {}", e))?;
-
             // 获取会话号范围的结束值（在移动之前）
             let end_sesno = *sesno_range.end();
-
             // 收集指定范围内的增量元素
             let range_eles = io.collect_increment_eles(Some(sesno_range))?;
-
             // 将元素更新到数据库
             io.update_elements_to_database(&range_eles).await?;
-
             // 更新MySQL pdms_element表
             match self.update_mysql_pdms_elements(&range_eles).await {
                 Ok(_) => {
@@ -398,13 +396,10 @@ impl AiosDBManager {
                 }
                 Err(e) => {
                     println!("MySQL pdms_element表更新失败: {}", e);
-                    // 注意：这里不返回错误，避免影响其他处理流程
                 }
             }
-
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
-            // dbg!(&file_name);
             //更新 sesno 到 db_file_info 中的sql
             let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, end_sesno);
             //执行更新
@@ -416,7 +411,6 @@ impl AiosDBManager {
                     dbg!(&e);
                 }
             }
-
             // 执行相关的模型更新操作
             // self.process_model_updates(&range_eles, basic_info.pdms_header.db_num).await?;
         }
@@ -1002,14 +996,9 @@ impl AiosDBManager {
         &self,
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     ) -> anyhow::Result<()> {
-        use crate::consts::PDMS_ELEMENTS_TABLE;
-        use aios_core::get_db_option;
-        use std::collections::HashMap;
-
         // 获取数据库连接配置
         let db_option = get_db_option();
         let project_name = &db_option.project_name;
-
         // 获取MySQL连接池
         let connection_str =
             crate::data_interface::tidb_manager::AiosDBManager::get_default_conn_str(&db_option);
@@ -1018,12 +1007,10 @@ impl AiosDBManager {
             project_name,
         )
             .await?;
-
         // 分类收集不同操作类型的元素
         let mut insert_elements = Vec::new(); // 新增元素
         let mut update_elements = Vec::new(); // 修改元素
         let mut delete_elements = Vec::new(); // 删除元素
-
         // 遍历所有会话号下的元素操作数据
         for (sesno, ele_vec) in range_eles {
             for ele_data in ele_vec {
@@ -1044,32 +1031,27 @@ impl AiosDBManager {
                 }
             }
         }
-
         println!(
             "MySQL更新统计: 新增{}个, 修改{}个, 删除{}个元素",
             insert_elements.len(),
             update_elements.len(),
             delete_elements.len()
         );
-
         // 处理新增元素
         if !insert_elements.is_empty() {
             self.process_mysql_insert_elements(&pool, &insert_elements)
                 .await?;
         }
-
         // 处理修改元素
         if !update_elements.is_empty() {
             self.process_mysql_update_elements(&pool, &update_elements)
                 .await?;
         }
-
         // 处理删除元素
         if !delete_elements.is_empty() {
             self.process_mysql_delete_elements(&pool, &delete_elements)
                 .await?;
         }
-
         println!("MySQL pdms_element表更新完成");
         Ok(())
     }
@@ -1087,19 +1069,12 @@ impl AiosDBManager {
         pool: &sqlx::Pool<sqlx::MySql>,
         insert_elements: &[(RefU64, u32, &parse_pdms_db::parse::EleData)],
     ) -> anyhow::Result<()> {
-        use crate::api::element::gen_pdms_element_insert_sql;
-        use crate::consts::PDMS_ELEMENTS_TABLE;
-        use std::collections::HashMap;
-
         if insert_elements.is_empty() {
             return Ok(());
         }
-
         println!("开始处理{}个新增元素", insert_elements.len());
-
         // 分批处理，避免SQL语句过长
         const BATCH_SIZE: usize = 100;
-
         for chunk in insert_elements.chunks(BATCH_SIZE) {
             let mut insert_sql = String::new();
             let mut has_valid_elements = false;
@@ -1107,7 +1082,6 @@ impl AiosDBManager {
             for (refno, _sesno, add_data) in chunk {
                 // 使用EleData中的属性信息
                 let attr_map = add_data.whole_attmap.att_map();
-
                 // 构建children_map（使用EleData中的children信息）
                 let mut children_map = HashMap::new();
                 if !add_data.children.is_empty() {
@@ -1115,10 +1089,8 @@ impl AiosDBManager {
                     let children_vec: Vec<RefU64> = add_data.children.iter().cloned().collect();
                     children_map.insert(*refno, children_vec);
                 }
-
                 // 从属性映射中获取数据库编号，如果没有则使用默认值0
                 let dbnum = attr_map.get_i32("DBNO").unwrap_or(0);
-
                 // 生成插入SQL片段
                 let sql_fragment = gen_pdms_element_insert_sql(attr_map, dbnum, &children_map);
                 if !sql_fragment.is_empty() {
@@ -1126,7 +1098,6 @@ impl AiosDBManager {
                     has_valid_elements = true;
                 }
             }
-
             // 执行批量插入
             if has_valid_elements {
                 // 构建完整的INSERT语句
@@ -1134,12 +1105,10 @@ impl AiosDBManager {
                     "INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB, ORDER_NUM, CHILDREN_COUNT, IS_DEL) VALUES {}",
                     PDMS_ELEMENTS_TABLE, insert_sql
                 );
-
                 // 移除最后的逗号
                 if full_sql.ends_with(",") {
                     full_sql.truncate(full_sql.len() - 1);
                 }
-
                 // 执行SQL
                 match sqlx::query(&full_sql).execute(pool).await {
                     Ok(result) => {
@@ -1157,7 +1126,6 @@ impl AiosDBManager {
         println!("新增元素处理完成");
         Ok(())
     }
-
     /// 处理MySQL修改元素操作
     ///
     /// 更新已存在元素的相关字段
@@ -1176,15 +1144,11 @@ impl AiosDBManager {
         if update_elements.is_empty() {
             return Ok(());
         }
-
         println!("开始处理{}个修改元素", update_elements.len());
-
         // 分批处理
         const BATCH_SIZE: usize = 50;
-
         for chunk in update_elements.chunks(BATCH_SIZE) {
             let mut update_sqls = Vec::new();
-
             for (refno, _sesno, modify_data) in chunk {
                 // todo 暂时通过查询surreal来获取最终得值
                 if let Some(pe) = get_pe((*refno).into()).await? {
@@ -1197,7 +1161,6 @@ impl AiosDBManager {
                     update_sqls.push(update_sql);
                 }
             }
-
             // 批量执行UPDATE语句
             for sql in update_sqls {
                 match sqlx::query(&sql).execute(pool).await {
@@ -1214,7 +1177,6 @@ impl AiosDBManager {
                 }
             }
         }
-
         println!("修改元素处理完成");
         Ok(())
     }
@@ -1232,17 +1194,12 @@ impl AiosDBManager {
         pool: &sqlx::Pool<sqlx::MySql>,
         delete_elements: &[(RefU64, u32)],
     ) -> anyhow::Result<()> {
-        use crate::consts::PDMS_ELEMENTS_TABLE;
-
         if delete_elements.is_empty() {
             return Ok(());
         }
-
         println!("开始处理{}个删除元素", delete_elements.len());
-
         // 分批处理
         const BATCH_SIZE: usize = 100;
-
         for chunk in delete_elements.chunks(BATCH_SIZE) {
             // 构建批量UPDATE语句，将IS_DEL设置为1
             let refno_list: Vec<String> = chunk
@@ -1255,7 +1212,6 @@ impl AiosDBManager {
                 PDMS_ELEMENTS_TABLE,
                 refno_list.join(",")
             );
-
             match sqlx::query(&delete_sql).execute(pool).await {
                 Ok(result) => {
                     println!("成功标记{}行记录为已删除", result.rows_affected());
@@ -1267,7 +1223,6 @@ impl AiosDBManager {
                 }
             }
         }
-
         println!("删除元素处理完成");
         Ok(())
     }
