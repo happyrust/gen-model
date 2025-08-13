@@ -35,6 +35,7 @@ use tokio::fs::create_dir_all;
 use walkdir::WalkDir;
 
 // 本地模块导入
+use crate::api::element::gen_pdms_element_insert_sql;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -42,7 +43,6 @@ use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
 use tracing_subscriber::fmt::format;
-use crate::api::element::gen_pdms_element_insert_sql;
 
 use crate::consts::PDMS_ELEMENTS_TABLE;
 
@@ -189,6 +189,15 @@ impl IncrementInfo {
 
 /// JSON数据分块处理的大小常量
 const JSON_CHUNK_COUNT: usize = 200;
+
+/// MySQL批量处理的大小常量
+const BATCH_SIZE: usize = 100;
+
+/// 更新world transform的批量大小（较小，因为涉及复杂计算）
+const TRANSFORM_BATCH_SIZE: usize = 50;
+
+/// 查询inst_relate数据的批量大小（最小，避免查询超时）
+const QUERY_BATCH_SIZE: usize = 20;
 
 /// 需要检查的数据库类型列表
 /// 包含目录(CATA)、设计(DESI)、字典(DICT)、系统(SYST)、全局(GLB/GLOB)等类型
@@ -1006,12 +1015,12 @@ impl AiosDBManager {
             &connection_str,
             project_name,
         )
-            .await?;
+        .await?;
         // 分类收集不同操作类型的元素
         let mut insert_elements = Vec::new(); // 新增元素
         let mut update_elements = Vec::new(); // 修改元素
         let mut delete_elements = Vec::new(); // 删除元素
-        // 遍历所有会话号下的元素操作数据
+                                              // 遍历所有会话号下的元素操作数据
         for (sesno, ele_vec) in range_eles {
             for ele_data in ele_vec {
                 match &ele_data.detail {
@@ -1031,12 +1040,6 @@ impl AiosDBManager {
                 }
             }
         }
-        println!(
-            "MySQL更新统计: 新增{}个, 修改{}个, 删除{}个元素",
-            insert_elements.len(),
-            update_elements.len(),
-            delete_elements.len()
-        );
         // 处理新增元素
         if !insert_elements.is_empty() {
             self.process_mysql_insert_elements(&pool, &insert_elements)
@@ -1074,7 +1077,6 @@ impl AiosDBManager {
         }
         println!("开始处理{}个新增元素", insert_elements.len());
         // 分批处理，避免SQL语句过长
-        const BATCH_SIZE: usize = 100;
         for chunk in insert_elements.chunks(BATCH_SIZE) {
             let mut insert_sql = String::new();
             let mut has_valid_elements = false;
@@ -1146,17 +1148,25 @@ impl AiosDBManager {
         }
         println!("开始处理{}个修改元素", update_elements.len());
         // 分批处理
-        const BATCH_SIZE: usize = 50;
         for chunk in update_elements.chunks(BATCH_SIZE) {
             let mut update_sqls = Vec::new();
             for (refno, _sesno, modify_data) in chunk {
                 // todo 暂时通过查询surreal来获取最终得值
                 if let Some(pe) = get_pe((*refno).into()).await? {
-                    let name = if !pe.name.is_empty() { pe.name } else { get_default_name((*refno).into()).await?.unwrap_or("".to_string()) };
+                    let name = if !pe.name.is_empty() {
+                        pe.name
+                    } else {
+                        get_default_name((*refno).into())
+                            .await?
+                            .unwrap_or("".to_string())
+                    };
                     // 构建UPDATE语句
                     let update_sql = format!(
                         "UPDATE {} SET OWNER={}, NAME='{}' WHERE ID={}",
-                        PDMS_ELEMENTS_TABLE, pe.owner.refno().0, name, pe.refno.refno().0
+                        PDMS_ELEMENTS_TABLE,
+                        pe.owner.refno().0,
+                        name,
+                        pe.refno.refno().0
                     );
                     update_sqls.push(update_sql);
                 }
@@ -1199,7 +1209,6 @@ impl AiosDBManager {
         }
         println!("开始处理{}个删除元素", delete_elements.len());
         // 分批处理
-        const BATCH_SIZE: usize = 100;
         for chunk in delete_elements.chunks(BATCH_SIZE) {
             // 构建批量UPDATE语句，将IS_DEL设置为1
             let refno_list: Vec<String> = chunk
@@ -1466,7 +1475,6 @@ impl AiosDBManager {
         println!("开始删除 {} 个元素的inst_relate数据", refnos.len());
 
         // 分批处理，避免SQL语句过长导致性能问题
-        const BATCH_SIZE: usize = 100;
         let refnos_vec: Vec<&RefnoEnum> = refnos.iter().collect();
 
         // 按批次处理删除操作
@@ -1555,10 +1563,9 @@ impl AiosDBManager {
         );
 
         // 第二步：分批处理 - 避免单次处理过多数据
-        const BATCH_SIZE: usize = 50;
         let refnos_vec: Vec<RefnoEnum> = refnos_with_inst_relate.into_iter().collect();
 
-        for chunk in refnos_vec.chunks(BATCH_SIZE) {
+        for chunk in refnos_vec.chunks(TRANSFORM_BATCH_SIZE) {
             let mut update_sqls = Vec::new();
 
             // 第三步：批量计算和更新
@@ -1634,10 +1641,9 @@ impl AiosDBManager {
         let mut result = HashSet::new();
 
         // 分批处理，避免SQL语句过长导致性能问题
-        const BATCH_SIZE: usize = 20;
         let refnos_vec: Vec<&RefnoEnum> = refnos.iter().collect();
 
-        for chunk in refnos_vec.chunks(BATCH_SIZE) {
+        for chunk in refnos_vec.chunks(QUERY_BATCH_SIZE) {
             // 构建PE键列表，用于SQL查询
             let pe_keys: String = chunk
                 .iter()
