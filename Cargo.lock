@@ -242,6 +242,7 @@ dependencies = [
  "reqwest 0.11.27",
  "rkyv",
  "rstar 0.11.0",
+ "rust-ploop-processor",
  "serde",
  "serde_derive",
  "serde_json",
@@ -9784,6 +9785,20 @@ checksum = "3e0698206bcb8882bf2a9ecb4c1e7785db57ff052297085a6efd4fe42302068a"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
+]
+
+[[package]]
+name = "rust-ploop-processor"
+version = "0.1.0"
+source = "git+https://gitee.com/happydpc/rust-ploop-processor#cbc854ddbdd28b34c136041e99703a7f938c559a"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "glam",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
