@@ -7,12 +7,17 @@ edition = "2024"
 name = "aios_database"
 path = "src/lib.rs"
 
+[[bin]]
+name = "web_ui"
+path = "src/bin/web_ui.rs"
+required-features = ["web_ui"]
+
 
 [features]
 default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
-grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken"]  #GRPC服务功能
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能
 truck = []
 local = []
 ws = []
@@ -31,6 +36,8 @@ surreal_v2 = []
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
+web_ui = ["dep:axum", "dep:tower-http", "dep:sysinfo"]              #Web UI功能
+sqlite-index = ["dep:rusqlite"]
 
 [dependencies]
 config = "0.14.1"
@@ -80,17 +87,22 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 base64 = "0.22"
 flate2 = "1.0"
 byteorder = "1.5"
+num_cpus = "1.16"
+reqwest = { version = "0.12", features = ["json"] }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.29.3", features = ["serde", "rkyv"] }
-cached = "0.55.1"
-rkyv = { version = "0.7.45", features = ["hashbrown"] }
-rfd = { version = "0.15.1", features = ["async-std"] }
+cached = "0.56.0"
+rkyv = { version = "0.8.11", features = ["hashbrown-0_15"] }
+rfd = { version = "0.15.4", features = ["async-std"] }
+# redb = "3.0.1" # Removed - using SQLite for all storage
 
+# 空间索引相关依赖
+rstar = { version = "0.12", optional = true }
 
 #造型功能，先在database测试
 opencascade = { git = "https://gitee.com/happydpc/occt-rs.git", package = "opencascade", optional = true }
@@ -112,7 +124,7 @@ surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features
 ] }
 async-once-cell = "0.5.3"
 rumqttc = "0.24.0"
-petgraph = { version = "0.8.1", features = ["serde-1"] }
+petgraph = { version = "0.8.2", features = ["serde-1"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["registry", "json"] }
 tracing-chrome = "0.7.1"
@@ -127,7 +139,7 @@ rust-embed = "8"
 gpui = { git = "https://github.com/huacnlee/zed.git", branch = "webview", optional = true }
 story = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
 gpui-component = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
-toml = "0.8.19"
+toml = "0.9.5"
 pollster = "0.4.0"
 async-std = "1.13.1"
 
@@ -140,19 +152,31 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "1.0"
 jsonwebtoken = { version = "9.0", optional = true }
 async-trait = "0.1"
+env_logger = "0.11"
+
+# Web UI 相关依赖
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["fs"], optional = true }
+sysinfo = { version = "0.30", optional = true }
+
+# SQLite driver for spatial tests and cache
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 tonic-build = "0.12"
 prost-build = "0.13"
 
+[dev-dependencies]
+tempfile = "3"
+
 
 [dependencies.sqlx]
-version = "0.8.2"
+version = "0.8.6"
 default-features = false
 optional = true
 features = [
-    # "runtime-async-std-rustls",
+    "runtime-tokio-rustls",
     #    "runtime-async-std-native-tls",
     "macros",
     "mysql",
@@ -185,3 +209,17 @@ aios_core = { path = "../new-crates/aios-core" }
 #
 #[patch."https://gitee.com/happydpc/surrealdb.git"]
 #surrealdb = { path = "../surrealdb/crates/sdk" }
+
+# Examples
+[[example]]
+name = "spatial_query_server"
+required-features = ["grpc"]
+
+[[example]]
+name = "spatial_query_client"
+required-features = ["grpc"]
+
+[[example]]
+name = "spatial_index_builder"
+required-features = ["grpc"]
+
