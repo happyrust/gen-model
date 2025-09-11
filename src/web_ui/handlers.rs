@@ -38,6 +38,7 @@ use nalgebra::{Point3, Vector3};
 use std::str::FromStr;
 use once_cell::sync::Lazy;
 use dashmap::DashMap;
+use uuid::Uuid;
 
 // 可选：从本地 SQLite 读取项目列表（按 DbOption.toml 配置）
 // use rusqlite as _; // 确保依赖已链接 - 暂时禁用
@@ -1020,12 +1021,7 @@ pub async fn create_task(
         }))));
     }
 
-    if request.config.manual_db_nums.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "必须指定至少一个数据库编号"
-        }))));
-    }
-
+    // 允许 manual_db_nums 为空：表示“全部数据库”
     let mut task_manager = state.task_manager.lock().await;
 
     let task = TaskInfo::new(request.name, request.task_type, request.config);
@@ -1080,6 +1076,66 @@ pub async fn stop_task(
                 "message": "任务已停止"
             })));
         }
+    }
+    
+    Err(StatusCode::NOT_FOUND)
+}
+
+/// 重启任务
+pub async fn restart_task(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut task_manager = state.task_manager.lock().await;
+    
+    if let Some(old_task) = task_manager.active_tasks.get(&id) {
+        // 只允许重启失败的任务
+        if old_task.status != TaskStatus::Failed {
+            return Ok(Json(json!({
+                "success": false,
+                "error": "只能重启失败的任务"
+            })));
+        }
+        
+        // 创建新任务（基于原任务配置）
+        let new_task_id = Uuid::new_v4().to_string();
+        let mut new_task = TaskInfo {
+            id: new_task_id.clone(),
+            name: format!("{} (重启)", old_task.name),
+            task_type: old_task.task_type.clone(),
+            config: old_task.config.clone(),
+            status: TaskStatus::Pending,
+            progress: TaskProgress::default(),
+            created_at: SystemTime::now(),
+            started_at: None,
+            completed_at: None,
+            logs: vec![],
+            error: None,
+            error_details: None,
+            priority: old_task.priority.clone(),
+            dependencies: Vec::new(),
+            estimated_duration: old_task.estimated_duration,
+            actual_duration: None,
+        };
+        
+        new_task.add_log(LogLevel::Info, format!("基于任务 {} 重新创建", id));
+        
+        // 立即启动新任务
+        new_task.status = TaskStatus::Running;
+        new_task.started_at = Some(SystemTime::now());
+        new_task.add_log(LogLevel::Info, "重启任务开始执行".to_string());
+        
+        // 添加新任务到任务列表
+        task_manager.active_tasks.insert(new_task_id.clone(), new_task);
+        
+        // 启动真实的任务执行逻辑
+        tokio::spawn(execute_real_task(state.clone(), new_task_id.clone()));
+        
+        return Ok(Json(json!({
+            "success": true,
+            "message": "任务重启成功",
+            "new_task_id": new_task_id
+        })));
     }
     
     Err(StatusCode::NOT_FOUND)
@@ -1235,11 +1291,79 @@ pub async fn sqlite_spatial_page() -> Result<Html<String>, StatusCode> {
 pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, StatusCode> {
     #[cfg(feature = "sqlite-index")]
     {
-        if !crate::fast_model::aabb_cache::AabbCache::sqlite_is_enabled() {
+        use aios_core::{SUL_DB, RefnoEnum, RefU64};
+        use crate::spatial_index::SqliteSpatialIndex;
+        use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
+
+        if !SqliteSpatialIndex::is_enabled() {
             return Ok(Json(json!({"success": false, "error": "未启用 sqlite-index 或配置未打开"})));
         }
-        // SQLite index rebuild is handled separately now
-        Ok(Json(json!({"success": false, "error": "Rebuild from redb not implemented in new architecture"})))
+
+        // 打开并清空 SQLite 索引
+        let index = match SqliteSpatialIndex::with_default_path() {
+            Ok(v) => v,
+            Err(e) => return Ok(Json(json!({"success": false, "error": format!("打开索引失败: {}", e)})))
+        };
+        if let Err(e) = index.clear() {
+            return Ok(Json(json!({"success": false, "error": format!("清空索引失败: {}", e)})));
+        }
+
+        // 分页扫描 SurrealDB 的 inst_relate，获取 refno 列表
+        let batch: usize = 5000;
+        let mut offset: usize = 0;
+        let mut total_processed: usize = 0;
+        let t0 = std::time::Instant::now();
+
+        loop {
+            let sql = format!(
+                "SELECT value fn::newest_pe_id(in) FROM inst_relate WHERE in.id != none AND world_trans.d != none LIMIT {} START {};",
+                batch, offset
+            );
+
+            let mut resp = match SUL_DB.query(sql).await {
+                Ok(v) => v,
+                Err(e) => return Ok(Json(json!({"success": false, "error": format!("SurrealDB 查询失败: {}", e)})))
+            };
+
+            let result = match resp.take::<Vec<u64>>(0) {
+                Ok(v) => v,
+                Err(_) => Vec::new(),
+            };
+
+            if result.is_empty() {
+                break;
+            }
+
+            // 构造 RefnoEnum 列表
+            let refnos: Vec<RefnoEnum> = result
+                .into_iter()
+                .map(|id| RefnoEnum::Refno(RefU64(id)))
+                .collect();
+
+            // 批量计算并同步 AABB，内部会写回 Surreal 以及写入 SQLite 索引
+            if let Err(e) = update_inst_relate_aabbs_by_refnos(&refnos, true).await {
+                return Ok(Json(json!({"success": false, "error": format!("批量更新AABB失败: {}", e)})));
+            }
+
+            total_processed += refnos.len();
+            offset += batch;
+        }
+
+        // 统计索引中元素数量
+        let stats = match index.get_stats() {
+            Ok(s) => s,
+            Err(e) => return Ok(Json(json!({"success": false, "error": format!("获取索引统计失败: {}", e)})))
+        };
+        let elapsed = t0.elapsed();
+
+        Ok(Json(json!({
+            "success": true,
+            "message": "SQLite 空间索引重建完成",
+            "processed_refnos": total_processed,
+            "index_elements": stats.total_elements,
+            "index_type": stats.index_type,
+            "elapsed_ms": elapsed.as_millis(),
+        })))
     }
     #[cfg(not(feature = "sqlite-index"))]
     {
@@ -2672,7 +2796,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
     // 创建数据库配置
     let mut db_option = DbOption::default();
-    db_option.manual_db_nums = Some(config.manual_db_nums.clone());
+    // 若未指定数据库编号，表示处理全部数据库（下游以 None 触发自动枚举）
+    db_option.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
     db_option.gen_model = config.gen_model;
     db_option.gen_mesh = config.gen_mesh;
     db_option.gen_spatial_tree = config.gen_spatial_tree;
@@ -2793,7 +2918,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
         parse_opt.v_user = base_opt.v_user.clone();
         parse_opt.v_password = base_opt.v_password.clone();
         // 覆盖 WebUI 任务层的关键参数
-        parse_opt.manual_db_nums = Some(config.manual_db_nums.clone());
+        // 解析阶段同样支持“全部数据库”
+        parse_opt.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
         parse_opt.project_name = config.project_name.clone();
         parse_opt.project_code = config.project_code.to_string();
         parse_opt.total_sync = true; // 以全量同步方式触发解析
@@ -3241,7 +3367,7 @@ async fn execute_parse_pdms_task<F, Fut>(
 
     // 创建数据库配置
     let mut db_option = DbOption::default();
-    db_option.manual_db_nums = Some(config.manual_db_nums.clone());
+    db_option.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
     db_option.project_name = config.project_name.clone();
     db_option.project_code = config.project_code.to_string();
     db_option.total_sync = true; // 设置为全量同步模式
@@ -3941,8 +4067,8 @@ pub async fn tasks_page() -> Html<String> {
     Html(crate::web_ui::simple_templates::render_advanced_tasks_page())
 }
 
-pub async fn task_logs_page(Path(_task_id): Path<String>) -> Html<String> {
-    Html(crate::web_ui::simple_templates::render_simple_generic_page("任务日志", "任务日志功能正在开发中..."))
+pub async fn task_logs_page(Path(task_id): Path<String>) -> Html<String> {
+    Html(crate::web_ui::simple_templates::render_task_logs_page(task_id))
 }
 
 pub async fn batch_tasks_page() -> Html<String> {

@@ -123,6 +123,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/tasks/:id", get(get_task).delete(delete_task))
         .route("/api/tasks/:id/start", post(start_task))
         .route("/api/tasks/:id/stop", post(stop_task))
+        .route("/api/tasks/:id/restart", post(restart_task))
         .route("/api/tasks/:id/error", get(get_task_error_details))
         .route("/api/tasks/:id/logs", get(get_task_logs))
         .route("/api/tasks/batch", post(create_batch_tasks))
