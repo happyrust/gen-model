@@ -22,6 +22,9 @@ pub mod db_status_handlers;
 pub mod wizard_handlers;
 pub mod wizard_template;
 pub mod database_diagnostics;
+pub mod db_connection;
+pub mod db_startup_manager;
+pub mod db_startup_handlers;
 
 use handlers::*;
 use models::*;
@@ -68,6 +71,7 @@ impl AppState {
             mesh_tol_ratio: 3.0,
             room_keyword: "-RM".to_string(),
             project_name: "AvevaMarineSample".to_string(),
+            project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
             project_code: 1516,
             ..Default::default()
         });
@@ -82,6 +86,7 @@ impl AppState {
             mesh_tol_ratio: 3.0,
             room_keyword: "-RM".to_string(),
             project_name: "AvevaMarineSample".to_string(),
+            project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
             project_code: 1516,
             ..Default::default()
         });
@@ -132,17 +137,24 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/config/templates", get(get_config_templates))
         .route("/api/databases", get(get_available_databases))
         .route("/api/status", get(get_system_status))
-        // SurrealDB 控制
-        .route("/api/surreal/start", post(handlers::start_surreal_server))
-        .route("/api/surreal/stop", post(handlers::stop_surreal_server))
-        .route("/api/surreal/restart", post(handlers::restart_surreal_server))
+        // SurrealDB 控制 (暂时注释掉有编译问题的路由)
+        // .route("/api/surreal/start", post(handlers::start_surreal_server))
+        // .route("/api/surreal/stop", post(handlers::stop_surreal_server))
+        // .route("/api/surreal/restart", post(handlers::restart_surreal_server))
         .route("/api/surreal/status", get(handlers::get_surreal_status))
         .route("/api/surreal/test", post(handlers::test_surreal_connection))
+        .route("/api/surreal/check-port", get(handlers::check_port_status))
+        .route("/api/surreal/kill-port", post(handlers::kill_port_processes_api))
         // 数据库连接监控API
         .route("/api/database/connection/check", get(handlers::check_database_connection))
         .route("/api/database/diagnostics", get(handlers::run_database_diagnostics_api))
         .route("/api/database/startup-scripts", get(handlers::get_startup_scripts))
         .route("/api/database/start-instance", post(handlers::start_database_instance))
+        // 数据库启动管理API
+        .route("/api/database/startup/start", post(db_startup_handlers::start_database_api))
+        .route("/api/database/startup/status", get(db_startup_handlers::get_startup_status))
+        .route("/api/database/startup/instances", get(db_startup_handlers::get_all_instances))
+        .route("/api/database/startup/stop", post(db_startup_handlers::stop_database_api))
         // 数据库状态管理API
         .route("/api/db-status", get(db_status_handlers::get_db_status_list))
         .route("/api/db-status/:dbnum", get(db_status_handlers::get_db_status_detail))
@@ -171,6 +183,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/wizard/list-projects", get(wizard_handlers::list_projects))
         .route("/api/wizard/create-task", post(wizard_handlers::create_wizard_task))
         .route("/api/wizard/templates", get(wizard_handlers::get_wizard_templates))
+        .route("/api/wizard/browse-directory", get(wizard_handlers::browse_directory))
         // SQLite 空间索引 API
         .route("/api/sqlite-spatial/rebuild", post(handlers::api_sqlite_spatial_rebuild))
         .route("/api/sqlite-spatial/query", get(handlers::api_sqlite_spatial_query))

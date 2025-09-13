@@ -19,6 +19,116 @@ use std::os::unix::process::ExitStatusExt;
 
 use tokio::process::Command as TokioCommand;
 
+/// 检查端口占用情况
+async fn check_port_usage(port: u16) -> Result<Vec<u32>, std::io::Error> {
+    let output = TokioCommand::new("lsof")
+        .args(["-ti", &format!(":{}", port)])
+        .output()
+        .await?;
+    
+    if output.status.success() {
+        let pids_str = String::from_utf8_lossy(&output.stdout);
+        let pids: Vec<u32> = pids_str
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        Ok(pids)
+    } else {
+        Ok(vec![])
+    }
+}
+
+/// 强制关闭占用端口的进程
+async fn kill_port_processes(port: u16) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let pids = check_port_usage(port).await?;
+    let mut killed_pids = vec![];
+    
+    for pid in pids {
+        let output = TokioCommand::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .await?;
+        
+        if output.status.success() {
+            killed_pids.push(pid);
+            // 等待进程优雅退出
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            
+            // 如果进程仍在运行，强制杀死
+            if check_port_usage(port).await?.contains(&pid) {
+                let _ = TokioCommand::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .output()
+                    .await;
+            }
+        }
+    }
+    
+    Ok(killed_pids)
+}
+
+/// 检查端口状态 API
+pub async fn check_port_status(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let port: u16 = params.get("port")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8010);
+    
+    match check_port_usage(port).await {
+        Ok(pids) => {
+            Ok(Json(json!({
+                "success": true,
+                "port": port,
+                "occupied": !pids.is_empty(),
+                "pids": pids,
+                "message": if pids.is_empty() {
+                    format!("端口 {} 空闲", port)
+                } else {
+                    format!("端口 {} 被 {} 个进程占用", port, pids.len())
+                }
+            })))
+        }
+        Err(e) => {
+            Ok(Json(json!({
+                "success": false,
+                "error": format!("检查端口失败: {}", e)
+            })))
+        }
+    }
+}
+
+/// 强制关闭端口占用进程 API
+pub async fn kill_port_processes_api(
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let port: u16 = req.get("port")
+        .and_then(|p| p.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(8010);
+    
+    match kill_port_processes(port).await {
+        Ok(killed_pids) => {
+            Ok(Json(json!({
+                "success": true,
+                "port": port,
+                "killed_pids": killed_pids,
+                "message": if killed_pids.is_empty() {
+                    format!("端口 {} 没有需要关闭的进程", port)
+                } else {
+                    format!("成功关闭 {} 个占用端口 {} 的进程", killed_pids.len(), port)
+                }
+            })))
+        }
+        Err(e) => {
+            Ok(Json(json!({
+                "success": false,
+                "error": format!("关闭进程失败: {}", e)
+            })))
+        }
+    }
+}
+
 use super::{
     models::*,
     // templates::*,  // 暂时禁用
@@ -2077,76 +2187,47 @@ pub async fn get_system_status(
 
 /// 启动 SurrealDB 服务（根据 DbOption.toml 配置）
 pub async fn start_surreal_server(
-    _state: State<AppState>,
-    payload: Option<Json<SurrealControlRequest>>,
+    State(_state): State<AppState>,
+    _payload: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     use aios_core::get_db_option;
 
     // 读取配置
     let opt = get_db_option();
-    let req_ref = payload.as_ref().map(|j| &j.0);
-    let ip = req_ref.and_then(|r| r.bind_ip.clone()).unwrap_or(opt.v_ip.clone());
-    let port = req_ref.and_then(|r| r.bind_port).unwrap_or(opt.v_port);
-    let bind_addr = format!("{}:{}", ip, port);
-    let user = req_ref.and_then(|r| r.db_user.clone()).unwrap_or(opt.v_user.clone());
-    let pass = req_ref.and_then(|r| r.db_password.clone()).unwrap_or(opt.v_password.clone());
-    let project = req_ref.and_then(|r| r.project_name.clone()).unwrap_or(opt.project_name.clone());
+    // 优先使用前端传入的覆盖参数
+    let (mut ip, mut port, mut user, mut pass, mut project) = (
+        opt.v_ip.clone(),
+        opt.v_port,
+        opt.v_user.clone(),
+        opt.v_password.clone(),
+        opt.project_name.clone(),
+    );
 
-    let req = payload.map(|j| j.0);
-    let mode = req.as_ref().and_then(|r| r.mode.as_ref()).map(|s| s.as_str()).unwrap_or("local");
-
-    if mode == "ssh" {
-        // 远程启动
-        let ssh = match req.and_then(|r| r.ssh) {
-            Some(v) => v,
-            None => {
-                return Ok(Json(json!({
-                    "success": false,
-                    "message": "SSH 参数缺失: host/user 必填",
-                })));
-            }
-        };
-
-        let db_path = format!("rocksdb://{}.rdb", project);
-        let remote_cmd = format!(
-            "nohup surreal start --bind {} --user {} --pass {} {} >/dev/null 2>&1 & echo $!",
-            bind_addr, user, pass, db_path
-        );
-        match run_remote_ssh(&ssh, &remote_cmd).await {
-            Ok(_) => Ok(Json(json!({
-                "success": true,
-                "message": format!("已通过 SSH 触发远程启动，目标: {} (绑定: {})", ssh.host, bind_addr),
-            }))),
-            Err(e) => Ok(Json(json!({
-                "success": false,
-                "message": format!("SSH 启动失败: {}", e),
-            }))),
-        }
-    } else {
-        // 本地
-        let addr_in_use = is_addr_listening(&bind_addr);
-        if addr_in_use {
-            return Ok(Json(json!({
-                "success": true,
-                "message": format!("SurrealDB 已在 {} 运行", bind_addr),
-            })));
-        }
-
-        let db_path = format!("rocksdb://{}.rdb", project);
-
-        let mut cmd = TokioCommand::new("surreal");
-        cmd.arg("start")
-            .arg("--bind").arg(&bind_addr)
-            .arg("--user").arg(&user)
-            .arg("--pass").arg(&pass)
-            .arg(&db_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null());
-
-        // 改进的启动逻辑
-        start_surreal_process_improved(&bind_addr, &user, &pass, &project).await
+    if let Some(Json(body)) = &_payload {
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
+        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) { user = s.to_string(); }
+        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) { pass = s.to_string(); }
+        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) { project = s.to_string(); }
     }
+
+    // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
+    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
+    let bind_addr = format!("{}:{}", ip, port);
+
+    let mode = "local";
+
+    // 本地启动
+    let addr_in_use = is_addr_listening(&bind_addr);
+    if addr_in_use {
+        return Ok(Json(json!({
+            "success": true,
+            "message": format!("SurrealDB 已在 {} 运行", bind_addr),
+        })));
+    }
+
+    // 改进的启动逻辑
+    start_surreal_process_improved(&bind_addr, &user, &pass, &project).await
 }
 
 /// 改进的 SurrealDB 进程启动函数
@@ -2156,8 +2237,14 @@ async fn start_surreal_process_improved(
     pass: &str,
     project: &str,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    println!("🔧 准备启动 SurrealDB...");
+    println!("   地址: {}", bind_addr);
+    println!("   用户: {}", user);
+    println!("   项目: {}", project);
+    
     // 1. 检查 surreal 命令是否存在
     if !command_exists("surreal").await {
+        println!("❌ SurrealDB CLI 未找到");
         return Ok(Json(json!({
             "success": false,
             "message": "SurrealDB CLI 未安装或不在 PATH 中",
@@ -2169,10 +2256,57 @@ async fn start_surreal_process_improved(
             ]
         })));
     }
+    println!("✅ 找到 SurrealDB CLI");
+
+    // 2. 智能端口检查和清理
+    let port = bind_addr.split(':').last().unwrap_or("8000").parse::<u16>().unwrap_or(8000);
+    match check_port_usage(port).await {
+        Ok(occupied_pids) => {
+            if !occupied_pids.is_empty() {
+                // 尝试自动清理端口占用
+                match kill_port_processes(port).await {
+                    Ok(killed_pids) => {
+                        if !killed_pids.is_empty() {
+                            println!("已自动清理端口 {} 上的进程: {:?}", port, killed_pids);
+                            // 等待进程完全退出
+                            tokio::time::sleep(StdDuration::from_secs(1)).await;
+                        } else {
+                            return Ok(Json(json!({
+                                "success": false,
+                                "message": format!("端口 {} 被占用但无法清理进程: {:?}", port, occupied_pids),
+                                "port_info": {
+                                    "port": port,
+                                    "occupied_pids": occupied_pids
+                                },
+                                "auto_kill_attempted": true
+                            })));
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(Json(json!({
+                            "success": false,
+                            "message": format!("端口 {} 被占用，自动清理失败: {}", port, e),
+                            "port_info": {
+                                "port": port,
+                                "occupied_pids": occupied_pids
+                            },
+                            "auto_kill_attempted": true
+                        })));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("警告：端口检查失败: {}", e);
+            // 继续尝试启动，但记录警告
+        }
+    }
 
     let db_path = format!("rocksdb://{}.rdb", project);
+    println!("📁 数据库路径: {}", db_path);
 
-    // 2. 创建启动命令，捕获输出用于诊断
+    // 3. 创建启动命令，捕获输出用于诊断
+    println!("🚀 执行启动命令...");
     let mut cmd = TokioCommand::new("surreal");
     cmd.arg("start")
         .arg("--bind").arg(bind_addr)
@@ -2182,6 +2316,8 @@ async fn start_surreal_process_improved(
         .stdout(Stdio::piped())  // 捕获标准输出
         .stderr(Stdio::piped())  // 捕获错误输出
         .stdin(Stdio::null());
+    
+    println!("命令: surreal start --bind {} --user {} --pass [HIDDEN] {}", bind_addr, user, db_path);
 
     match cmd.spawn() {
         Ok(mut child) => {
@@ -2203,6 +2339,7 @@ async fn start_surreal_process_improved(
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         // 进程已退出，获取输出信息
+                        println!("❌ SurrealDB 进程已退出，退出码: {:?}", status.code());
                         let output = child.wait_with_output().await.unwrap_or_else(|_| std::process::Output {
                             status: std::process::ExitStatus::from_raw(1),
                             stdout: vec![],
@@ -2210,18 +2347,25 @@ async fn start_surreal_process_improved(
                         });
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
+                        
+                        println!("📋 标准输出: {}", stdout);
+                        println!("⚠️ 错误输出: {}", stderr);
 
                         return Ok(Json(json!({
                             "success": false,
                             "message": format!("SurrealDB 启动失败，进程退出码: {}", status.code().unwrap_or(-1)),
                             "stdout": stdout.to_string(),
                             "stderr": stderr.to_string(),
-                            "hint": "请检查端口是否被占用、权限是否足够、或数据库路径是否有效"
+                            "hint": "请检查端口是否被占用、权限是否足够、或数据库路径是否有效",
+                            "bind_addr": bind_addr,
+                            "db_path": db_path
                         })));
                     }
                     Ok(None) => {
                         // 进程仍在运行，检查端口是否可连接
+                        println!("⏳ 进程运行中，检查端口 {} 连接性... (尝试 {}/{})", bind_addr, attempts, max_attempts);
                         if test_tcp_connection(bind_addr).await {
+                            println!("✅ 端口 {} 已响应", bind_addr);
                             // 进一步测试数据库功能
                             tokio::time::sleep(StdDuration::from_millis(1000)).await; // 给数据库更多初始化时间
                             let (db_functional, error_msg) = test_database_functionality().await;
@@ -2270,15 +2414,19 @@ async fn start_surreal_process_improved(
             }
         }
         Err(e) => {
+            println!("❌ 启动进程失败: {}", e);
             Ok(Json(json!({
                 "success": false,
                 "message": format!("无法启动 SurrealDB 进程: {}", e),
                 "error_details": e.to_string(),
+                "bind_addr": bind_addr,
+                "db_path": format!("rocksdb://{}.rdb", project),
                 "troubleshooting": [
                     "检查 surreal 命令是否在 PATH 中",
                     "验证当前用户是否有执行权限",
                     "确认端口未被其他进程占用",
-                    "检查磁盘空间是否充足"
+                    "检查磁盘空间是否充足",
+                    format!("检查配置端口 {} 是否正确", bind_addr)
                 ]
             })))
         }
@@ -2287,41 +2435,20 @@ async fn start_surreal_process_improved(
 
 /// 停止 SurrealDB 服务
 pub async fn stop_surreal_server(
-    _state: State<AppState>,
-    payload: Option<Json<SurrealControlRequest>>,
+    State(_state): State<AppState>,
+    _payload: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     use aios_core::get_db_option;
     let opt = get_db_option();
-    let req_ref = payload.as_ref().map(|j| &j.0);
-    let ip = req_ref.and_then(|r| r.bind_ip.clone()).unwrap_or(opt.v_ip.clone());
-    let port = req_ref.and_then(|r| r.bind_port).unwrap_or(opt.v_port);
-    let bind_addr = format!("{}:{}", ip, port);
-
-    let req = payload.map(|j| j.0);
-    let mode = req.as_ref().and_then(|r| r.mode.as_ref()).map(|s| s.as_str()).unwrap_or("local");
-
-    if mode == "ssh" {
-        let ssh = match req.and_then(|r| r.ssh) {
-            Some(v) => v,
-            None => {
-                return Ok(Json(json!({
-                    "success": false,
-                    "message": "SSH 参数缺失: host/user 必填",
-                })));
-            }
-        };
-        let remote_cmd = format!("pkill -f 'surreal start --bind {}' || true", bind_addr);
-        return match run_remote_ssh(&ssh, &remote_cmd).await {
-            Ok(_) => Ok(Json(json!({
-                "success": true,
-                "message": format!("已通过 SSH 触发远程停止，目标: {} (绑定: {})", ssh.host, bind_addr),
-            }))),
-            Err(e) => Ok(Json(json!({
-                "success": false,
-                "message": format!("SSH 停止失败: {}", e),
-            }))),
-        };
+    let mut ip = opt.v_ip.clone();
+    let mut port = opt.v_port;
+    if let Some(Json(body)) = &_payload {
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
     }
+    // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
+    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
+    let bind_addr = format!("{}:{}", ip, port);
 
     // 如果端口未监听，视为已停止
     if !is_addr_listening(&bind_addr) {
@@ -2483,142 +2610,44 @@ async fn run_remote_ssh(ssh: &SshOptions, remote_cmd: &str) -> Result<(), String
 
 /// 重启 SurrealDB 服务：先杀指定端口上的进程，再启动
 pub async fn restart_surreal_server(
-    _state: State<AppState>,
-    payload: Option<Json<SurrealControlRequest>>,
-)
-    -> Result<Json<serde_json::Value>, StatusCode>
-{
+    State(_state): State<AppState>,
+    _payload: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     use aios_core::get_db_option;
 
     let opt = get_db_option();
-    let req_ref = payload.as_ref().map(|j| &j.0);
-    let ip = req_ref.and_then(|r| r.bind_ip.clone()).unwrap_or(opt.v_ip.clone());
-    let port = req_ref.and_then(|r| r.bind_port).unwrap_or(opt.v_port);
+    let mut ip = opt.v_ip.clone();
+    let mut port = opt.v_port;
+    let mut user = opt.v_user.clone();
+    let mut pass = opt.v_password.clone();
+    let mut project = opt.project_name.clone();
+
+    if let Some(Json(body)) = &_payload {
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
+        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) { user = s.to_string(); }
+        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) { pass = s.to_string(); }
+        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) { project = s.to_string(); }
+    }
+
+    // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
+    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
     let bind_addr = format!("{}:{}", ip, port);
-    let user = req_ref.and_then(|r| r.db_user.clone()).unwrap_or(opt.v_user.clone());
-    let pass = req_ref.and_then(|r| r.db_password.clone()).unwrap_or(opt.v_password.clone());
-    let project = req_ref.and_then(|r| r.project_name.clone()).unwrap_or(opt.project_name.clone());
 
-    let req = payload.map(|j| j.0);
-    let mode = req.as_ref().and_then(|r| r.mode.as_ref()).map(|s| s.as_str()).unwrap_or("local");
+    let mode = "local";
 
-    // Helper: start local
-    async fn start_local(bind_addr: &str, user: &str, pass: &str, project: &str)
-        -> Result<serde_json::Value, String>
-    {
-        let db_path = format!("rocksdb://{}.rdb", project);
-        let mut cmd = TokioCommand::new("surreal");
-        cmd.arg("start")
-            .arg("--bind").arg(bind_addr)
-            .arg("--user").arg(user)
-            .arg("--pass").arg(pass)
-            .arg(&db_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null());
-        match cmd.spawn() {
-            Ok(mut child) => {
-                if let Some(pid) = child.id() {
-                    let _ = std::fs::write(".surreal.pid", pid.to_string());
-                }
-                tokio::time::sleep(StdDuration::from_millis(500)).await;
-                Ok(json!({
-                    "success": true,
-                    "message": format!("SurrealDB 已重启: {} (存储: {})", bind_addr, db_path),
-                }))
-            }
-            Err(e) => Err(format!("无法启动 SurrealDB: {}", e)),
-        }
-    }
 
-    if mode == "ssh" {
-        // 远程重启：按端口 kill 然后再启动
-        let ssh = match req.and_then(|r| r.ssh) {
-            Some(v) => v,
-            None => {
-                return Ok(Json(json!({
-                    "success": false,
-                    "message": "SSH 参数缺失: host/user 必填",
-                })));
-            }
-        };
-
-        let db_path = format!("rocksdb://{}.rdb", project);
-        let remote_cmd = format!(
-            "pkill -f 'surreal start --bind {bind}' || true; sleep 0.3; nohup surreal start --bind {bind} --user {user} --pass {pass} {db} >/dev/null 2>&1 & echo $!",
-            bind = bind_addr,
-            user = user,
-            pass = pass,
-            db = db_path
-        );
-        return match run_remote_ssh(&ssh, &remote_cmd).await {
-            Ok(_) => Ok(Json(json!({
-                "success": true,
-                "message": format!("已通过 SSH 重启 SurrealDB，目标: {} (绑定: {})", ssh.host, bind_addr),
-            }))),
-            Err(e) => Ok(Json(json!({
-                "success": false,
-                "message": format!("SSH 重启失败: {}", e),
-            }))),
-        };
-    }
-
-    // 本地重启
+    // 先停止现有服务
     if is_addr_listening(&bind_addr) {
-        // 优先使用 pkill 根据命令行特征结束
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = TokioCommand::new("pkill")
-                .arg("-f")
-                .arg(format!("surreal start --bind {}", bind_addr))
-                .status().await;
-
-            // Fallback: 使用 lsof 找端口占用进程
-            if is_addr_listening(&bind_addr) {
-                if let Ok(out) = TokioCommand::new("lsof")
-                    .arg("-ti")
-                    .arg(format!("TCP:{}", port))
-                    .output().await
-                {
-                    if out.status.success() {
-                        let text = String::from_utf8_lossy(&out.stdout);
-                        for pid in text.lines().filter(|s| !s.trim().is_empty()) {
-                            let _ = TokioCommand::new("kill").arg("-TERM").arg(pid).status().await;
-                        }
-                        tokio::time::sleep(StdDuration::from_millis(300)).await;
-                        if is_addr_listening(&bind_addr) {
-                            let text = String::from_utf8_lossy(&out.stdout);
-                            for pid in text.lines().filter(|s| !s.trim().is_empty()) {
-                                let _ = TokioCommand::new("kill").arg("-KILL").arg(pid).status().await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: 通过 PowerShell 找到端口占用的 PID 并终止
-            let _ = TokioCommand::new("powershell")
-                .arg("-NoProfile").arg("-Command")
-                .arg(format!(
-                    "Get-NetTCPConnection -LocalPort {} -State Listen | Select-Object -Expand OwningProcess | ForEach-Object { taskkill /PID $_ /F }",
-                    port
-                ))
-                .status().await;
-        }
-
-        // 清理本地 pid 文件
-        let _ = std::fs::remove_file(".surreal.pid");
-        tokio::time::sleep(StdDuration::from_millis(400)).await;
+        // 优先使用端口清理功能
+        let _ = kill_port_processes(port).await;
+        
+        // 等待端口释放
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-
-    // 启动
-    match start_local(&bind_addr, &user, &pass, &project).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => Ok(Json(json!({ "success": false, "message": e }))),
-    }
+    
+    // 使用改进的启动函数重启
+    start_surreal_process_improved(&bind_addr, &user, &pass, &project).await
 }
 
 /// 查询 SurrealDB 运行状态
@@ -2635,7 +2664,13 @@ pub async fn get_surreal_status(
     use aios_core::{get_db_option, SUL_DB};
 
     let opt = get_db_option();
-    let ip = q.ip.unwrap_or(opt.v_ip.clone());
+    let ip_raw = q.ip.unwrap_or(opt.v_ip.clone());
+    // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
+    let ip = if ip_raw == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        ip_raw
+    };
     let port = q.port.unwrap_or(opt.v_port);
     let bind_addr = format!("{}:{}", ip, port);
 
@@ -2672,52 +2707,70 @@ pub async fn test_surreal_connection(
 
     let connection_url = format!("ws://{}:{}", request.ip, request.port);
 
-    // 首先检查配置是否与当前运行的数据库匹配
-    let db_option = aios_core::get_db_option();
-    let config_matches = request.ip == db_option.v_ip
-        && request.port == db_option.v_port
-        && request.user == db_option.v_user
-        && request.password == db_option.v_password
-        && request.namespace == db_option.project_code.to_string()
-        && request.database == db_option.project_name;
+    // 打印详细的请求参数用于调试
+    println!("========== 测试连接请求详情 ==========");
+    println!("IP地址: {}", request.ip);
+    println!("端口: {}", request.port);
+    println!("用户名: {}", request.user);
+    println!("密码长度: {} 字符", request.password.len());
+    println!("密码内容: [{}]", request.password); // 临时打印密码以调试
+    println!("命名空间: {}", request.namespace);
+    println!("数据库: {}", request.database);
+    println!("连接URL: {}", connection_url);
+    println!("======================================");
+    
+    // 直接使用界面输入的配置进行测试
+    let test_result = crate::web_ui::db_connection::test_database_connection(
+        &request.ip,
+        &request.port.to_string(),
+        &request.user,
+        &request.password,
+        &request.namespace,
+        &request.database,
+    ).await;
 
-    if !config_matches {
+    if let Err(e) = test_result {
+        println!("❌ 连接测试失败: {}", e);
+        println!("错误链: {:?}", e);
+        
+        // 提供更详细的错误信息
+        let error_detail = if e.to_string().contains("认证失败") || e.to_string().contains("Authentication") {
+            format!("认证失败：用户名或密码错误\n\n当前配置:\n- 用户名: {}\n- 密码: {} ({}个字符)\n\n提示：\n- 端口8009的默认密码是 'root'\n- 请确认数据库启动时使用的密码", 
+                    request.user, 
+                    "*".repeat(request.password.len()),
+                    request.password.len())
+        } else if e.to_string().contains("无法连接到数据库服务器") {
+            format!("无法连接到数据库服务器\n\n问题：\n- 数据库未在 {}:{} 上运行\n\n解决方案：\n1. 检查 SurrealDB 是否已启动\n2. 确认端口号是否正确\n3. 检查防火墙设置", 
+                    request.ip, request.port)
+        } else if e.to_string().contains("无法使用指定的命名空间和数据库") {
+            format!("命名空间或数据库不存在\n\n当前配置:\n- 命名空间: '{}'\n- 数据库: '{}'\n\n提示：这些会在首次连接时自动创建", 
+                    request.namespace, request.database)
+        } else {
+            e.to_string()
+        };
+        
         return Ok(Json(json!({
             "success": false,
-            "message": "连接参数与当前配置不匹配",
-            "error_type": "config_mismatch",
-            "details": format!("请检查配置是否与 DbOption.toml 中的设置一致。当前配置: {}:{}，命名空间: {}，数据库: {}",
-                db_option.v_ip, db_option.v_port, db_option.project_code, db_option.project_name)
+            "message": "连接失败",
+            "error_type": "connection_failed",
+            "details": error_detail,
+            "debug_info": {
+                "ip": request.ip,
+                "port": request.port,
+                "user": request.user,
+                "namespace": request.namespace,
+                "database": request.database,
+                "password_length": request.password.len()
+            }
         })));
     }
 
-    // 使用全局连接进行测试查询
-    match timeout(Duration::from_secs(5), SUL_DB.query("SELECT 1 as test")).await {
-        Ok(Ok(_)) => {
-            Ok(Json(json!({
-                "success": true,
-                "message": "连接测试成功",
-                "details": format!("成功连接到 {}，命名空间: {}，数据库: {}", connection_url, request.namespace, request.database)
-            })))
-        }
-        Ok(Err(e)) => {
-            Ok(Json(json!({
-                "success": false,
-                "message": format!("查询测试失败: {}", e),
-                "error_type": "query_failed",
-                "details": "全局数据库连接存在但无法执行查询"
-            })))
-        }
-        Err(_) => {
-            Ok(Json(json!({
-                "success": false,
-                "message": "查询超时：无法在5秒内完成测试查询",
-                "error_type": "query_timeout",
-                "details": "全局数据库连接可能未初始化或响应缓慢"
-            })))
-        }
-    }
-
+    // 连接测试成功
+    Ok(Json(json!({
+        "success": true,
+        "message": "连接测试成功",
+        "details": format!("成功连接到 {}，命名空间: {}，数据库: {}", connection_url, request.namespace, request.database)
+    })))
 }
 
 /// 真实任务执行器
@@ -2805,6 +2858,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
     db_option.mesh_tol_ratio = Some(config.mesh_tol_ratio as f32);
     db_option.project_name = config.project_name.clone();
     db_option.project_code = config.project_code.to_string();
+    db_option.project_path = config.project_path.clone();
+    db_option.included_projects = vec![config.project_name.clone()];
 
     // 更新任务状态
     let mut update_progress = |step: &str, current: u32, total: u32, percentage: f32, message: &str| {
@@ -2842,7 +2897,10 @@ async fn execute_real_task(state: AppState, task_id: String) {
     };
 
     // 计算总步骤：若需要先解析，则在原有基础上+1
-    let needs_parse_first = matches!(task_type, TaskType::ParsePdmsData) || matches!(task_type, TaskType::FullGeneration);
+    // 扩展：DataParsingWizard 也视为解析型任务
+    let needs_parse_first = matches!(task_type, TaskType::ParsePdmsData)
+        || matches!(task_type, TaskType::FullGeneration)
+        || matches!(task_type, TaskType::DataParsingWizard);
     let mut total_steps = if config.gen_model && config.gen_spatial_tree { 7 }
                      else if config.gen_model { 5 }
                      else if config.gen_spatial_tree { 4 }
@@ -2851,35 +2909,35 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
     let mut current_step = 0;
 
-    // 步骤1: 初始化数据库连接
+    // 步骤1: 初始化数据库连接（使用部署站点的配置）
     current_step += 1;
     update_progress("初始化数据库连接", current_step, total_steps,
                    (current_step as f32 / total_steps as f32) * 100.0,
-                   "正在连接SurrealDB数据库...");
+                   "正在使用部署站点配置连接数据库...");
 
-    // 尝试初始化数据库连接，但要正确处理"Already connected"的情况
-    match init_surreal().await {
-        Ok(_) => {
-            update_progress("初始化数据库连接", current_step, total_steps,
-                           (current_step as f32 / total_steps as f32) * 100.0,
-                           "数据库连接成功");
-        }
+    // 使用 WebUI 配置连接数据库
+    // 使用 init_surreal_with_config 函数来使用用户指定的配置
+    let db_connection = match crate::web_ui::db_connection::init_surreal_with_config(&config).await {
+        Ok(conn) => conn,
         Err(e) => {
-            let error_msg = e.to_string();
-            // 如果错误是"Already connected"，这实际上是成功的
-            if error_msg.contains("Already connected") || error_msg.contains("already connected") {
-                update_progress("初始化数据库连接", current_step, total_steps,
-                               (current_step as f32 / total_steps as f32) * 100.0,
-                               "数据库已经连接，继续执行任务");
-            } else {
-                // 使用改进的错误处理
-                handle_database_connection_error(&state, &task_id, &config, e).await;
-                // 标记更新失败
-                set_update_finalize(&config.manual_db_nums, "Failed").await;
-                return;
-            }
+            handle_database_connection_error(&state, &task_id, &config, e).await;
+            set_update_finalize(&config.manual_db_nums, "Failed").await;
+            return;
         }
-    }
+    };
+    
+    // 将连接存储到全局连接池中
+    let deployment_id = format!("{}:{}", config.db_ip, config.db_port);
+    crate::web_ui::db_connection::DEPLOYMENT_DB_CONNECTIONS
+        .write().await
+        .insert(deployment_id.clone(), db_connection);
+    update_progress(
+        "初始化数据库连接",
+        current_step,
+        total_steps,
+        (current_step as f32 / total_steps as f32) * 100.0,
+        &format!("数据库连接成功: {}:{}", config.db_ip, config.db_port),
+    );
 
     if is_cancelled().await {
         return;
@@ -2907,21 +2965,33 @@ async fn execute_real_task(state: AppState, task_id: String) {
         );
 
         use crate::versioned_db::database::sync_pdms_with_callback;
-        // 使用现有 DbOption 作为基础，继承 included_projects 等关键配置
-        // 以当前全局配置为基线，构造可写入的解析配置
-        let base_opt = aios_core::get_db_option();
+        // 基于 WebUI 任务配置构造解析配置（避免依赖 DbOption.toml 的连接参数）
         let mut parse_opt = aios_core::options::DbOption::default();
-        // 继承解析所需的项目集合与连接信息
-        parse_opt.included_projects = base_opt.included_projects.clone();
-        parse_opt.v_ip = base_opt.v_ip.clone();
-        parse_opt.v_port = base_opt.v_port;
-        parse_opt.v_user = base_opt.v_user.clone();
-        parse_opt.v_password = base_opt.v_password.clone();
-        // 覆盖 WebUI 任务层的关键参数
-        // 解析阶段同样支持“全部数据库”
+        // 优先从向导任务存储中读取选中项目；否则回退到任务配置中的项目名称
+        let included_projects = if matches!(task_type, TaskType::DataParsingWizard) {
+            if let Some(cfg) = crate::web_ui::wizard_handlers::load_wizard_config_by_task_id(&task_id) {
+                if !cfg.selected_projects.is_empty() { cfg.selected_projects } else { vec![config.project_name.clone()] }
+            } else {
+                vec![config.project_name.clone()]
+            }
+        } else {
+            vec![config.project_name.clone()]
+        };
+        parse_opt.included_projects = included_projects;
+        // 连接参数来源于 WebUI 配置
+        // 注意：v_port 在 aios_core 中通常为 u16，db_port 这里是 String，尽量解析；失败则回退默认端口
+        parse_opt.v_ip = config.db_ip.clone();
+        parse_opt.v_user = config.db_user.clone();
+        parse_opt.v_password = config.db_password.clone();
+        parse_opt.v_port = config
+            .db_port
+            .parse::<u16>()
+            .unwrap_or(8009);
+        // 覆盖 WebUI 任务层的关键参数 - 使用任务配置而不依赖 DbOption.toml
         parse_opt.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
         parse_opt.project_name = config.project_name.clone();
         parse_opt.project_code = config.project_code.to_string();
+        parse_opt.project_path = config.project_path.clone();
         parse_opt.total_sync = true; // 以全量同步方式触发解析
 
         // 解析进度回调：将底层进度折算到当前步骤
@@ -3006,7 +3076,7 @@ async fn execute_real_task(state: AppState, task_id: String) {
             }
         }
 
-        if matches!(task_type, TaskType::ParsePdmsData) {
+        if matches!(task_type, TaskType::ParsePdmsData) || matches!(task_type, TaskType::DataParsingWizard) {
             // 仅解析任务：标记完成并收尾 dbnum_info_table
             set_update_finalize(&config.manual_db_nums, "Success").await;
 
@@ -3017,7 +3087,7 @@ async fn execute_real_task(state: AppState, task_id: String) {
                     task.completed_at = Some(SystemTime::now());
                     task.progress.percentage = ((current_step as f32) / (total_steps as f32) * 100.0).max(100.0);
                     task.progress.current_step = "解析完成".to_string();
-                    task.add_log(LogLevel::Info, "仅解析任务已完成".to_string());
+                    task.add_log(LogLevel::Info, "解析任务已完成".to_string());
                 }
                 task_manager.task_history.push(task);
             }

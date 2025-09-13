@@ -6,7 +6,7 @@ use crate::grpc_service::error::{ServiceError, ServiceResult};
 use crate::grpc_service::types::{DbFileInfo, DbFileStatus, MdbInfo, MdbMetadata};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use sqlx::{MySql, Pool};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 #[derive(Debug)]
 pub struct MdbManager {
     /// 数据库连接池
-    db_pool: Arc<Pool<MySql>>,
+    // db_pool: Arc<Pool<MySql>>, // 暂时注释掉，使用 aios_core 接口
     /// 缓存的MDB列表
     cached_mdb_list: Arc<RwLock<Vec<MdbInfo>>>,
     /// 最后更新时间
@@ -26,9 +26,9 @@ pub struct MdbManager {
 
 impl MdbManager {
     /// 创建新的MDB管理器
-    pub fn new(db_pool: Arc<Pool<MySql>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            db_pool,
+            // db_pool,
             cached_mdb_list: Arc::new(RwLock::new(Vec::new())),
             last_update: Arc::new(RwLock::new(DateTime::<Utc>::MIN_UTC)),
             cache_duration: 300, // 5分钟缓存
@@ -54,8 +54,8 @@ impl MdbManager {
     /// 重新加载MDB列表
     async fn reload_mdb_list(&self) -> ServiceResult<Vec<MdbInfo>> {
         // 使用现有的get_project_mdb函数
-        let mdb_map = crate::get_project_mdb(&self.db_pool).await
-            .map_err(|e| ServiceError::Database(e.into()))?;
+        // TODO: 使用 aios_core 接口查询项目数据库
+        let mdb_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         let mut mdb_list = Vec::new();
         

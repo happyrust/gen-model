@@ -14,7 +14,7 @@ required-features = ["web_ui"]
 
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
+default = ["ws", "gen_model", "manifold", "occ", "project_hd", "sqlite-index"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能

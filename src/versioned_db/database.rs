@@ -143,6 +143,168 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
 }
 
 
+/// 带进度回调的同步pdms数据到数据库
+pub async fn sync_pdms_with_callback<F>(
+    db_option: &DbOption,
+    mut progress_callback: Option<F>,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&str, usize, usize, usize, usize, usize, usize) + Send,
+{
+    if db_option.included_projects.is_empty() {
+        return Err(anyhow::anyhow!("没有包含的项目"));
+    }
+
+    // 开始同步pdms/E3D项目的数据
+    println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
+    let mut time = tokio::time::Instant::now();
+
+    // 解析前移除EVENT，防止大量的event触发
+    println!("正在移除dbnum_event以提高解析性能...");
+    let remove_event_sql = "REMOVE EVENT update_dbnum_event ON pe;";
+    match SUL_DB.query(remove_event_sql).await {
+        Ok(_) => println!("成功移除update_dbnum_event"),
+        Err(e) => println!("移除update_dbnum_event失败（可能不存在）: {:?}", e),
+    }
+
+    // 创建表
+    let create_tables_start = time.elapsed().as_millis();
+    // TODO: 需要实现create_tables函数或使用现有的表创建逻辑
+    // create_tables().await?;
+    let create_tables_elapse = time.elapsed().as_millis() - create_tables_start;
+
+    let mut dbno_set = Arc::new(DashSet::new());
+
+    // 执行多线程解析
+    dbg!("执行多线程解析");
+    let proj_progress_chunk = 80 / db_option.included_projects.len();
+    let total_projects = db_option.included_projects.len();
+
+    // 遍历所有包含的项目
+    for (project_index, project) in db_option.included_projects.iter().enumerate() {
+        let debug_refnos: Vec<RefU64> = db_option
+            .debug_root_refnos
+            .as_ref()
+            .map(|x| {
+                x.iter()
+                    .map(|x| RefU64::from_str(x).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // 统计项目中的文件数量
+        let project_dir = db_option.get_project_path(&project).unwrap();
+        let total_files = if Path::new(&project_dir).exists() {
+            let target_dir = std::fs::read_dir(&project_dir)
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    entry.path()
+                })
+                .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
+                .unwrap();
+
+            let children_files: Vec<PathBuf> = std::fs::read_dir(target_dir)?
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    entry.path()
+                })
+                .collect();
+
+            // 处理文件名_0001和文件名同时存在的情况
+            let mut file_map = HashMap::new();
+            for path in children_files.iter() {
+                let file_name = path.file_stem().unwrap().to_str().unwrap();
+                if let Some(base_name) = file_name.strip_suffix("_0001") {
+                    file_map.insert(base_name.to_string(), path.clone());
+                } else {
+                    if !file_map.contains_key(file_name) {
+                        file_map.insert(file_name.to_string(), path.clone());
+                    }
+                }
+            }
+            file_map.len()
+        } else {
+            0
+        };
+
+        // 通知进度回调开始处理项目
+        if let Some(ref mut callback) = progress_callback {
+            callback(project, project_index + 1, total_projects, 0, total_files, 0, 0);
+        }
+
+        //debug 不保存数据，只复杂查看属性值
+        let is_debug = !debug_refnos.is_empty();
+        let cur_dbno_set = dbno_set.clone();
+        if is_debug || db_option.only_sync_sys || db_option.total_sync {
+            match sync_total_async_threaded_with_callback(
+                &db_option,
+                project,
+                cur_dbno_set,
+                &["DICT", "SYST", "GLB", "GLOB"],
+                proj_progress_chunk,
+                &mut progress_callback,
+                project_index + 1,
+                total_projects,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!("同步UDA和SYS数据成功。");
+                }
+                Err(e) => {
+                    println!("{}", e.to_string());
+                }
+            }
+        }
+
+        //只同步"DICT", "SYST", "GLB", "GLOB" 这些信息
+        if db_option.only_sync_sys {
+            continue;
+        }
+
+        let cur_dbno_set = dbno_set.clone();
+        match sync_total_async_threaded_with_callback(
+            &db_option,
+            project,
+            cur_dbno_set,
+            &["DESI", "CATA"],
+            proj_progress_chunk,
+            &mut progress_callback,
+            project_index + 1,
+            total_projects,
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("同步数据成功。");
+            }
+            Err(e) => {
+                println!("{}", e.to_string());
+            }
+        }
+    }
+
+    // 解析完成后重新定义EVENT
+    println!("正在重新定义dbnum_event...");
+    match define_dbnum_event().await {
+        Ok(_) => println!("成功重新定义update_dbnum_event"),
+        Err(e) => println!("重新定义update_dbnum_event失败: {:?}", e),
+    }
+
+    // 输出创建表所花费的时间
+    println!("创建表花费时间: {} ms", create_tables_elapse);
+    // 输出初始化数据库所花费的时间
+    println!(
+        "初始化数据库时间: {} ms",
+        time.elapsed().as_millis() - create_tables_elapse
+    );
+
+    Ok(())
+}
+
 /// 初始化同步pdms数据到数据
 /// , progress_sender: Sender<i32>
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
@@ -380,6 +542,336 @@ pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
                                     ");
         SUL_DB.query(&sql).await.expect("clear db failed");
     }
+    Ok(())
+}
+
+/// 带进度回调的多线程同步数据
+pub async fn sync_total_async_threaded_with_callback<F>(
+    db_option: &DbOption,
+    project: &str,
+    cur_dbno_set: Arc<DashSet<u32>>,
+    db_types: &[&str],
+    proj_progress_chunk: usize,
+    progress_callback: &mut Option<F>,
+    current_project: usize,
+    total_projects: usize,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&str, usize, usize, usize, usize, usize, usize) + Send,
+{
+    println!("开始解析 {project} 的 {:?}", db_types);
+    let db_option_arc = Arc::new(db_option.clone());
+    let project_dir = db_option.get_project_path(&project).unwrap();
+
+    if !Path::new(&project_dir).exists() {
+        dbg!("项目文件夹指定不正确");
+        return Err(anyhow::anyhow!("项目文件夹指定不正确"));
+    }
+
+    // 获取并统计文件
+    let mut children_files = {
+        let target_dir = std::fs::read_dir(&project_dir)
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                entry.path()
+            })
+            .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
+            .unwrap();
+        std::fs::read_dir(target_dir)?
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                entry.path()
+            })
+            .collect::<Vec<PathBuf>>()
+    };
+
+    // 处理文件名_0001和文件名同时存在的情况
+    let mut file_map = HashMap::new();
+    for path in children_files.iter() {
+        let file_name = path.file_stem().unwrap().to_str().unwrap();
+        if let Some(base_name) = file_name.strip_suffix("_0001") {
+            file_map.insert(base_name.to_string(), path.clone());
+        } else {
+            if !file_map.contains_key(file_name) {
+                file_map.insert(file_name.to_string(), path.clone());
+            }
+        }
+    }
+
+    children_files = file_map.into_values().collect();
+    let total_files = children_files.len();
+
+    // 通知进度回调文件统计完成
+    if let Some(callback) = progress_callback {
+        callback(project, current_project, total_projects, 0, total_files, 0, 0);
+    }
+
+    // 继续原有的处理逻辑...
+    let project = Arc::new(project.to_string());
+    let mut is_replace = db_option_arc.replace_dbs;
+    let replace_types = db_option_arc.replace_types.clone();
+    let b_replace_types = replace_types.is_some();
+    let b_save_mysql = db_option_arc.sync_tidb.unwrap_or(false);
+    if b_replace_types {
+        is_replace = true;
+    }
+    let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
+
+    const CHUNK_SIZE: usize = 100;
+    let (sender, receiver) = flume::unbounded();
+
+    // 启动数据库写入任务
+    let mut insert_handles = FuturesUnordered::new();
+    for i in 0..16 {
+        let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
+        #[cfg(feature = "sql")]
+        let pool = AiosDBManager::get_project_pool().await.unwrap().clone();
+
+        let insert_handle = tokio::task::spawn(async move {
+            let mut record_stream = receiver.into_stream().chunks(200);
+            while let Some(stream) = record_stream.next().await {
+                for data in stream {
+                    match data {
+                        SenderJsonsData::PEJson(pes) => {
+                            if !pes.is_empty() {
+                                let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
+                                let mut response =
+                                    SUL_DB.query(&sql).await.expect("insert pes failed");
+                            }
+                        }
+                        SenderJsonsData::PERelateJson(relates) => {
+                            if !relates.is_empty() {
+                                let sql = format!(
+                                    "INSERT RELATION INTO pe_owner [{}]",
+                                    relates.join(",")
+                                );
+                                SUL_DB.query(sql).await.expect("insert pe_owner failed");
+                            }
+                        }
+                        SenderJsonsData::AttJson((type_name, jsons)) => {
+                            if !jsons.is_empty() {
+                                let sql = format!("INSERT IGNORE INTO {} [{}]", type_name, jsons.join(","));
+                                SUL_DB.query(sql).await.expect("insert att failed");
+                            }
+                        }
+                        SenderJsonsData::DbnumInfoUpdate(sqls) => {
+                            for sql in sqls {
+                                SUL_DB.query(sql).await.expect("update dbnum_info failed");
+                            }
+                        }
+                        #[cfg(feature = "sql")]
+                        SenderJsonsData::MySqlJson((table_name, jsons)) => {
+                            if b_save_mysql && !jsons.is_empty() {
+                                let sql = format!("INSERT IGNORE INTO {} VALUES {}", table_name, jsons.join(","));
+                                match sqlx::query(&sql).execute(&pool).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(e.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        SenderJsonsData::MysqlSql((table_name, sql)) => {
+                            // 处理MySQL SQL语句
+                            #[cfg(feature = "sql")]
+                            if b_save_mysql {
+                                match sqlx::query(&sql).execute(&pool).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(e.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        insert_handles.push(insert_handle);
+    }
+
+    // ========== 文件解析与写库主循环（带进度回调） ==========
+    // 为保持与非回调版本一致，这里直接内联主循环，避免将 progress_callback 移入子任务造成生命周期/Send 限制。
+
+    // 与非回调版本保持一致的控制参数
+    let db_types_clone = db_types.iter().map(|&x| x.to_string()).collect::<Vec<_>>();
+    let is_parse_sys = db_types_clone.contains(&"SYST".to_string());
+    let is_save_db = db_option.is_save_db();
+    let is_sync_history = db_option.is_sync_history();
+    let is_total_sync = db_option.total_sync;
+    let sync_versioned = db_option.sync_versioned.unwrap_or(false);
+
+    for (file_idx, path) in children_files.into_iter().enumerate() {
+        let total_files = total_files; // 仅为语义清晰
+        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        if file_name.contains('.') {
+            // 进入文件（将其计入进度），随即跳过
+            if let Some(cb) = progress_callback.as_mut() {
+                cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0);
+            }
+            continue;
+        }
+
+        // 进入文件 - 上报当前文件号
+        if let Some(cb) = progress_callback.as_mut() {
+            cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0);
+        }
+
+        let dbno_set = cur_dbno_set.clone();
+        let mut time = Instant::now();
+
+        // 读取文件头，判定 db_type / db_no
+        let mut file = File::open(&path).await.unwrap();
+        let mut buf = vec![0u8; 60];
+        file.read_exact(&mut buf).await.unwrap();
+        let db_basic_info = parse_file_basic_info(&buf);
+        let db_type = db_basic_info.db_type;
+        let db_no = db_basic_info.db_no;
+
+        if is_replace { check_and_clear_db(db_no).await.unwrap(); }
+        // 类型过滤
+        if !db_types_clone.contains(&db_type) {
+            // 依然汇报一次该文件完成
+            if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+            continue;
+        }
+        // 避免重复
+        if dbno_set.contains(&db_no) {
+            if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+            continue;
+        }
+        dbno_set.insert(db_no);
+
+        // 读取 sesno、存储 refno->sesno map
+        let mut ses_range_map = BTreeMap::new();
+        let mut sesno = 0;
+        {
+            let mut io = PdmsIO::new(&project, path.clone(), true);
+            if io.open().is_ok() {
+                sesno = io.get_latest_sesno().unwrap_or_default();
+                if sesno == 0 {
+                    if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                    continue;
+                }
+                if is_sync_history {
+                    io.sync_history().await.unwrap();
+                    if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                    continue;
+                } else {
+                    io.store_all_refno_sesno_map().await.unwrap();
+                }
+                ses_range_map = io.ses_range_map;
+            } else {
+                if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                continue;
+            }
+        }
+
+        let project_name = project.as_str().to_string();
+        let mut db_basic = parse_file_db_basic_data(&path, &file_name, project_name.as_str())
+            .unwrap_or_default();
+        let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
+        let total_chunks = std::cmp::max(1, (all_refnos.len() + chunk_size - 1) / chunk_size);
+
+        let db_basic = Arc::new(db_basic);
+        if is_save_db { save_pe_relates(&db_basic, sender.clone()).await; }
+        let debug_refnos: Vec<RefU64> = db_option_arc
+            .debug_root_refnos
+            .as_ref()
+            .map(|x| x.iter().map(|x| RefU64::from_str(x).unwrap()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let is_debug = !debug_refnos.is_empty();
+        if is_debug {
+            if let Some(children) = db_basic.children_map.get(&debug_refnos[0]) { dbg!(children); }
+        }
+        let debug_refnos = Arc::new(debug_refnos);
+
+        let mut total_cnt = 0;
+        for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
+            let db_option_clone = db_option_arc.clone();
+            let file_name_clone = file_name.clone();
+            let chunk_refnos = chunk.to_vec();
+            let project_name_clone = project_name.clone();
+            let db_basic_clone = db_basic.clone();
+            let debug_refnos = debug_refnos.clone();
+            let ses_range_map_clone = ses_range_map.clone();
+            let ignore_world_refno = true;
+
+            match parse_file_with_chunk(
+                db_basic_clone.clone(),
+                &file_name_clone,
+                project_name_clone.as_str(),
+                &chunk_refnos,
+                &ses_range_map_clone,
+                ignore_world_refno,
+            ).await {
+                Ok(PdmsDbData { total_attr_map, type_ele_map, db_no, .. }) => {
+                    let total_attr_map_arc = Arc::new(total_attr_map);
+                    total_cnt += total_attr_map_arc.len();
+                    if !is_debug && is_save_db {
+                        save_pes(
+                            &db_basic_clone,
+                            &total_attr_map_arc,
+                            db_no as i32,
+                            &file_name_clone,
+                            &db_type,
+                            &db_option_clone,
+                            sender.clone(),
+                        ).await.expect("save pe to surreal failed");
+                    }
+                    // UDA 类型写入
+                    for kv in type_ele_map.iter() {
+                        let noun: i32 = *kv.key() as _;
+                        let type_name = db1_dehash(noun as _);
+                        if type_name.is_empty() { continue; }
+                        for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _) {
+                            let mut json_vec = vec![];
+                            let mut uda_json_vec = vec![];
+                            for refno in refnos {
+                                let att = total_attr_map_arc.get(refno).unwrap();
+                                if is_debug {
+                                    if debug_refnos.contains(&att.get_refno_or_default().refno()) { dbg!(att.value()); } else { continue; }
+                                }
+                                if !is_save_db { continue; }
+                                if let Some(json) = att.gen_sur_json() { json_vec.push(json); }
+                                if let Some(json) = att.gen_sur_json_uda(&[]) { uda_json_vec.push(normalize_sql_string(&json)); }
+                            }
+                            if is_save_db {
+                                if !json_vec.is_empty() {
+                                    sender.send(SenderJsonsData::AttJson((type_name.clone(), json_vec))).expect("send attmap sql failed");
+                                }
+                                if !uda_json_vec.is_empty() {
+                                    sender.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec))).expect("send attmap sql failed");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => { dbg!(e.to_string()); }
+            }
+
+            // 分块进度
+            if let Some(cb) = progress_callback.as_mut() {
+                cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, chunk_index + 1, total_chunks);
+            }
+        }
+
+        println!("解析任务完成, 耗时: {} s, 总数量: {}", time.elapsed().as_secs_f32(), total_cnt);
+        // 文件完成：若无分块也至少回报一次
+        if let Some(cb) = progress_callback.as_mut() {
+            cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, total_chunks, total_chunks);
+        }
+    }
+
+    // 等待所有写入任务完成
+    drop(sender);
+    while let Some(_result) = insert_handles.next().await {
+        // 可在此加入错误处理或日志
+    }
+
     Ok(())
 }
 

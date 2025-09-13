@@ -9,8 +9,8 @@ use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
-use aios_core::{clear_all_caches, SUL_DB};
-use aios_core::{get_db_option, RefU64Vec};
+use aios_core::{RefU64Vec, get_db_option};
+use aios_core::{SUL_DB, clear_all_caches};
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -18,7 +18,7 @@ use notify::{RecursiveMode, Watcher};
 use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
-use pdms_io::sync::compress::{execute_compress, CompressOptions};
+use pdms_io::sync::compress::{CompressOptions, execute_compress};
 // use pdms_io::sync::compress::{execute_compress, CompressOptions};
 use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
@@ -115,10 +115,11 @@ impl AiosDBManager {
                 .map_err(|e| anyhow::anyhow!("Failed to open PdmsIO: {}", e))?;
             let end_sesno = sesno_range.end().clone();
             let range_update_eles = io.collect_increment_eles(Some(sesno_range))?;
-            io.update_elements_to_database(&range_update_eles).await?;
-            
+            io.update_elements_to_database(&range_update_eles, true)
+                .await?;
+
             //执行逻辑
-            
+
             //更新 sesno 到 db_file_info 中
             let file_name = path.file_stem().unwrap().to_str().unwrap();
             // dbg!(&file_name);
@@ -282,8 +283,11 @@ impl AiosDBManager {
                         io.open()?;
                         if let Ok(basic_info) = io.get_page_basic_info() {
                             if file_latest_sesno > db_latest_sesno {
-                                println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
-                                        文件属性对应sesno: {file_latest_sesno}", &file_name);
+                                println!(
+                                    "发现需要增量更新的文件: {:?}, 当前数据库属性最大sesno: {db_latest_sesno},\
+                                        文件属性对应sesno: {file_latest_sesno}",
+                                    &file_name
+                                );
                                 let nearest_sesno = io
                                     .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
                                     .unwrap_or_default();

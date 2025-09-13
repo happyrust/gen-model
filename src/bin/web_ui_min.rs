@@ -1,7 +1,11 @@
+#[cfg(feature = "web_ui")] 
 use aios_database::web_ui::{handlers, AppState};
+#[cfg(feature = "web_ui")] 
 use axum::{routing::{get, post}, Router};
+#[cfg(feature = "web_ui")] 
 use tower_http::services::ServeDir;
 
+#[cfg(feature = "web_ui")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 最小化 Web UI，仅包含桥架支撑检测与SCTN测试页面/接口
@@ -32,3 +36,5 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "web_ui"))]
+fn main() {}

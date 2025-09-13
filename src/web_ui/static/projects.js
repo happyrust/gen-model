@@ -15,6 +15,23 @@
 
   function setHidden(el, hidden){ el.classList[hidden? 'add':'remove']('hidden'); }
 
+  // 密码可见性切换功能
+  window.togglePasswordVisibility = function(inputId, button) {
+    const input = document.getElementById(inputId);
+    const eyeIcon = button.querySelector('.eye-icon');
+    const eyeSlashIcon = button.querySelector('.eye-slash-icon');
+    
+    if (input.type === 'password') {
+      input.type = 'text';
+      eyeIcon.classList.add('hidden');
+      eyeSlashIcon.classList.remove('hidden');
+    } else {
+      input.type = 'password';
+      eyeIcon.classList.remove('hidden');
+      eyeSlashIcon.classList.add('hidden');
+    }
+  };
+
   function statusBadge(status){
     const map = {
       Running: 'bg-green-100 text-green-700',
@@ -182,6 +199,8 @@
       const resp = await fetch('/api/deployment-sites/' + encodeURIComponent(id));
       if(!resp.ok){ throw new Error('HTTP '+resp.status); }
       const p = await resp.json();
+      // 保存当前站点详情，供后续操作（如重启数据库）
+      window.__currentSiteDetail = p;
 
       $('pm-title').textContent = p.name || p.id || '部署站点详情';
       $('pm-status').textContent = p.status || '未知';
@@ -304,6 +323,21 @@
         '</div></div>'
       ].filter(Boolean);
 
+      // 根据数据库类型决定是否显示“重启数据库”按钮（目前仅支持 SurrealDB）
+      try {
+        const dbType = String((cfg.db_type||'')).toLowerCase();
+        const restartBtn = $('pm-restart-db');
+        if (restartBtn) {
+          if (dbType === 'surrealdb') {
+            setHidden(restartBtn, false);
+            restartBtn.title = '根据当前配置重启 SurrealDB 实例';
+          } else {
+            setHidden(restartBtn, true);
+            restartBtn.title = '';
+          }
+        }
+      } catch(_) {}
+
       $('pm-content').innerHTML = `
         <div class=\"space-y-4\">
           <div class=\"bg-gray-50 border border-gray-200 rounded p-3\">
@@ -357,7 +391,45 @@
     }catch(err){
       const ms = Math.max(0, Math.round(performance.now()-t0));
       setHealthStatus('健康检查失败：' + (err && err.name==='AbortError'?'超时':'网络错误') + ' | ' + startedAt.toLocaleString() + ' | ' + ms + 'ms','err');
+  }
+
+  // 使用当前弹窗中的配置重启数据库（仅 SurrealDB）
+  window.pmRestartDatabase = async function(){
+    try {
+      const detail = window.__currentSiteDetail || null;
+      if (!detail || !detail.config) {
+        alert('未加载站点配置，无法重启数据库');
+        return;
+      }
+      const cfg = detail.config || {};
+      const dbType = String((cfg.db_type||'')).toLowerCase();
+      if (dbType !== 'surrealdb') {
+        alert('当前仅支持 SurrealDB 重启');
+        return;
+      }
+
+      const body = {
+        mode: 'local',               // 简化：按本机控制处理；如需 SSH 可扩展
+        bind_ip: cfg.db_ip,
+        bind_port: parseInt(cfg.db_port || '0') || undefined,
+        db_user: cfg.db_user,
+        db_password: cfg.db_password,
+        project_name: cfg.project_name,
+      };
+
+      const res = await fetch('/api/surreal/restart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      let data = {};
+      try { data = await res.json(); } catch(_){ }
+      alert(data.message || (data.success ? '重启命令已发送' : '重启失败'));
+    } catch (e) {
+      console.error('pmRestartDatabase error', e);
+      alert('重启请求发送失败：' + (e && e.message || '未知错误'));
     }
+  };
   };
 
   // 全局键盘事件
@@ -421,11 +493,11 @@
       const deploymentSite = await resp.json();
       const config = deploymentSite.config || {};
       
-      // 创建解析任务
-      // 处理数据库编号：如果 manual_db_nums 为空但 mdb_name 为 "ALL"，使用 project_code
-      const manualDbNums = config.manual_db_nums && config.manual_db_nums.length > 0 
-        ? config.manual_db_nums 
-        : (config.mdb_name === "ALL" && config.project_code ? [config.project_code] : []);
+      // 处理数据库编号：如果为空且 mdb_name="ALL"，使用 project_code 作为默认
+      let manualDbNums = Array.isArray(config.manual_db_nums) ? config.manual_db_nums : [];
+      if (manualDbNums.length === 0 && config.mdb_name === "ALL" && config.project_code) {
+        manualDbNums = [config.project_code];
+      }
       
       const taskPayload = {
         name: `解析任务-${deploymentSite.name || id}`,
@@ -447,10 +519,28 @@
       
       if (createResp.ok) {
         const result = await createResp.json();
-        alert(`解析任务创建成功！\n任务ID: ${result.id}\n\n即将跳转到任务管理页面...`);
+        // 创建后立即启动任务
+        try {
+          const startResp = await fetch(`/api/tasks/${encodeURIComponent(result.id)}/start`, { method: 'POST' });
+          if (!startResp.ok) {
+            const msg = await startResp.text();
+            throw new Error(`启动失败: ${msg}`);
+          }
+        } catch (e) {
+          console.error('任务启动失败:', e);
+          alert(`任务已创建，但启动失败：${e.message}`);
+          return;
+        }
+        // 启动成功后跳转到任务管理页面
         window.location.href = '/tasks';
       } else {
-        const errorText = await createResp.text();
+        let errorText;
+        try {
+          const errJson = await createResp.json();
+          errorText = errJson.error || JSON.stringify(errJson);
+        } catch (_) {
+          errorText = await createResp.text();
+        }
         console.error('任务创建失败:', errorText);
         throw new Error(`任务创建失败: ${errorText}`);
       }
@@ -470,11 +560,18 @@
       const deploymentSite = await resp.json();
       const config = deploymentSite.config || {};
       
+      // 处理数据库编号：如果为空且 mdb_name="ALL"，使用 project_code 作为默认
+      let manualDbNums = Array.isArray(config.manual_db_nums) ? config.manual_db_nums : [];
+      if (manualDbNums.length === 0 && config.mdb_name === "ALL" && config.project_code) {
+        manualDbNums = [config.project_code];
+      }
+
       const taskPayload = {
         name: `建模任务-${deploymentSite.name || id}`,
         task_type: 'GenerateModel',
         config: {
           ...config,
+          manual_db_nums: manualDbNums,
           gen_model: true,
           gen_mesh: config.gen_mesh !== false,  // 保持原配置
           gen_spatial_tree: false  // 建模时不生成空间树
@@ -489,10 +586,13 @@
       
       if (createResp.ok) {
         const result = await createResp.json();
-        alert(`建模任务创建成功！\n任务ID: ${result.id}\n\n即将跳转到任务管理页面...`);
+        // 直接跳转到任务管理页面，无需弹窗
         window.location.href = '/tasks';
       } else {
-        throw new Error('任务创建失败');
+        let errorText;
+        try { const errJson = await createResp.json(); errorText = errJson.error || JSON.stringify(errJson); }
+        catch(_) { errorText = await createResp.text(); }
+        throw new Error(`任务创建失败: ${errorText}`);
       }
     } catch (error) {
       console.error('启动建模任务失败:', error);
@@ -510,11 +610,18 @@
       const deploymentSite = await resp.json();
       const config = deploymentSite.config || {};
       
+      // 处理数据库编号：如果为空且 mdb_name="ALL"，使用 project_code 作为默认
+      let manualDbNums = Array.isArray(config.manual_db_nums) ? config.manual_db_nums : [];
+      if (manualDbNums.length === 0 && config.mdb_name === "ALL" && config.project_code) {
+        manualDbNums = [config.project_code];
+      }
+
       const taskPayload = {
         name: `空间索引任务-${deploymentSite.name || id}`,
         task_type: 'GenerateSpatialIndex',
         config: {
           ...config,
+          manual_db_nums: manualDbNums,
           gen_model: false,  // 空间索引任务只生成空间树
           gen_mesh: false,
           gen_spatial_tree: true
@@ -529,10 +636,13 @@
       
       if (createResp.ok) {
         const result = await createResp.json();
-        alert(`空间索引任务创建成功！\n任务ID: ${result.id}\n\n即将跳转到任务管理页面...`);
+        // 直接跳转到任务管理页面，无需弹窗
         window.location.href = '/tasks';
       } else {
-        throw new Error('任务创建失败');
+        let errorText;
+        try { const errJson = await createResp.json(); errorText = errJson.error || JSON.stringify(errJson); }
+        catch(_) { errorText = await createResp.text(); }
+        throw new Error(`任务创建失败: ${errorText}`);
       }
     } catch (error) {
       console.error('启动空间索引任务失败:', error);
@@ -585,6 +695,7 @@
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">项目代码</label>
                     <input type="number" name="project_code" value="${escHtml(config.project_code || '')}" 
+                           onchange="document.querySelector('input[name=surreal_ns]').value = this.value"
                            class="w-full px-3 py-2 border border-gray-300 rounded-md">
                   </div>
                   
@@ -645,14 +756,32 @@
                   
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">密码</label>
-                    <input type="password" name="db_password" value="${escHtml(config.db_password || '')}" 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    <div class="relative">
+                      <input type="password" name="db_password" id="config-db-password-${projectCode}" 
+                             value="${escHtml(config.db_password || '')}" 
+                             class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md">
+                      <button type="button" 
+                              onclick="togglePasswordVisibility('config-db-password-${projectCode}', this)"
+                              class="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700">
+                        <svg class="w-5 h-5 eye-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                        </svg>
+                        <svg class="w-5 h-5 eye-slash-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                   
                   <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Surreal 命名空间</label>
-                    <input type="number" name="surreal_ns" value="${escHtml(config.surreal_ns || '')}" 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                      Surreal 命名空间
+                      <span class="text-xs text-gray-500 ml-1">(自动使用项目代码)</span>
+                    </label>
+                    <input type="number" name="surreal_ns" value="${escHtml(config.surreal_ns || config.project_code || '')}" 
+                           readonly
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-100 cursor-not-allowed">
                   </div>
                 </div>
                 

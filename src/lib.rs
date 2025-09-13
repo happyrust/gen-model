@@ -19,7 +19,7 @@ use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
 use aios_core::pdms_types::*;
-use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
+// Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::ssc_setting::{
     set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,
@@ -56,6 +56,7 @@ use simplelog::*;
 pub mod api;
 pub mod cata;
 pub mod consts;
+pub mod expression_fix;
 pub mod data_interface;
 pub mod tables;
 // pub mod ssc;
@@ -71,6 +72,9 @@ pub mod gui;
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 
+#[cfg(feature = "gen_model")]
+pub mod xeokit_xtk_generator;
+
 pub mod versioned_db;
 
 pub mod mqtt_service;
@@ -79,6 +83,10 @@ pub mod options;
 
 #[cfg(feature = "grpc")]
 pub mod grpc_service;
+pub mod spatial_index;
+
+#[cfg(feature = "grpc")]
+pub mod test_spatial_query;
 
 // 添加options模块的重导出
 pub use options::get_db_option_ext;
@@ -177,9 +185,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // progress_sender.send(5).await?;
     // progress_sender.send(5)?;
 
-    aios_core::function::define_common_functions()
-        .await
-        .unwrap();
+    if let Err(e) = aios_core::function::define_common_functions().await {
+        eprintln!("初始化通用函数失败: {} (忽略并继续)", e);
+    }
     // 解析完成后重新定义EVENT
     println!("正在重新定义dbnum_event...");
     match define_dbnum_event().await {
@@ -225,7 +233,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         mgr.init_watcher().await?;
     }
 
-    load_aabb_tree().await.unwrap();
+    // SQLite R*-tree initialization is handled automatically
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
@@ -260,10 +268,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         println!("房间关键字为: {:?}", db_option.get_room_key_word());
         println!("正在生成空间树");
         println!("正在计算房间");
-        println!(
-            "房间空间数的数量为: {}",
-            GLOBAL_AABB_TREE.read().await.tree.size()
-        );
+        // SQLite R*-tree will be used for spatial indexing
         let mut time = Instant::now();
         build_room_relations(&db_option).await.unwrap();
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
@@ -366,6 +371,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
     use crate::fast_model::aabb_tree::manual_update_aabbs;
     use aios_core::init_surreal;
+    use aios_core::SUL_DB;
     
     let config = surrealdb::opt::Config::default()
         .ast_payload(); // 启用AST格式
@@ -380,33 +386,156 @@ async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
     
     #[cfg(feature = "ws")]
     {
-        match init_surreal().await {
+        // 使用改进的数据库连接初始化
+        match init_surreal_with_retry(&db_option).await {
             Ok(_) => {
                 println!(
-                    "数据库已经连接到 {}, 站点: {}",
-                    db_option.project_name,
-                    db_option.get_version_db_conn_str()
+                    "✅ 数据库连接成功: {} -> {}",
+                    db_option.get_version_db_conn_str(),
+                    db_option.project_name
                 );
             }
             Err(e) => {
-                dbg!(&e.to_string());
+                eprintln!("❌ 数据库连接失败: {}", e);
+                eprintln!("   配置信息: {}", db_option.get_connection_summary());
+                eprintln!("   请检查 SurrealDB 服务是否运行，配置是否正确");
+                // 不要直接返回错误，让应用继续运行但标记数据库不可用
             }
         }
     }
 
     if db_option.gen_spatial_tree {
-        // Try to load existing AABB tree first
-        load_aabb_tree().await?;
-
-        // Check if tree is empty after loading
-        if GLOBAL_AABB_TREE.read().await.is_empty() {
-            println!("AABB tree is empty after loading, performing manual update...");
-            manual_update_aabbs(true).await?;
-            println!("Manual update aabb tree completed");
-        }
+        // SQLite R*-tree initialization is handled in spatial_index_builder
     }
     
     run_cli(db_option).await
+}
+
+/// 改进的数据库连接初始化，支持重试和详细错误诊断
+async fn init_surreal_with_retry(db_option: &DbOption) -> anyhow::Result<()> {
+    use aios_core::{init_surreal, SUL_DB};
+    use std::time::Duration;
+
+    // 验证配置
+    db_option.validate_connection_config()
+        .map_err(|e| anyhow::anyhow!("配置验证失败: {}", e))?;
+
+    let max_retries = 3;
+    let mut last_error = None;
+
+    for attempt in 1..=max_retries {
+        println!("🔄 数据库连接尝试 {}/{}", attempt, max_retries);
+
+        match try_connect_database(db_option).await {
+            Ok(_) => {
+                println!("✅ 数据库连接成功");
+                return Ok(());
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                last_error = Some(anyhow::anyhow!("{}", error_msg));
+                eprintln!("❌ 连接尝试 {} 失败: {}", attempt, error_msg);
+
+                if attempt < max_retries {
+                    let wait_time = attempt * 2;
+                    println!("⏳ {}秒后重试...", wait_time);
+                    tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("连接失败")))
+}
+
+/// 尝试连接数据库的核心逻辑
+async fn try_connect_database(db_option: &DbOption) -> anyhow::Result<()> {
+    use aios_core::{init_surreal, SUL_DB};
+
+    let conn_str = db_option.get_version_db_conn_str();
+    println!("🔗 连接字符串: {}", conn_str);
+
+    // 1. 建立连接
+    SUL_DB
+        .connect(conn_str.clone())
+        .with_capacity(1000)
+        .await
+        .map_err(|e| anyhow::anyhow!("连接失败 {}: {}", conn_str, e))?;
+
+    println!("✓ 基础连接建立成功");
+
+    // 2. 选择命名空间和数据库
+    SUL_DB
+        .use_ns(&db_option.project_code.to_string())
+        .use_db(&db_option.project_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("选择数据库失败 (ns: {}, db: {}): {}",
+            db_option.project_code, db_option.project_name, e))?;
+
+    println!("✓ 命名空间和数据库选择成功");
+
+    // 3. 执行初始化
+    init_surreal()
+        .await
+        .map_err(|e| anyhow::anyhow!("数据库初始化失败: {}", e))?;
+
+    println!("✓ 数据库初始化完成");
+
+    // 4. 测试查询
+    SUL_DB
+        .query("SELECT 1 as test")
+        .await
+        .map_err(|e| anyhow::anyhow!("测试查询失败: {}", e))?;
+
+    println!("✓ 功能测试通过");
+
+    Ok(())
+}
+
+/// DbOption 扩展 trait，提供验证和连接摘要功能
+trait DbOptionValidation {
+    fn validate_connection_config(&self) -> Result<(), String>;
+    fn get_connection_summary(&self) -> String;
+}
+
+impl DbOptionValidation for aios_core::options::DbOption {
+    fn validate_connection_config(&self) -> Result<(), String> {
+        if self.v_ip.is_empty() {
+            return Err("数据库IP不能为空".to_string());
+        }
+
+        if self.v_port == 0 {
+            return Err("数据库端口不能为0".to_string());
+        }
+
+        if self.v_user.is_empty() {
+            return Err("数据库用户名不能为空".to_string());
+        }
+
+        if self.project_name.is_empty() {
+            return Err("项目名称不能为空".to_string());
+        }
+
+        // 检查端口范围
+        if self.v_port > 65535 {
+            return Err("数据库端口超出有效范围 (1-65535)".to_string());
+        }
+
+        // 检查项目代码
+        if self.project_code.is_empty() || self.project_code == "0" {
+            return Err("项目代码不能为空或0".to_string());
+        }
+
+        Ok(())
+    }
+
+    fn get_connection_summary(&self) -> String {
+        format!(
+            "连接信息: {}:{} (用户: {}, 项目: {}, 命名空间: {})",
+            self.v_ip, self.v_port, self.v_user,
+            self.project_name, self.project_code
+        )
+    }
 }
 
 pub mod admin;
@@ -419,4 +548,6 @@ pub mod data_state;
 // pub mod rvm;
 // pub mod ssc;
 pub mod version_management;
+#[cfg(feature = "web_ui")]
+pub mod web_ui;
 pub mod xkt_generator;

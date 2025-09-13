@@ -183,6 +183,8 @@ pub struct DatabaseConfig {
     pub manual_db_nums: Vec<u32>,
     /// 项目名称
     pub project_name: String,
+    /// 项目路径
+    pub project_path: String,
     /// 项目代码
     pub project_code: u32,
     /// MDB名称
@@ -224,6 +226,7 @@ impl Default for DatabaseConfig {
             name: "默认配置".to_string(),
             manual_db_nums: vec![],
             project_name: "AvevaMarineSample".to_string(),
+            project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
             project_code: 1516,
             mdb_name: "ALL".to_string(),
             module: "DESI".to_string(),
@@ -852,6 +855,9 @@ pub struct WizardTaskRequest {
     pub wizard_config: DataParsingWizardConfig,
     /// 任务优先级
     pub priority: Option<TaskPriority>,
+    /// 任务模式：ParseOnly | FullGeneration（可选，默认 ParseOnly）
+    #[serde(default)]
+    pub task_mode: Option<String>,
 }
 
 /// 任务队列管理器

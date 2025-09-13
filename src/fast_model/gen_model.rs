@@ -15,7 +15,7 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::tubing::TubiSize;
-use aios_core::room::room::GLOBAL_AABB_TREE;
+// Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::{pdms_types::*, RefnoEnum, RefU64};
@@ -49,6 +49,8 @@ use std::mem::take;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(feature = "sqlite-index")]
+use crate::spatial_index::SqliteSpatialIndex;
 
 ///一个db生成模型里，汇总的参考号集合
 #[derive(Debug, Clone, Default)]
@@ -289,11 +291,18 @@ pub async fn gen_all_geos_data(
             }
         }
     }
+    // After generation, build SQLite RTree index from cached AABBs
+    #[cfg(feature = "sqlite-index")]
     {
-        let read = GLOBAL_AABB_TREE.read().await;
-        println!("GLOBAL_AABB_TREE: {:?}", read.tree.size());
-        GLOBAL_AABB_TREE.read().await.serialize_to_bin_file()?;
+        // SQLite spatial index is initialized when needed
+        if SqliteSpatialIndex::is_enabled() {
+            match SqliteSpatialIndex::with_default_path() {
+                Ok(index) => println!("SQLite spatial index initialized"),
+                Err(e) => eprintln!("Failed to initialize SQLite spatial index: {}", e),
+            }
+        }
     }
+    // SQLite R*-tree index is used for spatial queries
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
 
     Ok(true)

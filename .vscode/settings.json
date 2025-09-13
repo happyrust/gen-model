@@ -7,5 +7,6 @@
     "rust-analyzer.linkedProjects": [
         "Cargo.toml"
     ],
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "chatgpt.openOnStartup": true
 }

@@ -53,7 +53,7 @@ function deploymentSitesApp() {
         // 任务请求数据
         taskRequest: {
             site_id: '',
-            task_type: 'DataGeneration',
+            task_type: 'ParsePdmsData',
             priority: 'Normal'
         },
         
@@ -260,6 +260,14 @@ function deploymentSitesApp() {
                     const result = await response.json();
                     this.showTaskModal = false;
                     this.showSuccess(`任务创建成功，任务ID: ${result.task_id}`);
+                    // 自动启动任务
+                    try {
+                        await fetch(`/api/tasks/${encodeURIComponent(result.task_id)}/start`, { method: 'POST' });
+                        this.showSuccess('任务已自动启动');
+                    } catch (e) {
+                        console.error('自动启动任务失败:', e);
+                        this.showError('任务已创建，但启动失败，请在任务页面手动启动');
+                    }
                 } else {
                     const error = await response.json();
                     throw new Error(error.error || '创建任务失败');

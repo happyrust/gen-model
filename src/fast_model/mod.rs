@@ -30,6 +30,9 @@ pub mod aabb_tree;
 
 pub mod incremental;
 
+pub mod aabb_cache;
+pub mod session;
+
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 use once_cell::sync::Lazy;

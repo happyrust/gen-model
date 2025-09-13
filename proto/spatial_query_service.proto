@@ -1,0 +1,212 @@
+syntax = "proto3";
+
+package spatial_query;
+
+// 空间查询服务
+service SpatialQueryService {
+    // 根据参考号查询相交的构件
+    rpc QueryIntersectingElements(SpatialQueryRequest) returns (SpatialQueryResponse);
+
+    // 批量查询多个参考号的相交构件
+    rpc BatchQueryIntersecting(BatchSpatialQueryRequest) returns (BatchSpatialQueryResponse);
+
+    // 重建空间索引
+    rpc RebuildSpatialIndex(RebuildIndexRequest) returns (RebuildIndexResponse);
+
+    // 获取空间索引统计信息
+    rpc GetIndexStats(IndexStatsRequest) returns (IndexStatsResponse);
+    
+    // SCTN桥架接触检测
+    rpc DetectSctnContacts(SctnContactRequest) returns (SctnContactResponse);
+    
+    // 批量SCTN接触检测
+    rpc BatchDetectSctnContacts(BatchSctnContactRequest) returns (BatchSctnContactResponse);
+    
+    // 检测桥架支撑关系
+    rpc DetectTraySupports(TraySupportRequest) returns (TraySupportResponse);
+}
+
+// 单个空间查询请求
+message SpatialQueryRequest {
+    uint64 refno = 1;                     // 目标参考号
+    optional BoundingBox custom_bbox = 2;  // 可选：自定义包围盒
+    repeated string element_types = 3;     // 可选：过滤构件类型
+    bool include_self = 4;                // 是否包含自身
+    float tolerance = 5;                  // 容差值，默认0.001
+    uint32 max_results = 6;               // 最大结果数量，默认1000
+}
+
+// 单个空间查询响应
+message SpatialQueryResponse {
+    repeated IntersectingElement elements = 1;  // 相交的构件列表
+    uint32 total_count = 2;                    // 总数量
+    string query_time_ms = 3;                  // 查询耗时（毫秒）
+    bool success = 4;                          // 查询是否成功
+    string error_message = 5;                  // 错误信息（如果有）
+}
+
+// 批量空间查询请求
+message BatchSpatialQueryRequest {
+    repeated SpatialQueryRequest requests = 1;  // 批量查询请求
+    bool parallel_execution = 2;               // 是否并行执行
+}
+
+// 批量空间查询响应
+message BatchSpatialQueryResponse {
+    repeated SpatialQueryResponse responses = 1;  // 批量查询响应
+    string total_time_ms = 2;                    // 总耗时
+    uint32 successful_queries = 3;               // 成功查询数量
+    uint32 failed_queries = 4;                  // 失败查询数量
+}
+
+// 相交的构件信息
+message IntersectingElement {
+    uint64 refno = 1;                    // 构件参考号
+    string element_type = 2;             // 构件类型
+    BoundingBox bbox = 3;                // 包围盒
+    float intersection_volume = 4;        // 相交体积
+    float distance_to_center = 5;        // 到目标中心的距离
+    string element_name = 6;             // 构件名称（可选）
+}
+
+// 包围盒定义
+message BoundingBox {
+    Point3D min = 1;  // 最小点
+    Point3D max = 2;  // 最大点
+}
+
+// 三维点
+message Point3D {
+    float x = 1;
+    float y = 2;
+    float z = 3;
+}
+
+// 重建索引请求
+message RebuildIndexRequest {
+    bool force_rebuild = 1;        // 是否强制重建
+    repeated string element_types = 2;  // 只重建指定类型的索引
+}
+
+// 重建索引响应
+message RebuildIndexResponse {
+    bool success = 1;              // 是否成功
+    string message = 2;            // 消息
+    uint32 indexed_elements = 3;   // 索引的元素数量
+    string rebuild_time_ms = 4;    // 重建耗时
+}
+
+// 索引统计请求
+message IndexStatsRequest {
+    // 空请求，获取所有统计信息
+}
+
+// 索引统计响应
+message IndexStatsResponse {
+    uint32 total_elements = 1;           // 总元素数量
+    uint32 indexed_elements = 2;         // 已索引元素数量
+    string last_rebuild_time = 3;        // 最后重建时间
+    repeated ElementTypeStats type_stats = 4;  // 按类型统计
+    float index_memory_mb = 5;           // 索引占用内存（MB）
+}
+
+// 按类型统计
+message ElementTypeStats {
+    string element_type = 1;  // 构件类型
+    uint32 count = 2;         // 数量
+}
+
+// SCTN接触检测请求
+message SctnContactRequest {
+    uint64 sctn_refno = 1;               // SCTN参考号
+    repeated string target_types = 2;     // 目标构件类型
+    float tolerance = 3;                 // 容差
+    bool include_proximity = 4;           // 是否包含接近关系
+    uint32 max_results = 5;              // 最大结果数
+}
+
+// SCTN接触检测响应
+message SctnContactResponse {
+    repeated ContactInfo contacts = 1;    // 接触信息列表
+    uint32 total_contacts = 2;           // 总接触数量
+    string query_time_ms = 3;            // 查询耗时
+    bool success = 4;                    // 是否成功
+    string error_message = 5;            // 错误信息
+}
+
+// 接触信息
+message ContactInfo {
+    uint64 target_refno = 1;             // 目标构件参考号
+    string target_type = 2;              // 目标构件类型
+    ContactType contact_type = 3;        // 接触类型
+    repeated Point3D contact_points = 4;  // 接触点
+    Vector3D contact_normal = 5;         // 接触法向量
+    float penetration_depth = 6;         // 穿透深度
+    float contact_area = 7;              // 接触面积
+    float distance = 8;                  // 距离
+}
+
+// 接触类型枚举
+enum ContactType {
+    CONTACT_TYPE_NONE = 0;
+    CONTACT_TYPE_SURFACE = 1;
+    CONTACT_TYPE_EDGE = 2;
+    CONTACT_TYPE_POINT = 3;
+    CONTACT_TYPE_PENETRATION = 4;
+    CONTACT_TYPE_PROXIMITY = 5;
+}
+
+// 三维向量
+message Vector3D {
+    float x = 1;
+    float y = 2;
+    float z = 3;
+}
+
+// 批量SCTN接触检测请求
+message BatchSctnContactRequest {
+    repeated uint64 sctn_refnos = 1;      // SCTN参考号列表
+    repeated string target_types = 2;     // 目标构件类型
+    float tolerance = 3;                 // 容差
+    bool parallel_execution = 4;         // 是否并行执行
+}
+
+// 批量SCTN接触检测响应
+message BatchSctnContactResponse {
+    map<uint64, SctnContactResponse> results = 1;  // 按refno组织的结果
+    string total_time_ms = 2;                      // 总耗时
+    uint32 processed_count = 3;                    // 处理数量
+}
+
+// 桥架支撑检测请求
+message TraySupportRequest {
+    uint64 bran_refno = 1;                // 桥架分支参考号
+    float max_distance = 2;               // 最大检测距离
+    bool include_hangers = 3;             // 是否包含吊架
+}
+
+// 桥架支撑检测响应
+message TraySupportResponse {
+    repeated SupportRelation relations = 1;  // 支撑关系列表
+    uint32 total_supports = 2;              // 总支撑数
+    string query_time_ms = 3;               // 查询耗时
+    bool success = 4;                       // 是否成功
+}
+
+// 支撑关系
+message SupportRelation {
+    uint64 tray_section = 1;              // 桥架截面参考号
+    uint64 support_refno = 2;             // 支撑构件参考号
+    SupportType support_type = 3;         // 支撑类型
+    Point3D contact_point = 4;            // 接触点
+    float load_distribution = 5;          // 荷载分布系数
+}
+
+// 支撑类型枚举
+enum SupportType {
+    SUPPORT_TYPE_UNKNOWN = 0;
+    SUPPORT_TYPE_DIRECT = 1;
+    SUPPORT_TYPE_HANGER = 2;
+    SUPPORT_TYPE_BRACKET = 3;
+    SUPPORT_TYPE_WALL_MOUNT = 4;
+}

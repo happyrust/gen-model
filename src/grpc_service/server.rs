@@ -50,7 +50,7 @@ pub async fn start_grpc_server_with_config(config: GrpcServerConfig) -> ServiceR
 
     // 创建管理器实例
     let progress_manager = Arc::new(ProgressManager::new());
-    let mdb_manager = Arc::new(MdbManager::new(db_manager.get_pool().clone()));
+    let mdb_manager = Arc::new(MdbManager::new());
     let task_manager = Arc::new(TaskManager::new(config.max_concurrent_tasks));
 
     // 创建服务实例

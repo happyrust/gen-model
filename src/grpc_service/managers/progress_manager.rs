@@ -62,7 +62,7 @@ impl ProgressManager {
         if let Some(sender) = self.progress_channels.get(&update.task_id) {
             if let Err(_) = sender.send(update) {
                 // 如果发送失败，说明没有接收者，可以考虑清理
-                log::warn!("No receivers for task progress: {}", &update.task_id);
+                log::warn!("No receivers for task progress");
             }
         }
 

@@ -1,0 +1,21 @@
+[package]
+name = "simple-web-ui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "simple_web_ui"
+path = "src/bin/simple_web_ui.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"

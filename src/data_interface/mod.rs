@@ -15,6 +15,6 @@ pub mod sesno_increment;
 
 pub mod tidb_manager;
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 

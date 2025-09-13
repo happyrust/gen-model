@@ -1,7 +1,7 @@
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
 use aios_core::room::algorithm::*;
-use aios_core::room::room::{load_aabb_tree, load_room_aabb_tree, GLOBAL_AABB_TREE};
+// Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{init_demo_test_surreal, init_test_surreal, RefnoEnum};
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
@@ -28,7 +28,7 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
     // process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
     //     .await
     //     .unwrap();
-    load_aabb_tree().await.unwrap();
+    // SQLite R*-tree is used for spatial indexing
     build_room_relations(&option).await.unwrap();
     let mesh_path = option.get_meshes_path();
     let within_refnos = cal_room_refnos(&mesh_path, refno, &HashSet::new(), 0.1)
@@ -279,10 +279,20 @@ pub async fn cal_room_refnos(
             ) else {
                 continue;
             };
-            let mut read = GLOBAL_AABB_TREE.read().await;
-            let mut contains_query = read
-                .locate_intersecting_bounds(&geom_inst.world_aabb)
-                .collect::<Vec<_>>();
+            // Use SQLite R*-tree for spatial queries
+            let mut contains_query = Vec::new();
+            #[cfg(feature = "sqlite-index")]
+            if crate::spatial_index::SqliteSpatialIndex::is_enabled() {
+                let spatial_index = crate::spatial_index::SqliteSpatialIndex::with_default_path()
+                    .expect("Failed to open spatial index");
+                if let Ok(ids) = spatial_index.query_intersect(&geom_inst.world_aabb) {
+                    for id in ids {
+                        if let Ok(Some(bbox)) = spatial_index.get_aabb(id) {
+                            contains_query.push(RStarBoundingBox::from_aabb(bbox, RefnoEnum::from(id)));
+                        }
+                    }
+                }
+            }
             if contains_query.is_empty() {
                 continue;
             }
@@ -295,8 +305,8 @@ pub async fn cal_room_refnos(
                     return false;
                 }
                 //排除自己
-                let r: RefnoEnum = (*refno).into();
-                if exclude_refnos.contains(&r) || panel_refno.refno() == *refno {
+                let r: RefnoEnum = RefnoEnum::from(RefU64(refno.0));
+                if exclude_refnos.contains(&r) || panel_refno.refno() == RefU64(refno.0) {
                     return false;
                 }
                 // dbg!(&bbox);

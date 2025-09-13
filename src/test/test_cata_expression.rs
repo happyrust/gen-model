@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use regex::Regex;
 
 use crate::test::test_helper::get_test_ams_db_manager;
+use crate::expression_fix::{ExpressionFixer, eval_pdms_expression, eval_attrib_expression};
 
 ///测试带小数的表达式, gitee:
 #[test]
@@ -113,6 +114,86 @@ fn test_math_exp() {
     let mut context: DashMap<String, String> = DashMap::new();
     let cata_context = CataContext { context, is_tubi: false };
     dbg!(eval_str_to_f64(expr, &cata_context, true, "DIST")).expect("TODO: panic message");
+}
+
+/// 测试ATTRIB表达式修复功能
+#[test]
+fn test_attrib_expression_fix() {
+    // 创建测试上下文
+    let context = ExpressionFixer::create_test_context();
+
+    // 测试原始问题表达式: ( MIN ( ATTRIB HEIG,ATTRIB PARA[3 ] ) )
+    let problematic_expr = "( MIN ( ATTRIB HEIG,ATTRIB PARA[3 ] ) )";
+    println!("测试表达式: {}", problematic_expr);
+
+    // 使用修复器处理表达式
+    let result = ExpressionFixer::eval_expression_with_attrib_support(
+        problematic_expr,
+        &context,
+        true,
+        "DIST"
+    );
+
+    match result {
+        Ok(value) => {
+            println!("✅ 表达式修复成功！结果: {}", value);
+            // MIN(100.0, 40.0) = 40.0
+            assert_eq!(value, 40.0);
+        }
+        Err(e) => {
+            println!("❌ 表达式修复失败: {}", e);
+            panic!("表达式修复应该成功");
+        }
+    }
+}
+
+/// 测试各种ATTRIB表达式格式
+#[test]
+fn test_various_attrib_expressions() {
+    let context = ExpressionFixer::create_test_context();
+
+    // 测试用例集合
+    let test_cases = vec![
+        ("ATTRIB HEIG", 100.0, "简单ATTRIB属性"),
+        ("ATTRIB PARA[0]", 10.0, "ATTRIB数组索引[0]"),
+        ("ATTRIB PARA[3 ]", 40.0, "ATTRIB数组索引带空格"),
+        ("MIN(ATTRIB HEIG, ATTRIB WIDT)", 100.0, "MIN函数与ATTRIB"),
+        ("MAX(ATTRIB PARA[1], ATTRIB PARA[2])", 30.0, "MAX函数与ATTRIB数组"),
+        ("ATTRIB HEIG + ATTRIB PARA[1]", 120.0, "ATTRIB加法运算"),
+        ("(ATTRIB WIDT - ATTRIB HEIG) / 2", 50.0, "ATTRIB复合运算"),
+    ];
+
+    for (expr, expected, description) in test_cases {
+        println!("\n测试: {} - {}", description, expr);
+
+        match eval_pdms_expression(expr, &context) {
+            Ok(result) => {
+                println!("✅ 结果: {} (期望: {})", result, expected);
+                assert_eq!(result, expected, "表达式 '{}' 的结果不匹配", expr);
+            }
+            Err(e) => {
+                println!("❌ 失败: {}", e);
+                panic!("表达式 '{}' 应该成功解析", expr);
+            }
+        }
+    }
+}
+
+/// 测试表达式预处理功能
+#[test]
+fn test_expression_preprocessing() {
+    let test_cases = vec![
+        ("( MIN ( ATTRIB HEIG,ATTRIB PARA[3 ] ) )", "(MIN(HEIG,PARA3))"),
+        ("ATTRIB WIDT + ATTRIB LENG", "WIDT + LENG"),
+        ("MAX(ATTRIB PARA[0], ATTRIB PARA[1] * 2)", "MAX(PARA0,PARA1 * 2)"),
+        ("ATTRIB HEIG / ( ATTRIB PARA[2] + 10 )", "HEIG / (PARA2 + 10)"),
+    ];
+
+    for (input, expected) in test_cases {
+        let processed = ExpressionFixer::preprocess_attrib_expression(input);
+        println!("输入: {} -> 输出: {}", input, processed);
+        assert_eq!(processed, expected, "预处理结果不匹配");
+    }
 }
 
 #[test]

@@ -107,7 +107,7 @@ pub fn wizard_page() -> String {
     {}
 </body>
 </html>
-"#, 
+"#,
     wizard_steps_indicator(),
     wizard_step_content(),
     wizard_javascript()
@@ -127,12 +127,12 @@ fn wizard_steps_indicator() -> String {
                          :class="currentStep >= 1 ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-600'">
                         <i class="fas fa-folder"></i>
                     </div>
-                    <span class="ml-2 text-sm font-medium" 
+                    <span class="ml-2 text-sm font-medium"
                           :class="currentStep >= 1 ? 'text-blue-600' : 'text-gray-500'">选择目录</span>
                 </div>
-                
+
                 <div class="w-16 h-1 bg-gray-300" :class="currentStep >= 2 ? 'bg-blue-600' : 'bg-gray-300'"></div>
-                
+
                 <!-- 步骤2: 选择项目 -->
                 <div class="flex items-center">
                     <div class="flex items-center justify-center w-10 h-10 rounded-full"
@@ -142,9 +142,9 @@ fn wizard_steps_indicator() -> String {
                     <span class="ml-2 text-sm font-medium"
                           :class="currentStep >= 2 ? 'text-blue-600' : 'text-gray-500'">选择项目</span>
                 </div>
-                
+
                 <div class="w-16 h-1 bg-gray-300" :class="currentStep >= 3 ? 'bg-blue-600' : 'bg-gray-300'"></div>
-                
+
                 <!-- 步骤3: 配置参数 -->
                 <div class="flex items-center">
                     <div class="flex items-center justify-center w-10 h-10 rounded-full"
@@ -154,9 +154,9 @@ fn wizard_steps_indicator() -> String {
                     <span class="ml-2 text-sm font-medium"
                           :class="currentStep >= 3 ? 'text-blue-600' : 'text-gray-500'">配置参数</span>
                 </div>
-                
+
                 <div class="w-16 h-1 bg-gray-300" :class="currentStep >= 4 ? 'bg-blue-600' : 'bg-gray-300'"></div>
-                
+
                 <!-- 步骤4: 执行任务 -->
                 <div class="flex items-center">
                     <div class="flex items-center justify-center w-10 h-10 rounded-full"
@@ -198,18 +198,25 @@ fn step1_directory_selection() -> String {
         <h2 class="text-2xl font-bold mb-6 text-gray-800">
             <i class="fas fa-folder mr-2 text-blue-600"></i>选择项目目录
         </h2>
-        
+
         <div class="space-y-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-2">
                     项目根目录路径
                 </label>
                 <div class="flex space-x-2">
-                    <input type="text" 
+                    <input type="text"
                            x-model="directoryPath"
+                           @change="if(directoryPath) scanDirectory()"
                            class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="例如: /Volumes/DPC/work/e3d_models">
-                    <button @click="scanDirectory()" 
+                    <button @click="selectDirectory()"
+                            :disabled="scanning"
+                            class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400">
+                        <i class="fas fa-folder-open mr-2"></i>
+                        选择目录
+                    </button>
+                    <button @click="scanDirectory()"
                             :disabled="!directoryPath || scanning"
                             class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400">
                         <i class="fas fa-search mr-2"></i>
@@ -217,15 +224,15 @@ fn step1_directory_selection() -> String {
                     </button>
                 </div>
             </div>
-            
+
             <div>
                 <label class="flex items-center">
-                    <input type="checkbox" x-model="scanRecursive" class="mr-2">
+                    <input type="checkbox" x-model="scanRecursive" class="mr-2 rounded border-gray-300 text-blue-600">
                     <span class="text-sm text-gray-700">递归扫描子目录</span>
                 </label>
                 <p class="text-xs text-gray-500 mt-1">默认扫描深度：1层</p>
             </div>
-            
+
             <!-- 扫描结果 -->
             <div x-show="scanResult" class="mt-6">
                 <div class="bg-green-50 border border-green-200 rounded-md p-4">
@@ -240,7 +247,7 @@ fn step1_directory_selection() -> String {
                     </div>
                 </div>
             </div>
-            
+
             <!-- 错误信息 -->
             <div x-show="scanResult?.errors?.length > 0" class="mt-4">
                 <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4">
@@ -253,9 +260,9 @@ fn step1_directory_selection() -> String {
                 </div>
             </div>
         </div>
-        
+
         <div class="flex justify-end mt-8">
-            <button @click="nextStep()" 
+            <button @click="nextStep()"
                     :disabled="!scanResult || scanResult.projects.length === 0"
                     class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400">
                 下一步 <i class="fas fa-arrow-right ml-2"></i>
@@ -273,24 +280,24 @@ fn step2_project_selection() -> String {
         <h2 class="text-2xl font-bold mb-6 text-gray-800">
             <i class="fas fa-project-diagram mr-2 text-blue-600"></i>选择要解析的项目
         </h2>
-        
+
         <div class="space-y-4">
             <div class="flex justify-between items-center">
                 <p class="text-gray-600">
                     找到 <span x-text="scanResult?.projects?.length || 0"></span> 个项目，请选择要解析的项目：
                 </p>
                 <div class="space-x-2">
-                    <button @click="selectAllProjects()" 
+                    <button @click="selectAllProjects()"
                             class="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200">
                         全选
                     </button>
-                    <button @click="clearAllProjects()" 
+                    <button @click="clearAllProjects()"
                             class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200">
                         清空
                     </button>
                 </div>
             </div>
-            
+
             <!-- 项目列表 -->
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-96 overflow-y-auto">
                 <template x-for="project in scanResult?.projects || []" :key="project.name">
@@ -323,7 +330,7 @@ fn step2_project_selection() -> String {
                     </div>
                 </template>
             </div>
-            
+
             <!-- 选择统计 -->
             <div x-show="selectedProjects.length > 0" class="bg-blue-50 border border-blue-200 rounded-md p-4">
                 <h4 class="text-sm font-medium text-blue-800 mb-2">
@@ -337,13 +344,13 @@ fn step2_project_selection() -> String {
                 </div>
             </div>
         </div>
-        
+
         <div class="flex justify-between mt-8">
-            <button @click="prevStep()" 
+            <button @click="prevStep()"
                     class="px-6 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400">
                 <i class="fas fa-arrow-left mr-2"></i>上一步
             </button>
-            <button @click="nextStep()" 
+            <button @click="nextStep()"
                     :disabled="selectedProjects.length === 0"
                     class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400">
                 下一步 <i class="fas fa-arrow-right ml-2"></i>
@@ -363,6 +370,20 @@ fn step3_parameter_configuration() -> String {
         </h2>
 
         <div class="space-y-6">
+            <!-- 任务模式选择 -->
+            <div class="bg-white border border-gray-200 rounded-md p-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">任务模式</label>
+                <div class="flex items-center space-x-6 text-sm">
+                    <label class="inline-flex items-center">
+                        <input type="radio" class="mr-2" name="taskMode" value="ParseOnly" x-model="taskMode">
+                        仅解析（不进行建模与空间树）
+                    </label>
+                    <label class="inline-flex items-center">
+                        <input type="radio" class="mr-2" name="taskMode" value="FullGeneration" x-model="taskMode">
+                        解析 + 建模 + 空间树
+                    </label>
+                </div>
+            </div>
             <!-- 项目信息配置 -->
             <div>
                 <h3 class="text-lg font-medium text-gray-900 mb-4">项目信息</h3>
@@ -470,6 +491,14 @@ fn step3_parameter_configuration() -> String {
                         </button>
                     </div>
                 </div>
+                <!-- 连接操作结果提示（移动至连接卡片内） -->
+                <template x-if="opMsg">
+                    <div :class="opOk === null ? 'bg-gray-50 border-gray-200' : (opOk ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200')"
+                         class="mb-4 border rounded-md p-3 text-sm">
+                        <span :class="opOk ? 'text-green-800' : 'text-red-800'" x-text="opMsg"></span>
+                    </div>
+                </template>
+
                 <!-- 基本连接信息区 -->
                 <div class="info-section rounded-lg p-4 mb-6">
                     <h4 class="text-sm font-semibold text-gray-800 mb-4 flex items-center">
@@ -519,10 +548,17 @@ fn step3_parameter_configuration() -> String {
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">密码</label>
-                            <input type="password"
-                                   x-model="config.db_password"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                   placeholder="••••••••">
+                            <div class="relative">
+                                <input :type="showDbPassword ? 'text' : 'password'"
+                                       x-model="config.db_password"
+                                       class="enhanced-input w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                       placeholder="••••••••">
+                                <button type="button"
+                                        @click="showDbPassword = !showDbPassword"
+                                        class="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700">
+                                    <i :class="showDbPassword ? 'fas fa-eye-slash' : 'fas fa-eye'"></i>
+                                </button>
+                            </div>
                         </div>
                         <div x-show="config.db_type === 'surrealdb'">
                             <label class="block text-sm font-medium text-gray-700 mb-2">命名空间</label>
@@ -558,8 +594,15 @@ fn step3_parameter_configuration() -> String {
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">密码（可选）</label>
-                            <input x-model="ssh.password" type="password" placeholder="建议使用密钥"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            <div class="relative">
+                                <input x-model="ssh.password" :type="showSshPassword ? 'text' : 'password'" placeholder="建议使用密钥"
+                                       class="enhanced-input w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                <button type="button"
+                                        @click="showSshPassword = !showSshPassword"
+                                        class="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700">
+                                    <i :class="showSshPassword ? 'fas fa-eye-slash' : 'fas fa-eye'"></i>
+                                </button>
+                            </div>
                             <p class="text-xs text-yellow-700 mt-1">如未安装 sshpass，请使用密钥/agent</p>
                         </div>
                     </div>
@@ -569,12 +612,6 @@ fn step3_parameter_configuration() -> String {
             <!-- 生成选项 -->
             <div>
                 <h3 class="text-lg font-medium text-gray-900 mb-4">生成选项</h3>
-                <template x-if="opMsg">
-                    <div :class="opOk === null ? 'bg-gray-50 border-gray-200' : (opOk ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200')"
-                         class="mb-4 border rounded-md p-3 text-sm">
-                        <span :class="opOk ? 'text-green-800' : 'text-red-800'" x-text="opMsg"></span>
-                    </div>
-                </template>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <label class="flex items-center">
                         <input type="checkbox" x-model="config.gen_model" class="mr-2 rounded border-gray-300 text-blue-600">
@@ -756,11 +793,72 @@ fn step4_task_execution() -> String {
 
             <!-- 错误信息 -->
             <div x-show="taskError" class="bg-red-50 border border-red-200 rounded-md p-4">
-                <div class="flex items-center">
-                    <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
-                    <div>
-                        <h4 class="text-sm font-medium text-red-800">任务创建失败</h4>
-                        <p class="text-sm text-red-700 mt-1" x-text="taskError"></p>
+                <div class="flex items-start">
+                    <i class="fas fa-exclamation-triangle text-red-600 mr-3 mt-1"></i>
+                    <div class="flex-1">
+                        <h4 class="text-sm font-medium text-red-800 mb-2">错误信息</h4>
+                        <pre class="text-sm text-red-700 whitespace-pre-wrap font-mono bg-red-100 rounded p-2" x-text="taskError"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 诊断信息面板 -->
+            <div class="mt-4">
+                <button @click="showDiagnostics = !showDiagnostics"
+                        class="flex items-center text-sm text-gray-600 hover:text-gray-800">
+                    <i :class="showDiagnostics ? 'fa-chevron-down' : 'fa-chevron-right'" 
+                       class="fas mr-2"></i>
+                    <span>诊断信息</span>
+                    <span class="ml-2 text-xs text-gray-500">(显示详细日志和调试信息)</span>
+                </button>
+                
+                <div x-show="showDiagnostics" x-transition class="mt-2 bg-gray-50 border border-gray-200 rounded-md p-4">
+                    <div class="space-y-4">
+                        <!-- 浏览器控制台日志 -->
+                        <div>
+                            <h5 class="text-sm font-medium text-gray-700 mb-2">
+                                <i class="fas fa-terminal mr-1"></i>浏览器控制台
+                            </h5>
+                            <div class="bg-black text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
+                                <div>打开浏览器开发者工具（F12）查看详细日志</div>
+                                <div class="mt-2 opacity-75">最近的请求:</div>
+                                <div x-show="lastRequestInfo" class="mt-1">
+                                    <div>URL: <span x-text="lastRequestInfo?.url"></span></div>
+                                    <div>状态: <span x-text="lastRequestInfo?.status"></span></div>
+                                    <div>响应: <span x-text="JSON.stringify(lastRequestInfo?.response)"></span></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 任务日志（如果有任务ID） -->
+                        <div x-show="createdTaskId">
+                            <h5 class="text-sm font-medium text-gray-700 mb-2">
+                                <i class="fas fa-file-alt mr-1"></i>任务日志
+                            </h5>
+                            <div class="bg-white border border-gray-300 rounded p-3">
+                                <a :href="`/tasks/${createdTaskId}/logs`" target="_blank"
+                                   class="text-blue-600 hover:text-blue-800 text-sm">
+                                    <i class="fas fa-external-link-alt mr-1"></i>
+                                    查看任务日志
+                                </a>
+                            </div>
+                        </div>
+
+                        <!-- 系统状态检查 -->
+                        <div>
+                            <h5 class="text-sm font-medium text-gray-700 mb-2">
+                                <i class="fas fa-heartbeat mr-1"></i>系统状态
+                            </h5>
+                            <div class="space-y-2">
+                                <button @click="checkSystemStatus()"
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                    <i class="fas fa-sync mr-1"></i>检查系统状态
+                                </button>
+                                <div x-show="systemStatus" class="bg-white border border-gray-300 rounded p-3 text-xs">
+                                    <pre x-text="JSON.stringify(systemStatus, null, 2)"></pre>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -894,8 +992,10 @@ fn wizard_javascript() -> String {
                 selectedProjects: [],
 
                 // 步骤3: 参数配置
-                taskName: '部署站点解析任务',
+                taskName: '',  // 初始为空，将根据选择的项目自动填充
                 manualDbNums: '',
+                showDbPassword: false,  // 控制密码可见性
+                showSshPassword: false, // 控制SSH密码可见性
                 config: {
                     project_name: 'AvevaMarineSample',
                     project_code: 1516,
@@ -939,6 +1039,138 @@ fn wizard_javascript() -> String {
                 taskCreated: false,
                 createdTaskId: null,
                 taskError: null,
+                // 任务模式：ParseOnly | FullGeneration
+                taskMode: 'ParseOnly',
+                
+                // 诊断信息
+                showDiagnostics: false,
+                lastRequestInfo: null,
+                systemStatus: null,
+
+                // 选择目录 - 打开系统目录浏览器
+                async selectDirectory() {
+                    const self = this;
+
+                    // 创建目录浏览器对话框
+                    const dialog = document.createElement('div');
+                    dialog.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+                    dialog.id = 'directory-browser-dialog';
+
+                    let currentPath = '';
+                    let parentPath = null;
+
+                    // 创建对话框内容
+                    async function createDialogContent(path = null) {
+                        let url = '/api/wizard/browse-directory';
+                        if (path) {
+                            url += '?path=' + encodeURIComponent(path);
+                        }
+
+                        try {
+                            const response = await fetch(url);
+                            if (!response.ok) throw new Error('无法访问目录');
+
+                            const data = await response.json();
+                            currentPath = data.current_path;
+                            parentPath = data.parent_path;
+
+                            return `
+                                <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full mx-4" style="max-height: 80vh;">
+                                    <div class="px-6 py-4 border-b bg-gray-50 rounded-t-lg">
+                                        <div class="flex items-center justify-between">
+                                            <h3 class="text-lg font-semibold text-gray-900">选择项目目录</h3>
+                                            <button onclick="document.getElementById('directory-browser-dialog').remove();"
+                                                    class="text-gray-400 hover:text-gray-600">
+                                                <i class="fas fa-times"></i>
+                                            </button>
+                                        </div>
+                                        <div class="mt-2 flex items-center text-sm text-gray-600">
+                                            <i class="fas fa-folder-open text-blue-500 mr-2"></i>
+                                            <span class="font-mono">${currentPath}</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="p-4 overflow-y-auto" style="max-height: 50vh;">
+                                        ${parentPath ? `
+                                            <button onclick="window.browseToDirectory('${parentPath.replace(/'/g, "\\'")}')"
+                                                    class="w-full text-left px-3 py-2 hover:bg-gray-100 rounded flex items-center mb-2">
+                                                <i class="fas fa-level-up-alt text-gray-500 mr-3"></i>
+                                                <span class="text-gray-600">..</span>
+                                            </button>
+                                        ` : ''}
+
+                                        <div class="space-y-1">
+                                            ${data.entries.map(entry => {
+                                                if (entry.is_directory) {
+                                                    return `
+                                                        <button onclick="window.browseToDirectory('${entry.path.replace(/'/g, "\\'")}')"
+                                                                class="w-full text-left px-3 py-2 hover:bg-blue-50 rounded flex items-center group">
+                                                            <i class="fas fa-folder text-yellow-500 group-hover:text-yellow-600 mr-3"></i>
+                                                            <span class="text-gray-700 group-hover:text-blue-600">${entry.name}</span>
+                                                        </button>
+                                                    `;
+                                                } else {
+                                                    return `
+                                                        <div class="px-3 py-2 flex items-center text-gray-400">
+                                                            <i class="fas fa-file text-gray-300 mr-3"></i>
+                                                            <span class="text-sm">${entry.name}</span>
+                                                        </div>
+                                                    `;
+                                                }
+                                            }).join('')}
+                                        </div>
+                                    </div>
+
+                                    <div class="px-6 py-4 border-t bg-gray-50 rounded-b-lg">
+                                        <div class="flex space-x-3">
+                                            <button onclick="window.selectCurrentDirectory('${currentPath.replace(/'/g, "\\'")}')"
+                                                    class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                                                <i class="fas fa-check mr-2"></i>选择当前目录
+                                            </button>
+                                            <button onclick="document.getElementById('directory-browser-dialog').remove();"
+                                                    class="px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition-colors">
+                                                取消
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        } catch (error) {
+                            return `
+                                <div class="bg-white rounded-lg p-6 max-w-md">
+                                    <h3 class="text-lg font-semibold text-red-600 mb-2">访问错误</h3>
+                                    <p class="text-gray-600">${error.message}</p>
+                                    <button onclick="document.getElementById('directory-browser-dialog').remove();"
+                                            class="mt-4 px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400">
+                                        关闭
+                                    </button>
+                                </div>
+                            `;
+                        }
+                    }
+
+                    // 定义全局函数供对话框内的按钮调用
+                    window.browseToDirectory = async function(path) {
+                        const dialog = document.getElementById('directory-browser-dialog');
+                        if (dialog) {
+                            dialog.innerHTML = '<div class="flex items-center justify-center p-8"><i class="fas fa-spinner fa-spin text-3xl text-blue-600"></i></div>';
+                            dialog.innerHTML = await createDialogContent(path);
+                        }
+                    };
+
+                    window.selectCurrentDirectory = function(path) {
+                        self.directoryPath = path;
+                        self.scanDirectory();
+                        document.getElementById('directory-browser-dialog').remove();
+                        delete window.browseToDirectory;
+                        delete window.selectCurrentDirectory;
+                    };
+
+                    // 初始加载
+                    dialog.innerHTML = '<div class="flex items-center justify-center p-8"><i class="fas fa-spinner fa-spin text-3xl text-blue-600"></i></div>';
+                    document.body.appendChild(dialog);
+                    dialog.innerHTML = await createDialogContent(this.directoryPath || null);
+                },
 
                 // 扫描目录
                 async scanDirectory() {
@@ -975,7 +1207,7 @@ fn wizard_javascript() -> String {
                 },
 
                 // SurrealDB: 刷新状态
-                async refreshSurrealStatus() {
+                async refreshSurrealStatus(silent = false) {
                     try {
                         const ip = this.config.db_ip || '';
                         const port = parseInt(this.config.db_port || '0') || 0;
@@ -999,6 +1231,10 @@ fn wizard_javascript() -> String {
                 },
 
                 async startSurreal() {
+                    // 清除之前的消息
+                    this.opMsg = '';
+                    this.opOk = null;
+
                     const body = {
                         mode: this.controlMode,
                         ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
@@ -1018,13 +1254,29 @@ fn wizard_javascript() -> String {
                         this.opMsg = data.message || (data.success ? '启动命令已发送' : '启动失败');
                         this.opOk = !!data.success;
                         await this.refreshSurrealStatus();
+
+                        // 5秒后自动清除消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     } catch (e) {
                         this.opMsg = '网络错误，无法启动';
                         this.opOk = false;
+
+                        // 5秒后自动清除错误消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     }
                 },
 
                 async stopSurreal() {
+                    // 清除之前的消息
+                    this.opMsg = '';
+                    this.opOk = null;
+
                     const body = {
                         mode: this.controlMode,
                         ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
@@ -1041,13 +1293,29 @@ fn wizard_javascript() -> String {
                         this.opMsg = data.message || (data.success ? '停止命令已发送' : '停止失败');
                         this.opOk = !!data.success;
                         await this.refreshSurrealStatus();
+
+                        // 5秒后自动清除消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     } catch (e) {
                         this.opMsg = '网络错误，无法停止';
                         this.opOk = false;
+
+                        // 5秒后自动清除错误消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     }
                 },
 
                 async restartSurreal() {
+                    // 清除之前的消息
+                    this.opMsg = '';
+                    this.opOk = null;
+
                     const body = {
                         mode: this.controlMode,
                         ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
@@ -1067,9 +1335,21 @@ fn wizard_javascript() -> String {
                         this.opMsg = data.message || (data.success ? '重启命令已发送' : '重启失败');
                         this.opOk = !!data.success;
                         await this.refreshSurrealStatus();
+
+                        // 5秒后自动清除消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     } catch (e) {
                         this.opMsg = '网络错误，无法重启';
                         this.opOk = false;
+
+                        // 5秒后自动清除错误消息
+                        setTimeout(() => {
+                            this.opMsg = '';
+                            this.opOk = null;
+                        }, 5000);
                     }
                 },
 
@@ -1204,6 +1484,7 @@ fn wizard_javascript() -> String {
                                 name: this.taskName,
                                 manual_db_nums: manualDbNums,
                                 project_name: this.config.project_name,
+                                project_path: this.directoryPath,  // 添加项目路径
                                 project_code: this.config.project_code,
                                 mdb_name: this.config.mdb_name,
                                 module: this.config.module,
@@ -1227,22 +1508,77 @@ fn wizard_javascript() -> String {
                             continue_on_failure: this.continueOnFailure
                         };
 
+                        const requestData = {
+                            task_name: this.taskName,
+                            wizard_config: wizardConfig,
+                            priority: 'Normal',
+                            task_mode: this.taskMode
+                        };
+                        
+                        // 记录请求信息用于诊断
+                        this.lastRequestInfo = {
+                            url: '/api/wizard/create-task',
+                            method: 'POST',
+                            data: requestData,
+                            timestamp: new Date().toISOString()
+                        };
+                        
                         const response = await fetch('/api/wizard/create-task', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                task_name: this.taskName,
-                                wizard_config: wizardConfig,
-                                priority: 'Normal'
-                            })
+                            body: JSON.stringify(requestData)
                         });
 
+                        const result = await response.json();
+                        
+                        // 更新请求信息的响应部分
+                        this.lastRequestInfo.status = response.status;
+                        this.lastRequestInfo.response = result;
+                        
                         if (response.ok) {
-                            const result = await response.json();
                             this.createdTaskId = result.id;
                             this.taskCreated = true;
+                            console.log('任务创建成功:', result);
+                            
+                            // 任务创建成功后，自动启动任务
+                            try {
+                                const startResponse = await fetch(`/api/tasks/${encodeURIComponent(result.id)}/start`, { method: 'POST' });
+                                if (!startResponse.ok) {
+                                    const startError = await startResponse.text();
+                                    console.error('启动任务失败:', startError);
+                                    this.taskError = '任务创建成功但启动失败: ' + startError;
+                                }
+                            } catch (e) {
+                                console.error('启动任务失败:', e);
+                                this.taskError = '任务创建成功但启动失败: ' + e.message;
+                            }
                         } else {
-                            throw new Error('任务创建失败');
+                            // 从后端获取详细错误信息
+                            let errorMessage = '任务创建失败';
+                            let errorDetails = '';
+                            let suggestions = [];
+                            
+                            if (result.error) {
+                                errorMessage = result.error;
+                            }
+                            if (result.details) {
+                                errorDetails = result.details;
+                            }
+                            if (result.suggestions && Array.isArray(result.suggestions)) {
+                                suggestions = result.suggestions;
+                            }
+                            
+                            // 构造详细的错误消息
+                            let fullErrorMessage = errorMessage;
+                            if (errorDetails) {
+                                fullErrorMessage += '\n\n详细信息: ' + errorDetails;
+                            }
+                            if (suggestions.length > 0) {
+                                fullErrorMessage += '\n\n建议:\n' + suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n');
+                            }
+                            
+                            console.error('任务创建失败:', result);
+                            throw new Error(fullErrorMessage);
                         }
                     } catch (error) {
                         console.error('创建任务失败:', error);
@@ -1256,23 +1592,49 @@ fn wizard_javascript() -> String {
                 goToTasks() {
                     window.location.href = '/tasks';
                 },
+                
+                // 检查系统状态
+                async checkSystemStatus() {
+                    try {
+                        const response = await fetch('/api/status');
+                        if (response.ok) {
+                            this.systemStatus = await response.json();
+                        } else {
+                            this.systemStatus = { error: '无法获取系统状态' };
+                        }
+                    } catch (error) {
+                        this.systemStatus = { error: error.message };
+                    }
+                },
 
                 // 步骤导航
                 nextStep() {
                     if (this.currentStep < 4) {
                         this.currentStep++;
 
-                        // 如果从项目选择步骤进入配置步骤，自动更新项目名称
+                        // 如果从项目选择步骤进入配置步骤，自动更新项目名称和任务名称
                         if (this.currentStep === 3 && this.selectedProjects.length > 0) {
                             // 创建新的config对象来触发响应式更新
                             this.config = {
                                 ...this.config,
                                 project_name: this.selectedProjects[0]
                             };
+                            
+                            // 如果任务名称为空，自动使用项目名称
+                            if (!this.taskName || this.taskName.trim() === '') {
+                                // 如果是单个项目，直接使用项目名称
+                                // 如果是多个项目，使用"项目名称等N个项目"的格式
+                                if (this.selectedProjects.length === 1) {
+                                    this.taskName = this.selectedProjects[0];
+                                } else {
+                                    this.taskName = `${this.selectedProjects[0]}等${this.selectedProjects.length}个项目`;
+                                }
+                            }
+                            
                             // 进入第3步后开始轮询状态
-                            this.refreshSurrealStatus();
+                            this.refreshSurrealStatus(true);  // 静默模式，不显示错误消息
                             if (!this.statusTimer) {
-                                this.statusTimer = setInterval(() => this.refreshSurrealStatus(), 3000);
+                                this.statusTimer = setInterval(() => this.refreshSurrealStatus(true), 3000);
                             }
                         }
                     }

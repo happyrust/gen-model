@@ -7,13 +7,14 @@ use aios_core::error::{init_deserialize_error, init_query_error, init_save_datab
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
-use aios_core::room::room::GLOBAL_AABB_TREE;
+// Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
     query_deep_visible_inst_refnos, RefnoEnum, SUL_DB,
 };
+use crate::spatial_index::SqliteSpatialIndex;
 use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
@@ -605,7 +606,27 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         };
         let mut update_sql = String::new();
         for r in result {
-            // dbg!(&r);
+            // 优先尝试从 SQLite 空间索引读取
+            #[cfg(feature = "sqlite-index")]
+            if SqliteSpatialIndex::is_enabled() {
+                let spatial_index = SqliteSpatialIndex::with_default_path()
+                    .expect("Failed to open spatial index");
+                if let Ok(Some(aabb)) = spatial_index.get_aabb(r.refno.refno()) {
+                    let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
+                    aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
+                    // 使用当前查询到的 noun，避免旧缓存的 noun 干扰筛选
+                    rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
+                    let sql = format!(
+                    "update {} set aabb = aabb:⟨{}⟩;",
+                    r.refno.to_inst_relate_key(),
+                    aabb_hash,
+                );
+                    update_sql.push_str(&sql);
+                    continue;
+                }
+            }
+
+            // 缓存未命中则计算并回填
             let mut aabb = Aabb::new_invalid();
             for g in r.geo_aabbs {
                 let t = r.world_trans * g.trans;
@@ -616,7 +637,6 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 });
                 aabb.merge(&tmp_aabb);
             }
-            // dbg!(aabb.extents().magnitude());
             if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
                 #[cfg(feature = "debug_model")]
                 dbg!("Found nan aabb");
@@ -624,22 +644,29 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             }
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
             aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
-            rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
+            let bbox = RStarBoundingBox::new(aabb, r.refno, r.noun);
+            rstar_objs.push(bbox.clone());
+            // 写入 SQLite 空间索引
+            #[cfg(feature = "sqlite-index")]
+            if SqliteSpatialIndex::is_enabled() {
+                let spatial_index = SqliteSpatialIndex::with_default_path()
+                    .expect("Failed to open spatial index");
+                let _ = spatial_index.insert_aabb(bbox.refno, &bbox.aabb, Some(&bbox.noun));
+            }
+            // 记录依赖（仅记录世界变换哈希；几何哈希需在其他查询路径写入）
+            // This dependency tracking can be handled separately if needed
             let sql = format!(
                 "update {} set aabb = aabb:⟨{}⟩;",
                 r.refno.to_inst_relate_key(),
                 aabb_hash,
             );
-            //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
-            // dbg!(&sql);
             update_sql.push_str(&sql);
         }
         if !update_sql.is_empty() {
             // dbg!(&update_sql);
             SUL_DB.query(&update_sql).await.unwrap();
         }
-        //更新Rstar
-        GLOBAL_AABB_TREE.write().await.update_aabbs(rstar_objs);
+        // SQLite R*-tree update is now handled directly
     }
     utils::save_aabb_to_surreal(&aabb_map).await;
 

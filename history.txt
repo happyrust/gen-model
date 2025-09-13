@@ -1,0 +1,5 @@
+#V2
+SELECT count() FROM inst_relate WHERE aabb != none;
+USE NS test DB test; INFO FOR ROOT;
+USE NS test; DEFINE DATABASE test;
+DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;

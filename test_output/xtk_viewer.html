@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XTK 文件查看器</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .controls {
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .file-input {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .file-input input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        .btn:hover {
+            background: #2980b9;
+        }
+        
+        .btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+        
+        .viewer {
+            height: 600px;
+            background: #ecf0f1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .info-panel {
+            padding: 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+        }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .info-item {
+            background: white;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #3498db;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+        
+        .info-value {
+            color: #7f8c8d;
+        }
+        
+        .error {
+            color: #e74c3c;
+            background: #fdf2f2;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #e74c3c;
+            margin: 10px 0;
+        }
+        
+        .success {
+            color: #27ae60;
+            background: #f2fdf5;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #27ae60;
+            margin: 10px 0;
+        }
+        
+        .placeholder {
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 18px;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            color: #3498db;
+            font-size: 16px;
+        }
+        
+        .file-list {
+            margin-top: 20px;
+        }
+        
+        .file-item {
+            padding: 10px;
+            background: white;
+            margin: 5px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s;
+            border: 1px solid #eee;
+        }
+        
+        .file-item:hover {
+            background: #f8f9fa;
+        }
+        
+        .file-item.selected {
+            background: #e3f2fd;
+            border-color: #3498db;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 XTK 文件查看器</h1>
+            <p>用于查看和验证生成的 XTK 文件</p>
+        </div>
+        
+        <div class="controls">
+            <div class="file-input">
+                <input type="file" id="fileInput" accept=".xkt" />
+            </div>
+            <button class="btn" onclick="loadFile()">加载文件</button>
+            <button class="btn" onclick="validateFile()" id="validateBtn" disabled>验证文件</button>
+            <button class="btn" onclick="clearViewer()">清空</button>
+        </div>
+        
+        <div class="viewer" id="viewer">
+            <div class="placeholder">
+                <p>📁 请选择一个 XTK 文件进行查看</p>
+                <p>支持的格式: .xkt</p>
+            </div>
+            <div class="loading" id="loading">
+                <p>⏳ 正在加载文件...</p>
+            </div>
+        </div>
+        
+        <div class="info-panel">
+            <h3>📊 文件信息</h3>
+            <div id="fileInfo">
+                <p class="placeholder">暂无文件信息</p>
+            </div>
+            
+            <div class="file-list" id="fileList">
+                <h4>📋 测试文件列表</h4>
+                <p>以下是可能的测试文件（如果存在）：</p>
+                <div class="file-item" onclick="loadTestFile('test_refno_24383_92720.xkt')">
+                    📄 test_refno_24383_92720.xkt - 基本测试文件
+                </div>
+                <div class="file-item" onclick="loadTestFile('demo_默认配置_24383_92720.xkt')">
+                    📄 demo_默认配置_24383_92720.xkt - 默认配置
+                </div>
+                <div class="file-item" onclick="loadTestFile('demo_高性能配置_24383_92720.xkt')">
+                    📄 demo_高性能配置_24383_92720.xkt - 高性能配置
+                </div>
+                <div class="file-item" onclick="loadTestFile('demo_高质量配置_24383_92720.xkt')">
+                    📄 demo_高质量配置_24383_92720.xkt - 高质量配置
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFile = null;
+        let currentFileData = null;
+
+        function loadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showError('请选择一个文件');
+                return;
+            }
+            
+            if (!file.name.endsWith('.xkt')) {
+                showError('请选择 XTK 文件 (.xkt)');
+                return;
+            }
+            
+            currentFile = file;
+            showLoading(true);
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                currentFileData = new Uint8Array(e.target.result);
+                displayFileInfo(file, currentFileData);
+                showLoading(false);
+                document.getElementById('validateBtn').disabled = false;
+                showSuccess(`文件 "${file.name}" 加载成功`);
+            };
+            
+            reader.onerror = function() {
+                showError('文件读取失败');
+                showLoading(false);
+            };
+            
+            reader.readAsArrayBuffer(file);
+        }
+
+        function loadTestFile(filename) {
+            // 清除选中状态
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            
+            // 设置选中状态
+            event.target.classList.add('selected');
+            
+            // 尝试加载文件
+            fetch(filename)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`文件不存在: ${filename}`);
+                    }
+                    return response.arrayBuffer();
+                })
+                .then(buffer => {
+                    currentFileData = new Uint8Array(buffer);
+                    currentFile = { name: filename, size: buffer.byteLength };
+                    displayFileInfo(currentFile, currentFileData);
+                    document.getElementById('validateBtn').disabled = false;
+                    showSuccess(`测试文件 "${filename}" 加载成功`);
+                })
+                .catch(error => {
+                    showError(`无法加载测试文件: ${error.message}`);
+                });
+        }
+
+        function displayFileInfo(file, data) {
+            const infoDiv = document.getElementById('fileInfo');
+            
+            // 基本文件信息
+            let info = `
+                <div class="info-grid">
+                    <div class="info-item">
+                        <div class="info-label">文件名</div>
+                        <div class="info-value">${file.name}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">文件大小</div>
+                        <div class="info-value">${(file.size / 1024).toFixed(2)} KB</div>
+                    </div>
+            `;
+            
+            // 解析 XTK 文件头
+            if (data.length >= 4) {
+                const version = new DataView(data.buffer).getUint32(0, true);
+                info += `
+                    <div class="info-item">
+                        <div class="info-label">XTK 版本</div>
+                        <div class="info-value">${version}</div>
+                    </div>
+                `;
+            }
+            
+            // 解析索引信息
+            if (data.length >= 4 + 14 * 4) {
+                const view = new DataView(data.buffer, 4);
+                const sizePositions = view.getUint32(0, true);
+                const sizeNormals = view.getUint32(4, true);
+                const sizeIndices = view.getUint32(8, true);
+                const sizeEdgeIndices = view.getUint32(12, true);
+                
+                info += `
+                    <div class="info-item">
+                        <div class="info-label">位置数据大小</div>
+                        <div class="info-value">${sizePositions} bytes</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">法向量数据大小</div>
+                        <div class="info-value">${sizeNormals} bytes</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">索引数据大小</div>
+                        <div class="info-value">${sizeIndices} bytes</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">边缘索引大小</div>
+                        <div class="info-value">${sizeEdgeIndices} bytes</div>
+                    </div>
+                `;
+            }
+            
+            info += '</div>';
+            infoDiv.innerHTML = info;
+        }
+
+        function validateFile() {
+            if (!currentFileData) {
+                showError('请先加载文件');
+                return;
+            }
+            
+            const errors = [];
+            const warnings = [];
+            
+            // 验证文件大小
+            if (currentFileData.length < 4) {
+                errors.push('文件太小，无法包含版本号');
+            }
+            
+            // 验证版本号
+            if (currentFileData.length >= 4) {
+                const version = new DataView(currentFileData.buffer).getUint32(0, true);
+                if (version !== 4) {
+                    warnings.push(`版本号可能不正确: ${version} (期望: 4)`);
+                }
+            }
+            
+            // 验证索引结构
+            if (currentFileData.length >= 4 + 14 * 4) {
+                const view = new DataView(currentFileData.buffer, 4);
+                const sizePositions = view.getUint32(0, true);
+                const sizeIndices = view.getUint32(8, true);
+                
+                if (sizePositions === 0 && sizeIndices === 0) {
+                    warnings.push('模型没有几何数据');
+                }
+                
+                if (sizeIndices > 0 && sizePositions === 0) {
+                    errors.push('有索引数据但没有位置数据');
+                }
+            } else {
+                errors.push('文件太小，无法包含完整索引');
+            }
+            
+            // 显示验证结果
+            let resultHtml = '<h4>🔍 验证结果</h4>';
+            
+            if (errors.length === 0) {
+                resultHtml += '<div class="success">✅ 文件格式验证通过</div>';
+            } else {
+                resultHtml += '<div class="error">❌ 发现错误:</div>';
+                errors.forEach(error => {
+                    resultHtml += `<div class="error">• ${error}</div>`;
+                });
+            }
+            
+            if (warnings.length > 0) {
+                warnings.forEach(warning => {
+                    resultHtml += `<div style="color: #f39c12; background: #fef9e7; padding: 10px; border-radius: 4px; margin: 5px 0;">⚠️ ${warning}</div>`;
+                });
+            }
+            
+            document.getElementById('fileInfo').innerHTML += resultHtml;
+        }
+
+        function clearViewer() {
+            currentFile = null;
+            currentFileData = null;
+            document.getElementById('fileInput').value = '';
+            document.getElementById('validateBtn').disabled = true;
+            document.getElementById('fileInfo').innerHTML = '<p class="placeholder">暂无文件信息</p>';
+            document.getElementById('viewer').innerHTML = `
+                <div class="placeholder">
+                    <p>📁 请选择一个 XTK 文件进行查看</p>
+                    <p>支持的格式: .xkt</p>
+                </div>
+            `;
+            
+            // 清除选中状态
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            
+            showSuccess('查看器已清空');
+        }
+
+        function showLoading(show) {
+            const loading = document.getElementById('loading');
+            const placeholder = document.querySelector('.placeholder');
+            
+            if (show) {
+                loading.style.display = 'block';
+                if (placeholder) placeholder.style.display = 'none';
+            } else {
+                loading.style.display = 'none';
+            }
+        }
+
+        function showError(message) {
+            const viewer = document.getElementById('viewer');
+            viewer.innerHTML = `<div class="error">❌ ${message}</div>`;
+        }
+
+        function showSuccess(message) {
+            const viewer = document.getElementById('viewer');
+            viewer.innerHTML = `<div class="success">✅ ${message}</div>`;
+        }
+
+        // 页面加载完成后的初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('XTK 查看器已加载');
+        });
+    </script>
+</body>
+</html>

@@ -30,6 +30,30 @@ pub mod auth;
 pub mod health;
 
 #[cfg(feature = "grpc")]
+pub mod spatial_query_service;
+
+#[cfg(feature = "grpc")]
+pub mod spatial_index_builder;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_contact_detector;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_geometry_extractor;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_raycast_detector;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_path_analyzer;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_collision_optimizer;
+
+#[cfg(feature = "grpc")]
+pub mod sctn_visualizer;
+
+#[cfg(feature = "grpc")]
 #[cfg(test)]
 pub mod tests;
 
@@ -48,3 +72,12 @@ pub use auth::{AuthService, AuthConfig, AuthInterceptor, RateLimiter, InputValid
 
 #[cfg(feature = "grpc")]
 pub use health::{HealthMonitorService, HealthChecker, HealthStatus};
+
+#[cfg(feature = "grpc")]
+pub use spatial_query_service::{SpatialQueryServiceImpl, SpatialElement};
+
+#[cfg(feature = "grpc")]
+pub use sctn_contact_detector::{
+    SctnContactDetector, BatchSctnDetector, CableTraySection, 
+    ContactResult, ContactType, SupportRelation
+};

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, Instant};
 use parse_pdms_db::parse::parse_db_basic_info;
-use chrono::TimeZone;
+use chrono::{TimeZone, Local};
 
 use crate::web_ui::models::*;
 use crate::web_ui::AppState;
@@ -223,17 +223,91 @@ pub async fn list_projects(
     }
 }
 
+/// 检查任务名称是否已存在
+fn check_task_name_exists(task_name: &str) -> Result<bool, String> {
+    let conn = open_deployment_sites_sqlite()
+        .map_err(|e| format!("无法打开数据库: {}", e))?;
+    
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) FROM deployment_tasks WHERE name = ?1"
+    ).map_err(|e| format!("准备查询语句失败: {}", e))?;
+    
+    let count: i64 = stmt.query_row([task_name], |row| row.get(0))
+        .map_err(|e| format!("查询任务名称失败: {}", e))?;
+    
+    Ok(count > 0)
+}
+
 /// 创建数据解析向导任务
 pub async fn create_wizard_task(
     State(state): State<AppState>,
     Json(request): Json<WizardTaskRequest>,
-) -> Result<Json<TaskInfo>, StatusCode> {
+) -> Result<Json<TaskInfo>, (StatusCode, Json<serde_json::Value>)> {
+    // 验证请求参数
+    if request.wizard_config.selected_projects.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "任务创建失败",
+                "details": "未选择任何项目，请至少选择一个项目",
+                "error_type": "validation_error"
+            }))
+        ));
+    }
+    
+    if request.task_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "任务创建失败",
+                "details": "任务名称不能为空",
+                "error_type": "validation_error"
+            }))
+        ));
+    }
+    
+    // 检查任务名称是否已存在
+    match check_task_name_exists(&request.task_name) {
+        Ok(exists) => {
+            if exists {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "任务创建失败",
+                        "details": format!("任务名称 '{}' 已存在，请使用其他名称", request.task_name),
+                        "error_type": "duplicate_name",
+                        "suggestions": [
+                            format!("{} - {}", request.task_name, chrono::Local::now().format("%Y%m%d_%H%M%S")),
+                            format!("{} (2)", request.task_name),
+                            format!("{} - 副本", request.task_name)
+                        ]
+                    }))
+                ));
+            }
+        }
+        Err(e) => {
+            // 如果检查失败，记录警告但不阻止创建
+            eprintln!("警告: 无法检查任务名称重复性: {}", e);
+        }
+    }
+    
     let mut task_manager = state.task_manager.lock().await;
+
+    // 决定任务类型：ParseOnly -> DataParsingWizard；FullGeneration -> FullGeneration
+    let task_type = match request
+        .task_mode
+        .as_deref()
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("full") | Some("fullgeneration") => TaskType::FullGeneration,
+        _ => TaskType::DataParsingWizard,
+    };
 
     // 创建向导任务
     let mut task = TaskInfo::new(
         request.task_name,
-        TaskType::DataParsingWizard,
+        task_type.clone(),
         request.wizard_config.base_config.clone(),
     );
 
@@ -245,7 +319,11 @@ pub async fn create_wizard_task(
     // 添加向导特定的配置信息到任务日志
     task.add_log(
         LogLevel::Info,
-        format!("创建数据解析向导任务，包含 {} 个项目", request.wizard_config.selected_projects.len()),
+        format!(
+            "创建数据解析向导任务（模式：{}），包含 {} 个项目",
+            match task_type { TaskType::FullGeneration => "解析+建模", _ => "仅解析" },
+            request.wizard_config.selected_projects.len()
+        ),
     );
 
     for project in &request.wizard_config.selected_projects {
@@ -256,17 +334,47 @@ pub async fn create_wizard_task(
     }
 
     let task_id = task.id.clone();
-    task_manager.active_tasks.insert(task_id.clone(), task.clone());
-
+    
+    // 先尝试保存到SQLite，如果失败则返回错误
+    println!("正在保存任务到SQLite，任务ID: {}", task_id);
+    
     // 保存部署站点配置到SQLite
     if let Err(e) = save_deployment_site_config(&request.wizard_config, &task_id) {
-        eprintln!("Failed to save deployment site config: {}", e);
+        eprintln!("❌ 保存部署站点配置失败: {}", e);
+        task.add_log(
+            LogLevel::Warning,
+            format!("部署站点配置保存失败（非致命）: {}", e),
+        );
+        // 继续执行，这不是致命错误
+    } else {
+        println!("✅ 部署站点配置保存成功");
     }
 
     // 保存任务信息到SQLite
     if let Err(e) = save_task_to_sqlite(&task, Some(&request.wizard_config)) {
-        eprintln!("Failed to save task to SQLite: {}", e);
+        eprintln!("❌ 保存任务信息到SQLite失败: {}", e);
+        
+        // 返回详细的错误信息
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "任务创建失败",
+                "details": format!("无法保存任务信息到数据库: {}", e),
+                "error_type": "database_save_error",
+                "task_id": task_id,
+                "suggestions": [
+                    "检查SQLite数据库文件权限",
+                    "确保deployment_sites.sqlite文件可写",
+                    "检查磁盘空间是否充足"
+                ]
+            }))
+        ));
+    } else {
+        println!("✅ 任务信息保存成功");
     }
+    
+    // 成功保存后，才将任务添加到内存中
+    task_manager.active_tasks.insert(task_id.clone(), task.clone());
 
     // 若配置了 SQLite 项目库，则为选中的项目预置卡片记录，便于向导后直接出现在首页
     if let Some((conn, table)) = open_sqlite_projects_table() {
@@ -331,6 +439,7 @@ pub async fn get_wizard_templates(
                 name: "向导解析配置".to_string(),
                 manual_db_nums: vec![],
                 project_name: "AvevaMarineSample".to_string(),
+                project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
                 project_code: 1516,
                 mdb_name: "ALL".to_string(),
                 module: "DESI".to_string(),
@@ -642,6 +751,98 @@ fn save_task_to_sqlite(task: &TaskInfo, wizard_config: Option<&DataParsingWizard
     Ok(())
 }
 
+/// 浏览目录结构
+#[derive(Debug, Deserialize)]
+pub struct BrowseDirectoryRequest {
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub is_directory: bool,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrowseDirectoryResponse {
+    pub current_path: String,
+    pub parent_path: Option<String>,
+    pub entries: Vec<DirectoryEntry>,
+}
+
+/// 浏览目录，返回子目录和文件列表
+pub async fn browse_directory(
+    Query(request): Query<BrowseDirectoryRequest>,
+) -> Result<Json<BrowseDirectoryResponse>, StatusCode> {
+    // 如果没有指定路径，使用默认路径
+    let path = request.path.unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        { "/Volumes".to_string() }
+        #[cfg(target_os = "windows")]
+        { "C:\\".to_string() }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { "/home".to_string() }
+    });
+
+    let current_path = PathBuf::from(&path);
+    
+    if !current_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let parent_path = current_path.parent().map(|p| p.to_string_lossy().to_string());
+    let mut entries = Vec::new();
+
+    // 读取目录内容
+    match fs::read_dir(&current_path) {
+        Ok(dir_entries) => {
+            for entry in dir_entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                
+                // 跳过隐藏文件（以.开头的）
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                let is_directory = path.is_dir();
+                let size = if !is_directory {
+                    entry.metadata().ok().map(|m| m.len())
+                } else {
+                    None
+                };
+
+                entries.push(DirectoryEntry {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_directory,
+                    size,
+                });
+            }
+        }
+        Err(_) => {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    // 按类型和名称排序：目录优先，然后按字母顺序
+    entries.sort_by(|a, b| {
+        match (a.is_directory, b.is_directory) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+
+    Ok(Json(BrowseDirectoryResponse {
+        current_path: current_path.to_string_lossy().to_string(),
+        parent_path,
+        entries,
+    }))
+}
+
 /// 从SQLite删除部署站点
 pub fn delete_deployment_site_from_sqlite(site_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
@@ -670,6 +871,20 @@ pub fn delete_deployment_site_from_sqlite(site_id: &str) -> Result<(), Box<dyn s
     } else {
         Err("Site not found in SQLite".into())
     }
+}
+
+/// 根据任务ID从SQLite载入向导配置
+pub fn load_wizard_config_by_task_id(task_id: &str) -> Option<DataParsingWizardConfig> {
+    let conn = open_deployment_sites_sqlite().ok()?;
+    let mut stmt = conn
+        .prepare("SELECT wizard_config_json FROM wizard_tasks WHERE id = ?1")
+        .ok()?;
+    let cfg_json: Option<String> = stmt
+        .query_row([task_id], |row| row.get(0))
+        .ok()
+        .flatten();
+    cfg_json
+        .and_then(|s| serde_json::from_str::<DataParsingWizardConfig>(&s).ok())
 }
 
 /// 从SQLite恢复任务信息
