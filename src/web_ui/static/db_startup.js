@@ -131,6 +131,9 @@ class DbStartupManager {
         this.showSuccess('数据库启动成功！');
         this.enableStartButton();
         this.updateButtonState('running');
+        // 隐藏错误详情
+        const box = document.getElementById('db-startup-error-details-container');
+        if (box) box.style.display = 'none';
         
         // 触发自定义事件
         window.dispatchEvent(new CustomEvent('db-startup-success', { 
@@ -141,7 +144,10 @@ class DbStartupManager {
     // 启动失败回调
     onStartupFailed(status) {
         console.error('数据库启动失败:', status);
-        this.showError(`启动失败: ${status.error_message || '未知错误'}`);
+        const msg = `启动失败: ${status.error_message || '未知错误'}`;
+        this.showError(msg);
+        try{ alert(msg); }catch(_){ /* ignore */ }
+        this.setErrorDetails(status.error_message || (typeof status === 'string' ? status : JSON.stringify(status)));
         this.enableStartButton();
         this.updateButtonState('stopped');
         
@@ -149,6 +155,21 @@ class DbStartupManager {
         window.dispatchEvent(new CustomEvent('db-startup-failed', { 
             detail: status 
         }));
+    }
+
+    // 设置失败详情并显示
+    setErrorDetails(text) {
+        const box = document.getElementById('db-startup-error-details-container');
+        const pre = document.getElementById('db-startup-error-details');
+        const btn = document.getElementById('copy-error-details');
+        if (!box || !pre) return;
+        pre.textContent = (text || '').toString();
+        box.style.display = pre.textContent.trim() ? 'block' : 'none';
+        if (btn) {
+            btn.onclick = () => {
+                try { navigator.clipboard.writeText(pre.textContent || ''); } catch(_) {}
+            };
+        }
     }
 
     // 更新进度显示
@@ -286,20 +307,33 @@ class DbStartupManager {
     // 初始化页面状态
     async initializePageState(ip, port) {
         const status = await this.checkStatus(ip, port);
-        
-        if (status) {
-            switch (status.status) {
-                case 'Running':
-                    this.updateButtonState('running');
-                    break;
-                case 'Starting':
-                    this.updateButtonState('starting');
-                    // 继续监控
-                    this.startStatusMonitoring(ip, port);
-                    break;
-                default:
-                    this.updateButtonState('stopped');
-                    break;
+
+        if (status && status.success) {
+            // 检查是否是外部启动的实例
+            if (status.external) {
+                console.log('检测到外部启动的数据库实例');
+                this.updateButtonState('running');
+                // 显示提示信息
+                const messageEl = document.getElementById('db-startup-message');
+                if (messageEl) {
+                    messageEl.className = 'alert alert-info';
+                    messageEl.textContent = '检测到数据库已在运行（外部启动）';
+                    messageEl.style.display = 'block';
+                }
+            } else {
+                switch (status.status) {
+                    case 'Running':
+                        this.updateButtonState('running');
+                        break;
+                    case 'Starting':
+                        this.updateButtonState('starting');
+                        // 继续监控
+                        this.startStatusMonitoring(ip, port);
+                        break;
+                    default:
+                        this.updateButtonState('stopped');
+                        break;
+                }
             }
         } else {
             this.updateButtonState('stopped');
@@ -317,19 +351,104 @@ document.addEventListener('DOMContentLoaded', () => {
     if (startBtn) {
         startBtn.addEventListener('click', async () => {
             const config = {
-                ip: document.getElementById('db-ip').value || 'localhost',
+                ip: document.getElementById('db-ip').value || '127.0.0.1',
                 port: parseInt(document.getElementById('db-port').value || '8009'),
                 user: document.getElementById('db-user').value || 'root',
                 password: document.getElementById('db-password').value || 'root',
                 dbFile: document.getElementById('db-file').value || 'ams-8009-test.db'
             };
-            
+
             await window.dbStartupManager.startDatabase(config);
         });
     }
 
+    // 绑定停止按钮事件
+    const stopBtn = document.getElementById('db-stop-button');
+    if (stopBtn) {
+        stopBtn.addEventListener('click', async () => {
+            if (!confirm('确定要停止数据库吗？')) {
+                return;
+            }
+
+            const ip = document.getElementById('db-ip').value || '127.0.0.1';
+            const port = parseInt(document.getElementById('db-port').value || '8009');
+
+            try {
+                const response = await fetch('/api/database/startup/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip, port })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    if (result.success) {
+                        window.dbStartupManager.updateButtonState('stopped');
+                        alert('数据库已停止');
+                    } else {
+                        alert('停止失败: ' + result.error);
+                    }
+                } else {
+                    alert('停止数据库失败');
+                }
+            } catch (error) {
+                console.error('停止数据库失败:', error);
+                alert('停止过程中出现网络错误');
+            }
+        });
+    }
+
     // 初始化页面状态
-    const ip = document.getElementById('db-ip')?.value || 'localhost';
+    const ip = document.getElementById('db-ip')?.value || '127.0.0.1';
     const port = parseInt(document.getElementById('db-port')?.value || '8009');
     window.dbStartupManager.initializePageState(ip, port);
+
+    // 绑定“测试连接”按钮
+    const testBtn = document.getElementById('db-test-button');
+    if (testBtn) {
+        testBtn.addEventListener('click', async () => {
+            const ip = document.getElementById('db-ip').value || '127.0.0.1';
+            const port = parseInt(document.getElementById('db-port').value || '8009');
+            const user = document.getElementById('db-user').value || 'root';
+            const password = document.getElementById('db-password').value || '';
+            // 尝试从页面取项目/命名空间；若不存在，采用常用默认值
+            const nsInput = document.getElementById('project-code');
+            const dbInput = document.getElementById('project-name');
+            const namespace = (nsInput && nsInput.value) ? nsInput.value : '1516';
+            const database = (dbInput && dbInput.value) ? dbInput.value : 'AvevaMarineSample';
+
+            try {
+                const res = await fetch('/api/surreal/test', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip, port, user, password, namespace, database })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(data.message || '连接测试成功');
+                    // 隐藏错误详情
+                    const box = document.getElementById('db-startup-error-details-container');
+                    if (box) box.style.display = 'none';
+                } else {
+                    const msg = data.message || '连接测试失败';
+                    const details = data.details || JSON.stringify(data);
+                    alert(msg + (details ? ('\n\n' + details) : ''));
+                    // 展示失败详情
+                    const box = document.getElementById('db-startup-error-details-container');
+                    const pre = document.getElementById('db-startup-error-details');
+                    const btn = document.getElementById('copy-error-details');
+                    if (pre) pre.textContent = details;
+                    if (box) box.style.display = 'block';
+                    if (btn) btn.onclick = () => { try { navigator.clipboard.writeText(pre?.textContent || ''); } catch(_) {} };
+                }
+            } catch (e) {
+                alert('网络错误，连接测试失败');
+                const box = document.getElementById('db-startup-error-details-container');
+                const pre = document.getElementById('db-startup-error-details');
+                const btn = document.getElementById('copy-error-details');
+                if (pre) pre.textContent = e?.message || String(e);
+                if (box) box.style.display = 'block';
+                if (btn) btn.onclick = () => { try { navigator.clipboard.writeText(pre?.textContent || ''); } catch(_) {} };
+            }
+        });
+    }
 });

@@ -8,9 +8,9 @@ pub fn render_index_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -472,8 +472,8 @@ pub fn render_sqlite_spatial_page() -> String {
   <meta charset=\"UTF-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
   <title>SQLite 空间索引测试</title>
-  <script src=\"https://cdn.tailwindcss.com\"></script>
-  <script src=\"https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js\" defer></script>
+    <link href=\"/static/simple-tailwind.css\" rel=\"stylesheet\"> 
+  <script src=\"/static/alpine.min.js\" defer></script>
 </head>
 <body class=\"bg-gray-50\">
   <div class=\"max-w-5xl mx-auto px-4 py-6\">
@@ -567,10 +567,12 @@ pub fn render_dashboard_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>仪表板 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
+    <!-- 本地优先，若不存在则回退 CDN -->
+    <script src="/static/chart.umd.min.js"></script>
+    <script>if(typeof Chart==='undefined'){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/chart.js';document.head.appendChild(s);}</script>
 </head>
 <body class="bg-gray-50" x-data="dashboard()">
     <div class="min-h-screen">
@@ -920,9 +922,9 @@ pub fn render_space_tools_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>空间计算工具 - AIOS</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
     <style> code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; } </style>
     <script>
       async function postJSON(url, body){
@@ -1059,9 +1061,9 @@ pub fn render_config_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>配置管理 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="bg-gray-50" x-data="configManager()">
     <div class="min-h-screen">
@@ -1498,9 +1500,9 @@ pub fn render_tasks_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务管理 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="bg-gray-50" x-data="taskManager()">
     <div class="min-h-screen">
@@ -2644,9 +2646,9 @@ pub fn render_task_logs_page(task_id: String) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务日志详情 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
     <style>
         .log-entry {{
             transition: background-color 0.2s;
@@ -3043,22 +3045,20 @@ pub fn render_db_status_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据库状态管理 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
     <style>
-        .status-badge {{
-            @apply px-2 py-1 rounded-full text-xs font-medium;
-        }}
-        .status-parsed {{ @apply bg-green-100 text-green-800; }}
-        .status-not-parsed {{ @apply bg-gray-100 text-gray-800; }}
-        .status-parsing {{ @apply bg-yellow-100 text-yellow-800; }}
-        .status-parse-failed {{ @apply bg-red-100 text-red-800; }}
-        .status-generated {{ @apply bg-blue-100 text-blue-800; }}
-        .status-not-generated {{ @apply bg-gray-100 text-gray-800; }}
-        .status-generating {{ @apply bg-purple-100 text-purple-800; }}
-        .status-generation-failed {{ @apply bg-red-100 text-red-800; }}
-        .needs-update {{ @apply bg-orange-50 border-l-4 border-orange-400; }}
+        .status-badge { display:inline-block; padding:0.25rem 0.5rem; border-radius:9999px; font-size:0.75rem; font-weight:500; }
+        .status-parsed { background-color: rgb(220 252 231); color: rgb(22 101 52); }
+        .status-not-parsed { background-color: rgb(243 244 246); color: rgb(31 41 55); }
+        .status-parsing { background-color: rgb(254 249 195); color: rgb(133 77 14); }
+        .status-parse-failed { background-color: rgb(254 226 226); color: rgb(153 27 27); }
+        .status-generated { background-color: rgb(219 234 254); color: rgb(30 64 175); }
+        .status-not-generated { background-color: rgb(243 244 246); color: rgb(31 41 55); }
+        .status-generating { background-color: rgb(243 232 255); color: rgb(107 33 168); }
+        .status-generation-failed { background-color: rgb(254 226 226); color: rgb(153 27 27); }
+        .needs-update { background-color: rgb(255 247 237); border-left: 4px solid rgb(251 146 60); }
     </style>
 </head>
 <body class="bg-gray-50" x-data="dbStatusManager()">
@@ -3618,9 +3618,9 @@ pub fn render_wizard_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据解析向导 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="bg-gray-50" x-data="wizardManager()">
     <div class="min-h-screen">
@@ -3799,9 +3799,9 @@ pub fn render_deployment_sites_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>部署站点管理 - AIOS 平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">

@@ -71,7 +71,7 @@ batch_insert_sql_cnt = 100
 v_ip = "localhost"
 v_port = 8009
 v_user = "root"
-v_password = "root"
+v_password = "1516"
 pe_chunk = 1000
 att_chunk = 200
 

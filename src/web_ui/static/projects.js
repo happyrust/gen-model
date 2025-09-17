@@ -5,6 +5,11 @@
   let PROJECTS = [];
   let CURRENT_ID = null;
   let FILTERS = { q:'', status:'', env:'', owner:'' };
+  let PAGE = 1;
+  let PAGES = 1;
+  let PER_PAGE = Number(localStorage.getItem('deploy_per_page')||12);
+  let SORT = localStorage.getItem('deploy_sort') || 'updated_at:desc';
+  let VIEW = localStorage.getItem('deploy_view') || 'grid';
 
   // 工具
   const $ = (id)=>document.getElementById(id);
@@ -61,8 +66,9 @@
     if(FILTERS.status) params.push('status='+encodeURIComponent(FILTERS.status));
     if(FILTERS.env) params.push('env='+encodeURIComponent(FILTERS.env));
     if(FILTERS.owner) params.push('owner='+encodeURIComponent(FILTERS.owner));
-    params.push('sort=updated_at:desc');
-    params.push('per_page=30');
+    if(SORT) params.push('sort='+encodeURIComponent(SORT));
+    params.push('page='+PAGE);
+    params.push('per_page='+PER_PAGE);
     return params.length? ('?'+params.join('&')) : '';
   }
 
@@ -87,15 +93,53 @@
   // 载入与渲染列表
   async function loadProjects(){
     try{
+      // Loading 状态
+      const grid = $('projects-grid');
+      if(grid){
+        grid.innerHTML = '<div class="py-8 text-center text-gray-500">正在加载部署站点...</div>';
+      }
       const resp = await fetch('/api/deployment-sites'+buildQuery());
       const data = await resp.json();
       const items = Array.isArray(data)? data : (data.items || []);
+      PAGE = Number(data.page || PAGE || 1);
+      PAGES = Number(data.pages || PAGES || 1);
+      PER_PAGE = Number(data.per_page || PER_PAGE || 12);
       PROJECTS = items;
       renderProjects(items);
+      renderPager();
+      setActiveViewButtons();
+      loadStats().catch(()=>{});
     }catch(err){
       console.error('loadProjects error:', err);
       $('projects-grid').innerHTML = '<div class="text-red-600">加载部署站点失败</div>';
     }
+  }
+
+  // 统计：根据当前过滤（q/env/owner），分别查询不同状态的总量
+  async function fetchCount(status){
+    try{
+      const params = [];
+      if(FILTERS.q) params.push('q='+encodeURIComponent(FILTERS.q));
+      if(FILTERS.env) params.push('env='+encodeURIComponent(FILTERS.env));
+      if(FILTERS.owner) params.push('owner='+encodeURIComponent(FILTERS.owner));
+      if(status!==undefined && status!==null) params.push('status='+encodeURIComponent(status));
+      params.push('page=1'); params.push('per_page=1');
+      const url = '/api/deployment-sites' + (params.length?('?'+params.join('&')):'');
+      const r = await fetch(url);
+      const j = await r.json();
+      return Number(j.total || (Array.isArray(j)? j.length : 0)) || 0;
+    }catch(_){ return 0; }
+  }
+  async function loadStats(){
+    const [total, running, deploying, configuring, failed] = await Promise.all([
+      fetchCount(''), fetchCount('Running'), fetchCount('Deploying'), fetchCount('Configuring'), fetchCount('Failed')
+    ]);
+    const set = (id,val,cls)=>{ const el=document.getElementById(id); if(el){ el.textContent = String(val); if(cls) el.className = cls; } };
+    set('stat-total', total, 'text-2xl font-bold text-gray-900');
+    set('stat-running', running, 'text-2xl font-bold text-green-600');
+    set('stat-deploying', deploying, 'text-2xl font-bold text-blue-600');
+    set('stat-configuring', configuring, 'text-2xl font-bold text-amber-600');
+    set('stat-failed', failed, 'text-2xl font-bold text-red-600');
   }
 
   // 暴露刷新函数给页面按钮
@@ -129,6 +173,23 @@
     const grid = $('projects-grid');
     if(!grid) return;
     if(!items || !items.length){ grid.innerHTML = '<div class="text-gray-500">暂无部署站点</div>'; return; }
+    if (VIEW === 'list') {
+      grid.classList.remove('grid-cards');
+      grid.classList.remove('grid-cards-lg');
+      const rows = items.map(p=>{
+        const id = escHtml(p.id||'');
+        const name = escHtml(p.name||id||'未命名');
+        const status = escHtml(p.status||'');
+        const env = escHtml(p.env||'');
+        const owner = escHtml(p.owner||'');
+        const updated = escHtml(p.updated_at||'');
+        return `<tr class=\"border-b\">\n          <td class=\"py-2 pr-4\"><a class=\"text-blue-600 hover:underline\" href=\"javascript:viewProjectDetails('${encodeURIComponent(id)}')\">${name}</a></td>\n          <td class=\"py-2 pr-4\"><span class=\"inline-flex px-2 py-0.5 rounded ${statusBadge(status)}\">${status||'—'}</span></td>\n          <td class=\"py-2 pr-4\"><span class=\"inline-flex px-2 py-0.5 rounded ${envBadge(env)}\">${env||'—'}</span></td>\n          <td class=\"py-2 pr-4\">${owner||''}</td>\n          <td class=\"py-2 pr-4\">${updated||''}</td>\n          <td class=\"py-2\"><button class=\"px-2 py-1 rounded bg-blue-600 text-white\" onclick=\"viewProjectDetails('${encodeURIComponent(id)}')\">详情</button></td>\n        </tr>`;
+      }).join('');
+      grid.innerHTML = `<div class=\"overflow-x-auto\"><table class=\"table-auto min-w-full text-sm\"><thead class=\"bg-gray-50\"><tr><th class=\"text-left py-2 pr-4\">名称</th><th class=\"text-left py-2 pr-4\">状态</th><th class=\"text-left py-2 pr-4\">环境</th><th class=\"text-left py-2 pr-4\">负责人</th><th class=\"text-left py-2 pr-4\">更新</th><th class=\"text-left py-2\">操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      return;
+    }
+    grid.classList.add('grid-cards');
+    grid.classList.add('grid-cards-lg');
     grid.innerHTML = items.map(p=>{
       const id = escHtml(p.id||'');
       const name = escHtml(p.name||id||'未命名项目');
@@ -164,6 +225,32 @@
         </div>
       </div>`;
     }).join('');
+  }
+
+  function renderPager(){
+    const el = $('sites-pager');
+    if(!el) return;
+    if(!PAGES || PAGES<=1){ el.innerHTML = ''; return; }
+    const disabledPrev = PAGE<=1? 'disabled aria-disabled="true"' : '';
+    const disabledNext = PAGE>=PAGES? 'disabled aria-disabled="true"' : '';
+    el.innerHTML = `
+      <div class="flex items-center gap-2">
+        <button class="px-3 py-1 border rounded" ${disabledPrev} data-page="prev">上一页</button>
+        <span>第 <b>${PAGE}</b> / <b>${PAGES}</b> 页</span>
+        <button class="px-3 py-1 border rounded" ${disabledNext} data-page="next">下一页</button>
+      </div>
+      <div class="text-gray-500">每页 ${PER_PAGE} 条</div>
+    `;
+    el.querySelector('[data-page="prev"]').onclick = ()=>{ if(PAGE>1){ PAGE--; loadProjects(); } };
+    el.querySelector('[data-page="next"]').onclick = ()=>{ if(PAGE<PAGES){ PAGE++; loadProjects(); } };
+  }
+
+  function setActiveViewButtons(){
+    const vg = $('view_grid'), vl = $('view_list');
+    if(!vg || !vl) return;
+    vg.classList.remove('bg-gray-100');
+    vl.classList.remove('bg-gray-100');
+    if(VIEW === 'grid') vg.classList.add('bg-gray-100'); else vl.classList.add('bg-gray-100');
   }
 
   // 弹窗
@@ -921,12 +1008,94 @@
   };
 
   document.addEventListener('DOMContentLoaded', ()=>{
+    const params = new URLSearchParams(location.search);
     const q = $('site_q'), st = $('site_status'), env = $('site_env'), owner = $('site_owner');
-    const apply = ()=>{ FILTERS = { q:q?.value.trim()||'', status:st?.value||'', env:env?.value||'', owner:owner?.value.trim()||'' }; loadProjects(); };
+    const so = $('site_sort');
+    const copyBtn = $('copy-share-link');
+    const per = $('site_per_page');
+    const vg = $('view_grid'), vl = $('view_list');
+    const grid = $('projects-grid');
+
+    // 初始化参数（优先 URL）
+    if(params.get('q')) FILTERS.q = params.get('q');
+    if(params.get('status')) FILTERS.status = params.get('status');
+    if(params.get('env')) FILTERS.env = params.get('env');
+    if(params.get('owner')) FILTERS.owner = params.get('owner');
+    if(params.get('sort')) SORT = params.get('sort');
+    if(params.get('page')) PAGE = Math.max(1, parseInt(params.get('page'),10)||1);
+    if(params.get('per_page')) PER_PAGE = Math.max(1, parseInt(params.get('per_page'),10)||PER_PAGE);
+    if(params.get('view')) VIEW = params.get('view');
+
+    // 读取首页 data-per-page
+    if(grid && grid.dataset && grid.dataset.perPage){
+      const n = parseInt(grid.dataset.perPage, 10);
+      if(!isNaN(n) && n>0) PER_PAGE = n;
+    }
+    // 回填到控件
+    if(q) q.value = FILTERS.q;
+    if(st) st.value = FILTERS.status;
+    if(env) env.value = FILTERS.env;
+    if(owner) owner.value = FILTERS.owner;
+    if(so) so.value = SORT;
+    if(per) per.value = String(PER_PAGE);
+    setActiveViewButtons();
+
+    const apply = ()=>{ 
+      FILTERS = { q:q?.value.trim()||'', status:st?.value||'', env:env?.value||'', owner:owner?.value.trim()||'' };
+      SORT = so?.value || SORT;
+      localStorage.setItem('deploy_sort', SORT);
+      localStorage.setItem('deploy_filters', JSON.stringify(FILTERS));
+      PAGE = 1;
+      loadProjects();
+      updateHomeViewAll();
+    };
     if(q){ q.addEventListener('input', ()=>{ clearTimeout(q._t); q._t = setTimeout(apply, 300); }); }
     if(st){ st.addEventListener('change', apply); }
     if(env){ env.addEventListener('change', apply); }
     if(owner){ owner.addEventListener('input', ()=>{ clearTimeout(owner._t); owner._t = setTimeout(apply, 300); }); }
+    if(so){ so.addEventListener('change', apply); }
+    if(per){ per.addEventListener('change', ()=>{ PER_PAGE = parseInt(per.value,10)||12; localStorage.setItem('deploy_per_page', String(PER_PAGE)); PAGE = 1; loadProjects(); }); }
+    if(vg){ vg.addEventListener('click', ()=>{ VIEW='grid'; localStorage.setItem('deploy_view', VIEW); setActiveViewButtons(); loadProjects(); }); }
+    if(vl){ vl.addEventListener('click', ()=>{ VIEW='list'; localStorage.setItem('deploy_view', VIEW); setActiveViewButtons(); loadProjects(); }); }
+    if(copyBtn){
+      copyBtn.addEventListener('click', ()=>{
+        try{
+          const params=[];
+          if(q && q.value) params.push('q='+encodeURIComponent(q.value));
+          if(st && st.value) params.push('status='+encodeURIComponent(st.value));
+          if(env && env.value) params.push('env='+encodeURIComponent(env.value));
+          if(owner && owner.value) params.push('owner='+encodeURIComponent(owner.value));
+          if(so && so.value) params.push('sort='+encodeURIComponent(so.value));
+          params.push('view='+encodeURIComponent(VIEW));
+          const url = location.origin + '/deployment-sites' + (params.length?('?'+params.join('&')):'');
+          navigator.clipboard.writeText(url);
+          copyBtn.textContent = '已复制'; setTimeout(()=> copyBtn.textContent='复制分享链接', 1200);
+        }catch(e){ alert('复制失败: '+e.message); }
+      });
+    }
+    // 统计卡片点击 => 快速筛选状态
+    document.querySelectorAll('.card[data-status]')?.forEach(card=>{
+      card.addEventListener('click', ()=>{
+        const target = card.getAttribute('data-status')||'';
+        if(st){ st.value = target; st.dispatchEvent(new Event('change')); }
+      });
+    });
+
     loadProjects();
+    updateHomeViewAll();
   });
+
+  function updateHomeViewAll(){
+    const link = document.getElementById('home-view-all');
+    if(!link) return;
+    const params = [];
+    if(FILTERS.q) params.push('q='+encodeURIComponent(FILTERS.q));
+    if(FILTERS.status) params.push('status='+encodeURIComponent(FILTERS.status));
+    if(FILTERS.env) params.push('env='+encodeURIComponent(FILTERS.env));
+    if(FILTERS.owner) params.push('owner='+encodeURIComponent(FILTERS.owner));
+    if(SORT) params.push('sort='+encodeURIComponent(SORT));
+    params.push('view='+encodeURIComponent(VIEW));
+    const url = '/deployment-sites' + (params.length?('?'+params.join('&')):'');
+    link.href = url;
+  }
 })();

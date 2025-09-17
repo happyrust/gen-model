@@ -17,22 +17,23 @@ class GrpcSpatialQueryClient {
      * Load gRPC-Web libraries
      */
     async loadGrpcWeb() {
-        // In production, these would be loaded via npm/webpack
-        // For now, we'll use CDN versions
+        // 本地优先加载 /static/grpc-web.min.js，不存在则回退到 CDN
         if (typeof grpc === 'undefined') {
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/grpc-web@1.4.2/index.min.js';
-            document.head.appendChild(script);
-            
-            return new Promise((resolve) => {
-                script.onload = () => {
-                    this.initializeClient();
-                    resolve();
-                };
+            const tryLoad = (src) => new Promise((resolve) => {
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = () => resolve(true);
+                s.onerror = () => resolve(false);
+                document.head.appendChild(s);
             });
-        } else {
-            this.initializeClient();
+
+            // 先尝试本地
+            const okLocal = await tryLoad('/static/grpc-web.min.js');
+            if (!okLocal) {
+                await tryLoad('https://cdn.jsdelivr.net/npm/grpc-web@1.4.2/index.min.js');
+            }
         }
+        this.initializeClient();
     }
 
     /**

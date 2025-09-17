@@ -21,10 +21,13 @@ pub mod db_status_template;
 pub mod db_status_handlers;
 pub mod wizard_handlers;
 pub mod wizard_template;
+pub mod layout;
 pub mod database_diagnostics;
 pub mod db_connection;
 pub mod db_startup_manager;
 pub mod db_startup_handlers;
+pub mod incremental_update_handlers;
+pub mod database_status_handlers;
 
 use handlers::*;
 use models::*;
@@ -132,6 +135,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/tasks/:id/error", get(get_task_error_details))
         .route("/api/tasks/:id/logs", get(get_task_logs))
         .route("/api/tasks/batch", post(create_batch_tasks))
+        .route("/api/tasks/next-number", get(get_next_task_number))
         .route("/api/templates", get(get_task_templates))
         .route("/api/config", get(get_config).post(update_config))
         .route("/api/config/templates", get(get_config_templates))
@@ -155,6 +159,28 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/database/startup/status", get(db_startup_handlers::get_startup_status))
         .route("/api/database/startup/instances", get(db_startup_handlers::get_all_instances))
         .route("/api/database/startup/stop", post(db_startup_handlers::stop_database_api))
+        // 增量更新检测API
+        .route("/api/incremental/status", get(incremental_update_handlers::get_all_incremental_status))
+        .route("/api/incremental/site/:site_id", get(incremental_update_handlers::get_site_incremental_details))
+        .route("/api/incremental/detect/:site_id", post(incremental_update_handlers::start_incremental_detection))
+        .route("/api/incremental/sync/:site_id", post(incremental_update_handlers::start_incremental_sync))
+        .route("/api/incremental/task/:task_id", get(incremental_update_handlers::get_detection_task_status))
+        .route("/api/incremental/task/:task_id/cancel", post(incremental_update_handlers::cancel_task))
+        .route("/api/incremental/config", get(incremental_update_handlers::get_incremental_config))
+        .route("/api/incremental/config", post(incremental_update_handlers::update_incremental_config))
+        // 增量更新页面
+        .route("/incremental", get(serve_incremental_update_page))
+        // 数据库状态管理API
+        .route("/api/database/status", get(database_status_handlers::get_all_database_status))
+        .route("/api/database/:db_num/details", get(database_status_handlers::get_database_details))
+        .route("/api/database/:db_num/parse", post(database_status_handlers::reparse_database))
+        .route("/api/database/:db_num/generate", post(database_status_handlers::regenerate_model))
+        .route("/api/database/:db_num/update", post(database_status_handlers::trigger_database_update))
+        .route("/api/database/:db_num/clear-cache", post(database_status_handlers::clear_database_cache))
+        .route("/api/database/batch", post(database_status_handlers::execute_batch_operation))
+        .route("/api/database/modules", get(database_status_handlers::get_module_list))
+        // 数据库状态页面
+        .route("/database-status", get(serve_database_status_page))
         // 数据库状态管理API
         .route("/api/db-status", get(db_status_handlers::get_db_status_list))
         .route("/api/db-status/:dbnum", get(db_status_handlers::get_db_status_detail))
@@ -175,8 +201,8 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/api/deployment-sites", get(handlers::api_get_deployment_sites).post(handlers::api_create_deployment_site))
         .route("/api/deployment-sites/:id", get(handlers::api_get_deployment_site).put(handlers::api_update_deployment_site).delete(handlers::api_delete_deployment_site))
         .route("/api/deployment-sites/:id/tasks", post(handlers::api_create_deployment_site_task))
-        // 部署站点管理页面 (暂时禁用，模板有问题)
-        // .route("/deployment-sites", get(handlers::deployment_sites_page))
+        // 部署站点管理页面
+        .route("/deployment-sites", get(handlers::deployment_sites_page))
         // 数据解析向导API
         .route("/api/wizard/scan-directory", get(wizard_handlers::scan_directory))
         .route("/api/wizard/scan-database-files", get(wizard_handlers::scan_database_files))
@@ -228,11 +254,14 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
     println!("   - 配置管理");
     println!("   - 任务历史记录");
     // 后台自动更新扫描任务（基于 auto_update + sesno 比较）
+    // 注释掉自动调度器，因为数据库服务由配置管理
     // 先确保 SurrealDB 的表结构字段齐备（在生产环境中便于统一管理）
     // crate::web_ui::db_status_handlers::ensure_dbnum_info_schema().await;
-    tokio::spawn(auto_update_scheduler(app_state.clone()));
+    // tokio::spawn(auto_update_scheduler(app_state.clone()));
+
     // 周期性项目健康检查（可通过 WEBUI_HEALTH_SCHED=0 关闭）
-    tokio::spawn(crate::web_ui::handlers::projects_health_scheduler());
+    // 也注释掉，避免启动时查询数据库
+    // tokio::spawn(crate::web_ui::handlers::projects_health_scheduler());
 
     axum::serve(listener, app).await?;
     Ok(())

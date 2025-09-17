@@ -13,22 +13,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("🚀 正在启动 AIOS Web UI 服务器...");
     println!("📱 访问地址: http://localhost:{}", port);
-    println!("💡 数据库连接将在需要时自动建立");
-
-    // 在后台异步初始化数据库连接，不阻塞 Web UI 启动
-    tokio::spawn(async {
-        println!("🔄 后台初始化数据库连接...");
-        match aios_core::init_surreal().await {
-            Ok(_) => {
-                let db_option = aios_core::get_db_option();
-                println!("✅ 数据库连接成功: {}:{}", db_option.v_ip, db_option.v_port);
-            }
-            Err(e) => {
-                println!("⚠️  数据库连接失败: {}", e);
-                println!("   Web UI 功能不受影响，数据库功能将在连接恢复后可用");
-            }
-        }
-    });
+    println!("💡 数据库服务由配置管理，根据需要启动");
 
     start_web_server(port).await?;
 

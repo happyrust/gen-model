@@ -3,3 +3,28 @@ SELECT count() FROM inst_relate WHERE aabb != none;
 USE NS test DB test; INFO FOR ROOT;
 USE NS test; DEFINE DATABASE test;
 DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
+INFO FOR NS;
+-- 创建 dbnum_info_table
+DEFINE TABLE dbnum_info_table SCHEMAFULL;
+-- 定义字段
+DEFINE FIELD dbnum ON dbnum_info_table TYPE int;
+DEFINE FIELD db_type ON dbnum_info_table TYPE string;
+DEFINE FIELD file_name ON dbnum_info_table TYPE string;
+DEFINE FIELD count ON dbnum_info_table TYPE int DEFAULT 0;
+DEFINE FIELD sesno ON dbnum_info_table TYPE int DEFAULT 0;
+DEFINE FIELD max_ref1 ON dbnum_info_table TYPE int;
+DEFINE FIELD project ON dbnum_info_table TYPE string;
+DEFINE FIELD auto_update ON dbnum_info_table TYPE bool DEFAULT false;
+DEFINE FIELD updating ON dbnum_info_table TYPE bool DEFAULT false;
+DEFINE FIELD last_update_at ON dbnum_info_table TYPE int;
+DEFINE FIELD last_update_result ON dbnum_info_table TYPE string;
+DEFINE FIELD updated_at ON dbnum_info_table TYPE datetime DEFAULT time::now();
+-- 创建索引
+DEFINE INDEX idx_dbnum ON dbnum_info_table FIELDS dbnum;
+DEFINE INDEX idx_db_type ON dbnum_info_table FIELDS db_type;
+-- 插入一些测试数据
+CREATE dbnum_info_table:7999 SET     dbnum = 7999,    db_type = 'DESI',    file_name = 'main_design.db',    count = 45678,    sesno = 100,    project = 'AvevaMarineSample',    auto_update = false,    updating = false,    last_update_at = 1700000000000,    last_update_result = 'Success';
+CREATE dbnum_info_table:8001 SET     dbnum = 8001,    db_type = 'EQUI',    file_name = 'equipment.db',    count = 12345,    sesno = 50,    project = 'AvevaMarineSample',    auto_update = true,    updating = false,    last_update_at = 1700000000000,    last_update_result = 'Success';
+CREATE dbnum_info_table:8002 SET     dbnum = 8002,    db_type = 'PIPE',    file_name = 'piping.db',    count = 0,    sesno = 0,    project = 'AvevaMarineSample',    auto_update = true,    updating = true,    last_update_result = 'Failed';
+-- 查询验证
+SELECT * FROM dbnum_info_table;

@@ -8,9 +8,9 @@ pub fn wizard_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>部署站点创建向导 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
     <style>
         /* 自定义卡片样式增强 */
         .db-connection-card {{
@@ -111,6 +111,26 @@ pub fn wizard_page() -> String {
     wizard_steps_indicator(),
     wizard_step_content(),
     wizard_javascript()
+    )
+}
+
+/// 统一布局版：侧栏 + 顶部导航
+pub fn wizard_page_with_layout() -> String {
+    let content = format!(r#"
+        {}
+        {}
+    "#, wizard_steps_indicator(), wizard_step_content());
+
+    let extra_head = Some(r#"<script src="/static/alpine.min.js" defer></script>"#);
+    let wizard_js = wizard_javascript();
+    let extra_scripts = Some(wizard_js.as_str());
+
+    crate::web_ui::layout::render_layout_with_sidebar(
+        "部署站点创建向导 - AIOS 数据库管理平台",
+        Some("wizard"),
+        &content,
+        extra_head,
+        extra_scripts,
     )
 }
 
@@ -369,11 +389,11 @@ fn step3_parameter_configuration() -> String {
             <i class="fas fa-cogs mr-2 text-blue-600"></i>配置解析参数
         </h2>
 
-        <div class="space-y-6">
+        <div class="space-y-8">
             <!-- 任务模式选择 -->
-            <div class="bg-white border border-gray-200 rounded-md p-4">
-                <label class="block text-sm font-medium text-gray-700 mb-2">任务模式</label>
-                <div class="flex items-center space-x-6 text-sm">
+            <div class="bg-gray-50 border border-gray-200 rounded-lg p-6">
+                <label class="block text-sm font-medium text-gray-700 mb-4">任务模式</label>
+                <div class="flex flex-wrap items-center gap-6">
                     <label class="inline-flex items-center">
                         <input type="radio" class="mr-2" name="taskMode" value="ParseOnly" x-model="taskMode">
                         仅解析（不进行建模与空间树）
@@ -385,57 +405,57 @@ fn step3_parameter_configuration() -> String {
                 </div>
             </div>
             <!-- 项目信息配置 -->
-            <div>
-                <h3 class="text-lg font-medium text-gray-900 mb-4">项目信息</h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <h3 class="text-lg font-medium text-gray-900 mb-6">项目信息</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">任务名称</label>
                         <input type="text"
                                x-model="taskName"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                placeholder="部署站点解析任务">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">项目名称</label>
                         <input type="text"
                                x-model="config.project_name"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                placeholder="AvevaMarineSample">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">项目代码</label>
                         <input type="number"
                                x-model="config.project_code"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                placeholder="1516">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">MDB名称</label>
                         <input type="text"
                                x-model="config.mdb_name"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                placeholder="ALL">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">模块类型</label>
                         <select x-model="config.module"
-                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                             <option value="DESI">DESI - 设计模块</option>
                             <option value="DRAFT">DRAFT - 制图模块</option>
                             <option value="ADMIN">ADMIN - 管理模块</option>
                         </select>
                     </div>
-                    <div>
+                    <div class="md:col-span-2">
                         <label class="block text-sm font-medium text-gray-700 mb-2">数据库编号</label>
-                        <div class="flex gap-2">
+                        <div class="flex gap-3">
                             <input type="text"
                                    x-model="manualDbNums"
-                                   class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                   class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                    placeholder="7999,1112 (可选，逗号分隔)">
                             <button type="button"
                                     @click="showDbSelector = true; loadDatabaseFiles()"
-                                    class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                                <i class="fas fa-search mr-1"></i>扫描
+                                    class="px-5 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors">
+                                <i class="fas fa-search mr-2"></i>扫描
                             </button>
                         </div>
                     </div>
@@ -443,7 +463,7 @@ fn step3_parameter_configuration() -> String {
             </div>
 
             <!-- 数据库连接配置卡片 -->
-            <div class="db-connection-card rounded-lg p-6">
+            <div class="db-connection-card rounded-lg p-8 mt-8">
                 <!-- 卡片标题和状态区 -->
                 <div class="flex items-center justify-between mb-6">
                     <div class="flex items-center space-x-3">
@@ -453,9 +473,12 @@ fn step3_parameter_configuration() -> String {
                         <div>
                             <h3 class="text-lg font-semibold text-gray-900">数据库连接</h3>
                             <div class="flex items-center text-sm text-gray-600 mt-1">
-                                <span :class="surrealStatus.listening ? 'bg-green-500' : 'bg-gray-400'"
+                                <span :class="statusDotClass()"
                                       class="inline-block w-2 h-2 rounded-full mr-2"></span>
                                 <span x-text="surrealStatusText()"></span>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-1">
+                                <span x-text="`目标: ${config.db_ip || '127.0.0.1'}:${parseInt(config.db_port || '8009') || 0}`"></span>
                             </div>
                         </div>
                     </div>
@@ -472,6 +495,7 @@ fn step3_parameter_configuration() -> String {
                                 <span>远程(SSH)</span>
                             </label>
                         </div>
+                        <span class="hidden sm:inline text-sm text-gray-600" x-text="`目标: ${config.db_ip || '127.0.0.1'}:${parseInt(config.db_port || '8009') || 0}`"></span>
                         <button @click="toggleSurreal()"
                                 :class="surrealStatus.listening ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'"
                                 class="enhanced-button px-4 py-2 text-white text-sm rounded-lg font-medium transition-colors duration-200">
@@ -499,17 +523,30 @@ fn step3_parameter_configuration() -> String {
                     </div>
                 </template>
 
+                <!-- 启动失败详情（可复制） -->
+                <div id="wizard-error-details-container" class="mb-4" style="display:none;">
+                    <div class="bg-red-50 border border-red-200 rounded-md p-3">
+                        <div class="flex items-center justify-between">
+                            <span class="text-red-800 font-medium">
+                                <i class="fas fa-exclamation-circle mr-1"></i>失败详情
+                            </span>
+                            <button id="wizard-copy-error" class="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">复制</button>
+                        </div>
+                        <pre id="wizard-error-details" class="text-red-700 text-sm whitespace-pre-wrap mt-2"></pre>
+                    </div>
+                </div>
+
                 <!-- 基本连接信息区 -->
-                <div class="info-section rounded-lg p-4 mb-6">
+                <div class="bg-gray-50 rounded-lg p-6 mb-6">
                     <h4 class="text-sm font-semibold text-gray-800 mb-4 flex items-center">
                         <i class="fas fa-server text-gray-600 mr-2"></i>
                         基本连接信息
                     </h4>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">数据库类型</label>
                             <select x-model="config.db_type"
-                                    class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white">
+                                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white">
                                 <option value="surrealdb">SurrealDB</option>
                                 <option value="tidb">TiDB</option>
                                 <option value="arangodb">ArangoDB</option>
@@ -519,31 +556,31 @@ fn step3_parameter_configuration() -> String {
                             <label class="block text-sm font-medium text-gray-700 mb-2">数据库IP</label>
                             <input type="text"
                                    x-model="config.db_ip"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                   placeholder="localhost">
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                   placeholder="127.0.0.1">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">端口</label>
                             <input type="text"
                                    x-model="config.db_port"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                    placeholder="8009">
                         </div>
                     </div>
                 </div>
 
                 <!-- 认证信息区 -->
-                <div class="auth-section rounded-lg p-4 mb-6">
+                <div class="bg-gray-50 rounded-lg p-6 mb-6">
                     <h4 class="text-sm font-semibold text-gray-800 mb-4 flex items-center">
                         <i class="fas fa-key text-amber-600 mr-2"></i>
                         认证信息
                     </h4>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">用户名</label>
                             <input type="text"
                                    x-model="config.db_user"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                    placeholder="root">
                         </div>
                         <div>
@@ -551,7 +588,7 @@ fn step3_parameter_configuration() -> String {
                             <div class="relative">
                                 <input :type="showDbPassword ? 'text' : 'password'"
                                        x-model="config.db_password"
-                                       class="enhanced-input w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                       class="w-full px-4 py-3 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                        placeholder="••••••••">
                                 <button type="button"
                                         @click="showDbPassword = !showDbPassword"
@@ -560,18 +597,19 @@ fn step3_parameter_configuration() -> String {
                                 </button>
                             </div>
                         </div>
-                        <div x-show="config.db_type === 'surrealdb'">
+                        <div :class="config.db_type === 'surrealdb' ? '' : 'invisible'">
                             <label class="block text-sm font-medium text-gray-700 mb-2">命名空间</label>
                             <input type="number"
                                    x-model="config.surreal_ns"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                   placeholder="1516">
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                   placeholder="1516"
+                                   :disabled="config.db_type !== 'surrealdb'">
                         </div>
                     </div>
                 </div>
 
                 <!-- 远程SSH参数 -->
-                <div x-show="controlMode==='ssh'" class="ssh-section rounded-lg p-4">
+                <div x-show="controlMode==='ssh'" class="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
                     <h4 class="text-sm font-semibold text-gray-800 mb-4 flex items-center">
                         <i class="fas fa-network-wired text-yellow-600 mr-2"></i>
                         SSH连接参数
@@ -580,23 +618,23 @@ fn step3_parameter_configuration() -> String {
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">主机</label>
                             <input x-model="ssh.host" type="text" placeholder="192.168.1.10"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">端口</label>
                             <input x-model.number="ssh.port" type="number" placeholder="22"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">用户</label>
                             <input x-model="ssh.user" type="text" placeholder="root"
-                                   class="enhanced-input w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">密码（可选）</label>
                             <div class="relative">
                                 <input x-model="ssh.password" :type="showSshPassword ? 'text' : 'password'" placeholder="建议使用密钥"
-                                       class="enhanced-input w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                       class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                                 <button type="button"
                                         @click="showSshPassword = !showSshPassword"
                                         class="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700">
@@ -610,9 +648,9 @@ fn step3_parameter_configuration() -> String {
             </div>
 
             <!-- 生成选项 -->
-            <div>
-                <h3 class="text-lg font-medium text-gray-900 mb-4">生成选项</h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <h3 class="text-lg font-medium text-gray-900 mb-6">生成选项</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <label class="flex items-center">
                         <input type="checkbox" x-model="config.gen_model" class="mr-2 rounded border-gray-300 text-blue-600">
                         <span class="text-sm text-gray-700">生成几何模型</span>
@@ -633,41 +671,41 @@ fn step3_parameter_configuration() -> String {
             </div>
 
             <!-- 高级选项 -->
-            <div>
-                <h3 class="text-lg font-medium text-gray-900 mb-4">高级选项</h3>
+            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <h3 class="text-lg font-medium text-gray-900 mb-6">高级选项</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">网格容差比率</label>
                         <input type="number"
                                x-model="config.mesh_tol_ratio"
                                step="0.1"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">房间关键字</label>
                         <input type="text"
                                x-model="config.room_keyword"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                placeholder="-RM">
                     </div>
                 </div>
             </div>
 
             <!-- 执行选项 -->
-            <div>
-                <h3 class="text-lg font-medium text-gray-900 mb-4">执行选项</h3>
-                <div class="space-y-4">
+            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <h3 class="text-lg font-medium text-gray-900 mb-6">执行选项</h3>
+                <div class="space-y-5">
                     <label class="flex items-center">
                         <input type="checkbox" x-model="parallelProcessing" class="mr-2 rounded border-gray-300 text-blue-600">
                         <span class="text-sm text-gray-700">并行处理项目</span>
                     </label>
-                    <div x-show="parallelProcessing" class="ml-6">
+                    <div x-show="parallelProcessing" class="ml-8">
                         <label class="block text-sm font-medium text-gray-700 mb-2">最大并发数</label>
                         <input type="number"
                                x-model="maxConcurrent"
                                min="1"
                                max="8"
-                               class="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                               class="w-40 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     </div>
                     <label class="flex items-center">
                         <input type="checkbox" x-model="continueOnFailure" class="mr-2 rounded border-gray-300 text-blue-600">
@@ -677,9 +715,9 @@ fn step3_parameter_configuration() -> String {
             </div>
 
             <!-- 配置预览 -->
-            <div class="bg-gray-50 border border-gray-200 rounded-md p-4">
-                <h4 class="text-sm font-medium text-gray-800 mb-2">配置预览</h4>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-gray-600">
+            <div class="bg-gray-50 border border-gray-200 rounded-lg p-6">
+                <h4 class="text-sm font-medium text-gray-800 mb-4">配置预览</h4>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm text-gray-600">
                     <div class="space-y-1">
                         <p><strong>项目信息:</strong></p>
                         <p>• 任务名称: <span x-text="taskName"></span></p>
@@ -1003,7 +1041,7 @@ fn wizard_javascript() -> String {
                     module: 'DESI',
                     db_type: 'surrealdb',
                     surreal_ns: 1516,
-                    db_ip: 'localhost',
+                    db_ip: '127.0.0.1',
                     db_port: '8009',
                     db_user: 'root',
                     db_password: 'root',
@@ -1021,11 +1059,14 @@ fn wizard_javascript() -> String {
                 // SurrealDB 控制与状态
                 surrealStatus: { status: 'unknown', listening: false, connected: false, address: '' },
                 statusTimer: null,
+                portCheckTimer: null,  // 端口检查定时器
+                lastCheckedPort: null, // 上次检查的端口
                 controlMode: 'local',
                 ssh: { host: '', port: 22, user: '', password: '' },
                 opMsg: '',
                 opOk: null,
                 testing: false,
+                errorDetails: '',
 
                 // 数据库选择器
                 showDbSelector: false,
@@ -1171,6 +1212,21 @@ fn wizard_javascript() -> String {
                     document.body.appendChild(dialog);
                     dialog.innerHTML = await createDialogContent(this.directoryPath || null);
                 },
+                // 失败详情显示/隐藏
+                showErrorDetails(text){
+                    this.errorDetails = (text || '').toString();
+                    const box = document.getElementById('wizard-error-details-container');
+                    const pre = document.getElementById('wizard-error-details');
+                    const btn = document.getElementById('wizard-copy-error');
+                    if(pre){ pre.textContent = this.errorDetails; }
+                    if(box){ box.style.display = this.errorDetails.trim() ? 'block' : 'none'; }
+                    if(btn){ btn.onclick = ()=>{ try{ navigator.clipboard.writeText(pre?.textContent || ''); }catch(_){} }; }
+                },
+                hideErrorDetails(){
+                    const box = document.getElementById('wizard-error-details-container');
+                    if(box){ box.style.display = 'none'; }
+                    this.errorDetails='';
+                },
 
                 // 扫描目录
                 async scanDirectory() {
@@ -1211,23 +1267,45 @@ fn wizard_javascript() -> String {
                     try {
                         const ip = this.config.db_ip || '';
                         const port = parseInt(this.config.db_port || '0') || 0;
-                        const qs = new URLSearchParams({ ip, port });
-                        const res = await fetch(`/api/surreal/status?${qs}`);
-                        if (res.ok) {
-                            const data = await res.json();
-                            this.surrealStatus = {
-                                status: data.status,
-                                listening: !!data.listening,
-                                connected: !!data.connected,
-                                address: data.address || ''
-                            };
+                        const user = this.config.db_user || '';
+                        const password = this.config.db_password || '';
+                        const namespace = String(this.config.surreal_ns || '');
+                        const database = this.config.project_name || '';
+
+                        // 并发请求：进程/监听状态 + 真实 ws 连通性
+                        const qs1 = new URLSearchParams({ ip, port });
+                        const pStatus = fetch(`/api/database/startup/status?${qs1}`);
+                        const qs2 = new URLSearchParams({ ip, port, user, password, namespace, database });
+                        const pConn = fetch(`/api/database/connection/check?${qs2}`);
+
+                        const [r1, r2] = await Promise.allSettled([pStatus, pConn]);
+                        let listening = false;
+                        let connected = false;
+                        let statusText = 'NotStarted';
+                        if (r1.status === 'fulfilled' && r1.value.ok) {
+                            const d1 = await r1.value.json();
+                            listening = d1?.status === 'Running' || d1?.external === true;
+                            statusText = d1?.status || 'NotStarted';
                         }
+                        if (r2.status === 'fulfilled' && r2.value.ok) {
+                            const d2 = await r2.value.json();
+                            connected = !!d2?.connected;
+                        }
+                        const address = `${ip}:${port}`;
+                        this.surrealStatus = { status: statusText, listening, connected, address };
                     } catch (_) { /* 忽略 */ }
                 },
 
                 surrealStatusText() {
                     const addr = this.surrealStatus.address ? `@ ${this.surrealStatus.address}` : '';
-                    return this.surrealStatus.listening ? `已连接 ${addr}` : `未连接 ${addr}`;
+                    if (this.surrealStatus.connected) return `已连接 ${addr}`;
+                    if (this.surrealStatus.listening) return `已监听(未就绪) ${addr}`;
+                    return `未连接 ${addr}`;
+                },
+                statusDotClass() {
+                    if (this.surrealStatus.connected) return 'bg-green-500';
+                    if (this.surrealStatus.listening) return 'bg-yellow-500';
+                    return 'bg-gray-400';
                 },
 
                 async startSurreal() {
@@ -1235,40 +1313,29 @@ fn wizard_javascript() -> String {
                     this.opMsg = '';
                     this.opOk = null;
 
-                    const body = {
-                        mode: this.controlMode,
-                        ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
-                        bind_ip: this.config.db_ip,
-                        bind_port: parseInt(this.config.db_port || '0') || undefined,
-                        db_user: this.config.db_user,
-                        db_password: this.config.db_password,
-                        project_name: this.config.project_name,
-                    };
+                    const ip = this.config.db_ip;
+                    const port = parseInt(this.config.db_port || '0') || 0;
+                    const user = this.config.db_user;
+                    const password = this.config.db_password;
+                    const dbFile = (this.config.db_file && this.config.db_file.trim()) || `ams-${port}-test.db`;
+
                     try {
-                        const res = await fetch('/api/surreal/start', {
+                        const res = await fetch('/api/database/startup/start', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(body)
+                            body: JSON.stringify({ ip, port, user, password, dbFile })
                         });
                         const data = await res.json();
-                        this.opMsg = data.message || (data.success ? '启动命令已发送' : '启动失败');
+                        this.opMsg = data.message || (data.success ? '启动任务已提交' : '启动失败');
                         this.opOk = !!data.success;
-                        await this.refreshSurrealStatus();
 
-                        // 5秒后自动清除消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
+                        // 启动后轮询状态直至 Running/Failed 或超时
+                        await this.pollStartupStatus(ip, port);
                     } catch (e) {
                         this.opMsg = '网络错误，无法启动';
                         this.opOk = false;
-
-                        // 5秒后自动清除错误消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
+                        try{ alert(this.opMsg); }catch(_){ }
+                        this.showErrorDetails(e?.message || String(e));
                     }
                 },
 
@@ -1277,37 +1344,25 @@ fn wizard_javascript() -> String {
                     this.opMsg = '';
                     this.opOk = null;
 
-                    const body = {
-                        mode: this.controlMode,
-                        ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
-                        bind_ip: this.config.db_ip,
-                        bind_port: parseInt(this.config.db_port || '0') || undefined,
-                    };
+                    const ip = this.config.db_ip;
+                    const port = parseInt(this.config.db_port || '0') || 0;
                     try {
-                        const res = await fetch('/api/surreal/stop', {
+                        const res = await fetch('/api/database/startup/stop', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(body)
+                            body: JSON.stringify({ ip, port })
                         });
                         const data = await res.json();
-                        this.opMsg = data.message || (data.success ? '停止命令已发送' : '停止失败');
+                        this.opMsg = data.message || (data.success ? '已停止' : (data.error || '停止失败'));
                         this.opOk = !!data.success;
                         await this.refreshSurrealStatus();
-
-                        // 5秒后自动清除消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
+                        // 停止后刷新端口状态
+                        await this.checkPortStatus();
                     } catch (e) {
                         this.opMsg = '网络错误，无法停止';
                         this.opOk = false;
-
-                        // 5秒后自动清除错误消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
+                        try{ alert(this.opMsg); }catch(_){ }
+                        this.showErrorDetails(e?.message || String(e));
                     }
                 },
 
@@ -1316,41 +1371,55 @@ fn wizard_javascript() -> String {
                     this.opMsg = '';
                     this.opOk = null;
 
-                    const body = {
-                        mode: this.controlMode,
-                        ssh: this.controlMode === 'ssh' ? { ...this.ssh } : undefined,
-                        bind_ip: this.config.db_ip,
-                        bind_port: parseInt(this.config.db_port || '0') || undefined,
-                        db_user: this.config.db_user,
-                        db_password: this.config.db_password,
-                        project_name: this.config.project_name,
-                    };
                     try {
-                        const res = await fetch('/api/surreal/restart', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(body)
-                        });
-                        const data = await res.json();
-                        this.opMsg = data.message || (data.success ? '重启命令已发送' : '重启失败');
-                        this.opOk = !!data.success;
-                        await this.refreshSurrealStatus();
-
-                        // 5秒后自动清除消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
+                        await this.stopSurreal();
+                        // 稍等端口释放
+                        await new Promise(r => setTimeout(r, 800));
+                        await this.startSurreal();
                     } catch (e) {
                         this.opMsg = '网络错误，无法重启';
                         this.opOk = false;
-
-                        // 5秒后自动清除错误消息
-                        setTimeout(() => {
-                            this.opMsg = '';
-                            this.opOk = null;
-                        }, 5000);
                     }
+                },
+
+                async pollStartupStatus(ip, port) {
+                    const start = Date.now();
+                    const timeoutMs = 60_000; // 最多轮询 60s
+                    while (Date.now() - start < timeoutMs) {
+                        try {
+                            const qs = new URLSearchParams({ ip, port });
+                            const res = await fetch(`/api/database/startup/status?${qs}`);
+                            if (!res.ok) break;
+                            const data = await res.json();
+                            if (data && data.status === 'Running') {
+                                this.opMsg = '数据库启动成功！';
+                                this.opOk = true;
+                                this.hideErrorDetails();
+                                await this.refreshSurrealStatus(true);
+                                // 启动成功后刷新端口状态
+                                await this.checkPortStatus();
+                                return;
+                            }
+                            if (data && data.status === 'Failed') {
+                                this.opMsg = `启动失败: ${data.error_message || '未知错误'}`;
+                                this.opOk = false;
+                                await this.refreshSurrealStatus(true);
+                                try{ alert(this.opMsg); }catch(_){ }
+                                this.showErrorDetails(data.error_message || JSON.stringify(data));
+                                return;
+                            }
+                            if (data && typeof data.progress === 'number') {
+                                this.opMsg = `启动中... ${data.progress}% ${data.progress_message || ''}`;
+                            } else {
+                                this.opMsg = '启动中...';
+                            }
+                        } catch (_) { /* 忽略瞬时错误，继续轮询 */ }
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                    this.opMsg = '启动超时';
+                    this.opOk = false;
+                    try{ alert(this.opMsg); }catch(_){ }
+                    this.showErrorDetails('启动超时，请检查端口占用、权限、或查看后端日志');
                 },
 
                 async toggleSurreal() {
@@ -1378,9 +1447,17 @@ fn wizard_javascript() -> String {
                         const data = await res.json();
                         this.opMsg = data.message || (data.success ? '连接成功' : '连接失败');
                         this.opOk = !!data.success;
+                        if (data.success) {
+                            this.hideErrorDetails();
+                        } else {
+                            const details = data.details || JSON.stringify(data);
+                            this.showErrorDetails(details);
+                            try { alert(this.opMsg + (details? ('\n\n' + details) : '')); } catch(_) {}
+                        }
                     } catch (e) {
                         this.opMsg = '网络错误，连接测试失败';
                         this.opOk = false;
+                        this.showErrorDetails(e?.message || String(e));
                     } finally {
                         this.testing = false;
                         await this.refreshSurrealStatus();
@@ -1678,6 +1755,64 @@ fn wizard_javascript() -> String {
                         return date.toLocaleDateString('zh-CN') + ' ' + date.toLocaleTimeString('zh-CN', {hour12: false});
                     } catch (e) {
                         return '格式错误';
+                    }
+                },
+
+                // 初始化方法 - Alpine.js 自动调用
+                init() {
+                    // 监听端口输入变化
+                    this.$watch('config.db_port', (newPort, oldPort) => {
+                        if (newPort !== oldPort) {
+                            // 延迟检查，避免频繁请求
+                            if (this.portCheckTimer) {
+                                clearTimeout(this.portCheckTimer);
+                            }
+                            this.portCheckTimer = setTimeout(() => {
+                                this.checkPortStatus();
+                            }, 500);
+                        }
+                    });
+
+                    // 初始检查端口状态
+                    this.checkPortStatus();
+                },
+
+                // 检查端口状态
+                async checkPortStatus() {
+                    const port = parseInt(this.config.db_port || '0') || 0;
+                    if (port < 1 || port > 65535) return;
+
+                    // 记录当前检查的端口
+                    this.lastCheckedPort = port;
+
+                    try {
+                        const response = await fetch(`/api/database/startup/status?ip=${this.config.db_ip}&port=${port}`);
+                        if (response.ok) {
+                            const data = await response.json();
+                            if (data.success) {
+                                // 更新状态
+                                this.surrealStatus.listening = (data.status === 'Running' || data.status === 'Starting');
+                                this.surrealStatus.connected = (data.status === 'Running');
+                                this.surrealStatus.address = `${this.config.db_ip}:${port}`;
+
+                                // 如果端口已被占用（外部启动或正在运行）
+                                if (data.external || data.status === 'Running') {
+                                    this.surrealStatus.status = 'external';
+                                } else if (data.status === 'Starting') {
+                                    this.surrealStatus.status = 'starting';
+                                } else {
+                                    this.surrealStatus.status = 'stopped';
+                                }
+                            } else {
+                                // 端口未使用
+                                this.surrealStatus.listening = false;
+                                this.surrealStatus.connected = false;
+                                this.surrealStatus.status = 'stopped';
+                            }
+                        }
+                    } catch (e) {
+                        console.error('检查端口状态失败:', e);
+                        this.surrealStatus.status = 'unknown';
                     }
                 }
             }

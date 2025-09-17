@@ -176,6 +176,7 @@ pub enum LogLevel {
 
 /// 数据库配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DatabaseConfig {
     /// 配置名称
     pub name: String,

@@ -8,13 +8,37 @@ pub fn render_simple_index_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <style>
+        /* 导航与头图 */
+        .nav-gradient { background: linear-gradient(90deg, #2563eb 0%, #4f46e5 100%); }
+        .hero { padding: 3.5rem 0 2rem; background:
+            radial-gradient(1200px 600px at 50% -120px, rgba(59,130,246,.12), transparent),
+            linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+        .title { letter-spacing: .02em; }
+
+        /* 卡片与图标 */
+        /* 统一卡片视觉：无边框 + 阴影，避免线条叠加 */
+        .feature-card { background:#fff; border:0; border-radius:12px; overflow:hidden;
+            box-shadow: 0 6px 14px rgba(16,24,40,.06); transition: transform .2s ease, box-shadow .2s ease; }
+        .feature-card:hover { transform: translateY(-4px); box-shadow: 0 14px 24px rgba(16,24,40,.12); }
+        .status-card { background:#fff; border:0; border-radius:12px; overflow:hidden; }
+        .filters-card { background:#fff; border:1px solid #eef2f7; border-radius:12px; overflow:hidden; }
+        .icon-ring { width:64px; height:64px; border-radius:9999px; display:flex; align-items:center; justify-content:center; box-shadow: inset 0 0 0 6px rgba(37,99,235,.08); background:#eff6ff; }
+        .icon-ring.green { background:#ecfdf5; box-shadow: inset 0 0 0 6px rgba(16,185,129,.08); }
+        .icon-ring.purple { background:#f5f3ff; box-shadow: inset 0 0 0 6px rgba(168,85,247,.08); }
+
+        /* 软提示 Badge */
+        .badge-soft { display:inline-flex; align-items:center; gap:.4rem; padding:.5rem .75rem; border-radius:.5rem;
+            background:#d1fae5; color:#065f46; border:1px solid #6ee7b7; }
+    </style>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
         <!-- 导航栏 -->
-        <nav class="bg-blue-600 text-white shadow-lg">
+        <nav class="nav-gradient text-white shadow-lg">
             <div class="max-w-7xl mx-auto px-4">
                 <div class="flex justify-between items-center py-4">
                     <div class="flex items-center space-x-4">
@@ -41,29 +65,27 @@ pub fn render_simple_index_page() -> String {
 
         <!-- 主要内容 -->
         <main class="max-w-7xl mx-auto py-6 px-4">
-            <!-- 欢迎区域 -->
-            <div class="text-center mb-12">
-                <h1 class="text-4xl font-bold text-gray-900 mb-4">
+            <!-- 欢迎区域 / 头图 -->
+            <section class="hero text-center mb-10 rounded">
+                <h1 class="text-4xl font-bold text-gray-900 mb-3 title">
                     <i class="fas fa-database text-blue-600 mr-3"></i>
                     AIOS 数据库管理平台
                 </h1>
-                <p class="text-xl text-gray-600 mb-8">
-                    专业的数据库生成和空间树管理系统
-                </p>
+                <p class="text-xl text-gray-600 mb-6">专业的数据库生成和空间树管理系统</p>
                 <div class="max-w-2xl mx-auto">
-                    <div class="bg-green-50 text-green-800 border border-green-200 rounded px-4 py-3">
-                        <i class="fas fa-check-circle mr-2"></i>
+                    <div class="badge-soft mx-auto">
+                        <i class="fas fa-check-circle"></i>
                         系统运行正常 - 简单 Web UI 已成功启动
                     </div>
                 </div>
-            </div>
+            </section>
 
             <!-- 功能卡片 -->
             <div class="grid md:grid-cols-3 gap-8 mb-12">
                 <!-- 数据生成卡片 -->
-                <div class="bg-white rounded-lg shadow-lg p-6 hover:shadow-xl transition-shadow">
+                <div class="feature-card p-6">
                     <div class="text-center">
-                        <div class="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <div class="icon-ring mx-auto mb-4">
                             <i class="fas fa-database text-2xl text-blue-600"></i>
                         </div>
                         <h3 class="text-xl font-semibold text-gray-900 mb-2">数据库生成</h3>
@@ -75,9 +97,9 @@ pub fn render_simple_index_page() -> String {
                 </div>
 
                 <!-- 空间树生成卡片 -->
-                <div class="bg-white rounded-lg shadow-lg p-6 hover:shadow-xl transition-shadow">
+                <div class="feature-card p-6">
                     <div class="text-center">
-                        <div class="bg-green-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <div class="icon-ring green mx-auto mb-4">
                             <i class="fas fa-sitemap text-2xl text-green-600"></i>
                         </div>
                         <h3 class="text-xl font-semibold text-gray-900 mb-2">空间树生成</h3>
@@ -89,9 +111,9 @@ pub fn render_simple_index_page() -> String {
                 </div>
 
                 <!-- 配置管理卡片 -->
-                <div class="bg-white rounded-lg shadow-lg p-6 hover:shadow-xl transition-shadow">
+                <div class="feature-card p-6">
                     <div class="text-center">
-                        <div class="bg-purple-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <div class="icon-ring purple mx-auto mb-4">
                             <i class="fas fa-cog text-2xl text-purple-600"></i>
                         </div>
                         <h3 class="text-xl font-semibold text-gray-900 mb-2">配置管理</h3>
@@ -104,7 +126,7 @@ pub fn render_simple_index_page() -> String {
             </div>
 
             <!-- 系统状态 -->
-            <div class="bg-white rounded-lg shadow-lg p-6">
+            <div class="status-card p-6">
                 <h2 class="text-2xl font-semibold text-gray-900 mb-4">
                     <i class="fas fa-chart-line text-blue-600 mr-2"></i>
                     系统状态
@@ -136,12 +158,14 @@ pub fn render_simple_index_page() -> String {
                         部署站点
                     </h2>
                     <div class="flex gap-3">
+                        <a href="/deployment-sites" class="px-3 py-2 rounded bg-gray-200 text-gray-900 hover:bg-gray-300">查看全部</a>
                         <button onclick="reloadProjects()" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">刷新</button>
                         <button onclick="window.location.href='/wizard'" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700">+ 创建站点</button>
                     </div>
                 </div>
                 <!-- 筛选栏 -->
-                <div class="mb-4 grid gap-3 md:grid-cols-4">
+                <div class="filters-card mb-4">
+                    <div class="grid gap-3 md:grid-cols-4">
                     <div>
                         <input id="site_q" placeholder="搜索名称/描述/负责人" class="w-full border rounded px-3 py-2 text-sm" />
                     </div>
@@ -179,8 +203,9 @@ pub fn render_simple_index_page() -> String {
                             </select>
                         </div>
                     </div>
+                    </div>
                 </div>
-                <div id="projects-grid" class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"></div>
+                <div id="projects-grid" data-per-page="6" class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"></div>
                 <div id="sites-pager" class="mt-4 flex items-center justify-between text-sm text-gray-600"></div>
             </div>
 
@@ -286,6 +311,219 @@ pub fn render_simple_index_page() -> String {
     "##.to_string()
 }
 
+/// 新版首页（统一布局 + 侧栏）
+pub fn render_index_with_sidebar() -> String {
+    let content = r#"
+        <!-- 欢迎区域 / 头图 -->
+        <section class="hero text-center mb-10 rounded">
+            <h1 class="text-4xl font-bold text-gray-900 mb-3">
+                <i class="fas fa-database text-blue-600 mr-3"></i>
+                AIOS 数据库管理平台
+            </h1>
+            <p class="text-xl text-gray-600 mb-6">专业的数据库生成和空间树管理系统</p>
+            <div class="max-w-2xl mx-auto">
+                <div class="badge-soft mx-auto">
+                    <i class="fas fa-check-circle"></i>
+                    系统运行正常 - 简单 Web UI 已成功启动
+                </div>
+            </div>
+        </section>
+
+        <!-- 首页优先展示：部署站点（缩略） -->
+        <section class="mb-10">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-2xl font-semibold text-gray-900">
+                    <i class="fas fa-server text-blue-600 mr-2"></i>
+                    部署站点
+                </h2>
+                <div class="flex gap-3">
+                    <a id="home-view-all" href="/deployment-sites" class="px-3 py-2 rounded bg-gray-200 text-gray-900 hover:bg-gray-300">查看全部</a>
+                    <button onclick="reloadProjects()" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">刷新</button>
+                    <button onclick="window.location.href='/wizard'" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700">+ 创建站点</button>
+                </div>
+            </div>
+
+            <!-- 统计概览（首页简版） -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-3">
+                <div class="card card--stat p-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-gray-600">总数</p>
+                            <p id="stat-total" class="text-2xl font-bold text-gray-900">--</p>
+                        </div>
+                        <i class="fas fa-database text-2xl text-blue-600"></i>
+                    </div>
+                </div>
+                <div class="card card--stat p-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-gray-600">运行中</p>
+                            <p id="stat-running" class="text-2xl font-bold text-green-600">--</p>
+                        </div>
+                        <i class="fas fa-check-circle text-2xl text-green-600"></i>
+                    </div>
+                </div>
+                <div class="card card--stat p-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-gray-600">部署中</p>
+                            <p id="stat-deploying" class="text-2xl font-bold text-blue-600">--</p>
+                        </div>
+                        <i class="fas fa-rocket text-2xl text-blue-600"></i>
+                    </div>
+                </div>
+                <div class="card card--stat p-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-gray-600">失败</p>
+                            <p id="stat-failed" class="text-2xl font-bold text-red-600">--</p>
+                        </div>
+                        <i class="fas fa-times-circle text-2xl text-red-600"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="filters-card mb-3">
+                <div class="grid gap-3 md:grid-cols-4">
+                    <div class="md:col-span-2">
+                        <input id="site_q" placeholder="搜索名称/描述/负责人" class="w-full border rounded px-3 py-2 text-sm" />
+                    </div>
+                    <div>
+                        <select id="site_status" class="w-full border rounded px-3 py-2 text-sm">
+                            <option value="">全部状态</option>
+                            <option>Running</option>
+                            <option>Deploying</option>
+                            <option>Configuring</option>
+                            <option>Failed</option>
+                            <option>Stopped</option>
+                        </select>
+                    </div>
+                    <div>
+                        <select id="site_env" class="w-full border rounded px-3 py-2 text-sm">
+                            <option value="">全部环境</option>
+                            <option>dev</option>
+                            <option>staging</option>
+                            <option>prod</option>
+                            <option>test</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div id="projects-grid" data-per-page="6" class="grid-cards grid-cards-lg"></div>
+        </section>
+
+        <!-- 功能卡片 -->
+        <div class="grid md:grid-cols-3 gap-8 mb-12">
+            <!-- 数据生成卡片 -->
+            <div class="card p-6">
+                <div class="text-center">
+                    <div class="icon-ring mx-auto mb-4">
+                        <i class="fas fa-database text-2xl text-blue-600"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-2">数据库生成</h3>
+                    <p class="text-gray-600 mb-4">生成和管理数据库编号7999的数据</p>
+                    <button onclick="createQuickTask(7999)" class="btn btn--primary">
+                        立即执行
+                    </button>
+                </div>
+            </div>
+
+            <!-- 空间树生成卡片 -->
+            <div class="card p-6">
+                <div class="text-center">
+                    <div class="icon-ring green mx-auto mb-4">
+                        <i class="fas fa-sitemap text-2xl text-green-600"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-2">空间树生成</h3>
+                    <p class="text-gray-600 mb-4">构建和优化空间关系树结构</p>
+                    <a href="/tasks" class="btn" style="background:#16a34a;color:#fff">查看任务</a>
+                </div>
+            </div>
+
+            <!-- 配置管理卡片 -->
+            <div class="card p-6">
+                <div class="text-center">
+                    <div class="icon-ring purple mx-auto mb-4">
+                        <i class="fas fa-cog text-2xl text-purple-600"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 mb-2">配置管理</h3>
+                    <p class="text-gray-600 mb-4">管理系统配置和参数设置</p>
+                    <a href="/config" class="btn" style="background:#9333ea;color:#fff">配置设置</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- 系统状态 -->
+        <div class="card p-6">
+            <h2 class="text-2xl font-semibold text-gray-900 mb-4">
+                <i class="fas fa-chart-bar text-blue-600 mr-2"></i>系统状态
+            </h2>
+            <div class="grid md:grid-cols-3 gap-6">
+                <div class="p-4 rounded bg-blue-50 border border-blue-200">
+                    <div class="text-sm text-gray-500 mb-1">任务队列</div>
+                    <div class="text-2xl font-bold text-gray-900">--</div>
+                </div>
+                <div class="p-4 rounded bg-green-50 border border-green-200">
+                    <div class="text-sm text-gray-500 mb-1">已完成</div>
+                    <div class="text-2xl font-bold text-gray-900">--</div>
+                </div>
+                <div class="p-4 rounded bg-yellow-50 border border-yellow-200">
+                    <div class="text-sm text-gray-500 mb-1">进行中</div>
+                    <div class="text-2xl font-bold text-gray-900">--</div>
+                </div>
+            </div>
+        </div>
+    "#;
+
+    let extra_scripts = r#"
+    <script>
+      async function createQuickTask(dbNum) {
+        try {
+          const response = await fetch('/api/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: '数据库 ' + dbNum + ' 快速生成',
+              task_type: 'FullGeneration',
+              config: {
+                name: '数据库 ' + dbNum + ' 配置',
+                manual_db_nums: [dbNum],
+                gen_model: true,
+                gen_mesh: true,
+                gen_spatial_tree: true,
+                apply_boolean_operation: true,
+                mesh_tol_ratio: 3.0,
+                room_keyword: '-RM',
+                project_name: 'AvevaMarineSample',
+                project_code: 1516
+              }
+            })
+          });
+          if (response.ok) {
+            const task = await response.json();
+            await fetch('/api/tasks/' + task.id + '/start', { method: 'POST' });
+            alert('任务创建成功！正在跳转到任务管理页面...');
+            window.location.href = '/tasks';
+          } else {
+            alert('任务创建失败，请稍后重试');
+          }
+        } catch(err) {
+          console.error(err);
+          alert('网络错误，请检查连接');
+        }
+      }
+    </script>
+    <script src="/static/projects.js"></script>
+    "#;
+
+    crate::web_ui::layout::render_layout_with_sidebar(
+        "AIOS 数据库管理平台",
+        Some("home"),
+        content,
+        None,
+        Some(extra_scripts),
+    )
+}
+
 pub fn render_database_connection_page() -> String {
     r##"
 <!DOCTYPE html>
@@ -294,8 +532,8 @@ pub fn render_database_connection_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据库连接管理 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
     <style>
         .alert {
             padding: 12px 16px;
@@ -356,7 +594,7 @@ pub fn render_database_connection_page() -> String {
                 <div class="grid grid-cols-2 gap-4 mb-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">服务器地址</label>
-                        <input type="text" id="db-ip" value="localhost" 
+                        <input type="text" id="db-ip" value="127.0.0.1" 
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div>
@@ -387,16 +625,26 @@ pub fn render_database_connection_page() -> String {
                             </button>
                         </div>
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">命名空间(NS)</label>
+                        <input type="number" id="project-code" value="1516"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">数据库(DB)</label>
+                        <input type="text" id="project-name" value="AvevaMarineSample"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
                     <div class="col-span-2">
                         <label class="block text-sm font-medium text-gray-700 mb-1">数据库文件</label>
-                        <input type="text" id="db-file" value="ams-8009-test.db" 
+                        <input type="text" id="db-file" value="YCYK-E3D.rdb" 
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                 </div>
 
                 <!-- 启动按钮和状态 -->
                 <div class="flex items-center space-x-4">
-                    <button id="db-start-button" 
+                    <button id="db-start-button"
                             class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">
                         启动
                     </button>
@@ -408,6 +656,32 @@ pub fn render_database_connection_page() -> String {
                             class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50">
                         测试连接
                     </button>
+                </div>
+
+                <!-- 消息显示区 -->
+                <div id="db-startup-message" class="alert mt-4" style="display: none;"></div>
+
+                <!-- 失败详情（可折叠） -->
+                <div id="db-startup-error-details-container" class="mt-2" style="display: none;">
+                    <div class="bg-red-50 border border-red-200 rounded-lg p-3">
+                        <div class="flex items-center justify-between">
+                            <span class="text-red-800 font-medium">
+                                <i class="fas fa-exclamation-circle mr-1"></i>失败详情
+                            </span>
+                            <button id="copy-error-details" class="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">
+                                复制
+                            </button>
+                        </div>
+                        <pre id="db-startup-error-details" class="text-red-700 text-sm whitespace-pre-wrap mt-2"></pre>
+                    </div>
+                </div>
+
+                <!-- 进度显示区 -->
+                <div id="db-startup-progress-container" class="mt-4" style="display: none;">
+                    <div class="progress">
+                        <div id="db-startup-progress" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                    </div>
+                    <div id="db-startup-progress-text" class="text-sm text-gray-600 mt-2"></div>
                 </div>
 
                 <!-- 启动进度显示 -->
@@ -424,15 +698,23 @@ pub fn render_database_connection_page() -> String {
 
             <!-- 连接状态卡片 -->
             <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
-                <div class="flex items-center justify-between mb-4">
-                    <h2 class="text-xl font-semibold text-gray-900">
-                        <i class="fas fa-plug text-blue-600 mr-2"></i>
-                        数据库连接状态
-                    </h2>
-                    <button id="refresh-status" onclick="checkConnectionStatus()" 
-                            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-                        <i class="fas fa-sync-alt mr-2"></i>刷新状态
-                    </button>
+                <div class="flex items-center justify-between mb-2">
+                    <div>
+                        <h2 class="text-xl font-semibold text-gray-900">
+                            <i class="fas fa-plug text-blue-600 mr-2"></i>
+                            数据库连接状态
+                        </h2>
+                        <div class="mt-1 text-xs text-gray-500">
+                            <span id="current-target-left">目标: 127.0.0.1:8009</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <span id="current-target" class="text-sm text-gray-600 hidden sm:inline">目标: 127.0.0.1:8009</span>
+                        <button id="refresh-status" onclick="checkConnectionStatus()" 
+                                class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                            <i class="fas fa-sync-alt mr-2"></i>刷新状态
+                        </button>
+                    </div>
                 </div>
 
                 <div id="connection-status" class="space-y-4">
@@ -480,7 +762,7 @@ pub fn render_database_connection_page() -> String {
             
             // 初始化数据库启动管理器
             if (window.dbStartupManager) {
-                const ip = document.getElementById('db-ip').value || 'localhost';
+                const ip = document.getElementById('db-ip').value || '127.0.0.1';
                 const port = parseInt(document.getElementById('db-port').value || '8009');
                 window.dbStartupManager.initializePageState(ip, port);
             }
@@ -493,13 +775,29 @@ pub fn render_database_connection_page() -> String {
         async function checkConnectionStatus() {
             const statusContainer = document.getElementById('connection-status');
             const refreshButton = document.getElementById('refresh-status');
+            const targetLabel = document.getElementById('current-target');
             
             // 显示加载状态
             refreshButton.disabled = true;
             refreshButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>检查中...';
 
             try {
-                const response = await fetch('/api/database/connection/check');
+                // 将界面上的配置透传给后端做体检，并更新目标标签
+                const ipRaw = document.getElementById('db-ip').value || '127.0.0.1';
+                const portRaw = document.getElementById('db-port').value || '8009';
+                if (targetLabel) { targetLabel.textContent = `目标: ${ipRaw}:${portRaw}`; }
+                const targetLabelLeft = document.getElementById('current-target-left');
+                if (targetLabelLeft) { targetLabelLeft.textContent = `目标: ${ipRaw}:${portRaw}`; }
+
+                const ip = encodeURIComponent(ipRaw);
+                const port = encodeURIComponent(portRaw);
+                const user = encodeURIComponent(document.getElementById('db-user').value || 'root');
+                const password = encodeURIComponent(document.getElementById('db-password').value || '');
+                const ns = encodeURIComponent((window.dbStartupManager?.config?.namespace) || document.getElementById('project-code')?.value || '');
+                const db = encodeURIComponent((window.dbStartupManager?.config?.database) || document.getElementById('project-name')?.value || '');
+
+                const qs = `/api/database/connection/check?ip=${ip}&port=${port}&user=${user}&password=${password}&namespace=${ns}&database=${db}`;
+                const response = await fetch(qs);
                 const status = await response.json();
                 
                 displayConnectionStatus(status);
@@ -706,8 +1004,8 @@ pub fn render_simple_dashboard_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>仪表板 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -825,8 +1123,8 @@ pub fn render_simple_config_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>配置管理 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -886,8 +1184,8 @@ pub fn render_simple_generic_page(title: &str, content: &str) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{} - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -948,10 +1246,11 @@ pub fn render_advanced_tasks_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务队列管理</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <!-- 可选：如需 x-data 绑定，可启用本地 Alpine.js -->
+    <!-- <script src="/static/alpine.min.js" defer></script> -->
+    <!-- Chart.js removed - not essential -->
 </head>
 <body class="bg-gray-50" x-data="taskManager()">
     <div class="min-h-screen">
@@ -1033,7 +1332,7 @@ pub fn render_advanced_tasks_page() -> String {
 
             <!-- 任务筛选和控制 -->
             <div class="bg-white rounded-lg shadow mb-6">
-                <div class="p-6 border-b">
+                <div class="p-6 border-b border-gray-100">
                     <div class="flex flex-col md:flex-row md:items-center md:justify-between">
                         <div class="flex space-x-4 mb-4 md:mb-0">
                             <select x-model="filter.status" @change="filterTasks()" class="border rounded px-3 py-2">
@@ -1068,12 +1367,12 @@ pub fn render_advanced_tasks_page() -> String {
 
             <!-- 任务列表 -->
             <div class="bg-white rounded-lg shadow overflow-hidden">
-                <div class="px-6 py-4 border-b">
+                <div class="px-6 py-4 border-b border-gray-100">
                     <h3 class="text-lg font-medium">任务列表</h3>
                 </div>
                 
                 <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
+                    <table class="min-w-full divide-y divide-gray-100">
                         <thead class="bg-gray-50">
                             <tr>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">任务信息</th>
@@ -1214,7 +1513,7 @@ pub fn render_advanced_tasks_page() -> String {
             <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
                 <div class="mt-3">
                     <!-- 模态框标题 -->
-                    <div class="flex items-center justify-between pb-4 border-b">
+                    <div class="flex items-center justify-between pb-4 border-b border-gray-100">
                         <h3 class="text-lg font-medium text-gray-900">新建任务</h3>
                         <button @click="showCreateModal = false" class="text-gray-400 hover:text-gray-600">
                             <i class="fas fa-times"></i>
@@ -1505,12 +1804,30 @@ pub fn render_advanced_tasks_page() -> String {
                     }
                 },
                 
-                nextStep() {
+                async nextStep() {
                     if (this.selectedSite) {
                         this.createStep = 2;
                         // 根据选中的站点配置初始化任务配置
                         const siteConfig = this.selectedSite.config;
-                        this.taskConfig.name = `${this.selectedSite.name} - ${this.taskConfig.task_type}`;
+
+                        // 自动生成任务名称：项目名+任务+流水号
+                        try {
+                            const response = await fetch('/api/tasks/next-number');
+                            const data = await response.json();
+                            if (data.success) {
+                                const projectName = this.selectedSite.config?.project_name || this.selectedSite.name;
+                                const taskNumber = String(data.next_number).padStart(4, '0');
+                                this.taskConfig.name = `${projectName}-任务-${taskNumber}`;
+                            } else {
+                                // 如果获取失败，使用默认格式
+                                this.taskConfig.name = `${this.selectedSite.name} - ${this.taskConfig.task_type}`;
+                            }
+                        } catch (error) {
+                            console.error('获取任务序号失败:', error);
+                            // 使用默认格式
+                            this.taskConfig.name = `${this.selectedSite.name} - ${this.taskConfig.task_type}`;
+                        }
+
                         if (siteConfig) {
                             this.taskConfig.gen_model = siteConfig.gen_model || false;
                             this.taskConfig.gen_mesh = siteConfig.gen_mesh || false;
@@ -1659,9 +1976,10 @@ pub fn render_task_logs_page(task_id: String) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务日志详情 - AIOS 数据库管理平台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <!-- 可选：如需 x-data 绑定，可启用本地 Alpine.js -->
+    <!-- <script src="/static/alpine.min.js" defer></script> -->
     <style>
         .log-entry {{
             transition: background-color 0.2s;
@@ -1752,7 +2070,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
             <div class="bg-white rounded-lg shadow">
                 <div class="max-h-96 overflow-y-auto">
                     <template x-for="log in filteredLogs" :key="log.timestamp + log.message">
-                        <div class="log-entry p-4 border-b border-gray-200 last:border-b-0">
+                        <div class="log-entry p-4 border-b border-gray-100 last:border-b-0">
                             <div class="flex items-start space-x-4">
                                 <div class="flex-shrink-0">
                                     <span class="px-2 py-1 rounded text-xs font-semibold"
@@ -1879,4 +2197,280 @@ pub fn render_task_logs_page(task_id: String) -> String {
 </body>
 </html>
     "##, task_id = task_id)
+}
+
+/// 统一布局版：仪表板
+pub fn render_dashboard_page_with_sidebar() -> String {
+    let content = r#"
+        <h1 class="text-3xl font-bold text-gray-900 mb-8">
+            <i class="fas fa-tachometer-alt text-blue-600 mr-3"></i>
+            系统仪表板
+        </h1>
+        <div class="grid md:grid-cols-4 gap-6 mb-8">
+            <div class="card p-6">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0"><i class="fas fa-server text-2xl text-blue-600"></i></div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-500">系统状态</p>
+                        <p class="text-2xl font-semibold text-gray-900">运行中</p>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-6">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0"><i class="fas fa-database text-2xl text-green-600"></i></div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-500">数据库连接</p>
+                        <p class="text-2xl font-semibold text-gray-900">正常</p>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-6">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0"><i class="fas fa-tasks text-2xl text-purple-600"></i></div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-500">任务队列</p>
+                        <p class="text-2xl font-semibold text-gray-900">3</p>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-6">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0"><i class="fas fa-check text-2xl text-green-600"></i></div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-500">成功率</p>
+                        <p class="text-2xl font-semibold text-gray-900">99.5%</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="grid md:grid-cols-3 gap-6">
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-rocket mr-2 text-blue-600"></i>快速开始</h2>
+                <div class="space-y-3">
+                    <a href="/tasks" class="btn btn--primary">创建新任务</a>
+                    <a href="/config" class="btn btn--secondary">配置参数</a>
+                    <a href="/db-status" class="btn btn--secondary">查看系统状态</a>
+                </div>
+            </div>
+            <div class="card p-6 md:col-span-2">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-history mr-2 text-blue-600"></i>最近活动</h2>
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center"><i class="fas fa-check text-green-600 mr-2"></i><span>任务 #1234 完成（数据库7999）</span></div>
+                        <span class="text-sm text-gray-500">5 分钟前</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center"><i class="fas fa-play text-blue-600 mr-2"></i><span>已启动解析任务（数据库8888）</span></div>
+                        <span class="text-sm text-gray-500">1 小时前</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center"><i class="fas fa-exclamation-triangle text-amber-600 mr-2"></i><span>检测到 2 个站点需要增量同步</span></div>
+                        <span class="text-sm text-gray-500">昨天</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    "#;
+
+    crate::web_ui::layout::render_layout_with_sidebar(
+        "仪表板 - AIOS 数据库管理平台",
+        Some("dashboard"),
+        content,
+        None,
+        None,
+    )
+}
+
+/// 统一布局版：配置管理
+pub fn render_config_page_with_sidebar() -> String {
+    let content = r#"
+        <h1 class="text-3xl font-bold text-gray-900 mb-8">
+            <i class="fas fa-cog text-blue-600 mr-3"></i>
+            配置管理
+        </h1>
+        <div class="grid md:grid-cols-2 gap-6">
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-database mr-2"></i>数据库配置</h2>
+                <p class="text-gray-600">管理数据库连接和命名空间设置等。</p>
+            </div>
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-cogs mr-2"></i>系统参数</h2>
+                <p class="text-gray-600">设置模型生成、空间树构建等参数。</p>
+            </div>
+        </div>
+    "#;
+
+    crate::web_ui::layout::render_layout_with_sidebar(
+        "配置管理 - AIOS 数据库管理平台",
+        Some("config"),
+        content,
+        None,
+        None,
+    )
+}
+
+/// 统一布局版：部署站点管理
+pub fn render_deployment_sites_page_with_sidebar() -> String {
+    let content = r##"
+        <div class="flex items-center justify-between mb-4">
+            <h1 class="text-2xl font-bold text-gray-900">
+                <i class="fas fa-server text-blue-600 mr-2"></i>部署站点管理
+            </h1>
+            <div class="flex gap-3">
+                <button id="copy-share-link" class="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300">复制分享链接</button>
+                <button onclick="reloadProjects()" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">刷新</button>
+                <button onclick="window.location.href='/wizard'" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700">+ 创建站点</button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-4">
+            <div class="card p-4 cursor-pointer hover:bg-gray-50" data-status="">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-600">监控站点</p>
+                        <p id="stat-total" class="text-2xl font-bold text-gray-900">--</p>
+                    </div>
+                    <i class="fas fa-server text-2xl text-blue-600"></i>
+                </div>
+            </div>
+            <div class="card p-4 cursor-pointer hover:bg-gray-50" data-status="Running">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-600">运行中</p>
+                        <p id="stat-running" class="text-2xl font-bold text-green-600">--</p>
+                    </div>
+                    <i class="fas fa-check-circle text-2xl text-green-600"></i>
+                </div>
+            </div>
+            <div class="card p-4 cursor-pointer hover:bg-gray-50" data-status="Deploying">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-600">部署中</p>
+                        <p id="stat-deploying" class="text-2xl font-bold text-blue-600">--</p>
+                    </div>
+                    <i class="fas fa-rocket text-2xl text-blue-600"></i>
+                </div>
+            </div>
+            <div class="card p-4 cursor-pointer hover:bg-gray-50" data-status="Configuring">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-600">配置中</p>
+                        <p id="stat-configuring" class="text-2xl font-bold text-amber-600">--</p>
+                    </div>
+                    <i class="fas fa-cogs text-2xl text-amber-600"></i>
+                </div>
+            </div>
+            <div class="card p-4 cursor-pointer hover:bg-gray-50" data-status="Failed">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-600">失败</p>
+                        <p id="stat-failed" class="text-2xl font-bold text-red-600">--</p>
+                    </div>
+                    <i class="fas fa-times-circle text-2xl text-red-600"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- 筛选栏 -->
+        <div class="card p-4 mb-4">
+          <div class="grid gap-3 md:grid-cols-4">
+            <div>
+              <input id="site_q" placeholder="搜索名称/描述/负责人" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <select id="site_status" class="w-full border rounded px-3 py-2 text-sm">
+                <option value="">全部状态</option>
+                <option>Configuring</option>
+                <option>Deploying</option>
+                <option>Running</option>
+                <option>Failed</option>
+                <option>Stopped</option>
+              </select>
+            </div>
+            <div>
+              <select id="site_env" class="w-full border rounded px-3 py-2 text-sm">
+                <option value="">全部环境</option>
+                <option>dev</option>
+                <option>staging</option>
+                <option>prod</option>
+                <option>test</option>
+              </select>
+            </div>
+            <div>
+              <input id="site_owner" placeholder="负责人" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div class="md:col-span-4">
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="text-sm text-gray-600">排序</label>
+                <select id="site_sort" class="border rounded px-3 py-2 text-sm">
+                  <option value="updated_at:desc">最近更新</option>
+                  <option value="name:asc">名称 (A→Z)</option>
+                  <option value="name:desc">名称 (Z→A)</option>
+                  <option value="created_at:asc">创建时间 (旧→新)</option>
+                  <option value="created_at:desc">创建时间 (新→旧)</option>
+                </select>
+                <div class="ml-auto flex items-center gap-2">
+                  <label class="text-sm text-gray-600">每页</label>
+                  <select id="site_per_page" class="border rounded px-2 py-1 text-sm">
+                    <option value="6">6</option>
+                    <option value="12" selected>12</option>
+                    <option value="24">24</option>
+                    <option value="48">48</option>
+                  </select>
+                  <div class="h-5 w-px bg-gray-300"></div>
+                  <div class="inline-flex rounded overflow-hidden border border-gray-300">
+                    <button id="view_grid" class="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200" data-view="grid"><i class="fas fa-th"></i></button>
+                    <button id="view_list" class="px-3 py-1 text-sm bg-white hover:bg-gray-100" data-view="list"><i class="fas fa-list"></i></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="projects-grid" class="grid-cards grid-cards-lg"></div>
+        <div id="sites-pager" class="mt-4 flex items-center justify-between text-sm text-gray-600"></div>
+
+        <!-- 详情弹窗 Modal -->
+        <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
+          <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
+          <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg p-6">
+            <div class="flex items-start justify-between">
+              <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
+              <button class="text-gray-400 hover:text-gray-600" onclick="closeProjectModal()">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <div class="mt-2 text-sm text-gray-600 flex items-center gap-3">
+              <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
+              <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+            </div>
+            <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
+            <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
+              加载失败，请稍后重试。按 Enter 键可重试。
+              <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
+            </div>
+            <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
+            <div class="mt-6 flex gap-3 justify-end">
+              <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100" onclick="copySiteConfig()">复制配置</button>
+              <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white" onclick="createSiteTask()">为站点创建任务</button>
+              <a id="pm-open-url" href="javascript:;" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hidden">打开地址</a>
+              <button id="pm-health" class="px-3 py-2 rounded bg-green-600 text-white hidden" onclick="pmHealthCheck()">健康检查</button>
+              <button id="pm-restart-db" class="px-3 py-2 rounded bg-purple-600 text-white hidden" onclick="pmRestartDatabase()">重启数据库</button>
+              <button class="px-3 py-2 rounded bg-gray-200" onclick="closeProjectModal()">关闭</button>
+            </div>
+          </div>
+        </div>
+    "##;
+
+    let extra_scripts = r#"<script src="/static/projects.js"></script>"#;
+
+    crate::web_ui::layout::render_layout_with_sidebar(
+        "部署站点管理 - AIOS",
+        Some("deploy-sites"),
+        content,
+        None,
+        Some(extra_scripts),
+    )
 }

@@ -195,6 +195,7 @@ pub async fn start_database_with_progress(
 ) -> Result<u32, String> {
     use tokio::process::Command;
     use std::time::Duration;
+    use crate::web_ui::handlers::kill_port_processes;
     
     let manager = DB_STARTUP_MANAGER.clone();
     
@@ -210,11 +211,50 @@ pub async fn start_database_with_progress(
         mgr.update_progress(&ip, port, 10, "检查端口是否可用...");
     }
 
-    // 检查端口是否被占用
+    // 检查端口是否被占用；若占用则先尝试清理再重试
     if check_port_in_use(&ip, port).await {
-        let mut mgr = manager.write().await;
-        mgr.mark_failed(&ip, port, "端口已被占用");
-        return Err("端口已被占用".to_string());
+        {
+            let mut mgr = manager.write().await;
+            mgr.update_progress(&ip, port, 12, "端口被占用，尝试清理占用进程...");
+        }
+
+        // 先执行清理，不在分支里执行任何 await（避免非 Send 错误跨越 await 边界）
+        let killed_len = match kill_port_processes(port).await {
+            Ok(killed) => killed.len(),
+            Err(e) => {
+                // 先把错误转换为字符串并让 e 在此块结束时被丢弃，避免跨 await
+                let err_msg = { format!("清理端口失败: {}", e) };
+                let mut mgr = manager.write().await;
+                mgr.mark_failed(&ip, port, &err_msg);
+                return Err(err_msg);
+            }
+        };
+
+        if killed_len > 0 {
+            {
+                let mut mgr = manager.write().await;
+                mgr.update_progress(&ip, port, 15, &format!("已结束 {} 个进程，等待端口释放...", killed_len));
+            }
+            // 等待端口释放，最多等 2 秒
+            for _ in 0..10 {
+                if !check_port_in_use(&ip, port).await { break; }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        } else {
+            // 没有可杀进程但端口仍被占用，视为外部程序占用
+            if check_port_in_use(&ip, port).await {
+                let mut mgr = manager.write().await;
+                mgr.mark_failed(&ip, port, "端口被外部进程占用，无法自动清理");
+                return Err("端口被外部进程占用，无法自动清理".to_string());
+            }
+        }
+
+        // 清理后再次检查
+        if check_port_in_use(&ip, port).await {
+            let mut mgr = manager.write().await;
+            mgr.mark_failed(&ip, port, "端口仍被占用");
+            return Err("端口仍被占用，无法启动".to_string());
+        }
     }
 
     // 更新进度：20% - 准备启动命令
@@ -223,9 +263,18 @@ pub async fn start_database_with_progress(
         mgr.update_progress(&ip, port, 20, "准备启动命令...");
     }
 
-    // 构建启动命令
-    let bind_addr = format!("{}:{}", ip, port);
-    let db_path = format!("file:{}", db_file);
+    // 构建启动命令 - 始终绑定到 0.0.0.0 以便从任何接口访问
+    let bind_addr = format!("0.0.0.0:{}", port);
+    // 数据库文件路径包含端口号，格式: db_name-port.db
+    let db_file_with_port = if db_file.ends_with(".db") {
+        // 如果已经有 .db 后缀，在后缀前插入端口号
+        let base = db_file.trim_end_matches(".db");
+        format!("{}-{}.db", base, port)
+    } else {
+        // 如果没有 .db 后缀，直接添加端口号和后缀
+        format!("{}-{}.db", db_file, port)
+    };
+    let db_path = format!("file:{}", db_file_with_port);
 
     // 更新进度：30% - 启动进程
     {
@@ -287,14 +336,30 @@ pub async fn start_database_with_progress(
         // 检查进程是否还在运行
         if let Ok(Some(status)) = child.try_wait() {
             if !status.success() {
+                // 尝试获取子进程输出，帮助用户定位问题
+                let output = child.wait_with_output().await.unwrap_or_else(|_| std::process::Output{
+                    status,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+                let mut err_snippet = String::new();
+                let stdout_s = String::from_utf8_lossy(&output.stdout);
+                let stderr_s = String::from_utf8_lossy(&output.stderr);
+                if !stderr_s.trim().is_empty() { err_snippet.push_str(&format!("stderr: {}\n", stderr_s.trim())); }
+                if !stdout_s.trim().is_empty() { err_snippet.push_str(&format!("stdout: {}\n", stdout_s.trim())); }
+                let msg = if err_snippet.is_empty() {
+                    format!("进程意外退出，退出码: {:?}", status.code())
+                } else {
+                    format!("进程意外退出，退出码: {:?}\n{}", status.code(), err_snippet)
+                };
                 let mut mgr = manager.write().await;
-                mgr.mark_failed(&ip, port, "进程意外退出");
-                return Err("数据库进程意外退出".to_string());
+                mgr.mark_failed(&ip, port, &msg);
+                return Err(msg);
             }
         }
 
-        // 尝试连接数据库
-        if test_tcp_connection(&bind_addr).await {
+        // 尝试连接数据库 - 使用本地地址进行测试
+        if test_tcp_connection(&format!("127.0.0.1:{}", port)).await {
             // 更新进度：95% - 验证功能
             {
                 let mut mgr = manager.write().await;
@@ -303,6 +368,18 @@ pub async fn start_database_with_progress(
 
             // 等待一会儿让数据库完全初始化
             tokio::time::sleep(Duration::from_secs(1)).await;
+
+            // 创建必要的表
+            {
+                let mut mgr = manager.write().await;
+                mgr.update_progress(&ip, port, 98, "创建数据库表...");
+            }
+
+            // 调用创建表的函数
+            if let Err(e) = create_required_tables(&ip, port, &user, &password).await {
+                eprintln!("警告: 创建数据库表失败: {}", e);
+                // 不阻止启动流程，只是记录警告
+            }
 
             // 标记启动成功
             {
@@ -325,17 +402,37 @@ pub async fn start_database_with_progress(
 }
 
 /// 检查端口是否被占用
-async fn check_port_in_use(ip: &str, port: u16) -> bool {
-    use tokio::net::TcpStream;
-    use std::time::Duration;
-    
-    let addr = format!("{}:{}", ip, port);
-    match tokio::time::timeout(
-        Duration::from_secs(1),
-        TcpStream::connect(&addr)
-    ).await {
-        Ok(Ok(_)) => true,  // 连接成功，端口被占用
-        _ => false,          // 连接失败或超时，端口可用
+async fn check_port_in_use(_ip: &str, port: u16) -> bool {
+    use tokio::process::Command;
+
+    // 使用 lsof 命令检查端口是否被占用
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!("lsof -i :{} -t 2>/dev/null", port))
+        .output()
+        .await;
+
+    match output {
+        Ok(output) => {
+            // 如果有输出（PID），说明端口被占用
+            !output.stdout.is_empty()
+        }
+        Err(_) => {
+            // 如果命令执行失败，尝试用 TCP 连接方式检查
+            use tokio::net::TcpStream;
+            use std::time::Duration;
+
+            // 尝试连接 127.0.0.1 和 0.0.0.0
+            for addr in &[format!("127.0.0.1:{}", port), format!("0.0.0.0:{}", port)] {
+                if let Ok(Ok(_)) = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    TcpStream::connect(addr)
+                ).await {
+                    return true;
+                }
+            }
+            false
+        }
     }
 }
 
@@ -351,4 +448,97 @@ async fn test_tcp_connection(addr: &str) -> bool {
         Ok(Ok(_)) => true,
         _ => false,
     }
+}
+
+/// 创建必要的数据库表
+async fn create_required_tables(ip: &str, port: u16, user: &str, password: &str) -> Result<(), String> {
+    use surrealdb::Surreal;
+    use surrealdb::engine::remote::ws::{Client, Ws};
+    use surrealdb::opt::auth::Root;
+
+    // 连接到数据库
+    let db = Surreal::new::<Ws>(format!("{}:{}", ip, port))
+        .await
+        .map_err(|e| format!("连接数据库失败: {}", e))?;
+
+    // 登录
+    db.signin(Root {
+        username: user,
+        password: password,
+    })
+    .await
+    .map_err(|e| format!("数据库认证失败: {}", e))?;
+
+    // 使用默认的命名空间和数据库
+    db.use_ns("1516").use_db("AvevaMarineSample").await
+        .map_err(|e| format!("选择命名空间/数据库失败: {}", e))?;
+
+    // 创建 dbnum_info_table
+    let create_table_sql = r#"
+        -- 创建 dbnum_info_table（如果不存在）
+        DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMAFULL;
+
+        -- 定义字段
+        DEFINE FIELD IF NOT EXISTS dbnum ON dbnum_info_table TYPE int;
+        DEFINE FIELD IF NOT EXISTS db_type ON dbnum_info_table TYPE string;
+        DEFINE FIELD IF NOT EXISTS file_name ON dbnum_info_table TYPE string;
+        DEFINE FIELD IF NOT EXISTS count ON dbnum_info_table TYPE int DEFAULT 0;
+        DEFINE FIELD IF NOT EXISTS sesno ON dbnum_info_table TYPE int DEFAULT 0;
+        DEFINE FIELD IF NOT EXISTS max_ref1 ON dbnum_info_table TYPE int;
+        DEFINE FIELD IF NOT EXISTS project ON dbnum_info_table TYPE string;
+        DEFINE FIELD IF NOT EXISTS auto_update ON dbnum_info_table TYPE bool DEFAULT false;
+        DEFINE FIELD IF NOT EXISTS updating ON dbnum_info_table TYPE bool DEFAULT false;
+        DEFINE FIELD IF NOT EXISTS last_update_at ON dbnum_info_table TYPE int;
+        DEFINE FIELD IF NOT EXISTS last_update_result ON dbnum_info_table TYPE string;
+        DEFINE FIELD IF NOT EXISTS updated_at ON dbnum_info_table TYPE datetime DEFAULT time::now();
+
+        -- 创建索引
+        DEFINE INDEX IF NOT EXISTS idx_dbnum ON dbnum_info_table FIELDS dbnum;
+        DEFINE INDEX IF NOT EXISTS idx_db_type ON dbnum_info_table FIELDS db_type;
+
+        -- 创建 pe 表（如果不存在）
+        DEFINE TABLE IF NOT EXISTS pe SCHEMAFULL;
+
+        -- pe 表的基本字段
+        DEFINE FIELD IF NOT EXISTS dbnum ON pe TYPE int;
+        DEFINE FIELD IF NOT EXISTS sesno ON pe TYPE int;
+        DEFINE FIELD IF NOT EXISTS deleted ON pe TYPE bool DEFAULT false;
+        DEFINE FIELD IF NOT EXISTS owner ON pe TYPE string;
+        DEFINE FIELD IF NOT EXISTS noun ON pe TYPE string;
+        DEFINE FIELD IF NOT EXISTS fullname ON pe TYPE string;
+
+        -- 创建索引
+        DEFINE INDEX IF NOT EXISTS idx_pe_dbnum ON pe FIELDS dbnum;
+        DEFINE INDEX IF NOT EXISTS idx_pe_owner ON pe FIELDS owner;
+    "#;
+
+    // 执行创建表的SQL
+    db.query(create_table_sql)
+        .await
+        .map_err(|e| format!("创建表失败: {}", e))?;
+
+    println!("✅ 数据库表创建成功");
+
+    // 插入一些初始测试数据（可选）
+    let insert_test_data = r#"
+        -- 插入测试数据（如果表为空）
+        IF (SELECT count() FROM dbnum_info_table) = 0 THEN
+            CREATE dbnum_info_table:test_7999 SET
+                dbnum = 7999,
+                db_type = 'DESI',
+                file_name = 'test_design.db',
+                count = 0,
+                sesno = 0,
+                project = 'TestProject',
+                auto_update = false,
+                updating = false;
+        END;
+    "#;
+
+    // 尝试插入测试数据（失败也不影响）
+    if let Err(e) = db.query(insert_test_data).await {
+        eprintln!("插入测试数据失败（可忽略）: {}", e);
+    }
+
+    Ok(())
 }

@@ -29,8 +29,13 @@ pub async fn init_surreal_with_config(config: &DatabaseConfig) -> Result<Arc<Sur
     .await?;
     
     // 使用命名空间和数据库
-    // 命名空间使用项目代码
-    let namespace = config.project_code.to_string();
+    // 优先使用界面填写的命名空间（surreal_ns），否则回退到 project_code
+    let namespace = if config.surreal_ns > 0 {
+        config.surreal_ns.to_string()
+    } else {
+        config.project_code.to_string()
+    };
+    // 数据库名默认使用项目名称（如需专用 DB，可后续扩展使用 config.mdb_name）
     let database = config.project_name.clone();
     
     db.use_ns(&namespace).use_db(&database).await?;
@@ -133,20 +138,12 @@ pub async fn test_database_connection(
         }
     }
     
-    // 执行简单查询测试连接
+    // 执行简单查询测试连接（兼容 SurrealDB 2.x：使用 RETURN 而非 SELECT 常量）
     println!("4. 执行测试查询...");
-    match db.query("SELECT 'test' as result").await {
+    match db.query("RETURN 'ok'").await {
         Ok(mut response) => {
-            match response.take::<Vec<serde_json::Value>>(0) {
-                Ok(_) => {
-                    println!("   ✓ 查询执行成功");
-                }
-                Err(e) => {
-                    println!("   ✗ 查询结果处理失败: {}", e);
-                    // 即使查询结果处理失败，连接本身是成功的
-                    println!("   注意：虽然查询结果处理有问题，但数据库连接是正常的");
-                }
-            }
+            // 仅验证语句执行是否成功即可
+            println!("   ✓ 查询执行成功");
         }
         Err(e) => {
             println!("   ✗ 查询执行失败: {}", e);

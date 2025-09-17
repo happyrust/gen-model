@@ -279,10 +279,32 @@ async fn get_file_version_info(file_name: &str, _project: &str) -> Option<FileVe
     }
 }
 
-fn get_latest_sesno_from_file(_project: &str, _dbnum: u32) -> Option<u32> {
-    // TODO: Implement proper PDMS sesno extraction
-    // This requires creating PdmsIO from project directory
-    None
+fn get_latest_sesno_from_file(project: &str, dbnum: u32) -> Option<u32> {
+    use pdms_io::io::PdmsIO;
+    use std::path::Path;
+
+    // 获取项目路径
+    let db_option = aios_core::get_db_option();
+    let project_path = db_option.get_project_path(project)?;
+
+    // 检查路径是否存在
+    if !Path::new(&project_path).exists() {
+        eprintln!("项目路径不存在: {}", project_path.display());
+        return None;
+    }
+
+    // 创建 PdmsIO 实例 - PdmsIO::new 需要三个参数
+    let mut pdms_io = PdmsIO::new(project.to_string(), project_path, true);
+
+    // 获取最新 sesno (注意: 这个方法可能不是针对特定 dbnum 的)
+    // TODO: 需要确认是否有获取特定 dbnum sesno 的方法
+    match pdms_io.get_latest_sesno() {
+        Ok(sesno) => Some(sesno),
+        Err(e) => {
+            eprintln!("获取 sesno 失败 (dbnum: {}): {}", dbnum, e);
+            None
+        }
+    }
 }
 
 // ==== 本地扫描与同步接口 ====
