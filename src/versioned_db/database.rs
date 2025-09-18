@@ -590,13 +590,13 @@ pub async fn sync_total_async_threaded(
                 let db_basic_info = parse_file_basic_info(&buf);
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
-                //需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
-                if is_replace {
-                    check_and_clear_db(db_no).await.unwrap();
-                }
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
+                }
+                //需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
+                if is_replace {
+                    check_and_clear_db(db_no).await.unwrap();
                 }
                 //保证不重复加载相同dbno的数据
                 if dbno_set.contains(&db_no) {
