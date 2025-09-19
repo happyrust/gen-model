@@ -7,19 +7,19 @@ use std::ops::{Deref, DerefMut};
 pub struct DbOptionExt {
     #[serde(flatten)]
     pub inner: DbOption,
-    
+
     /// MQTT服务器地址，用于异地部署
     #[serde(default)]
     pub mqtt_server: Option<String>,
-    
+
     /// MQTT服务器端口，用于异地部署
     #[serde(default)]
     pub mqtt_port: Option<u16>,
-    
+
     /// HTTP数据服务器地址，用于异地部署
     #[serde(default)]
     pub http_server: Option<String>,
-    
+
     /// HTTP数据服务器端口，用于异地部署
     #[serde(default)]
     pub http_port: Option<u16>,
@@ -60,4 +60,4 @@ impl From<DbOption> for DbOptionExt {
 pub fn get_db_option_ext() -> DbOptionExt {
     let db_option = aios_core::get_db_option();
     DbOptionExt::from(db_option.clone())
-} 
+}

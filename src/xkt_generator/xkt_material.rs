@@ -1,6 +1,6 @@
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use glam::Vec3;
 
 /// XKT 材质数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,4 +172,4 @@ impl XKTMesh {
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
     }
-} 
+}

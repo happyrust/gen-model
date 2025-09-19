@@ -1,9 +1,11 @@
 //! GRPC服务器实现
 
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::grpc_service::error::{ServiceError, ServiceResult};
 use crate::grpc_service::managers::{MdbManager, ProgressManager, TaskManager};
-use crate::grpc_service::progress_service::{proto::progress_service_server::ProgressServiceServer, ProgressServiceImpl};
-use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::grpc_service::progress_service::{
+    ProgressServiceImpl, proto::progress_service_server::ProgressServiceServer,
+};
 use std::sync::Arc;
 use tonic::transport::Server;
 use tonic_reflection::server::Builder as ReflectionBuilder;
@@ -45,7 +47,7 @@ pub async fn start_grpc_server_with_config(config: GrpcServerConfig) -> ServiceR
     let db_manager = Arc::new(
         AiosDBManager::init_form_config()
             .await
-            .map_err(|e| ServiceError::Internal(e))?
+            .map_err(|e| ServiceError::Internal(e))?,
     );
 
     // 创建管理器实例
@@ -54,25 +56,27 @@ pub async fn start_grpc_server_with_config(config: GrpcServerConfig) -> ServiceR
     let task_manager = Arc::new(TaskManager::new(config.max_concurrent_tasks));
 
     // 创建服务实例
-    let progress_service = ProgressServiceImpl::new(
-        progress_manager,
-        mdb_manager,
-        task_manager,
-    );
+    let progress_service = ProgressServiceImpl::new(progress_manager, mdb_manager, task_manager);
 
     // 构建服务器
     let mut server_builder = Server::builder();
 
     // 添加服务
-    let mut service_builder = server_builder.add_service(ProgressServiceServer::new(progress_service));
+    let mut service_builder =
+        server_builder.add_service(ProgressServiceServer::new(progress_service));
 
     // 如果启用反射，添加反射服务
     if config.enable_reflection {
         let reflection_service = ReflectionBuilder::configure()
-            .register_encoded_file_descriptor_set(include_bytes!(concat!(env!("OUT_DIR"), "/progress_service.bin")))
+            .register_encoded_file_descriptor_set(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/progress_service.bin"
+            )))
             .build()
-            .map_err(|e| ServiceError::Internal(anyhow::anyhow!("Failed to build reflection service: {}", e)))?;
-        
+            .map_err(|e| {
+                ServiceError::Internal(anyhow::anyhow!("Failed to build reflection service: {}", e))
+            })?;
+
         service_builder = service_builder.add_service(reflection_service);
     }
 
@@ -95,6 +99,6 @@ pub async fn start_test_server() -> ServiceResult<()> {
         max_concurrent_tasks: 2,
         enable_reflection: false,
     };
-    
+
     start_grpc_server_with_config(config).await
 }

@@ -1,28 +1,24 @@
-use axum::{
-    response::Html,
-    routing::get,
-    Router,
-};
+use axum::{Router, response::Html, routing::get};
 
 /// 独立的Web UI服务器
-/// 
+///
 /// 这个示例展示了一个完全独立的Web UI界面，不依赖任何复杂的库
-/// 
+///
 /// 使用方法：
 /// ```bash
 /// cargo run --example standalone_web_ui
 /// ```
-/// 
+///
 /// 然后在浏览器中访问: http://localhost:8080
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
     env_logger::init();
-    
+
     println!("🚀 正在启动独立 AIOS Web UI...");
     println!("📋 这是一个独立版本，不依赖复杂的库");
     println!();
-    
+
     let app = Router::new()
         .route("/", get(index_page))
         .route("/dashboard", get(dashboard_page))
@@ -37,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   - 基础页面导航");
     println!("   - 简单的界面展示");
     println!("   - 系统状态查看");
-    
+
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use aios_core::*;
-use aios_core::{AttrMap, RefU64Vec};
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{GmParam, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::Spine3D;
+use aios_core::*;
+use aios_core::{AttrMap, RefU64Vec};
 use bevy_transform::prelude::*;
 use dashmap::mapref::one::Ref;
 use glam::Vec3;
@@ -32,7 +32,6 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
     async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
-
 
     ///获得参考号的Owner
     fn get_owner(&self, refno: RefU64) -> RefU64;
@@ -95,7 +94,7 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
-     ///获得子节点的refno集合
+    ///获得子节点的refno集合
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<String>;
@@ -117,7 +116,7 @@ pub trait PdmsDataInterface: Send + Sync {
     ///获得refno的祖先参考号
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
 
-      ///查询指定参考号下哪些有负实体的参考号
+    ///查询指定参考号下哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
 
     ///查询指定参考号下负实体和正实体的集合
@@ -186,5 +185,4 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn get_cat_refno(&self, refno: RefU64) -> Option<RefU64>;
 
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap>;
-
 }

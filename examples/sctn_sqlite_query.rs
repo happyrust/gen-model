@@ -4,19 +4,14 @@
 /// 运行示例:
 ///   cargo run --example sctn_sqlite_query --features sqlite-index -- \
 ///     --target 24383/86525 --index aabb_cache.sqlite --radius 1.0 --limit 50
-
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Arg, Command};
 use std::path::PathBuf;
 
-use aios_database::spatial_index::SqliteSpatialIndex;
 use aios_core::pdms_types::RefU64;
-use parry3d::{
-    bounding_volume::Aabb,
-    query::contact,
-    shape::Cuboid,
-};
+use aios_database::spatial_index::SqliteSpatialIndex;
 use nalgebra::{Isometry3, Vector3};
+use parry3d::{bounding_volume::Aabb, query::contact, shape::Cuboid};
 
 fn parse_refno(s: &str) -> Result<RefU64> {
     use std::str::FromStr;
@@ -26,7 +21,11 @@ fn parse_refno(s: &str) -> Result<RefU64> {
 fn cuboid_from_aabb(aabb: &Aabb) -> (Cuboid, Isometry3<f32>) {
     let half_extents = (aabb.maxs - aabb.mins) * 0.5;
     let center = aabb.center();
-    let shape = Cuboid::new(Vector3::new(half_extents.x.max(1e-6), half_extents.y.max(1e-6), half_extents.z.max(1e-6)));
+    let shape = Cuboid::new(Vector3::new(
+        half_extents.x.max(1e-6),
+        half_extents.y.max(1e-6),
+        half_extents.z.max(1e-6),
+    ));
     let iso = Isometry3::translation(center.x, center.y, center.z);
     (shape, iso)
 }
@@ -47,43 +46,55 @@ async fn main() -> Result<()> {
                 .long("target")
                 .value_name("REFNO")
                 .help("目标SCTN参考号，例如 24383/86525")
-                .required(true)
+                .required(true),
         )
         .arg(
             Arg::new("index")
                 .long("index")
                 .value_name("FILE")
                 .help("SQLite索引文件路径，默认读取项目根目录 aabb_cache.sqlite")
-                .required(false)
+                .required(false),
         )
         .arg(
             Arg::new("radius")
                 .long("radius")
                 .value_name("M")
                 .help("查询半径(米): 扩展包围盒进行邻域检索")
-                .default_value("1.0")
+                .default_value("1.0"),
         )
         .arg(
             Arg::new("limit")
                 .long("limit")
                 .value_name("N")
                 .help("最多检查的邻居数量")
-                .default_value("100")
+                .default_value("100"),
         )
         .arg(
             Arg::new("tolerance")
                 .long("tolerance")
                 .value_name("M")
                 .help("接触检测容差(米)")
-                .default_value("0.05")
+                .default_value("0.05"),
         )
         .get_matches();
 
     let target_str = matches.get_one::<String>("target").unwrap();
     let target = parse_refno(target_str)?;
-    let radius: f32 = matches.get_one::<String>("radius").unwrap().parse().unwrap_or(1.0);
-    let limit: usize = matches.get_one::<String>("limit").unwrap().parse().unwrap_or(100);
-    let tolerance: f32 = matches.get_one::<String>("tolerance").unwrap().parse().unwrap_or(0.05);
+    let radius: f32 = matches
+        .get_one::<String>("radius")
+        .unwrap()
+        .parse()
+        .unwrap_or(1.0);
+    let limit: usize = matches
+        .get_one::<String>("limit")
+        .unwrap()
+        .parse()
+        .unwrap_or(100);
+    let tolerance: f32 = matches
+        .get_one::<String>("tolerance")
+        .unwrap()
+        .parse()
+        .unwrap_or(0.05);
 
     // 索引路径
     let index_path = matches
@@ -95,7 +106,10 @@ async fn main() -> Result<()> {
     println!("SCTN SQLite 空间索引查询与接触检测");
     println!("索引文件: {:?}", index_path);
     println!("目标: {}", target.0);
-    println!("查询半径: {:.2} m, 容差: {:.2} m, 限制: {} 个", radius, tolerance, limit);
+    println!(
+        "查询半径: {:.2} m, 容差: {:.2} m, 限制: {} 个",
+        radius, tolerance, limit
+    );
     println!("==============================================\n");
 
     if !SqliteSpatialIndex::is_enabled() {
@@ -111,8 +125,12 @@ async fn main() -> Result<()> {
 
     println!(
         "目标包围盒: ({:.3},{:.3},{:.3}) - ({:.3},{:.3},{:.3})",
-        target_bbox.mins.x, target_bbox.mins.y, target_bbox.mins.z,
-        target_bbox.maxs.x, target_bbox.maxs.y, target_bbox.maxs.z
+        target_bbox.mins.x,
+        target_bbox.mins.y,
+        target_bbox.mins.z,
+        target_bbox.maxs.x,
+        target_bbox.maxs.y,
+        target_bbox.maxs.z
     );
 
     // 扩展查询并获取邻居
@@ -120,7 +138,9 @@ async fn main() -> Result<()> {
     let mut neighbors = index.query_intersect(&query)?;
     // 过滤自身
     neighbors.retain(|r| *r != target);
-    if neighbors.len() > limit { neighbors.truncate(limit); }
+    if neighbors.len() > limit {
+        neighbors.truncate(limit);
+    }
 
     println!("\n邻域候选数量: {}", neighbors.len());
 
@@ -151,7 +171,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("\n结果统计: 接触/碰撞 {} 个, 接近 {} 个", n_contact, n_proximity);
+    println!(
+        "\n结果统计: 接触/碰撞 {} 个, 接近 {} 个",
+        n_contact, n_proximity
+    );
     Ok(())
 }
-

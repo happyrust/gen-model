@@ -1,15 +1,13 @@
-use std::sync::Arc;
+use aios_core::pdms_types::RefU64;
 use anyhow::Result;
 use nalgebra::{Point3, Vector3};
 use parry3d::bounding_volume::Aabb;
 use parry3d::query::{Ray, RayCast, RayIntersection};
-use parry3d::shape::{Cuboid, TriMesh, Ball};
-use aios_core::pdms_types::RefU64;
+use parry3d::shape::{Ball, Cuboid, TriMesh};
 use rayon::prelude::*;
+use std::sync::Arc;
 
-use crate::grpc_service::sctn_contact_detector::{
-    CableTraySection, SupportRelation, SupportType,
-};
+use crate::grpc_service::sctn_contact_detector::{CableTraySection, SupportRelation, SupportType};
 use crate::spatial_index::SqliteSpatialIndex;
 
 /// 射线投射支撑检测器
@@ -41,18 +39,16 @@ impl SctnRaycastDetector {
         candidate_supports: &[SupportCandidate],
     ) -> Result<Vec<SupportRelation>> {
         let mut relations = Vec::new();
-        
+
         // 生成射线采样点
         let ray_origins = self.generate_ray_origins(sctn);
-        
+
         // 并行处理每个射线
         let ray_results: Vec<_> = ray_origins
             .par_iter()
-            .filter_map(|origin| {
-                self.cast_support_ray(*origin, candidate_supports).ok()
-            })
+            .filter_map(|origin| self.cast_support_ray(*origin, candidate_supports).ok())
             .collect();
-        
+
         // 聚合结果
         for result in ray_results {
             if let Some(hit) = result {
@@ -65,35 +61,35 @@ impl SctnRaycastDetector {
                 });
             }
         }
-        
+
         // 去重和优化
         self.optimize_support_relations(&mut relations);
-        
+
         Ok(relations)
     }
 
     /// 生成射线起点
     fn generate_ray_origins(&self, sctn: &CableTraySection) -> Vec<Point3<f32>> {
         let mut origins = Vec::new();
-        
+
         // 计算采样点数量
         let num_samples = (sctn.depth * self.ray_samples_per_meter as f32) as usize;
         let num_samples = num_samples.max(2); // 至少2个点
-        
+
         // 沿桥架长度方向生成采样点
         for i in 0..num_samples {
             let t = i as f32 / (num_samples - 1) as f32;
-            
+
             // 沿宽度方向也生成多个点（左中右）
             for w in &[0.0, 0.5, 1.0] {
                 let x = sctn.bbox.mins.x + t * (sctn.bbox.maxs.x - sctn.bbox.mins.x);
                 let y = sctn.bbox.mins.y; // 底部
                 let z = sctn.bbox.mins.z + w * (sctn.bbox.maxs.z - sctn.bbox.mins.z);
-                
+
                 origins.push(Point3::new(x, y, z));
             }
         }
-        
+
         origins
     }
 
@@ -105,14 +101,14 @@ impl SctnRaycastDetector {
     ) -> Result<Option<RayHit>> {
         // 创建向下的射线
         let ray = Ray::new(origin, -Vector3::y());
-        
+
         let mut closest_hit: Option<RayHit> = None;
         let mut min_distance = self.max_ray_distance;
-        
+
         for candidate in candidates {
             // 创建候选支撑的形状
             let shape = self.create_shape_for_candidate(candidate);
-            
+
             // 执行射线投射
             if let Some(toi) = shape.cast_ray(&ray, self.max_ray_distance, true) {
                 if toi < min_distance {
@@ -127,7 +123,7 @@ impl SctnRaycastDetector {
                 }
             }
         }
-        
+
         Ok(closest_hit)
     }
 
@@ -154,7 +150,7 @@ impl SctnRaycastDetector {
         let center = sctn.bbox.center();
         let distance_from_center = (hit.intersection_point - center).norm();
         let max_distance = sctn.depth / 2.0;
-        
+
         // 越靠近中心，荷载系数越大
         1.0 - (distance_from_center / max_distance).min(1.0) * 0.5
     }
@@ -163,24 +159,26 @@ impl SctnRaycastDetector {
     fn optimize_support_relations(&self, relations: &mut Vec<SupportRelation>) {
         // 按支撑点位置排序
         relations.sort_by(|a, b| {
-            a.contact_point.x.partial_cmp(&b.contact_point.x)
+            a.contact_point
+                .x
+                .partial_cmp(&b.contact_point.x)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         // 去除过于接近的重复支撑
         let mut filtered = Vec::new();
         let min_spacing = 0.1; // 最小间距10cm
-        
+
         for relation in relations.iter() {
             let too_close = filtered.iter().any(|existing: &SupportRelation| {
                 (existing.contact_point - relation.contact_point).norm() < min_spacing
             });
-            
+
             if !too_close {
                 filtered.push(relation.clone());
             }
         }
-        
+
         *relations = filtered;
     }
 
@@ -194,13 +192,13 @@ impl SctnRaycastDetector {
         if support.bbox.maxs.y > sctn.bbox.mins.y {
             return false;
         }
-        
+
         // 检查水平重叠
-        let x_overlap = sctn.bbox.maxs.x > support.bbox.mins.x && 
-                       sctn.bbox.mins.x < support.bbox.maxs.x;
-        let z_overlap = sctn.bbox.maxs.z > support.bbox.mins.z && 
-                       sctn.bbox.mins.z < support.bbox.maxs.z;
-        
+        let x_overlap =
+            sctn.bbox.maxs.x > support.bbox.mins.x && sctn.bbox.mins.x < support.bbox.maxs.x;
+        let z_overlap =
+            sctn.bbox.maxs.z > support.bbox.mins.z && sctn.bbox.mins.z < support.bbox.maxs.z;
+
         x_overlap && z_overlap
     }
 }
@@ -241,26 +239,28 @@ impl AdvancedRaycastAnalyzer {
         if relations.is_empty() {
             return SpanAnalysis::default();
         }
-        
+
         let mut spans = Vec::new();
-        
+
         // 按X坐标排序
         let mut sorted_supports = relations.to_vec();
         sorted_supports.sort_by(|a, b| {
-            a.contact_point.x.partial_cmp(&b.contact_point.x)
+            a.contact_point
+                .x
+                .partial_cmp(&b.contact_point.x)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         // 计算跨度
         for i in 1..sorted_supports.len() {
-            let span = sorted_supports[i].contact_point.x - sorted_supports[i-1].contact_point.x;
+            let span = sorted_supports[i].contact_point.x - sorted_supports[i - 1].contact_point.x;
             spans.push(span);
         }
-        
+
         let max_span = spans.iter().cloned().fold(0.0_f32, f32::max);
         let min_span = spans.iter().cloned().fold(f32::MAX, f32::min);
         let avg_span = spans.iter().sum::<f32>() / spans.len() as f32;
-        
+
         SpanAnalysis {
             max_span,
             min_span,
@@ -278,7 +278,7 @@ impl AdvancedRaycastAnalyzer {
         max_unsupported_length: f32,
     ) -> Vec<UnsupportedSegment> {
         let mut unsupported = Vec::new();
-        
+
         if supports.is_empty() {
             // 整个桥架都未支撑
             unsupported.push(UnsupportedSegment {
@@ -295,14 +295,16 @@ impl AdvancedRaycastAnalyzer {
             });
             return unsupported;
         }
-        
+
         // 按位置排序
         let mut sorted_supports = supports.to_vec();
         sorted_supports.sort_by(|a, b| {
-            a.contact_point.x.partial_cmp(&b.contact_point.x)
+            a.contact_point
+                .x
+                .partial_cmp(&b.contact_point.x)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         // 检查起始段
         let first_support_x = sorted_supports[0].contact_point.x;
         let start_gap = first_support_x - sctn.bbox.mins.x;
@@ -314,20 +316,20 @@ impl AdvancedRaycastAnalyzer {
                 severity: self.assess_severity(start_gap, max_unsupported_length),
             });
         }
-        
+
         // 检查中间段
         for i in 1..sorted_supports.len() {
-            let gap = sorted_supports[i].contact_point.x - sorted_supports[i-1].contact_point.x;
+            let gap = sorted_supports[i].contact_point.x - sorted_supports[i - 1].contact_point.x;
             if gap > max_unsupported_length {
                 unsupported.push(UnsupportedSegment {
-                    start: sorted_supports[i-1].contact_point,
+                    start: sorted_supports[i - 1].contact_point,
                     end: sorted_supports[i].contact_point,
                     length: gap,
                     severity: self.assess_severity(gap, max_unsupported_length),
                 });
             }
         }
-        
+
         // 检查末尾段
         let last_support_x = sorted_supports.last().unwrap().contact_point.x;
         let end_gap = sctn.bbox.maxs.x - last_support_x;
@@ -339,7 +341,7 @@ impl AdvancedRaycastAnalyzer {
                 severity: self.assess_severity(end_gap, max_unsupported_length),
             });
         }
-        
+
         unsupported
     }
 

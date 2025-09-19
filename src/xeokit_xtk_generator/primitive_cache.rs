@@ -2,9 +2,9 @@
 
 use super::*;
 use anyhow::Result;
+use glam::Mat4;
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-use glam::Mat4;
 
 /// 基元缓存
 pub struct PrimitiveCache {
@@ -38,7 +38,7 @@ impl PrimitiveCache {
         material: &XKTMaterial,
     ) -> Result<usize> {
         let hash = self.hash_builder.hash_geometry_material(geometry, material);
-        
+
         if let Some(&primitive_id) = self.primitives.get(&hash) {
             // 复用现有基元
             self.primitive_data[primitive_id].usage_count += 1;
@@ -47,18 +47,18 @@ impl PrimitiveCache {
             // 创建新基元
             let primitive_id = self.next_id;
             self.next_id += 1;
-            
+
             let primitive = XKTPrimitive {
                 id: primitive_id,
-                positions_portion: 0, // 稍后设置
-                normals_portion: 0,   // 稍后设置
-                indices_portion: 0,   // 稍后设置
-                edge_indices_portion: 0, // 稍后设置
+                positions_portion: 0,     // 稍后设置
+                normals_portion: 0,       // 稍后设置
+                indices_portion: 0,       // 稍后设置
+                edge_indices_portion: 0,  // 稍后设置
                 decode_matrix_portion: 0, // 稍后设置
                 color: material.color_as_u8(),
                 usage_count: 1,
             };
-            
+
             self.primitive_data.push(primitive);
             self.primitives.insert(hash, primitive_id);
             Ok(primitive_id)
@@ -77,10 +77,8 @@ impl PrimitiveCache {
 
     /// 获取复用统计
     pub fn get_reuse_stats(&self) -> PrimitiveReuseStats {
-        let total_instances: usize = self.primitive_data.iter()
-            .map(|p| p.usage_count)
-            .sum();
-        
+        let total_instances: usize = self.primitive_data.iter().map(|p| p.usage_count).sum();
+
         let unique_primitives = self.primitive_data.len();
         let reuse_ratio = if total_instances > 0 {
             1.0 - (unique_primitives as f32 / total_instances as f32)
@@ -88,7 +86,9 @@ impl PrimitiveCache {
             0.0
         };
 
-        let most_reused = self.primitive_data.iter()
+        let most_reused = self
+            .primitive_data
+            .iter()
             .max_by_key(|p| p.usage_count)
             .map(|p| (p.id, p.usage_count));
 
@@ -121,7 +121,8 @@ impl PrimitiveCache {
             Err(XTKGeneratorError::InvalidPrimitiveReference {
                 entity_id: "unknown".to_string(),
                 primitive_id,
-            }.into())
+            }
+            .into())
         }
     }
 }
@@ -134,13 +135,13 @@ impl GeometryHashBuilder {
         material: &XKTMaterial,
     ) -> PrimitiveHash {
         let mut hasher = DefaultHasher::new();
-        
+
         // 哈希几何数据
         self.hash_geometry(geometry, &mut hasher);
-        
+
         // 哈希材质数据
         self.hash_material(material, &mut hasher);
-        
+
         PrimitiveHash(hasher.finish())
     }
 
@@ -148,16 +149,16 @@ impl GeometryHashBuilder {
     fn hash_geometry(&self, geometry: &ConvertedGeometry, hasher: &mut DefaultHasher) {
         // 哈希量化位置
         geometry.quantized_positions.hash(hasher);
-        
+
         // 哈希编码法向量
         geometry.encoded_normals.hash(hasher);
-        
+
         // 哈希索引
         geometry.indices.hash(hasher);
-        
+
         // 哈希边缘索引
         geometry.edge_indices.hash(hasher);
-        
+
         // 哈希解码矩阵（使用位表示以确保一致性）
         for matrix in &geometry.decode_matrices {
             let matrix_array = matrix.to_cols_array();
@@ -170,12 +171,12 @@ impl GeometryHashBuilder {
     /// 计算材质哈希
     fn hash_material(&self, material: &XKTMaterial, hasher: &mut DefaultHasher) {
         material.id.hash(hasher);
-        
+
         // 哈希颜色（使用位表示）
         for &component in &material.color {
             component.to_bits().hash(hasher);
         }
-        
+
         material.metallic.to_bits().hash(hasher);
         material.roughness.to_bits().hash(hasher);
     }
@@ -196,11 +197,11 @@ impl PrimitiveReuseStats {
         println!("总实例数: {}", self.total_instances);
         println!("唯一基元数: {}", self.unique_primitives);
         println!("复用率: {:.2}%", self.reuse_ratio * 100.0);
-        
+
         if let Some((id, count)) = self.most_reused_primitive {
             println!("最多复用的基元: ID {} (使用 {} 次)", id, count);
         }
-        
+
         let memory_saved = if self.total_instances > 0 {
             (self.reuse_ratio * 100.0) as usize
         } else {
@@ -221,7 +222,7 @@ impl EdgeIndexGenerator {
     /// 从三角形索引生成边缘索引
     pub fn generate_edge_indices(&self, triangle_indices: &[u32]) -> Result<Vec<u32>> {
         let mut edges = std::collections::HashSet::new();
-        
+
         // 从三角形提取边
         for triangle in triangle_indices.chunks(3) {
             if triangle.len() == 3 {
@@ -230,7 +231,7 @@ impl EdgeIndexGenerator {
                     (triangle[1], triangle[2]),
                     (triangle[2], triangle[0]),
                 ];
-                
+
                 for (a, b) in edges_in_triangle {
                     // 确保边的顶点顺序一致（小的在前）
                     let edge = if a < b { (a, b) } else { (b, a) };
@@ -238,22 +239,26 @@ impl EdgeIndexGenerator {
                 }
             }
         }
-        
+
         // 转换为边缘索引数组
         let mut edge_indices = Vec::with_capacity(edges.len() * 2);
         for (a, b) in edges {
             edge_indices.push(a);
             edge_indices.push(b);
         }
-        
+
         Ok(edge_indices)
     }
 
     /// 生成轮廓边缘（用于高级渲染）
-    pub fn generate_silhouette_edges(&self, triangle_indices: &[u32], positions: &[Vec3]) -> Result<Vec<u32>> {
+    pub fn generate_silhouette_edges(
+        &self,
+        triangle_indices: &[u32],
+        positions: &[Vec3],
+    ) -> Result<Vec<u32>> {
         // 构建边-三角形邻接信息
         let mut edge_triangles: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-        
+
         for (tri_idx, triangle) in triangle_indices.chunks(3).enumerate() {
             if triangle.len() == 3 {
                 let edges = [
@@ -261,14 +266,17 @@ impl EdgeIndexGenerator {
                     (triangle[1], triangle[2]),
                     (triangle[2], triangle[0]),
                 ];
-                
+
                 for (a, b) in edges {
                     let edge = if a < b { (a, b) } else { (b, a) };
-                    edge_triangles.entry(edge).or_insert_with(Vec::new).push(tri_idx);
+                    edge_triangles
+                        .entry(edge)
+                        .or_insert_with(Vec::new)
+                        .push(tri_idx);
                 }
             }
         }
-        
+
         // 找到边界边（只属于一个三角形的边）
         let mut silhouette_edges = Vec::new();
         for ((a, b), triangles) in edge_triangles {
@@ -278,7 +286,7 @@ impl EdgeIndexGenerator {
                 silhouette_edges.push(b);
             }
         }
-        
+
         Ok(silhouette_edges)
     }
 }
@@ -305,7 +313,8 @@ impl MaterialManager {
             material.clone()
         } else {
             let material = self.create_material_for_type(pdms_type);
-            self.materials.insert(pdms_type.to_string(), material.clone());
+            self.materials
+                .insert(pdms_type.to_string(), material.clone());
             material
         }
     }
@@ -313,7 +322,7 @@ impl MaterialManager {
     /// 为 PDMS 类型创建材质
     fn create_material_for_type(&mut self, pdms_type: &str) -> XKTMaterial {
         let color = self.color_scheme.get_color_for_type(pdms_type);
-        
+
         XKTMaterial {
             id: format!("material_{}", self.next_id),
             color: [color.r, color.g, color.b, color.a],
@@ -326,10 +335,10 @@ impl MaterialManager {
     fn get_metallic_for_type(&self, pdms_type: &str) -> f32 {
         match pdms_type {
             "PIPE" | "ELBOW" | "TEE" | "REDUCER" => 0.8, // 金属管道
-            "VALVE" | "FLANGE" => 0.9, // 金属阀门
-            "EQUIPMENT" | "VESSEL" => 0.7, // 设备
-            "STRUCTURE" | "BEAM" | "COLUMN" => 0.9, // 结构钢
-            _ => 0.1, // 默认非金属
+            "VALVE" | "FLANGE" => 0.9,                   // 金属阀门
+            "EQUIPMENT" | "VESSEL" => 0.7,               // 设备
+            "STRUCTURE" | "BEAM" | "COLUMN" => 0.9,      // 结构钢
+            _ => 0.1,                                    // 默认非金属
         }
     }
 
@@ -337,11 +346,11 @@ impl MaterialManager {
     fn get_roughness_for_type(&self, pdms_type: &str) -> f32 {
         match pdms_type {
             "PIPE" | "ELBOW" | "TEE" | "REDUCER" => 0.3, // 光滑管道
-            "VALVE" | "FLANGE" => 0.4, // 稍粗糙的阀门
-            "EQUIPMENT" | "VESSEL" => 0.5, // 设备表面
-            "STRUCTURE" | "BEAM" | "COLUMN" => 0.6, // 结构钢
-            "INSTRUMENT" => 0.2, // 光滑仪表
-            _ => 0.5, // 默认中等粗糙度
+            "VALVE" | "FLANGE" => 0.4,                   // 稍粗糙的阀门
+            "EQUIPMENT" | "VESSEL" => 0.5,               // 设备表面
+            "STRUCTURE" | "BEAM" | "COLUMN" => 0.6,      // 结构钢
+            "INSTRUMENT" => 0.2,                         // 光滑仪表
+            _ => 0.5,                                    // 默认中等粗糙度
         }
     }
 
@@ -368,34 +377,186 @@ pub struct Color {
 impl ColorScheme {
     pub fn new() -> Self {
         let mut type_colors = HashMap::new();
-        
+
         // PDMS 类型颜色映射
-        type_colors.insert("PIPE".to_string(), Color { r: 0.2, g: 0.6, b: 1.0, a: 1.0 }); // 蓝色
-        type_colors.insert("ELBOW".to_string(), Color { r: 0.3, g: 0.7, b: 1.0, a: 1.0 });
-        type_colors.insert("TEE".to_string(), Color { r: 0.1, g: 0.5, b: 0.9, a: 1.0 });
-        type_colors.insert("REDUCER".to_string(), Color { r: 0.4, g: 0.8, b: 1.0, a: 1.0 });
-        
-        type_colors.insert("VALVE".to_string(), Color { r: 1.0, g: 0.3, b: 0.3, a: 1.0 }); // 红色
-        type_colors.insert("GATE_VALVE".to_string(), Color { r: 0.9, g: 0.2, b: 0.2, a: 1.0 });
-        type_colors.insert("BALL_VALVE".to_string(), Color { r: 1.0, g: 0.4, b: 0.4, a: 1.0 });
-        
-        type_colors.insert("EQUIPMENT".to_string(), Color { r: 0.3, g: 0.8, b: 0.3, a: 1.0 }); // 绿色
-        type_colors.insert("VESSEL".to_string(), Color { r: 0.2, g: 0.7, b: 0.2, a: 1.0 });
-        type_colors.insert("PUMP".to_string(), Color { r: 0.4, g: 0.9, b: 0.4, a: 1.0 });
-        
-        type_colors.insert("STRUCTURE".to_string(), Color { r: 1.0, g: 0.6, b: 0.2, a: 1.0 }); // 橙色
-        type_colors.insert("BEAM".to_string(), Color { r: 0.9, g: 0.5, b: 0.1, a: 1.0 });
-        type_colors.insert("COLUMN".to_string(), Color { r: 1.0, g: 0.7, b: 0.3, a: 1.0 });
-        
-        type_colors.insert("INSTRUMENT".to_string(), Color { r: 1.0, g: 1.0, b: 0.3, a: 1.0 }); // 黄色
-        type_colors.insert("TRANSMITTER".to_string(), Color { r: 0.9, g: 0.9, b: 0.2, a: 1.0 });
-        
-        type_colors.insert("ELECTRICAL".to_string(), Color { r: 0.8, g: 0.3, b: 1.0, a: 1.0 }); // 紫色
-        type_colors.insert("CABLE".to_string(), Color { r: 0.7, g: 0.2, b: 0.9, a: 1.0 });
-        
-        type_colors.insert("HVAC".to_string(), Color { r: 0.3, g: 1.0, b: 0.8, a: 1.0 }); // 青色
-        type_colors.insert("DUCT".to_string(), Color { r: 0.2, g: 0.9, b: 0.7, a: 1.0 });
-        
+        type_colors.insert(
+            "PIPE".to_string(),
+            Color {
+                r: 0.2,
+                g: 0.6,
+                b: 1.0,
+                a: 1.0,
+            },
+        ); // 蓝色
+        type_colors.insert(
+            "ELBOW".to_string(),
+            Color {
+                r: 0.3,
+                g: 0.7,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+        type_colors.insert(
+            "TEE".to_string(),
+            Color {
+                r: 0.1,
+                g: 0.5,
+                b: 0.9,
+                a: 1.0,
+            },
+        );
+        type_colors.insert(
+            "REDUCER".to_string(),
+            Color {
+                r: 0.4,
+                g: 0.8,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "VALVE".to_string(),
+            Color {
+                r: 1.0,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
+            },
+        ); // 红色
+        type_colors.insert(
+            "GATE_VALVE".to_string(),
+            Color {
+                r: 0.9,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            },
+        );
+        type_colors.insert(
+            "BALL_VALVE".to_string(),
+            Color {
+                r: 1.0,
+                g: 0.4,
+                b: 0.4,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "EQUIPMENT".to_string(),
+            Color {
+                r: 0.3,
+                g: 0.8,
+                b: 0.3,
+                a: 1.0,
+            },
+        ); // 绿色
+        type_colors.insert(
+            "VESSEL".to_string(),
+            Color {
+                r: 0.2,
+                g: 0.7,
+                b: 0.2,
+                a: 1.0,
+            },
+        );
+        type_colors.insert(
+            "PUMP".to_string(),
+            Color {
+                r: 0.4,
+                g: 0.9,
+                b: 0.4,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "STRUCTURE".to_string(),
+            Color {
+                r: 1.0,
+                g: 0.6,
+                b: 0.2,
+                a: 1.0,
+            },
+        ); // 橙色
+        type_colors.insert(
+            "BEAM".to_string(),
+            Color {
+                r: 0.9,
+                g: 0.5,
+                b: 0.1,
+                a: 1.0,
+            },
+        );
+        type_colors.insert(
+            "COLUMN".to_string(),
+            Color {
+                r: 1.0,
+                g: 0.7,
+                b: 0.3,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "INSTRUMENT".to_string(),
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 0.3,
+                a: 1.0,
+            },
+        ); // 黄色
+        type_colors.insert(
+            "TRANSMITTER".to_string(),
+            Color {
+                r: 0.9,
+                g: 0.9,
+                b: 0.2,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "ELECTRICAL".to_string(),
+            Color {
+                r: 0.8,
+                g: 0.3,
+                b: 1.0,
+                a: 1.0,
+            },
+        ); // 紫色
+        type_colors.insert(
+            "CABLE".to_string(),
+            Color {
+                r: 0.7,
+                g: 0.2,
+                b: 0.9,
+                a: 1.0,
+            },
+        );
+
+        type_colors.insert(
+            "HVAC".to_string(),
+            Color {
+                r: 0.3,
+                g: 1.0,
+                b: 0.8,
+                a: 1.0,
+            },
+        ); // 青色
+        type_colors.insert(
+            "DUCT".to_string(),
+            Color {
+                r: 0.2,
+                g: 0.9,
+                b: 0.7,
+                a: 1.0,
+            },
+        );
+
         Self { type_colors }
     }
 
@@ -405,16 +566,21 @@ impl ColorScheme {
         if let Some(&color) = self.type_colors.get(pdms_type) {
             return color;
         }
-        
+
         // 尝试部分匹配
         for (type_name, &color) in &self.type_colors {
             if pdms_type.contains(type_name) || type_name.contains(pdms_type) {
                 return color;
             }
         }
-        
+
         // 默认颜色（灰色）
-        Color { r: 0.7, g: 0.7, b: 0.7, a: 1.0 }
+        Color {
+            r: 0.7,
+            g: 0.7,
+            b: 0.7,
+            a: 1.0,
+        }
     }
 }
 

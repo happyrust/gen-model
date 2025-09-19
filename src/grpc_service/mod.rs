@@ -1,5 +1,5 @@
 //! GRPC服务模块
-//! 
+//!
 //! 提供数据解析进度监控、MDB管理和任务控制的GRPC接口
 
 #[cfg(feature = "grpc")]
@@ -65,19 +65,19 @@ pub use error::ServiceError;
 pub use server::start_grpc_server;
 
 #[cfg(feature = "grpc")]
-pub use logging::{init_grpc_logging, GrpcRequestLogger, TaskExecutionLogger, PERFORMANCE_METRICS};
+pub use logging::{GrpcRequestLogger, PERFORMANCE_METRICS, TaskExecutionLogger, init_grpc_logging};
 
 #[cfg(feature = "grpc")]
-pub use auth::{AuthService, AuthConfig, AuthInterceptor, RateLimiter, InputValidator};
+pub use auth::{AuthConfig, AuthInterceptor, AuthService, InputValidator, RateLimiter};
 
 #[cfg(feature = "grpc")]
-pub use health::{HealthMonitorService, HealthChecker, HealthStatus};
+pub use health::{HealthChecker, HealthMonitorService, HealthStatus};
 
 #[cfg(feature = "grpc")]
-pub use spatial_query_service::{SpatialQueryServiceImpl, SpatialElement};
+pub use spatial_query_service::{SpatialElement, SpatialQueryServiceImpl};
 
 #[cfg(feature = "grpc")]
 pub use sctn_contact_detector::{
-    SctnContactDetector, BatchSctnDetector, CableTraySection, 
-    ContactResult, ContactType, SupportRelation
+    BatchSctnDetector, CableTraySection, ContactResult, ContactType, SctnContactDetector,
+    SupportRelation,
 };

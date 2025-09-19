@@ -3,7 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "grpc")]
     {
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-        
+
         tonic_build::configure()
             .build_server(true)
             .build_client(true)

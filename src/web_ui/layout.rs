@@ -34,10 +34,6 @@ pub fn render_layout_with_sidebar(
         <i class="fas fa-database"></i>
         <span>AIOS 数据库管理平台</span>
       </div>
-      <button class="btn btn--secondary text-sm lg:hidden" onclick="document.body.classList.toggle('sidebar-open')">
-        <i class="fas fa-bars"></i>
-        菜单
-      </button>
     </div>
   </header>
 
@@ -61,6 +57,7 @@ pub fn render_layout_with_sidebar(
         <a class="nav-item {dbstatus_active}" href="/db-status"><span class="icon fas fa-database app-icon"></span> 系统状态</a>
         <a class="nav-item {spatial_active}" href="/sqlite-spatial"><span class="icon fas fa-vector-square app-icon"></span> 空间查询</a>
         <a class="nav-item {wizard_active}" href="/wizard"><span class="icon fas fa-magic app-icon"></span> 解析向导</a>
+        <a class="nav-item {remote_active}" href="/remote-sync"><span class="icon fas fa-project-diagram app-icon"></span> 异地环境</a>
       </nav>
       <div class="nav-group">工具</div>
       <nav class="nav-list">
@@ -81,8 +78,7 @@ pub fn render_layout_with_sidebar(
 </html>
 "#;
 
-    tpl
-        .replace("{{title}}", title)
+    tpl.replace("{{title}}", title)
         .replace("{{extra_head}}", extra_head.unwrap_or(""))
         .replace("{home_active}", is_active("home"))
         .replace("{dashboard_active}", is_active("dashboard"))
@@ -93,6 +89,7 @@ pub fn render_layout_with_sidebar(
         .replace("{dbstatus_active}", is_active("db-status"))
         .replace("{spatial_active}", is_active("sqlite-spatial"))
         .replace("{wizard_active}", is_active("wizard"))
+        .replace("{remote_active}", is_active("remote-sync"))
         .replace("{dbconn_active}", is_active("db-conn"))
         .replace("{content}", content_html)
         .replace("{extra_scripts}", extra_scripts.unwrap_or(""))
@@ -159,7 +156,11 @@ pub fn strip_first_tag_block(content: &str, tag: &str) -> String {
 /// 包装外部完整 HTML（文件或字符串）到统一布局：
 /// - 提取并注入 <style> 片段到 <head>
 /// - 提取 <body> 内的内容，并移除第一个 <nav> 区块
-pub fn wrap_external_html_in_layout(title: &str, active_nav: Option<&str>, full_html: &str) -> String {
+pub fn wrap_external_html_in_layout(
+    title: &str,
+    active_nav: Option<&str>,
+    full_html: &str,
+) -> String {
     let extra_head = scope_inline_styles(&extract_inline_styles(full_html));
     let mut content = extract_body_inner(full_html);
     content = strip_first_tag_block(&content, "nav");

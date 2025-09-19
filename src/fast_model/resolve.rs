@@ -1,6 +1,6 @@
 use crate::fast_model::query_gm_params;
 use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
-use aios_core::expression::resolve::{resolve_axis_param, SCOM_INFO_MAP};
+use aios_core::expression::resolve::{SCOM_INFO_MAP, resolve_axis_param};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{PlinParam, ScomInfo};
 use aios_core::{CataContext, RefU64, RefnoEnum};

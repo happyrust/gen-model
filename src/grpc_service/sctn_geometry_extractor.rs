@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::Result;
+use bevy_transform::prelude::Transform;
 use nalgebra::{Point3, Vector3};
 use parry3d::bounding_volume::Aabb;
-use aios_core::pdms_types::{RefU64, RefnoEnum};
-use bevy_transform::prelude::Transform;
+use std::sync::Arc;
 
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -23,31 +23,34 @@ impl SctnGeometryExtractor {
     pub async fn extract_sctn_geometry(&self, sctn_refno: RefU64) -> Result<CableTraySection> {
         // 获取SCTN的属性
         let attrs = self.db_manager.get_attr(sctn_refno).await?;
-        
+
         // 获取世界坐标变换
-        let transform = self.db_manager
+        let transform = self
+            .db_manager
             .get_world_transform(sctn_refno)
             .await?
             .unwrap_or_default()
             .unwrap_or_default();
-        
+
         // 提取尺寸参数
         let width = self.extract_width(&attrs).unwrap_or(0.3);
         let height = self.extract_height(&attrs).unwrap_or(0.1);
         let depth = self.extract_depth(&attrs).unwrap_or(1.0);
-        
+
         // 获取包围盒
-        let bbox = self.calculate_sctn_bbox(sctn_refno, &transform, width, height, depth).await?;
-        
+        let bbox = self
+            .calculate_sctn_bbox(sctn_refno, &transform, width, height, depth)
+            .await?;
+
         // 获取中心线
         let centerline = self.extract_centerline(sctn_refno, &transform).await?;
-        
+
         // 获取方向
         let direction = self.extract_direction(&transform);
-        
+
         // 获取支撑点
         let support_points = self.find_support_points(sctn_refno).await?;
-        
+
         Ok(CableTraySection {
             refno: sctn_refno,
             bbox,
@@ -62,15 +65,18 @@ impl SctnGeometryExtractor {
     }
 
     /// 批量提取桥架分支下的所有SCTN
-    pub async fn extract_branch_sections(&self, bran_refno: RefU64) -> Result<Vec<CableTraySection>> {
+    pub async fn extract_branch_sections(
+        &self,
+        bran_refno: RefU64,
+    ) -> Result<Vec<CableTraySection>> {
         let mut sections = Vec::new();
-        
+
         // 获取BRAN下的所有子元素
         let children = self.db_manager.get_children_refs(bran_refno).await?;
-        
+
         for child in children.iter() {
             let type_name = self.db_manager.get_type_name(*child).await;
-            
+
             if type_name == "SCTN" {
                 match self.extract_sctn_geometry(*child).await {
                     Ok(sctn) => sections.push(sctn),
@@ -80,20 +86,23 @@ impl SctnGeometryExtractor {
                 }
             }
         }
-        
+
         // 按照空间位置排序
         sections.sort_by(|a, b| {
             let dist_a = a.bbox.center().coords.norm();
             let dist_b = b.bbox.center().coords.norm();
-            dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+            dist_a
+                .partial_cmp(&dist_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         Ok(sections)
     }
 
     /// 提取宽度参数
     fn extract_width(&self, attrs: &aios_core::AttrMap) -> Option<f32> {
-        attrs.get("WIDTH")
+        attrs
+            .get("WIDTH")
             .or_else(|| attrs.get("WIDT"))
             .or_else(|| attrs.get("WID"))
             .and_then(|v| v.as_f64())
@@ -102,7 +111,8 @@ impl SctnGeometryExtractor {
 
     /// 提取高度参数
     fn extract_height(&self, attrs: &aios_core::AttrMap) -> Option<f32> {
-        attrs.get("HEIGHT")
+        attrs
+            .get("HEIGHT")
             .or_else(|| attrs.get("HEIG"))
             .or_else(|| attrs.get("HEI"))
             .and_then(|v| v.as_f64())
@@ -111,7 +121,8 @@ impl SctnGeometryExtractor {
 
     /// 提取深度/长度参数
     fn extract_depth(&self, attrs: &aios_core::AttrMap) -> Option<f32> {
-        attrs.get("LENGTH")
+        attrs
+            .get("LENGTH")
             .or_else(|| attrs.get("LENG"))
             .or_else(|| attrs.get("DEPTH"))
             .and_then(|v| v.as_f64())
@@ -131,13 +142,13 @@ impl SctnGeometryExtractor {
         if let Ok(Some(cached_bbox)) = self.get_cached_bbox(refno).await {
             return Ok(cached_bbox);
         }
-        
+
         // 根据变换和尺寸计算包围盒
         let position = transform.translation;
         let half_width = width / 2.0;
         let half_height = height / 2.0;
         let half_depth = depth / 2.0;
-        
+
         // 考虑旋转的包围盒
         let corners = vec![
             Point3::new(-half_width, -half_height, -half_depth),
@@ -149,23 +160,23 @@ impl SctnGeometryExtractor {
             Point3::new(-half_width, half_height, half_depth),
             Point3::new(half_width, half_height, half_depth),
         ];
-        
+
         let mut min = Point3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = Point3::new(f32::MIN, f32::MIN, f32::MIN);
-        
+
         for corner in corners {
             let rotated = transform.rotation * corner.coords;
             let world_point = Point3::from(position + rotated);
-            
+
             min.x = min.x.min(world_point.x);
             min.y = min.y.min(world_point.y);
             min.z = min.z.min(world_point.z);
-            
+
             max.x = max.x.max(world_point.x);
             max.y = max.y.max(world_point.y);
             max.z = max.z.max(world_point.z);
         }
-        
+
         Ok(Aabb::new(min, max))
     }
 
@@ -187,10 +198,10 @@ impl SctnGeometryExtractor {
     ) -> Result<Vec<Point3<f32>>> {
         // 获取SCTN的路径点
         let mut centerline = Vec::new();
-        
+
         // 获取起点和终点
         let attrs = self.db_manager.get_attr(refno).await?;
-        
+
         // 尝试从属性中获取PPOS（起点）和QPOS（终点）
         if let (Some(ppos), Some(qpos)) = (
             self.extract_point(&attrs, "PPOS"),
@@ -203,7 +214,7 @@ impl SctnGeometryExtractor {
             let center = Point3::from(transform.translation);
             centerline.push(center);
         }
-        
+
         Ok(centerline)
     }
 
@@ -241,9 +252,10 @@ impl SctnGeometryExtractor {
     /// 查找支撑点
     async fn find_support_points(&self, sctn_refno: RefU64) -> Result<Vec<Point3<f32>>> {
         let mut support_points = Vec::new();
-        
+
         // 查询与SCTN相关的支撑构件
-        let supports = self.db_manager
+        let supports = self
+            .db_manager
             .query_foreign_refnos(
                 &[sctn_refno],
                 &[&["SCTN"]],
@@ -252,7 +264,7 @@ impl SctnGeometryExtractor {
                 2,
             )
             .await?;
-        
+
         for support_refno in supports {
             // 获取支撑点的位置
             if let Ok(Some(transform)) = self.db_manager.get_world_transform(support_refno).await {
@@ -261,39 +273,43 @@ impl SctnGeometryExtractor {
                 }
             }
         }
-        
+
         Ok(support_points)
     }
 
     /// 获取桥架的类型和规格
     pub async fn get_tray_specification(&self, refno: RefU64) -> Result<TraySpecification> {
         let attrs = self.db_manager.get_attr(refno).await?;
-        
+
         // 提取规格参数
-        let spec_type = attrs.get("STYP")
+        let spec_type = attrs
+            .get("STYP")
             .or_else(|| attrs.get("SPEC"))
             .and_then(|v| v.as_str())
             .unwrap_or("UNKNOWN")
             .to_string();
-        
-        let material = attrs.get("MATE")
+
+        let material = attrs
+            .get("MATE")
             .or_else(|| attrs.get("MATERIAL"))
             .and_then(|v| v.as_str())
             .unwrap_or("STEEL")
             .to_string();
-        
-        let thickness = attrs.get("THIC")
+
+        let thickness = attrs
+            .get("THIC")
             .or_else(|| attrs.get("THICKNESS"))
             .and_then(|v| v.as_f64())
             .map(|v| v as f32)
             .unwrap_or(2.0); // 默认2mm厚度
-        
-        let load_class = attrs.get("LOAD")
+
+        let load_class = attrs
+            .get("LOAD")
             .or_else(|| attrs.get("LOAD_CLASS"))
             .and_then(|v| v.as_str())
             .unwrap_or("MEDIUM")
             .to_string();
-        
+
         Ok(TraySpecification {
             spec_type,
             material,
@@ -306,10 +322,10 @@ impl SctnGeometryExtractor {
 /// 桥架规格信息
 #[derive(Debug, Clone)]
 pub struct TraySpecification {
-    pub spec_type: String,    // 类型（梯架、槽盒、托盘等）
-    pub material: String,     // 材质
-    pub thickness: f32,       // 厚度
-    pub load_class: String,   // 荷载等级
+    pub spec_type: String,  // 类型（梯架、槽盒、托盘等）
+    pub material: String,   // 材质
+    pub thickness: f32,     // 厚度
+    pub load_class: String, // 荷载等级
 }
 
 /// 高级几何分析
@@ -327,15 +343,15 @@ impl SctnGeometryAnalyzer {
     /// 分析桥架的弯曲和转角
     pub async fn analyze_tray_bends(&self, sections: &[CableTraySection]) -> Vec<TrayBend> {
         let mut bends = Vec::new();
-        
+
         for i in 1..sections.len() - 1 {
             let prev = &sections[i - 1];
             let curr = &sections[i];
             let next = &sections[i + 1];
-            
+
             // 计算方向变化
             let angle = prev.direction.angle(&next.direction);
-            
+
             if angle > 0.1 {
                 // 有明显的方向变化
                 let bend_type = if angle < std::f32::consts::FRAC_PI_4 {
@@ -347,7 +363,7 @@ impl SctnGeometryAnalyzer {
                 } else {
                     BendType::Sharp
                 };
-                
+
                 bends.push(TrayBend {
                     section_refno: curr.refno,
                     angle: angle.to_degrees(),
@@ -356,14 +372,14 @@ impl SctnGeometryAnalyzer {
                 });
             }
         }
-        
+
         bends
     }
 
     /// 计算桥架的总长度
     pub fn calculate_total_length(&self, sections: &[CableTraySection]) -> f32 {
         let mut total_length = 0.0;
-        
+
         for section in sections {
             if section.centerline.len() >= 2 {
                 for i in 1..section.centerline.len() {
@@ -375,20 +391,20 @@ impl SctnGeometryAnalyzer {
                 total_length += section.depth;
             }
         }
-        
+
         total_length
     }
 
     /// 检测桥架的连续性
     pub fn check_continuity(&self, sections: &[CableTraySection], max_gap: f32) -> Vec<GapInfo> {
         let mut gaps = Vec::new();
-        
+
         for i in 1..sections.len() {
             let prev_end = sections[i - 1].bbox.maxs;
             let curr_start = sections[i].bbox.mins;
-            
+
             let gap_distance = (curr_start - prev_end).norm();
-            
+
             if gap_distance > max_gap {
                 gaps.push(GapInfo {
                     from_section: sections[i - 1].refno,
@@ -398,7 +414,7 @@ impl SctnGeometryAnalyzer {
                 });
             }
         }
-        
+
         gaps
     }
 }
@@ -415,10 +431,10 @@ pub struct TrayBend {
 /// 弯曲类型
 #[derive(Debug, Clone)]
 pub enum BendType {
-    Slight,  // 小于45度
-    Medium,  // 45-90度
-    Right,   // 90度左右
-    Sharp,   // 大于135度
+    Slight, // 小于45度
+    Medium, // 45-90度
+    Right,  // 90度左右
+    Sharp,  // 大于135度
 }
 
 /// 间隙信息

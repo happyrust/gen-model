@@ -1,5 +1,5 @@
 //! MDB管理器
-//! 
+//!
 //! 负责管理MDB文件列表和相关信息
 
 use crate::grpc_service::error::{ServiceError, ServiceResult};
@@ -40,7 +40,7 @@ impl MdbManager {
         // 检查缓存是否过期
         let last_update = *self.last_update.read().await;
         let now = Utc::now();
-        
+
         if (now - last_update).num_seconds() < self.cache_duration {
             // 返回缓存的数据
             let cached_list = self.cached_mdb_list.read().await;
@@ -58,7 +58,7 @@ impl MdbManager {
         let mdb_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         let mut mdb_list = Vec::new();
-        
+
         for (mdb_name, db_nums) in mdb_map.iter() {
             let db_files: Vec<DbFileInfo> = db_nums
                 .iter()
@@ -74,8 +74,8 @@ impl MdbManager {
                 name: mdb_name.clone(),
                 refno: 0, // TODO: 从数据库获取实际refno
                 path: format!("/{}", mdb_name),
-                size: 0, // TODO: 计算总大小
-                created_at: Utc::now(), // TODO: 获取实际创建时间
+                size: 0,                 // TODO: 计算总大小
+                created_at: Utc::now(),  // TODO: 获取实际创建时间
                 modified_at: Utc::now(), // TODO: 获取实际修改时间
                 db_files,
                 metadata: MdbMetadata {
@@ -105,10 +105,8 @@ impl MdbManager {
     /// 获取MDB详情
     pub async fn get_mdb_details(&self, mdb_name: &str) -> ServiceResult<Option<MdbInfo>> {
         let mdb_list = self.get_mdb_list().await?;
-        
-        Ok(mdb_list
-            .into_iter()
-            .find(|mdb| mdb.name == mdb_name))
+
+        Ok(mdb_list.into_iter().find(|mdb| mdb.name == mdb_name))
     }
 
     /// 检查MDB是否存在

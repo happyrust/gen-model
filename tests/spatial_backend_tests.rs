@@ -1,11 +1,11 @@
 //! 集成测试：SqliteSpatialIndex 的高级空间查询能力
 
-use aios_database::spatial_index::{
-    SqliteSpatialIndex, SpatialQueryBackend, QueryOptions, SortBy, SortOrder
-};
 use aios_core::RefU64;
-use parry3d::bounding_volume::Aabb;
+use aios_database::spatial_index::{
+    QueryOptions, SortBy, SortOrder, SpatialQueryBackend, SqliteSpatialIndex,
+};
 use nalgebra::{Point3, Vector3};
+use parry3d::bounding_volume::Aabb;
 
 #[cfg(feature = "sqlite-index")]
 fn aabb(minx: f32, miny: f32, minz: f32, maxx: f32, maxy: f32, maxz: f32) -> Aabb {
@@ -20,13 +20,29 @@ fn setup_index() -> anyhow::Result<(SqliteSpatialIndex, tempfile::TempDir)> {
 
     // 插入测试数据
     // id=1 PIPE  (-1..1)
-    index.insert_aabb(RefU64(1), &aabb(-1.0, -0.5, -0.5, 1.0, 0.5, 0.5), Some("PIPE"))?;
+    index.insert_aabb(
+        RefU64(1),
+        &aabb(-1.0, -0.5, -0.5, 1.0, 0.5, 0.5),
+        Some("PIPE"),
+    )?;
     // id=2 SUPPORT (5..6)
-    index.insert_aabb(RefU64(2), &aabb(5.0, -0.5, -0.5, 6.0, 0.5, 0.5), Some("SUPPORT"))?;
+    index.insert_aabb(
+        RefU64(2),
+        &aabb(5.0, -0.5, -0.5, 6.0, 0.5, 0.5),
+        Some("SUPPORT"),
+    )?;
     // id=3 EQUI (10..11)
-    index.insert_aabb(RefU64(3), &aabb(10.0, -0.5, -0.5, 11.0, 0.5, 0.5), Some("EQUI"))?;
+    index.insert_aabb(
+        RefU64(3),
+        &aabb(10.0, -0.5, -0.5, 11.0, 0.5, 0.5),
+        Some("EQUI"),
+    )?;
     // id=4 PIPE (2.2..2.5) 小盒
-    index.insert_aabb(RefU64(4), &aabb(2.2, -0.2, -0.2, 2.5, 0.2, 0.2), Some("PIPE"))?;
+    index.insert_aabb(
+        RefU64(4),
+        &aabb(2.2, -0.2, -0.2, 2.5, 0.2, 0.2),
+        Some("PIPE"),
+    )?;
 
     Ok((index, dir))
 }

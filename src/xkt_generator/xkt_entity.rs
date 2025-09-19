@@ -170,9 +170,9 @@ impl XKTEntityTree {
     pub fn add_entity(&mut self, entity: XKTEntity) {
         let id = entity.id.clone();
         let is_root = entity.is_root();
-        
+
         self.entities.insert(id.clone(), entity);
-        
+
         if is_root && !self.root_entities.contains(&id) {
             self.root_entities.push(id);
         }
@@ -189,7 +189,11 @@ impl XKTEntityTree {
     }
 
     /// 建立父子关系
-    pub fn set_parent_child_relationship(&mut self, parent_id: &str, child_id: &str) -> Result<(), String> {
+    pub fn set_parent_child_relationship(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<(), String> {
         // 检查实体是否存在
         if !self.entities.contains_key(parent_id) {
             return Err(format!("Parent entity '{}' not found", parent_id));
@@ -210,7 +214,7 @@ impl XKTEntityTree {
         if let Some(parent) = self.entities.get_mut(parent_id) {
             parent.add_child(child_id.to_string());
         }
-        
+
         if let Some(child) = self.entities.get_mut(child_id) {
             child.set_parent(parent_id.to_string());
         }
@@ -238,7 +242,7 @@ impl XKTEntityTree {
     pub fn get_ancestors(&self, entity_id: &str) -> Vec<String> {
         let mut ancestors = Vec::new();
         let mut current = entity_id;
-        
+
         while let Some(entity) = self.entities.get(current) {
             if let Some(parent_id) = &entity.parent_id {
                 ancestors.push(parent_id.clone());
@@ -247,7 +251,7 @@ impl XKTEntityTree {
                 break;
             }
         }
-        
+
         ancestors
     }
 
@@ -277,14 +281,18 @@ impl XKTEntityTree {
         if let Some(entity) = self.entities.get(entity_id) {
             if let Some(parent_id) = &entity.parent_id {
                 if let Some(parent) = self.entities.get(parent_id) {
-                    return parent.children_ids.iter()
+                    return parent
+                        .children_ids
+                        .iter()
                         .filter(|&id| id != entity_id)
                         .cloned()
                         .collect();
                 }
             } else {
                 // 根实体的兄弟节点是其他根实体
-                return self.root_entities.iter()
+                return self
+                    .root_entities
+                    .iter()
                     .filter(|&id| id != entity_id)
                     .cloned()
                     .collect();
@@ -292,4 +300,4 @@ impl XKTEntityTree {
         }
         Vec::new()
     }
-} 
+}

@@ -9,51 +9,8 @@ Y88b  d88P Y88b 888 888     888     Y8b.     888  888 888 888  .d88P 888   d88P
  'Y8888P'   'Y88888 888     888      'Y8888  'Y888888 888 8888888P'  8888888P'
 
 
-[2m2025-09-12T04:32:33.254058Z[0m [32m INFO[0m [2msurreal::env[0m[2m:[0m Running 2.1.4+20250211.a6805999.dirty for macos on aarch64
-[2m2025-09-12T04:32:33.256492Z[0m [32m INFO[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Starting kvs store at file://ams-8009-test.db
-[2m2025-09-12T04:32:33.257043Z[0m [33m WARN[0m [2msurrealdb_core::kvs::ds[0m[2m:[0m file:// is deprecated, please use surrealkv:// or rocksdb://
-[2m2025-09-12T04:32:33.259441Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Background thread count: 10
-[2m2025-09-12T04:32:33.259579Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Maximum background jobs count: 20
-[2m2025-09-12T04:32:33.259587Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Maximum number of open files: 1024
-[2m2025-09-12T04:32:33.259588Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Number of log files to keep: 20
-[2m2025-09-12T04:32:33.259589Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Maximum write buffers: 32
-[2m2025-09-12T04:32:33.259590Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Write buffer size: 268435456
-[2m2025-09-12T04:32:33.259591Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Target file size for compaction: 134217728
-[2m2025-09-12T04:32:33.259592Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Target file size compaction multiplier: 10
-[2m2025-09-12T04:32:33.259593Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Minimum write buffers to merge: 6
-[2m2025-09-12T04:32:33.259594Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Number of files to trigger compaction: 16
-[2m2025-09-12T04:32:33.259595Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Compaction readahead size: 16777216
-[2m2025-09-12T04:32:33.259596Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Maximum concurrent subcompactions: 4
-[2m2025-09-12T04:32:33.259842Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Use separate thread queues: true
-[2m2025-09-12T04:32:33.259846Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Enable separation of keys and values: true
-[2m2025-09-12T04:32:33.259848Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Minimum blob value size: 4096
-[2m2025-09-12T04:32:33.259848Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Write-ahead-log file size limit: 1024MB
-[2m2025-09-12T04:32:33.260077Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Allow concurrent memtable writes: true
-[2m2025-09-12T04:32:33.260080Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Avoid unnecessary blocking IO: true
-[2m2025-09-12T04:32:33.260081Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Allow adaptive write thread yielding: true
-[2m2025-09-12T04:32:33.260094Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Wait for disk sync acknowledgement: false
-[2m2025-09-12T04:32:33.268183Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Block cache size: 7516192768
-[2m2025-09-12T04:32:33.268371Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Enable memory-mapped reads: false
-[2m2025-09-12T04:32:33.268375Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Enable memory-mapped writes: false
-[2m2025-09-12T04:32:33.268377Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Setting delete compaction factory: 1000 / 50 (0.5)
-[2m2025-09-12T04:32:33.268737Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Setting compaction style: level
-[2m2025-09-12T04:32:33.268739Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Setting compression level
-[2m2025-09-12T04:32:33.268740Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Setting storage engine log level: warn
-[2m2025-09-12T04:32:33.268742Z[0m [32m INFO[0m [2msurrealdb::core::kvs::rocksdb[0m[2m:[0m Background write-ahead-log flushing: disabled
-[2m2025-09-12T04:32:33.300396Z[0m [32m INFO[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Started kvs store at file://ams-8009-test.db
-[2m2025-09-12T04:32:33.314134Z[0m [33m WARN[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Credentials were provided, but existing root users were found. The root user 'root' will not be created
-[2m2025-09-12T04:32:33.314149Z[0m [33m WARN[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Consider removing the --user and --pass arguments from the server start command
-[2m2025-09-12T04:32:33.329802Z[0m [32m INFO[0m [2msurrealdb::net[0m[2m:[0m Listening for a system shutdown signal.
-[2m2025-09-12T04:32:33.330253Z[0m [32m INFO[0m [2msurrealdb::net[0m[2m:[0m Started web server on 127.0.0.1:8009
-[2m2025-09-12T17:30:44.100330Z[0m [31mERROR[0m [2msurrealdb::core::kvs::node[0m[2m:[0m [3merror[0m[2m=[0mFailed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T17:30:44.104685Z[0m [31mERROR[0m [2msurrealdb::api::engine::tasks[0m[2m:[0m Error updating node registration information: Failed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T20:49:42.677050Z[0m [31mERROR[0m [2msurrealdb::core::kvs::node[0m[2m:[0m [3merror[0m[2m=[0mFailed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T20:49:42.680278Z[0m [31mERROR[0m [2msurrealdb::api::engine::tasks[0m[2m:[0m Error processing and archiving inactive nodes: Failed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T22:19:33.918351Z[0m [31mERROR[0m [2msurrealdb::core::kvs::node[0m[2m:[0m [3merror[0m[2m=[0mFailed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T22:19:33.918500Z[0m [31mERROR[0m [2msurrealdb::api::engine::tasks[0m[2m:[0m Error updating node registration information: Failed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T23:20:32.872772Z[0m [31mERROR[0m [2msurrealdb::core::kvs::node[0m[2m:[0m [3merror[0m[2m=[0mFailed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-12T23:20:32.872862Z[0m [31mERROR[0m [2msurrealdb::api::engine::tasks[0m[2m:[0m Error updating node registration information: Failed to commit transaction due to a read or write conflict. This transaction can be retried
-[2m2025-09-13T00:53:32.306750Z[0m [33m WARN[0m [2msurrealdb::net[0m[2m:[0m SIGTERM received. Waiting for a graceful shutdown. A second signal will force an immediate shutdown.
-[2m2025-09-13T00:53:32.308559Z[0m [32m INFO[0m [2msurrealdb::net[0m[2m:[0m Listening for a system shutdown signal.
-[2m2025-09-13T00:53:32.561774Z[0m [32m INFO[0m [2msurrealdb::net[0m[2m:[0m Web server stopped. Bye!
+[2m2025-09-19T04:35:35.639997Z[0m [33m WARN[0m [2msurrealdb_core::kvs::ds[0m[2m:[0m file:// is deprecated, please use surrealkv:// or rocksdb://
+[2m2025-09-19T04:35:35.680908Z[0m [33m WARN[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Credentials were provided, but existing root users were found. The root user 'root' will not be created
+[2m2025-09-19T04:35:35.680923Z[0m [33m WARN[0m [2msurrealdb::core::kvs::ds[0m[2m:[0m Consider removing the --user and --pass arguments from the server start command
+[2m2025-09-19T04:43:11.584281Z[0m [33m WARN[0m [2msurrealdb::net[0m[2m:[0m SIGTERM received. Waiting for a graceful shutdown. A second signal will force an immediate shutdown.
 Goodbye!

@@ -1,3 +1,4 @@
+use aios_core::SUL_DB;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::normalize_sql_string;
@@ -6,12 +7,11 @@ use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
-use aios_core::SUL_DB;
 use chrono::Local;
 use dashmap::{DashMap, DashSet};
+use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
 use pdms_io::io::PdmsIO;
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::fs::{create_dir_all, File};
+use tokio::fs::{File, create_dir_all};
 use tokio::io::AsyncReadExt;
 // use tokio::sync::mpsc::Sender;
 use std::sync::mpsc::Sender;
@@ -142,7 +142,6 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// 带进度回调的同步pdms数据到数据库
 pub async fn sync_pdms_with_callback<F>(
     db_option: &DbOption,
@@ -232,7 +231,15 @@ where
 
         // 通知进度回调开始处理项目
         if let Some(ref mut callback) = progress_callback {
-            callback(project, project_index + 1, total_projects, 0, total_files, 0, 0);
+            callback(
+                project,
+                project_index + 1,
+                total_projects,
+                0,
+                total_files,
+                0,
+                0,
+            );
         }
 
         //debug 不保存数据，只复杂查看属性值
@@ -315,7 +322,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     // 计时器开始
     let mut time = tokio::time::Instant::now();
-    
+
     // 解析前移除EVENT，防止大量的event触发
     println!("正在移除dbnum_event以提高解析性能...");
     let remove_event_sql = "REMOVE EVENT update_dbnum_event ON pe;";
@@ -323,7 +330,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         Ok(_) => println!("成功移除update_dbnum_event"),
         Err(e) => println!("移除update_dbnum_event失败（可能不存在）: {:?}", e),
     }
-    
+
     // 获取默认的数据库连接字符串
     if db_option.sync_tidb.unwrap_or(false) {
         #[cfg(feature = "sql")]
@@ -431,7 +438,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 pub async fn define_dbnum_event() -> anyhow::Result<()> {
     let event_sql = r#"
     DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
@@ -468,7 +474,7 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
             };
         };
     "#;
-    
+
     SUL_DB.query(event_sql).await?;
     Ok(())
 }
@@ -502,7 +508,7 @@ DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event
             };
         };
     "#;
-    
+
     SUL_DB.query(event_sql).await?;
     Ok(())
 }
@@ -530,12 +536,18 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
 }
 
 pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
-    let sql = format!("SELECT value id FROM only pe WHERE dbnum = {} limit 1", db_no);
+    let sql = format!(
+        "SELECT value id FROM only pe WHERE dbnum = {} limit 1",
+        db_no
+    );
     let mut response = SUL_DB.query(&sql).await.expect("check db exists failed");
     use surrealdb::sql::Thing;
     let db_exists: Option<Thing> = response.take(0).unwrap();
     if db_exists.is_some() {
-        println!("Database with dbnum {} already exists in pe table. Will override with new data.", db_no);
+        println!(
+            "Database with dbnum {} already exists in pe table. Will override with new data.",
+            db_no
+        );
         println!("开始删除已有的dbnum {db_no} 的数据");
         let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
                                     delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
@@ -606,7 +618,15 @@ where
 
     // 通知进度回调文件统计完成
     if let Some(callback) = progress_callback {
-        callback(project, current_project, total_projects, 0, total_files, 0, 0);
+        callback(
+            project,
+            current_project,
+            total_projects,
+            0,
+            total_files,
+            0,
+            0,
+        );
     }
 
     // 继续原有的处理逻辑...
@@ -653,7 +673,11 @@ where
                         }
                         SenderJsonsData::AttJson((type_name, jsons)) => {
                             if !jsons.is_empty() {
-                                let sql = format!("INSERT IGNORE INTO {} [{}]", type_name, jsons.join(","));
+                                let sql = format!(
+                                    "INSERT IGNORE INTO {} [{}]",
+                                    type_name,
+                                    jsons.join(",")
+                                );
                                 SUL_DB.query(sql).await.expect("insert att failed");
                             }
                         }
@@ -665,7 +689,11 @@ where
                         #[cfg(feature = "sql")]
                         SenderJsonsData::MySqlJson((table_name, jsons)) => {
                             if b_save_mysql && !jsons.is_empty() {
-                                let sql = format!("INSERT IGNORE INTO {} VALUES {}", table_name, jsons.join(","));
+                                let sql = format!(
+                                    "INSERT IGNORE INTO {} VALUES {}",
+                                    table_name,
+                                    jsons.join(",")
+                                );
                                 match sqlx::query(&sql).execute(&pool).await {
                                     Ok(_) => {}
                                     Err(e) => {
@@ -710,14 +738,30 @@ where
         if file_name.contains('.') {
             // 进入文件（将其计入进度），随即跳过
             if let Some(cb) = progress_callback.as_mut() {
-                cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0);
+                cb(
+                    project.as_str(),
+                    current_project,
+                    total_projects,
+                    file_idx + 1,
+                    total_files,
+                    0,
+                    0,
+                );
             }
             continue;
         }
 
         // 进入文件 - 上报当前文件号
         if let Some(cb) = progress_callback.as_mut() {
-            cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0);
+            cb(
+                project.as_str(),
+                current_project,
+                total_projects,
+                file_idx + 1,
+                total_files,
+                0,
+                0,
+            );
         }
 
         let dbno_set = cur_dbno_set.clone();
@@ -731,16 +775,38 @@ where
         let db_type = db_basic_info.db_type;
         let db_no = db_basic_info.db_no;
 
-        if is_replace { check_and_clear_db(db_no).await.unwrap(); }
+        if is_replace {
+            check_and_clear_db(db_no).await.unwrap();
+        }
         // 类型过滤
         if !db_types_clone.contains(&db_type) {
             // 依然汇报一次该文件完成
-            if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+            if let Some(cb) = progress_callback.as_mut() {
+                cb(
+                    project.as_str(),
+                    current_project,
+                    total_projects,
+                    file_idx + 1,
+                    total_files,
+                    0,
+                    0,
+                );
+            }
             continue;
         }
         // 避免重复
         if dbno_set.contains(&db_no) {
-            if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+            if let Some(cb) = progress_callback.as_mut() {
+                cb(
+                    project.as_str(),
+                    current_project,
+                    total_projects,
+                    file_idx + 1,
+                    total_files,
+                    0,
+                    0,
+                );
+            }
             continue;
         }
         dbno_set.insert(db_no);
@@ -753,39 +819,77 @@ where
             if io.open().is_ok() {
                 sesno = io.get_latest_sesno().unwrap_or_default();
                 if sesno == 0 {
-                    if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                    if let Some(cb) = progress_callback.as_mut() {
+                        cb(
+                            project.as_str(),
+                            current_project,
+                            total_projects,
+                            file_idx + 1,
+                            total_files,
+                            0,
+                            0,
+                        );
+                    }
                     continue;
                 }
                 if is_sync_history {
                     io.sync_history().await.unwrap();
-                    if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                    if let Some(cb) = progress_callback.as_mut() {
+                        cb(
+                            project.as_str(),
+                            current_project,
+                            total_projects,
+                            file_idx + 1,
+                            total_files,
+                            0,
+                            0,
+                        );
+                    }
                     continue;
                 } else {
                     io.store_all_refno_sesno_map().await.unwrap();
                 }
                 ses_range_map = io.ses_range_map;
             } else {
-                if let Some(cb) = progress_callback.as_mut() { cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, 0, 0); }
+                if let Some(cb) = progress_callback.as_mut() {
+                    cb(
+                        project.as_str(),
+                        current_project,
+                        total_projects,
+                        file_idx + 1,
+                        total_files,
+                        0,
+                        0,
+                    );
+                }
                 continue;
             }
         }
 
         let project_name = project.as_str().to_string();
-        let mut db_basic = parse_file_db_basic_data(&path, &file_name, project_name.as_str())
-            .unwrap_or_default();
+        let mut db_basic =
+            parse_file_db_basic_data(&path, &file_name, project_name.as_str()).unwrap_or_default();
         let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
         let total_chunks = std::cmp::max(1, (all_refnos.len() + chunk_size - 1) / chunk_size);
 
         let db_basic = Arc::new(db_basic);
-        if is_save_db { save_pe_relates(&db_basic, sender.clone()).await; }
+        if is_save_db {
+            save_pe_relates(&db_basic, sender.clone()).await;
+        }
         let debug_refnos: Vec<RefU64> = db_option_arc
             .debug_root_refnos
             .as_ref()
-            .map(|x| x.iter().map(|x| RefU64::from_str(x).unwrap()).collect::<Vec<_>>())
+            .map(|x| {
+                x.iter()
+                    .map(|x| RefU64::from_str(x).unwrap())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let is_debug = !debug_refnos.is_empty();
         if is_debug {
-            if let Some(children) = db_basic.children_map.get(&debug_refnos[0]) { dbg!(children); }
+            if let Some(children) = db_basic.children_map.get(&debug_refnos[0]) {
+                dbg!(children);
+            }
         }
         let debug_refnos = Arc::new(debug_refnos);
 
@@ -807,8 +911,15 @@ where
                 &chunk_refnos,
                 &ses_range_map_clone,
                 ignore_world_refno,
-            ).await {
-                Ok(PdmsDbData { total_attr_map, type_ele_map, db_no, .. }) => {
+            )
+            .await
+            {
+                Ok(PdmsDbData {
+                    total_attr_map,
+                    type_ele_map,
+                    db_no,
+                    ..
+                }) => {
                     let total_attr_map_arc = Arc::new(total_attr_map);
                     total_cnt += total_attr_map_arc.len();
                     if !is_debug && is_save_db {
@@ -820,49 +931,95 @@ where
                             &db_type,
                             &db_option_clone,
                             sender.clone(),
-                        ).await.expect("save pe to surreal failed");
+                        )
+                        .await
+                        .expect("save pe to surreal failed");
                     }
                     // UDA 类型写入
                     for kv in type_ele_map.iter() {
                         let noun: i32 = *kv.key() as _;
                         let type_name = db1_dehash(noun as _);
-                        if type_name.is_empty() { continue; }
+                        if type_name.is_empty() {
+                            continue;
+                        }
                         for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _) {
                             let mut json_vec = vec![];
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
                                 if is_debug {
-                                    if debug_refnos.contains(&att.get_refno_or_default().refno()) { dbg!(att.value()); } else { continue; }
+                                    if debug_refnos.contains(&att.get_refno_or_default().refno()) {
+                                        dbg!(att.value());
+                                    } else {
+                                        continue;
+                                    }
                                 }
-                                if !is_save_db { continue; }
-                                if let Some(json) = att.gen_sur_json() { json_vec.push(json); }
-                                if let Some(json) = att.gen_sur_json_uda(&[]) { uda_json_vec.push(normalize_sql_string(&json)); }
+                                if !is_save_db {
+                                    continue;
+                                }
+                                if let Some(json) = att.gen_sur_json() {
+                                    json_vec.push(json);
+                                }
+                                if let Some(json) = att.gen_sur_json_uda(&[]) {
+                                    uda_json_vec.push(normalize_sql_string(&json));
+                                }
                             }
                             if is_save_db {
                                 if !json_vec.is_empty() {
-                                    sender.send(SenderJsonsData::AttJson((type_name.clone(), json_vec))).expect("send attmap sql failed");
+                                    sender
+                                        .send(SenderJsonsData::AttJson((
+                                            type_name.clone(),
+                                            json_vec,
+                                        )))
+                                        .expect("send attmap sql failed");
                                 }
                                 if !uda_json_vec.is_empty() {
-                                    sender.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec))).expect("send attmap sql failed");
+                                    sender
+                                        .send(SenderJsonsData::AttJson((
+                                            "ATT_UDA".to_string(),
+                                            uda_json_vec,
+                                        )))
+                                        .expect("send attmap sql failed");
                                 }
                             }
                         }
                     }
                 }
-                Err(e) => { dbg!(e.to_string()); }
+                Err(e) => {
+                    dbg!(e.to_string());
+                }
             }
 
             // 分块进度
             if let Some(cb) = progress_callback.as_mut() {
-                cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, chunk_index + 1, total_chunks);
+                cb(
+                    project.as_str(),
+                    current_project,
+                    total_projects,
+                    file_idx + 1,
+                    total_files,
+                    chunk_index + 1,
+                    total_chunks,
+                );
             }
         }
 
-        println!("解析任务完成, 耗时: {} s, 总数量: {}", time.elapsed().as_secs_f32(), total_cnt);
+        println!(
+            "解析任务完成, 耗时: {} s, 总数量: {}",
+            time.elapsed().as_secs_f32(),
+            total_cnt
+        );
         // 文件完成：若无分块也至少回报一次
         if let Some(cb) = progress_callback.as_mut() {
-            cb(project.as_str(), current_project, total_projects, file_idx + 1, total_files, total_chunks, total_chunks);
+            cb(
+                project.as_str(),
+                current_project,
+                total_projects,
+                file_idx + 1,
+                total_files,
+                total_chunks,
+                total_chunks,
+            );
         }
     }
 
@@ -885,7 +1042,6 @@ pub async fn sync_total_async_threaded(
     // progress_sender: Sender<i32>,
     proj_progress_chunk: usize,
 ) -> anyhow::Result<()> {
-
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
@@ -928,7 +1084,7 @@ pub async fn sync_total_async_threaded(
             }
         }
     }
-    
+
     // 更新children_files只包含需要处理的文件
     children_files = file_map.into_values().collect();
     // println!("需要处理的文件: {:?}", &children_files);
@@ -940,7 +1096,7 @@ pub async fn sync_total_async_threaded(
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
     let b_replace_types = replace_types.is_some(); // 是否存在替换的类型列表
-                                                   // 是否保存到tidb
+    // 是否保存到tidb
     let b_save_mysql = db_option_arc.sync_tidb.unwrap_or(false);
     if b_replace_types {
         is_replace = true;
@@ -959,7 +1115,7 @@ pub async fn sync_total_async_threaded(
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
         let pool = AiosDBManager::get_project_pool().await.unwrap().clone();
-        
+
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(200);
             // let mut cnt = 0;
@@ -995,7 +1151,10 @@ pub async fn sync_total_async_threaded(
                             if !updates.is_empty() {
                                 // 使用UPSERT语法来更新或插入dbnum_info_table记录
                                 for update in updates {
-                                    SUL_DB.query(update).await.expect("upsert dbnum_info failed");
+                                    SUL_DB
+                                        .query(update)
+                                        .await
+                                        .expect("upsert dbnum_info failed");
                                 }
                             }
                         }
@@ -1049,15 +1208,15 @@ pub async fn sync_total_async_threaded(
             let dbno_set = cur_dbno_set.clone();
             let mut time = Instant::now();
             // dbg!(&file_name);
-            if (is_parse_sys && is_total_sync) ||
-                db_option_arc.included_db_files.is_none()
+            if (is_parse_sys && is_total_sync)
+                || db_option_arc.included_db_files.is_none()
                 || db_option_arc
-                .included_db_files
-                .as_ref()
-                .unwrap()
-                .contains(&file_name)
+                    .included_db_files
+                    .as_ref()
+                    .unwrap()
+                    .contains(&file_name)
             {
-                if !is_total_sync{
+                if !is_total_sync {
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
                 }
                 // dbg!(&file_name);
@@ -1068,7 +1227,7 @@ pub async fn sync_total_async_threaded(
                 let db_type = db_basic_info.db_type;
                 let db_no = db_basic_info.db_no;
                 //需要检查pe里是否有这个dbno，如果有，则需要改成使用upsert
-                if is_replace{
+                if is_replace {
                     check_and_clear_db(db_no).await.unwrap();
                 }
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
@@ -1090,10 +1249,10 @@ pub async fn sync_total_async_threaded(
                     let mut io = PdmsIO::new(&project, path.clone(), true);
 
                     //打开文件
-                    if io.open().is_ok(){
-                         //获取最新sesno
-                         sesno = io.get_latest_sesno().unwrap_or_default();
-                         if sesno > 0 {
+                    if io.open().is_ok() {
+                        //获取最新sesno
+                        sesno = io.get_latest_sesno().unwrap_or_default();
+                        if sesno > 0 {
                             // let sql = format!(
                             //     "
                             //     DELETE db_file_info:{0};
@@ -1104,15 +1263,15 @@ pub async fn sync_total_async_threaded(
                             // if sync_versioned {
                             //     continue;
                             // }
-                        }else{
+                        } else {
                             continue;
                         }
-                        if is_sync_history{
+                        if is_sync_history {
                             //同步历史纪录
                             io.sync_history().await.unwrap();
                             //同步完历史纪录就返回
                             continue;
-                        }else{
+                        } else {
                             //存储所有refno sesno map
                             io.store_all_refno_sesno_map().await.unwrap();
                         }
@@ -1120,14 +1279,11 @@ pub async fn sync_total_async_threaded(
                         ses_range_map = io.ses_range_map;
                     }
                 }
-              
+
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
-                let mut db_basic = parse_file_db_basic_data(
-                    &path,
-                    &file_name,
-                    project_name.clone().as_str(),
-                )
-                    .unwrap_or_default();
+                let mut db_basic =
+                    parse_file_db_basic_data(&path, &file_name, project_name.clone().as_str())
+                        .unwrap_or_default();
                 let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
 
                 let db_basic = Arc::new(db_basic);
@@ -1170,13 +1326,15 @@ pub async fn sync_total_async_threaded(
                         &chunk_refnos,
                         &ses_range_map_clone,
                         ignore_world_refno,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(PdmsDbData {
-                               total_attr_map,
-                               type_ele_map,
-                               db_no,
-                               ..
-                           }) => {
+                            total_attr_map,
+                            type_ele_map,
+                            db_no,
+                            ..
+                        }) => {
                             //类型暂时不多线程
                             let total_attr_map_arc = Arc::new(total_attr_map);
                             total_cnt += total_attr_map_arc.len();
@@ -1192,13 +1350,21 @@ pub async fn sync_total_async_threaded(
                                     &db_option_clone,
                                     sender_clone.clone(),
                                 )
-                                    .await
-                                    .expect("save pe to surreal failed");
+                                .await
+                                .expect("save pe to surreal failed");
                             }
                             if b_save_mysql {
                                 #[cfg(feature = "sql")]
-                                save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
-                                               &db_option_clone, db_no as i32, &sender_clone).await;
+                                save_pes_mysql(
+                                    &db_basic_clone,
+                                    &project_name,
+                                    &total_attr_map_arc,
+                                    &pool,
+                                    &db_option_clone,
+                                    db_no as i32,
+                                    &sender_clone,
+                                )
+                                .await;
                             }
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
@@ -1207,7 +1373,8 @@ pub async fn sync_total_async_threaded(
                                     continue;
                                 }
                                 //UDA 还是要单独存，不然数据很容易混乱
-                                for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
+                                for refnos in
+                                    &kv.value().iter().chunks(db_option_clone.att_chunk as _)
                                 {
                                     let mut json_vec = vec![];
                                     let mut uda_json_vec = vec![];
@@ -1215,9 +1382,11 @@ pub async fn sync_total_async_threaded(
                                         let att = total_attr_map_arc.get(refno).unwrap();
                                         //调试时，只解析这个单独的refno
                                         if is_debug {
-                                            if debug_refnos.contains(&att.get_refno_or_default().refno()) {
+                                            if debug_refnos
+                                                .contains(&att.get_refno_or_default().refno())
+                                            {
                                                 dbg!(att.value());
-                                            }else{
+                                            } else {
                                                 continue;
                                             }
                                         }
@@ -1235,14 +1404,22 @@ pub async fn sync_total_async_threaded(
                                     }
                                     if is_save_db {
                                         if !json_vec.is_empty() {
-                                            sender_clone.send(SenderJsonsData::AttJson((type_name.clone(), json_vec)))
-                                                        .expect("send attmap sql failed");
+                                            sender_clone
+                                                .send(SenderJsonsData::AttJson((
+                                                    type_name.clone(),
+                                                    json_vec,
+                                                )))
+                                                .expect("send attmap sql failed");
                                         }
 
                                         if !uda_json_vec.is_empty() {
                                             // dbg!(&uda_json_vec);
-                                            sender_clone.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec)))
-                                                        .expect("send attmap sql failed");
+                                            sender_clone
+                                                .send(SenderJsonsData::AttJson((
+                                                    "ATT_UDA".to_string(),
+                                                    uda_json_vec,
+                                                )))
+                                                .expect("send attmap sql failed");
                                         }
                                     }
                                 }
@@ -1254,7 +1431,11 @@ pub async fn sync_total_async_threaded(
                     }
                 }
 
-                println!("解析任务完成, 耗时: {} s, 总数量: {}", time.elapsed().as_secs_f32(), total_cnt);
+                println!(
+                    "解析任务完成, 耗时: {} s, 总数量: {}",
+                    time.elapsed().as_secs_f32(),
+                    total_cnt
+                );
             }
             //单个文件多线程
             // if !handles.is_empty() {
@@ -1273,7 +1454,9 @@ pub async fn sync_total_async_threaded(
         // if !db_info_sql.is_empty() {
         //     SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         // }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     drop(sender);
     // insert_handles.push(parse_handle);
     while let Some(result) = insert_handles.next().await {

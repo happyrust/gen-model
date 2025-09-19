@@ -1,6 +1,7 @@
 use crate::api::element::gen_pdms_element_insert_sql;
 use crate::consts::PDMS_ELEMENTS_TABLE;
-use crate::versioned_db::database::{SenderJsonsData};
+use crate::versioned_db::database::SenderJsonsData;
+use aios_core::SUL_DB;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::db::*;
 use aios_core::options::DbOption;
@@ -8,13 +9,14 @@ use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::db_tool::db1_hash;
-use aios_core::SUL_DB;
 use config::File;
 use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use itertools::Itertools;
 use log::{error, info};
+use petgraph::Directed;
+use petgraph::Undirected;
 use petgraph::algo::all_simple_paths;
 use petgraph::graph::Graph;
 use petgraph::graph::NodeIndex;
@@ -22,20 +24,18 @@ use petgraph::graphmap::GraphMap;
 use petgraph::graphmap::UnGraphMap;
 use petgraph::prelude::DiGraphMap;
 use petgraph::visit::IntoEdgesDirected;
-use petgraph::Directed;
-use petgraph::Undirected;
 use rayon::prelude::*;
 #[cfg(feature = "sql")]
 use sqlx::Executor;
 #[cfg(feature = "sql")]
 use sqlx::{MySql, Pool};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use std::collections::BTreeMap;
 
 /// 保存element数据到版本管理
 pub async fn save_pes(
@@ -48,14 +48,14 @@ pub async fn save_pes(
     output: flume::Sender<SenderJsonsData>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    
+
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
     let mut chunk_index = 0;
     let mut sql = String::new();
-    
+
     // 用于收集dbnum_info_table的数据
     let mut dbnum_info_map: BTreeMap<u64, (i32, i32, i32, u64)> = BTreeMap::new(); // ref_0 -> (dbnum, count, max_sesno, max_ref1)
-    
+
     for chunk in keys.chunks(option.pe_chunk as _) {
         let mut insert_jsons = Vec::new();
         for &refno in chunk {
@@ -63,18 +63,19 @@ pub async fn save_pes(
             let pe_data = att_map.pe(db_num);
             let json = pe_data.gen_sur_json(Some(refno.to_pe_key()));
             insert_jsons.push(json);
-            
+
             // 从refno中提取ref_0和ref_1
             // RefU64内部是u64，在pe:ref_0_ref_1格式中，ref_0是高32位，ref_1是低32位
             let refno_u64 = refno.0;
             let ref_0 = (refno_u64 >> 32) as u64;
             let ref_1 = (refno_u64 & 0xFFFFFFFF) as u64;
-            
+
             // 获取sesno，从pe_data中获取
             let sesno = pe_data.sesno as i32;
-            
+
             // 更新dbnum_info_map
-            dbnum_info_map.entry(ref_0)
+            dbnum_info_map
+                .entry(ref_0)
                 .and_modify(|(_, count, max_sesno, max_ref1)| {
                     *count += 1;
                     *max_sesno = (*max_sesno).max(sesno);
@@ -82,11 +83,14 @@ pub async fn save_pes(
                 })
                 .or_insert((db_num, 1, sesno, ref_1));
         }
-        
-        output.send_async(SenderJsonsData::PEJson(insert_jsons)).await.expect("send pes error");
+
+        output
+            .send_async(SenderJsonsData::PEJson(insert_jsons))
+            .await
+            .expect("send pes error");
         chunk_index += 1;
     }
-    
+
     // 生成dbnum_info_table的更新数据
     if !dbnum_info_map.is_empty() {
         let mut dbnum_info_updates = Vec::new();
@@ -98,13 +102,16 @@ pub async fn save_pes(
             );
             dbnum_info_updates.push(sql);
         }
-        
+
         // 分批发送dbnum_info更新
         for chunk in dbnum_info_updates.chunks(option.pe_chunk as _) {
-            output.send_async(SenderJsonsData::DbnumInfoUpdate(chunk.to_vec())).await.expect("send dbnum_info error");
+            output
+                .send_async(SenderJsonsData::DbnumInfoUpdate(chunk.to_vec()))
+                .await
+                .expect("send dbnum_info error");
         }
     }
-    
+
     Ok(())
 }
 
@@ -145,7 +152,8 @@ pub async fn save_pes_mysql(
             }
         }
         let mut sql = format!(
-            "INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES {insert_sql}", );
+            "INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES {insert_sql}",
+        );
         if option.replace_dbs {
             sql = sql.replace("INSERT IGNORE", "REPLACE");
         }
@@ -164,7 +172,6 @@ pub async fn save_pes_mysql(
         }
     }
 }
-
 
 //使用insert relations 去保存图数据关联关系
 pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<SenderJsonsData>) {
@@ -186,10 +193,18 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Sende
             .collect::<Vec<String>>();
         all_relate_jsons.extend_from_slice(&relate_json);
         if all_relate_jsons.len() >= 500 {
-            output.send(SenderJsonsData::PERelateJson(std::mem::take(&mut all_relate_jsons))).expect("send pe_relates error");
+            output
+                .send(SenderJsonsData::PERelateJson(std::mem::take(
+                    &mut all_relate_jsons,
+                )))
+                .expect("send pe_relates error");
         }
     }
     if !all_relate_jsons.is_empty() {
-        output.send(SenderJsonsData::PERelateJson(std::mem::take(&mut all_relate_jsons))).expect("send pe_relates error");
+        output
+            .send(SenderJsonsData::PERelateJson(std::mem::take(
+                &mut all_relate_jsons,
+            )))
+            .expect("send pe_relates error");
     }
 }

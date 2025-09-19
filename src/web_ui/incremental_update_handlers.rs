@@ -1,11 +1,11 @@
 use axum::{
-    extract::{Query, State, Path},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::web_ui::AppState;
@@ -104,7 +104,7 @@ pub async fn get_all_incremental_status(
                 },
             ],
             increment_size: 1024 * 1024 * 8, // 8MB total
-            estimated_sync_time: 120, // 2 minutes
+            estimated_sync_time: 120,        // 2 minutes
         },
         IncrementalUpdateInfo {
             site_id: "site_002".to_string(),
@@ -126,7 +126,7 @@ pub async fn get_all_incremental_status(
             synced_items: 12,
             changed_files: vec![],
             increment_size: 1024 * 1024 * 15, // 15MB
-            estimated_sync_time: 180, // 3 minutes
+            estimated_sync_time: 180,         // 3 minutes
         },
     ];
 

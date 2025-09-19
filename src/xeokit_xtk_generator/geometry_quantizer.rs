@@ -2,7 +2,7 @@
 
 use super::*;
 use anyhow::Result;
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 
 /// K-d 树节点，用于空间分区
@@ -61,9 +61,12 @@ impl AABB {
     }
 
     pub fn contains(&self, point: Vec3) -> bool {
-        point.x >= self.min.x && point.x <= self.max.x &&
-        point.y >= self.min.y && point.y <= self.max.y &&
-        point.z >= self.min.z && point.z <= self.max.z
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
     }
 }
 
@@ -97,7 +100,7 @@ impl GeometryQuantizer {
 
         // 使用 K-d 树进行空间分区
         let regions = self.partition_positions(positions)?;
-        
+
         let mut quantized_positions = Vec::new();
         let mut all_decode_matrices = Vec::new();
 
@@ -128,15 +131,20 @@ impl GeometryQuantizer {
     fn partition_positions(&self, positions: &[Vec3]) -> Result<Vec<QuantizationRegion>> {
         let indices: Vec<usize> = (0..positions.len()).collect();
         let root = self.build_kd_tree(positions, indices, 0)?;
-        
+
         let mut regions = Vec::new();
         self.collect_leaf_regions(&root, positions, &mut regions);
-        
+
         Ok(regions)
     }
 
     /// 构建 K-d 树
-    fn build_kd_tree(&self, positions: &[Vec3], indices: Vec<usize>, depth: usize) -> Result<KDNode> {
+    fn build_kd_tree(
+        &self,
+        positions: &[Vec3],
+        indices: Vec<usize>,
+        depth: usize,
+    ) -> Result<KDNode> {
         if indices.len() <= self.max_region_size {
             // 叶子节点
             return Ok(KDNode {
@@ -150,7 +158,7 @@ impl GeometryQuantizer {
 
         // 选择分割轴（循环使用 x, y, z）
         let axis = depth % 3;
-        
+
         // 计算分割值（中位数）
         let mut sorted_indices = indices.clone();
         sorted_indices.sort_by(|&a, &b| {
@@ -166,7 +174,9 @@ impl GeometryQuantizer {
                 1 => pos_b.y,
                 _ => pos_b.z,
             };
-            val_a.partial_cmp(&val_b).unwrap_or(std::cmp::Ordering::Equal)
+            val_a
+                .partial_cmp(&val_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let median_index = sorted_indices.len() / 2;
@@ -181,7 +191,7 @@ impl GeometryQuantizer {
 
         // 分割点集
         let (left_indices, right_indices) = sorted_indices.split_at(median_index);
-        
+
         // 递归构建子树
         let left_child = self.build_kd_tree(positions, left_indices.to_vec(), depth + 1)?;
         let right_child = self.build_kd_tree(positions, right_indices.to_vec(), depth + 1)?;
@@ -196,16 +206,20 @@ impl GeometryQuantizer {
     }
 
     /// 收集叶子节点区域
-    fn collect_leaf_regions(&self, node: &KDNode, positions: &[Vec3], regions: &mut Vec<QuantizationRegion>) {
+    fn collect_leaf_regions(
+        &self,
+        node: &KDNode,
+        positions: &[Vec3],
+        regions: &mut Vec<QuantizationRegion>,
+    ) {
         if node.left.is_none() && node.right.is_none() {
             // 叶子节点
             if !node.points.is_empty() {
-                let region_positions: Vec<Vec3> = node.points.iter()
-                    .map(|&i| positions[i])
-                    .collect();
-                
+                let region_positions: Vec<Vec3> =
+                    node.points.iter().map(|&i| positions[i]).collect();
+
                 let bounds = AABB::from_points(&region_positions);
-                
+
                 regions.push(QuantizationRegion {
                     bounds,
                     point_indices: node.points.clone(),
@@ -229,7 +243,7 @@ impl GeometryQuantizer {
         let size = bounds.size();
         let max_quantized = (1u32 << self.quantization_bits) - 1;
         let scale = size / max_quantized as f32;
-        
+
         Mat4::from_cols(
             glam::Vec4::new(scale.x, 0.0, 0.0, 0.0),
             glam::Vec4::new(0.0, scale.y, 0.0, 0.0),
@@ -243,7 +257,7 @@ impl GeometryQuantizer {
         let size = bounds.size();
         let normalized = (position - bounds.min) / size;
         let max_value = (1u32 << self.quantization_bits) - 1;
-        
+
         [
             (normalized.x.clamp(0.0, 1.0) * max_value as f32) as u16,
             (normalized.y.clamp(0.0, 1.0) * max_value as f32) as u16,
@@ -259,7 +273,7 @@ impl GeometryQuantizer {
 
         let decode_matrix = self.decode_matrices[region_index];
         let max_value = (1u32 << self.quantization_bits) - 1;
-        
+
         let normalized = Vec3::new(
             quantized[0] as f32 / max_value as f32,
             quantized[1] as f32 / max_value as f32,
@@ -267,13 +281,15 @@ impl GeometryQuantizer {
         );
 
         // 应用解码矩阵
-        let homogeneous = decode_matrix * glam::Vec4::new(normalized.x, normalized.y, normalized.z, 1.0);
+        let homogeneous =
+            decode_matrix * glam::Vec4::new(normalized.x, normalized.y, normalized.z, 1.0);
         Vec3::new(homogeneous.x, homogeneous.y, homogeneous.z)
     }
 
     /// 获取解码矩阵数据
     pub fn get_decode_matrices_data(&self) -> Vec<f32> {
-        self.decode_matrices.iter()
+        self.decode_matrices
+            .iter()
             .flat_map(|matrix| matrix.to_cols_array())
             .collect()
     }
@@ -311,18 +327,25 @@ impl GeometryProcessor {
     }
 
     /// 转换 PDMS 几何体
-    pub fn convert_pdms_geometry(&mut self, geo_param: &crate::fast_model::GeoParam) -> Result<ConvertedGeometry> {
+    pub fn convert_pdms_geometry(
+        &mut self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<ConvertedGeometry> {
         // 根据几何类型生成基础几何体
         let base_geometry = self.generate_base_geometry(geo_param)?;
-        
+
         // 量化位置
-        let quantization_result = self.quantizer.quantize_positions(&base_geometry.positions)?;
-        
+        let quantization_result = self
+            .quantizer
+            .quantize_positions(&base_geometry.positions)?;
+
         // 编码法向量
         let encoded_normals = self.normal_encoder.encode_normals(&base_geometry.normals)?;
-        
+
         // 生成边缘索引
-        let edge_indices = self.edge_generator.generate_edge_indices(&base_geometry.indices)?;
+        let edge_indices = self
+            .edge_generator
+            .generate_edge_indices(&base_geometry.indices)?;
 
         Ok(ConvertedGeometry {
             quantized_positions: quantization_result.quantized_positions,
@@ -335,7 +358,10 @@ impl GeometryProcessor {
     }
 
     /// 生成基础几何体
-    fn generate_base_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_base_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 
         // TODO: Check actual PdmsGeoParam variants and implement proper matching
@@ -362,7 +388,10 @@ impl GeometryProcessor {
     }
 
     /// 生成立方体几何体
-    fn generate_box_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_box_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         // TODO: Extract actual parameters from PdmsGeoParam::PrimBox variant
         // For now, use default values
         let width = 1.0;
@@ -375,15 +404,15 @@ impl GeometryProcessor {
 
         let positions = vec![
             // 前面
-            Vec3::new(-half_w, -half_h,  half_d),
-            Vec3::new( half_w, -half_h,  half_d),
-            Vec3::new( half_w,  half_h,  half_d),
-            Vec3::new(-half_w,  half_h,  half_d),
+            Vec3::new(-half_w, -half_h, half_d),
+            Vec3::new(half_w, -half_h, half_d),
+            Vec3::new(half_w, half_h, half_d),
+            Vec3::new(-half_w, half_h, half_d),
             // 后面
             Vec3::new(-half_w, -half_h, -half_d),
-            Vec3::new(-half_w,  half_h, -half_d),
-            Vec3::new( half_w,  half_h, -half_d),
-            Vec3::new( half_w, -half_h, -half_d),
+            Vec3::new(-half_w, half_h, -half_d),
+            Vec3::new(half_w, half_h, -half_d),
+            Vec3::new(half_w, -half_h, -half_d),
             // 其他面的顶点...
         ];
 
@@ -403,8 +432,7 @@ impl GeometryProcessor {
 
         let indices = vec![
             // 前面
-            0, 1, 2, 0, 2, 3,
-            // 后面
+            0, 1, 2, 0, 2, 3, // 后面
             4, 5, 6, 4, 6, 7,
             // 其他面的索引...
         ];
@@ -417,7 +445,10 @@ impl GeometryProcessor {
     }
 
     /// 生成圆柱体几何体
-    fn generate_cylinder_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_cylinder_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         // TODO: Extract actual parameters from PdmsGeoParam variant
         let radius = 0.5;
         let height = 1.0;
@@ -447,7 +478,7 @@ impl GeometryProcessor {
         // 生成侧面三角形
         for i in 0..segments {
             let base = i * 2;
-            
+
             // 第一个三角形
             indices.extend_from_slice(&[base, base + 1, base + 2]);
             // 第二个三角形
@@ -464,7 +495,7 @@ impl GeometryProcessor {
     /// 生成占位符几何体
     pub fn create_placeholder_geometry(&self) -> Result<ConvertedGeometry> {
         let base_geometry = self.generate_placeholder_geometry()?;
-        
+
         let quantization_result = QuantizationResult {
             quantized_positions: vec![0, 0, 0, 65535, 65535, 65535],
             decode_matrices: vec![Mat4::IDENTITY],
@@ -504,7 +535,10 @@ impl GeometryProcessor {
     }
 
     /// 生成截锥体几何体 (PrimSCylinder)
-    fn generate_truncated_cone_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_truncated_cone_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         // TODO: Extract actual parameters from PdmsGeoParam variant
         let radius1 = 1.0;
         let radius2 = 0.5;
@@ -585,7 +619,10 @@ impl GeometryProcessor {
     }
 
     /// 生成球体几何体 (PrimSphere)
-    fn generate_sphere_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_sphere_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         // TODO: Extract actual parameters from PdmsGeoParam variant
         let radius = 1.0;
         let segments = 32u32;
@@ -643,7 +680,10 @@ impl GeometryProcessor {
     }
 
     /// 生成金字塔几何体 (PrimPyramid)
-    fn generate_pyramid_geometry(&self, geo_param: &crate::fast_model::GeoParam) -> Result<BaseGeometry> {
+    fn generate_pyramid_geometry(
+        &self,
+        geo_param: &crate::fast_model::GeoParam,
+    ) -> Result<BaseGeometry> {
         // TODO: Extract actual parameters from PdmsGeoParam variant
         let base_width = 2.0;
         let base_height = 2.0;
@@ -660,9 +700,9 @@ impl GeometryProcessor {
         // 底面四个顶点
         positions.extend_from_slice(&[
             Vec3::new(-half_width, -half_height, -half_depth), // 0
-            Vec3::new( half_width, -half_height, -half_depth), // 1
-            Vec3::new( half_width, -half_height,  half_depth), // 2
-            Vec3::new(-half_width, -half_height,  half_depth), // 3
+            Vec3::new(half_width, -half_height, -half_depth),  // 1
+            Vec3::new(half_width, -half_height, half_depth),   // 2
+            Vec3::new(-half_width, -half_height, half_depth),  // 3
         ]);
 
         // 顶点
@@ -680,27 +720,19 @@ impl GeometryProcessor {
         let apex = Vec3::new(0.0, half_height, 0.0);
 
         // 前面法向量
-        let front_normal = self.calculate_triangle_normal(
-            positions[1], positions[0], apex
-        );
+        let front_normal = self.calculate_triangle_normal(positions[1], positions[0], apex);
         normals.push(front_normal);
 
         // 右面法向量
-        let right_normal = self.calculate_triangle_normal(
-            positions[2], positions[1], apex
-        );
+        let right_normal = self.calculate_triangle_normal(positions[2], positions[1], apex);
         normals.push(right_normal);
 
         // 后面法向量
-        let back_normal = self.calculate_triangle_normal(
-            positions[3], positions[2], apex
-        );
+        let back_normal = self.calculate_triangle_normal(positions[3], positions[2], apex);
         normals.push(back_normal);
 
         // 左面法向量
-        let left_normal = self.calculate_triangle_normal(
-            positions[0], positions[3], apex
-        );
+        let left_normal = self.calculate_triangle_normal(positions[0], positions[3], apex);
         normals.push(left_normal);
 
         // 底面三角形
@@ -709,12 +741,9 @@ impl GeometryProcessor {
         // 侧面三角形
         indices.extend_from_slice(&[
             // 前面
-            1, 4, 0,
-            // 右面
-            2, 4, 1,
-            // 后面
-            3, 4, 2,
-            // 左面
+            1, 4, 0, // 右面
+            2, 4, 1, // 后面
+            3, 4, 2, // 左面
             0, 4, 3,
         ]);
 
@@ -1258,11 +1287,16 @@ impl GeometryProcessor {
     */
 
     /// 解析自定义网格数据
-    fn parse_custom_mesh_data(&self, vertices_str: &str, indices_str: &str) -> Result<BaseGeometry> {
+    fn parse_custom_mesh_data(
+        &self,
+        vertices_str: &str,
+        indices_str: &str,
+    ) -> Result<BaseGeometry> {
         // 解析顶点数据 (格式: "x1,y1,z1;x2,y2,z2;...")
         let mut positions = Vec::new();
         for vertex_str in vertices_str.split(';') {
-            let coords: Vec<f32> = vertex_str.split(',')
+            let coords: Vec<f32> = vertex_str
+                .split(',')
                 .filter_map(|s| s.trim().parse().ok())
                 .collect();
 
@@ -1274,7 +1308,8 @@ impl GeometryProcessor {
         // 解析索引数据 (格式: "i1,i2,i3;i4,i5,i6;...")
         let mut indices = Vec::new();
         for triangle_str in indices_str.split(';') {
-            let triangle_indices: Vec<u32> = triangle_str.split(',')
+            let triangle_indices: Vec<u32> = triangle_str
+                .split(',')
                 .filter_map(|s| s.trim().parse().ok())
                 .collect();
 
@@ -1310,9 +1345,8 @@ impl GeometryProcessor {
                 let i2 = triangle[2] as usize;
 
                 if i0 < positions.len() && i1 < positions.len() && i2 < positions.len() {
-                    let face_normal = self.calculate_triangle_normal(
-                        positions[i0], positions[i1], positions[i2]
-                    );
+                    let face_normal =
+                        self.calculate_triangle_normal(positions[i0], positions[i1], positions[i2]);
 
                     normals[i0] += face_normal;
                     normals[i1] += face_normal;
@@ -1343,7 +1377,8 @@ impl GeometryProcessor {
         geometry: &ConvertedGeometry,
         material: &XKTMaterial,
     ) -> Result<usize> {
-        self.primitive_cache.get_or_create_primitive(geometry, material)
+        self.primitive_cache
+            .get_or_create_primitive(geometry, material)
     }
 }
 

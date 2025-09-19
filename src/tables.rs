@@ -1,8 +1,8 @@
 use crate::consts::*;
+use aios_core::AttrVal;
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::helper::*;
 use aios_core::helper::*;
-use aios_core::AttrVal;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 

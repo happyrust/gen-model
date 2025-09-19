@@ -3,10 +3,10 @@ use aios_core::options::DbOption;
 use aios_core::room::algorithm::*;
 // Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{init_demo_test_surreal, init_test_surreal, RefnoEnum};
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
-use bevy_transform::components::Transform;
+use aios_core::{RefnoEnum, init_demo_test_surreal, init_test_surreal};
 use bevy_transform::TransformPoint;
+use bevy_transform::components::Transform;
 use dashmap::DashSet;
 use glam::{Mat4, Vec3};
 use itertools::Itertools;
@@ -16,10 +16,10 @@ use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
 use parry3d::shape::{TriMesh, TriMeshFlags};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use regex::Regex;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
@@ -80,7 +80,7 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 }
 
 /// 构建房间关系
-/// 
+///
 /// 该函数用于构建房间之间的空间关系,包括:
 /// 1. 根据房间关键词匹配房间和面板的对应关系
 /// 2. 计算每个面板内包含的构件
@@ -118,12 +118,12 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
 }
 
 /// 保存房间关联关系到数据库
-/// 
+///
 /// # 参数
 /// * `panel_refno` - 面板的引用号
 /// * `within_refnos` - 面板内包含的构件引用号集合
 /// * `room_num` - 房间号
-/// 
+///
 /// # 返回值
 /// * `anyhow::Result<()>` - 成功返回Ok(()), 失败返回错误信息
 async fn save_room_relate(
@@ -148,7 +148,6 @@ async fn save_room_relate(
     Ok(())
 }
 
-
 /// 构建房间和面板之间的关联关系
 ///
 /// # 参数
@@ -165,14 +164,13 @@ async fn save_room_relate(
 /// 通过 build_room_panels_relate_common 函数构建房间和面板的关联关系
 async fn build_room_panels_relate(
     room_key_word: &Vec<String>,
-) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>>{
-    #[cfg(feature="project_hd")]
+) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>> {
+    #[cfg(feature = "project_hd")]
     return build_room_panels_relate_common(room_key_word, match_room_name_hd).await;
 
-    #[cfg(feature="project_hh")]
+    #[cfg(feature = "project_hh")]
     return build_room_panels_relate_common(room_key_word, match_room_name_hh).await;
 }
-
 
 /// hd 正则匹配是否满足房间命名规则
 pub fn match_room_name_hd(room_name: &str) -> bool {
@@ -185,17 +183,16 @@ pub fn match_room_name_hh(room_name: &str) -> bool {
     true
 }
 
-
 /// 构建房间和面板之间的关联关系
-/// 
+///
 /// # 参数
 /// * `room_key_word` - 用于匹配房间的关键词列表
 /// * `match_room_fn` - 用于匹配房间号的函数
-/// 
+///
 /// # 返回值
 /// 返回一个元组列表,每个元组包含:
 /// * 房间的引用号(RefnoEnum)
-/// * 房间号(String) 
+/// * 房间号(String)
 /// * 该房间关联的面板引用号列表(Vec<RefnoEnum>)
 async fn build_room_panels_relate_common<F>(
     room_key_word: &Vec<String>,
@@ -210,7 +207,7 @@ where
         .map(|x| format!("'{}' in NAME", x))
         .join(" or ");
     //属于room的panel
-    #[cfg(feature="project_hd")]
+    #[cfg(feature = "project_hd")]
     let sql = format!(
         r#"
         select value [  id, 
@@ -219,7 +216,7 @@ where
                     ] from FRMW where {filter}
     "#
     );
-    #[cfg(feature="project_hh")]
+    #[cfg(feature = "project_hh")]
     let sql = format!(
         r#"
         select value [  id, 
@@ -288,7 +285,8 @@ pub async fn cal_room_refnos(
                 if let Ok(ids) = spatial_index.query_intersect(&geom_inst.world_aabb) {
                     for id in ids {
                         if let Ok(Some(bbox)) = spatial_index.get_aabb(id) {
-                            contains_query.push(RStarBoundingBox::from_aabb(bbox, RefnoEnum::from(id)));
+                            contains_query
+                                .push(RStarBoundingBox::from_aabb(bbox, RefnoEnum::from(id)));
                         }
                     }
                 }
@@ -408,7 +406,6 @@ pub async fn cal_room_refnos(
     Ok(within_refnos)
 }
 
-
 #[tokio::test]
 async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
     // Initialize test database
@@ -462,7 +459,7 @@ async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
     // Test build_room_panels_relate_common
     let room_key_words = vec!["AE-AC01-R".to_string()];
     let match_room_fn = |room_num: &str| room_num.contains("AE");
-    
+
     let result = build_room_panels_relate_common(&room_key_words, match_room_fn).await?;
 
     // Verify results

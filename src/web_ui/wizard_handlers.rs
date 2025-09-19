@@ -1,20 +1,19 @@
 /// 数据解析向导处理器
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::Json,
 };
+use chrono::{Local, TimeZone};
+use parse_pdms_db::parse::parse_db_basic_info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, Instant};
-use parse_pdms_db::parse::parse_db_basic_info;
-use chrono::{TimeZone, Local};
+use std::time::{Instant, SystemTime};
 
-use crate::web_ui::models::*;
 use crate::web_ui::AppState;
+use crate::web_ui::models::*;
 use rusqlite as _;
 
 /// 扫描指定目录中的项目
@@ -28,14 +27,27 @@ pub async fn scan_directory(
     let mut scanned_directories = 0;
 
     let root_path = PathBuf::from(&request.directory_path);
-    
+
     if !root_path.exists() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // 扫描目录
-    match scan_projects_recursive(&root_path, &mut projects, &mut errors, &mut scanned_directories, 0, request.max_depth.unwrap_or(3)) {
-        Ok(_) => {},
+    let max_depth = if request.recursive {
+        request.max_depth.unwrap_or(4).max(1)
+    } else {
+        1
+    };
+
+    match scan_projects_recursive(
+        &root_path,
+        &mut projects,
+        &mut errors,
+        &mut scanned_directories,
+        0,
+        max_depth,
+    ) {
+        Ok(_) => {}
         Err(e) => {
             errors.push(format!("扫描目录失败: {}", e));
         }
@@ -80,9 +92,10 @@ fn scan_projects_recursive(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_dir() {
-            let dir_name = path.file_name()
+            let dir_name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Unknown");
 
@@ -94,7 +107,14 @@ fn scan_projects_recursive(
                 }
             } else {
                 // 递归扫描子目录
-                if let Err(e) = scan_projects_recursive(&path, projects, errors, scanned_count, current_depth + 1, max_depth) {
+                if let Err(e) = scan_projects_recursive(
+                    &path,
+                    projects,
+                    errors,
+                    scanned_count,
+                    current_depth + 1,
+                    max_depth,
+                ) {
                     errors.push(format!("扫描子目录 {} 失败: {}", path.display(), e));
                 }
             }
@@ -123,7 +143,10 @@ fn is_project_directory(dir_path: &Path) -> bool {
 }
 
 /// 创建项目信息
-fn create_project_info(project_path: &Path, project_name: &str) -> Result<ProjectInfo, Box<dyn std::error::Error>> {
+fn create_project_info(
+    project_path: &Path,
+    project_name: &str,
+) -> Result<ProjectInfo, Box<dyn std::error::Error>> {
     let mut db_folder_count = 0;
     let mut total_size = 0;
     let mut last_modified = SystemTime::UNIX_EPOCH;
@@ -162,7 +185,11 @@ fn create_project_info(project_path: &Path, project_name: &str) -> Result<Projec
         size_bytes: total_size,
         last_modified,
         available: db_folder_count > 0,
-        description: Some(format!("位置: {} | {} 个数据库文件夹", get_relative_path_display(project_path), db_folder_count)),
+        description: Some(format!(
+            "位置: {} | {} 个数据库文件夹",
+            get_relative_path_display(project_path),
+            db_folder_count
+        )),
     })
 }
 
@@ -176,7 +203,7 @@ fn get_relative_path_display(path: &Path) -> String {
         path.to_string_lossy().to_string()
     } else {
         // 只显示最后3级目录，前面用...表示
-        let last_three: Vec<String> = components[len-3..]
+        let last_three: Vec<String> = components[len - 3..]
             .iter()
             .map(|c| c.as_os_str().to_string_lossy().to_string())
             .collect();
@@ -207,8 +234,7 @@ pub async fn list_projects(
     State(_state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<ProjectInfo>>, StatusCode> {
-    let directory = params.get("directory")
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let directory = params.get("directory").ok_or(StatusCode::BAD_REQUEST)?;
 
     let scan_request = DirectoryScanRequest {
         directory_path: directory.clone(),
@@ -225,16 +251,16 @@ pub async fn list_projects(
 
 /// 检查任务名称是否已存在
 fn check_task_name_exists(task_name: &str) -> Result<bool, String> {
-    let conn = open_deployment_sites_sqlite()
-        .map_err(|e| format!("无法打开数据库: {}", e))?;
-    
-    let mut stmt = conn.prepare(
-        "SELECT COUNT(*) FROM deployment_tasks WHERE name = ?1"
-    ).map_err(|e| format!("准备查询语句失败: {}", e))?;
-    
-    let count: i64 = stmt.query_row([task_name], |row| row.get(0))
+    let conn = open_deployment_sites_sqlite().map_err(|e| format!("无法打开数据库: {}", e))?;
+
+    let mut stmt = conn
+        .prepare("SELECT COUNT(*) FROM deployment_tasks WHERE name = ?1")
+        .map_err(|e| format!("准备查询语句失败: {}", e))?;
+
+    let count: i64 = stmt
+        .query_row([task_name], |row| row.get(0))
         .map_err(|e| format!("查询任务名称失败: {}", e))?;
-    
+
     Ok(count > 0)
 }
 
@@ -251,10 +277,10 @@ pub async fn create_wizard_task(
                 "error": "任务创建失败",
                 "details": "未选择任何项目，请至少选择一个项目",
                 "error_type": "validation_error"
-            }))
+            })),
         ));
     }
-    
+
     if request.task_name.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -262,10 +288,10 @@ pub async fn create_wizard_task(
                 "error": "任务创建失败",
                 "details": "任务名称不能为空",
                 "error_type": "validation_error"
-            }))
+            })),
         ));
     }
-    
+
     // 检查任务名称是否已存在
     match check_task_name_exists(&request.task_name) {
         Ok(exists) => {
@@ -281,7 +307,7 @@ pub async fn create_wizard_task(
                             format!("{} (2)", request.task_name),
                             format!("{} - 副本", request.task_name)
                         ]
-                    }))
+                    })),
                 ));
             }
         }
@@ -290,7 +316,7 @@ pub async fn create_wizard_task(
             eprintln!("警告: 无法检查任务名称重复性: {}", e);
         }
     }
-    
+
     let mut task_manager = state.task_manager.lock().await;
 
     // 决定任务类型：ParseOnly -> DataParsingWizard；FullGeneration -> FullGeneration
@@ -321,23 +347,23 @@ pub async fn create_wizard_task(
         LogLevel::Info,
         format!(
             "创建数据解析向导任务（模式：{}），包含 {} 个项目",
-            match task_type { TaskType::FullGeneration => "解析+建模", _ => "仅解析" },
+            match task_type {
+                TaskType::FullGeneration => "解析+建模",
+                _ => "仅解析",
+            },
             request.wizard_config.selected_projects.len()
         ),
     );
 
     for project in &request.wizard_config.selected_projects {
-        task.add_log(
-            LogLevel::Info,
-            format!("选中项目: {}", project),
-        );
+        task.add_log(LogLevel::Info, format!("选中项目: {}", project));
     }
 
     let task_id = task.id.clone();
-    
+
     // 先尝试保存到SQLite，如果失败则返回错误
     println!("正在保存任务到SQLite，任务ID: {}", task_id);
-    
+
     // 保存部署站点配置到SQLite
     if let Err(e) = save_deployment_site_config(&request.wizard_config, &task_id) {
         eprintln!("❌ 保存部署站点配置失败: {}", e);
@@ -353,7 +379,7 @@ pub async fn create_wizard_task(
     // 保存任务信息到SQLite
     if let Err(e) = save_task_to_sqlite(&task, Some(&request.wizard_config)) {
         eprintln!("❌ 保存任务信息到SQLite失败: {}", e);
-        
+
         // 返回详细的错误信息
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -367,14 +393,16 @@ pub async fn create_wizard_task(
                     "确保deployment_sites.sqlite文件可写",
                     "检查磁盘空间是否充足"
                 ]
-            }))
+            })),
         ));
     } else {
         println!("✅ 任务信息保存成功");
     }
-    
+
     // 成功保存后，才将任务添加到内存中
-    task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    task_manager
+        .active_tasks
+        .insert(task_id.clone(), task.clone());
 
     // 若配置了 SQLite 项目库，则为选中的项目预置卡片记录，便于向导后直接出现在首页
     if let Some((conn, table)) = open_sqlite_projects_table() {
@@ -401,7 +429,9 @@ fn open_sqlite_projects_table() -> Option<(rusqlite::Connection, String)> {
     }
     let built = builder.build().ok()?;
     let db_path: String = built.get_string("project_config_sqlite_path").ok()?;
-    let table: String = built.get_string("project_config_table").unwrap_or_else(|_| "projects".to_string());
+    let table: String = built
+        .get_string("project_config_table")
+        .unwrap_or_else(|_| "projects".to_string());
 
     let conn = rusqlite::Connection::open(db_path).ok()?;
     let create_sql = format!(
@@ -429,38 +459,36 @@ fn open_sqlite_projects_table() -> Option<(rusqlite::Connection, String)> {
 pub async fn get_wizard_templates(
     State(_state): State<AppState>,
 ) -> Result<Json<Vec<TaskTemplate>>, StatusCode> {
-    let templates = vec![
-        TaskTemplate {
-            id: "data_parsing_wizard".to_string(),
-            name: "数据解析向导".to_string(),
-            description: "通过向导界面选择项目并批量解析PDMS数据".to_string(),
-            task_type: TaskType::DataParsingWizard,
-            default_config: DatabaseConfig {
-                name: "向导解析配置".to_string(),
-                manual_db_nums: vec![],
-                project_name: "AvevaMarineSample".to_string(),
-                project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
-                project_code: 1516,
-                mdb_name: "ALL".to_string(),
-                module: "DESI".to_string(),
-                db_type: "surrealdb".to_string(),
-                surreal_ns: 1516,
-                db_ip: "localhost".to_string(),
-                db_port: "8009".to_string(),
-                db_user: "root".to_string(),
-                db_password: "root".to_string(),
-                gen_model: true,
-                gen_mesh: false,
-                gen_spatial_tree: true,
-                apply_boolean_operation: true,
-                mesh_tol_ratio: 3.0,
-                room_keyword: "-RM".to_string(),
-                target_sesno: None,
-            },
-            allow_custom_config: true,
-            estimated_duration: Some(1800), // 30分钟
+    let templates = vec![TaskTemplate {
+        id: "data_parsing_wizard".to_string(),
+        name: "数据解析向导".to_string(),
+        description: "通过向导界面选择项目并批量解析PDMS数据".to_string(),
+        task_type: TaskType::DataParsingWizard,
+        default_config: DatabaseConfig {
+            name: "向导解析配置".to_string(),
+            manual_db_nums: vec![],
+            project_name: "AvevaMarineSample".to_string(),
+            project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
+            project_code: 1516,
+            mdb_name: "ALL".to_string(),
+            module: "DESI".to_string(),
+            db_type: "surrealdb".to_string(),
+            surreal_ns: 1516,
+            db_ip: "localhost".to_string(),
+            db_port: "8009".to_string(),
+            db_user: "root".to_string(),
+            db_password: "root".to_string(),
+            gen_model: true,
+            gen_mesh: false,
+            gen_spatial_tree: true,
+            apply_boolean_operation: true,
+            mesh_tol_ratio: 3.0,
+            room_keyword: "-RM".to_string(),
+            target_sesno: None,
         },
-    ];
+        allow_custom_config: true,
+        estimated_duration: Some(1800), // 30分钟
+    }];
 
     Ok(Json(templates))
 }
@@ -560,7 +588,11 @@ fn find_database_directories(project_path: &Path, errors: &mut Vec<String>) -> V
             }
         }
         Err(e) => {
-            errors.push(format!("无法读取项目目录 {}: {}", project_path.display(), e));
+            errors.push(format!(
+                "无法读取项目目录 {}: {}",
+                project_path.display(),
+                e
+            ));
         }
     }
 
@@ -621,12 +653,15 @@ fn parse_database_file(file_path: &Path, errors: &mut Vec<String>) -> Option<Dat
 }
 
 /// 保存部署站点配置到SQLite
-fn save_deployment_site_config(wizard_config: &DataParsingWizardConfig, task_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn save_deployment_site_config(
+    wizard_config: &DataParsingWizardConfig,
+    task_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
-    
+
     let now = chrono::Utc::now().to_rfc3339();
     let config_json = serde_json::to_string(wizard_config)?;
-    
+
     conn.execute(
         "INSERT OR REPLACE INTO deployment_sites (
             id, name, config_json, selected_projects, root_directory, 
@@ -644,27 +679,28 @@ fn save_deployment_site_config(wizard_config: &DataParsingWizardConfig, task_id:
             task_id
         ],
     )?;
-    
+
     Ok(())
 }
 
 /// 打开部署站点SQLite数据库
 fn open_deployment_sites_sqlite() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     use config as cfg;
-    
+
     // 尝试从配置文件读取SQLite路径，否则使用默认路径
     let db_path = if std::path::Path::new("DbOption.toml").exists() {
         let builder = cfg::Config::builder()
             .add_source(cfg::File::with_name("DbOption"))
             .build()?;
-        builder.get_string("deployment_sites_sqlite_path")
+        builder
+            .get_string("deployment_sites_sqlite_path")
             .unwrap_or_else(|_| "deployment_sites.sqlite".to_string())
     } else {
         "deployment_sites.sqlite".to_string()
     };
-    
+
     let conn = rusqlite::Connection::open(&db_path)?;
-    
+
     // 创建部署站点配置表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS deployment_sites (
@@ -682,7 +718,7 @@ fn open_deployment_sites_sqlite() -> Result<rusqlite::Connection, Box<dyn std::e
         )",
         rusqlite::params![],
     )?;
-    
+
     // 创建任务配置表（用于持久化任务信息）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS wizard_tasks (
@@ -703,27 +739,30 @@ fn open_deployment_sites_sqlite() -> Result<rusqlite::Connection, Box<dyn std::e
         )",
         rusqlite::params![],
     )?;
-    
+
     Ok(conn)
 }
 
 /// 保存任务信息到SQLite
-fn save_task_to_sqlite(task: &TaskInfo, wizard_config: Option<&DataParsingWizardConfig>) -> Result<(), Box<dyn std::error::Error>> {
+fn save_task_to_sqlite(
+    task: &TaskInfo,
+    wizard_config: Option<&DataParsingWizardConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
-    
+
     let config_json = serde_json::to_string(&task.config)?;
     let wizard_config_json = wizard_config.map(|wc| serde_json::to_string(wc).unwrap_or_default());
     let logs_json = serde_json::to_string(&task.logs)?;
     let priority_str = format!("{:?}", task.priority);
     let status_str = format!("{:?}", task.status);
     let task_type_str = format!("{:?}", task.task_type);
-    
+
     // 简化时间处理 - 使用当前时间
     let created_at = chrono::Utc::now().to_rfc3339();
-    
+
     let progress_percentage = task.progress.percentage as f64;
     let current_step = Some(task.progress.current_step.as_str());
-    
+
     conn.execute(
         "INSERT OR REPLACE INTO wizard_tasks (
             id, name, task_type, status, config_json, wizard_config_json, 
@@ -747,7 +786,7 @@ fn save_task_to_sqlite(task: &TaskInfo, wizard_config: Option<&DataParsingWizard
             logs_json
         ],
     )?;
-    
+
     Ok(())
 }
 
@@ -779,20 +818,28 @@ pub async fn browse_directory(
     // 如果没有指定路径，使用默认路径
     let path = request.path.unwrap_or_else(|| {
         #[cfg(target_os = "macos")]
-        { "/Volumes".to_string() }
+        {
+            "/Volumes".to_string()
+        }
         #[cfg(target_os = "windows")]
-        { "C:\\".to_string() }
+        {
+            "C:\\".to_string()
+        }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        { "/home".to_string() }
+        {
+            "/home".to_string()
+        }
     });
 
     let current_path = PathBuf::from(&path);
-    
+
     if !current_path.exists() {
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let parent_path = current_path.parent().map(|p| p.to_string_lossy().to_string());
+    let parent_path = current_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string());
     let mut entries = Vec::new();
 
     // 读取目录内容
@@ -801,7 +848,7 @@ pub async fn browse_directory(
             for entry in dir_entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                
+
                 // 跳过隐藏文件（以.开头的）
                 if name.starts_with('.') {
                     continue;
@@ -828,12 +875,10 @@ pub async fn browse_directory(
     }
 
     // 按类型和名称排序：目录优先，然后按字母顺序
-    entries.sort_by(|a, b| {
-        match (a.is_directory, b.is_directory) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     Ok(Json(BrowseDirectoryResponse {
@@ -846,13 +891,13 @@ pub async fn browse_directory(
 /// 从SQLite删除部署站点
 pub fn delete_deployment_site_from_sqlite(site_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
-    
+
     // 删除部署站点记录
     let sites_deleted = conn.execute(
         "DELETE FROM deployment_sites WHERE id = ?1",
         rusqlite::params![site_id],
     )?;
-    
+
     // 删除相关的任务记录
     // 站点ID格式为 "wizard_{task_id}"，需要提取任务ID部分
     let task_id = if site_id.starts_with("wizard_") {
@@ -860,12 +905,12 @@ pub fn delete_deployment_site_from_sqlite(site_id: &str) -> Result<(), Box<dyn s
     } else {
         site_id
     };
-    
+
     conn.execute(
         "DELETE FROM wizard_tasks WHERE id = ?1",
         rusqlite::params![task_id],
     )?;
-    
+
     if sites_deleted > 0 {
         Ok(())
     } else {
@@ -879,32 +924,28 @@ pub fn load_wizard_config_by_task_id(task_id: &str) -> Option<DataParsingWizardC
     let mut stmt = conn
         .prepare("SELECT wizard_config_json FROM wizard_tasks WHERE id = ?1")
         .ok()?;
-    let cfg_json: Option<String> = stmt
-        .query_row([task_id], |row| row.get(0))
-        .ok()
-        .flatten();
-    cfg_json
-        .and_then(|s| serde_json::from_str::<DataParsingWizardConfig>(&s).ok())
+    let cfg_json: Option<String> = stmt.query_row([task_id], |row| row.get(0)).ok().flatten();
+    cfg_json.and_then(|s| serde_json::from_str::<DataParsingWizardConfig>(&s).ok())
 }
 
 /// 从SQLite恢复任务信息
 pub fn restore_tasks_from_sqlite() -> Vec<TaskInfo> {
     let mut tasks = Vec::new();
-    
+
     let conn = match open_deployment_sites_sqlite() {
         Ok(c) => c,
         Err(_) => return tasks,
     };
-    
+
     let mut stmt = match conn.prepare(
         "SELECT id, name, task_type, status, config_json, wizard_config_json, 
          priority, created_at, started_at, completed_at, progress_percentage, 
-         current_step, logs_json FROM wizard_tasks WHERE status IN ('Pending', 'Running')"
+         current_step, logs_json FROM wizard_tasks WHERE status IN ('Pending', 'Running')",
     ) {
         Ok(s) => s,
         Err(_) => return tasks,
     };
-    
+
     let task_iter = match stmt.query_map(rusqlite::params![], |row| {
         let id: String = row.get(0)?;
         let name: String = row.get(1)?;
@@ -914,12 +955,12 @@ pub fn restore_tasks_from_sqlite() -> Vec<TaskInfo> {
         let progress_percentage: Option<f64> = row.get(10)?;
         let current_step: Option<String> = row.get(11)?;
         let logs_json: String = row.get(12)?;
-        
+
         // 解析配置
         if let Ok(config) = serde_json::from_str::<DatabaseConfig>(&config_json) {
             let mut task = TaskInfo::new(name, TaskType::DataParsingWizard, config);
             task.id = id;
-            
+
             // 设置进度
             if let Some(percentage) = progress_percentage {
                 task.progress = TaskProgress {
@@ -932,40 +973,47 @@ pub fn restore_tasks_from_sqlite() -> Vec<TaskInfo> {
                     estimated_remaining_seconds: None,
                 };
             }
-            
+
             // 恢复日志
             if let Ok(logs) = serde_json::from_str::<Vec<LogEntry>>(&logs_json) {
                 task.logs = logs;
             }
-            
+
             Ok(task)
         } else {
-            Err(rusqlite::Error::InvalidColumnType(0, "config".to_string(), rusqlite::types::Type::Text))
+            Err(rusqlite::Error::InvalidColumnType(
+                0,
+                "config".to_string(),
+                rusqlite::types::Type::Text,
+            ))
         }
     }) {
         Ok(iter) => iter,
         Err(_) => return tasks,
     };
-    
+
     for task_result in task_iter {
         if let Ok(task) = task_result {
             tasks.push(task);
         }
     }
-    
+
     tasks
 }
 
 /// 从SQLite加载所有部署站点（简化版本，返回JSON Value）
-pub fn load_deployment_sites_from_sqlite() -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+pub fn load_deployment_sites_from_sqlite()
+-> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
-    
-    let mut stmt = conn.prepare("
+
+    let mut stmt = conn.prepare(
+        "
         SELECT id, name, config_json, selected_projects, root_directory, 
                parallel_processing, max_concurrent, created_at, updated_at, status
         FROM deployment_sites ORDER BY created_at DESC
-    ")?;
-    
+    ",
+    )?;
+
     let site_iter = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
         let name: String = row.get(1)?;
@@ -974,18 +1022,22 @@ pub fn load_deployment_sites_from_sqlite() -> Result<Vec<serde_json::Value>, Box
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
         let status: String = row.get(9)?;
-        
+
         // 解析 selected_projects
-        let e3d_projects: Vec<String> = serde_json::from_str(&selected_projects_json)
-            .unwrap_or_default();
-            
+        let e3d_projects: Vec<String> =
+            serde_json::from_str(&selected_projects_json).unwrap_or_default();
+
         // 解析 config_json 并提取 base_config
-        let config = if let Ok(wizard_config) = serde_json::from_str::<serde_json::Value>(&config_json) {
-            wizard_config.get("base_config").cloned().unwrap_or(serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        };
-        
+        let config =
+            if let Ok(wizard_config) = serde_json::from_str::<serde_json::Value>(&config_json) {
+                wizard_config
+                    .get("base_config")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
         // 构建 JSON 对象
         let site_json = serde_json::json!({
             "id": id,
@@ -1000,35 +1052,39 @@ pub fn load_deployment_sites_from_sqlite() -> Result<Vec<serde_json::Value>, Box
             "created_at": created_at,
             "updated_at": updated_at
         });
-        
+
         Ok(site_json)
     })?;
-    
+
     let mut sites = Vec::new();
     for site_result in site_iter {
         if let Ok(site) = site_result {
             sites.push(site);
         }
     }
-    
+
     Ok(sites)
 }
 
 /// 通过ID从SQLite获取单个部署站点详情
-pub fn load_deployment_site_by_id_from_sqlite(site_id: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+pub fn load_deployment_site_by_id_from_sqlite(
+    site_id: &str,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
     // 如果不是wizard创建的站点，直接返回None
     if !site_id.starts_with("wizard_") {
         return Ok(None);
     }
-    
+
     let conn = open_deployment_sites_sqlite()?;
-    
-    let mut stmt = conn.prepare("
+
+    let mut stmt = conn.prepare(
+        "
         SELECT id, name, config_json, selected_projects, root_directory, 
                parallel_processing, max_concurrent, created_at, updated_at, status
         FROM deployment_sites WHERE id = ?1
-    ")?;
-    
+    ",
+    )?;
+
     let mut site_iter = stmt.query_map([site_id], |row| {
         let id: String = row.get(0)?;
         let name: String = row.get(1)?;
@@ -1040,22 +1096,22 @@ pub fn load_deployment_site_by_id_from_sqlite(site_id: &str) -> Result<Option<se
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
         let status: Option<String> = row.get(9)?;
-        
+
         // 解析配置JSON
-        let full_config: serde_json::Value = serde_json::from_str(&config_json)
-            .unwrap_or(serde_json::json!({}));
-        
+        let full_config: serde_json::Value =
+            serde_json::from_str(&config_json).unwrap_or(serde_json::json!({}));
+
         // 提取base_config作为config，保持前端兼容性
         let config = if let Some(base_config) = full_config.get("base_config") {
             base_config.clone()
         } else {
             full_config
         };
-        
+
         // 解析项目列表
-        let e3d_projects: Vec<String> = serde_json::from_str(&selected_projects_json)
-            .unwrap_or(vec![]);
-        
+        let e3d_projects: Vec<String> =
+            serde_json::from_str(&selected_projects_json).unwrap_or(vec![]);
+
         Ok(serde_json::json!({
             "id": id,
             "name": name,
@@ -1070,7 +1126,7 @@ pub fn load_deployment_site_by_id_from_sqlite(site_id: &str) -> Result<Option<se
             "updated_at": updated_at
         }))
     })?;
-    
+
     if let Some(result) = site_iter.next() {
         Ok(Some(result?))
     } else {

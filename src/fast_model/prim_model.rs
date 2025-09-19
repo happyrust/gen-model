@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{get_generic_type, SEND_INST_SIZE, shared};
+use crate::fast_model::{SEND_INST_SIZE, get_generic_type, shared};
+use aios_core::RefU64;
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -10,14 +10,14 @@ use aios_core::pdms_types::*;
 use aios_core::prim_geo::polyhedron::Polygon;
 use aios_core::prim_geo::*;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
-use aios_core::RefU64;
 use bevy_transform::components::Transform;
+use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Isometry;
+use std::collections::HashMap;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
-use glam::Vec3;
 use tokio::sync::{Mutex, RwLock};
 
 /// 生成基本体的几何数据
@@ -82,19 +82,18 @@ pub async fn gen_prim_geos(
                 let mut geo_param = PdmsGeoParam::Unknown;
                 let cur_type = attr.get_type_str();
                 //需要限制负实体的大小，太大，导致负运算失败
-                let neg_limit_size: Option<f32> =
-                    if GENRAL_NEG_NOUN_NAMES.contains(&cur_type) {
-                        // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
-                        //     parent_inst
-                        //         .aabb
-                        //         .map(|x| x.bounding_sphere().radius * 4.0)
-                        // } else {
-                        //负实体默认的最大大小，不能超过
-                        Some(1000_000.0)
-                        // }
-                    } else {
-                        None
-                    };
+                let neg_limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&cur_type) {
+                    // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
+                    //     parent_inst
+                    //         .aabb
+                    //         .map(|x| x.bounding_sphere().radius * 4.0)
+                    // } else {
+                    //负实体默认的最大大小，不能超过
+                    Some(1000_000.0)
+                    // }
+                } else {
+                    None
+                };
                 // dbg!((attr.get_type_str(), refno, neg_limit_size));
                 //多面体的处理
                 let brep_shape = if cur_type == "POHE" || cur_type == "POLYHE" {
@@ -125,10 +124,10 @@ pub async fn gen_prim_geos(
                             verts_map.insert(v.get_refno_or_default(), pos);
                             // verts_map.insert(v.get_refno_or_default(), i);
                         }
-                        let index_loops = aios_core::query_filter_deep_children_atts(
-                            refno,
-                            &["LOOPTS"],
-                        ).await.unwrap_or_default();
+                        let index_loops =
+                            aios_core::query_filter_deep_children_atts(refno, &["LOOPTS"])
+                                .await
+                                .unwrap_or_default();
                         // dbg!(index_loops.len());
                         // let tmp_refnos = index_loops.iter().map(|x| x.get_owner()).collect::<Vec<_>>();
                         // dbg!(&tmp_refnos);
@@ -142,9 +141,10 @@ pub async fn gen_prim_geos(
                             map
                         });
                         // dbg!(index_map.len());
-                        let loop_atts = aios_core::query_filter_deep_children_atts(refno, &["POLOOP"])
-                            .await
-                            .unwrap_or_default();
+                        let loop_atts =
+                            aios_core::query_filter_deep_children_atts(refno, &["POLOOP"])
+                                .await
+                                .unwrap_or_default();
                         // dbg!(loop_atts.len());
                         let loops_map = loop_atts.iter().fold(HashMap::new(), |mut map, x| {
                             let owner = x.get_owner();
@@ -168,7 +168,7 @@ pub async fn gen_prim_geos(
                             }
                             polygons.push(Polygon { loops });
                         }
-                    }else{
+                    } else {
                         for pgo_refno in pgo_refnos {
                             let mut verts = vec![];
                             let v_att = aios_core::get_children_named_attmaps(pgo_refno)
@@ -183,7 +183,11 @@ pub async fn gen_prim_geos(
                     }
 
                     // dbg!(&polygons);
-                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons, mesh: None, is_polyhe });
+                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron {
+                        polygons,
+                        mesh: None,
+                        is_polyhe,
+                    });
                     Some(shape)
                 } else {
                     attr.create_brep_shape(neg_limit_size)
@@ -242,7 +246,7 @@ pub async fn gen_prim_geos(
                     shape_insts_data.insert_info(refno, geos_info);
                 }
 
-                if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                     sender
                         .send(std::mem::take(&mut shape_insts_data))
                         .expect("send prim shape_insts_data error");

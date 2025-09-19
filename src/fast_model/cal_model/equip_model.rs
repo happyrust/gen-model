@@ -1,10 +1,12 @@
-use std::collections::HashMap;
-use aios_core::{gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir, RefU64, RefnoEnum, SUL_DB};
+use crate::fast_model::utils::save_transforms_to_surreal;
+use aios_core::{
+    RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir,
+};
 use bevy_transform::components::Transform;
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
-use crate::fast_model::utils::save_transforms_to_surreal;
 use parry3d::bounding_volume::BoundingVolume;
+use std::collections::HashMap;
 
 pub async fn update_cal_equip() -> anyhow::Result<()> {
     update_cal_equip_wtrans().await?;
@@ -27,16 +29,17 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut sql = String::new();
     for refno in equips {
-        let world_trans = aios_core::get_world_transform(refno).await?.unwrap_or_default();
+        let world_trans = aios_core::get_world_transform(refno)
+            .await?
+            .unwrap_or_default();
         let transform_hash = gen_bytes_hash::<_, 64>(&world_trans);
         if !transform_map.contains_key(&transform_hash) {
-            transform_map.insert(
-                transform_hash,
-                serde_json::to_string(&world_trans).unwrap(),
-            );
+            transform_map.insert(transform_hash, serde_json::to_string(&world_trans).unwrap());
         }
         sql.push_str(&format!(
-            "create cal_equi:{refno} SET world_trans=trans:⟨{}⟩;", transform_hash));
+            "create cal_equi:{refno} SET world_trans=trans:⟨{}⟩;",
+            transform_hash
+        ));
     }
     save_transforms_to_surreal(&transform_map).await?;
     SUL_DB.query(sql).await.unwrap();
@@ -55,18 +58,21 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
 
     let mut equip_sql = String::new();
     for equip in equips {
-        let sql = format!(r#"
+        let sql = format!(
+            r#"
             (select value array::flatten([(select value aabb.d from <-pe_owner<-pe<-pe_owner<-pe->inst_relate),
                 (select value aabb.d from <-pe_owner<-pe->inst_relate)]) from {} where array::len(->nearest_relate)=0)[0]
-            "#, equip.to_pe_key());
+            "#,
+            equip.to_pe_key()
+        );
         // dbg!(&sql);
-        let mut response = SUL_DB
-            .query(sql)
-            .await?;
-        let Ok(aabbs) = response.take::<Vec<Aabb>>(0) else{
+        let mut response = SUL_DB.query(sql).await?;
+        let Ok(aabbs) = response.take::<Vec<Aabb>>(0) else {
             continue;
         };
-        if aabbs.is_empty() { continue; }
+        if aabbs.is_empty() {
+            continue;
+        }
         let mut final_aabb = Aabb::new_invalid();
         for aabb in aabbs {
             final_aabb.merge(&aabb);
@@ -74,17 +80,22 @@ pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
         //得到底部的中心点，去计算最近的楼板
         let btm_pts = &final_aabb.vertices()[..4];
         for btm_pt in btm_pts {
-            let pt: Vec3 =  (*btm_pt).into();
-            if let Ok(Some((nearest, dist))) = query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR")
-                .await {
+            let pt: Vec3 = (*btm_pt).into();
+            if let Ok(Some((nearest, dist))) =
+                query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR").await
+            {
                 // dbg!((btm_pt, nearest, dist));
-                equip_sql.push_str(&format!("relate {}->nearest_relate->FLOOR:{} set dist={};",
-                 equip.to_pe_key(), nearest.to_string(), dist));
+                equip_sql.push_str(&format!(
+                    "relate {}->nearest_relate->FLOOR:{} set dist={};",
+                    equip.to_pe_key(),
+                    nearest.to_string(),
+                    dist
+                ));
                 break;
             }
         }
     }
-    if !equip_sql.is_empty(){
+    if !equip_sql.is_empty() {
         SUL_DB.query(equip_sql).await.unwrap();
     }
     Ok(())

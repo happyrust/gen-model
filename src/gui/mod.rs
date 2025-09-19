@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use assets::Assets;
-use gpui::{actions, App, AppContext, KeyBinding, Menu, MenuItem};
+use gpui::{App, AppContext, KeyBinding, Menu, MenuItem, actions};
 use gpui_component::input::{Copy, Cut, Paste, Redo, Undo};
 
 mod assets;
@@ -10,8 +10,8 @@ mod config_panel_story;
 mod logs;
 
 pub use config_panel_story::ConfigPanelStory;
-pub use logs::{add_global_log, log_from_thread, LogLevel};
 use gpui::*;
+pub use logs::{LogLevel, add_global_log, log_from_thread};
 use story::AppState;
 
 // actions!(main_menu, [Quit]);

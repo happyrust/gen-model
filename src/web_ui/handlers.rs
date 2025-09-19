@@ -1,23 +1,25 @@
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::{Html, Json},
-};
 use aios_core::{get_db_option, options::DbOption};
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderValue, StatusCode, header},
+    response::{Html, Json, Response},
+};
 // Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
+use chrono::{Local, Utc};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::{Duration, Instant, SystemTime};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-use once_cell::sync::Lazy;
-use std::path::Path as StdPath;
 use std::fs;
-use std::process::Stdio;
-use std::time::Duration as StdDuration;
-use std::net::{TcpStream, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::{Path as StdPath, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::Semaphore;
 
 use tokio::process::Command as TokioCommand;
 
@@ -30,7 +32,7 @@ async fn check_port_usage(port: u16) -> Result<Vec<u32>, std::io::Error> {
         .args(["-ti", &format!(":{}", port)])
         .output()
         .await?;
-    
+
     if output.status.success() {
         let pids_str = String::from_utf8_lossy(&output.stdout);
         let pids: Vec<u32> = pids_str
@@ -47,21 +49,25 @@ async fn check_port_usage(port: u16) -> Result<Vec<u32>, std::io::Error> {
 pub async fn kill_port_processes(port: u16) -> Result<Vec<u32>, String> {
     let pids = check_port_usage(port).await.map_err(|e| e.to_string())?;
     let mut killed_pids = vec![];
-    
+
     for pid in pids {
         let output = TokioCommand::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output()
             .await
             .map_err(|e| e.to_string())?;
-        
+
         if output.status.success() {
             killed_pids.push(pid);
             // 等待进程优雅退出
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             // 如果进程仍在运行，强制杀死
-            if check_port_usage(port).await.map_err(|e| e.to_string())?.contains(&pid) {
+            if check_port_usage(port)
+                .await
+                .map_err(|e| e.to_string())?
+                .contains(&pid)
+            {
                 let _ = TokioCommand::new("kill")
                     .args(["-KILL", &pid.to_string()])
                     .output()
@@ -69,7 +75,7 @@ pub async fn kill_port_processes(port: u16) -> Result<Vec<u32>, String> {
             }
         }
     }
-    
+
     Ok(killed_pids)
 }
 
@@ -77,30 +83,27 @@ pub async fn kill_port_processes(port: u16) -> Result<Vec<u32>, String> {
 pub async fn check_port_status(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let port: u16 = params.get("port")
+    let port: u16 = params
+        .get("port")
         .and_then(|p| p.parse().ok())
         .unwrap_or(8010);
-    
+
     match check_port_usage(port).await {
-        Ok(pids) => {
-            Ok(Json(json!({
-                "success": true,
-                "port": port,
-                "occupied": !pids.is_empty(),
-                "pids": pids,
-                "message": if pids.is_empty() {
-                    format!("端口 {} 空闲", port)
-                } else {
-                    format!("端口 {} 被 {} 个进程占用", port, pids.len())
-                }
-            })))
-        }
-        Err(e) => {
-            Ok(Json(json!({
-                "success": false,
-                "error": format!("检查端口失败: {}", e)
-            })))
-        }
+        Ok(pids) => Ok(Json(json!({
+            "success": true,
+            "port": port,
+            "occupied": !pids.is_empty(),
+            "pids": pids,
+            "message": if pids.is_empty() {
+                format!("端口 {} 空闲", port)
+            } else {
+                format!("端口 {} 被 {} 个进程占用", port, pids.len())
+            }
+        }))),
+        Err(e) => Ok(Json(json!({
+            "success": false,
+            "error": format!("检查端口失败: {}", e)
+        }))),
     }
 }
 
@@ -108,51 +111,140 @@ pub async fn check_port_status(
 pub async fn kill_port_processes_api(
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let port: u16 = req.get("port")
+    let port: u16 = req
+        .get("port")
         .and_then(|p| p.as_u64())
         .and_then(|p| u16::try_from(p).ok())
         .unwrap_or(8010);
-    
+
     match kill_port_processes(port).await {
-        Ok(killed_pids) => {
-            Ok(Json(json!({
-                "success": true,
-                "port": port,
-                "killed_pids": killed_pids,
-                "message": if killed_pids.is_empty() {
-                    format!("端口 {} 没有需要关闭的进程", port)
-                } else {
-                    format!("成功关闭 {} 个占用端口 {} 的进程", killed_pids.len(), port)
-                }
-            })))
-        }
-        Err(e) => {
-            Ok(Json(json!({
-                "success": false,
-                "error": format!("关闭进程失败: {}", e)
-            })))
-        }
+        Ok(killed_pids) => Ok(Json(json!({
+            "success": true,
+            "port": port,
+            "killed_pids": killed_pids,
+            "message": if killed_pids.is_empty() {
+                format!("端口 {} 没有需要关闭的进程", port)
+            } else {
+                format!("成功关闭 {} 个占用端口 {} 的进程", killed_pids.len(), port)
+            }
+        }))),
+        Err(e) => Ok(Json(json!({
+            "success": false,
+            "error": format!("关闭进程失败: {}", e)
+        }))),
     }
 }
 
+/// XKT 预览页面
+pub async fn serve_xtk_viewer_page() -> Html<String> {
+    Html(crate::web_ui::simple_templates::render_xtk_viewer_page())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateXktRequest {
+    pub dbno: u32,
+    #[serde(default)]
+    pub compress: Option<bool>,
+}
+
+pub async fn api_generate_xkt(
+    State(_state): State<AppState>,
+    Json(req): Json<GenerateXktRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let compress = req.compress.unwrap_or(true);
+    let output_dir = StdPath::new("output/web_ui");
+    if let Err(e) = tokio::fs::create_dir_all(output_dir).await {
+        eprintln!("创建 XKT 输出目录失败: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
+    let filename = format!(
+        "db{}_{}.xkt",
+        req.dbno,
+        if compress {
+            format!("compressed_{}", timestamp)
+        } else {
+            format!("raw_{}", timestamp)
+        }
+    );
+    let full_path = output_dir.join(&filename);
+
+    let db_option = get_db_option();
+    if let Err(e) = generate_xtk_by_dbno(
+        req.dbno,
+        full_path.to_string_lossy().as_ref(),
+        compress,
+        db_option,
+    )
+    .await
+    {
+        eprintln!("生成 XKT 失败 (dbno {}): {}", req.dbno, e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "dbno": req.dbno,
+        "filename": filename,
+        "url": format!("/api/xkt/download/{}", filename)
+    })))
+}
+
+pub async fn api_download_xkt(
+    State(_state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Result<Response, StatusCode> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let full_path = StdPath::new("output/web_ui").join(&filename);
+    let data = tokio::fs::read(&full_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let mut response = Response::new(Body::from(data));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
+
+    Ok(response)
+}
+
 use super::{
-    models::*,
+    AppState,
+    CreateTaskRequest,
+    TaskQuery,
+    UpdateConfigRequest,
     // templates::*,  // 暂时禁用
     batch_tasks_template,
+    models::*,
     simple_templates::render_database_connection_page,
-    AppState, CreateTaskRequest, TaskQuery, UpdateConfigRequest,
 };
-use aios_core::SUL_DB;
-use crate::fast_model::session::{SESSION_STORE, PdmsTimeExtractor};
+use crate::fast_model::{
+    gen_model::generate_xtk_by_dbno,
+    session::{PdmsTimeExtractor, SESSION_STORE},
+};
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
-#[cfg(feature = "sqlite-index")]
-use parry3d::bounding_volume::Aabb;
+use aios_core::SUL_DB;
+use dashmap::DashMap;
 #[cfg(feature = "sqlite-index")]
 use nalgebra::{Point3, Vector3};
 #[cfg(feature = "sqlite-index")]
+use parry3d::bounding_volume::Aabb;
+#[cfg(feature = "sqlite-index")]
 use std::str::FromStr;
-use dashmap::DashMap;
 use uuid::Uuid;
 
 // 可选：从本地 SQLite 读取项目列表（按 DbOption.toml 配置）
@@ -231,44 +323,62 @@ fn analyze_geometry_error(error: &anyhow::Error) -> (String, Vec<String>) {
     let error_msg = error.to_string().to_lowercase();
 
     if error_msg.contains("connection") || error_msg.contains("database") {
-        ("GEO_DB_001".to_string(), vec![
-            "检查数据库连接是否稳定".to_string(),
-            "验证数据库中是否存在指定的数据库编号".to_string(),
-            "确认数据库用户有足够的读写权限".to_string(),
-        ])
+        (
+            "GEO_DB_001".to_string(),
+            vec![
+                "检查数据库连接是否稳定".to_string(),
+                "验证数据库中是否存在指定的数据库编号".to_string(),
+                "确认数据库用户有足够的读写权限".to_string(),
+            ],
+        )
     } else if error_msg.contains("memory") || error_msg.contains("allocation") {
-        ("GEO_MEM_001".to_string(), vec![
-            "增加系统可用内存".to_string(),
-            "减少批处理大小".to_string(),
-            "关闭其他占用内存的程序".to_string(),
-            "检查是否有内存泄漏".to_string(),
-        ])
+        (
+            "GEO_MEM_001".to_string(),
+            vec![
+                "增加系统可用内存".to_string(),
+                "减少批处理大小".to_string(),
+                "关闭其他占用内存的程序".to_string(),
+                "检查是否有内存泄漏".to_string(),
+            ],
+        )
     } else if error_msg.contains("timeout") {
-        ("GEO_TIME_001".to_string(), vec![
-            "增加任务超时时间".to_string(),
-            "检查网络连接稳定性".to_string(),
-            "分批处理大量数据".to_string(),
-        ])
+        (
+            "GEO_TIME_001".to_string(),
+            vec![
+                "增加任务超时时间".to_string(),
+                "检查网络连接稳定性".to_string(),
+                "分批处理大量数据".to_string(),
+            ],
+        )
     } else if error_msg.contains("mesh") || error_msg.contains("geometry") {
-        ("GEO_MESH_001".to_string(), vec![
-            "检查几何数据的完整性".to_string(),
-            "调整网格容差参数".to_string(),
-            "验证输入数据格式".to_string(),
-            "检查OCC几何库配置".to_string(),
-        ])
+        (
+            "GEO_MESH_001".to_string(),
+            vec![
+                "检查几何数据的完整性".to_string(),
+                "调整网格容差参数".to_string(),
+                "验证输入数据格式".to_string(),
+                "检查OCC几何库配置".to_string(),
+            ],
+        )
     } else if error_msg.contains("permission") || error_msg.contains("access") {
-        ("GEO_PERM_001".to_string(), vec![
-            "检查文件系统权限".to_string(),
-            "确认assets/meshes目录可写".to_string(),
-            "验证数据库写入权限".to_string(),
-        ])
+        (
+            "GEO_PERM_001".to_string(),
+            vec![
+                "检查文件系统权限".to_string(),
+                "确认assets/meshes目录可写".to_string(),
+                "验证数据库写入权限".to_string(),
+            ],
+        )
     } else {
-        ("GEO_UNKNOWN_001".to_string(), vec![
-            "查看详细错误日志".to_string(),
-            "检查系统资源使用情况".to_string(),
-            "尝试重新启动任务".to_string(),
-            "联系技术支持".to_string(),
-        ])
+        (
+            "GEO_UNKNOWN_001".to_string(),
+            vec![
+                "查看详细错误日志".to_string(),
+                "检查系统资源使用情况".to_string(),
+                "尝试重新启动任务".to_string(),
+                "联系技术支持".to_string(),
+            ],
+        )
     }
 }
 
@@ -283,26 +393,35 @@ fn analyze_spatial_error_msg(error_msg: &str) -> (String, Vec<String>) {
     let error_msg = error_msg.to_lowercase();
 
     if error_msg.contains("aabb") || error_msg.contains("tree") {
-        ("SPATIAL_TREE_001".to_string(), vec![
-            "检查AABB树文件是否损坏".to_string(),
-            "尝试重新构建空间索引".to_string(),
-            "验证几何数据的完整性".to_string(),
-            "检查空间树配置参数".to_string(),
-        ])
+        (
+            "SPATIAL_TREE_001".to_string(),
+            vec![
+                "检查AABB树文件是否损坏".to_string(),
+                "尝试重新构建空间索引".to_string(),
+                "验证几何数据的完整性".to_string(),
+                "检查空间树配置参数".to_string(),
+            ],
+        )
     } else if error_msg.contains("room") || error_msg.contains("panel") {
-        ("SPATIAL_ROOM_001".to_string(), vec![
-            "检查房间关键字配置".to_string(),
-            "验证房间和面板数据".to_string(),
-            "确认空间关系计算参数".to_string(),
-            "检查项目特定的房间匹配规则".to_string(),
-        ])
+        (
+            "SPATIAL_ROOM_001".to_string(),
+            vec![
+                "检查房间关键字配置".to_string(),
+                "验证房间和面板数据".to_string(),
+                "确认空间关系计算参数".to_string(),
+                "检查项目特定的房间匹配规则".to_string(),
+            ],
+        )
     } else {
-        ("SPATIAL_UNKNOWN_001".to_string(), vec![
-            "查看空间树生成日志".to_string(),
-            "检查几何数据是否已生成".to_string(),
-            "验证数据库中的空间数据".to_string(),
-            "联系技术支持".to_string(),
-        ])
+        (
+            "SPATIAL_UNKNOWN_001".to_string(),
+            vec![
+                "查看空间树生成日志".to_string(),
+                "检查几何数据是否已生成".to_string(),
+                "验证数据库中的空间数据".to_string(),
+                "联系技术支持".to_string(),
+            ],
+        )
     }
 }
 
@@ -328,7 +447,11 @@ pub async fn api_get_projects(
             let ql = q.to_lowercase();
             items.retain(|p| {
                 p.name.to_lowercase().contains(&ql)
-                    || p.owner.as_deref().unwrap_or("").to_lowercase().contains(&ql)
+                    || p.owner
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&ql)
             });
         }
         if let Some(status) = params.status.as_ref().filter(|s| !s.is_empty()) {
@@ -342,7 +465,10 @@ pub async fn api_get_projects(
         let (sort_field, sort_dir) = match params.sort.as_deref() {
             Some(s) if s.contains(":") => {
                 let mut it = s.splitn(2, ":");
-                (it.next().unwrap_or("updated_at"), it.next().unwrap_or("desc"))
+                (
+                    it.next().unwrap_or("updated_at"),
+                    it.next().unwrap_or("desc"),
+                )
             }
             Some(s) => (s, "desc"),
             None => ("updated_at", "desc"),
@@ -365,7 +491,11 @@ pub async fn api_get_projects(
         let total = items.len();
         let start = (page - 1) * per_page;
         let end = (start + per_page).min(total);
-        let page_items = if start < total { items[start..end].to_vec() } else { Vec::new() };
+        let page_items = if start < total {
+            items[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
 
         return Ok(Json(serde_json::json!({
             "items": page_items,
@@ -377,18 +507,34 @@ pub async fn api_get_projects(
     }
 
     let mut filters: Vec<String> = Vec::new();
-    if let Some(q) = params.q.as_ref().and_then(|s| if s.is_empty() { None } else { Some(s) }) {
+    if let Some(q) = params
+        .q
+        .as_ref()
+        .and_then(|s| if s.is_empty() { None } else { Some(s) })
+    {
         let q = q.replace("'", "\\'");
         filters.push(format!("name CONTAINS '{}' OR owner CONTAINS '{}'", q, q));
     }
-    if let Some(status) = params.status.as_ref().and_then(|s| if s.is_empty() { None } else { Some(s) }) {
+    if let Some(status) = params
+        .status
+        .as_ref()
+        .and_then(|s| if s.is_empty() { None } else { Some(s) })
+    {
         filters.push(format!("status = '{}'", status.replace("'", "\\'")));
     }
-    if let Some(owner) = params.owner.as_ref().and_then(|s| if s.is_empty() { None } else { Some(s) }) {
+    if let Some(owner) = params
+        .owner
+        .as_ref()
+        .and_then(|s| if s.is_empty() { None } else { Some(s) })
+    {
         filters.push(format!("owner = '{}'", owner.replace("'", "\\'")));
     }
 
-    let where_clause = if filters.is_empty() { String::new() } else { format!("WHERE {}", filters.join(" AND ")) };
+    let where_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", filters.join(" AND "))
+    };
 
     let per_page = params.per_page.unwrap_or(20).max(1).min(100) as usize;
     let page = params.page.unwrap_or(1).max(1) as usize;
@@ -397,7 +543,10 @@ pub async fn api_get_projects(
     let (sort_field, sort_dir) = match params.sort.as_deref() {
         Some(s) if s.contains(":") => {
             let mut it = s.splitn(2, ":");
-            (it.next().unwrap_or("updated_at"), it.next().unwrap_or("desc"))
+            (
+                it.next().unwrap_or("updated_at"),
+                it.next().unwrap_or("desc"),
+            )
         }
         Some(s) => (s, "desc"),
         None => ("updated_at", "desc"),
@@ -405,7 +554,15 @@ pub async fn api_get_projects(
 
     let sql = format!(
         "SELECT *, id as id FROM projects {} ORDER BY {} {} LIMIT {} START {}",
-        where_clause, sort_field, if sort_dir.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" }, per_page, start
+        where_clause,
+        sort_field,
+        if sort_dir.eq_ignore_ascii_case("asc") {
+            "ASC"
+        } else {
+            "DESC"
+        },
+        per_page,
+        start
     );
     let count_sql = format!("SELECT count() as total FROM projects {}", where_clause);
 
@@ -437,7 +594,9 @@ pub async fn api_get_projects(
                     created_at: row["created_at"].as_str().map(|s| s.to_string()),
                     updated_at: row["updated_at"].as_str().map(|s| s.to_string()),
                 };
-                if !item.name.is_empty() { items.push(item); }
+                if !item.name.is_empty() {
+                    items.push(item);
+                }
             }
         }
         Err(_) => {}
@@ -480,46 +639,52 @@ fn try_load_projects_from_sqlite() -> Option<Vec<ProjectItem>> {
         row.get::<_, Option<String>>(col).ok().flatten()
     }
 
-    let rows = stmt.query_map([], |row| {
-        let name = get_opt_str(row, "name").unwrap_or_default();
-        let version = get_opt_str(row, "version");
-        let url = get_opt_str(row, "url");
-        let env = get_opt_str(row, "env");
-        let status_str = get_opt_str(row, "status").unwrap_or_else(|| "Running".to_string());
-        let owner = get_opt_str(row, "owner");
-        let tags = None; // 可扩展: JSON 字段
-        let notes = get_opt_str(row, "notes");
-        let health_url = get_opt_str(row, "health_url");
-        let updated_at = get_opt_str(row, "updated_at");
-        let created_at = get_opt_str(row, "created_at");
+    let rows = stmt
+        .query_map([], |row| {
+            let name = get_opt_str(row, "name").unwrap_or_default();
+            let version = get_opt_str(row, "version");
+            let url = get_opt_str(row, "url");
+            let env = get_opt_str(row, "env");
+            let status_str = get_opt_str(row, "status").unwrap_or_else(|| "Running".to_string());
+            let owner = get_opt_str(row, "owner");
+            let tags = None; // 可扩展: JSON 字段
+            let notes = get_opt_str(row, "notes");
+            let health_url = get_opt_str(row, "health_url");
+            let updated_at = get_opt_str(row, "updated_at");
+            let created_at = get_opt_str(row, "created_at");
 
-        let status = match status_str.as_str() {
-            "Deploying" => ProjectStatus::Deploying,
-            "Failed" => ProjectStatus::Failed,
-            "Stopped" => ProjectStatus::Stopped,
-            _ => ProjectStatus::Running,
-        };
+            let status = match status_str.as_str() {
+                "Deploying" => ProjectStatus::Deploying,
+                "Failed" => ProjectStatus::Failed,
+                "Stopped" => ProjectStatus::Stopped,
+                _ => ProjectStatus::Running,
+            };
 
-        Ok(ProjectItem {
-            id: Some(format!("sqlite:{}", name)),
-            name,
-            version,
-            url,
-            env,
-            status,
-            owner,
-            tags,
-            notes,
-            health_url,
-            last_health_check: None,
-            created_at,
-            updated_at,
+            Ok(ProjectItem {
+                id: Some(format!("sqlite:{}", name)),
+                name,
+                version,
+                url,
+                env,
+                status,
+                owner,
+                tags,
+                notes,
+                health_url,
+                last_health_check: None,
+                created_at,
+                updated_at,
+            })
         })
-    }).ok()?;
+        .ok()?;
 
     let mut items: Vec<ProjectItem> = Vec::new();
     for r in rows {
-        if let Ok(p) = r { if !p.name.is_empty() { items.push(p); } }
+        if let Ok(p) = r {
+            if !p.name.is_empty() {
+                items.push(p);
+            }
+        }
     }
 
     Some(items)
@@ -534,7 +699,9 @@ fn open_sqlite_projects_table() -> Option<(rusqlite::Connection, String)> {
     }
     let built = builder.build().ok()?;
     let db_path: String = built.get_string("project_config_sqlite_path").ok()?;
-    let table: String = built.get_string("project_config_table").unwrap_or_else(|_| "projects".to_string());
+    let table: String = built
+        .get_string("project_config_table")
+        .unwrap_or_else(|_| "projects".to_string());
 
     let conn = rusqlite::Connection::open(db_path).ok()?;
     // 初始化表（若不存在）
@@ -564,17 +731,20 @@ pub async fn api_create_project(
     Json(mut req): Json<ProjectCreateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if req.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"项目名称不能为空"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"项目名称不能为空"})),
+        ));
     }
 
     // 如果配置了 SQLite 项目库，则写入 SQLite 并返回
     if let Some((conn, table)) = open_sqlite_projects_table() {
         let now = chrono::Utc::now().to_rfc3339();
         let status_str = match req.status.clone().unwrap_or(ProjectStatus::Running) {
-            ProjectStatus::Deploying=>"Deploying",
-            ProjectStatus::Running=>"Running",
-            ProjectStatus::Failed=>"Failed",
-            ProjectStatus::Stopped=>"Stopped",
+            ProjectStatus::Deploying => "Deploying",
+            ProjectStatus::Running => "Running",
+            ProjectStatus::Failed => "Failed",
+            ProjectStatus::Stopped => "Stopped",
         };
         let _ = conn.execute(
             &format!("INSERT OR REPLACE INTO {} (name, version, url, env, status, owner, tags, notes, health_url, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE((SELECT created_at FROM {} WHERE name=?1), ?10), ?11)", table, table),
@@ -612,17 +782,28 @@ pub async fn api_create_project(
     }
 
     // 唯一性检查
-    let check_sql = format!("SELECT * FROM projects WHERE name = '{}' LIMIT 1", req.name.replace("'", "\\'"));
+    let check_sql = format!(
+        "SELECT * FROM projects WHERE name = '{}' LIMIT 1",
+        req.name.replace("'", "\\'")
+    );
     if let Ok(mut resp) = SUL_DB.query(check_sql).await {
         let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
         if !rows.is_empty() {
-            return Err((StatusCode::CONFLICT, Json(json!({"error":"项目名称已存在"}))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"项目名称已存在"})),
+            ));
         }
     }
 
     let status = req.status.take().unwrap_or(ProjectStatus::Running);
     let now = chrono::Utc::now().to_rfc3339();
-    let status_str = match status { ProjectStatus::Deploying=>"Deploying", ProjectStatus::Running=>"Running", ProjectStatus::Failed=>"Failed", ProjectStatus::Stopped=>"Stopped" };
+    let status_str = match status {
+        ProjectStatus::Deploying => "Deploying",
+        ProjectStatus::Running => "Running",
+        ProjectStatus::Failed => "Failed",
+        ProjectStatus::Stopped => "Stopped",
+    };
 
     let mut body = serde_json::json!({
         "name": req.name,
@@ -637,7 +818,9 @@ pub async fn api_create_project(
         "created_at": now,
         "updated_at": now,
     });
-    if let Some(map) = body.as_object_mut() { map.retain(|_, v| !v.is_null()); }
+    if let Some(map) = body.as_object_mut() {
+        map.retain(|_, v| !v.is_null());
+    }
 
     let sql = format!("CREATE projects CONTENT {} RETURN AFTER", body);
     match SUL_DB.query(sql).await {
@@ -646,7 +829,10 @@ pub async fn api_create_project(
             let item = rows.get(0).cloned().unwrap_or(json!({"name":"unknown"}));
             Ok(Json(json!({"status":"success","item": item})))
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("创建失败: {}", e)}))))
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("创建失败: {}", e)})),
+        )),
     }
 }
 
@@ -657,7 +843,10 @@ pub async fn api_get_project(
     // SQLite 路径：id 形如 sqlite:{name}
     if let Some(name) = id.strip_prefix("sqlite:") {
         if let Some((conn, table)) = open_sqlite_projects_table() {
-            let sql = format!("SELECT name, version, url, env, status, owner, tags, notes, health_url, created_at, updated_at FROM {} WHERE name = ?1", table);
+            let sql = format!(
+                "SELECT name, version, url, env, status, owner, tags, notes, health_url, created_at, updated_at FROM {} WHERE name = ?1",
+                table
+            );
             if let Ok(mut stmt) = conn.prepare(&sql) {
                 if let Ok(mut rows) = stmt.query(rusqlite::params![name]) {
                     if let Ok(Some(row)) = rows.next() {
@@ -693,7 +882,7 @@ pub async fn api_get_project(
                 Err(StatusCode::NOT_FOUND)
             }
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -705,17 +894,34 @@ pub async fn api_update_project(
     // 若为 SQLite 项目
     if let Some(name) = id.strip_prefix("sqlite:") {
         if let Some((conn, table)) = open_sqlite_projects_table() {
-            if let Some(n) = req.name.as_ref() { if n.trim().is_empty() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"项目名称不能为空"})))); } }
+            if let Some(n) = req.name.as_ref() {
+                if n.trim().is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":"项目名称不能为空"})),
+                    ));
+                }
+            }
             let now = chrono::Utc::now().to_rfc3339();
             // 读取旧记录以便合并（仅取 created_at，避免借用生命周期问题）
             let sql_get = format!("SELECT created_at FROM {} WHERE name=?1", table);
             let old_created: Option<String> = conn
                 .prepare(&sql_get)
                 .ok()
-                .and_then(|mut stmt| stmt.query_row(rusqlite::params![name], |row| row.get::<_, Option<String>>(0)).ok())
+                .and_then(|mut stmt| {
+                    stmt.query_row(rusqlite::params![name], |row| {
+                        row.get::<_, Option<String>>(0)
+                    })
+                    .ok()
+                })
                 .flatten();
             let final_name = req.name.take().unwrap_or_else(|| name.to_string());
-            let status_str = req.status.as_ref().map(|s| match s { ProjectStatus::Deploying=>"Deploying", ProjectStatus::Running=>"Running", ProjectStatus::Failed=>"Failed", ProjectStatus::Stopped=>"Stopped" });
+            let status_str = req.status.as_ref().map(|s| match s {
+                ProjectStatus::Deploying => "Deploying",
+                ProjectStatus::Running => "Running",
+                ProjectStatus::Failed => "Failed",
+                ProjectStatus::Stopped => "Stopped",
+            });
             let _ = conn.execute(
                 &format!("INSERT OR REPLACE INTO {} (name, version, url, env, status, owner, tags, notes, health_url, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, ?11), ?12)", table),
                 rusqlite::params![
@@ -749,27 +955,44 @@ pub async fn api_update_project(
             });
             return Ok(Json(json!({"status":"success","item": item})));
         }
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"SQLite 配置不可用"}))));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"SQLite 配置不可用"})),
+        ));
     }
     // 可选唯一性校验：若 name 变更
     if let Some(name) = req.name.as_ref() {
         if name.trim().is_empty() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"项目名称不能为空"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"项目名称不能为空"})),
+            ));
         }
-        let check_sql = format!("SELECT * FROM projects WHERE name = '{}' LIMIT 1", name.replace("'", "\\'"));
+        let check_sql = format!(
+            "SELECT * FROM projects WHERE name = '{}' LIMIT 1",
+            name.replace("'", "\\'")
+        );
         if let Ok(mut resp) = SUL_DB.query(check_sql).await {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
             // 若找到记录且不是当前 id，则冲突
             if let Some(r) = rows.get(0) {
                 if r["id"].as_str().map(|s| s != id).unwrap_or(true) {
-                    return Err((StatusCode::CONFLICT, Json(json!({"error":"项目名称已存在"}))));
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(json!({"error":"项目名称已存在"})),
+                    ));
                 }
             }
         }
     }
 
     // 构造 MERGE 内容
-    let status_str = req.status.as_ref().map(|s| match s { ProjectStatus::Deploying=>"Deploying", ProjectStatus::Running=>"Running", ProjectStatus::Failed=>"Failed", ProjectStatus::Stopped=>"Stopped" });
+    let status_str = req.status.as_ref().map(|s| match s {
+        ProjectStatus::Deploying => "Deploying",
+        ProjectStatus::Running => "Running",
+        ProjectStatus::Failed => "Failed",
+        ProjectStatus::Stopped => "Stopped",
+    });
     let now = chrono::Utc::now().to_rfc3339();
     let mut body = serde_json::json!({
         "name": req.name.take(),
@@ -783,10 +1006,15 @@ pub async fn api_update_project(
         "health_url": req.health_url.take(),
         "updated_at": now,
     });
-    if let Some(map) = body.as_object_mut() { map.retain(|_, v| !v.is_null()); }
+    if let Some(map) = body.as_object_mut() {
+        map.retain(|_, v| !v.is_null());
+    }
 
     let id_esc = id.replace("'", "\\'");
-    let sql = format!("UPDATE type::thing('{}') MERGE {} RETURN AFTER", id_esc, body);
+    let sql = format!(
+        "UPDATE type::thing('{}') MERGE {} RETURN AFTER",
+        id_esc, body
+    );
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -796,7 +1024,10 @@ pub async fn api_update_project(
                 Err((StatusCode::NOT_FOUND, Json(json!({"error":"未找到项目"}))))
             }
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("更新失败: {}", e)}))))
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("更新失败: {}", e)})),
+        )),
     }
 }
 
@@ -809,7 +1040,9 @@ pub async fn api_delete_project(
         if let Some((conn, table)) = open_sqlite_projects_table() {
             let sql = format!("DELETE FROM {} WHERE name = ?1", table);
             if let Ok(changed) = conn.execute(&sql, rusqlite::params![name]) {
-                if changed > 0 { return Ok(Json(json!({"status":"success"}))); }
+                if changed > 0 {
+                    return Ok(Json(json!({"status":"success"})));
+                }
                 return Err(StatusCode::NOT_FOUND);
             }
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -821,10 +1054,12 @@ pub async fn api_delete_project(
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-            if rows.is_empty() { return Err(StatusCode::NOT_FOUND); }
+            if rows.is_empty() {
+                return Err(StatusCode::NOT_FOUND);
+            }
             Ok(Json(json!({"status":"success"})))
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -837,28 +1072,54 @@ pub async fn api_healthcheck_project(
         if let Some((conn, table)) = open_sqlite_projects_table() {
             // 读取 health_url
             let get_sql = format!("SELECT health_url FROM {} WHERE name = ?1", table);
-            let health_url: Option<String> = conn.query_row(&get_sql, rusqlite::params![name], |row| row.get(0)).ok();
+            let health_url: Option<String> = conn
+                .query_row(&get_sql, rusqlite::params![name], |row| row.get(0))
+                .ok();
             let Some(url) = health_url else {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"未配置 health_url"}))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"未配置 health_url"})),
+                ));
             };
 
             // 探测
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)}))))?;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)})),
+                    )
+                })?;
             let res = client.get(&url).send().await;
             let ok = matches!(res.as_ref().map(|r| r.status().is_success()), Ok(true));
 
             // 更新状态
             let status_str = if ok { "Running" } else { "Failed" };
             let now = chrono::Utc::now().to_rfc3339();
-            let upd_sql = format!("UPDATE {} SET status = ?1, last_health_check = ?2, updated_at = ?2 WHERE name = ?3", table);
-            let _ = conn.execute(&upd_sql, rusqlite::params![status_str, now.clone(), name])
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("更新失败: {}", e)}))))?;
+            let upd_sql = format!(
+                "UPDATE {} SET status = ?1, last_health_check = ?2, updated_at = ?2 WHERE name = ?3",
+                table
+            );
+            let _ = conn
+                .execute(&upd_sql, rusqlite::params![status_str, now.clone(), name])
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("更新失败: {}", e)})),
+                    )
+                })?;
 
             let item = json!({"id": format!("sqlite:{}", name), "name": name, "status": status_str, "last_health_check": now,});
-            return Ok(Json(json!({"status":"success","healthy": ok, "item": item})));
+            return Ok(Json(
+                json!({"status":"success","healthy": ok, "item": item}),
+            ));
         }
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"SQLite 配置不可用"}))));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"SQLite 配置不可用"})),
+        ));
     }
     // 查询 health_url
     let id_esc = id.replace("'", "\\'");
@@ -866,17 +1127,34 @@ pub async fn api_healthcheck_project(
     let health_url = match SUL_DB.query(get_sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-            rows.get(0).and_then(|r| r["health_url"].as_str()).map(|s| s.to_string())
+            rows.get(0)
+                .and_then(|r| r["health_url"].as_str())
+                .map(|s| s.to_string())
         }
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("查询失败: {}", e)}))))
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询失败: {}", e)})),
+            ));
+        }
     };
     let Some(url) = health_url else {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"未配置 health_url"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"未配置 health_url"})),
+        ));
     };
 
     // 探测
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)}))))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)})),
+            )
+        })?;
     let res = client.get(&url).send().await;
     let ok = matches!(res.as_ref().map(|r| r.status().is_success()), Ok(true));
 
@@ -890,9 +1168,14 @@ pub async fn api_healthcheck_project(
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
             let item = rows.get(0).cloned().unwrap_or(json!({"id": id}));
-            Ok(Json(json!({"status":"success","healthy": ok, "item": item})))
+            Ok(Json(
+                json!({"status":"success","healthy": ok, "item": item}),
+            ))
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("更新失败: {}", e)}))))
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("更新失败: {}", e)})),
+        )),
     }
 }
 
@@ -907,42 +1190,92 @@ pub async fn api_projects_demo() -> Result<Json<serde_json::Value>, StatusCode> 
              (?8, ?9, ?10, ?11, ?12, ?13, ?7, ?7)",
             tbl = table
         );
-        let _ = conn.execute(
-            &sql,
-            rusqlite::params![
-                "demo", "dev", "Running", "http://localhost:9000", "v1.0.0", "alice", now,
-                "staging-app", "staging", "Deploying", "http://localhost:9100", "v1.2.3", "bob"
-            ],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let _ = conn
+            .execute(
+                &sql,
+                rusqlite::params![
+                    "demo",
+                    "dev",
+                    "Running",
+                    "http://localhost:9000",
+                    "v1.0.0",
+                    "alice",
+                    now,
+                    "staging-app",
+                    "staging",
+                    "Deploying",
+                    "http://localhost:9100",
+                    "v1.2.3",
+                    "bob"
+                ],
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(Json(json!({"status":"success","source":"sqlite"})));
     }
 
     // SurrealDB 回退
-    let make = |name: &str, env: &str, status: &str, url: &str, version: &str, owner: &str| -> String {
+    let make = |name: &str,
+                env: &str,
+                status: &str,
+                url: &str,
+                version: &str,
+                owner: &str|
+     -> String {
         format!(
             "CREATE projects CONTENT {{ name: '{n}', env: '{e}', status: '{s}', url: '{u}', version: '{v}', owner: '{o}', created_at: '{t}', updated_at: '{t}' }};",
-            n=name.replace("'","\'"), e=env, s=status, u=url, v=version, o=owner, t=now
+            n = name.replace("'", "\'"),
+            e = env,
+            s = status,
+            u = url,
+            v = version,
+            o = owner,
+            t = now
         )
     };
-    let sql = format!("{}{}", make("demo","dev","Running","http://localhost:9000","v1.0.0","alice"), make("staging-app","staging","Deploying","http://localhost:9100","v1.2.3","bob"));
+    let sql = format!(
+        "{}{}",
+        make(
+            "demo",
+            "dev",
+            "Running",
+            "http://localhost:9000",
+            "v1.0.0",
+            "alice"
+        ),
+        make(
+            "staging-app",
+            "staging",
+            "Deploying",
+            "http://localhost:9100",
+            "v1.2.3",
+            "bob"
+        )
+    );
     match SUL_DB.query(sql).await {
         Ok(_) => Ok(Json(json!({"status":"success","source":"surrealdb"}))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 /// 后台健康检查调度器：周期性检查配置了 health_url 的项目
 pub async fn projects_health_scheduler() {
     use std::time::Duration as StdDur;
-    let disabled = std::env::var("WEBUI_HEALTH_SCHED").map(|v| v == "0").unwrap_or(false);
-    if disabled { return; }
+    let disabled = std::env::var("WEBUI_HEALTH_SCHED")
+        .map(|v| v == "0")
+        .unwrap_or(false);
+    if disabled {
+        return;
+    }
 
     let interval_sec: u64 = std::env::var("PROJECTS_HEALTH_INTERVAL_SEC")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120);
 
-    let client = match reqwest::Client::builder().timeout(StdDur::from_secs(3)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(StdDur::from_secs(3))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -958,10 +1291,19 @@ pub async fn projects_health_scheduler() {
         };
 
         for row in rows {
-            let id = match row["id"].as_str() { Some(s) => s.to_string(), None => continue };
-            let url = match row["health_url"].as_str() { Some(s) => s.to_string(), None => continue };
+            let id = match row["id"].as_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let url = match row["health_url"].as_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
 
-            let ok = match client.get(&url).send().await { Ok(r) if r.status().is_success() => true, _ => false };
+            let ok = match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => true,
+                _ => false,
+            };
             let status_str = if ok { "Running" } else { "Failed" };
             let now = chrono::Utc::now().to_rfc3339();
             let id_esc = id.replace("'", "\\'");
@@ -980,29 +1322,27 @@ pub async fn get_tasks(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let task_manager = state.task_manager.lock().await;
-    
+
     let mut tasks: Vec<&TaskInfo> = task_manager.active_tasks.values().collect();
     tasks.extend(task_manager.task_history.iter());
-    
+
     // 按状态过滤
     if let Some(status_filter) = &params.status {
-        tasks.retain(|task| {
-            match status_filter.as_str() {
-                "pending" => task.status == TaskStatus::Pending,
-                "running" => task.status == TaskStatus::Running,
-                "completed" => task.status == TaskStatus::Completed,
-                "failed" => task.status == TaskStatus::Failed,
-                "cancelled" => task.status == TaskStatus::Cancelled,
-                _ => true,
-            }
+        tasks.retain(|task| match status_filter.as_str() {
+            "pending" => task.status == TaskStatus::Pending,
+            "running" => task.status == TaskStatus::Running,
+            "completed" => task.status == TaskStatus::Completed,
+            "failed" => task.status == TaskStatus::Failed,
+            "cancelled" => task.status == TaskStatus::Cancelled,
+            _ => true,
         });
     }
-    
+
     // 限制数量
     if let Some(limit) = params.limit {
         tasks.truncate(limit);
     }
-    
+
     Ok(Json(json!({
         "tasks": tasks,
         "total": tasks.len()
@@ -1080,15 +1420,13 @@ pub async fn get_task_logs(
 
     // 按日志级别过滤
     if let Some(level_filter) = &params.level {
-        logs.retain(|log| {
-            match level_filter.as_str() {
-                "Debug" => matches!(log.level, LogLevel::Debug),
-                "Info" => matches!(log.level, LogLevel::Info),
-                "Warning" => matches!(log.level, LogLevel::Warning),
-                "Error" => matches!(log.level, LogLevel::Error),
-                "Critical" => matches!(log.level, LogLevel::Critical),
-                _ => true,
-            }
+        logs.retain(|log| match level_filter.as_str() {
+            "Debug" => matches!(log.level, LogLevel::Debug),
+            "Info" => matches!(log.level, LogLevel::Info),
+            "Warning" => matches!(log.level, LogLevel::Warning),
+            "Error" => matches!(log.level, LogLevel::Error),
+            "Critical" => matches!(log.level, LogLevel::Critical),
+            _ => true,
         });
     }
 
@@ -1106,11 +1444,7 @@ pub async fn get_task_logs(
     // 按时间倒序排列（最新的在前面）
     logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-    let paginated_logs: Vec<_> = logs
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let paginated_logs: Vec<_> = logs.into_iter().skip(offset).take(limit).collect();
 
     Ok(Json(serde_json::json!({
         "task_id": task.id,
@@ -1131,9 +1465,12 @@ pub async fn create_task(
 ) -> Result<Json<TaskInfo>, (StatusCode, Json<serde_json::Value>)> {
     // 验证请求数据
     if request.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "任务名称不能为空"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "任务名称不能为空"
+            })),
+        ));
     }
 
     // 允许 manual_db_nums 为空：表示“全部数据库”
@@ -1153,28 +1490,32 @@ pub async fn start_task(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mut task_manager = state.task_manager.lock().await;
-    
+
     if let Some(task) = task_manager.active_tasks.get_mut(&id) {
         if task.status == TaskStatus::Pending {
             task.status = TaskStatus::Running;
             task.started_at = Some(SystemTime::now());
             task.add_log(LogLevel::Info, "任务开始执行".to_string());
-            
+
             // 启动真实的任务执行逻辑
             let state_cp = state.clone();
             let id_cp = id.clone();
             tokio::spawn(async move {
-                let _permit = TASK_EXEC_SEMAPHORE.clone().acquire_owned().await.expect("semaphore");
+                let _permit = TASK_EXEC_SEMAPHORE
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore");
                 execute_real_task(state_cp, id_cp).await;
             });
-            
+
             return Ok(Json(json!({
                 "success": true,
                 "message": "任务已启动"
             })));
         }
     }
-    
+
     Err(StatusCode::NOT_FOUND)
 }
 
@@ -1184,20 +1525,20 @@ pub async fn stop_task(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mut task_manager = state.task_manager.lock().await;
-    
+
     if let Some(task) = task_manager.active_tasks.get_mut(&id) {
         if task.status == TaskStatus::Running {
             task.status = TaskStatus::Cancelled;
             task.completed_at = Some(SystemTime::now());
             task.add_log(LogLevel::Warning, "任务被用户取消".to_string());
-            
+
             return Ok(Json(json!({
                 "success": true,
                 "message": "任务已停止"
             })));
         }
     }
-    
+
     Err(StatusCode::NOT_FOUND)
 }
 
@@ -1207,7 +1548,7 @@ pub async fn restart_task(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mut task_manager = state.task_manager.lock().await;
-    
+
     if let Some(old_task) = task_manager.active_tasks.get(&id) {
         // 只允许重启失败的任务
         if old_task.status != TaskStatus::Failed {
@@ -1216,7 +1557,7 @@ pub async fn restart_task(
                 "error": "只能重启失败的任务"
             })));
         }
-        
+
         // 创建新任务（基于原任务配置）
         let new_task_id = Uuid::new_v4().to_string();
         let mut new_task = TaskInfo {
@@ -1237,32 +1578,38 @@ pub async fn restart_task(
             estimated_duration: old_task.estimated_duration,
             actual_duration: None,
         };
-        
+
         new_task.add_log(LogLevel::Info, format!("基于任务 {} 重新创建", id));
-        
+
         // 立即启动新任务
         new_task.status = TaskStatus::Running;
         new_task.started_at = Some(SystemTime::now());
         new_task.add_log(LogLevel::Info, "重启任务开始执行".to_string());
-        
+
         // 添加新任务到任务列表
-        task_manager.active_tasks.insert(new_task_id.clone(), new_task);
-        
+        task_manager
+            .active_tasks
+            .insert(new_task_id.clone(), new_task);
+
         // 启动真实的任务执行逻辑
         let state_cp = state.clone();
         let new_id_cp = new_task_id.clone();
         tokio::spawn(async move {
-            let _permit = TASK_EXEC_SEMAPHORE.clone().acquire_owned().await.expect("semaphore");
+            let _permit = TASK_EXEC_SEMAPHORE
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore");
             execute_real_task(state_cp, new_id_cp).await;
         });
-        
+
         return Ok(Json(json!({
             "success": true,
             "message": "任务重启成功",
             "new_task_id": new_task_id
         })));
     }
-    
+
     Err(StatusCode::NOT_FOUND)
 }
 
@@ -1272,14 +1619,14 @@ pub async fn delete_task(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mut task_manager = state.task_manager.lock().await;
-    
+
     if task_manager.active_tasks.remove(&id).is_some() {
         return Ok(Json(json!({
             "success": true,
             "message": "任务已删除"
         })));
     }
-    
+
     // 从历史记录中删除
     if let Some(pos) = task_manager.task_history.iter().position(|t| t.id == id) {
         task_manager.task_history.remove(pos);
@@ -1288,7 +1635,7 @@ pub async fn delete_task(
             "message": "任务已删除"
         })));
     }
-    
+
     Err(StatusCode::NOT_FOUND)
 }
 
@@ -1309,9 +1656,7 @@ pub async fn get_next_task_number(
 }
 
 /// 获取配置
-pub async fn get_config(
-    State(state): State<AppState>,
-) -> Result<Json<DatabaseConfig>, StatusCode> {
+pub async fn get_config(State(state): State<AppState>) -> Result<Json<DatabaseConfig>, StatusCode> {
     let config_manager = state.config_manager.read().await;
     Ok(Json(config_manager.current_config.clone()))
 }
@@ -1323,7 +1668,7 @@ pub async fn update_config(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mut config_manager = state.config_manager.write().await;
     config_manager.current_config = request.config;
-    
+
     Ok(Json(json!({
         "success": true,
         "message": "配置已更新"
@@ -1440,21 +1785,29 @@ pub async fn sqlite_spatial_page() -> Result<Html<String>, StatusCode> {
 pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, StatusCode> {
     #[cfg(feature = "sqlite-index")]
     {
-        use aios_core::{SUL_DB, RefnoEnum, RefU64};
-        use crate::spatial_index::SqliteSpatialIndex;
         use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
+        use crate::spatial_index::SqliteSpatialIndex;
+        use aios_core::{RefU64, RefnoEnum, SUL_DB};
 
         if !SqliteSpatialIndex::is_enabled() {
-            return Ok(Json(json!({"success": false, "error": "未启用 sqlite-index 或配置未打开"})));
+            return Ok(Json(
+                json!({"success": false, "error": "未启用 sqlite-index 或配置未打开"}),
+            ));
         }
 
         // 打开并清空 SQLite 索引
         let index = match SqliteSpatialIndex::with_default_path() {
             Ok(v) => v,
-            Err(e) => return Ok(Json(json!({"success": false, "error": format!("打开索引失败: {}", e)})))
+            Err(e) => {
+                return Ok(Json(
+                    json!({"success": false, "error": format!("打开索引失败: {}", e)}),
+                ));
+            }
         };
         if let Err(e) = index.clear() {
-            return Ok(Json(json!({"success": false, "error": format!("清空索引失败: {}", e)})));
+            return Ok(Json(
+                json!({"success": false, "error": format!("清空索引失败: {}", e)}),
+            ));
         }
 
         // 分页扫描 SurrealDB 的 inst_relate，获取 refno 列表
@@ -1471,7 +1824,11 @@ pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, Sta
 
             let mut resp = match SUL_DB.query(sql).await {
                 Ok(v) => v,
-                Err(e) => return Ok(Json(json!({"success": false, "error": format!("SurrealDB 查询失败: {}", e)})))
+                Err(e) => {
+                    return Ok(Json(
+                        json!({"success": false, "error": format!("SurrealDB 查询失败: {}", e)}),
+                    ));
+                }
             };
 
             let result = match resp.take::<Vec<u64>>(0) {
@@ -1491,7 +1848,9 @@ pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, Sta
 
             // 批量计算并同步 AABB，内部会写回 Surreal 以及写入 SQLite 索引
             if let Err(e) = update_inst_relate_aabbs_by_refnos(&refnos, true).await {
-                return Ok(Json(json!({"success": false, "error": format!("批量更新AABB失败: {}", e)})));
+                return Ok(Json(
+                    json!({"success": false, "error": format!("批量更新AABB失败: {}", e)}),
+                ));
             }
 
             total_processed += refnos.len();
@@ -1501,7 +1860,11 @@ pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, Sta
         // 统计索引中元素数量
         let stats = match index.get_stats() {
             Ok(s) => s,
-            Err(e) => return Ok(Json(json!({"success": false, "error": format!("获取索引统计失败: {}", e)})))
+            Err(e) => {
+                return Ok(Json(
+                    json!({"success": false, "error": format!("获取索引统计失败: {}", e)}),
+                ));
+            }
         };
         let elapsed = t0.elapsed();
 
@@ -1516,7 +1879,9 @@ pub async fn api_sqlite_spatial_rebuild() -> Result<Json<serde_json::Value>, Sta
     }
     #[cfg(not(feature = "sqlite-index"))]
     {
-        Ok(Json(json!({"success": false, "error": "编译未启用 sqlite-index 特性"})))
+        Ok(Json(
+            json!({"success": false, "error": "编译未启用 sqlite-index 特性"}),
+        ))
     }
 }
 
@@ -1541,18 +1906,22 @@ pub async fn spatial_query_page() -> Html<String> {
 }
 
 /// SQLite 空间索引 – 增强的查询API
-pub async fn api_sqlite_spatial_query(Query(q): Query<SqliteSpatialQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn api_sqlite_spatial_query(
+    Query(q): Query<SqliteSpatialQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     #[cfg(feature = "sqlite-index")]
     {
         if !SqliteSpatialIndex::is_enabled() {
-            return Ok(Json(json!({"success": false, "error": "未启用 sqlite-index 或配置未打开"})));
+            return Ok(Json(
+                json!({"success": false, "error": "未启用 sqlite-index 或配置未打开"}),
+            ));
         }
-        
+
         let spatial_index = match SqliteSpatialIndex::with_default_path() {
             Ok(idx) => idx,
-            Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()})))
+            Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()}))),
         };
-        
+
         // 根据查询模式处理
         let query_aabb = if let Some(mode) = &q.mode {
             if mode == "refno" && q.refno.is_some() {
@@ -1560,65 +1929,103 @@ pub async fn api_sqlite_spatial_query(Query(q): Query<SqliteSpatialQuery>) -> Re
                 let refno_str = q.refno.as_ref().unwrap();
                 let refno = match refno_str.parse::<u64>() {
                     Ok(n) => aios_core::RefU64(n),
-                    Err(_) => return Ok(Json(json!({"success": false, "error": "无效的参考号"})))
+                    Err(_) => return Ok(Json(json!({"success": false, "error": "无效的参考号"}))),
                 };
-                
+
                 // 获取目标的 AABB
                 let target_aabb = match spatial_index.get_aabb(refno) {
                     Ok(Some(aabb)) => aabb,
-                    Ok(None) => return Ok(Json(json!({"success": false, "error": "未找到指定参考号的 AABB"}))),
-                    Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()})))
+                    Ok(None) => {
+                        return Ok(Json(
+                            json!({"success": false, "error": "未找到指定参考号的 AABB"}),
+                        ));
+                    }
+                    Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()}))),
                 };
-                
+
                 // 扩展查询范围
                 let distance = q.distance.unwrap_or(1000.0) as f32;
                 Aabb::new(
-                    [target_aabb.mins.x - distance, target_aabb.mins.y - distance, target_aabb.mins.z - distance].into(),
-                    [target_aabb.maxs.x + distance, target_aabb.maxs.y + distance, target_aabb.maxs.z + distance].into()
+                    [
+                        target_aabb.mins.x - distance,
+                        target_aabb.mins.y - distance,
+                        target_aabb.mins.z - distance,
+                    ]
+                    .into(),
+                    [
+                        target_aabb.maxs.x + distance,
+                        target_aabb.maxs.y + distance,
+                        target_aabb.maxs.z + distance,
+                    ]
+                    .into(),
                 )
             } else {
                 // 默认边界框查询
                 Aabb::new(
-                    [q.minx.unwrap_or(-1000.0) as f32, q.miny.unwrap_or(-1000.0) as f32, q.minz.unwrap_or(-1000.0) as f32].into(),
-                    [q.maxx.unwrap_or(1000.0) as f32, q.maxy.unwrap_or(1000.0) as f32, q.maxz.unwrap_or(1000.0) as f32].into()
+                    [
+                        q.minx.unwrap_or(-1000.0) as f32,
+                        q.miny.unwrap_or(-1000.0) as f32,
+                        q.minz.unwrap_or(-1000.0) as f32,
+                    ]
+                    .into(),
+                    [
+                        q.maxx.unwrap_or(1000.0) as f32,
+                        q.maxy.unwrap_or(1000.0) as f32,
+                        q.maxz.unwrap_or(1000.0) as f32,
+                    ]
+                    .into(),
                 )
             }
         } else {
             // 默认边界框查询
             Aabb::new(
-                [q.minx.unwrap_or(-1000.0) as f32, q.miny.unwrap_or(-1000.0) as f32, q.minz.unwrap_or(-1000.0) as f32].into(),
-                [q.maxx.unwrap_or(1000.0) as f32, q.maxy.unwrap_or(1000.0) as f32, q.maxz.unwrap_or(1000.0) as f32].into()
+                [
+                    q.minx.unwrap_or(-1000.0) as f32,
+                    q.miny.unwrap_or(-1000.0) as f32,
+                    q.minz.unwrap_or(-1000.0) as f32,
+                ]
+                .into(),
+                [
+                    q.maxx.unwrap_or(1000.0) as f32,
+                    q.maxy.unwrap_or(1000.0) as f32,
+                    q.maxz.unwrap_or(1000.0) as f32,
+                ]
+                .into(),
             )
         };
-        
-        let ids = match spatial_index.query_intersect(&query_aabb) { 
-            Ok(v) => v, 
-            Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()})))
+
+        let ids = match spatial_index.query_intersect(&query_aabb) {
+            Ok(v) => v,
+            Err(e) => return Ok(Json(json!({"success": false, "error": e.to_string()}))),
         };
-        
+
         let mut results = Vec::new();
         for id in ids {
             let aabb = spatial_index.get_aabb(id).ok().flatten();
-            let aabb_json = aabb.map(|bb| json!({
-                "min": {"x": bb.mins.x, "y": bb.mins.y, "z": bb.mins.z},
-                "max": {"x": bb.maxs.x, "y": bb.maxs.y, "z": bb.maxs.z},
-            }));
-            
+            let aabb_json = aabb.map(|bb| {
+                json!({
+                    "min": {"x": bb.mins.x, "y": bb.mins.y, "z": bb.mins.z},
+                    "max": {"x": bb.maxs.x, "y": bb.maxs.y, "z": bb.maxs.z},
+                })
+            });
+
             // 获取更多信息（如果可用）
             let noun = "Unknown"; // TODO: 从数据库获取 noun
-            
+
             results.push(json!({
-                "refno": id.0, 
+                "refno": id.0,
                 "aabb": aabb_json,
                 "noun": noun
             }));
         }
-        
+
         Ok(Json(json!({"success": true, "results": results})))
     }
     #[cfg(not(feature = "sqlite-index"))]
     {
-        Ok(Json(json!({"success": false, "error": "编译未启用 sqlite-index 特性"})))
+        Ok(Json(
+            json!({"success": false, "error": "编译未启用 sqlite-index 特性"}),
+        ))
     }
 }
 
@@ -1770,10 +2177,13 @@ pub async fn create_batch_tasks(
     let mut task_manager = state.task_manager.lock().await;
 
     // 验证模板是否存在
-    let templates = get_task_templates(State(state.clone())).await
+    let templates = get_task_templates(State(state.clone()))
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let template = templates.0.iter()
+    let template = templates
+        .0
+        .iter()
         .find(|t| t.id == request.template_id)
         .ok_or(StatusCode::BAD_REQUEST)?;
 
@@ -1834,35 +2244,38 @@ pub async fn api_get_deployment_sites(
     let per_page = params.per_page.unwrap_or(10).min(100);
     let page = params.page.unwrap_or(1);
     let offset = (page - 1) * per_page;
-    
+
     let mut where_clauses = Vec::new();
-    
+
     if let Some(q) = params.q.as_ref().filter(|s| !s.is_empty()) {
         let q_esc = q.replace("'", "\\'");
-        where_clauses.push(format!("(name CONTAINS '{}' OR description CONTAINS '{}' OR owner CONTAINS '{}')", q_esc, q_esc, q_esc));
+        where_clauses.push(format!(
+            "(name CONTAINS '{}' OR description CONTAINS '{}' OR owner CONTAINS '{}')",
+            q_esc, q_esc, q_esc
+        ));
     }
-    
+
     if let Some(status) = params.status.as_ref().filter(|s| !s.is_empty()) {
         let status_esc = status.replace("'", "\\'");
         where_clauses.push(format!("status = '{}'", status_esc));
     }
-    
+
     if let Some(owner) = params.owner.as_ref().filter(|s| !s.is_empty()) {
         let owner_esc = owner.replace("'", "\\'");
         where_clauses.push(format!("owner = '{}'", owner_esc));
     }
-    
+
     if let Some(env) = params.env.as_ref().filter(|s| !s.is_empty()) {
         let env_esc = env.replace("'", "\\'");
         where_clauses.push(format!("env = '{}'", env_esc));
     }
-    
+
     let where_clause = if where_clauses.is_empty() {
         String::new()
     } else {
         format!("WHERE {}", where_clauses.join(" AND "))
     };
-    
+
     let sort_field = match params.sort.as_deref() {
         Some("name:asc") => "name ASC",
         Some("name:desc") => "name DESC",
@@ -1871,17 +2284,20 @@ pub async fn api_get_deployment_sites(
         Some("updated_at:desc") => "updated_at DESC",
         _ => "created_at DESC",
     };
-    
+
     let sql = format!(
         "SELECT *, id as id FROM deployment_sites {} ORDER BY {} LIMIT {} START {}",
         where_clause, sort_field, per_page, offset
     );
-    
-    let count_sql = format!("SELECT count() as total FROM deployment_sites {}", where_clause);
-    
+
+    let count_sql = format!(
+        "SELECT count() as total FROM deployment_sites {}",
+        where_clause
+    );
+
     // 先尝试从SurrealDB获取数据
     let mut all_items = Vec::new();
-    
+
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let surreal_items: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -1892,7 +2308,7 @@ pub async fn api_get_deployment_sites(
             eprintln!("Failed to query SurrealDB for deployment sites");
         }
     }
-    
+
     // 然后从SQLite获取向导创建的部署站点
     match crate::web_ui::wizard_handlers::load_deployment_sites_from_sqlite() {
         Ok(sqlite_sites) => {
@@ -1902,7 +2318,7 @@ pub async fn api_get_deployment_sites(
             eprintln!("Failed to load deployment sites from SQLite: {}", e);
         }
     }
-    
+
     // 应用过滤和排序
     if let Some(q) = params.q.as_ref().filter(|s| !s.is_empty()) {
         let q_lower = q.to_lowercase();
@@ -1913,36 +2329,38 @@ pub async fn api_get_deployment_sites(
             name.contains(&q_lower) || desc.contains(&q_lower) || owner.contains(&q_lower)
         });
     }
-    
+
     if let Some(status) = params.status.as_ref().filter(|s| !s.is_empty()) {
         all_items.retain(|item| item["status"].as_str().unwrap_or("") == status);
     }
-    
+
     if let Some(env) = params.env.as_ref().filter(|s| !s.is_empty()) {
         all_items.retain(|item| item["env"].as_str().unwrap_or("") == env);
     }
-    
+
     if let Some(owner) = params.owner.as_ref().filter(|s| !s.is_empty()) {
         all_items.retain(|item| item["owner"].as_str().unwrap_or("") == owner);
     }
-    
+
     // 排序
     match params.sort.as_deref() {
         Some("name:asc") => all_items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())),
         Some("name:desc") => all_items.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str())),
-        Some("updated_at:asc") => all_items.sort_by(|a, b| a["updated_at"].as_str().cmp(&b["updated_at"].as_str())),
+        Some("updated_at:asc") => {
+            all_items.sort_by(|a, b| a["updated_at"].as_str().cmp(&b["updated_at"].as_str()))
+        }
         _ => all_items.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str())),
     }
-    
+
     let total = all_items.len() as u64;
-    
+
     // 分页
     let paginated_items: Vec<_> = all_items
         .into_iter()
         .skip(offset as usize)
         .take(per_page as usize)
         .collect();
-    
+
     Ok(Json(json!({
         "items": paginated_items,
         "total": total,
@@ -1952,23 +2370,203 @@ pub async fn api_get_deployment_sites(
     })))
 }
 
+/// 从 DbOption.toml 导入配置并创建部署站点
+pub async fn api_import_deployment_site_from_dboption(
+    payload: Option<Json<DeploymentSiteImportRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let req = payload.map(|Json(v)| v).unwrap_or_default();
+    let path = req
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("DbOption.toml"));
+
+    if !path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("配置文件不存在: {}", path.display())
+            })),
+        ));
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("读取配置失败: {}", e)})),
+        )
+    })?;
+
+    let db_option: DbOption = toml::from_str(&raw).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("解析 DbOption.toml 失败: {}", e)})),
+        )
+    })?;
+
+    let mut config = DatabaseConfig::from_db_option(&db_option);
+    // 若配置名称来自 DbOption，保证更精确的描述
+    if let Some(name) = req
+        .name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        config.name = name.to_string();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let default_site_name = if let Some(name) = req
+        .name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        name.to_string()
+    } else if !config.project_name.is_empty() {
+        format!("{}-{}", config.project_name, timestamp)
+    } else {
+        format!("导入站点-{}", timestamp)
+    };
+    let site_name = default_site_name;
+
+    // 检查名称唯一性
+    let check_sql = format!(
+        "SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1",
+        site_name.replace("'", "\\'")
+    );
+    if let Ok(mut resp) = SUL_DB.query(check_sql).await {
+        let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
+        if !rows.is_empty() {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"站点名称已存在"})),
+            ));
+        }
+    }
+
+    let project_code_opt = if config.project_code == 0 {
+        None
+    } else {
+        Some(config.project_code)
+    };
+    let now = SystemTime::now();
+    let base_path = StdPath::new(&config.project_path);
+    let included_projects = if db_option.included_projects.is_empty() {
+        vec![config.project_name.clone()]
+    } else {
+        db_option.included_projects.clone()
+    };
+
+    let e3d_projects: Vec<E3dProjectInfo> = included_projects
+        .into_iter()
+        .filter(|project| !project.trim().is_empty())
+        .map(|project| {
+            let project_path = if StdPath::new(&project).is_absolute() {
+                project.clone()
+            } else if config.project_path.is_empty() {
+                project.clone()
+            } else {
+                base_path.join(&project).to_string_lossy().into_owned()
+            };
+
+            E3dProjectInfo {
+                name: project.clone(),
+                path: project_path,
+                project_code: project_code_opt,
+                db_file_count: 0,
+                size_bytes: 0,
+                last_modified: now,
+                selected: true,
+                description: None,
+            }
+        })
+        .collect();
+
+    let env = req.env.clone().or_else(|| {
+        let trimmed = db_option.location.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let site = DeploymentSite {
+        id: None,
+        name: site_name.clone(),
+        description: req.description.clone(),
+        e3d_projects,
+        config,
+        status: DeploymentSiteStatus::Configuring,
+        url: None,
+        env,
+        owner: req.owner.clone(),
+        tags: req.tags.clone(),
+        notes: req.notes.clone(),
+        created_at: Some(now),
+        updated_at: Some(now),
+    };
+
+    let site_json = serde_json::to_value(&site).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"序列化失败"})),
+        )
+    })?;
+
+    let sql = format!("CREATE deployment_sites CONTENT {}", site_json);
+    match SUL_DB.query(sql).await {
+        Ok(mut resp) => {
+            let items: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
+            if let Some(item) = items.get(0) {
+                Ok(Json(json!({
+                    "status": "success",
+                    "item": item,
+                    "message": format!("已从 {} 导入部署站点", path.display()),
+                })))
+            } else {
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":"创建失败"})),
+                ))
+            }
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("数据库错误: {}", e)})),
+        )),
+    }
+}
+
 /// 创建部署站点
 pub async fn api_create_deployment_site(
     Json(req): Json<DeploymentSiteCreateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if req.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"站点名称不能为空"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"站点名称不能为空"})),
+        ));
     }
-    
+
     // 检查名称唯一性
-    let check_sql = format!("SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1", req.name.replace("'", "\\'"));
+    let check_sql = format!(
+        "SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1",
+        req.name.replace("'", "\\'")
+    );
     if let Ok(mut resp) = SUL_DB.query(check_sql).await {
         let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
         if !rows.is_empty() {
-            return Err((StatusCode::CONFLICT, Json(json!({"error":"站点名称已存在"}))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"站点名称已存在"})),
+            ));
         }
     }
-    
+
     // 构建E3D项目信息列表
     let mut e3d_projects = Vec::new();
     for project_path in &req.selected_projects {
@@ -1978,7 +2576,7 @@ pub async fn api_create_deployment_site(
                 .and_then(|n| n.to_str())
                 .unwrap_or("Unknown")
                 .to_string();
-                
+
             e3d_projects.push(E3dProjectInfo {
                 name: project_name,
                 path: project_path.clone(),
@@ -1991,7 +2589,7 @@ pub async fn api_create_deployment_site(
             });
         }
     }
-    
+
     let now = std::time::SystemTime::now();
     let site = DeploymentSite {
         id: None,
@@ -2008,10 +2606,14 @@ pub async fn api_create_deployment_site(
         created_at: Some(now),
         updated_at: Some(now),
     };
-    
-    let site_json = serde_json::to_value(&site)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"序列化失败"}))))?;
-    
+
+    let site_json = serde_json::to_value(&site).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"序列化失败"})),
+        )
+    })?;
+
     let sql = format!("CREATE deployment_sites CONTENT {}", site_json);
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
@@ -2019,10 +2621,16 @@ pub async fn api_create_deployment_site(
             if let Some(item) = items.get(0) {
                 Ok(Json(json!({"status":"success","item": item})))
             } else {
-                Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"创建失败"}))))
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":"创建失败"})),
+                ))
             }
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("数据库错误: {}", e)})))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("数据库错误: {}", e)})),
+        )),
     }
 }
 
@@ -2030,10 +2638,26 @@ pub async fn api_create_deployment_site(
 pub async fn api_get_deployment_site(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // 向导生成的站点全部保存在 SQLite，ID 以 "wizard_" 开头，此类请求无需触发 SurrealDB 查询，
+    // 避免因为数据库权限不足导致 500。
+    let load_from_sqlite =
+        || match crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id) {
+            Ok(Some(site)) => Ok(Json(site)),
+            Ok(None) => Err(StatusCode::NOT_FOUND),
+            Err(e) => {
+                eprintln!("Failed to load deployment site from SQLite ({}): {}", id, e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        };
+
+    if id.starts_with("wizard_") {
+        return load_from_sqlite();
+    }
+
     // 首先尝试从SurrealDB获取
     let id_esc = id.replace("'", "\\'");
     let sql = format!("SELECT * FROM type::thing('{}')", id_esc);
-    
+
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -2041,20 +2665,16 @@ pub async fn api_get_deployment_site(
                 return Ok(Json(item.clone()));
             }
         }
-        Err(_) => {
-            eprintln!("Failed to query SurrealDB for deployment site: {}", id);
+        Err(err) => {
+            eprintln!(
+                "Failed to query SurrealDB for deployment site {}: {}",
+                id, err
+            );
         }
     }
-    
-    // 如果SurrealDB中没有找到，尝试从SQLite获取
-    match crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id) {
-        Ok(Some(site)) => Ok(Json(site)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            eprintln!("Failed to load deployment site from SQLite: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
+
+    // 如果SurrealDB没有命中（或查询失败），回退到SQLite
+    load_from_sqlite()
 }
 
 /// 更新部署站点
@@ -2065,19 +2685,28 @@ pub async fn api_update_deployment_site(
     // 检查名称唯一性（如果要更新名称）
     if let Some(name) = req.name.as_ref() {
         if name.trim().is_empty() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"站点名称不能为空"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"站点名称不能为空"})),
+            ));
         }
-        let check_sql = format!("SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1", name.replace("'", "\\'"));
+        let check_sql = format!(
+            "SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1",
+            name.replace("'", "\\'")
+        );
         if let Ok(mut resp) = SUL_DB.query(check_sql).await {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
             if let Some(r) = rows.get(0) {
                 if r["id"].as_str().map(|s| s != id).unwrap_or(true) {
-                    return Err((StatusCode::CONFLICT, Json(json!({"error":"站点名称已存在"}))));
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(json!({"error":"站点名称已存在"})),
+                    ));
                 }
             }
         }
     }
-    
+
     let now = std::time::SystemTime::now();
     let mut body = json!({
         "name": req.name,
@@ -2097,14 +2726,17 @@ pub async fn api_update_deployment_site(
         "notes": req.notes,
         "updated_at": now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
     });
-    
+
     if let Some(map) = body.as_object_mut() {
         map.retain(|_, v| !v.is_null());
     }
-    
+
     let id_esc = id.replace("'", "\\'");
-    let sql = format!("UPDATE type::thing('{}') MERGE {} RETURN AFTER", id_esc, body);
-    
+    let sql = format!(
+        "UPDATE type::thing('{}') MERGE {} RETURN AFTER",
+        id_esc, body
+    );
+
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -2114,7 +2746,10 @@ pub async fn api_update_deployment_site(
                 Err((StatusCode::NOT_FOUND, Json(json!({"error":"未找到站点"}))))
             }
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("更新失败: {}", e)})))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("更新失败: {}", e)})),
+        )),
     }
 }
 
@@ -2126,11 +2761,11 @@ pub async fn api_delete_deployment_site(
     if let Ok(()) = crate::web_ui::wizard_handlers::delete_deployment_site_from_sqlite(&id) {
         return Ok(Json(json!({"status":"success","source":"sqlite"})));
     }
-    
+
     // 如果SQLite中没有，则尝试从SurrealDB删除
     let id_esc = id.replace("'", "\\'");
     let sql = format!("DELETE type::thing('{}') RETURN BEFORE", id_esc);
-    
+
     match SUL_DB.query(sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -2149,7 +2784,10 @@ pub async fn api_create_deployment_site_task(
     Json(req): Json<DeploymentSiteTaskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // 获取站点信息
-    let site_sql = format!("SELECT * FROM type::thing('{}')", req.site_id.replace("'", "\\'"));
+    let site_sql = format!(
+        "SELECT * FROM type::thing('{}')",
+        req.site_id.replace("'", "\\'")
+    );
     let site = match SUL_DB.query(site_sql).await {
         Ok(mut resp) => {
             let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
@@ -2158,31 +2796,40 @@ pub async fn api_create_deployment_site_task(
                 None => return Err((StatusCode::NOT_FOUND, Json(json!({"error":"未找到站点"})))),
             }
         }
-        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"数据库查询失败"})))),
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":"数据库查询失败"})),
+            ));
+        }
     };
-    
-    let site: DeploymentSite = serde_json::from_value(site)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"站点数据解析失败"}))))?;
-    
+
+    let site: DeploymentSite = serde_json::from_value(site).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"站点数据解析失败"})),
+        )
+    })?;
+
     // 使用站点配置或覆盖配置
     let config = req.config_override.unwrap_or(site.config);
-    
+
     // 生成任务名称
-    let task_name = req.task_name.unwrap_or_else(|| {
-        format!("{} - {:?}", site.name, req.task_type)
-    });
-    
+    let task_name = req
+        .task_name
+        .unwrap_or_else(|| format!("{} - {:?}", site.name, req.task_type));
+
     // 创建任务
     let mut task = TaskInfo::new(task_name, req.task_type, config);
     if let Some(priority) = req.priority {
         task.priority = priority;
     }
-    
+
     // 添加到任务管理器
     let mut task_manager = state.task_manager.lock().await;
     let task_id = task.id.clone();
     task_manager.active_tasks.insert(task_id.clone(), task);
-    
+
     Ok(Json(json!({
         "status": "success",
         "task_id": task_id,
@@ -2267,15 +2914,27 @@ pub async fn start_surreal_server(
     );
 
     if let Some(Json(body)) = &_payload {
-        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
-        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
-        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) { user = s.to_string(); }
-        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) { pass = s.to_string(); }
-        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) { project = s.to_string(); }
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) {
+            ip = s.to_string();
+        }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) {
+            port = u16::try_from(p).unwrap_or(port);
+        }
+        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) {
+            user = s.to_string();
+        }
+        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) {
+            pass = s.to_string();
+        }
+        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) {
+            project = s.to_string();
+        }
     }
 
     // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
-    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
+    if ip == "localhost" {
+        ip = "127.0.0.1".to_string();
+    }
     let bind_addr = format!("{}:{}", ip, port);
 
     let mode = "local";
@@ -2318,7 +2977,7 @@ async fn start_surreal_process_improved(
     println!("   地址: {} (统一绑定 0.0.0.0)", final_bind_addr);
     println!("   用户: {}", user);
     println!("   项目: {}", project);
-    
+
     // 1. 检查 surreal 命令是否存在
     if !command_exists("surreal").await {
         println!("❌ SurrealDB CLI 未找到");
@@ -2386,15 +3045,21 @@ async fn start_surreal_process_improved(
     println!("🚀 执行启动命令...");
     let mut cmd = TokioCommand::new("surreal");
     cmd.arg("start")
-        .arg("--bind").arg(&final_bind_addr)
-        .arg("--user").arg(user)
-        .arg("--pass").arg(pass)
+        .arg("--bind")
+        .arg(&final_bind_addr)
+        .arg("--user")
+        .arg(user)
+        .arg("--pass")
+        .arg(pass)
         .arg(&db_path)
-        .stdout(Stdio::piped())  // 捕获标准输出
-        .stderr(Stdio::piped())  // 捕获错误输出
+        .stdout(Stdio::piped()) // 捕获标准输出
+        .stderr(Stdio::piped()) // 捕获错误输出
         .stdin(Stdio::null());
-    
-    println!("命令: surreal start --bind {} --user {} --pass [HIDDEN] {}", final_bind_addr, user, db_path);
+
+    println!(
+        "命令: surreal start --bind {} --user {} --pass [HIDDEN] {}",
+        final_bind_addr, user, db_path
+    );
 
     match cmd.spawn() {
         Ok(mut child) => {
@@ -2417,14 +3082,16 @@ async fn start_surreal_process_improved(
                     Ok(Some(status)) => {
                         // 进程已退出，获取输出信息
                         println!("❌ SurrealDB 进程已退出，退出码: {:?}", status.code());
-                        let output = child.wait_with_output().await.unwrap_or_else(|_| std::process::Output {
-                            status: std::process::ExitStatus::from_raw(1),
-                            stdout: vec![],
-                            stderr: b"failed to get output".to_vec(),
+                        let output = child.wait_with_output().await.unwrap_or_else(|_| {
+                            std::process::Output {
+                                status: std::process::ExitStatus::from_raw(1),
+                                stdout: vec![],
+                                stderr: b"failed to get output".to_vec(),
+                            }
                         });
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        
+
                         println!("📋 标准输出: {}", stdout);
                         println!("⚠️ 错误输出: {}", stderr);
 
@@ -2441,7 +3108,10 @@ async fn start_surreal_process_improved(
                     Ok(None) => {
                         // 进程仍在运行，检查端口是否可连接
                         let loopback_addr = format!("127.0.0.1:{}", port);
-                        println!("⏳ 进程运行中，检查端口 {} 连接性... (尝试 {}/{})", loopback_addr, attempts, max_attempts);
+                        println!(
+                            "⏳ 进程运行中，检查端口 {} 连接性... (尝试 {}/{})",
+                            loopback_addr, attempts, max_attempts
+                        );
                         if test_tcp_connection(&loopback_addr).await {
                             println!("✅ 端口 {} 已响应", loopback_addr);
                             // 进一步测试数据库功能
@@ -2522,11 +3192,17 @@ pub async fn stop_surreal_server(
     let mut ip = opt.v_ip.clone();
     let mut port = opt.v_port;
     if let Some(Json(body)) = &_payload {
-        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
-        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) {
+            ip = s.to_string();
+        }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) {
+            port = u16::try_from(p).unwrap_or(port);
+        }
     }
     // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
-    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
+    if ip == "localhost" {
+        ip = "127.0.0.1".to_string();
+    }
     let bind_addr = format!("{}:{}", ip, port);
 
     // 如果端口未监听，视为已停止
@@ -2550,13 +3226,16 @@ pub async fn stop_surreal_server(
             })));
         }
     };
-    let pid: u32 = match pid_txt.parse() { Ok(p) => p, Err(_) => {
-        return Ok(Json(json!({
-            "success": false,
-            "message": "PID 文件格式不正确",
-            "pid_text": pid_txt,
-        })));
-    }};
+    let pid: u32 = match pid_txt.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(Json(json!({
+                "success": false,
+                "message": "PID 文件格式不正确",
+                "pid_text": pid_txt,
+            })));
+        }
+    };
 
     // 分平台结束进程
     #[cfg(target_os = "windows")]
@@ -2569,11 +3248,19 @@ pub async fn stop_surreal_server(
     #[cfg(not(target_os = "windows"))]
     let res: Result<std::process::ExitStatus, std::io::Error> = {
         // 优先温和终止
-        let _ = TokioCommand::new("kill").arg("-TERM").arg(pid.to_string()).status().await;
+        let _ = TokioCommand::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .await;
         tokio::time::sleep(StdDuration::from_millis(400)).await;
         if is_addr_listening(&bind_addr) {
             // 强制终止
-            let _ = TokioCommand::new("kill").arg("-KILL").arg(pid.to_string()).status().await;
+            let _ = TokioCommand::new("kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .status()
+                .await;
         }
         Ok(std::process::ExitStatus::from_raw(0))
     };
@@ -2639,8 +3326,10 @@ async fn command_exists(cmd: &str) -> bool {
 pub async fn test_tcp_connection(addr: &str) -> bool {
     match tokio::time::timeout(
         StdDuration::from_secs(3),
-        tokio::net::TcpStream::connect(addr)
-    ).await {
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    {
         Ok(Ok(_)) => true,
         _ => false,
     }
@@ -2648,7 +3337,7 @@ pub async fn test_tcp_connection(addr: &str) -> bool {
 
 /// 测试SurrealDB数据库功能连接
 pub async fn test_database_functionality() -> (bool, Option<String>) {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     match timeout(Duration::from_secs(5), SUL_DB.query("SELECT 1 as test")).await {
         Ok(Ok(_)) => (true, None),
@@ -2662,7 +3351,11 @@ async fn run_remote_ssh(ssh: &SshOptions, remote_cmd: &str) -> Result<(), String
     let target = format!("{}@{}", ssh.user, ssh.host);
 
     // 若提供 password，尝试使用 sshpass；否则期望密钥或 agent
-    let use_sshpass = ssh.password.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+    let use_sshpass = ssh
+        .password
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
     let mut cmd = if use_sshpass {
         let mut c = TokioCommand::new("sshpass");
         c.arg("-p").arg(ssh.password.clone().unwrap());
@@ -2672,8 +3365,10 @@ async fn run_remote_ssh(ssh: &SshOptions, remote_cmd: &str) -> Result<(), String
         TokioCommand::new("ssh")
     };
 
-    cmd.arg("-o").arg("StrictHostKeyChecking=no")
-        .arg("-p").arg(port.to_string())
+    cmd.arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-p")
+        .arg(port.to_string())
         .arg(&target)
         .arg(remote_cmd)
         .stdout(Stdio::null())
@@ -2702,29 +3397,40 @@ pub async fn restart_surreal_server(
     let mut project = opt.project_name.clone();
 
     if let Some(Json(body)) = &_payload {
-        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) { ip = s.to_string(); }
-        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) { port = u16::try_from(p).unwrap_or(port); }
-        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) { user = s.to_string(); }
-        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) { pass = s.to_string(); }
-        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) { project = s.to_string(); }
+        if let Some(s) = body.get("bind_ip").and_then(|v| v.as_str()) {
+            ip = s.to_string();
+        }
+        if let Some(p) = body.get("bind_port").and_then(|v| v.as_u64()) {
+            port = u16::try_from(p).unwrap_or(port);
+        }
+        if let Some(s) = body.get("db_user").and_then(|v| v.as_str()) {
+            user = s.to_string();
+        }
+        if let Some(s) = body.get("db_password").and_then(|v| v.as_str()) {
+            pass = s.to_string();
+        }
+        if let Some(s) = body.get("project_name").and_then(|v| v.as_str()) {
+            project = s.to_string();
+        }
     }
 
     // SurrealDB 2.x 不接受 "localhost"，必须使用 IP 地址
-    if ip == "localhost" { ip = "127.0.0.1".to_string(); }
+    if ip == "localhost" {
+        ip = "127.0.0.1".to_string();
+    }
     let bind_addr = format!("{}:{}", ip, port);
 
     let mode = "local";
-
 
     // 先停止现有服务
     if is_addr_listening(&bind_addr) {
         // 优先使用端口清理功能
         let _ = kill_port_processes(port).await;
-        
+
         // 等待端口释放
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    
+
     // 使用改进的启动函数重启
     start_surreal_process_improved(&bind_addr, &user, &pass, &project).await
 }
@@ -2740,7 +3446,7 @@ pub async fn get_surreal_status(
     _state: State<AppState>,
     Query(q): Query<SurrealStatusQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    use aios_core::{get_db_option, SUL_DB};
+    use aios_core::{SUL_DB, get_db_option};
 
     let opt = get_db_option();
     let ip_raw = q.ip.unwrap_or(opt.v_ip.clone());
@@ -2756,7 +3462,10 @@ pub async fn get_surreal_status(
     let listening = is_addr_listening(&bind_addr);
 
     // 是否能够进行基本查询（需要已初始化连接）
-    let connected = match SUL_DB.query("SELECT 1").await { Ok(_) => true, Err(_) => false };
+    let connected = match SUL_DB.query("SELECT 1").await {
+        Ok(_) => true,
+        Err(_) => false,
+    };
 
     // 读取本地 PID（若由本服务启动）
     let (pid, pid_present) = match std::fs::read_to_string(".surreal.pid") {
@@ -2782,7 +3491,7 @@ pub async fn test_surreal_connection(
     Json(request): Json<SurrealTestRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     use aios_core::SUL_DB;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let connection_url = format!("ws://{}:{}", request.ip, request.port);
 
@@ -2798,7 +3507,7 @@ pub async fn test_surreal_connection(
     println!("数据库: {}", request.database);
     println!("连接URL: {}", connection_url);
     println!("======================================");
-    
+
     // 直接使用界面输入的配置进行测试
     let test_result = crate::web_ui::db_connection::test_database_connection(
         &request.ip,
@@ -2807,28 +3516,37 @@ pub async fn test_surreal_connection(
         &request.password,
         &request.namespace,
         &request.database,
-    ).await;
+    )
+    .await;
 
     if let Err(e) = test_result {
         println!("❌ 连接测试失败: {}", e);
         println!("错误链: {:?}", e);
-        
+
         // 提供更详细的错误信息
-        let error_detail = if e.to_string().contains("认证失败") || e.to_string().contains("Authentication") {
-            format!("认证失败：用户名或密码错误\n\n当前配置:\n- 用户名: {}\n- 密码: {} ({}个字符)\n\n提示：\n- 端口8009的默认密码是 'root'\n- 请确认数据库启动时使用的密码", 
-                    request.user, 
-                    "*".repeat(request.password.len()),
-                    request.password.len())
+        let error_detail = if e.to_string().contains("认证失败")
+            || e.to_string().contains("Authentication")
+        {
+            format!(
+                "认证失败：用户名或密码错误\n\n当前配置:\n- 用户名: {}\n- 密码: {} ({}个字符)\n\n提示：\n- 端口8009的默认密码是 'root'\n- 请确认数据库启动时使用的密码",
+                request.user,
+                "*".repeat(request.password.len()),
+                request.password.len()
+            )
         } else if e.to_string().contains("无法连接到数据库服务器") {
-            format!("无法连接到数据库服务器\n\n问题：\n- 数据库未在 {}:{} 上运行\n\n解决方案：\n1. 检查 SurrealDB 是否已启动\n2. 确认端口号是否正确\n3. 检查防火墙设置", 
-                    request.ip, request.port)
+            format!(
+                "无法连接到数据库服务器\n\n问题：\n- 数据库未在 {}:{} 上运行\n\n解决方案：\n1. 检查 SurrealDB 是否已启动\n2. 确认端口号是否正确\n3. 检查防火墙设置",
+                request.ip, request.port
+            )
         } else if e.to_string().contains("无法使用指定的命名空间和数据库") {
-            format!("命名空间或数据库不存在\n\n当前配置:\n- 命名空间: '{}'\n- 数据库: '{}'\n\n提示：这些会在首次连接时自动创建", 
-                    request.namespace, request.database)
+            format!(
+                "命名空间或数据库不存在\n\n当前配置:\n- 命名空间: '{}'\n- 数据库: '{}'\n\n提示：这些会在首次连接时自动创建",
+                request.namespace, request.database
+            )
         } else {
             e.to_string()
         };
-        
+
         return Ok(Json(json!({
             "success": false,
             "message": "连接失败",
@@ -2877,41 +3595,53 @@ fn analyze_expression_error(error: &anyhow::Error, expression: &str) -> (String,
     let error_msg = error.to_string().to_lowercase();
 
     if error_msg.contains("attrib") || expression.contains("ATTRIB") {
-        ("EXPR_ATTRIB_001".to_string(), vec![
-            "ATTRIB关键字需要预处理转换".to_string(),
-            "检查属性名是否在上下文中定义".to_string(),
-            "验证PARA数组索引是否正确".to_string(),
-            "确认表达式语法格式正确".to_string(),
-        ])
+        (
+            "EXPR_ATTRIB_001".to_string(),
+            vec![
+                "ATTRIB关键字需要预处理转换".to_string(),
+                "检查属性名是否在上下文中定义".to_string(),
+                "验证PARA数组索引是否正确".to_string(),
+                "确认表达式语法格式正确".to_string(),
+            ],
+        )
     } else if error_msg.contains("min") || error_msg.contains("max") {
-        ("EXPR_FUNCTION_001".to_string(), vec![
-            "检查函数参数数量是否正确".to_string(),
-            "验证函数参数类型是否匹配".to_string(),
-            "确认函数名拼写正确".to_string(),
-            "检查括号是否配对".to_string(),
-        ])
+        (
+            "EXPR_FUNCTION_001".to_string(),
+            vec![
+                "检查函数参数数量是否正确".to_string(),
+                "验证函数参数类型是否匹配".to_string(),
+                "确认函数名拼写正确".to_string(),
+                "检查括号是否配对".to_string(),
+            ],
+        )
     } else if error_msg.contains("parse") || error_msg.contains("syntax") {
-        ("EXPR_SYNTAX_001".to_string(), vec![
-            "检查表达式语法是否正确".to_string(),
-            "验证括号是否配对".to_string(),
-            "确认操作符使用正确".to_string(),
-            "检查变量名是否有效".to_string(),
-        ])
+        (
+            "EXPR_SYNTAX_001".to_string(),
+            vec![
+                "检查表达式语法是否正确".to_string(),
+                "验证括号是否配对".to_string(),
+                "确认操作符使用正确".to_string(),
+                "检查变量名是否有效".to_string(),
+            ],
+        )
     } else {
-        ("EXPR_UNKNOWN_001".to_string(), vec![
-            "查看详细错误日志".to_string(),
-            "检查表达式格式".to_string(),
-            "验证上下文变量".to_string(),
-            "联系技术支持".to_string(),
-        ])
+        (
+            "EXPR_UNKNOWN_001".to_string(),
+            vec![
+                "查看详细错误日志".to_string(),
+                "检查表达式格式".to_string(),
+                "验证上下文变量".to_string(),
+                "联系技术支持".to_string(),
+            ],
+        )
     }
 }
 
 async fn execute_real_task(state: AppState, task_id: String) {
+    use crate::fast_model::aabb_tree::manual_update_aabbs;
+    use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
     use crate::fast_model::gen_all_geos_data;
     use crate::fast_model::room_model::build_room_relations;
-    use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
-    use crate::fast_model::aabb_tree::manual_update_aabbs;
     use aios_core::options::DbOption;
     // Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
     use aios_core::init_surreal;
@@ -2930,7 +3660,11 @@ async fn execute_real_task(state: AppState, task_id: String) {
     // 创建数据库配置
     let mut db_option = DbOption::default();
     // 若未指定数据库编号，表示处理全部数据库（下游以 None 触发自动枚举）
-    db_option.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
+    db_option.manual_db_nums = if config.manual_db_nums.is_empty() {
+        None
+    } else {
+        Some(config.manual_db_nums.clone())
+    };
     db_option.gen_model = config.gen_model;
     db_option.gen_mesh = config.gen_mesh;
     db_option.gen_spatial_tree = config.gen_spatial_tree;
@@ -2944,23 +3678,24 @@ async fn execute_real_task(state: AppState, task_id: String) {
     db_option.included_projects = vec![config.project_name.clone()];
 
     // 更新任务状态
-    let mut update_progress = |step: &str, current: u32, total: u32, percentage: f32, message: &str| {
-        let state_clone = state.clone();
-        let task_id_clone = task_id.clone();
-        let step_clone = step.to_string();
-        let message_clone = message.to_string();
+    let mut update_progress =
+        |step: &str, current: u32, total: u32, percentage: f32, message: &str| {
+            let state_clone = state.clone();
+            let task_id_clone = task_id.clone();
+            let step_clone = step.to_string();
+            let message_clone = message.to_string();
 
-        tokio::spawn(async move {
-            let mut task_manager = state_clone.task_manager.lock().await;
-            if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
-                if task.status == TaskStatus::Cancelled {
-                    return;
+            tokio::spawn(async move {
+                let mut task_manager = state_clone.task_manager.lock().await;
+                if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
+                    if task.status == TaskStatus::Cancelled {
+                        return;
+                    }
+                    task.update_progress(step_clone, current, total, percentage);
+                    task.add_log(LogLevel::Info, message_clone);
                 }
-                task.update_progress(step_clone, current, total, percentage);
-                task.add_log(LogLevel::Info, message_clone);
-            }
-        });
-    };
+            });
+        };
 
     // 检查任务是否被取消
     let is_cancelled = {
@@ -2971,7 +3706,9 @@ async fn execute_real_task(state: AppState, task_id: String) {
             let task_id = task_id_clone.clone();
             Box::pin(async move {
                 let task_manager = state.task_manager.lock().await;
-                task_manager.active_tasks.get(&task_id)
+                task_manager
+                    .active_tasks
+                    .get(&task_id)
                     .map(|t| t.status == TaskStatus::Cancelled)
                     .unwrap_or(true)
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
@@ -2983,23 +3720,35 @@ async fn execute_real_task(state: AppState, task_id: String) {
     let needs_parse_first = matches!(task_type, TaskType::ParsePdmsData)
         || matches!(task_type, TaskType::FullGeneration)
         || matches!(task_type, TaskType::DataParsingWizard);
-    let mut total_steps = if config.gen_model && config.gen_spatial_tree { 7 }
-                     else if config.gen_model { 5 }
-                     else if config.gen_spatial_tree { 4 }
-                     else { 3 };
-    if needs_parse_first { total_steps += 1; }
+    let mut total_steps = if config.gen_model && config.gen_spatial_tree {
+        7
+    } else if config.gen_model {
+        5
+    } else if config.gen_spatial_tree {
+        4
+    } else {
+        3
+    };
+    if needs_parse_first {
+        total_steps += 1;
+    }
 
     let mut current_step = 0;
 
     // 步骤1: 初始化数据库连接（使用部署站点的配置）
     current_step += 1;
-    update_progress("初始化数据库连接", current_step, total_steps,
-                   (current_step as f32 / total_steps as f32) * 100.0,
-                   "正在使用部署站点配置连接数据库...");
+    update_progress(
+        "初始化数据库连接",
+        current_step,
+        total_steps,
+        (current_step as f32 / total_steps as f32) * 100.0,
+        "正在使用部署站点配置连接数据库...",
+    );
 
     // 使用 WebUI 配置连接数据库
     // 使用 init_surreal_with_config 函数来使用用户指定的配置
-    let db_connection = match crate::web_ui::db_connection::init_surreal_with_config(&config).await {
+    let db_connection = match crate::web_ui::db_connection::init_surreal_with_config(&config).await
+    {
         Ok(conn) => conn,
         Err(e) => {
             handle_database_connection_error(&state, &task_id, &config, e).await;
@@ -3007,11 +3756,12 @@ async fn execute_real_task(state: AppState, task_id: String) {
             return;
         }
     };
-    
+
     // 将连接存储到全局连接池中
     let deployment_id = format!("{}:{}", config.db_ip, config.db_port);
     crate::web_ui::db_connection::DEPLOYMENT_DB_CONNECTIONS
-        .write().await
+        .write()
+        .await
         .insert(deployment_id.clone(), db_connection);
     update_progress(
         "初始化数据库连接",
@@ -3051,8 +3801,14 @@ async fn execute_real_task(state: AppState, task_id: String) {
         let mut parse_opt = aios_core::options::DbOption::default();
         // 优先从向导任务存储中读取选中项目；否则回退到任务配置中的项目名称
         let included_projects = if matches!(task_type, TaskType::DataParsingWizard) {
-            if let Some(cfg) = crate::web_ui::wizard_handlers::load_wizard_config_by_task_id(&task_id) {
-                if !cfg.selected_projects.is_empty() { cfg.selected_projects } else { vec![config.project_name.clone()] }
+            if let Some(cfg) =
+                crate::web_ui::wizard_handlers::load_wizard_config_by_task_id(&task_id)
+            {
+                if !cfg.selected_projects.is_empty() {
+                    cfg.selected_projects
+                } else {
+                    vec![config.project_name.clone()]
+                }
             } else {
                 vec![config.project_name.clone()]
             }
@@ -3065,12 +3821,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         parse_opt.v_ip = config.db_ip.clone();
         parse_opt.v_user = config.db_user.clone();
         parse_opt.v_password = config.db_password.clone();
-        parse_opt.v_port = config
-            .db_port
-            .parse::<u16>()
-            .unwrap_or(8009);
+        parse_opt.v_port = config.db_port.parse::<u16>().unwrap_or(8009);
         // 覆盖 WebUI 任务层的关键参数 - 使用任务配置而不依赖 DbOption.toml
-        parse_opt.manual_db_nums = if config.manual_db_nums.is_empty() { None } else { Some(config.manual_db_nums.clone()) };
+        parse_opt.manual_db_nums = if config.manual_db_nums.is_empty() {
+            None
+        } else {
+            Some(config.manual_db_nums.clone())
+        };
         parse_opt.project_name = config.project_name.clone();
         parse_opt.project_code = config.project_code.to_string();
         parse_opt.project_path = config.project_path.clone();
@@ -3088,21 +3845,52 @@ async fn execute_real_task(state: AppState, task_id: String) {
                            total_files: usize,
                            current_chunk: usize,
                            total_chunks: usize| {
-            let project_ratio = if total_projects > 0 { current_project as f32 / total_projects as f32 } else { 0.0 };
-            let file_ratio = if total_files > 0 { current_file as f32 / (total_projects.max(1) as f32 * total_files as f32) } else { 0.0 };
-            let chunk_ratio = if total_chunks > 0 { current_chunk as f32 / (total_projects.max(1) as f32 * total_files.max(1) as f32 * total_chunks as f32) } else { 0.0 };
+            let project_ratio = if total_projects > 0 {
+                current_project as f32 / total_projects as f32
+            } else {
+                0.0
+            };
+            let file_ratio = if total_files > 0 {
+                current_file as f32 / (total_projects.max(1) as f32 * total_files as f32)
+            } else {
+                0.0
+            };
+            let chunk_ratio = if total_chunks > 0 {
+                current_chunk as f32
+                    / (total_projects.max(1) as f32
+                        * total_files.max(1) as f32
+                        * total_chunks as f32)
+            } else {
+                0.0
+            };
             let base = ((step_idx - 1) as f32 / total_steps_copy as f32) * 100.0;
             let step_share = (1.0 / total_steps_copy as f32) * 100.0;
-            let pct = base + step_share * (0.2 + 0.6 * project_ratio + 0.15 * file_ratio + 0.05 * chunk_ratio).min(1.0);
+            let pct = base
+                + step_share
+                    * (0.2 + 0.6 * project_ratio + 0.15 * file_ratio + 0.05 * chunk_ratio).min(1.0);
 
             let state2 = state_cp.clone();
             let task_id2 = task_id_cp.clone();
-            let message = format!("解析项目 {} 进度: {}/{} 文件 {}/{} 块 {}/{}", project_name, current_project, total_projects, current_file, total_files, current_chunk, total_chunks);
+            let message = format!(
+                "解析项目 {} 进度: {}/{} 文件 {}/{} 块 {}/{}",
+                project_name,
+                current_project,
+                total_projects,
+                current_file,
+                total_files,
+                current_chunk,
+                total_chunks
+            );
             tokio::spawn(async move {
                 let mut tm = state2.task_manager.lock().await;
                 if let Some(task) = tm.active_tasks.get_mut(&task_id2) {
                     if task.status != TaskStatus::Cancelled {
-                        task.update_progress("解析PDMS/E3D数据".to_string(), step_idx as u32, total_steps_copy as u32, pct);
+                        task.update_progress(
+                            "解析PDMS/E3D数据".to_string(),
+                            step_idx as u32,
+                            total_steps_copy as u32,
+                            pct,
+                        );
                         task.add_log(LogLevel::Info, message);
                     }
                 }
@@ -3158,7 +3946,9 @@ async fn execute_real_task(state: AppState, task_id: String) {
             }
         }
 
-        if matches!(task_type, TaskType::ParsePdmsData) || matches!(task_type, TaskType::DataParsingWizard) {
+        if matches!(task_type, TaskType::ParsePdmsData)
+            || matches!(task_type, TaskType::DataParsingWizard)
+        {
             // 仅解析任务：标记完成并收尾 dbnum_info_table
             set_update_finalize(&config.manual_db_nums, "Success").await;
 
@@ -3167,7 +3957,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
                 if task.status == TaskStatus::Running {
                     task.status = TaskStatus::Completed;
                     task.completed_at = Some(SystemTime::now());
-                    task.progress.percentage = ((current_step as f32) / (total_steps as f32) * 100.0).max(100.0);
+                    task.progress.percentage =
+                        ((current_step as f32) / (total_steps as f32) * 100.0).max(100.0);
                     task.progress.current_step = "解析完成".to_string();
                     task.add_log(LogLevel::Info, "解析任务已完成".to_string());
                 }
@@ -3179,9 +3970,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
     // 步骤2: 验证数据库编号
     current_step += 1;
-    update_progress("验证数据库编号", current_step, total_steps,
-                   (current_step as f32 / total_steps as f32) * 100.0,
-                   &format!("正在验证数据库编号: {:?}", config.manual_db_nums));
+    update_progress(
+        "验证数据库编号",
+        current_step,
+        total_steps,
+        (current_step as f32 / total_steps as f32) * 100.0,
+        &format!("正在验证数据库编号: {:?}", config.manual_db_nums),
+    );
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -3195,9 +3990,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         let base_percentage = ((current_step - 1) as f32 / total_steps as f32) * 100.0;
         let step_percentage = (1.0 / total_steps as f32) * 100.0;
 
-        update_progress("生成几何数据", current_step, total_steps,
-                       base_percentage,
-                       "开始生成几何模型数据...");
+        update_progress(
+            "生成几何数据",
+            current_step,
+            total_steps,
+            base_percentage,
+            "开始生成几何模型数据...",
+        );
 
         let start_time = Instant::now();
 
@@ -3208,7 +4007,11 @@ async fn execute_real_task(state: AppState, task_id: String) {
             tokio::spawn(async move {
                 let sub_steps = vec![
                     ("查询数据库结构", 10.0, "正在查询ZONE、PLOO等层级结构..."),
-                    ("收集元件库信息", 25.0, "正在收集管道、支吊架等元件库信息..."),
+                    (
+                        "收集元件库信息",
+                        25.0,
+                        "正在收集管道、支吊架等元件库信息...",
+                    ),
                     ("生成实例数据", 45.0, "正在生成几何实例数据..."),
                     ("生成三角网格", 70.0, "正在生成三角网格模型..."),
                     ("执行布尔运算", 90.0, "正在执行布尔运算优化..."),
@@ -3228,7 +4031,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
                         }
                     }
 
-                    let current_percentage = base_percentage + (step_percentage * sub_progress / 100.0);
+                    let current_percentage =
+                        base_percentage + (step_percentage * sub_progress / 100.0);
 
                     let mut task_manager = state_clone.task_manager.lock().await;
                     if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
@@ -3244,11 +4048,11 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
                     // 根据不同阶段设置不同的等待时间
                     let wait_time = match sub_progress {
-                        10.0 => tokio::time::Duration::from_secs(3),   // 查询阶段较快
-                        25.0 => tokio::time::Duration::from_secs(5),   // 收集信息
-                        45.0 => tokio::time::Duration::from_secs(15),  // 生成实例数据较慢
-                        70.0 => tokio::time::Duration::from_secs(10),  // 生成网格
-                        90.0 => tokio::time::Duration::from_secs(20),  // 布尔运算最慢
+                        10.0 => tokio::time::Duration::from_secs(3), // 查询阶段较快
+                        25.0 => tokio::time::Duration::from_secs(5), // 收集信息
+                        45.0 => tokio::time::Duration::from_secs(15), // 生成实例数据较慢
+                        70.0 => tokio::time::Duration::from_secs(10), // 生成网格
+                        90.0 => tokio::time::Duration::from_secs(20), // 布尔运算最慢
                         _ => tokio::time::Duration::from_secs(2),
                     };
 
@@ -3287,7 +4091,7 @@ async fn execute_real_task(state: AppState, task_id: String) {
                     LogLevel::Error,
                     format!("几何数据生成失败: {}", e),
                     Some(error_code),
-                    Some(format!("{:?}", e))
+                    Some(format!("{:?}", e)),
                 );
                 task_manager.task_history.push(task);
             }
@@ -3299,9 +4103,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         progress_monitor.abort();
 
         let elapsed = start_time.elapsed().as_millis();
-        update_progress("生成几何数据", current_step, total_steps,
-                       (current_step as f32 / total_steps as f32) * 100.0,
-                       &format!("几何数据生成完成，耗时: {}ms", elapsed));
+        update_progress(
+            "生成几何数据",
+            current_step,
+            total_steps,
+            (current_step as f32 / total_steps as f32) * 100.0,
+            &format!("几何数据生成完成，耗时: {}ms", elapsed),
+        );
 
         if is_cancelled().await {
             return;
@@ -3311,9 +4119,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
     // 步骤4: 加载AABB树（如果需要空间树）
     if config.gen_spatial_tree {
         current_step += 1;
-        update_progress("加载空间索引", current_step, total_steps,
-                       (current_step as f32 / total_steps as f32) * 100.0,
-                       "正在加载SQLite空间索引...");
+        update_progress(
+            "加载空间索引",
+            current_step,
+            total_steps,
+            (current_step as f32 / total_steps as f32) * 100.0,
+            "正在加载SQLite空间索引...",
+        );
 
         // SQLite空间索引在需要时自动加载
         #[cfg(feature = "sqlite-index")]
@@ -3344,7 +4156,7 @@ async fn execute_real_task(state: AppState, task_id: String) {
                     LogLevel::Error,
                     format!("AABB树加载失败: {}", error_msg),
                     Some(error_code),
-                    None
+                    None,
                 );
                 task_manager.task_history.push(task);
             }
@@ -3354,9 +4166,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         // SQLite R*-tree 索引现在通过 SqliteSpatialIndex 管理
         #[cfg(feature = "sqlite-index")]
         if !SqliteSpatialIndex::is_enabled() {
-            update_progress("更新空间索引", current_step, total_steps,
-                           (current_step as f32 / total_steps as f32) * 100.0,
-                           "SQLite 空间索引未启用");
+            update_progress(
+                "更新空间索引",
+                current_step,
+                total_steps,
+                (current_step as f32 / total_steps as f32) * 100.0,
+                "SQLite 空间索引未启用",
+            );
         }
 
         if is_cancelled().await {
@@ -3370,9 +4186,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         let base_percentage = ((current_step - 1) as f32 / total_steps as f32) * 100.0;
         let step_percentage = (1.0 / total_steps as f32) * 100.0;
 
-        update_progress("构建房间关系", current_step, total_steps,
-                       base_percentage,
-                       &format!("开始构建房间关系，空间树节点数: {}", tree_size));
+        update_progress(
+            "构建房间关系",
+            current_step,
+            total_steps,
+            base_percentage,
+            &format!("开始构建房间关系，空间树节点数: {}", tree_size),
+        );
 
         // 启动房间关系构建的进度监控
         let room_progress_monitor = {
@@ -3398,7 +4218,8 @@ async fn execute_real_task(state: AppState, task_id: String) {
                         }
                     }
 
-                    let current_percentage = base_percentage + (step_percentage * sub_progress / 100.0);
+                    let current_percentage =
+                        base_percentage + (step_percentage * sub_progress / 100.0);
 
                     let mut task_manager = state_clone.task_manager.lock().await;
                     if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
@@ -3434,9 +4255,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
         room_progress_monitor.abort();
 
         let elapsed = start_time.elapsed().as_millis();
-        update_progress("构建房间关系", current_step, total_steps,
-                       (current_step as f32 / total_steps as f32) * 100.0,
-                       &format!("房间关系构建完成，耗时: {}ms", elapsed));
+        update_progress(
+            "构建房间关系",
+            current_step,
+            total_steps,
+            (current_step as f32 / total_steps as f32) * 100.0,
+            &format!("房间关系构建完成，耗时: {}ms", elapsed),
+        );
 
         if is_cancelled().await {
             return;
@@ -3444,9 +4269,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
         // 步骤6: 更新设备计算
         current_step += 1;
-        update_progress("更新设备计算", current_step, total_steps,
-                       (current_step as f32 / total_steps as f32) * 100.0,
-                       "正在更新设备空间计算...");
+        update_progress(
+            "更新设备计算",
+            current_step,
+            total_steps,
+            (current_step as f32 / total_steps as f32) * 100.0,
+            "正在更新设备空间计算...",
+        );
 
         if let Err(e) = update_cal_equip().await {
             let mut task_manager = state.task_manager.lock().await;
@@ -3466,9 +4295,13 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
         // 步骤7: 更新分支组件计算
         current_step += 1;
-        update_progress("更新分支组件", current_step, total_steps,
-                       (current_step as f32 / total_steps as f32) * 100.0,
-                       "正在更新分支组件计算...");
+        update_progress(
+            "更新分支组件",
+            current_step,
+            total_steps,
+            (current_step as f32 / total_steps as f32) * 100.0,
+            "正在更新分支组件计算...",
+        );
 
         if let Err(e) = update_cal_bran_component().await {
             let mut task_manager = state.task_manager.lock().await;
@@ -3856,8 +4689,12 @@ pub async fn get_db_status_list(
                         match status_filter.as_str() {
                             "parsed" if status.parse_status != ParseStatus::Parsed => continue,
                             "not_parsed" if status.parse_status == ParseStatus::Parsed => continue,
-                            "generated" if status.model_status != ModelStatus::Generated => continue,
-                            "not_generated" if status.model_status == ModelStatus::Generated => continue,
+                            "generated" if status.model_status != ModelStatus::Generated => {
+                                continue;
+                            }
+                            "not_generated" if status.model_status == ModelStatus::Generated => {
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -3906,7 +4743,7 @@ pub async fn get_db_status_detail(
             }
             Err(StatusCode::NOT_FOUND)
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -3927,7 +4764,10 @@ pub async fn execute_incremental_update(
     let config = DatabaseConfig {
         name: task_name.clone(),
         manual_db_nums: request.dbnums.clone(),
-        gen_model: matches!(request.update_type, UpdateType::ParseAndModel | UpdateType::Full),
+        gen_model: matches!(
+            request.update_type,
+            UpdateType::ParseAndModel | UpdateType::Full
+        ),
         gen_mesh: matches!(request.update_type, UpdateType::Full),
         gen_spatial_tree: matches!(request.update_type, UpdateType::Full),
         apply_boolean_operation: false,
@@ -3943,7 +4783,10 @@ pub async fn execute_incremental_update(
     if !config.manual_db_nums.is_empty() {
         let mut sql = String::new();
         for db in &config.manual_db_nums {
-            sql.push_str(&format!("UPDATE dbnum_info_table SET updating = true WHERE dbnum = {};", db));
+            sql.push_str(&format!(
+                "UPDATE dbnum_info_table SET updating = true WHERE dbnum = {};",
+                db
+            ));
         }
         let _ = SUL_DB.query(sql).await;
     }
@@ -3957,14 +4800,20 @@ pub async fn execute_incremental_update(
     task.add_log(LogLevel::Info, "增量更新任务开始执行".to_string());
     let task_id = task.id.clone();
 
-    task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    task_manager
+        .active_tasks
+        .insert(task_id.clone(), task.clone());
     drop(task_manager);
 
     // 启动任务执行（并发限流）
     let state_cp = state.clone();
     let id_cp = task_id.clone();
     tokio::spawn(async move {
-        let _permit = TASK_EXEC_SEMAPHORE.clone().acquire_owned().await.expect("semaphore");
+        let _permit = TASK_EXEC_SEMAPHORE
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore");
         execute_real_task(state_cp, id_cp).await;
     });
 
@@ -3978,13 +4827,19 @@ pub async fn execute_incremental_update(
 
 async fn set_update_finalize(dbnums: &[u32], result: &str) {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     // 同步写入会话映射（成功时）
     if result == "Success" {
         let now_secs = (ts / 1000) as u64;
         for &db in dbnums {
-            if let Some(latest) = get_latest_sesno_from_file(&aios_core::get_db_option().project_name, db) {
-                let _ = crate::fast_model::session::SESSION_STORE.put_sesno_time_mapping(db, latest, now_secs);
+            if let Some(latest) =
+                get_latest_sesno_from_file(&aios_core::get_db_option().project_name, db)
+            {
+                let _ = crate::fast_model::session::SESSION_STORE
+                    .put_sesno_time_mapping(db, latest, now_secs);
             }
         }
     }
@@ -4024,13 +4879,11 @@ pub async fn check_file_versions(
                 "needs_update_count": version_checks.iter().filter(|v| v["needs_update"].as_bool().unwrap_or(false)).count()
             })))
         }
-        Err(e) => {
-            Ok(Json(json!({
-                "version_checks": [],
-                "total": 0,
-                "error": format!("检查失败: {}", e)
-            })))
-        }
+        Err(e) => Ok(Json(json!({
+            "version_checks": [],
+            "total": 0,
+            "error": format!("检查失败: {}", e)
+        }))),
     }
 }
 
@@ -4066,9 +4919,7 @@ async fn convert_to_db_status(db_info: serde_json::Value) -> Option<DbStatusInfo
     let mesh_status = check_mesh_status(dbnum).await;
 
     // 读取本地缓存与文件中的 sesno，基于 sesno 判断是否需要更新
-    let cached_sesno = SESSION_STORE
-        .get_max_sesno_for_dbnum(dbnum)
-        .unwrap_or(0);
+    let cached_sesno = SESSION_STORE.get_max_sesno_for_dbnum(dbnum).unwrap_or(0);
     let latest_file_sesno = get_latest_sesno_from_file(&project, dbnum).unwrap_or(sesno);
 
     // 文件版本信息（用于展示）
@@ -4080,7 +4931,9 @@ async fn convert_to_db_status(db_info: serde_json::Value) -> Option<DbStatusInfo
     // 可选字段
     let auto_update = db_info["auto_update"].as_bool().unwrap_or(false);
     let updating = db_info["updating"].as_bool().unwrap_or(false);
-    let last_update_result = db_info["last_update_result"].as_str().map(|s| s.to_string());
+    let last_update_result = db_info["last_update_result"]
+        .as_str()
+        .map(|s| s.to_string());
 
     Some(DbStatusInfo {
         dbnum,
@@ -4118,7 +4971,10 @@ async fn check_model_status(dbnum: u32) -> ModelStatus {
     use aios_core::SUL_DB;
 
     // 查询是否存在该数据库的几何数据
-    let sql = format!("SELECT COUNT(*) as count FROM inst_geo WHERE dbnum = {}", dbnum);
+    let sql = format!(
+        "SELECT COUNT(*) as count FROM inst_geo WHERE dbnum = {}",
+        dbnum
+    );
 
     match SUL_DB.query(sql).await {
         Ok(mut response) => {
@@ -4183,9 +5039,7 @@ async fn check_single_file_version(db_info: serde_json::Value) -> Option<serde_j
     let sesno = db_info["sesno"].as_u64().unwrap_or(0) as u32;
     let project = db_info["project"].as_str().unwrap_or("");
 
-    let cached_sesno = SESSION_STORE
-        .get_max_sesno_for_dbnum(dbnum)
-        .unwrap_or(0);
+    let cached_sesno = SESSION_STORE.get_max_sesno_for_dbnum(dbnum).unwrap_or(0);
     let latest_file_sesno = get_latest_sesno_from_file(project, dbnum).unwrap_or(sesno);
     let needs_update = cached_sesno < latest_file_sesno;
 
@@ -4275,7 +5129,10 @@ pub async fn wizard_page() -> Html<String> {
 
 /// 空间计算页面
 pub async fn space_tools_page() -> Html<String> {
-    let html = crate::web_ui::simple_templates::render_simple_generic_page("空间计算工具", "空间计算工具功能正在开发中...");
+    let html = crate::web_ui::simple_templates::render_simple_generic_page(
+        "空间计算工具",
+        "空间计算工具功能正在开发中...",
+    );
     let wrapped = crate::web_ui::layout::wrap_external_html_in_layout(
         "空间计算工具 - AIOS",
         Some("sqlite-spatial"),
@@ -4285,9 +5142,7 @@ pub async fn space_tools_page() -> Html<String> {
 }
 
 /// 支架-桥架识别（占位实现，返回回显数据）
-pub async fn api_space_suppo_trays(
-    Json(req): Json<SuppoTraysRequest>,
-) -> Json<serde_json::Value> {
+pub async fn api_space_suppo_trays(Json(req): Json<SuppoTraysRequest>) -> Json<serde_json::Value> {
     Json(json!({
         "status":"success",
         "message":"stub",
@@ -4297,9 +5152,7 @@ pub async fn api_space_suppo_trays(
 }
 
 /// 预埋板编号识别（占位）
-pub async fn api_space_fitting(
-    Json(req): Json<FittingRequest>,
-) -> Json<serde_json::Value> {
+pub async fn api_space_fitting(Json(req): Json<FittingRequest>) -> Json<serde_json::Value> {
     Json(json!({
         "status":"success",
         "message":"stub",
@@ -4345,9 +5198,7 @@ pub async fn api_space_steel_relative(
 }
 
 /// 托盘跨度（左右）（占位）
-pub async fn api_space_tray_span(
-    Json(req): Json<TraySpanRequest>,
-) -> Json<serde_json::Value> {
+pub async fn api_space_tray_span(Json(req): Json<TraySpanRequest>) -> Json<serde_json::Value> {
     Json(json!({
         "status":"success",
         "message":"stub",
@@ -4437,9 +5288,12 @@ pub async fn tray_supports_page() -> Html<String> {
 #[derive(Debug, Deserialize)]
 pub struct TraySupportsDetectRequest {
     pub target_refno: String,
-    #[serde(default)] pub radius: Option<f32>,
-    #[serde(default)] pub tolerance: Option<f32>,
-    #[serde(default)] pub limit: Option<usize>,
+    #[serde(default)]
+    pub radius: Option<f32>,
+    #[serde(default)]
+    pub tolerance: Option<f32>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// API：桥架支撑检测（SQLite R-Tree）
@@ -4466,13 +5320,19 @@ pub async fn api_sqlite_tray_supports_detect(
         // 打开索引
         let index = match SqliteSpatialIndex::with_default_path() {
             Ok(v) => v,
-            Err(e) => return Json(json!({"status":"error","message":format!("打开索引失败: {}", e)})),
+            Err(e) => {
+                return Json(json!({"status":"error","message":format!("打开索引失败: {}", e)}));
+            }
         };
         // 目标 AABB
         let tb = match index.get_aabb(refno) {
             Ok(Some(b)) => b,
             Ok(None) => return Json(json!({"status":"error","message":"索引中未找到目标SCTN"})),
-            Err(e) => return Json(json!({"status":"error","message":format!("查询目标AABB失败: {}", e)})),
+            Err(e) => {
+                return Json(
+                    json!({"status":"error","message":format!("查询目标AABB失败: {}", e)}),
+                );
+            }
         };
 
         // 邻域检索
@@ -4483,31 +5343,47 @@ pub async fn api_sqlite_tray_supports_detect(
         };
         let mut neigh = match index.query_intersect(&query) {
             Ok(v) => v,
-            Err(e) => return Json(json!({"status":"error","message":format!("邻域查询失败: {}", e)})),
+            Err(e) => {
+                return Json(json!({"status":"error","message":format!("邻域查询失败: {}", e)}));
+            }
         };
         neigh.retain(|r| *r != refno);
-        if neigh.len() > limit { neigh.truncate(limit); }
+        if neigh.len() > limit {
+            neigh.truncate(limit);
+        }
 
         // 读取 items 表中的 noun（如果存在）
         let mut noun_map = std::collections::HashMap::<u64, String>::new();
         if !neigh.is_empty() {
             if let Ok(conn) = rusqlite::Connection::open(SqliteSpatialIndex::default_path()) {
-                let ids = neigh.iter().map(|r| (r.0 as i64).to_string()).collect::<Vec<_>>().join(",");
+                let ids = neigh
+                    .iter()
+                    .map(|r| (r.0 as i64).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let sql = format!("SELECT id, noun FROM items WHERE id IN ({})", ids);
                 if let Ok(mut stmt) = conn.prepare(&sql) {
                     if let Ok(rows) = stmt.query_map([], |row| {
-                        let id: i64 = row.get(0)?; let noun: String = row.get(1)?; Ok((id as u64, noun))
+                        let id: i64 = row.get(0)?;
+                        let noun: String = row.get(1)?;
+                        Ok((id as u64, noun))
                     }) {
-                        for r in rows { if let Ok((id, noun)) = r { noun_map.insert(id, noun); } }
+                        for r in rows {
+                            if let Ok((id, noun)) = r {
+                                noun_map.insert(id, noun);
+                            }
+                        }
                     }
                 }
             }
         }
 
         // 支撑判定：顶面对齐 + 水平重叠
-        fn is_support(tray:&Aabb, sup:&Aabb, tol:f32) -> bool {
+        fn is_support(tray: &Aabb, sup: &Aabb, tol: f32) -> bool {
             let vg = (tray.mins.y - sup.maxs.y).abs();
-            if vg > tol { return false; }
+            if vg > tol {
+                return false;
+            }
             let xo = tray.maxs.x > sup.mins.x && tray.mins.x < sup.maxs.x;
             let zo = tray.maxs.z > sup.mins.z && tray.mins.z < sup.maxs.z;
             xo && zo
@@ -4551,9 +5427,12 @@ static SCTN_TEST_RESULTS: Lazy<DashMap<String, serde_json::Value>> = Lazy::new(D
 #[derive(Debug, Deserialize)]
 pub struct SctnTestRequest {
     pub target_refno: String,
-    #[serde(default)] pub radius: Option<f32>,
-    #[serde(default)] pub tolerance: Option<f32>,
-    #[serde(default)] pub limit: Option<usize>,
+    #[serde(default)]
+    pub radius: Option<f32>,
+    #[serde(default)]
+    pub tolerance: Option<f32>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// 页面：输入 RefNo，启动测试，查看进度与阶段结果
@@ -4650,7 +5529,11 @@ pub async fn api_sctn_test_run(
     let mut cfg = crate::web_ui::models::DatabaseConfig::default();
     cfg.manual_db_nums = vec![];
     let mut tm = state.task_manager.lock().await;
-    let task = crate::web_ui::models::TaskInfo::new(task_name, crate::web_ui::models::TaskType::Custom("SctnTest".into()), cfg);
+    let task = crate::web_ui::models::TaskInfo::new(
+        task_name,
+        crate::web_ui::models::TaskType::Custom("SctnTest".into()),
+        cfg,
+    );
     let task_id = task.id.clone();
     tm.active_tasks.insert(task_id.clone(), task.clone());
     drop(tm);
@@ -4671,7 +5554,9 @@ pub async fn api_sctn_test_result(Path(id): Path<String>) -> Json<serde_json::Va
 async fn run_sctn_test_pipeline(state: AppState, task_id: String, req: SctnTestRequest) {
     // 工具函数：更新任务进度
     let update = |msg: &str, step: u32, total: u32, pct: f32| {
-        let st = state.clone(); let id = task_id.clone(); let m = msg.to_string();
+        let st = state.clone();
+        let id = task_id.clone();
+        let m = msg.to_string();
         tokio::spawn(async move {
             let mut tm = st.task_manager.lock().await;
             if let Some(task) = tm.active_tasks.get_mut(&id) {
@@ -4683,10 +5568,11 @@ async fn run_sctn_test_pipeline(state: AppState, task_id: String, req: SctnTestR
     };
 
     // 仅使用 SQLite 索引，分 4 步：读取目标 -> 邻域检索 -> 接触检测 -> 支撑检测
-    let total = 4u32; let mut step = 0u32;
+    let total = 4u32;
+    let mut step = 0u32;
 
     // 初始化快照
-    let mut snap = SctnTestSnapshot{
+    let mut snap = SctnTestSnapshot {
         target_refno: req.target_refno.clone(),
         target_bbox: None,
         neighbors: 0,
@@ -4697,61 +5583,151 @@ async fn run_sctn_test_pipeline(state: AppState, task_id: String, req: SctnTestR
     };
 
     // Step1: 读取目标
-    step += 1; update("读取目标AABB", step, total, 100.0*step as f32/total as f32);
+    step += 1;
+    update(
+        "读取目标AABB",
+        step,
+        total,
+        100.0 * step as f32 / total as f32,
+    );
     #[cfg(feature = "sqlite-index")]
-    let index = match SqliteSpatialIndex::with_default_path(){ Ok(v)=>v, Err(e)=>{ finish_fail(state, task_id, format!("打开索引失败: {}", e)).await; return; }};
+    let index = match SqliteSpatialIndex::with_default_path() {
+        Ok(v) => v,
+        Err(e) => {
+            finish_fail(state, task_id, format!("打开索引失败: {}", e)).await;
+            return;
+        }
+    };
     #[cfg(not(feature = "sqlite-index"))]
-    { finish_fail(state, task_id, "未启用sqlite-index".into()).await; return; }
-    let refno = match aios_core::pdms_types::RefU64::from_str(&req.target_refno) { Ok(v)=>v, Err(_)=>{ finish_fail(state, task_id, "无效RefNo格式".into()).await; return; } };
-    let tb = match index.get_aabb(refno){ Ok(Some(b))=>b, Ok(None)=>{ finish_fail(state, task_id, "索引中未找到目标SCTN".into()).await; return; }, Err(e)=>{ finish_fail(state, task_id, format!("查询目标失败: {}", e)).await; return; } };
-    snap.target_bbox = Some(json!({"mins":[tb.mins.x,tb.mins.y,tb.mins.z], "maxs":[tb.maxs.x,tb.maxs.y,tb.maxs.z]}));
-    SCTN_TEST_RESULTS.insert(task_id.clone(), json!({"status":"running","snapshot": snap}));
+    {
+        finish_fail(state, task_id, "未启用sqlite-index".into()).await;
+        return;
+    }
+    let refno = match aios_core::pdms_types::RefU64::from_str(&req.target_refno) {
+        Ok(v) => v,
+        Err(_) => {
+            finish_fail(state, task_id, "无效RefNo格式".into()).await;
+            return;
+        }
+    };
+    let tb = match index.get_aabb(refno) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            finish_fail(state, task_id, "索引中未找到目标SCTN".into()).await;
+            return;
+        }
+        Err(e) => {
+            finish_fail(state, task_id, format!("查询目标失败: {}", e)).await;
+            return;
+        }
+    };
+    snap.target_bbox = Some(
+        json!({"mins":[tb.mins.x,tb.mins.y,tb.mins.z], "maxs":[tb.maxs.x,tb.maxs.y,tb.maxs.z]}),
+    );
+    SCTN_TEST_RESULTS.insert(
+        task_id.clone(),
+        json!({"status":"running","snapshot": snap}),
+    );
 
     // Step2: 邻域检索
-    step += 1; update("邻域检索", step, total, 100.0*step as f32/total as f32);
+    step += 1;
+    update("邻域检索", step, total, 100.0 * step as f32 / total as f32);
     let radius = req.radius.unwrap_or(2.0);
-    let query = Aabb::new(tb.mins - Vector3::new(radius,radius,radius), tb.maxs + Vector3::new(radius,radius,radius));
-    let mut neigh = match index.query_intersect(&query){ Ok(v)=>v, Err(e)=>{ finish_fail(state, task_id, format!("邻域查询失败: {}", e)).await; return; } };
+    let query = Aabb::new(
+        tb.mins - Vector3::new(radius, radius, radius),
+        tb.maxs + Vector3::new(radius, radius, radius),
+    );
+    let mut neigh = match index.query_intersect(&query) {
+        Ok(v) => v,
+        Err(e) => {
+            finish_fail(state, task_id, format!("邻域查询失败: {}", e)).await;
+            return;
+        }
+    };
     neigh.retain(|r| *r != refno);
-    if let Some(lm)=req.limit { if neigh.len()>lm { neigh.truncate(lm); } }
+    if let Some(lm) = req.limit {
+        if neigh.len() > lm {
+            neigh.truncate(lm);
+        }
+    }
     snap.neighbors = neigh.len();
-    SCTN_TEST_RESULTS.insert(task_id.clone(), json!({"status":"running","snapshot": snap}));
+    SCTN_TEST_RESULTS.insert(
+        task_id.clone(),
+        json!({"status":"running","snapshot": snap}),
+    );
 
     // 读取 items 中 noun
-    let mut noun_map = std::collections::HashMap::<u64,String>::new();
+    let mut noun_map = std::collections::HashMap::<u64, String>::new();
     if !neigh.is_empty() {
         if let Ok(conn) = rusqlite::Connection::open(SqliteSpatialIndex::default_path()) {
-            let ids = neigh.iter().map(|r| (r.0 as i64).to_string()).collect::<Vec<_>>().join(",");
+            let ids = neigh
+                .iter()
+                .map(|r| (r.0 as i64).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             let sql = format!("SELECT id, noun FROM items WHERE id IN ({})", ids);
             if let Ok(mut stmt) = conn.prepare(&sql) {
-                if let Ok(rows) = stmt.query_map([], |row| { let id:i64=row.get(0)?; let noun:String=row.get(1)?; Ok((id as u64, noun)) }) {
-                    for r in rows { if let Ok((id,n))=r { noun_map.insert(id,n); } }
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    let id: i64 = row.get(0)?;
+                    let noun: String = row.get(1)?;
+                    Ok((id as u64, noun))
+                }) {
+                    for r in rows {
+                        if let Ok((id, n)) = r {
+                            noun_map.insert(id, n);
+                        }
+                    }
                 }
             }
         }
     }
 
     // Step3: 接触检测（Cuboid逼近）
-    step += 1; update("接触检测", step, total, 100.0*step as f32/total as f32);
+    step += 1;
+    update("接触检测", step, total, 100.0 * step as f32 / total as f32);
     let tol = req.tolerance.unwrap_or(0.10);
-    use parry3d::shape::Cuboid; use parry3d::query::contact; use nalgebra::Isometry3;
-    let ext_t = (tb.maxs - tb.mins) * 0.5; let c_t = tb.center();
-    let shape_t = Cuboid::new(Vector3::new(ext_t.x.max(1e-6), ext_t.y.max(1e-6), ext_t.z.max(1e-6)));
+    use nalgebra::Isometry3;
+    use parry3d::query::contact;
+    use parry3d::shape::Cuboid;
+    let ext_t = (tb.maxs - tb.mins) * 0.5;
+    let c_t = tb.center();
+    let shape_t = Cuboid::new(Vector3::new(
+        ext_t.x.max(1e-6),
+        ext_t.y.max(1e-6),
+        ext_t.z.max(1e-6),
+    ));
     let iso_t = Isometry3::translation(c_t.x, c_t.y, c_t.z);
-    let mut contacts = 0usize; let mut proximities = 0usize;
-    for r in &neigh { if let Ok(Some(b)) = index.get_aabb(*r) {
-        let ext = (b.maxs - b.mins) * 0.5; let c = b.center();
-        let shape = Cuboid::new(Vector3::new(ext.x.max(1e-6), ext.y.max(1e-6), ext.z.max(1e-6)));
-        let iso = Isometry3::translation(c.x, c.y, c.z);
-        if let Ok(Some(ct)) = contact(&iso_t, &shape_t, &iso, &shape, tol) {
-            if ct.dist < -tol || ct.dist.abs() < 1e-3 { contacts += 1; } else if ct.dist < tol { proximities += 1; }
+    let mut contacts = 0usize;
+    let mut proximities = 0usize;
+    for r in &neigh {
+        if let Ok(Some(b)) = index.get_aabb(*r) {
+            let ext = (b.maxs - b.mins) * 0.5;
+            let c = b.center();
+            let shape = Cuboid::new(Vector3::new(
+                ext.x.max(1e-6),
+                ext.y.max(1e-6),
+                ext.z.max(1e-6),
+            ));
+            let iso = Isometry3::translation(c.x, c.y, c.z);
+            if let Ok(Some(ct)) = contact(&iso_t, &shape_t, &iso, &shape, tol) {
+                if ct.dist < -tol || ct.dist.abs() < 1e-3 {
+                    contacts += 1;
+                } else if ct.dist < tol {
+                    proximities += 1;
+                }
+            }
         }
-    }}
-    snap.contacts = contacts; snap.proximities = proximities;
-    SCTN_TEST_RESULTS.insert(task_id.clone(), json!({"status":"running","snapshot": snap}));
+    }
+    snap.contacts = contacts;
+    snap.proximities = proximities;
+    SCTN_TEST_RESULTS.insert(
+        task_id.clone(),
+        json!({"status":"running","snapshot": snap}),
+    );
 
     // Step4: 支撑检测（顶面对齐 + 水平重叠）
-    step += 1; update("支撑检测", step, total, 100.0*step as f32/total as f32);
+    step += 1;
+    update("支撑检测", step, total, 100.0 * step as f32 / total as f32);
     let mut supports = Vec::<serde_json::Value>::new();
     for r in neigh {
         if let Ok(Some(b)) = index.get_aabb(r) {
@@ -4766,7 +5742,10 @@ async fn run_sctn_test_pipeline(state: AppState, task_id: String, req: SctnTestR
     }
     snap.supports = supports.len();
     snap.sample_supports = supports.iter().take(10).cloned().collect();
-    SCTN_TEST_RESULTS.insert(task_id.clone(), json!({"status":"completed","snapshot": snap, "supports": supports}));
+    SCTN_TEST_RESULTS.insert(
+        task_id.clone(),
+        json!({"status":"completed","snapshot": snap, "supports": supports}),
+    );
 
     // 完成任务
     let mut tm = state.task_manager.lock().await;
@@ -4844,7 +5823,11 @@ pub async fn check_database_connection(
     let default_cfg = get_db_config_from_options();
     // SurrealDB 2.x 推荐将 localhost 规范成 127.0.0.1
     let ip_raw = q.ip.unwrap_or(default_cfg.ip);
-    let ip = if ip_raw == "localhost" { "127.0.0.1".to_string() } else { ip_raw };
+    let ip = if ip_raw == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        ip_raw
+    };
     let config = DatabaseConnectionConfig {
         ip,
         port: q.port.unwrap_or(default_cfg.port),
@@ -4855,9 +5838,19 @@ pub async fn check_database_connection(
     };
 
     let (connected, error_message) = check_surrealdb_connection(&config).await;
-    let connection_time = if connected { Some(start_time.elapsed()) } else { None };
+    let connection_time = if connected {
+        Some(start_time.elapsed())
+    } else {
+        None
+    };
 
-    let status = DatabaseConnectionStatus { connected, error_message, connection_time, last_check, config };
+    let status = DatabaseConnectionStatus {
+        connected,
+        error_message,
+        connection_time,
+        last_check,
+        config,
+    };
     Ok(Json(status))
 }
 
@@ -4866,7 +5859,7 @@ pub async fn get_startup_scripts(
     State(_state): State<AppState>,
 ) -> Result<Json<Vec<StartupScript>>, StatusCode> {
     let mut scripts = Vec::new();
-    
+
     // 扫描cmd目录下的启动脚本
     if let Ok(entries) = std::fs::read_dir("cmd") {
         for entry in entries.flatten() {
@@ -4874,15 +5867,16 @@ pub async fn get_startup_scripts(
                 if file_name.ends_with(".sh") && file_name.contains("surreal") {
                     let path = entry.path();
                     let path_str = path.to_string_lossy().to_string();
-                    
+
                     // 从文件名解析端口号
                     let port = extract_port_from_filename(file_name);
-                    
+
                     // 检查脚本是否可执行
-                    let executable = path.metadata()
+                    let executable = path
+                        .metadata()
                         .map(|m| m.permissions().mode() & 0o111 != 0)
                         .unwrap_or(false);
-                    
+
                     scripts.push(StartupScript {
                         name: file_name.to_string(),
                         path: path_str,
@@ -4894,7 +5888,7 @@ pub async fn get_startup_scripts(
             }
         }
     }
-    
+
     // 如果没找到脚本，创建默认脚本选项
     if scripts.is_empty() {
         let opt = get_db_option();
@@ -4906,7 +5900,7 @@ pub async fn get_startup_scripts(
             executable: false,
         });
     }
-    
+
     Ok(Json(scripts))
 }
 
@@ -4916,12 +5910,12 @@ pub async fn start_database_instance(
     Json(request): Json<StartDatabaseRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let script_path = request.script_path;
-    
+
     // 验证脚本路径安全性
     if !script_path.starts_with("cmd/") || script_path.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    
+
     // 检查脚本文件是否存在
     if !std::path::Path::new(&script_path).exists() {
         // 如果脚本不存在，尝试创建默认脚本
@@ -4932,7 +5926,7 @@ pub async fn start_database_instance(
             })));
         }
     }
-    
+
     // 启动数据库实例
     match start_surreal_with_script(&script_path).await {
         Ok(_) => Ok(Json(json!({
@@ -4943,7 +5937,7 @@ pub async fn start_database_instance(
         Err(e) => Ok(Json(json!({
             "success": false,
             "message": format!("启动失败: {}", e)
-        })))
+        }))),
     }
 }
 
@@ -4971,10 +5965,10 @@ fn get_db_config_from_options() -> DatabaseConnectionConfig {
 
 /// 检查SurrealDB连接
 async fn check_surrealdb_connection(config: &DatabaseConnectionConfig) -> (bool, Option<String>) {
-    use tokio::time::{timeout, Duration};
+    use surrealdb::Surreal;
     use surrealdb::engine::remote::ws::Ws;
     use surrealdb::opt::auth::Root;
-    use surrealdb::Surreal;
+    use tokio::time::{Duration, timeout};
 
     // 1) 先做 TCP 监听检测
     let addr = format!("{}:{}", config.ip, config.port);
@@ -4994,9 +5988,24 @@ async fn check_surrealdb_connection(config: &DatabaseConnectionConfig) -> (bool,
         Err(_) => return (false, Some("建立连接超时".to_string())),
     };
 
-    if let Err(e) = timeout(Duration::from_secs(3), db.signin(Root { username: &config.user, password: &config.password })).await {
+    if let Err(e) = timeout(
+        Duration::from_secs(3),
+        db.signin(Root {
+            username: &config.user,
+            password: &config.password,
+        }),
+    )
+    .await
+    {
         return (false, Some("认证超时".to_string()));
-    } else if let Err(e) = db.signin(Root { username: &config.user, password: &config.password }).await { // 已在上面 await 过一次（编译器借用问题，这里再执行一次）
+    } else if let Err(e) = db
+        .signin(Root {
+            username: &config.user,
+            password: &config.password,
+        })
+        .await
+    {
+        // 已在上面 await 过一次（编译器借用问题，这里再执行一次）
         return (false, Some(format!("认证失败: {}", e)));
     }
 
@@ -5025,54 +6034,56 @@ fn extract_port_from_filename(filename: &str) -> u16 {
 /// 使用脚本启动SurrealDB
 async fn start_surreal_with_script(script_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::process::Command;
-    
+
     // 确保脚本有执行权限
     let _ = std::process::Command::new("chmod")
         .arg("+x")
         .arg(script_path)
         .output();
-    
+
     // 启动脚本
     let mut cmd = Command::new("bash");
     cmd.arg(script_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    
+
     // 在后台启动
     let child = cmd.spawn()?;
-    
+
     // 等待一小段时间确保启动
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     Ok(())
 }
 
 /// 创建默认启动脚本
-async fn create_default_startup_script(script_path: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+async fn create_default_startup_script(
+    script_path: &str,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let opt = get_db_option();
-    
+
     // 确保cmd目录存在
     std::fs::create_dir_all("cmd")?;
-    
+
     // 创建脚本内容
     let script_content = format!(
         "#!/bin/bash\n./surreal start --user {} --pass {} --bind {}:{} rocksdb://ams-{}-test.db\n",
         opt.v_user, opt.v_password, opt.v_ip, port, port
     );
-    
+
     // 写入脚本文件
     std::fs::write(script_path, script_content)?;
-    
+
     // 设置执行权限
     let _ = std::process::Command::new("chmod")
         .arg("+x")
         .arg(script_path)
         .output();
-    
+
     Ok(())
 }
-
 
 /// 改进的数据库连接错误处理
 async fn handle_database_connection_error(
@@ -5133,7 +6144,10 @@ async fn handle_database_connection_error(
                 "验证 WebUI 中的连接参数是否正确".to_string(),
                 "确认网络连接和防火墙设置".to_string(),
                 "检查数据库用户权限和密码".to_string(),
-                format!("尝试手动连接测试: surreal sql --conn ws://{} --user {} --pass ******", addr, config.db_user),
+                format!(
+                    "尝试手动连接测试: surreal sql --conn ws://{} --user {} --pass ******",
+                    addr, config.db_user
+                ),
             ],
             related_config: Some(serde_json::json!({
                 "connection_string": format!("ws://{}", addr),
@@ -5146,7 +6160,10 @@ async fn handle_database_connection_error(
         };
 
         task.error_details = Some(error_details);
-        task.add_log(LogLevel::Error, format!("数据库连接失败: {}", error_category));
+        task.add_log(
+            LogLevel::Error,
+            format!("数据库连接失败: {}", error_category),
+        );
 
         // 添加诊断信息到日志
         for info in diagnostic_info {
@@ -5165,11 +6182,13 @@ pub async fn run_database_diagnostics_api(
 
     let diagnostic_result = run_database_diagnostics().await;
 
-    Ok(Json(serde_json::to_value(diagnostic_result).unwrap_or_else(|_| {
-        serde_json::json!({
-            "error": "Failed to serialize diagnostic result"
-        })
-    })))
+    Ok(Json(
+        serde_json::to_value(diagnostic_result).unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": "Failed to serialize diagnostic result"
+            })
+        }),
+    ))
 }
 
 /// 数据库连接管理页面

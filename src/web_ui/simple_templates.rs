@@ -212,30 +212,37 @@ pub fn render_simple_index_page() -> String {
             <!-- 详情弹窗 Modal -->
             <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
               <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
-              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg p-6">
-                <div class="flex items-start justify-between">
+              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg flex flex-col" style="max-height: 85vh;">
+                <!-- 标题栏 -->
+                <div class="flex items-center justify-between p-6 pb-4 border-b">
                   <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
-                  <button class="text-gray-400 hover:text-gray-600" onclick="closeProjectModal()">
-                    <i class="fas fa-times"></i>
+                  <button class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors" onclick="closeProjectModal()">
+                    <i class="fas fa-times text-xl"></i>
                   </button>
                 </div>
-                <div class="mt-2 text-sm text-gray-600 flex items-center gap-3">
-                  <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
-                  <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+
+                <!-- 内容区域（可滚动） -->
+                <div class="flex-1 overflow-y-auto px-6 py-4" style="max-height: calc(85vh - 160px);">
+                  <div class="text-sm text-gray-600 flex items-center gap-3">
+                    <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
+                    <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+                  </div>
+                  <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
+                  <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
+                    加载失败，请稍后重试。按 Enter 键可重试。
+                    <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
+                  </div>
+                  <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
                 </div>
-                <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
-                <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
-                  加载失败，请稍后重试。按 Enter 键可重试。
-                  <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
-                </div>
-                <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
-                <div class="mt-6 flex gap-3 justify-end">
-                  <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100" onclick="copySiteConfig()">复制配置</button>
-                  <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white" onclick="createSiteTask()">为站点创建任务</button>
-                  <a id="pm-open-url" href="#" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hidden">打开地址</a>
-                  <button id="pm-health" class="px-3 py-2 rounded bg-green-600 text-white hidden" onclick="pmHealthCheck()">健康检查</button>
-                  <button id="pm-restart-db" class="px-3 py-2 rounded bg-purple-600 text-white hidden" onclick="pmRestartDatabase()">重启数据库</button>
-                  <button class="px-3 py-2 rounded bg-gray-200" onclick="closeProjectModal()">关闭</button>
+
+                <!-- 底部按钮栏 -->
+                <div class="border-t px-6 py-4 flex gap-3 justify-end bg-gray-50">
+                  <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100 hover:bg-gray-200 transition-colors" onclick="copySiteConfig()">复制配置</button>
+                  <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700 transition-colors" onclick="createSiteTask()">为站点创建任务</button>
+                  <a id="pm-open-url" href="#" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors hidden">打开地址</a>
+                  <button id="pm-health" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700 transition-colors hidden" onclick="pmHealthCheck()">健康检查</button>
+                  <button id="pm-restart-db" class="px-3 py-2 rounded bg-purple-600 text-white hover:bg-purple-700 transition-colors hidden" onclick="pmRestartDatabase()">重启数据库</button>
+                  <button class="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300 transition-colors" onclick="closeProjectModal()">关闭</button>
                 </div>
               </div>
             </div>
@@ -248,7 +255,7 @@ pub fn render_simple_index_page() -> String {
             const input = document.getElementById(inputId);
             const eyeIcon = button.querySelector('.eye-icon');
             const eyeSlashIcon = button.querySelector('.eye-slash-icon');
-            
+
             if (input.type === 'password') {
                 input.type = 'text';
                 eyeIcon.classList.add('hidden');
@@ -260,11 +267,6 @@ pub fn render_simple_index_page() -> String {
             }
         }
 
-        // 兜底：若外部脚本加载异常，依然可打开弹窗
-        window.__openModal = function(){
-            const m = document.getElementById('project-modal');
-            if(m){ m.classList.remove('hidden'); m.style.display='block'; }
-        };
     async function createQuickTask(dbNum) {
             try {
                 const response = await fetch("/api/tasks", {
@@ -311,6 +313,376 @@ pub fn render_simple_index_page() -> String {
     "##.to_string()
 }
 
+pub fn render_xtk_viewer_page() -> String {
+    r##"<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>XKT 预览 - AIOS</title>
+    <link rel=\"stylesheet\" href=\"/static/simple-tailwind.css\">
+    <link rel=\"stylesheet\" href=\"/static/ui.css\">
+    <style>
+        body { background:#0f172a; color:#e2e8f0; }
+        .toolbar { background:rgba(15,23,42,.85); border-bottom:1px solid rgba(148,163,184,.2); backdrop-filter: blur(8px); }
+        #viewerCanvas { width:100%; height:calc(100vh - 180px); display:block; border-radius:12px; background:#0b1120; }
+        .panel { max-width:1040px; margin:0 auto; }
+        .btn-primary { background:#2563eb; color:#fff; transition:all .2s ease; }
+        .btn-primary:hover { background:#1d4ed8; transform:translateY(-1px); }
+        .btn-secondary { background:rgba(148,163,184,.18); color:#e2e8f0; transition:all .2s ease; }
+        .btn-secondary:hover { background:rgba(148,163,184,.3); transform:translateY(-1px); }
+        .status-chip { display:inline-flex; align-items:center; gap:.4rem; padding:.4rem .75rem; border-radius:9999px; background:rgba(37,99,235,.15); color:#bfdbfe; font-size:.85rem; }
+        label { color:#cbd5f5; font-weight:600; }
+        input { color:#0f172a; }
+    </style>
+    <script src=\"https://cdn.jsdelivr.net/npm/@xeokit/xeokit-sdk/dist/xeokit-sdk.min.js\"></script>
+</head>
+<body>
+    <header class=\"toolbar shadow-md\">
+        <div class=\"panel px-6 py-4 flex flex-col gap-3 md:gap-0 md:flex-row md:items-center md:justify-between\">
+            <div>
+                <h1 class=\"text-2xl font-semibold text-blue-200\">XKT 模型预览</h1>
+                <p class=\"text-sm text-slate-300 mt-1\">支持直接选择本地 XKT 文件或输入可访问的 URL</p>
+            </div>
+            <div class=\"status-chip\">
+                <span class=\"inline-block w-2 h-2 rounded-full bg-green-400\"></span>
+                xeokit SDK 在线加载
+            </div>
+        </div>
+    </header>
+
+    <main class=\"panel px-6 py-6 space-y-6\">
+        <section class=\"bg-slate-900/60 border border-slate-700/60 rounded-xl p-5 space-y-4\">
+            <div class=\"grid gap-4 md:grid-cols-2\">
+                <div>
+                    <label class=\"block mb-2\">从本地文件加载</label>
+                    <input id=\"fileInput\" type=\"file\" accept=\".xkt\" class=\"w-full px-3 py-2 rounded bg-slate-800/70 border border-slate-600/70 text-slate-200\">
+                    <p class=\"text-sm text-slate-400 mt-2\">选择本地 XKT 文件后会立即加载。</p>
+                </div>
+                <div>
+                    <label class=\"block mb-2\">从 URL 加载</label>
+                    <div class=\"flex gap-3\">
+                        <input id=\"xktUrl\" type=\"text\" placeholder=\"例如 /static/models/sample.xkt\" class=\"flex-1 px-3 py-2 rounded bg-slate-800/70 border border-slate-600/70 text-slate-200\">
+                        <button id=\"loadFromUrl\" class=\"btn-primary px-5 py-2 rounded\">加载</button>
+                    </div>
+                    <p class=\"text-sm text-slate-400 mt-2\">确保文件可通过浏览器访问，例如放在 /static 目录或开启文件服务。</p>
+                </div>
+            </div>
+            <div class=\"text-sm text-slate-300\">
+                当前模型：<span id=\"modelStatus\" class=\"text-blue-200\">未加载</span>
+            </div>
+        </section>
+
+        <section class=\"bg-slate-900/60 border border-slate-700/60 rounded-xl p-5 space-y-4\">
+            <div class=\"flex flex-col gap-4 md:flex-row md:items-center md:justify-between\">
+                <div>
+                    <label class=\"block text-lg font-semibold text-slate-100\">数据库列表</label>
+                    <p class=\"text-sm text-slate-400 mt-1\">可选择一个或多个数据库号批量生成 XKT，支持全选。</p>
+                </div>
+                <div class=\"flex flex-wrap gap-3\">
+                    <button id=\"refreshDbList\" class=\"btn-secondary px-4 py-2 rounded\">刷新列表</button>
+                    <button id=\"generateSelected\" class=\"btn-primary px-4 py-2 rounded\">生成选中</button>
+                    <button id=\"generateLoadSelected\" class=\"btn-primary px-4 py-2 rounded\">生成并加载选中</button>
+                </div>
+            </div>
+            <div class=\"bg-slate-950/60 border border-slate-800/60 rounded-lg overflow-hidden\">
+                <table class=\"min-w-full text-sm text-slate-200\">
+                    <thead class=\"bg-slate-800/70 text-slate-300\">
+                        <tr>
+                            <th class=\"px-3 py-2 text-left w-12\">
+                                <input type=\"checkbox\" id=\"selectAllDb\" class=\"accent-blue-500\">
+                            </th>
+                            <th class=\"px-3 py-2 text-left\">数据库号</th>
+                            <th class=\"px-3 py-2 text-left\">名称</th>
+                            <th class=\"px-3 py-2 text-left\">记录数</th>
+                            <th class=\"px-3 py-2 text-left\">可用状态</th>
+                            <th class=\"px-3 py-2 text-left\">最近更新</th>
+                        </tr>
+                    </thead>
+                    <tbody id=\"dbListBody\" class=\"divide-y divide-slate-800/60\"></tbody>
+                </table>
+                <div id=\"dbListEmpty\" class=\"p-4 text-sm text-slate-400 hidden\">暂无数据库记录，请点击刷新按钮。</div>
+            </div>
+            <div id=\"generationLog\" class=\"bg-slate-950/50 border border-slate-800/60 rounded-lg p-3 h-40 overflow-y-auto text-xs text-slate-300 space-y-1\"></div>
+        </section>
+
+        <section>
+            <canvas id=\"viewerCanvas\"></canvas>
+        </section>
+    </main>
+
+    <script>
+        (function() {
+            if (!window.xeokit) {
+                document.getElementById('modelStatus').innerText = 'xeokit SDK 未加载';
+                return;
+            }
+
+            const viewer = new xeokit.Viewer({
+                canvasId: 'viewerCanvas',
+                transparent: true,
+                xrayPickable: true
+            });
+
+            new xeokit.CameraControl(viewer, {
+                doublePickFlyTo: true
+            });
+
+            viewer.camera.eye = [120, 60, 120];
+            viewer.camera.look = [0, 0, 0];
+            viewer.camera.up = [0, 1, 0];
+
+            const xktLoader = new xeokit.XKTLoaderPlugin(viewer, {
+                edges: true
+            });
+
+            const dbListBody = document.getElementById('dbListBody');
+            const dbListEmpty = document.getElementById('dbListEmpty');
+            const selectAllDb = document.getElementById('selectAllDb');
+            const refreshDbListBtn = document.getElementById('refreshDbList');
+            const generateSelectedBtn = document.getElementById('generateSelected');
+            const generateLoadSelectedBtn = document.getElementById('generateLoadSelected');
+            const generationLog = document.getElementById('generationLog');
+
+            let dbList = [];
+            const selectedDbnos = new Set();
+            let isGenerating = false;
+            let modelCounter = 0;
+            let loadedModels = [];
+
+            function appendLog(message, type = 'info') {
+                if (!generationLog) { return; }
+                const entry = document.createElement('div');
+                const time = new Date().toLocaleTimeString();
+                const colorClass = type === 'error'
+                    ? 'text-rose-400'
+                    : type === 'success'
+                        ? 'text-emerald-300'
+                        : 'text-slate-300';
+                entry.className = colorClass;
+                entry.textContent = `[${time}] ${message}`;
+                generationLog.prepend(entry);
+                if (generationLog.children.length > 200) {
+                    generationLog.removeChild(generationLog.lastElementChild);
+                }
+            }
+
+            function syncSelectAllState() {
+                if (!selectAllDb) { return; }
+                selectAllDb.checked = dbList.length > 0 && selectedDbnos.size === dbList.length;
+                selectAllDb.indeterminate = selectedDbnos.size > 0 && selectedDbnos.size < dbList.length;
+            }
+
+            function renderDbList() {
+                if (!dbListBody) { return; }
+                dbListBody.innerHTML = '';
+                if (!dbList.length) {
+                    dbListEmpty?.classList.remove('hidden');
+                    return;
+                }
+                dbListEmpty?.classList.add('hidden');
+                dbList.forEach((item) => {
+                    const row = document.createElement('tr');
+                    row.className = 'hover:bg-slate-800/40';
+                    const updatedText = (() => {
+                        if (!item.last_updated) { return '-'; }
+                        const t = new Date(item.last_updated);
+                        return isNaN(t.getTime()) ? '-' : t.toLocaleString();
+                    })();
+                    const checked = selectedDbnos.has(item.dbnum) ? 'checked' : '';
+                    row.innerHTML = `
+                        <td class="px-3 py-2">
+                            <input type="checkbox" class="accent-blue-500 db-checkbox" data-dbno="${item.dbnum}" ${checked}>
+                        </td>
+                        <td class="px-3 py-2 font-semibold text-blue-200">${item.dbnum}</td>
+                        <td class="px-3 py-2">${item.name || '-'}</td>
+                        <td class="px-3 py-2 text-right">${item.record_count ?? '-'}</td>
+                        <td class="px-3 py-2">
+                            <span class="px-2 py-1 rounded-full text-xs ${item.available ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${item.available ? '可用' : '不可用'}</span>
+                        </td>
+                        <td class="px-3 py-2 text-slate-400">${updatedText}</td>
+                    `;
+                    const checkbox = row.querySelector('.db-checkbox');
+                    checkbox?.addEventListener('change', (event) => {
+                        const value = Number(event.target.dataset.dbno);
+                        if (event.target.checked) {
+                            selectedDbnos.add(value);
+                        } else {
+                            selectedDbnos.delete(value);
+                        }
+                        syncSelectAllState();
+                    });
+                    dbListBody.appendChild(row);
+                });
+                syncSelectAllState();
+            }
+
+            async function loadDbList() {
+                try {
+                    const response = await fetch('/api/databases');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    const data = await response.json();
+                    selectedDbnos.forEach((db) => {
+                        if (!data.find((item) => item.dbnum === db)) {
+                            selectedDbnos.delete(db);
+                        }
+                    });
+                    dbList = data;
+                    renderDbList();
+                    appendLog(`数据库列表已更新（共 ${dbList.length} 个）`);
+                } catch (error) {
+                    console.error('加载数据库列表失败', error);
+                    appendLog(`加载数据库列表失败: ${error.message}`, 'error');
+                    dbList = [];
+                    renderDbList();
+                }
+            }
+
+            function getSelectedDbnos() {
+                return Array.from(selectedDbnos).sort((a, b) => a - b);
+            }
+
+            function setButtonsDisabled(disabled) {
+                [generateSelectedBtn, generateLoadSelectedBtn, refreshDbListBtn].forEach((btn) => {
+                    if (!btn) { return; }
+                    btn.disabled = disabled;
+                    btn.classList.toggle('opacity-60', disabled);
+                    btn.classList.toggle('cursor-not-allowed', disabled);
+                });
+            }
+
+            async function loadModel(sourceUrl, label, options = {}) {
+                const { preserve = false } = options;
+                try {
+                    if (!preserve) {
+                        loadedModels.forEach((model) => {
+                            xktLoader.destroyModel(model.id);
+                        });
+                        loadedModels = [];
+                        viewer.scene.clear(true, true);
+                    }
+
+                    const modelId = `model_${++modelCounter}`;
+                    document.getElementById('modelStatus').innerText = `加载中: ${label}`;
+
+                    await xktLoader.load({
+                        id: modelId,
+                        src: sourceUrl,
+                    });
+
+                    viewer.cameraFlight.flyTo(modelId, { duration: 1.0 });
+                    loadedModels.push({ id: modelId, label, sourceUrl });
+
+                    if (sourceUrl.startsWith('blob:')) {
+                        setTimeout(() => URL.revokeObjectURL(sourceUrl), 2000);
+                    }
+
+                    const statusText = loadedModels.length === 1
+                        ? `已加载: ${label}`
+                        : `已加载 ${loadedModels.length} 个模型（最新: ${label}）`;
+                    document.getElementById('modelStatus').innerText = statusText;
+                    appendLog(`加载模型成功: ${label}`, 'success');
+                } catch (error) {
+                    console.error('加载 XKT 失败', error);
+                    document.getElementById('modelStatus').innerText = '加载失败';
+                    appendLog(`加载模型失败: ${label}`, 'error');
+                    throw error;
+                }
+            }
+
+            async function generateXkt(dbno) {
+                appendLog(`开始生成数据库 ${dbno} 的 XKT...`);
+                const response = await fetch('/api/xkt/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dbno }),
+                });
+
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (_) {
+                    // ignore json error for non-JSON responses
+                }
+
+                if (!response.ok || !data.success) {
+                    const message = data.error || `生成失败 (HTTP ${response.status})`;
+                    appendLog(`数据库 ${dbno} 生成失败: ${message}`, 'error');
+                    throw new Error(message);
+                }
+
+                appendLog(`数据库 ${dbno} 生成完成: ${data.filename}`, 'success');
+                return data;
+            }
+
+            async function generateSelected(autoLoad) {
+                if (isGenerating) { return; }
+                const dbnos = getSelectedDbnos();
+                if (!dbnos.length) {
+                    alert('请至少选择一个数据库编号');
+                    return;
+                }
+
+                isGenerating = true;
+                setButtonsDisabled(true);
+                appendLog(`开始生成 ${dbnos.length} 个数据库的 XKT...`);
+
+                try {
+                    let firstModel = true;
+                    for (const dbno of dbnos) {
+                        const result = await generateXkt(dbno);
+                        if (autoLoad) {
+                            await loadModel(result.url, `db${dbno}`, { preserve: !firstModel });
+                            firstModel = false;
+                        }
+                    }
+                    appendLog(autoLoad
+                        ? `已生成并加载 ${dbnos.length} 个数据库`
+                        : `已生成 ${dbnos.length} 个数据库`, 'success');
+                } catch (error) {
+                    console.error('生成 XKT 失败', error);
+                    appendLog(`生成过程中出现错误: ${error.message}`, 'error');
+                    alert('生成过程中出现错误，请检查控制台输出。');
+                } finally {
+                    setButtonsDisabled(false);
+                    isGenerating = false;
+                }
+            }
+
+            selectAllDb?.addEventListener('change', (event) => {
+                selectedDbnos.clear();
+                if (event.target.checked) {
+                    dbList.forEach((item) => selectedDbnos.add(item.dbnum));
+                }
+                renderDbList();
+            });
+
+            refreshDbListBtn?.addEventListener('click', loadDbList);
+            generateSelectedBtn?.addEventListener('click', () => generateSelected(false));
+            generateLoadSelectedBtn?.addEventListener('click', () => generateSelected(true));
+
+            document.getElementById('fileInput').addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (!file) { return; }
+                const objectUrl = URL.createObjectURL(file);
+                loadModel(objectUrl, file.name, { preserve: false });
+            });
+
+            document.getElementById('loadFromUrl').addEventListener('click', () => {
+                const url = document.getElementById('xktUrl').value.trim();
+                loadModel(url, url || '未命名路径', { preserve: false });
+            });
+
+            loadDbList();
+        })();
+    </script>
+</body>
+</html>"##
+        .to_string()
+}
+
 /// 新版首页（统一布局 + 侧栏）
 pub fn render_index_with_sidebar() -> String {
     let content = r#"
@@ -330,86 +702,86 @@ pub fn render_index_with_sidebar() -> String {
         </section>
 
         <!-- 首页优先展示：部署站点（缩略） -->
-        <section class="mb-10">
-            <div class="flex items-center justify-between mb-3">
-                <h2 class="text-2xl font-semibold text-gray-900">
-                    <i class="fas fa-server text-blue-600 mr-2"></i>
-                    部署站点
-                </h2>
-                <div class="flex gap-3">
-                    <a id="home-view-all" href="/deployment-sites" class="px-3 py-2 rounded bg-gray-200 text-gray-900 hover:bg-gray-300">查看全部</a>
-                    <button onclick="reloadProjects()" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">刷新</button>
-                    <button onclick="window.location.href='/wizard'" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700">+ 创建站点</button>
+        <section class="mb-12">
+            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                <div>
+                    <h2 class="section-title">
+                        <span class="section-icon bg-blue-100 text-blue-600">
+                            <i class="fas fa-server"></i>
+                        </span>
+                        部署站点
+                    </h2>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <a id="home-view-all" href="/deployment-sites" class="btn btn--ghost">
+                        <i class="fas fa-layer-group mr-2"></i>查看全部
+                    </a>
+                    <button type="button" onclick="reloadProjects()" class="btn btn--secondary">
+                        <i class="fas fa-sync-alt mr-2"></i>刷新
+                    </button>
+                    <button type="button" onclick="window.location.href='/wizard'" class="btn btn--success">
+                        <i class="fas fa-plus mr-2"></i>创建站点
+                    </button>
                 </div>
             </div>
 
-            <!-- 统计概览（首页简版） -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-3">
-                <div class="card card--stat p-4">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <p class="text-sm text-gray-600">总数</p>
-                            <p id="stat-total" class="text-2xl font-bold text-gray-900">--</p>
-                        </div>
-                        <i class="fas fa-database text-2xl text-blue-600"></i>
+            <!-- 统计与搜索合并栏 -->
+            <div class="bg-white rounded-lg border border-gray-200 px-3 py-2 mb-4">
+                <div class="flex items-center justify-between gap-3">
+                    <!-- 左侧：统计信息 -->
+                    <div class="flex items-center gap-3 text-xs text-gray-600">
+                        <span class="font-medium text-gray-900">站点: <span id="stat-total" class="text-sm">1</span></span>
+                        <span class="border-l pl-3">✅ <span id="stat-running">0</span></span>
+                        <span>🚀 <span id="stat-deploying">0</span></span>
+                        <span>❌ <span id="stat-failed">0</span></span>
                     </div>
-                </div>
-                <div class="card card--stat p-4">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <p class="text-sm text-gray-600">运行中</p>
-                            <p id="stat-running" class="text-2xl font-bold text-green-600">--</p>
-                        </div>
-                        <i class="fas fa-check-circle text-2xl text-green-600"></i>
-                    </div>
-                </div>
-                <div class="card card--stat p-4">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <p class="text-sm text-gray-600">部署中</p>
-                            <p id="stat-deploying" class="text-2xl font-bold text-blue-600">--</p>
-                        </div>
-                        <i class="fas fa-rocket text-2xl text-blue-600"></i>
-                    </div>
-                </div>
-                <div class="card card--stat p-4">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <p class="text-sm text-gray-600">失败</p>
-                            <p id="stat-failed" class="text-2xl font-bold text-red-600">--</p>
-                        </div>
-                        <i class="fas fa-times-circle text-2xl text-red-600"></i>
-                    </div>
-                </div>
-            </div>
-            <div class="filters-card mb-3">
-                <div class="grid gap-3 md:grid-cols-4">
-                    <div class="md:col-span-2">
-                        <input id="site_q" placeholder="搜索名称/描述/负责人" class="w-full border rounded px-3 py-2 text-sm" />
-                    </div>
-                    <div>
-                        <select id="site_status" class="w-full border rounded px-3 py-2 text-sm">
-                            <option value="">全部状态</option>
+                    <!-- 右侧：搜索和筛选 -->
+                    <div class="flex gap-2">
+                        <input id="site_q" class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="搜索..." style="width:150px" />
+                        <select id="site_status" class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+                            <option value="">全部</option>
                             <option>Running</option>
-                            <option>Deploying</option>
-                            <option>Configuring</option>
                             <option>Failed</option>
-                            <option>Stopped</option>
-                        </select>
-                    </div>
-                    <div>
-                        <select id="site_env" class="w-full border rounded px-3 py-2 text-sm">
-                            <option value="">全部环境</option>
-                            <option>dev</option>
-                            <option>staging</option>
-                            <option>prod</option>
-                            <option>test</option>
                         </select>
                     </div>
                 </div>
             </div>
-            <div id="projects-grid" data-per-page="6" class="grid-cards grid-cards-lg"></div>
+
+            <div id="projects-grid" data-per-page="6" class="grid-cards grid-cards-lg home-projects-grid"></div>
+            <div id="sites-pager" class="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600"></div>
         </section>
+
+            <!-- 详情弹窗 Modal -->
+            <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
+              <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
+              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg p-6">
+                <div class="flex items-start justify-between">
+                  <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
+                  <button class="text-gray-400 hover:text-gray-600" onclick="closeProjectModal()">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+                <div class="mt-2 text-sm text-gray-600 flex items-center gap-3">
+                  <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
+                  <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+                </div>
+                <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
+                <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
+                  加载失败，请稍后重试。按 Enter 键可重试。
+                  <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
+                </div>
+                <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
+                <div class="mt-6 flex gap-3 justify-end">
+                  <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100" onclick="copySiteConfig()">复制配置</button>
+                  <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white" onclick="createSiteTask()">为站点创建任务</button>
+                  <a id="pm-open-url" href="javascript:;" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hidden">打开地址</a>
+                  <button id="pm-health" class="px-3 py-2 rounded bg-green-600 text-white hidden" onclick="pmHealthCheck()">健康检查</button>
+                  <button id="pm-restart-db" class="px-3 py-2 rounded bg-purple-600 text-white hidden" onclick="pmRestartDatabase()">重启数据库</button>
+                  <button class="px-3 py-2 rounded bg-gray-200" onclick="closeProjectModal()">关闭</button>
+                </div>
+              </div>
+            </div>
+
 
         <!-- 功能卡片 -->
         <div class="grid md:grid-cols-3 gap-8 mb-12">
@@ -435,7 +807,7 @@ pub fn render_index_with_sidebar() -> String {
                     </div>
                     <h3 class="text-xl font-semibold text-gray-900 mb-2">空间树生成</h3>
                     <p class="text-gray-600 mb-4">构建和优化空间关系树结构</p>
-                    <a href="/tasks" class="btn" style="background:#16a34a;color:#fff">查看任务</a>
+                    <a href="/tasks" class="btn btn--success">查看任务</a>
                 </div>
             </div>
 
@@ -447,28 +819,36 @@ pub fn render_index_with_sidebar() -> String {
                     </div>
                     <h3 class="text-xl font-semibold text-gray-900 mb-2">配置管理</h3>
                     <p class="text-gray-600 mb-4">管理系统配置和参数设置</p>
-                    <a href="/config" class="btn" style="background:#9333ea;color:#fff">配置设置</a>
+                    <a href="/config" class="btn btn--purple">配置设置</a>
                 </div>
             </div>
         </div>
 
         <!-- 系统状态 -->
         <div class="card p-6">
-            <h2 class="text-2xl font-semibold text-gray-900 mb-4">
-                <i class="fas fa-chart-bar text-blue-600 mr-2"></i>系统状态
-            </h2>
-            <div class="grid md:grid-cols-3 gap-6">
-                <div class="p-4 rounded bg-blue-50 border border-blue-200">
-                    <div class="text-sm text-gray-500 mb-1">任务队列</div>
-                    <div class="text-2xl font-bold text-gray-900">--</div>
+            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+                <h2 class="section-title">
+                    <span class="section-icon bg-indigo-100 text-indigo-600">
+                        <i class="fas fa-chart-bar"></i>
+                    </span>
+                    系统状态
+                </h2>
+                <a class="btn btn--ghost" href="/db-status">
+                    <i class="fas fa-external-link-alt mr-2"></i>查看详情
+                </a>
+            </div>
+            <div class="status-grid">
+                <div class="status-item">
+                    <div class="metric-label">任务队列</div>
+                    <div class="metric-value is-loading">--</div>
                 </div>
-                <div class="p-4 rounded bg-green-50 border border-green-200">
-                    <div class="text-sm text-gray-500 mb-1">已完成</div>
-                    <div class="text-2xl font-bold text-gray-900">--</div>
+                <div class="status-item">
+                    <div class="metric-label">已完成</div>
+                    <div class="metric-value is-loading">--</div>
                 </div>
-                <div class="p-4 rounded bg-yellow-50 border border-yellow-200">
-                    <div class="text-sm text-gray-500 mb-1">进行中</div>
-                    <div class="text-2xl font-bold text-gray-900">--</div>
+                <div class="status-item">
+                    <div class="metric-label">进行中</div>
+                    <div class="metric-value is-loading">--</div>
                 </div>
             </div>
         </div>
@@ -594,25 +974,25 @@ pub fn render_database_connection_page() -> String {
                 <div class="grid grid-cols-2 gap-4 mb-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">服务器地址</label>
-                        <input type="text" id="db-ip" value="127.0.0.1" 
+                        <input type="text" id="db-ip" value="127.0.0.1"
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">端口</label>
-                        <input type="number" id="db-port" value="8009" 
+                        <input type="number" id="db-port" value="8009"
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">用户名</label>
-                        <input type="text" id="db-user" value="root" 
+                        <input type="text" id="db-user" value="root"
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">密码</label>
                         <div class="relative">
-                            <input type="password" id="db-password" value="root" 
+                            <input type="password" id="db-password" value="root"
                                    class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <button type="button" 
+                            <button type="button"
                                     onclick="togglePasswordVisibility('db-password', this)"
                                     class="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700">
                                 <svg class="w-5 h-5 eye-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -637,7 +1017,7 @@ pub fn render_database_connection_page() -> String {
                     </div>
                     <div class="col-span-2">
                         <label class="block text-sm font-medium text-gray-700 mb-1">数据库文件</label>
-                        <input type="text" id="db-file" value="YCYK-E3D.rdb" 
+                        <input type="text" id="db-file" value="YCYK-E3D.rdb"
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                 </div>
@@ -710,7 +1090,7 @@ pub fn render_database_connection_page() -> String {
                     </div>
                     <div class="flex items-center space-x-3">
                         <span id="current-target" class="text-sm text-gray-600 hidden sm:inline">目标: 127.0.0.1:8009</span>
-                        <button id="refresh-status" onclick="checkConnectionStatus()" 
+                        <button id="refresh-status" onclick="checkConnectionStatus()"
                                 class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
                             <i class="fas fa-sync-alt mr-2"></i>刷新状态
                         </button>
@@ -732,7 +1112,7 @@ pub fn render_database_connection_page() -> String {
                         <i class="fas fa-play-circle text-green-600 mr-2"></i>
                         数据库启动脚本
                     </h2>
-                    <button onclick="refreshStartupScripts()" 
+                    <button onclick="refreshStartupScripts()"
                             class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">
                         <i class="fas fa-sync-alt mr-2"></i>刷新脚本
                     </button>
@@ -750,7 +1130,7 @@ pub fn render_database_connection_page() -> String {
 
     <!-- 引入数据库启动管理器 -->
     <script src="/static/db_startup.js"></script>
-    
+
     <script>
         let connectionCheckInterval;
         let lastConnectionStatus = null;
@@ -759,14 +1139,14 @@ pub fn render_database_connection_page() -> String {
         document.addEventListener('DOMContentLoaded', function() {
             checkConnectionStatus();
             refreshStartupScripts();
-            
+
             // 初始化数据库启动管理器
             if (window.dbStartupManager) {
                 const ip = document.getElementById('db-ip').value || '127.0.0.1';
                 const port = parseInt(document.getElementById('db-port').value || '8009');
                 window.dbStartupManager.initializePageState(ip, port);
             }
-            
+
             // 每30秒自动检查连接状态
             connectionCheckInterval = setInterval(checkConnectionStatus, 30000);
         });
@@ -776,7 +1156,7 @@ pub fn render_database_connection_page() -> String {
             const statusContainer = document.getElementById('connection-status');
             const refreshButton = document.getElementById('refresh-status');
             const targetLabel = document.getElementById('current-target');
-            
+
             // 显示加载状态
             refreshButton.disabled = true;
             refreshButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>检查中...';
@@ -799,15 +1179,15 @@ pub fn render_database_connection_page() -> String {
                 const qs = `/api/database/connection/check?ip=${ip}&port=${port}&user=${user}&password=${password}&namespace=${ns}&database=${db}`;
                 const response = await fetch(qs);
                 const status = await response.json();
-                
+
                 displayConnectionStatus(status);
                 lastConnectionStatus = status;
-                
+
                 // 如果连接状态发生变化，刷新启动脚本
                 if (shouldRefreshScripts(status)) {
                     refreshStartupScripts();
                 }
-                
+
             } catch (error) {
                 console.error('检查连接状态失败:', error);
                 statusContainer.innerHTML = `
@@ -831,7 +1211,7 @@ pub fn render_database_connection_page() -> String {
         function displayConnectionStatus(status) {
             const statusContainer = document.getElementById('connection-status');
             const scriptsSection = document.getElementById('startup-scripts-section');
-            
+
             if (status.connected) {
                 statusContainer.innerHTML = `
                     <div class="bg-green-50 border border-green-200 rounded-lg p-4">
@@ -882,11 +1262,11 @@ pub fn render_database_connection_page() -> String {
         // 刷新启动脚本列表
         async function refreshStartupScripts() {
             const scriptsContainer = document.getElementById('startup-scripts');
-            
+
             try {
                 const response = await fetch('/api/database/startup-scripts');
                 const scripts = await response.json();
-                
+
                 displayStartupScripts(scripts);
             } catch (error) {
                 console.error('获取启动脚本失败:', error);
@@ -907,7 +1287,7 @@ pub fn render_database_connection_page() -> String {
         // 显示启动脚本列表
         function displayStartupScripts(scripts) {
             const scriptsContainer = document.getElementById('startup-scripts');
-            
+
             if (scripts.length === 0) {
                 scriptsContainer.innerHTML = `
                     <div class="text-center py-8 text-gray-500">
@@ -933,7 +1313,7 @@ pub fn render_database_connection_page() -> String {
                             <p class="text-xs text-gray-500 mt-1">路径: ${script.path}</p>
                             <p class="text-xs text-gray-500">端口: ${script.port}</p>
                         </div>
-                        <button onclick="startDatabaseInstance('${script.path}', ${script.port})" 
+                        <button onclick="startDatabaseInstance('${script.path}', ${script.port})"
                                 class="ml-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">
                             <i class="fas fa-play mr-2"></i>启动
                         </button>
@@ -964,7 +1344,7 @@ pub fn render_database_connection_page() -> String {
 
                 if (result.success) {
                     alert('数据库实例启动成功！\\n请稍等片刻后刷新连接状态。');
-                    
+
                     // 3秒后自动检查连接状态
                     setTimeout(() => {
                         checkConnectionStatus();
@@ -1177,7 +1557,8 @@ pub fn render_simple_config_page() -> String {
 }
 
 pub fn render_simple_generic_page(title: &str, content: &str) -> String {
-    format!(r#"
+    format!(
+        r#"
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1234,7 +1615,9 @@ pub fn render_simple_generic_page(title: &str, content: &str) -> String {
     </div>
 </body>
 </html>
-    "#, title, title, content)
+    "#,
+        title, title, content
+    )
 }
 
 /// 渲染高级任务管理页面
@@ -1292,7 +1675,7 @@ pub fn render_advanced_tasks_page() -> String {
                         </div>
                     </div>
                 </div>
-                
+
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="flex-shrink-0">
@@ -1304,7 +1687,7 @@ pub fn render_advanced_tasks_page() -> String {
                         </div>
                     </div>
                 </div>
-                
+
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="flex-shrink-0">
@@ -1316,7 +1699,7 @@ pub fn render_advanced_tasks_page() -> String {
                         </div>
                     </div>
                 </div>
-                
+
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="flex-shrink-0">
@@ -1343,7 +1726,7 @@ pub fn render_advanced_tasks_page() -> String {
                                 <option value="Failed">失败任务</option>
                                 <option value="Cancelled">已取消</option>
                             </select>
-                            
+
                             <select x-model="filter.type" @change="filterTasks()" class="border rounded px-3 py-2">
                                 <option value="">所有类型</option>
                                 <option value="ModelGeneration">模型生成</option>
@@ -1352,14 +1735,25 @@ pub fn render_advanced_tasks_page() -> String {
                                 <option value="IncrementalSync">增量同步</option>
                             </select>
                         </div>
-                        
+
                         <div class="flex space-x-2">
-                            <button @click="refreshTasks()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+                            <button @click="refreshTasks()" type="button" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
                                 <i class="fas fa-sync-alt mr-2"></i>刷新
                             </button>
-                            <button @click="showCreateModal = true; resetCreateModal()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
+                            <button @click="openCreateModal()" type="button" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700" :class="{'opacity-60 cursor-not-allowed': deploymentSitesLoaded && deploymentSites.length === 0}" :disabled="deploymentSitesLoaded && deploymentSites.length === 0">
                                 <i class="fas fa-plus mr-2"></i>新建任务
                             </button>
+                        </div>
+                        <div x-show="deploymentSitesLoaded && deploymentSites.length === 0" class="mt-2 text-xs text-red-500 flex items-center gap-2">
+                            <i class="fas fa-info-circle"></i>
+                            <span>
+                                暂无可用部署站点，请先前往
+                                <a href="/deployment-sites" class="text-blue-600 underline">部署站点</a>
+                                或
+                                <a href="/wizard" class="text-blue-600 underline">解析向导</a>
+                                创建。
+                            </span>
+                            <button type="button" @click="loadDeploymentSites()" class="ml-2 px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">重新检查</button>
                         </div>
                     </div>
                 </div>
@@ -1370,7 +1764,7 @@ pub fn render_advanced_tasks_page() -> String {
                 <div class="px-6 py-4 border-b border-gray-100">
                     <h3 class="text-lg font-medium">任务列表</h3>
                 </div>
-                
+
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-100">
                         <thead class="bg-gray-50">
@@ -1387,7 +1781,7 @@ pub fn render_advanced_tasks_page() -> String {
                                 <tr class="hover:bg-gray-50">
                                     <td class="px-6 py-4">
                                         <div class="flex items-center">
-                                            <button @click="toggleTaskExpanded(task)" 
+                                            <button @click="toggleTaskExpanded(task)"
                                                     class="mr-3 p-1 text-gray-400 hover:text-gray-600 focus:outline-none">
                                                 <i class="fas fa-chevron-right transform transition-transform duration-200"
                                                    :class="{'rotate-90': task.expanded}"></i>
@@ -1396,18 +1790,18 @@ pub fn render_advanced_tasks_page() -> String {
                                                 <div class="text-sm font-medium text-gray-900" x-text="task.name"></div>
                                                 <div class="text-sm text-gray-500" x-text="task.task_type"></div>
                                                 <div class="text-xs text-gray-400" x-text="task.id"></div>
-                                                
+
                                                 <!-- 展开的日志内容 -->
                                                 <div x-show="task.expanded" class="mt-4 border-l-4 border-blue-500 pl-4">
                                                     <h4 class="text-sm font-medium text-gray-900 mb-3 flex items-center">
                                                         <i class="fas fa-file-alt mr-2 text-blue-500"></i>
                                                         任务日志
-                                                        <button @click="refreshTaskLogs(task.id)" 
+                                                        <button @click="refreshTaskLogs(task.id)"
                                                                 class="ml-3 text-xs text-blue-600 hover:text-blue-800">
                                                             <i class="fas fa-sync-alt mr-1"></i>刷新
                                                         </button>
                                                     </h4>
-                                                    
+
                                                     <div class="bg-white rounded border max-h-64 overflow-y-auto">
                                                         <template x-if="task.logs && task.logs.length > 0">
                                                             <div class="space-y-1 p-3">
@@ -1447,7 +1841,7 @@ pub fn render_advanced_tasks_page() -> String {
                                                  :style="'width: ' + (task.progress?.percentage || 0) + '%'"></div>
                                         </div>
                                         <div class="text-xs text-gray-500 mt-1">
-                                            <span x-text="(task.progress?.percentage || 0).toFixed(1)"></span>% - 
+                                            <span x-text="(task.progress?.percentage || 0).toFixed(1)"></span>% -
                                             <span x-text="task.progress?.current_step || '等待开始'"></span>
                                         </div>
                                     </td>
@@ -1460,34 +1854,34 @@ pub fn render_advanced_tasks_page() -> String {
                                                 class="text-green-600 hover:text-green-900" title="启动任务">
                                             <i class="fas fa-play"></i>
                                         </button>
-                                        
+
                                         <!-- 停止按钮 - 对运行中任务显示 -->
                                         <button x-show="task.status === 'Running'" @click="stopTask(task.id)"
                                                 class="text-red-600 hover:text-red-900" title="停止任务">
                                             <i class="fas fa-stop"></i>
                                         </button>
-                                        
+
                                         <!-- 重启按钮 - 对失败的任务显示 -->
                                         <button x-show="task.status === 'Failed'" @click="restartTask(task.id)"
                                                 class="text-orange-600 hover:text-orange-900" title="重新启动">
                                             <i class="fas fa-redo"></i>
                                         </button>
-                                        
+
                                         <!-- 取消按钮 - 对失败任务也显示停止选项 -->
                                         <button x-show="task.status === 'Failed'" @click="stopTask(task.id)"
                                                 class="text-red-600 hover:text-red-900" title="取消任务">
                                             <i class="fas fa-times"></i>
                                         </button>
-                                        
+
                                         <button @click="viewTaskDetails(task)" class="text-blue-600 hover:text-blue-900" title="查看详情">
                                             <i class="fas fa-eye"></i>
                                         </button>
                                         <button @click="viewTaskLogs(task.id)" class="text-purple-600 hover:text-purple-900" title="查看日志">
                                             <i class="fas fa-file-alt"></i>
                                         </button>
-                                        
+
                                         <!-- 删除按钮 - 对完成、失败、取消的任务显示 -->
-                                        <button x-show="['Completed', 'Failed', 'Cancelled'].includes(task.status)" 
+                                        <button x-show="['Completed', 'Failed', 'Cancelled'].includes(task.status)"
                                                 @click="deleteTask(task.id)" class="text-gray-600 hover:text-gray-900" title="删除任务">
                                             <i class="fas fa-trash"></i>
                                         </button>
@@ -1497,7 +1891,7 @@ pub fn render_advanced_tasks_page() -> String {
                         </tbody>
                     </table>
                 </div>
-                
+
                 <div x-show="filteredTasks.length === 0" class="text-center py-12">
                     <i class="fas fa-inbox text-4xl text-gray-400 mb-4"></i>
                     <p class="text-gray-500">暂无任务</p>
@@ -1506,9 +1900,10 @@ pub fn render_advanced_tasks_page() -> String {
         </main>
 
         <!-- 新建任务模态框 -->
-        <div x-show="showCreateModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" 
-             x-transition:enter="ease-out duration-300" x-transition:enter-start="opacity-0" 
-             x-transition:enter-end="opacity-100" x-transition:leave="ease-in duration-200" 
+        <div x-show="showCreateModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50"
+             @click.self="showCreateModal = false"
+             x-transition:enter="ease-out duration-300" x-transition:enter-start="opacity-0"
+             x-transition:enter-end="opacity-100" x-transition:leave="ease-in duration-200"
              x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0">
             <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
                 <div class="mt-3">
@@ -1519,7 +1914,7 @@ pub fn render_advanced_tasks_page() -> String {
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
-                    
+
                     <!-- 步骤指示器 -->
                     <div class="flex items-center justify-center space-x-4 py-4">
                         <div class="flex items-center">
@@ -1548,9 +1943,9 @@ pub fn render_advanced_tasks_page() -> String {
                                             <div class="flex items-center">
                                                 <h5 class="font-medium text-gray-900" x-text="site.name"></h5>
                                                 <span class="ml-2 px-2 py-1 text-xs rounded-full"
-                                                      :class="site.env === 'prod' ? 'bg-purple-100 text-purple-800' : 
+                                                      :class="site.env === 'prod' ? 'bg-purple-100 text-purple-800' :
                                                              site.env === 'staging' ? 'bg-blue-100 text-blue-800' :
-                                                             'bg-green-100 text-green-800'" 
+                                                             'bg-green-100 text-green-800'"
                                                       x-text="site.env"></span>
                                                 <span class="ml-2 px-2 py-1 text-xs rounded-full"
                                                       :class="site.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'"
@@ -1580,14 +1975,14 @@ pub fn render_advanced_tasks_page() -> String {
                         <div class="space-y-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">任务名称</label>
-                                <input type="text" x-model="taskConfig.name" 
+                                <input type="text" x-model="taskConfig.name"
                                        class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                                        placeholder="输入任务名称">
                             </div>
-                            
+
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">任务类型</label>
-                                <select x-model="taskConfig.task_type" 
+                                <select x-model="taskConfig.task_type"
                                         class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                                     <option value="ParsePdmsData">PDMS数据解析</option>
                                     <option value="FullGeneration">完整数据生成</option>
@@ -1629,15 +2024,15 @@ pub fn render_advanced_tasks_page() -> String {
 
                     <!-- 模态框底部按钮 -->
                     <div class="flex justify-between pt-4 border-t">
-                        <button @click="showCreateModal = false" 
+                        <button @click="showCreateModal = false"
                                 class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">取消</button>
                         <div class="space-x-2">
-                            <button x-show="createStep === 2" @click="createStep = 1" 
+                            <button x-show="createStep === 2" @click="createStep = 1"
                                     class="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded hover:bg-gray-300">上一步</button>
-                            <button x-show="createStep === 1" @click="nextStep()" 
+                            <button x-show="createStep === 1" @click="nextStep()"
                                     :disabled="!selectedSite"
                                     class="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed">下一步</button>
-                            <button x-show="createStep === 2" @click="createTaskFromSite()" 
+                            <button x-show="createStep === 2" @click="createTaskFromSite()"
                                     :disabled="!taskConfig.name"
                                     class="px-4 py-2 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">创建任务</button>
                         </div>
@@ -1663,10 +2058,11 @@ pub fn render_advanced_tasks_page() -> String {
                     type: ''
                 },
                 showCreateModal: false,
-                
+
                 // 新建任务相关数据
                 createStep: 1,
                 deploymentSites: [],
+                deploymentSitesLoaded: false,
                 selectedSite: null,
                 taskConfig: {
                     name: '',
@@ -1677,20 +2073,20 @@ pub fn render_advanced_tasks_page() -> String {
                     apply_boolean_operation: true,
                     mesh_tol_ratio: 3.0
                 },
-                
+
                 init() {
                     this.loadTasks();
                     this.loadDeploymentSites();
                     // 每5秒刷新一次任务列表
                     setInterval(() => this.loadTasks(), 5000);
                 },
-                
+
                 async loadTasks() {
                     try {
                         const response = await fetch('/api/tasks?limit=100');
                         const data = await response.json();
                         let tasks = data.tasks || [];
-                        
+
                         // 为每个任务设置初始状态和保持展开状态
                         for (let task of tasks) {
                             const existingTask = this.tasks.find(t => t.id === task.id);
@@ -1698,7 +2094,7 @@ pub fn render_advanced_tasks_page() -> String {
                             task.expanded = existingTask ? existingTask.expanded : false;
                             task.logs = existingTask ? existingTask.logs : [];
                         }
-                        
+
                         this.tasks = tasks;
                         this.updateStats();
                         this.filterTasks();
@@ -1706,7 +2102,7 @@ pub fn render_advanced_tasks_page() -> String {
                         console.error('加载任务失败:', error);
                     }
                 },
-                
+
                 updateStats() {
                     this.stats = {
                         running: this.tasks.filter(t => t.status === 'Running').length,
@@ -1715,7 +2111,7 @@ pub fn render_advanced_tasks_page() -> String {
                         failed: this.tasks.filter(t => t.status === 'Failed').length
                     };
                 },
-                
+
                 filterTasks() {
                     this.filteredTasks = this.tasks.filter(task => {
                         if (this.filter.status && task.status !== this.filter.status) return false;
@@ -1723,7 +2119,7 @@ pub fn render_advanced_tasks_page() -> String {
                         return true;
                     });
                 },
-                
+
                 getStatusColor(status) {
                     const colors = {
                         Pending: 'bg-yellow-100 text-yellow-800',
@@ -1734,7 +2130,7 @@ pub fn render_advanced_tasks_page() -> String {
                     };
                     return colors[status] || 'bg-gray-100 text-gray-800';
                 },
-                
+
                 getStatusText(status) {
                     const statusTexts = {
                         Pending: '等待队列',
@@ -1745,7 +2141,7 @@ pub fn render_advanced_tasks_page() -> String {
                     };
                     return statusTexts[status] || status;
                 },
-                
+
                 getLogLevelColor(level) {
                     const colors = {
                         'Info': 'bg-blue-100 text-blue-800',
@@ -1755,22 +2151,22 @@ pub fn render_advanced_tasks_page() -> String {
                     };
                     return colors[level] || 'bg-gray-100 text-gray-800';
                 },
-                
+
                 async toggleTaskExpanded(task) {
                     // 切换展开状态
                     task.expanded = !task.expanded;
-                    
+
                     // 如果展开且还没有日志，则加载日志
                     if (task.expanded && (!task.logs || task.logs.length === 0)) {
                         await this.refreshTaskLogs(task.id);
                     }
                 },
-                
+
                 async refreshTaskLogs(taskId) {
                     try {
                         const response = await fetch(`/api/tasks/${taskId}/logs?limit=10`);
                         const data = await response.json();
-                        
+
                         // 更新任务的日志数据
                         const task = this.tasks.find(t => t.id === taskId);
                         if (task) {
@@ -1786,24 +2182,36 @@ pub fn render_advanced_tasks_page() -> String {
                         }
                     }
                 },
-                
+
                 formatDate(timestamp) {
                     if (!timestamp) return '-';
                     return new Date(timestamp).toLocaleString('zh-CN');
                 },
-                
+
                 // 新建任务相关方法
                 async loadDeploymentSites() {
+                    this.deploymentSitesLoaded = false;
                     try {
                         const response = await fetch('/api/deployment-sites');
                         const data = await response.json();
                         this.deploymentSites = data.items || [];
+                        this.deploymentSitesLoaded = true;
                     } catch (error) {
                         console.error('加载部署站点失败:', error);
                         this.deploymentSites = [];
+                        this.deploymentSitesLoaded = true;
                     }
                 },
-                
+
+                async openCreateModal() {
+                    await this.loadDeploymentSites();
+                    if (!this.deploymentSites || this.deploymentSites.length === 0) {
+                        return;
+                    }
+                    this.resetCreateModal();
+                    this.showCreateModal = true;
+                },
+
                 async nextStep() {
                     if (this.selectedSite) {
                         this.createStep = 2;
@@ -1837,7 +2245,7 @@ pub fn render_advanced_tasks_page() -> String {
                         }
                     }
                 },
-                
+
                 resetCreateModal() {
                     this.createStep = 1;
                     this.selectedSite = null;
@@ -1851,13 +2259,13 @@ pub fn render_advanced_tasks_page() -> String {
                         mesh_tol_ratio: 3.0
                     };
                 },
-                
+
                 async createTaskFromSite() {
                     if (!this.selectedSite || !this.taskConfig.name) {
                         alert('请选择站点和输入任务名称');
                         return;
                     }
-                    
+
                     try {
                         // 合并站点配置和任务配置
                         const siteConfig = this.selectedSite.config;
@@ -1874,7 +2282,7 @@ pub fn render_advanced_tasks_page() -> String {
                                 mesh_tol_ratio: this.taskConfig.mesh_tol_ratio
                             }
                         };
-                        
+
                         const response = await fetch('/api/tasks', {
                             method: 'POST',
                             headers: {
@@ -1882,9 +2290,9 @@ pub fn render_advanced_tasks_page() -> String {
                             },
                             body: JSON.stringify(payload)
                         });
-                        
+
                         const result = await response.json();
-                        
+
                         if (response.ok) {
                             this.showCreateModal = false;
                             this.resetCreateModal();
@@ -1898,7 +2306,7 @@ pub fn render_advanced_tasks_page() -> String {
                         alert('任务创建失败: ' + error.message);
                     }
                 },
-                
+
                 async startTask(taskId) {
                     try {
                         await fetch(`/api/tasks/${taskId}/start`, { method: 'POST' });
@@ -1908,7 +2316,7 @@ pub fn render_advanced_tasks_page() -> String {
                         alert('启动任务失败');
                     }
                 },
-                
+
                 async stopTask(taskId) {
                     try {
                         await fetch(`/api/tasks/${taskId}/stop`, { method: 'POST' });
@@ -1918,7 +2326,7 @@ pub fn render_advanced_tasks_page() -> String {
                         alert('停止任务失败');
                     }
                 },
-                
+
                 async restartTask(taskId) {
                     if (!confirm('确定要重新启动这个任务吗？这将基于原配置重新创建并启动任务。')) return;
                     try {
@@ -1935,7 +2343,7 @@ pub fn render_advanced_tasks_page() -> String {
                         alert('重启任务失败: ' + error.message);
                     }
                 },
-                
+
                 async deleteTask(taskId) {
                     if (!confirm('确定要删除这个任务吗？')) return;
                     try {
@@ -1946,16 +2354,16 @@ pub fn render_advanced_tasks_page() -> String {
                         alert('删除任务失败');
                     }
                 },
-                
+
                 viewTaskDetails(task) {
                     // 这里可以打开一个模态框显示任务详情
                     alert('任务详情: ' + JSON.stringify(task, null, 2));
                 },
-                
+
                 viewTaskLogs(taskId) {
                     window.open(`/tasks/${taskId}/logs`, '_blank');
                 },
-                
+
                 refreshTasks() {
                     this.loadTasks();
                 }
@@ -1969,7 +2377,8 @@ pub fn render_advanced_tasks_page() -> String {
 
 /// 渲染任务日志页面
 pub fn render_task_logs_page(task_id: String) -> String {
-    format!(r##"
+    format!(
+        r##"
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2057,7 +2466,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                             <option value="Error">错误</option>
                             <option value="Debug">调试</option>
                         </select>
-                        <input type="text" x-model="filters.search" @input="applyFilters()" 
+                        <input type="text" x-model="filters.search" @input="applyFilters()"
                                placeholder="搜索日志内容..." class="border rounded px-3 py-2 w-64">
                     </div>
                     <div class="text-sm text-gray-500">
@@ -2087,7 +2496,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                         </div>
                     </template>
                 </div>
-                
+
                 <div x-show="filteredLogs.length === 0" class="text-center py-12">
                     <i class="fas fa-file-alt text-4xl text-gray-400 mb-4"></i>
                     <p class="text-gray-500">暂无日志</p>
@@ -2107,18 +2516,18 @@ pub fn render_task_logs_page(task_id: String) -> String {
                     level: '',
                     search: ''
                 }},
-                
+
                 init() {{
                     this.loadLogs();
                     // 每10秒刷新一次日志
                     setInterval(() => this.loadLogs(), 10000);
                 }},
-                
+
                 async loadLogs() {{
                     try {{
                         const response = await fetch(`/api/tasks/${{this.taskId}}/logs?limit=200`);
                         const data = await response.json();
-                        
+
                         this.taskInfo = data.task || {{}};
                         this.logs = data.logs || [];
                         this.applyFilters();
@@ -2126,25 +2535,25 @@ pub fn render_task_logs_page(task_id: String) -> String {
                         console.error('加载日志失败:', error);
                     }}
                 }},
-                
+
                 applyFilters() {{
                     let filtered = this.logs;
-                    
+
                     if (this.filters.level) {{
                         filtered = filtered.filter(log => log.level === this.filters.level);
                     }}
-                    
+
                     if (this.filters.search) {{
                         const search = this.filters.search.toLowerCase();
-                        filtered = filtered.filter(log => 
+                        filtered = filtered.filter(log =>
                             log.message.toLowerCase().includes(search) ||
                             (log.details && log.details.toLowerCase().includes(search))
                         );
                     }}
-                    
+
                     this.filteredLogs = filtered;
                 }},
-                
+
                 downloadLogs() {{
                     const content = this.logs.map(log => {{
                         let line = `[${{this.formatTimestamp(log.timestamp)}}] [${{log.level}}] ${{log.message}}`;
@@ -2153,7 +2562,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                         }}
                         return line;
                     }}).join('\n\n');
-                    
+
                     const blob = new Blob([content], {{ type: 'text/plain' }});
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -2162,7 +2571,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                     a.click();
                     window.URL.revokeObjectURL(url);
                 }},
-                
+
                 formatTimestamp(timestamp) {{
                     try {{
                         return new Date(timestamp).toLocaleString('zh-CN');
@@ -2170,7 +2579,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                         return timestamp;
                     }}
                 }},
-                
+
                 getStatusColor(status) {{
                     const colors = {{
                         'Pending': 'bg-yellow-100 text-yellow-800',
@@ -2181,7 +2590,7 @@ pub fn render_task_logs_page(task_id: String) -> String {
                     }};
                     return colors[status] || 'bg-gray-100 text-gray-800';
                 }},
-                
+
                 getLevelColor(level) {{
                     const colors = {{
                         'Info': 'bg-blue-100 text-blue-800',
@@ -2196,7 +2605,9 @@ pub fn render_task_logs_page(task_id: String) -> String {
     </script>
 </body>
 </html>
-    "##, task_id = task_id)
+    "##,
+        task_id = task_id
+    )
 }
 
 /// 统一布局版：仪表板
@@ -2299,14 +2710,62 @@ pub fn render_config_page_with_sidebar() -> String {
                 <p class="text-gray-600">设置模型生成、空间树构建等参数。</p>
             </div>
         </div>
+
+        <div class="mt-6 grid md:grid-cols-2 gap-6" x-data="cfgRuntimeBox()">
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-broadcast-tower mr-2"></i>运行时（MQTT/Watcher）</h2>
+                <div class="text-sm text-gray-700 space-y-1">
+                    <div>激活环境：<span class="font-mono" x-text="runtime.env_id||'-'"></span></div>
+                    <div>MQTT连接：<span :class="runtime.mqtt_connected===true?'text-green-600':(runtime.mqtt_connected===false?'text-red-600':'text-gray-500')"
+                        x-text="runtime.mqtt_connected===true?'已连接':(runtime.mqtt_connected===false?'未连接':'未知')"></span></div>
+                    <div class="pt-2">
+                        <button @click="refresh()" class="px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200"><i class="fas fa-sync mr-1"></i>刷新状态</button>
+                        <a href="/remote-sync" class="ml-2 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700"><i class="fas fa-wrench mr-1"></i>管理异地环境</a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4"><i class="fas fa-file-import mr-2"></i>从 DbOption 导入环境</h2>
+                <div class="text-sm text-gray-700">
+                    <p>快速根据当前 DbOption.toml 中的 MQTT/文件服务/地区参数生成一个“异地环境”。</p>
+                    <div class="mt-3 space-x-2">
+                        <button @click="viewConfig()" class="px-3 py-1.5 bg-gray-100 rounded hover:bg-gray-200"><i class="fas fa-eye mr-1"></i>查看当前运行配置</button>
+                        <button @click="doImport()" class="px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700"><i class="fas fa-plus mr-1"></i>从 DbOption 导入</button>
+                        <button @click="doImportAndActivate()" class="px-3 py-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700"><i class="fas fa-play mr-1"></i>导入并激活</button>
+                    </div>
+                    <pre class="mt-3 bg-gray-50 p-3 rounded text-xs overflow-x-auto" x-text="pretty(config)"></pre>
+                </div>
+            </div>
+        </div>
     "#;
+
+    let extra_head = Some(r#"<script src="/static/alpine.min.js" defer></script>"#);
+    let extra_scripts = Some(
+        r#"
+    <script>
+    function cfgRuntimeBox(){
+      return {
+        runtime: {env_id:null, mqtt_connected:null},
+        config: {},
+        pretty(o){ try { return JSON.stringify(o, null, 2) } catch{ return '' } },
+        async refresh(){ const r = await fetch('/api/remote-sync/runtime/status'); const d = await r.json(); if(d.status==='success'){ this.runtime = { env_id: d.env_id, mqtt_connected: d.mqtt_connected }; } },
+        async viewConfig(){ const r = await fetch('/api/remote-sync/runtime/config'); const d = await r.json(); if(d.status==='success'){ this.config = d.config; } },
+        async doImport(){ const r = await fetch('/api/remote-sync/envs/import-from-dboption',{method:'POST'}); const d = await r.json(); if(d.status==='success'){ alert('已导入，环境ID: '+d.id); window.location.href = `/remote-sync?env=${encodeURIComponent(d.id)}`; } else { alert('导入失败'); } },
+        async doImportAndActivate(){ const r = await fetch('/api/remote-sync/envs/import-from-dboption',{method:'POST'}); const d = await r.json(); if(d.status==='success'){ await fetch(`/api/remote-sync/envs/${d.id}/activate`,{method:'POST'}); window.location.href = `/remote-sync?env=${encodeURIComponent(d.id)}`; } else { alert('导入失败'); } },
+        async init(){ await this.refresh(); }
+      }
+    }
+    </script>
+    "#,
+    );
 
     crate::web_ui::layout::render_layout_with_sidebar(
         "配置管理 - AIOS 数据库管理平台",
         Some("config"),
         content,
-        None,
-        None,
+        extra_head,
+        extra_scripts,
     )
 }
 
@@ -2318,6 +2777,9 @@ pub fn render_deployment_sites_page_with_sidebar() -> String {
                 <i class="fas fa-server text-blue-600 mr-2"></i>部署站点管理
             </h1>
             <div class="flex gap-3">
+                <button onclick="importDeploymentSiteFromDbOption()" class="px-3 py-2 rounded bg-purple-600 text-white hover:bg-purple-700">
+                    <i class="fas fa-file-import mr-1"></i>从 DbOption 导入
+                </button>
                 <button id="copy-share-link" class="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300">复制分享链接</button>
                 <button onclick="reloadProjects()" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">刷新</button>
                 <button onclick="window.location.href='/wizard'" class="px-3 py-2 rounded bg-green-600 text-white hover:bg-green-700">+ 创建站点</button>

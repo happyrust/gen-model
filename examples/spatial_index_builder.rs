@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::grpc_service::spatial_index_builder::{
-    SpatialIndexBuilder, SpatialIndexConfig, SpatialIndexPersistence
+    SpatialIndexBuilder, SpatialIndexConfig, SpatialIndexPersistence,
 };
 
 #[derive(Parser)]
@@ -23,48 +23,48 @@ enum Commands {
         /// 数据库编号列表
         #[arg(short, long, value_delimiter = ',')]
         db_nos: Vec<i32>,
-        
+
         /// 输出文件路径
         #[arg(short, long)]
         output: PathBuf,
-        
+
         /// 批量大小
         #[arg(long, default_value = "10000")]
         batch_size: usize,
-        
+
         /// 包围盒容差
         #[arg(long, default_value = "0.001")]
         tolerance: f32,
-        
+
         /// 过滤构件类型
         #[arg(long, value_delimiter = ',')]
         filter_types: Option<Vec<String>>,
-        
+
         /// 最小包围盒尺寸
         #[arg(long, default_value = "0.0001")]
         min_bbox_size: f32,
     },
-    
+
     /// 验证索引文件
     Validate {
         /// 索引文件路径
         #[arg(short, long)]
         file: PathBuf,
     },
-    
+
     /// 显示索引统计信息
     Stats {
         /// 索引文件路径
         #[arg(short, long)]
         file: PathBuf,
     },
-    
+
     /// 合并多个索引文件
     Merge {
         /// 输入文件列表
         #[arg(short, long, value_delimiter = ',')]
         inputs: Vec<PathBuf>,
-        
+
         /// 输出文件路径
         #[arg(short, long)]
         output: PathBuf,
@@ -77,25 +77,33 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { 
-            db_nos, 
-            output, 
+        Commands::Build {
+            db_nos,
+            output,
             batch_size,
             tolerance,
             filter_types,
-            min_bbox_size 
+            min_bbox_size,
         } => {
-            build_index(db_nos, output, batch_size, tolerance, filter_types, min_bbox_size).await?;
+            build_index(
+                db_nos,
+                output,
+                batch_size,
+                tolerance,
+                filter_types,
+                min_bbox_size,
+            )
+            .await?;
         }
-        
+
         Commands::Validate { file } => {
             validate_index(file).await?;
         }
-        
+
         Commands::Stats { file } => {
             show_stats(file).await?;
         }
-        
+
         Commands::Merge { inputs, output } => {
             merge_indexes(inputs, output).await?;
         }
@@ -124,7 +132,7 @@ async fn build_index(
 
     // 初始化数据库管理器
     let db_manager = Arc::new(AiosDBManager::init_form_config().await?);
-    
+
     // 配置构建器
     let config = SpatialIndexConfig {
         bbox_tolerance: tolerance,
@@ -148,7 +156,7 @@ async fn build_index(
     println!("   跳过构件: {}", statistics.skipped_elements);
     println!("   构建耗时: {} ms", statistics.build_time_ms);
     println!("   内存估算: {:.2} MB", statistics.memory_estimate_mb);
-    
+
     if !statistics.type_distribution.is_empty() {
         println!("   类型分布:");
         for (type_name, count) in &statistics.type_distribution {
@@ -186,12 +194,14 @@ async fn show_stats(file: PathBuf) -> Result<()> {
     println!("📊 索引统计信息: {:?}", file);
 
     let (rtree, statistics) = SpatialIndexPersistence::load_index(&file)?;
-    
+
     println!("索引基本信息:");
     println!("  R-tree 元素数量: {}", rtree.size());
-    println!("  文件大小: {:.2} KB", 
-        std::fs::metadata(&file)?.len() as f64 / 1024.0);
-    
+    println!(
+        "  文件大小: {:.2} KB",
+        std::fs::metadata(&file)?.len() as f64 / 1024.0
+    );
+
     println!("\n构建统计:");
     print_statistics(&statistics);
 
@@ -213,15 +223,15 @@ async fn merge_indexes(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {
 
     for input_file in inputs {
         println!("   正在处理: {:?}", input_file);
-        
+
         let (rtree, statistics) = SpatialIndexPersistence::load_index(&input_file)?;
-        
+
         // 收集所有元素
         all_elements.extend(rtree.iter().cloned());
-        
+
         // 合并统计信息
         merge_statistics(&mut merged_stats, &statistics);
-        
+
         println!("     已加载 {} 个元素", rtree.size());
     }
 
@@ -248,12 +258,12 @@ fn print_statistics(stats: &aios_database::grpc_service::spatial_index_builder::
     println!("  跳过构件: {}", stats.skipped_elements);
     println!("  构建耗时: {} ms", stats.build_time_ms);
     println!("  内存估算: {:.2} MB", stats.memory_estimate_mb);
-    
+
     if !stats.type_distribution.is_empty() {
         println!("  类型分布:");
         let mut sorted_types: Vec<_> = stats.type_distribution.iter().collect();
         sorted_types.sort_by(|a, b| b.1.cmp(a.1)); // 按数量降序排列
-        
+
         for (type_name, count) in sorted_types {
             let percentage = (*count as f64 / stats.indexed_elements as f64) * 100.0;
             println!("    {}: {} 个 ({:.1}%)", type_name, count, percentage);
@@ -262,24 +272,26 @@ fn print_statistics(stats: &aios_database::grpc_service::spatial_index_builder::
 }
 
 /// 分析R-tree结构
-fn analyze_rtree_structure(rtree: &rstar::RTree<aios_database::grpc_service::spatial_query_service::SpatialElement>) {
+fn analyze_rtree_structure(
+    rtree: &rstar::RTree<aios_database::grpc_service::spatial_query_service::SpatialElement>,
+) {
     println!("  元素总数: {}", rtree.size());
-    
+
     // 计算包围盒统计
     if rtree.size() > 0 {
         let mut total_volume = 0.0f32;
         let mut min_volume = f32::MAX;
         let mut max_volume = 0.0f32;
-        
+
         for element in rtree.iter() {
             let size = element.bbox.maxs - element.bbox.mins;
             let volume = size.x * size.y * size.z;
-            
+
             total_volume += volume;
             min_volume = min_volume.min(volume);
             max_volume = max_volume.max(volume);
         }
-        
+
         println!("  包围盒体积统计:");
         println!("    平均体积: {:.6}", total_volume / rtree.size() as f32);
         println!("    最小体积: {:.6}", min_volume);
@@ -288,7 +300,8 @@ fn analyze_rtree_structure(rtree: &rstar::RTree<aios_database::grpc_service::spa
 }
 
 /// 创建空统计信息
-fn create_empty_statistics() -> aios_database::grpc_service::spatial_index_builder::IndexStatistics {
+fn create_empty_statistics() -> aios_database::grpc_service::spatial_index_builder::IndexStatistics
+{
     aios_database::grpc_service::spatial_index_builder::IndexStatistics {
         total_elements: 0,
         indexed_elements: 0,
@@ -308,8 +321,11 @@ fn merge_statistics(
     target.skipped_elements += source.skipped_elements;
     target.build_time_ms += source.build_time_ms;
     target.memory_estimate_mb += source.memory_estimate_mb;
-    
+
     for (type_name, count) in &source.type_distribution {
-        *target.type_distribution.entry(type_name.clone()).or_insert(0) += count;
+        *target
+            .type_distribution
+            .entry(type_name.clone())
+            .or_insert(0) += count;
     }
 }

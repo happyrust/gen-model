@@ -37,26 +37,69 @@
     }
   };
 
-  function statusBadge(status){
-    const map = {
-      Running: 'bg-green-100 text-green-700',
-      Deploying: 'bg-blue-100 text-blue-700',
-      Configuring: 'bg-amber-100 text-amber-700',
-      Ok: 'bg-green-100 text-green-700',
-      Healthy: 'bg-green-100 text-green-700',
-      Pending: 'bg-yellow-100 text-yellow-700',
-      Failed: 'bg-red-100 text-red-700',
-      Error: 'bg-red-100 text-red-700',
-      Stopped: 'bg-gray-100 text-gray-700'
-    };
-    return map[status] || 'bg-gray-100 text-gray-700';
+  const STATUS_CLASS_MAP = {
+    success: 'badge badge--success',
+    info: 'badge badge--info',
+    warning: 'badge badge--warning',
+    danger: 'badge badge--danger',
+    muted: 'badge badge--muted',
+    default: 'badge'
+  };
+
+  const STATUS_LABEL_MAP = {
+    running: '运行中',
+    active: '启用中',
+    deploying: '部署中',
+    configuring: '配置中',
+    failed: '失败',
+    stopped: '已停止',
+    pending: '待处理',
+    idle: '空闲',
+    scanning: '检测中',
+    syncing: '同步中',
+    completed: '已完成',
+    'changesdetected': '发现变更'
+  };
+
+  function normalizeStatus(status){
+    const s = String(status || '').toLowerCase();
+    if(!s) return 'default';
+    if(s.includes('run') || s.includes('ok') || s.includes('healthy')) return 'success';
+    if(s.includes('deploy')) return 'info';
+    if(s.includes('config') || s.includes('pending')) return 'warning';
+    if(s.includes('fail') || s.includes('error')) return 'danger';
+    if(s.includes('stop')) return 'muted';
+    if(s === 'active') return 'success';
+    return 'default';
   }
+
+  function statusBadge(status){
+    const tone = normalizeStatus(status);
+    return STATUS_CLASS_MAP[tone] || STATUS_CLASS_MAP.default;
+  }
+
+  function statusLabel(status){
+    const raw = String(status || '').trim();
+    if(!raw) return '状态未知';
+    const key = raw.toLowerCase();
+    if(STATUS_LABEL_MAP[key]) return STATUS_LABEL_MAP[key];
+    const compactKey = key.replace(/[^a-z]/g, '');
+    if(STATUS_LABEL_MAP[compactKey]) return STATUS_LABEL_MAP[compactKey];
+    return raw;
+  }
+
   function envBadge(env){
-    const map = { prod:'bg-purple-100 text-purple-700',
-                  staging:'bg-blue-100 text-blue-700',
-                  dev:'bg-amber-100 text-amber-700',
-                  test:'bg-gray-100 text-gray-700' };
-    return map[String(env||'').toLowerCase()] || 'bg-gray-100 text-gray-700';
+    const map = {
+      prod: 'badge badge--env-prod',
+      production: 'badge badge--env-prod',
+      staging: 'badge badge--env-staging',
+      stage: 'badge badge--env-staging',
+      dev: 'badge badge--env-dev',
+      development: 'badge badge--env-dev',
+      test: 'badge badge--env-test',
+      testing: 'badge badge--env-test'
+    };
+    return map[String(env || '').toLowerCase()] || 'badge badge--muted';
   }
 
   // 辅助：构建查询、格式化
@@ -96,7 +139,7 @@
       // Loading 状态
       const grid = $('projects-grid');
       if(grid){
-        grid.innerHTML = '<div class="py-8 text-center text-gray-500">正在加载部署站点...</div>';
+        grid.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin mr-2"></i>正在加载部署站点...</div>';
       }
       const resp = await fetch('/api/deployment-sites'+buildQuery());
       const data = await resp.json();
@@ -134,16 +177,64 @@
     const [total, running, deploying, configuring, failed] = await Promise.all([
       fetchCount(''), fetchCount('Running'), fetchCount('Deploying'), fetchCount('Configuring'), fetchCount('Failed')
     ]);
-    const set = (id,val,cls)=>{ const el=document.getElementById(id); if(el){ el.textContent = String(val); if(cls) el.className = cls; } };
-    set('stat-total', total, 'text-2xl font-bold text-gray-900');
-    set('stat-running', running, 'text-2xl font-bold text-green-600');
-    set('stat-deploying', deploying, 'text-2xl font-bold text-blue-600');
-    set('stat-configuring', configuring, 'text-2xl font-bold text-amber-600');
-    set('stat-failed', failed, 'text-2xl font-bold text-red-600');
+    const set = (id,val)=>{
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.textContent = String(val);
+      el.classList.remove('is-loading');
+    };
+    set('stat-total', total);
+    set('stat-running', running);
+    set('stat-deploying', deploying);
+    set('stat-configuring', configuring);
+    set('stat-failed', failed);
   }
 
   // 暴露刷新函数给页面按钮
   window.reloadProjects = function(){ loadProjects(); };
+
+  // 从 DbOption.toml 导入部署站点
+  window.importDeploymentSiteFromDbOption = async function(){
+    try {
+      const suggestion = 'DbOption.toml';
+      const input = prompt('请输入 DbOption.toml 路径（留空使用当前目录下的 '+suggestion+'）', '');
+      if (input === null) {
+        return;
+      }
+      const payload = {};
+      if (input && input.trim()) {
+        payload.path = input.trim();
+      }
+      const resp = await fetch('/api/deployment-sites/import-dboption', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      let data = null;
+      try {
+        data = await resp.json();
+      } catch (_e) {
+        data = {};
+      }
+      if (!resp.ok || !data || data.status !== 'success') {
+        const msg = data && (data.error || data.message);
+        alert('导入失败: ' + (msg || ('HTTP '+resp.status)));
+        return;
+      }
+      const siteName = data.item && (data.item.name || data.item.config?.project_name);
+      alert('导入成功' + (siteName ? ': '+siteName : '')); 
+      await loadProjects();
+      const newId = data.item && data.item.id;
+      if (newId) {
+        setTimeout(() => {
+          viewProjectDetails(encodeURIComponent(newId));
+        }, 200);
+      }
+    } catch (err) {
+      console.error('importDeploymentSiteFromDbOption failed:', err);
+      alert('导入失败: ' + err);
+    }
+  };
 
   // 快速新建站点：建议使用 /wizard，此处暂保留占位
   window.createProjectQuick = async function(){
@@ -172,20 +263,26 @@
   function renderProjects(items){
     const grid = $('projects-grid');
     if(!grid) return;
-    if(!items || !items.length){ grid.innerHTML = '<div class="text-gray-500">暂无部署站点</div>'; return; }
+    if(!items || !items.length){
+      grid.innerHTML = '<div class="empty-state"><i class="fas fa-layer-group mr-2"></i>暂无部署站点</div>';
+      return;
+    }
     if (VIEW === 'list') {
       grid.classList.remove('grid-cards');
       grid.classList.remove('grid-cards-lg');
       const rows = items.map(p=>{
         const id = escHtml(p.id||'');
         const name = escHtml(p.name||id||'未命名');
-        const status = escHtml(p.status||'');
+        const rawStatus = p.status || '';
+        const statusText = escHtml(statusLabel(rawStatus));
         const env = escHtml(p.env||'');
         const owner = escHtml(p.owner||'');
         const updated = escHtml(p.updated_at||'');
-        return `<tr class=\"border-b\">\n          <td class=\"py-2 pr-4\"><a class=\"text-blue-600 hover:underline\" href=\"javascript:viewProjectDetails('${encodeURIComponent(id)}')\">${name}</a></td>\n          <td class=\"py-2 pr-4\"><span class=\"inline-flex px-2 py-0.5 rounded ${statusBadge(status)}\">${status||'—'}</span></td>\n          <td class=\"py-2 pr-4\"><span class=\"inline-flex px-2 py-0.5 rounded ${envBadge(env)}\">${env||'—'}</span></td>\n          <td class=\"py-2 pr-4\">${owner||''}</td>\n          <td class=\"py-2 pr-4\">${updated||''}</td>\n          <td class=\"py-2\"><button class=\"px-2 py-1 rounded bg-blue-600 text-white\" onclick=\"viewProjectDetails('${encodeURIComponent(id)}')\">详情</button></td>\n        </tr>`;
+        const badgeClass = statusBadge(rawStatus);
+        const displayStatus = statusText || '—';
+        return `<tr class=\"border-b\">\n          <td class=\"py-3 pr-4 font-medium text-gray-900\"><a class=\"text-blue-600 hover:underline\" href=\"javascript:viewProjectDetails('${encodeURIComponent(id)}')\">${name}</a></td>\n          <td class=\"py-3 pr-4\"><span class=\"${badgeClass}\">${displayStatus}</span></td>\n          <td class=\"py-3 pr-4\"><span class=\"${envBadge(env)}\">${env||'—'}</span></td>\n          <td class=\"py-3 pr-4 text-gray-600\">${owner||''}</td>\n          <td class=\"py-3 pr-4 text-gray-500\">${updated||''}</td>\n          <td class=\"py-3\"><button class=\"btn btn--ghost\" onclick=\"viewProjectDetails('${encodeURIComponent(id)}')\">详情</button></td>\n        </tr>`;
       }).join('');
-      grid.innerHTML = `<div class=\"overflow-x-auto\"><table class=\"table-auto min-w-full text-sm\"><thead class=\"bg-gray-50\"><tr><th class=\"text-left py-2 pr-4\">名称</th><th class=\"text-left py-2 pr-4\">状态</th><th class=\"text-left py-2 pr-4\">环境</th><th class=\"text-left py-2 pr-4\">负责人</th><th class=\"text-left py-2 pr-4\">更新</th><th class=\"text-left py-2\">操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      grid.innerHTML = `<div class=\"card overflow-hidden\"><div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\"><thead class=\"bg-gray-50 text-left text-gray-500 uppercase tracking-wider\"><tr><th class=\"py-3 pr-4\">名称</th><th class=\"py-3 pr-4\">状态</th><th class=\"py-3 pr-4\">环境</th><th class=\"py-3 pr-4\">负责人</th><th class=\"py-3 pr-4\">更新</th><th class=\"py-3\">操作</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
       return;
     }
     grid.classList.add('grid-cards');
@@ -193,37 +290,33 @@
     grid.innerHTML = items.map(p=>{
       const id = escHtml(p.id||'');
       const name = escHtml(p.name||id||'未命名项目');
-      const status = escHtml(p.status||'');
+      const rawStatus = p.status || '';
       const env = escHtml(p.env||'');
       const url = escHtml(p.url||'');
       const owner = escHtml(p.owner||'');
       const updated = escHtml(p.updated_at||'');
+      const description = escHtml(p.description||'');
+      const statusClass = statusBadge(rawStatus);
+      const statusText = escHtml(statusLabel(rawStatus));
+      const envClass = envBadge(env);
+      const meta = [];
+      if(owner) meta.push(`<span><i class=\"fa fa-user\"></i>${owner}</span>`);
+      if(updated) meta.push(`<span><i class=\"fa fa-clock\"></i>${updated}</span>`);
       return `
-      <div class="bg-white rounded-lg shadow p-5 hover:shadow-lg transition">
-        <div class="flex items-start justify-between">
-          <div class="min-w-0">
-            <div class="text-lg font-semibold text-gray-900 truncate">${name}</div>
-            <div class="mt-1 flex gap-2 text-xs text-gray-600">
-              <span class="inline-flex px-2 py-0.5 rounded ${statusBadge(status)}">${status||'未知'}</span>
-              <span class="inline-flex px-2 py-0.5 rounded ${envBadge(env)}">${env||'—'}</span>
-            </div>
+      <article class="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-lg transition-all cursor-pointer" onclick="window.viewProjectDetails('${encodeURIComponent(id)}')">
+        <div class="flex items-start justify-between mb-2">
+          <h3 class="text-lg font-semibold text-gray-900 truncate flex-1">${name}</h3>
+          <span class="${statusClass} text-xs">${statusText}</span>
+        </div>
+        ${description ? `<p class="text-sm text-gray-600 mb-3 line-clamp-2">${description}</p>` : ''}
+        <div class="flex items-center justify-between text-xs text-gray-500">
+          <div class="flex items-center gap-3">
+            ${env ? `<span class="${envClass}">${env}</span>` : ''}
+            ${owner ? `<span><i class="fas fa-user mr-1"></i>${owner}</span>` : ''}
           </div>
+          ${updated ? `<span class="text-gray-400">${updated}</span>` : ''}
         </div>
-        <div class="mt-3 space-y-1 text-xs text-gray-600">
-          ${owner? `<div><i class=\"fa fa-user w-3 mr-1\"></i> 负责人: ${owner}</div>`:''}
-          ${url? `<div><i class=\"fa fa-link w-3 mr-1\"></i> <a class=\"text-blue-600 hover:underline\" target=\"_blank\" href=\"${url}\">${url}</a></div>`:''}
-          ${updated? `<div><i class=\"fa fa-clock w-3 mr-1\"></i> 更新: ${updated}</div>`:''}
-        </div>
-        <div class="mt-4 flex gap-2">
-          <button class="px-3 py-1.5 rounded bg-blue-600 text-white" data-view-site="${encodeURIComponent(id)}" onclick="viewProjectDetails('${encodeURIComponent(id)}')">
-            <i class="fa fa-eye mr-1"></i> 查看详情
-          </button>
-          ${url? `<a class="px-3 py-1.5 rounded bg-gray-200" href="${url}" target="_blank">打开</a>`:''}
-          <button class="px-3 py-1.5 rounded bg-red-600 text-white hover:bg-red-700" onclick="deleteDeploymentSite('${encodeURIComponent(id)}', '${escHtml(name)}')">
-            <i class="fa fa-trash mr-1"></i> 删除
-          </button>
-        </div>
-      </div>`;
+      </article>`;
     }).join('');
   }
 
@@ -235,9 +328,9 @@
     const disabledNext = PAGE>=PAGES? 'disabled aria-disabled="true"' : '';
     el.innerHTML = `
       <div class="flex items-center gap-2">
-        <button class="px-3 py-1 border rounded" ${disabledPrev} data-page="prev">上一页</button>
+        <button class="btn btn--ghost" ${disabledPrev} data-page="prev"><i class="fas fa-arrow-left mr-1"></i>上一页</button>
         <span>第 <b>${PAGE}</b> / <b>${PAGES}</b> 页</span>
-        <button class="px-3 py-1 border rounded" ${disabledNext} data-page="next">下一页</button>
+        <button class="btn btn--ghost" ${disabledNext} data-page="next">下一页<i class="fas fa-arrow-right ml-1"></i></button>
       </div>
       <div class="text-gray-500">每页 ${PER_PAGE} 条</div>
     `;
@@ -248,9 +341,9 @@
   function setActiveViewButtons(){
     const vg = $('view_grid'), vl = $('view_list');
     if(!vg || !vl) return;
-    vg.classList.remove('bg-gray-100');
-    vl.classList.remove('bg-gray-100');
-    if(VIEW === 'grid') vg.classList.add('bg-gray-100'); else vl.classList.add('bg-gray-100');
+    vg.classList.remove('active');
+    vl.classList.remove('active');
+    if(VIEW === 'list') vl.classList.add('active'); else vg.classList.add('active');
   }
 
   // 弹窗
@@ -266,9 +359,15 @@
   window.closeProjectModal = function(){ const modal=$('project-modal'); if(!modal) return; setHidden(modal, true); modal.style.display='none'; };
 
   window.viewProjectDetails = function(encodedId){
+    console.log('[DEBUG] viewProjectDetails called with:', encodedId);
     const id = decodeURIComponent(encodedId||'');
     CURRENT_ID = id;
-    try { openProjectModal(); } catch(e){ console.error('openProjectModal failed', e); }
+    try {
+      openProjectModal();
+      console.log('[DEBUG] Modal opened successfully');
+    } catch(e){
+      console.error('openProjectModal failed', e);
+    }
     loadProjectDetail(id);
   };
 
@@ -290,7 +389,7 @@
       window.__currentSiteDetail = p;
 
       $('pm-title').textContent = p.name || p.id || '部署站点详情';
-      $('pm-status').textContent = p.status || '未知';
+      $('pm-status').textContent = statusLabel(p.status);
       $('pm-status').className = `inline-flex items-center px-2 py-0.5 rounded text-xs ${statusBadge(p.status||'')}`;
       $('pm-env').textContent = p.env || '—';
       $('pm-env').className = `inline-flex items-center px-2 py-0.5 rounded text-xs ${envBadge(p.env||'')}`;
@@ -425,19 +524,85 @@
         }
       } catch(_) {}
 
+      // 加载该站点的任务列表
+      let tasksHtml = '<div class="text-center py-4 text-gray-500">正在加载任务列表...</div>';
+      try {
+        const tasksResp = await fetch(`/api/tasks?site_id=${encodeURIComponent(id)}`);
+        let tasks = [];
+        if (tasksResp.ok) {
+          const tasksData = await tasksResp.json();
+          tasks = tasksData.tasks || [];
+        }
+
+        // 生成任务列表HTML
+        tasksHtml = tasks.length > 0 ? `
+          <table class=\"min-w-full text-sm\">
+            <thead class=\"bg-gray-50 text-left text-gray-600 border-b\">
+              <tr>
+                <th class=\"py-2 px-3 font-medium\">任务ID</th>
+                <th class=\"py-2 px-3 font-medium\">类型</th>
+                <th class=\"py-2 px-3 font-medium\">状态</th>
+                <th class=\"py-2 px-3 font-medium\">进度</th>
+                <th class=\"py-2 px-3 font-medium\">创建时间</th>
+                <th class=\"py-2 px-3 font-medium\">操作</th>
+              </tr>
+            </thead>
+            <tbody>` + tasks.map(task => {
+          const statusClass = task.status === 'completed' ? 'badge badge--success' :
+                            task.status === 'running' ? 'badge badge--info' :
+                            task.status === 'failed' ? 'badge badge--danger' : 'badge badge--warning';
+          return `
+            <tr class="border-b hover:bg-gray-50">
+              <td class="py-2 px-3 font-mono text-xs">${escHtml(task.id || '')}</td>
+              <td class="py-2 px-3">${escHtml(task.type || 'database_generation')}</td>
+              <td class="py-2 px-3"><span class="${statusClass}">${escHtml(task.status || 'pending')}</span></td>
+              <td class="py-2 px-3">${escHtml(task.progress || '0')}%</td>
+              <td class="py-2 px-3 text-xs text-gray-500">${escHtml(task.created_at || '')}</td>
+              <td class="py-2 px-3">
+                <a href="/tasks/${escHtml(task.id)}" class="text-blue-600 hover:text-blue-800">
+                  查看
+                </a>
+              </td>
+            </tr>`;
+        }).join('') + '</tbody></table>' : '<div class="text-center py-8 text-gray-500">暂无相关任务</div>';
+      } catch (err) {
+        console.error('Failed to load tasks:', err);
+        tasksHtml = '<div class="text-center py-4 text-red-500">加载任务列表失败</div>';
+      }
+
       $('pm-content').innerHTML = `
         <div class=\"space-y-4\">
+          <div class=\"bg-white border border-gray-200 rounded overflow-hidden\">
+            <div class=\"px-4 py-3 border-b bg-gray-50 flex justify-between items-center\">
+              <h4 class=\"font-semibold text-gray-800\">任务列表</h4>
+              <a href="/tasks/new?site_id=${encodeURIComponent(id)}&site_name=${encodeURIComponent(p.name||'')}"
+                 class="btn btn--primary btn--sm">
+                <i class="fas fa-plus mr-1"></i>新建任务
+              </a>
+            </div>
+            <div class=\"overflow-x-auto\">
+              ${tasksHtml}
+            </div>
+          </div>
+
           <div class=\"bg-gray-50 border border-gray-200 rounded p-3\">
             <h4 class=\"font-semibold text-gray-800 mb-2\">基本信息</h4>
-            ${metaLines.join('') || '<div class=\\"text-gray-500\\">无</div>'}
+            ${metaLines.join('') || '<div class=\\"text-gray-500\\">无基本信息</div>'}
           </div>
-          <div class=\"bg-white border border-gray-200 rounded p-3\">
-            <h4 class=\"font-semibold text-gray-800 mb-3\">完整配置参数</h4>
-            <div class=\"space-y-2\">${enhancedCfgLines.join('')}</div>
-            <details class=\"mt-3\"><summary class=\"text-blue-600 cursor-pointer text-sm\">查看原始配置 JSON</summary>
-              <pre class=\"text-xs bg-gray-50 border rounded p-2 overflow-x-auto mt-2\">${escHtml(JSON.stringify(cfg, null, 2))}</pre>
-            </details>
-          </div>
+
+          <details class=\"bg-white border border-gray-200 rounded\">
+            <summary class=\"px-4 py-3 cursor-pointer hover:bg-gray-50 font-semibold text-gray-800\">
+              配置参数 <span class=\"text-xs text-gray-500 font-normal\">(点击展开)</span>
+            </summary>
+            <div class=\"p-4 border-t bg-gray-50\">
+              <div class=\"space-y-2\">${enhancedCfgLines.join('')}</div>
+              <details class=\"mt-3\">
+                <summary class=\"text-blue-600 cursor-pointer text-sm\">查看原始配置 JSON</summary>
+                <pre class=\"text-xs bg-white border rounded p-2 overflow-x-auto mt-2\">${escHtml(JSON.stringify(cfg, null, 2))}</pre>
+              </details>
+            </div>
+          </details>
+
           ${e3dHtml}
           ${taskActionsHtml}
         </div>`;
@@ -1058,8 +1223,9 @@
     if(vg){ vg.addEventListener('click', ()=>{ VIEW='grid'; localStorage.setItem('deploy_view', VIEW); setActiveViewButtons(); loadProjects(); }); }
     if(vl){ vl.addEventListener('click', ()=>{ VIEW='list'; localStorage.setItem('deploy_view', VIEW); setActiveViewButtons(); loadProjects(); }); }
     if(copyBtn){
+      const originalHtml = copyBtn.innerHTML;
       copyBtn.addEventListener('click', ()=>{
-        try{
+        try {
           const params=[];
           if(q && q.value) params.push('q='+encodeURIComponent(q.value));
           if(st && st.value) params.push('status='+encodeURIComponent(st.value));
@@ -1068,9 +1234,17 @@
           if(so && so.value) params.push('sort='+encodeURIComponent(so.value));
           params.push('view='+encodeURIComponent(VIEW));
           const url = location.origin + '/deployment-sites' + (params.length?('?'+params.join('&')):'');
-          navigator.clipboard.writeText(url);
-          copyBtn.textContent = '已复制'; setTimeout(()=> copyBtn.textContent='复制分享链接', 1200);
-        }catch(e){ alert('复制失败: '+e.message); }
+          navigator.clipboard.writeText(url).then(()=>{
+            copyBtn.innerHTML = '<i class="fas fa-check mr-2"></i>已复制';
+            setTimeout(()=> copyBtn.innerHTML = originalHtml, 1500);
+          }).catch(err=>{
+            console.error('copy share link failed', err);
+            alert('复制失败: ' + err.message);
+          });
+        } catch(e) {
+          console.error('copy share link error', e);
+          alert('复制失败: ' + e.message);
+        }
       });
     }
     // 统计卡片点击 => 快速筛选状态

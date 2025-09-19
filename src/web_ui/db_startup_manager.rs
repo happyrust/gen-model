@@ -1,8 +1,8 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 /// 数据库启动状态
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,7 +86,7 @@ impl DbStartupManager {
     /// 标记实例开始启动
     pub fn mark_starting(&mut self, ip: &str, port: u16) -> Result<(), String> {
         let key = format!("{}:{}", ip, port);
-        
+
         // 检查是否已经在启动或运行
         if let Some(existing) = self.instances.get(&key) {
             match existing.status {
@@ -169,13 +169,11 @@ impl DbStartupManager {
     pub fn cleanup_old_failures(&mut self) {
         let now = Utc::now();
         let five_minutes_ago = now - chrono::Duration::minutes(5);
-        
-        self.instances.retain(|_, info| {
-            match &info.status {
-                DbStartupStatus::Failed(_) => info.last_check > five_minutes_ago,
-                DbStartupStatus::Stopped => info.last_check > five_minutes_ago,
-                _ => true,
-            }
+
+        self.instances.retain(|_, info| match &info.status {
+            DbStartupStatus::Failed(_) => info.last_check > five_minutes_ago,
+            DbStartupStatus::Stopped => info.last_check > five_minutes_ago,
+            _ => true,
         });
     }
 
@@ -193,12 +191,12 @@ pub async fn start_database_with_progress(
     password: String,
     db_file: String,
 ) -> Result<u32, String> {
-    use tokio::process::Command;
-    use std::time::Duration;
     use crate::web_ui::handlers::kill_port_processes;
-    
+    use std::time::Duration;
+    use tokio::process::Command;
+
     let manager = DB_STARTUP_MANAGER.clone();
-    
+
     // 标记开始启动
     {
         let mut mgr = manager.write().await;
@@ -233,11 +231,18 @@ pub async fn start_database_with_progress(
         if killed_len > 0 {
             {
                 let mut mgr = manager.write().await;
-                mgr.update_progress(&ip, port, 15, &format!("已结束 {} 个进程，等待端口释放...", killed_len));
+                mgr.update_progress(
+                    &ip,
+                    port,
+                    15,
+                    &format!("已结束 {} 个进程，等待端口释放...", killed_len),
+                );
             }
             // 等待端口释放，最多等 2 秒
             for _ in 0..10 {
-                if !check_port_in_use(&ip, port).await { break; }
+                if !check_port_in_use(&ip, port).await {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         } else {
@@ -310,7 +315,7 @@ pub async fn start_database_with_progress(
         })?;
 
     let pid = child.id().unwrap_or(0);
-    
+
     // 保存PID到文件
     std::fs::write(".surreal.pid", pid.to_string()).ok();
 
@@ -324,29 +329,41 @@ pub async fn start_database_with_progress(
     let max_attempts = 30;
     for attempt in 1..=max_attempts {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        
+
         // 更新进度
         let progress = 50 + (40 * attempt / max_attempts) as u8;
         {
             let mut mgr = manager.write().await;
-            mgr.update_progress(&ip, port, progress, 
-                &format!("检查连接... ({}/{})", attempt, max_attempts));
+            mgr.update_progress(
+                &ip,
+                port,
+                progress,
+                &format!("检查连接... ({}/{})", attempt, max_attempts),
+            );
         }
 
         // 检查进程是否还在运行
         if let Ok(Some(status)) = child.try_wait() {
             if !status.success() {
                 // 尝试获取子进程输出，帮助用户定位问题
-                let output = child.wait_with_output().await.unwrap_or_else(|_| std::process::Output{
-                    status,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                });
+                let output =
+                    child
+                        .wait_with_output()
+                        .await
+                        .unwrap_or_else(|_| std::process::Output {
+                            status,
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        });
                 let mut err_snippet = String::new();
                 let stdout_s = String::from_utf8_lossy(&output.stdout);
                 let stderr_s = String::from_utf8_lossy(&output.stderr);
-                if !stderr_s.trim().is_empty() { err_snippet.push_str(&format!("stderr: {}\n", stderr_s.trim())); }
-                if !stdout_s.trim().is_empty() { err_snippet.push_str(&format!("stdout: {}\n", stdout_s.trim())); }
+                if !stderr_s.trim().is_empty() {
+                    err_snippet.push_str(&format!("stderr: {}\n", stderr_s.trim()));
+                }
+                if !stdout_s.trim().is_empty() {
+                    err_snippet.push_str(&format!("stdout: {}\n", stdout_s.trim()));
+                }
                 let msg = if err_snippet.is_empty() {
                     format!("进程意外退出，退出码: {:?}", status.code())
                 } else {
@@ -394,10 +411,10 @@ pub async fn start_database_with_progress(
     // 启动超时
     let mut mgr = manager.write().await;
     mgr.mark_failed(&ip, port, "启动超时");
-    
+
     // 尝试终止进程
     child.kill().await.ok();
-    
+
     Err("数据库启动超时".to_string())
 }
 
@@ -419,15 +436,14 @@ async fn check_port_in_use(_ip: &str, port: u16) -> bool {
         }
         Err(_) => {
             // 如果命令执行失败，尝试用 TCP 连接方式检查
-            use tokio::net::TcpStream;
             use std::time::Duration;
+            use tokio::net::TcpStream;
 
             // 尝试连接 127.0.0.1 和 0.0.0.0
             for addr in &[format!("127.0.0.1:{}", port), format!("0.0.0.0:{}", port)] {
-                if let Ok(Ok(_)) = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    TcpStream::connect(addr)
-                ).await {
+                if let Ok(Ok(_)) =
+                    tokio::time::timeout(Duration::from_millis(100), TcpStream::connect(addr)).await
+                {
                     return true;
                 }
             }
@@ -438,20 +454,22 @@ async fn check_port_in_use(_ip: &str, port: u16) -> bool {
 
 /// 测试TCP连接
 async fn test_tcp_connection(addr: &str) -> bool {
-    use tokio::net::TcpStream;
     use std::time::Duration;
-    
-    match tokio::time::timeout(
-        Duration::from_secs(1),
-        TcpStream::connect(addr)
-    ).await {
+    use tokio::net::TcpStream;
+
+    match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await {
         Ok(Ok(_)) => true,
         _ => false,
     }
 }
 
 /// 创建必要的数据库表
-async fn create_required_tables(ip: &str, port: u16, user: &str, password: &str) -> Result<(), String> {
+async fn create_required_tables(
+    ip: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+) -> Result<(), String> {
     use surrealdb::Surreal;
     use surrealdb::engine::remote::ws::{Client, Ws};
     use surrealdb::opt::auth::Root;
@@ -470,7 +488,9 @@ async fn create_required_tables(ip: &str, port: u16, user: &str, password: &str)
     .map_err(|e| format!("数据库认证失败: {}", e))?;
 
     // 使用默认的命名空间和数据库
-    db.use_ns("1516").use_db("AvevaMarineSample").await
+    db.use_ns("1516")
+        .use_db("AvevaMarineSample")
+        .await
         .map_err(|e| format!("选择命名空间/数据库失败: {}", e))?;
 
     // 创建 dbnum_info_table

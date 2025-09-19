@@ -1,14 +1,14 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{get_generic_type, SEND_INST_SIZE, shared};
+use crate::fast_model::{SEND_INST_SIZE, get_generic_type, shared};
+use aios_core::RefU64;
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::{Extrusion, Revolution};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
-use aios_core::RefU64;
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
 use glam::Vec3;
@@ -206,7 +206,7 @@ pub async fn gen_loop_geos(
                 );
                 shape_insts_data.insert_info(target_refno, geos_info);
 
-                if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                     sender
                         .send(std::mem::take(&mut shape_insts_data))
                         .expect("send loop shape_insts_data error");

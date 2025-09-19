@@ -145,6 +145,19 @@ async fn export_piping_system() -> anyhow::Result<()> {
 **返回值:**
 - `anyhow::Result<()>` - 成功返回 `Ok(())`，失败返回错误信息
 
+#### `generate_xtk_by_dbno_refno`
+根据数据库号与单个参考号导出对应层级的 XKT 文件。
+
+**参数:**
+- `dbno: u32` - 数据库号
+- `refno: RefnoEnum` - 目标参考号
+- `output_path: &str` - 输出文件路径
+- `compress: bool` - 是否启用压缩
+- `db_option: &DbOption` - 数据库选项配置
+
+**返回值:**
+- `anyhow::Result<()>` - 成功返回 `Ok(())`，失败返回错误信息
+
 ### 辅助函数
 
 #### `process_refno_to_xtk`

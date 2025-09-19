@@ -47,7 +47,7 @@ pub async fn start_database_api(
                 "error": "数据库正在启动中，请稍候"
             })));
         }
-        
+
         if manager.is_running(&request.ip, request.port) {
             return Ok(Json(json!({
                 "success": false,
@@ -66,7 +66,9 @@ pub async fn start_database_api(
             request.user,
             request.password,
             request.db_file,
-        ).await {
+        )
+        .await
+        {
             Ok(pid) => {
                 println!("✅ 数据库启动成功，PID: {}", pid);
             }
@@ -161,7 +163,7 @@ pub async fn get_all_instances(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let manager = DB_STARTUP_MANAGER.read().await;
     let instances = manager.get_all_instances();
-    
+
     Ok(Json(json!({
         "success": true,
         "instances": instances
@@ -178,7 +180,8 @@ pub async fn stop_database_api(
     // 先尝试从管理器获取PID
     let mut pid = {
         let manager = DB_STARTUP_MANAGER.read().await;
-        manager.get_instance(&request.ip, request.port)
+        manager
+            .get_instance(&request.ip, request.port)
             .and_then(|info| info.pid)
     };
 
@@ -201,10 +204,7 @@ pub async fn stop_database_api(
 
     if let Some(pid) = pid {
         // 尝试终止进程
-        let output = Command::new("kill")
-            .arg(pid.to_string())
-            .output()
-            .await;
+        let output = Command::new("kill").arg(pid.to_string()).output().await;
 
         match output {
             Ok(_) => {
@@ -217,12 +217,10 @@ pub async fn stop_database_api(
                     "message": format!("数据库进程 {} 已停止", pid)
                 })))
             }
-            Err(e) => {
-                Ok(Json(json!({
-                    "success": false,
-                    "error": format!("无法停止进程: {}", e)
-                })))
-            }
+            Err(e) => Ok(Json(json!({
+                "success": false,
+                "error": format!("无法停止进程: {}", e)
+            }))),
         }
     } else {
         Ok(Json(json!({

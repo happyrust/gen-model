@@ -125,6 +125,31 @@ class DbStartupManager {
         }
     }
 
+    // 主动刷新当前实例状态，并同步按钮显示
+    async refreshCurrentStatus(ip, port) {
+        try {
+            const status = await this.checkStatus(ip, port);
+            if (!status) {
+                this.updateButtonState('stopped');
+                return;
+            }
+
+            switch (status.status) {
+                case 'Running':
+                case 'Starting':
+                    // 如果仍在启动或运行，维持运行状态的按钮语义
+                    this.updateButtonState('running');
+                    break;
+                default:
+                    this.updateButtonState('stopped');
+                    break;
+            }
+        } catch (err) {
+            console.error('刷新数据库状态失败:', err);
+            this.updateButtonState('stopped');
+        }
+    }
+
     // 启动成功回调
     onStartupSuccess(status) {
         console.log('数据库启动成功:', status);
@@ -385,6 +410,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (result.success) {
                         window.dbStartupManager.updateButtonState('stopped');
                         alert('数据库已停止');
+                        if (typeof checkConnectionStatus === 'function') {
+                            checkConnectionStatus();
+                        }
+                        if (window.dbStartupManager && typeof window.dbStartupManager.refreshCurrentStatus === 'function') {
+                            window.dbStartupManager.refreshCurrentStatus(ip, port);
+                        }
                     } else {
                         alert('停止失败: ' + result.error);
                     }

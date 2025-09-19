@@ -41,7 +41,7 @@ impl StreamProcessor {
     {
         let total_count = refnos.len();
         self.progress_tracker.start(total_count);
-        
+
         let mut results = Vec::new();
         let mut processed_count = 0;
 
@@ -59,11 +59,8 @@ impl StreamProcessor {
 
             // 更新统计
             processed_count += batch.len();
-            self.progress_tracker.update_progress(
-                processed_count,
-                batch.len(),
-                batch_duration,
-            );
+            self.progress_tracker
+                .update_progress(processed_count, batch.len(), batch_duration);
 
             results.extend(batch_results);
 
@@ -93,7 +90,7 @@ impl StreamProcessor {
     {
         let total_count = refnos.len();
         self.progress_tracker.start(total_count);
-        
+
         let mut results = Vec::new();
         let mut processed_count = 0;
 
@@ -110,11 +107,8 @@ impl StreamProcessor {
 
             // 更新统计
             processed_count += batch.len();
-            self.progress_tracker.update_progress(
-                processed_count,
-                batch.len(),
-                batch_duration,
-            );
+            self.progress_tracker
+                .update_progress(processed_count, batch.len(), batch_duration);
 
             results.extend(batch_results);
 
@@ -159,26 +153,25 @@ impl MemoryMonitor {
     pub fn should_gc(&self) -> bool {
         let current_usage = self.get_memory_usage_mb();
         let usage_ratio = current_usage as f32 / self.memory_limit_mb as f32;
-        
-        usage_ratio > self.gc_threshold && 
-        self.last_gc_time.elapsed() > self.gc_interval
+
+        usage_ratio > self.gc_threshold && self.last_gc_time.elapsed() > self.gc_interval
     }
 
     /// 强制执行垃圾回收
     pub async fn force_gc(&mut self) -> Result<()> {
         let before_usage = self.get_memory_usage_mb();
-        
+
         // 执行垃圾回收
         std::hint::black_box(Vec::<u8>::new());
-        
+
         // 让出控制权
         tokio::task::yield_now().await;
-        
+
         let after_usage = self.get_memory_usage_mb();
         let freed = before_usage.saturating_sub(after_usage);
-        
+
         println!("垃圾回收完成: 释放 {} MB 内存", freed);
-        
+
         self.last_gc_time = Instant::now();
         Ok(())
     }
@@ -208,7 +201,7 @@ impl MemoryMonitor {
     #[cfg(target_os = "linux")]
     fn get_linux_memory_usage(&self) -> usize {
         use std::fs;
-        
+
         if let Ok(status) = fs::read_to_string("/proc/self/status") {
             for line in status.lines() {
                 if line.starts_with("VmRSS:") {
@@ -259,7 +252,7 @@ impl ProgressTracker {
         self.stats.processed_items = 0;
         self.stats.failed_items = 0;
         self.last_update = Instant::now();
-        
+
         println!("开始处理 {} 个项目...", total_items);
     }
 
@@ -273,7 +266,7 @@ impl ProgressTracker {
         self.stats.processed_items = processed_items;
         self.stats.total_batches += 1;
         self.stats.total_processing_time += batch_duration;
-        
+
         // 计算处理速度
         if let Some(start_time) = self.start_time {
             let elapsed = start_time.elapsed();
@@ -285,9 +278,8 @@ impl ProgressTracker {
         // 估算剩余时间
         if self.stats.items_per_second > 0.0 {
             let remaining_items = self.stats.total_items.saturating_sub(processed_items);
-            self.stats.estimated_remaining_time = Duration::from_secs_f32(
-                remaining_items as f32 / self.stats.items_per_second
-            );
+            self.stats.estimated_remaining_time =
+                Duration::from_secs_f32(remaining_items as f32 / self.stats.items_per_second);
         }
 
         self.last_update = Instant::now();
@@ -303,7 +295,7 @@ impl ProgressTracker {
         if let Some(start_time) = self.start_time {
             self.stats.total_time = start_time.elapsed();
         }
-        
+
         println!("处理完成!");
         self.print_final_stats();
     }
@@ -317,7 +309,10 @@ impl ProgressTracker {
         };
 
         let remaining_time_str = if self.stats.estimated_remaining_time.as_secs() > 0 {
-            format!("剩余时间: {}s", self.stats.estimated_remaining_time.as_secs())
+            format!(
+                "剩余时间: {}s",
+                self.stats.estimated_remaining_time.as_secs()
+            )
         } else {
             "计算中...".to_string()
         };
@@ -341,9 +336,10 @@ impl ProgressTracker {
         println!("总批次数: {}", self.stats.total_batches);
         println!("总耗时: {:.2}s", self.stats.total_time.as_secs_f32());
         println!("平均速度: {:.1} items/s", self.stats.items_per_second);
-        
+
         if self.stats.total_batches > 0 {
-            let avg_batch_time = self.stats.total_processing_time.as_secs_f32() / self.stats.total_batches as f32;
+            let avg_batch_time =
+                self.stats.total_processing_time.as_secs_f32() / self.stats.total_batches as f32;
             println!("平均批处理时间: {:.3}s", avg_batch_time);
         }
 
@@ -448,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn test_stream_processor() {
         let mut processor = StreamProcessor::new(10);
-        
+
         // 创建测试数据
         let test_refnos: Vec<RefnoEnum> = (0..100)
             .map(|i| RefnoEnum::from(format!("test_{}", i).as_str()))
@@ -456,21 +452,25 @@ mod tests {
 
         // 测试处理函数
         let mut call_count = 0;
-        let results = processor.process_refnos(test_refnos, |batch| {
-            call_count += 1;
-            println!("处理批次 {}, 大小: {}", call_count, batch.len());
-            
-            // 模拟处理
-            let batch_results: Vec<String> = batch.iter()
-                .map(|refno| format!("processed_{}", refno))
-                .collect();
-            
-            Ok(batch_results)
-        }).await.unwrap();
+        let results = processor
+            .process_refnos(test_refnos, |batch| {
+                call_count += 1;
+                println!("处理批次 {}, 大小: {}", call_count, batch.len());
+
+                // 模拟处理
+                let batch_results: Vec<String> = batch
+                    .iter()
+                    .map(|refno| format!("processed_{}", refno))
+                    .collect();
+
+                Ok(batch_results)
+            })
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 100);
         assert_eq!(call_count, 10); // 100个项目，每批10个，共10批
-        
+
         let stats = processor.get_stats();
         assert_eq!(stats.processed_items, 100);
         assert_eq!(stats.total_batches, 10);
@@ -479,11 +479,11 @@ mod tests {
     #[test]
     fn test_memory_monitor() {
         let monitor = MemoryMonitor::new(1024);
-        
+
         // 测试内存使用检查
         let usage = monitor.get_memory_usage_mb();
         println!("当前内存使用: {} MB", usage);
-        
+
         // 测试GC触发条件
         let should_gc = monitor.should_gc();
         println!("是否应该GC: {}", should_gc);
@@ -492,17 +492,17 @@ mod tests {
     #[test]
     fn test_progress_tracker() {
         let mut tracker = ProgressTracker::new();
-        
+
         tracker.start(100);
-        
+
         // 模拟进度更新
         for i in 1..=10 {
             tracker.update_progress(i * 10, 10, Duration::from_millis(100));
             tracker.print_progress();
         }
-        
+
         tracker.finish();
-        
+
         let stats = tracker.get_stats();
         assert_eq!(stats.processed_items, 100);
         assert_eq!(stats.total_batches, 10);

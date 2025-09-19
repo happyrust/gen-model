@@ -1,20 +1,20 @@
-pub mod xkt_model;
-pub mod xkt_geometry;
-pub mod xkt_material;
-pub mod xkt_entity;
-pub mod xkt_writer;
 pub mod color_scheme;
 pub mod examples;
+pub mod xkt_entity;
+pub mod xkt_geometry;
+pub mod xkt_material;
+pub mod xkt_model;
+pub mod xkt_writer;
 
 #[cfg(test)]
 pub mod tests;
 
-pub use xkt_model::*;
+pub use color_scheme::*;
+pub use xkt_entity::*;
 pub use xkt_geometry::*;
 pub use xkt_material::*;
-pub use xkt_entity::*;
+pub use xkt_model::*;
 pub use xkt_writer::*;
-pub use color_scheme::*;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -70,4 +70,4 @@ impl XKTFile {
         let writer = XKTWriter::new();
         writer.write_to_file(self, path, compress).await
     }
-} 
+}

@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use aios_core::pdms_types::RefU64;
 use anyhow::Result;
 use nalgebra::{Point3, Vector3};
-use petgraph::graph::{UnGraph, NodeIndex};
-use petgraph::algo::{dijkstra, connected_components};
-use aios_core::pdms_types::RefU64;
+use petgraph::algo::{connected_components, dijkstra};
+use petgraph::graph::{NodeIndex, UnGraph};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::grpc_service::sctn_contact_detector::CableTraySection;
 
@@ -23,26 +23,26 @@ impl SctnPathAnalyzer {
     pub fn build_tray_network(&self, sections: &[CableTraySection]) -> TrayNetwork {
         let mut graph = UnGraph::new_undirected();
         let mut node_map = HashMap::new();
-        
+
         // 添加节点
         for section in sections {
             let node = graph.add_node(section.refno);
             node_map.insert(section.refno, node);
         }
-        
+
         // 添加边（连接关系）
         for i in 0..sections.len() {
             for j in i + 1..sections.len() {
                 if self.are_connected(&sections[i], &sections[j]) {
                     let node_i = node_map[&sections[i].refno];
                     let node_j = node_map[&sections[j].refno];
-                    
+
                     let distance = self.calculate_distance(&sections[i], &sections[j]);
                     graph.add_edge(node_i, node_j, distance);
                 }
             }
         }
-        
+
         TrayNetwork {
             graph,
             node_map,
@@ -57,24 +57,34 @@ impl SctnPathAnalyzer {
         if dist > self.connection_tolerance {
             return false;
         }
-        
+
         // 检查方向是否合理
         let angle = sctn1.direction.angle(&sctn2.direction);
-        
+
         // 允许直连、90度转角或T型连接
         angle < std::f32::consts::PI * 0.95
     }
 
     /// 计算包围盒之间的距离
-    fn bbox_distance(&self, bbox1: &parry3d::bounding_volume::Aabb, bbox2: &parry3d::bounding_volume::Aabb) -> f32 {
+    fn bbox_distance(
+        &self,
+        bbox1: &parry3d::bounding_volume::Aabb,
+        bbox2: &parry3d::bounding_volume::Aabb,
+    ) -> f32 {
         let center1 = bbox1.center();
         let center2 = bbox2.center();
-        
+
         // 计算最近点距离
-        let x_gap = (bbox1.mins.x - bbox2.maxs.x).max(0.0).max(bbox2.mins.x - bbox1.maxs.x);
-        let y_gap = (bbox1.mins.y - bbox2.maxs.y).max(0.0).max(bbox2.mins.y - bbox1.maxs.y);
-        let z_gap = (bbox1.mins.z - bbox2.maxs.z).max(0.0).max(bbox2.mins.z - bbox1.maxs.z);
-        
+        let x_gap = (bbox1.mins.x - bbox2.maxs.x)
+            .max(0.0)
+            .max(bbox2.mins.x - bbox1.maxs.x);
+        let y_gap = (bbox1.mins.y - bbox2.maxs.y)
+            .max(0.0)
+            .max(bbox2.mins.y - bbox1.maxs.y);
+        let z_gap = (bbox1.mins.z - bbox2.maxs.z)
+            .max(0.0)
+            .max(bbox2.mins.z - bbox1.maxs.z);
+
         (x_gap * x_gap + y_gap * y_gap + z_gap * z_gap).sqrt()
     }
 
@@ -92,19 +102,16 @@ impl SctnPathAnalyzer {
     ) -> Option<TrayPath> {
         let start_node = network.node_map.get(&from)?;
         let end_node = network.node_map.get(&to)?;
-        
+
         // 使用Dijkstra算法
-        let result = dijkstra(
-            &network.graph,
-            *start_node,
-            Some(*end_node),
-            |e| *e.weight(),
-        );
-        
+        let result = dijkstra(&network.graph, *start_node, Some(*end_node), |e| {
+            *e.weight()
+        });
+
         // 回溯路径
         if let Some(&distance) = result.get(end_node) {
             let path = self.reconstruct_path(network, *start_node, *end_node, &result);
-            
+
             Some(TrayPath {
                 sections: path,
                 total_length: distance,
@@ -126,9 +133,9 @@ impl SctnPathAnalyzer {
     ) -> Vec<RefU64> {
         let mut path = Vec::new();
         let mut current = end;
-        
+
         path.push(network.graph[current]);
-        
+
         while current != start {
             // 找到前驱节点
             for neighbor in network.graph.neighbors(current) {
@@ -144,7 +151,7 @@ impl SctnPathAnalyzer {
                 }
             }
         }
-        
+
         path.reverse();
         path
     }
@@ -152,28 +159,28 @@ impl SctnPathAnalyzer {
     /// 分析网络连通性
     pub fn analyze_connectivity(&self, network: &TrayNetwork) -> ConnectivityAnalysis {
         let num_components = connected_components(&network.graph);
-        
+
         // 找出每个连通分量
         let mut components = vec![Vec::new(); num_components];
         for (refno, &node) in &network.node_map {
             let component_id = self.find_component_id(&network.graph, node);
             components[component_id].push(*refno);
         }
-        
+
         // 找出孤立节点
         let isolated_sections: Vec<RefU64> = components
             .iter()
             .filter(|c| c.len() == 1)
             .flat_map(|c| c.clone())
             .collect();
-        
+
         // 找出最大连通分量
         let largest_component = components
             .iter()
             .max_by_key(|c| c.len())
             .cloned()
             .unwrap_or_default();
-        
+
         ConnectivityAnalysis {
             num_components,
             components,
@@ -189,19 +196,19 @@ impl SctnPathAnalyzer {
         let mut queue = VecDeque::new();
         queue.push_back(node);
         visited.insert(node);
-        
+
         let mut min_index = node.index();
-        
+
         while let Some(current) = queue.pop_front() {
             min_index = min_index.min(current.index());
-            
+
             for neighbor in graph.neighbors(current) {
                 if visited.insert(neighbor) {
                     queue.push_back(neighbor);
                 }
             }
         }
-        
+
         min_index
     }
 
@@ -209,7 +216,7 @@ impl SctnPathAnalyzer {
     pub fn detect_loops(&self, network: &TrayNetwork) -> Vec<Loop> {
         let mut loops = Vec::new();
         let mut visited = HashSet::new();
-        
+
         for node in network.graph.node_indices() {
             if !visited.contains(&node) {
                 self.dfs_find_loops(
@@ -222,7 +229,7 @@ impl SctnPathAnalyzer {
                 );
             }
         }
-        
+
         loops
     }
 
@@ -238,14 +245,12 @@ impl SctnPathAnalyzer {
     ) {
         visited.insert(current);
         path.push(current);
-        
+
         for neighbor in graph.neighbors(current) {
             if neighbor == start && path.len() > 2 {
                 // 找到环路
-                let loop_sections: Vec<RefU64> = path.iter()
-                    .map(|&n| graph[n])
-                    .collect();
-                
+                let loop_sections: Vec<RefU64> = path.iter().map(|&n| graph[n]).collect();
+
                 loops.push(Loop {
                     sections: loop_sections,
                     length: path.len(),
@@ -254,21 +259,23 @@ impl SctnPathAnalyzer {
                 self.dfs_find_loops(graph, neighbor, start, visited, path, loops);
             }
         }
-        
+
         path.pop();
     }
 
     /// 分析路径复杂度
-    pub fn analyze_path_complexity(&self, path: &TrayPath, sections: &[CableTraySection]) -> PathComplexity {
+    pub fn analyze_path_complexity(
+        &self,
+        path: &TrayPath,
+        sections: &[CableTraySection],
+    ) -> PathComplexity {
         let mut turns = 0;
         let mut elevations = 0;
         let mut total_angle = 0.0;
-        
-        let section_map: HashMap<RefU64, &CableTraySection> = sections
-            .iter()
-            .map(|s| (s.refno, s))
-            .collect();
-        
+
+        let section_map: HashMap<RefU64, &CableTraySection> =
+            sections.iter().map(|s| (s.refno, s)).collect();
+
         for i in 1..path.sections.len() - 1 {
             if let (Some(prev), Some(curr), Some(next)) = (
                 section_map.get(&path.sections[i - 1]),
@@ -281,7 +288,7 @@ impl SctnPathAnalyzer {
                     turns += 1;
                     total_angle += angle;
                 }
-                
+
                 // 计算高程变化
                 let height_change = (next.bbox.center().y - prev.bbox.center().y).abs();
                 if height_change > 0.1 {
@@ -289,9 +296,10 @@ impl SctnPathAnalyzer {
                 }
             }
         }
-        
-        let complexity_score = turns as f32 + elevations as f32 * 0.5 + total_angle / std::f32::consts::PI;
-        
+
+        let complexity_score =
+            turns as f32 + elevations as f32 * 0.5 + total_angle / std::f32::consts::PI;
+
         PathComplexity {
             num_turns: turns,
             num_elevation_changes: elevations,
@@ -372,14 +380,22 @@ impl PathOptimizer {
     }
 
     /// 优化路径以减少转弯
-    pub fn optimize_for_fewer_turns(&self, network: &TrayNetwork, path: &TrayPath) -> Option<TrayPath> {
+    pub fn optimize_for_fewer_turns(
+        &self,
+        network: &TrayNetwork,
+        path: &TrayPath,
+    ) -> Option<TrayPath> {
         // 使用A*算法重新寻路，权重偏向直线
         // TODO: 实现A*算法
         None
     }
 
     /// 优化路径以减少高程变化
-    pub fn optimize_for_level_path(&self, network: &TrayNetwork, path: &TrayPath) -> Option<TrayPath> {
+    pub fn optimize_for_level_path(
+        &self,
+        network: &TrayNetwork,
+        path: &TrayPath,
+    ) -> Option<TrayPath> {
         // 优先选择同一高程的路径
         // TODO: 实现高程优化
         None
@@ -396,7 +412,7 @@ impl PathOptimizer {
         let mut paths = Vec::new();
         let mut visited = HashSet::new();
         let mut current_path = Vec::new();
-        
+
         self.dfs_all_paths(
             network,
             from,
@@ -406,7 +422,7 @@ impl PathOptimizer {
             &mut paths,
             max_paths,
         );
-        
+
         // 按长度排序
         paths.sort_by(|a, b| a.total_length.partial_cmp(&b.total_length).unwrap());
         paths.truncate(max_paths);
@@ -426,10 +442,10 @@ impl PathOptimizer {
         if all_paths.len() >= max_paths {
             return;
         }
-        
+
         visited.insert(current);
         path.push(current);
-        
+
         if current == target {
             // 找到一条路径
             let total_length = self.calculate_path_length(network, path);
@@ -458,14 +474,14 @@ impl PathOptimizer {
                 }
             }
         }
-        
+
         path.pop();
         visited.remove(&current);
     }
 
     fn calculate_path_length(&self, network: &TrayNetwork, path: &[RefU64]) -> f32 {
         let mut total = 0.0;
-        
+
         for i in 1..path.len() {
             if let (Some(&node1), Some(&node2)) = (
                 network.node_map.get(&path[i - 1]),
@@ -476,7 +492,7 @@ impl PathOptimizer {
                 }
             }
         }
-        
+
         total
     }
 }

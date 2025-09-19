@@ -1,6 +1,8 @@
+use crate::grpc_service::spatial_query_service::{
+    SpatialQueryServiceImpl, spatial_query::spatial_query_service_server::SpatialQueryServiceServer,
+};
 use std::net::SocketAddr;
 use tonic::transport::Server;
-use crate::grpc_service::spatial_query_service::{SpatialQueryServiceImpl, spatial_query::spatial_query_service_server::SpatialQueryServiceServer};
 
 /// 启动空间查询服务器用于测试
 pub async fn start_spatial_query_server() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,11 +25,10 @@ pub async fn start_spatial_query_server() -> Result<(), Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tonic::Request;
     use crate::grpc_service::spatial_query_service::spatial_query::{
-        spatial_query_service_client::SpatialQueryServiceClient,
-        SpatialQueryRequest,
+        SpatialQueryRequest, spatial_query_service_client::SpatialQueryServiceClient,
     };
+    use tonic::Request;
 
     #[tokio::test]
     async fn test_spatial_query_service() {
@@ -66,8 +67,10 @@ mod tests {
                 println!("   查询耗时: {} ms", inner.query_time_ms);
 
                 for element in inner.elements {
-                    println!("   - 参考号: {}, 类型: {}, 名称: {}",
-                        element.refno, element.element_type, element.element_name);
+                    println!(
+                        "   - 参考号: {}, 类型: {}, 名称: {}",
+                        element.refno, element.element_type, element.element_name
+                    );
                 }
             }
             Err(e) => {
@@ -76,7 +79,9 @@ mod tests {
         }
 
         // 测试获取统计信息
-        let stats_request = Request::new(crate::grpc_service::spatial_query_service::spatial_query::IndexStatsRequest {});
+        let stats_request = Request::new(
+            crate::grpc_service::spatial_query_service::spatial_query::IndexStatsRequest {},
+        );
         let stats_response = client.get_index_stats(stats_request).await;
 
         match stats_response {

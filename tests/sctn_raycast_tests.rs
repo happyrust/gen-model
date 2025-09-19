@@ -1,7 +1,7 @@
 #![cfg(feature = "grpc")]
-use aios_database::grpc_service::sctn_contact_detector::{SctnContactDetector, CableTraySection};
-use aios_database::spatial_index::SqliteSpatialIndex;
 use aios_core::RefU64;
+use aios_database::grpc_service::sctn_contact_detector::{CableTraySection, SctnContactDetector};
+use aios_database::spatial_index::SqliteSpatialIndex;
 use anyhow::Result;
 use nalgebra::{Point3, Vector3};
 use parry3d::bounding_volume::Aabb;

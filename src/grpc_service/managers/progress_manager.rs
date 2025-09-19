@@ -1,5 +1,5 @@
 //! 进度管理器
-//! 
+//!
 //! 负责管理解析任务的进度跟踪和实时更新
 
 use crate::grpc_service::error::{ServiceError, ServiceResult};
@@ -28,9 +28,12 @@ impl ProgressManager {
     }
 
     /// 创建新任务
-    pub async fn create_task(&self, task_id: String) -> ServiceResult<broadcast::Receiver<ProgressUpdate>> {
+    pub async fn create_task(
+        &self,
+        task_id: String,
+    ) -> ServiceResult<broadcast::Receiver<ProgressUpdate>> {
         let (sender, receiver) = broadcast::channel(1000);
-        
+
         // 创建任务进度记录
         let task_progress = TaskProgress {
             task_id: task_id.clone(),

@@ -10,25 +10,22 @@
 /// 运行示例:
 ///   cargo run --example find_associated_trays --features sqlite-index,grpc -- \
 ///     --target 24383/86525 --radius 1.0 --limit 50 --tolerance 0.1 --export
-
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Arg, Command};
 use std::sync::Arc;
 
 use aios_core::pdms_types::RefU64;
-use parry3d::bounding_volume::Aabb;
 use nalgebra::{Point3, Vector3};
+use parry3d::bounding_volume::Aabb;
 
 use aios_database::spatial_index::SqliteSpatialIndex;
 
 #[cfg(feature = "grpc")]
-use aios_database::grpc_service::sctn_geometry_extractor::SctnGeometryExtractor;
-#[cfg(feature = "grpc")]
 use aios_database::data_interface::tidb_manager::AiosDBManager;
+#[cfg(feature = "grpc")]
+use aios_database::grpc_service::sctn_geometry_extractor::SctnGeometryExtractor;
 
-use aios_database::grpc_service::sctn_contact_detector::{
-    SctnContactDetector, CableTraySection
-};
+use aios_database::grpc_service::sctn_contact_detector::{CableTraySection, SctnContactDetector};
 use aios_database::grpc_service::sctn_path_analyzer::SctnPathAnalyzer;
 use aios_database::grpc_service::sctn_visualizer::SctnVisualizer;
 
@@ -77,37 +74,53 @@ async fn main() -> Result<()> {
         .about("通过目标SCTN查找关联桥架（邻近/连接/接触），并构建拓扑")
         .arg(
             Arg::new("target")
-                .long("target").required(true)
+                .long("target")
+                .required(true)
                 .value_name("REFNO")
-                .help("目标SCTN参考号，如 24383/86525")
+                .help("目标SCTN参考号，如 24383/86525"),
         )
         .arg(
             Arg::new("radius")
-                .long("radius").default_value("1.0")
-                .help("邻域查询半径(米)")
+                .long("radius")
+                .default_value("1.0")
+                .help("邻域查询半径(米)"),
         )
         .arg(
             Arg::new("limit")
-                .long("limit").default_value("100")
-                .help("最多检查邻居数量")
+                .long("limit")
+                .default_value("100")
+                .help("最多检查邻居数量"),
         )
         .arg(
             Arg::new("tolerance")
-                .long("tolerance").default_value("0.1")
-                .help("接触/连接判定的容差(米)")
+                .long("tolerance")
+                .default_value("0.1")
+                .help("接触/连接判定的容差(米)"),
         )
         .arg(
             Arg::new("export")
                 .long("export")
                 .action(clap::ArgAction::SetTrue)
-                .help("导出HTML/OBJ可视化到 test_output/")
+                .help("导出HTML/OBJ可视化到 test_output/"),
         )
         .get_matches();
 
     let target = parse_refno(matches.get_one::<String>("target").unwrap())?;
-    let radius: f32 = matches.get_one::<String>("radius").unwrap().parse().unwrap_or(1.0);
-    let limit: usize = matches.get_one::<String>("limit").unwrap().parse().unwrap_or(100);
-    let tolerance: f32 = matches.get_one::<String>("tolerance").unwrap().parse().unwrap_or(0.1);
+    let radius: f32 = matches
+        .get_one::<String>("radius")
+        .unwrap()
+        .parse()
+        .unwrap_or(1.0);
+    let limit: usize = matches
+        .get_one::<String>("limit")
+        .unwrap()
+        .parse()
+        .unwrap_or(100);
+    let tolerance: f32 = matches
+        .get_one::<String>("tolerance")
+        .unwrap()
+        .parse()
+        .unwrap_or(0.1);
     let do_export = matches.get_flag("export");
 
     if !SqliteSpatialIndex::is_enabled() {
@@ -123,7 +136,8 @@ async fn main() -> Result<()> {
     let dbm_opt: Option<Arc<AiosDBManager>> = None;
 
     // 目标SCTN
-    let target_bbox = index.get_aabb(target)?
+    let target_bbox = index
+        .get_aabb(target)?
         .ok_or_else(|| anyhow!("索引中未找到目标SCTN: {}，请先生成模型并写入索引", target.0))?;
 
     #[cfg(feature = "grpc")]
@@ -138,22 +152,34 @@ async fn main() -> Result<()> {
     let target_sctn = reconstruct_sctn_from_aabb(target, &target_bbox);
 
     println!("目标SCTN: {}", target.0);
-    println!("  位置: ({:.3},{:.3},{:.3})-({:.3},{:.3},{:.3})",
-        target_bbox.mins.x, target_bbox.mins.y, target_bbox.mins.z,
-        target_bbox.maxs.x, target_bbox.maxs.y, target_bbox.maxs.z);
+    println!(
+        "  位置: ({:.3},{:.3},{:.3})-({:.3},{:.3},{:.3})",
+        target_bbox.mins.x,
+        target_bbox.mins.y,
+        target_bbox.mins.z,
+        target_bbox.maxs.x,
+        target_bbox.maxs.y,
+        target_bbox.maxs.z
+    );
 
     // 邻域候选
     let query = expand_aabb(&target_bbox, radius);
     let mut neighbors = index.query_intersect(&query)?;
     neighbors.retain(|r| *r != target);
-    if neighbors.len() > limit { neighbors.truncate(limit); }
+    if neighbors.len() > limit {
+        neighbors.truncate(limit);
+    }
 
     // 过滤SCTN + 构建候选几何
     let mut sctn_candidates: Vec<CableTraySection> = Vec::new();
     for r in neighbors {
         if let Some(b) = index.get_aabb(r)? {
             #[cfg(feature = "grpc")]
-            let is_sctn = if let Some(ref dbm) = dbm_opt { dbm.get_type_name(r).await == "SCTN" } else { false };
+            let is_sctn = if let Some(ref dbm) = dbm_opt {
+                dbm.get_type_name(r).await == "SCTN"
+            } else {
+                false
+            };
             #[cfg(not(feature = "grpc"))]
             let is_sctn = true; // 无法识别类型时保守纳入，交给后续接触判定
 
@@ -183,13 +209,17 @@ async fn main() -> Result<()> {
     let mut contacts_all = Vec::new();
 
     for s in &sctn_candidates {
-        let result = detector.check_detailed_contact(&target_sctn, &aios_database::grpc_service::spatial_query_service::SpatialElement{
-            refno: s.refno,
-            bbox: s.bbox.clone(),
-            element_type: "SCTN".to_string(),
-            element_name: format!("SCTN_{}", s.refno.0),
-            last_updated: std::time::SystemTime::now(),
-        }, true)?;
+        let result = detector.check_detailed_contact(
+            &target_sctn,
+            &aios_database::grpc_service::spatial_query_service::SpatialElement {
+                refno: s.refno,
+                bbox: s.bbox.clone(),
+                element_type: "SCTN".to_string(),
+                element_name: format!("SCTN_{}", s.refno.0),
+                last_updated: std::time::SystemTime::now(),
+            },
+            true,
+        )?;
         if let Some(contact) = result {
             // 认为接触/接近即为“关联桥架”
             associated.push(s.clone());
@@ -206,18 +236,31 @@ async fn main() -> Result<()> {
 
     println!("\n关联桥架数量: {}", associated.len());
     for s in &associated {
-        println!("  - {} 位置中心 ({:.2},{:.2},{:.2})", s.refno.0, s.bbox.center().x, s.bbox.center().y, s.bbox.center().z);
+        println!(
+            "  - {} 位置中心 ({:.2},{:.2},{:.2})",
+            s.refno.0,
+            s.bbox.center().x,
+            s.bbox.center().y,
+            s.bbox.center().z
+        );
     }
-    println!("\n连通分量: {}，是否完全连通: {}", connectivity.num_components, connectivity.is_fully_connected);
+    println!(
+        "\n连通分量: {}，是否完全连通: {}",
+        connectivity.num_components, connectivity.is_fully_connected
+    );
 
     if do_export {
         std::fs::create_dir_all("test_output").ok();
         let vis = SctnVisualizer::new("test_output");
         vis.export_to_obj(&sections_for_network, "sctn_associated.obj")?;
-        vis.export_to_html(&sections_for_network, &contacts_all, &[], "sctn_associated.html")?;
+        vis.export_to_html(
+            &sections_for_network,
+            &contacts_all,
+            &[],
+            "sctn_associated.html",
+        )?;
         println!("\n已导出: test_output/sctn_associated.obj 与 test_output/sctn_associated.html");
     }
 
     Ok(())
 }
-

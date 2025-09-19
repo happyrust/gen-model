@@ -3,8 +3,8 @@ use aios_core::pdms_types::*;
 use aios_core::{AttrMap, RefnoEnum};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use serde_with::serde_as;
 #[cfg(feature = "sql")]
 use sqlx::types::Uuid;
 #[cfg(feature = "sql")]
@@ -129,7 +129,9 @@ fn gen_insert_increment_sql(
     increment_datas: Vec<IncrEleUpdateLog>,
     session_name: &str,
 ) -> String {
-    let mut sql = format!("INSERT IGNORE INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
+    let mut sql = format!(
+        "INSERT IGNORE INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES"
+    );
     for increment_data in increment_datas {
         // uuid 作为图数据库和 tidb 连接的主键
         let id = Uuid::new_v4().to_string();

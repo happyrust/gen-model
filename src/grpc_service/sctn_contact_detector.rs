@@ -1,41 +1,43 @@
-use std::sync::Arc;
-use anyhow::Result;
-use nalgebra::{Point3, Vector3, Isometry3};
-use parry3d::bounding_volume::Aabb;
-use parry3d::query::{contact, Contact, Ray, PointQuery};
-use parry3d::shape::{Cuboid, Ball};
 use aios_core::pdms_types::RefU64;
-use serde::{Serialize, Deserialize};
+use anyhow::Result;
+use nalgebra::{Isometry3, Point3, Vector3};
+use parry3d::bounding_volume::Aabb;
+use parry3d::query::{Contact, PointQuery, Ray, contact};
+use parry3d::shape::{Ball, Cuboid};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::spatial_query_service::SpatialElement;
-use crate::spatial_index::{SqliteSpatialIndex, QueryOptions, SpatialQueryBackend, SortBy, SortOrder};
-use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::grpc_service::sctn_geometry_extractor::SctnGeometryExtractor;
+use crate::spatial_index::{
+    QueryOptions, SortBy, SortOrder, SpatialQueryBackend, SqliteSpatialIndex,
+};
 
 /// 桥架截面（SCTN）数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CableTraySection {
     pub refno: RefU64,
     pub bbox: Aabb,
-    pub centerline: Vec<Point3<f32>>,      // 桥架中心线
-    pub width: f32,                        // 桥架宽度
-    pub height: f32,                       // 桥架高度
-    pub depth: f32,                        // 桥架深度/长度
-    pub direction: Vector3<f32>,           // 桥架走向
-    pub support_points: Vec<Point3<f32>>,  // 支撑点
-    pub section_type: String,              // 截面类型
+    pub centerline: Vec<Point3<f32>>,     // 桥架中心线
+    pub width: f32,                       // 桥架宽度
+    pub height: f32,                      // 桥架高度
+    pub depth: f32,                       // 桥架深度/长度
+    pub direction: Vector3<f32>,          // 桥架走向
+    pub support_points: Vec<Point3<f32>>, // 支撑点
+    pub section_type: String,             // 截面类型
 }
 
 /// 接触类型枚举
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ContactType {
-    Surface,      // 表面接触
-    Edge,         // 边缘接触  
-    Point,        // 点接触
-    Penetration,  // 穿透
-    Proximity,    // 接近（在容差范围内）
-    None,         // 无接触
+    Surface,     // 表面接触
+    Edge,        // 边缘接触
+    Point,       // 点接触
+    Penetration, // 穿透
+    Proximity,   // 接近（在容差范围内）
+    None,        // 无接触
 }
 
 /// 接触检测结果
@@ -62,10 +64,10 @@ pub struct SupportRelation {
 /// 支撑类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SupportType {
-    DirectSupport,    // 直接支撑
-    HangerSupport,    // 吊架支撑
-    BracketSupport,   // 托架支撑
-    WallMount,        // 墙装支撑
+    DirectSupport,  // 直接支撑
+    HangerSupport,  // 吊架支撑
+    BracketSupport, // 托架支撑
+    WallMount,      // 墙装支撑
     Unknown,
 }
 
@@ -91,7 +93,7 @@ impl SctnContactDetector {
             tolerance,
         })
     }
-    
+
     /// 创建带数据库管理器的检测器
     pub fn with_db_manager(tolerance: f32, db_manager: Arc<AiosDBManager>) -> Result<Self> {
         let spatial_index = if SqliteSpatialIndex::is_enabled() {
@@ -125,27 +127,27 @@ impl SctnContactDetector {
     ) -> Result<Vec<(RefU64, ContactResult)>> {
         // 步骤1: 扩展包围盒进行粗筛选
         let expanded_bbox = self.expand_bbox(&sctn.bbox, self.tolerance);
-        
+
         // 步骤2: 使用空间索引查询候选构件
         let candidates = self.query_candidates(&expanded_bbox, target_types).await?;
-        
+
         // 步骤3: 精确接触检测
         let mut contacts = Vec::new();
         for candidate in candidates {
-            if let Some(contact) = self.check_detailed_contact(
-                sctn,
-                &candidate,
-                include_proximity,
-            )? {
+            if let Some(contact) =
+                self.check_detailed_contact(sctn, &candidate, include_proximity)?
+            {
                 contacts.push((candidate.refno, contact));
             }
         }
-        
+
         // 步骤4: 按距离排序
         contacts.sort_by(|a, b| {
-            a.1.distance.partial_cmp(&b.1.distance).unwrap_or(std::cmp::Ordering::Equal)
+            a.1.distance
+                .partial_cmp(&b.1.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         Ok(contacts)
     }
 
@@ -156,14 +158,14 @@ impl SctnContactDetector {
         max_distance: f32,
     ) -> Result<Vec<SupportRelation>> {
         let mut relations = Vec::new();
-        
+
         // 沿桥架底部创建多个检测点
         let check_points = self.generate_support_check_points(sctn);
-        
+
         for point in check_points {
             // 向下投影检测支撑
             let ray = Ray::new(point, -Vector3::y());
-            
+
             // 查找下方的支架构件
             if let Some(support) = self.raycast_to_support(ray, max_distance).await? {
                 // 验证支撑关系
@@ -178,7 +180,7 @@ impl SctnContactDetector {
                 }
             }
         }
-        
+
         Ok(relations)
     }
 
@@ -197,39 +199,46 @@ impl SctnContactDetector {
         target_types: &[String],
     ) -> Result<Vec<SpatialElement>> {
         let mut candidates = Vec::new();
-        
+
         // 使用SQLite索引查询
         if let Some(ref index) = self.spatial_index {
             // 使用统一后端能力：相交 + 类型过滤 + 返回AABB
             let mut opts = QueryOptions::default();
-            if !target_types.is_empty() { opts.types = target_types.to_vec(); }
+            if !target_types.is_empty() {
+                opts.types = target_types.to_vec();
+            }
             opts.include_bbox = true;
             // 为了稳定输出，按id排序
             opts.sort = Some(SortBy::Id(SortOrder::Asc));
             let hits = index.query_intersect_hits(bbox, &opts)?;
-            
+
             // 使用数据库管理器获取真实数据
             if let Some(ref db_manager) = self.db_manager {
                 for hit in hits {
                     let refno = hit.refno;
                     // 获取构件类型
                     let element_type = db_manager.get_type_name(refno).await;
-                    
+
                     // 如果指定了类型过滤，检查类型
                     if !target_types.is_empty() && !target_types.contains(&element_type) {
                         continue;
                     }
-                    
+
                     // 获取属性
                     if let Ok(attrs) = db_manager.get_attr(refno).await {
-                        let element_name = attrs.get("NAME")
+                        let element_name = attrs
+                            .get("NAME")
                             .and_then(|v| v.as_str())
                             .unwrap_or(&format!("Element_{}", refno.0))
                             .to_string();
-                        
+
                         // 获取包围盒
-                        let element_bbox = if let Some(bb) = hit.bbox { bb } else { index.get_aabb(refno)?.unwrap_or_else(|| bbox.clone()) };
-                        
+                        let element_bbox = if let Some(bb) = hit.bbox {
+                            bb
+                        } else {
+                            index.get_aabb(refno)?.unwrap_or_else(|| bbox.clone())
+                        };
+
                         candidates.push(SpatialElement {
                             refno,
                             bbox: element_bbox,
@@ -252,7 +261,7 @@ impl SctnContactDetector {
                 }
             }
         }
-        
+
         Ok(candidates)
     }
 
@@ -269,7 +278,7 @@ impl SctnContactDetector {
             sctn.height / 2.0,
             sctn.depth / 2.0,
         ));
-        
+
         // 创建目标的立方体形状
         let target_size = target.bbox.maxs - target.bbox.mins;
         let target_cuboid = Cuboid::new(Vector3::new(
@@ -277,23 +286,23 @@ impl SctnContactDetector {
             target_size.y / 2.0,
             target_size.z / 2.0,
         ));
-        
+
         // 保存target_size供后续使用
         let sctn_size = Vector3::new(sctn.width, sctn.height, sctn.depth);
-        
+
         // 计算位置和方向
         let sctn_pos = Isometry3::translation(
             sctn.bbox.center().x,
             sctn.bbox.center().y,
             sctn.bbox.center().z,
         );
-        
+
         let target_pos = Isometry3::translation(
             target.bbox.center().x,
             target.bbox.center().y,
             target.bbox.center().z,
         );
-        
+
         // 检测接触
         let contact_result = contact(
             &sctn_pos,
@@ -302,12 +311,12 @@ impl SctnContactDetector {
             &target_cuboid,
             self.tolerance,
         );
-        
+
         if let Ok(Some(c)) = contact_result {
             // 分析接触类型
             let contact_type = self.analyze_contact_type(&c, sctn, target);
             let distance = (sctn.bbox.center() - target.bbox.center()).norm();
-            
+
             return Ok(Some(ContactResult {
                 contact_type,
                 contact_points: vec![c.point1.into(), c.point2.into()],
@@ -317,13 +326,13 @@ impl SctnContactDetector {
                 distance,
             }));
         }
-        
+
         // 检测接近关系
         if include_proximity {
             // 使用距离检测代替proximity函数
             let distance = (sctn.bbox.center() - target.bbox.center()).norm();
             let max_extent = (sctn_size.norm() + target_size.norm()) / 2.0;
-            
+
             if distance < max_extent + self.tolerance {
                 return Ok(Some(ContactResult {
                     contact_type: ContactType::Proximity,
@@ -335,7 +344,7 @@ impl SctnContactDetector {
                 }));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -365,13 +374,16 @@ impl SctnContactDetector {
         target: &SpatialElement,
     ) -> f32 {
         // 简化计算：使用包围盒重叠面积估算
-        let overlap_x = (sctn.bbox.maxs.x.min(target.bbox.maxs.x) - 
-                        sctn.bbox.mins.x.max(target.bbox.mins.x)).max(0.0);
-        let overlap_y = (sctn.bbox.maxs.y.min(target.bbox.maxs.y) - 
-                        sctn.bbox.mins.y.max(target.bbox.mins.y)).max(0.0);
-        let overlap_z = (sctn.bbox.maxs.z.min(target.bbox.maxs.z) - 
-                        sctn.bbox.mins.z.max(target.bbox.mins.z)).max(0.0);
-        
+        let overlap_x = (sctn.bbox.maxs.x.min(target.bbox.maxs.x)
+            - sctn.bbox.mins.x.max(target.bbox.mins.x))
+        .max(0.0);
+        let overlap_y = (sctn.bbox.maxs.y.min(target.bbox.maxs.y)
+            - sctn.bbox.mins.y.max(target.bbox.mins.y))
+        .max(0.0);
+        let overlap_z = (sctn.bbox.maxs.z.min(target.bbox.maxs.z)
+            - sctn.bbox.mins.z.max(target.bbox.mins.z))
+        .max(0.0);
+
         // 返回最小的两个维度的乘积作为接触面积估算
         let mut dims = vec![overlap_x, overlap_y, overlap_z];
         dims.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -382,7 +394,7 @@ impl SctnContactDetector {
     fn generate_support_check_points(&self, sctn: &CableTraySection) -> Vec<Point3<f32>> {
         let mut points = Vec::new();
         let bottom_y = sctn.bbox.mins.y;
-        
+
         // 沿桥架长度方向生成多个检测点
         let num_points = 5;
         for i in 0..num_points {
@@ -391,7 +403,7 @@ impl SctnContactDetector {
             let z = sctn.bbox.mins.z + t * (sctn.bbox.maxs.z - sctn.bbox.mins.z);
             points.push(Point3::new(x, bottom_y, z));
         }
-        
+
         points
     }
 
@@ -402,7 +414,11 @@ impl SctnContactDetector {
         max_distance: f32,
     ) -> Result<Option<SupportDetectionResult>> {
         // 需要空间索引支持
-        let index = if let Some(ref idx) = self.spatial_index { idx } else { return Ok(None); };
+        let index = if let Some(ref idx) = self.spatial_index {
+            idx
+        } else {
+            return Ok(None);
+        };
 
         // 约定支架类型标识为 "SUPPO"
         let mut opts = QueryOptions::default();
@@ -416,7 +432,11 @@ impl SctnContactDetector {
         let hits = index.query_ray_hits(origin, dir, max_distance, &opts)?;
         if let Some(hit) = hits.into_iter().next() {
             if let Some(distance) = hit.distance {
-                let d = if dir.norm() > 0.0 { dir.normalize() } else { Vector3::y() * -1.0 };
+                let d = if dir.norm() > 0.0 {
+                    dir.normalize()
+                } else {
+                    Vector3::y() * -1.0
+                };
                 let contact_point = origin + d * distance;
                 return Ok(Some(SupportDetectionResult {
                     refno: hit.refno,
@@ -481,17 +501,16 @@ impl BatchSctnDetector {
         target_types: &[String],
     ) -> Result<Vec<(RefU64, Vec<(RefU64, ContactResult)>)>> {
         let mut all_results = Vec::new();
-        
+
         for sctn in sections {
-            let contacts = self.detector.detect_sctn_contacts(
-                &sctn,
-                target_types,
-                true,
-            ).await?;
-            
+            let contacts = self
+                .detector
+                .detect_sctn_contacts(&sctn, target_types, true)
+                .await?;
+
             all_results.push((sctn.refno, contacts));
         }
-        
+
         Ok(all_results)
     }
 
@@ -501,7 +520,7 @@ impl BatchSctnDetector {
         sections: &[CableTraySection],
     ) -> Result<Vec<TrayConnection>> {
         let mut connections = Vec::new();
-        
+
         for i in 0..sections.len() {
             for j in i + 1..sections.len() {
                 if let Some(conn) = self.check_tray_connection(&sections[i], &sections[j])? {
@@ -509,7 +528,7 @@ impl BatchSctnDetector {
                 }
             }
         }
-        
+
         Ok(connections)
     }
 
@@ -520,7 +539,7 @@ impl BatchSctnDetector {
         sctn2: &CableTraySection,
     ) -> Result<Option<TrayConnection>> {
         let distance = (sctn1.bbox.center() - sctn2.bbox.center()).norm();
-        
+
         // 检查是否在连接距离内
         if distance < self.detector.tolerance * 10.0 {
             // 检查方向是否一致或垂直
@@ -532,7 +551,7 @@ impl BatchSctnDetector {
             } else {
                 ConnectionType::Branch
             };
-            
+
             return Ok(Some(TrayConnection {
                 section1: sctn1.refno,
                 section2: sctn2.refno,
@@ -540,7 +559,7 @@ impl BatchSctnDetector {
                 connection_point: (sctn1.bbox.center() + sctn2.bbox.center()) / 2.0,
             }));
         }
-        
+
         Ok(None)
     }
 }
@@ -557,8 +576,8 @@ pub struct TrayConnection {
 /// 连接类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConnectionType {
-    Straight,  // 直连
-    Corner,    // 转角
-    Branch,    // 分支
-    Cross,     // 交叉
+    Straight, // 直连
+    Corner,   // 转角
+    Branch,   // 分支
+    Cross,    // 交叉
 }

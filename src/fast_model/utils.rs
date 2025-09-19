@@ -1,24 +1,31 @@
-use std::collections::HashMap;
-use aios_core::error::init_save_database_error;
 use aios_core::SUL_DB;
+use aios_core::error::init_save_database_error;
 use dashmap::DashMap;
 use parry3d::bounding_volume::Aabb;
+use std::collections::HashMap;
 use tokio::task::JoinSet;
 
 pub async fn save_aabb_to_surreal(aabb_map: &DashMap<String, Aabb>) {
     if !aabb_map.is_empty() {
-        let keys = aabb_map.iter().map(|kv| kv.key().clone()).collect::<Vec<_>>();
+        let keys = aabb_map
+            .iter()
+            .map(|kv| kv.key().clone())
+            .collect::<Vec<_>>();
         for chunk in keys.chunks(300) {
             let mut sql = "".to_string();
             for k in chunk {
                 let v = aabb_map.get(k).unwrap();
-                let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, serde_json::to_string(v.value()).unwrap());
+                let json = format!(
+                    "{{'id':aabb:⟨{}⟩, 'd':{}}}",
+                    k,
+                    serde_json::to_string(v.value()).unwrap()
+                );
                 sql.push_str(&format!("INSERT IGNORE INTO aabb {};", json));
             }
             match SUL_DB.query(&sql).await {
                 Ok(_) => {}
                 Err(_) => {
-                    init_save_database_error(&sql,&std::panic::Location::caller().to_string());
+                    init_save_database_error(&sql, &std::panic::Location::caller().to_string());
                 }
             }
         }
@@ -38,7 +45,7 @@ pub async fn save_pts_to_surreal(vec3_map: &DashMap<u64, String>) {
             match SUL_DB.query(&sql).await {
                 Ok(_) => {}
                 Err(_e) => {
-                    init_save_database_error(&sql,&std::panic::Location::caller().to_string());
+                    init_save_database_error(&sql, &std::panic::Location::caller().to_string());
                 }
             };
         }

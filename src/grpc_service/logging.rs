@@ -1,8 +1,8 @@
 //! GRPC服务日志记录模块
 
-use tracing::{info, warn, error, debug, span, Level};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::collections::HashMap;
+use tracing::{Level, debug, error, info, span, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// 初始化GRPC服务日志
 pub fn init_grpc_logging() -> anyhow::Result<()> {
@@ -170,54 +170,74 @@ impl PerformanceMetrics {
 
     /// 增加活跃连接数
     pub fn increment_connections(&self) {
-        let count = self.active_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let count = self
+            .active_connections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         debug!("Active connections: {}", count);
     }
 
     /// 减少活跃连接数
     pub fn decrement_connections(&self) {
-        let count = self.active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+        let count = self
+            .active_connections
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+            - 1;
         debug!("Active connections: {}", count);
     }
 
     /// 增加请求计数
     pub fn increment_requests(&self) {
-        self.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 增加失败请求计数
     pub fn increment_failed_requests(&self) {
-        self.failed_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.failed_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 增加活跃任务数
     pub fn increment_tasks(&self) {
-        let count = self.active_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let count = self
+            .active_tasks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         info!("Active tasks: {}", count);
     }
 
     /// 减少活跃任务数
     pub fn decrement_tasks(&self) {
-        let count = self.active_tasks.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+        let count = self
+            .active_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+            - 1;
         info!("Active tasks: {}", count);
     }
 
     /// 记录性能指标
     pub fn log_metrics(&self) {
-        let active_connections = self.active_connections.load(std::sync::atomic::Ordering::Relaxed);
-        let total_requests = self.total_requests.load(std::sync::atomic::Ordering::Relaxed);
-        let failed_requests = self.failed_requests.load(std::sync::atomic::Ordering::Relaxed);
+        let active_connections = self
+            .active_connections
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_requests = self
+            .total_requests
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let failed_requests = self
+            .failed_requests
+            .load(std::sync::atomic::Ordering::Relaxed);
         let active_tasks = self.active_tasks.load(std::sync::atomic::Ordering::Relaxed);
-        
+
         info!(
             active_connections = active_connections,
             total_requests = total_requests,
             failed_requests = failed_requests,
             active_tasks = active_tasks,
-            success_rate = if total_requests > 0 { 
-                ((total_requests - failed_requests) as f64 / total_requests as f64) * 100.0 
-            } else { 
-                100.0 
+            success_rate = if total_requests > 0 {
+                ((total_requests - failed_requests) as f64 / total_requests as f64) * 100.0
+            } else {
+                100.0
             },
             "Performance metrics"
         );

@@ -1,5 +1,5 @@
 //! 任务管理器
-//! 
+//!
 //! 负责管理解析任务的生命周期和并发控制
 
 use crate::grpc_service::error::{ServiceError, ServiceResult};
@@ -7,7 +7,7 @@ use crate::grpc_service::types::{TaskRequest, TaskStatus, TaskType};
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -44,10 +44,13 @@ impl TaskManager {
     /// 提交任务
     pub async fn submit_task(&self, task_request: TaskRequest) -> ServiceResult<String> {
         let task_id = task_request.id.clone();
-        
+
         // 检查是否已有同名任务在运行
         if self.active_tasks.contains_key(&task_id) {
-            return Err(ServiceError::Task(format!("Task {} is already running", task_id)));
+            return Err(ServiceError::Task(format!(
+                "Task {} is already running",
+                task_id
+            )));
         }
 
         // 如果当前活跃任务数未达到上限，直接启动任务
@@ -118,15 +121,22 @@ impl TaskManager {
             }
             TaskType::IncrementalSync => {
                 // TODO: 集成现有的增量同步逻辑
-                Self::execute_incremental_sync(&task_request, &cancel_token, &progress_sender).await?;
+                Self::execute_incremental_sync(&task_request, &cancel_token, &progress_sender)
+                    .await?;
             }
             TaskType::ModelGeneration => {
                 // TODO: 集成现有的模型生成逻辑
-                Self::execute_model_generation(&task_request, &cancel_token, &progress_sender).await?;
+                Self::execute_model_generation(&task_request, &cancel_token, &progress_sender)
+                    .await?;
             }
             TaskType::SpatialTreeGeneration => {
                 // TODO: 集成现有的空间树生成逻辑
-                Self::execute_spatial_tree_generation(&task_request, &cancel_token, &progress_sender).await?;
+                Self::execute_spatial_tree_generation(
+                    &task_request,
+                    &cancel_token,
+                    &progress_sender,
+                )
+                .await?;
             }
         }
 
@@ -150,16 +160,16 @@ impl TaskManager {
         cancel_token: &CancellationToken,
         progress_sender: &broadcast::Sender<crate::grpc_service::types::ProgressUpdate>,
     ) -> Result<(), ServiceError> {
-        use crate::grpc_service::integration::{sync_pdms_with_progress, GrpcProgressCallback};
+        use crate::grpc_service::integration::{GrpcProgressCallback, sync_pdms_with_progress};
         use aios_core::get_db_option;
         use std::sync::Arc;
-        
+
         // 创建进度回调
         let callback = Arc::new(GrpcProgressCallback::new(
             task_request.id.clone(),
             progress_sender.clone(),
         ));
-        
+
         // 设置取消监听
         let callback_clone = callback.clone();
         let cancel_token_clone = cancel_token.clone();
@@ -167,11 +177,11 @@ impl TaskManager {
             cancel_token_clone.cancelled().await;
             callback_clone.cancel();
         });
-        
+
         // 创建数据库选项
         let mut db_option = get_db_option().clone();
         db_option.total_sync = true;
-        
+
         // 执行同步
         sync_pdms_with_progress(&db_option, callback).await
     }
@@ -182,25 +192,25 @@ impl TaskManager {
         cancel_token: &CancellationToken,
         progress_sender: &broadcast::Sender<crate::grpc_service::types::ProgressUpdate>,
     ) -> Result<(), ServiceError> {
-        use crate::grpc_service::integration::{sync_pdms_with_progress, GrpcProgressCallback};
+        use crate::grpc_service::integration::{GrpcProgressCallback, sync_pdms_with_progress};
         use aios_core::get_db_option;
         use std::sync::Arc;
-        
+
         let callback = Arc::new(GrpcProgressCallback::new(
             task_request.id.clone(),
             progress_sender.clone(),
         ));
-        
+
         let callback_clone = callback.clone();
         let cancel_token_clone = cancel_token.clone();
         tokio::spawn(async move {
             cancel_token_clone.cancelled().await;
             callback_clone.cancel();
         });
-        
+
         let mut db_option = get_db_option().clone();
         db_option.incr_sync = true;
-        
+
         sync_pdms_with_progress(&db_option, callback).await
     }
 
@@ -210,27 +220,29 @@ impl TaskManager {
         cancel_token: &CancellationToken,
         progress_sender: &broadcast::Sender<crate::grpc_service::types::ProgressUpdate>,
     ) -> Result<(), ServiceError> {
-        use crate::grpc_service::integration::{generate_models_with_progress, GrpcProgressCallback};
+        use crate::grpc_service::integration::{
+            GrpcProgressCallback, generate_models_with_progress,
+        };
         use aios_core::get_db_option;
         use std::sync::Arc;
-        
+
         let callback = Arc::new(GrpcProgressCallback::new(
             task_request.id.clone(),
             progress_sender.clone(),
         ));
-        
+
         let callback_clone = callback.clone();
         let cancel_token_clone = cancel_token.clone();
         tokio::spawn(async move {
             cancel_token_clone.cancelled().await;
             callback_clone.cancel();
         });
-        
+
         let mut db_option = get_db_option().clone();
         if task_request.options.generate_models {
             db_option.gen_mesh = Some(true);
         }
-        
+
         generate_models_with_progress(&db_option, callback).await
     }
 
@@ -240,25 +252,27 @@ impl TaskManager {
         cancel_token: &CancellationToken,
         progress_sender: &broadcast::Sender<crate::grpc_service::types::ProgressUpdate>,
     ) -> Result<(), ServiceError> {
-        use crate::grpc_service::integration::{build_spatial_tree_with_progress, GrpcProgressCallback};
+        use crate::grpc_service::integration::{
+            GrpcProgressCallback, build_spatial_tree_with_progress,
+        };
         use aios_core::get_db_option;
         use std::sync::Arc;
-        
+
         let callback = Arc::new(GrpcProgressCallback::new(
             task_request.id.clone(),
             progress_sender.clone(),
         ));
-        
+
         let callback_clone = callback.clone();
         let cancel_token_clone = cancel_token.clone();
         tokio::spawn(async move {
             cancel_token_clone.cancelled().await;
             callback_clone.cancel();
         });
-        
+
         let mut db_option = get_db_option().clone();
         db_option.gen_spatial_tree = task_request.options.build_spatial_tree;
-        
+
         build_spatial_tree_with_progress(&db_option, callback).await
     }
 
@@ -267,10 +281,10 @@ impl TaskManager {
         if let Some((_, task_handle)) = self.active_tasks.remove(task_id) {
             task_handle.cancel_token.cancel();
             task_handle.handle.abort();
-            
+
             // 尝试启动队列中的下一个任务
             self.try_start_queued_task().await?;
-            
+
             Ok(())
         } else {
             Err(ServiceError::Task(format!("Task {} not found", task_id)))

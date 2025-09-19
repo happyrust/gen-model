@@ -1,6 +1,6 @@
 use aios_core::RefU64;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use serde::{Serialize, Deserialize};
 
 ///属性 update flag的数据结构，包含信息：否几何体发生修改，
 /// 如果检测到有相应的属性发生修改，就会将更新模型的生成
@@ -24,16 +24,12 @@ impl AttsUpdatedRecord {
         }
     }
 
-    pub fn primitive_changed(&self) {
-    }
+    pub fn primitive_changed(&self) {}
 
-    pub fn loop_changed(&self) {
-    }
+    pub fn loop_changed(&self) {}
 
-    pub fn cata_changed(&self) {
-    }
+    pub fn cata_changed(&self) {}
 }
-
 
 ///mesh update flag的数据结构，包含信息：记录发生修改的时间戳
 pub struct MeshUpdatedRecord {

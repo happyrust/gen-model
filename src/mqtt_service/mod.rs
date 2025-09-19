@@ -1,13 +1,12 @@
-use std::sync::Arc;
-use std::time::Duration;
 use aios_core::get_db_option;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions};
 use serde::{Deserialize, Serialize};
-
+use std::sync::Arc;
+use std::time::Duration;
 
 // 更新e3d文件的消息
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct SyncE3dFileMsg{
+pub struct SyncE3dFileMsg {
     // 后续还需要加入唯一id，如果开启数据同步？ CDC
     // 这个字段用于存储文件名
     pub file_names: Vec<String>,
@@ -83,21 +82,18 @@ pub fn new_mqtt_inst(id: &str) -> MqttInstance {
 
     // 创建新的MqttOptions，配置 MQTT连接选项。
     // 参数分别是服务器ID，MQTT服务器主机，MQTT服务器端口号。
-    let mut mqttoptions = MqttOptions::new(id,
-                                           db_option.mqtt_host.as_str(), db_option.mqtt_port);
+    let mut mqttoptions = MqttOptions::new(id, db_option.mqtt_host.as_str(), db_option.mqtt_port);
 
     // 设置清理会话为false
     mqttoptions.set_clean_session(false);
 
     // 设置保持连接的时间为500秒
     mqttoptions.set_keep_alive(Duration::from_secs(500));
+    // 使用默认 TCP 超时设置（无需 TLS/认证，保持简单协议）
 
     // 使用上述配置和5000毫秒的超时时间创建新的AsyncClient和EventLoop
     let (client, el) = AsyncClient::new(mqttoptions, 5000);
 
     // 返回新创建的MqttInstance
-    MqttInstance {
-        client,
-        el,
-    }
+    MqttInstance { client, el }
 }

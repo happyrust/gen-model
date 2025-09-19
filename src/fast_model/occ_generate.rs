@@ -1,20 +1,20 @@
 use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
-use crate::fast_model::{utils, EXIST_MESH_GEO_HASHES};
+use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
 // Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
+use crate::spatial_index::SqliteSpatialIndex;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
-    gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
-    query_deep_visible_inst_refnos, RefnoEnum, SUL_DB,
+    RefnoEnum, SUL_DB, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
+    query_deep_visible_inst_refnos,
 };
-use crate::spatial_index::SqliteSpatialIndex;
 use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
@@ -114,14 +114,12 @@ pub async fn booleans_meshes_in_db(
     Ok(())
 }
 
-
-
 /// 处理网格并更新数据库
-/// 
+///
 /// # 参数
 /// * `option` - 数据库选项，包含网格路径和是否替换现有网格等配置
 /// * `refnos` - 需要处理的引用号列表
-/// 
+///
 /// # 返回值
 /// * `anyhow::Result<()>` - 执行结果
 pub async fn process_meshes_update_db(
@@ -276,9 +274,9 @@ pub async fn process_meshes_update_db_deep(
 }
 
 /// 几何参数查询结构体
-/// 
+///
 /// # 字段
-/// 
+///
 /// * `id` - 几何体ID
 /// * `param` - PDMS几何体参数
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -288,15 +286,15 @@ struct QueryGeoParam {
 }
 
 /// 生成实例的网格数据
-/// 
+///
 /// # 参数
-/// 
+///
 /// * `refnos` - 参考号数组
 /// * `replace_exist` - 是否替换已存在的网格数据
 /// * `dir` - 模型文件目录路径
-/// 
+///
 /// # 返回值
-/// 
+///
 /// 返回 `anyhow::Result<()>` 表示生成是否成功
 pub async fn gen_inst_meshes(
     refnos: &[RefnoEnum],
@@ -609,18 +607,18 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             // 优先尝试从 SQLite 空间索引读取
             #[cfg(feature = "sqlite-index")]
             if SqliteSpatialIndex::is_enabled() {
-                let spatial_index = SqliteSpatialIndex::with_default_path()
-                    .expect("Failed to open spatial index");
+                let spatial_index =
+                    SqliteSpatialIndex::with_default_path().expect("Failed to open spatial index");
                 if let Ok(Some(aabb)) = spatial_index.get_aabb(r.refno.refno()) {
                     let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
                     aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
                     // 使用当前查询到的 noun，避免旧缓存的 noun 干扰筛选
                     rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
                     let sql = format!(
-                    "update {} set aabb = aabb:⟨{}⟩;",
-                    r.refno.to_inst_relate_key(),
-                    aabb_hash,
-                );
+                        "update {} set aabb = aabb:⟨{}⟩;",
+                        r.refno.to_inst_relate_key(),
+                        aabb_hash,
+                    );
                     update_sql.push_str(&sql);
                     continue;
                 }
@@ -649,8 +647,8 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             // 写入 SQLite 空间索引
             #[cfg(feature = "sqlite-index")]
             if SqliteSpatialIndex::is_enabled() {
-                let spatial_index = SqliteSpatialIndex::with_default_path()
-                    .expect("Failed to open spatial index");
+                let spatial_index =
+                    SqliteSpatialIndex::with_default_path().expect("Failed to open spatial index");
                 let _ = spatial_index.insert_aabb(bbox.refno, &bbox.aabb, Some(&bbox.noun));
             }
             // 记录依赖（仅记录世界变换哈希；几何哈希需在其他查询路径写入）
@@ -890,7 +888,10 @@ pub async fn apply_insts_boolean_occ(
                                     }
                                 }
                                 if !success {
-                                    println!("布尔运算失败: 无法保存结果 mesh, refno: {}", &b.refno);
+                                    println!(
+                                        "布尔运算失败: 无法保存结果 mesh, refno: {}",
+                                        &b.refno
+                                    );
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id

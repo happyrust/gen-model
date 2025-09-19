@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::types::RefU64;
+use aios_core::{RefnoEnum, RefnoSesno};
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
-use aios_core::{RefnoEnum, RefnoSesno};
 use pdms_io::io::PdmsIO;
 
-use rusqlite::{params, Connection, Result as SqlResult};
 use config as cfg;
+use rusqlite::{Connection, Result as SqlResult, params};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct StoredAabb {
@@ -33,10 +33,10 @@ pub struct RefnoTimeData {
     pub refno_value: u64,
     pub session: u32,
     pub dbnum: u32,
-    pub created_at: u64,        // 创建时间戳
-    pub updated_at: u64,        // 更新时间戳
-    pub sesno_timestamp: u64,   // sesno 对应的实际时间
-    pub author: Option<String>, // 创建者
+    pub created_at: u64,             // 创建时间戳
+    pub updated_at: u64,             // 更新时间戳
+    pub sesno_timestamp: u64,        // sesno 对应的实际时间
+    pub author: Option<String>,      // 创建者
     pub description: Option<String>, // 变更描述
 }
 
@@ -95,10 +95,9 @@ impl PdmsTimeExtractor {
 
     /// 批量提取多个 sesno 的时间信息
     pub fn extract_batch(&self, sesnos: &[u32]) -> Vec<(u32, u64)> {
-        sesnos.iter()
-            .filter_map(|&sesno| {
-                self.extract_time_data(sesno).map(|ts| (sesno, ts))
-            })
+        sesnos
+            .iter()
+            .filter_map(|&sesno| self.extract_time_data(sesno).map(|ts| (sesno, ts)))
             .collect()
     }
 
@@ -153,7 +152,7 @@ impl AabbCache {
                 std::fs::create_dir_all(dir)?;
             }
         }
-        
+
         // Initialize the database schema
         let cache = Self { db_path };
         cache.init_schema()?;
@@ -180,7 +179,7 @@ impl AabbCache {
 
     fn init_schema(&self) -> anyhow::Result<()> {
         let conn = self.get_connection()?;
-        
+
         // Create main tables
         conn.execute_batch(
             r#"
@@ -243,7 +242,7 @@ impl AabbCache {
             CREATE INDEX IF NOT EXISTS idx_time_data_refno ON refno_time_data(refno_key);
             "#,
         )?;
-        
+
         Ok(())
     }
 
@@ -280,23 +279,23 @@ impl AabbCache {
     /// Rebuild SQLite RTree from internal storage
     pub fn sqlite_rebuild_from_internal(&self) -> anyhow::Result<usize> {
         let conn = self.get_connection()?;
-        
+
         // Clear existing RTree data
         conn.execute("DELETE FROM aabb_index", [])?;
-        
+
         // Load all ref_bbox data and insert into RTree
         let mut stmt = conn.prepare("SELECT refno, data FROM ref_bbox")?;
         let mut insert_stmt = conn.prepare(
             "INSERT INTO aabb_index (id, min_x, max_x, min_y, max_y, min_z, max_z) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
         )?;
-        
+
         let mut count = 0;
         let rows = stmt.query_map([], |row| {
             let refno: i64 = row.get(0)?;
             let data: Vec<u8> = row.get(1)?;
             Ok((refno, data))
         })?;
-        
+
         for row in rows {
             let (refno, data) = row?;
             if let Ok(stored) = bincode::deserialize::<StoredRStarBBox>(&data) {
@@ -313,42 +312,43 @@ impl AabbCache {
                 count += 1;
             }
         }
-        
+
         Ok(count)
     }
 
     /// Intersect query against SQLite RTree; returns refnos
     pub fn sqlite_query_intersect(&self, query: &Aabb) -> anyhow::Result<Vec<RefU64>> {
         let conn = self.get_connection()?;
-        
+
         let minx = query.mins.x as f64;
         let maxx = query.maxs.x as f64;
         let miny = query.mins.y as f64;
         let maxy = query.maxs.y as f64;
         let minz = query.mins.z as f64;
         let maxz = query.maxs.z as f64;
-        
+
         let mut stmt = conn.prepare(
             "SELECT id FROM aabb_index WHERE max_x >= ?1 AND min_x <= ?2 AND max_y >= ?3 AND min_y <= ?4 AND max_z >= ?5 AND min_z <= ?6"
         )?;
-        
-        let ids = stmt.query_map(params![minx, maxx, miny, maxy, minz, maxz], |row| {
-            let id: i64 = row.get(0)?;
-            Ok(RefU64(id as u64))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-        
+
+        let ids = stmt
+            .query_map(params![minx, maxx, miny, maxy, minz, maxz], |row| {
+                let id: i64 = row.get(0)?;
+                Ok(RefU64(id as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(ids)
     }
 
     /// Get AABB by refno from SQLite RTree row
     pub fn sqlite_get_aabb(&self, refno: RefU64) -> anyhow::Result<Option<Aabb>> {
         let conn = self.get_connection()?;
-        
+
         let mut stmt = conn.prepare(
-            "SELECT min_x, max_x, min_y, max_y, min_z, max_z FROM aabb_index WHERE id=?1"
+            "SELECT min_x, max_x, min_y, max_y, min_z, max_z FROM aabb_index WHERE id=?1",
         )?;
-        
+
         let result = stmt.query_row(params![refno.0 as i64], |row| {
             let min_x: f64 = row.get(0)?;
             let max_x: f64 = row.get(1)?;
@@ -356,13 +356,13 @@ impl AabbCache {
             let max_y: f64 = row.get(3)?;
             let min_z: f64 = row.get(4)?;
             let max_z: f64 = row.get(5)?;
-            
+
             Ok(Aabb::new(
                 [min_x as f32, min_y as f32, min_z as f32].into(),
                 [max_x as f32, max_y as f32, max_z as f32].into(),
             ))
         });
-        
+
         match result {
             Ok(aabb) => Ok(Some(aabb)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -371,10 +371,12 @@ impl AabbCache {
     }
 
     // ---------- Basic CRUD operations ----------
-    
+
     pub fn get_geo_aabb(&self, geo_hash: &str) -> Option<Aabb> {
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare("SELECT data FROM geo_aabb WHERE geo_hash = ?1").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM geo_aabb WHERE geo_hash = ?1")
+            .ok()?;
         let data: Vec<u8> = stmt.query_row(params![geo_hash], |row| row.get(0)).ok()?;
         let stored: StoredAabb = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
@@ -393,7 +395,9 @@ impl AabbCache {
 
     pub fn get_deps_for_geo(&self, geo_hash: &str) -> Option<DepsForGeo> {
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare("SELECT data FROM refs_by_geo WHERE geo_hash = ?1").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM refs_by_geo WHERE geo_hash = ?1")
+            .ok()?;
         let data: Vec<u8> = stmt.query_row(params![geo_hash], |row| row.get(0)).ok()?;
         bincode::deserialize(&data).ok()
     }
@@ -410,7 +414,9 @@ impl AabbCache {
 
     pub fn get_geos_for_ref(&self, refno: RefU64) -> Option<GeosForRef> {
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare("SELECT data FROM deps_by_ref WHERE refno = ?1").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM deps_by_ref WHERE refno = ?1")
+            .ok()?;
         let data: Vec<u8> = stmt.query_row(params![refno.0], |row| row.get(0)).ok()?;
         bincode::deserialize(&data).ok()
     }
@@ -427,7 +433,9 @@ impl AabbCache {
 
     pub fn get_ref_bbox(&self, refno: RefU64) -> Option<RStarBoundingBox> {
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare("SELECT data FROM ref_bbox WHERE refno = ?1").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM ref_bbox WHERE refno = ?1")
+            .ok()?;
         let data: Vec<u8> = stmt.query_row(params![refno.0], |row| row.get(0)).ok()?;
         let stored: StoredRStarBBox = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
@@ -437,13 +445,13 @@ impl AabbCache {
         let conn = self.get_connection()?;
         let stored: StoredRStarBBox = bbox.into();
         let bytes = bincode::serialize(&stored)?;
-        
+
         // Store in main table
         conn.execute(
             "INSERT OR REPLACE INTO ref_bbox (refno, data) VALUES (?1, ?2)",
             params![stored.refno, bytes],
         )?;
-        
+
         // Also update RTree index
         let aabb = &stored.aabb;
         conn.execute(
@@ -458,26 +466,33 @@ impl AabbCache {
                 aabb.maxs[2] as f64,
             ],
         )?;
-        
+
         Ok(())
     }
 
     pub fn remove_ref_bbox(&self, refno: RefU64) -> anyhow::Result<()> {
         let conn = self.get_connection()?;
         conn.execute("DELETE FROM ref_bbox WHERE refno = ?1", params![refno.0])?;
-        conn.execute("DELETE FROM aabb_index WHERE id = ?1", params![refno.0 as i64])?;
+        conn.execute(
+            "DELETE FROM aabb_index WHERE id = ?1",
+            params![refno.0 as i64],
+        )?;
         Ok(())
     }
 
     // ---------- Versioned methods ----------
-    
-    pub fn put_ref_bbox_versioned(&self, bbox: &RStarBoundingBox, session: u32) -> anyhow::Result<()> {
+
+    pub fn put_ref_bbox_versioned(
+        &self,
+        bbox: &RStarBoundingBox,
+        session: u32,
+    ) -> anyhow::Result<()> {
         let refno_enum = if session == 0 {
             RefnoEnum::Refno(bbox.refno)
         } else {
             RefnoEnum::from(RefnoSesno::new(bbox.refno, session))
         };
-        
+
         let refno_key = refno_enum.to_string();
         let versioned = VersionedStoredAabb {
             refno_value: bbox.refno.0,
@@ -493,14 +508,14 @@ impl AabbCache {
                 .unwrap()
                 .as_secs(),
         };
-        
+
         let bytes = bincode::serialize(&versioned)?;
         let conn = self.get_connection()?;
         conn.execute(
             "INSERT OR REPLACE INTO versioned_ref_bbox (refno_key, session, data) VALUES (?1, ?2, ?3)",
             params![refno_key, session, bytes],
         )?;
-        
+
         Ok(())
     }
 
@@ -510,23 +525,25 @@ impl AabbCache {
         } else {
             RefnoEnum::from(RefnoSesno::new(refno, session))
         };
-        
+
         let refno_key = refno_enum.to_string();
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare(
-            "SELECT data FROM versioned_ref_bbox WHERE refno_key = ?1 AND session = ?2"
-        ).ok()?;
-        
-        let data: Vec<u8> = stmt.query_row(params![refno_key, session], |row| row.get(0)).ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM versioned_ref_bbox WHERE refno_key = ?1 AND session = ?2")
+            .ok()?;
+
+        let data: Vec<u8> = stmt
+            .query_row(params![refno_key, session], |row| row.get(0))
+            .ok()?;
         let versioned: VersionedStoredAabb = bincode::deserialize(&data).ok()?;
-        
+
         let aabb = Aabb::new(versioned.mins.into(), versioned.maxs.into());
         Some(RStarBoundingBox::new(aabb, refno_enum, String::new()))
     }
 
     pub fn get_ref_bbox_history(&self, refno: RefU64) -> Vec<(u32, RStarBoundingBox)> {
         let mut results = Vec::new();
-        
+
         if let Ok(conn) = self.get_connection() {
             // Query for all sessions of this refno
             let query = "SELECT session, data FROM versioned_ref_bbox WHERE refno_key LIKE ?1 ORDER BY session";
@@ -539,21 +556,26 @@ impl AabbCache {
                 }) {
                     for row in rows {
                         if let Ok((session, data)) = row {
-                            if let Ok(versioned) = bincode::deserialize::<VersionedStoredAabb>(&data) {
+                            if let Ok(versioned) =
+                                bincode::deserialize::<VersionedStoredAabb>(&data)
+                            {
                                 let aabb = Aabb::new(versioned.mins.into(), versioned.maxs.into());
                                 let refno_enum = if session == 0 {
                                     RefnoEnum::Refno(refno)
                                 } else {
                                     RefnoEnum::from(RefnoSesno::new(refno, session))
                                 };
-                                results.push((session, RStarBoundingBox::new(aabb, refno_enum, String::new())));
+                                results.push((
+                                    session,
+                                    RStarBoundingBox::new(aabb, refno_enum, String::new()),
+                                ));
                             }
                         }
                     }
                 }
             }
         }
-        
+
         results
     }
 
@@ -562,21 +584,27 @@ impl AabbCache {
         if let Some(bbox) = self.get_ref_bbox_at_session(refno, 0) {
             return Some(bbox);
         }
-        
+
         // Otherwise get the highest session version
         let history = self.get_ref_bbox_history(refno);
-        history.into_iter().max_by_key(|(session, _)| *session).map(|(_, bbox)| bbox)
+        history
+            .into_iter()
+            .max_by_key(|(session, _)| *session)
+            .map(|(_, bbox)| bbox)
     }
 
     // ---------- Time data methods ----------
-    
+
     pub fn put_refno_time_data(&self, time_data: &RefnoTimeData) -> anyhow::Result<()> {
         let refno_enum = if time_data.session == 0 {
             RefnoEnum::Refno(RefU64(time_data.refno_value))
         } else {
-            RefnoEnum::from(RefnoSesno::new(RefU64(time_data.refno_value), time_data.session))
+            RefnoEnum::from(RefnoSesno::new(
+                RefU64(time_data.refno_value),
+                time_data.session,
+            ))
         };
-        
+
         let refno_key = refno_enum.to_string();
         let bytes = bincode::serialize(time_data)?;
         let conn = self.get_connection()?;
@@ -584,7 +612,7 @@ impl AabbCache {
             "INSERT OR REPLACE INTO refno_time_data (refno_key, session, data) VALUES (?1, ?2, ?3)",
             params![refno_key, time_data.session, bytes],
         )?;
-        
+
         Ok(())
     }
 
@@ -594,14 +622,16 @@ impl AabbCache {
         } else {
             RefnoEnum::from(RefnoSesno::new(refno, session))
         };
-        
+
         let refno_key = refno_enum.to_string();
         let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare(
-            "SELECT data FROM refno_time_data WHERE refno_key = ?1 AND session = ?2"
-        ).ok()?;
-        
-        let data: Vec<u8> = stmt.query_row(params![refno_key, session], |row| row.get(0)).ok()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM refno_time_data WHERE refno_key = ?1 AND session = ?2")
+            .ok()?;
+
+        let data: Vec<u8> = stmt
+            .query_row(params![refno_key, session], |row| row.get(0))
+            .ok()?;
         bincode::deserialize(&data).ok()
     }
 
@@ -619,48 +649,42 @@ impl AabbCache {
         let mut stmt = conn.prepare(
             "SELECT timestamp, description FROM sesno_time_mapping WHERE dbnum = ?1 AND sesno = ?2"
         ).ok()?;
-        
-        let result = stmt.query_row(params![dbnum, sesno], |row| {
-            Ok(SesnoTimeMapping {
-                dbnum,
-                sesno,
-                timestamp: row.get(0)?,
-                description: row.get(1)?,
+
+        let result = stmt
+            .query_row(params![dbnum, sesno], |row| {
+                Ok(SesnoTimeMapping {
+                    dbnum,
+                    sesno,
+                    timestamp: row.get(0)?,
+                    description: row.get(1)?,
+                })
             })
-        }).ok()?;
-        
+            .ok()?;
+
         Some(result)
     }
 
     // ---------- Utility methods ----------
-    
+
     pub fn get_stats(&self) -> anyhow::Result<CacheStats> {
         let conn = self.get_connection()?;
-        
-        let ref_bbox_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM ref_bbox",
-            [],
-            |row| row.get(0),
-        )?;
-        
-        let versioned_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM versioned_ref_bbox",
-            [],
-            |row| row.get(0),
-        )?;
-        
-        let time_data_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM refno_time_data",
-            [],
-            |row| row.get(0),
-        )?;
-        
-        let sesno_mapping_count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM sesno_time_mapping",
-            [],
-            |row| row.get(0),
-        )?;
-        
+
+        let ref_bbox_count: u64 =
+            conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row| row.get(0))?;
+
+        let versioned_count: u64 =
+            conn.query_row("SELECT COUNT(*) FROM versioned_ref_bbox", [], |row| {
+                row.get(0)
+            })?;
+
+        let time_data_count: u64 =
+            conn.query_row("SELECT COUNT(*) FROM refno_time_data", [], |row| row.get(0))?;
+
+        let sesno_mapping_count: u64 =
+            conn.query_row("SELECT COUNT(*) FROM sesno_time_mapping", [], |row| {
+                row.get(0)
+            })?;
+
         Ok(CacheStats {
             ref_bbox_count,
             versioned_count,
@@ -693,7 +717,7 @@ impl AabbCache {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         })?;
-        
+
         let mut out = Vec::new();
         for row in rows {
             let data = row?;
@@ -701,7 +725,7 @@ impl AabbCache {
                 out.push((&stored).into());
             }
         }
-        
+
         Ok(out)
     }
 
@@ -714,7 +738,10 @@ impl AabbCache {
                         dbnum: extractor.dbnum,
                         sesno,
                         timestamp,
-                        description: Some(format!("Auto-extracted from PDMS DB {}", extractor.dbnum)),
+                        description: Some(format!(
+                            "Auto-extracted from PDMS DB {}",
+                            extractor.dbnum
+                        )),
                     };
                     self.put_sesno_time_mapping(&mapping)?;
                 }
@@ -730,12 +757,12 @@ impl AabbCache {
             let hash: String = row.get(0)?;
             Ok(hash)
         })?;
-        
+
         let mut hashes = Vec::new();
         for row in rows {
             hashes.push(row?);
         }
-        
+
         Ok(hashes)
     }
 
@@ -777,13 +804,13 @@ impl AabbCache {
 // mod tests {
 //     use super::*;
 //     use glam::Vec3;
-// 
+//
 // //     #[test]
 // //     fn test_aabb_cache_basic_operations() {
 // //         let temp_dir = tempfile::tempdir().expect("create temp dir");
 // //         let cache_path = temp_dir.path().join("test_cache.sqlite");
 // //         let cache = AabbCache::open_with_path(&cache_path).expect("open cache");
-// 
+//
 //         // Test ref_bbox operations
 //         let refno = RefU64(12345);
 //         let aabb = Aabb::new(
@@ -791,11 +818,11 @@ impl AabbCache {
 //             Vec3::new(10.0, 10.0, 10.0).into()
 //         );
 //         let bbox = RStarBoundingBox::new(aabb, refno.into(), "test_element".to_string());
-//         
+//
 //         cache.put_ref_bbox(&bbox).expect("put ref bbox");
 //         let retrieved = cache.get_ref_bbox(refno).expect("get ref bbox");
 //         assert_eq!(retrieved.refno, bbox.refno);
-//         
+//
 //         // Test geo_aabb operations
 //         let geo_hash = "test_geo_hash";
 //         cache.put_geo_aabb(geo_hash, &aabb).expect("put geo aabb");
@@ -803,15 +830,15 @@ impl AabbCache {
 //         assert_eq!(retrieved_aabb.mins, aabb.mins);
 //         assert_eq!(retrieved_aabb.maxs, aabb.maxs);
 //     }
-// 
+//
 //     #[test]
 //     fn test_versioned_operations() {
 // //         let temp_dir = tempfile::tempdir().expect("create temp dir");
 // //         let cache_path = temp_dir.path().join("test_versioned.sqlite");
 // //         let cache = AabbCache::open_with_path(&cache_path).expect("open cache");
-// // 
+// //
 // //         let refno = RefU64(54321);
-//         
+//
 //         // Store multiple versions
 //         for session in 0..3 {
 //             let aabb = Aabb::new(
@@ -821,22 +848,22 @@ impl AabbCache {
 //             let bbox = RStarBoundingBox::new(aabb, refno.into(), format!("version_{}", session));
 //             cache.put_ref_bbox_versioned(&bbox, session).expect("put versioned");
 //         }
-//         
+//
 //         // Retrieve specific version
 //         let version_1 = cache.get_ref_bbox_at_session(refno, 1).expect("get session 1");
 //         assert_eq!(version_1.aabb.mins.x, 1.0);
-//         
+//
 //         // Get history
 //         let history = cache.get_ref_bbox_history(refno);
 //         assert!(history.len() >= 3);
 //     }
-// 
+//
 //     #[test]
 //     fn test_spatial_query() {
 // //         let temp_dir = tempfile::tempdir().expect("create temp dir");
 // //         let cache_path = temp_dir.path().join("test_spatial.sqlite");
 // //         let cache = AabbCache::open_with_path(&cache_path).expect("open cache");
-// // 
+// //
 // //         // Insert multiple elements
 //         for i in 0..5 {
 //             let refno = RefU64(1000 + i);
@@ -847,13 +874,13 @@ impl AabbCache {
 //             let bbox = RStarBoundingBox::new(aabb, refno.into(), format!("element_{}", i));
 //             cache.put_ref_bbox(&bbox).expect("put ref bbox");
 //         }
-//         
+//
 //         // Query intersecting
 //         let query_aabb = Aabb::new(
 //             Vec3::new(12.0, 0.0, 0.0).into(),
 //             Vec3::new(18.0, 5.0, 5.0).into()
 //         );
-//         
+//
 //         let results = cache.sqlite_query_intersect(&query_aabb).expect("query intersect");
 //         assert!(!results.is_empty());
 //     }

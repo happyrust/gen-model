@@ -7,18 +7,18 @@ use serde_json::json;
 use std::time::SystemTime;
 
 use crate::web_ui::{
-    models::{
-        DbStatusInfo, DbStatusQuery, FileVersionInfo, IncrementalUpdateRequest,
-        ModelStatus, ParseStatus, MeshStatus, UpdateType,
-    },
     AppState,
+    models::{
+        DbStatusInfo, DbStatusQuery, FileVersionInfo, IncrementalUpdateRequest, MeshStatus,
+        ModelStatus, ParseStatus, UpdateType,
+    },
 };
 
 // 引入真实实现作为委托
+use crate::fast_model::session::{PdmsTimeExtractor, SESSION_STORE};
 use crate::web_ui::handlers as real_handlers;
-use crate::fast_model::session::{SESSION_STORE, PdmsTimeExtractor};
-use aios_core::get_db_option;
 use aios_core::SUL_DB;
+use aios_core::get_db_option;
 
 pub async fn get_db_status_list(
     State(_state): State<AppState>,
@@ -38,15 +38,23 @@ pub async fn get_db_status_list(
                     // 过滤条件
                     let mut include = true;
                     if let Some(ref project) = params.project {
-                        if db_status.project != *project { include = false; }
+                        if db_status.project != *project {
+                            include = false;
+                        }
                     }
                     if let Some(ref db_type) = params.db_type {
-                        if !db_type.is_empty() && db_status.db_type != *db_type { include = false; }
+                        if !db_type.is_empty() && db_status.db_type != *db_type {
+                            include = false;
+                        }
                     }
                     if let Some(true) = params.needs_update_only {
-                        if !db_status.needs_update { include = false; }
+                        if !db_status.needs_update {
+                            include = false;
+                        }
                     }
-                    if include { db_statuses.push(db_status); }
+                    if include {
+                        db_statuses.push(db_status);
+                    }
                 }
             }
         }
@@ -85,24 +93,20 @@ pub async fn get_db_status_detail(
             let rows: Vec<serde_json::Value> = response.take(0).unwrap_or_default();
             if let Some(row) = rows.into_iter().next() {
                 if let Some(info) = convert_row_to_status(row).await {
-                    let change_log = vec![
-                        json!({
-                            "version": info.sesno,
-                            "date": "",
-                            "changes": "",
-                            "records_changed": info.count
-                        })
-                    ];
+                    let change_log = vec![json!({
+                        "version": info.sesno,
+                        "date": "",
+                        "changes": "",
+                        "records_changed": info.count
+                    })];
 
-                    let related_files = vec![
-                        json!({
-                            "file_type": "Source",
-                            "file_path": info.file_version.as_ref().map(|f| f.file_path.clone()).unwrap_or_default(),
-                            "size": info.file_version.as_ref().map(|f| f.file_size).unwrap_or(0),
-                            "modified": "",
-                            "exists": info.file_version.as_ref().map(|f| f.exists).unwrap_or(false)
-                        })
-                    ];
+                    let related_files = vec![json!({
+                        "file_type": "Source",
+                        "file_path": info.file_version.as_ref().map(|f| f.file_path.clone()).unwrap_or_default(),
+                        "size": info.file_version.as_ref().map(|f| f.file_size).unwrap_or(0),
+                        "modified": "",
+                        "exists": info.file_version.as_ref().map(|f| f.exists).unwrap_or(false)
+                    })];
 
                     return Ok(Json(json!({
                         "status": "success",
@@ -138,14 +142,21 @@ pub async fn check_file_versions(
 
 // 设置/取消自动更新选项
 #[derive(serde::Deserialize)]
-pub struct AutoUpdateRequest { pub auto_update: bool }
+pub struct AutoUpdateRequest {
+    pub auto_update: bool,
+}
 
 pub async fn set_auto_update(
     Path(dbnum): Path<u32>,
     Json(req): Json<AutoUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if std::env::var("WEBUI_SUR_WRITE").map(|v| v == "0").unwrap_or(false) {
-        return Ok(Json(json!({"status":"skipped","message":"SurrealDB write disabled by env WEBUI_SUR_WRITE=0"})));
+    if std::env::var("WEBUI_SUR_WRITE")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
+        return Ok(Json(
+            json!({"status":"skipped","message":"SurrealDB write disabled by env WEBUI_SUR_WRITE=0"}),
+        ));
     }
     let sql = format!(
         "UPDATE dbnum_info_table SET auto_update = {} WHERE dbnum = {}",
@@ -153,32 +164,45 @@ pub async fn set_auto_update(
         dbnum
     );
     match SUL_DB.query(sql).await {
-        Ok(_) => Ok(Json(json!({"status":"success","dbnum":dbnum,"auto_update":req.auto_update}))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Ok(_) => Ok(Json(
+            json!({"status":"success","dbnum":dbnum,"auto_update":req.auto_update}),
+        )),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 #[derive(serde::Deserialize)]
-pub struct AutoUpdateTypeRequest { pub auto_update_type: String }
+pub struct AutoUpdateTypeRequest {
+    pub auto_update_type: String,
+}
 
 pub async fn set_auto_update_type(
     Path(dbnum): Path<u32>,
     Json(req): Json<AutoUpdateTypeRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if std::env::var("WEBUI_SUR_WRITE").map(|v| v == "0").unwrap_or(false) {
-        return Ok(Json(json!({"status":"skipped","message":"SurrealDB write disabled by env WEBUI_SUR_WRITE=0"})));
+    if std::env::var("WEBUI_SUR_WRITE")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
+        return Ok(Json(
+            json!({"status":"skipped","message":"SurrealDB write disabled by env WEBUI_SUR_WRITE=0"}),
+        ));
     }
     let t = req.auto_update_type;
     if !matches!(t.as_str(), "ParseOnly" | "ParseAndModel" | "Full") {
-        return Ok(Json(json!({"status":"error","message":"invalid auto_update_type"})));
+        return Ok(Json(
+            json!({"status":"error","message":"invalid auto_update_type"}),
+        ));
     }
     let sql = format!(
         "UPDATE dbnum_info_table SET auto_update_type = '{}' WHERE dbnum = {}",
         t, dbnum
     );
     match SUL_DB.query(sql).await {
-        Ok(_) => Ok(Json(json!({"status":"success","dbnum":dbnum,"auto_update_type":t}))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Ok(_) => Ok(Json(
+            json!({"status":"success","dbnum":dbnum,"auto_update_type":t}),
+        )),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -192,7 +216,11 @@ async fn convert_row_to_status(row: serde_json::Value) -> Option<DbStatusInfo> {
 
     // 查询解析计数（以 pe 表为准）
     let count = query_count_pe(dbnum).await.unwrap_or(0);
-    let parse_status = if count > 0 { ParseStatus::Parsed } else { ParseStatus::NotParsed };
+    let parse_status = if count > 0 {
+        ParseStatus::Parsed
+    } else {
+        ParseStatus::NotParsed
+    };
 
     let model_status = check_model_status(dbnum).await;
     let mesh_status = match model_status {
@@ -251,14 +279,20 @@ async fn check_model_status(dbnum: u32) -> ModelStatus {
     match SUL_DB.query(sql).await {
         Ok(mut response) => {
             let counts: Vec<u64> = response.take(0).unwrap_or_default();
-            if counts.first().copied().unwrap_or(0) > 0 { ModelStatus::Generated } else { ModelStatus::NotGenerated }
+            if counts.first().copied().unwrap_or(0) > 0 {
+                ModelStatus::Generated
+            } else {
+                ModelStatus::NotGenerated
+            }
         }
         Err(_) => ModelStatus::NotGenerated,
     }
 }
 
 async fn get_file_version_info(file_name: &str, _project: &str) -> Option<FileVersionInfo> {
-    if file_name.is_empty() { return None; }
+    if file_name.is_empty() {
+        return None;
+    }
     let file_path = format!("/data/{}", file_name);
     if let Ok(metadata) = std::fs::metadata(&file_path) {
         Some(FileVersionInfo {
@@ -366,10 +400,14 @@ pub async fn scan_local_files() -> Result<Json<serde_json::Value>, StatusCode> {
 }
 
 #[derive(serde::Deserialize)]
-pub struct SyncFileMetadataRequest { pub dbnums: Option<Vec<u32>> }
+pub struct SyncFileMetadataRequest {
+    pub dbnums: Option<Vec<u32>>,
+}
 
 // 将本地扫描到的 file_sesno 写入 SurrealDB（持久化文件侧版本），便于后续对比
-pub async fn sync_file_metadata(Json(req): Json<SyncFileMetadataRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn sync_file_metadata(
+    Json(req): Json<SyncFileMetadataRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     // 查询列表
     let sql = "SELECT dbnum, project FROM dbnum_info_table ORDER BY dbnum";
     let (rows,): (Vec<serde_json::Value>,) = match SUL_DB.query(sql).await {
@@ -381,11 +419,16 @@ pub async fn sync_file_metadata(Json(req): Json<SyncFileMetadataRequest>) -> Res
     for row in rows.into_iter() {
         let dbnum = row["dbnum"].as_u64().unwrap_or(0) as u32;
         if let Some(ref only) = req.dbnums {
-            if !only.contains(&dbnum) { continue; }
+            if !only.contains(&dbnum) {
+                continue;
+            }
         }
         let project = row["project"].as_str().unwrap_or("");
         if let Some(file_sesno) = get_latest_sesno_from_file(project, dbnum) {
-            updates.push_str(&format!("UPDATE dbnum_info_table SET file_sesno = {} WHERE dbnum = {};", file_sesno, dbnum));
+            updates.push_str(&format!(
+                "UPDATE dbnum_info_table SET file_sesno = {} WHERE dbnum = {};",
+                file_sesno, dbnum
+            ));
         }
     }
 
@@ -397,7 +440,9 @@ pub async fn sync_file_metadata(Json(req): Json<SyncFileMetadataRequest>) -> Res
 }
 
 // 扫描并写入到本地 redb（SESSION_STORE），作为本地缓存基线
-pub async fn rescan_and_cache(Json(req): Json<SyncFileMetadataRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn rescan_and_cache(
+    Json(req): Json<SyncFileMetadataRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let sql = "SELECT dbnum, project FROM dbnum_info_table ORDER BY dbnum";
     let (rows,): (Vec<serde_json::Value>,) = match SUL_DB.query(sql).await {
         Ok(mut resp) => (resp.take(0).unwrap_or_default(),),
@@ -412,10 +457,17 @@ pub async fn rescan_and_cache(Json(req): Json<SyncFileMetadataRequest>) -> Resul
 
     for row in rows.into_iter() {
         let dbnum = row["dbnum"].as_u64().unwrap_or(0) as u32;
-        if let Some(ref only) = req.dbnums { if !only.contains(&dbnum) { continue; } }
+        if let Some(ref only) = req.dbnums {
+            if !only.contains(&dbnum) {
+                continue;
+            }
+        }
         let project = row["project"].as_str().unwrap_or("");
         if let Some(file_sesno) = get_latest_sesno_from_file(project, dbnum) {
-            if SESSION_STORE.put_sesno_time_mapping(dbnum, file_sesno, now_secs).is_ok() {
+            if SESSION_STORE
+                .put_sesno_time_mapping(dbnum, file_sesno, now_secs)
+                .is_ok()
+            {
                 updated += 1;
             }
         }

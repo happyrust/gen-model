@@ -1,33 +1,30 @@
-use std::sync::Arc;
-use std::time::{SystemTime, Instant};
+use aios_core::pdms_types::{RefU64, RefnoEnum};
+use nalgebra::Point3;
+use parry3d::bounding_volume::Aabb;
+use rstar::{AABB, RTree, RTreeObject};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
-use rstar::{RTree, RTreeObject, AABB};
-use parry3d::bounding_volume::Aabb;
-use nalgebra::Point3;
-use serde::{Serialize, Deserialize};
-use aios_core::pdms_types::{RefU64, RefnoEnum};
 
-use crate::grpc_service::spatial_index_builder::{
-    SpatialIndexBuilder, SpatialIndexConfig, SpatialIndexPersistence
-};
 use crate::grpc_service::sctn_contact_detector::{
-    SctnContactDetector, BatchSctnDetector, CableTraySection,
-    ContactResult as SctnContactResult, ContactType as SctnContactType,
-    SupportRelation as SctnSupportRelation, SupportType as SctnSupportType,
+    BatchSctnDetector, CableTraySection, ContactResult as SctnContactResult,
+    ContactType as SctnContactType, SctnContactDetector, SupportRelation as SctnSupportRelation,
+    SupportType as SctnSupportType,
 };
 use crate::grpc_service::sctn_geometry_extractor::SctnGeometryExtractor;
+use crate::grpc_service::spatial_index_builder::{
+    SpatialIndexBuilder, SpatialIndexConfig, SpatialIndexPersistence,
+};
 
 // 引入生成的 protobuf 代码
 pub mod spatial_query {
     tonic::include_proto!("spatial_query");
 }
 
-use spatial_query::{
-    spatial_query_service_server::SpatialQueryService,
-    *,
-};
+use spatial_query::{spatial_query_service_server::SpatialQueryService, *};
 
 /// 空间元素结构体，用于 R-star 树索引
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,13 +70,17 @@ impl SpatialQueryServiceImpl {
     /// 使用预构建的索引文件创建服务
     pub async fn from_index_file(index_file: impl AsRef<Path>) -> anyhow::Result<Self> {
         let index_path = index_file.as_ref().to_path_buf();
-        
+
         if !SpatialIndexPersistence::is_valid_index_file(&index_path) {
             return Err(anyhow::anyhow!("无效的索引文件: {:?}", index_path));
         }
 
         let (spatial_index, _statistics) = SpatialIndexPersistence::load_index(&index_path)?;
-        log::info!("从文件加载空间索引: {:?}, 元素数量: {}", index_path, spatial_index.size());
+        log::info!(
+            "从文件加载空间索引: {:?}, 元素数量: {}",
+            index_path,
+            spatial_index.size()
+        );
 
         Ok(Self {
             spatial_index: Arc::new(RwLock::new(spatial_index)),
@@ -91,7 +92,7 @@ impl SpatialQueryServiceImpl {
 
     /// 使用数据库管理器创建服务（支持动态重建）
     pub async fn with_db_manager(
-        db_manager: Arc<crate::data_interface::tidb_manager::AiosDBManager>
+        db_manager: Arc<crate::data_interface::tidb_manager::AiosDBManager>,
     ) -> anyhow::Result<Self> {
         let spatial_index = Self::build_initial_index().await?;
 
@@ -120,7 +121,9 @@ impl SpatialQueryServiceImpl {
 
             // 如果设置了文件路径，保存索引
             if let Some(ref file_path) = self.index_file_path {
-                if let Err(e) = SpatialIndexPersistence::save_index(&spatial_index, &statistics, file_path) {
+                if let Err(e) =
+                    SpatialIndexPersistence::save_index(&spatial_index, &statistics, file_path)
+                {
                     log::warn!("保存索引文件失败: {:?}, 错误: {}", file_path, e);
                 }
             }
@@ -156,10 +159,7 @@ impl SpatialQueryServiceImpl {
         // 创建一些测试数据
         elements.push(SpatialElement {
             refno: RefU64(1001),
-            bbox: Aabb::new(
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(1.0, 1.0, 1.0),
-            ),
+            bbox: Aabb::new(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
             element_type: "PIPE".to_string(),
             element_name: "管道001".to_string(),
             last_updated: SystemTime::now(),
@@ -167,10 +167,7 @@ impl SpatialQueryServiceImpl {
 
         elements.push(SpatialElement {
             refno: RefU64(1002),
-            bbox: Aabb::new(
-                Point3::new(0.5, 0.5, 0.5),
-                Point3::new(1.5, 1.5, 1.5),
-            ),
+            bbox: Aabb::new(Point3::new(0.5, 0.5, 0.5), Point3::new(1.5, 1.5, 1.5)),
             element_type: "EQUI".to_string(),
             element_name: "设备001".to_string(),
             last_updated: SystemTime::now(),
@@ -178,10 +175,7 @@ impl SpatialQueryServiceImpl {
 
         elements.push(SpatialElement {
             refno: RefU64(1003),
-            bbox: Aabb::new(
-                Point3::new(2.0, 2.0, 2.0),
-                Point3::new(3.0, 3.0, 3.0),
-            ),
+            bbox: Aabb::new(Point3::new(2.0, 2.0, 2.0), Point3::new(3.0, 3.0, 3.0)),
             element_type: "PIPE".to_string(),
             element_name: "管道002".to_string(),
             last_updated: SystemTime::now(),
@@ -189,10 +183,7 @@ impl SpatialQueryServiceImpl {
 
         elements.push(SpatialElement {
             refno: RefU64(1004),
-            bbox: Aabb::new(
-                Point3::new(0.8, 0.8, 0.8),
-                Point3::new(2.2, 2.2, 2.2),
-            ),
+            bbox: Aabb::new(Point3::new(0.8, 0.8, 0.8), Point3::new(2.2, 2.2, 2.2)),
             element_type: "STRU".to_string(),
             element_name: "结构001".to_string(),
             last_updated: SystemTime::now(),
@@ -234,17 +225,31 @@ impl SpatialQueryServiceImpl {
                 .expect("Failed to open spatial index");
             if let Ok(ids) = spatial_index.query_intersect(&expanded_bbox) {
                 for id in ids {
-                    if !include_self && id == target_refno { continue; }
+                    if !include_self && id == target_refno {
+                        continue;
+                    }
                     if let Ok(Some(bbox)) = spatial_index.get_aabb(id) {
                         let element_center = (bbox.mins.coords + bbox.maxs.coords) * 0.5;
                         let distance = (target_center - element_center).norm();
-                        let intersection_volume = self.calculate_intersection_volume(&target_bbox, &bbox);
+                        let intersection_volume =
+                            self.calculate_intersection_volume(&target_bbox, &bbox);
                         intersecting.push(IntersectingElement {
                             refno: id.0,
-                            element_type: element_types.get(0).cloned().unwrap_or_else(|| "UNK".to_string()),
+                            element_type: element_types
+                                .get(0)
+                                .cloned()
+                                .unwrap_or_else(|| "UNK".to_string()),
                             bbox: Some(BoundingBox {
-                                min: Some(Point3D { x: bbox.mins.x, y: bbox.mins.y, z: bbox.mins.z }),
-                                max: Some(Point3D { x: bbox.maxs.x, y: bbox.maxs.y, z: bbox.maxs.z }),
+                                min: Some(Point3D {
+                                    x: bbox.mins.x,
+                                    y: bbox.mins.y,
+                                    z: bbox.mins.z,
+                                }),
+                                max: Some(Point3D {
+                                    x: bbox.maxs.x,
+                                    y: bbox.maxs.y,
+                                    z: bbox.maxs.z,
+                                }),
                             }),
                             intersection_volume,
                             distance_to_center: distance,
@@ -258,26 +263,48 @@ impl SpatialQueryServiceImpl {
         if intersecting.is_empty() {
             let spatial_index = self.spatial_index.read().await;
             let query_envelope = AABB::from_corners(
-                [expanded_bbox.mins.x, expanded_bbox.mins.y, expanded_bbox.mins.z],
-                [expanded_bbox.maxs.x, expanded_bbox.maxs.y, expanded_bbox.maxs.z],
+                [
+                    expanded_bbox.mins.x,
+                    expanded_bbox.mins.y,
+                    expanded_bbox.mins.z,
+                ],
+                [
+                    expanded_bbox.maxs.x,
+                    expanded_bbox.maxs.y,
+                    expanded_bbox.maxs.z,
+                ],
             );
             intersecting = spatial_index
                 .locate_in_envelope_intersecting(&query_envelope)
                 .filter(|element| {
-                    if !include_self && element.refno == target_refno { return false; }
-                    if !element_types.is_empty() && !element_types.contains(&element.element_type) { return false; }
+                    if !include_self && element.refno == target_refno {
+                        return false;
+                    }
+                    if !element_types.is_empty() && !element_types.contains(&element.element_type) {
+                        return false;
+                    }
                     true
                 })
                 .map(|element| {
-                    let element_center = (element.bbox.mins.coords + element.bbox.maxs.coords) * 0.5;
+                    let element_center =
+                        (element.bbox.mins.coords + element.bbox.maxs.coords) * 0.5;
                     let distance = (target_center - element_center).norm();
-                    let intersection_volume = self.calculate_intersection_volume(&target_bbox, &element.bbox);
+                    let intersection_volume =
+                        self.calculate_intersection_volume(&target_bbox, &element.bbox);
                     IntersectingElement {
                         refno: element.refno.0,
                         element_type: element.element_type.clone(),
                         bbox: Some(BoundingBox {
-                            min: Some(Point3D { x: element.bbox.mins.x, y: element.bbox.mins.y, z: element.bbox.mins.z }),
-                            max: Some(Point3D { x: element.bbox.maxs.x, y: element.bbox.maxs.y, z: element.bbox.maxs.z }),
+                            min: Some(Point3D {
+                                x: element.bbox.mins.x,
+                                y: element.bbox.mins.y,
+                                z: element.bbox.mins.z,
+                            }),
+                            max: Some(Point3D {
+                                x: element.bbox.maxs.x,
+                                y: element.bbox.maxs.y,
+                                z: element.bbox.maxs.z,
+                            }),
                         }),
                         intersection_volume,
                         distance_to_center: distance,
@@ -288,7 +315,11 @@ impl SpatialQueryServiceImpl {
         }
 
         // 4. 按距离排序并限制结果数量
-        intersecting.sort_by(|a, b| a.distance_to_center.partial_cmp(&b.distance_to_center).unwrap_or(std::cmp::Ordering::Equal));
+        intersecting.sort_by(|a, b| {
+            a.distance_to_center
+                .partial_cmp(&b.distance_to_center)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         intersecting.truncate(max_results as usize);
 
         Ok(intersecting)
@@ -349,8 +380,16 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
             )
         });
 
-        let tolerance = if req.tolerance > 0.0 { req.tolerance } else { 0.001 };
-        let max_results = if req.max_results > 0 { req.max_results } else { 1000 };
+        let tolerance = if req.tolerance > 0.0 {
+            req.tolerance
+        } else {
+            0.001
+        };
+        let max_results = if req.max_results > 0 {
+            req.max_results
+        } else {
+            1000
+        };
 
         match self
             .query_intersecting_elements(
@@ -374,15 +413,13 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
                     error_message: String::new(),
                 }))
             }
-            Err(e) => {
-                Ok(Response::new(SpatialQueryResponse {
-                    elements: vec![],
-                    total_count: 0,
-                    query_time_ms: start_time.elapsed().as_millis().to_string(),
-                    success: false,
-                    error_message: e.to_string(),
-                }))
-            }
+            Err(e) => Ok(Response::new(SpatialQueryResponse {
+                elements: vec![],
+                total_count: 0,
+                query_time_ms: start_time.elapsed().as_millis().to_string(),
+                success: false,
+                error_message: e.to_string(),
+            })),
         }
     }
 
@@ -452,14 +489,12 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
                     rebuild_time_ms: start_time.elapsed().as_millis().to_string(),
                 }))
             }
-            Err(e) => {
-                Ok(Response::new(RebuildIndexResponse {
-                    success: false,
-                    message: format!("Rebuild failed: {}", e),
-                    indexed_elements: 0,
-                    rebuild_time_ms: start_time.elapsed().as_millis().to_string(),
-                }))
-            }
+            Err(e) => Ok(Response::new(RebuildIndexResponse {
+                success: false,
+                message: format!("Rebuild failed: {}", e),
+                indexed_elements: 0,
+                rebuild_time_ms: start_time.elapsed().as_millis().to_string(),
+            })),
         }
     }
 
@@ -532,7 +567,10 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
         };
 
         // 执行接触检测
-        match detector.detect_sctn_contacts(&sctn, &req.target_types, req.include_proximity).await {
+        match detector
+            .detect_sctn_contacts(&sctn, &req.target_types, req.include_proximity)
+            .await
+        {
             Ok(results) => {
                 let contacts: Vec<ContactInfo> = results
                     .into_iter()
@@ -541,9 +579,14 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
                         target_refno: refno.0,
                         target_type: "UNKNOWN".to_string(), // TODO: 获取实际类型
                         contact_type: convert_contact_type(contact.contact_type) as i32,
-                        contact_points: contact.contact_points
+                        contact_points: contact
+                            .contact_points
                             .into_iter()
-                            .map(|p| Point3D { x: p.x, y: p.y, z: p.z })
+                            .map(|p| Point3D {
+                                x: p.x,
+                                y: p.y,
+                                z: p.z,
+                            })
                             .collect(),
                         contact_normal: Some(Vector3D {
                             x: contact.contact_normal.x,
@@ -567,15 +610,13 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
                     error_message: String::new(),
                 }))
             }
-            Err(e) => {
-                Ok(Response::new(SctnContactResponse {
-                    contacts: vec![],
-                    total_contacts: 0,
-                    query_time_ms: start_time.elapsed().as_millis().to_string(),
-                    success: false,
-                    error_message: e.to_string(),
-                }))
-            }
+            Err(e) => Ok(Response::new(SctnContactResponse {
+                contacts: vec![],
+                total_contacts: 0,
+                query_time_ms: start_time.elapsed().as_millis().to_string(),
+                success: false,
+                error_message: e.to_string(),
+            })),
         }
     }
 
@@ -645,14 +686,19 @@ impl SpatialQueryService for SpatialQueryServiceImpl {
         };
 
         // 获取桥架分支下的所有SCTN
-        let sctns = self.get_branch_sections(RefU64(req.bran_refno)).await
+        let sctns = self
+            .get_branch_sections(RefU64(req.bran_refno))
+            .await
             .unwrap_or_else(|_| vec![]);
 
         let mut all_relations = Vec::new();
-        
+
         // 检测每个SCTN的支撑关系
         for sctn in sctns {
-            match detector.detect_support_relationships(&sctn, req.max_distance).await {
+            match detector
+                .detect_support_relationships(&sctn, req.max_distance)
+                .await
+            {
                 Ok(relations) => {
                     for rel in relations {
                         all_relations.push(SupportRelation {
@@ -715,7 +761,7 @@ impl SpatialQueryServiceImpl {
             let extractor = SctnGeometryExtractor::new(db_manager.clone());
             return extractor.extract_sctn_geometry(refno).await;
         }
-        
+
         // 如果没有数据库管理器，尝试从空间索引获取基本信息
         let spatial_index = self.spatial_index.read().await;
         for element in spatial_index.iter() {
@@ -734,17 +780,20 @@ impl SpatialQueryServiceImpl {
                 });
             }
         }
-        
+
         Err(anyhow::anyhow!("SCTN {} not found", refno.0))
     }
 
     /// 获取桥架分支下的所有SCTN - 使用真实数据
-    async fn get_branch_sections(&self, bran_refno: RefU64) -> anyhow::Result<Vec<CableTraySection>> {
+    async fn get_branch_sections(
+        &self,
+        bran_refno: RefU64,
+    ) -> anyhow::Result<Vec<CableTraySection>> {
         if let Some(ref db_manager) = self.db_manager {
             let extractor = SctnGeometryExtractor::new(db_manager.clone());
             return extractor.extract_branch_sections(bran_refno).await;
         }
-        
+
         // 没有数据库连接时返回空
         Ok(vec![])
     }

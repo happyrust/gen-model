@@ -4,8 +4,8 @@
 use super::*;
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
-use flate2::{write::ZlibEncoder, Compression};
-use std::io::{Write, Cursor};
+use flate2::{Compression, write::ZlibEncoder};
+use std::io::{Cursor, Write};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
@@ -29,15 +29,16 @@ impl XKTWriter {
         // 2. 构建并写入索引
         let index = self.build_index(model)?;
         let index_data = index.serialize()?;
-        
+
         // 写入索引大小
         file.write_u32_le(index_data.len() as u32).await?;
-        
+
         // 写入索引数据
         file.write_all(&index_data).await?;
 
         // 3. 写入压缩的数据段
-        self.write_compressed_data_sections(&mut file, model).await?;
+        self.write_compressed_data_sections(&mut file, model)
+            .await?;
 
         file.flush().await?;
         Ok(())
@@ -52,13 +53,16 @@ impl XKTWriter {
         let normals_data = self.serialize_normals(&model.geometries.normals)?;
         let indices_data = self.serialize_indices(&model.geometries.indices)?;
         let edge_indices_data = self.serialize_edge_indices(&model.geometries.edge_indices)?;
-        let decode_matrices_data = self.serialize_decode_matrices(&model.geometries.decode_matrices)?;
+        let decode_matrices_data =
+            self.serialize_decode_matrices(&model.geometries.decode_matrices)?;
 
         // 序列化基元数据
         let primitive_positions_portions = self.serialize_primitive_positions_portions(model)?;
         let primitive_indices_portions = self.serialize_primitive_indices_portions(model)?;
-        let primitive_edge_indices_portions = self.serialize_primitive_edge_indices_portions(model)?;
-        let primitive_decode_matrices_portions = self.serialize_primitive_decode_matrices_portions(model)?;
+        let primitive_edge_indices_portions =
+            self.serialize_primitive_edge_indices_portions(model)?;
+        let primitive_decode_matrices_portions =
+            self.serialize_primitive_decode_matrices_portions(model)?;
         let primitive_colors = self.serialize_primitive_colors(model)?;
 
         // 序列化实例数据
@@ -66,7 +70,8 @@ impl XKTWriter {
 
         // 序列化实体数据
         let entity_ids = self.serialize_entity_ids(model)?;
-        let entity_primitive_instances_portions = self.serialize_entity_primitive_instances_portions(model)?;
+        let entity_primitive_instances_portions =
+            self.serialize_entity_primitive_instances_portions(model)?;
         let entity_matrices = self.serialize_entity_matrices(model)?;
 
         // 压缩数据并计算大小
@@ -76,35 +81,38 @@ impl XKTWriter {
         index.size_edge_indices = self.compress_data(&edge_indices_data)?.len() as u32;
         index.size_decode_matrices = self.compress_data(&decode_matrices_data)?.len() as u32;
 
-        index.size_each_primitive_positions_and_normals_portion = 
+        index.size_each_primitive_positions_and_normals_portion =
             self.compress_data(&primitive_positions_portions)?.len() as u32;
-        index.size_each_primitive_indices_portion = 
+        index.size_each_primitive_indices_portion =
             self.compress_data(&primitive_indices_portions)?.len() as u32;
-        index.size_each_primitive_edge_indices_portion = 
+        index.size_each_primitive_edge_indices_portion =
             self.compress_data(&primitive_edge_indices_portions)?.len() as u32;
-        index.size_each_primitive_decode_matrices_portion = 
-            self.compress_data(&primitive_decode_matrices_portions)?.len() as u32;
-        index.size_each_primitive_color = 
-            self.compress_data(&primitive_colors)?.len() as u32;
+        index.size_each_primitive_decode_matrices_portion = self
+            .compress_data(&primitive_decode_matrices_portions)?
+            .len() as u32;
+        index.size_each_primitive_color = self.compress_data(&primitive_colors)?.len() as u32;
 
-        index.size_primitive_instances = 
-            self.compress_data(&primitive_instances)?.len() as u32;
+        index.size_primitive_instances = self.compress_data(&primitive_instances)?.len() as u32;
 
-        index.size_each_entity_id = 
-            self.compress_data(&entity_ids)?.len() as u32;
-        index.size_each_entity_primitive_instances_portion = 
-            self.compress_data(&entity_primitive_instances_portions)?.len() as u32;
-        index.size_each_entity_matrix = 
-            self.compress_data(&entity_matrices)?.len() as u32;
+        index.size_each_entity_id = self.compress_data(&entity_ids)?.len() as u32;
+        index.size_each_entity_primitive_instances_portion = self
+            .compress_data(&entity_primitive_instances_portions)?
+            .len() as u32;
+        index.size_each_entity_matrix = self.compress_data(&entity_matrices)?.len() as u32;
 
         Ok(index)
     }
 
     /// 写入压缩的数据段
-    async fn write_compressed_data_sections(&self, file: &mut File, model: &XKTModel) -> Result<()> {
+    async fn write_compressed_data_sections(
+        &self,
+        file: &mut File,
+        model: &XKTModel,
+    ) -> Result<()> {
         // 几何数据
         let positions_data = self.serialize_positions(&model.geometries.positions)?;
-        file.write_all(&self.compress_data(&positions_data)?).await?;
+        file.write_all(&self.compress_data(&positions_data)?)
+            .await?;
 
         let normals_data = self.serialize_normals(&model.geometries.normals)?;
         file.write_all(&self.compress_data(&normals_data)?).await?;
@@ -113,40 +121,54 @@ impl XKTWriter {
         file.write_all(&self.compress_data(&indices_data)?).await?;
 
         let edge_indices_data = self.serialize_edge_indices(&model.geometries.edge_indices)?;
-        file.write_all(&self.compress_data(&edge_indices_data)?).await?;
+        file.write_all(&self.compress_data(&edge_indices_data)?)
+            .await?;
 
-        let decode_matrices_data = self.serialize_decode_matrices(&model.geometries.decode_matrices)?;
-        file.write_all(&self.compress_data(&decode_matrices_data)?).await?;
+        let decode_matrices_data =
+            self.serialize_decode_matrices(&model.geometries.decode_matrices)?;
+        file.write_all(&self.compress_data(&decode_matrices_data)?)
+            .await?;
 
         // 基元数据
         let primitive_positions_portions = self.serialize_primitive_positions_portions(model)?;
-        file.write_all(&self.compress_data(&primitive_positions_portions)?).await?;
+        file.write_all(&self.compress_data(&primitive_positions_portions)?)
+            .await?;
 
         let primitive_indices_portions = self.serialize_primitive_indices_portions(model)?;
-        file.write_all(&self.compress_data(&primitive_indices_portions)?).await?;
+        file.write_all(&self.compress_data(&primitive_indices_portions)?)
+            .await?;
 
-        let primitive_edge_indices_portions = self.serialize_primitive_edge_indices_portions(model)?;
-        file.write_all(&self.compress_data(&primitive_edge_indices_portions)?).await?;
+        let primitive_edge_indices_portions =
+            self.serialize_primitive_edge_indices_portions(model)?;
+        file.write_all(&self.compress_data(&primitive_edge_indices_portions)?)
+            .await?;
 
-        let primitive_decode_matrices_portions = self.serialize_primitive_decode_matrices_portions(model)?;
-        file.write_all(&self.compress_data(&primitive_decode_matrices_portions)?).await?;
+        let primitive_decode_matrices_portions =
+            self.serialize_primitive_decode_matrices_portions(model)?;
+        file.write_all(&self.compress_data(&primitive_decode_matrices_portions)?)
+            .await?;
 
         let primitive_colors = self.serialize_primitive_colors(model)?;
-        file.write_all(&self.compress_data(&primitive_colors)?).await?;
+        file.write_all(&self.compress_data(&primitive_colors)?)
+            .await?;
 
         // 实例数据
         let primitive_instances = self.serialize_primitive_instances(model)?;
-        file.write_all(&self.compress_data(&primitive_instances)?).await?;
+        file.write_all(&self.compress_data(&primitive_instances)?)
+            .await?;
 
         // 实体数据
         let entity_ids = self.serialize_entity_ids(model)?;
         file.write_all(&self.compress_data(&entity_ids)?).await?;
 
-        let entity_primitive_instances_portions = self.serialize_entity_primitive_instances_portions(model)?;
-        file.write_all(&self.compress_data(&entity_primitive_instances_portions)?).await?;
+        let entity_primitive_instances_portions =
+            self.serialize_entity_primitive_instances_portions(model)?;
+        file.write_all(&self.compress_data(&entity_primitive_instances_portions)?)
+            .await?;
 
         let entity_matrices = self.serialize_entity_matrices(model)?;
-        file.write_all(&self.compress_data(&entity_matrices)?).await?;
+        file.write_all(&self.compress_data(&entity_matrices)?)
+            .await?;
 
         Ok(())
     }
@@ -239,14 +261,19 @@ impl XKTWriter {
 
     /// 序列化基元实例 (Uint32[])
     fn serialize_primitive_instances(&self, model: &XKTModel) -> Result<Vec<u8>> {
-        let total_instances: usize = model.entities.iter()
+        let total_instances: usize = model
+            .entities
+            .iter()
             .map(|e| e.primitive_instances.len())
             .sum();
-        
+
         let mut buffer = Vec::with_capacity(total_instances * 4);
         for entity in &model.entities {
             for instance in &entity.primitive_instances {
-                WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, instance.primitive_id as u32)?;
+                WriteBytesExt::write_u32::<LittleEndian>(
+                    &mut buffer,
+                    instance.primitive_id as u32,
+                )?;
             }
         }
         Ok(buffer)
@@ -263,7 +290,7 @@ impl XKTWriter {
     fn serialize_entity_primitive_instances_portions(&self, model: &XKTModel) -> Result<Vec<u8>> {
         let mut buffer = Vec::with_capacity(model.entities.len() * 4);
         let mut current_portion = 0u32;
-        
+
         for entity in &model.entities {
             WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, current_portion)?;
             current_portion += entity.primitive_instances.len() as u32;
@@ -285,10 +312,7 @@ impl XKTWriter {
 
     /// 使用 zlib 压缩数据
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = ZlibEncoder::new(
-            Vec::new(),
-            Compression::new(self.compression_level)
-        );
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(self.compression_level));
         encoder.write_all(data)?;
         Ok(encoder.finish()?)
     }
@@ -336,22 +360,37 @@ impl XKTIndex {
     /// 序列化索引为字节数组
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::with_capacity(14 * 4); // 14个 u32 字段
-        
+
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_positions)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_normals)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_indices)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_edge_indices)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_decode_matrices)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_primitive_positions_and_normals_portion)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_primitive_indices_portion)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_primitive_edge_indices_portion)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_primitive_decode_matrices_portion)?;
+        WriteBytesExt::write_u32::<LittleEndian>(
+            &mut buffer,
+            self.size_each_primitive_positions_and_normals_portion,
+        )?;
+        WriteBytesExt::write_u32::<LittleEndian>(
+            &mut buffer,
+            self.size_each_primitive_indices_portion,
+        )?;
+        WriteBytesExt::write_u32::<LittleEndian>(
+            &mut buffer,
+            self.size_each_primitive_edge_indices_portion,
+        )?;
+        WriteBytesExt::write_u32::<LittleEndian>(
+            &mut buffer,
+            self.size_each_primitive_decode_matrices_portion,
+        )?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_primitive_color)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_primitive_instances)?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_entity_id)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_entity_primitive_instances_portion)?;
+        WriteBytesExt::write_u32::<LittleEndian>(
+            &mut buffer,
+            self.size_each_entity_primitive_instances_portion,
+        )?;
         WriteBytesExt::write_u32::<LittleEndian>(&mut buffer, self.size_each_entity_matrix)?;
-        
+
         Ok(buffer)
     }
 }

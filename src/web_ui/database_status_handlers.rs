@@ -1,11 +1,11 @@
 use axum::{
-    extract::{Query, State, Path},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::web_ui::AppState;
@@ -201,13 +201,22 @@ pub async fn get_all_database_status(
 
     // 统计信息
     let total = databases.len();
-    let parsed_count = databases.iter().filter(|db| matches!(db.parse_status, ProcessStatus::Completed)).count();
-    let generated_count = databases.iter().filter(|db| matches!(db.model_status, ProcessStatus::Completed)).count();
+    let parsed_count = databases
+        .iter()
+        .filter(|db| matches!(db.parse_status, ProcessStatus::Completed))
+        .count();
+    let generated_count = databases
+        .iter()
+        .filter(|db| matches!(db.model_status, ProcessStatus::Completed))
+        .count();
     let needs_update_count = databases.iter().filter(|db| db.needs_update).count();
-    let failed_count = databases.iter().filter(|db|
-        matches!(db.parse_status, ProcessStatus::Failed) ||
-        matches!(db.model_status, ProcessStatus::Failed)
-    ).count();
+    let failed_count = databases
+        .iter()
+        .filter(|db| {
+            matches!(db.parse_status, ProcessStatus::Failed)
+                || matches!(db.model_status, ProcessStatus::Failed)
+        })
+        .count();
 
     // 分页
     let page = query.page.unwrap_or(1);
@@ -388,10 +397,13 @@ pub async fn execute_batch_operation(
     state: State<AppState>,
     Json(request): Json<BatchOperationRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    use crate::web_ui::models::{TaskInfo, TaskType, TaskStatus, DatabaseConfig};
+    use crate::web_ui::models::{DatabaseConfig, TaskInfo, TaskStatus, TaskType};
     use uuid::Uuid;
 
-    println!("执行批量操作: {} 对数据库 {:?}", request.operation, request.db_nums);
+    println!(
+        "执行批量操作: {} 对数据库 {:?}",
+        request.operation, request.db_nums
+    );
 
     // 根据操作类型确定任务类型
     let task_type = match request.operation.as_str() {
@@ -462,7 +474,10 @@ pub async fn trigger_database_update(
     println!("触发数据库 {} 更新", db_num);
 
     // 更新数据库状态
-    let sql = format!("UPDATE dbnum_info_table SET auto_update = true, updating = true WHERE dbnum = {}", db_num);
+    let sql = format!(
+        "UPDATE dbnum_info_table SET auto_update = true, updating = true WHERE dbnum = {}",
+        db_num
+    );
 
     match SUL_DB.query(sql).await {
         Ok(_) => {
@@ -572,9 +587,14 @@ pub async fn get_module_list(
         Err(_) => {
             // 如果查询失败，返回默认列表
             vec![
-                "DESI".to_string(), "EQUI".to_string(), "PIPE".to_string(),
-                "STRU".to_string(), "HVAC".to_string(), "ELEC".to_string(),
-                "INSU".to_string(), "SUPP".to_string()
+                "DESI".to_string(),
+                "EQUI".to_string(),
+                "PIPE".to_string(),
+                "STRU".to_string(),
+                "HVAC".to_string(),
+                "ELEC".to_string(),
+                "INSU".to_string(),
+                "SUPP".to_string(),
             ]
         }
     };

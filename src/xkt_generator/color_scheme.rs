@@ -14,7 +14,7 @@ impl ColorScheme {
             type_colors: HashMap::new(),
             default_color: Vec3::new(0.7, 0.7, 0.7), // 默认灰色
         };
-        
+
         // 初始化常见PDMS类型的颜色
         scheme.init_pdms_colors();
         scheme
@@ -23,53 +23,84 @@ impl ColorScheme {
     /// 初始化PDMS常见类型的颜色
     fn init_pdms_colors(&mut self) {
         // 管道系统 - 蓝色系
-        self.type_colors.insert("PIPE".to_string(), Vec3::new(0.2, 0.4, 0.8));
-        self.type_colors.insert("ELBO".to_string(), Vec3::new(0.3, 0.5, 0.9));
-        self.type_colors.insert("TEE".to_string(), Vec3::new(0.1, 0.3, 0.7));
-        self.type_colors.insert("REDU".to_string(), Vec3::new(0.4, 0.6, 1.0));
-        self.type_colors.insert("FLANGE".to_string(), Vec3::new(0.0, 0.2, 0.6));
+        self.type_colors
+            .insert("PIPE".to_string(), Vec3::new(0.2, 0.4, 0.8));
+        self.type_colors
+            .insert("ELBO".to_string(), Vec3::new(0.3, 0.5, 0.9));
+        self.type_colors
+            .insert("TEE".to_string(), Vec3::new(0.1, 0.3, 0.7));
+        self.type_colors
+            .insert("REDU".to_string(), Vec3::new(0.4, 0.6, 1.0));
+        self.type_colors
+            .insert("FLANGE".to_string(), Vec3::new(0.0, 0.2, 0.6));
 
         // 阀门 - 红色系
-        self.type_colors.insert("VALVE".to_string(), Vec3::new(0.8, 0.2, 0.2));
-        self.type_colors.insert("GVAL".to_string(), Vec3::new(0.9, 0.3, 0.3));
-        self.type_colors.insert("CHVA".to_string(), Vec3::new(0.7, 0.1, 0.1));
+        self.type_colors
+            .insert("VALVE".to_string(), Vec3::new(0.8, 0.2, 0.2));
+        self.type_colors
+            .insert("GVAL".to_string(), Vec3::new(0.9, 0.3, 0.3));
+        self.type_colors
+            .insert("CHVA".to_string(), Vec3::new(0.7, 0.1, 0.1));
 
         // 设备 - 绿色系
-        self.type_colors.insert("EQUIPMENT".to_string(), Vec3::new(0.2, 0.8, 0.2));
-        self.type_colors.insert("VESSEL".to_string(), Vec3::new(0.3, 0.9, 0.3));
-        self.type_colors.insert("TANK".to_string(), Vec3::new(0.1, 0.7, 0.1));
-        self.type_colors.insert("PUMP".to_string(), Vec3::new(0.4, 1.0, 0.4));
+        self.type_colors
+            .insert("EQUIPMENT".to_string(), Vec3::new(0.2, 0.8, 0.2));
+        self.type_colors
+            .insert("VESSEL".to_string(), Vec3::new(0.3, 0.9, 0.3));
+        self.type_colors
+            .insert("TANK".to_string(), Vec3::new(0.1, 0.7, 0.1));
+        self.type_colors
+            .insert("PUMP".to_string(), Vec3::new(0.4, 1.0, 0.4));
 
         // 仪表 - 黄色系
-        self.type_colors.insert("INSTRUMENT".to_string(), Vec3::new(0.9, 0.9, 0.2));
-        self.type_colors.insert("GAUGE".to_string(), Vec3::new(1.0, 1.0, 0.3));
-        self.type_colors.insert("TRANSMITTER".to_string(), Vec3::new(0.8, 0.8, 0.1));
+        self.type_colors
+            .insert("INSTRUMENT".to_string(), Vec3::new(0.9, 0.9, 0.2));
+        self.type_colors
+            .insert("GAUGE".to_string(), Vec3::new(1.0, 1.0, 0.3));
+        self.type_colors
+            .insert("TRANSMITTER".to_string(), Vec3::new(0.8, 0.8, 0.1));
 
         // 结构 - 橙色系
-        self.type_colors.insert("STRUCTURE".to_string(), Vec3::new(0.9, 0.5, 0.1));
-        self.type_colors.insert("BEAM".to_string(), Vec3::new(1.0, 0.6, 0.2));
-        self.type_colors.insert("COLUMN".to_string(), Vec3::new(0.8, 0.4, 0.0));
-        self.type_colors.insert("PLATE".to_string(), Vec3::new(0.7, 0.3, 0.1));
+        self.type_colors
+            .insert("STRUCTURE".to_string(), Vec3::new(0.9, 0.5, 0.1));
+        self.type_colors
+            .insert("BEAM".to_string(), Vec3::new(1.0, 0.6, 0.2));
+        self.type_colors
+            .insert("COLUMN".to_string(), Vec3::new(0.8, 0.4, 0.0));
+        self.type_colors
+            .insert("PLATE".to_string(), Vec3::new(0.7, 0.3, 0.1));
 
         // 电气 - 紫色系
-        self.type_colors.insert("ELECTRICAL".to_string(), Vec3::new(0.6, 0.2, 0.8));
-        self.type_colors.insert("CABLE".to_string(), Vec3::new(0.7, 0.3, 0.9));
-        self.type_colors.insert("CONDUIT".to_string(), Vec3::new(0.5, 0.1, 0.7));
+        self.type_colors
+            .insert("ELECTRICAL".to_string(), Vec3::new(0.6, 0.2, 0.8));
+        self.type_colors
+            .insert("CABLE".to_string(), Vec3::new(0.7, 0.3, 0.9));
+        self.type_colors
+            .insert("CONDUIT".to_string(), Vec3::new(0.5, 0.1, 0.7));
 
         // 暖通 - 青色系
-        self.type_colors.insert("HVAC".to_string(), Vec3::new(0.2, 0.8, 0.8));
-        self.type_colors.insert("DUCT".to_string(), Vec3::new(0.3, 0.9, 0.9));
-        self.type_colors.insert("DAMPER".to_string(), Vec3::new(0.1, 0.7, 0.7));
+        self.type_colors
+            .insert("HVAC".to_string(), Vec3::new(0.2, 0.8, 0.8));
+        self.type_colors
+            .insert("DUCT".to_string(), Vec3::new(0.3, 0.9, 0.9));
+        self.type_colors
+            .insert("DAMPER".to_string(), Vec3::new(0.1, 0.7, 0.7));
 
         // 土建 - 棕色系
-        self.type_colors.insert("CIVIL".to_string(), Vec3::new(0.6, 0.4, 0.2));
-        self.type_colors.insert("FOUNDATION".to_string(), Vec3::new(0.5, 0.3, 0.1));
-        self.type_colors.insert("WALL".to_string(), Vec3::new(0.7, 0.5, 0.3));
+        self.type_colors
+            .insert("CIVIL".to_string(), Vec3::new(0.6, 0.4, 0.2));
+        self.type_colors
+            .insert("FOUNDATION".to_string(), Vec3::new(0.5, 0.3, 0.1));
+        self.type_colors
+            .insert("WALL".to_string(), Vec3::new(0.7, 0.5, 0.3));
 
         // 通用几何体 - 灰色系
-        self.type_colors.insert("BOX".to_string(), Vec3::new(0.6, 0.6, 0.6));
-        self.type_colors.insert("CYLINDER".to_string(), Vec3::new(0.5, 0.5, 0.5));
-        self.type_colors.insert("SPHERE".to_string(), Vec3::new(0.8, 0.8, 0.8));
+        self.type_colors
+            .insert("BOX".to_string(), Vec3::new(0.6, 0.6, 0.6));
+        self.type_colors
+            .insert("CYLINDER".to_string(), Vec3::new(0.5, 0.5, 0.5));
+        self.type_colors
+            .insert("SPHERE".to_string(), Vec3::new(0.8, 0.8, 0.8));
     }
 
     /// 根据类型获取颜色
@@ -202,15 +233,15 @@ mod tests {
     #[test]
     fn test_color_scheme() {
         let scheme = ColorScheme::new();
-        
+
         // 测试已定义类型
         let pipe_color = scheme.get_color_for_type("PIPE");
         assert_eq!(pipe_color, Vec3::new(0.2, 0.4, 0.8));
-        
+
         // 测试部分匹配
         let pipe_component_color = scheme.get_color_for_type("PIPE_COMPONENT");
         assert_eq!(pipe_component_color, Vec3::new(0.2, 0.4, 0.8));
-        
+
         // 测试未知类型
         let unknown_color = scheme.get_color_for_type("UNKNOWN_TYPE");
         assert_eq!(unknown_color, scheme.default_color);
@@ -222,10 +253,10 @@ mod tests {
         assert!((red.x - 1.0).abs() < 0.001);
         assert!(red.y.abs() < 0.001);
         assert!(red.z.abs() < 0.001);
-        
+
         let green = hsv_to_rgb(120.0, 1.0, 1.0);
         assert!(green.x.abs() < 0.001);
         assert!((green.y - 1.0).abs() < 0.001);
         assert!(green.z.abs() < 0.001);
     }
-} 
+}

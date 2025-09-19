@@ -36,7 +36,7 @@ surreal_v2 = []
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-web_ui = ["dep:axum", "dep:tower-http", "dep:sysinfo"]              #Web UI功能
+web_ui = ["dep:axum", "dep:tower-http", "dep:sysinfo", "dep:axum-extra"]              #Web UI功能
 sqlite-index = ["dep:rusqlite"]
 
 [dependencies]
@@ -53,6 +53,14 @@ lazy_static = "1.4.0"
 approx = "0.5.1"
 #flate2 = "1.0.23"
 log = "0.4.17"
+
+# MQTT 服务器和客户端
+rumqttc = "0.24"
+# rumqttd = "0.19" # 暂时注释掉，rumqttd 需要单独的项目
+
+# 实时通信（axum-extra 需要和 axum 版本匹配）
+# axum-extra = { version = "0.9", features = ["typed-header", "sse"] }
+futures-util = "0.3"
 
 memchr = "2.5.0"
 nom = "7.1.1"
@@ -123,7 +131,6 @@ surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features
     #    "kv-rocksdb",
 ] }
 async-once-cell = "0.5.3"
-rumqttc = "0.24.0"
 petgraph = { version = "0.8.2", features = ["serde-1"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["registry", "json"] }
@@ -156,6 +163,7 @@ env_logger = "0.11"
 
 # Web UI 相关依赖
 axum = { version = "0.7", optional = true }
+axum-extra = { version = "0.8", optional = true, features = [] }
 tower-http = { version = "0.5", features = ["fs"], optional = true }
 sysinfo = { version = "0.30", optional = true }
 
@@ -222,4 +230,3 @@ required-features = ["grpc"]
 [[example]]
 name = "spatial_index_builder"
 required-features = ["grpc"]
-

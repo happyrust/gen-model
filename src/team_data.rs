@@ -1,11 +1,11 @@
+use crate::consts::TEAM_DATA_TABLE;
+use aios_core::aios_db_mgr::PdmsDataInterface;
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+use aios_core::error::init_query_error;
+use aios_core::{RefU64, SUL_DB, init_test_surreal, query_filter_ancestors};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::{init_test_surreal, query_filter_ancestors, RefU64, SUL_DB};
-use aios_core::aios_db_mgr::PdmsDataInterface;
-use aios_core::error::init_query_error;
-use serde::{Serialize, Deserialize};
-use crate::consts::TEAM_DATA_TABLE;
 
 ///Admin模块DB信息
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -28,12 +28,16 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
             for refno in db_refnos {
                 // 找到所属的team
                 let team = query_filter_ancestors(refno.into(), &vec!["TEAM"]).await?;
-                if team.is_empty() { continue; };
+                if team.is_empty() {
+                    continue;
+                };
                 let team_refno = team[0].refno();
                 let team_name = if team_name_map.contains_key(&team_refno) {
                     team_name_map.get(&team_refno).unwrap().to_string()
                 } else {
-                    let Ok(team_name) = mgr.get_name(team_refno).await else { continue; };
+                    let Ok(team_name) = mgr.get_name(team_refno).await else {
+                        continue;
+                    };
                     team_name_map.entry(team_refno).or_insert(team_name.clone());
                     team_name
                 };
@@ -71,7 +75,9 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
                 let pool = mgr.get_project_pool().await?;
                 let table_sql = gen_create_team_data_sql();
                 let result = sqlx::query(&table_sql).execute(&pool).await;
-                if let Err(e) = result { dbg!(&e); }
+                if let Err(e) = result {
+                    dbg!(&e);
+                }
                 let data_sql = gen_save_team_data_sql(r);
                 let result = sqlx::query(&data_sql).execute(&pool).await;
                 if let Err(e) = result {
@@ -80,9 +86,7 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
                 }
             }
         }
-        Err(e) => {
-            init_query_error("", e, &std::panic::Location::caller().to_string())
-        }
+        Err(e) => init_query_error("", e, &std::panic::Location::caller().to_string()),
     }
     Ok(())
 }
@@ -97,29 +101,31 @@ async fn query_all_db_refnos() -> anyhow::Result<Vec<RefU64>> {
 
 fn match_stype(input: &str) -> String {
     match input {
-        "1" => { "DESI".to_string() }
-        "2" => { "CATA".to_string() }
-        "4" => { "PROP".to_string() }
-        "6" => { "ISOD".to_string() }
-        "7" => { "PADD".to_string() }
-        "8" => { "DICT".to_string() }
-        "9" => { "ENGI".to_string() }
-        "14" => { "SCHE".to_string() }
-        _ => { "".to_string() }
+        "1" => "DESI".to_string(),
+        "2" => "CATA".to_string(),
+        "4" => "PROP".to_string(),
+        "6" => "ISOD".to_string(),
+        "7" => "PADD".to_string(),
+        "8" => "DICT".to_string(),
+        "9" => "ENGI".to_string(),
+        "14" => "SCHE".to_string(),
+        _ => "".to_string(),
     }
 }
 
 fn match_claim_data(input: i32) -> String {
     match input {
-        0 => { "unset".to_string() }
-        2 => { "Implicit".to_string() }
-        _ => { "".to_string() }
+        0 => "unset".to_string(),
+        2 => "Implicit".to_string(),
+        _ => "".to_string(),
     }
 }
 
 fn gen_create_team_data_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(format!("
+    sql.push_str(
+        format!(
+            "
     CREATE TABLE IF NOT EXISTS {TEAM_DATA_TABLE} (
         TEAM_NAME VARCHAR(100) NOT NULL,
         NAME VARCHAR(100) PRIMARY KEY,
@@ -127,15 +133,26 @@ fn gen_create_team_data_sql() -> String {
         DB_TYPE VARCHAR(50) ,
         DB_NO INT ,
         CLAIM VARCHAR(50) ,
-        `DESC` VARCHAR(255) )").as_str());
+        `DESC` VARCHAR(255) )"
+        )
+        .as_str(),
+    );
     sql
 }
 
 fn gen_save_team_data_sql(data: Vec<SysDBData>) -> String {
-    let mut sql = String::from(&format!("INSERT IGNORE INTO {TEAM_DATA_TABLE} (TEAM_NAME, NAME, S_TYPE, DB_TYPE, DB_NO, CLAIM, `DESC`) VALUES"));
+    let mut sql = String::from(&format!(
+        "INSERT IGNORE INTO {TEAM_DATA_TABLE} (TEAM_NAME, NAME, S_TYPE, DB_TYPE, DB_NO, CLAIM, `DESC`) VALUES"
+    ));
     let b_empty = data.is_empty();
     for d in data {
-        sql.push_str(&format!("('{}','{}','{}','{}',{},'{}','{}'),", d.team_name, d.name, d.s_type, d.db_type, d.db_no, d.claim, d.desc).as_str())
+        sql.push_str(
+            &format!(
+                "('{}','{}','{}','{}',{},'{}','{}'),",
+                d.team_name, d.name, d.s_type, d.db_type, d.db_no, d.claim, d.desc
+            )
+            .as_str(),
+        )
     }
     if !b_empty {
         sql.remove(sql.len() - 1);

@@ -35,9 +35,9 @@ pub mod session;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
+pub use gen_model::*;
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
-pub use gen_model::*;
 // pub use gen_model_refactored::DbModelInstRefnos;
 pub use occ_generate::*;
 pub use query::*;

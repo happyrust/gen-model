@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
                 .value_name("MODE")
                 .help("运行模式: test, examples, all")
                 .default_value("all")
-                .value_parser(["test", "examples", "all"])
+                .value_parser(["test", "examples", "all"]),
         )
         .arg(
             Arg::new("output")
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
                 .long("output")
                 .value_name("DIR")
                 .help("输出目录")
-                .default_value("./output")
+                .default_value("./output"),
         )
         .get_matches();
 
@@ -60,4 +60,4 @@ async fn main() -> anyhow::Result<()> {
     println!("更多信息请访问: https://xeokit.github.io/");
 
     Ok(())
-} 
+}

@@ -1,29 +1,29 @@
+use aios_core::{get_db_option, init_surreal};
 use aios_database::web_ui::start_web_server;
-use aios_core::{init_surreal, get_db_option};
 use anyhow::Result;
 
 /// 真实任务执行的Web UI服务器示例
-/// 
+///
 /// 这个示例展示了如何启动具有真实任务执行能力的Web UI界面
-/// 
+///
 /// 功能特性：
 /// - 真实的数据库生成任务执行
 /// - 真实的空间树生成和监控
 /// - 实时任务进度跟踪
 /// - 真实的系统状态监控
 /// - 真实的数据库信息查询
-/// 
+///
 /// 使用方法：
 /// ```bash
 /// cargo run --example real_task_execution --features "web_ui,ws,gen_model,manifold,project_hd"
 /// ```
-/// 
+///
 /// 然后在浏览器中访问: http://localhost:8080
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志
     env_logger::init();
-    
+
     println!("🚀 正在启动 AIOS 数据库管理平台 (真实执行版本)...");
     println!("📋 功能包括:");
     println!("   • 真实的数据库编号7999生成任务执行");
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     println!("   • 真实的系统资源监控");
     println!("   • 真实的数据库连接状态检测");
     println!();
-    
+
     // 预先初始化数据库连接以验证配置
     println!("🔗 正在验证数据库连接...");
     let db_option = get_db_option();
@@ -54,12 +54,12 @@ async fn main() -> Result<()> {
             println!("   请检查 DbOption.toml 配置文件和SurrealDB服务状态");
         }
     }
-    
+
     println!();
     println!("🌐 启动Web服务器...");
-    
+
     // 启动Web服务器
     start_web_server(8080).await?;
-    
+
     Ok(())
 }

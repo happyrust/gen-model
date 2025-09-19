@@ -1,7 +1,7 @@
 // 错误处理 - xeokit XTK 生成器的统一错误处理系统
 
-use thiserror::Error;
 use std::fmt;
+use thiserror::Error;
 
 /// XTK 生成器错误类型
 #[derive(Error, Debug)]
@@ -16,7 +16,10 @@ pub enum XTKGeneratorError {
     NormalEncodingError { message: String },
 
     #[error("基元引用无效: 实体 '{entity_id}' 引用了不存在的基元 {primitive_id}")]
-    InvalidPrimitiveReference { entity_id: String, primitive_id: usize },
+    InvalidPrimitiveReference {
+        entity_id: String,
+        primitive_id: usize,
+    },
 
     #[error("材质错误: {message}")]
     MaterialError { message: String },
@@ -132,7 +135,8 @@ impl ErrorContext {
     }
 
     pub fn with_info(mut self, key: &str, value: &str) -> Self {
-        self.additional_info.insert(key.to_string(), value.to_string());
+        self.additional_info
+            .insert(key.to_string(), value.to_string());
         self
     }
 }
@@ -157,7 +161,9 @@ impl ContextualError {
 
 impl fmt::Display for ContextualError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] 操作 '{}' 失败: {}", 
+        write!(
+            f,
+            "[{}] 操作 '{}' 失败: {}",
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
             self.context.operation,
             self.error
@@ -268,14 +274,14 @@ impl ErrorCollector {
             println!("=== 错误和警告摘要 ===");
             println!("错误数量: {}", self.error_count());
             println!("警告数量: {}", self.warning_count());
-            
+
             if self.has_errors() {
                 println!("\n错误详情:");
                 for (i, error) in self.errors.iter().enumerate() {
                     println!("  {}. {}", i + 1, error);
                 }
             }
-            
+
             if self.has_warnings() {
                 println!("\n警告详情:");
                 for (i, warning) in self.warnings.iter().enumerate() {
@@ -290,7 +296,8 @@ impl ErrorCollector {
     /// 生成错误报告
     pub fn generate_report(&self) -> ErrorReport {
         let error_types = self.analyze_error_types();
-        let most_common_error = error_types.iter()
+        let most_common_error = error_types
+            .iter()
             .max_by_key(|(_, count)| *count)
             .map(|(error_type, count)| (error_type.clone(), *count));
 
@@ -299,15 +306,15 @@ impl ErrorCollector {
             total_warnings: self.warning_count(),
             error_types,
             most_common_error,
-            first_error: None,  // Can't clone errors with source fields
-            last_error: None,   // Can't clone errors with source fields
+            first_error: None, // Can't clone errors with source fields
+            last_error: None,  // Can't clone errors with source fields
         }
     }
 
     /// 分析错误类型
     fn analyze_error_types(&self) -> std::collections::HashMap<String, usize> {
         let mut error_types = std::collections::HashMap::new();
-        
+
         for error in &self.errors {
             let error_type = match &error.error {
                 XTKGeneratorError::GeometryError { .. } => "几何处理错误",
@@ -330,10 +337,10 @@ impl ErrorCollector {
                 XTKGeneratorError::ResourceExhausted { .. } => "资源不足",
                 XTKGeneratorError::Unknown { .. } => "未知错误",
             };
-            
+
             *error_types.entry(error_type.to_string()).or_insert(0) += 1;
         }
-        
+
         error_types
     }
 }
@@ -354,26 +361,26 @@ impl ErrorReport {
         println!("=== 详细错误报告 ===");
         println!("总错误数: {}", self.total_errors);
         println!("总警告数: {}", self.total_warnings);
-        
+
         if !self.error_types.is_empty() {
             println!("\n错误类型分布:");
             let mut sorted_types: Vec<_> = self.error_types.iter().collect();
             sorted_types.sort_by(|a, b| b.1.cmp(a.1));
-            
+
             for (error_type, count) in sorted_types {
                 let percentage = (*count as f32 / self.total_errors as f32) * 100.0;
                 println!("  {}: {} ({:.1}%)", error_type, count, percentage);
             }
         }
-        
+
         if let Some((error_type, count)) = &self.most_common_error {
             println!("\n最常见错误: {} (出现 {} 次)", error_type, count);
         }
-        
+
         if let Some(ref first_error) = self.first_error {
             println!("\n首个错误: {}", first_error);
         }
-        
+
         if let Some(ref last_error) = self.last_error {
             println!("\n最后错误: {}", last_error);
         }
@@ -462,7 +469,7 @@ mod tests {
     #[test]
     fn test_error_collector() {
         let mut collector = ErrorCollector::new();
-        
+
         // 添加一些错误
         collector.add_error(
             XTKGeneratorError::GeometryError {
@@ -470,16 +477,16 @@ mod tests {
             },
             ErrorContext::new("test_operation").with_entity_id("test_entity"),
         );
-        
+
         collector.add_warning("测试警告".to_string());
-        
+
         assert!(collector.has_errors());
         assert!(collector.has_warnings());
         assert_eq!(collector.error_count(), 1);
         assert_eq!(collector.warning_count(), 1);
-        
+
         collector.print_summary();
-        
+
         let report = collector.generate_report();
         report.print_detailed_report();
     }
@@ -500,13 +507,15 @@ mod tests {
         let success_result = CollectedResult::success("测试值");
         assert!(success_result.is_success());
         assert!(!success_result.is_failure());
-        
+
         let mut errors = ErrorCollector::new();
         errors.add_error(
-            XTKGeneratorError::Unknown { message: "测试错误".to_string() },
+            XTKGeneratorError::Unknown {
+                message: "测试错误".to_string(),
+            },
             ErrorContext::new("test"),
         );
-        
+
         let failure_result: CollectedResult<String> = CollectedResult::failure(errors);
         assert!(!failure_result.is_success());
         assert!(failure_result.is_failure());

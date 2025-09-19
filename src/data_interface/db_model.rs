@@ -4,12 +4,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aios_core::SUL_DB;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
 use dashmap::DashMap;
 use futures::StreamExt;
 use glam::Vec3;
@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{execute_clone, CloneOptions};
+use pdms_io::sync::clone::{CloneOptions, execute_clone};
 // use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
@@ -36,7 +36,7 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
-use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
+use crate::mqtt_service::{SyncE3dFileMsg, new_mqtt_inst};
 
 pub const TUBI_TOL: f32 = 0.1f32;
 
@@ -207,7 +207,7 @@ impl AiosDBManager {
                 .subscribe("Sync/E3d", QoS::ExactlyOnce)
                 .await
                 .unwrap();
-            mqtt_inst.el.network_options.set_connection_timeout(10000);
+            // 连接超时已在 MqttOptions 上配置，无需再从 EventLoop 访问网络选项
             loop {
                 let event = mqtt_inst.el.poll().await;
                 match &event {
@@ -247,6 +247,72 @@ impl AiosDBManager {
             }
         });
         f.await.expect("demo_mqtt_requests panic");
+    }
+
+    ///处理mqtt的消息，带重连退避（单位ms）
+    pub async fn poll_sync_e3d_mqtt_events_with_backoff(
+        watcher: Arc<PdmsWatcher>,
+        initial_backoff_ms: u64,
+        max_backoff_ms: u64,
+    ) {
+        let db_option = get_db_option();
+        let location = db_option.location.clone();
+        let mut backoff = initial_backoff_ms.max(100);
+        let max_backoff = max_backoff_ms.max(backoff);
+
+        loop {
+            // 构造新的连接实例
+            let mut mqtt_inst = new_mqtt_inst(&format!(
+                "{}-{}-sub",
+                db_option.location.as_str(),
+                db_option.project_code
+            ));
+            let _ = mqtt_inst
+                .client
+                .subscribe("Sync/E3d", QoS::ExactlyOnce)
+                .await;
+
+            // 轮询事件，直到错误发生
+            loop {
+                let event = mqtt_inst.el.poll().await;
+                match &event {
+                    Ok(v) => match v {
+                        Incoming(Packet::Publish(p)) => {
+                            let sync_e3d = SyncE3dFileMsg::from(p.payload.to_vec());
+                            if sync_e3d.location != location {
+                                let _ = SUL_DB
+                                    .query(format!(
+                                        "INSERT IGNORE INTO e3d_sync {} ",
+                                        serde_json::to_string(&sync_e3d).unwrap()
+                                    ))
+                                    .await;
+                                let _ = Self::exec_delta_clone_remotes(&watcher, sync_e3d).await;
+                            }
+                            // 收到消息，视为连接正常，重置退避
+                            backoff = initial_backoff_ms.max(100);
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        {
+                            let mut mqtt_connect_status = MQTT_CONNECT_STATUS.lock().await;
+                            if mqtt_connect_status.is_none() {
+                                *mqtt_connect_status = Some(false);
+                                error!("Init MQTT Connection error encountered: {}", e);
+                            } else if (*mqtt_connect_status).unwrap() {
+                                *mqtt_connect_status = Some(false);
+                                error!("MQTT Connection error encountered: {}", e);
+                            }
+                        }
+                        // 发生错误，退出内层循环以重建连接
+                        break;
+                    }
+                }
+            }
+            // 退避等待后重建连接
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
+            backoff = (backoff.saturating_mul(2)).min(max_backoff);
+        }
     }
 
     ///快速获得table名称

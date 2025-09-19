@@ -22,33 +22,39 @@ impl SpatialQueryService for SimpleSpatialQueryService {
         request: tonic::Request<SpatialQueryRequest>,
     ) -> Result<tonic::Response<SpatialQueryResponse>, tonic::Status> {
         let req = request.into_inner();
-        
+
         println!("🔍 收到空间查询请求: refno={}", req.refno);
-        
+
         // 返回模拟数据
         let response = SpatialQueryResponse {
             success: true,
-            elements: vec![
-                IntersectingElement {
-                    refno: 1002,
-                    element_type: "PIPE".to_string(),
-                    element_name: "测试管道".to_string(),
-                    intersection_volume: 0.5,
-                    distance_to_center: 1.0,
-                    bbox: Some(BoundingBox {
-                        min: Some(Point3d { x: 0.0, y: 0.0, z: 0.0 }),
-                        max: Some(Point3d { x: 1.0, y: 1.0, z: 1.0 }),
+            elements: vec![IntersectingElement {
+                refno: 1002,
+                element_type: "PIPE".to_string(),
+                element_name: "测试管道".to_string(),
+                intersection_volume: 0.5,
+                distance_to_center: 1.0,
+                bbox: Some(BoundingBox {
+                    min: Some(Point3d {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
                     }),
-                }
-            ],
+                    max: Some(Point3d {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                    }),
+                }),
+            }],
             query_time_ms: 10,
             total_elements_checked: 100,
             error_message: String::new(),
         };
-        
+
         Ok(tonic::Response::new(response))
     }
-    
+
     async fn get_index_stats(
         &self,
         _request: tonic::Request<IndexStatsRequest>,
@@ -59,29 +65,27 @@ impl SpatialQueryService for SimpleSpatialQueryService {
             last_rebuild_time: "2024-08-29 16:00:00".to_string(),
             index_memory_mb: 10.5,
         };
-        
+
         Ok(tonic::Response::new(response))
     }
-    
+
     async fn batch_query_intersecting_elements(
         &self,
         request: tonic::Request<BatchSpatialQueryRequest>,
     ) -> Result<tonic::Response<BatchSpatialQueryResponse>, tonic::Status> {
         let req = request.into_inner();
-        
+
         let mut results = Vec::new();
         for single_request in req.requests {
-            let single_response = self.query_intersecting_elements(
-                tonic::Request::new(single_request)
-            ).await?;
-            
+            let single_response = self
+                .query_intersecting_elements(tonic::Request::new(single_request))
+                .await?;
+
             results.push(single_response.into_inner());
         }
-        
-        let response = BatchSpatialQueryResponse {
-            results,
-        };
-        
+
+        let response = BatchSpatialQueryResponse { results };
+
         Ok(tonic::Response::new(response))
     }
 }

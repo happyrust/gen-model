@@ -1,9 +1,9 @@
 use aios_core::pdms_types::EleOperation;
 use aios_core::types::*;
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub mod update_log;
 pub mod set_status;
+pub mod update_log;
 // pub mod query_status;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -17,8 +17,6 @@ pub struct SetStatusData {
     pub node: String,
     pub attr_map: AttrMap,
 }
-
-
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RefnoStatusDifference {

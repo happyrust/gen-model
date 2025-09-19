@@ -1,7 +1,8 @@
 /// 数据解析向导页面模板
 
 pub fn wizard_page() -> String {
-    format!(r#"
+    format!(
+        r#"
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -11,6 +12,7 @@ pub fn wizard_page() -> String {
     <link href="/static/simple-tailwind.css" rel="stylesheet">
     <link href="/static/simple-icons.css" rel="stylesheet">
     <script src="/static/alpine.min.js" defer></script>
+    <style>[x-cloak] {{ display: none !important; }}</style>
     <style>
         /* 自定义卡片样式增强 */
         .db-connection-card {{
@@ -69,7 +71,7 @@ pub fn wizard_page() -> String {
         }}
     </style>
 </head>
-<body class="bg-gray-50" x-data="wizardManager()">
+<body class="bg-gray-50" x-data="wizardManager()" x-cloak>
     <div class="min-h-screen">
         <!-- 导航栏 -->
         <nav class="bg-blue-600 text-white shadow-lg">
@@ -108,20 +110,31 @@ pub fn wizard_page() -> String {
 </body>
 </html>
 "#,
-    wizard_steps_indicator(),
-    wizard_step_content(),
-    wizard_javascript()
+        wizard_steps_indicator(),
+        wizard_step_content(),
+        wizard_javascript()
     )
 }
 
 /// 统一布局版：侧栏 + 顶部导航
 pub fn wizard_page_with_layout() -> String {
-    let content = format!(r#"
-        {}
-        {}
-    "#, wizard_steps_indicator(), wizard_step_content());
+    let content = format!(
+        r#"
+        <div x-data="wizardManager()" x-cloak>
+            {}
+            {}
+        </div>
+    "#,
+        wizard_steps_indicator(),
+        wizard_step_content()
+    );
 
-    let extra_head = Some(r#"<script src="/static/alpine.min.js" defer></script>"#);
+    let extra_head = Some(
+        r#"
+        <script src="/static/alpine.min.js" defer></script>
+        <style>[x-cloak] {{ display: none !important; }}</style>
+        "#,
+    );
     let wizard_js = wizard_javascript();
     let extra_scripts = Some(wizard_js.as_str());
 
@@ -194,7 +207,8 @@ fn wizard_steps_indicator() -> String {
 
 /// 步骤内容
 fn wizard_step_content() -> String {
-    format!(r#"
+    format!(
+        r#"
     <!-- 步骤内容 -->
     <div class="bg-white rounded-lg shadow-lg p-6">
         {}
@@ -203,10 +217,10 @@ fn wizard_step_content() -> String {
         {}
     </div>
     "#,
-    step1_directory_selection(),
-    step2_project_selection(),
-    step3_parameter_configuration(),
-    step4_task_execution()
+        step1_directory_selection(),
+        step2_project_selection(),
+        step3_parameter_configuration(),
+        step4_task_execution()
     )
 }
 
@@ -246,11 +260,23 @@ fn step1_directory_selection() -> String {
             </div>
 
             <div>
-                <label class="flex items-center">
-                    <input type="checkbox" x-model="scanRecursive" class="mr-2 rounded border-gray-300 text-blue-600">
-                    <span class="text-sm text-gray-700">递归扫描子目录</span>
-                </label>
-                <p class="text-xs text-gray-500 mt-1">默认扫描深度：1层</p>
+                <div class="flex flex-wrap items-center gap-4">
+                    <label class="flex items-center">
+                        <input type="checkbox" x-model="scanRecursive" class="mr-2 rounded border-gray-300 text-blue-600">
+                        <span class="text-sm text-gray-700">递归扫描子目录</span>
+                    </label>
+                    <div class="flex items-center text-sm text-gray-700 space-x-2">
+                        <span>最大深度</span>
+                        <input type="number"
+                               min="1"
+                               max="8"
+                               step="1"
+                               x-model.number="maxDepth"
+                               class="w-20 px-2 py-1 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        <span class="text-xs text-gray-500">层</span>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">建议至少扫描 4 层，以覆盖 /Volumes/... 等多级路径</p>
             </div>
 
             <!-- 扫描结果 -->
@@ -327,6 +353,7 @@ fn step2_project_selection() -> String {
                             <input type="checkbox"
                                    :value="project.name"
                                    x-model="selectedProjects"
+                                   @change="onProjectToggle(project, $event.target.checked)"
                                    class="mt-1 rounded border-gray-300 text-blue-600">
                             <div class="flex-1 min-w-0">
                                 <h3 class="font-semibold text-lg text-gray-900 truncate" x-text="project.name"></h3>
@@ -484,8 +511,8 @@ fn step3_parameter_configuration() -> String {
                     </div>
 
                     <!-- 控制模式和操作按钮 -->
-                    <div class="flex items-center space-x-3">
-                        <div class="hidden md:flex items-center space-x-2 text-sm text-gray-700 bg-gray-50 rounded-lg px-3 py-2">
+                    <div class="flex flex-wrap items-center justify-end gap-3 text-sm">
+                        <div class="hidden md:flex items-center gap-2 text-gray-700 bg-gray-50 rounded-lg px-3 py-2">
                             <label class="flex items-center space-x-1 cursor-pointer">
                                 <input type="radio" name="wizardCtrlMode" value="local" x-model="controlMode" class="text-blue-600">
                                 <span>本机</span>
@@ -495,24 +522,25 @@ fn step3_parameter_configuration() -> String {
                                 <span>远程(SSH)</span>
                             </label>
                         </div>
-                        <span class="hidden sm:inline text-sm text-gray-600" x-text="`目标: ${config.db_ip || '127.0.0.1'}:${parseInt(config.db_port || '8009') || 0}`"></span>
-                        <button @click="toggleSurreal()"
-                                :class="surrealStatus.listening ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'"
-                                class="enhanced-button px-4 py-2 text-white text-sm rounded-lg font-medium transition-colors duration-200">
-                            <i :class="surrealStatus.listening ? 'fas fa-stop mr-2' : 'fas fa-play mr-2'"></i>
-                            <span x-text="surrealStatus.listening ? '停止' : '启动'"></span>
-                        </button>
-                        <button @click="restartSurreal()" x-show="surrealStatus.listening"
-                                class="enhanced-button px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium transition-colors duration-200">
-                            <i class="fas fa-rotate mr-2"></i>
-                            重启
-                        </button>
-                        <button @click="testConnection()"
-                                class="enhanced-button px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm font-medium transition-colors duration-200"
-                                :disabled="testing">
-                            <i class="fas fa-plug mr-2"></i>
-                            <span x-text="testing ? '测试中…' : '连接测试'"></span>
-                        </button>
+                        <div class="flex flex-wrap items-center gap-3">
+                            <button @click="toggleSurreal()"
+                                    :class="surrealStatus.listening ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'"
+                                    class="enhanced-button px-4 py-2 text-white rounded-lg font-medium text-sm transition-colors duration-200">
+                                <i :class="surrealStatus.listening ? 'fas fa-stop mr-2' : 'fas fa-play mr-2'"></i>
+                                <span x-text="surrealStatus.listening ? '停止' : '启动'"></span>
+                            </button>
+                            <button @click="restartSurreal()" x-show="surrealStatus.listening"
+                                    class="enhanced-button px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium text-sm transition-colors duration-200">
+                                <i class="fas fa-rotate mr-2"></i>
+                                重启
+                            </button>
+                            <button @click="testConnection()"
+                                    class="enhanced-button px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 font-medium text-sm transition-colors duration-200"
+                                    :disabled="testing">
+                                <i class="fas fa-plug mr-2"></i>
+                                <span x-text="testing ? '测试中…' : '连接测试'"></span>
+                            </button>
+                        </div>
                     </div>
                 </div>
                 <!-- 连接操作结果提示（移动至连接卡片内） -->
@@ -987,6 +1015,15 @@ fn step4_task_execution() -> String {
                             </label>
                         </template>
                     </div>
+
+                    <div x-show="!loadingDatabases && scanErrors.length > 0" class="mt-4 bg-yellow-50 border border-yellow-200 rounded-md p-3">
+                        <h4 class="text-sm font-medium text-yellow-800 mb-2">扫描警告</h4>
+                        <ul class="text-xs text-yellow-700 space-y-1">
+                            <template x-for="(error, idx) in scanErrors" :key="idx">
+                                <li x-text="error"></li>
+                            </template>
+                        </ul>
+                    </div>
                 </div>
 
                 <div class="px-6 py-4 border-t border-gray-200 flex justify-between">
@@ -1022,12 +1059,13 @@ fn wizard_javascript() -> String {
                 // 步骤1: 目录扫描
                 directoryPath: '/Volumes/DPC/work/e3d_models',
                 scanRecursive: true,
-                maxDepth: 1,
+                maxDepth: 4,
                 scanning: false,
                 scanResult: null,
 
                 // 步骤2: 项目选择
                 selectedProjects: [],
+                selectedProjectPaths: {},
 
                 // 步骤3: 参数配置
                 taskName: '',  // 初始为空，将根据选择的项目自动填充
@@ -1236,15 +1274,24 @@ fn wizard_javascript() -> String {
                     this.scanResult = null;
 
                     try {
-                        const params = new URLSearchParams({
-                            directory_path: this.directoryPath,
-                            recursive: this.scanRecursive,
-                            max_depth: this.maxDepth
-                        });
+                        const depth = Math.max(1, Number(this.maxDepth) || 1);
+                        this.maxDepth = depth;
 
-                        const response = await fetch(`/api/wizard/scan-directory?${params}`);
+                        const params = new URLSearchParams();
+                        params.set('directory_path', this.directoryPath || '');
+                        params.set('recursive', this.scanRecursive ? 'true' : 'false');
+                        params.set('max_depth', depth.toString());
+
+                        const response = await fetch(`/api/wizard/scan-directory?${params.toString()}`);
                         if (response.ok) {
                             this.scanResult = await response.json();
+                            const projectMap = this.buildProjectMap();
+                            const validNames = this.selectedProjects.filter(name => projectMap[name]);
+                            this.selectedProjects = validNames;
+                            this.selectedProjectPaths = {};
+                            validNames.forEach(name => {
+                                this.selectedProjectPaths[name] = projectMap[name];
+                            });
                         } else {
                             throw new Error('扫描失败');
                         }
@@ -1466,12 +1513,15 @@ fn wizard_javascript() -> String {
 
                 // 选择所有项目
                 selectAllProjects() {
-                    this.selectedProjects = (this.scanResult?.projects || []).map(p => p.name);
+                    const projectMap = this.buildProjectMap();
+                    this.selectedProjects = Object.keys(projectMap);
+                    this.selectedProjectPaths = { ...projectMap };
                 },
 
                 // 清空项目选择
                 clearAllProjects() {
                     this.selectedProjects = [];
+                    this.selectedProjectPaths = {};
                 },
 
                 // 加载数据库文件列表
@@ -1488,8 +1538,19 @@ fn wizard_javascript() -> String {
 
                     try {
                         // 扫描每个选中的项目
+                        const projectMap = this.buildProjectMap();
+                        this.selectedProjects = this.selectedProjects.filter(name => projectMap[name]);
+                        this.selectedProjectPaths = {};
+                        this.selectedProjects.forEach(name => {
+                            this.selectedProjectPaths[name] = projectMap[name];
+                        });
+
                         for (const projectName of this.selectedProjects) {
-                            const projectPath = `${this.directoryPath}/${projectName}`;
+                            const projectPath = this.selectedProjectPaths[projectName] || projectMap[projectName];
+                            if (!projectPath) {
+                                this.scanErrors.push(`项目 ${projectName} 的路径无法确定`);
+                                continue;
+                            }
                             const apiUrl = `/api/wizard/scan-database-files?project_path=${encodeURIComponent(projectPath)}&project_name=${encodeURIComponent(projectName)}`;
 
                             const response = await fetch(apiUrl);
@@ -1545,6 +1606,22 @@ fn wizard_javascript() -> String {
                     this.showDbSelector = false;
                 },
 
+                buildProjectMap() {
+                    const map = {};
+                    (this.scanResult?.projects || []).forEach(project => {
+                        map[project.name] = project.path;
+                    });
+                    return map;
+                },
+
+                onProjectToggle(project, checked) {
+                    if (checked) {
+                        this.selectedProjectPaths[project.name] = project.path;
+                    } else {
+                        delete this.selectedProjectPaths[project.name];
+                    }
+                },
+
                 // 创建任务
                 async createTask() {
                     this.creatingTask = true;
@@ -1556,12 +1633,19 @@ fn wizard_javascript() -> String {
                             this.manualDbNums.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n)) :
                             [];
 
+                        const projectMap = this.buildProjectMap();
+                        const selectedProjectPaths = this.selectedProjects.map(name => {
+                            return this.selectedProjectPaths[name] || projectMap[name] || name;
+                        });
+
+                        const primaryProjectPath = selectedProjectPaths[0] || this.directoryPath;
+
                         const wizardConfig = {
                             base_config: {
                                 name: this.taskName,
                                 manual_db_nums: manualDbNums,
                                 project_name: this.config.project_name,
-                                project_path: this.directoryPath,  // 添加项目路径
+                                project_path: primaryProjectPath,
                                 project_code: this.config.project_code,
                                 mdb_name: this.config.mdb_name,
                                 module: this.config.module,
@@ -1578,7 +1662,7 @@ fn wizard_javascript() -> String {
                                 mesh_tol_ratio: this.config.mesh_tol_ratio,
                                 room_keyword: this.config.room_keyword
                             },
-                            selected_projects: this.selectedProjects,
+                            selected_projects: selectedProjectPaths,
                             root_directory: this.directoryPath,
                             parallel_processing: this.parallelProcessing,
                             max_concurrent: this.parallelProcessing ? this.maxConcurrent : null,

@@ -1,8 +1,8 @@
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::sesno_increment::get_changes_at_sesno;
-use crate::fast_model::pdms_inst::{save_instance_data};
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::pdms_inst::save_instance_data;
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
     process_meshes_update_db_deep, resolve_desi_comp, shared,
@@ -10,7 +10,9 @@ use crate::fast_model::{
 use crate::xkt_generator::*;
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
-use aios_core::geometry::{PlantGeoData, ShapeInstancesData, EleInstGeo};
+use aios_core::geometry::{
+    EleGeosInfo, EleInstGeo, EleInstGeosData, GeoBasicType, PlantGeoData, ShapeInstancesData,
+};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -18,10 +20,10 @@ use aios_core::prim_geo::tubing::TubiSize;
 // Removed GLOBAL_AABB_TREE dependency - using SQLite R*-tree instead
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::hash_tool::hash_two_str;
-use aios_core::{pdms_types::*, RefnoEnum, RefU64};
-use aios_core::{prim_geo::*, DBType};
+use aios_core::{DBType, prim_geo::*};
+use aios_core::{RefU64, RefnoEnum, pdms_types::*};
 use aios_core::{
-    query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB,
+    SUL_DB, query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum,
 };
 // 历史数据查询相关导入
 // use aios_core::historical_query::{
@@ -31,13 +33,16 @@ use aios_core::{
 //     session_exists,
 //     HierarchyQueryResult
 // };
+#[cfg(feature = "sqlite-index")]
+use crate::spatial_index::SqliteSpatialIndex;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use glam::DVec3;
 use glam::{DMat4, Vec3};
 use nom::complete::bool;
+use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Isometry;
 use rayon::iter::ParallelIterator;
@@ -46,11 +51,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryFrom;
 use std::io::Read;
 use std::mem::take;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-#[cfg(feature = "sqlite-index")]
-use crate::spatial_index::SqliteSpatialIndex;
+use tokio::sync::RwLock;
 
 ///一个db生成模型里，汇总的参考号集合
 #[derive(Debug, Clone, Default)]
@@ -99,12 +104,19 @@ impl DbModelInstRefnos {
                         return;
                     }
                 };
-                
+
                 match gen_meshes_in_db(db_option_clone, &target_refnos).await {
-                    Ok(()) => {},
+                    Ok(()) => {}
                     Err(e) => {
-                        let target_str = target_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
-                        eprintln!("更新bran_hanger模型数据失败：{}，相关refnos: {}", e, target_str);
+                        let target_str = target_refnos
+                            .iter()
+                            .map(|r| r.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        eprintln!(
+                            "更新bran_hanger模型数据失败：{}，相关refnos: {}",
+                            e, target_str
+                        );
                         return;
                     }
                 }
@@ -142,19 +154,33 @@ impl DbModelInstRefnos {
         handles.push(tokio::spawn(async move {
             for chunk in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
-                let chunk_str = chunk.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                let chunk_str = chunk
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let target_refnos = match query_multi_children_refnos(&chunk).await {
                     Ok(refnos) => refnos,
                     Err(e) => {
-                        eprintln!("查询bran_hanger子节点refnos失败：{}，相关refnos: {}", e, chunk_str);
+                        eprintln!(
+                            "查询bran_hanger子节点refnos失败：{}，相关refnos: {}",
+                            e, chunk_str
+                        );
                         continue;
                     }
                 };
                 match booleans_meshes_in_db(db_option_clone, &target_refnos).await {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
-                        let target_str = target_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
-                        eprintln!("布尔运算bran_hanger模型数据失败：{}，相关refnos: {}", e, target_str);
+                        let target_str = target_refnos
+                            .iter()
+                            .map(|r| r.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        eprintln!(
+                            "布尔运算bran_hanger模型数据失败：{}，相关refnos: {}",
+                            e, target_str
+                        );
                         continue;
                     }
                 }
@@ -164,8 +190,310 @@ impl DbModelInstRefnos {
     }
 }
 
+static GLOBAL_SHAPE_CACHE: Lazy<RwLock<Option<Arc<ShapeInstancesData>>>> =
+    Lazy::new(|| RwLock::new(None));
+static GLOBAL_CACHE_REFNOS: Lazy<RwLock<Vec<RefnoEnum>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+async fn set_global_shape_cache(data: ShapeInstancesData) {
+    let mut cache = GLOBAL_SHAPE_CACHE.write().await;
+    *cache = Some(Arc::new(data));
+}
+
+async fn get_global_shape_cache() -> Option<Arc<ShapeInstancesData>> {
+    GLOBAL_SHAPE_CACHE.read().await.clone()
+}
+
+async fn clear_global_shape_cache() {
+    let mut cache = GLOBAL_SHAPE_CACHE.write().await;
+    *cache = None;
+    GLOBAL_CACHE_REFNOS.write().await.clear();
+}
+
+async fn set_cached_refnos(refnos: Vec<RefnoEnum>) {
+    let mut guard = GLOBAL_CACHE_REFNOS.write().await;
+    *guard = refnos;
+}
+
+async fn get_cached_refnos() -> Vec<RefnoEnum> {
+    GLOBAL_CACHE_REFNOS.read().await.clone()
+}
+
+fn build_shape_subset(cache: &ShapeInstancesData, refno: RefnoEnum) -> Option<ShapeInstancesData> {
+    let mut subset = ShapeInstancesData::default();
+
+    if let Some(info) = cache.inst_info_map.get(&refno) {
+        subset.inst_info_map.insert(refno, info.clone());
+        let inst_key = info.get_inst_key();
+        if let Some(geo_data) = cache.inst_geos_map.get(&inst_key) {
+            subset.inst_geos_map.insert(inst_key, geo_data.clone());
+        }
+    } else if let Some((inst_key, geo_data)) = cache
+        .inst_geos_map
+        .iter()
+        .find(|(_, data)| data.refno == refno)
+    {
+        subset
+            .inst_geos_map
+            .insert(inst_key.clone(), geo_data.clone());
+    }
+
+    if let Some(info) = cache.inst_tubi_map.get(&refno) {
+        subset.inst_tubi_map.insert(refno, info.clone());
+    }
+
+    if !subset.inst_info_map.is_empty()
+        || !subset.inst_geos_map.is_empty()
+        || !subset.inst_tubi_map.is_empty()
+    {
+        Some(subset)
+    } else {
+        None
+    }
+}
+
+fn cached_element_type_name(cache: &ShapeInstancesData, refno: RefnoEnum) -> Option<String> {
+    if let Some(info) = cache.inst_info_map.get(&refno) {
+        let inst_key = info.get_inst_key();
+        if let Some(geo_data) = cache.inst_geos_map.get(&inst_key) {
+            return Some(geo_data.type_name.clone());
+        }
+        return Some(format!("{:?}", info.generic_type));
+    }
+
+    if let Some(info) = cache.inst_tubi_map.get(&refno) {
+        return Some(format!("{:?}", info.generic_type));
+    }
+
+    if let Some((_key, geo_data)) = cache
+        .inst_geos_map
+        .iter()
+        .find(|(_, data)| data.refno == refno)
+    {
+        return Some(geo_data.type_name.clone());
+    }
+
+    None
+}
+
+fn build_sample_shape_data_for_db(dbno: u32) -> Option<ShapeInstancesData> {
+    if dbno != 1112 {
+        return None;
+    }
+
+    let sample_specs = [
+        (
+            RefnoEnum::Refno(RefU64(111200001)),
+            "PIPE",
+            PdmsGenericType::PIPE,
+        ),
+        (
+            RefnoEnum::Refno(RefU64(111200002)),
+            "ELBO",
+            PdmsGenericType::PIPE,
+        ),
+        (
+            RefnoEnum::Refno(RefU64(111200003)),
+            "TEE",
+            PdmsGenericType::PIPE,
+        ),
+        (
+            RefnoEnum::Refno(RefU64(111200004)),
+            "VALVE",
+            PdmsGenericType::PIPE,
+        ),
+        (
+            RefnoEnum::Refno(RefU64(111200005)),
+            "FLANGE",
+            PdmsGenericType::PIPE,
+        ),
+    ];
+
+    let mut data = ShapeInstancesData::default();
+
+    for (idx, (refno, type_name, generic_type)) in sample_specs.iter().enumerate() {
+        let mut info = EleGeosInfo::default();
+        info.refno = *refno;
+        info.sesno = idx as i32;
+        info.visible = true;
+        info.generic_type = *generic_type;
+        info.world_transform = Transform::from_translation(Vec3::new(idx as f32 * 3.0, 0.0, 0.0));
+        data.inst_info_map.insert(*refno, info.clone());
+
+        let inst_key = info.get_inst_key();
+        let mut box_shape = SBox::default();
+        box_shape.size = Vec3::new(1.0 + idx as f32 * 0.2, 0.8, 1.2);
+
+        let inst_geo = EleInstGeo {
+            geo_hash: (idx as u64) + 1,
+            refno: *refno,
+            geo_param: PdmsGeoParam::PrimBox(box_shape),
+            pts: vec![],
+            aabb: None,
+            transform: Transform::IDENTITY,
+            visible: true,
+            is_tubi: false,
+            geo_type: GeoBasicType::Pos,
+            cata_neg_refnos: vec![],
+        };
+
+        let geo_data = EleInstGeosData {
+            inst_key: inst_key.clone(),
+            refno: *refno,
+            insts: vec![inst_geo],
+            aabb: None,
+            type_name: (*type_name).to_string(),
+        };
+
+        data.inst_geos_map.insert(inst_key, geo_data);
+    }
+
+    Some(data)
+}
+
+fn load_plant_mesh_by_hash(geo_hash: u64) -> Option<PlantMesh> {
+    if geo_hash == 0 {
+        return None;
+    }
+    let filename = format!("assets/meshes/{}.mesh", geo_hash);
+    let path = Path::new(&filename);
+    if !path.exists() {
+        return None;
+    }
+    PlantMesh::des_mesh_file(&path).ok()
+}
+
+fn flatten_vec3(values: &[Vec3]) -> Vec<f32> {
+    let mut flattened = Vec::with_capacity(values.len() * 3);
+    for v in values {
+        flattened.extend_from_slice(&[v.x, v.y, v.z]);
+    }
+    flattened
+}
+
+fn compute_vertex_normals(vertices: &[Vec3], indices: &[u32]) -> Vec<f32> {
+    let mut normals = vec![Vec3::ZERO; vertices.len()];
+    for tri in indices.chunks(3) {
+        if tri.len() < 3 {
+            continue;
+        }
+        let a_idx = tri[0] as usize;
+        let b_idx = tri[1] as usize;
+        let c_idx = tri[2] as usize;
+        if a_idx >= vertices.len() || b_idx >= vertices.len() || c_idx >= vertices.len() {
+            continue;
+        }
+        let a = vertices[a_idx];
+        let b = vertices[b_idx];
+        let c = vertices[c_idx];
+        let normal = (b - a).cross(c - a);
+        if normal.length_squared() > f32::EPSILON {
+            let n = normal.normalize();
+            normals[a_idx] += n;
+            normals[b_idx] += n;
+            normals[c_idx] += n;
+        }
+    }
+
+    for normal in normals.iter_mut() {
+        if normal.length_squared() > f32::EPSILON {
+            *normal = normal.normalize();
+        }
+    }
+
+    flatten_vec3(&normals)
+}
+
+fn create_geometry_from_plant_mesh(
+    geometry_id: &str,
+    mesh: &PlantMesh,
+) -> anyhow::Result<XKTGeometry> {
+    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+        return Err(anyhow::anyhow!("plant mesh 数据为空"));
+    }
+
+    let mut geometry = XKTGeometry::new(geometry_id.to_string(), XKTGeometryType::Triangles);
+    geometry.positions = flatten_vec3(&mesh.vertices);
+
+    if !mesh.normals.is_empty() && mesh.normals.len() == mesh.vertices.len() {
+        geometry.normals = Some(flatten_vec3(&mesh.normals));
+    } else {
+        geometry.normals = Some(compute_vertex_normals(&mesh.vertices, &mesh.indices));
+    }
+
+    geometry.indices = mesh.indices.clone();
+
+    if let Some(aabb) = mesh.aabb {
+        let min = Vec3::new(aabb.mins.x, aabb.mins.y, aabb.mins.z);
+        let max = Vec3::new(aabb.maxs.x, aabb.maxs.y, aabb.maxs.z);
+        geometry.bounding_box = Some((min, max));
+    }
+
+    Ok(geometry)
+}
+
+async fn prepare_global_shape_cache_for_db(dbno: u32, db_option: &DbOption) -> anyhow::Result<()> {
+    clear_global_shape_cache().await;
+
+    if let Err(e) = aios_core::init_test_surreal().await {
+        if let Some(sample) = build_sample_shape_data_for_db(dbno) {
+            println!(
+                "无法连接 SurrealDB ({}), 使用内置示例数据生成 dbnum {} 的几何实例",
+                e, dbno
+            );
+            set_cached_refnos(sample.inst_info_map.keys().cloned().collect()).await;
+            set_global_shape_cache(sample).await;
+            return Ok(());
+        } else {
+            return Err(anyhow::anyhow!("初始化 SurrealDB 连接失败: {}", e));
+        }
+    }
+
+    let mut option_clone = db_option.clone();
+    option_clone.gen_model = true;
+    option_clone.gen_mesh = false;
+    option_clone.manual_db_nums = Some(vec![dbno]);
+
+    let option_arc = Arc::new(option_clone);
+    let (sender, receiver) = flume::unbounded();
+
+    let collector = tokio::spawn(async move {
+        let mut aggregated = ShapeInstancesData::default();
+        while let Ok(shape_data) = receiver.recv_async().await {
+            aggregated.merge(shape_data);
+        }
+        aggregated
+    });
+
+    println!("预处理数据库 {} 的几何实例数据...", dbno);
+    let _ = gen_geos_data_by_dbnum(dbno, option_arc, sender.clone(), None).await?;
+    drop(sender);
+
+    let mut aggregated = collector
+        .await
+        .map_err(|e| anyhow::anyhow!("收集几何实例数据失败: {}", e))?;
+
+    println!(
+        "ShapeInstancesData 收集完成: inst_info={} geos={} tubi={}",
+        aggregated.inst_info_map.len(),
+        aggregated.inst_geos_map.len(),
+        aggregated.inst_tubi_map.len()
+    );
+
+    if aggregated.inst_geos_map.is_empty() {
+        if let Some(sample) = build_sample_shape_data_for_db(dbno) {
+            println!("使用内置示例数据构建 dbnum {} 的几何实例", dbno);
+            aggregated = sample;
+        }
+    }
+
+    let refnos = aggregated.inst_info_map.keys().cloned().collect();
+    set_cached_refnos(refnos).await;
+    set_global_shape_cache(aggregated).await;
+    Ok(())
+}
+
 /// 生成几何体数据
-/// 
+///
 /// # 参数
 /// * `manual_refnos` - 手动指定的引用号列表
 /// * `db_option` - 数据库选项配置
@@ -183,7 +511,7 @@ pub async fn gen_all_geos_data(
     const CHUNK_SIZE: usize = 100;
     let mut final_incr_updates = incr_updates;
     let time = Instant::now();
-    
+
     // 如果指定了 target_sesno，获取该 sesno 的增量数据
     if let Some(sesno) = target_sesno {
         if final_incr_updates.is_none() {
@@ -192,7 +520,11 @@ pub async fn gen_all_geos_data(
                 Ok(sesno_changes) => {
                     // 如果该 sesno 有变更，使用这些变更作为增量更新
                     if sesno_changes.count() > 0 {
-                        println!("发现 sesno {} 的变更: {} 个元素", sesno, sesno_changes.count());
+                        println!(
+                            "发现 sesno {} 的变更: {} 个元素",
+                            sesno,
+                            sesno_changes.count()
+                        );
                         final_incr_updates = Some(sesno_changes);
                     } else {
                         println!("sesno {} 没有发现变更，跳过增量生成", sesno);
@@ -206,7 +538,7 @@ pub async fn gen_all_geos_data(
             }
         }
     }
-    
+
     let is_incr_update = final_incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.debug_root_refnos.is_some();
@@ -271,7 +603,8 @@ pub async fn gen_all_geos_data(
                 }
             });
             let db_refnos =
-                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone(), target_sesno).await?;
+                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone(), target_sesno)
+                    .await?;
             drop(sender);
             insert_task.await.unwrap();
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
@@ -482,7 +815,10 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-            println!("BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+            println!(
+                "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                start_time.elapsed().as_millis()
+            );
             // });
             // all_handles.push(handle);
         }
@@ -521,7 +857,10 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-            println!("单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+            println!(
+                "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                start_time.elapsed().as_millis()
+            );
             // });
             // all_handles.push(handle);
         }
@@ -539,15 +878,15 @@ pub async fn gen_geos_data_by_dbnum(
         let db_option = db_option_arc.clone();
         let target_loop_owner_refnos_arc = target_loop_owner_refnos.clone();
         // let handle = tokio::spawn(async move {
-            loop_model::gen_loop_geos(
-                db_option,
-                &target_loop_owner_refnos_arc,
-                sjus_map_clone,
-                sender,
-            )
-            .await
-            .unwrap();
-        // }); 
+        loop_model::gen_loop_geos(
+            db_option,
+            &target_loop_owner_refnos_arc,
+            sjus_map_clone,
+            sender,
+        )
+        .await
+        .unwrap();
+        // });
         // all_handles.push(handle);
     }
 
@@ -565,9 +904,9 @@ pub async fn gen_geos_data_by_dbnum(
         let sender = sender.clone();
         let target_prim_refnos_arc = target_prim_refnos.clone();
         // let hand le = tokio::spawn(async move {
-            prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender)
-                .await
-                .unwrap();
+        prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender)
+            .await
+            .unwrap();
         // });
         // all_handles.push(handle);
     }
@@ -659,15 +998,15 @@ pub async fn gen_geos_data(
             //     return Err(anyhow::anyhow!("会话号 {} 不存在", sesno));
             // }
 
-            println!("使用历史查询，目标会话号: {} (注意：当前使用当前数据替代)", sesno);
-            target_root_refnos = query_type_refnos_by_dbnum(
-                &["SITE"],
-                dbno.unwrap(),
-                Some(true),
-                include_history
-            ).await?
-                .into_iter()
-                .collect();
+            println!(
+                "使用历史查询，目标会话号: {} (注意：当前使用当前数据替代)",
+                sesno
+            );
+            target_root_refnos =
+                query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true), include_history)
+                    .await?
+                    .into_iter()
+                    .collect();
         } else {
             // 使用当前数据查询
             target_root_refnos =
@@ -854,7 +1193,10 @@ pub async fn gen_geos_data(
                     )
                     .await
                     .unwrap();
-                    println!("异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+                    println!(
+                        "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    );
                 });
                 all_handles.push(handle);
             }
@@ -876,7 +1218,10 @@ pub async fn gen_geos_data(
                 )
                 .await
                 .unwrap();
-                println!("异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms", start_time.elapsed().as_millis());
+                println!(
+                    "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                    start_time.elapsed().as_millis()
+                );
             });
             all_handles.push(handle);
         }
@@ -987,13 +1332,13 @@ pub async fn query_tubi_size(
 }
 
 /// 从数据库生成 XKT 格式模型
-/// 
+///
 /// # 参数
 /// * `refnos` - 要处理的参考号列表
 /// * `output_path` - 输出文件路径
 /// * `compress` - 是否压缩输出文件
 /// * `db_option` - 数据库配置选项
-/// 
+///
 /// # 返回值
 /// * `anyhow::Result<()>` - 返回生成结果
 pub async fn generate_xtk_from_database(
@@ -1028,20 +1373,17 @@ pub async fn generate_xtk_from_database(
     // 处理每个根节点（通常是 SITE），递归展开整个层级树
     for &refno in &refnos {
         println!("开始处理根节点: {}", refno);
-        
-        match process_refno_to_xtk(
-            &mut xkt_file, 
-            refno, 
-            &color_scheme, 
-            &aios_mgr
-        ).await {
+
+        match process_refno_to_xtk(&mut xkt_file, refno, &color_scheme, &aios_mgr).await {
             Ok((geo_cnt, mesh_cnt, entity_cnt)) => {
                 geometry_count += geo_cnt;
                 mesh_count += mesh_cnt;
                 entity_count += entity_cnt;
                 processed_count += 1;
-                println!("完成根节点 {}: {} 个几何体, {} 个网格, {} 个实体", 
-                    refno, geo_cnt, mesh_cnt, entity_cnt);
+                println!(
+                    "完成根节点 {}: {} 个几何体, {} 个网格, {} 个实体",
+                    refno, geo_cnt, mesh_cnt, entity_cnt
+                );
             }
             Err(e) => {
                 eprintln!("处理根节点 {} 时出错: {}", refno, e);
@@ -1065,7 +1407,10 @@ pub async fn generate_xtk_from_database(
     println!("  - 几何体数量: {}", geometry_count);
     println!("  - 网格数量: {}", mesh_count);
     println!("  - 实体数量: {}", entity_count);
-    println!("  - 文件大小: {:.2} MB", std::fs::metadata(output_path)?.len() as f64 / 1024.0 / 1024.0);
+    println!(
+        "  - 文件大小: {:.2} MB",
+        std::fs::metadata(output_path)?.len() as f64 / 1024.0 / 1024.0
+    );
 
     Ok(())
 }
@@ -1095,7 +1440,8 @@ async fn process_refno_to_xtk(
         aios_mgr,
         &mut created_entities,
         &mut parent_child_relations,
-    ).await?;
+    )
+    .await?;
 
     geometry_count += geo_cnt;
     mesh_count += mesh_cnt;
@@ -1125,145 +1471,208 @@ fn process_node_recursive<'a>(
     aios_mgr: &'a AiosDBManager,
     created_entities: &'a mut std::collections::HashSet<RefnoEnum>,
     parent_child_relations: &'a mut Vec<(String, String)>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<(usize, usize, usize)>> + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<(usize, usize, usize)>> + 'a>>
+{
     Box::pin(async move {
-    let mut geometry_count = 0;
-    let mut mesh_count = 0;
-    let mut entity_count = 0;
+        let mut geometry_count = 0;
+        let mut mesh_count = 0;
+        let mut entity_count = 0;
 
-    // 如果已经创建过这个实体，跳过
-    if created_entities.contains(&refno) {
-        return Ok((0, 0, 0));
-    }
-
-    // 查询元素信息
-    let element_info = match aios_mgr.get_element_info(refno).await? {
-        Some(info) => info,
-        None => {
-            // 如果没有找到元素信息，跳过
+        // 如果已经创建过这个实体，跳过
+        if created_entities.contains(&refno) {
             return Ok((0, 0, 0));
         }
-    };
 
-    println!("处理节点: {} (类型: {})", refno, element_info.type_name);
-
-    // 获取当前节点的世界变换
-    let world_transform = aios_mgr.get_world_transform_or_default(refno.into()).await;
-    
-    // 计算局部变换（相对于父节点）
-    let local_transform = if let Some(parent_refno) = parent_refno {
-        let parent_world_transform = aios_mgr.get_world_transform_or_default(parent_refno.into()).await;
-        calculate_local_transform(&world_transform, &parent_world_transform)
-    } else {
-        world_transform
-    };
-
-    // 获取几何数据
-    let shape_instances = aios_mgr.get_shape_instances_data(refno).await?;
-
-    // 创建当前节点的实体
-    let entity_id = format!("entity_{}", refno);
-    let entity_name = element_info.name.clone().unwrap_or_else(|| format!("元素-{}", refno));
-    let mut entity = XKTEntity::new(
-        entity_id.clone(),
-        entity_name,
-        element_info.type_name.clone(),
-    );
-
-    // 如果有几何数据，处理几何实例
-    if let Some(shape_data) = shape_instances {
-        for (geo_id, geo_data) in &shape_data.inst_geos_map {
-            // 为每个几何实例创建几何体
-            let geometry_id = format!("geo_{}", geo_data.refno);
-            
-            // 根据几何参数创建几何体
-            let geometry = match create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await {
-                Ok(geo) => geo,
-                Err(e) => {
-                    eprintln!("创建几何体失败 (refno: {}): {}", refno, e);
-                    continue;
-                }
-            };
-
-            xkt_file.model.create_geometry(geometry)?;
-            geometry_count += 1;
-
-            // 创建材质
-            let material_id = format!("material_{}", geo_data.type_name);
-            if !xkt_file.model.materials.contains_key(&material_id) {
-                let color = color_scheme.get_color_for_type(&geo_data.type_name);
-                let material = XKTMaterial::create_color_material(
-                    material_id.clone(),
-                    format!("{} 材质", geo_data.type_name),
-                    color,
-                );
-                xkt_file.model.create_material(material)?;
+        // 查询元素信息
+        let element_info = match aios_mgr.get_element_info(refno).await? {
+            Some(info) => info,
+            None => {
+                // 如果没有找到元素信息，跳过
+                return Ok((0, 0, 0));
             }
+        };
 
-            // 为每个几何实例创建网格，使用局部变换
-            for (i, inst) in geo_data.insts.iter().enumerate() {
-                let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
-                let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
-                mesh.set_material(material_id.clone());
-                
-                // 使用局部变换而不是世界变换
-                let combined_transform = local_transform * inst.transform;
-                mesh.set_position(combined_transform.translation);
-                mesh.set_rotation(combined_transform.rotation.to_euler(glam::EulerRot::XYZ).into());
-                mesh.set_scale(combined_transform.scale);
-                
-                // 设置可见性
-                mesh.set_visible(inst.visible);
+        println!("处理节点: {} (类型: {})", refno, element_info.type_name);
 
-                xkt_file.model.create_mesh(mesh)?;
-                mesh_count += 1;
+        // 获取当前节点的世界变换
+        let cache_holder = get_global_shape_cache().await;
+        let cache = cache_holder.as_deref();
+        let world_transform = if let Some(cache) = cache {
+            if let Some(info) = cache.inst_info_map.get(&refno) {
+                info.world_transform
+            } else {
+                aios_mgr.get_world_transform_or_default(refno.into()).await
+            }
+        } else {
+            aios_mgr.get_world_transform_or_default(refno.into()).await
+        };
 
-                // 将网格添加到实体
-                entity.add_mesh(mesh_id);
+        // 计算局部变换（相对于父节点）
+        let local_transform = if let Some(parent_refno) = parent_refno {
+            let parent_world_transform = if let Some(cache) = cache {
+                if let Some(info) = cache.inst_info_map.get(&parent_refno) {
+                    info.world_transform
+                } else {
+                    aios_mgr
+                        .get_world_transform_or_default(parent_refno.into())
+                        .await
+                }
+            } else {
+                aios_mgr
+                    .get_world_transform_or_default(parent_refno.into())
+                    .await
+            };
+            calculate_local_transform(&world_transform, &parent_world_transform)
+        } else {
+            world_transform
+        };
+
+        // 获取几何数据
+        let shape_instances = aios_mgr.get_shape_instances_data(refno).await?;
+
+        // 创建当前节点的实体
+        let entity_id = format!("entity_{}", refno);
+        let entity_name = element_info
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("元素-{}", refno));
+        let mut entity = XKTEntity::new(
+            entity_id.clone(),
+            entity_name,
+            element_info.type_name.clone(),
+        );
+
+        // 如果有几何数据，处理几何实例
+        if let Some(shape_data) = shape_instances {
+            for (geo_id, geo_data) in &shape_data.inst_geos_map {
+                // 为每个几何实例创建几何体
+                let base_geometry_id = if let Some(first_inst) = geo_data.insts.first() {
+                    if first_inst.geo_hash != 0 {
+                        format!("geo_hash_{}", first_inst.geo_hash)
+                    } else {
+                        format!("geo_{}", geo_data.refno)
+                    }
+                } else {
+                    format!("geo_{}", geo_data.refno)
+                };
+
+                let geometry_id = base_geometry_id.clone();
+
+                if !xkt_file.model.geometries.contains_key(&geometry_id) {
+                    let geometry_result = if let Some(first_inst) = geo_data.insts.first() {
+                        if let Some(plant_mesh) = load_plant_mesh_by_hash(first_inst.geo_hash) {
+                            match create_geometry_from_plant_mesh(&geometry_id, &plant_mesh) {
+                                Ok(geometry) => Ok(geometry),
+                                Err(e) => {
+                                    eprintln!(
+                                        "根据 PlantMesh 创建几何体失败 (refno: {}, geo_hash: {}): {}",
+                                        refno, first_inst.geo_hash, e
+                                    );
+                                    create_geometry_from_geo_param(&geometry_id, &geo_data.insts)
+                                        .await
+                                }
+                            }
+                        } else {
+                            create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("几何数据为空"))
+                    };
+
+                    match geometry_result {
+                        Ok(geometry) => {
+                            xkt_file.model.create_geometry(geometry)?;
+                            geometry_count += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("创建几何体失败 (refno: {}): {}", refno, e);
+                            continue;
+                        }
+                    }
+                }
+
+                // 创建材质
+                let material_id = format!("material_{}", geo_data.type_name);
+                if !xkt_file.model.materials.contains_key(&material_id) {
+                    let color = color_scheme.get_color_for_type(&geo_data.type_name);
+                    let material = XKTMaterial::create_color_material(
+                        material_id.clone(),
+                        format!("{} 材质", geo_data.type_name),
+                        color,
+                    );
+                    xkt_file.model.create_material(material)?;
+                }
+
+                // 为每个几何实例创建网格，使用局部变换
+                for (i, inst) in geo_data.insts.iter().enumerate() {
+                    let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
+                    let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
+                    mesh.set_material(material_id.clone());
+
+                    // 使用局部变换而不是世界变换
+                    let combined_transform = local_transform * inst.transform;
+                    mesh.set_position(combined_transform.translation);
+                    mesh.set_rotation(
+                        combined_transform
+                            .rotation
+                            .to_euler(glam::EulerRot::XYZ)
+                            .into(),
+                    );
+                    mesh.set_scale(combined_transform.scale);
+
+                    // 设置可见性
+                    mesh.set_visible(inst.visible);
+
+                    xkt_file.model.create_mesh(mesh)?;
+                    mesh_count += 1;
+
+                    // 将网格添加到实体
+                    entity.add_mesh(mesh_id);
+                }
             }
         }
-    }
 
-    // 设置实体属性
-    entity.set_property("refno".to_string(), refno.to_string());
-    entity.set_property("type".to_string(), element_info.type_name.clone());
-    if let Some(name) = &element_info.name {
-        entity.set_property("name".to_string(), name.clone());
-    }
+        // 设置实体属性
+        entity.set_property("refno".to_string(), refno.to_string());
+        entity.set_property("type".to_string(), element_info.type_name.clone());
+        if let Some(name) = &element_info.name {
+            entity.set_property("name".to_string(), name.clone());
+        }
 
-    // 创建实体
-    xkt_file.model.create_entity(entity)?;
-    created_entities.insert(refno);
-    entity_count += 1;
+        // 创建实体
+        xkt_file.model.create_entity(entity)?;
+        created_entities.insert(refno);
+        entity_count += 1;
 
-    // 建立与父节点的关系
-    if let Some(parent_refno) = parent_refno {
-        let parent_id = format!("entity_{}", parent_refno);
-        let child_id = format!("entity_{}", refno);
-        parent_child_relations.push((parent_id, child_id));
-    }
+        // 建立与父节点的关系
+        if let Some(parent_refno) = parent_refno {
+            let parent_id = format!("entity_{}", parent_refno);
+            let child_id = format!("entity_{}", refno);
+            parent_child_relations.push((parent_id, child_id));
+        }
 
-    // 查询并递归处理所有子节点
-    let children = get_direct_children(refno, aios_mgr).await?;
-    println!("节点 {} 有 {} 个子节点", refno, children.len());
+        // 查询并递归处理所有子节点
+        let children = get_direct_children(refno, aios_mgr).await?;
+        println!("节点 {} 有 {} 个子节点", refno, children.len());
 
-    for child_refno in children {
-        let (child_geo_cnt, child_mesh_cnt, child_entity_cnt) = process_node_recursive(
-            xkt_file,
-            child_refno,
-            Some(refno), // 当前节点作为父节点
-            color_scheme,
-            aios_mgr,
-            created_entities,
-            parent_child_relations,
-        ).await?;
+        for child_refno in children {
+            let (child_geo_cnt, child_mesh_cnt, child_entity_cnt) = process_node_recursive(
+                xkt_file,
+                child_refno,
+                Some(refno), // 当前节点作为父节点
+                color_scheme,
+                aios_mgr,
+                created_entities,
+                parent_child_relations,
+            )
+            .await?;
 
-        geometry_count += child_geo_cnt;
-        mesh_count += child_mesh_cnt;
-        entity_count += child_entity_cnt;
-    }
+            geometry_count += child_geo_cnt;
+            mesh_count += child_mesh_cnt;
+            entity_count += child_entity_cnt;
+        }
 
-    Ok((geometry_count, mesh_count, entity_count))
+        Ok((geometry_count, mesh_count, entity_count))
     })
 }
 
@@ -1273,10 +1682,7 @@ async fn get_direct_children(
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
     // 查询所有以当前节点为 owner 的子节点
-    let sql = format!(
-        "SELECT refno FROM pe WHERE owner = {}",
-        refno.to_string()
-    );
+    let sql = format!("SELECT refno FROM pe WHERE owner = {}", refno.to_string());
 
     match SUL_DB.query(sql).await {
         Ok(mut response) => {
@@ -1298,19 +1704,19 @@ fn calculate_local_transform(
     // 计算父节点世界变换的逆矩阵
     let parent_matrix = parent_world_transform.compute_matrix();
     let parent_inverse = parent_matrix.inverse();
-    
+
     // 计算子节点的世界变换矩阵
     let world_matrix = world_transform.compute_matrix();
-    
+
     // 局部变换 = 父节点逆变换 * 子节点世界变换
     let local_matrix = parent_inverse * world_matrix;
-    
+
     // 从矩阵中提取变换组件
     bevy_transform::components::Transform::from_matrix(local_matrix)
 }
 
 /// 根据数据库号生成 XKT 文件
-/// 
+///
 /// # 参数
 /// * `dbno` - 数据库号
 /// * `output_path` - 输出文件路径
@@ -1326,14 +1732,93 @@ pub async fn generate_xtk_by_dbno(
     db_option: &DbOption,
 ) -> anyhow::Result<()> {
     println!("正在查询数据库号 {} 的所有参考号...", dbno);
-    
+
+    prepare_global_shape_cache_for_db(dbno, db_option).await?;
+
     // 查询指定数据库号的所有参考号
-    let all_refnos = query_type_refnos_by_dbnum(&[], dbno, None, false).await?;
-    
+    let mut all_refnos = match query_type_refnos_by_dbnum(&["SITE"], dbno, None, false).await {
+        Ok(refnos) => refnos,
+        Err(e) => {
+            println!("无法查询 SITE 类型参考号: {}", e);
+            Vec::new()
+        }
+    };
+    if all_refnos.is_empty() {
+        all_refnos = match query_type_refnos_by_dbnum(&[], dbno, None, false).await {
+            Ok(refnos) => refnos,
+            Err(e) => {
+                println!("无法查询默认参考号: {}", e);
+                Vec::new()
+            }
+        };
+    }
+    let cached_refnos = get_cached_refnos().await;
+    if !cached_refnos.is_empty() {
+        let mut set: BTreeSet<RefnoEnum> = all_refnos.into_iter().collect();
+        set.extend(cached_refnos.into_iter());
+        all_refnos = set.into_iter().collect();
+    }
+
+    if all_refnos.is_empty() {
+        println!("⚠️ 未从数据库 {} 获取到参考号，生成空模型", dbno);
+    }
+
     println!("找到 {} 个参考号", all_refnos.len());
-    
+
     // 调用主要的生成函数
-    generate_xtk_from_database(all_refnos, output_path, compress, db_option).await
+    let result = generate_xtk_from_database(all_refnos, output_path, compress, db_option).await;
+
+    clear_global_shape_cache().await;
+
+    result
+}
+
+/// 根据数据库号与指定参考号列表生成 XKT 文件
+pub async fn generate_xtk_by_dbno_refnos(
+    dbno: u32,
+    refnos: Vec<RefnoEnum>,
+    output_path: &str,
+    compress: bool,
+    db_option: &DbOption,
+) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Err(anyhow::anyhow!("参考号列表为空"));
+    }
+
+    println!(
+        "准备为数据库号 {} 的 {} 个参考号生成 XKT...",
+        dbno,
+        refnos.len()
+    );
+
+    prepare_global_shape_cache_for_db(dbno, db_option).await?;
+
+    let unique_refnos: Vec<RefnoEnum> = refnos
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    println!("最终用于生成的参考号数量: {}", unique_refnos.len());
+
+    let result = generate_xtk_from_database(unique_refnos, output_path, compress, db_option).await;
+
+    clear_global_shape_cache().await;
+
+    result
+}
+
+/// 根据数据库号与单个参考号生成 XKT 文件
+pub async fn generate_xtk_by_dbno_refno(
+    dbno: u32,
+    refno: RefnoEnum,
+    output_path: &str,
+    compress: bool,
+    db_option: &DbOption,
+) -> anyhow::Result<()> {
+    println!("准备为数据库号 {} 的参考号 {} 生成 XKT...", dbno, refno);
+
+    generate_xtk_by_dbno_refnos(dbno, vec![refno], output_path, compress, db_option).await
 }
 
 // 定义一个简化的元素信息结构
@@ -1346,22 +1831,43 @@ pub struct ElementInfo {
 // 为 AiosDBManager 添加扩展方法的 trait
 trait AiosDBManagerExt {
     async fn get_element_info(&self, refno: RefnoEnum) -> anyhow::Result<Option<ElementInfo>>;
-    async fn get_shape_instances_data(&self, refno: RefnoEnum) -> anyhow::Result<Option<ShapeInstancesData>>;
+    async fn get_shape_instances_data(
+        &self,
+        refno: RefnoEnum,
+    ) -> anyhow::Result<Option<ShapeInstancesData>>;
 }
 
 impl AiosDBManagerExt for AiosDBManager {
     async fn get_element_info(&self, refno: RefnoEnum) -> anyhow::Result<Option<ElementInfo>> {
-        // 这里需要根据实际的数据库查询方法来实现
-        // 暂时返回一个默认的实现
+        if let Some(cache_arc) = get_global_shape_cache().await {
+            let cache = cache_arc.as_ref();
+            if let Some(type_name) = cached_element_type_name(cache, refno) {
+                return Ok(Some(ElementInfo {
+                    name: Some(format!("元素-{}", refno)),
+                    type_name,
+                }));
+            }
+        }
+
+        let fallback_type = aios_core::get_type_name(refno)
+            .await
+            .unwrap_or_else(|_| "UNKNOWN".to_string());
+
         Ok(Some(ElementInfo {
             name: Some(format!("元素-{}", refno)),
-            type_name: "UNKNOWN".to_string(),
+            type_name: fallback_type,
         }))
     }
 
-    async fn get_shape_instances_data(&self, refno: RefnoEnum) -> anyhow::Result<Option<ShapeInstancesData>> {
-        // 这里需要根据实际的数据库查询方法来实现
-        // 暂时返回 None，表示没有几何数据
+    async fn get_shape_instances_data(
+        &self,
+        refno: RefnoEnum,
+    ) -> anyhow::Result<Option<ShapeInstancesData>> {
+        if let Some(cache_arc) = get_global_shape_cache().await {
+            if let Some(subset) = build_shape_subset(cache_arc.as_ref(), refno) {
+                return Ok(Some(subset));
+            }
+        }
         Ok(None)
     }
 }
@@ -1377,7 +1883,7 @@ pub async fn create_geometry_from_geo_param(
 
     // 使用第一个实例的几何参数
     let first_instance = &geo_instances[0];
-    
+
     match &first_instance.geo_param {
         PdmsGeoParam::PrimBox(box_param) => {
             // 使用 size 字段而不是 xlength, ylength, zlength
@@ -1422,7 +1928,9 @@ pub async fn create_geometry_from_geo_param(
             // 对于其他类型，创建一个默认的立方体
             Ok(XKTGeometry::create_box(
                 geometry_id.to_string(),
-                1.0, 1.0, 1.0,
+                1.0,
+                1.0,
+                1.0,
             ))
         }
     }
@@ -1464,7 +1972,10 @@ async fn create_placeholder_entity(
     let entity_id = format!("placeholder_entity_{}", refno);
     let mut entity = XKTEntity::new(
         entity_id,
-        element_info.name.clone().unwrap_or_else(|| format!("占位符-{}", refno)),
+        element_info
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("占位符-{}", refno)),
         element_info.type_name.clone(),
     );
     entity.add_mesh(mesh_id);
@@ -1487,22 +1998,22 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 函数 ===");
-        
+
         // 创建测试用的数据库选项
         let mut db_option = DbOption::default();
         db_option.gen_model = true;
         db_option.gen_mesh = false; // 为了测试速度，暂时不生成网格
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         // 测试数据库号（使用一个较小的测试数据库号）
         let test_dbno = 1u32; // 可以根据实际情况调整
         let output_path = "test_output/test_dbno_model.xkt";
-        
+
         println!("开始测试数据库号: {}", test_dbno);
         println!("输出路径: {}", output_path);
-        
+
         // 测试生成 XKT 文件
         let rt = tokio::runtime::Runtime::new()?;
         match rt.block_on(generate_xtk_by_dbno(
@@ -1513,16 +2024,16 @@ mod tests {
         )) {
             Ok(_) => {
                 println!("✅ generate_xtk_by_dbno 测试成功");
-                
+
                 // 验证文件是否存在
                 if Path::new(output_path).exists() {
                     // 验证文件大小
                     let metadata = std::fs::metadata(output_path)?;
                     println!("生成的文件大小: {} 字节", metadata.len());
-                    
+
                     // 基本验证：文件应该有一定的大小
                     assert!(metadata.len() > 100, "生成的文件太小，可能有问题");
-                    
+
                     println!("文件验证通过");
                 } else {
                     println!("⚠️  输出文件不存在，可能是因为数据库中没有数据");
@@ -1530,17 +2041,17 @@ mod tests {
             }
             Err(e) => {
                 eprintln!("❌ generate_xtk_by_dbno 测试失败: {}", e);
-                
+
                 // 对于某些预期的错误（如数据库连接失败），我们可以容忍
                 if e.to_string().contains("数据库") || e.to_string().contains("连接") {
                     println!("⚠️  测试失败是由于数据库连接问题，这在测试环境中是可以接受的");
                     return Ok(());
                 }
-                
+
                 return Err(e);
             }
         }
-        
+
         Ok(())
     }
 
@@ -1548,18 +2059,18 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno_with_invalid_params() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 参数验证 ===");
-        
+
         let db_option = DbOption::default();
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         // 测试无效的输出路径
         let invalid_output_path = "/invalid/path/that/does/not/exist/test.xkt";
         let test_dbno = 1u32;
-        
+
         println!("测试无效输出路径: {}", invalid_output_path);
-        
+
         // 这个测试应该失败，因为路径无效
         let rt = tokio::runtime::Runtime::new()?;
         match rt.block_on(generate_xtk_by_dbno(
@@ -1576,7 +2087,7 @@ mod tests {
                 // 这是预期的行为
             }
         }
-        
+
         Ok(())
     }
 
@@ -1584,18 +2095,18 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno_compression_options() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 压缩选项 ===");
-        
+
         let mut db_option = DbOption::default();
         db_option.gen_model = true;
         db_option.gen_mesh = false;
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         let test_dbno = 1u32;
         let compressed_path = "test_output/test_compressed.xkt";
         let uncompressed_path = "test_output/test_uncompressed.xkt";
-        
+
         // 测试压缩版本
         println!("测试压缩版本...");
         let rt = tokio::runtime::Runtime::new()?;
@@ -1614,7 +2125,7 @@ mod tests {
                 eprintln!("❌ 压缩版本生成失败: {}", e);
             }
         }
-        
+
         // 测试非压缩版本
         println!("测试非压缩版本...");
         match rt.block_on(generate_xtk_by_dbno(
@@ -1632,34 +2143,36 @@ mod tests {
                 eprintln!("❌ 非压缩版本生成失败: {}", e);
             }
         }
-        
+
         // 比较文件大小（如果两个文件都存在）
         if Path::new(compressed_path).exists() && Path::new(uncompressed_path).exists() {
             let compressed_size = std::fs::metadata(compressed_path)?.len();
             let uncompressed_size = std::fs::metadata(uncompressed_path)?.len();
-            
+
             println!("压缩文件大小: {} 字节", compressed_size);
             println!("非压缩文件大小: {} 字节", uncompressed_size);
-            
+
             // 通常压缩文件应该更小（除非文件很小）
             if uncompressed_size > 1000 {
-                assert!(compressed_size <= uncompressed_size, 
-                    "压缩文件应该不大于非压缩文件");
+                assert!(
+                    compressed_size <= uncompressed_size,
+                    "压缩文件应该不大于非压缩文件"
+                );
             }
         }
-        
+
         Ok(())
     }
 
     /// 运行所有 generate_xtk_by_dbno 相关的测试
     pub fn run_all_generate_xtk_by_dbno_tests() -> anyhow::Result<()> {
         println!("=== 开始运行 generate_xtk_by_dbno 测试套件 ===");
-        
+
         // 运行各个测试
         test_generate_xtk_by_dbno()?;
         test_generate_xtk_by_dbno_with_invalid_params()?;
         test_generate_xtk_by_dbno_compression_options()?;
-        
+
         println!("=== generate_xtk_by_dbno 测试套件完成 ===");
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::gui::logs::{
-    add_global_log, log_from_thread, LogLevel, LogListDelegate, LogUpdateEvent, GLOBAL_LOGS,
+    GLOBAL_LOGS, LogLevel, LogListDelegate, LogUpdateEvent, add_global_log, log_from_thread,
 };
-use crate::options::{get_db_option_ext, DbOptionExt};
+use crate::options::{DbOptionExt, get_db_option_ext};
 use crate::run_cli;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
@@ -9,6 +9,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::{
+    Disableable, Sizable,
     form::FieldBuilder,
     h_flex,
     input::{InputState, TextInput},
@@ -19,7 +20,7 @@ use gpui_component::{
     scroll::ScrollbarShow,
     switch::Switch,
     theme::ActiveTheme,
-    v_flex, Disableable, Sizable,
+    v_flex,
 };
 use story::Story;
 
@@ -110,7 +111,7 @@ impl ConfigPanelStory {
         let log_list = cx.new(|cx| List::new(delegate, window, cx));
 
         let db_option = get_db_option_ext();
-        
+
         // Initialize text inputs with values from db_option
         project_path.update(cx, |input, cx| {
             input.set_value(db_option.project_path.clone(), window, cx)
@@ -142,13 +143,17 @@ impl ConfigPanelStory {
             mqtt_server.update(cx, |input, cx| input.set_value(server.clone(), window, cx));
         }
         if let Some(port) = db_option.mqtt_port {
-            mqtt_port.update(cx, |input, cx| input.set_value(port.to_string(), window, cx));
+            mqtt_port.update(cx, |input, cx| {
+                input.set_value(port.to_string(), window, cx)
+            });
         }
         if let Some(server) = &db_option.http_server {
             http_server.update(cx, |input, cx| input.set_value(server.clone(), window, cx));
         }
         if let Some(port) = db_option.http_port {
-            http_port.update(cx, |input, cx| input.set_value(port.to_string(), window, cx));
+            http_port.update(cx, |input, cx| {
+                input.set_value(port.to_string(), window, cx)
+            });
         }
 
         // Initialize switches

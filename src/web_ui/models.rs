@@ -1,3 +1,4 @@
+use aios_core::options::DbOption;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +15,10 @@ where
 }
 
 /// 自定义Option<SystemTime>序列化函数
-fn serialize_optional_system_time<S>(time: &Option<SystemTime>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_optional_system_time<S>(
+    time: &Option<SystemTime>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -248,6 +252,48 @@ impl Default for DatabaseConfig {
     }
 }
 
+impl DatabaseConfig {
+    /// 根据 DbOption.toml 中的配置生成部署站点所需的数据库配置
+    pub fn from_db_option(opt: &DbOption) -> Self {
+        let manual_db_nums = opt.manual_db_nums.clone().unwrap_or_default();
+        let project_code = opt.project_code.parse::<u32>().unwrap_or_default();
+        let surreal_ns = opt.surreal_ns.parse::<u32>().unwrap_or(project_code);
+        let mesh_tol_ratio = opt.mesh_tol_ratio.map(|v| v as f64).unwrap_or(3.0);
+        let room_keyword = opt
+            .get_room_key_word()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "-RM".to_string());
+
+        DatabaseConfig {
+            name: if opt.project_name.is_empty() {
+                "DbOption 导入配置".to_string()
+            } else {
+                format!("{} 配置", opt.project_name)
+            },
+            manual_db_nums,
+            project_name: opt.project_name.clone(),
+            project_path: opt.project_path.clone(),
+            project_code,
+            mdb_name: opt.mdb_name.clone(),
+            module: opt.module.clone(),
+            db_type: "surrealdb".to_string(),
+            surreal_ns,
+            db_ip: opt.ip.clone(),
+            db_port: opt.port.clone(),
+            db_user: opt.user.clone(),
+            db_password: opt.password.clone(),
+            gen_model: opt.gen_model,
+            gen_mesh: opt.gen_mesh,
+            gen_spatial_tree: opt.gen_spatial_tree,
+            apply_boolean_operation: opt.apply_boolean_operation,
+            mesh_tol_ratio,
+            room_keyword,
+            target_sesno: None,
+        }
+    }
+}
+
 // ================= Projects =================
 
 /// 项目状态
@@ -277,7 +323,9 @@ pub enum DeploymentSiteStatus {
 }
 
 impl Default for DeploymentSiteStatus {
-    fn default() -> Self { Self::Configuring }
+    fn default() -> Self {
+        Self::Configuring
+    }
 }
 
 /// E3D项目信息
@@ -364,6 +412,32 @@ pub struct DeploymentSiteCreateRequest {
     pub notes: Option<String>,
 }
 
+/// 从 DbOption 导入部署站点的请求
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeploymentSiteImportRequest {
+    /// DbOption.toml 文件路径
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 覆盖默认生成的站点名称
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 描述
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 环境
+    #[serde(default)]
+    pub env: Option<String>,
+    /// 负责人
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// 标签
+    #[serde(default)]
+    pub tags: Option<serde_json::Value>,
+    /// 备注
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
 /// 更新部署站点请求
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeploymentSiteUpdateRequest {
@@ -439,7 +513,9 @@ pub struct DeploymentSiteTaskRequest {
 }
 
 impl Default for ProjectStatus {
-    fn default() -> Self { Self::Running }
+    fn default() -> Self {
+        Self::Running
+    }
 }
 
 /// 已部署项目（用于首页展示与 API 返回）
@@ -930,9 +1006,9 @@ impl TaskQueueManager {
 
     /// 检查依赖是否满足
     fn are_dependencies_satisfied(&self, dependencies: &[String]) -> bool {
-        dependencies.iter().all(|dep_id| {
-            self.completed_tasks.iter().any(|task| task.id == *dep_id)
-        })
+        dependencies
+            .iter()
+            .all(|dep_id| self.completed_tasks.iter().any(|task| task.id == *dep_id))
     }
 
     /// 根据ID获取任务
@@ -957,9 +1033,15 @@ impl TaskQueueManager {
     }
 
     /// 创建批量任务
-    pub fn create_batch_tasks(&mut self, template_id: &str, batch_config: BatchTaskConfig) -> Result<Vec<String>, String> {
+    pub fn create_batch_tasks(
+        &mut self,
+        template_id: &str,
+        batch_config: BatchTaskConfig,
+    ) -> Result<Vec<String>, String> {
         // 先克隆模板以避免借用冲突
-        let template = self.task_templates.get(template_id)
+        let template = self
+            .task_templates
+            .get(template_id)
             .ok_or_else(|| format!("任务模板 {} 不存在", template_id))?
             .clone();
 
@@ -1015,13 +1097,23 @@ impl TaskInfo {
         }
     }
 
-    pub fn new_with_priority(name: String, task_type: TaskType, config: DatabaseConfig, priority: TaskPriority) -> Self {
+    pub fn new_with_priority(
+        name: String,
+        task_type: TaskType,
+        config: DatabaseConfig,
+        priority: TaskPriority,
+    ) -> Self {
         let mut task = Self::new(name, task_type, config);
         task.priority = priority;
         task
     }
 
-    pub fn new_with_dependencies(name: String, task_type: TaskType, config: DatabaseConfig, dependencies: Vec<String>) -> Self {
+    pub fn new_with_dependencies(
+        name: String,
+        task_type: TaskType,
+        config: DatabaseConfig,
+        dependencies: Vec<String>,
+    ) -> Self {
         let mut task = Self::new(name, task_type, config);
         task.dependencies = dependencies;
         task
@@ -1031,7 +1123,13 @@ impl TaskInfo {
         self.add_log_with_details(level, message, None, None);
     }
 
-    pub fn add_log_with_details(&mut self, level: LogLevel, message: String, error_code: Option<String>, stack_trace: Option<String>) {
+    pub fn add_log_with_details(
+        &mut self,
+        level: LogLevel,
+        message: String,
+        error_code: Option<String>,
+        stack_trace: Option<String>,
+    ) {
         self.logs.push(LogEntry {
             timestamp: SystemTime::now(),
             level,

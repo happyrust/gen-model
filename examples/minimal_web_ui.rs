@@ -1,28 +1,24 @@
-use axum::{
-    response::Html,
-    routing::get,
-    Router,
-};
+use axum::{Router, response::Html, routing::get};
 
 /// 最小化的Web UI服务器
-/// 
+///
 /// 这个示例展示了一个最基本的Web UI界面，用于测试基础功能
-/// 
+///
 /// 使用方法：
 /// ```bash
 /// cargo run --example minimal_web_ui --features "web_ui"
 /// ```
-/// 
+///
 /// 然后在浏览器中访问: http://localhost:8080
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 初始化日志
     env_logger::init();
-    
+
     println!("🚀 正在启动最小化 AIOS Web UI...");
     println!("📋 这是一个基础版本，用于测试连接");
     println!();
-    
+
     let app = Router::new()
         .route("/", get(index_page))
         .route("/dashboard", get(dashboard_page))
@@ -35,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     println!("🎯 功能包括:");
     println!("   - 基础页面导航");
     println!("   - 简单的界面展示");
-    
+
     axum::serve(listener, app).await?;
     Ok(())
 }

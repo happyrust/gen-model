@@ -1,25 +1,25 @@
 // 配置系统 - xeokit XTK 生成器的配置管理
 
 use super::*;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use anyhow::Result;
 
 /// XTK 生成器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XTKGeneratorConfig {
     // 性能配置
     pub performance: PerformanceConfig,
-    
+
     // 质量配置
     pub quality: QualityConfig,
-    
+
     // 优化配置
     pub optimization: OptimizationConfig,
-    
+
     // 输出配置
     pub output: OutputConfig,
-    
+
     // 调试配置
     pub debug: DebugConfig,
 }
@@ -29,16 +29,16 @@ pub struct XTKGeneratorConfig {
 pub struct PerformanceConfig {
     /// 批处理大小
     pub batch_size: usize,
-    
+
     /// 线程数量
     pub thread_count: usize,
-    
+
     /// 内存限制（MB）
     pub memory_limit_mb: usize,
-    
+
     /// 启用并行处理
     pub enable_parallel_processing: bool,
-    
+
     /// 内存池大小
     pub memory_pool_size: usize,
 }
@@ -48,16 +48,16 @@ pub struct PerformanceConfig {
 pub struct QualityConfig {
     /// 位置量化位数
     pub quantization_bits: u8,
-    
+
     /// 法向量精度
     pub normal_precision: NormalPrecision,
-    
+
     /// 启用边缘生成
     pub enable_edge_generation: bool,
-    
+
     /// 启用轮廓边缘
     pub enable_silhouette_edges: bool,
-    
+
     /// 几何体验证
     pub enable_geometry_validation: bool,
 }
@@ -67,19 +67,19 @@ pub struct QualityConfig {
 pub struct OptimizationConfig {
     /// 启用几何体复用
     pub enable_geometry_reuse: bool,
-    
+
     /// 启用实例化
     pub enable_instancing: bool,
-    
+
     /// 压缩级别 (0-9)
     pub compression_level: u32,
-    
+
     /// 启用K-d树分区
     pub enable_kd_tree_partitioning: bool,
-    
+
     /// 最大区域大小
     pub max_region_size: usize,
-    
+
     /// 启用材质合并
     pub enable_material_merging: bool,
 }
@@ -89,16 +89,16 @@ pub struct OptimizationConfig {
 pub struct OutputConfig {
     /// 输出格式版本
     pub format_version: XKTFormatVersion,
-    
+
     /// 包含元数据
     pub include_metadata: bool,
-    
+
     /// 包含属性
     pub include_properties: bool,
-    
+
     /// 包含统计信息
     pub include_statistics: bool,
-    
+
     /// 输出文件扩展名
     pub file_extension: String,
 }
@@ -108,16 +108,16 @@ pub struct OutputConfig {
 pub struct DebugConfig {
     /// 启用详细日志
     pub enable_verbose_logging: bool,
-    
+
     /// 启用性能分析
     pub enable_profiling: bool,
-    
+
     /// 保存中间文件
     pub save_intermediate_files: bool,
-    
+
     /// 验证输出文件
     pub validate_output: bool,
-    
+
     /// 生成质量报告
     pub generate_quality_report: bool,
 }
@@ -125,8 +125,8 @@ pub struct DebugConfig {
 /// XKT 格式版本
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum XKTFormatVersion {
-    V4,   // xeokit XKT V4.0 (标准)
-    V3,   // xeokit XKT V3.0 (向后兼容)
+    V4,     // xeokit XKT V4.0 (标准)
+    V3,     // xeokit XKT V3.0 (向后兼容)
     Custom, // 自定义格式
 }
 
@@ -222,34 +222,34 @@ impl XTKGeneratorConfig {
     /// 从环境变量加载配置
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        
+
         // 性能配置
         if let Ok(batch_size) = std::env::var("XTK_BATCH_SIZE") {
             if let Ok(size) = batch_size.parse() {
                 config.performance.batch_size = size;
             }
         }
-        
+
         if let Ok(memory_limit) = std::env::var("XTK_MEMORY_LIMIT_MB") {
             if let Ok(limit) = memory_limit.parse() {
                 config.performance.memory_limit_mb = limit;
             }
         }
-        
+
         // 质量配置
         if let Ok(quantization_bits) = std::env::var("XTK_QUANTIZATION_BITS") {
             if let Ok(bits) = quantization_bits.parse() {
                 config.quality.quantization_bits = bits;
             }
         }
-        
+
         // 优化配置
         if let Ok(compression_level) = std::env::var("XTK_COMPRESSION_LEVEL") {
             if let Ok(level) = compression_level.parse() {
                 config.optimization.compression_level = level;
             }
         }
-        
+
         config
     }
 
@@ -259,29 +259,29 @@ impl XTKGeneratorConfig {
         if self.performance.batch_size == 0 {
             return Err(anyhow::anyhow!("批处理大小不能为0"));
         }
-        
+
         if self.performance.thread_count == 0 {
             return Err(anyhow::anyhow!("线程数量不能为0"));
         }
-        
+
         if self.performance.memory_limit_mb < 128 {
             return Err(anyhow::anyhow!("内存限制不能小于128MB"));
         }
-        
+
         // 验证质量配置
         if self.quality.quantization_bits < 8 || self.quality.quantization_bits > 32 {
             return Err(anyhow::anyhow!("量化位数必须在8-32之间"));
         }
-        
+
         // 验证优化配置
         if self.optimization.compression_level > 9 {
             return Err(anyhow::anyhow!("压缩级别不能超过9"));
         }
-        
+
         if self.optimization.max_region_size == 0 {
             return Err(anyhow::anyhow!("最大区域大小不能为0"));
         }
-        
+
         Ok(())
     }
 
@@ -305,7 +305,7 @@ impl XTKGeneratorConfig {
             optimization: OptimizationConfig {
                 enable_geometry_reuse: true,
                 enable_instancing: true,
-                compression_level: 3, // 降低压缩级别以提高速度
+                compression_level: 3,               // 降低压缩级别以提高速度
                 enable_kd_tree_partitioning: false, // 禁用复杂分区
                 max_region_size: 131072,
                 enable_material_merging: true,
@@ -522,7 +522,9 @@ mod tests {
 
         // 验证高性能配置的特点
         assert!(high_perf.performance.batch_size > high_qual.performance.batch_size);
-        assert!(high_perf.optimization.compression_level < high_qual.optimization.compression_level);
+        assert!(
+            high_perf.optimization.compression_level < high_qual.optimization.compression_level
+        );
     }
 
     #[test]

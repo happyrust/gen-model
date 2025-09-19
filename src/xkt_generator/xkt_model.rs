@@ -1,10 +1,10 @@
+use anyhow::Result;
+use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
-use glam::{Vec3, Mat4, Quat};
-use anyhow::Result;
 
-use super::{XKTGeometry, XKTMaterial, XKTEntity, XKTMesh};
+use super::{XKTEntity, XKTGeometry, XKTMaterial, XKTMesh};
 
 /// XKT 模型的主要数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,18 +96,18 @@ impl XKTModel {
     /// 创建网格
     pub fn create_mesh(&mut self, mesh: XKTMesh) -> Result<String> {
         let id = mesh.id.clone();
-        
+
         // 验证几何体和材质是否存在
         if !self.geometries.contains_key(&mesh.geometry_id) {
             return Err(anyhow::anyhow!("Geometry '{}' not found", mesh.geometry_id));
         }
-        
+
         if let Some(material_id) = &mesh.material_id {
             if !self.materials.contains_key(material_id) {
                 return Err(anyhow::anyhow!("Material '{}' not found", material_id));
             }
         }
-        
+
         self.meshes.insert(id.clone(), mesh);
         self.update_stats();
         Ok(id)
@@ -116,14 +116,14 @@ impl XKTModel {
     /// 创建实体
     pub fn create_entity(&mut self, entity: XKTEntity) -> Result<String> {
         let id = entity.id.clone();
-        
+
         // 验证网格是否存在
         for mesh_id in &entity.mesh_ids {
             if !self.meshes.contains_key(mesh_id) {
                 return Err(anyhow::anyhow!("Mesh '{}' not found", mesh_id));
             }
         }
-        
+
         self.entities.insert(id.clone(), entity);
         self.update_stats();
         Ok(id)
@@ -135,13 +135,13 @@ impl XKTModel {
         self.stats.num_materials = self.materials.len();
         self.stats.num_meshes = self.meshes.len();
         self.stats.num_entities = self.entities.len();
-        
+
         // 计算三角形和顶点数量
-        self.stats.num_triangles = self.geometries.values()
-            .map(|g| g.indices.len() / 3)
-            .sum();
-        
-        self.stats.num_vertices = self.geometries.values()
+        self.stats.num_triangles = self.geometries.values().map(|g| g.indices.len() / 3).sum();
+
+        self.stats.num_vertices = self
+            .geometries
+            .values()
             .map(|g| g.positions.len() / 3)
             .sum();
     }
@@ -149,10 +149,10 @@ impl XKTModel {
     /// 完成模型构建
     pub async fn finalize(&mut self) -> Result<()> {
         self.update_stats();
-        
+
         // 验证模型完整性
         self.validate()?;
-        
+
         println!("XKT Model finalized:");
         println!("  Geometries: {}", self.stats.num_geometries);
         println!("  Materials: {}", self.stats.num_materials);
@@ -160,7 +160,7 @@ impl XKTModel {
         println!("  Entities: {}", self.stats.num_entities);
         println!("  Triangles: {}", self.stats.num_triangles);
         println!("  Vertices: {}", self.stats.num_vertices);
-        
+
         Ok(())
     }
 
@@ -169,14 +169,20 @@ impl XKTModel {
         // 检查是否有孤立的网格
         for mesh in self.meshes.values() {
             if !self.geometries.contains_key(&mesh.geometry_id) {
-                return Err(anyhow::anyhow!("Mesh '{}' references non-existent geometry '{}'", 
-                    mesh.id, mesh.geometry_id));
+                return Err(anyhow::anyhow!(
+                    "Mesh '{}' references non-existent geometry '{}'",
+                    mesh.id,
+                    mesh.geometry_id
+                ));
             }
-            
+
             if let Some(material_id) = &mesh.material_id {
                 if !self.materials.contains_key(material_id) {
-                    return Err(anyhow::anyhow!("Mesh '{}' references non-existent material '{}'", 
-                        mesh.id, material_id));
+                    return Err(anyhow::anyhow!(
+                        "Mesh '{}' references non-existent material '{}'",
+                        mesh.id,
+                        material_id
+                    ));
                 }
             }
         }
@@ -185,8 +191,11 @@ impl XKTModel {
         for entity in self.entities.values() {
             for mesh_id in &entity.mesh_ids {
                 if !self.meshes.contains_key(mesh_id) {
-                    return Err(anyhow::anyhow!("Entity '{}' references non-existent mesh '{}'", 
-                        entity.id, mesh_id));
+                    return Err(anyhow::anyhow!(
+                        "Entity '{}' references non-existent mesh '{}'",
+                        entity.id,
+                        mesh_id
+                    ));
                 }
             }
         }
@@ -219,4 +228,4 @@ impl XKTModel {
             None
         }
     }
-} 
+}

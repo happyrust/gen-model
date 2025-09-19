@@ -1,37 +1,37 @@
 // xeokit 兼容的 XTK 生成器模块
 // 实现标准 xeokit XKT V4.0 格式
 
-pub mod xkt_v4_writer;
+pub mod config;
+pub mod error;
+pub mod examples;
 pub mod geometry_quantizer;
 pub mod normal_encoder;
 pub mod primitive_cache;
 pub mod stream_processor;
-pub mod config;
-pub mod error;
-pub mod examples;
+pub mod xkt_v4_writer;
 
+#[cfg(test)]
+pub mod test_helpers;
 #[cfg(test)]
 pub mod tests;
 #[cfg(test)]
 pub mod validation_tests;
-#[cfg(test)]
-pub mod test_helpers;
 
-pub use xkt_v4_writer::*;
+pub use config::*;
+pub use error::*;
 pub use geometry_quantizer::*;
 pub use normal_encoder::*;
 pub use primitive_cache::*;
 pub use stream_processor::*;
-pub use config::*;
-pub use error::*;
+pub use xkt_v4_writer::*;
 
 use anyhow::Result;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use glam::{Vec3, Mat4};
-use uuid::Uuid;
-use tokio::fs;
 use std::time::Instant;
+use tokio::fs;
+use uuid::Uuid;
 
 /// xeokit XKT V4.0 版本号
 pub const XKT_V4_VERSION: u32 = 4;
@@ -68,19 +68,22 @@ impl XeokitXTKGenerator {
 
         // 创建 XKT 模型
         let mut xkt_model = XKTModel::new();
-        
+
         // 流式处理参考号
         let mut stream_processor = StreamProcessor::new(self.config.performance.batch_size);
-        
+
         for batch in refnos.chunks(self.config.performance.batch_size) {
-            self.process_refno_batch(&mut xkt_model, batch, db_option).await?;
+            self.process_refno_batch(&mut xkt_model, batch, db_option)
+                .await?;
         }
 
         // 完成模型构建
         xkt_model.finalize()?;
 
         // 写入 XKT 文件
-        self.stream_writer.write_xkt_file(&xkt_model, output_path).await?;
+        self.stream_writer
+            .write_xkt_file(&xkt_model, output_path)
+            .await?;
 
         let duration = start_time.elapsed();
         let result = GenerationResult {
@@ -125,10 +128,10 @@ impl XeokitXTKGenerator {
     ) -> Result<()> {
         // 查询元素信息
         let element_info = self.query_element_info(refno, db_option).await?;
-        
+
         // 查询几何参数
         let geo_param = self.query_geometry_param(refno, db_option).await?;
-        
+
         // 转换几何体
         let converted_geometry = if let Some(geo_param) = geo_param {
             self.geometry_processor.convert_pdms_geometry(&geo_param)?
@@ -138,13 +141,14 @@ impl XeokitXTKGenerator {
         };
 
         // 获取或创建材质
-        let material = self.material_manager.get_material_for_type(&element_info.type_name);
+        let material = self
+            .material_manager
+            .get_material_for_type(&element_info.type_name);
 
         // 获取或创建基元
-        let primitive_id = self.geometry_processor.get_or_create_primitive(
-            &converted_geometry,
-            &material,
-        )?;
+        let primitive_id = self
+            .geometry_processor
+            .get_or_create_primitive(&converted_geometry, &material)?;
 
         // 创建实体
         let entity = XKTEntity {
@@ -160,7 +164,7 @@ impl XeokitXTKGenerator {
         };
 
         xkt_model.add_entity(entity)?;
-        
+
         Ok(())
     }
 
@@ -169,12 +173,14 @@ impl XeokitXTKGenerator {
             return 0.0;
         }
 
-        let total_instances: usize = model.entities.iter()
+        let total_instances: usize = model
+            .entities
+            .iter()
             .map(|e| e.primitive_instances.len())
             .sum();
-        
+
         let unique_primitives = model.primitives.len();
-        
+
         if total_instances == 0 {
             0.0
         } else {
@@ -265,7 +271,8 @@ impl XKTModel {
                     return Err(XTKGeneratorError::InvalidPrimitiveReference {
                         entity_id: entity.id.clone(),
                         primitive_id: instance.primitive_id,
-                    }.into());
+                    }
+                    .into());
                 }
             }
         }
@@ -313,11 +320,11 @@ pub struct XKTPrimitive {
 /// 几何数据容器
 #[derive(Debug, Clone)]
 pub struct GeometryData {
-    pub positions: Vec<u16>,           // 量化的位置数据
-    pub normals: Vec<u8>,              // Oct编码的法向量
-    pub indices: Vec<u32>,             // 三角形索引
-    pub edge_indices: Vec<u32>,        // 边缘索引
-    pub decode_matrices: Vec<f32>,     // 解码矩阵
+    pub positions: Vec<u16>,       // 量化的位置数据
+    pub normals: Vec<u8>,          // Oct编码的法向量
+    pub indices: Vec<u32>,         // 三角形索引
+    pub edge_indices: Vec<u32>,    // 边缘索引
+    pub decode_matrices: Vec<f32>, // 解码矩阵
 }
 
 impl GeometryData {

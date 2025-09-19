@@ -1,8 +1,11 @@
-#[cfg(feature = "web_ui")] 
-use aios_database::web_ui::{handlers, AppState};
-#[cfg(feature = "web_ui")] 
-use axum::{routing::{get, post}, Router};
-#[cfg(feature = "web_ui")] 
+#[cfg(feature = "web_ui")]
+use aios_database::web_ui::{AppState, handlers};
+#[cfg(feature = "web_ui")]
+use axum::{
+    Router,
+    routing::{get, post},
+};
+#[cfg(feature = "web_ui")]
 use tower_http::services::ServeDir;
 
 #[cfg(feature = "web_ui")]
@@ -29,7 +32,10 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/static", ServeDir::new("src/web_ui/static"))
         .with_state(state);
 
-    let port: u16 = std::env::var("WEB_UI_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
+    let port: u16 = std::env::var("WEB_UI_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8000);
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
     println!("🚀 Minimal Web UI 启动: http://localhost:{}", port);
     axum::serve(listener, app).await?;

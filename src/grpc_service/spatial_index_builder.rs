@@ -1,18 +1,18 @@
-use std::sync::Arc;
-use std::time::SystemTime;
+use anyhow::Result;
+use nalgebra::Point3;
+use parry3d::bounding_volume::Aabb;
+use rstar::{AABB, RTree, RTreeObject};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use anyhow::Result;
+use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::RwLock;
-use rstar::{RTree, RTreeObject, AABB};
-use parry3d::bounding_volume::Aabb;
-use nalgebra::Point3;
-use serde::{Serialize, Deserialize};
 
-use aios_core::pdms_types::{RefU64, RefnoEnum, PdmsGenericType};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::grpc_service::spatial_query_service::SpatialElement;
+use aios_core::pdms_types::{PdmsGenericType, RefU64, RefnoEnum};
 
 /// 空间索引构建器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +72,10 @@ impl SpatialIndexBuilder {
     }
 
     /// 从数据库构建空间索引
-    pub async fn build_from_database(&self, db_nos: &[i32]) -> Result<(RTree<SpatialElement>, IndexStatistics)> {
+    pub async fn build_from_database(
+        &self,
+        db_nos: &[i32],
+    ) -> Result<(RTree<SpatialElement>, IndexStatistics)> {
         let start_time = SystemTime::now();
         let mut elements = Vec::new();
         let mut statistics = IndexStatistics {
@@ -93,13 +96,14 @@ impl SpatialIndexBuilder {
         // 批量处理构件
         for chunk in root_refnos.chunks(self.config.batch_size) {
             let batch_elements = self.build_elements_batch(chunk).await?;
-            
+
             for element in batch_elements {
                 statistics.total_elements += 1;
-                
+
                 // 应用过滤条件
                 if self.should_include_element(&element) {
-                    *statistics.type_distribution
+                    *statistics
+                        .type_distribution
                         .entry(element.element_type.clone())
                         .or_insert(0) += 1;
                     elements.push(element);
@@ -109,8 +113,11 @@ impl SpatialIndexBuilder {
                 }
             }
 
-            log::info!("已处理 {}/{} 个构件", 
-                statistics.total_elements, root_refnos.len());
+            log::info!(
+                "已处理 {}/{} 个构件",
+                statistics.total_elements,
+                root_refnos.len()
+            );
         }
 
         // 构建R-star树
@@ -125,7 +132,10 @@ impl SpatialIndexBuilder {
     }
 
     /// 从指定参考号列表构建索引
-    pub async fn build_from_refnos(&self, refnos: &[RefU64]) -> Result<(RTree<SpatialElement>, IndexStatistics)> {
+    pub async fn build_from_refnos(
+        &self,
+        refnos: &[RefU64],
+    ) -> Result<(RTree<SpatialElement>, IndexStatistics)> {
         let start_time = SystemTime::now();
         let mut elements = Vec::new();
         let mut statistics = IndexStatistics {
@@ -142,10 +152,11 @@ impl SpatialIndexBuilder {
         // 批量处理
         for chunk in refnos.chunks(self.config.batch_size) {
             let batch_elements = self.build_elements_batch(chunk).await?;
-            
+
             for element in batch_elements {
                 if self.should_include_element(&element) {
-                    *statistics.type_distribution
+                    *statistics
+                        .type_distribution
                         .entry(element.element_type.clone())
                         .or_insert(0) += 1;
                     elements.push(element);
@@ -182,7 +193,7 @@ impl SpatialIndexBuilder {
     async fn create_spatial_element(&self, refno: RefU64) -> Result<Option<SpatialElement>> {
         // TODO: 实现真实的数据查询逻辑
         // 这里需要从数据库查询构件的包围盒、类型等信息
-        
+
         // 模拟数据创建过程
         let element_type = self.get_element_type(refno).await?;
         let bbox = self.get_element_bbox(refno).await?;
@@ -227,16 +238,18 @@ impl SpatialIndexBuilder {
     /// 判断是否包含该元素
     fn should_include_element(&self, element: &SpatialElement) -> bool {
         // 类型过滤
-        if !self.config.filter_types.is_empty() 
-            && !self.config.filter_types.contains(&element.element_type) {
+        if !self.config.filter_types.is_empty()
+            && !self.config.filter_types.contains(&element.element_type)
+        {
             return false;
         }
 
         // 包围盒尺寸过滤
         let size = element.bbox.maxs - element.bbox.mins;
-        if size.x < self.config.min_bbox_size 
-            || size.y < self.config.min_bbox_size 
-            || size.z < self.config.min_bbox_size {
+        if size.x < self.config.min_bbox_size
+            || size.y < self.config.min_bbox_size
+            || size.z < self.config.min_bbox_size
+        {
             return false;
         }
 
@@ -259,16 +272,16 @@ pub struct SpatialIndexPersistence;
 impl SpatialIndexPersistence {
     /// 保存索引到文件
     pub fn save_index(
-        rtree: &RTree<SpatialElement>, 
+        rtree: &RTree<SpatialElement>,
         statistics: &IndexStatistics,
-        file_path: &Path
+        file_path: &Path,
     ) -> Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
-        
+
         let file = File::create(file_path)?;
         let writer = BufWriter::new(file);
-        
+
         // 使用bincode进行序列化
         let data = IndexPersistenceData {
             elements: rtree.iter().cloned().collect(),
@@ -276,7 +289,7 @@ impl SpatialIndexPersistence {
             version: 1,
             created_at: SystemTime::now(),
         };
-        
+
         bincode::serialize_into(writer, &data)?;
         log::info!("空间索引已保存到文件: {:?}", file_path);
         Ok(())
@@ -286,13 +299,13 @@ impl SpatialIndexPersistence {
     pub fn load_index(file_path: &Path) -> Result<(RTree<SpatialElement>, IndexStatistics)> {
         use std::fs::File;
         use std::io::BufReader;
-        
+
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
-        
+
         let data: IndexPersistenceData = bincode::deserialize_from(reader)?;
         let rtree = RTree::bulk_load(data.elements);
-        
+
         log::info!("空间索引已从文件加载: {:?}", file_path);
         Ok((rtree, data.statistics))
     }
@@ -433,8 +446,14 @@ impl<'de> Deserialize<'de> for IndexStatistics {
 
         deserializer.deserialize_struct(
             "IndexStatistics",
-            &["total_elements", "indexed_elements", "skipped_elements", 
-              "build_time_ms", "memory_estimate_mb", "type_distribution"],
+            &[
+                "total_elements",
+                "indexed_elements",
+                "skipped_elements",
+                "build_time_ms",
+                "memory_estimate_mb",
+                "type_distribution",
+            ],
             IndexStatisticsVisitor,
         )
     }

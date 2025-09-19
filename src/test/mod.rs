@@ -8,11 +8,11 @@
 mod test_gen_model;
 mod test_performance;
 // mod test_spatial_index_1112; // 暂时注释，需要修复
-mod test_sqlite_spatial;
 #[cfg(feature = "grpc")]
 mod test_sctn_contact;
 #[cfg(feature = "grpc")]
 mod test_sctn_with_spatial_index;
+mod test_sqlite_spatial;
 // mod test_incr_update;
 
 // mod test_data_state;

@@ -1,8 +1,8 @@
 // xeokit XTK 生成器使用示例
 
 use super::*;
-use aios_core::pdms_types::RefnoEnum;
 use aios_core::options::DbOption;
+use aios_core::pdms_types::RefnoEnum;
 use anyhow::Result;
 
 /// 基本使用示例
@@ -28,11 +28,9 @@ pub async fn basic_usage_example() -> Result<()> {
 
     // 5. 生成 XKT 文件
     let output_path = "examples/basic_output.xkt";
-    let result = generator.generate_xkt_from_refnos(
-        test_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(test_refnos, output_path, &db_option)
+        .await?;
 
     println!("生成完成: {:?}", result);
     Ok(())
@@ -55,11 +53,9 @@ pub async fn high_performance_example() -> Result<()> {
     let output_path = "examples/high_performance_output.xkt";
 
     let start_time = std::time::Instant::now();
-    let result = generator.generate_xkt_from_refnos(
-        large_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(large_refnos, output_path, &db_option)
+        .await?;
 
     let duration = start_time.elapsed();
     println!("高性能生成完成，耗时: {:.2}s", duration.as_secs_f32());
@@ -84,11 +80,9 @@ pub async fn high_quality_example() -> Result<()> {
     let db_option = DbOption::default();
     let output_path = "examples/high_quality_output.xkt";
 
-    let result = generator.generate_xkt_from_refnos(
-        test_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(test_refnos, output_path, &db_option)
+        .await?;
 
     println!("高质量生成完成: {:?}", result);
     Ok(())
@@ -118,11 +112,9 @@ pub async fn custom_config_example() -> Result<()> {
     let db_option = DbOption::default();
     let output_path = "examples/custom_config_output.xkt";
 
-    let result = generator.generate_xkt_from_refnos(
-        test_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(test_refnos, output_path, &db_option)
+        .await?;
 
     println!("自定义配置生成完成: {:?}", result);
     Ok(())
@@ -145,17 +137,16 @@ pub async fn error_handling_example() -> Result<()> {
     let db_option = DbOption::default();
     let output_path = "examples/error_handling_output.xkt";
 
-    match generator.generate_xkt_from_refnos(
-        problematic_refnos,
-        output_path,
-        &db_option,
-    ).await {
+    match generator
+        .generate_xkt_from_refnos(problematic_refnos, output_path, &db_option)
+        .await
+    {
         Ok(result) => {
             println!("意外成功: {:?}", result);
         }
         Err(error) => {
             println!("捕获到预期错误: {}", error);
-            
+
             // 展示错误处理
             match error.downcast_ref::<XTKGeneratorError>() {
                 Some(XTKGeneratorError::DatabaseError { source }) => {
@@ -183,7 +174,7 @@ pub async fn config_file_example() -> Result<()> {
 
     // 创建示例配置
     let config = XTKGeneratorConfig::high_quality();
-    
+
     // 保存配置到文件
     let config_path = "examples/example_config.toml";
     config.save_to_file(config_path)?;
@@ -196,16 +187,14 @@ pub async fn config_file_example() -> Result<()> {
 
     // 使用加载的配置
     let mut generator = XeokitXTKGenerator::new(loaded_config);
-    
+
     let test_refnos = vec![RefnoEnum::from("config_file_test/item_1")];
     let db_option = DbOption::default();
     let output_path = "examples/config_file_output.xkt";
 
-    let result = generator.generate_xkt_from_refnos(
-        test_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(test_refnos, output_path, &db_option)
+        .await?;
 
     println!("使用配置文件生成完成: {:?}", result);
     Ok(())
@@ -224,10 +213,10 @@ pub async fn benchmark_example() -> Result<()> {
 
     for (config_name, config) in configs {
         println!("\n测试配置: {}", config_name);
-        
+
         for &size in &test_sizes {
             let mut generator = XeokitXTKGenerator::new(config.clone());
-            
+
             let test_refnos: Vec<RefnoEnum> = (0..size)
                 .map(|i| RefnoEnum::from(format!("benchmark_{}/item_{}", config_name, i).as_str()))
                 .collect();
@@ -236,18 +225,18 @@ pub async fn benchmark_example() -> Result<()> {
             let output_path = format!("examples/benchmark_{}_{}.xkt", config_name, size);
 
             let start_time = std::time::Instant::now();
-            
-            match generator.generate_xkt_from_refnos(
-                test_refnos,
-                &output_path,
-                &db_option,
-            ).await {
+
+            match generator
+                .generate_xkt_from_refnos(test_refnos, &output_path, &db_option)
+                .await
+            {
                 Ok(result) => {
                     let duration = start_time.elapsed();
                     let items_per_second = size as f32 / duration.as_secs_f32();
-                    
-                    println!("  {} 项目: {:.2}s ({:.1} items/s, {} KB)", 
-                        size, 
+
+                    println!(
+                        "  {} 项目: {:.2}s ({:.1} items/s, {} KB)",
+                        size,
                         duration.as_secs_f32(),
                         items_per_second,
                         result.file_size / 1024
@@ -280,22 +269,20 @@ pub async fn quality_validation_example() -> Result<()> {
     let db_option = DbOption::default();
     let output_path = "examples/quality_validation_output.xkt";
 
-    let result = generator.generate_xkt_from_refnos(
-        test_refnos,
-        output_path,
-        &db_option,
-    ).await?;
+    let result = generator
+        .generate_xkt_from_refnos(test_refnos, output_path, &db_option)
+        .await?;
 
     println!("质量验证生成完成: {:?}", result);
 
     // 如果启用了质量报告，这里会显示详细的质量信息
     if std::path::Path::new("examples/quality_validation_output.xkt").exists() {
         println!("✅ 输出文件验证通过");
-        
+
         // 可以添加更多验证逻辑
         let file_size = std::fs::metadata("examples/quality_validation_output.xkt")?.len();
         println!("文件大小: {} bytes", file_size);
-        
+
         if file_size > 0 {
             println!("✅ 文件大小验证通过");
         } else {
@@ -315,28 +302,28 @@ pub async fn run_all_examples() -> Result<()> {
 
     // 运行所有示例
     println!("=== 运行所有示例 ===");
-    
+
     println!("1. 基本使用示例");
     basic_usage_example().await?;
-    
+
     println!("2. 高性能配置示例");
     high_performance_example().await?;
-    
+
     println!("3. 高质量配置示例");
     high_quality_example().await?;
-    
+
     println!("4. 自定义配置示例");
     custom_config_example().await?;
-    
+
     println!("5. 错误处理示例");
     error_handling_example().await?;
-    
+
     println!("6. 配置文件示例");
     config_file_example().await?;
-    
+
     println!("7. 性能基准测试");
     benchmark_example().await?;
-    
+
     println!("8. 质量验证");
     quality_validation_example().await?;
     Ok(())

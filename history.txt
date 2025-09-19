@@ -28,3 +28,9 @@ CREATE dbnum_info_table:8001 SET     dbnum = 8001,    db_type = 'EQUI',    file_
 CREATE dbnum_info_table:8002 SET     dbnum = 8002,    db_type = 'PIPE',    file_name = 'piping.db',    count = 0,    sesno = 0,    project = 'AvevaMarineSample',    auto_update = true,    updating = true,    last_update_result = 'Failed';
 -- 查询验证
 SELECT * FROM dbnum_info_table;
+DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
+select value id from SITE where REFNO.dbnum=1112 limit 5;
+select value id from ZONE where REFNO.dbnum=1112 limit 5;
+DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
+select value id from SITE where REFNO.dbnum=1112 limit 5;
+select count() from pe where id.dbnum=1112;

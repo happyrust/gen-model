@@ -13,7 +13,7 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
 use crate::fast_model::room_model::build_room_relations;
-use crate::fast_model::{gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES};
+use crate::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
@@ -26,7 +26,7 @@ use aios_core::ssc_setting::{
     set_pdms_major_code,
 };
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::{build_cate_relate, pdms_types::*, SUL_DB};
+use aios_core::{SUL_DB, build_cate_relate, pdms_types::*};
 use aios_core::{get_db_option, init_demo_test_surreal, init_surreal};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, Timelike};
@@ -50,14 +50,14 @@ use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use versioned_db::database::{define_dbnum_event, sync_pdms};
 
-use log::{error, LevelFilter};
+use log::{LevelFilter, error};
 use simplelog::*;
 
 pub mod api;
 pub mod cata;
 pub mod consts;
-pub mod expression_fix;
 pub mod data_interface;
+pub mod expression_fix;
 pub mod tables;
 // pub mod ssc;
 pub mod defines;
@@ -89,8 +89,8 @@ pub mod spatial_index;
 pub mod test_spatial_query;
 
 // 添加options模块的重导出
-pub use options::get_db_option_ext;
 pub use options::DbOptionExt;
+pub use options::get_db_option_ext;
 
 // 重新导出MDB相关函数供GRPC服务使用
 // pub use crate::api::element::query_types_refnos_names;
@@ -105,7 +105,7 @@ pub use mdb::get_project_mdb;
 //     use crate::api::attr::{query_explicit_attr, query_numbdbs_by_mdb};
 //     use crate::api::element::query_types_refnos_names;
 //     use dashmap::DashMap;
-    
+
 //     let mut result = DashMap::new();
 //     // 获取到所有的 mdb
 //     let mdb = query_types_refnos_names(&vec!["MDB"], project_pool, None).await?;
@@ -323,24 +323,23 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// 运行app
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
     use crate::fast_model::aabb_tree::manual_update_aabbs;
     use aios_core::init_surreal;
-    
+
     // 如果传入的是DbOptionExt，则取其内部的DbOption
     let db_option_ext = option.unwrap_or_else(|| get_db_option_ext());
     let db_option: DbOption = db_option_ext.inner.clone();
-    
+
     // 检查是否需要启动GRPC服务器
     #[cfg(feature = "grpc")]
     let start_grpc = std::env::var("AIOS_GRPC_ENABLED")
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
-    
+
     #[cfg(feature = "grpc")]
     if start_grpc {
         // 在后台启动GRPC服务器
@@ -349,18 +348,16 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
                 eprintln!("GRPC server error: {}", e);
             }
         });
-        
+
         // 继续执行正常的应用逻辑，但不阻塞GRPC服务器
-        let app_handle = tokio::spawn(async move {
-            run_app_internal(db_option).await
-        });
-        
+        let app_handle = tokio::spawn(async move { run_app_internal(db_option).await });
+
         // 等待任一任务完成
         tokio::select! {
             result = app_handle => result?,
             _ = grpc_handle => {},
         }
-        
+
         return Ok(());
     }
     // 调用内部实现
@@ -370,20 +367,19 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 /// 内部应用运行逻辑
 async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
     use crate::fast_model::aabb_tree::manual_update_aabbs;
-    use aios_core::init_surreal;
     use aios_core::SUL_DB;
-    
-    let config = surrealdb::opt::Config::default()
-        .ast_payload(); // 启用AST格式
-    
+    use aios_core::init_surreal;
+
+    let config = surrealdb::opt::Config::default().ast_payload(); // 启用AST格式
+
     #[cfg(feature = "local")]
     SUL_DB
         .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
         .with_capacity(1000)
         .await?;
-    
+
     println!("数据库连接中...");
-    
+
     #[cfg(feature = "ws")]
     {
         // 使用改进的数据库连接初始化
@@ -407,17 +403,18 @@ async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
     if db_option.gen_spatial_tree {
         // SQLite R*-tree initialization is handled in spatial_index_builder
     }
-    
+
     run_cli(db_option).await
 }
 
 /// 改进的数据库连接初始化，支持重试和详细错误诊断
 async fn init_surreal_with_retry(db_option: &DbOption) -> anyhow::Result<()> {
-    use aios_core::{init_surreal, SUL_DB};
+    use aios_core::{SUL_DB, init_surreal};
     use std::time::Duration;
 
     // 验证配置
-    db_option.validate_connection_config()
+    db_option
+        .validate_connection_config()
         .map_err(|e| anyhow::anyhow!("配置验证失败: {}", e))?;
 
     let max_retries = 3;
@@ -450,7 +447,7 @@ async fn init_surreal_with_retry(db_option: &DbOption) -> anyhow::Result<()> {
 
 /// 尝试连接数据库的核心逻辑
 async fn try_connect_database(db_option: &DbOption) -> anyhow::Result<()> {
-    use aios_core::{init_surreal, SUL_DB};
+    use aios_core::{SUL_DB, init_surreal};
 
     let conn_str = db_option.get_version_db_conn_str();
     println!("🔗 连接字符串: {}", conn_str);
@@ -469,8 +466,14 @@ async fn try_connect_database(db_option: &DbOption) -> anyhow::Result<()> {
         .use_ns(&db_option.project_code.to_string())
         .use_db(&db_option.project_name)
         .await
-        .map_err(|e| anyhow::anyhow!("选择数据库失败 (ns: {}, db: {}): {}",
-            db_option.project_code, db_option.project_name, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "选择数据库失败 (ns: {}, db: {}): {}",
+                db_option.project_code,
+                db_option.project_name,
+                e
+            )
+        })?;
 
     println!("✓ 命名空间和数据库选择成功");
 
@@ -532,8 +535,7 @@ impl DbOptionValidation for aios_core::options::DbOption {
     fn get_connection_summary(&self) -> String {
         format!(
             "连接信息: {}:{} (用户: {}, 项目: {}, 命名空间: {})",
-            self.v_ip, self.v_port, self.v_user,
-            self.project_name, self.project_code
+            self.v_ip, self.v_port, self.v_user, self.project_name, self.project_code
         )
     }
 }

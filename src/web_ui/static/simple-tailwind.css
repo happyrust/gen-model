@@ -129,6 +129,7 @@ body {
 .text-blue-600 { color: rgb(37 99 235); }
 .text-blue-700 { color: rgb(29 78 216); }
 .text-blue-800 { color: rgb(30 64 175); }
+.text-indigo-600 { color: rgb(79 70 229); }
 .text-green-500 { color: rgb(34 197 94); }
 .text-green-600 { color: rgb(22 163 74); }
 .text-green-700 { color: rgb(21 128 61); }
@@ -161,6 +162,7 @@ body {
 .bg-blue-50 { background-color: rgb(239 246 255); }
 .bg-blue-100 { background-color: rgb(219 234 254); }
 .bg-blue-200 { background-color: rgb(191 219 254); }
+.bg-indigo-50 { background-color: rgb(238 242 255); }
 .bg-blue-500 { background-color: rgb(59 130 246); }
 .bg-blue-600 { background-color: rgb(37 99 235); }
 .bg-blue-700 { background-color: rgb(29 78 216); }
@@ -172,6 +174,7 @@ body {
 .bg-red-100 { background-color: rgb(254 226 226); }
 .bg-red-500 { background-color: rgb(239 68 68); }
 .bg-red-600 { background-color: rgb(220 38 38); }
+.bg-amber-50 { background-color: rgb(255 251 235); }
 .bg-amber-500 { background-color: rgb(245 158 11); }
 .bg-yellow-50 { background-color: rgb(254 252 232); }
 .bg-yellow-100 { background-color: rgb(254 249 195); }

@@ -1,7 +1,7 @@
+use anyhow::Result;
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use glam::Vec3;
-use anyhow::Result;
 
 /// XKT 几何体类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,77 +47,37 @@ impl XKTGeometry {
 
         let positions = vec![
             // 前面
-            -half_w, -half_h,  half_d,
-             half_w, -half_h,  half_d,
-             half_w,  half_h,  half_d,
-            -half_w,  half_h,  half_d,
-            // 后面
-            -half_w, -half_h, -half_d,
-            -half_w,  half_h, -half_d,
-             half_w,  half_h, -half_d,
-             half_w, -half_h, -half_d,
-            // 顶面
-            -half_w,  half_h, -half_d,
-            -half_w,  half_h,  half_d,
-             half_w,  half_h,  half_d,
-             half_w,  half_h, -half_d,
-            // 底面
-            -half_w, -half_h, -half_d,
-             half_w, -half_h, -half_d,
-             half_w, -half_h,  half_d,
-            -half_w, -half_h,  half_d,
-            // 右面
-             half_w, -half_h, -half_d,
-             half_w,  half_h, -half_d,
-             half_w,  half_h,  half_d,
-             half_w, -half_h,  half_d,
-            // 左面
-            -half_w, -half_h, -half_d,
-            -half_w, -half_h,  half_d,
-            -half_w,  half_h,  half_d,
-            -half_w,  half_h, -half_d,
+            -half_w, -half_h, half_d, half_w, -half_h, half_d, half_w, half_h, half_d, -half_w,
+            half_h, half_d, // 后面
+            -half_w, -half_h, -half_d, -half_w, half_h, -half_d, half_w, half_h, -half_d, half_w,
+            -half_h, -half_d, // 顶面
+            -half_w, half_h, -half_d, -half_w, half_h, half_d, half_w, half_h, half_d, half_w,
+            half_h, -half_d, // 底面
+            -half_w, -half_h, -half_d, half_w, -half_h, -half_d, half_w, -half_h, half_d, -half_w,
+            -half_h, half_d, // 右面
+            half_w, -half_h, -half_d, half_w, half_h, -half_d, half_w, half_h, half_d, half_w,
+            -half_h, half_d, // 左面
+            -half_w, -half_h, -half_d, -half_w, -half_h, half_d, -half_w, half_h, half_d, -half_w,
+            half_h, -half_d,
         ];
 
         let normals = vec![
             // 前面
-            0.0, 0.0, 1.0,
-            0.0, 0.0, 1.0,
-            0.0, 0.0, 1.0,
-            0.0, 0.0, 1.0,
-            // 后面
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            // 顶面
-            0.0, 1.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 1.0, 0.0,
-            // 底面
-            0.0, -1.0, 0.0,
-            0.0, -1.0, 0.0,
-            0.0, -1.0, 0.0,
-            0.0, -1.0, 0.0,
-            // 右面
-            1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0,
-            // 左面
-            -1.0, 0.0, 0.0,
-            -1.0, 0.0, 0.0,
-            -1.0, 0.0, 0.0,
-            -1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // 后面
+            0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, // 顶面
+            0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, // 底面
+            0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, // 右面
+            1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, // 左面
+            -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0,
         ];
 
         let indices = vec![
-            0,  1,  2,   0,  2,  3,    // 前面
-            4,  5,  6,   4,  6,  7,    // 后面
-            8,  9,  10,  8,  10, 11,   // 顶面
-            12, 13, 14,  12, 14, 15,   // 底面
-            16, 17, 18,  16, 18, 19,   // 右面
-            20, 21, 22,  20, 22, 23,   // 左面
+            0, 1, 2, 0, 2, 3, // 前面
+            4, 5, 6, 4, 6, 7, // 后面
+            8, 9, 10, 8, 10, 11, // 顶面
+            12, 13, 14, 12, 14, 15, // 底面
+            16, 17, 18, 16, 18, 19, // 右面
+            20, 21, 22, 20, 22, 23, // 左面
         ];
 
         let min = Vec3::new(-half_w, -half_h, -half_d);
@@ -157,7 +117,7 @@ impl XKTGeometry {
                 let z = radius * sin_phi * sin_theta;
 
                 positions.extend_from_slice(&[x, y, z]);
-                
+
                 // 法向量就是归一化的位置向量
                 let length = (x * x + y * y + z * z).sqrt();
                 normals.extend_from_slice(&[x / length, y / length, z / length]);
@@ -171,8 +131,12 @@ impl XKTGeometry {
                 let next = current + segments + 1;
 
                 indices.extend_from_slice(&[
-                    current, next, current + 1,
-                    current + 1, next, next + 1,
+                    current,
+                    next,
+                    current + 1,
+                    current + 1,
+                    next,
+                    next + 1,
                 ]);
             }
         }
@@ -251,8 +215,12 @@ impl XKTGeometry {
 
             // 侧面四边形（两个三角形）
             indices.extend_from_slice(&[
-                base_side_bottom, next_side_bottom, base_side_top,
-                base_side_top, next_side_bottom, next_side_top,
+                base_side_bottom,
+                next_side_bottom,
+                base_side_top,
+                base_side_top,
+                next_side_bottom,
+                next_side_top,
             ]);
         }
 
@@ -319,4 +287,4 @@ impl XKTGeometry {
             0
         }
     }
-} 
+}
