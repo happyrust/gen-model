@@ -210,9 +210,9 @@ pub fn render_simple_index_page() -> String {
             </div>
 
             <!-- 详情弹窗 Modal -->
-            <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
+            <div id="project-modal" class="fixed inset-0 z-1000 hidden" aria-hidden="true">
               <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
-              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg flex flex-col" style="max-height: 85vh;">
+              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg flex flex-col z-1010" style="max-height: 85vh;">
                 <!-- 标题栏 -->
                 <div class="flex items-center justify-between p-6 pb-4 border-b">
                   <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
@@ -374,6 +374,39 @@ pub fn render_xtk_viewer_page() -> String {
         </section>
 
         <section class=\"bg-slate-900/60 border border-slate-700/60 rounded-xl p-5 space-y-4\">
+            <div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\">
+                <div>
+                    <h2 class=\"text-xl font-semibold text-slate-100\">手动生成 XKT</h2>
+                    <p class=\"text-sm text-slate-400\">输入数据库号，选填参考号（支持单个元素导出），即可生成 XKT 文件。</p>
+                </div>
+                <div class=\"flex items-center gap-3\">
+                    <label class=\"flex items-center gap-2 text-sm text-slate-300\">
+                        <input id=\"manualCompress\" type=\"checkbox\" class=\"accent-blue-500\" checked>
+                        启用压缩
+                    </label>
+                    <label class=\"flex items-center gap-2 text-sm text-slate-300\">
+                        <input id=\"manualAutoload\" type=\"checkbox\" class=\"accent-blue-500\" checked>
+                        生成后自动加载
+                    </label>
+                </div>
+            </div>
+            <div class=\"grid gap-4 md:grid-cols-3\">
+                <div>
+                    <label class=\"block mb-2\" for=\"manualDbno\">数据库号</label>
+                    <input id=\"manualDbno\" type=\"number\" min=\"1\" placeholder=\"例如 7999\" class=\"w-full px-3 py-2 rounded bg-slate-800/70 border border-slate-600/70 text-slate-200\">
+                </div>
+                <div class=\"md:col-span-2\">
+                    <label class=\"block mb-2\" for=\"manualRefno\">参考号（可选）</label>
+                    <input id=\"manualRefno\" type=\"text\" placeholder=\"例如 SITE/1234\" class=\"w-full px-3 py-2 rounded bg-slate-800/70 border border-slate-600/70 text-slate-200\">
+                </div>
+            </div>
+            <div class=\"flex flex-col gap-2 md:flex-row md:items-center md:gap-4\">
+                <button id=\"manualGenerate\" class=\"btn-primary px-5 py-2 rounded w-full md:w-auto\">生成 XKT</button>
+                <span id=\"manualGenerateStatus\" class=\"text-sm text-slate-400\"></span>
+            </div>
+        </section>
+
+        <section class=\"bg-slate-900/60 border border-slate-700/60 rounded-xl p-5 space-y-4\">
             <div class=\"flex flex-col gap-4 md:flex-row md:items-center md:justify-between\">
                 <div>
                     <label class=\"block text-lg font-semibold text-slate-100\">数据库列表</label>
@@ -443,6 +476,12 @@ pub fn render_xtk_viewer_page() -> String {
             const generateSelectedBtn = document.getElementById('generateSelected');
             const generateLoadSelectedBtn = document.getElementById('generateLoadSelected');
             const generationLog = document.getElementById('generationLog');
+            const manualDbnoInput = document.getElementById('manualDbno');
+            const manualRefnoInput = document.getElementById('manualRefno');
+            const manualCompressInput = document.getElementById('manualCompress');
+            const manualAutoloadInput = document.getElementById('manualAutoload');
+            const manualGenerateBtn = document.getElementById('manualGenerate');
+            const manualGenerateStatus = document.getElementById('manualGenerateStatus');
 
             let dbList = [];
             const selectedDbnos = new Set();
@@ -592,12 +631,19 @@ pub fn render_xtk_viewer_page() -> String {
                 }
             }
 
-            async function generateXkt(dbno) {
-                appendLog(`开始生成数据库 ${dbno} 的 XKT...`);
+            async function generateXkt({ dbno, refno = null, compress = true }) {
+                const targetLabel = refno ? `数据库 ${dbno} / 参考号 ${refno}` : `数据库 ${dbno}`;
+                appendLog(`开始生成 ${targetLabel} 的 XKT...`);
+
+                const payload = { dbno, compress };
+                if (refno) {
+                    payload.refno = refno;
+                }
+
                 const response = await fetch('/api/xkt/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ dbno }),
+                    body: JSON.stringify(payload),
                 });
 
                 let data = {};
@@ -609,11 +655,11 @@ pub fn render_xtk_viewer_page() -> String {
 
                 if (!response.ok || !data.success) {
                     const message = data.error || `生成失败 (HTTP ${response.status})`;
-                    appendLog(`数据库 ${dbno} 生成失败: ${message}`, 'error');
+                    appendLog(`${targetLabel} 生成失败: ${message}`, 'error');
                     throw new Error(message);
                 }
 
-                appendLog(`数据库 ${dbno} 生成完成: ${data.filename}`, 'success');
+                appendLog(`${targetLabel} 生成完成: ${data.filename}`, 'success');
                 return data;
             }
 
@@ -632,7 +678,7 @@ pub fn render_xtk_viewer_page() -> String {
                 try {
                     let firstModel = true;
                     for (const dbno of dbnos) {
-                        const result = await generateXkt(dbno);
+                        const result = await generateXkt({ dbno });
                         if (autoLoad) {
                             await loadModel(result.url, `db${dbno}`, { preserve: !firstModel });
                             firstModel = false;
@@ -662,6 +708,57 @@ pub fn render_xtk_viewer_page() -> String {
             refreshDbListBtn?.addEventListener('click', loadDbList);
             generateSelectedBtn?.addEventListener('click', () => generateSelected(false));
             generateLoadSelectedBtn?.addEventListener('click', () => generateSelected(true));
+
+            manualGenerateBtn?.addEventListener('click', async () => {
+                if (!manualDbnoInput) { return; }
+
+                const dbnoValue = manualDbnoInput.value.trim();
+                if (!dbnoValue) {
+                    alert('请填写数据库号');
+                    manualDbnoInput.focus();
+                    return;
+                }
+
+                const dbno = Number(dbnoValue);
+                if (!Number.isFinite(dbno) || dbno <= 0) {
+                    alert('数据库号格式不正确');
+                    manualDbnoInput.focus();
+                    return;
+                }
+
+                const refno = manualRefnoInput?.value.trim() || null;
+                const compress = manualCompressInput?.checked ?? true;
+                const autoLoad = manualAutoloadInput?.checked ?? false;
+
+                manualGenerateBtn.disabled = true;
+                manualGenerateBtn.classList.add('opacity-60', 'cursor-not-allowed');
+                if (manualGenerateStatus) {
+                    manualGenerateStatus.textContent = '正在生成，请稍候...';
+                    manualGenerateStatus.className = 'text-sm text-slate-300';
+                }
+
+                try {
+                    const result = await generateXkt({ dbno, refno, compress });
+                    if (manualGenerateStatus) {
+                        manualGenerateStatus.textContent = `生成完成: ${result.filename}`;
+                        manualGenerateStatus.className = 'text-sm text-emerald-300';
+                    }
+
+                    if (autoLoad && result?.url) {
+                        const label = refno ? `${dbno}-${refno}` : `db${dbno}`;
+                        await loadModel(result.url, label, { preserve: false });
+                    }
+                } catch (error) {
+                    console.error('手动生成 XKT 失败', error);
+                    if (manualGenerateStatus) {
+                        manualGenerateStatus.textContent = `生成失败: ${error.message}`;
+                        manualGenerateStatus.className = 'text-sm text-rose-400';
+                    }
+                } finally {
+                    manualGenerateBtn.disabled = false;
+                    manualGenerateBtn.classList.remove('opacity-60', 'cursor-not-allowed');
+                }
+            });
 
             document.getElementById('fileInput').addEventListener('change', (event) => {
                 const file = event.target.files[0];
@@ -752,26 +849,33 @@ pub fn render_index_with_sidebar() -> String {
         </section>
 
             <!-- 详情弹窗 Modal -->
-            <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
+            <div id="project-modal" class="fixed inset-0 z-1000 hidden" aria-hidden="true">
               <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
-              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg p-6">
-                <div class="flex items-start justify-between">
+              <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg flex flex-col z-1010" style="max-height: 85vh;">
+                <!-- 标题栏 -->
+                <div class="flex items-center justify-between p-6 pb-4 border-b flex-shrink-0">
                   <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
-                  <button class="text-gray-400 hover:text-gray-600" onclick="closeProjectModal()">
-                    <i class="fas fa-times"></i>
+                  <button class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors" onclick="closeProjectModal()">
+                    <i class="fas fa-times text-xl"></i>
                   </button>
                 </div>
-                <div class="mt-2 text-sm text-gray-600 flex items-center gap-3">
-                  <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
-                  <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+
+                <!-- 内容区域（可滚动） -->
+                <div class="flex-1 overflow-y-auto px-6 py-4" style="max-height: calc(85vh - 160px);">
+                  <div class="text-sm text-gray-600 flex items-center gap-3">
+                    <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
+                    <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+                  </div>
+                  <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
+                  <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
+                    加载失败，请稍后重试。按 Enter 键可重试。
+                    <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
+                  </div>
+                  <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
                 </div>
-                <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
-                <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
-                  加载失败，请稍后重试。按 Enter 键可重试。
-                  <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
-                </div>
-                <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
-                <div class="mt-6 flex gap-3 justify-end">
+
+                <!-- 底部按钮栏 -->
+                <div class="border-t px-6 py-4 flex gap-3 justify-end bg-gray-50 flex-shrink-0">
                   <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100" onclick="copySiteConfig()">复制配置</button>
                   <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white" onclick="createSiteTask()">为站点创建任务</button>
                   <a id="pm-open-url" href="javascript:;" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hidden">打开地址</a>
@@ -1900,12 +2004,12 @@ pub fn render_advanced_tasks_page() -> String {
         </main>
 
         <!-- 新建任务模态框 -->
-        <div x-show="showCreateModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50"
+        <div x-show="showCreateModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000"
              @click.self="showCreateModal = false"
              x-transition:enter="ease-out duration-300" x-transition:enter-start="opacity-0"
              x-transition:enter-end="opacity-100" x-transition:leave="ease-in duration-200"
              x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0">
-            <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white z-1010">
                 <div class="mt-3">
                     <!-- 模态框标题 -->
                     <div class="flex items-center justify-between pb-4 border-b border-gray-100">
@@ -2373,6 +2477,351 @@ pub fn render_advanced_tasks_page() -> String {
 </body>
 </html>
     "#.to_string()
+}
+
+/// 渲染任务详情页面
+pub fn render_task_detail_page(task_id: String) -> String {
+    format!(
+        r##"
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>任务详情 - AIOS 数据库管理平台</title>
+    <link href="/static/simple-tailwind.css" rel="stylesheet">
+    <link href="/static/simple-icons.css" rel="stylesheet">
+    <script src="/static/alpine.min.js" defer></script>
+    <style>
+        .task-detail-grid {{ display: grid; grid-template-columns: 1fr 2fr; gap: 1rem; }}
+        .detail-label {{ font-weight: 600; color: #4B5563; }}
+        .detail-value {{ color: #1F2937; }}
+        @media (max-width: 768px) {{
+            .task-detail-grid {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen" x-data="taskDetailApp('{}')">
+        <!-- 页面标题栏 -->
+        <div class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center">
+                    <h1 class="text-2xl font-bold text-gray-800">
+                        <i class="fas fa-tasks mr-2"></i>任务详情
+                    </h1>
+                    <div class="flex space-x-2">
+                        <a href="/tasks" class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+                            <i class="fas fa-arrow-left mr-2"></i>返回任务列表
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 主要内容区域 -->
+        <div class="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+            <!-- 任务基本信息卡片 -->
+            <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+                <h2 class="text-xl font-semibold mb-4 text-gray-800">
+                    <i class="fas fa-info-circle mr-2"></i>基本信息
+                </h2>
+                <div class="task-detail-grid">
+                    <div>
+                        <span class="detail-label">任务ID:</span>
+                    </div>
+                    <div>
+                        <span class="detail-value font-mono" x-text="task?.id || '加载中...'"></span>
+                    </div>
+
+                    <div>
+                        <span class="detail-label">任务名称:</span>
+                    </div>
+                    <div>
+                        <input type="text" x-model="task.name"
+                               class="w-full px-3 py-1 border rounded-md focus:ring-2 focus:ring-blue-500"
+                               @change="updateTask()">
+                    </div>
+
+                    <div>
+                        <span class="detail-label">任务类型:</span>
+                    </div>
+                    <div>
+                        <select x-model="task.task_type"
+                                class="w-full px-3 py-1 border rounded-md focus:ring-2 focus:ring-blue-500"
+                                @change="updateTask()">
+                            <option value="DataParsingWizard">数据解析</option>
+                            <option value="ModelGeneration">模型生成</option>
+                            <option value="SpatialCalculation">空间计算</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <span class="detail-label">状态:</span>
+                    </div>
+                    <div>
+                        <span class="px-3 py-1 rounded-full text-sm font-medium"
+                              :class="getStatusClass(task?.status)"
+                              x-text="getStatusLabel(task?.status)"></span>
+                    </div>
+
+                    <div>
+                        <span class="detail-label">创建时间:</span>
+                    </div>
+                    <div>
+                        <span class="detail-value" x-text="formatDate(task?.created_at)"></span>
+                    </div>
+
+                    <div>
+                        <span class="detail-label">更新时间:</span>
+                    </div>
+                    <div>
+                        <span class="detail-value" x-text="formatDate(task?.updated_at)"></span>
+                    </div>
+
+                    <div>
+                        <span class="detail-label">部署站点:</span>
+                    </div>
+                    <div>
+                        <span class="detail-value" x-text="task?.site_name || '未指定'"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 任务配置卡片 -->
+            <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+                <h2 class="text-xl font-semibold mb-4 text-gray-800">
+                    <i class="fas fa-cog mr-2"></i>任务配置
+                </h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">描述</label>
+                        <textarea x-model="task.description"
+                                  rows="3"
+                                  class="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500"
+                                  @change="updateTask()"
+                                  placeholder="任务描述..."></textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">参数配置 (JSON)</label>
+                        <textarea x-model="taskParamsJson"
+                                  rows="6"
+                                  class="w-full px-3 py-2 border rounded-md font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                                  @change="updateParams()"
+                                  placeholder="{{}}"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 进度信息卡片 -->
+            <div class="bg-white rounded-lg shadow-md p-6 mb-6" x-show="task?.status === 'Running'">
+                <h2 class="text-xl font-semibold mb-4 text-gray-800">
+                    <i class="fas fa-chart-line mr-2"></i>执行进度
+                </h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between text-sm">
+                        <span x-text="task?.progress?.current_step || '准备中'"></span>
+                        <span x-text="(task?.progress?.percentage || 0) + '%'"></span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-3">
+                        <div class="bg-blue-600 h-3 rounded-full transition-all duration-300"
+                             :style="`width: ${{(task?.progress?.percentage || 0)}}%`"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="flex justify-between">
+                <div class="flex space-x-3">
+                    <button @click="saveChanges()"
+                            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        <i class="fas fa-save mr-2"></i>保存修改
+                    </button>
+                    <button @click="viewLogs()"
+                            class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
+                        <i class="fas fa-file-alt mr-2"></i>查看日志
+                    </button>
+                    <template x-if="task?.status === 'Pending'">
+                        <button @click="startTask()"
+                                class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                            <i class="fas fa-play mr-2"></i>启动任务
+                        </button>
+                    </template>
+                    <template x-if="task?.status === 'Running'">
+                        <button @click="stopTask()"
+                                class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                            <i class="fas fa-stop mr-2"></i>停止任务
+                        </button>
+                    </template>
+                    <template x-if="['Failed', 'Stopped'].includes(task?.status)">
+                        <button @click="restartTask()"
+                                class="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700">
+                            <i class="fas fa-redo mr-2"></i>重启任务
+                        </button>
+                    </template>
+                </div>
+                <div>
+                    <button @click="deleteTask()"
+                            x-show="['Completed', 'Failed', 'Cancelled', 'Pending'].includes(task?.status)"
+                            class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                        <i class="fas fa-trash mr-2"></i>删除任务
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function taskDetailApp(taskId) {{
+            return {{
+                task: null,
+                taskParamsJson: '',
+
+                async init() {{
+                    await this.loadTask();
+                    // 定期刷新任务状态
+                    setInterval(() => {{
+                        if (this.task?.status === 'Running') {{
+                            this.loadTask();
+                        }}
+                    }}, 2000);
+                }},
+
+                async loadTask() {{
+                    try {{
+                        const response = await fetch('/api/tasks/' + taskId);
+                        if (response.ok) {{
+                            this.task = await response.json();
+                            this.taskParamsJson = JSON.stringify(this.task.params || {{}}, null, 2);
+                        }}
+                    }} catch (error) {{
+                        console.error('加载任务失败:', error);
+                    }}
+                }},
+
+                async updateTask() {{
+                    // 这里可以实现自动保存功能
+                }},
+
+                async updateParams() {{
+                    try {{
+                        this.task.params = JSON.parse(this.taskParamsJson);
+                    }} catch (e) {{
+                        console.error('JSON格式错误');
+                    }}
+                }},
+
+                async saveChanges() {{
+                    try {{
+                        const response = await fetch('/api/tasks/' + taskId, {{
+                            method: 'PUT',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(this.task)
+                        }});
+                        if (response.ok) {{
+                            alert('保存成功！');
+                            await this.loadTask();
+                        }}
+                    }} catch (error) {{
+                        alert('保存失败：' + error);
+                    }}
+                }},
+
+                async startTask() {{
+                    if (confirm('确定要启动此任务吗？')) {{
+                        try {{
+                            const response = await fetch('/api/tasks/' + taskId + '/start', {{ method: 'POST' }});
+                            if (response.ok) {{
+                                await this.loadTask();
+                            }}
+                        }} catch (error) {{
+                            alert('启动失败：' + error);
+                        }}
+                    }}
+                }},
+
+                async stopTask() {{
+                    if (confirm('确定要停止此任务吗？')) {{
+                        try {{
+                            const response = await fetch('/api/tasks/' + taskId + '/stop', {{ method: 'POST' }});
+                            if (response.ok) {{
+                                await this.loadTask();
+                            }}
+                        }} catch (error) {{
+                            alert('停止失败：' + error);
+                        }}
+                    }}
+                }},
+
+                async restartTask() {{
+                    if (confirm('确定要重启此任务吗？')) {{
+                        try {{
+                            const response = await fetch('/api/tasks/' + taskId + '/restart', {{ method: 'POST' }});
+                            if (response.ok) {{
+                                await this.loadTask();
+                            }}
+                        }} catch (error) {{
+                            alert('重启失败：' + error);
+                        }}
+                    }}
+                }},
+
+                async deleteTask() {{
+                    if (confirm('确定要删除此任务吗？\\n\\n注意：此操作不可恢复！')) {{
+                        try {{
+                            const response = await fetch('/api/tasks/' + taskId, {{ method: 'DELETE' }});
+                            if (response.ok) {{
+                                alert('任务已删除');
+                                window.location.href = '/tasks';
+                            }}
+                        }} catch (error) {{
+                            alert('删除失败：' + error);
+                        }}
+                    }}
+                }},
+
+                viewLogs() {{
+                    window.location.href = '/tasks/' + taskId + '/logs';
+                }},
+
+                getStatusClass(status) {{
+                    const classes = {{
+                        'Pending': 'bg-gray-100 text-gray-800',
+                        'Running': 'bg-blue-100 text-blue-800',
+                        'Completed': 'bg-green-100 text-green-800',
+                        'Failed': 'bg-red-100 text-red-800',
+                        'Stopped': 'bg-yellow-100 text-yellow-800',
+                        'Cancelled': 'bg-gray-100 text-gray-800'
+                    }};
+                    return classes[status] || 'bg-gray-100 text-gray-800';
+                }},
+
+                getStatusLabel(status) {{
+                    const labels = {{
+                        'Pending': '等待中',
+                        'Running': '运行中',
+                        'Completed': '已完成',
+                        'Failed': '失败',
+                        'Stopped': '已停止',
+                        'Cancelled': '已取消'
+                    }};
+                    return labels[status] || status;
+                }},
+
+                formatDate(dateStr) {{
+                    if (!dateStr) return '未知';
+                    const date = new Date(dateStr);
+                    return date.toLocaleString('zh-CN');
+                }}
+            }};
+        }}
+    </script>
+</body>
+</html>
+    "##,
+        task_id
+    )
 }
 
 /// 渲染任务日志页面
@@ -2895,26 +3344,33 @@ pub fn render_deployment_sites_page_with_sidebar() -> String {
         <div id="sites-pager" class="mt-4 flex items-center justify-between text-sm text-gray-600"></div>
 
         <!-- 详情弹窗 Modal -->
-        <div id="project-modal" class="fixed inset-0 z-50 hidden" aria-hidden="true">
+        <div id="project-modal" class="fixed inset-0 z-1000 hidden" aria-hidden="true">
           <div class="absolute inset-0 bg-black/50" onclick="closeProjectModal()"></div>
-          <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg p-6">
-            <div class="flex items-start justify-between">
+          <div class="relative max-w-3xl mx-auto mt-16 bg-white rounded-lg shadow-lg flex flex-col z-1010" style="max-height: 85vh;">
+            <!-- 标题栏 -->
+            <div class="flex items-center justify-between p-6 pb-4 border-b flex-shrink-0">
               <h3 id="pm-title" class="text-xl font-semibold">部署站点详情</h3>
-              <button class="text-gray-400 hover:text-gray-600" onclick="closeProjectModal()">
-                <i class="fas fa-times"></i>
+              <button class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors" onclick="closeProjectModal()">
+                <i class="fas fa-times text-xl"></i>
               </button>
             </div>
-            <div class="mt-2 text-sm text-gray-600 flex items-center gap-3">
-              <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
-              <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+
+            <!-- 内容区域（可滚动） -->
+            <div class="flex-1 overflow-y-auto px-6 py-4" style="max-height: calc(85vh - 160px);">
+              <div class="text-sm text-gray-600 flex items-center gap-3">
+                <span id="pm-status" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">状态</span>
+                <span id="pm-env" class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">环境</span>
+              </div>
+              <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
+              <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
+                加载失败，请稍后重试。按 Enter 键可重试。
+                <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
+              </div>
+              <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
             </div>
-            <div id="pm-hc-status" class="hidden mt-3 text-xs"></div>
-            <div id="pm-error" class="hidden mt-3 p-3 rounded bg-red-50 text-red-700 text-sm">
-              加载失败，请稍后重试。按 Enter 键可重试。
-              <div class="mt-2"><button class="px-3 py-1 rounded bg-red-600 text-white" onclick="retryLoadProjectDetail()">重试</button></div>
-            </div>
-            <div id="pm-content" class="mt-4 text-sm text-gray-700">正在加载...</div>
-            <div class="mt-6 flex gap-3 justify-end">
+
+            <!-- 底部按钮栏 -->
+            <div class="border-t px-6 py-4 flex gap-3 justify-end bg-gray-50 flex-shrink-0">
               <button id="pm-copy" class="px-3 py-2 rounded bg-gray-100" onclick="copySiteConfig()">复制配置</button>
               <button id="pm-create-task" class="px-3 py-2 rounded bg-green-600 text-white" onclick="createSiteTask()">为站点创建任务</button>
               <a id="pm-open-url" href="javascript:;" target="_blank" class="px-3 py-2 rounded bg-blue-600 text-white hidden">打开地址</a>

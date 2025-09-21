@@ -472,7 +472,7 @@ class IncrementalUpdateManager {
         };
 
         const notification = document.createElement('div');
-        notification.className = `fixed top-4 right-4 px-4 py-2 text-white rounded shadow-lg ${colors[type]} z-50`;
+        notification.className = `fixed top-4 right-4 px-4 py-2 text-white rounded shadow-lg ${colors[type]} z-900`;
         notification.textContent = message;
         document.body.appendChild(notification);
 

@@ -18,6 +18,45 @@
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   const ts = ()=> new Date().toLocaleString();
 
+  // 任务类型中文映射
+  function getTaskTypeLabel(type) {
+    const typeMap = {
+      'database_generation': '数据解析',
+      'DataGeneration': '数据生成',
+      'ParsePdmsData': '数据解析',
+      'GenerateModel': '模型生成',
+      'GenerateSpatialIndex': '空间计算',
+      'SpatialTreeGeneration': '空间计算',
+      'MeshGeneration': '网格生成',
+      'FullGeneration': '完整生成',
+      'DataParsingWizard': '数据解析',
+      'GenerateGeometry': '几何生成',
+      'BuildSpatialIndex': '空间索引',
+      'BatchDatabaseProcess': '批量处理',
+      'BatchGeometryGeneration': '批量生成',
+      'DataExport': '数据导出',
+      'DataImport': '数据导入'
+    };
+    return typeMap[type] || type;
+  }
+
+  // 任务状态中文映射
+  function getTaskStatusLabel(status) {
+    const statusMap = {
+      'pending': '等待中',
+      'Pending': '等待中',
+      'running': '运行中',
+      'Running': '运行中',
+      'completed': '已完成',
+      'Completed': '已完成',
+      'failed': '失败',
+      'Failed': '失败',
+      'cancelled': '已取消',
+      'Cancelled': '已取消'
+    };
+    return statusMap[status] || status;
+  }
+
   function setHidden(el, hidden){ el.classList[hidden? 'add':'remove']('hidden'); }
 
   // 密码可见性切换功能
@@ -554,9 +593,22 @@
           return `
             <tr class="border-b hover:bg-gray-50">
               <td class="py-2 px-3 font-mono text-xs">${escHtml(task.id || '')}</td>
-              <td class="py-2 px-3">${escHtml(task.type || 'database_generation')}</td>
-              <td class="py-2 px-3"><span class="${statusClass}">${escHtml(task.status || 'pending')}</span></td>
-              <td class="py-2 px-3">${escHtml(task.progress || '0')}%</td>
+              <td class="py-2 px-3">${escHtml(getTaskTypeLabel(task.type || task.task_type || 'database_generation'))}</td>
+              <td class="py-2 px-3"><span class="${statusClass}">${escHtml(getTaskStatusLabel(task.status || 'pending'))}</span></td>
+              <td class="py-2 px-3">
+                ${task.progress && typeof task.progress === 'object' ?
+                  `<div class="text-xs">
+                    <div class="flex items-center mb-1">
+                      <div class="w-24 bg-gray-200 rounded-full h-2 mr-2">
+                        <div class="bg-blue-600 h-2 rounded-full" style="width: ${task.progress.percentage || 0}%"></div>
+                      </div>
+                      <span>${Math.round(task.progress.percentage || 0)}%</span>
+                    </div>
+                    <div class="text-gray-600">${escHtml(task.progress.current_step || '')}</div>
+                  </div>` :
+                  `${escHtml(task.progress || '0')}%`
+                }
+              </td>
               <td class="py-2 px-3 text-xs text-gray-500">${escHtml(task.created_at || '')}</td>
               <td class="py-2 px-3">
                 <a href="/tasks/${escHtml(task.id)}" class="text-blue-600 hover:text-blue-800">
@@ -575,10 +627,10 @@
           <div class=\"bg-white border border-gray-200 rounded overflow-hidden\">
             <div class=\"px-4 py-3 border-b bg-gray-50 flex justify-between items-center\">
               <h4 class=\"font-semibold text-gray-800\">任务列表</h4>
-              <a href="/tasks/new?site_id=${encodeURIComponent(id)}&site_name=${encodeURIComponent(p.name||'')}"
-                 class="btn btn--primary btn--sm">
+              <button onclick="createTaskForSite('${encodeURIComponent(id)}', '${encodeURIComponent(p.name||'')}')"
+                      class="btn btn--primary btn--sm">
                 <i class="fas fa-plus mr-1"></i>新建任务
-              </a>
+              </button>
             </div>
             <div class=\"overflow-x-auto\">
               ${tasksHtml}
@@ -902,6 +954,50 @@
     }
   };
 
+  // 创建任务前检查站点是否存在
+  window.createTaskForSite = async function(encodedSiteId, encodedSiteName) {
+    const siteId = decodeURIComponent(encodedSiteId || '');
+    const siteName = decodeURIComponent(encodedSiteName || '');
+
+    try {
+      // 检查是否有部署站点
+      const resp = await fetch('/api/deployment-sites');
+      const data = await resp.json();
+      const sites = Array.isArray(data) ? data : (data.items || []);
+
+      if (!sites || sites.length === 0) {
+        // 没有部署站点，提示用户
+        const confirmCreate = confirm(
+          '暂无可用的部署站点！\n\n' +
+          '创建任务需要先配置部署站点。\n' +
+          '是否现在创建一个新的部署站点？'
+        );
+
+        if (confirmCreate) {
+          // 跳转到创建站点向导
+          window.location.href = '/wizard';
+        }
+        return;
+      }
+
+      // 有站点，检查当前站点是否还存在
+      if (siteId) {
+        const siteExists = sites.some(s => s.id === siteId);
+        if (!siteExists) {
+          alert('该部署站点已不存在，请选择其他站点创建任务。');
+          return;
+        }
+      }
+
+      // 跳转到新建任务页面
+      window.location.href = `/tasks/new?site_id=${encodeURIComponent(siteId)}&site_name=${encodeURIComponent(siteName)}`;
+
+    } catch (error) {
+      console.error('检查部署站点失败:', error);
+      alert('检查部署站点失败，请稍后重试。');
+    }
+  };
+
   // 编辑站点配置功能
   window.editSiteConfiguration = async function(encodedId) {
     const id = decodeURIComponent(encodedId || '');
@@ -916,8 +1012,8 @@
       
       // 创建编辑表单模态框
       const modalHtml = `
-        <div id="config-edit-modal" class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50">
-          <div class="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+        <div id="config-edit-modal" class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-1000">
+          <div class="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto z-1010">
             <div class="flex justify-between items-center mb-4">
               <h3 class="text-lg font-medium">编辑配置 - ${escHtml(deploymentSite.name)}</h3>
               <button onclick="closeConfigEditModal()" class="text-gray-400 hover:text-gray-600">

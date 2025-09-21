@@ -1538,7 +1538,7 @@ pub fn render_tasks_page() -> String {
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-2xl font-bold text-gray-800">任务管理</h2>
                 <div class="flex space-x-4">
-                    <button @click="showCreateModal = true"
+                    <button @click="checkSitesBeforeCreate()"
                             class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition">
                         <i class="fas fa-plus mr-2"></i>创建新任务
                     </button>
@@ -1679,6 +1679,11 @@ pub fn render_tasks_page() -> String {
                                                     title="查看详情">
                                                 <i class="fas fa-eye"></i>
                                             </button>
+                                            <button @click="editTask(task.id)"
+                                                    class="text-green-600 hover:text-green-900"
+                                                    title="编辑任务">
+                                                <i class="fas fa-edit"></i>
+                                            </button>
                                             <button @click="viewTaskLogs(task.id)"
                                                     class="text-purple-600 hover:text-purple-900"
                                                     title="查看日志">
@@ -1690,8 +1695,10 @@ pub fn render_tasks_page() -> String {
                                                     title="查看错误详情">
                                                 <i class="fas fa-exclamation-triangle"></i>
                                             </button>
-                                            <button @click="deleteTask(task.id)"
-                                                    class="text-red-600 hover:text-red-900">
+                                            <button x-show="['Completed', 'Failed', 'Cancelled', 'Pending'].includes(task.status)"
+                                                    @click="deleteTask(task.id)"
+                                                    class="text-red-600 hover:text-red-900"
+                                                    title="删除任务">
                                                 <i class="fas fa-trash"></i>
                                             </button>
                                         </div>
@@ -1713,8 +1720,8 @@ pub fn render_tasks_page() -> String {
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white z-1010">
             <div class="mt-3">
                 <h3 class="text-lg font-medium text-gray-900 mb-4">创建新任务</h3>
                 <form @submit.prevent="createTask()">
@@ -1766,8 +1773,8 @@ pub fn render_tasks_page() -> String {
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-        <div class="relative top-10 mx-auto p-5 border w-11/12 max-w-5xl shadow-lg rounded-md bg-white">
+         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-10 mx-auto p-5 border w-11/12 max-w-5xl shadow-lg rounded-md bg-white z-1010">
             <div class="mt-3">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-medium text-gray-900">
@@ -1922,8 +1929,8 @@ pub fn render_tasks_page() -> String {
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-        <div class="relative top-10 mx-auto p-5 border w-4/5 max-w-4xl shadow-lg rounded-md bg-white">
+         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-10 mx-auto p-5 border w-4/5 max-w-4xl shadow-lg rounded-md bg-white z-1010">
             <div class="mt-3">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-medium text-red-600">
@@ -2034,8 +2041,8 @@ pub fn render_tasks_page() -> String {
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-        <div class="relative top-10 mx-auto p-5 border w-4/5 max-w-5xl shadow-lg rounded-md bg-white">
+         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-10 mx-auto p-5 border w-4/5 max-w-5xl shadow-lg rounded-md bg-white z-1010">
             <div class="mt-3">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-medium text-purple-600">
@@ -2158,18 +2165,21 @@ pub fn render_tasks_page() -> String {
 
                 getTaskTypeText(taskType) {
                     const map = {
+                        "database_generation": "数据解析",
                         "DataGeneration": "数据生成",
-                        "SpatialTreeGeneration": "空间树生成",
+                        "SpatialTreeGeneration": "空间计算",
                         "FullGeneration": "完整生成",
                         "MeshGeneration": "网格生成",
-                        "ParsePdmsData": "解析PDMS数据",
-                        "GenerateGeometry": "生成几何数据",
-                        "BuildSpatialIndex": "构建空间索引",
-                        "BatchDatabaseProcess": "批量数据库处理",
-                        "BatchGeometryGeneration": "批量几何生成",
+                        "ParsePdmsData": "数据解析",
+                        "GenerateModel": "模型生成",
+                        "GenerateSpatialIndex": "空间计算",
+                        "GenerateGeometry": "几何生成",
+                        "BuildSpatialIndex": "空间索引",
+                        "BatchDatabaseProcess": "批量处理",
+                        "BatchGeometryGeneration": "批量生成",
                         "DataExport": "数据导出",
                         "DataImport": "数据导入",
-                        "DataParsingWizard": "数据解析向导"
+                        "DataParsingWizard": "数据解析"
                     };
                     if (typeof taskType === 'string') return map[taskType] || taskType;
                     // 兼容 serde 外部标记：例如 { "Custom": "Xxx" }
@@ -2210,6 +2220,30 @@ pub fn render_tasks_page() -> String {
                     setInterval(() => {
                         this.loadTasks();
                     }, 3000);
+                },
+
+                async checkSitesBeforeCreate() {
+                    try {
+                        // 检查是否有部署站点
+                        const response = await fetch('/api/deployment-sites');
+                        const data = await response.json();
+                        const sites = Array.isArray(data) ? data : (data.items || []);
+
+                        if (!sites || sites.length === 0) {
+                            // 没有部署站点，提示用户
+                            if (confirm('暂无可用的部署站点！\n\n创建任务需要先配置部署站点。\n是否现在创建一个新的部署站点？')) {
+                                // 跳转到创建站点向导
+                                window.location.href = '/wizard';
+                            }
+                            return;
+                        }
+
+                        // 有站点，显示创建任务模态框
+                        this.showCreateModal = true;
+                    } catch (error) {
+                        console.error('检查部署站点失败:', error);
+                        alert('检查部署站点失败，请稍后重试。');
+                    }
                 },
 
                 async loadTasks() {
@@ -2384,7 +2418,7 @@ pub fn render_tasks_page() -> String {
                 },
 
                 async deleteTask(taskId) {
-                    if (!confirm("确定要删除这个任务吗？")) return;
+                    if (!confirm("确定要删除这个任务吗？\n\n注意：此操作不可恢复！")) return;
 
                     try {
                         const response = await fetch(`/api/tasks/${taskId}`, {
@@ -2393,12 +2427,35 @@ pub fn render_tasks_page() -> String {
 
                         if (response.ok) {
                             await this.loadTasks();
+                            // 显示成功提示
+                            this.showNotification("任务已成功删除", "success");
                         } else {
                             alert("删除任务失败");
                         }
                     } catch (error) {
                         console.error("Error deleting task:", error);
+                        alert("删除任务失败：" + error.message);
                     }
+                },
+
+                editTask(taskId) {
+                    // 跳转到任务详情页面进行编辑
+                    window.location.href = `/tasks/${taskId}`;
+                },
+
+                showNotification(message, type = "info") {
+                    // 简单的通知显示
+                    const notification = document.createElement("div");
+                    notification.className = `fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 ${
+                        type === "success" ? "bg-green-500" :
+                        type === "error" ? "bg-red-500" :
+                        "bg-blue-500"
+                    } text-white`;
+                    notification.textContent = message;
+                    document.body.appendChild(notification);
+                    setTimeout(() => {
+                        notification.remove();
+                    }, 3000);
                 },
 
                 refreshTasks() {
@@ -2448,10 +2505,14 @@ pub fn render_tasks_page() -> String {
 
                 getTaskTypeText(taskType) {
                     const texts = {
+                        "database_generation": "数据解析",
                         "DataGeneration": "数据生成",
-                        "SpatialTreeGeneration": "空间树生成",
+                        "SpatialTreeGeneration": "空间计算",
                         "FullGeneration": "完整生成",
-                        "MeshGeneration": "网格生成"
+                        "MeshGeneration": "网格生成",
+                        "ParsePdmsData": "数据解析",
+                        "GenerateModel": "模型生成",
+                        "GenerateSpatialIndex": "空间计算"
                     };
                     return texts[taskType] || taskType;
                 },
@@ -3339,8 +3400,8 @@ pub fn render_db_status_page() -> String {
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+         class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white z-1010">
             <div class="mt-3">
                 <h3 class="text-lg font-medium text-gray-900 mb-4">批量更新数据库</h3>
                 <div class="mb-4">
@@ -3966,8 +4027,8 @@ pub fn render_deployment_sites_page() -> String {
 
             <!-- 创建站点模态框 -->
             <div x-show="showCreateModal" x-cloak 
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50">
-                <div class="bg-white rounded-lg p-6 w-full max-w-2xl max-h-screen overflow-y-auto">
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-1000">
+                <div class="bg-white rounded-lg p-6 w-full max-w-2xl max-h-screen overflow-y-auto z-1010">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-lg font-medium">创建部署站点</h3>
                         <button @click="showCreateModal = false" class="text-gray-400 hover:text-gray-600">
@@ -4048,8 +4109,8 @@ pub fn render_deployment_sites_page() -> String {
 
             <!-- 任务创建模态框 -->
             <div x-show="showTaskModal" x-cloak 
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50">
-                <div class="bg-white rounded-lg p-6 w-full max-w-md">
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-1000">
+                <div class="bg-white rounded-lg p-6 w-full max-w-md z-1010">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-lg font-medium">为站点创建任务</h3>
                         <button @click="showTaskModal = false" class="text-gray-400 hover:text-gray-600">

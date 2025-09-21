@@ -145,6 +145,8 @@ pub struct GenerateXktRequest {
     pub dbno: u32,
     #[serde(default)]
     pub compress: Option<bool>,
+    #[serde(default)]
+    pub refno: Option<String>,
 }
 
 pub async fn api_generate_xkt(
@@ -171,21 +173,38 @@ pub async fn api_generate_xkt(
     let full_path = output_dir.join(&filename);
 
     let db_option = get_db_option();
-    if let Err(e) = generate_xtk_by_dbno(
-        req.dbno,
-        full_path.to_string_lossy().as_ref(),
-        compress,
-        db_option,
-    )
-    .await
-    {
-        eprintln!("生成 XKT 失败 (dbno {}): {}", req.dbno, e);
+    let generate_result = if let Some(ref refno_str) = req.refno {
+        let refno = aios_core::pdms_types::RefnoEnum::from(refno_str.as_str());
+        generate_xtk_by_dbno_refno(
+            req.dbno,
+            refno,
+            full_path.to_string_lossy().as_ref(),
+            compress,
+            db_option,
+        )
+        .await
+    } else {
+        generate_xtk_by_dbno(
+            req.dbno,
+            full_path.to_string_lossy().as_ref(),
+            compress,
+            db_option,
+        )
+        .await
+    };
+
+    if let Err(e) = generate_result {
+        eprintln!(
+            "生成 XKT 失败 (dbno {}, refno {:?}): {}",
+            req.dbno, req.refno, e
+        );
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     Ok(Json(serde_json::json!({
         "success": true,
         "dbno": req.dbno,
+        "refno": req.refno,
         "filename": filename,
         "url": format!("/api/xkt/download/{}", filename)
     })))
@@ -232,7 +251,7 @@ use super::{
     simple_templates::render_database_connection_page,
 };
 use crate::fast_model::{
-    gen_model::generate_xtk_by_dbno,
+    gen_model::{generate_xtk_by_dbno, generate_xtk_by_dbno_refno},
     session::{PdmsTimeExtractor, SESSION_STORE},
 };
 #[cfg(feature = "sqlite-index")]
@@ -2295,29 +2314,14 @@ pub async fn api_get_deployment_sites(
         where_clause
     );
 
-    // 先尝试从SurrealDB获取数据
-    let mut all_items = Vec::new();
-
-    match SUL_DB.query(sql).await {
-        Ok(mut resp) => {
-            let surreal_items: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-            all_items.extend(surreal_items);
-        }
-        Err(_) => {
-            // SurrealDB查询失败，记录但继续
-            eprintln!("Failed to query SurrealDB for deployment sites");
-        }
-    }
-
-    // 然后从SQLite获取向导创建的部署站点
-    match crate::web_ui::wizard_handlers::load_deployment_sites_from_sqlite() {
-        Ok(sqlite_sites) => {
-            all_items.extend(sqlite_sites);
-        }
+    // 只从SQLite获取部署站点数据
+    let mut all_items = match crate::web_ui::wizard_handlers::load_deployment_sites_from_sqlite() {
+        Ok(sqlite_sites) => sqlite_sites,
         Err(e) => {
             eprintln!("Failed to load deployment sites from SQLite: {}", e);
+            Vec::new()
         }
-    }
+    };
 
     // 应用过滤和排序
     if let Some(q) = params.q.as_ref().filter(|s| !s.is_empty()) {
@@ -2638,43 +2642,15 @@ pub async fn api_create_deployment_site(
 pub async fn api_get_deployment_site(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // 向导生成的站点全部保存在 SQLite，ID 以 "wizard_" 开头，此类请求无需触发 SurrealDB 查询，
-    // 避免因为数据库权限不足导致 500。
-    let load_from_sqlite =
-        || match crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id) {
-            Ok(Some(site)) => Ok(Json(site)),
-            Ok(None) => Err(StatusCode::NOT_FOUND),
-            Err(e) => {
-                eprintln!("Failed to load deployment site from SQLite ({}): {}", id, e);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        };
-
-    if id.starts_with("wizard_") {
-        return load_from_sqlite();
-    }
-
-    // 首先尝试从SurrealDB获取
-    let id_esc = id.replace("'", "\\'");
-    let sql = format!("SELECT * FROM type::thing('{}')", id_esc);
-
-    match SUL_DB.query(sql).await {
-        Ok(mut resp) => {
-            let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-            if let Some(item) = rows.get(0) {
-                return Ok(Json(item.clone()));
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "Failed to query SurrealDB for deployment site {}: {}",
-                id, err
-            );
+    // 只从SQLite获取部署站点数据
+    match crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id) {
+        Ok(Some(site)) => Ok(Json(site)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            eprintln!("Failed to load deployment site from SQLite ({}): {}", id, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
-
-    // 如果SurrealDB没有命中（或查询失败），回退到SQLite
-    load_from_sqlite()
 }
 
 /// 更新部署站点
@@ -5088,6 +5064,16 @@ pub async fn tasks_page() -> Html<String> {
     let html = crate::web_ui::simple_templates::render_advanced_tasks_page();
     let wrapped = crate::web_ui::layout::wrap_external_html_in_layout(
         "任务队列管理 - AIOS",
+        Some("tasks"),
+        &html,
+    );
+    Html(wrapped)
+}
+
+pub async fn task_detail_page(Path(task_id): Path<String>) -> Html<String> {
+    let html = crate::web_ui::simple_templates::render_task_detail_page(task_id);
+    let wrapped = crate::web_ui::layout::wrap_external_html_in_layout(
+        "任务详情 - AIOS",
         Some("tasks"),
         &html,
     );

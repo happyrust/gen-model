@@ -1,8 +1,12 @@
 use aios_core::options::DbOption;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// 任务ID计数器
+static TASK_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// 自定义SystemTime序列化函数，转换为毫秒时间戳
 fn serialize_system_time<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
@@ -1076,9 +1080,34 @@ impl TaskQueueManager {
 }
 
 impl TaskInfo {
+    /// 生成任务ID格式: 站点名称_任务名_流水号
+    fn generate_task_id(site_name: &str, task_name: &str) -> String {
+        let counter = TASK_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let site_part = site_name
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .take(20)
+            .collect::<String>();
+        let task_part = task_name
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .take(20)
+            .collect::<String>();
+
+        // 如果站点名或任务名为空，使用默认值
+        let site_part = if site_part.is_empty() { "default" } else { &site_part };
+        let task_part = if task_part.is_empty() { "task" } else { &task_part };
+
+        format!("{}_{}_{}", site_part, task_part, counter)
+    }
+
     pub fn new(name: String, task_type: TaskType, config: DatabaseConfig) -> Self {
+        // 从配置中提取站点名称，如果没有则使用"default"
+        let site_name = config.name.as_str();
+        let task_id = Self::generate_task_id(site_name, &name);
+
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: task_id,
             name,
             task_type,
             status: TaskStatus::Pending,

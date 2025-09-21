@@ -532,6 +532,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/dashboard", get(dashboard_page))
         .route("/config", get(config_page))
         .route("/tasks", get(tasks_page))
+        .route("/tasks/:id", get(task_detail_page))
         .route("/tasks/:id/logs", get(task_logs_page))
         .route("/batch-tasks", get(batch_tasks_page))
         .route("/db-status", get(db_status_page))
