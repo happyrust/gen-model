@@ -1,0 +1,102 @@
+name: Deploy docs to server via SSH (Nginx)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - feat/modern-aios-ui
+    paths:
+      - '开发文档/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/deploy-docs-ssh.yml'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install MkDocs
+        run: |
+          python -m pip install --upgrade pip
+          pip install mkdocs mkdocs-material
+
+      - name: Build site
+        run: mkdocs build -d site
+
+      - name: Upload site to server (SCP)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          source: "site/*"
+          target: "/tmp/gen-model-site"
+
+      - name: Configure Nginx and deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            set -e
+            # Install nginx if missing
+            if ! command -v nginx >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update -y
+                sudo apt-get install -y nginx
+              elif command -v yum >/dev/null 2>&1; then
+                sudo yum install -y epel-release || true
+                sudo yum install -y nginx
+                sudo systemctl enable nginx --now || true
+              fi
+            fi
+
+            # Deploy files
+            sudo mkdir -p /var/www/gen-model-docs
+            sudo rsync -a --delete /tmp/gen-model-site/ /var/www/gen-model-docs/
+
+            # Write nginx server config
+            if [ -d /etc/nginx/sites-available ]; then
+              CONF="/etc/nginx/sites-available/gen-model-docs"
+              sudo bash -c "cat > $CONF" <<'EOF'
+server {
+    listen 80;
+    server_name _;
+    root /var/www/gen-model-docs;
+    index index.html;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+              sudo ln -sf "$CONF" /etc/nginx/sites-enabled/gen-model-docs
+              if [ -f /etc/nginx/sites-enabled/default ]; then
+                sudo rm -f /etc/nginx/sites-enabled/default
+              fi
+            else
+              sudo bash -c "cat > /etc/nginx/conf.d/gen-model-docs.conf" <<'EOF'
+server {
+    listen 80;
+    server_name _;
+    root /var/www/gen-model-docs;
+    index index.html;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+            fi
+
+            sudo nginx -t
+            sudo systemctl reload nginx || sudo service nginx reload
+
