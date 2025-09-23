@@ -468,6 +468,14 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             "/api/deployment-sites/:id/tasks",
             post(handlers::api_create_deployment_site_task),
         )
+        .route(
+            "/api/deployment-sites/:id/healthcheck",
+            post(handlers::api_healthcheck_deployment_site),
+        )
+        .route(
+            "/api/deployment-sites/:id/export-config",
+            get(handlers::api_export_deployment_site_config),
+        )
         // 部署站点管理页面
         .route("/deployment-sites", get(handlers::deployment_sites_page))
         // 数据解析向导API

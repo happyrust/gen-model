@@ -2813,6 +2813,104 @@ pub async fn api_create_deployment_site_task(
     })))
 }
 
+/// 部署站点健康检查
+pub async fn api_healthcheck_deployment_site(
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 向导站点存储在 SQLite 中，优先处理
+    if let Ok(Some(site_value)) =
+        crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
+    {
+        let site: DeploymentSite = serde_json::from_value(site_value.clone()).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "站点数据解析失败" })),
+            )
+        })?;
+
+        let Some(url) = site.health_url.as_ref().or(site.url.as_ref()) else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "未配置 health_url" })),
+            ));
+        };
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)})),
+                )
+            })?;
+
+        let res = client.get(url).send().await;
+        let healthy = matches!(res.as_ref().map(|r| r.status().is_success()), Ok(true));
+        let status_str = if healthy { "Running" } else { "Failed" };
+        let now = chrono::Utc::now().to_rfc3339();
+
+        if let Err(e) = crate::web_ui::wizard_handlers::update_deployment_site_health(
+            &id,
+            status_str,
+            &now,
+        ) {
+            eprintln!("更新部署站点健康检查失败: {}", e);
+        }
+
+        let updated = crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
+            .ok()
+            .flatten()
+            .unwrap_or(site_value);
+
+        return Ok(Json(json!({
+            "status": "success",
+            "healthy": healthy,
+            "item": updated
+        })));
+    }
+
+    // 其他站点走通用项目健康检查
+    match api_healthcheck_project(Path(id.clone())).await {
+        Ok(Json(payload)) => Ok(Json(payload)),
+        Err(err) => Err(err),
+    }
+}
+
+/// 导出部署站点配置
+pub async fn api_export_deployment_site_config(
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if let Ok(Some(site_value)) =
+        crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
+    {
+        let name = site_value["name"].as_str().unwrap_or(&id).to_string();
+        let config = site_value["config"].clone();
+        return Ok(Json(json!({
+            "status": "success",
+            "name": name,
+            "config": config
+        })));
+    }
+
+    let id_esc = id.replace("'", "\\'");
+    let sql = format!("SELECT config, name FROM type::thing('{}')", id_esc);
+    match SUL_DB.query(sql).await {
+        Ok(mut resp) => {
+            let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
+            if let Some(row) = rows.get(0) {
+                return Ok(Json(json!({
+                    "status": "success",
+                    "name": row["name"].clone(),
+                    "config": row["config"].clone()
+                })));
+            }
+            Err(StatusCode::NOT_FOUND)
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
 // /// 部署站点管理页面路由处理 (暂时禁用)
 // pub async fn deployment_sites_page() -> Html<String> {
 //     Html(crate::web_ui::templates::render_deployment_sites_page())

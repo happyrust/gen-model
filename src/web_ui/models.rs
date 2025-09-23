@@ -373,6 +373,9 @@ pub struct DeploymentSite {
     /// 访问地址
     #[serde(default)]
     pub url: Option<String>,
+    /// 健康检查地址
+    #[serde(default)]
+    pub health_url: Option<String>,
     /// 环境（prod/staging/dev）
     #[serde(default)]
     pub env: Option<String>,
@@ -391,6 +394,9 @@ pub struct DeploymentSite {
     /// 更新时间
     #[serde(serialize_with = "serialize_optional_system_time")]
     pub updated_at: Option<SystemTime>,
+    /// 最近健康检查
+    #[serde(default)]
+    pub last_health_check: Option<String>,
 }
 
 /// 创建部署站点请求
@@ -434,6 +440,9 @@ pub struct DeploymentSiteImportRequest {
     /// 负责人
     #[serde(default)]
     pub owner: Option<String>,
+    /// 健康检查地址
+    #[serde(default)]
+    pub health_url: Option<String>,
     /// 标签
     #[serde(default)]
     pub tags: Option<serde_json::Value>,
@@ -466,6 +475,9 @@ pub struct DeploymentSiteUpdateRequest {
     /// 负责人
     #[serde(default)]
     pub owner: Option<String>,
+    /// 健康检查地址
+    #[serde(default)]
+    pub health_url: Option<String>,
     /// 标签
     #[serde(default)]
     pub tags: Option<serde_json::Value>,

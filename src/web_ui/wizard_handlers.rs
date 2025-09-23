@@ -665,8 +665,8 @@ fn save_deployment_site_config(
     conn.execute(
         "INSERT OR REPLACE INTO deployment_sites (
             id, name, config_json, selected_projects, root_directory, 
-            parallel_processing, max_concurrent, created_at, updated_at, task_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+            parallel_processing, max_concurrent, created_at, updated_at, task_id, health_url, last_health_check
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             format!("wizard_{}", task_id),
             format!("向导部署站点 - {}", wizard_config.base_config.project_name),
@@ -676,7 +676,9 @@ fn save_deployment_site_config(
             wizard_config.parallel_processing,
             wizard_config.max_concurrent.unwrap_or(1),
             now,
-            task_id
+            task_id,
+            Option::<String>::None::<String>,
+            Option::<String>::None::<String>
         ],
     )?;
 
@@ -718,6 +720,13 @@ fn open_deployment_sites_sqlite() -> Result<rusqlite::Connection, Box<dyn std::e
         )",
         rusqlite::params![],
     )?;
+
+    // 向后兼容：如果老库缺少字段，则尝试添加，忽略失败即可
+    let _ = conn.execute("ALTER TABLE deployment_sites ADD COLUMN health_url TEXT", rusqlite::params![]);
+    let _ = conn.execute(
+        "ALTER TABLE deployment_sites ADD COLUMN last_health_check TEXT",
+        rusqlite::params![],
+    );
 
     // 创建任务配置表（用于持久化任务信息）
     conn.execute(
@@ -1009,7 +1018,8 @@ pub fn load_deployment_sites_from_sqlite()
     let mut stmt = conn.prepare(
         "
         SELECT id, name, config_json, selected_projects, root_directory, 
-               parallel_processing, max_concurrent, created_at, updated_at, status
+               parallel_processing, max_concurrent, created_at, updated_at, status,
+               health_url, last_health_check
         FROM deployment_sites ORDER BY created_at DESC
     ",
     )?;
@@ -1022,6 +1032,8 @@ pub fn load_deployment_sites_from_sqlite()
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
         let status: String = row.get(9)?;
+        let health_url: Option<String> = row.get(10).ok();
+        let last_health_check: Option<String> = row.get(11).ok();
 
         // 解析 selected_projects
         let e3d_projects: Vec<String> =
@@ -1047,6 +1059,8 @@ pub fn load_deployment_sites_from_sqlite()
             "env": "dev",
             "owner": "",
             "url": null,
+            "health_url": health_url,
+            "last_health_check": last_health_check,
             "e3d_projects": e3d_projects,
             "config": config,
             "created_at": created_at,
@@ -1080,7 +1094,8 @@ pub fn load_deployment_site_by_id_from_sqlite(
     let mut stmt = conn.prepare(
         "
         SELECT id, name, config_json, selected_projects, root_directory, 
-               parallel_processing, max_concurrent, created_at, updated_at, status
+               parallel_processing, max_concurrent, created_at, updated_at, status,
+               health_url, last_health_check
         FROM deployment_sites WHERE id = ?1
     ",
     )?;
@@ -1096,6 +1111,8 @@ pub fn load_deployment_site_by_id_from_sqlite(
         let created_at: String = row.get(7)?;
         let updated_at: String = row.get(8)?;
         let status: Option<String> = row.get(9)?;
+        let health_url: Option<String> = row.get(10).ok();
+        let last_health_check: Option<String> = row.get(11).ok();
 
         // 解析配置JSON
         let full_config: serde_json::Value =
@@ -1120,6 +1137,8 @@ pub fn load_deployment_site_by_id_from_sqlite(
             "env": "dev",
             "owner": "",
             "url": null,
+            "health_url": health_url,
+            "last_health_check": last_health_check,
             "e3d_projects": e3d_projects,
             "config": config,
             "created_at": created_at,
@@ -1132,4 +1151,23 @@ pub fn load_deployment_site_by_id_from_sqlite(
     } else {
         Ok(None)
     }
+}
+
+/// 更新部署站点健康检查结果
+pub fn update_deployment_site_health(
+    site_id: &str,
+    status: &str,
+    timestamp: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 仅针对向导创建的站点
+    if !site_id.starts_with("wizard_") {
+        return Ok(());
+    }
+
+    let conn = open_deployment_sites_sqlite()?;
+    conn.execute(
+        "UPDATE deployment_sites SET status = ?1, last_health_check = ?2, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![status, timestamp, site_id],
+    )?;
+    Ok(())
 }
