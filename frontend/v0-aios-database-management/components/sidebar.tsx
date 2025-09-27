@@ -4,7 +4,7 @@ import type React from "react"
 
 import { useState } from "react"
 import { useRouter, usePathname } from "next/navigation"
-import { Database, Server, Settings, Activity, Zap, Shield, BarChart3, ChevronDown, ChevronRight } from "lucide-react"
+import { Database, Server, Settings, Activity, Zap, Shield, BarChart3, ChevronDown, ChevronRight, Network } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme-toggle"
 
@@ -72,6 +72,11 @@ const toolItems: NavItem[] = [
     title: "解析向导",
     icon: Zap,
     href: "/wizard",
+  },
+  {
+    title: "异地协同",
+    icon: Network,
+    href: "/collaboration",
   },
   {
     title: "异地环境",
