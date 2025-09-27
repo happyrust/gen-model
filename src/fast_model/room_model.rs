@@ -101,6 +101,19 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         .flatten()
         .collect::<HashSet<_>>();
     dbg!(room_panel_map.len());
+    // 打印一次 R*-tree 索引统计，确认元素数量
+    #[cfg(feature = "sqlite-index")]
+    if crate::spatial_index::SqliteSpatialIndex::is_enabled() {
+        if let Ok(index) = crate::spatial_index::SqliteSpatialIndex::with_default_path() {
+            if let Ok(stats) = index.get_stats() {
+                println!(
+                    "SQLite R*-tree stats: total_elements={}, index_type={}",
+                    stats.total_elements, stats.index_type
+                );
+            }
+        }
+    }
+
     for (_room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
             let refnos = cal_room_refnos(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
@@ -210,7 +223,7 @@ where
     #[cfg(feature = "project_hd")]
     let sql = format!(
         r#"
-        select value [  id, 
+        select value [  id,
                         array::last(string::split(NAME, '-')),
                         array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
                     ] from FRMW where {filter}
@@ -219,7 +232,7 @@ where
     #[cfg(feature = "project_hh")]
     let sql = format!(
         r#"
-        select value [  id, 
+        select value [  id,
                         array::last(string::split(NAME, '-')),
                         array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
                     ] from SBFR where {filter}
@@ -276,26 +289,57 @@ pub async fn cal_room_refnos(
             ) else {
                 continue;
             };
-            // Use SQLite R*-tree for spatial queries
+            // 使用 SQLite R*-tree 进行空间查询（先 contains 再 intersect）
             let mut contains_query = Vec::new();
+            let mut need_check_refnos: HashSet<RefU64> = HashSet::default();
             #[cfg(feature = "sqlite-index")]
             if crate::spatial_index::SqliteSpatialIndex::is_enabled() {
+                use crate::spatial_index::SpatialQueryBackend;
                 let spatial_index = crate::spatial_index::SqliteSpatialIndex::with_default_path()
                     .expect("Failed to open spatial index");
-                if let Ok(ids) = spatial_index.query_intersect(&geom_inst.world_aabb) {
-                    for id in ids {
-                        if let Ok(Some(bbox)) = spatial_index.get_aabb(id) {
+
+                // 构建查询参数：带容差、返回 bbox，并排除面板自身与外部排除集合
+                let mut opts = crate::spatial_index::QueryOptions::default();
+                opts.tolerance = inside_tol.max(0.0);
+                opts.include_bbox = true;
+                opts.exclude.push(panel_refno.refno());
+                for r in exclude_refnos {
+                    opts.exclude.push(r.refno());
+                }
+
+                // 1) 完全包含：直接计入 contains_query
+                if let Ok(hits) = spatial_index.query_contains_hits(&geom_inst.world_aabb, &opts) {
+                    for h in hits {
+                        if let Some(bb) = h.bbox {
                             contains_query
-                                .push(RStarBoundingBox::from_aabb(bbox, RefnoEnum::from(id)));
+                                .push(RStarBoundingBox::from_aabb(bb, RefnoEnum::from(h.refno)));
                         }
                     }
                 }
+
+                // 2) 边界相交：作为后续点检查候选（去重避免与 contains 重复）
+                if let Ok(mut hits) =
+                    spatial_index.query_intersect_hits(&geom_inst.world_aabb, &opts)
+                {
+                    let contained_set: std::collections::HashSet<u64> =
+                        contains_query.iter().map(|b| b.refno.0).collect();
+                    hits.retain(|h| !contained_set.contains(&h.refno.0));
+                    for h in hits {
+                        need_check_refnos.insert(h.refno);
+                    }
+                }
+                // 统计与日志
+                let contains_cnt = contains_query.len();
+                let border_cnt = need_check_refnos.len();
+                println!(
+                    "[Room] panel {} contains={}, border_candidates={}",
+                    panel_refno, contains_cnt, border_cnt
+                );
             }
-            if contains_query.is_empty() {
+            if contains_query.is_empty() && need_check_refnos.is_empty() {
                 continue;
             }
             // dbg!(&contains_query);
-            let mut need_check_refnos: HashSet<RefU64> = HashSet::default();
             contains_query.retain(|RStarBoundingBox { refno, aabb, .. }| {
                 //filter the wrong aabb
                 if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
@@ -398,6 +442,12 @@ pub async fn cal_room_refnos(
                     );
                 }
                 within_refnos.extend(intersect_set);
+                println!(
+                    "[Room] panel {} final_within={}",
+                    panel_refno,
+                    within_refnos.len()
+                );
+
                 // dbg!(&within_refnos);
             }
         }
@@ -414,23 +464,23 @@ async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
     // Create test hierarchy data
     let create_sql = r#"
         -- Create FRMW node
-        CREATE FRMW SET 
+        CREATE FRMW SET
             id = "FRMW_AE_AC01_R",
             NAME = "AE-AC01-R",
             REFNO = "1000";
 
         -- Create SBFR nodes under FRMW
-        CREATE SBFR SET 
+        CREATE SBFR SET
             id = "SBFR_AE01055A",
             NAME = "AE-AC01-R-AE01055A",
             REFNO = "1001";
         CREATE SBFR SET
-            id = "SBFR_AE01911A", 
+            id = "SBFR_AE01911A",
             NAME = "AE-AC01-R-AE01911A",
             REFNO = "1002";
         CREATE SBFR SET
             id = "SBFR_AE01945A",
-            NAME = "AE-AC01-R-AE01945A", 
+            NAME = "AE-AC01-R-AE01945A",
             REFNO = "1003";
         CREATE SBFR SET
             id = "SBFR_AE01907G",

@@ -83,6 +83,13 @@ async fn main() -> anyhow::Result<()> {
     let target_db_option = Path::new("DbOption.toml");
     let _override_guard = DbOptionOverride::new(config_file, target_db_option)?;
 
+    // 初始化 SurrealDB 连接
+    println!("初始化 SurrealDB 连接...");
+    if let Err(e) = aios_core::init_test_surreal().await {
+        eprintln!("警告: SurrealDB 初始化失败: {}", e);
+        eprintln!("将尝试继续执行，但可能无法查询数据库");
+    }
+
     let default_output = format!(
         "output/db{}_{}.xkt",
         args.dbno.unwrap_or(0),

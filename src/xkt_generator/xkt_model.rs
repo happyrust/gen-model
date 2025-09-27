@@ -1,21 +1,48 @@
 use anyhow::Result;
-use glam::{Mat4, Quat, Vec3};
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use super::xkt_index::XKTIndexManager;
+use super::xkt_spatial::{XKTSpatialIndex, XKTTile};
 use super::{XKTEntity, XKTGeometry, XKTMaterial, XKTMesh};
 
 /// XKT 模型的主要数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XKTModel {
     pub id: String,
+
+    // 核心数据存储（Map形式，用于查找）
     pub geometries: HashMap<String, XKTGeometry>,
     pub materials: HashMap<String, XKTMaterial>,
     pub meshes: HashMap<String, XKTMesh>,
     pub entities: HashMap<String, XKTEntity>,
+
+    // 有序列表（用于索引构建）
+    pub geometries_list: Vec<XKTGeometry>,
+    pub meshes_list: Vec<XKTMesh>,
+    pub entities_list: Vec<XKTEntity>,
+
+    // 空间分区
+    pub spatial_index: Option<XKTSpatialIndex>,
+    pub tiles_list: Vec<XKTTile>,
+
+    // 索引管理器
+    pub index_manager: XKTIndexManager,
+
+    // 几何体复用信息
+    pub geometry_reuse_table: GeometryReuseTable,
+
+    // 重用几何体解码矩阵
+    pub reused_geometries_decode_matrix: Option<[f32; 16]>,
+
+    // 元数据和统计
     pub metadata: XKTMetadata,
     pub stats: XKTStats,
+
+    // 状态标志
+    pub finalized: bool,
 }
 
 /// XKT 模型元数据
@@ -37,6 +64,47 @@ pub struct XKTStats {
     pub num_entities: usize,
     pub num_triangles: usize,
     pub num_vertices: usize,
+}
+
+/// 几何体复用注册表
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeometryReuseEntry {
+    pub geometry_id: String,
+    pub mesh_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeometryReuseTable {
+    pub entries: HashMap<String, GeometryReuseEntry>,
+}
+
+impl GeometryReuseTable {
+    pub fn register_instance(&mut self, geometry_id: &str, mesh_id: &str) -> usize {
+        let mesh_id_owned = mesh_id.to_string();
+        let entry = self
+            .entries
+            .entry(geometry_id.to_string())
+            .or_insert_with(|| GeometryReuseEntry {
+                geometry_id: geometry_id.to_string(),
+                mesh_ids: Vec::new(),
+            });
+
+        if !entry.mesh_ids.iter().any(|id| id == &mesh_id_owned) {
+            entry.mesh_ids.push(mesh_id_owned);
+        }
+
+        entry.mesh_ids.len()
+    }
+
+    pub fn is_reused(&self, geometry_id: &str) -> bool {
+        self.entries
+            .get(geometry_id)
+            .map_or(false, |entry| entry.mesh_ids.len() > 1)
+    }
+
+    pub fn get(&self, geometry_id: &str) -> Option<&GeometryReuseEntry> {
+        self.entries.get(geometry_id)
+    }
 }
 
 impl Default for XKTMetadata {
@@ -72,15 +140,39 @@ impl XKTModel {
             materials: HashMap::new(),
             meshes: HashMap::new(),
             entities: HashMap::new(),
+            geometries_list: Vec::new(),
+            meshes_list: Vec::new(),
+            entities_list: Vec::new(),
+            spatial_index: None,
+            tiles_list: Vec::new(),
+            index_manager: XKTIndexManager::new(),
+            geometry_reuse_table: GeometryReuseTable::default(),
+            reused_geometries_decode_matrix: None,
             metadata: XKTMetadata::default(),
             stats: XKTStats::default(),
+            finalized: false,
         }
     }
 
     /// 创建几何体
-    pub fn create_geometry(&mut self, geometry: XKTGeometry) -> Result<String> {
+    pub fn create_geometry(&mut self, mut geometry: XKTGeometry) -> Result<String> {
+        if self.finalized {
+            return Err(anyhow::anyhow!("XKTModel已经finalized，无法添加更多几何体"));
+        }
+
         let id = geometry.id.clone();
-        self.geometries.insert(id.clone(), geometry);
+
+        // 设置几何体索引
+        geometry.geometry_index = Some(self.geometries_list.len());
+
+        if geometry.bounding_box.is_none() {
+            geometry.calculate_bounding_box();
+        }
+
+        // 添加到存储
+        self.geometries.insert(id.clone(), geometry.clone());
+        self.geometries_list.push(geometry);
+
         self.update_stats();
         Ok(id)
     }
@@ -94,12 +186,17 @@ impl XKTModel {
     }
 
     /// 创建网格
-    pub fn create_mesh(&mut self, mesh: XKTMesh) -> Result<String> {
+    pub fn create_mesh(&mut self, mut mesh: XKTMesh) -> Result<String> {
+        if self.finalized {
+            return Err(anyhow::anyhow!("XKTModel已经finalized，无法添加更多网格"));
+        }
+
         let id = mesh.id.clone();
+        let geometry_id = mesh.geometry_id.clone();
 
         // 验证几何体和材质是否存在
-        if !self.geometries.contains_key(&mesh.geometry_id) {
-            return Err(anyhow::anyhow!("Geometry '{}' not found", mesh.geometry_id));
+        if !self.geometries.contains_key(&geometry_id) {
+            return Err(anyhow::anyhow!("Geometry '{}' not found", geometry_id));
         }
 
         if let Some(material_id) = &mesh.material_id {
@@ -108,13 +205,35 @@ impl XKTModel {
             }
         }
 
-        self.meshes.insert(id.clone(), mesh);
+        // 准备变换矩阵
+        mesh.ensure_matrix();
+        mesh.mesh_index = Some(self.meshes_list.len());
+
+        // 更新几何体复用信息
+        let reuse_count = self
+            .geometry_reuse_table
+            .register_instance(&geometry_id, &id);
+
+        if let Some(geometry) = self.geometries.get_mut(&geometry_id) {
+            geometry.reuse.instance_count = reuse_count;
+        }
+
+        self.sync_geometry_to_list(&geometry_id);
+
+        // 添加到存储
+        self.meshes.insert(id.clone(), mesh.clone());
+        self.meshes_list.push(mesh);
+
         self.update_stats();
         Ok(id)
     }
 
     /// 创建实体
-    pub fn create_entity(&mut self, entity: XKTEntity) -> Result<String> {
+    pub fn create_entity(&mut self, mut entity: XKTEntity) -> Result<String> {
+        if self.finalized {
+            return Err(anyhow::anyhow!("XKTModel已经finalized，无法添加更多实体"));
+        }
+
         let id = entity.id.clone();
 
         // 验证网格是否存在
@@ -124,7 +243,21 @@ impl XKTModel {
             }
         }
 
-        self.entities.insert(id.clone(), entity);
+        // 设置实体索引
+        entity.entity_index = Some(self.entities_list.len());
+
+        // 标记是否包含复用几何体
+        entity.has_reused_geometries = entity.mesh_ids.iter().any(|mesh_id| {
+            self.meshes
+                .get(mesh_id)
+                .and_then(|mesh| self.geometry_reuse_table.get(&mesh.geometry_id))
+                .map_or(false, |entry| entry.mesh_ids.len() > 1)
+        });
+
+        // 添加到存储
+        self.entities.insert(id.clone(), entity.clone());
+        self.entities_list.push(entity);
+
         self.update_stats();
         Ok(id)
     }
@@ -137,13 +270,23 @@ impl XKTModel {
         self.stats.num_entities = self.entities.len();
 
         // 计算三角形和顶点数量
-        self.stats.num_triangles = self.geometries.values().map(|g| g.indices.len() / 3).sum();
+        self.stats.num_triangles = self.geometries.values().map(|g| g.triangle_count()).sum();
 
         self.stats.num_vertices = self
             .geometries
             .values()
             .map(|g| g.positions.len() / 3)
             .sum();
+    }
+
+    fn sync_geometry_to_list(&mut self, geometry_id: &str) {
+        if let Some(geometry) = self.geometries.get(geometry_id) {
+            if let Some(index) = geometry.geometry_index {
+                if let Some(slot) = self.geometries_list.get_mut(index) {
+                    *slot = geometry.clone();
+                }
+            }
+        }
     }
 
     /// 完成模型构建

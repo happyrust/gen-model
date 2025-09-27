@@ -1,14 +1,70 @@
-use anyhow::Result;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// XKT 几何体类型
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum XKTGeometryType {
     Triangles,
     Lines,
     Points,
+    TriangleStrip,
+    TriangleFan,
+    LineStrip,
+    LineLoop,
+    AxisLabel,
+}
+
+impl XKTGeometryType {
+    /// 是否需要索引缓冲
+    pub fn requires_indices(self) -> bool {
+        matches!(
+            self,
+            XKTGeometryType::Triangles
+                | XKTGeometryType::TriangleStrip
+                | XKTGeometryType::TriangleFan
+                | XKTGeometryType::Lines
+                | XKTGeometryType::LineStrip
+                | XKTGeometryType::LineLoop
+        )
+    }
+
+    /// 转换为 XKT primitive code
+    pub fn to_xkt_code(self, solid: Option<bool>) -> u8 {
+        match self {
+            XKTGeometryType::Triangles => {
+                if solid.unwrap_or(false) {
+                    0
+                } else {
+                    1
+                }
+            }
+            XKTGeometryType::Lines => 2,
+            XKTGeometryType::Points => 3,
+            XKTGeometryType::LineStrip => 4,
+            XKTGeometryType::LineLoop => 5,
+            XKTGeometryType::TriangleStrip => 6,
+            XKTGeometryType::TriangleFan => 7,
+            XKTGeometryType::AxisLabel => 8,
+        }
+    }
+}
+
+/// 几何体复用信息
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeometryReuseInfo {
+    pub instance_count: usize,
+    pub decode_matrix_slot: Option<usize>,
+}
+
+impl GeometryReuseInfo {
+    pub fn register_instance(&mut self) -> usize {
+        self.instance_count += 1;
+        self.instance_count
+    }
+
+    pub fn is_reused(&self) -> bool {
+        self.instance_count > 1
+    }
 }
 
 /// XKT 几何体数据结构
@@ -16,11 +72,26 @@ pub enum XKTGeometryType {
 pub struct XKTGeometry {
     pub id: String,
     pub geometry_type: XKTGeometryType,
+    pub geometry_index: Option<usize>,
+    pub axis_label: Option<String>,
+
+    // 原始数据
     pub positions: Vec<f32>,
     pub normals: Option<Vec<f32>>,
     pub colors: Option<Vec<f32>>,
     pub uv: Option<Vec<f32>>,
     pub indices: Vec<u32>,
+
+    // XKT v10 压缩数据
+    pub positions_quantized: Option<Vec<u16>>,
+    pub normals_oct_encoded: Option<Vec<i8>>,
+    pub colors_compressed: Option<Vec<u8>>,
+    pub uvs_compressed: Option<Vec<u16>>,
+    pub edge_indices: Option<Vec<u32>>,
+
+    // 几何体属性
+    pub reuse: GeometryReuseInfo,
+    pub solid: Option<bool>,
     pub bounding_box: Option<(Vec3, Vec3)>,
 }
 
@@ -30,11 +101,20 @@ impl XKTGeometry {
         Self {
             id,
             geometry_type,
+            geometry_index: None,
+            axis_label: None,
             positions: Vec::new(),
             normals: None,
             colors: None,
             uv: None,
             indices: Vec::new(),
+            positions_quantized: None,
+            normals_oct_encoded: None,
+            colors_compressed: None,
+            uvs_compressed: None,
+            edge_indices: None,
+            reuse: GeometryReuseInfo::default(),
+            solid: None,
             bounding_box: None,
         }
     }
@@ -83,16 +163,12 @@ impl XKTGeometry {
         let min = Vec3::new(-half_w, -half_h, -half_d);
         let max = Vec3::new(half_w, half_h, half_d);
 
-        Self {
-            id,
-            geometry_type: XKTGeometryType::Triangles,
-            positions,
-            normals: Some(normals),
-            colors: None,
-            uv: None,
-            indices,
-            bounding_box: Some((min, max)),
-        }
+        let mut geometry = Self::new(id, XKTGeometryType::Triangles);
+        geometry.positions = positions;
+        geometry.normals = Some(normals);
+        geometry.indices = indices;
+        geometry.bounding_box = Some((min, max));
+        geometry
     }
 
     /// 创建球体几何体
@@ -144,16 +220,12 @@ impl XKTGeometry {
         let min = Vec3::new(-radius, -radius, -radius);
         let max = Vec3::new(radius, radius, radius);
 
-        Self {
-            id,
-            geometry_type: XKTGeometryType::Triangles,
-            positions,
-            normals: Some(normals),
-            colors: None,
-            uv: None,
-            indices,
-            bounding_box: Some((min, max)),
-        }
+        let mut geometry = Self::new(id, XKTGeometryType::Triangles);
+        geometry.positions = positions;
+        geometry.normals = Some(normals);
+        geometry.indices = indices;
+        geometry.bounding_box = Some((min, max));
+        geometry
     }
 
     /// 创建圆柱体几何体
@@ -227,16 +299,12 @@ impl XKTGeometry {
         let min = Vec3::new(-radius, -half_height, -radius);
         let max = Vec3::new(radius, half_height, radius);
 
-        Self {
-            id,
-            geometry_type: XKTGeometryType::Triangles,
-            positions,
-            normals: Some(normals),
-            colors: None,
-            uv: None,
-            indices,
-            bounding_box: Some((min, max)),
-        }
+        let mut geometry = Self::new(id, XKTGeometryType::Triangles);
+        geometry.positions = positions;
+        geometry.normals = Some(normals);
+        geometry.indices = indices;
+        geometry.bounding_box = Some((min, max));
+        geometry
     }
 
     /// 计算边界框
@@ -281,10 +349,40 @@ impl XKTGeometry {
 
     /// 获取三角形数量
     pub fn triangle_count(&self) -> usize {
-        if self.geometry_type == XKTGeometryType::Triangles {
+        if matches!(
+            self.geometry_type,
+            XKTGeometryType::Triangles
+                | XKTGeometryType::TriangleStrip
+                | XKTGeometryType::TriangleFan
+        ) {
             self.indices.len() / 3
         } else {
             0
         }
+    }
+
+    /// 设置轴标签
+    pub fn set_axis_label<S: Into<String>>(&mut self, label: S) {
+        self.axis_label = Some(label.into());
+    }
+
+    /// 注册几何实例复用
+    pub fn register_instance(&mut self) -> usize {
+        self.reuse.register_instance()
+    }
+
+    /// 是否为复用几何
+    pub fn is_reused(&self) -> bool {
+        self.reuse.is_reused()
+    }
+
+    /// 转换为 XKT primitive code，用于 eachGeometryPrimitiveType
+    pub fn primitive_code(&self) -> u8 {
+        self.geometry_type.to_xkt_code(self.solid)
+    }
+
+    /// 默认单位矩阵（用作占位）
+    pub fn identity_matrix() -> [f32; 16] {
+        Mat4::IDENTITY.to_cols_array()
     }
 }

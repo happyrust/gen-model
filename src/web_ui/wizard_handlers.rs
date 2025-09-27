@@ -677,8 +677,8 @@ fn save_deployment_site_config(
             wizard_config.max_concurrent.unwrap_or(1),
             now,
             task_id,
-            Option::<String>::None::<String>,
-            Option::<String>::None::<String>
+            Option::<String>::None,
+            Option::<String>::None
         ],
     )?;
 
@@ -722,7 +722,10 @@ fn open_deployment_sites_sqlite() -> Result<rusqlite::Connection, Box<dyn std::e
     )?;
 
     // 向后兼容：如果老库缺少字段，则尝试添加，忽略失败即可
-    let _ = conn.execute("ALTER TABLE deployment_sites ADD COLUMN health_url TEXT", rusqlite::params![]);
+    let _ = conn.execute(
+        "ALTER TABLE deployment_sites ADD COLUMN health_url TEXT",
+        rusqlite::params![],
+    );
     let _ = conn.execute(
         "ALTER TABLE deployment_sites ADD COLUMN last_health_check TEXT",
         rusqlite::params![],
@@ -1170,4 +1173,58 @@ pub fn update_deployment_site_health(
         rusqlite::params![status, timestamp, site_id],
     )?;
     Ok(())
+}
+
+/// 保存通过API创建的部署站点到SQLite
+pub fn save_api_deployment_site(
+    site: &DeploymentSite,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let conn = open_deployment_sites_sqlite()?;
+
+    let site_id = format!("site_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let config_json = serde_json::to_string(&site.config)?;
+    let selected_projects = serde_json::to_string(
+        &site
+            .e3d_projects
+            .iter()
+            .map(|p| p.path.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let root_directory = site
+        .e3d_projects
+        .first()
+        .map(|p| {
+            std::path::Path::new(&p.path)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or("")
+        })
+        .unwrap_or("");
+
+    conn.execute(
+        "INSERT INTO deployment_sites (
+            id, name, config_json, selected_projects, root_directory,
+            parallel_processing, max_concurrent, created_at, updated_at,
+            task_id, status, health_url, last_health_check
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            site_id,
+            site.name,
+            config_json,
+            selected_projects,
+            root_directory,
+            false,
+            1,
+            now,
+            now,
+            Option::<String>::None,
+            format!("{:?}", site.status),
+            site.health_url,
+            site.last_health_check.as_ref().map(|_| now.clone())
+        ],
+    )?;
+
+    Ok(site_id)
 }

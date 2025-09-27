@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{Method, StatusCode, header},
     response::{Html, Json},
     routing::{delete, get, post, put},
 };
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
@@ -29,10 +30,14 @@ pub mod remote_runtime;
 pub mod remote_sync_handlers;
 pub mod remote_sync_template;
 pub mod simple_templates;
+pub mod simple_xkt_viewer;
 pub mod sync_control_center;
 pub mod sync_control_handlers;
 pub mod wizard_handlers;
 pub mod wizard_template;
+pub mod xeokit_viewer;
+pub mod xkt_auto_test;
+pub mod xkt_generator_viewer;
 
 use handlers::*;
 use models::*;
@@ -131,23 +136,40 @@ impl ConfigManager {
 pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
     let app_state = AppState::new();
 
+    // 🔧 修复：初始化数据库连接
+    println!("🔄 正在初始化数据库连接...");
+    if let Err(e) = aios_core::init_surreal().await {
+        let error_msg = e.to_string();
+        if error_msg.contains("Already connected") {
+            println!("⚠️ 数据库已经连接，跳过重复初始化");
+        } else {
+            eprintln!("❌ 数据库初始化失败: {}", error_msg);
+            eprintln!("⚡ 服务器将继续启动，但数据库功能可能不可用");
+        }
+    } else {
+        println!("✅ 数据库连接初始化成功");
+    }
+
     // 初始化 SurrealDB 中的 projects 表（若已存在忽略错误）
     crate::web_ui::handlers::ensure_projects_schema().await;
     // 初始化 SurrealDB 中的 deployment_sites 表
     crate::web_ui::handlers::ensure_deployment_sites_schema().await;
 
     let app = Router::new()
-        // XKT 生成 API (暂时注释，需要修复处理器签名)
-        // .route("/api/xkt/generate", post(handlers::api_generate_xkt))
-        // .route("/api/xkt/download/:filename", get(handlers::api_download_xkt))
+        // XKT 生成 API
+        .route("/api/xkt/generate", post(handlers::api_generate_xkt))
+        .route(
+            "/api/xkt/download/{filename}",
+            get(handlers::api_download_xkt),
+        )
         // API路由
         .route("/api/tasks", get(get_tasks).post(create_task))
-        .route("/api/tasks/:id", get(get_task).delete(delete_task))
-        .route("/api/tasks/:id/start", post(start_task))
-        .route("/api/tasks/:id/stop", post(stop_task))
-        .route("/api/tasks/:id/restart", post(restart_task))
-        .route("/api/tasks/:id/error", get(get_task_error_details))
-        .route("/api/tasks/:id/logs", get(get_task_logs))
+        .route("/api/tasks/{id}", get(get_task).delete(delete_task))
+        .route("/api/tasks/{id}/start", post(start_task))
+        .route("/api/tasks/{id}/stop", post(stop_task))
+        .route("/api/tasks/{id}/restart", post(restart_task))
+        .route("/api/tasks/{id}/error", get(get_task_error_details))
+        .route("/api/tasks/{id}/logs", get(get_task_logs))
         .route("/api/tasks/batch", post(create_batch_tasks))
         .route("/api/tasks/next-number", get(get_next_task_number))
         .route("/api/templates", get(get_task_templates))
@@ -206,23 +228,23 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(incremental_update_handlers::get_all_incremental_status),
         )
         .route(
-            "/api/incremental/site/:site_id",
+            "/api/incremental/site/{site_id}",
             get(incremental_update_handlers::get_site_incremental_details),
         )
         .route(
-            "/api/incremental/detect/:site_id",
+            "/api/incremental/detect/{site_id}",
             post(incremental_update_handlers::start_incremental_detection),
         )
         .route(
-            "/api/incremental/sync/:site_id",
+            "/api/incremental/sync/{site_id}",
             post(incremental_update_handlers::start_incremental_sync),
         )
         .route(
-            "/api/incremental/task/:task_id",
+            "/api/incremental/task/{task_id}",
             get(incremental_update_handlers::get_detection_task_status),
         )
         .route(
-            "/api/incremental/task/:task_id/cancel",
+            "/api/incremental/task/{task_id}/cancel",
             post(incremental_update_handlers::cancel_task),
         )
         .route(
@@ -294,7 +316,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         )
         .route("/api/sync/task", post(sync_control_handlers::add_sync_task))
         .route(
-            "/api/sync/task/:id/cancel",
+            "/api/sync/task/{id}/cancel",
             post(sync_control_handlers::cancel_sync_task),
         )
         .route(
@@ -320,26 +342,26 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(remote_sync_handlers::list_envs).post(remote_sync_handlers::create_env),
         )
         .route(
-            "/api/remote-sync/envs/:id",
+            "/api/remote-sync/envs/{id}",
             get(remote_sync_handlers::get_env)
                 .put(remote_sync_handlers::update_env)
                 .delete(remote_sync_handlers::delete_env),
         )
         .route(
-            "/api/remote-sync/envs/:id/apply",
+            "/api/remote-sync/envs/{id}/apply",
             post(remote_sync_handlers::apply_env),
         )
         .route(
-            "/api/remote-sync/envs/:id/activate",
+            "/api/remote-sync/envs/{id}/activate",
             post(remote_sync_handlers::activate_env),
         )
         .route(
             "/api/remote-sync/runtime/stop",
             post(remote_sync_handlers::stop_runtime),
         )
-        // .route("/api/remote-sync/envs/:id/test-mqtt", post(remote_sync_handlers::test_mqtt_env))
-        // .route("/api/remote-sync/envs/:id/test-http", post(remote_sync_handlers::test_http_env))
-        // .route("/api/remote-sync/sites/:id/test-http", post(remote_sync_handlers::test_http_site))
+        // .route("/api/remote-sync/envs/{id}/test-mqtt", post(remote_sync_handlers::test_mqtt_env))
+        // .route("/api/remote-sync/envs/{id}/test-http", post(remote_sync_handlers::test_http_env))
+        // .route("/api/remote-sync/sites/{id}/test-http", post(remote_sync_handlers::test_http_site))
         .route(
             "/api/remote-sync/runtime/status",
             get(remote_sync_handlers::runtime_status),
@@ -353,11 +375,11 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             post(remote_sync_handlers::import_env_from_dboption),
         )
         .route(
-            "/api/remote-sync/envs/:id/sites",
+            "/api/remote-sync/envs/{id}/sites",
             get(remote_sync_handlers::list_sites).post(remote_sync_handlers::create_site),
         )
         .route(
-            "/api/remote-sync/sites/:id",
+            "/api/remote-sync/sites/{id}",
             put(remote_sync_handlers::update_site).delete(remote_sync_handlers::delete_site),
         )
         // 数据库状态管理API
@@ -366,23 +388,23 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(database_status_handlers::get_all_database_status),
         )
         .route(
-            "/api/database/:db_num/details",
+            "/api/database/{db_num}/details",
             get(database_status_handlers::get_database_details),
         )
         .route(
-            "/api/database/:db_num/parse",
+            "/api/database/{db_num}/parse",
             post(database_status_handlers::reparse_database),
         )
         .route(
-            "/api/database/:db_num/generate",
+            "/api/database/{db_num}/generate",
             post(database_status_handlers::regenerate_model),
         )
         .route(
-            "/api/database/:db_num/update",
+            "/api/database/{db_num}/update",
             post(database_status_handlers::trigger_database_update),
         )
         .route(
-            "/api/database/:db_num/clear-cache",
+            "/api/database/{db_num}/clear-cache",
             post(database_status_handlers::clear_database_cache),
         )
         .route(
@@ -401,7 +423,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(db_status_handlers::get_db_status_list),
         )
         .route(
-            "/api/db-status/:dbnum",
+            "/api/db-status/{dbnum}",
             get(db_status_handlers::get_db_status_detail),
         )
         .route(
@@ -413,11 +435,11 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(db_status_handlers::check_file_versions),
         )
         .route(
-            "/api/db-status/:dbnum/auto-update-type",
+            "/api/db-status/{dbnum}/auto-update-type",
             post(db_status_handlers::set_auto_update_type),
         )
         .route(
-            "/api/db-status/:dbnum/auto-update",
+            "/api/db-status/{dbnum}/auto-update",
             post(db_status_handlers::set_auto_update),
         )
         // 本地扫描与同步
@@ -439,14 +461,14 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(handlers::api_get_projects).post(handlers::api_create_project),
         )
         .route(
-            "/api/projects/:id",
+            "/api/projects/{id}",
             get(handlers::api_get_project)
                 .put(handlers::api_update_project)
                 .delete(handlers::api_delete_project),
         )
         .route("/api/projects/demo", post(handlers::api_projects_demo))
         .route(
-            "/api/projects/:id/healthcheck",
+            "/api/projects/{id}/healthcheck",
             post(handlers::api_healthcheck_project),
         )
         // 部署站点管理 API
@@ -459,21 +481,21 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(handlers::api_get_deployment_sites).post(handlers::api_create_deployment_site),
         )
         .route(
-            "/api/deployment-sites/:id",
+            "/api/deployment-sites/{id}",
             get(handlers::api_get_deployment_site)
                 .put(handlers::api_update_deployment_site)
                 .delete(handlers::api_delete_deployment_site),
         )
         .route(
-            "/api/deployment-sites/:id/tasks",
+            "/api/deployment-sites/{id}/tasks",
             post(handlers::api_create_deployment_site_task),
         )
+        // .route(
+        //     "/api/deployment-sites/{id}/healthcheck",
+        //     post(handlers::api_healthcheck_deployment_site_post),
+        // )
         .route(
-            "/api/deployment-sites/:id/healthcheck",
-            post(handlers::api_healthcheck_deployment_site),
-        )
-        .route(
-            "/api/deployment-sites/:id/export-config",
+            "/api/deployment-sites/{id}/export-config",
             get(handlers::api_export_deployment_site_config),
         )
         // 部署站点管理页面
@@ -540,8 +562,8 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/dashboard", get(dashboard_page))
         .route("/config", get(config_page))
         .route("/tasks", get(tasks_page))
-        .route("/tasks/:id", get(task_detail_page))
-        .route("/tasks/:id/logs", get(task_logs_page))
+        .route("/tasks/{id}", get(task_detail_page))
+        .route("/tasks/{id}/logs", get(task_logs_page))
         .route("/batch-tasks", get(batch_tasks_page))
         .route("/db-status", get(db_status_page))
         .route("/wizard", get(wizard_page))
@@ -552,6 +574,23 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(handlers::database_connection_page),
         )
         .route("/xtk-viewer", get(handlers::serve_xtk_viewer_page))
+        .route("/xkt", get(handlers::serve_simple_xkt_viewer_page))
+        // XKT 生成器和查看器测试页面
+        .route(
+            "/xkt-generator",
+            get(handlers::serve_xkt_generator_viewer_page),
+        )
+        // XKT 自动化测试页面
+        .route(
+            "/xkt-auto-test",
+            get(xkt_auto_test::serve_xkt_auto_test_page),
+        )
+        // Xeokit XKT 模型查看器
+        .route("/xeokit-viewer", get(xeokit_viewer::xeokit_viewer_page))
+        // XKT 文件服务路由 - 支持嵌套路径
+        .route("/files/{*filepath}", get(xeokit_viewer::serve_xkt_file))
+        // XKT 文件列表API
+        .route("/api/xkt/list-files", get(xeokit_viewer::list_xkt_files))
         // 桥架支撑检测页面 + API
         .route("/tray-supports", get(handlers::tray_supports_page))
         .route(
@@ -562,8 +601,14 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
         .route("/sctn-test", get(handlers::sctn_test_page))
         .route("/api/sctn-test/run", post(handlers::api_sctn_test_run))
         .route(
-            "/api/sctn-test/result/:id",
+            "/api/sctn-test/result/{id}",
             get(handlers::api_sctn_test_result),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers(Any),
         )
         .with_state(app_state.clone());
 

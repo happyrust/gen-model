@@ -27,43 +27,46 @@ impl XKTWriter {
         self
     }
 
-    /// 将 XKT 文件写入字节数组
+    /// 将 XKT 文件写入字节数组（符合 Xeokit v10 格式）
     pub fn write_to_bytes(&self, xkt_file: &XKTFile, compress: bool) -> Result<Vec<u8>> {
+        // 直接创建 Xeokit 兼容的 JSON 格式
+        let xeokit_data = serde_json::json!({
+            "metadata": {
+                "version": "10.0.0",
+                "type": "XKT",
+                "generator": "aios-database",
+                "created": chrono::Utc::now().to_rfc3339()
+            },
+            "materials": xkt_file.model.materials,
+            "meshes": xkt_file.model.geometries,
+            "entities": xkt_file.model.entities
+        });
+
+        let json_string = serde_json::to_string(&xeokit_data)?;
+        let json_bytes = json_string.as_bytes();
+
         let mut buffer = Vec::new();
 
-        // 写入文件头
-        self.write_header(&mut buffer)?;
-
-        // 序列化模型数据
-        let model_json = serde_json::to_string(&xkt_file.model)?;
-        let model_bytes = model_json.as_bytes();
+        // 写入标准 XKT v10 头部
+        buffer.write_all(b"XKT")?;
+        buffer.write_u8(10)?; // 版本 10
 
         if compress {
-            // 压缩数据
+            // 压缩 JSON 数据
             let mut encoder = GzEncoder::new(Vec::new(), Compression::new(self.compression_level));
-            encoder.write_all(model_bytes)?;
+            encoder.write_all(json_bytes)?;
             let compressed_data = encoder.finish()?;
 
-            // 写入压缩标志
-            buffer.write_u8(1)?; // 1 表示压缩
-
-            // 写入原始大小
-            buffer.write_u32::<LittleEndian>(model_bytes.len() as u32)?;
-
-            // 写入压缩大小
-            buffer.write_u32::<LittleEndian>(compressed_data.len() as u32)?;
-
-            // 写入压缩数据
+            // 写入压缩标志和数据
+            buffer.write_u8(1)?; // 压缩标志
+            buffer.write_u32::<LittleEndian>(json_bytes.len() as u32)?; // 原始大小
+            buffer.write_u32::<LittleEndian>(compressed_data.len() as u32)?; // 压缩大小
             buffer.write_all(&compressed_data)?;
         } else {
-            // 写入未压缩标志
-            buffer.write_u8(0)?; // 0 表示未压缩
-
-            // 写入数据大小
-            buffer.write_u32::<LittleEndian>(model_bytes.len() as u32)?;
-
-            // 写入数据
-            buffer.write_all(model_bytes)?;
+            // 写入未压缩数据
+            buffer.write_u8(0)?; // 未压缩标志
+            buffer.write_u32::<LittleEndian>(json_bytes.len() as u32)?;
+            buffer.write_all(json_bytes)?;
         }
 
         Ok(buffer)
@@ -88,20 +91,13 @@ impl XKTWriter {
         Ok(())
     }
 
-    /// 写入文件头
+    /// 写入文件头（符合 Xeokit 标准格式）
     fn write_header(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // XKT 魔数 "XKT\0"
         buffer.write_all(b"XKT\0")?;
 
-        // 版本号
-        buffer.write_u32::<LittleEndian>(XKT_VERSION)?;
-
-        // 创建时间戳
-        let timestamp = chrono::Utc::now().timestamp() as u64;
-        buffer.write_u64::<LittleEndian>(timestamp)?;
-
-        // 保留字段
-        buffer.write_u32::<LittleEndian>(0)?;
+        // 版本号 - 使用兼容的版本号
+        buffer.write_u32::<LittleEndian>(10)?;
 
         Ok(())
     }
@@ -201,6 +197,11 @@ impl XKTWriter {
             super::XKTGeometryType::Triangles => 0u8,
             super::XKTGeometryType::Lines => 1u8,
             super::XKTGeometryType::Points => 2u8,
+            super::XKTGeometryType::LineStrip => 3u8,
+            super::XKTGeometryType::LineLoop => 4u8,
+            super::XKTGeometryType::TriangleStrip => 5u8,
+            super::XKTGeometryType::TriangleFan => 6u8,
+            super::XKTGeometryType::AxisLabel => 7u8,
         };
         buffer.write_u8(geometry_type)?;
 

@@ -1,0 +1,47 @@
+🚀 正在启动 AIOS Web UI 服务器...
+📱 访问地址: http://localhost:8080
+💡 数据库服务由配置管理，根据需要启动
+🔄 正在初始化数据库连接...
+[2025-09-27T18:25:34Z DEBUG tungstenite::handshake::client] Client handshake done.
+载入surreal init_status.surql
+载入surreal get_room_nodes.surql
+载入surreal material_common.surql
+载入surreal common.surql
+载入surreal gy_common.surql
+载入surreal fn_query_room_code.surql
+载入surreal fn_query_room_code_hh.surql
+✅ 数据库连接初始化成功
+🚀 Web UI服务器启动成功！
+📱 访问地址: http://localhost:8080
+🎯 功能包括:
+   - 数据库生成任务管理
+   - 实时进度监控
+   - 配置管理
+   - 任务历史记录
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output
+列出目录: /Volumes/DPC/work/gen-model/test_output

@@ -1107,8 +1107,16 @@ impl TaskInfo {
             .collect::<String>();
 
         // 如果站点名或任务名为空，使用默认值
-        let site_part = if site_part.is_empty() { "default" } else { &site_part };
-        let task_part = if task_part.is_empty() { "task" } else { &task_part };
+        let site_part = if site_part.is_empty() {
+            "default"
+        } else {
+            &site_part
+        };
+        let task_part = if task_part.is_empty() {
+            "task"
+        } else {
+            &task_part
+        };
 
         format!("{}_{}_{}", site_part, task_part, counter)
     }

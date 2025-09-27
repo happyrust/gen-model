@@ -1,6 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::gen_model::is_xtk_debug_enabled;
 use crate::fast_model::{SEND_INST_SIZE, get_generic_type, shared};
 use aios_core::RefU64;
 use aios_core::geometry::*;
@@ -52,7 +53,9 @@ pub async fn gen_prim_geos(
             if end_idx > prim_cnt as usize {
                 end_idx = prim_cnt as usize;
             }
-            println!("当前范围: {start_idx} ~ {end_idx}");
+            if is_xtk_debug_enabled() {
+                println!("当前范围: {start_idx} ~ {end_idx}");
+            }
             for j in start_idx..end_idx {
                 let refno = all_refnos[j];
                 // println!(
@@ -266,10 +269,12 @@ pub async fn gen_prim_geos(
         handles.push(handle);
     }
     futures::future::join_all(take(&mut handles)).await;
-    println!(
-        "处理常规基本几何体: {} 花费时间: {} ms",
-        prim_cnt,
-        t.elapsed().as_millis()
-    );
+    if is_xtk_debug_enabled() {
+        println!(
+            "处理常规基本几何体: {} 花费时间: {} ms",
+            prim_cnt,
+            t.elapsed().as_millis()
+        );
+    }
     Ok(true)
 }

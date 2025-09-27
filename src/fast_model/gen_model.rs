@@ -46,8 +46,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Isometry;
 use rayon::iter::ParallelIterator;
-use std::collections::HashSet;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::io::Read;
 use std::mem::take;
@@ -193,6 +192,35 @@ impl DbModelInstRefnos {
 static GLOBAL_SHAPE_CACHE: Lazy<RwLock<Option<Arc<ShapeInstancesData>>>> =
     Lazy::new(|| RwLock::new(None));
 static GLOBAL_CACHE_REFNOS: Lazy<RwLock<Vec<RefnoEnum>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+static XKT_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
+    std::env::var("XKT_GEN_DEBUG")
+        .or_else(|_| std::env::var("XKT_GEN_VERBOSE"))
+        .ok()
+        .and_then(|value| parse_env_flag(&value))
+        .unwrap_or(false)
+});
+
+fn parse_env_flag(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_xtk_debug_enabled() -> bool {
+    *XKT_DEBUG_ENABLED
+}
+
+pub(crate) fn xkt_debug<F>(builder: F)
+where
+    F: FnOnce() -> String,
+{
+    if is_xtk_debug_enabled() {
+        println!("{}", builder());
+    }
+}
 
 async fn set_global_shape_cache(data: ShapeInstancesData) {
     let mut cache = GLOBAL_SHAPE_CACHE.write().await;
@@ -350,6 +378,116 @@ fn build_sample_shape_data_for_db(dbno: u32) -> Option<ShapeInstancesData> {
     Some(data)
 }
 
+/// 检查指定的 geo_hash 是否有对应的 mesh 文件
+fn check_mesh_exists(geo_hash: u64) -> bool {
+    if geo_hash == 0 {
+        return false;
+    }
+    let filename = format!("assets/meshes/{}.mesh", geo_hash);
+    let exists = Path::new(&filename).exists();
+
+    // 添加调试信息
+    if !exists && is_xtk_debug_enabled() {
+        xkt_debug(|| format!("    调试: mesh文件不存在: {}", filename));
+        // 检查是否有相似的文件名
+        if let Ok(entries) = std::fs::read_dir("assets/meshes") {
+            let target_str = geo_hash.to_string();
+            let mut found_similar = false;
+            for entry in entries.take(5) {
+                if let Ok(entry) = entry {
+                    let file_name = entry.file_name();
+                    let name = file_name.to_string_lossy();
+                    if name.contains(&target_str[..8]) {
+                        xkt_debug(|| format!("      发现相似文件: {}", name));
+                        found_similar = true;
+                    }
+                }
+            }
+            if !found_similar {
+                xkt_debug(|| "      未发现任何相似文件名".to_string());
+            }
+        }
+    }
+
+    exists
+}
+
+/// 检查多个几何体节点，返回需要重新生成 mesh 的节点
+async fn check_nodes_need_mesh_generation(shape_data: &ShapeInstancesData) -> Vec<RefnoEnum> {
+    let mut need_regenerate = Vec::new();
+    let mut total_checked = 0;
+    let mut missing_mesh_count = 0;
+
+    xkt_debug(|| "开始检查 mesh 文件状态...".to_string());
+    xkt_debug(|| format!("总共需要检查 {} 个节点", shape_data.inst_info_map.len()));
+
+    for (refno, inst_info) in &shape_data.inst_info_map {
+        total_checked += 1;
+
+        // 获取实例的 inst_key
+        let inst_key = inst_info.get_inst_key();
+        if let Some(geo_data) = shape_data.inst_geos_map.get(&inst_key) {
+            xkt_debug(|| format!("  📋 检查节点 {} (inst_key: {})", refno, inst_key));
+            xkt_debug(|| format!("      包含 {} 个几何实例", geo_data.insts.len()));
+
+            // 检查每个实例的 mesh 是否存在
+            let mut missing_meshes = Vec::new();
+            for (idx, inst) in geo_data.insts.iter().enumerate() {
+                xkt_debug(|| format!("      实例 {}: geo_hash = {}", idx, inst.geo_hash));
+                if inst.geo_hash != 0 {
+                    if !check_mesh_exists(inst.geo_hash) {
+                        missing_meshes.push(inst.geo_hash);
+                    }
+                } else {
+                    xkt_debug(|| "        ⚠️  geo_hash 为 0，跳过".to_string());
+                }
+            }
+
+            if !missing_meshes.is_empty() {
+                xkt_debug(|| {
+                    format!(
+                        "  ❌ 节点 {} 缺少 {} 个 mesh 文件:",
+                        refno,
+                        missing_meshes.len()
+                    )
+                });
+                for hash in &missing_meshes {
+                    xkt_debug(|| format!("     - {}.mesh", hash));
+                }
+                missing_mesh_count += missing_meshes.len();
+                need_regenerate.push(refno.clone());
+            } else if !geo_data.insts.is_empty() {
+                xkt_debug(|| format!("  ✅ 节点 {} 的所有 mesh 文件都存在", refno));
+            } else {
+                xkt_debug(|| format!("  ⚠️  节点 {} 没有几何实例", refno));
+            }
+        } else {
+            xkt_debug(|| {
+                format!(
+                    "  ⚠️  节点 {} 没有找到几何数据 (inst_key: {})",
+                    refno, inst_key
+                )
+            });
+        }
+    }
+
+    // 检查 TUBI 节点 (inst_tubi_map 存储的是 EleGeosInfo 类型)
+    for (refno, _tubi_info) in &shape_data.inst_tubi_map {
+        // TUBI 节点的 mesh 生成比较特殊，暂时跳过检查
+        // 如果需要检查，需要根据 TUBI 的特定逻辑来处理
+        xkt_debug(|| format!("  ℹ️  TUBI 节点 {} 暂时跳过 mesh 检查", refno));
+    }
+
+    xkt_debug(|| "\n=== Mesh 文件检查结果 ===".to_string());
+    xkt_debug(|| format!("检查节点数: {}", total_checked));
+    xkt_debug(|| format!("缺失 mesh 文件数: {}", missing_mesh_count));
+    xkt_debug(|| format!("需要重新生成的节点数: {}", need_regenerate.len()));
+    xkt_debug(|| format!("TUBI 节点数: {}", shape_data.inst_tubi_map.len()));
+    xkt_debug(|| "========================\n".to_string());
+
+    need_regenerate
+}
+
 fn load_plant_mesh_by_hash(geo_hash: u64) -> Option<PlantMesh> {
     if geo_hash == 0 {
         return None;
@@ -422,7 +560,13 @@ fn create_geometry_from_plant_mesh(
 
     geometry.indices = mesh.indices.clone();
 
-    if let Some(aabb) = mesh.aabb {
+    let resolved_aabb = mesh.aabb.as_ref().cloned().or_else(|| mesh.cal_aabb());
+
+    if mesh.aabb.is_none() && resolved_aabb.is_some() {
+        xkt_debug(|| format!("自动计算 mesh {} 的包围盒", geometry_id));
+    }
+
+    if let Some(aabb) = resolved_aabb {
         let min = Vec3::new(aabb.mins.x, aabb.mins.y, aabb.mins.z);
         let max = Vec3::new(aabb.maxs.x, aabb.maxs.y, aabb.maxs.z);
         geometry.bounding_box = Some((min, max));
@@ -434,23 +578,27 @@ fn create_geometry_from_plant_mesh(
 async fn prepare_global_shape_cache_for_db(dbno: u32, db_option: &DbOption) -> anyhow::Result<()> {
     clear_global_shape_cache().await;
 
-    if let Err(e) = aios_core::init_test_surreal().await {
+    // 检查数据库连接是否已经初始化（应该在 gen_xtk.rs 的 main 函数中完成）
+    // 通过尝试一个简单查询来测试连接
+    let test_query = "SELECT * FROM pe LIMIT 1";
+    if let Err(e) = SUL_DB.query(test_query).await {
+        // 如果查询失败，尝试使用示例数据
         if let Some(sample) = build_sample_shape_data_for_db(dbno) {
             println!(
-                "无法连接 SurrealDB ({}), 使用内置示例数据生成 dbnum {} 的几何实例",
+                "无法执行数据库查询 ({}), 使用内置示例数据生成 dbnum {} 的几何实例",
                 e, dbno
             );
             set_cached_refnos(sample.inst_info_map.keys().cloned().collect()).await;
             set_global_shape_cache(sample).await;
             return Ok(());
         } else {
-            return Err(anyhow::anyhow!("初始化 SurrealDB 连接失败: {}", e));
+            return Err(anyhow::anyhow!("数据库连接失败: {}", e));
         }
     }
 
     let mut option_clone = db_option.clone();
     option_clone.gen_model = true;
-    option_clone.gen_mesh = false;
+    option_clone.gen_mesh = true; // 确保生成mesh
     option_clone.manual_db_nums = Some(vec![dbno]);
 
     let option_arc = Arc::new(option_clone);
@@ -464,7 +612,7 @@ async fn prepare_global_shape_cache_for_db(dbno: u32, db_option: &DbOption) -> a
         aggregated
     });
 
-    println!("预处理数据库 {} 的几何实例数据...", dbno);
+    xkt_debug(|| format!("预处理数据库 {} 的几何实例数据...", dbno));
     let _ = gen_geos_data_by_dbnum(dbno, option_arc, sender.clone(), None).await?;
     drop(sender);
 
@@ -472,16 +620,18 @@ async fn prepare_global_shape_cache_for_db(dbno: u32, db_option: &DbOption) -> a
         .await
         .map_err(|e| anyhow::anyhow!("收集几何实例数据失败: {}", e))?;
 
-    println!(
-        "ShapeInstancesData 收集完成: inst_info={} geos={} tubi={}",
-        aggregated.inst_info_map.len(),
-        aggregated.inst_geos_map.len(),
-        aggregated.inst_tubi_map.len()
-    );
+    xkt_debug(|| {
+        format!(
+            "ShapeInstancesData 收集完成: inst_info={} geos={} tubi={}",
+            aggregated.inst_info_map.len(),
+            aggregated.inst_geos_map.len(),
+            aggregated.inst_tubi_map.len()
+        )
+    });
 
     if aggregated.inst_geos_map.is_empty() {
         if let Some(sample) = build_sample_shape_data_for_db(dbno) {
-            println!("使用内置示例数据构建 dbnum {} 的几何实例", dbno);
+            xkt_debug(|| format!("使用内置示例数据构建 dbnum {} 的几何实例", dbno));
             aggregated = sample;
         }
     }
@@ -520,14 +670,16 @@ pub async fn gen_all_geos_data(
                 Ok(sesno_changes) => {
                     // 如果该 sesno 有变更，使用这些变更作为增量更新
                     if sesno_changes.count() > 0 {
-                        println!(
-                            "发现 sesno {} 的变更: {} 个元素",
-                            sesno,
-                            sesno_changes.count()
-                        );
+                        xkt_debug(|| {
+                            format!(
+                                "发现 sesno {} 的变更: {} 个元素",
+                                sesno,
+                                sesno_changes.count()
+                            )
+                        });
                         final_incr_updates = Some(sesno_changes);
                     } else {
-                        println!("sesno {} 没有发现变更，跳过增量生成", sesno);
+                        xkt_debug(|| format!("sesno {} 没有发现变更，跳过增量生成", sesno));
                         return Ok(false);
                     }
                 }
@@ -550,7 +702,7 @@ pub async fn gen_all_geos_data(
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
                 save_instance_data(&shape_insts, false).await.unwrap();
-                println!("Insert manual shape insts: {}", shape_insts.inst_cnt());
+                xkt_debug(|| format!("Insert manual shape insts: {}", shape_insts.inst_cnt()));
             }
         });
         let target_root_refnos = gen_geos_data(
@@ -586,10 +738,12 @@ pub async fn gen_all_geos_data(
             dbnos
         };
 
-        dbg!(&dbnos);
+        if is_xtk_debug_enabled() {
+            xkt_debug(|| format!("准备生成数据库列表: {:?}", dbnos));
+        }
         let db_option_arc = Arc::new(db_option.clone());
         for dbno in dbnos.clone() {
-            println!("开始{}的模型生成", dbno);
+            xkt_debug(|| format!("开始{}的模型生成", dbno));
             let time = Instant::now();
             let (sender, receiver) = flume::unbounded();
             let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
@@ -598,8 +752,12 @@ pub async fn gen_all_geos_data(
                     let time = Instant::now();
                     // save_instance_data(&shape_insts, false).await.unwrap();
                     save_instance_data(&shape_insts, false).await.unwrap();
-                    println!("save_instance_data time: {}ms", time.elapsed().as_millis());
-                    println!("Insert shape insts: {}", shape_insts.inst_info_map.len());
+                    xkt_debug(|| {
+                        format!("save_instance_data time: {}ms", time.elapsed().as_millis())
+                    });
+                    xkt_debug(|| {
+                        format!("Insert shape insts: {}", shape_insts.inst_info_map.len())
+                    });
                 }
             });
             let db_refnos =
@@ -607,20 +765,20 @@ pub async fn gen_all_geos_data(
                     .await?;
             drop(sender);
             insert_task.await.unwrap();
-            println!("生成完insts时间: {}ms", time.elapsed().as_millis());
+            xkt_debug(|| format!("生成完insts时间: {}ms", time.elapsed().as_millis()));
             if db_option_arc.gen_mesh {
                 let time = Instant::now();
-                println!("开始执行模型生成和布尔运算");
+                xkt_debug(|| "开始执行模型生成和布尔运算".to_string());
                 //模型生成完之后，再进行布尔运算
                 db_refnos
                     .execute_gen_inst_meshes(Some(db_option_arc.clone()))
                     .await;
-                println!("生成insts三角模型时间: {}ms", time.elapsed().as_millis());
+                xkt_debug(|| format!("生成insts三角模型时间: {}ms", time.elapsed().as_millis()));
                 let time = Instant::now();
                 db_refnos
                     .execute_boolean_meshes(Some(db_option_arc.clone()))
                     .await;
-                println!("布尔运算时间: {}ms", time.elapsed().as_millis());
+                xkt_debug(|| format!("布尔运算时间: {}ms", time.elapsed().as_millis()));
             }
         }
     }
@@ -636,7 +794,7 @@ pub async fn gen_all_geos_data(
         }
     }
     // SQLite R*-tree index is used for spatial queries
-    println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
+    xkt_debug(|| format!("生成完所有模型时间: {}ms", time.elapsed().as_millis()));
 
     Ok(true)
 }
@@ -673,7 +831,7 @@ pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> any
             .await
             .expect("更新模型数据失败");
     }
-    println!("更新所有模型时间: {}ms", time.elapsed().as_millis());
+    xkt_debug(|| format!("更新所有模型时间: {}ms", time.elapsed().as_millis()));
     Ok(())
 }
 
@@ -714,7 +872,7 @@ pub async fn gen_geos_data_by_dbnum(
     }
     // let mut all_handles = FuturesUnordered::new();
 
-    println!("gen_geos_data_by_dbnum 处理db: {}", dbno);
+    xkt_debug(|| format!("gen_geos_data_by_dbnum 处理db: {}", dbno));
     let d_types = db_option_arc.debug_refno_types.clone();
     let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA");
     let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP");
@@ -735,7 +893,7 @@ pub async fn gen_geos_data_by_dbnum(
                 .unwrap_or_default();
         #[cfg(debug_assertions)]
         if !target_ploo_refnos.is_empty() {
-            println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
+            xkt_debug(|| format!("target_ploo_refnos: {:?}", target_ploo_refnos.len()));
         }
         if gen_model {
             for r in target_ploo_refnos.chunks(200) {
@@ -765,10 +923,12 @@ pub async fn gen_geos_data_by_dbnum(
     //2.1 管道或者支吊架的分类
     let target_bran_hanger_refnos =
         Arc::new(query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None, gen_history).await?);
-    println!(
-        "当前分段使用管道或者支吊架元件库数量: {}",
-        target_bran_hanger_refnos.len()
-    );
+    xkt_debug(|| {
+        format!(
+            "当前分段使用管道或者支吊架元件库数量: {}",
+            target_bran_hanger_refnos.len()
+        )
+    });
 
     //打印管道/支吊架的使用数量
     if !target_bran_hanger_refnos.is_empty() && gen_cata_flag && gen_model {
@@ -815,10 +975,12 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-            println!(
-                "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
-                start_time.elapsed().as_millis()
-            );
+            xkt_debug(|| {
+                format!(
+                    "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                    start_time.elapsed().as_millis()
+                )
+            });
             // });
             // all_handles.push(handle);
         }
@@ -841,7 +1003,7 @@ pub async fn gen_geos_data_by_dbnum(
             map
         };
 
-        println!("当前分段使用元件库数量: {}", cur_cate_refnos.len());
+        xkt_debug(|| format!("当前分段使用元件库数量: {}", cur_cate_refnos.len()));
         if gen_model && gen_cata_flag && !target_single_cata_map.is_empty() {
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
@@ -857,10 +1019,12 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-            println!(
-                "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
-                start_time.elapsed().as_millis()
-            );
+            xkt_debug(|| {
+                format!(
+                    "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                    start_time.elapsed().as_millis()
+                )
+            });
             // });
             // all_handles.push(handle);
         }
@@ -871,7 +1035,7 @@ pub async fn gen_geos_data_by_dbnum(
             .await
             .unwrap_or_default(),
     );
-    println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
+    xkt_debug(|| format!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len()));
     if gen_model && gen_loop_flag && !target_loop_owner_refnos.is_empty() {
         let sjus_map_clone = loop_sjus_map_arc.clone();
         let sender = sender.clone();
@@ -896,7 +1060,7 @@ pub async fn gen_geos_data_by_dbnum(
             .unwrap_or_default(),
     );
 
-    println!("当前分段使用基本体数量: {}", target_prim_refnos.len());
+    xkt_debug(|| format!("当前分段使用基本体数量: {}", target_prim_refnos.len()));
     //基本元件的生成
     if gen_model && gen_prim_flag && !target_prim_refnos.is_empty() {
         //基本体模型的生成
@@ -923,7 +1087,7 @@ pub async fn gen_geos_data_by_dbnum(
         prim_refnos: target_prim_refnos,
     };
 
-    println!("数据库号： {} 生成instances完毕。", dbno);
+    xkt_debug(|| format!("数据库号： {} 生成instances完毕。", dbno));
 
     Ok(db_refnos)
 }
@@ -1017,21 +1181,21 @@ pub async fn gen_geos_data(
         }
     }
     if dbno.is_some() {
-        println!("总共 {} 个SITE", target_root_refnos.len());
+        xkt_debug(|| format!("总共 {} 个SITE", target_root_refnos.len()));
     } else {
-        println!("总共 {} 个结点", target_root_refnos.len());
+        xkt_debug(|| format!("总共 {} 个结点", target_root_refnos.len()));
     }
     let origin_root_refnos = target_root_refnos.clone();
     // let process_handle = tokio::spawn(async move {
     // let mut handles = vec![]
     if is_incr_update {
-        println!("处理更新模型数量: {}", incr_count);
+        xkt_debug(|| format!("处理更新模型数量: {}", incr_count));
     } else if has_manual_refnos {
-        println!("处理生成模型数量: {}", manual_refnos.len());
+        xkt_debug(|| format!("处理生成模型数量: {}", manual_refnos.len()));
     } else if is_debug {
-        println!("调试模型数量: {:?}", debug_root_refnos.len());
+        xkt_debug(|| format!("调试模型数量: {:?}", debug_root_refnos.len()));
     } else if dbno.is_some() {
-        println!("处理db: {}", dbno.unwrap());
+        xkt_debug(|| format!("处理db: {}", dbno.unwrap()));
     }
     let d_types = db_option_arc.debug_refno_types.clone();
     let mut gen_cata_flag =
@@ -1064,7 +1228,7 @@ pub async fn gen_geos_data(
                 continue;
             };
             #[cfg(debug_assertions)]
-            if !target_ploo_refnos.is_empty() {
+            if !target_ploo_refnos.is_empty() && is_xtk_debug_enabled() {
                 println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
             }
             for r in target_ploo_refnos {
@@ -1162,10 +1326,12 @@ pub async fn gen_geos_data(
         };
         //打印管道/支吊架的使用数量
         if !target_bran_hanger_refnos.is_empty() && gen_cata_flag {
-            println!(
-                "当前分段使用管道或者支吊架元件库数量: {}",
-                target_bran_hanger_refnos.len()
-            );
+            xkt_debug(|| {
+                format!(
+                    "当前分段使用管道或者支吊架元件库数量: {}",
+                    target_bran_hanger_refnos.len()
+                )
+            });
             //查询出branch 和 branch 下的子节点
             let mut branch_refnos_map = DashMap::new();
             let mut bran_comp_eles = vec![];
@@ -1193,17 +1359,19 @@ pub async fn gen_geos_data(
                     )
                     .await
                     .unwrap();
-                    println!(
-                        "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
-                        start_time.elapsed().as_millis()
-                    );
+                    xkt_debug(|| {
+                        format!(
+                            "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                            start_time.elapsed().as_millis()
+                        )
+                    });
                 });
                 all_handles.push(handle);
             }
         }
 
         if gen_cata_flag && !target_single_cata_map.is_empty() {
-            println!("当前分段使用独立的元件库数量: {}", use_cata_refnos.len());
+            xkt_debug(|| format!("当前分段使用独立的元件库数量: {}", use_cata_refnos.len()));
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
@@ -1218,10 +1386,12 @@ pub async fn gen_geos_data(
                 )
                 .await
                 .unwrap();
-                println!(
-                    "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
-                    start_time.elapsed().as_millis()
-                );
+                xkt_debug(|| {
+                    format!(
+                        "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    )
+                });
             });
             all_handles.push(handle);
         }
@@ -1243,7 +1413,7 @@ pub async fn gen_geos_data(
             loop_owner_refnos.into_iter().collect()
         };
         if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
-            println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
+            xkt_debug(|| format!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len()));
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let sender = sender.clone();
             let db_option = db_option_arc.clone();
@@ -1347,7 +1517,7 @@ pub async fn generate_xtk_from_database(
     compress: bool,
     db_option: &DbOption,
 ) -> anyhow::Result<()> {
-    println!("开始从数据库生成 XKT 格式模型（支持层级结构）...");
+    println!("开始从数据库生成 XKT 格式模型...");
     let start_time = Instant::now();
 
     // 创建 XKT 文件
@@ -1368,26 +1538,96 @@ pub async fn generate_xtk_from_database(
     let mut mesh_count = 0;
     let mut entity_count = 0;
 
-    println!("正在处理 {} 个参考号...", refnos.len());
+    // 从全局缓存获取所有有几何数据的元素
+    let cache_holder = get_global_shape_cache().await;
+    if let Some(cache) = cache_holder.as_deref() {
+        let geometry_refnos: Vec<RefnoEnum> = cache.inst_info_map.keys().cloned().collect();
+        println!("从缓存中找到 {} 个有几何数据的元素", geometry_refnos.len());
 
-    // 处理每个根节点（通常是 SITE），递归展开整个层级树
-    for &refno in &refnos {
-        println!("开始处理根节点: {}", refno);
-
-        match process_refno_to_xtk(&mut xkt_file, refno, &color_scheme, &aios_mgr).await {
-            Ok((geo_cnt, mesh_cnt, entity_cnt)) => {
-                geometry_count += geo_cnt;
-                mesh_count += mesh_cnt;
-                entity_count += entity_cnt;
-                processed_count += 1;
-                println!(
-                    "完成根节点 {}: {} 个几何体, {} 个网格, {} 个实体",
-                    refno, geo_cnt, mesh_cnt, entity_cnt
-                );
+        // 调试：打印前10个有几何数据的元素
+        println!("调试：前10个有几何数据的元素:");
+        for refno in geometry_refnos.iter().take(10) {
+            if let Some(type_name) = cached_element_type_name(cache, *refno) {
+                println!("  - {} ({})", refno, type_name);
+            } else {
+                println!("  - {} (类型未知)", refno);
             }
-            Err(e) => {
-                eprintln!("处理根节点 {} 时出错: {}", refno, e);
+        }
+
+        // 如果指定了refnos，需要找到它们下面的所有有几何数据的子节点
+        let mut target_refnos = HashSet::new();
+        if !refnos.is_empty() {
+            println!("调试：查找指定refnos下的所有几何节点...");
+
+            // 先查询指定refnos的所有子节点
+            for &refno in &refnos {
+                // 查询所有子节点
+                if let Ok(all_children) = query_multi_children_refnos(&[refno]).await {
+                    println!("  refno {} 有 {} 个后代节点", refno, all_children.len());
+
+                    // 检查这些子节点哪些在几何缓存中
+                    for child in all_children {
+                        if geometry_refnos.contains(&child) {
+                            target_refnos.insert(child);
+                        }
+                    }
+                }
+
+                // 自己也可能有几何数据
+                if geometry_refnos.contains(&refno) {
+                    target_refnos.insert(refno);
+                }
+            }
+
+            println!("找到 {} 个相关的几何节点", target_refnos.len());
+        } else {
+            // 没有指定的话，处理所有有几何数据的节点
+            target_refnos = geometry_refnos.iter().cloned().collect();
+        }
+
+        // 批量处理所有有几何数据的元素
+        for &refno in &target_refnos {
+            let should_process = true; // 现在处理所有找到的几何节点
+
+            if !should_process {
                 continue;
+            }
+
+            match process_element_to_xtk(&mut xkt_file, refno, &color_scheme, &aios_mgr, cache)
+                .await
+            {
+                Ok((geo_cnt, mesh_cnt, entity_cnt)) => {
+                    geometry_count += geo_cnt;
+                    mesh_count += mesh_cnt;
+                    entity_count += entity_cnt;
+                    processed_count += 1;
+                    if processed_count % 100 == 0 {
+                        println!("已处理 {} 个元素...", processed_count);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("处理元素 {} 时出错: {}", refno, e);
+                    continue;
+                }
+            }
+        }
+    } else {
+        println!("警告：未找到全局形状缓存，尝试直接处理指定的参考号...");
+        // 如果没有缓存，回退到直接处理指定的refnos
+        for &refno in &refnos {
+            match process_refno_to_xtk_fallback(&mut xkt_file, refno, &color_scheme, &aios_mgr)
+                .await
+            {
+                Ok((geo_cnt, mesh_cnt, entity_cnt)) => {
+                    geometry_count += geo_cnt;
+                    mesh_count += mesh_cnt;
+                    entity_count += entity_cnt;
+                    processed_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("处理参考号 {} 时出错: {}", refno, e);
+                    continue;
+                }
             }
         }
     }
@@ -1415,8 +1655,151 @@ pub async fn generate_xtk_from_database(
     Ok(())
 }
 
-/// 处理单个参考号并转换为 XKT 格式（从 site 开始递归展开层级树）
-async fn process_refno_to_xtk(
+/// 处理单个元素并转换为 XKT 格式（直接处理有几何数据的元素）
+async fn process_element_to_xtk(
+    xkt_file: &mut XKTFile,
+    refno: RefnoEnum,
+    color_scheme: &ColorScheme,
+    aios_mgr: &AiosDBManager,
+    cache: &ShapeInstancesData,
+) -> anyhow::Result<(usize, usize, usize)> {
+    let mut geometry_count = 0;
+    let mut mesh_count = 0;
+    let mut entity_count = 0;
+
+    // 从缓存获取元素信息
+    let element_type =
+        cached_element_type_name(cache, refno).unwrap_or_else(|| "UNKNOWN".to_string());
+
+    // 获取几何数据
+    let shape_data = build_shape_subset(cache, refno);
+    if shape_data.is_none() {
+        return Ok((0, 0, 0));
+    }
+    let shape_data = shape_data.unwrap();
+
+    // 创建实体
+    let entity_id = format!("entity_{}", refno);
+    let entity_name = format!("元素-{}", refno);
+    let mut entity = XKTEntity::new(entity_id.clone(), entity_name, element_type.clone());
+
+    // 获取世界变换
+    let world_transform = if let Some(info) = cache.inst_info_map.get(&refno) {
+        info.world_transform
+    } else {
+        aios_mgr.get_world_transform_or_default(refno.into()).await
+    };
+
+    // 处理几何数据
+    for (geo_id, geo_data) in &shape_data.inst_geos_map {
+        // 创建或获取几何体
+        let base_geometry_id = if let Some(first_inst) = geo_data.insts.first() {
+            if first_inst.geo_hash != 0 {
+                format!("geo_hash_{}", first_inst.geo_hash)
+            } else {
+                format!("geo_{}", geo_data.refno)
+            }
+        } else {
+            format!("geo_{}", geo_data.refno)
+        };
+
+        let geometry_id = base_geometry_id.clone();
+
+        if !xkt_file.model.geometries.contains_key(&geometry_id) {
+            let geometry_result = if let Some(first_inst) = geo_data.insts.first() {
+                println!(
+                    "调试: 尝试加载 mesh，refno: {}, geo_hash: {}",
+                    refno, first_inst.geo_hash
+                );
+                if let Some(plant_mesh) = load_plant_mesh_by_hash(first_inst.geo_hash) {
+                    println!("  成功加载 mesh 文件: {}.mesh", first_inst.geo_hash);
+                    match create_geometry_from_plant_mesh(&geometry_id, &plant_mesh) {
+                        Ok(geometry) => {
+                            println!("  成功根据 PlantMesh 创建几何体");
+                            Ok(geometry)
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  根据 PlantMesh 创建几何体失败 (refno: {}, geo_hash: {}): {}",
+                                refno, first_inst.geo_hash, e
+                            );
+                            create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
+                        }
+                    }
+                } else {
+                    println!(
+                        "  未找到 mesh 文件: assets/meshes/{}.mesh，使用简单几何体",
+                        first_inst.geo_hash
+                    );
+                    create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
+                }
+            } else {
+                Err(anyhow::anyhow!("几何数据为空"))
+            };
+
+            match geometry_result {
+                Ok(geometry) => {
+                    xkt_file.model.create_geometry(geometry)?;
+                    geometry_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("创建几何体失败 (refno: {}): {}", refno, e);
+                    continue;
+                }
+            }
+        }
+
+        // 创建材质
+        let material_id = format!("material_{}", geo_data.type_name);
+        if !xkt_file.model.materials.contains_key(&material_id) {
+            let color = color_scheme.get_color_for_type(&geo_data.type_name);
+            let material = XKTMaterial::create_color_material(
+                material_id.clone(),
+                format!("{} 材质", geo_data.type_name),
+                color,
+            );
+            xkt_file.model.create_material(material)?;
+        }
+
+        // 为每个几何实例创建网格
+        for (i, inst) in geo_data.insts.iter().enumerate() {
+            let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
+            let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
+            mesh.set_material(material_id.clone());
+
+            // 使用实例的变换（相对于元素的世界变换）
+            let combined_transform = world_transform * inst.transform;
+            mesh.set_position(combined_transform.translation);
+            mesh.set_rotation(
+                combined_transform
+                    .rotation
+                    .to_euler(glam::EulerRot::XYZ)
+                    .into(),
+            );
+            mesh.set_scale(combined_transform.scale);
+            mesh.set_visible(inst.visible);
+
+            xkt_file.model.create_mesh(mesh)?;
+            mesh_count += 1;
+
+            // 将网格添加到实体
+            entity.add_mesh(mesh_id);
+        }
+    }
+
+    // 设置实体属性
+    entity.set_property("refno".to_string(), refno.to_string());
+    entity.set_property("type".to_string(), element_type.clone());
+
+    // 创建实体
+    xkt_file.model.create_entity(entity)?;
+    entity_count += 1;
+
+    Ok((geometry_count, mesh_count, entity_count))
+}
+
+/// 处理单个参考号并转换为 XKT 格式（备用方法，无缓存时使用）
+async fn process_refno_to_xtk_fallback(
     xkt_file: &mut XKTFile,
     refno: RefnoEnum,
     color_scheme: &ColorScheme,
@@ -1426,42 +1809,145 @@ async fn process_refno_to_xtk(
     let mut mesh_count = 0;
     let mut entity_count = 0;
 
-    // 存储已创建的实体，避免重复创建
-    let mut created_entities = std::collections::HashSet::new();
-    // 存储父子关系，用于后续建立层级
-    let mut parent_child_relations = Vec::new();
+    // 获取元素信息
+    let element_info = match aios_mgr.get_element_info(refno).await? {
+        Some(info) => info,
+        None => return Ok((0, 0, 0)),
+    };
 
-    // 递归处理节点及其所有子节点
-    let (geo_cnt, mesh_cnt, entity_cnt) = process_node_recursive(
-        xkt_file,
-        refno,
-        None, // 根节点没有父节点
-        color_scheme,
-        aios_mgr,
-        &mut created_entities,
-        &mut parent_child_relations,
-    )
-    .await?;
+    // 获取几何数据
+    let shape_instances = aios_mgr.get_shape_instances_data(refno).await?;
+    if shape_instances.is_none() {
+        return Ok((0, 0, 0));
+    }
+    let shape_data = shape_instances.unwrap();
 
-    geometry_count += geo_cnt;
-    mesh_count += mesh_cnt;
-    entity_count += entity_cnt;
+    // 创建实体
+    let entity_id = format!("entity_{}", refno);
+    let entity_name = element_info
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("元素-{}", refno));
+    let mut entity = XKTEntity::new(
+        entity_id.clone(),
+        entity_name,
+        element_info.type_name.clone(),
+    );
 
-    // 建立父子关系
-    for (parent_id, child_id) in parent_child_relations {
-        // 设置子实体的父节点
-        if let Some(child_entity) = xkt_file.model.entities.get_mut(&child_id) {
-            child_entity.set_parent(parent_id.clone());
+    // 获取世界变换
+    let world_transform = aios_mgr.get_world_transform_or_default(refno.into()).await;
+
+    // 处理几何数据（与process_element_to_xtk类似的逻辑）
+    for (geo_id, geo_data) in &shape_data.inst_geos_map {
+        let base_geometry_id = if let Some(first_inst) = geo_data.insts.first() {
+            if first_inst.geo_hash != 0 {
+                format!("geo_hash_{}", first_inst.geo_hash)
+            } else {
+                format!("geo_{}", geo_data.refno)
+            }
+        } else {
+            format!("geo_{}", geo_data.refno)
+        };
+
+        let geometry_id = base_geometry_id.clone();
+
+        if !xkt_file.model.geometries.contains_key(&geometry_id) {
+            let geometry_result = if let Some(first_inst) = geo_data.insts.first() {
+                println!(
+                    "调试: 尝试加载 mesh，refno: {}, geo_hash: {}",
+                    refno, first_inst.geo_hash
+                );
+                if let Some(plant_mesh) = load_plant_mesh_by_hash(first_inst.geo_hash) {
+                    println!("  成功加载 mesh 文件: {}.mesh", first_inst.geo_hash);
+                    match create_geometry_from_plant_mesh(&geometry_id, &plant_mesh) {
+                        Ok(geometry) => {
+                            println!("  成功根据 PlantMesh 创建几何体");
+                            Ok(geometry)
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  根据 PlantMesh 创建几何体失败 (refno: {}, geo_hash: {}): {}",
+                                refno, first_inst.geo_hash, e
+                            );
+                            create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
+                        }
+                    }
+                } else {
+                    println!(
+                        "  未找到 mesh 文件: assets/meshes/{}.mesh，使用简单几何体",
+                        first_inst.geo_hash
+                    );
+                    create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
+                }
+            } else {
+                Err(anyhow::anyhow!("几何数据为空"))
+            };
+
+            match geometry_result {
+                Ok(geometry) => {
+                    xkt_file.model.create_geometry(geometry)?;
+                    geometry_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("创建几何体失败 (refno: {}): {}", refno, e);
+                    continue;
+                }
+            }
         }
-        // 设置父实体的子节点
-        if let Some(parent_entity) = xkt_file.model.entities.get_mut(&parent_id) {
-            parent_entity.add_child(child_id.clone());
+
+        // 创建材质
+        let material_id = format!("material_{}", geo_data.type_name);
+        if !xkt_file.model.materials.contains_key(&material_id) {
+            let color = color_scheme.get_color_for_type(&geo_data.type_name);
+            let material = XKTMaterial::create_color_material(
+                material_id.clone(),
+                format!("{} 材质", geo_data.type_name),
+                color,
+            );
+            xkt_file.model.create_material(material)?;
+        }
+
+        // 为每个几何实例创建网格
+        for (i, inst) in geo_data.insts.iter().enumerate() {
+            let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
+            let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
+            mesh.set_material(material_id.clone());
+
+            let combined_transform = world_transform * inst.transform;
+            mesh.set_position(combined_transform.translation);
+            mesh.set_rotation(
+                combined_transform
+                    .rotation
+                    .to_euler(glam::EulerRot::XYZ)
+                    .into(),
+            );
+            mesh.set_scale(combined_transform.scale);
+            mesh.set_visible(inst.visible);
+
+            xkt_file.model.create_mesh(mesh)?;
+            mesh_count += 1;
+            entity.add_mesh(mesh_id);
         }
     }
+
+    // 设置实体属性
+    entity.set_property("refno".to_string(), refno.to_string());
+    entity.set_property("type".to_string(), element_info.type_name.clone());
+    if let Some(name) = &element_info.name {
+        entity.set_property("name".to_string(), name.clone());
+    }
+
+    // 创建实体
+    xkt_file.model.create_entity(entity)?;
+    entity_count += 1;
 
     Ok((geometry_count, mesh_count, entity_count))
 }
 
+// 注释掉旧的递归处理函数，现在我们直接处理有几何数据的元素
+// 保留这些函数以备将来需要层级结构时使用
+
+/*
 /// 递归处理节点及其所有子节点
 fn process_node_recursive<'a>(
     xkt_file: &'a mut XKTFile,
@@ -1474,205 +1960,8 @@ fn process_node_recursive<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<(usize, usize, usize)>> + 'a>>
 {
     Box::pin(async move {
-        let mut geometry_count = 0;
-        let mut mesh_count = 0;
-        let mut entity_count = 0;
-
-        // 如果已经创建过这个实体，跳过
-        if created_entities.contains(&refno) {
-            return Ok((0, 0, 0));
-        }
-
-        // 查询元素信息
-        let element_info = match aios_mgr.get_element_info(refno).await? {
-            Some(info) => info,
-            None => {
-                // 如果没有找到元素信息，跳过
-                return Ok((0, 0, 0));
-            }
-        };
-
-        println!("处理节点: {} (类型: {})", refno, element_info.type_name);
-
-        // 获取当前节点的世界变换
-        let cache_holder = get_global_shape_cache().await;
-        let cache = cache_holder.as_deref();
-        let world_transform = if let Some(cache) = cache {
-            if let Some(info) = cache.inst_info_map.get(&refno) {
-                info.world_transform
-            } else {
-                aios_mgr.get_world_transform_or_default(refno.into()).await
-            }
-        } else {
-            aios_mgr.get_world_transform_or_default(refno.into()).await
-        };
-
-        // 计算局部变换（相对于父节点）
-        let local_transform = if let Some(parent_refno) = parent_refno {
-            let parent_world_transform = if let Some(cache) = cache {
-                if let Some(info) = cache.inst_info_map.get(&parent_refno) {
-                    info.world_transform
-                } else {
-                    aios_mgr
-                        .get_world_transform_or_default(parent_refno.into())
-                        .await
-                }
-            } else {
-                aios_mgr
-                    .get_world_transform_or_default(parent_refno.into())
-                    .await
-            };
-            calculate_local_transform(&world_transform, &parent_world_transform)
-        } else {
-            world_transform
-        };
-
-        // 获取几何数据
-        let shape_instances = aios_mgr.get_shape_instances_data(refno).await?;
-
-        // 创建当前节点的实体
-        let entity_id = format!("entity_{}", refno);
-        let entity_name = element_info
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("元素-{}", refno));
-        let mut entity = XKTEntity::new(
-            entity_id.clone(),
-            entity_name,
-            element_info.type_name.clone(),
-        );
-
-        // 如果有几何数据，处理几何实例
-        if let Some(shape_data) = shape_instances {
-            for (geo_id, geo_data) in &shape_data.inst_geos_map {
-                // 为每个几何实例创建几何体
-                let base_geometry_id = if let Some(first_inst) = geo_data.insts.first() {
-                    if first_inst.geo_hash != 0 {
-                        format!("geo_hash_{}", first_inst.geo_hash)
-                    } else {
-                        format!("geo_{}", geo_data.refno)
-                    }
-                } else {
-                    format!("geo_{}", geo_data.refno)
-                };
-
-                let geometry_id = base_geometry_id.clone();
-
-                if !xkt_file.model.geometries.contains_key(&geometry_id) {
-                    let geometry_result = if let Some(first_inst) = geo_data.insts.first() {
-                        if let Some(plant_mesh) = load_plant_mesh_by_hash(first_inst.geo_hash) {
-                            match create_geometry_from_plant_mesh(&geometry_id, &plant_mesh) {
-                                Ok(geometry) => Ok(geometry),
-                                Err(e) => {
-                                    eprintln!(
-                                        "根据 PlantMesh 创建几何体失败 (refno: {}, geo_hash: {}): {}",
-                                        refno, first_inst.geo_hash, e
-                                    );
-                                    create_geometry_from_geo_param(&geometry_id, &geo_data.insts)
-                                        .await
-                                }
-                            }
-                        } else {
-                            create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await
-                        }
-                    } else {
-                        Err(anyhow::anyhow!("几何数据为空"))
-                    };
-
-                    match geometry_result {
-                        Ok(geometry) => {
-                            xkt_file.model.create_geometry(geometry)?;
-                            geometry_count += 1;
-                        }
-                        Err(e) => {
-                            eprintln!("创建几何体失败 (refno: {}): {}", refno, e);
-                            continue;
-                        }
-                    }
-                }
-
-                // 创建材质
-                let material_id = format!("material_{}", geo_data.type_name);
-                if !xkt_file.model.materials.contains_key(&material_id) {
-                    let color = color_scheme.get_color_for_type(&geo_data.type_name);
-                    let material = XKTMaterial::create_color_material(
-                        material_id.clone(),
-                        format!("{} 材质", geo_data.type_name),
-                        color,
-                    );
-                    xkt_file.model.create_material(material)?;
-                }
-
-                // 为每个几何实例创建网格，使用局部变换
-                for (i, inst) in geo_data.insts.iter().enumerate() {
-                    let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
-                    let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
-                    mesh.set_material(material_id.clone());
-
-                    // 使用局部变换而不是世界变换
-                    let combined_transform = local_transform * inst.transform;
-                    mesh.set_position(combined_transform.translation);
-                    mesh.set_rotation(
-                        combined_transform
-                            .rotation
-                            .to_euler(glam::EulerRot::XYZ)
-                            .into(),
-                    );
-                    mesh.set_scale(combined_transform.scale);
-
-                    // 设置可见性
-                    mesh.set_visible(inst.visible);
-
-                    xkt_file.model.create_mesh(mesh)?;
-                    mesh_count += 1;
-
-                    // 将网格添加到实体
-                    entity.add_mesh(mesh_id);
-                }
-            }
-        }
-
-        // 设置实体属性
-        entity.set_property("refno".to_string(), refno.to_string());
-        entity.set_property("type".to_string(), element_info.type_name.clone());
-        if let Some(name) = &element_info.name {
-            entity.set_property("name".to_string(), name.clone());
-        }
-
-        // 创建实体
-        xkt_file.model.create_entity(entity)?;
-        created_entities.insert(refno);
-        entity_count += 1;
-
-        // 建立与父节点的关系
-        if let Some(parent_refno) = parent_refno {
-            let parent_id = format!("entity_{}", parent_refno);
-            let child_id = format!("entity_{}", refno);
-            parent_child_relations.push((parent_id, child_id));
-        }
-
-        // 查询并递归处理所有子节点
-        let children = get_direct_children(refno, aios_mgr).await?;
-        println!("节点 {} 有 {} 个子节点", refno, children.len());
-
-        for child_refno in children {
-            let (child_geo_cnt, child_mesh_cnt, child_entity_cnt) = process_node_recursive(
-                xkt_file,
-                child_refno,
-                Some(refno), // 当前节点作为父节点
-                color_scheme,
-                aios_mgr,
-                created_entities,
-                parent_child_relations,
-            )
-            .await?;
-
-            geometry_count += child_geo_cnt;
-            mesh_count += child_mesh_cnt;
-            entity_count += child_entity_cnt;
-        }
-
-        Ok((geometry_count, mesh_count, entity_count))
+        // ... 递归处理逻辑 ...
+        Ok((0, 0, 0))
     })
 }
 
@@ -1714,6 +2003,7 @@ fn calculate_local_transform(
     // 从矩阵中提取变换组件
     bevy_transform::components::Transform::from_matrix(local_matrix)
 }
+*/
 
 /// 根据数据库号生成 XKT 文件
 ///
@@ -1791,7 +2081,157 @@ pub async fn generate_xtk_by_dbno_refnos(
         refnos.len()
     );
 
-    prepare_global_shape_cache_for_db(dbno, db_option).await?;
+    // 先确保生成几何数据和mesh
+    println!("调试：先生成几何实例和mesh数据...");
+    let mut option_with_mesh = db_option.clone();
+    option_with_mesh.gen_model = true;
+    option_with_mesh.gen_mesh = true;
+
+    // 为指定的refnos生成几何数据
+    clear_global_shape_cache().await;
+    let option_arc = Arc::new(option_with_mesh);
+    let (sender, receiver) = flume::unbounded();
+
+    let collector = tokio::spawn(async move {
+        let mut aggregated = ShapeInstancesData::default();
+        while let Ok(data) = receiver.recv_async().await {
+            aggregated.merge(data);
+        }
+        aggregated
+    });
+
+    // 直接为指定的refnos生成几何数据
+    let _ = gen_geos_data(
+        Some(dbno),
+        refnos.clone(),
+        &option_arc,
+        None, // incr_updates
+        sender.clone(),
+        None, // target_sesno
+    )
+    .await?;
+
+    drop(sender);
+    let aggregated = collector.await?;
+
+    // 在设置缓存之后，检查并生成缺失的 mesh 文件
+    if aggregated.inst_info_map.len() > 0 {
+        // 检查哪些节点需要生成 mesh
+        let nodes_need_mesh = check_nodes_need_mesh_generation(&aggregated).await;
+
+        if !nodes_need_mesh.is_empty() {
+            println!("检测到 {} 个节点需要生成 mesh 文件", nodes_need_mesh.len());
+
+            // 强制重新生成mesh，忽略数据库中的meshed标志
+            println!("开启强制重新生成mesh模式...");
+            let mut force_option = option_arc.as_ref().clone();
+            force_option.replace_mesh = Some(true); // 强制替换已存在的mesh
+
+            let force_option_arc = Arc::new(force_option);
+
+            // 只为缺失 mesh 的节点生成 mesh
+            if let Err(e) = process_meshes_update_db_deep(&force_option_arc, &nodes_need_mesh).await
+            {
+                eprintln!("警告: 生成 mesh 文件失败: {}", e);
+            } else {
+                println!("成功生成 {} 个元素的 mesh 文件", nodes_need_mesh.len());
+
+                // 重新检查是否所有 mesh 都已生成
+                let still_missing = check_nodes_need_mesh_generation(&aggregated).await;
+                if !still_missing.is_empty() {
+                    eprintln!(
+                        "警告: 仍有 {} 个节点的 mesh 文件未生成",
+                        still_missing.len()
+                    );
+                    for refno in &still_missing {
+                        eprintln!("  - {}", refno);
+                    }
+                } else {
+                    println!("✅ 所有节点的 mesh 文件生成成功");
+                }
+            }
+        } else {
+            println!("所有节点的 mesh 文件都已存在，无需重新生成");
+        }
+    }
+
+    println!(
+        "ShapeInstancesData 收集完成: inst_info={} geos={} tubi={}",
+        aggregated.inst_info_map.len(),
+        aggregated.inst_geos_map.len(),
+        aggregated.inst_tubi_map.len()
+    );
+
+    set_cached_refnos(aggregated.inst_info_map.keys().cloned().collect()).await;
+    set_global_shape_cache(aggregated).await;
+
+    // 调试：查询refno下的所有子节点（在数据库初始化之后）
+    println!("调试：查询 refno {:?} 下的所有子节点...", refnos);
+    for &refno in &refnos {
+        // 查询所有子节点
+        let sql = format!(
+            "SELECT refno, type FROM pe WHERE owner = {}",
+            refno.to_string()
+        );
+        if let Ok(mut response) = SUL_DB.query(sql).await {
+            let children: Vec<(RefnoEnum, String)> = response.take(0).unwrap_or_default();
+            println!("  refno {} 有 {} 个直接子节点:", refno, children.len());
+            for (child_refno, child_type) in children.iter().take(10) {
+                println!("    - {} ({})", child_refno, child_type);
+            }
+            if children.len() > 10 {
+                println!("    ... 还有 {} 个子节点", children.len() - 10);
+            }
+        }
+
+        // 递归查询所有后代节点
+        if let Ok(all_children) = query_multi_children_refnos(&[refno]).await {
+            println!("  refno {} 总共有 {} 个后代节点", refno, all_children.len());
+
+            // 查询这些节点的类型，看看有哪些可能有几何数据
+            if !all_children.is_empty() {
+                let types_sql = format!(
+                    "SELECT type, COUNT(*) as count FROM [{}] GROUP BY type",
+                    all_children
+                        .iter()
+                        .take(1000) // 限制查询数量
+                        .map(|r| format!("pe:{}", r))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                if let Ok(mut response) = SUL_DB.query(types_sql).await {
+                    let type_counts: Vec<(String, i32)> = response.take(0).unwrap_or_default();
+                    println!("  节点类型分布:");
+                    for (node_type, count) in type_counts {
+                        println!("    - {}: {} 个", node_type, count);
+                    }
+                }
+            }
+
+            // 检查生成的几何缓存中有哪些节点
+            if let Some(cache) = get_global_shape_cache().await {
+                let cache_refnos: HashSet<RefnoEnum> =
+                    cache.inst_info_map.keys().cloned().collect();
+                let mut found_count = 0;
+                for child in &all_children {
+                    if cache_refnos.contains(child) {
+                        found_count += 1;
+                        if found_count <= 10 {
+                            println!("    找到几何数据: {}", child);
+                        }
+                    }
+                }
+                if found_count > 10 {
+                    println!("    ... 还有 {} 个节点有几何数据", found_count - 10);
+                }
+                println!(
+                    "  总计: {} / {} 个子节点有几何数据",
+                    found_count,
+                    all_children.len()
+                );
+            }
+        }
+    }
 
     let unique_refnos: Vec<RefnoEnum> = refnos
         .into_iter()

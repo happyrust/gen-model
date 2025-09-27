@@ -274,11 +274,9 @@ pub async fn process_meshes_update_db_deep(
 }
 
 /// 几何参数查询结构体
-///
-/// # 字段
-///
-/// * `id` - 几何体ID
-/// * `param` - PDMS几何体参数
+/// - id: inst_geo 的原始记录 ID（来自 SurrealDB：record::id(id) 字符串化）
+/// - param: PDMS 几何参数（用于生成 OCC 形体与后续网格化）
+/// 用于分批查询 inst_geo 的几何参数，配合 gen_inst_meshes 的并发处理
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryGeoParam {
     pub id: String,
@@ -296,14 +294,28 @@ struct QueryGeoParam {
 /// # 返回值
 ///
 /// 返回 `anyhow::Result<()>` 表示生成是否成功
+///
+/// # 侧效与说明
+/// - 并发分批查询 inst_geo 参数并生成网格
+/// - 将网格序列化保存到磁盘（dir/*.mesh）
+/// - 回写 SurrealDB: inst_geo.meshed/aabb/pts 字段，错误则标记 bad=true
+/// - 更新内存缓存 EXIST_MESH_GEO_HASHES；最后批量保存 aabb/pts 到 SurrealDB
 pub async fn gen_inst_meshes(
     refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
+    // 每批并发处理的 inst_geo 数量上限，控制单批任务规模
     const PAGE_NUM: usize = 100;
+    // 计数/调试用途（目前未外显）
     let mut i = 0;
+    // 根据 refnos 生成 inst_relate 的键集合（SurrealDB 查询范围）
     let inst_keys = get_inst_relate_keys(refnos);
+
+    // 根据 replace_exist 决定是否跳过已生成或异常的几何：
+    // - replace_exist=true：不过滤 aabb/meshed，允许覆盖，但仍过滤 bad
+    // - replace_exist=false：仅选择 aabb 为空、未网格化且非 bad 的几何
+    // 同时保留 ($parent<-neg_relate)[0] != none 的标记，用于后续容差调整
     let sql = if replace_exist {
         format!(
             r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where  !out.bad)
@@ -315,13 +327,12 @@ pub async fn gen_inst_meshes(
             from {inst_keys})"#
         )
     };
-    //out.aabb.d == none and
-    // println!("sql is {}", &sql);
+    // 执行查询，返回 (inst_geo Thing, 是否存在负实体) 的二元组列表
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    //todo 排除已经生成了的模型
+    // 进一步过滤：当不覆盖时，跳过内存缓存中已存在网格的几何（减少重复计算）
     // let mut update_geos_by_meshes = HashSet::default();
-    inst_geo_ids.retain(|(x, y)| {
+    inst_geo_ids.retain(|(x, _y)| {
         if let Some(t) = x {
             if replace_exist {
                 true
@@ -337,38 +348,47 @@ pub async fn gen_inst_meshes(
             false
         }
     });
+    // 无可处理对象则直接返回
     if inst_geo_ids.is_empty() {
         return Ok(());
     }
+    // 记录每个几何是否具备负实体关系（影响容差选择与布尔精度）
     let thing_has_neg_map = inst_geo_ids
         .iter()
         .map(|(x, y)| (x.as_ref().unwrap().id.to_raw(), *y))
         .collect::<HashMap<_, _>>();
     let thing_has_neg_map_arc = Arc::new(thing_has_neg_map);
-    // dbg!(&thing_map);
+
     let mut tasks = vec![];
-    //: DashMap<u64, String>
+    // 线程安全缓存：aabb_map 用于累积 aabb；pts_json_map 用于存储端点 JSON（去重）
     let aabb_map = Arc::new(DashMap::new());
     let pts_json_map = Arc::new(DashMap::new());
-    for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
+
+    // 分批并发处理 inst_geo
+    for (_idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
+        // 将本批次 inst_geo id 合并为 SurrealDB in 子查询集合
         let ids = chunk
             .into_iter()
             .map(|(x, _)| x.as_ref().unwrap().to_string())
             .join(",");
+        // 克隆所需上下文到异步任务中
         let thing_neg_map = thing_has_neg_map_arc.clone();
         let dir = dir.clone();
         let aabb_map = aabb_map.clone();
         let pts_json_map = pts_json_map.clone();
+        // 每批一个异步任务：查询参数 -> 构造形体 -> 网格化 -> 回写
         let task = tokio::spawn(async move {
+            // shapes_map: 缓存 (几何hash -> (OCC形体, 容差))，统一批量网格化
             let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
+            // 查询本批所有 inst_geo 的参数
             let sql = format!(
                 "select <string> record::id(id) as id, param from [{}] where param != NONE",
                 ids
             );
-            // println!("sql is {}", &sql);
             match SUL_DB.query(&sql).await {
                 Ok(mut response) => {
                     let r = response.take::<Vec<QueryGeoParam>>(0);
+                    // 反序列化失败：记录错误并跳过本批
                     if let Err(e) = &r {
                         init_deserialize_error(
                             "Vec<QueryGeoParam>",
@@ -383,18 +403,18 @@ pub async fn gen_inst_meshes(
                         return;
                     }
                     i += 1;
-                    // dbg!(&result);
+                    // 遍历每个几何参数并构造 OCC 形体
                     for g in result {
-                        //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("gen mesh param: {}", &g.id);
-                        //检查是否是PrimPolyhedron
+                        // PrimPolyhedron 采用固定较小容差（面片模型）
                         let is_polyhedron = match &g.param {
                             PdmsGeoParam::PrimPolyhedron(_) => true,
                             _ => false,
                         };
                         match g.param.gen_occ_shape() {
                             Ok(shape) => {
+                                // 基于边的采样近似计算 aabb，用于估算容差尺度
                                 let mut aabb = Aabb::new_invalid();
                                 for edge in shape.edges() {
                                     for point in edge.approximation_segments_custom(2.0, 2.0) {
@@ -405,16 +425,14 @@ pub async fn gen_inst_meshes(
                                         ));
                                     }
                                 }
-                                //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
-                                //如果是作为负实体可以稍微降一些？
+                                // 负实体或参与布尔的母体需要更严格容差（避免薄片/空洞）
                                 let mut coeff = 0.005;
-                                // dbg!(&g.id);
                                 if thing_neg_map.get(&g.id).copied().unwrap_or(false) {
                                     match g.param {
+                                        // 拉伸/旋转体对布尔结果较敏感，进一步减小容差
                                         PdmsGeoParam::PrimExtrusion(_)
                                         | PdmsGeoParam::PrimRevolution(_) => {
                                             coeff /= 10.0;
-                                            // dbg!(&coeff);
                                         }
                                         _ => {
                                             coeff /= 5.0;
@@ -422,15 +440,18 @@ pub async fn gen_inst_meshes(
                                     };
                                 }
 
+                                // 计算容差：
+                                // - 多面体固定 0.01
+                                // - 其他类型按 aabb 尺度 * 系数，上限 50.0（防止异常放大）
                                 let mut tol = if is_polyhedron {
                                     0.01
                                 } else {
                                     (aabb.half_extents().magnitude() as f64 * coeff).min(50.0)
                                 };
-                                // dbg!(tol);
                                 shapes_map.insert(g.id, (shape, tol));
                             }
                             Err(e) => {
+                                // 仅在启用日志特性时打印影响范围，便于排障
                                 #[cfg(feature = "log_error")]
                                 {
                                     let failed_refnos =
@@ -440,33 +461,32 @@ pub async fn gen_inst_meshes(
                             }
                         }
                     }
+                    // 批量回写语句缓冲
                     let mut update_sql = "".to_string();
 
+                    // 执行网格化与落盘，并构建回写 SQL
                     for (id, (s, tol)) in &shapes_map {
                         let mut m_tol = *tol;
-                        // dbg!(m_tol);
                         let mut success = false;
-                        // #[cfg(feature = "debug_model")]
-                        // s.write_step(format!("{}.step", id)).unwrap();
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("gen mesh hash: {}", id);
                         match PlantMesh::gen_occ_mesh(s, m_tol) {
                             Ok(mesh) => {
                                 if mesh.aabb.is_none() {
+                                    // 无有效 aabb 直接跳过
                                     continue;
                                 }
                                 #[cfg(feature = "debug_model")]
                                 mesh.export_obj(false, &format!("{}.obj", id));
-                                // dbg!((id, m_tol, mesh.vertices.len()));
-                                //保存到文件到dir下
+                                // 保存 .mesh 文件
                                 if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
                                     #[cfg(feature = "debug_model")]
                                     mesh.export_obj(false, &format!("{}.obj", id));
+                                    // 生成 aabb/pts 哈希并去重缓存
                                     let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
                                     let mut pt_hashes = HashSet::new();
                                     for edge in s.edges() {
-                                        //TODO edge 这里取中点就可以了
-                                        // for point in edge.approximation_segments_custom(1.0, 1.0) {
+                                        // 采样端点即可（中点可选 TODO），降低点集规模
                                         for point in [edge.start_point(), edge.end_point()] {
                                             let pts_hash = RsVec3(point.as_vec3()).gen_hash();
                                             pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
@@ -478,19 +498,21 @@ pub async fn gen_inst_meshes(
                                             }
                                         }
                                     }
+                                    // 构建回写：标记已网格化、绑定 aabb、记录涉及的点集引用
                                     update_sql.push_str(&format!(
                                         "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
                                         id,
                                         aabb_hash,
                                         pt_hashes.into_iter().join(","),
                                     ));
+                                    // 记录 aabb 实体（统一批量保存）
                                     aabb_map
                                         .entry(aabb_hash.to_string())
                                         .or_insert(mesh.aabb.unwrap());
                                     success = true;
                                 }
                             }
-                            //显示哪些模型可能会受影响
+                            // 网格化失败：仅在 debug 特性下打印受影响 refnos
                             Err(e) => {
                                 #[cfg(any(
                                     feature = "debug_model",
@@ -504,12 +526,12 @@ pub async fn gen_inst_meshes(
                             }
                         }
                         if !success {
-                            //有问题的模型，就不需要每次都重复生成了
+                            // 标记 bad，避免后续重复尝试；可另行排障后再清理此标记
                             update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", id));
                         }
                     }
                     if !update_sql.is_empty() {
-                        //执行SUL_DB update,使用chunk 保存
+                        // 批量回写 SurrealDB（使用一个语句拼接多条 update）
                         if let Err(_) = SUL_DB.query(&update_sql).await {
                             init_save_database_error(
                                 &update_sql,
@@ -518,6 +540,7 @@ pub async fn gen_inst_meshes(
                         }
                     }
                 }
+                // 本批次查询失败：记录错误并继续其他批次
                 Err(e) => {
                     init_query_error(&sql, e, &std::panic::Location::caller().to_string());
                 }
@@ -526,6 +549,7 @@ pub async fn gen_inst_meshes(
         tasks.push(task);
     }
 
+    // 等待所有批次任务完成
     match futures::future::try_join_all(tasks).await {
         Ok(_) => {}
         Err(e) => {
@@ -533,6 +557,7 @@ pub async fn gen_inst_meshes(
         }
     }
 
+    // 用新生成的 aabb 更新内存缓存，避免重复计算
     for (id, _) in inst_geo_ids {
         if let Some(id) = id {
             let h = id.to_raw();
@@ -544,6 +569,7 @@ pub async fn gen_inst_meshes(
         }
     }
 
+    // 批量持久化点集与 aabb 实体
     utils::save_pts_to_surreal(&pts_json_map).await;
     utils::save_aabb_to_surreal(&aabb_map).await;
 
@@ -559,6 +585,11 @@ struct QueryAabbParam {
     pub world_trans: Transform,
 }
 
+/// 查询 inst_relate 的 AABB 计算所需字段
+
+/// 单个几何的变换与局部 AABB
+/// - trans: 从几何到实例的局部变换
+/// - aabb: 几何的局部包围盒
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct GeoAabbTrans {
     pub trans: Transform,
@@ -581,6 +612,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     replace_exist: bool,
 ) -> anyhow::Result<()> {
     const CHUNK: usize = 100;
+    // SQL 说明：
+    // - world_trans.d != none：仅处理拥有世界变换的实例
+    // - 子查询 out->geo_relate 仅保留 out.aabb.d != none 且 trans.d != none 的几何（有局部AABB且有变换）
+    // - 若 !replace_exist 则追加条件 and aabb=none，避免覆盖已存在的实例 AABB（增量回填）
+
     // dbg!(refnos);
     let aabb_map = DashMap::new();
     for chunk in refnos.chunks(CHUNK) {
@@ -735,6 +771,13 @@ pub async fn apply_insts_boolean_occ(
 ) -> anyhow::Result<()> {
     let inst_keys = get_inst_relate_keys(refnos);
     //筛选出来 "Neg", "CataCrossNeg" 的关联
+    // SQL 说明：
+    // - 仅选择存在负实体关系的实例： (in<-neg_relate)[0] != none
+    // - 排除已标记 bad_bool 的实例： where ... and !bad_bool
+    // - 要求实例已有整体 AABB： aabb.d != none（避免后续布尔时范围未知）
+    // - 内层负实体筛选： geo_type in ["Neg", "CataCrossNeg"] 且 trans.d != NONE（参与布尔的负实体几何及其变换）
+    // - 若不替换已有布尔结果，应追加 and !booled 以避免重复布尔；当前实现始终追加 and !booled（即默认增量）
+
     let mut sql = format!(
         r#"
             select

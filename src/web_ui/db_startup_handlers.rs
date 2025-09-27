@@ -109,44 +109,66 @@ pub async fn get_startup_status(
 
     // 如果管理器中没有记录，检查是否有外部启动的实例
     let port_str = query.port.to_string();
-    let check_cmd = Command::new("sh")
-        .arg("-c")
-        .arg(format!("lsof -i :{} -t 2>/dev/null || netstat -an 2>/dev/null | grep -q '[:.]{}.*LISTEN' && echo 'running' || echo 'not_running'", port_str, port_str))
-        .output()
-        .await;
 
-    if let Ok(output) = check_cmd {
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // 根据操作系统选择不同的命令
+    let (check_result, pid) = if cfg!(target_os = "windows") {
+        // Windows: 使用 netstat 检查端口
+        let check_cmd = Command::new("cmd")
+            .args([
+                "/C",
+                &format!("netstat -ano | findstr :{} | findstr LISTENING", port_str),
+            ])
+            .output()
+            .await;
 
-        // 如果端口被占用，说明有外部实例在运行
-        if result.contains("running") || !result.contains("not_running") {
-            // 尝试获取进程信息
-            let pid_cmd = Command::new("sh")
-                .arg("-c")
-                .arg(format!("lsof -i :{} -t 2>/dev/null | head -1", port_str))
-                .output()
-                .await;
-
-            let pid = if let Ok(pid_output) = pid_cmd {
-                String::from_utf8_lossy(&pid_output.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
+        if let Ok(output) = check_cmd {
+            let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !result.is_empty() {
+                // 从 netstat 输出提取 PID（最后一列）
+                let pid = result
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().last())
+                    .and_then(|p| p.parse::<u32>().ok());
+                (true, pid)
             } else {
-                None
-            };
-
-            return Ok(Json(json!({
-                "success": true,
-                "status": "Running",
-                "progress": 100,
-                "progress_message": "数据库已在运行（外部启动）",
-                "pid": pid,
-                "external": true,
-                "start_time": null,
-                "error_message": null,
-            })));
+                (false, None)
+            }
+        } else {
+            (false, None)
         }
+    } else {
+        // Unix/Linux/macOS: 使用 lsof 检查端口
+        let check_cmd = Command::new("sh")
+            .arg("-c")
+            .arg(format!("lsof -i :{} -t 2>/dev/null | head -1", port_str))
+            .output()
+            .await;
+
+        if let Ok(output) = check_cmd {
+            let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !result.is_empty() {
+                let pid = result.parse::<u32>().ok();
+                (true, pid)
+            } else {
+                (false, None)
+            }
+        } else {
+            (false, None)
+        }
+    };
+
+    if check_result {
+        return Ok(Json(json!({
+            "success": true,
+            "status": "Running",
+            "progress": 100,
+            "progress_message": "数据库已在运行（外部启动）",
+            "pid": pid,
+            "external": true,
+            "start_time": null,
+            "error_message": null,
+        })));
     }
 
     // 端口未被占用，数据库未运行
@@ -188,23 +210,54 @@ pub async fn stop_database_api(
     // 如果管理器中没有，通过端口号查找进程
     if pid.is_none() {
         let port_str = request.port.to_string();
-        let pid_cmd = Command::new("sh")
-            .arg("-c")
-            .arg(format!("lsof -i :{} -t 2>/dev/null | head -1", port_str))
-            .output()
-            .await;
 
-        if let Ok(output) = pid_cmd {
-            pid = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<u32>()
-                .ok();
+        if cfg!(target_os = "windows") {
+            // Windows: 使用 netstat 查找 PID
+            let pid_cmd = Command::new("cmd")
+                .args([
+                    "/C",
+                    &format!("netstat -ano | findstr :{} | findstr LISTENING", port_str),
+                ])
+                .output()
+                .await;
+
+            if let Ok(output) = pid_cmd {
+                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                pid = result
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().last())
+                    .and_then(|p| p.parse::<u32>().ok());
+            }
+        } else {
+            // Unix/Linux/macOS: 使用 lsof 查找 PID
+            let pid_cmd = Command::new("sh")
+                .arg("-c")
+                .arg(format!("lsof -i :{} -t 2>/dev/null | head -1", port_str))
+                .output()
+                .await;
+
+            if let Ok(output) = pid_cmd {
+                pid = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok();
+            }
         }
     }
 
     if let Some(pid) = pid {
         // 尝试终止进程
-        let output = Command::new("kill").arg(pid.to_string()).output().await;
+        let output = if cfg!(target_os = "windows") {
+            // Windows: 使用 taskkill
+            Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output()
+                .await
+        } else {
+            // Unix/Linux/macOS: 使用 kill
+            Command::new("kill").arg(pid.to_string()).output().await
+        };
 
         match output {
             Ok(_) => {

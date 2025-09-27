@@ -1,6 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::gen_model::is_xtk_debug_enabled;
 use crate::fast_model::{SEND_INST_SIZE, get_generic_type, shared};
 use aios_core::RefU64;
 use aios_core::geometry::*;
@@ -53,7 +54,9 @@ pub async fn gen_loop_geos(
             if end_idx > loop_owner_cnt {
                 end_idx = loop_owner_cnt;
             }
-            println!("当前范围: {start_idx} ~ {end_idx}");
+            if is_xtk_debug_enabled() {
+                println!("当前范围: {start_idx} ~ {end_idx}");
+            }
             let mut shape_insts_data = ShapeInstancesData::default();
             for j in start_idx..end_idx {
                 let target_refno = all_loop_owner_refnos[j];
@@ -226,10 +229,12 @@ pub async fn gen_loop_geos(
         handles.push(handle);
     }
     futures::future::join_all(take(&mut handles)).await;
-    println!(
-        "处理loops几何体: {} 花费时间: {} ms",
-        loop_owner_cnt,
-        t.elapsed().as_millis()
-    );
+    if is_xtk_debug_enabled() {
+        println!(
+            "处理loops几何体: {} 花费时间: {} ms",
+            loop_owner_cnt,
+            t.elapsed().as_millis()
+        );
+    }
     Ok(true)
 }

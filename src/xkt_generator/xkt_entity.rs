@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 /// XKT 实体数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,9 +7,20 @@ pub struct XKTEntity {
     pub id: String,
     pub name: String,
     pub entity_type: String,
+    pub entity_index: Option<usize>,
+
+    // 网格引用
     pub mesh_ids: Vec<String>,
+
+    // 层级关系
     pub parent_id: Option<String>,
     pub children_ids: Vec<String>,
+
+    // XKT v10 属性
+    pub aabb: Option<[f64; 6]>,
+    pub has_reused_geometries: bool,
+
+    // 属性和状态
     pub properties: HashMap<String, String>,
     pub visible: bool,
     pub pickable: bool,
@@ -30,9 +40,12 @@ impl XKTEntity {
             id,
             name,
             entity_type,
+            entity_index: None,
             mesh_ids: Vec::new(),
             parent_id: None,
             children_ids: Vec::new(),
+            aabb: None,
+            has_reused_geometries: false,
             properties: HashMap::new(),
             visible: true,
             pickable: true,

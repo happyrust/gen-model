@@ -140,6 +140,16 @@ pub async fn serve_xtk_viewer_page() -> Html<String> {
     Html(crate::web_ui::simple_templates::render_xtk_viewer_page())
 }
 
+/// 简化版 XKT 预览页面
+pub async fn serve_simple_xkt_viewer_page() -> Html<String> {
+    Html(crate::web_ui::simple_xkt_viewer::render_simple_xkt_viewer_page())
+}
+
+/// XKT 生成器和查看器测试页面
+pub async fn serve_xkt_generator_viewer_page() -> Html<String> {
+    Html(crate::web_ui::xkt_generator_viewer::render_xkt_generator_viewer_page())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GenerateXktRequest {
     pub dbno: u32,
@@ -160,16 +170,28 @@ pub async fn api_generate_xkt(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-    let filename = format!(
-        "db{}_{}.xkt",
-        req.dbno,
-        if compress {
-            format!("compressed_{}", timestamp)
-        } else {
-            format!("raw_{}", timestamp)
-        }
-    );
+    let filename = if let Some(ref refno_str) = req.refno {
+        // 指定参考号时，使用参考号作为文件名
+        let safe_refno = refno_str.replace("/", "_").replace("\\", "_");
+        format!(
+            "db{}_{}_refno_{}.xkt",
+            req.dbno,
+            if compress { "compressed" } else { "raw" },
+            safe_refno
+        )
+    } else {
+        // 整个数据库时，使用时间戳
+        let timestamp = Utc::now().format("%Y%m%d%H%M%S");
+        format!(
+            "db{}_{}.xkt",
+            req.dbno,
+            if compress {
+                format!("compressed_{}", timestamp)
+            } else {
+                format!("raw_{}", timestamp)
+            }
+        )
+    };
     let full_path = output_dir.join(&filename);
 
     let db_option = get_db_option();
@@ -2506,12 +2528,14 @@ pub async fn api_import_deployment_site_from_dboption(
         config,
         status: DeploymentSiteStatus::Configuring,
         url: None,
+        health_url: req.health_url.clone(),
         env,
         owner: req.owner.clone(),
         tags: req.tags.clone(),
         notes: req.notes.clone(),
         created_at: Some(now),
         updated_at: Some(now),
+        last_health_check: None,
     };
 
     let site_json = serde_json::to_value(&site).map_err(|_| {
@@ -2556,14 +2580,14 @@ pub async fn api_create_deployment_site(
         ));
     }
 
-    // 检查名称唯一性
-    let check_sql = format!(
-        "SELECT * FROM deployment_sites WHERE name = '{}' LIMIT 1",
-        req.name.replace("'", "\\'")
-    );
-    if let Ok(mut resp) = SUL_DB.query(check_sql).await {
-        let rows: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-        if !rows.is_empty() {
+    // 检查名称唯一性（从SQLite检查）
+    if let Ok(sites) = crate::web_ui::wizard_handlers::load_deployment_sites_from_sqlite() {
+        if sites.iter().any(|s| {
+            s.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n == req.name)
+                .unwrap_or(false)
+        }) {
             return Err((
                 StatusCode::CONFLICT,
                 Json(json!({"error":"站点名称已存在"})),
@@ -2603,38 +2627,48 @@ pub async fn api_create_deployment_site(
         config: req.config,
         status: DeploymentSiteStatus::Configuring,
         url: None,
+        health_url: None,
         env: req.env,
         owner: req.owner,
         tags: req.tags,
         notes: req.notes,
         created_at: Some(now),
         updated_at: Some(now),
+        last_health_check: None,
     };
 
-    let site_json = serde_json::to_value(&site).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":"序列化失败"})),
-        )
-    })?;
+    match crate::web_ui::wizard_handlers::save_api_deployment_site(&site) {
+        Ok(site_id) => {
+            eprintln!("成功保存站点到 SQLite，ID: {}", site_id);
 
-    let sql = format!("CREATE deployment_sites CONTENT {}", site_json);
-    match SUL_DB.query(sql).await {
-        Ok(mut resp) => {
-            let items: Vec<serde_json::Value> = resp.take(0).unwrap_or_default();
-            if let Some(item) = items.get(0) {
-                Ok(Json(json!({"status":"success","item": item})))
-            } else {
-                Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error":"创建失败"})),
-                ))
+            match crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&site_id) {
+                Ok(Some(site_value)) => {
+                    eprintln!("成功从 SQLite 加载站点数据");
+                    Ok(Json(json!({"status":"success","item": site_value})))
+                }
+                Ok(None) => {
+                    eprintln!("警告: 无法从 SQLite 加载刚创建的站点");
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error":"创建失败: 无法加载创建的站点"})),
+                    ))
+                }
+                Err(e) => {
+                    eprintln!("从 SQLite 加载站点失败: {}", e);
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("加载站点失败: {}", e)})),
+                    ))
+                }
             }
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("数据库错误: {}", e)})),
-        )),
+        Err(e) => {
+            eprintln!("保存站点到 SQLite 失败: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("创建失败: {}", e)})),
+            ))
+        }
     }
 }
 
@@ -2816,45 +2850,31 @@ pub async fn api_create_deployment_site_task(
 /// 部署站点健康检查
 pub async fn api_healthcheck_deployment_site(
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     // 向导站点存储在 SQLite 中，优先处理
     if let Ok(Some(site_value)) =
         crate::web_ui::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
     {
-        let site: DeploymentSite = serde_json::from_value(site_value.clone()).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "站点数据解析失败" })),
-            )
-        })?;
+        let site: DeploymentSite = serde_json::from_value(site_value.clone())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let Some(url) = site.health_url.as_ref().or(site.url.as_ref()) else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "未配置 health_url" })),
-            ));
+            return Err(StatusCode::BAD_REQUEST);
         };
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("初始化 HTTP 客户端失败: {}", e)})),
-                )
-            })?;
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let res = client.get(url).send().await;
         let healthy = matches!(res.as_ref().map(|r| r.status().is_success()), Ok(true));
         let status_str = if healthy { "Running" } else { "Failed" };
         let now = chrono::Utc::now().to_rfc3339();
 
-        if let Err(e) = crate::web_ui::wizard_handlers::update_deployment_site_health(
-            &id,
-            status_str,
-            &now,
-        ) {
+        if let Err(e) =
+            crate::web_ui::wizard_handlers::update_deployment_site_health(&id, status_str, &now)
+        {
             eprintln!("更新部署站点健康检查失败: {}", e);
         }
 
@@ -2873,7 +2893,19 @@ pub async fn api_healthcheck_deployment_site(
     // 其他站点走通用项目健康检查
     match api_healthcheck_project(Path(id.clone())).await {
         Ok(Json(payload)) => Ok(Json(payload)),
-        Err(err) => Err(err),
+        Err((status, _)) => Err(status),
+    }
+}
+
+/// 部署站点健康检查 (POST版本)
+pub async fn api_healthcheck_deployment_site_post(
+    Path(id): Path<String>,
+    _body: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 调用原健康检查函数
+    match api_healthcheck_deployment_site(Path(id)).await {
+        Ok(json) => Ok(json),
+        Err(status) => Err((status, Json(json!({ "error": "Health check failed" })))),
     }
 }
 
@@ -2932,7 +2964,7 @@ pub async fn get_system_status(
     sys.refresh_all();
 
     // 获取CPU使用率
-    let cpu_usage = sys.global_cpu_info().cpu_usage();
+    let cpu_usage = sys.global_cpu_usage();
 
     // 获取内存使用率
     let total_memory = sys.total_memory();

@@ -1,6 +1,5 @@
-use glam::Vec3;
+use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// XKT 材质数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,13 +111,28 @@ impl XKTMaterial {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XKTMesh {
     pub id: String,
+    pub mesh_index: Option<usize>,
     pub geometry_id: String,
     pub material_id: Option<String>,
+
+    // 变换矩阵（4x4）
+    pub matrix: Option<[f32; 16]>,
+
+    // 传统变换参数（用于构建矩阵）
     pub position: Vec3,
     pub rotation: Vec3, // Euler angles in radians
     pub scale: Vec3,
-    pub color: Option<Vec3>,
+
+    // PBR材质属性
+    pub color: Vec3,
     pub opacity: f32,
+    pub metallic: f32,
+    pub roughness: f32,
+
+    // 纹理集引用
+    pub texture_set_id: Option<String>,
+
+    // 状态
     pub visible: bool,
 }
 
@@ -127,13 +141,18 @@ impl XKTMesh {
     pub fn new(id: String, geometry_id: String) -> Self {
         Self {
             id,
+            mesh_index: None,
             geometry_id,
             material_id: None,
+            matrix: None,
             position: Vec3::ZERO,
             rotation: Vec3::ZERO,
             scale: Vec3::ONE,
-            color: None,
+            color: Vec3::ONE,
             opacity: 1.0,
+            metallic: 0.0,
+            roughness: 0.5,
+            texture_set_id: None,
             visible: true,
         }
     }
@@ -160,7 +179,7 @@ impl XKTMesh {
 
     /// 设置颜色（覆盖材质颜色）
     pub fn set_color(&mut self, color: Vec3) {
-        self.color = Some(color);
+        self.color = color;
     }
 
     /// 设置透明度
@@ -171,5 +190,30 @@ impl XKTMesh {
     /// 设置可见性
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+    }
+
+    /// 确保存在 4x4 变换矩阵
+    pub fn ensure_matrix(&mut self) {
+        if self.matrix.is_some() {
+            return;
+        }
+
+        let rotation = Quat::from_euler(
+            EulerRot::XYZ,
+            self.rotation.x,
+            self.rotation.y,
+            self.rotation.z,
+        );
+
+        let transform = Mat4::from_scale_rotation_translation(self.scale, rotation, self.position);
+        self.matrix = Some(transform.to_cols_array());
+    }
+
+    /// 直接设置矩阵并归零 TRS 参数，便于后续维护
+    pub fn set_matrix(&mut self, matrix: [f32; 16]) {
+        self.matrix = Some(matrix);
+        self.position = Vec3::ZERO;
+        self.rotation = Vec3::ZERO;
+        self.scale = Vec3::ONE;
     }
 }

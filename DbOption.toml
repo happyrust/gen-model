@@ -12,7 +12,7 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1"
+project_path = "/Volumes/DPC/work/e3d_models"
 # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
@@ -31,7 +31,7 @@ save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
 #是否生成房间树
-gen_spatial_tree = false
+gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
@@ -122,3 +122,12 @@ gen_history_model = false
 debug_root_refnos = ["17496/201375"]
 
 # debug_root_refnos = ["17496_195578"]
+
+
+# 空间索引开关（SQLite R*-Tree）
+enable_sqlite_rtree = true
+# sqlite_index_enabled = true # 兼容键（可选）
+
+
+# SQLite R*-tree 索引文件路径（与 AabbCache 保持一致）
+sqlite_index_path = "assets/aabb_index.sqlite"

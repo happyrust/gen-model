@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Xeokit Cube Demo</title>
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #viewerCanvas { width: 100%; height: 100%; display: block; }
+  </style>
+  <script type="module">
+    import { Viewer, XKTLoaderPlugin } from "https://cdn.jsdelivr.net/npm/@xeokit/xeokit-sdk@2.6.8/dist/xeokit-sdk.es.js";
+
+    window.addEventListener("DOMContentLoaded", () => {
+      const viewer = new Viewer({
+        canvasId: "viewerCanvas",
+        transparent: true
+      });
+
+      viewer.camera.eye = [6.0, 6.0, 6.0];
+      viewer.camera.look = [0.0, 0.0, 0.0];
+      viewer.camera.up = [0.0, 1.0, 0.0];
+
+      const xktLoader = new XKTLoaderPlugin(viewer, {
+        id: "XKTLoaderPlugin"
+      });
+
+      xktLoader.load({
+        id: "cube",
+        src: "cube_demo.xkt",
+        edges: true,
+        success: () => {
+          viewer.cameraFlight.flyTo(viewer.scene);
+        },
+        error: (err) => {
+          console.error("加载 XKT 失败", err);
+          alert("加载 XKT 失败: " + err);
+        }
+      });
+    });
+  </script>
+</head>
+<body>
+  <canvas id="viewerCanvas"></canvas>
+</body>
+</html>

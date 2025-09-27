@@ -72,8 +72,8 @@ pub mod gui;
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 
-#[cfg(feature = "gen_model")]
-pub mod xeokit_xtk_generator;
+// #[cfg(feature = "gen_model")]
+// pub mod xeokit_xtk_generator; // 暂时注释掉，待实现
 
 pub mod versioned_db;
 
@@ -270,7 +270,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         println!("正在计算房间");
         // SQLite R*-tree will be used for spatial indexing
         let mut time = Instant::now();
-        build_room_relations(&db_option).await.unwrap();
+        if let Err(e) = build_room_relations(&db_option).await {
+            eprintln!("计算房间失败: {}", e);
+            return Err(e);
+        }
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         update_cal_equip().await?;
         update_cal_bran_component().await?;
@@ -446,52 +449,31 @@ async fn init_surreal_with_retry(db_option: &DbOption) -> anyhow::Result<()> {
 }
 
 /// 尝试连接数据库的核心逻辑
-async fn try_connect_database(db_option: &DbOption) -> anyhow::Result<()> {
+async fn try_connect_database(_db_option: &DbOption) -> anyhow::Result<()> {
     use aios_core::{SUL_DB, init_surreal};
 
-    let conn_str = db_option.get_version_db_conn_str();
-    println!("🔗 连接字符串: {}", conn_str);
+    println!("使用 aios_core::init_surreal 初始化数据库...");
+    match init_surreal().await {
+        Ok(_) => {
+            println!("✓ 数据库初始化完成");
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Already connected") {
+                println!("⚠️ 已经连接，跳过重复初始化");
+            } else {
+                return Err(anyhow::anyhow!("数据库初始化失败: {}", msg));
+            }
+        }
+    }
 
-    // 1. 建立连接
-    SUL_DB
-        .connect(conn_str.clone())
-        .with_capacity(1000)
-        .await
-        .map_err(|e| anyhow::anyhow!("连接失败 {}: {}", conn_str, e))?;
-
-    println!("✓ 基础连接建立成功");
-
-    // 2. 选择命名空间和数据库
-    SUL_DB
-        .use_ns(&db_option.project_code.to_string())
-        .use_db(&db_option.project_name)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "选择数据库失败 (ns: {}, db: {}): {}",
-                db_option.project_code,
-                db_option.project_name,
-                e
-            )
-        })?;
-
-    println!("✓ 命名空间和数据库选择成功");
-
-    // 3. 执行初始化
-    init_surreal()
-        .await
-        .map_err(|e| anyhow::anyhow!("数据库初始化失败: {}", e))?;
-
-    println!("✓ 数据库初始化完成");
-
-    // 4. 测试查询
+    // 功能性验证
     SUL_DB
         .query("SELECT 1 as test")
         .await
         .map_err(|e| anyhow::anyhow!("测试查询失败: {}", e))?;
 
     println!("✓ 功能测试通过");
-
     Ok(())
 }
 
