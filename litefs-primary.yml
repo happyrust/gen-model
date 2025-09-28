@@ -1,0 +1,40 @@
+# LiteFS 主节点配置
+# 用于北京服务器（或第一个部署的服务器）
+
+# FUSE 挂载点
+fuse:
+  dir: "/litefs"
+  # 允许非root用户访问
+  allow-other: true
+
+# LiteFS 数据存储目录
+data:
+  dir: "/var/lib/litefs"
+
+# 主节点选举配置（静态模式）
+lease:
+  type: "static"
+  # 当前节点为主节点
+  is-primary: true
+  # 主节点地址（供副本连接）
+  advertise-url: "http://PRIMARY_IP:20202"
+
+# 代理配置（可选，如果需要透明代理）
+# proxy:
+#   addr: ":20202"
+#   target: "localhost:8080"
+#   db: "deployment_sites.sqlite"
+#   passthrough:
+#     - "*.html"
+
+# HTTP 管理 API
+http:
+  addr: ":20203"
+
+# 日志配置
+log:
+  level: "info"
+
+# 退出策略
+exit:
+  on-error: false

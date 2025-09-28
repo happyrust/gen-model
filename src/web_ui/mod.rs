@@ -26,6 +26,7 @@ pub mod db_status_handlers;
 pub mod db_status_template;
 pub mod incremental_update_handlers;
 pub mod layout;
+pub mod litefs_handlers;
 pub mod remote_runtime;
 pub mod remote_sync_handlers;
 pub mod remote_sync_template;
@@ -382,6 +383,10 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             "/api/remote-sync/sites/{id}",
             put(remote_sync_handlers::update_site).delete(remote_sync_handlers::delete_site),
         )
+        // LiteFS 节点状态和健康检查 API
+        .route("/api/node-status", get(litefs_handlers::get_node_status))
+        .route("/api/health", get(litefs_handlers::health_check))
+        .route("/api/sync-status", get(litefs_handlers::sync_status))
         // 数据库状态管理API
         .route(
             "/api/database/status",

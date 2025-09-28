@@ -49,7 +49,7 @@ pub async fn remote_sync_page() -> Html<String> {
 }
 
 /// 打开 SQLite（复用部署站点同一文件）
-fn open_sqlite() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+pub fn open_sqlite() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     use config as cfg;
 
     let db_path = if std::path::Path::new("DbOption.toml").exists() {
@@ -63,7 +63,22 @@ fn open_sqlite() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
         "deployment_sites.sqlite".to_string()
     };
 
-    let conn = rusqlite::Connection::open(&db_path)?;
+    eprintln!("打开数据库: {}", db_path);
+
+    let mut conn = rusqlite::Connection::open(&db_path)?;
+
+    // 检查是否为 LiteFS 挂载点
+    let is_litefs = db_path.starts_with("/litefs");
+
+    if is_litefs {
+        // LiteFS 下推荐设置
+        eprintln!("检测到 LiteFS 环境，配置 WAL 模式");
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    } else {
+        // 本地开发环境
+        eprintln!("本地开发环境");
+    }
     // env 表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS remote_sync_envs (

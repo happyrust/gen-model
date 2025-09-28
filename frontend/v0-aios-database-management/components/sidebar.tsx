@@ -7,6 +7,7 @@ import { useRouter, usePathname } from "next/navigation"
 import { Database, Server, Settings, Activity, Zap, Shield, BarChart3, ChevronDown, ChevronRight, Network } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { NodeStatusBadge } from "@/components/node-status-badge"
 
 interface NavItem {
   title: string
@@ -187,12 +188,17 @@ export function Sidebar() {
 
         {/* Footer */}
         <div className="absolute bottom-6 left-6 right-6">
-          <div className="p-3 bg-sidebar-accent rounded-lg">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-2 h-2 bg-success rounded-full"></div>
-              <span className="text-sm font-medium text-sidebar-accent-foreground">系统状态</span>
+          <div className="p-3 bg-sidebar-accent rounded-lg space-y-3">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2 h-2 bg-success rounded-full"></div>
+                <span className="text-sm font-medium text-sidebar-accent-foreground">系统状态</span>
+              </div>
+              <p className="text-xs text-sidebar-accent-foreground/70">所有服务正常运行</p>
             </div>
-            <p className="text-xs text-sidebar-accent-foreground/70">所有服务正常运行</p>
+            <div className="border-t border-sidebar-border pt-2">
+              <NodeStatusBadge />
+            </div>
           </div>
         </div>
       </div>

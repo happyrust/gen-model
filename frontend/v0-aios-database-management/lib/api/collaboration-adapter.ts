@@ -1,5 +1,15 @@
 import type { CollaborationGroup, RemoteSite, SyncRecord, SyncStrategy, CollaborationGroupStatus } from "@/types/collaboration"
 
+interface NodeStatus {
+  is_primary: boolean
+  primary_url: string | null
+  node_name: string | null
+}
+
+let cachedNodeStatus: NodeStatus | null = null
+let nodeStatusFetchTime: number = 0
+const NODE_STATUS_CACHE_TTL = 30000
+
 export interface RemoteSyncEnv {
   id: string
   name: string
@@ -70,6 +80,35 @@ function buildApiUrl(path: string) {
   return `${API_BASE_URL}${path}`
 }
 
+async function getNodeStatus(): Promise<NodeStatus | null> {
+  const now = Date.now()
+  if (cachedNodeStatus && (now - nodeStatusFetchTime) < NODE_STATUS_CACHE_TTL) {
+    return cachedNodeStatus
+  }
+
+  try {
+    const response = await fetch(buildApiUrl("/api/node-status"))
+    if (!response.ok) return null
+    const data = await response.json()
+    cachedNodeStatus = data.node
+    nodeStatusFetchTime = now
+    return cachedNodeStatus
+  } catch (error) {
+    console.error("Failed to fetch node status:", error)
+    return null
+  }
+}
+
+async function ensurePrimaryNode(): Promise<string | null> {
+  const status = await getNodeStatus()
+  if (!status) return null
+
+  if (!status.is_primary && status.primary_url) {
+    return status.primary_url
+  }
+  return null
+}
+
 async function handleResponse<T>(response: Response): Promise<T> {
   const text = await response.text()
   let data: unknown = null
@@ -111,6 +150,17 @@ export async function getRemoteSyncEnv(id: string): Promise<RemoteSyncEnv> {
 }
 
 export async function createRemoteSyncEnv(payload: RemoteSyncEnvCreatePayload): Promise<RemoteSyncEnv> {
+  const primaryUrl = await ensurePrimaryNode()
+  if (primaryUrl) {
+    const redirectUrl = `${primaryUrl}/api/remote-sync/envs`
+    const response = await fetch(redirectUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    return handleResponse<RemoteSyncEnv>(response)
+  }
+
   const response = await fetch(buildApiUrl("/api/remote-sync/envs"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -120,6 +170,17 @@ export async function createRemoteSyncEnv(payload: RemoteSyncEnvCreatePayload): 
 }
 
 export async function updateRemoteSyncEnv(id: string, payload: Partial<RemoteSyncEnvCreatePayload>): Promise<RemoteSyncEnv> {
+  const primaryUrl = await ensurePrimaryNode()
+  if (primaryUrl) {
+    const redirectUrl = `${primaryUrl}/api/remote-sync/envs/${id}`
+    const response = await fetch(redirectUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    return handleResponse<RemoteSyncEnv>(response)
+  }
+
   const response = await fetch(buildApiUrl(`/api/remote-sync/envs/${id}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -129,6 +190,16 @@ export async function updateRemoteSyncEnv(id: string, payload: Partial<RemoteSyn
 }
 
 export async function deleteRemoteSyncEnv(id: string): Promise<void> {
+  const primaryUrl = await ensurePrimaryNode()
+  if (primaryUrl) {
+    const redirectUrl = `${primaryUrl}/api/remote-sync/envs/${id}`
+    const response = await fetch(redirectUrl, {
+      method: "DELETE",
+    })
+    await handleResponse<void>(response)
+    return
+  }
+
   const response = await fetch(buildApiUrl(`/api/remote-sync/envs/${id}`), {
     method: "DELETE",
   })
