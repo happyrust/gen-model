@@ -9,10 +9,15 @@
     "test-xkt": "cd tests && npm test",
     "test-xkt-auto": "./tests/run-test.sh"
   },
-  "keywords": ["xkt", "3d", "xeokit"],
+  "keywords": [
+    "xkt",
+    "3d",
+    "xeokit"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "node-fetch": "^3.3.2",
     "puppeteer": "^21.0.0"
   }
 }

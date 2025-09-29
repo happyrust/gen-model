@@ -1,0 +1,96 @@
+{
+  "database": 1112,
+  "totalZones": 5,
+  "generatedAt": "2025-09-29T13:30:00.000Z",
+  "globalBoundingBox": {
+    "min": [-500, -500, 0],
+    "max": [500, 500, 300]
+  },
+  "zones": [
+    {
+      "id": "zone_001",
+      "name": "工艺区 A",
+      "refno": "17496/266203",
+      "description": "主要工艺设备区",
+      "xktFile": "zone_001.xkt",
+      "fileSize": 2466,
+      "compressed": true,
+      "hasGeometry": true,
+      "boundingBox": {
+        "min": [-250, -250, 0],
+        "max": [-50, -50, 100]
+      },
+      "center": [-150, -150, 50],
+      "radius": 141.42,
+      "adjacentZones": ["zone_002", "zone_003"]
+    },
+    {
+      "id": "zone_002",
+      "name": "工艺区 B",
+      "refno": "17496/266203",
+      "description": "次要工艺设备区",
+      "xktFile": "zone_002.xkt",
+      "fileSize": 2466,
+      "compressed": true,
+      "hasGeometry": true,
+      "boundingBox": {
+        "min": [50, -250, 0],
+        "max": [250, -50, 100]
+      },
+      "center": [150, -150, 50],
+      "radius": 141.42,
+      "adjacentZones": ["zone_001", "zone_004"]
+    },
+    {
+      "id": "zone_003",
+      "name": "储罐区",
+      "refno": "17496/266203",
+      "description": "储罐和容器区",
+      "xktFile": "zone_003.xkt",
+      "fileSize": 2466,
+      "compressed": true,
+      "hasGeometry": true,
+      "boundingBox": {
+        "min": [-250, 50, 0],
+        "max": [-50, 250, 100]
+      },
+      "center": [-150, 150, 50],
+      "radius": 141.42,
+      "adjacentZones": ["zone_001", "zone_005"]
+    },
+    {
+      "id": "zone_004",
+      "name": "管廊区",
+      "refno": "17496/266203",
+      "description": "主管廊结构",
+      "xktFile": "zone_004.xkt",
+      "fileSize": 2466,
+      "compressed": true,
+      "hasGeometry": true,
+      "boundingBox": {
+        "min": [50, 50, 0],
+        "max": [250, 250, 100]
+      },
+      "center": [150, 150, 50],
+      "radius": 141.42,
+      "adjacentZones": ["zone_002", "zone_005"]
+    },
+    {
+      "id": "zone_005",
+      "name": "公用工程区",
+      "refno": "17496/266203",
+      "description": "公用工程系统",
+      "xktFile": "zone_005.xkt",
+      "fileSize": 2466,
+      "compressed": true,
+      "hasGeometry": true,
+      "boundingBox": {
+        "min": [-100, -100, 100],
+        "max": [100, 100, 200]
+      },
+      "center": [0, 0, 150],
+      "radius": 141.42,
+      "adjacentZones": ["zone_003", "zone_004"]
+    }
+  ]
+}

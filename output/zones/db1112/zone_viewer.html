@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Zone-Based XKT Viewer</title>
+    <style>
+        body { margin: 0; font-family: Arial; }
+        #viewer { width: 100%; height: calc(100vh - 150px); }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        #info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+        .zone-item {
+            margin: 5px 0;
+            padding: 5px;
+            background: #f0f0f0;
+            border-radius: 3px;
+        }
+        .zone-item.loaded {
+            background: #d4edda;
+        }
+        .zone-item.loading {
+            background: #fff3cd;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h3>Zone-Based Loading Control</h3>
+        <div>
+            <label>View Distance: <input type="range" id="viewDistance" min="100" max="1000" value="500">
+                <span id="viewDistanceValue">500</span>m
+            </label>
+        </div>
+        <div>
+            <label>Auto Load: <input type="checkbox" id="autoLoad" checked></label>
+        </div>
+        <h4>Zones:</h4>
+        <div id="zoneList"></div>
+    </div>
+
+    <div id="info">
+        <div>Loaded Zones: <span id="loadedCount">0</span></div>
+        <div>Total Memory: <span id="memoryUsage">0</span> MB</div>
+        <div>FPS: <span id="fps">0</span></div>
+    </div>
+
+    <canvas id="viewer"></canvas>
+
+    <script type="module">
+        // Zone loading manager
+        class ZoneManager {
+            constructor() {
+                this.manifest = null;
+                this.loadedZones = new Map();
+                this.loadingQueue = [];
+                this.viewDistance = 500;
+                this.autoLoad = true;
+            }
+
+            async init() {
+                // Load manifest
+                const response = await fetch('/zones/db1112/zone_manifest.json');
+                this.manifest = await response.json();
+
+                console.log('Zone manifest loaded:', this.manifest);
+                this.displayZones();
+            }
+
+            displayZones() {
+                const listEl = document.getElementById('zoneList');
+                listEl.innerHTML = '';
+
+                this.manifest.zones.forEach(zone => {
+                    const div = document.createElement('div');
+                    div.className = 'zone-item';
+                    div.id = 'zone-' + zone.id;
+                    div.innerHTML = `
+                        <strong>${zone.name}</strong> (${zone.id})<br>
+                        Size: ${(zone.fileSize / 1024).toFixed(1)} KB
+                        <button onclick="zoneManager.toggleZone('${zone.id}')">Load/Unload</button>
+                    `;
+                    listEl.appendChild(div);
+                });
+            }
+
+            async loadZone(zoneId) {
+                const zone = this.manifest.zones.find(z => z.id === zoneId);
+                if (!zone || this.loadedZones.has(zoneId)) return;
+
+                console.log('Loading zone:', zone.name);
+
+                // Update UI
+                const zoneEl = document.getElementById('zone-' + zoneId);
+                if (zoneEl) zoneEl.classList.add('loading');
+
+                try {
+                    // Simulate XKT loading
+                    const response = await fetch(`/zones/db1112/${zone.xktFile}`);
+                    const data = await response.arrayBuffer();
+
+                    // Here would parse and add to 3D scene
+                    this.loadedZones.set(zoneId, {
+                        zone: zone,
+                        data: data,
+                        size: data.byteLength
+                    });
+
+                    // Update UI
+                    if (zoneEl) {
+                        zoneEl.classList.remove('loading');
+                        zoneEl.classList.add('loaded');
+                    }
+
+                    this.updateStats();
+                    console.log('Zone loaded:', zone.name);
+                } catch (error) {
+                    console.error('Failed to load zone:', error);
+                    if (zoneEl) zoneEl.classList.remove('loading');
+                }
+            }
+
+            unloadZone(zoneId) {
+                if (!this.loadedZones.has(zoneId)) return;
+
+                console.log('Unloading zone:', zoneId);
+                this.loadedZones.delete(zoneId);
+
+                // Update UI
+                const zoneEl = document.getElementById('zone-' + zoneId);
+                if (zoneEl) {
+                    zoneEl.classList.remove('loaded');
+                }
+
+                this.updateStats();
+            }
+
+            toggleZone(zoneId) {
+                if (this.loadedZones.has(zoneId)) {
+                    this.unloadZone(zoneId);
+                } else {
+                    this.loadZone(zoneId);
+                }
+            }
+
+            updateStats() {
+                document.getElementById('loadedCount').textContent = this.loadedZones.size;
+
+                let totalMemory = 0;
+                this.loadedZones.forEach(zone => {
+                    totalMemory += zone.size;
+                });
+                document.getElementById('memoryUsage').textContent =
+                    (totalMemory / (1024 * 1024)).toFixed(2);
+            }
+        }
+
+        // Initialize
+        const zoneManager = new ZoneManager();
+        window.zoneManager = zoneManager;
+
+        zoneManager.init().then(() => {
+            console.log('Zone manager initialized');
+
+            // Load first zone by default
+            if (zoneManager.manifest.zones.length > 0) {
+                zoneManager.loadZone(zoneManager.manifest.zones[0].id);
+            }
+        });
+
+        // Controls
+        document.getElementById('viewDistance').addEventListener('input', (e) => {
+            zoneManager.viewDistance = parseInt(e.target.value);
+            document.getElementById('viewDistanceValue').textContent = e.target.value;
+        });
+
+        document.getElementById('autoLoad').addEventListener('change', (e) => {
+            zoneManager.autoLoad = e.target.checked;
+        });
+
+        // FPS counter
+        let lastTime = performance.now();
+        let frameCount = 0;
+
+        function updateFPS() {
+            frameCount++;
+            const currentTime = performance.now();
+            if (currentTime - lastTime > 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+            requestAnimationFrame(updateFPS);
+        }
+        updateFPS();
+    </script>
+</body>
+</html>
