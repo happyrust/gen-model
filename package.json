@@ -9,11 +9,7 @@
     "test-xkt": "cd tests && npm test",
     "test-xkt-auto": "./tests/run-test.sh"
   },
-  "keywords": [
-    "xkt",
-    "3d",
-    "xeokit"
-  ],
+  "keywords": ["xkt", "3d", "xeokit"],
   "author": "",
   "license": "ISC",
   "dependencies": {
