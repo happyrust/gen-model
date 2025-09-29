@@ -1,0 +1,19 @@
+{
+  "name": "xkt-tests",
+  "version": "1.0.0",
+  "description": "XKT file loading automation tests",
+  "main": "test-xkt.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test-xkt.js",
+    "test-xkt": "node test-xkt.js",
+    "serve": "python3 -m http.server 8082",
+    "test-with-server": "npm run serve & sleep 2 && npm test"
+  },
+  "keywords": ["xkt", "3d", "xeokit", "puppeteer", "automation"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^21.0.0"
+  }
+}

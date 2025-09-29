@@ -1,6 +1,6 @@
 #同步文件配置
 total_sync = false
-incr_sync =  false
+incr_sync =  true
 sync_history = false
 enable_log = false
 sync_graph_db = false
@@ -119,7 +119,7 @@ room_keyword = "-R-" # 2016  K-R-K100   (-R-)
 
 #debug_root_refnos = ["24381_46952"]
 gen_history_model = false
-debug_root_refnos = ["17496/201375"]
+# debug_root_refnos = ["17496/201375"]
 
 # debug_root_refnos = ["17496_195578"]
 

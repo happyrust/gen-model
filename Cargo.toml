@@ -12,6 +12,10 @@ name = "web_ui"
 path = "src/bin/web_ui.rs"
 required-features = ["web_ui"]
 
+[[bin]]
+name = "db_option_ui"
+path = "src/bin/db_option_ui/main.rs"
+
 
 [features]
 default = ["ws", "gen_model", "manifold", "occ", "project_hd", "sqlite-index"]
@@ -147,8 +151,11 @@ gpui = { git = "https://github.com/huacnlee/zed.git", branch = "webview", option
 story = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
 gpui-component = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
 toml = "0.9.5"
+toml_edit = "0.22"
 pollster = "0.4.0"
 async-std = "1.13.1"
+eframe = { version = "0.32.3", features = ["wgpu"] }
+re_ui = "0.25.1"
 
 # GRPC 相关依赖
 tonic = { version = "0.12", optional = true, features = ["tls", "tls-roots"] }

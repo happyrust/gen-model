@@ -1,6 +1,6 @@
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -49,10 +49,7 @@ fn check_if_primary() -> bool {
 
     match open_sqlite() {
         Ok(conn) => {
-            match conn.execute(
-                "CREATE TABLE IF NOT EXISTS _litefs_test (id INTEGER)",
-                [],
-            ) {
+            match conn.execute("CREATE TABLE IF NOT EXISTS _litefs_test (id INTEGER)", []) {
                 Ok(_) => {
                     let _ = conn.execute("DROP TABLE IF EXISTS _litefs_test", []);
                     true

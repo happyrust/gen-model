@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XKT v10 简化测试</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+        .viewer-container {
+            width: 800px;
+            height: 600px;
+            border: 2px solid #333;
+            background-color: #222;
+            margin: 20px 0;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        .control-button {
+            margin: 5px;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .error { color: red; }
+        .success { color: green; }
+        .info { color: blue; }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "@xeokit/xeokit-sdk": "./js/xeokit/xeokit-sdk.es.js"
+        }
+    }
+    </script>
+</head>
+<body>
+    <h1>XKT v10 格式验证测试</h1>
+
+    <div class="viewer-container">
+        <canvas id="viewer" style="width: 100%; height: 100%;"></canvas>
+    </div>
+
+    <div class="controls">
+        <button class="control-button" onclick="testXKTv10()">测试 XKT v10 标准立方体</button>
+        <button class="control-button" onclick="resetView()">重置视图</button>
+    </div>
+
+    <div class="status" id="status">
+        <h3>状态</h3>
+        <p>准备测试...</p>
+    </div>
+
+    <script type="module">
+        import {Viewer, XKTLoaderPlugin} from "@xeokit/xeokit-sdk";
+
+        let viewer;
+        let xktLoader;
+        let currentModel = null;
+
+        // 初始化查看器
+        function initViewer() {
+            try {
+                updateStatus("正在初始化 xeokit 查看器...", "info");
+
+                viewer = new Viewer({
+                    canvasId: "viewer",
+                    transparent: true
+                });
+
+                xktLoader = new XKTLoaderPlugin(viewer, {
+                    objectDefaults: {
+                        IfcSpace: {
+                            pickable: false,
+                            opacity: 0.2
+                        }
+                    }
+                });
+
+                // 设置相机
+                viewer.scene.camera.eye = [3, 3, 3];
+                viewer.scene.camera.look = [0, 0, 0];
+                viewer.scene.camera.up = [0, 1, 0];
+
+                // 设置光照
+                viewer.scene.lightsOn = true;
+                viewer.scene.ambientLightColor = [0.3, 0.3, 0.3];
+                viewer.scene.dirLightColor = [0.8, 0.8, 0.8];
+                viewer.scene.dirLightDir = [-0.5, -0.5, -0.5];
+
+                updateStatus("✅ xeokit 查看器初始化成功", "success");
+
+            } catch (error) {
+                updateStatus(`❌ 查看器初始化失败: ${error.message}`, "error");
+                console.error("Viewer initialization error:", error);
+            }
+        }
+
+        // 测试XKT v10文件
+        window.testXKTv10 = async function() {
+            if (!viewer || !xktLoader) {
+                updateStatus("❌ 查看器未初始化", "error");
+                return;
+            }
+
+            try {
+                updateStatus("🔄 正在加载 XKT v10 标准立方体...", "info");
+
+                // 卸载当前模型
+                if (currentModel) {
+                    currentModel.destroy();
+                    currentModel = null;
+                }
+
+                const loadStartTime = Date.now();
+
+                // 加载模型
+                currentModel = xktLoader.load({
+                    id: "cube_v10_test",
+                    src: "./cube_v10_fixed.xkt",
+                    edges: true
+                });
+
+                currentModel.on("loaded", () => {
+                    const loadTime = Date.now() - loadStartTime;
+                    updateStatus(`✅ XKT v10 文件加载成功！加载时间: ${loadTime}ms`, "success");
+
+                    // 显示模型信息
+                    const scene = viewer.scene;
+                    const aabb = scene.aabb;
+                    const entityCount = Object.keys(scene.objects).length;
+
+                    const info = `
+                        <strong>模型信息:</strong><br>
+                        • 文件: cube_v10_fixed.xkt<br>
+                        • 实体数量: ${entityCount}<br>
+                        • 包围盒: [${aabb[0].toFixed(2)}, ${aabb[1].toFixed(2)}, ${aabb[2].toFixed(2)}] 到 [${aabb[3].toFixed(2)}, ${aabb[4].toFixed(2)}, ${aabb[5].toFixed(2)}]<br>
+                        • 加载时间: ${loadTime}ms
+                    `;
+                    updateStatus(info, "success");
+
+                    // 自动适配视图
+                    viewer.cameraFlight.flyTo(currentModel);
+                });
+
+                currentModel.on("error", (error) => {
+                    updateStatus(`❌ XKT v10 文件加载失败: ${error}`, "error");
+                    console.error("XKT load error:", error);
+                });
+
+            } catch (error) {
+                updateStatus(`❌ 加载错误: ${error.message}`, "error");
+                console.error("Load error:", error);
+            }
+        };
+
+        // 重置视图
+        window.resetView = function() {
+            if (currentModel && viewer) {
+                viewer.cameraFlight.flyTo(currentModel);
+                updateStatus("🔄 视图已重置", "info");
+            }
+        };
+
+        // 更新状态
+        function updateStatus(message, type = "info") {
+            const statusDiv = document.getElementById("status");
+            statusDiv.innerHTML = `<h3>状态</h3><p class="${type}">${message}</p>`;
+        }
+
+        // 页面加载时初始化
+        window.addEventListener('load', () => {
+            initViewer();
+        });
+    </script>
+</body>
+</html>

@@ -5,7 +5,8 @@ pub mod xkt_geometry;
 pub mod xkt_material;
 pub mod xkt_model;
 pub mod xkt_writer;
-// pub mod xkt_v11_writer; // 暂时注释掉，待实现
+pub mod xkt_v10_writer;
+pub mod xkt_v11_writer;
 pub mod xkt_index;
 pub mod xkt_proper_writer;
 pub mod xkt_simple_writer;
@@ -27,6 +28,8 @@ pub use xkt_proper_writer::*;
 pub use xkt_simple_writer::*;
 pub use xkt_spatial::*;
 pub use xkt_writer::*;
+pub use xkt_v10_writer::*;
+pub use xkt_v11_writer::*;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -81,6 +84,12 @@ impl XKTFile {
     pub async fn save_to_file(&self, path: &str, compress: bool) -> Result<()> {
         let writer = XKTProperWriter::new();
         writer.write_to_file(self, path, compress).await
+    }
+
+    /// 保存为标准 XKT v10 文件 (严格按照xeokit规范)
+    pub async fn save_to_file_v10(&self, path: &str) -> Result<()> {
+        let writer = XKTv10Writer::new();
+        writer.write_to_file(self, path).await
     }
 
     /// 保存为旧版 XKT 文件 (使用原格式)

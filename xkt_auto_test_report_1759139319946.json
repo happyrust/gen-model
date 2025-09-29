@@ -1,0 +1,97 @@
+{
+  "timestamp": "2025-09-29T09:48:39.945Z",
+  "totalTests": 3,
+  "successful": 2,
+  "failed": 1,
+  "results": [
+    {
+      "timestamp": "2025-09-29T09:47:20.730Z",
+      "dbnum": 1112,
+      "refno": "17496/266203",
+      "compress": true,
+      "tests": {
+        "generation": true,
+        "fileExists": true,
+        "formatValidation": true,
+        "structureAnalysis": true
+      },
+      "errors": [],
+      "filename": "db1112_compressed_refno_17496_266203.xkt",
+      "fileSize": 2471,
+      "version": 10,
+      "sections": [
+        {
+          "index": 0,
+          "offset": 120
+        },
+        {
+          "index": 1,
+          "offset": 397
+        },
+        {
+          "index": 2,
+          "offset": 405
+        },
+        {
+          "index": 3,
+          "offset": 413
+        },
+        {
+          "index": 4,
+          "offset": 421
+        }
+      ],
+      "success": true
+    },
+    {
+      "timestamp": "2025-09-29T09:47:50.146Z",
+      "dbnum": 1112,
+      "refno": "17496/266203",
+      "compress": false,
+      "tests": {
+        "generation": true,
+        "fileExists": true,
+        "formatValidation": true,
+        "structureAnalysis": true
+      },
+      "errors": [],
+      "filename": "db1112_raw_refno_17496_266203.xkt",
+      "fileSize": 9963,
+      "version": 10,
+      "sections": [
+        {
+          "index": 0,
+          "offset": 120
+        },
+        {
+          "index": 1,
+          "offset": 601
+        },
+        {
+          "index": 2,
+          "offset": 601
+        },
+        {
+          "index": 3,
+          "offset": 601
+        },
+        {
+          "index": 4,
+          "offset": 601
+        }
+      ],
+      "success": true
+    },
+    {
+      "timestamp": "2025-09-29T09:48:15.191Z",
+      "dbnum": 1112,
+      "refno": "17497/256215",
+      "compress": true,
+      "tests": {},
+      "errors": [
+        "API 错误 500: "
+      ],
+      "success": false
+    }
+  ]
+}

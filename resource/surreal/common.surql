@@ -584,6 +584,44 @@ DEFINE FUNCTION fn::get_mdb_dbnums($mdb: string, $db_type: int) {
         ));
 };
 
+// 根据类型集合和数据库号查询引用号列表，与 Rust 侧 query_type_refnos_by_dbnum 对应
+remove function fn::query_type_refnos_by_dbnum;
+DEFINE FUNCTION fn::query_type_refnos_by_dbnum(
+    $nouns: array<string>,
+    $dbnum: number,
+    $has_children: option<bool>,
+    $only_history: option<bool>
+) {
+    if $nouns = none || array::len($nouns) = 0 {
+        return [];
+    };
+
+    let $distinct = array::distinct($nouns);
+    let $history_flag = if $only_history = none { false } else { $only_history };
+    let $children_flag = if $has_children = none { none } else { $has_children };
+
+    let $result_sets = $distinct.map(|$noun| {
+        let $table = if $history_flag {
+            string::concat($noun, "_H")
+        } else {
+            $noun
+        };
+
+        if $children_flag = true {
+            SELECT VALUE id FROM type::table($table)
+            WHERE REFNO.dbnum = $dbnum AND (REFNO<-pe_owner.in)[0] != none
+        } else if $children_flag = false {
+            SELECT VALUE id FROM type::table($table)
+            WHERE REFNO.dbnum = $dbnum AND (REFNO<-pe_owner.in)[0] == none
+        } else {
+            SELECT VALUE id FROM type::table($table)
+            WHERE REFNO.dbnum = $dbnum
+        }
+    });
+
+    return array::flatten($result_sets);
+};
+
 remove function fn::get_flan_bolt_list;
 define function fn::get_flan_bolt_list($pe:record) {
     if $pe.refno.SPRE == NONE { return NONE; };

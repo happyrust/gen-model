@@ -1181,7 +1181,10 @@ pub fn save_api_deployment_site(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
 
-    let site_id = format!("site_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+    let site_id = format!(
+        "wizard_{}",
+        uuid::Uuid::new_v4().to_string().replace("-", "")
+    );
     let now = chrono::Utc::now().to_rfc3339();
 
     let config_json = serde_json::to_string(&site.config)?;
