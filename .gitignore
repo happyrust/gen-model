@@ -20,3 +20,23 @@ frontend/v0-aios-database-management/node_modules
 # Ignore all node_modules directories
 node_modules/
 **/node_modules/
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE crash reports and temporary files
+rustc-ice-*.txt
+
+# Test and output directories (keep tracked files)
+*.log
+*.db-shm
+*.db-wal
+
+# External repositories (managed separately)
+docs.surrealdb.com/
+external/rs-core/
