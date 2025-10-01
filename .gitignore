@@ -16,3 +16,7 @@ simple_grpc
 
 frontend/v0-aios-database-management/.next
 frontend/v0-aios-database-management/node_modules
+
+# Ignore all node_modules directories
+node_modules/
+**/node_modules/
