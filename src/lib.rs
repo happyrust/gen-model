@@ -185,7 +185,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             build_cate_relate(false).await?;
         }
         // progress_sender.send(100)?;
-        return Ok(());
     }
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
