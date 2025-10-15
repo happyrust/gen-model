@@ -387,6 +387,9 @@ impl AiosDBManager {
     ) -> anyhow::Result<bool> {
         // 遍历所有需要增量更新的文件
         for (path, (basic_info, sesno_range)) in increment_ranges_map {
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            // 跳过复制的副本文件
+            if file_name.contains("-") { continue; };
             println!("正在处理文件: {:?}, 会话号范围: {:?}", path, &sesno_range);
             // 创建并打开PDMS IO对象
             let mut io = PdmsIO::new("", path.clone(), true);
@@ -469,15 +472,12 @@ impl AiosDBManager {
     async fn query_latest_sesno_by_dbnum(dbnum: u32) -> anyhow::Result<u32> {
         // 从dbnum_info_table中查询对应dbnum的最大sesno
         // 使用更高效的查询，直接获取该dbnum的最大sesno值
+        let sql = format!(
+            "math::max(array::flatten([SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {}])); ",
+            dbnum
+        );
         let mut response = SUL_DB
-            .query(format!(
-                r#"
-                math::max(array::flatten([
-                    SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {}
-                ]));
-                "#,
-                dbnum
-            ))
+            .query(&sql)
             .await?;
         let sesno: Option<u32> = response.take(0)?;
         Ok(sesno.unwrap_or_default())
@@ -557,13 +557,14 @@ impl AiosDBManager {
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_latest_sesno()
                     .unwrap_or_default();
-
+                dbg!(&file_latest_sesno);
                 // 查询数据库中的最新会话号
                 // TODO: 对于数据库中不存在的文件，需要考虑全新解析
                 let Ok(db_latest_sesno) = Self::query_latest_sesno_by_dbnum(db_no).await else {
                     // 暂时跳过数据库里没有的文件，后续考虑自动追加文件全新解析
                     continue;
                 };
+                dbg!(&db_latest_sesno);
 
                 // 跳过会话号为0的情况
                 if db_latest_sesno == 0 {
@@ -602,11 +603,14 @@ impl AiosDBManager {
                                 .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
                                 .unwrap_or_default();
 
-                            // 添加到待更新参数列表
-                            params.insert(
-                                path.to_path_buf(),
-                                (basic_info.clone(), nearest_sesno..=file_latest_sesno as i32),
-                            );
+                            // 元件库暂时不执行增量更新
+                            if db_type != "CATA" {
+                                // 添加到待更新参数列表
+                                params.insert(
+                                    path.to_path_buf(),
+                                    (basic_info.clone(), nearest_sesno..=file_latest_sesno as i32),
+                                );
+                            }
                         }
                         // 注意：不再初始化缓存，因为我们已经移除了对缓存的依赖
                     }
@@ -1015,12 +1019,12 @@ impl AiosDBManager {
             &connection_str,
             project_name,
         )
-        .await?;
+            .await?;
         // 分类收集不同操作类型的元素
         let mut insert_elements = Vec::new(); // 新增元素
         let mut update_elements = Vec::new(); // 修改元素
         let mut delete_elements = Vec::new(); // 删除元素
-                                              // 遍历所有会话号下的元素操作数据
+        // 遍历所有会话号下的元素操作数据
         for (sesno, ele_vec) in range_eles {
             for ele_data in ele_vec {
                 match &ele_data.detail {
@@ -1176,7 +1180,7 @@ impl AiosDBManager {
                 match sqlx::query(&sql).execute(pool).await {
                     Ok(result) => {
                         if result.rows_affected() == 0 {
-                            println!("警告: 更新元素时未找到对应记录: {}", sql);
+                            println!("警告: MySQL 更新元素时未找到对应记录: {}", sql);
                         }
                     }
                     Err(e) => {

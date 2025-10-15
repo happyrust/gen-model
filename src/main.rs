@@ -73,7 +73,7 @@ fn get_noun_hash() {
     let noun = "DB";
     let hash = db1_hash(noun);
     dbg!(hash);
-    let hashes = [919309, 640481, 919399];
+    let hashes = [0xE567E, 640481, 919399];
     for hash in hashes {
         let str = db1_dehash(hash);
         dbg!(&hash);
