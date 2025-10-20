@@ -224,6 +224,7 @@ impl AiosDBManager {
     /// let range_eles = io.collect_increment_eles(Some(sesno_range))?;
     /// aios_db_manager.update_mysql_pdms_elements_simple(&range_eles).await?;
     /// ```
+    #[cfg(feature = "sql")]
     pub async fn update_mysql_pdms_elements_simple(
         &self,
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
@@ -1075,6 +1076,7 @@ impl AiosDBManager {
     ///
     /// * `pool` - MySQL连接池
     /// * `insert_elements` - 新增元素列表，包含(refno, sesno, add_data)
+    #[cfg(feature = "sql")]
     async fn process_mysql_insert_elements(
         &self,
         pool: &sqlx::Pool<sqlx::MySql>,
@@ -1144,6 +1146,7 @@ impl AiosDBManager {
     ///
     /// * `pool` - MySQL连接池
     /// * `update_elements` - 修改元素列表，包含(refno, sesno, modify_data)
+    #[cfg(feature = "sql")]
     async fn process_mysql_update_elements(
         &self,
         pool: &sqlx::Pool<sqlx::MySql>,
@@ -1207,6 +1210,7 @@ impl AiosDBManager {
     ///
     /// * `pool` - MySQL连接池
     /// * `delete_elements` - 删除元素列表，包含(refno, sesno)
+    #[cfg(feature = "sql")]
     async fn process_mysql_delete_elements(
         &self,
         pool: &sqlx::Pool<sqlx::MySql>,
