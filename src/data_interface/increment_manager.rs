@@ -402,12 +402,15 @@ impl AiosDBManager {
             // 将元素更新到数据库
             io.update_elements_to_database(&range_eles).await?;
             // 更新MySQL pdms_element表
-            match self.update_mysql_pdms_elements(&range_eles).await {
-                Ok(_) => {
-                    println!("MySQL pdms_element表更新成功");
-                }
-                Err(e) => {
-                    println!("MySQL pdms_element表更新失败: {}", e);
+            #[cfg(feature = "sql")]
+            {
+                match self.update_mysql_pdms_elements(&range_eles).await {
+                    Ok(_) => {
+                        println!("MySQL pdms_element表更新成功");
+                    }
+                    Err(e) => {
+                        println!("MySQL pdms_element表更新失败: {}", e);
+                    }
                 }
             }
             //更新 sesno 到 db_file_info 中
@@ -1005,6 +1008,7 @@ impl AiosDBManager {
     /// - 使用批量SQL操作减少数据库连接开销
     /// - 按操作类型分组处理，提高执行效率
     /// - 分批处理避免SQL语句过长
+    #[cfg(feature = "sql")]
     pub async fn update_mysql_pdms_elements(
         &self,
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
