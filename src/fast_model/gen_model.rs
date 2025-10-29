@@ -88,7 +88,7 @@ impl DbModelInstRefnos {
                         return;
                     }
                 };
-                
+
                 match gen_meshes_in_db(db_option_clone, &target_refnos).await {
                     Ok(()) => {},
                     Err(e) => {
@@ -154,7 +154,7 @@ impl DbModelInstRefnos {
 }
 
 /// 生成几何体数据
-/// 
+///
 /// # 参数
 /// * `manual_refnos` - 手动指定的引用号列表
 /// * `db_option` - 数据库选项配置
@@ -491,7 +491,7 @@ pub async fn gen_geos_data_by_dbnum(
             )
             .await
             .unwrap();
-        // }); 
+        // });
         // all_handles.push(handle);
     }
 
@@ -541,7 +541,7 @@ pub async fn gen_geos_data(
     incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
-    let skip_exist = !db_option.is_replace_mesh();
+    // let skip_exist = !db_option.is_replace_mesh();
     let mut all_handles = FuturesUnordered::new();
     // dbg!(&incr_updates);
     const CHUNK_SIZE: usize = 100;
@@ -550,6 +550,8 @@ pub async fn gen_geos_data(
     let has_manual_refnos = !manual_refnos.is_empty();
     //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
     let debug_root_refnos = db_option.get_all_debug_refnos().await;
+    let has_debug = !debug_root_refnos.is_empty();
+    let skip_exist = !(db_option.is_replace_mesh() || has_manual_refnos || has_debug);
     // dbg!(&debug_root_refnos);
     if !is_incr_update
         //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
@@ -903,13 +905,13 @@ pub async fn query_tubi_size(
 }
 
 /// 从数据库生成 XKT 格式模型
-/// 
+///
 /// # 参数
 /// * `refnos` - 要处理的参考号列表
 /// * `output_path` - 输出文件路径
 /// * `compress` - 是否压缩输出文件
 /// * `db_option` - 数据库配置选项
-/// 
+///
 /// # 返回值
 /// * `anyhow::Result<()>` - 返回生成结果
 pub async fn generate_xtk_from_database(
@@ -944,11 +946,11 @@ pub async fn generate_xtk_from_database(
     // 处理每个根节点（通常是 SITE），递归展开整个层级树
     for &refno in &refnos {
         println!("开始处理根节点: {}", refno);
-        
+
         match process_refno_to_xtk(
-            &mut xkt_file, 
-            refno, 
-            &color_scheme, 
+            &mut xkt_file,
+            refno,
+            &color_scheme,
             &aios_mgr
         ).await {
             Ok((geo_cnt, mesh_cnt, entity_cnt)) => {
@@ -956,7 +958,7 @@ pub async fn generate_xtk_from_database(
                 mesh_count += mesh_cnt;
                 entity_count += entity_cnt;
                 processed_count += 1;
-                println!("完成根节点 {}: {} 个几何体, {} 个网格, {} 个实体", 
+                println!("完成根节点 {}: {} 个几何体, {} 个网格, {} 个实体",
                     refno, geo_cnt, mesh_cnt, entity_cnt);
             }
             Err(e) => {
@@ -1065,7 +1067,7 @@ fn process_node_recursive<'a>(
 
     // 获取当前节点的世界变换
     let world_transform = aios_mgr.get_world_transform_or_default(refno.into()).await;
-    
+
     // 计算局部变换（相对于父节点）
     let local_transform = if let Some(parent_refno) = parent_refno {
         let parent_world_transform = aios_mgr.get_world_transform_or_default(parent_refno.into()).await;
@@ -1091,7 +1093,7 @@ fn process_node_recursive<'a>(
         for (geo_id, geo_data) in &shape_data.inst_geos_map {
             // 为每个几何实例创建几何体
             let geometry_id = format!("geo_{}", geo_data.refno);
-            
+
             // 根据几何参数创建几何体
             let geometry = match create_geometry_from_geo_param(&geometry_id, &geo_data.insts).await {
                 Ok(geo) => geo,
@@ -1121,13 +1123,13 @@ fn process_node_recursive<'a>(
                 let mesh_id = format!("mesh_{}_{}", geo_data.refno, i);
                 let mut mesh = XKTMesh::new(mesh_id.clone(), geometry_id.clone());
                 mesh.set_material(material_id.clone());
-                
+
                 // 使用局部变换而不是世界变换
                 let combined_transform = local_transform * inst.transform;
                 mesh.set_position(combined_transform.translation);
                 mesh.set_rotation(combined_transform.rotation.to_euler(glam::EulerRot::XYZ).into());
                 mesh.set_scale(combined_transform.scale);
-                
+
                 // 设置可见性
                 mesh.set_visible(inst.visible);
 
@@ -1214,19 +1216,19 @@ fn calculate_local_transform(
     // 计算父节点世界变换的逆矩阵
     let parent_matrix = parent_world_transform.compute_matrix();
     let parent_inverse = parent_matrix.inverse();
-    
+
     // 计算子节点的世界变换矩阵
     let world_matrix = world_transform.compute_matrix();
-    
+
     // 局部变换 = 父节点逆变换 * 子节点世界变换
     let local_matrix = parent_inverse * world_matrix;
-    
+
     // 从矩阵中提取变换组件
     bevy_transform::components::Transform::from_matrix(local_matrix)
 }
 
 /// 根据数据库号生成 XKT 文件
-/// 
+///
 /// # 参数
 /// * `dbno` - 数据库号
 /// * `output_path` - 输出文件路径
@@ -1242,12 +1244,12 @@ pub async fn generate_xtk_by_dbno(
     db_option: &DbOption,
 ) -> anyhow::Result<()> {
     println!("正在查询数据库号 {} 的所有参考号...", dbno);
-    
+
     // 查询指定数据库号的所有参考号
     let all_refnos = query_type_refnos_by_dbnum(&[], dbno, None, false).await?;
-    
+
     println!("找到 {} 个参考号", all_refnos.len());
-    
+
     // 调用主要的生成函数
     generate_xtk_from_database(all_refnos, output_path, compress, db_option).await
 }
@@ -1293,7 +1295,7 @@ pub async fn create_geometry_from_geo_param(
 
     // 使用第一个实例的几何参数
     let first_instance = &geo_instances[0];
-    
+
     match &first_instance.geo_param {
         PdmsGeoParam::PrimBox(box_param) => {
             // 使用 size 字段而不是 xlength, ylength, zlength
@@ -1403,22 +1405,22 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 函数 ===");
-        
+
         // 创建测试用的数据库选项
         let mut db_option = DbOption::default();
         db_option.gen_model = true;
         db_option.gen_mesh = false; // 为了测试速度，暂时不生成网格
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         // 测试数据库号（使用一个较小的测试数据库号）
         let test_dbno = 1u32; // 可以根据实际情况调整
         let output_path = "test_output/test_dbno_model.xkt";
-        
+
         println!("开始测试数据库号: {}", test_dbno);
         println!("输出路径: {}", output_path);
-        
+
         // 测试生成 XKT 文件
         let rt = tokio::runtime::Runtime::new()?;
         match rt.block_on(generate_xtk_by_dbno(
@@ -1429,16 +1431,16 @@ mod tests {
         )) {
             Ok(_) => {
                 println!("✅ generate_xtk_by_dbno 测试成功");
-                
+
                 // 验证文件是否存在
                 if Path::new(output_path).exists() {
                     // 验证文件大小
                     let metadata = std::fs::metadata(output_path)?;
                     println!("生成的文件大小: {} 字节", metadata.len());
-                    
+
                     // 基本验证：文件应该有一定的大小
                     assert!(metadata.len() > 100, "生成的文件太小，可能有问题");
-                    
+
                     println!("文件验证通过");
                 } else {
                     println!("⚠️  输出文件不存在，可能是因为数据库中没有数据");
@@ -1446,17 +1448,17 @@ mod tests {
             }
             Err(e) => {
                 eprintln!("❌ generate_xtk_by_dbno 测试失败: {}", e);
-                
+
                 // 对于某些预期的错误（如数据库连接失败），我们可以容忍
                 if e.to_string().contains("数据库") || e.to_string().contains("连接") {
                     println!("⚠️  测试失败是由于数据库连接问题，这在测试环境中是可以接受的");
                     return Ok(());
                 }
-                
+
                 return Err(e);
             }
         }
-        
+
         Ok(())
     }
 
@@ -1464,18 +1466,18 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno_with_invalid_params() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 参数验证 ===");
-        
+
         let db_option = DbOption::default();
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         // 测试无效的输出路径
         let invalid_output_path = "/invalid/path/that/does/not/exist/test.xkt";
         let test_dbno = 1u32;
-        
+
         println!("测试无效输出路径: {}", invalid_output_path);
-        
+
         // 这个测试应该失败，因为路径无效
         let rt = tokio::runtime::Runtime::new()?;
         match rt.block_on(generate_xtk_by_dbno(
@@ -1492,7 +1494,7 @@ mod tests {
                 // 这是预期的行为
             }
         }
-        
+
         Ok(())
     }
 
@@ -1500,18 +1502,18 @@ mod tests {
     #[test]
     fn test_generate_xtk_by_dbno_compression_options() -> anyhow::Result<()> {
         println!("=== 测试 generate_xtk_by_dbno 压缩选项 ===");
-        
+
         let mut db_option = DbOption::default();
         db_option.gen_model = true;
         db_option.gen_mesh = false;
-        
+
         // 创建输出目录
         std::fs::create_dir_all("test_output").ok();
-        
+
         let test_dbno = 1u32;
         let compressed_path = "test_output/test_compressed.xkt";
         let uncompressed_path = "test_output/test_uncompressed.xkt";
-        
+
         // 测试压缩版本
         println!("测试压缩版本...");
         let rt = tokio::runtime::Runtime::new()?;
@@ -1530,7 +1532,7 @@ mod tests {
                 eprintln!("❌ 压缩版本生成失败: {}", e);
             }
         }
-        
+
         // 测试非压缩版本
         println!("测试非压缩版本...");
         match rt.block_on(generate_xtk_by_dbno(
@@ -1548,34 +1550,34 @@ mod tests {
                 eprintln!("❌ 非压缩版本生成失败: {}", e);
             }
         }
-        
+
         // 比较文件大小（如果两个文件都存在）
         if Path::new(compressed_path).exists() && Path::new(uncompressed_path).exists() {
             let compressed_size = std::fs::metadata(compressed_path)?.len();
             let uncompressed_size = std::fs::metadata(uncompressed_path)?.len();
-            
+
             println!("压缩文件大小: {} 字节", compressed_size);
             println!("非压缩文件大小: {} 字节", uncompressed_size);
-            
+
             // 通常压缩文件应该更小（除非文件很小）
             if uncompressed_size > 1000 {
-                assert!(compressed_size <= uncompressed_size, 
+                assert!(compressed_size <= uncompressed_size,
                     "压缩文件应该不大于非压缩文件");
             }
         }
-        
+
         Ok(())
     }
 
     /// 运行所有 generate_xtk_by_dbno 相关的测试
     pub fn run_all_generate_xtk_by_dbno_tests() -> anyhow::Result<()> {
         println!("=== 开始运行 generate_xtk_by_dbno 测试套件 ===");
-        
+
         // 运行各个测试
         test_generate_xtk_by_dbno()?;
         test_generate_xtk_by_dbno_with_invalid_params()?;
         test_generate_xtk_by_dbno_compression_options()?;
-        
+
         println!("=== generate_xtk_by_dbno 测试套件完成 ===");
         Ok(())
     }

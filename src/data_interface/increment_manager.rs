@@ -39,6 +39,7 @@ use crate::api::element::gen_pdms_element_insert_sql;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::helper::delete_inst_relate_cascade;
 use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
@@ -401,7 +402,7 @@ impl AiosDBManager {
             // 收集指定范围内的增量元素
             let range_eles = io.collect_increment_eles(Some(sesno_range))?;
             // 将元素更新到数据库
-            io.update_elements_to_database(&range_eles).await?;
+            io.update_elements_to_database(&range_eles, false).await?;
             // 更新MySQL pdms_element表
             #[cfg(feature = "sql")]
             {
@@ -1415,7 +1416,8 @@ impl AiosDBManager {
             // 第一步：删除修改元素的旧inst_relate数据
             // 这是必要的清理步骤，确保不会有残留的旧数据影响新模型
             if has_delete_tasks {
-                self.delete_inst_relate_data(&refnos_to_delete_inst_relate)
+                let refnos_vec: Vec<RefnoEnum> = refnos_to_delete_inst_relate.into_iter().collect();
+                delete_inst_relate_cascade(&refnos_vec, 1000)
                     .await?;
             }
 
@@ -1450,80 +1452,8 @@ impl AiosDBManager {
         Ok(())
     }
 
-    /// 删除指定参考号的inst_relate数据
-    ///
-    /// 当元素被修改时，需要先删除其旧的inst_relate数据，然后重新生成。
-    /// 该方法会级联删除相关的geo_relate数据，确保数据的完整性。
-    ///
-    /// # 参数
-    ///
-    /// * `refnos` - 需要删除inst_relate数据的参考号集合
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
-    ///
-    /// # 删除策略
-    ///
-    /// 采用级联删除的方式，按以下顺序删除：
-    /// 1. 删除geo_relate指向的几何数据
-    /// 2. 删除geo_relate关系数据
-    /// 3. 删除inst_relate的输出关系
-    /// 4. 删除inst_relate记录本身
-    ///
-    /// # 性能优化
-    ///
-    /// - 使用批处理机制，每批处理100个元素
-    /// - 避免SQL语句过长导致的性能问题
-    /// - 提供详细的进度日志便于监控
-    async fn delete_inst_relate_data(&self, refnos: &HashSet<RefnoEnum>) -> anyhow::Result<()> {
-        use crate::SUL_DB;
 
-        // 如果没有需要删除的数据，直接返回
-        if refnos.is_empty() {
-            return Ok(());
-        }
 
-        println!("开始删除 {} 个元素的inst_relate数据", refnos.len());
-
-        // 分批处理，避免SQL语句过长导致性能问题
-        let refnos_vec: Vec<&RefnoEnum> = refnos.iter().collect();
-
-        // 按批次处理删除操作
-        for chunk in refnos_vec.chunks(BATCH_SIZE) {
-            let mut delete_sqls = Vec::new();
-
-            for &refno in chunk {
-                // 构建级联删除SQL语句
-                // 按照依赖关系的逆序进行删除，确保数据完整性
-                let delete_sql = format!(
-                    r#"
-                    delete array::flatten(select value out->geo_relate.out from {});
-                    delete array::flatten(select value out->geo_relate from {});
-                    delete array::flatten(select value out from {});
-                    delete {};"#,
-                    refno.to_inst_relate_key(), // 删除geo_relate指向的几何数据
-                    refno.to_inst_relate_key(), // 删除geo_relate关系数据
-                    refno.to_inst_relate_key(), // 删除inst_relate的输出关系
-                    refno.to_inst_relate_key()  // 删除inst_relate记录本身
-                );
-                delete_sqls.push(delete_sql);
-            }
-
-            // 执行批量删除操作
-            if !delete_sqls.is_empty() {
-                let batch_sql = delete_sqls.join("");
-                println!("执行删除SQL，批次大小: {}", chunk.len());
-                SUL_DB
-                    .query(batch_sql)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("删除inst_relate数据失败: {}", e))?;
-            }
-        }
-
-        println!("inst_relate数据删除完成");
-        Ok(())
-    }
 
     /// 更新指定参考号及其子树的世界变换矩阵
     ///

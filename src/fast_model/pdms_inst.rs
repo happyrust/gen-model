@@ -10,6 +10,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::helper::delete_inst_relate_cascade;
 // use crate::fast_model::EXIST_MESH_GEOS;
 
 /// 初始化数据库的 inst_relate 表的索引
@@ -412,29 +413,8 @@ pub async fn save_instance_data(
 
     //把delete 提前，因为后面的插入都是异步的执行
     if replace_exist {
-        let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(chunk_size) {
-            let mut delete_sql_vec = vec![];
-
-            for &k in chunk {
-                let v = inst_mgr.inst_info_map.get(k).unwrap();
-                let delete_old_sql = format!(
-                    r#"
-                delete array::flatten(select value out->geo_relate.out from {0});
-                delete array::flatten(select value out->geo_relate from {0});
-                delete array::flatten(select value out from {0});
-                delete {0};"#,
-                    v.refno.to_inst_relate_key()
-                );
-                delete_sql_vec.push(delete_old_sql);
-            }
-            //如果需要删除之前的，先执行
-            if !delete_sql_vec.is_empty() {
-                let sql = delete_sql_vec.join("");
-                // 这里需要同步等待删除操作完成
-                SUL_DB.query(sql).await.unwrap();
-            }
-        }
+        let keys = inst_mgr.inst_info_map.keys().copied().collect::<Vec<_>>();
+        delete_inst_relate_cascade(&keys, chunk_size).await?;
     }
 
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
