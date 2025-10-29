@@ -1,7 +1,7 @@
 [package]
 name = "aios-database"
 version = "0.1.3"
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "aios_database"
@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "project_hd","sql"]
+default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
 gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
 truck = []
@@ -160,15 +160,15 @@ features = [
 #panic = 'abort'
 #codegen-units = 1
 
-[patch."https://gitee.com/happydpc/rs-core.git"]
-aios_core = { path = "../new-crates/aios-core" }
+# [patch."https://gitee.com/happydpc/rs-core.git"]
+# aios_core = { path = "../new-crates/aios-core" }
 
-[patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
-parse_pdms_db = { path = "../aios-parse-pdms" }
+# [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
+# parse_pdms_db = { path = "../aios-parse-pdms" }
 
-[patch."https://gitee.com/happydpc/pdms-io.git"]
-pdms_io = { path = "../pdms-io" }
+# [patch."https://gitee.com/happydpc/pdms-io.git"]
+# pdms_io = { path = "../pdms-io" }
 
 
-[patch."https://gitee.com/happydpc/surrealdb.git"]
-surrealdb = { path = "../surrealdb/crates/sdk" }
+# [patch."https://gitee.com/happydpc/surrealdb.git"]
+# surrealdb = { path = "../surrealdb/crates/sdk" }
