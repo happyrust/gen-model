@@ -428,6 +428,23 @@ impl AiosDBManager {
                 }
             }
             // 执行相关的模型更新操作
+            let mut db_option = self.db_option.clone();
+            let refnos = range_eles.values()
+                .flat_map(|vec| vec.iter())
+                .map(|p| p.refno).collect::<Vec<RefU64>>();
+            let mut owner = HashSet::new();
+            // 直接重新生成owner的模型，防止修改管件之后，tubi发生变化，没有修改到
+            for refno in refnos {
+                if let Ok(Some(pe)) = self.get_owner_ele_node(refno).await {
+                    // 如果owner的类型是zone或者site，证明修改的不是模型，则可以跳过
+                    if pe.noun == "SITE" || pe.noun == "ZONE" { continue; };
+                    owner.insert(pe.refno.to_pdms_str());
+                }
+            }
+            dbg!(&owner);
+            db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
+            db_option.replace_mesh = Some(true);
+            gen_all_geos_data(vec![], &db_option, None).await?;
             // self.process_model_updates(&range_eles, basic_info.pdms_header.db_num).await?;
         }
 

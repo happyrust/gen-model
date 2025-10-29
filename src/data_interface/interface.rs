@@ -6,6 +6,7 @@ use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{GmParam, ScomInfo};
 use aios_core::pdms_types::*;
+use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::spine::Spine3D;
 use bevy_transform::prelude::*;
 use dashmap::mapref::one::Ref;
@@ -78,7 +79,7 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 
-    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
+    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<SPdmsElement>>;
 
     fn get_cur_project(&self) -> &str;
 

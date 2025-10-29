@@ -10,7 +10,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::types::AttrVal::*;
-use aios_core::{CataContext, rs_surreal};
+use aios_core::{CataContext, rs_surreal, SUL_DB};
 use aios_core::{AttrMap, RefU64Vec};
 use anyhow::anyhow;
 
@@ -32,6 +32,7 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
+use aios_core::pe::SPdmsElement;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::*;
@@ -231,14 +232,15 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得owner
-    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
+    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<SPdmsElement>> {
         let mut node = None;
-        // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
-        //     let parent = self.get_owner(refno);
-        //     if parent.is_valid() {
-        //         node = Some(query_ele_node(parent, &project_pool).await?);
-        //     }
-        // }
+        // let sql = format!("select ")
+        let sql = format!(
+            r#"select * omit id from only {}.owner limit 1;"#,
+            refno.to_pe_key()
+        );
+        let mut response = SUL_DB.query(sql).await?;
+        let pe: Option<SPdmsElement> = response.take(0)?;
         Ok(node)
     }
 

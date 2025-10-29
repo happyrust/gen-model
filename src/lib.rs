@@ -235,7 +235,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         let mut time = Instant::now();
         build_room_relations(&db_option).await.unwrap();
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
-        update_cal_equip().await?;
+        // update_cal_equip().await?;
         update_cal_bran_component().await?;
     }
 
