@@ -180,7 +180,6 @@ pub async fn gen_all_geos_data(
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
-                dbg!("hello");
                 save_instance_data(&shape_insts, has_debug).await.unwrap();
                 println!("Insert manual shape insts: {}", shape_insts.inst_cnt());
             }

@@ -12,8 +12,8 @@ use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
-use aios_core::{clear_all_caches, get_default_name, get_pe, SUL_DB};
-use aios_core::{get_db_option, RefU64Vec, RefnoEnum};
+use aios_core::{RefU64Vec, RefnoEnum, get_db_option};
+use aios_core::{SUL_DB, clear_all_caches, get_default_name, get_pe};
 
 // 异步和工具库导入
 use futures::StreamExt;
@@ -25,7 +25,7 @@ use notify::{RecursiveMode, Watcher};
 use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
-use pdms_io::sync::compress::{execute_compress, CompressOptions};
+use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use pdms_io::watch::PdmsWatcher;
 
 // 其他依赖导入
@@ -36,10 +36,10 @@ use walkdir::WalkDir;
 
 // 本地模块导入
 use crate::api::element::gen_pdms_element_insert_sql;
+use crate::data_interface::helper::delete_inst_relate_cascade;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::data_interface::helper::delete_inst_relate_cascade;
 use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
@@ -391,7 +391,9 @@ impl AiosDBManager {
         for (path, (basic_info, sesno_range)) in increment_ranges_map {
             let file_name = path.file_name().unwrap().to_str().unwrap();
             // 跳过复制的副本文件
-            if file_name.contains("-") { continue; };
+            if file_name.contains("-") {
+                continue;
+            };
             println!("正在处理文件: {:?}, 会话号范围: {:?}", path, &sesno_range);
             // 创建并打开PDMS IO对象
             let mut io = PdmsIO::new("", path.clone(), true);
@@ -430,21 +432,35 @@ impl AiosDBManager {
             }
             // 执行相关的模型更新操作
             let mut db_option = self.db_option.clone();
-            let refnos = range_eles.values()
+            let refnos = range_eles
+                .values()
                 .flat_map(|vec| vec.iter())
-                .map(|p| p.refno).collect::<Vec<RefU64>>();
+                .map(|p| p.refno)
+                .collect::<Vec<RefU64>>();
             let mut owner = HashSet::new();
             // 直接重新生成owner的模型，防止修改管件之后，tubi发生变化，没有修改到
             for refno in refnos {
                 if let Ok(Some(pe)) = self.get_owner_ele_node(refno).await {
                     // 如果owner的类型是zone或者site，证明修改的不是模型，则可以跳过
-                    if pe.noun == "SITE" || pe.noun == "ZONE" { continue; };
+                    if pe.noun == "SITE" || pe.noun == "ZONE" {
+                        continue;
+                    };
                     owner.insert(pe.refno.to_pdms_str());
                 }
             }
             dbg!(&owner);
-            db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
-            gen_all_geos_data(vec![], &db_option, None).await?;
+            if !owner.is_empty() {
+                // 确保 gen_model 为 true，以便触发模型生成和数据发送
+                db_option.gen_model = true;
+                db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
+                println!(
+                    "开始生成增量更新的模型数据，owner数量: {}",
+                    db_option.debug_root_refnos.as_ref().unwrap().len()
+                );
+                gen_all_geos_data(vec![], &db_option, None).await?;
+            } else {
+                println!("没有找到需要更新的owner元件，跳过模型生成");
+            }
             // self.process_model_updates(&range_eles, basic_info.pdms_header.db_num).await?;
         }
 
@@ -497,9 +513,7 @@ impl AiosDBManager {
             "math::max(array::flatten([SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {}])); ",
             dbnum
         );
-        let mut response = SUL_DB
-            .query(&sql)
-            .await?;
+        let mut response = SUL_DB.query(&sql).await?;
         let sesno: Option<u32> = response.take(0)?;
         Ok(sesno.unwrap_or_default())
     }
@@ -615,8 +629,11 @@ impl AiosDBManager {
                     if let Ok(basic_info) = io.get_page_basic_info() {
                         // 如果文件的会话号大于数据库中的会话号，说明需要增量更新
                         if file_latest_sesno > db_latest_sesno {
-                            println!("发现需要增量更新的文件: {:?}, 当前数据库最大sesno: {db_latest_sesno}, \
-                                    文件最新sesno: {file_latest_sesno}", &file_name);
+                            println!(
+                                "发现需要增量更新的文件: {:?}, 当前数据库最大sesno: {db_latest_sesno}, \
+                                    文件最新sesno: {file_latest_sesno}",
+                                &file_name
+                            );
 
                             // 获取最接近的大于指定值的会话号
                             // 注意: db_latest_sesno + 1 不一定存在，需要找最近的会话号
@@ -1041,7 +1058,7 @@ impl AiosDBManager {
             &connection_str,
             project_name,
         )
-            .await?;
+        .await?;
         // 分类收集不同操作类型的元素
         let mut insert_elements = Vec::new(); // 新增元素
         let mut update_elements = Vec::new(); // 修改元素
@@ -1363,9 +1380,9 @@ impl AiosDBManager {
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
         db_num: i32,
     ) -> anyhow::Result<()> {
+        use crate::SUL_DB;
         use crate::fast_model::occ_generate::process_meshes_update_db_deep;
         use crate::get_db_option;
-        use crate::SUL_DB;
         use std::collections::HashSet;
 
         // 收集需要生成模型的参考号集合
@@ -1433,8 +1450,7 @@ impl AiosDBManager {
             // 这是必要的清理步骤，确保不会有残留的旧数据影响新模型
             if has_delete_tasks {
                 let refnos_vec: Vec<RefnoEnum> = refnos_to_delete_inst_relate.into_iter().collect();
-                delete_inst_relate_cascade(&refnos_vec, 1000)
-                    .await?;
+                delete_inst_relate_cascade(&refnos_vec, 1000).await?;
             }
 
             // 第二步：批量生成新的模型数据
@@ -1467,9 +1483,6 @@ impl AiosDBManager {
 
         Ok(())
     }
-
-
-
 
     /// 更新指定参考号及其子树的世界变换矩阵
     ///
