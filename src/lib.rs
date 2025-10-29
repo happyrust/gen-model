@@ -87,6 +87,7 @@ extern crate derive_more;
 
 #[macro_use]
 extern crate nom;
+extern crate anyhow;
 
 // pub async fn start_sync_task(
 //     db_option: Arc<DbOption>,

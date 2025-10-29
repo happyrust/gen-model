@@ -233,15 +233,13 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得owner
     async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<SPdmsElement>> {
-        let mut node = None;
-        // let sql = format!("select ")
         let sql = format!(
             r#"select * omit id from only {}.owner limit 1;"#,
             refno.to_pe_key()
         );
         let mut response = SUL_DB.query(sql).await?;
         let pe: Option<SPdmsElement> = response.take(0)?;
-        Ok(node)
+        Ok(pe)
     }
 
     ///获得当前的项目名称

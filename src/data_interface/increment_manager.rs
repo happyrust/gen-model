@@ -402,7 +402,7 @@ impl AiosDBManager {
             // 收集指定范围内的增量元素
             let range_eles = io.collect_increment_eles(Some(sesno_range))?;
             // 将元素更新到数据库
-            io.update_elements_to_database(&range_eles, false).await?;
+            io.update_elements_to_database(&range_eles).await?;
             // 更新MySQL pdms_element表
             #[cfg(feature = "sql")]
             {
@@ -444,7 +444,6 @@ impl AiosDBManager {
             }
             dbg!(&owner);
             db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
-            db_option.replace_mesh = Some(true);
             gen_all_geos_data(vec![], &db_option, None).await?;
             // self.process_model_updates(&range_eles, basic_info.pdms_header.db_num).await?;
         }

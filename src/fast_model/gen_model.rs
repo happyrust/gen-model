@@ -4,8 +4,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::pdms_inst::{save_instance_data};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
-    process_meshes_update_db_deep, resolve_desi_comp, shared,
+    resolve_desi_comp, shared,
 };
+use crate::process_meshes_update_db_deep;
 use crate::xkt_generator::*;
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
@@ -172,14 +173,15 @@ pub async fn gen_all_geos_data(
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.debug_root_refnos.is_some();
     let time = Instant::now();
-
+    dbg!(&has_debug);
     if is_incr_update || has_manual_refnos || has_debug {
         // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let (sender, receiver) = flume::unbounded();
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
-                save_instance_data(&shape_insts, false).await.unwrap();
+                dbg!("hello");
+                save_instance_data(&shape_insts, has_debug).await.unwrap();
                 println!("Insert manual shape insts: {}", shape_insts.inst_cnt());
             }
         });

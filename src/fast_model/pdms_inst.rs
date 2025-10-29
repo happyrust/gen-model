@@ -412,8 +412,10 @@ pub async fn save_instance_data(
     let mut db_futures = FuturesUnordered::new();
 
     //把delete 提前，因为后面的插入都是异步的执行
+    dbg!(&replace_exist);
     if replace_exist {
         let keys = inst_mgr.inst_info_map.keys().copied().collect::<Vec<_>>();
+        dbg!(&keys);
         delete_inst_relate_cascade(&keys, chunk_size).await?;
     }
 

@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use aios_core::{RefnoEnum, SUL_DB};
 
 /// 级联删除 inst_relate 及其关联的 geo_relate 和 inst_geo 数据
@@ -28,25 +29,22 @@ pub async fn delete_inst_relate_cascade(
         for refno in chunk {
             inst_ids.push(refno.to_inst_relate_key());
             let delete_sql = format!(
-                r#"
-                    delete array::flatten(select value [out, id, in] from {}->inst_info->geo_relate);
-                "#,
-                refno.to_inst_relate_key()
+                r#"delete array::flatten(select value [out, id, in] from {}->inst_info->geo_relate);delete from {}"#,
+                refno.to_inst_relate_key(),refno.to_inst_relate_key()
             );
             delete_sql_vec.push(delete_sql);
         }
+        dbg!(&delete_sql_vec);
 
         if !delete_sql_vec.is_empty() {
-            let mut sql = "BEGIN TRANSACTION;\n".to_string();
-            sql.push_str(&delete_sql_vec.join(""));
-            sql.push_str(&format!("delete [{}];", inst_ids.join(",")));
-            sql.push_str("\nCOMMIT TRANSACTION;");
-
-            // println!("Delete Sql is {}", &sql);
-            SUL_DB
-                .query(sql)
-                .await
-                .expect("delete model insts info failed");
+            let sql = delete_sql_vec.join("");
+            match SUL_DB.query(&sql).await {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&sql);
+                    return Err(anyhow!(e.to_string()));
+                }
+            }
         }
     }
 
