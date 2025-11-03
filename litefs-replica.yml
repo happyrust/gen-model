@@ -1,0 +1,36 @@
+# LiteFS 副本节点配置
+# 用于上海、广州等其他服务器
+
+# FUSE 挂载点
+fuse:
+  dir: "/litefs"
+  allow-other: true
+
+# LiteFS 数据存储目录
+data:
+  dir: "/var/lib/litefs"
+
+# 主节点选举配置（静态模式）
+lease:
+  type: "static"
+  # 当前节点为副本
+  is-primary: false
+
+# 副本配置
+replica:
+  # 主节点地址（需要替换为实际的主节点 IP）
+  primary-url: "http://PRIMARY_IP:20202"
+  # 连接超时
+  connect-timeout: "10s"
+
+# HTTP 管理 API
+http:
+  addr: ":20203"
+
+# 日志配置
+log:
+  level: "info"
+
+# 退出策略
+exit:
+  on-error: false

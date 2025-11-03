@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>空间查询工具 - AIOS Database</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 400px 1fr;
+            gap: 20px;
+        }
+        
+        .panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        
+        .query-panel h2 {
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .input-group {
+            margin-bottom: 15px;
+        }
+        
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 500;
+        }
+        
+        .input-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        
+        .input-row input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        .input-row input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .query-mode {
+            margin: 20px 0;
+        }
+        
+        .mode-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .mode-tab {
+            flex: 1;
+            padding: 10px;
+            background: #f5f5f5;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .mode-tab.active {
+            background: #667eea;
+            color: white;
+        }
+        
+        .preset-queries {
+            margin-top: 20px;
+        }
+        
+        .preset-btn {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: left;
+        }
+        
+        .preset-btn:hover {
+            background: #e9ecef;
+            transform: translateX(5px);
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5a67d8;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .results-panel {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .results-stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-card {
+            flex: 1;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            color: #6c757d;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        
+        .results-container {
+            flex: 1;
+            overflow-y: auto;
+            max-height: 600px;
+        }
+        
+        .result-item {
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        
+        .result-item:hover {
+            background: #e9ecef;
+            transform: translateX(5px);
+            box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+        }
+        
+        .result-item.selected {
+            background: #667eea;
+            color: white;
+        }
+        
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        
+        .result-refno {
+            font-weight: bold;
+            font-size: 16px;
+        }
+        
+        .result-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 14px;
+        }
+        
+        .coord-label {
+            color: #6c757d;
+            font-weight: 500;
+        }
+        
+        .result-item.selected .coord-label {
+            color: rgba(255,255,255,0.8);
+        }
+        
+        .export-menu {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .export-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            z-index: 1000;
+            margin-top: 5px;
+        }
+        
+        .export-dropdown.show {
+            display: block;
+        }
+        
+        .export-option {
+            padding: 10px 20px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        
+        .export-option:hover {
+            background: #f8f9fa;
+        }
+        
+        .visualization-panel {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .viz-canvas {
+            width: 100%;
+            height: 400px;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            position: relative;
+        }
+        
+        .loading {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            z-index: 900;
+        }
+        
+        .loading.show {
+            display: block;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .filter-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+        }
+        
+        .filter-section h3 {
+            margin-bottom: 10px;
+            color: #555;
+        }
+        
+        .filter-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        
+        .distance-slider {
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        .distance-value {
+            text-align: center;
+            color: #667eea;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 空间查询工具</h1>
+            <p>交互式 3D 空间索引查询系统</p>
+        </div>
+        
+        <div class="main-content">
+            <!-- 查询面板 -->
+            <div class="panel query-panel">
+                <h2>查询参数</h2>
+                
+                <div class="query-mode">
+                    <div class="mode-tabs">
+                        <button class="mode-tab active" data-mode="box">边界框查询</button>
+                        <button class="mode-tab" data-mode="refno">参考号查询</button>
+                        <button class="mode-tab" data-mode="radius">半径查询</button>
+                    </div>
+                </div>
+                
+                <!-- 边界框查询 -->
+                <div id="box-query" class="query-content">
+                    <div class="input-group">
+                        <label>X 轴范围 (mm)</label>
+                        <div class="input-row">
+                            <input type="number" id="minx" placeholder="最小值" value="-1000">
+                            <input type="number" id="maxx" placeholder="最大值" value="1000">
+                        </div>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label>Y 轴范围 (mm)</label>
+                        <div class="input-row">
+                            <input type="number" id="miny" placeholder="最小值" value="-1000">
+                            <input type="number" id="maxy" placeholder="最大值" value="1000">
+                        </div>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label>Z 轴范围 (mm)</label>
+                        <div class="input-row">
+                            <input type="number" id="minz" placeholder="最小值" value="-1000">
+                            <input type="number" id="maxz" placeholder="最大值" value="1000">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 参考号查询 -->
+                <div id="refno-query" class="query-content" style="display: none;">
+                    <div class="input-group">
+                        <label>参考号</label>
+                        <input type="text" id="target-refno" placeholder="输入参考号，如 111200001" style="width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    
+                    <div class="input-group">
+                        <label>查询距离 (mm)</label>
+                        <input type="range" id="query-distance" class="distance-slider" min="0" max="5000" value="500">
+                        <div class="distance-value" id="distance-value">500 mm</div>
+                    </div>
+                </div>
+                
+                <!-- 半径查询 -->
+                <div id="radius-query" class="query-content" style="display: none;">
+                    <div class="input-group">
+                        <label>中心点坐标 (mm)</label>
+                        <div class="input-row">
+                            <input type="number" id="center-x" placeholder="X" value="0">
+                            <input type="number" id="center-y" placeholder="Y" value="0">
+                        </div>
+                        <div class="input-row" style="margin-top: 10px;">
+                            <input type="number" id="center-z" placeholder="Z" value="0">
+                            <input type="number" id="radius" placeholder="半径" value="1000">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 预设查询 -->
+                <div class="preset-queries">
+                    <h3>快速查询</h3>
+                    <button class="preset-btn" onclick="applyPreset('small')">
+                        📦 小范围查询 (2m x 2m x 2m)
+                    </button>
+                    <button class="preset-btn" onclick="applyPreset('medium')">
+                        📐 中等范围 (10m x 10m x 10m)
+                    </button>
+                    <button class="preset-btn" onclick="applyPreset('large')">
+                        🌍 大范围查询 (50m x 50m x 50m)
+                    </button>
+                    <button class="preset-btn" onclick="applyPreset('all')">
+                        🌐 查询所有 (100m x 100m x 100m)
+                    </button>
+                </div>
+                
+                <!-- 过滤选项 -->
+                <div class="filter-section">
+                    <h3>结果过滤</h3>
+                    <input type="text" class="filter-input" id="noun-filter" placeholder="按名称过滤（如: PIPE, VALVE）">
+                    <input type="text" class="filter-input" id="refno-filter" placeholder="按参考号过滤">
+                </div>
+                
+                <!-- 操作按钮 -->
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="executeQuery()">
+                        执行查询
+                    </button>
+                    <button class="btn btn-secondary" onclick="clearQuery()">
+                        清空
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 结果面板 -->
+            <div class="panel results-panel">
+                <div class="results-header">
+                    <h2>查询结果</h2>
+                    <div class="export-menu">
+                        <button class="btn btn-secondary" onclick="toggleExportMenu()">
+                            导出 ▼
+                        </button>
+                        <div class="export-dropdown" id="export-dropdown">
+                            <div class="export-option" onclick="exportResults('json')">导出为 JSON</div>
+                            <div class="export-option" onclick="exportResults('csv')">导出为 CSV</div>
+                            <div class="export-option" onclick="exportResults('excel')">导出为 Excel</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="results-stats">
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-count">0</div>
+                        <div class="stat-label">查询结果数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="query-time">0ms</div>
+                        <div class="stat-label">查询耗时</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="selected-count">0</div>
+                        <div class="stat-label">已选择</div>
+                    </div>
+                </div>
+                
+                <div class="results-container" id="results-container">
+                    <p style="text-align: center; color: #999; padding: 40px;">
+                        暂无查询结果<br>
+                        请设置查询参数并点击"执行查询"
+                    </p>
+                </div>
+                
+                <!-- 可视化面板 -->
+                <div class="visualization-panel">
+                    <h3>空间可视化</h3>
+                    <div class="viz-canvas" id="viz-canvas">
+                        <canvas id="3d-canvas" style="width: 100%; height: 100%;"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 加载提示 -->
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <p>正在查询...</p>
+    </div>
+    
+    <script>
+        let selectedItems = new Set();
+        let queryResults = [];
+        
+        // 切换查询模式
+        document.querySelectorAll('.mode-tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+                this.classList.add('active');
+                
+                document.querySelectorAll('.query-content').forEach(content => {
+                    content.style.display = 'none';
+                });
+                
+                const mode = this.dataset.mode;
+                document.getElementById(`${mode}-query`).style.display = 'block';
+            });
+        });
+        
+        // 距离滑块
+        const distanceSlider = document.getElementById('query-distance');
+        const distanceValue = document.getElementById('distance-value');
+        if (distanceSlider) {
+            distanceSlider.addEventListener('input', function() {
+                distanceValue.textContent = `${this.value} mm`;
+            });
+        }
+        
+        // 应用预设
+        function applyPreset(preset) {
+            const presets = {
+                small: { minx: -1000, maxx: 1000, miny: -1000, maxy: 1000, minz: -1000, maxz: 1000 },
+                medium: { minx: -5000, maxx: 5000, miny: -5000, maxy: 5000, minz: -5000, maxz: 5000 },
+                large: { minx: -25000, maxx: 25000, miny: -25000, maxy: 25000, minz: -25000, maxz: 25000 },
+                all: { minx: -50000, maxx: 50000, miny: -50000, maxy: 50000, minz: -50000, maxz: 50000 }
+            };
+            
+            const values = presets[preset];
+            Object.keys(values).forEach(key => {
+                const input = document.getElementById(key);
+                if (input) input.value = values[key];
+            });
+        }
+        
+        // 执行查询
+        async function executeQuery() {
+            const loading = document.getElementById('loading');
+            loading.classList.add('show');
+            
+            const activeMode = document.querySelector('.mode-tab.active').dataset.mode;
+            let queryParams = {};
+            
+            if (activeMode === 'box') {
+                queryParams = {
+                    minx: parseFloat(document.getElementById('minx').value),
+                    maxx: parseFloat(document.getElementById('maxx').value),
+                    miny: parseFloat(document.getElementById('miny').value),
+                    maxy: parseFloat(document.getElementById('maxy').value),
+                    minz: parseFloat(document.getElementById('minz').value),
+                    maxz: parseFloat(document.getElementById('maxz').value)
+                };
+            } else if (activeMode === 'refno') {
+                const refno = document.getElementById('target-refno').value;
+                const distance = parseFloat(document.getElementById('query-distance').value);
+                queryParams = {
+                    refno: refno,
+                    distance: distance,
+                    mode: 'refno'
+                };
+            } else if (activeMode === 'radius') {
+                const centerX = parseFloat(document.getElementById('center-x').value);
+                const centerY = parseFloat(document.getElementById('center-y').value);
+                const centerZ = parseFloat(document.getElementById('center-z').value);
+                const radius = parseFloat(document.getElementById('radius').value);
+                queryParams = {
+                    minx: centerX - radius,
+                    maxx: centerX + radius,
+                    miny: centerY - radius,
+                    maxy: centerY + radius,
+                    minz: centerZ - radius,
+                    maxz: centerZ + radius
+                };
+            }
+            
+            const startTime = performance.now();
+            
+            try {
+                const params = new URLSearchParams(queryParams);
+                const response = await fetch(`/api/sqlite-spatial/query?${params}`);
+                const data = await response.json();
+                
+                const endTime = performance.now();
+                const queryTime = Math.round(endTime - startTime);
+                
+                if (data.success) {
+                    queryResults = data.results || [];
+                    displayResults(queryResults, queryTime);
+                    visualizeResults(queryResults);
+                } else {
+                    alert('查询失败: ' + data.error);
+                }
+            } catch (error) {
+                alert('查询错误: ' + error.message);
+            } finally {
+                loading.classList.remove('show');
+            }
+        }
+        
+        // 显示结果
+        function displayResults(results, queryTime) {
+            const container = document.getElementById('results-container');
+            const totalCount = document.getElementById('total-count');
+            const queryTimeEl = document.getElementById('query-time');
+            
+            totalCount.textContent = results.length;
+            queryTimeEl.textContent = `${queryTime}ms`;
+            
+            if (results.length === 0) {
+                container.innerHTML = `
+                    <p style="text-align: center; color: #999; padding: 40px;">
+                        没有找到匹配的结果
+                    </p>
+                `;
+                return;
+            }
+            
+            // 应用过滤
+            let filteredResults = results;
+            const nounFilter = document.getElementById('noun-filter').value.toLowerCase();
+            const refnoFilter = document.getElementById('refno-filter').value;
+            
+            if (nounFilter || refnoFilter) {
+                filteredResults = results.filter(item => {
+                    const matchNoun = !nounFilter || (item.noun && item.noun.toLowerCase().includes(nounFilter));
+                    const matchRefno = !refnoFilter || item.refno.toString().includes(refnoFilter);
+                    return matchNoun && matchRefno;
+                });
+            }
+            
+            container.innerHTML = filteredResults.map((item, index) => `
+                <div class="result-item ${selectedItems.has(item.refno) ? 'selected' : ''}" 
+                     data-refno="${item.refno}" 
+                     onclick="toggleSelection(${item.refno})">
+                    <div class="result-header">
+                        <span class="result-refno">RefNo: ${item.refno}</span>
+                        <span>${item.noun || 'Unknown'}</span>
+                    </div>
+                    ${item.aabb ? `
+                        <div class="result-details">
+                            <div>
+                                <span class="coord-label">Min:</span> 
+                                (${item.aabb.min.x.toFixed(2)}, ${item.aabb.min.y.toFixed(2)}, ${item.aabb.min.z.toFixed(2)})
+                            </div>
+                            <div>
+                                <span class="coord-label">Max:</span> 
+                                (${item.aabb.max.x.toFixed(2)}, ${item.aabb.max.y.toFixed(2)}, ${item.aabb.max.z.toFixed(2)})
+                            </div>
+                        </div>
+                    ` : '<div class="result-details">No AABB data</div>'}
+                </div>
+            `).join('');
+        }
+        
+        // 切换选择
+        function toggleSelection(refno) {
+            if (selectedItems.has(refno)) {
+                selectedItems.delete(refno);
+            } else {
+                selectedItems.add(refno);
+            }
+            
+            const item = document.querySelector(`[data-refno="${refno}"]`);
+            if (item) {
+                item.classList.toggle('selected');
+            }
+            
+            document.getElementById('selected-count').textContent = selectedItems.size;
+        }
+        
+        // 清空查询
+        function clearQuery() {
+            document.querySelectorAll('input[type="number"], input[type="text"]').forEach(input => {
+                input.value = '';
+            });
+            document.getElementById('results-container').innerHTML = `
+                <p style="text-align: center; color: #999; padding: 40px;">
+                    暂无查询结果<br>
+                    请设置查询参数并点击"执行查询"
+                </p>
+            `;
+            document.getElementById('total-count').textContent = '0';
+            document.getElementById('query-time').textContent = '0ms';
+            document.getElementById('selected-count').textContent = '0';
+            selectedItems.clear();
+            queryResults = [];
+        }
+        
+        // 导出菜单
+        function toggleExportMenu() {
+            const dropdown = document.getElementById('export-dropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        // 导出结果
+        function exportResults(format) {
+            const dropdown = document.getElementById('export-dropdown');
+            dropdown.classList.remove('show');
+            
+            if (queryResults.length === 0) {
+                alert('没有可导出的数据');
+                return;
+            }
+            
+            const exportData = selectedItems.size > 0 
+                ? queryResults.filter(item => selectedItems.has(item.refno))
+                : queryResults;
+            
+            if (format === 'json') {
+                const jsonStr = JSON.stringify(exportData, null, 2);
+                downloadFile(jsonStr, 'spatial_query_results.json', 'application/json');
+            } else if (format === 'csv') {
+                const csv = convertToCSV(exportData);
+                downloadFile(csv, 'spatial_query_results.csv', 'text/csv');
+            } else if (format === 'excel') {
+                alert('Excel 导出功能开发中...');
+            }
+        }
+        
+        // 转换为 CSV
+        function convertToCSV(data) {
+            const headers = ['RefNo', 'Noun', 'MinX', 'MinY', 'MinZ', 'MaxX', 'MaxY', 'MaxZ'];
+            const rows = data.map(item => [
+                item.refno,
+                item.noun || '',
+                item.aabb ? item.aabb.min.x : '',
+                item.aabb ? item.aabb.min.y : '',
+                item.aabb ? item.aabb.min.z : '',
+                item.aabb ? item.aabb.max.x : '',
+                item.aabb ? item.aabb.max.y : '',
+                item.aabb ? item.aabb.max.z : ''
+            ]);
+            
+            return [headers, ...rows].map(row => row.join(',')).join('\n');
+        }
+        
+        // 下载文件
+        function downloadFile(content, filename, contentType) {
+            const blob = new Blob([content], { type: contentType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        // 简单的 3D 可视化
+        function visualizeResults(results) {
+            const canvas = document.getElementById('3d-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // 设置画布大小
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            // 清空画布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (results.length === 0) return;
+            
+            // 计算边界
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            results.forEach(item => {
+                if (item.aabb) {
+                    minX = Math.min(minX, item.aabb.min.x);
+                    minY = Math.min(minY, item.aabb.min.y);
+                    maxX = Math.max(maxX, item.aabb.max.x);
+                    maxY = Math.max(maxY, item.aabb.max.y);
+                }
+            });
+            
+            const width = maxX - minX || 1;
+            const height = maxY - minY || 1;
+            const scale = Math.min(canvas.width / width, canvas.height / height) * 0.8;
+            const offsetX = (canvas.width - width * scale) / 2;
+            const offsetY = (canvas.height - height * scale) / 2;
+            
+            // 绘制结果
+            results.forEach(item => {
+                if (item.aabb) {
+                    const x = (item.aabb.min.x - minX) * scale + offsetX;
+                    const y = (item.aabb.min.y - minY) * scale + offsetY;
+                    const w = (item.aabb.max.x - item.aabb.min.x) * scale;
+                    const h = (item.aabb.max.y - item.aabb.min.y) * scale;
+                    
+                    ctx.strokeStyle = selectedItems.has(item.refno) ? '#667eea' : '#ddd';
+                    ctx.lineWidth = selectedItems.has(item.refno) ? 2 : 1;
+                    ctx.strokeRect(x, y, w, h);
+                    
+                    if (selectedItems.has(item.refno)) {
+                        ctx.fillStyle = 'rgba(102, 126, 234, 0.2)';
+                        ctx.fillRect(x, y, w, h);
+                    }
+                }
+            });
+        }
+        
+        // 点击外部关闭导出菜单
+        document.addEventListener('click', function(event) {
+            const exportMenu = document.querySelector('.export-menu');
+            const dropdown = document.getElementById('export-dropdown');
+            if (!exportMenu.contains(event.target)) {
+                dropdown.classList.remove('show');
+            }
+        });
+    </script>
+</body>
+</html>

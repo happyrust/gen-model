@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>增量更新检测 - AIOS Database</title>
+    <link rel="stylesheet" href="/static/simple-tailwind.css">
+    <link rel="stylesheet" href="/static/simple-icons.css">
+    <style>
+        .status-idle { color: #6b7280; }
+        .status-scanning { color: #3b82f6; }
+        .status-changes-detected { color: #f59e0b; }
+        .status-syncing { color: #10b981; }
+        .status-completed { color: #059669; }
+        .status-error { color: #ef4444; }
+
+        .change-added { background-color: #dcfce7; }
+        .change-modified { background-color: #fef3c7; }
+        .change-deleted { background-color: #fee2e2; }
+
+        @keyframes pulse-ring {
+            0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+            100% { box-shadow: 0 0 0 20px rgba(59, 130, 246, 0); }
+        }
+
+        .scanning-animation {
+            animation: pulse-ring 2s infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- 导航栏 -->
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <i class="fas fa-sync-alt text-2xl text-blue-600 mr-3"></i>
+                    <h1 class="text-xl font-bold text-gray-900">增量更新检测中心</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <button id="refresh-all" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        <i class="fas fa-refresh mr-2"></i>刷新状态
+                    </button>
+                    <button id="config-btn" class="px-4 py-2 text-sm bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                        <i class="fas fa-cog mr-2"></i>配置
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <!-- 统计概览 -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">监控站点</p>
+                        <p class="text-2xl font-bold text-gray-900" id="total-sites">0</p>
+                    </div>
+                    <i class="fas fa-server text-3xl text-blue-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">待同步项</p>
+                        <p class="text-2xl font-bold text-amber-600" id="total-pending">0</p>
+                    </div>
+                    <i class="fas fa-clock text-3xl text-amber-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">已同步项</p>
+                        <p class="text-2xl font-bold text-green-600" id="total-synced">0</p>
+                    </div>
+                    <i class="fas fa-check-circle text-3xl text-green-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">上次检查</p>
+                        <p class="text-sm font-medium text-gray-900" id="last-check">--</p>
+                    </div>
+                    <i class="fas fa-history text-3xl text-gray-500"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- 站点列表 -->
+        <div class="bg-white rounded-lg shadow">
+            <div class="px-6 py-4 border-b">
+                <h2 class="text-lg font-semibold text-gray-900">部署站点状态</h2>
+            </div>
+            <div class="p-6">
+                <div id="sites-container" class="space-y-4">
+                    <!-- 站点卡片将通过 JavaScript 动态生成 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 详情模态框 -->
+    <div id="detail-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white z-1010">
+            <div class="flex justify-between items-center pb-3 border-b">
+                <h3 class="text-xl font-bold text-gray-900" id="modal-title">站点详情</h3>
+                <button onclick="closeDetailModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            <div class="mt-4" id="modal-content">
+                <!-- 详情内容将动态加载 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 配置模态框 -->
+    <div id="config-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-1000">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white z-1010">
+            <div class="flex justify-between items-center pb-3 border-b">
+                <h3 class="text-xl font-bold text-gray-900">增量更新配置</h3>
+                <button onclick="closeConfigModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            <div class="mt-4 space-y-4">
+                <div>
+                    <label class="flex items-center">
+                        <input type="checkbox" id="auto-detect" class="mr-2">
+                        <span>自动检测变更</span>
+                    </label>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">检测间隔（秒）</label>
+                    <input type="number" id="detect-interval" value="300" min="60" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="flex items-center">
+                        <input type="checkbox" id="auto-sync" class="mr-2">
+                        <span>自动同步</span>
+                    </label>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">批量同步大小</label>
+                    <input type="number" id="sync-batch-size" value="10" min="1" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="flex items-center">
+                        <input type="checkbox" id="notification-enabled" class="mr-2">
+                        <span>启用通知</span>
+                    </label>
+                </div>
+                <div class="flex justify-end space-x-2 pt-4">
+                    <button onclick="closeConfigModal()" class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400">
+                        取消
+                    </button>
+                    <button onclick="saveConfig()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                        保存
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/incremental_update.js"></script>
+</body>
+</html>

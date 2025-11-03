@@ -1,0 +1,701 @@
+"use client"
+
+import { useState, useEffect } from "react"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Progress } from "@/components/ui/progress"
+import { 
+  Database, 
+  Zap, 
+  Settings, 
+  CheckCircle2, 
+  AlertCircle, 
+  Loader2,
+  Play,
+  Clock,
+  Cpu,
+  HardDrive,
+  MemoryStick
+} from "lucide-react"
+import { useTaskCreation } from "@/hooks/use-task-creation"
+import type { TaskCreationFormData, TaskType, TaskPriority } from "@/types/task-creation"
+
+interface TaskCreationWizardProps {
+  onTaskCreated?: (taskId: string) => void
+  onCancel?: () => void
+}
+
+const TASK_TYPES: { value: TaskType; label: string; description: string; icon: React.ReactNode }[] = [
+  {
+    value: 'DataParsingWizard',
+    label: '数据解析任务',
+    description: '解析PDMS数据库文件，提取几何和属性信息',
+    icon: <Database className="h-5 w-5" />
+  },
+  {
+    value: 'ModelGeneration',
+    label: '模型生成任务',
+    description: '基于解析数据生成3D模型和网格',
+    icon: <Zap className="h-5 w-5" />
+  },
+  {
+    value: 'SpatialTreeGeneration',
+    label: '空间树生成任务',
+    description: '构建空间索引树，优化查询性能',
+    icon: <Settings className="h-5 w-5" />
+  },
+  {
+    value: 'FullSync',
+    label: '全量同步任务',
+    description: '完整同步所有数据到目标数据库',
+    icon: <Database className="h-5 w-5" />
+  },
+  {
+    value: 'IncrementalSync',
+    label: '增量同步任务',
+    description: '仅同步变更的数据到目标数据库',
+    icon: <Clock className="h-5 w-5" />
+  }
+]
+
+const PRIORITY_OPTIONS: { value: TaskPriority; label: string; color: string }[] = [
+  { value: 'Low', label: '低', color: 'bg-gray-100 text-gray-800' },
+  { value: 'Normal', label: '普通', color: 'bg-blue-100 text-blue-800' },
+  { value: 'High', label: '高', color: 'bg-orange-100 text-orange-800' },
+  { value: 'Critical', label: '紧急', color: 'bg-red-100 text-red-800' }
+]
+
+export function TaskCreationWizard({ onTaskCreated, onCancel }: TaskCreationWizardProps) {
+  const [currentStep, setCurrentStep] = useState(1)
+  const [formData, setFormData] = useState<TaskCreationFormData>({
+    taskName: '',
+    taskType: 'DataParsingWizard',
+    siteId: '',
+    priority: 'Normal',
+    description: '',
+    parameters: {}
+  })
+  const [previewData, setPreviewData] = useState<any>(null)
+  const [nameValidation, setNameValidation] = useState<{ available: boolean; message?: string } | null>(null)
+  const [isValidatingName, setIsValidatingName] = useState(false)
+
+  const {
+    sites,
+    templates,
+    loading,
+    error,
+    loadSites,
+    loadTemplates,
+    validateName,
+    previewConfig,
+    submitTask,
+    setError
+  } = useTaskCreation()
+
+  useEffect(() => {
+    loadSites()
+    loadTemplates()
+  }, [loadSites, loadTemplates])
+
+  // 验证任务名称
+  const handleNameValidation = async (name: string) => {
+    if (!name.trim()) {
+      setNameValidation(null)
+      return
+    }
+
+    setIsValidatingName(true)
+    try {
+      const result = await validateName(name)
+      setNameValidation(result)
+    } catch (err) {
+      setNameValidation({ available: false, message: '验证失败' })
+    } finally {
+      setIsValidatingName(false)
+    }
+  }
+
+  // 更新表单数据
+  const updateFormData = (updates: Partial<TaskCreationFormData>) => {
+    setFormData(prev => ({ ...prev, ...updates }))
+    
+    // 如果更新了任务名称，进行验证
+    if (updates.taskName !== undefined) {
+      handleNameValidation(updates.taskName)
+    }
+  }
+
+  // 预览任务配置
+  const handlePreview = async () => {
+    try {
+      const preview = await previewConfig(formData)
+      setPreviewData(preview)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '预览失败')
+    }
+  }
+
+  // 提交任务
+  const handleSubmit = async () => {
+    try {
+      const result = await submitTask(formData)
+      onTaskCreated?.(result.taskId)
+    } catch (err) {
+      // 错误已在hook中处理
+    }
+  }
+
+  // 下一步
+  const nextStep = () => {
+    if (currentStep < 4) {
+      setCurrentStep(prev => prev + 1)
+    }
+  }
+
+  // 上一步
+  const prevStep = () => {
+    if (currentStep > 1) {
+      setCurrentStep(prev => prev - 1)
+    }
+  }
+
+  // 验证当前步骤
+  const validateCurrentStep = (): boolean => {
+    switch (currentStep) {
+      case 1:
+        return formData.taskName.trim() !== '' && 
+               formData.taskType !== '' &&
+               (nameValidation?.available ?? false)
+      case 2:
+        return formData.siteId !== ''
+      case 3:
+        return true // 参数配置步骤总是有效的
+      case 4:
+        return true // 预览步骤总是有效的
+      default:
+        return false
+    }
+  }
+
+  const canProceed = validateCurrentStep()
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 space-y-6">
+      {/* 头部 */}
+      <div className="text-center">
+        <h1 className="text-3xl font-bold mb-2">创建新任务</h1>
+        <p className="text-muted-foreground">配置并创建解析或模型生成任务</p>
+      </div>
+
+      {/* 步骤指示器 */}
+      <div className="flex items-center justify-center space-x-4">
+        {[1, 2, 3, 4].map((step) => (
+          <div key={step} className="flex items-center">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+              step <= currentStep 
+                ? 'bg-primary text-primary-foreground' 
+                : 'bg-muted text-muted-foreground'
+            }`}>
+              {step}
+            </div>
+            {step < 4 && (
+              <div className={`w-12 h-0.5 mx-2 ${
+                step < currentStep ? 'bg-primary' : 'bg-muted'
+              }`} />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* 错误提示 */}
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {/* 步骤内容 */}
+      <div className="space-y-6">
+        {/* 步骤1: 基础信息 */}
+        {currentStep === 1 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>基础信息</CardTitle>
+              <CardDescription>设置任务名称、类型和优先级</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* 任务名称 */}
+              <div className="space-y-2">
+                <Label htmlFor="taskName">任务名称 *</Label>
+                <div className="relative">
+                  <Input
+                    id="taskName"
+                    value={formData.taskName}
+                    onChange={(e) => updateFormData({ taskName: e.target.value })}
+                    placeholder="输入任务名称"
+                    className={nameValidation?.available === false ? 'border-red-500' : ''}
+                  />
+                  {isValidatingName && (
+                    <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin" />
+                  )}
+                </div>
+                {nameValidation && (
+                  <div className={`text-sm ${
+                    nameValidation.available ? 'text-green-600' : 'text-red-600'
+                  }`}>
+                    {nameValidation.message}
+                  </div>
+                )}
+              </div>
+
+              {/* 任务类型 */}
+              <div className="space-y-3">
+                <Label>任务类型 *</Label>
+                <RadioGroup 
+                  value={formData.taskType} 
+                  onValueChange={(value) => updateFormData({ taskType: value as TaskType })}
+                >
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {TASK_TYPES.map((type) => (
+                      <div
+                        key={type.value}
+                        className={`flex items-start space-x-3 p-4 rounded-lg border-2 transition-colors ${
+                          formData.taskType === type.value
+                            ? 'border-primary bg-primary/5'
+                            : 'border-border hover:border-primary/50'
+                        }`}
+                      >
+                        <RadioGroupItem value={type.value} id={type.value} className="mt-1" />
+                        <Label htmlFor={type.value} className="flex-1 cursor-pointer">
+                          <div className="flex items-center gap-2 mb-1">
+                            {type.icon}
+                            <span className="font-medium">{type.label}</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{type.description}</p>
+                        </Label>
+                      </div>
+                    ))}
+                  </div>
+                </RadioGroup>
+              </div>
+
+              {/* 优先级 */}
+              <div className="space-y-2">
+                <Label>优先级</Label>
+                <Select 
+                  value={formData.priority} 
+                  onValueChange={(value) => updateFormData({ priority: value as TaskPriority })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PRIORITY_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        <div className="flex items-center gap-2">
+                          <Badge className={option.color}>{option.label}</Badge>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* 描述 */}
+              <div className="space-y-2">
+                <Label htmlFor="description">任务描述</Label>
+                <Textarea
+                  id="description"
+                  value={formData.description}
+                  onChange={(e) => updateFormData({ description: e.target.value })}
+                  placeholder="可选：描述任务的目的或特殊要求"
+                  rows={3}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 步骤2: 选择站点 */}
+        {currentStep === 2 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>选择部署站点</CardTitle>
+              <CardDescription>选择要执行任务的部署站点</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                  <span>加载站点中...</span>
+                </div>
+              ) : (
+                <RadioGroup 
+                  value={formData.siteId} 
+                  onValueChange={(value) => updateFormData({ siteId: value })}
+                >
+                  <div className="space-y-3">
+                    {sites.map((site) => (
+                      <div
+                        key={site.id}
+                        className={`flex items-center space-x-3 p-4 rounded-lg border-2 transition-colors ${
+                          formData.siteId === site.id
+                            ? 'border-primary bg-primary/5'
+                            : 'border-border hover:border-primary/50'
+                        }`}
+                      >
+                        <RadioGroupItem value={site.id} id={site.id} />
+                        <Label htmlFor={site.id} className="flex-1 cursor-pointer">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="font-semibold">{site.name}</div>
+                              <div className="text-sm text-muted-foreground">
+                                环境: {site.environment} · 状态: {site.status}
+                              </div>
+                              {site.description && (
+                                <div className="text-sm text-muted-foreground mt-1">
+                                  {site.description}
+                                </div>
+                              )}
+                            </div>
+                            <Badge variant={site.status === 'running' ? 'default' : 'secondary'}>
+                              {site.status}
+                            </Badge>
+                          </div>
+                        </Label>
+                      </div>
+                    ))}
+                  </div>
+                </RadioGroup>
+              )}
+              {sites.length === 0 && !loading && (
+                <div className="text-center py-8 text-muted-foreground">
+                  暂无可用的部署站点
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 步骤3: 任务参数 */}
+        {currentStep === 3 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>任务参数</CardTitle>
+              <CardDescription>配置任务的具体参数</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TaskParametersForm 
+                taskType={formData.taskType}
+                parameters={formData.parameters}
+                onParametersChange={(params) => updateFormData({ parameters: params })}
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 步骤4: 预览和确认 */}
+        {currentStep === 4 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>预览和确认</CardTitle>
+              <CardDescription>确认任务配置并创建任务</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TaskPreview 
+                formData={formData}
+                previewData={previewData}
+                onPreview={handlePreview}
+              />
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
+      {/* 底部按钮 */}
+      <div className="flex justify-between">
+        <div>
+          {currentStep > 1 && (
+            <Button variant="outline" onClick={prevStep}>
+              上一步
+            </Button>
+          )}
+        </div>
+        <div className="flex gap-2">
+          {onCancel && (
+            <Button variant="outline" onClick={onCancel}>
+              取消
+            </Button>
+          )}
+          {currentStep < 4 ? (
+            <Button onClick={nextStep} disabled={!canProceed}>
+              下一步
+            </Button>
+          ) : (
+            <Button onClick={handleSubmit} disabled={loading || !canProceed}>
+              {loading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  创建中...
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4 mr-2" />
+                  创建任务
+                </>
+              )}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 任务参数配置组件
+interface TaskParametersFormProps {
+  taskType: TaskType
+  parameters: any
+  onParametersChange: (parameters: any) => void
+}
+
+function TaskParametersForm({ taskType, parameters, onParametersChange }: TaskParametersFormProps) {
+  const updateParameter = (key: string, value: any) => {
+    onParametersChange({ ...parameters, [key]: value })
+  }
+
+  return (
+    <div className="space-y-6">
+      {taskType === 'DataParsingWizard' && (
+        <>
+          <div className="space-y-3">
+            <Label>解析模式</Label>
+            <RadioGroup 
+              value={parameters.parseMode || 'all'} 
+              onValueChange={(value) => updateParameter('parseMode', value)}
+            >
+              <div className="space-y-2">
+                <div className="flex items-center space-x-2">
+                  <RadioGroupItem value="all" id="all" />
+                  <Label htmlFor="all">全部解析</Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <RadioGroupItem value="dbnum" id="dbnum" />
+                  <Label htmlFor="dbnum">指定数据库编号</Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <RadioGroupItem value="refno" id="refno" />
+                  <Label htmlFor="refno">指定参考号</Label>
+                </div>
+              </div>
+            </RadioGroup>
+          </div>
+
+          {parameters.parseMode === 'dbnum' && (
+            <div className="space-y-2">
+              <Label htmlFor="dbnum">数据库编号</Label>
+              <Input
+                id="dbnum"
+                type="number"
+                value={parameters.dbnum || ''}
+                onChange={(e) => updateParameter('dbnum', parseInt(e.target.value) || undefined)}
+                placeholder="例如: 1112"
+              />
+            </div>
+          )}
+
+          {parameters.parseMode === 'refno' && (
+            <div className="space-y-2">
+              <Label htmlFor="refno">参考号</Label>
+              <Input
+                id="refno"
+                value={parameters.refno || ''}
+                onChange={(e) => updateParameter('refno', e.target.value)}
+                placeholder="例如: REF-001"
+              />
+            </div>
+          )}
+        </>
+      )}
+
+      {taskType === 'ModelGeneration' && (
+        <div className="space-y-4">
+          <div className="space-y-3">
+            <Label>生成选项</Label>
+            <div className="space-y-2">
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="generateModels"
+                  checked={parameters.generateModels || false}
+                  onCheckedChange={(checked) => updateParameter('generateModels', checked)}
+                />
+                <Label htmlFor="generateModels">生成3D模型</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="generateMesh"
+                  checked={parameters.generateMesh || false}
+                  onCheckedChange={(checked) => updateParameter('generateMesh', checked)}
+                />
+                <Label htmlFor="generateMesh">生成网格</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="generateSpatialTree"
+                  checked={parameters.generateSpatialTree || false}
+                  onCheckedChange={(checked) => updateParameter('generateSpatialTree', checked)}
+                />
+                <Label htmlFor="generateSpatialTree">生成空间树</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="applyBooleanOperation"
+                  checked={parameters.applyBooleanOperation || false}
+                  onCheckedChange={(checked) => updateParameter('applyBooleanOperation', checked)}
+                />
+                <Label htmlFor="applyBooleanOperation">应用布尔运算</Label>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="meshTolRatio">网格容差比例</Label>
+            <Input
+              id="meshTolRatio"
+              type="number"
+              step="0.1"
+              value={parameters.meshTolRatio || 3.0}
+              onChange={(e) => updateParameter('meshTolRatio', parseFloat(e.target.value) || 3.0)}
+              placeholder="3.0"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 通用参数 */}
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="maxConcurrent">最大并发数</Label>
+          <Input
+            id="maxConcurrent"
+            type="number"
+            min="1"
+            max="10"
+            value={parameters.maxConcurrent || 1}
+            onChange={(e) => updateParameter('maxConcurrent', parseInt(e.target.value) || 1)}
+            placeholder="1"
+          />
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <Checkbox
+            id="parallelProcessing"
+            checked={parameters.parallelProcessing || false}
+            onCheckedChange={(checked) => updateParameter('parallelProcessing', checked)}
+          />
+          <Label htmlFor="parallelProcessing">启用并行处理</Label>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 任务预览组件
+interface TaskPreviewProps {
+  formData: TaskCreationFormData
+  previewData: any
+  onPreview: () => void
+}
+
+function TaskPreview({ formData, previewData, onPreview }: TaskPreviewProps) {
+  return (
+    <div className="space-y-6">
+      {/* 任务信息预览 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label className="text-sm font-medium">任务名称</Label>
+          <p className="text-sm">{formData.taskName}</p>
+        </div>
+        <div className="space-y-2">
+          <Label className="text-sm font-medium">任务类型</Label>
+          <p className="text-sm">{TASK_TYPES.find(t => t.value === formData.taskType)?.label}</p>
+        </div>
+        <div className="space-y-2">
+          <Label className="text-sm font-medium">优先级</Label>
+          <Badge className={PRIORITY_OPTIONS.find(p => p.value === formData.priority)?.color}>
+            {PRIORITY_OPTIONS.find(p => p.value === formData.priority)?.label}
+          </Badge>
+        </div>
+        <div className="space-y-2">
+          <Label className="text-sm font-medium">部署站点</Label>
+          <p className="text-sm">{formData.siteId}</p>
+        </div>
+      </div>
+
+      {/* 资源需求预览 */}
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <Label className="text-sm font-medium">资源需求预估</Label>
+          <Button variant="outline" size="sm" onClick={onPreview}>
+            刷新预估
+          </Button>
+        </div>
+        
+        {previewData ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+              <MemoryStick className="h-4 w-4" />
+              <div>
+                <p className="text-sm font-medium">内存</p>
+                <p className="text-xs text-muted-foreground">{previewData.resourceRequirements.memory}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+              <Cpu className="h-4 w-4" />
+              <div>
+                <p className="text-sm font-medium">CPU</p>
+                <p className="text-xs text-muted-foreground">{previewData.resourceRequirements.cpu}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+              <HardDrive className="h-4 w-4" />
+              <div>
+                <p className="text-sm font-medium">磁盘</p>
+                <p className="text-xs text-muted-foreground">{previewData.resourceRequirements.disk}</p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-4 text-muted-foreground">
+            点击"刷新预估"获取资源需求信息
+          </div>
+        )}
+      </div>
+
+      {/* 警告信息 */}
+      {previewData?.warnings && previewData.warnings.length > 0 && (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            <div className="space-y-1">
+              <p className="font-medium">注意事项：</p>
+              {previewData.warnings.map((warning: string, index: number) => (
+                <p key={index} className="text-sm">• {warning}</p>
+              ))}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  )
+}
+

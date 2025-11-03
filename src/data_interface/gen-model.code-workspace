@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../new-crates/pdms-io"
+		},
+		{
+			"path": "../../../new-crates/aios-core"
+		}
+	],
+	"settings": {
+		"workbench.colorCustomizations": {
+			"activityBar.background": "#531633",
+			"titleBar.activeBackground": "#751F47",
+			"titleBar.activeForeground": "#FEFCFD"
+		},
+		"git.ignoreLimitWarning": true
+	}
+}

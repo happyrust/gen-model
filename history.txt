@@ -1,0 +1,101 @@
+#V2
+-- 统计各个表的记录数
+SELECT count() FROM pe GROUP ALL;
+SELECT count() FROM type GROUP ALL;
+SELECT count() FROM att GROUP ALL;
+-- 查看 inst_relate 数据
+SELECT * FROM inst_relate WHERE in = pe:17496_201377;
+-- 统计总数
+SELECT count() FROM inst_relate GROUP ALL;
+-- 查看相关的 inst_info 和 inst_geo
+SELECT * FROM inst_info WHERE refno = 17496_201377;
+SELECT * FROM geo_relate WHERE in.refno = 17496_201377;
+-- 检查inst_relate, inst_info, inst_geo是否有数据
+SELECT count() FROM inst_relate GROUP ALL;
+SELECT count() FROM inst_info GROUP ALL;
+SELECT count() FROM inst_geo GROUP ALL;
+SELECT count() FROM geo_relate GROUP ALL;
+-- 如果有数据,查看 inst_relate 的示例
+SELECT * FROM inst_relate LIMIT 3;
+SELECT * FROM inst_geo;
+-- 检查自定义函数是否存在
+INFO FOR DB;
+-- 手动测试 inst_relate 插入 (简化版,不使用函数)
+INSERT RELATION INTO inst_relate {  id: inst_relate:17496_201377,  in: pe:17496_201377,  out: inst_info:⟨1⟩,  world_trans: trans:⟨0⟩,  generic: 'Normal',  has_cata_neg: false,  solid: true};
+-- 查询插入结果
+SELECT * FROM inst_relate WHERE in = pe:17496_201377;
+SELECT count() FROM inst_relate GROUP ALL;
+SELECT count() FROM inst_info GROUP ALL;
+SELECT count() FROM geo_relate GROUP ALL;
+SELECT * FROM inst_info WHERE refno = 17496_201377;
+SELECT * FROM geo_relate WHERE in.refno = 17496_201377;
+-- 查看 inst_geo 的 geo_hash
+SELECT * FROM inst_geo;
+-- 查看 geo_relate 中的 geo_hash
+SELECT * FROM geo_relate;
+-- 查看该 refno 的可见后代实例
+SELECT * FROM inst_relate WHERE in = pe:17496_201377;
+-- 检查是否有geo_relate
+SELECT * FROM geo_relate WHERE in.refno = 17496_201377;
+SELECT count() FROM inst_relate GROUP ALL;
+SELECT count() FROM inst_info GROUP ALL;
+SELECT count() FROM geo_relate GROUP ALL;
+SELECT count() FROM inst_geo GROUP ALL;
+SELECT count() FROM inst_relate GROUP ALL;
+SELECT count() FROM geo_relate GROUP ALL;
+SELECT * FROM geo_relate WHERE geom_refno = 17496_201377;
+SELECT * FROM inst_info WHERE refno = 17496_201377;
+SELECT id, inst_key, refno FROM inst_geo LIMIT 5;
+SELECT count() FROM geo_relate WHERE geom_refno = 17496_201377 GROUP ALL;
+SELECT count() FROM inst_relate WHERE in = pe:17496_201377 GROUP ALL;
+SELECT count() FROM inst_info WHERE refno = 17496_201377 GROUP ALL;
+SELECT count() FROM geo_relate GROUP ALL;
+SELECT count() FROM inst_relate GROUP ALL;
+SELECT count() FROM inst_info GROUP ALL;
+SELECT count() FROM inst_geo GROUP ALL;
+SELECT * FROM geo_relate LIMIT 1;
+SELECT * FROM inst_info LIMIT 1;
+SELECT *, in.id as inst_info_id, out.id as inst_geo_id FROM geo_relate LIMIT 1;
+SELECT count() FROM pe WHERE refno = 17496_201377 GROUP ALL;
+SELECT * FROM pe WHERE refno = 17496_201377 LIMIT 1;
+SELECT count() FROM pe GROUP ALL;
+SELECT count() FROM type GROUP ALL;
+SELECT count() FROM att GROUP ALL;
+SELECT * FROM pe:17496_201377;
+SELECT noun, name, refno FROM pe:17496_201376;
+SELECT noun, name, refno FROM (SELECT owner FROM pe:17496_201376)[0].owner;
+USE NS `1516` DB ams1112_0001; SELECT * FROM pe:⟨17496_201377⟩;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM pe GROUP ALL;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM inst_relate GROUP ALL;
+USE NS `1516` DB ams1112_0001; SELECT * FROM pe:⟨17496_201377⟩;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM pe GROUP ALL;
+USE NS `1516` DB ams1112_0001; SELECT * FROM pe:⟨17496_201377⟩;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM pe GROUP ALL;
+USE NS `1516` DB AvevaMarineSample; SELECT count() FROM pe GROUP ALL;
+USE NS `1516` DB AvevaMarineSample; SELECT * FROM pe:⟨17496_201377⟩;
+USE NS `1516` DB AvevaMarineSample; SELECT count() FROM inst_relate GROUP ALL;
+USE NS `1516` DB AvevaMarineSample; SELECT count() FROM type GROUP ALL; SELECT count() FROM att GROUP ALL;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM pe GROUP ALL;
+USE NS `1516` DB ams1112_0001; SELECT * FROM pe:⟨17496_201377⟩;
+USE NS `1516` DB ams1112_0001; SELECT count() FROM inst_relate GROUP ALL; SELECT * FROM inst_relate LIMIT 1;
+USE NS `1516` DB AvevaMarineSample; SELECT count() FROM inst_relate GROUP ALL; SELECT * FROM pe:⟨17496_201377⟩;
+-- 查找有 meshed=true 的几何体
+SELECT in, out.meshed FROM inst_relate->geo_relate WHERE out.meshed = true LIMIT 10;
+SELECT COUNT() FROM inst_geo GROUP ALL;
+SELECT refno, noun FROM ONLY pe:17496_171099
+SELECT count() as total FROM inst_relate WHERE in.id != none AND world_trans.d != none;
+SELECT count() FROM inst_relate LIMIT 1;
+SELECT * FROM inst_relate LIMIT 3;
+INFO FOR DB;
+SELECT count() FROM pe LIMIT 1;
+SELECT count() as total FROM inst_relate;
+SELECT count() as with_aabb FROM inst_relate WHERE aabb != none;
+SELECT count() FROM inst_relate;
+SELECT * FROM inst_relate LIMIT 3;
+SELECT * FROM inst_relate:17496_201377;
+INFO FOR TABLE inst_relate;
+SELECT * FROM pe WHERE refno CONTAINS '16596' AND refno CONTAINS '9189' LIMIT 1;
+SELECT count() FROM pe;
+SELECT * FROM pe WHERE refno = '16596_9189' LIMIT 1;
+SELECT refno, type, name FROM pe WHERE parent_refno = '16596_9189' AND dbno = 1112 LIMIT 5;
+SELECT count() FROM pe WHERE dbno = 1112;

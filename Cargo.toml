@@ -1,0 +1,246 @@
+[package]
+name = "aios-database"
+version = "0.2.0"
+edition = "2024"
+
+[lib]
+name = "aios_database"
+path = "src/lib.rs"
+
+[[bin]]
+name = "web_ui"
+path = "src/bin/web_ui.rs"
+required-features = ["web_ui"]
+
+[[bin]]
+name = "db_option_ui"
+path = "src/bin/db_option_ui/main.rs"
+required-features = ["web_ui"]
+
+# [[bin]]
+# name = "gen_xkt_new"
+# path = "src/bin/gen_xkt_new.rs"
+# required-features = ["gen_model"]
+
+
+[features]
+default = ["ws", "gen_model", "manifold", "project_hd", "sqlite-index", "surreal-save"]
+gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
+console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能
+truck = []
+local = []
+ws = []
+debug_obj_export = []
+debug_expr = ["aios_core/debug_expr"]
+mqtt = []
+viewer = []                                                           #是否开启视图
+gen_model = ["aios_core/gen_model"]
+manifold = ["aios_core/manifold"]
+sql = ["dep:sea-orm", "dep:sqlx"]
+debug_parse = ["pdms_io/debug_parse"]
+surreal-save = []
+mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保存PE数据到内存KV数据库
+project_hd = []
+project_hh = []
+profile = []                                                          #性能分析，包含tracing功能
+web_ui = ["dep:axum", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_ui"]              #Web UI功能
+sqlite-index = ["dep:rusqlite"]
+debug_e3d = []
+
+# 查询提供者选择 (用于模型生成时的层级查询)
+query-surreal = []                          # 使用 SurrealDB 查询 (默认)
+
+[dependencies]
+config = "0.14.1"
+bincode = "1.3.3"
+anyhow = "1.0.57"
+serde_json = "1.0.81"
+hex = "0.4.3"
+once_cell = "1.12.0"
+futures = "^0.3"
+smol_str = "0.3.2"
+itertools = "0.14.0"
+lazy_static = "1.4.0"
+approx = "0.5.1"
+#flate2 = "1.0.23"
+log = "0.4.17"
+
+# MQTT 服务器和客户端
+rumqttc = "0.25.0"
+# rumqttd = "0.19" # 暂时注释掉，rumqttd 需要单独的项目
+
+# 实时通信（axum-extra 需要和 axum 版本匹配）
+# axum-extra = { version = "0.9", features = ["typed-header", "sse"] }
+futures-util = "0.3"
+
+memchr = "2.5.0"
+nom = "7.1.1"
+nom-derive = "0.10.1"
+regex = "1.12.1"
+calamine = { git = "https://gitee.com/happydpc/calamine.git" }
+#sled = "0.34.7"
+derive_more = { version = "1.0.0", features = ["deref", "deref_mut"] }
+bitflags = "2.9.4"
+bitvec = "1.0.0"
+chrono = "0.4.22"
+nalgebra = { version = "0.34.1", features = [
+    "serde",
+    "convert-glam030",
+] }
+parry3d = { version = "0.25.0", features = [
+    "serde-serialize",
+] }
+parry2d = { version = "0.25.0", features = [
+    "serde-serialize",
+] }
+parse_pdms_db = { path = "../aios-parse-pdms" }
+aios_core = { path = "../rs-core", default-features = false, features = [] }
+# Note: web_ui feature is added conditionally via [features] section
+bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_transform", features = ["serialize"] }
+bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
+pdms_io = { path = "../pdms-io" }
+dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
+gen-xkt = { path = "../gen-xkt" }
+
+# 通用依赖
+uuid = { version = "1.0", features = ["v4", "serde"] }
+base64 = "0.22"
+flate2 = "1.0"
+byteorder = "1.5"
+num_cpus = "1.16"
+reqwest = { version = "0.12", features = ["json"] }
+
+clap = { version = "4.3.5", features = ["derive"] }
+dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
+tokio = { version = "1.47.1", features = ["full"] }
+serde = { version = "1.0.137", features = ["derive"] }
+id_tree = { version = "1.8.0", features = ["serde_support"] }
+glam = { version = "0.30.8", features = ["serde", "rkyv"] }
+cached = "0.56.0"
+rkyv = { version = "0.8.12", features = ["hashbrown-0_15"] }
+rfd = { version = "0.15.4", features = ["async-std"] }
+# redb = "3.0.1" # Removed - using SQLite for all storage
+
+image = { version = "0.24", default-features = false, features = ["png"] }
+imageproc = "0.23"
+rusttype = "0.9"
+
+# 空间索引相关依赖
+rstar = { version = "0.12", optional = true }
+
+#造型功能，先在database测试
+serde_with = { version = "3.14.1", features = ["macros"] }
+rayon = "1.10.0"
+indexmap = "2.11.4"
+urlencoding = "2.1.3"
+notify = "8.0.0"
+walkdir = "2.5.0"
+num_enum = "0.7.2"
+jsonxf = "1.1.1"
+sea-orm = { version = "1.1.1", features = [
+    "sqlx-mysql",
+    "runtime-async-std",
+], optional = true }
+async-once-cell = "0.5.3"
+petgraph = { version = "0.8.2", features = ["serde-1"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["registry", "json"] }
+tracing-chrome = "0.7.1"
+strum = { version = "0.27.2", features = ["derive"] }
+strum_macros = "0.27.2"
+simplelog = "0.12.2"
+downcast-rs = "1.2.0"
+flume = "0.11.0"
+rand = "0.9.0"
+rust-embed = "8"
+
+gpui = { version = "0.2.2", optional = true }
+story = { path = "../gpui-component/crates/story", optional = true }
+gpui-component = { path = "../gpui-component/crates/ui", optional = true }
+toml = "0.9.5"
+toml_edit = "0.22"
+pollster = "0.4.0"
+async-std = "1.13.1"
+eframe = { version = "0.33.0", features = ["wgpu"], optional = true }
+re_ui = { path = "../rerun/crates/viewer/re_ui", optional = true }
+
+# GRPC 相关依赖
+tonic = { version = "0.14.2", optional = true }
+prost = { version = "0.14.1", optional = true }
+tonic-reflection = { version = "0.14.2", optional = true }
+tokio-util = { version = "0.7", optional = true, features = ["codec"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+thiserror = "1.0"
+jsonwebtoken = { version = "9.0", optional = true }
+async-trait = "0.1"
+env_logger = "0.11"
+
+# Web UI 相关依赖
+axum = { version = "0.8.6", optional = true }
+axum-extra = { version = "0.10.1", optional = true, features = [] }
+tower-http = { version = "0.6.6", features = ["fs", "cors"], optional = true }
+sysinfo = { version = "0.37.0", optional = true }
+
+# SQLite driver for spatial tests and cache
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+indicatif = "0.18.1"
+rust_xlsxwriter = "0.73.0"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+tonic-build = "0.14.2"
+prost-build = "0.14.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+
+[dependencies.sqlx]
+version = "0.8.6"
+default-features = false
+optional = true
+features = [
+    "runtime-tokio-rustls",
+    #    "runtime-async-std-native-tls",
+    "macros",
+    "mysql",
+    # "tls",
+    "chrono",
+    "json",
+    # "decimal",
+    "bigdecimal",
+    "uuid",
+    "time",
+]
+
+
+#[profile.release]
+#lto = true
+#strip = true
+#opt-level = 3
+#panic = 'abort'
+#codegen-units = 1
+
+# [patch."https://gitee.com/happydpc/rs-core.git"]
+# aios_core = { path = "../rs-core" }
+
+# [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
+# parse_pdms_db = { path = "../aios-parse-pdms-fork" }
+
+# [patch."https://gitee.com/happydpc/pdms-io.git"]
+# pdms_io = { path = "../pdms-io" }
+
+
+# Examples
+[[example]]
+name = "debug_query_multi_filter"
+path = "src/examples/debug_query_multi_filter.rs"
+
+[[example]]
+name = "verify_lod_feature"
+path = "src/examples/verify_lod_feature.rs"
+
+[[example]]
+name = "debug_refno_21491_19209"
+path = "src/examples/debug_refno_21491_19209.rs"

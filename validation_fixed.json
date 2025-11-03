@@ -1,0 +1,30 @@
+{
+  "valid": true,
+  "filePath": "_火车卸车鹤管_B1.xkt",
+  "fileName": "_火车卸车鹤管_B1.xkt",
+  "fileSize": 45317,
+  "version": 12,
+  "compressed": true,
+  "errors": [],
+  "warnings": [
+    "发现 1 个空实体（无mesh），占总数的 9.09%"
+  ],
+  "statistics": {
+    "geometries": 9,
+    "meshes": 49,
+    "entities": 11,
+    "vertices": 2979,
+    "triangles": 4852,
+    "edges": 7803
+  },
+  "metadata": {
+    "emptyEntities": {
+      "count": 1,
+      "total": 11,
+      "percentage": "9.09",
+      "samples": [
+        "entity_0"
+      ]
+    }
+  }
+}

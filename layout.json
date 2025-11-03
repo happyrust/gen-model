@@ -1,0 +1,38 @@
+{
+  "version": 5,
+  "center": {
+    "panel_name": "StackPanel",
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "children": [
+          {
+            "panel_name": "StoryContainer",
+            "children": [],
+            "info": {
+              "panel": {
+                "story_klass": "ConfigPanelStory"
+              }
+            }
+          }
+        ],
+        "info": {
+          "tabs": {
+            "active_index": 0
+          }
+        }
+      }
+    ],
+    "info": {
+      "stack": {
+        "sizes": [
+          100.0
+        ],
+        "axis": 1
+      }
+    }
+  },
+  "left_dock": null,
+  "right_dock": null,
+  "bottom_dock": null
+}

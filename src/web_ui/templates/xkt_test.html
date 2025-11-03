@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XKT 模型测试 - AIOS</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; }
+        
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .header h1 { font-size: 28px; margin-bottom: 8px; }
+        .header p { opacity: 0.9; font-size: 14px; }
+        
+        .grid { display: grid; grid-template-columns: 400px 1fr; gap: 20px; }
+        
+        .panel { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .panel-title { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: #2d3748; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; }
+        
+        .form-group { margin-bottom: 20px; }
+        .form-label { display: block; font-size: 14px; font-weight: 500; color: #4a5568; margin-bottom: 8px; }
+        .form-input { width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px; transition: all 0.2s; }
+        .form-input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.1); }
+        
+        .checkbox-group { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+        .checkbox-group input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+        .checkbox-group label { font-size: 14px; color: #4a5568; cursor: pointer; }
+        
+        .btn { padding: 12px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; width: 100%; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102,126,234,0.4); }
+        .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        
+        .btn-secondary { background: #e2e8f0; color: #4a5568; margin-top: 10px; width: 100%; }
+        .btn-secondary:hover { background: #cbd5e0; }
+        
+        .quick-tests { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+        .quick-test-btn { padding: 8px 12px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+        .quick-test-btn:hover { background: #edf2f7; border-color: #cbd5e0; }
+        
+        .viewer-container { height: 600px; background: #1a202c; border-radius: 12px; position: relative; overflow: hidden; }
+        #xkt-viewer { width: 100%; height: 100%; }
+        
+        .viewer-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: #a0aec0; flex-direction: column; gap: 12px; }
+        .viewer-placeholder i { font-size: 64px; opacity: 0.3; }
+        
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 20px; }
+        .stat-card { background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%); padding: 16px; border-radius: 8px; text-align: center; }
+        .stat-value { font-size: 24px; font-weight: 700; color: #2d3748; }
+        .stat-label { font-size: 12px; color: #718096; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+        
+        .file-list { margin-top: 20px; }
+        .file-item { padding: 12px; background: #f7fafc; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .file-name { font-size: 14px; color: #2d3748; font-weight: 500; }
+        .file-size { font-size: 12px; color: #718096; }
+        
+        .loading { display: none; text-align: center; padding: 20px; color: #667eea; }
+        .loading.active { display: block; }
+        .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 12px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 进度条样式 */
+        .progress-container { display: none; margin-top: 16px; }
+        .progress-container.active { display: block; }
+        .progress-bar-wrapper { background: #e2e8f0; border-radius: 8px; height: 24px; overflow: hidden; margin-bottom: 12px; }
+        .progress-bar { background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); height: 100%; transition: width 0.3s ease; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: 600; }
+        .progress-text { font-size: 14px; color: #4a5568; text-align: center; }
+        .progress-details { font-size: 12px; color: #718096; text-align: center; margin-top: 8px; }
+        
+        .alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
+        .alert-success { background: #c6f6d5; color: #22543d; border-left: 4px solid #38a169; }
+        .alert-error { background: #fed7d7; color: #742a2a; border-left: 4px solid #e53e3e; }
+        .alert-info { background: #bee3f8; color: #2c5282; border-left: 4px solid #3182ce; }
+
+        /* NavCube 样式 */
+        #myNavCubeCanvas {
+            position: absolute;
+            width: 200px;
+            height: 200px;
+            bottom: 20px;
+            right: 20px;
+            z-index: 100;
+        }
+
+        /* TreeView 容器样式 */
+        #treeViewWrapper {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 100;
+        }
+
+        .treeview-header {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 8px 8px 0 0;
+            padding: 8px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-weight: 500;
+            color: #2d3748;
+            font-size: 14px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .treeview-header:hover {
+            background: rgba(255, 255, 255, 1);
+        }
+
+        .treeview-toggle {
+            font-size: 12px;
+            transition: transform 0.2s;
+        }
+
+        #treeViewContainer {
+            pointer-events: all;
+            height: 500px;
+            max-height: 500px;
+            overflow-y: scroll;
+            overflow-x: hidden;
+            background-color: rgba(255, 255, 255, 0.95);
+            color: black;
+            padding: 10px;
+            font-family: 'Roboto', sans-serif;
+            font-size: 14px;
+            user-select: none;
+            width: 300px;
+            border-radius: 0 0 8px 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+            display: block;
+        }
+
+        #treeViewContainer.collapsed {
+            display: none;
+        }
+
+        #treeViewContainer ul {
+            list-style: none;
+            padding-left: 1.5em;
+            pointer-events: none;
+        }
+
+        #treeViewContainer ul li {
+            position: relative;
+            width: 100%;
+            pointer-events: none;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            vertical-align: middle;
+        }
+
+        #treeViewContainer ul li a {
+            background-color: #eee;
+            border-radius: 50%;
+            color: #000;
+            display: inline-block;
+            height: 1.2em;
+            left: -1.5em;
+            position: absolute;
+            text-align: center;
+            text-decoration: none;
+            width: 1.2em;
+            pointer-events: all;
+            font-size: 12px;
+            line-height: 1.2em;
+        }
+
+        #treeViewContainer ul li a.plus {
+            background-color: #ded;
+            pointer-events: all;
+        }
+
+        #treeViewContainer ul li a.minus {
+            background-color: #eee;
+            pointer-events: all;
+        }
+
+        #treeViewContainer ul li span:hover {
+            color: white;
+            cursor: pointer;
+            background: #667eea;
+            padding-left: 2px;
+            pointer-events: all;
+        }
+
+        #treeViewContainer ul li span {
+            display: inline-block;
+            width: calc(100% - 30px);
+            padding-left: 2px;
+            pointer-events: all;
+            height: 20px;
+            font-size: 13px;
+        }
+
+        #treeViewContainer .highlighted-node {
+            border: #667eea solid 2px;
+            background: #ffd700;
+            color: black;
+            padding-left: 1px;
+            padding-right: 5px;
+            pointer-events: all;
+        }
+
+        /* 模态对话框样式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            animation: fadeIn 0.3s;
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            animation: slideIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes slideIn {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            color: #a0aec0;
+            cursor: pointer;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: #f7fafc;
+            color: #2d3748;
+        }
+
+        .file-item {
+            padding: 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+        }
+
+        .file-item:hover {
+            border-color: #667eea;
+            background: #f7fafc;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 4px;
+        }
+
+        .file-meta {
+            font-size: 12px;
+            color: #718096;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 13px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-load {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-load:hover {
+            background: #5568d3;
+        }
+
+        /* Tooltip 样式 */
+        .tooltip {
+            position: absolute;
+            background: #2d3748;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            z-index: 1000;
+            max-width: 300px;
+            word-wrap: break-word;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            display: none;
+        }
+
+        /* 模型信息面板 */
+        .model-info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            max-width: 350px;
+            z-index: 100;
+            font-size: 13px;
+            backdrop-filter: blur(10px);
+            display: none;
+        }
+
+        .model-info-header {
+            font-weight: 600;
+            font-size: 14px;
+            color: #2d3748;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .model-info-close {
+            background: none;
+            border: none;
+            font-size: 18px;
+            color: #a0aec0;
+            cursor: pointer;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .model-info-close:hover {
+            background: #f7fafc;
+            color: #2d3748;
+        }
+
+        .model-info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #f7fafc;
+        }
+
+        .model-info-item:last-child {
+            border-bottom: none;
+        }
+
+        .model-info-label {
+            color: #718096;
+            font-weight: 500;
+        }
+
+        .model-info-value {
+            color: #2d3748;
+            font-weight: 600;
+        }
+
+        .model-info-section {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .model-info-section-title {
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 8px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .tooltip.active {
+            display: block;
+        }
+
+        .tooltip::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 20px;
+            border: 6px solid transparent;
+            border-top-color: #2d3748;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎨 XKT 模型交互测试</h1>
+            <p>生成、验证和可视化 XKT 3D 模型</p>
+        </div>
+
+        <div class="grid">
+            <!-- 左侧控制面板 -->
+            <div>
+                <div class="panel">
+                    <div class="panel-title">📝 生成配置</div>
+                    
+                    <div class="form-group" style="position: relative;">
+                        <label class="form-label">参考号（逗号分隔）</label>
+                        <input type="text" id="refnos" class="form-input" placeholder="例如: 21491_18946" value="21491_18946"
+                               onmouseenter="showRefnoTooltip(event)" onmouseleave="hideRefnoTooltip()">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">快速测试</label>
+                        <div class="quick-tests">
+                            <button class="quick-test-btn" onclick="setRefno('21491_18946')">21491_18946</button>
+                            <button class="quick-test-btn" onclick="setRefno('21491_18957')">21491_18957</button>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">生成选项</label>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="compress" checked>
+                            <label for="compress">压缩 XKT 文件</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="include-descendants" checked>
+                            <label for="include-descendants">包含子孙节点</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="skip-mesh">
+                            <label for="skip-mesh">跳过 Mesh 数据</label>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary" onclick="generateXKT()" id="generate-btn">
+                        🚀 生成 XKT 模型
+                    </button>
+
+                    <button class="btn btn-secondary" onclick="showRecentFilesModal()">
+                        📂 加载最近文件
+                    </button>
+
+                    <button class="btn btn-secondary" onclick="openLocalFile()">
+                        📁 打开本地文件
+                    </button>
+                    <input type="file" id="file-input" accept=".xkt" style="display: none;" onchange="handleFileSelect(event)">
+                    
+                    <div style="margin-top: 20px; padding-top: 20px; border-top: 2px solid #e2e8f0;">
+                        <button class="btn btn-secondary" onclick="generateTestCube()" id="test-cube-btn" style="background: linear-gradient(135deg, #48bb78 0%, #38a169 100%); color: white;">
+                            🔲 生成测试立方体
+                        </button>
+                        <p style="margin-top: 8px; font-size: 12px; color: #718096; text-align: center;">
+                            快速验证 XKT 生成和加载
+                        </p>
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-title">📊 统计信息</div>
+                    <div id="stats-container">
+                        <p style="color: #a0aec0; text-align: center; padding: 20px;">暂无数据</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧查看器 -->
+            <div>
+                <div class="panel">
+                    <div class="panel-title">🎯 3D 查看器</div>
+                    
+                    <div id="alert-container"></div>
+
+                    <div class="loading" id="loading">
+                        <div class="spinner"></div>
+                        <p>正在生成 XKT 模型...</p>
+                    </div>
+
+                    <div class="progress-container" id="progress-container">
+                        <div class="progress-bar-wrapper">
+                            <div class="progress-bar" id="progress-bar" style="width: 0%;">
+                                <span id="progress-percent">0%</span>
+                            </div>
+                        </div>
+                        <div class="progress-text" id="progress-text">准备中...</div>
+                        <div class="progress-details" id="progress-details"></div>
+                    </div>
+
+                    <div class="viewer-container" id="viewer-container">
+                        <div class="viewer-placeholder">
+                            <i>🎨</i>
+                            <p>选择参考号并点击"生成 XKT 模型"开始</p>
+                        </div>
+                        <canvas id="xkt-viewer" style="display: none;"></canvas>
+                        <canvas id="myNavCubeCanvas" style="display: none;"></canvas>
+                        
+                        <!-- TreeView 包装器（可折叠） -->
+                        <div id="treeViewWrapper" style="display: none;">
+                            <div class="treeview-header" onclick="toggleTreeView()">
+                                <span>🌳 层级浏览</span>
+                                <span class="treeview-toggle" id="treeViewToggle">▼</span>
+                            </div>
+                            <div id="treeViewContainer" class="collapsed"></div>
+                        </div>
+
+                        <!-- 模型信息面板 -->
+                        <div id="model-info-panel" class="model-info-panel">
+                            <div class="model-info-header">
+                                <span>📊 模型信息</span>
+                                <button class="model-info-close" onclick="hideModelInfo()">×</button>
+                            </div>
+                            <div id="model-info-content"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-title">📁 最近生成的文件</div>
+                    <div id="file-list" class="file-list">
+                        <p style="color: #a0aec0; text-align: center; padding: 20px;">暂无文件</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 最近文件模态对话框 -->
+    <div id="recent-files-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">📂 最近生成的文件</div>
+                <button class="modal-close" onclick="closeRecentFilesModal()">×</button>
+            </div>
+            <div id="modal-file-list">
+                <p style="color: #a0aec0; text-align: center; padding: 20px;">加载中...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tooltip -->
+    <div id="refno-tooltip" class="tooltip"></div>
+
+    <script type="module">
+        // 使用解构导入，而不是命名空间导入
+        import {Viewer, XKTLoaderPlugin, NavCubePlugin, TreeViewPlugin} from '/static/xeokit-sdk.es.js';
+
+        let viewer = null;
+        let xktLoader = null;
+        let currentModel = null;
+        let navCube = null;
+        let treeView = null;
+        let lastLoadedModelInfo = { source: 'unknown', filePath: '', fileUrl: '' };
+        let webGLIndexErrorNotified = false;
+
+        const WEBGL_INDEX_ERROR_KEYWORDS = ['GL_INVALID_OPERATION', 'Vertex buffer is not big enough'];
+        const originalConsoleError = console.error.bind(console);
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function extractConsoleMessage(args) {
+            try {
+                return args.map(arg => {
+                    if (typeof arg === 'string') {
+                        return arg;
+                    }
+                    if (arg instanceof Error) {
+                        return arg.message || arg.toString();
+                    }
+                    if (arg && typeof arg === 'object') {
+                        if (typeof arg.message === 'string') {
+                            return arg.message;
+                        }
+                        return JSON.stringify(arg);
+                    }
+                    return String(arg);
+                }).join(' ');
+            } catch (error) {
+                return args.map(arg => {
+                    if (typeof arg === 'string') {
+                        return arg;
+                    }
+                    if (arg instanceof Error) {
+                        return arg.message || arg.toString();
+                    }
+                    return String(arg);
+                }).join(' ');
+            }
+        }
+
+        function handleWebGLIndexError(message) {
+            if (webGLIndexErrorNotified) {
+                return;
+            }
+            webGLIndexErrorNotified = true;
+            const infoText = escapeHtml(lastLoadedModelInfo.fileUrl || lastLoadedModelInfo.filePath || '未知模型');
+            console.warn('⚠️ 捕获到 WebGL 索引越界问题，模型来源:', infoText, '原始消息:', message);
+            showAlert(`⚠️ 检测到模型索引越界，渲染可能异常。<br>来源: ${infoText}`, 'warning');
+            logViewerAndModelState('WebGL 索引异常');
+        }
+
+        console.error = function(...args) {
+            const message = extractConsoleMessage(args);
+            if (message && WEBGL_INDEX_ERROR_KEYWORDS.every(keyword => message.includes(keyword))) {
+                handleWebGLIndexError(message);
+                console.warn('已拦截并转换 WebGL 索引错误:', message);
+                return;
+            }
+            originalConsoleError(...args);
+        };
+
+        window.addEventListener('error', (event) => {
+            const message = event?.message || '';
+            if (message && WEBGL_INDEX_ERROR_KEYWORDS.every(keyword => message.includes(keyword))) {
+                handleWebGLIndexError(message);
+            }
+        }, { capture: true });
+
+        // 初始化 xeokit 查看器
+        function initViewer() {
+            const canvas = document.getElementById('xkt-viewer');
+            viewer = new Viewer({
+                canvasId: 'xkt-viewer',
+                transparent: true
+            });
+            console.log('🧭 Viewer 初始化完成:', viewer);
+
+            // 设置初始相机位置
+            viewer.camera.eye = [-3.933, 2.855, 27.018];
+            viewer.camera.look = [4.400, 3.724, 8.899];
+            viewer.camera.up = [-0.018, 0.999, 0.039];
+
+            // 创建 XKT 加载器
+            xktLoader = new XKTLoaderPlugin(viewer);
+            console.log('🌐 初始 viewer.scene 状态:', viewer.scene);
+
+            // 添加 NavCube 导航立方体
+            navCube = new NavCubePlugin(viewer, {
+                canvasId: 'myNavCubeCanvas',
+                visible: true,
+                size: 200,
+                alignment: 'bottomRight',
+                bottomMargin: 20,
+                rightMargin: 20
+            });
+
+            // 添加 TreeView 树形视图
+            treeView = new TreeViewPlugin(viewer, {
+                containerElement: document.getElementById('treeViewContainer'),
+                autoExpandDepth: 3
+            });
+
+            // 显示 NavCube（TreeView 默认折叠）
+            document.getElementById('myNavCubeCanvas').style.display = 'block';
+            document.getElementById('treeViewWrapper').style.display = 'block';
+        }
+
+        // 设置参考号
+        window.setRefno = function(refno) {
+            document.getElementById('refnos').value = refno;
+        };
+
+        // 生成 XKT 模型
+        window.generateXKT = async function() {
+            const refnos = document.getElementById('refnos').value.trim();
+            if (!refnos) {
+                showAlert('请输入参考号', 'error');
+                return;
+            }
+
+            const compress = document.getElementById('compress').checked;
+            const includeDescendants = document.getElementById('include-descendants').checked;
+            const skipMesh = document.getElementById('skip-mesh').checked;
+
+            console.log('🔧 生成参数:', {
+                refnos,
+                compress,
+                includeDescendants,
+                skipMesh,
+                warning: skipMesh ? '⚠️ 警告：已启用"跳过 Mesh 数据"，生成的模型将没有几何体！' : '✅ 正常模式'
+            });
+
+            if (skipMesh) {
+                const confirmed = confirm('⚠️ 警告：您已勾选"跳过 Mesh 数据"，生成的 XKT 文件将不包含几何体数据，只有对象结构。\n\n这通常用于测试目的。\n\n是否继续？');
+                if (!confirmed) {
+                    return;
+                }
+            }
+
+            const generateBtn = document.getElementById('generate-btn');
+            const loading = document.getElementById('loading');
+            const progressContainer = document.getElementById('progress-container');
+
+            generateBtn.disabled = true;
+            loading.classList.add('active');
+            progressContainer.classList.add('active');
+            clearAlert();
+
+            // 模拟进度更新
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                if (progress < 90) {
+                    progress += Math.random() * 10;
+                    updateProgress(Math.min(progress, 90), getProgressMessage(progress));
+                }
+            }, 500);
+
+            try {
+                const response = await fetch('/api/xkt/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        refnos,
+                        compress,
+                        include_descendants: includeDescendants,
+                        skip_mesh: skipMesh
+                    })
+                });
+
+                clearInterval(progressInterval);
+                updateProgress(100, '生成完成！');
+
+                const result = await response.json();
+
+                console.log('📦 生成结果:', result);
+
+                if (result.success) {
+                    showAlert('XKT 模型生成成功！', 'success');
+
+                    // 显示进度日志
+                    if (result.progress_logs && result.progress_logs.length > 0) {
+                        console.log('📋 进度日志:', result.progress_logs);
+                        const lastLog = result.progress_logs[result.progress_logs.length - 1];
+                        updateProgress(100, '✅ 生成完成！', lastLog);
+                    }
+
+                    // 显示统计信息
+                    if (result.stats) {
+                        console.log('📊 统计信息:', result.stats);
+                        displayStats(result.stats);
+
+                        // 检查是否缺少几何数据
+                        if (result.stats.meshes === 0 && result.stats.geometries === 0) {
+                            console.warn('⚠️ 警告：生成的 XKT 文件没有几何数据！');
+                            console.warn('可能原因：');
+                            console.warn('1. 勾选了"跳过 Mesh 数据"选项');
+                            console.warn('2. 源数据没有几何体信息');
+                            console.warn('3. Mesh 文件生成失败');
+                            showAlert('⚠️ 警告：生成的模型没有几何数据，请检查生成选项', 'warning');
+                        }
+                    }
+
+                    // 自动验证生成的 XKT 文件
+                    if (result.file_path) {
+                        // result.file_path 是相对路径（例如：xkt/21491_18946_compressed.xkt）
+                        // 需要加上 /files/ 前缀
+                        const fullPath = result.file_path.startsWith('/')
+                            ? result.file_path
+                            : result.file_path;
+
+                        console.log('📁 加载模型路径:', {
+                            original: result.file_path,
+                            fullPath: fullPath
+                        });
+
+                        await validateXKTModel(fullPath);
+                        await loadModel(fullPath);
+                    }
+
+                    // 刷新文件列表
+                    loadRecentFiles();
+                } else {
+                    showAlert('生成失败: ' + result.message, 'error');
+                }
+            } catch (error) {
+                clearInterval(progressInterval);
+                showAlert('生成失败: ' + error.message, 'error');
+            } finally {
+                generateBtn.disabled = false;
+                loading.classList.remove('active');
+                setTimeout(() => {
+                    progressContainer.classList.remove('active');
+                    updateProgress(0, '准备中...');
+                }, 2000);
+            }
+        };
+
+        // 更新进度条
+        function updateProgress(percent, message, details = '') {
+            const progressBar = document.getElementById('progress-bar');
+            const progressPercent = document.getElementById('progress-percent');
+            const progressText = document.getElementById('progress-text');
+            const progressDetails = document.getElementById('progress-details');
+
+            progressBar.style.width = percent + '%';
+            progressPercent.textContent = Math.round(percent) + '%';
+            progressText.textContent = message;
+            progressDetails.textContent = details;
+        }
+
+        // 获取进度消息
+        function getProgressMessage(progress) {
+            if (progress < 20) return '🔍 正在收集模型数据...';
+            if (progress < 40) return '📐 正在处理几何体...';
+            if (progress < 60) return '🎨 正在生成网格...';
+            if (progress < 80) return '📦 正在压缩数据...';
+            if (progress < 95) return '💾 正在写入文件...';
+            return '✅ 即将完成...';
+        }
+
+        // 清除当前模型
+        function clearCurrentModel() {
+            if (currentModel) {
+                currentModel.destroy();
+                currentModel = null;
+            }
+            
+            // TreeView 会自动更新，无需手动清除
+            
+            // 重置相机位置
+            if (viewer) {
+                viewer.camera.eye = [-3.933, 2.855, 27.018];
+                viewer.camera.look = [4.400, 3.724, 8.899];
+                viewer.camera.up = [-0.018, 0.999, 0.039];
+            }
+        }
+
+        // 加载模型到查看器
+        async function loadModel(filePath) {
+            // 确保 viewer 和 xktLoader 都已初始化
+            if (!viewer || !xktLoader) {
+                initViewer();
+            }
+
+            // 清除旧模型
+            webGLIndexErrorNotified = false;
+            clearCurrentModel();
+
+            // 显示 canvas
+            document.querySelector('.viewer-placeholder').style.display = 'none';
+            document.getElementById('xkt-viewer').style.display = 'block';
+
+            // 构建完整的文件 URL
+            // filePath 格式可能是：xkt_test/test_cube_compressed.xkt 或 xkt/21491_18946_compressed.xkt
+            let fileUrl;
+            if (filePath.startsWith('/')) {
+                fileUrl = filePath;
+            } else if (filePath.startsWith('output/')) {
+                // 如果已经包含 output/ 前缀，只添加 /files/
+                fileUrl = `/files/${filePath}`;
+            } else if (filePath.startsWith('xkt_test/')) {
+                // 如果是 xkt_test/ 目录，添加 /files/output/
+                fileUrl = `/files/output/${filePath}`;
+            } else {
+                // 其他情况（如 xkt/xxx.xkt），添加 /files/output/
+                fileUrl = `/files/output/${filePath}`;
+            }
+
+            console.log('📁 加载模型 URL:', fileUrl);
+
+            // 所有 XKT 模型在导出时已经自动转换为米单位
+            // 无需在加载时再次缩放
+            console.log('📏 使用标准米单位 (模型已自动转换)');
+            let scaleFactor = [1.0, 1.0, 1.0];
+
+            lastLoadedModelInfo = {
+                source: 'remote',
+                filePath,
+                fileUrl
+            };
+
+            // 加载新模型（使用全局的 xktLoader）
+            currentModel = xktLoader.load({
+                id: 'model_' + Date.now(), // 使用唯一 ID
+                src: fileUrl,
+                edges: false, // 使用实体模式而不是线框模式
+                scale: scaleFactor,
+                rotation: [0, 0, 0],           // 无旋转
+                position: [0, 0, 0]            // 原点位置
+            });
+
+            const onModelLoaded = () => {
+                console.log('✅ 模型加载完成（远程文件）:', {
+                    filePath,
+                    fileUrl,
+                    modelId: currentModel.id
+                });
+
+                logViewerAndModelState('远程模型加载完成');
+
+                viewer.cameraFlight.flyTo(currentModel, () => {
+                    logViewerAndModelState('远程模型飞行完成');
+                    // showModelInfo();
+                });
+            };
+
+            const onModelError = (error) => {
+                console.error('❌ 模型加载失败:', {
+                    filePath,
+                    fileUrl,
+                    error
+                });
+                showAlert('模型加载失败: ' + error, 'error');
+            };
+
+            currentModel.on('loaded', onModelLoaded);
+            currentModel.on('error', onModelError);
+
+            if (currentModel.loaded) {
+                onModelLoaded();
+            }
+        }
+
+        // 显示模型信息
+        function showModelInfo() {
+            if (!viewer || !currentModel) {
+                console.warn('⚠️ showModelInfo: viewer 或 currentModel 不存在');
+                return;
+            }
+
+            try {
+                logViewerAndModelState('模型信息面板更新');
+
+                const scene = viewer.scene;
+
+                // 安全地获取统计信息
+                const numObjects = scene.objects ? Object.keys(scene.objects).length : 0;
+                const numMeshes = scene.meshes ? Object.keys(scene.meshes).length : 0;
+                const numGeometries = scene.geometries ? Object.keys(scene.geometries).length : 0;
+
+                console.log('📊 模型统计:', { numObjects, numMeshes, numGeometries });
+
+                // 计算顶点和三角形数量
+                let totalVertices = 0;
+                let totalTriangles = 0;
+
+                if (scene.geometries) {
+                    Object.values(scene.geometries).forEach(geometry => {
+                        if (geometry && geometry.positions) {
+                            totalVertices += geometry.positions.length / 3;
+                        }
+                        if (geometry && geometry.indices) {
+                            totalTriangles += geometry.indices.length / 3;
+                        }
+                    });
+                }
+
+                console.log('📐 几何统计:', { totalVertices, totalTriangles });
+
+                // 获取模型边界框（已经缩放后的尺寸，单位：米）
+                const aabb = scene.getAABB();
+
+                if (!aabb || aabb.length < 6) {
+                    console.warn('⚠️ 无法获取模型边界框');
+                    return;
+                }
+
+                const sizeInMeters = {
+                    x: (aabb[3] - aabb[0]).toFixed(3),
+                    y: (aabb[4] - aabb[1]).toFixed(3),
+                    z: (aabb[5] - aabb[2]).toFixed(3)
+                };
+
+                console.log('📏 模型尺寸（米）:', sizeInMeters);
+
+                // 原始尺寸（mm）= 显示尺寸（m）× 1000
+                const sizeInMM = {
+                    x: (sizeInMeters.x * 1000).toFixed(1),
+                    y: (sizeInMeters.y * 1000).toFixed(1),
+                    z: (sizeInMeters.z * 1000).toFixed(1)
+                };
+
+                // 构建信息 HTML
+                const infoHTML = `
+                    <div class="model-info-section">
+                        <div class="model-info-section-title">基本信息</div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">对象数量</span>
+                            <span class="model-info-value">${numObjects}</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">网格数量</span>
+                            <span class="model-info-value">${numMeshes}</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">几何体数量</span>
+                            <span class="model-info-value">${numGeometries}</span>
+                        </div>
+                    </div>
+                    <div class="model-info-section">
+                        <div class="model-info-section-title">几何统计</div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">顶点数量</span>
+                            <span class="model-info-value">${totalVertices.toLocaleString()}</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">三角形数量</span>
+                            <span class="model-info-value">${totalTriangles.toLocaleString()}</span>
+                        </div>
+                    </div>
+                    <div class="model-info-section">
+                        <div class="model-info-section-title">模型尺寸（米）</div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">X 轴</span>
+                            <span class="model-info-value">${sizeInMeters.x} m</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">Y 轴</span>
+                            <span class="model-info-value">${sizeInMeters.y} m</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">Z 轴</span>
+                            <span class="model-info-value">${sizeInMeters.z} m</span>
+                        </div>
+                    </div>
+                    <div class="model-info-section">
+                        <div class="model-info-section-title">原始尺寸（毫米）</div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">X 轴</span>
+                            <span class="model-info-value">${sizeInMM.x} mm</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">Y 轴</span>
+                            <span class="model-info-value">${sizeInMM.y} mm</span>
+                        </div>
+                        <div class="model-info-item">
+                            <span class="model-info-label">Z 轴</span>
+                            <span class="model-info-value">${sizeInMM.z} mm</span>
+                        </div>
+                    </div>
+                `;
+
+                document.getElementById('model-info-content').innerHTML = infoHTML;
+                document.getElementById('model-info-panel').style.display = 'block';
+
+            } catch (error) {
+                console.error('❌ showModelInfo 错误:', error);
+                console.error('错误堆栈:', error.stack);
+            }
+        }
+
+        // 打印 viewer 和模型状态，用于调试
+        function logViewerAndModelState(context = '模型状态') {
+            if (!viewer) {
+                console.warn(`⚠️ ${context}: Viewer 未初始化`);
+                return;
+            }
+
+            if (!currentModel) {
+                console.warn(`⚠️ ${context}: 当前没有加载模型`);
+            }
+
+            console.log(`🧾 ${context} - viewer.scene`, viewer.scene);
+
+            try {
+                const scene = viewer.scene;
+                if (scene?.getAABB) {
+                    const sceneAABB = scene.getAABB();
+                    if (sceneAABB && sceneAABB.length === 6) {
+                        const sceneSize = [
+                            Number((sceneAABB[3] - sceneAABB[0]).toFixed(3)),
+                            Number((sceneAABB[4] - sceneAABB[1]).toFixed(3)),
+                            Number((sceneAABB[5] - sceneAABB[2]).toFixed(3))
+                        ];
+                        console.log(`🌐 ${context} - 场景可见包围盒:`, {
+                            min: [sceneAABB[0], sceneAABB[1], sceneAABB[2]],
+                            max: [sceneAABB[3], sceneAABB[4], sceneAABB[5]],
+                            size: sceneSize
+                        });
+                    } else {
+                        console.warn(`⚠️ ${context}: 无法获取场景包围盒`);
+                    }
+                }
+
+                if (currentModel && currentModel.aabb) {
+                    const modelAABB = currentModel.aabb;
+                    if (modelAABB && modelAABB.length === 6) {
+                        const modelSize = [
+                            Number((modelAABB[3] - modelAABB[0]).toFixed(3)),
+                            Number((modelAABB[4] - modelAABB[1]).toFixed(3)),
+                            Number((modelAABB[5] - modelAABB[2]).toFixed(3))
+                        ];
+                        console.log(`📦 ${context} - 模型包围盒:`, {
+                            min: [modelAABB[0], modelAABB[1], modelAABB[2]],
+                            max: [modelAABB[3], modelAABB[4], modelAABB[5]],
+                            size: modelSize
+                        });
+                    } else {
+                        console.warn(`⚠️ ${context}: 模型包围盒数据缺失`);
+                    }
+                }
+            } catch (error) {
+                console.warn(`⚠️ ${context}: 打印模型状态失败`, error);
+            }
+        }
+
+        // 隐藏模型信息
+        function hideModelInfo() {
+            document.getElementById('model-info-panel').style.display = 'none';
+        }
+
+        // 显示统计信息
+        function displayStats(stats) {
+            const html = `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.geometries || 0}</div>
+                        <div class="stat-label">几何体</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.meshes || 0}</div>
+                        <div class="stat-label">网格</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.entities || 0}</div>
+                        <div class="stat-label">实体</div>
+                    </div>
+                    ${stats.vertices ? `
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.vertices}</div>
+                        <div class="stat-label">顶点</div>
+                    </div>
+                    ` : ''}
+                    ${stats.triangles ? `
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.triangles}</div>
+                        <div class="stat-label">三角形</div>
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+            document.getElementById('stats-container').innerHTML = html;
+        }
+
+        // 加载最近文件
+        window.loadRecentFiles = async function() {
+            try {
+                const response = await fetch('/api/xkt/list');
+                const files = await response.json();
+
+                if (files.length === 0) {
+                    document.getElementById('file-list').innerHTML = 
+                        '<p style="color: #a0aec0; text-align: center; padding: 20px;">暂无文件</p>';
+                    return;
+                }
+
+                const html = files.map(file => `
+                    <div class="file-item">
+                        <div>
+                            <div class="file-name">${file.name}</div>
+                            <div class="file-size">${formatFileSize(file.size)}</div>
+                        </div>
+                        <button class="quick-test-btn" onclick="loadFileByPath('${file.path}')">
+                            加载
+                        </button>
+                    </div>
+                `).join('');
+
+                document.getElementById('file-list').innerHTML = html;
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+            }
+        };
+
+        // 显示最近文件模态对话框
+        window.showRecentFilesModal = async function() {
+            const modal = document.getElementById('recent-files-modal');
+            modal.classList.add('active');
+
+            try {
+                const response = await fetch('/api/xkt/list');
+                const result = await response.json();
+                const files = result.files || [];
+
+                if (files.length === 0) {
+                    document.getElementById('modal-file-list').innerHTML =
+                        '<p style="color: #a0aec0; text-align: center; padding: 20px;">暂无文件</p>';
+                    return;
+                }
+
+                const html = files.map(file => `
+                    <div class="file-item">
+                        <div class="file-info">
+                            <div class="file-name">${file.name}</div>
+                            <div class="file-meta">${formatFileSize(file.size)}</div>
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn-small btn-load" onclick="loadFileFromModal('${file.path}')">
+                                加载
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+
+                document.getElementById('modal-file-list').innerHTML = html;
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+                document.getElementById('modal-file-list').innerHTML =
+                    '<p style="color: #e53e3e; text-align: center; padding: 20px;">加载失败</p>';
+            }
+        };
+
+        // 关闭最近文件模态对话框
+        window.closeRecentFilesModal = function() {
+            document.getElementById('recent-files-modal').classList.remove('active');
+        };
+
+        // 从模态对话框加载文件
+        window.loadFileFromModal = async function(filePath) {
+            closeRecentFilesModal();
+            await loadModel(filePath);
+            showAlert('模型加载成功', 'success');
+        };
+
+        // 打开本地文件
+        window.openLocalFile = function() {
+            document.getElementById('file-input').click();
+        };
+
+        // 处理文件选择（本地 .xkt 文件）
+        window.handleFileSelect = async function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (!file.name.endsWith('.xkt')) {
+                showAlert('请选择 XKT 文件', 'error');
+                return;
+            }
+
+            try {
+                // 直接以 ArrayBuffer 传给 XKTLoader，避免 blob: URL 被追加查询参数导致 404
+                const arrayBuffer = await file.arrayBuffer();
+                await loadModelFromArrayBuffer(arrayBuffer, file.name);
+                showAlert('本地文件加载成功', 'success');
+            } catch (error) {
+                console.error('本地文件加载失败:', error);
+                showAlert('文件加载失败: ' + error.message, 'error');
+            }
+        };
+
+        // 从 ArrayBuffer 加载模型（本地文件）
+        async function loadModelFromArrayBuffer(arrayBuffer, fileName) {
+            console.log('📂 开始加载本地文件:', fileName);
+            
+            // 检查 ArrayBuffer 是否有效
+            if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+                const error = 'ArrayBuffer 为空或无效';
+                console.error('❌', error);
+                showAlert('文件数据无效', 'error');
+                throw new Error(error);
+            }
+
+            console.log('📊 文件大小:', arrayBuffer.byteLength, 'bytes');
+
+            // 确保 viewer 和 xktLoader 都已初始化
+            if (!viewer) {
+                console.log('🧭 初始化 viewer...');
+                initViewer();
+            }
+            
+            if (!xktLoader) {
+                console.error('❌ xktLoader 未初始化！');
+                showAlert('加载器未初始化，请刷新页面重试', 'error');
+                throw new Error('xktLoader is not initialized');
+            }
+
+            console.log('✅ Viewer 和 xktLoader 已就绪');
+
+            // 清除旧模型
+            webGLIndexErrorNotified = false;
+            clearCurrentModel();
+
+            document.querySelector('.viewer-placeholder').style.display = 'none';
+            document.getElementById('xkt-viewer').style.display = 'block';
+
+            lastLoadedModelInfo = {
+                source: 'local',
+                filePath: fileName,
+                fileUrl: ''
+            };
+
+            try {
+                console.log('🔄 调用 xktLoader.load()...');
+                
+                // 使用全局的 xktLoader，直接传入 xkt: ArrayBuffer，避免对 blob: URL 发起 XHR
+                // 注意：PDMS 数据单位是 mm，需要缩放到 m（缩放 1/1000 = 0.001）
+                currentModel = xktLoader.load({
+                    id: 'model_' + Date.now(),
+                    xkt: arrayBuffer,
+                    edges: true,
+                    scale: [0.001, 0.001, 0.001],  // mm 转 m
+                    rotation: [0, 0, 0],           // 无旋转
+                    position: [0, 0, 0]            // 原点位置
+                });
+                
+                console.log('✅ xktLoader.load() 调用成功，等待模型加载...');
+            } catch (error) {
+                console.error('❌ xktLoader.load() 抛出异常:', error);
+                showAlert('模型加载器异常: ' + error.message, 'error');
+                throw error;
+            }
+
+            const onModelLoaded = () => {
+                console.log('✅ 模型加载完成（本地文件，ArrayBuffer）:', {
+                    fileName,
+                    modelId: currentModel.id
+                });
+
+                logViewerAndModelState('本地模型加载完成');
+
+                viewer.cameraFlight.flyTo(currentModel, () => {
+                    logViewerAndModelState('本地模型飞行完成');
+                    showModelInfo();
+                });
+            };
+
+            const onModelError = (error) => {
+                console.error('❌ 本地模型加载失败:', error);
+                showAlert('本地模型加载失败: ' + error, 'error');
+            };
+
+            currentModel.on('loaded', onModelLoaded);
+            currentModel.on('error', onModelError);
+            if (currentModel.loaded) {
+                onModelLoaded();
+            }
+        }
+
+        // 通过路径加载文件
+        window.loadFileByPath = async function(filePath) {
+            await loadModel(filePath);
+            showAlert('模型加载成功', 'success');
+        };
+
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        // 显示提示
+        function showAlert(message, type) {
+            const alertContainer = document.getElementById('alert-container');
+            alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            setTimeout(() => clearAlert(), 5000);
+        }
+
+        // 清除提示
+        function clearAlert() {
+            document.getElementById('alert-container').innerHTML = '';
+        }
+
+        // 显示参考号 tooltip
+        let tooltipTimeout = null;
+        window.showRefnoTooltip = async function(event) {
+            const refno = event.target.value.trim();
+            if (!refno) return;
+
+            const tooltip = document.getElementById('refno-tooltip');
+
+            // 延迟显示，避免快速移动时频繁请求
+            tooltipTimeout = setTimeout(async () => {
+                try {
+                    const response = await fetch(`/api/xkt/refno-name?refno=${encodeURIComponent(refno)}`);
+                    const result = await response.json();
+
+                    if (result.success && result.full_name) {
+                        tooltip.textContent = result.full_name;
+
+                        // 定位 tooltip
+                        const rect = event.target.getBoundingClientRect();
+                        tooltip.style.left = rect.left + 'px';
+                        tooltip.style.top = (rect.top - 40) + 'px';
+                        tooltip.classList.add('active');
+                    }
+                } catch (error) {
+                    console.error('获取参考号全名称失败:', error);
+                }
+            }, 500);
+        };
+
+        // 隐藏参考号 tooltip
+        window.hideRefnoTooltip = function() {
+            if (tooltipTimeout) {
+                clearTimeout(tooltipTimeout);
+                tooltipTimeout = null;
+            }
+            document.getElementById('refno-tooltip').classList.remove('active');
+        };
+
+        // 验证 XKT 模型
+        async function validateXKTModel(filePath) {
+            console.log('🔍 验证 XKT 模型:', filePath);
+            
+            try {
+                const response = await fetch(`/api/xkt/validate?file_path=${encodeURIComponent(filePath)}`);
+                const result = await response.json();
+                
+                if (result.valid) {
+                    console.log('✅ XKT 文件验证通过');
+                    console.log('📊 统计信息:', result.statistics);
+                    console.log('📋 验证详情:', result);
+                    
+                    // 显示统计信息
+                    if (result.statistics) {
+                        const stats = result.statistics;
+                        displayStats({
+                            geometries: stats.geometries || 0,
+                            meshes: stats.meshes || 0,
+                            entities: stats.entities || 0,
+                            vertices: stats.vertices || stats.vertex_count || 0,
+                            triangles: stats.triangles || stats.triangle_count || 0,
+                        });
+                        
+                        // 检查空实体
+                        if (result.metadata && result.metadata.emptyEntities) {
+                            const info = result.metadata.emptyEntities;
+                            const emptyMsg = `⚠️ 发现 ${info.count} 个空实体（无mesh），占比 ${info.percentage}%`;
+                            console.warn(emptyMsg);
+                            showAlert(emptyMsg, 'warning');
+                        }
+                    }
+                    
+                    return true;
+                } else {
+                    console.error('❌ XKT 文件验证失败');
+                    if (result.errors && result.errors.length > 0) {
+                        console.error('错误详情:', result.errors);
+                        showAlert(`XKT 文件验证失败: ${result.errors[0]}`, 'error');
+                    } else {
+                        showAlert('XKT 文件验证失败，请检查控制台日志', 'error');
+                    }
+                    return false;
+                }
+            } catch (error) {
+                console.error('验证失败:', error);
+                showAlert('验证过程中出错: ' + error.message, 'error');
+                return false;
+            }
+        }
+
+        // 生成测试立方体
+        window.generateTestCube = async function() {
+            const testCubeBtn = document.getElementById('test-cube-btn');
+            const loading = document.getElementById('loading');
+            const progressContainer = document.getElementById('progress-container');
+
+            console.log('🔲 开始生成测试立方体...');
+
+            testCubeBtn.disabled = true;
+            loading.classList.add('active');
+            progressContainer.classList.add('active');
+            clearAlert();
+
+            try {
+                updateProgress(10, '🔧 创建测试立方体...');
+                
+                // 调用后端 API 生成测试立方体
+                const response = await fetch('/api/xkt/test-cube', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        compress: true  // 默认压缩
+                    })
+                });
+
+                updateProgress(80, '📦 生成中...');
+
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.message || '生成失败');
+                }
+
+                console.log('📦 测试立方体生成结果:', result);
+                
+                updateProgress(100, '✅ 生成完成！');
+
+                if (result.success) {
+                    showAlert('测试立方体生成成功！', 'success');
+
+                    // 显示统计信息
+                    if (result.stats) {
+                        console.log('📊 统计信息:', result.stats);
+                        displayStats(result.stats);
+                    }
+
+                    // 自动加载生成的立方体
+                    if (result.file_path) {
+                        const fullPath = result.file_path;
+                        console.log('📁 自动加载测试立方体:', fullPath);
+                        
+                        // 短暂延迟后加载，确保文件已写入
+                        setTimeout(async () => {
+                            try {
+                                await validateXKTModel(fullPath);
+                                await loadModel(fullPath);
+                                showAlert('测试立方体加载成功！', 'success');
+                            } catch (error) {
+                                console.error('自动加载测试立方体失败:', error);
+                                showAlert('立方体加载失败: ' + error.message, 'error');
+                            }
+                        }, 500);
+                    }
+
+                    // 刷新文件列表
+                    loadRecentFiles();
+                } else {
+                    showAlert('生成失败: ' + result.message, 'error');
+                }
+            } catch (error) {
+                console.error('❌ 生成测试立方体失败:', error);
+                showAlert('生成失败: ' + error.message, 'error');
+            } finally {
+                testCubeBtn.disabled = false;
+                loading.classList.remove('active');
+                setTimeout(() => {
+                    progressContainer.classList.remove('active');
+                    updateProgress(0, '准备中...');
+                }, 2000);
+            }
+        };
+
+        // 页面加载时初始化
+        window.addEventListener('load', () => {
+            loadRecentFiles();
+        });
+    </script>
+</body>
+</html>

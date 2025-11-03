@@ -1,0 +1,219 @@
+#同步文件配置
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_live = false
+replace_dbs = false
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置
+#project_path = "D:/AVEVA/Projects/E3D2.1"
+project_path = "/Volumes/DPC/work/e3d_models"
+# included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+included_projects = ["YCYK-E3D"]
+project_dirs = ["YCYK-E3D"]
+
+mdb_name = "651YK"
+project_name = "YCYK-E3D"
+project_code = "1500"
+surreal_ns = "1500"
+module = "DESI"
+
+#是否生成模型数据
+gen_model = true
+gen_mesh = true
+replace_mesh = true
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#是否生成房间树
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+gen_model_batch_size = 16
+
+
+
+build_cate_relate = false
+
+#meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+#port = "4000"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100 #mysql 批量插入的数量
+
+
+#版本数据库服务配置
+v_ip = "127.0.0.1"
+v_port = 8009
+v_user = "root"
+v_password = "root"
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+# 内存KV数据库配置（额外备份，需要启用 mem-kv-save feature）
+mem_kv_ip = "127.0.0.1"
+mem_kv_port = "8010"
+mem_kv_user = "root"
+mem_kv_password = "root"
+
+#mqtt 事件 ip
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
+reset_mdb_project = false           #是否重新生成 mdb 缓存
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+# debug_refno_types = ["LOOP", "PRIM"]
+# included_db_files = ["ams1112_0001"]
+# included_db_files = ["acw8191_0001"]
+# manual_db_nums = [5511]
+# exclude_db_nums = [] #不参与生成模型的数据库编号
+plat_url = ""
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+
+# room_keyword = "-RM" # 2016  K-R-K100   (-R-)
+room_keyword = "-R-" # 2016  K-R-K100   (-R-)
+
+#test_refno = "24381_46952"
+
+debug_model_refnos = ["21491_18946"]
+gen_history_model = false
+
+# 空间索引开关（SQLite R*-Tree）
+enable_sqlite_rtree = true
+# sqlite_index_enabled = true # 兼容键（可选）
+
+
+# SQLite R*-tree 索引文件路径（与 AabbCache 保持一致）
+sqlite_index_path = "assets/aabb_index.sqlite"
+surreal_script_dir = "../rs-core/resource/surreal"
+
+
+# 精度配置（已启用 LOD 分级）
+[mesh_precision]
+default_lod = "L1"
+
+# 可根据 noun 或几何类型覆盖 LOD
+# [mesh_precision.overrides.noun_lod]
+# PIPE = "L2"
+# VALVE = "L3"
+
+# LOD L1 配置（低精度，快速预览）
+[mesh_precision.lod_profiles.L1]
+occ_linear_coeff = 2.0        # 较大的容差系数，生成更粗糙的网格（降低精度）
+occ_linear_min = 2.0          # 最小容差（提高以降低精度）
+occ_linear_max = 100.0         # 最大容差
+neg_multiplier = 0.5           # 负实体容差倍数
+sweep_multiplier = 0.2         # 拉伸/旋转体容差倍数
+polyhedron_fixed_tol = 0.05    # 多面体固定容差
+sphere_subdiv = 12             # 球体细分数（较少）
+radial_segments = 16           # 径向分段数（较少，注意：当前未生效）
+mesh_tol_ratio = 10.0           # 网格容差比率
+
+[mesh_precision.lod_profiles.L1.csg_settings]
+radial_segments = 12                # 基础圆周段数，最终段数会结合尺寸自适应
+height_segments = 1                 # 基础高度段数
+cap_segments = 1
+error_tolerance = 0.01              # 解析几何允许的误差（用于阈值判断）
+min_radial_segments = 12            # 尺寸自适应时的最小圆周段数
+max_radial_segments = 18            # 尺寸自适应允许的最大圆周段数
+min_height_segments = 1             # 尺寸自适应时的最小高度段数
+max_height_segments = 2             # 尺寸自适应允许的最大高度段数
+target_segment_length = 250.0       # mm，目标段长；大尺寸几何会细分至不超过该阈值
+non_scalable_factor = 0.9           # 对于不可缩放几何的段长调整系数（<1 提高精度）
+
+# LOD L2 配置（中等精度，平衡性能）
+[mesh_precision.lod_profiles.L2]
+occ_linear_coeff = 1.0        # 中等容差系数（降低精度）
+occ_linear_min = 1.0        # 最小容差（提高以降低精度）
+occ_linear_max = 80.0          # 最大容差
+neg_multiplier = 0.4           # 负实体容差倍数
+sweep_multiplier = 0.15        # 拉伸/旋转体容差倍数
+polyhedron_fixed_tol = 0.02    # 多面体固定容差
+sphere_subdiv = 18             # 球体细分数（中等）
+radial_segments = 24           # 圆周分段基线（会结合尺寸自适应）
+mesh_tol_ratio = 6.0           # 网格容差比率
+
+[mesh_precision.lod_profiles.L2.csg_settings]
+radial_segments = 20
+height_segments = 2
+cap_segments = 1
+error_tolerance = 0.005
+min_radial_segments = 12
+max_radial_segments = 30
+min_height_segments = 1
+max_height_segments = 3
+target_segment_length = 140.0
+non_scalable_factor = 0.8
+
+# LOD L3 配置（高精度，详细展示）
+[mesh_precision.lod_profiles.L3]
+occ_linear_coeff = 0.05        # 较小的容差系数，生成更精细的网格（降低精度）
+occ_linear_min = 0.01         # 最小容差（提高以降低精度）
+occ_linear_max = 50.0          # 最大容差
+neg_multiplier = 0.3           # 负实体容差倍数
+sweep_multiplier = 0.1         # 拉伸/旋转体容差倍数
+polyhedron_fixed_tol = 0.01    # 多面体固定容差
+sphere_subdiv = 32             # 球体细分数（较多）
+radial_segments = 48           # 圆周分段基线（高精度，可与自适应组合）
+mesh_tol_ratio = 3.0           # 网格容差比率
+
+[mesh_precision.lod_profiles.L3.csg_settings]
+radial_segments = 32
+height_segments = 3
+cap_segments = 1
+error_tolerance = 0.002
+min_radial_segments = 16
+max_radial_segments = 60
+min_height_segments = 2
+max_height_segments = 6
+target_segment_length = 80.0
+non_scalable_factor = 0.7

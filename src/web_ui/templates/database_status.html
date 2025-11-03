@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据库状态管理 - AIOS Database</title>
+    <link rel="stylesheet" href="/static/simple-tailwind.css">
+    <link rel="stylesheet" href="/static/simple-icons.css">
+    <style>
+        .status-notstarted { background-color: #f3f4f6; color: #6b7280; }
+        .status-inprogress { background-color: #dbeafe; color: #1e40af; }
+        .status-completed { background-color: #d1fae5; color: #065f46; }
+        .status-failed { background-color: #fee2e2; color: #991b1b; }
+        .status-outdated { background-color: #fef3c7; color: #92400e; }
+
+        .module-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .module-DESI { background-color: #e0e7ff; color: #3730a3; }
+        .module-EQUI { background-color: #fce7f3; color: #9f1239; }
+        .module-PIPE { background-color: #e0f2fe; color: #075985; }
+        .module-STRU { background-color: #f3e8ff; color: #6b21a8; }
+        .module-HVAC { background-color: #dcfce7; color: #14532d; }
+        .module-ELEC { background-color: #fef3c7; color: #713f12; }
+
+        .selected-row {
+            background-color: #eff6ff !important;
+        }
+
+        .progress-bar {
+            transition: width 0.3s ease-in-out;
+        }
+
+        /* 统计数字变化动画 */
+        .stat-change {
+            animation: pulse 0.5s ease-in-out;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); color: #3b82f6; }
+        }
+
+        /* 任务运行中旋转图标 */
+        .task-spinner {
+            display: inline-block;
+            animation: rotate 1s linear infinite;
+        }
+
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        /* 刷新按钮旋转 */
+        .fa-spin {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- 导航栏 -->
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <i class="fas fa-database text-2xl text-blue-600 mr-3"></i>
+                    <h1 class="text-xl font-bold text-gray-900">数据库状态管理中心</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-2 text-sm text-gray-600">
+                        <label class="flex items-center cursor-pointer">
+                            <input type="checkbox" id="auto-refresh-toggle" checked class="mr-2">
+                            <span>自动刷新</span>
+                        </label>
+                        <span class="text-gray-400">|</span>
+                        <span>最后更新: <span id="last-refresh-time">--:--:--</span></span>
+                    </div>
+                    <button id="refresh-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        <i class="fas fa-sync-alt mr-2"></i>刷新
+                    </button>
+                    <button id="batch-ops-btn" class="px-4 py-2 text-sm bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                        <i class="fas fa-tasks mr-2"></i>批量操作
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <!-- 统计卡片 -->
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">总数据库</p>
+                        <p class="text-2xl font-bold text-gray-900" id="stat-total">0</p>
+                    </div>
+                    <i class="fas fa-database text-3xl text-blue-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">已解析</p>
+                        <p class="text-2xl font-bold text-green-600" id="stat-parsed">0</p>
+                    </div>
+                    <i class="fas fa-check-circle text-3xl text-green-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">已生成</p>
+                        <p class="text-2xl font-bold text-blue-600" id="stat-generated">0</p>
+                    </div>
+                    <i class="fas fa-cube text-3xl text-blue-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">需更新</p>
+                        <p class="text-2xl font-bold text-amber-600" id="stat-needs-update">0</p>
+                    </div>
+                    <i class="fas fa-exclamation-triangle text-3xl text-amber-500"></i>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-500">失败</p>
+                        <p class="text-2xl font-bold text-red-600" id="stat-failed">0</p>
+                    </div>
+                    <i class="fas fa-times-circle text-3xl text-red-500"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- 过滤器 -->
+        <div class="bg-white rounded-lg shadow p-4 mb-6">
+            <div class="flex flex-wrap items-center gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">模块</label>
+                    <select id="filter-module" class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">全部模块</option>
+                        <option value="DESI">DESI</option>
+                        <option value="EQUI">EQUI</option>
+                        <option value="PIPE">PIPE</option>
+                        <option value="STRU">STRU</option>
+                        <option value="HVAC">HVAC</option>
+                        <option value="ELEC">ELEC</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">状态</label>
+                    <select id="filter-status" class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">全部状态</option>
+                        <option value="notstarted">未开始</option>
+                        <option value="inprogress">处理中</option>
+                        <option value="completed">已完成</option>
+                        <option value="failed">失败</option>
+                        <option value="outdated">已过期</option>
+                    </select>
+                </div>
+                <div class="flex items-end">
+                    <label class="flex items-center">
+                        <input type="checkbox" id="filter-needs-update" class="mr-2">
+                        <span class="text-sm font-medium text-gray-700">仅显示需要更新</span>
+                    </label>
+                </div>
+                <div class="flex items-end ml-auto">
+                    <button id="apply-filter" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                        <i class="fas fa-filter mr-2"></i>应用过滤
+                    </button>
+                    <button id="clear-filter" class="ml-2 px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400">
+                        清除
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据表格 -->
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left">
+                                <input type="checkbox" id="select-all" class="rounded">
+                            </th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" onclick="dbStatusManager.sortBy('db_num')">
+                                数据库号 <i class="fas fa-sort text-gray-400"></i>
+                            </th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                名称
+                            </th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                模块
+                            </th>
+                            <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                解析状态
+                            </th>
+                            <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                模型状态
+                            </th>
+                            <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                空间树
+                            </th>
+                            <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                需要更新
+                            </th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" onclick="dbStatusManager.sortBy('file_size')">
+                                大小(MB) <i class="fas fa-sort text-gray-400"></i>
+                            </th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" onclick="dbStatusManager.sortBy('element_count')">
+                                元素数 <i class="fas fa-sort text-gray-400"></i>
+                            </th>
+                            <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                操作
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody id="database-tbody" class="bg-white divide-y divide-gray-200">
+                        <!-- 数据行将通过 JavaScript 动态生成 -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 分页 -->
+            <div class="px-6 py-3 bg-gray-50 border-t flex items-center justify-between">
+                <div class="text-sm text-gray-700">
+                    显示 <span id="page-info">0-0</span> 条，共 <span id="total-count">0</span> 条
+                </div>
+                <div class="flex space-x-2">
+                    <button id="prev-page" class="px-3 py-1 border rounded text-sm hover:bg-gray-100 disabled:opacity-50" disabled>
+                        <i class="fas fa-chevron-left"></i>
+                    </button>
+                    <span class="px-3 py-1 text-sm">
+                        第 <span id="current-page">1</span> / <span id="total-pages">1</span> 页
+                    </span>
+                    <button id="next-page" class="px-3 py-1 border rounded text-sm hover:bg-gray-100 disabled:opacity-50" disabled>
+                        <i class="fas fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 批量操作模态框 -->
+    <div id="batch-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="flex justify-between items-center pb-3 border-b">
+                <h3 class="text-xl font-bold text-gray-900">批量操作</h3>
+                <button onclick="closeBatchModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            <div class="mt-4">
+                <p class="text-sm text-gray-600 mb-4">
+                    已选择 <span id="selected-count">0</span> 个数据库
+                </p>
+                <div class="space-y-2">
+                    <button onclick="executeBatchOperation('parse')" class="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                        <i class="fas fa-file-import mr-2"></i>批量解析
+                    </button>
+                    <button onclick="executeBatchOperation('generate')" class="w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                        <i class="fas fa-cube mr-2"></i>批量生成模型
+                    </button>
+                    <button onclick="executeBatchOperation('update')" class="w-full px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700">
+                        <i class="fas fa-sync mr-2"></i>批量更新
+                    </button>
+                    <button onclick="executeBatchOperation('clear')" class="w-full px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+                        <i class="fas fa-trash mr-2"></i>批量清理缓存
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 详情模态框 -->
+    <div id="detail-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+        <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white">
+            <div class="flex justify-between items-center pb-3 border-b">
+                <h3 class="text-xl font-bold text-gray-900" id="detail-title">数据库详情</h3>
+                <button onclick="closeDetailModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            <div class="mt-4" id="detail-content">
+                <!-- 详情内容将动态加载 -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/database_status.js"></script>
+</body>
+</html>

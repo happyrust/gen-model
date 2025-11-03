@@ -1,0 +1,12 @@
+{
+    "workbench.colorCustomizations": {
+        "activityBar.background": "#531633",
+        "titleBar.activeBackground": "#751F47",
+        "titleBar.activeForeground": "#FEFCFD"
+    },
+    "rust-analyzer.linkedProjects": [
+        "Cargo.toml"
+    ],
+    "git.ignoreLimitWarning": true,
+    "chatgpt.openOnStartup": true
+}

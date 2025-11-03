@@ -1,0 +1,49 @@
+/target
+.idea/
+/assets/
+/asset/
+models/
+final.obj
+watcher.json
+/all_attr_info.json
+accel_tree.bin
+/pdms-io/
+aios-database.exe
+mqtt-server.exe
+simple-http-server.exe
+simple_grpc
+
+
+frontend/v0-aios-database-management/.next
+frontend/v0-aios-database-management/node_modules
+
+# Ignore all node_modules directories
+node_modules/
+**/node_modules/
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE crash reports and temporary files
+rustc-ice-*.txt
+
+# Test and output directories (keep tracked files)
+*.log
+*.db-shm
+*.db-wal
+
+# Generated output directory
+output/
+
+# External repositories (managed separately)
+docs.surrealdb.com/
+external/rs-core/
+node_modules
+# Local SurrealDB datasets
+ams-8009-test.db
+surreal-8010.kv

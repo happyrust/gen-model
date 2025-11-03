@@ -1,0 +1,12 @@
+[build]
+# 默认禁用 OCC 功能避免 glam 版本冲突
+rustflags = []
+
+# [unstable]
+# codegen-backend = true
+
+# [profile.dev]
+# codegen-backend = "cranelift"
+
+# [profile.dev.package."*"]
+# codegen-backend = "llvm"

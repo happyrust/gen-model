@@ -1,0 +1,2 @@
+#V2
+array::flatten(pe_1112:9304_0.{2..4+prune=$value.noun = "ZONE"}.children).{ id, noun }

@@ -1,0 +1,432 @@
+#同步文件配置
+total_sync = true
+#增量同步，避免重新创建重复的索引和uda、sys
+incr_sync = false
+# total_sync = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_localdb = false
+replace_dbs = true
+sync_chunk_size = 100_0000
+
+#项目设置
+project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+module = "DESI"
+#是否生成模型数据
+gen_model = true
+mesh_tol_ratio = 3.0
+apply_boolean_operation = true
+#是否生成房间树
+gen_spatial_tree = false
+load_spatial_tree = false
+save_spatial_tree_to_db = true
+gen_model_batch_size = 100
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+
+#arangodb 配置
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+# arangodb_url = "http://50c170h624.zicp.vip:15830"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+#port = "4000"
+sql_threads_number = 50
+batch_insert_sql_cnt = 100   #mysql 批量插入的数量
+
+
+#版本数据库服务配置
+v_ip = "localhost"
+v_port = "8003"
+v_user = "root"
+v_password = ""
+pe_chunk = 1000
+att_chunk = 200
+
+
+#mqtt 事件 ip
+mqtt_host = "192.168.31.60"
+mqtt_port = 8883
+
+location = "SJZ1"
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.38:8100/asset/archives"
+
+
+#调试选项
+replace_mesh = true
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project =  false     #是否重新生成 mdb 缓存
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = ["CATA"]
+#included_db_files = ["ams7351_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001", ]
+#included_db_files = ["ams7353_0001", "ams7741_0001", "ams7998_0001"]
+#included_db_files = ["ams1112_0001", "ams5052_0001", "ams7000_0001", "ams5053_0001"]
+# included_db_files = ["acp7002_0001", "ams7997_0001", "ams1112_0001"]
+# included_db_files = ["acp7002_0001"]
+# included_db_files = ["ams7000_0001"]
+# included_db_files = ["ams1112_0001"]
+#manual_db_nums = [7999, 7997, 1112, 8000]
+#manual_db_nums = [7354]
+manual_db_nums = [7999, 1112]  #, 8000
+plat_url = ""
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+# debug_model_refnos = ["25688/71674"]
+# debug_model_refnos = ["17496/171188"]
+
+#test wall
+# debug_model_refnos = ["17496/171396"]
+
+#test HVAC
+# debug_model_refnos = ["24381/57495"]
+# debug_model_refnos = ["17496/172286"]
+
+#TEST-1 测试穹顶被负实体消去的情况, revolution 点在axis上的情况
+# debug_model_refnos = ["24381/36945"]
+
+#TEST-2 测试revolution 点不在axis上的情况
+
+#TEST-3 测试mgre为空,但是Ngmr不为空的情况
+# debug_model_refnos = ["25688/7959"]
+
+#TEST-3 测试风管有问题的情况
+# debug_model_refnos = ["24381/57574"]
+
+#SSLC的问题
+# debug_model_refnos = ["24381/46972"]
+
+#风管直段问题
+# debug_model_refnos = ["24381/58708"]
+
+# debug_model_refnos = ["24381/58482"]
+#debug_model_refnos = ["24381/58338", "24381/58708"]
+
+
+
+
+# debug_model_refnos = ["25688/7958"]
+
+# debug_model_refnos = ["17496/171191"]
+
+#joint还有问题，方位对齐的问题
+#debug_model_refnos = ["25688/48687"]
+# debug_model_refnos = ["17496/254041","17496/248848","17496/266201"]
+
+
+#ngmr的孔洞问题，需要调整组织，own_pos_refnos 要设为多个
+#debug_model_refnos =["23713/6102"]
+
+# debug_model_refnos =["24383/87588"]
+#电动阀门的问题
+# debug_model_refnos =["24383/66748"]
+# todo JUSL还是有问题，没有弄得太清楚，如果有SNODE的情况，对齐方式会有所不同
+# debug_model_refnos =["23736/64"]
+
+# debug_model_refnos =["23740/498", "17496/170985", "23734/3039"]
+
+
+# debug_model_refnos = ["23734/3041"]
+
+#打洞的问题，需要重构一下own pos refnos
+#debug_model_refnos = ["23713/6093"]
+#debug_model_refnos = ["24383/73928"]
+#debug_model_refnos = ["25688/4595", ]
+#debug_model_refnos = ["23713/6104"]
+# debug_model_refnos = ["25688/7954", "17496/202345", "9304/2", ]
+#debug_model_refnos = ["23738/595"]
+#debug_model_refnos = ["17496/118542", " 24381/35931", "24381/35902"]
+
+#楼板FIT显示
+# debug_model_refnos = ["25688/72092", "25688/75909"]
+
+#debug_model_refnos = ["24381/36612", "24381/40192", "24381/36945", "25688/71621", "24384/22441", "24384/3115", "24384/23184", "24384/24223"]
+#debug_model_refnos = ["24384/22447"]
+#debug_model_refnos = ["24381/36945"]
+#debug_model_refnos = ["17496/202345"]
+#debug_model_refnos = ["24381/42441"]
+#debug_model_refnos = ["24381/42463"]
+#debug_model_refnos = ["24381/37115"]
+#debug_model_refnos = ["24381/36563"]
+
+#管道不出来的情况，需要查一下原因, *以解决
+#debug_model_refnos = ["24381/57428"]
+
+#debug_model_refnos = ["9304/2"]
+#拉伸体的wire共线的问题, 开门洞还是有问题需要调试
+#debug_model_refnos = ["17496/106258"]
+
+#生成会崩溃, 已解决
+#debug_model_refnos = ["24383/73928"]
+
+#房间计算用
+#debug_model_refnos = ["24381/34848"]
+
+#风管还有问题
+#debug_model_refnos = ["24381/57479"]
+
+#风管有问题  还剩下OF的计算没有解决
+#debug_model_refnos = ["24381/57478"]
+#风管的rtorus 生成有问题
+#debug_model_refnos = ["24381/57524"]
+
+#桥架有问题 *已解决
+#debug_model_refnos = ["24384/22404"]
+
+#楼板生成有问题, 需要offset，这里判断如果是extrusion，就需要offset
+#debug_model_refnos = ["24381/40192"]
+#debug_model_refnos = ["24381/40451"]
+
+#debug_model_refnos = ["24384/24932"]
+
+#生成的负实体，没有将圆柱体削成半球
+#debug_model_refnos = ["24381/36945"]
+
+#debug_model_refnos = ["24383/73985"]
+
+#Cut 崩溃, 需要一个个切
+#debug_model_refnos = ["24381/57864"]
+
+#Cut 崩溃, 被offset影响
+#debug_model_refnos = ["24383/78369"]
+
+#debug_model_refnos = ["23714/1108", "23714/1"]
+
+
+#transform 有不合适的值，NAN
+#debug_model_refnos = ["24381/105513"]
+
+#stwall的元件库生成模型有错误
+#debug_model_refnos = ["17496/106397"]
+
+#24381_105593
+
+#debug_model_refnos = ["17496/169982"]
+#debug_model_refnos = ["25688/4135"]
+#debug_model_refnos = ["25688/4160"]
+#debug_model_refnos = ["9304/2"]
+
+#rtor显示问题
+#debug_model_refnos = ["24381/159849"]
+
+#管道测试
+#debug_model_refnos = ["24381/159849"]
+
+#大量负实体测试
+#debug_model_refnos = ["24381/101405"]
+#debug_model_refnos = ["17496/169987"]
+
+#SCTN测试
+#debug_model_refnos = ["25688/4377"]
+
+#WALL测试，SPLINE的问题
+#debug_model_refnos = ["24381/44638"]
+
+#debug_model_refnos = ["13246/101405"]
+
+#debug_model_refnos = ["17496/169983"]
+
+#WALL 的调试
+#debug_model_refnos = ["24381/46775"]
+
+
+#debug_model_refnos = ["17496/169982"]
+#debug_model_refnos = ["9304/2"]
+#debug_model_refnos = ["24383/84086"]
+#debug_model_refnos = ["24383/84443"]
+#debug_model_refnos = ["24383/84337"]
+#debug_model_refnos = ["24383/84382"]
+#debug_model_refnos = ["17496/106409"]
+
+#风管的测试
+#debug_model_refnos = ["24381/46775"]
+
+#测试风管bend的问题
+#debug_model_refnos = ["24381/47158"]
+
+#错误的pyramid
+#debug_model_refnos = ["17496/171101"]
+
+#FIXING 的调试
+#debug_model_refnos = ["17496/106824"]  #墙
+#debug_model_refnos = ["17496/145250"]  #FIXING
+#debug_model_refnos = ["17496/106409"]  #墙
+#debug_model_refnos = ["17496/173624"]  #墙 顺时针的情况
+
+#FIT 的调试
+#17496/173050
+#debug_model_refnos = ["17496/173050"]
+#debug_model_refnos = ["17496/173049"]
+
+#debug_model_refnos = ["17496/169983"]
+#debug_model_refnos = ["24381/148471"]
+#debug_model_refnos = ["24383/74047"]
+#debug_model_refnos = ["25688/4361"]
+#debug_model_refnos = ["24381/159290"]
+
+#debug_model_refnos = ["24383/73928"]
+
+
+#VALVE 有问题
+#debug_model_refnos = ["17496/170701"]
+
+#DISH  显示有问题
+#debug_model_refnos = ["17496/170884"]
+
+#debug_model_refnos = ["24381/42520"]
+#debug_model_refnos = ["24381/44462"]
+#debug_model_refnos = ["17496/169987"]
+
+#负实体的计算问题
+#debug_model_refnos = ["17496/169983"]
+#debug_model_refnos = ["9304/2"]
+#debug_model_refnos = ["17496/98576"]
+#生成多个分段了的负实体，会崩溃，需要跳过
+#debug_model_refnos = ["17496/99813"]
+
+#拉伸体有一些异性，需要处理掉不必要的边
+#debug_model_refnos = ["17496/99969"]
+
+#重点测试负实体
+#debug_model_refnos = ["17496/99813"]
+#debug_model_refnos = ["17496/170391"]
+
+#debug_model_refnos = ["17496/79888"]
+
+#有问题的负实体
+#debug_model_refnos = ["24381/44462"]
+#debug_model_refnos = ["24381/44372"]
+#debug_model_refnos = ["24381/44372"]
+
+#cut a sphere cap
+#debug_model_refnos = ["24381/36945"]
+
+#debug_model_refnos = ["17496/161421"]
+#debug_model_refnos = ["17496/171102"]
+#debug_model_refnos = ["17496/171102"]
+#debug_model_refnos = ["24381/57302"]
+#debug_model_refnos = ["17496/8518"]
+
+
+#直墙的显示问题
+#debug_model_refnos = ["17496/172197"]
+#debug_model_refnos = ["17496/171750"]
+#debug_model_refnos = ["24381/48631"]
+
+#debug_model_refnos = ["17496/172361"]
+#debug_model_refnos = ["17496/171256"]
+#debug_model_refnos = ["17496/171254"]
+#debug_model_refnos = ["17496/172817"]
+#debug_model_refnos = ["17496/172816"]
+#debug_model_refnos = ["17496/172852"]
+
+#debug_model_refnos = ["24381/44495", "17496/171256", "17496/171302"]
+#debug_model_refnos = ["24381/42520"]
+#debug_model_refnos = ["9304/2"]
+#debug_model_refnos = ["17496/161703"]
+
+#debug_model_refnos = ["17496/105760"]
+#debug_model_refnos = ["17496/105760"]
+
+#debug_model_refnos = ["17496/171102"]
+#debug_model_refnos = ["17496/171138"]
+#debug_model_refnos = ["17496/172824"]
+#debug_model_refnos = ["17496/171158"]
+
+#SBFI
+#debug_model_refnos = ["17496/137938"]
+#GWALL
+#debug_model_refnos = ["17496/116749"]
+#debug_model_refnos = ["17496/171346"]
+
+#debug_model_refnos = ["17496/178935"]
+#debug_model_refnos = ["17496/175492"]
+
+#电气负实体测试
+#debug_model_refnos = ["24383/84480"]
+#debug_model_refnos = ["24383/84515"]
+#debug_model_refnos = ["24383/84531"]
+#debug_model_refnos = ["24383/84532"]
+
+
+#17496/116750
+
+#debug_model_refnos = ["17496/72861"]
+#debug_model_refnos = ["17496/168790"]
+
+#debug_model_refnos = ["17496/171134"]
+#debug_model_refnos = ["17496/172861"]
+#debug_model_refnos = ["17496/173047"]
+#debug_model_refnos = ["17496/173056"]
+#debug_model_refnos = ["17496/194989"]
+#debug_model_refnos = ["17496/194993"]
+#debug_model_refnos = ["17496/161488"]
+#debug_model_refnos = ["17496/195553"]
+
+#重点测试管道
+#debug_model_refnos = ["17496/169986"]
+#debug_model_refnos = ["17496/171009"]
+#debug_model_refnos = ["17496/170902"]
+
+#debug_model_refnos = ["17496/173811"]
+#debug_model_refnos = ["17496/168790"]
+
+#SANN 的柱子计算
+#debug_model_refnos = ["17496/173810"]
+#debug_model_refnos = ["17496/171555"]
+#debug_model_refnos = ["17496/171751"]
+#debug_model_refnos = ["17496/171134"]
+
+#debug_model_refnos = ["17496/195598"]
+#debug_model_refnos = ["17496/195555"]
+#debug_model_refnos = ["17496/195603"]
+#debug_model_refnos = ["17496/161488"]
+#debug_model_refnos = ["17496/161704"]
+#debug_model_refnos = ["17496/171102"]
+#debug_model_refnos = ["17496/161704"]
+#debug_model_refnos = ["17496/106409"]
+#debug_model_refnos = ["25688/7956"]
+#debug_model_refnos = ["25688/7972"]
+#debug_model_refnos = ["25688/7971"]
+#debug_model_refnos = ["25688/8188"]
+#debug_model_refnos = ["17496/172226"]
+
+#指定哪些根节点下面是房间，以FRMW为一个整体
+room_root_refnos = ["24381/35795"]
+#room_root_refnos = ["24381/35342", "24381/35795", "24381/36068"]
+#room_root_refnos = ["24381/36068"]
+
+#room_root_refnos = ["24381/35622"]
+#24381_105593\

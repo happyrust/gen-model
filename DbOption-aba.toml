@@ -1,0 +1,113 @@
+#同步文件配置
+total_sync = false
+incr_sync = true
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_live = false
+replace_dbs = false
+sync_chunk_size = 1_0000
+
+#项目设置
+project_path = "D:/AVEVA/Projects/E3D2.1"
+included_projects = ["GDP"]
+#project_dirs = ["AvevaMarineSample"]
+
+mdb_name = "NI-MODEL"
+project_name = "ABA"
+project_code = 1001
+surreal_ns = 1001
+module = "DESI"
+#是否生成模型数据
+gen_model = true
+gen_mesh = true
+replace_mesh = true
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#是否生成房间树
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+gen_model_batch_size = 16
+
+meshes_path="E:\\RustProject\\new\\rs-plant3-d\\assets\\meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+#port = "4000"
+sql_threads_number = 50
+batch_insert_sql_cnt = 100 #mysql 批量插入的数量
+
+
+#版本数据库服务配置
+v_ip = "localhost"
+#v_port = "8004"
+#v_port = "8003"
+v_port = "8010"
+v_user = "root"
+v_password = "root"
+pe_chunk = 500
+att_chunk = 200
+
+
+#mqtt 事件 ip
+mqtt_host = "192.168.31.60"
+mqtt_port = 8883
+
+location = "SJZ1"
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.38:8100/asset/archives"
+
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
+reset_mdb_project = false           #是否重新生成 mdb 缓存
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = ["LOOP"]
+included_db_files = ["gdp004"]
+#included_db_files = ["acp7002_0001"]
+#manual_db_nums = [7999, 7997, 1112, 8000]
+#manual_db_nums = [7326]
+plat_url = ""
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
+
+#debug_model_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
+#debug_model_refnos = ["24381/36155", "24383/67004"]
+#debug_model_refnos = ["=24383/67642"]
+#gen_using_spref_refnos = ["13245/660780"]
+#manual_sync_refnos = ["17496/269319"]
+# debug_model_refnos = ["24383/66457", "24381/34110"]
+#debug_model_refnos = ["17496/172806"]

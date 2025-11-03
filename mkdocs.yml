@@ -1,0 +1,35 @@
+site_name: Gen-Model Docs
+site_description: 生成模型项目开发文档
+site_url: ""
+
+# 直接使用仓库中的“开发文档”作为文档根目录
+docs_dir: 开发文档
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.expand
+    - navigation.tabs
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.9.0/dist/mermaid.min.js
+  - javascripts/mermaid-init.js
+
+nav:
+  - 首页: index.md
+  - 增量更新实现: 增量更新-update_elements_to_database-实现分析.md
+

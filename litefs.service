@@ -1,0 +1,27 @@
+[Unit]
+Description=LiteFS - Distributed SQLite
+Documentation=https://github.com/superfly/litefs
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# 使用 /etc/litefs.yml 配置文件
+ExecStart=/usr/local/bin/litefs mount
+# 优雅退出
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 自动重启
+Restart=on-failure
+RestartSec=5s
+# 环境变量
+Environment="LITEFS_DIR=/litefs"
+# 工作目录
+WorkingDirectory=/var/lib/litefs
+# 创建挂载点
+ExecStartPre=/bin/mkdir -p /litefs
+ExecStartPre=/bin/mkdir -p /var/lib/litefs
+
+[Install]
+WantedBy=multi-user.target
