@@ -278,8 +278,10 @@ fn render_mesh_to_png(mesh: &PlantMesh, width: u32, height: u32, output_path: &P
         .max(extent.z.abs())
         .max(1.0);
     let radius = extent.length().max(max_extent).max(1.0);
-    // 进一步减小相机距离系数，使相机更靠近模型
-    let camera_distance = radius * 1.0;
+    // 增加相机距离系数，确保模型完整显示不被截断
+    // 考虑到透视投影（FOV 45度）和45度视角，需要更大的距离系数
+    // 使用 max_extent 而不是 radius，确保适应非立方体的边界框
+    let camera_distance = max_extent * 1.8;
     // 前视图 + 俯视 45°：相机在前方（Y 轴负方向）并向上（Z 轴正方向）45 度俯视模型
     // 方向向量：(0, -cos(45°), sin(45°)) = (0, -1/√2, 1/√2)
     let cos45 = 45.0f32.to_radians().cos();
