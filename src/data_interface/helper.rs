@@ -34,8 +34,6 @@ pub async fn delete_inst_relate_cascade(
             );
             delete_sql_vec.push(delete_sql);
         }
-        dbg!(&delete_sql_vec);
-
         if !delete_sql_vec.is_empty() {
             let sql = delete_sql_vec.join("");
             match SUL_DB.query(&sql).await {

@@ -450,8 +450,10 @@ impl AiosDBManager {
             }
             dbg!(&owner);
             if !owner.is_empty() {
-                // 确保 gen_model 为 true，以便触发模型生成和数据发送
+                // 确保 gen_model 和 gen_mesh 为 true，以便触发模型生成和数据发送
                 db_option.gen_model = true;
+                db_option.gen_mesh = true;
+                db_option.debug_refno_types = vec!["CATA".into(), "LOOP".into(), "PRIM".into()];
                 db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
                 println!(
                     "开始生成增量更新的模型数据，owner数量: {}",
