@@ -17,20 +17,20 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { 
-  ArrowLeft, 
-  Database, 
-  Settings, 
-  Play, 
-  Pause, 
-  Square, 
-  RefreshCw, 
+import {
+  ArrowLeft,
+  Database,
+  Settings,
+  Play,
+  Pause,
+  Square,
+  RefreshCw,
   AlertCircle,
   Loader2,
   ExternalLink,
   Copy,
   Edit,
-  Trash2
+  Trash2,
 } from "lucide-react"
 import { Sidebar } from "@/components/sidebar"
 import { toast } from "sonner"
@@ -39,6 +39,7 @@ import { zhCN } from "date-fns/locale"
 import type { Site } from "@/components/deployment-sites/site-card"
 import type { DeploymentSiteConfigPayload } from "@/lib/api"
 import { fetchDeploymentSite } from "@/lib/api"
+import { FileBrowserPanel } from "@/components/deployment-sites/file-browser-panel"
 
 interface SiteDetail extends Site {
   config: DeploymentSiteConfigPayload
@@ -79,8 +80,8 @@ export default function SiteDetailPage() {
         const siteDetail: SiteDetail = {
           id: siteData.id as string,
           name: siteData.name as string,
-          status: (siteData.status as string) || "configuring",
-          environment: (siteData.env as string) || "dev",
+          status: ((siteData.status as string) || "configuring") as Site["status"],
+          environment: ((siteData.env as string) || "dev") as Site["environment"],
           owner: siteData.owner as string,
           createdAt: siteData.created_at as string || new Date().toISOString(),
           updatedAt: siteData.updated_at as string || new Date().toISOString(),
@@ -486,6 +487,8 @@ export default function SiteDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          <FileBrowserPanel siteId={site.id} title="项目文件目录" />
 
           {/* Generation Options */}
           <Card>

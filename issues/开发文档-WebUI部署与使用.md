@@ -32,7 +32,7 @@
 ### 3.2 启动 Web UI（调试模式）
 ```bash
 export PORT=8080 RUST_LOG=info
-cargo run --bin web_ui
+cargo run --bin web_server
 ```
 
 ### 3.3 访问与验证
@@ -52,7 +52,7 @@ cargo run --bin web_ui
 ```mermaid
 flowchart TD
     A[准备环境\n- 工作目录与权限\n- 确认 ./surreal 可执行\n- 端口: 8009/8080] --> B[启动 SurrealDB\n./surreal start ...]
-    B --> C[启动 Web UI\nPORT=8080; cargo run --bin web_ui]
+    B --> C[启动 Web UI\nPORT=8080; cargo run --bin web_server]
     C --> D[访问浏览器\nhttp://127.0.0.1:8080/]
     D --> E[部署站点管理\n新建/查看站点]
     E --> F[扫描与配置\nE3D 路径/DB参数/生成选项]
@@ -133,7 +133,7 @@ graph TD
 ./surreal start --user root --pass root --bind 127.0.0.1:8009 rocksdb://ams-8009-test.db
 
 # 启动 Web UI（调试模式）
-export PORT=8080; cargo run --bin web_ui
+export PORT=8080; cargo run --bin web_server
 ```
 
 ### 6.2 日志
@@ -142,7 +142,7 @@ export PORT=8080; cargo run --bin web_ui
 journalctl -u web-ui -f  # 若已服务化
 
 # 仓库日志（如有）
-tail -f web_ui.log
+tail -f web_server.log
 ```
 
 ### 6.3 升级/回滚
@@ -186,7 +186,7 @@ git checkout <commit|tag> && systemctl restart web-ui
 ./surreal start --user root --pass root --bind 127.0.0.1:8009 rocksdb://ams-8009-test.db
 
 # 启 Web UI
-export PORT=8080; cargo run --bin web_ui
+export PORT=8080; cargo run --bin web_server
 
 # SurrealDB CLI（示例）
 ./surreal sql --conn ws://127.0.0.1:8009 --user root --pass root --ns 1516 --db AvevaMarineSample
@@ -225,28 +225,28 @@ export PORT=8080; cargo run --bin web_ui
 - 连接测试：使用页面输入参数直连 SurrealDB 做一次真实查询
 - 启动进度：异步跟踪数据库启动的阶段与百分比
 
-入口页面：`/database-connection`（简易版见 `src/web_ui/simple_templates.rs`），向导页也提供了启动/测试入口（`src/web_ui/wizard_template.rs`）。
+入口页面：`/database-connection`（简易版见 `src/web_server/simple_templates.rs`），向导页也提供了启动/测试入口（`src/web_server/wizard_template.rs`）。
 
 ### 10.2 核心数据结构（后端）
 - `DatabaseConfig`：连接与任务混合配置，含 `db_ip/db_port/db_user/db_password/project_code/project_name` 等。
-  - 位置：`src/web_ui/models.rs:232`
+  - 位置：`src/web_server/models.rs:232`
 - `DatabaseConnectionStatus`：体检返回体，含 `connected/error_message/connection_time/last_check/config`。
-  - 位置：`src/web_ui/handlers.rs:4668`
+  - 位置：`src/web_server/handlers.rs:4668`
 - `StartupScript`：启动脚本的展示信息。
-  - 位置：`src/web_ui/handlers.rs:4688`
+  - 位置：`src/web_server/handlers.rs:4688`
 
 ### 10.3 后端接口（REST）
 - 连接体检：`GET /api/database/connection/check`
-  - 实现：`src/web_ui/handlers.rs:4700` 调用 `check_surrealdb_connection` → 端口是否在监听 + `SELECT 1` 探活
+  - 实现：`src/web_server/handlers.rs:4700` 调用 `check_surrealdb_connection` → 端口是否在监听 + `SELECT 1` 探活
 - 启动脚本列表：`GET /api/database/startup-scripts`
-  - 实现：`src/web_ui/handlers.rs:4722` 扫描 `cmd/` 目录的 `surreal*.sh`，并标记可执行权限
+  - 实现：`src/web_server/handlers.rs:4722` 扫描 `cmd/` 目录的 `surreal*.sh`，并标记可执行权限
 - 用脚本启动实例：`POST /api/database/start-instance`（body: `{ script_path, port }`）
-  - 实现：`src/web_ui/handlers.rs:4758` 若脚本缺失会创建默认脚本；随后后台 `bash` 执行
+  - 实现：`src/web_server/handlers.rs:4758` 若脚本缺失会创建默认脚本；随后后台 `bash` 执行
 - Surreal 状态：`GET /api/surreal/status?ip=&port=`
-  - 实现：`src/web_ui/handlers.rs:2660` 组合“端口监听 + 全局连接能否查询”
+  - 实现：`src/web_server/handlers.rs:2660` 组合“端口监听 + 全局连接能否查询”
 - 连接测试：`POST /api/surreal/test`
   - 请求体：`{ ip, port, user, password, namespace, database }`
-  - 实现：`src/web_ui/handlers.rs:2701` → `src/web_ui/db_connection.rs:96` 真连一次（Ws → signin → use_ns/db → `RETURN 'ok'`）
+  - 实现：`src/web_server/handlers.rs:2701` → `src/web_server/db_connection.rs:96` 真连一次（Ws → signin → use_ns/db → `RETURN 'ok'`）
 
 #### 10.3.1 默认参数与界面行为
 - 默认账号密码：`root/root`（页面初始即为此值，可在界面修改）
@@ -257,36 +257,36 @@ export PORT=8080; cargo run --bin web_ui
   - 测试：`POST /api/surreal/test`（同页面参数）
   - 说明：为避免 `localhost` 兼容性问题，推荐使用 `127.0.0.1`。
 - 端口占用检测：`GET /api/surreal/check-port?port=8009`
-  - 实现：`src/web_ui/handlers.rs:71` 基于 `lsof -ti :<port>`
+  - 实现：`src/web_server/handlers.rs:71` 基于 `lsof -ti :<port>`
 - 端口占用清理：`POST /api/surreal/kill-port`（body: `{ port }`）
-  - 实现：`src/web_ui/handlers.rs:102` 尝试 `kill -TERM`，必要时 `-KILL`
+  - 实现：`src/web_server/handlers.rs:102` 尝试 `kill -TERM`，必要时 `-KILL`
 - 启动管理（推荐）：
   - 开始启动：`POST /api/database/startup/start`
   - 查询状态：`GET /api/database/startup/status?ip=&port=`
   - 列出所有实例：`GET /api/database/startup/instances`
   - 停止实例：`POST /api/database/startup/stop`（body: `{ ip, port }`）
-  - 实现：`src/web_ui/db_startup_handlers.rs:1`；状态管理与步骤在 `src/web_ui/db_startup_manager.rs`
+  - 实现：`src/web_server/db_startup_handlers.rs:1`；状态管理与步骤在 `src/web_server/db_startup_manager.rs`
 
-说明：历史的 `/api/surreal/start|stop|restart` 也有实现（`src/web_ui/handlers.rs:2189/2437/2612`），但在路由层暂时注释。建议统一走“启动管理”接口集，上层更好展示进度/错误。
+说明：历史的 `/api/surreal/start|stop|restart` 也有实现（`src/web_server/handlers.rs:2189/2437/2612`），但在路由层暂时注释。建议统一走“启动管理”接口集，上层更好展示进度/错误。
 
 ### 10.4 连接初始化与复用
 - 按站点（或配置）创建连接：`init_surreal_with_config`
-  - 位置：`src/web_ui/db_connection.rs:15`
+  - 位置：`src/web_server/db_connection.rs:15`
   - 步骤：`Surreal::new::<Ws>(host:port)` → `signin(Root{user,pass})` → `use_ns(project_code).use_db(project_name)`
 - 连接池：`DEPLOYMENT_DB_CONNECTIONS`（按 `ip:port` 缓存 `Surreal<Client>`）
-  - 位置：`src/web_ui/db_connection.rs:10`
+  - 位置：`src/web_server/db_connection.rs:10`
 - 在任务入口初始化并写入连接池（便于后续查询使用）
-  - 位置：`src/web_ui/handlers.rs:2920`（任务执行前置步骤）
+  - 位置：`src/web_server/handlers.rs:2920`（任务执行前置步骤）
 
 ### 10.5 启动/诊断实现要点
 - 启动改进版：检查 `surreal` 是否存在 → 检测端口，若被占用则先 `kill` 占用进程再继续 → 始终以 `--bind 0.0.0.0:<port>` 启动 → 跟踪端口可达 + 功能性查询
   - 实现：
-    - 统一绑定 0.0.0.0：`src/web_ui/handlers.rs:2234`
-    - 自动清理占用并重启：`src/web_ui/db_startup_manager.rs:201`（复用 `kill_port_processes`）
+    - 统一绑定 0.0.0.0：`src/web_server/handlers.rs:2234`
+    - 自动清理占用并重启：`src/web_server/db_startup_manager.rs:201`（复用 `kill_port_processes`）
 - 生成默认脚本：`./surreal start --user <u> --pass <p> --bind <ip:port> rocksdb://ams-<port>-test.db`
-  - 位置：`src/web_ui/handlers.rs:4889`
+  - 位置：`src/web_server/handlers.rs:4889`
 - 数据库诊断：配置校验/CLI/端口/TCP/功能性/进程 PID 文件，输出建议列表
-  - 位置：`src/web_ui/database_diagnostics.rs:1`
+  - 位置：`src/web_server/database_diagnostics.rs:1`
 
 ### 10.6 常见问题与处理
 - 连接被拒绝/超时：优先看端口监听与 TCP 测试；用 `GET /api/surreal/check-port` + `POST /api/surreal/kill-port` 清理占用后重启
@@ -296,7 +296,7 @@ export PORT=8080; cargo run --bin web_ui
 
 ### 10.7 安全与日志
 - 已屏蔽测试连接接口中的明文密码输出，只记录长度
-  - 位置：`src/web_ui/handlers.rs:2713`
+  - 位置：`src/web_server/handlers.rs:2713`
 - 建议：
   - 生产环境禁用过多 `println!`；统一走日志宏并按级别输出
   - 页面仅在用户显式点击时显示密码；默认遮罩
@@ -332,7 +332,7 @@ curl -s -X POST http://127.0.0.1:8080/api/database/startup/start \
 
 #### 11.1.1 任务创建入口
 - **API 端点**：`POST /api/tasks`
-- **处理函数**：`create_task` (src/web_ui/handlers.rs:1124)
+- **处理函数**：`create_task` (src/web_server/handlers.rs:1124)
 - **请求数据结构**：
   ```rust
   CreateTaskRequest {
@@ -371,12 +371,12 @@ curl -s -X POST http://127.0.0.1:8080/api/database/startup/start \
 
 #### 11.2.1 任务启动
 - **API 端点**：`POST /api/tasks/:id/start`
-- **处理函数**：`start_task` (src/web_ui/handlers.rs:1147)
+- **处理函数**：`start_task` (src/web_server/handlers.rs:1147)
 - **执行方式**：通过 `tokio::spawn` 异步执行 `execute_real_task`
 
 #### 11.2.2 核心执行函数
 **函数签名**：`async fn execute_real_task(state: AppState, task_id: String)`
-**位置**：src/web_ui/handlers.rs:2862
+**位置**：src/web_server/handlers.rs:2862
 
 **执行步骤**：
 1. **初始化数据库连接** (使用 WebUI 配置而非 DbOption.toml)

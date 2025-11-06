@@ -515,7 +515,7 @@ pub fn log_error(error: &SyncError, context: &str) {
 
 2. **启动主服务**
    ```bash
-   cargo run --bin web_ui --features web_ui
+   cargo run --bin web_server --features web_server
    ```
 
 3. **配置反向代理**（可选）
@@ -550,9 +550,9 @@ pub fn log_error(error: &SyncError, context: &str) {
 
 ### A. 相关文件
 
-- `/src/web_ui/sync_control_center.rs` - 同步控制中心
-- `/src/web_ui/sync_control_handlers.rs` - API 处理器
-- `/src/web_ui/sync_control_template.rs` - 前端模板
+- `/src/web_server/sync_control_center.rs` - 同步控制中心
+- `/src/web_server/sync_control_handlers.rs` - API 处理器
+- `/src/web_server/sync_control_template.rs` - 前端模板
 - `/rumqttd-server/` - MQTT 服务器
 - `/static/sync_monitor.js` - 前端监控脚本
 

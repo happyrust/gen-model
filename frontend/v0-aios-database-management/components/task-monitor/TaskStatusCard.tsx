@@ -37,10 +37,10 @@ export function TaskStatusCard({ task, onTaskAction }: TaskStatusCardProps) {
             </div>
             <div className="flex items-center gap-4 text-sm text-muted-foreground">
               <span>ID: {task.id}</span>
-              <span>优先级: {task.priority}</span>
-              <span>进度: {task.progress}%</span>
-              <span>开始时间: {task.startTime}</span>
-              {task.endTime && <span>结束时间: {task.endTime}</span>}
+              <span>优先级: {task.priority ?? "未指定"}</span>
+              <span>进度: {Math.round(task.progress)}%</span>
+              <span>开始时间: {task.startTime ? new Date(task.startTime).toLocaleString() : "未知"}</span>
+              {task.endTime && <span>结束时间: {new Date(task.endTime).toLocaleString()}</span>}
             </div>
             <div className="mt-3">
               <Progress value={task.progress} />
@@ -76,5 +76,4 @@ export function TaskStatusCard({ task, onTaskAction }: TaskStatusCardProps) {
     </Card>
   )
 }
-
 

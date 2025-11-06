@@ -1,4 +1,4 @@
-use aios_database::web_ui::start_web_server;
+use aios_database::web_server::start_web_server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

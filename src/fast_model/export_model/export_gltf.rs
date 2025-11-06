@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{query_insts, RefnoEnum};
-use anyhow::{anyhow, Context, Result};
+use aios_core::{RefnoEnum, query_insts};
+use anyhow::{Context, Result, anyhow};
 use glam::Vec3;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::fast_model::material_config::MaterialLibrary;
 use crate::fast_model::unit_converter::UnitConverter;
 
-use super::export_common::{collect_export_data, ExportData};
+use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
-    collect_export_refnos, query_geometry_instances, ExportStats, GltfExportConfig, ModelExporter,
+    ExportStats, GltfExportConfig, ModelExporter, collect_export_refnos, query_geometry_instances,
 };
 
 /// 导出指定 refno 的整体 glTF 模型（JSON + BIN）

@@ -74,8 +74,14 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
 
     // 打印加载的 LOD 配置（调试信息）
     println!("📋 加载的配置:");
-    println!("   - default_lod: {:?}", db_option.mesh_precision.default_lod);
-    println!("   - LOD profiles 数量: {}", db_option.mesh_precision.lod_profiles.len());
+    println!(
+        "   - default_lod: {:?}",
+        db_option.mesh_precision.default_lod
+    );
+    println!(
+        "   - LOD profiles 数量: {}",
+        db_option.mesh_precision.lod_profiles.len()
+    );
 
     Ok(DbOptionExt::from(db_option))
 }

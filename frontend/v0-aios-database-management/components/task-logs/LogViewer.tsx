@@ -7,24 +7,19 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { 
-  Search, 
-  Download, 
-  Filter, 
-  RefreshCw, 
-  Copy, 
+import {
+  Search,
+  Download,
+  Filter,
+  RefreshCw,
+  Copy,
   ChevronDown,
   ChevronUp,
   AlertCircle,
   Info,
-  AlertTriangle
+  AlertTriangle,
 } from "lucide-react"
-import { LogEntry } from "./LogEntry"
-import { LogFilters } from "./LogFilters"
-import { LogSearch } from "./LogSearch"
-import { LogDownloader } from "./LogDownloader"
 import { useTaskLogs } from "@/hooks/use-task-logs"
-import { useLogSearch } from "@/hooks/use-log-search"
 import { useWebSocket } from "@/hooks/use-websocket"
 import type { LogEntry as LogEntryType, LogFilters as LogFiltersType } from "@/types/task-logs"
 
@@ -35,39 +30,226 @@ interface LogViewerProps {
   maxLines?: number
 }
 
+interface LogEntryProps {
+  log: LogEntryType
+  showTimestamp: boolean
+  onExpand?: (logId: string) => void
+  onCopy?: (content: string) => void
+}
+
+interface LogFiltersProps {
+  filters: LogFiltersType
+  onChange: (filters: LogFiltersType) => void
+}
+
+interface LogSearchProps {
+  onSearch: (value: string) => void
+  placeholder?: string
+  debounceMs?: number
+}
+
+interface LogDownloaderProps {
+  logs: LogEntryType[]
+  onClose?: () => void
+}
+
+function LogSearch({ onSearch, placeholder, debounceMs = 0 }: LogSearchProps) {
+  const [value, setValue] = useState("")
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const nextValue = event.target.value
+    setValue(nextValue)
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+    }
+    if (debounceMs > 0) {
+      timeoutRef.current = setTimeout(() => {
+        onSearch(nextValue)
+      }, debounceMs)
+    } else {
+      onSearch(nextValue)
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [])
+
+  return (
+    <div className="relative">
+      <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+      <Input
+        value={value}
+        onChange={handleChange}
+        placeholder={placeholder ?? "搜索日志"}
+        className="pl-9"
+      />
+    </div>
+  )
+}
+
+function LogFilters({ filters, onChange }: LogFiltersProps) {
+  return (
+    <div className="grid gap-4 rounded-lg border border-border/60 bg-muted/30 p-4 md:grid-cols-3">
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">日志级别</span>
+        <Select
+          value={filters.level}
+          onValueChange={(value) =>
+            onChange({
+              ...filters,
+              level: value as LogFiltersType["level"],
+            })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择级别" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部</SelectItem>
+            <SelectItem value="info">信息</SelectItem>
+            <SelectItem value="warn">警告</SelectItem>
+            <SelectItem value="error">错误</SelectItem>
+            <SelectItem value="debug">调试</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">任务</span>
+        <Input
+          value={filters.taskId === "all" ? "" : filters.taskId}
+          placeholder="任务 ID (留空表示全部)"
+          onChange={(event) =>
+            onChange({
+              ...filters,
+              taskId: event.target.value.trim() || "all",
+            })
+          }
+        />
+      </div>
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">关键字</span>
+        <Input
+          value={filters.search}
+          placeholder="输入关键字过滤"
+          onChange={(event) =>
+            onChange({
+              ...filters,
+              search: event.target.value,
+            })
+          }
+        />
+      </div>
+    </div>
+  )
+}
+
+function LogEntry({ log, showTimestamp, onExpand, onCopy }: LogEntryProps) {
+  const levelColors: Record<LogEntryType["level"], string> = {
+    info: "text-blue-600",
+    warn: "text-yellow-600",
+    warning: "text-yellow-600",
+    error: "text-red-600",
+    debug: "text-muted-foreground",
+    critical: "text-orange-600",
+  }
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded border border-border/40 bg-background/80 p-3">
+      <Badge variant="outline" className={levelColors[log.level]}>
+        {log.level.toUpperCase()}
+      </Badge>
+      <div className="flex-1 space-y-1">
+        {showTimestamp && <p className="text-xs text-muted-foreground">{new Date(log.timestamp).toLocaleString()}</p>}
+        <p className="text-sm leading-relaxed text-foreground">{log.message}</p>
+        {log.source && <p className="text-xs text-muted-foreground">来源: {log.source}</p>}
+      </div>
+      {(onExpand || onCopy) && (
+        <div className="flex flex-col items-end gap-2">
+          {onExpand && (
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onExpand(log.id)}>
+              详情
+            </Button>
+          )}
+          {onCopy && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs"
+              onClick={() => onCopy(log.message)}
+            >
+              复制
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LogDownloader({ logs, onClose }: LogDownloaderProps) {
+  const handleDownload = () => {
+    const blob = new Blob(
+      [logs.map((log) => `[${log.timestamp}] [${log.level}] ${log.message}`).join("\n")],
+      { type: "text/plain;charset=utf-8" }
+    )
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `task-logs-${Date.now()}.txt`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    onClose?.()
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">导出日志</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">导出当前筛选结果到文本文件。</p>
+        <Button size="sm" onClick={handleDownload} className="gap-2">
+          <Download className="h-4 w-4" />
+          下载日志
+        </Button>
+        <Button size="sm" variant="outline" onClick={onClose}>
+          取消
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function LogViewer({ 
   taskId, 
   autoScroll = true, 
   showTimestamp = true,
   maxLines = 1000 
 }: LogViewerProps) {
-  const [filters, setFilters] = useState<LogFiltersType>({
-    level: 'all',
-    search: '',
-    dateRange: null,
-    taskId: taskId || 'all'
-  })
-  
   const [showFilters, setShowFilters] = useState(false)
   const [showDownloader, setShowDownloader] = useState(false)
   const [isAutoScroll, setIsAutoScroll] = useState(autoScroll)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
-  const lastLogCountRef = useRef(0)
 
   const {
     logs,
     loading,
     error,
+    filters,
+    pagination,
     loadLogs,
-    refreshLogs
+    refreshLogs,
+    setFilters: updateFilters,
+    searchLogs,
   } = useTaskLogs(taskId)
-
-  const {
-    query,
-    results,
-    isSearching,
-    searchLogs
-  } = useLogSearch()
 
   // WebSocket连接用于实时日志
   const { isConnected, lastMessage } = useWebSocket(
@@ -76,7 +258,7 @@ export function LogViewer({
 
   // 加载日志数据
   useEffect(() => {
-    loadLogs(filters)
+    void loadLogs()
   }, [loadLogs, filters])
 
   // 处理WebSocket消息
@@ -98,18 +280,20 @@ export function LogViewer({
   }, [logs, isAutoScroll])
 
   // 处理过滤条件变化
-  const handleFilterChange = useCallback((newFilters: LogFiltersType) => {
-    setFilters(prev => ({ ...prev, ...newFilters }))
-  }, [])
+  const handleFilterChange = useCallback(
+    (newFilters: Partial<LogFiltersType>) => {
+      updateFilters(newFilters)
+    },
+    [updateFilters]
+  )
 
   // 处理搜索
-  const handleSearch = useCallback((searchQuery: string) => {
-    if (searchQuery.trim()) {
+  const handleSearch = useCallback(
+    (searchQuery: string) => {
       searchLogs(searchQuery)
-    } else {
-      setFilters(prev => ({ ...prev, search: '' }))
-    }
-  }, [searchLogs])
+    },
+    [searchLogs]
+  )
 
   // 复制日志内容
   const handleCopyLogs = useCallback(() => {
@@ -129,22 +313,7 @@ export function LogViewer({
   }, [])
 
   // 获取显示的日志
-  const displayLogs = filters.search ? results : logs
-  const filteredLogs = displayLogs.filter(log => {
-    if (filters.level !== 'all' && log.level !== filters.level) {
-      return false
-    }
-    if (filters.dateRange) {
-      const logDate = new Date(log.timestamp)
-      const [start, end] = filters.dateRange
-      if (logDate < start || logDate > end) {
-        return false
-      }
-    }
-    return true
-  })
-
-  // 限制显示行数
+  const filteredLogs = logs
   const limitedLogs = maxLines ? filteredLogs.slice(-maxLines) : filteredLogs
 
   return (
@@ -217,9 +386,7 @@ export function LogViewer({
           {showFilters && (
             <LogFilters
               filters={filters}
-              onFilterChange={handleFilterChange}
-              availableLevels={['all', 'info', 'warn', 'error']}
-              availableTasks={[]}
+              onChange={handleFilterChange}
             />
           )}
         </CardContent>
@@ -271,9 +438,9 @@ export function LogViewer({
       {/* 日志统计 */}
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <div className="flex items-center gap-4">
-          <span>总计: {filteredLogs.length} 条</span>
+          <span>总计: {pagination.totalItems} 条</span>
           {filters.search && (
-            <span>搜索结果: {results.length} 条</span>
+            <span>匹配: {filteredLogs.length} 条</span>
           )}
           {maxLines && limitedLogs.length === maxLines && (
             <span className="text-yellow-600">
@@ -282,18 +449,22 @@ export function LogViewer({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <span>INFO: {filteredLogs.filter(l => l.level === 'info').length}</span>
-          <span>WARN: {filteredLogs.filter(l => l.level === 'warn').length}</span>
-          <span>ERROR: {filteredLogs.filter(l => l.level === 'error').length}</span>
+          <span>
+            INFO: {filteredLogs.filter((l) => l.level === "info").length}
+          </span>
+          <span>
+            WARN: {filteredLogs.filter((l) => l.level === "warn" || l.level === "warning").length}
+          </span>
+          <span>
+            ERROR: {filteredLogs.filter((l) => l.level === "error").length}
+          </span>
         </div>
       </div>
 
       {/* 下载对话框 */}
-      {showDownloader && taskId && (
+      {showDownloader && (
         <LogDownloader
-          taskId={taskId}
-          format="txt"
-          dateRange={[new Date(Date.now() - 24 * 60 * 60 * 1000), new Date()]}
+          logs={limitedLogs}
           onClose={() => setShowDownloader(false)}
         />
       )}

@@ -23,7 +23,7 @@
 
 #### **核心函数**
 ```rust
-// 文件: src/web_ui/handlers.rs
+// 文件: src/web_server/handlers.rs
 async fn start_surreal_process_improved(
     bind_addr: &str,
     user: &str,
@@ -83,7 +83,7 @@ trait DbOptionExt {
 
 #### **诊断模块**
 ```rust
-// 文件: src/web_ui/database_diagnostics.rs
+// 文件: src/web_server/database_diagnostics.rs
 pub async fn run_database_diagnostics() -> DatabaseDiagnosticResult
 ```
 
@@ -132,7 +132,7 @@ GET /api/database/diagnostics
 
 #### **智能错误分析**
 ```rust
-// 文件: src/web_ui/handlers.rs
+// 文件: src/web_server/handlers.rs
 async fn handle_database_connection_error(
     state: &AppState,
     task_id: &str,
@@ -158,7 +158,7 @@ async fn handle_database_connection_error(
 
 #### **连接测试工具**
 ```rust
-// 文件: src/web_ui/handlers.rs
+// 文件: src/web_server/handlers.rs
 
 // 检查命令是否存在
 async fn command_exists(cmd: &str) -> bool

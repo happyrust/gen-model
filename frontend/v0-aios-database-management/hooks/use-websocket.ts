@@ -8,7 +8,8 @@ interface WebSocketState {
   error: string | null
 }
 
-export function useWebSocket(url: string) {
+export function useWebSocket(url?: string | null) {
+  const disabled = !url
   const [state, setState] = useState<WebSocketState>({
     isConnected: false,
     lastMessage: null,
@@ -22,12 +23,19 @@ export function useWebSocket(url: string) {
   const reconnectDelay = 3000
 
   const connect = useCallback(() => {
+    if (disabled) return
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return
     }
 
     try {
-      const ws = new WebSocket(url)
+      const target = new URL(url!, window.location.origin)
+      if (target.protocol === "http:") {
+        target.protocol = "ws:"
+      } else if (target.protocol === "https:") {
+        target.protocol = "wss:"
+      }
+      const ws = new WebSocket(target.toString())
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -88,7 +96,7 @@ export function useWebSocket(url: string) {
         error: '无法建立WebSocket连接'
       }))
     }
-  }, [url])
+  }, [disabled, url])
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -118,12 +126,16 @@ export function useWebSocket(url: string) {
 
   // 组件挂载时连接
   useEffect(() => {
-    connect()
+    if (!disabled) {
+      connect()
+    }
 
     return () => {
-      disconnect()
+      if (!disabled) {
+        disconnect()
+      }
     }
-  }, [connect, disconnect])
+  }, [connect, disconnect, disabled])
 
   return {
     ...state,

@@ -13,7 +13,7 @@ use rkyv::vec;
 use tokio::task::JoinHandle;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{debug_model_debug};
+use crate::fast_model::debug_model_debug;
 // use crate::fast_model::EXIST_MESH_GEOS;
 
 ///保存instance 数据到数据库（并行优化版本）
@@ -574,10 +574,7 @@ pub async fn save_instance_data_optimize(
     let mut inst_keys: Vec<RefnoEnum> = Vec::with_capacity(inst_mgr.inst_info_map.len());
     debug_model_debug!(
         "🔍 [DEBUG] inst_info_map keys: {:?}",
-        inst_mgr
-            .inst_info_map
-            .keys()
-            .collect::<Vec<&RefnoEnum>>()
+        inst_mgr.inst_info_map.keys().collect::<Vec<&RefnoEnum>>()
     );
     let mut inst_info_batcher = TransactionBatcher::new(MAX_TX_STATEMENTS, MAX_CONCURRENT_TX);
     let mut inst_info_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
@@ -637,18 +634,21 @@ pub async fn save_instance_data_optimize(
             "🔍 [DEBUG] save_instance_data_optimize flushing remaining inst_relate records: {}",
             inst_relate_buffer.len()
         );
-        
+
         // 打印第一条 inst_relate 记录用于调试
         if let Some(first) = inst_relate_buffer.first() {
             debug_model_debug!("🔍 [DEBUG] First inst_relate record: {}", first);
         }
-        
+
         let statement = format!(
             "INSERT RELATION INTO inst_relate [{}];",
             inst_relate_buffer.join(",")
         );
         debug_model_debug!("🔍 [DEBUG] Executing inst_relate INSERT SQL: {}", statement);
-        debug_model_debug!("🔍 [DEBUG] Executing inst_relate INSERT with {} records", inst_relate_buffer.len());
+        debug_model_debug!(
+            "🔍 [DEBUG] Executing inst_relate INSERT with {} records",
+            inst_relate_buffer.len()
+        );
         inst_relate_batcher.push(statement).await?;
         debug_model_debug!("✅ [DEBUG] inst_relate INSERT pushed successfully");
     }
@@ -683,22 +683,25 @@ pub async fn save_instance_data_optimize(
             Ok(mut resp) => match resp.take::<Vec<serde_json::Value>>(0) {
                 Ok(counts) => debug_model_debug!(
                     "🔍 [DEBUG] inst_relate verify counts for [{}]: {:?}",
-                    pe_list, counts
+                    pe_list,
+                    counts
                 ),
                 Err(err) => debug_model_debug!(
                     "❌ [DEBUG] inst_relate verify take failed (sql: {}): {}",
-                    verify_sql, err
+                    verify_sql,
+                    err
                 ),
             },
             Err(e) => {
                 debug_model_debug!(
                     "❌ [DEBUG] inst_relate verify query failed (sql: {}): {}",
-                    verify_sql, e
+                    verify_sql,
+                    e
                 );
             }
         }
     }
-    
+
     debug_model_debug!("🔍 [DEBUG] Finishing inst_info_batcher...");
     inst_info_batcher.finish().await?;
     debug_model_debug!("✅ [DEBUG] inst_info_batcher finished successfully");

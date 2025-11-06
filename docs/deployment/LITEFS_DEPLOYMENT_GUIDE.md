@@ -114,7 +114,7 @@ deployment_sites_sqlite_path = "/litefs/deployment_sites.sqlite"
 cargo build --release
 
 # 启动服务
-./target/release/web_ui
+./target/release/web_server
 ```
 
 或使用 systemd 管理：
@@ -131,7 +131,7 @@ Requires=litefs.service
 Type=simple
 User=$USER
 WorkingDirectory=/opt/gen-model
-ExecStart=/opt/gen-model/target/release/web_ui
+ExecStart=/opt/gen-model/target/release/web_server
 Restart=on-failure
 RestartSec=5s
 Environment="RUST_LOG=info"
@@ -230,7 +230,7 @@ Requires=litefs.service
 Type=simple
 User=$USER
 WorkingDirectory=/opt/gen-model
-ExecStart=/opt/gen-model/target/release/web_ui
+ExecStart=/opt/gen-model/target/release/web_server
 Restart=on-failure
 RestartSec=5s
 Environment="RUST_LOG=info"
@@ -710,7 +710,7 @@ gen-model/
 ├── litefs-replica.yml          # 副本节点配置
 ├── litefs.service              # systemd 服务文件
 ├── install-litefs.sh           # 自动安装脚本
-├── src/web_ui/
+├── src/web_server/
 │   ├── litefs_handlers.rs      # 节点状态 API
 │   └── remote_sync_handlers.rs # 远程同步（已修改）
 └── frontend/v0-aios-database-management/

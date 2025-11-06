@@ -8,14 +8,14 @@ name = "aios_database"
 path = "src/lib.rs"
 
 [[bin]]
-name = "web_ui"
-path = "src/bin/web_ui.rs"
-required-features = ["web_ui"]
+name = "web_server"
+path = "src/bin/web_server.rs"
+required-features = ["web_server"]
 
 [[bin]]
 name = "db_option_ui"
 path = "src/bin/db_option_ui/main.rs"
-required-features = ["web_ui"]
+required-features = ["web_server"]
 
 # [[bin]]
 # name = "gen_xkt_new"
@@ -44,7 +44,7 @@ mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保�
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-web_ui = ["dep:axum", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_ui"]              #Web UI功能
+web_server = ["dep:axum", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_server"]              #Web UI功能
 sqlite-index = ["dep:rusqlite"]
 debug_e3d = []
 
@@ -96,7 +96,7 @@ parry2d = { version = "0.25.0", features = [
 ] }
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../rs-core", default-features = false, features = [] }
-# Note: web_ui feature is added conditionally via [features] section
+# Note: web_server feature is added conditionally via [features] section
 bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_transform", features = ["serialize"] }
 bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
 pdms_io = { path = "../pdms-io" }

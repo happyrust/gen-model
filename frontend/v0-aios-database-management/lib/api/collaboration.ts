@@ -8,16 +8,17 @@ import type {
   SyncOptions,
 } from "@/types/collaboration"
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? ""
+import { getPublicApiBaseUrl } from "@/lib/env"
 
 function buildApiUrl(path: string) {
   if (!path.startsWith("/")) {
     throw new Error(`API 路径必须以 / 开头: ${path}`)
   }
-  if (!API_BASE_URL) {
+  const base = getPublicApiBaseUrl()
+  if (!base) {
     return path
   }
-  return `${API_BASE_URL}${path}`
+  return `${base}${path}`
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
@@ -189,6 +190,16 @@ export async function syncGroup(groupId: string, options?: SyncOptions) {
     body: JSON.stringify(options || {}),
   })
   return handleResponse<{ status: string; sync_id: string }>(response)
+}
+
+export async function pauseGroupSync(groupId: string) {
+  const response = await fetch(buildApiUrl(`/api/collaboration-groups/${groupId}/pause`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  })
+  return handleResponse<{ status: string }>(response)
 }
 
 export async function fetchSyncRecords(groupId: string) {

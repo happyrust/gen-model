@@ -209,7 +209,7 @@ export function groupToEnvPayload(group: Partial<CollaborationGroup>): RemoteSyn
 ### 6. 实现步骤
 
 #### Phase 1: 后端基础设施（1-2 天）
-1. 创建 `src/web_ui/sync_file_handlers.rs` 模块
+1. 创建 `src/web_server/sync_file_handlers.rs` 模块
 2. 实现文件存储目录初始化
 3. 创建 `sync_files` 数据库表
 4. 实现文件上传 API
@@ -312,7 +312,7 @@ pub async fn download_file(Path(file_id): Path<String>) -> Result<Response, Stat
 ### 10. 示例代码结构
 
 ```rust
-// src/web_ui/sync_file_handlers.rs
+// src/web_server/sync_file_handlers.rs
 
 use axum::{
     extract::{Path, Query, State, Multipart},
@@ -360,7 +360,7 @@ pub async fn list_files(
 
 ### 11. 路由注册
 
-在 `src/web_ui/mod.rs` 中添加路由：
+在 `src/web_server/mod.rs` 中添加路由：
 
 ```rust
 use sync_file_handlers::{upload_file, download_file, list_files};
@@ -376,7 +376,7 @@ let app = Router::new()
 
 ## 总结
 
-本方案通过在现有 web_ui 服务中内置文件服务器功能，实现了：
+本方案通过在现有 web_server 服务中内置文件服务器功能，实现了：
 1. **零配置**：创建环境时自动配置文件服务器地址
 2. **集成化**：无需单独部署文件服务器
 3. **简化部署**：一个服务包含所有功能

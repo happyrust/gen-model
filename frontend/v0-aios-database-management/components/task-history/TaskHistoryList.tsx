@@ -1,31 +1,26 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useCallback, useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { 
-  Search, 
-  Filter, 
-  RefreshCw, 
-  Download, 
-  Play, 
+import {
+  Search,
+  Filter,
+  RefreshCw,
+  Download,
+  Play,
   Eye,
-  Calendar,
   Clock,
   CheckCircle,
   AlertTriangle,
   XCircle,
-  Pause
 } from "lucide-react"
-import { TaskHistoryCard } from "./TaskHistoryCard"
-import { TaskHistoryFilters } from "./TaskHistoryFilters"
-import { TaskAnalytics } from "./TaskAnalytics"
 import { useTaskHistory } from "@/hooks/use-task-history"
-import { useTaskAnalytics } from "@/hooks/use-task-analytics"
 import type { TaskHistory, HistoryFilters, TaskStatistics } from "@/types/task-history"
 
 interface TaskHistoryListProps {
@@ -33,42 +28,257 @@ interface TaskHistoryListProps {
   onReplay?: (taskId: string) => void
 }
 
+interface TaskHistoryCardProps {
+  task: TaskHistory
+  onViewDetails?: () => void
+  onReplay?: () => void
+}
+
+interface TaskHistoryFiltersProps {
+  filters: HistoryFilters
+  onFilterChange: (filters: Partial<HistoryFilters>) => void
+  availableStatuses: HistoryFilters["status"][]
+  availableTypes: string[]
+}
+
+interface TaskAnalyticsProps {
+  statistics: TaskStatistics | null
+  charts: Array<{ date: string; total: number; completed: number; failed: number }>
+  loading?: boolean
+}
+
+const STATUS_BADGES: Record<string, string> = {
+  completed: "bg-green-100 text-green-800",
+  failed: "bg-red-100 text-red-800",
+  cancelled: "bg-gray-100 text-gray-800",
+  running: "bg-blue-100 text-blue-800",
+  pending: "bg-yellow-100 text-yellow-800",
+  unknown: "bg-muted text-muted-foreground",
+}
+
+const TASK_TYPE_LABELS: Record<string, string> = {
+  ModelGeneration: "模型生成",
+  SpatialTreeGeneration: "空间树生成",
+  FullSync: "全量同步",
+  IncrementalSync: "增量同步",
+}
+
+function TaskHistoryCard({ task, onViewDetails, onReplay }: TaskHistoryCardProps) {
+  const badgeClass = STATUS_BADGES[task.status] ?? STATUS_BADGES.unknown
+  const startTimeLabel = task.startTime
+    ? new Date(task.startTime).toLocaleString()
+    : task.createdAt
+      ? new Date(task.createdAt).toLocaleString()
+      : "未知"
+  const endTimeLabel = task.endTime
+    ? new Date(task.endTime).toLocaleString()
+    : "未完成"
+  const durationSeconds =
+    task.durationMs !== undefined
+      ? (task.durationMs / 1000).toFixed(1)
+      : "0"
+  return (
+    <Card className="transition-colors hover:border-primary">
+      <CardContent className="flex flex-col gap-3 py-4 md:flex-row md:items-center md:justify-between">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{task.name}</span>
+            <Badge variant="secondary">{TASK_TYPE_LABELS[task.type] ?? task.type}</Badge>
+            <span className={`rounded px-2 py-0.5 text-xs font-medium ${badgeClass}`}>
+              {task.status === "completed"
+                ? "已完成"
+                : task.status === "failed"
+                  ? "失败"
+                  : task.status === "cancelled"
+                    ? "已取消"
+                    : task.status === "running"
+                      ? "运行中"
+                      : "等待中"}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+            <span>ID: {task.id}</span>
+            <span>任务ID: {task.taskId}</span>
+            <span>开始时间: {startTimeLabel}</span>
+            <span>结束时间: {endTimeLabel}</span>
+            <span>耗时: {durationSeconds}s</span>
+          </div>
+          {task.result?.message && (
+            <p className="text-xs text-muted-foreground">备注: {task.result.message}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onViewDetails} className="gap-1">
+            <Eye className="h-4 w-4" />
+            详情
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onReplay}
+            disabled={task.status === "running"}
+            className="gap-1"
+          >
+            <Play className="h-4 w-4" />
+            重新执行
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function TaskHistoryFilters({
+  filters,
+  onFilterChange,
+  availableStatuses,
+  availableTypes,
+}: TaskHistoryFiltersProps) {
+  return (
+    <div className="mt-4 grid gap-4 rounded-lg border border-border/60 bg-muted/30 p-4 md:grid-cols-3">
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">状态</Label>
+        <Select
+          value={filters.status}
+          onValueChange={(value) => onFilterChange({ status: value as HistoryFilters["status"] })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择状态" />
+          </SelectTrigger>
+          <SelectContent>
+            {["all", ...availableStatuses].map((status) => (
+              <SelectItem key={status} value={status}>
+                {status === "all"
+                  ? "全部"
+                  : status === "completed"
+                    ? "已完成"
+                    : status === "failed"
+                      ? "失败"
+                      : status === "cancelled"
+                        ? "已取消"
+                        : status === "running"
+                          ? "运行中"
+                          : status === "pending"
+                            ? "等待中"
+                            : "未知"}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">类型</Label>
+        <Select
+          value={filters.type}
+          onValueChange={(value) => onFilterChange({ type: value as HistoryFilters["type"] })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择类型" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部类型</SelectItem>
+            {availableTypes.map((type) => (
+              <SelectItem key={type} value={type}>
+                {TASK_TYPE_LABELS[type] ?? type}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">排序</Label>
+        <Select
+          value={filters.sortBy}
+          onValueChange={(value) => onFilterChange({ sortBy: value as HistoryFilters["sortBy"] })}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="startTime">开始时间</SelectItem>
+            <SelectItem value="endTime">结束时间</SelectItem>
+            <SelectItem value="duration">耗时</SelectItem>
+            <SelectItem value="status">状态</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+function TaskAnalytics({ statistics, charts, loading }: TaskAnalyticsProps) {
+  const isLoading = loading ?? false
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>任务统计概览</CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div>
+            <p className="text-xs text-muted-foreground">任务总数</p>
+            <p className="text-2xl font-bold">{statistics?.total ?? 0}</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">成功率</p>
+            <p className="text-2xl font-bold text-green-600">
+              {statistics ? `${(statistics.successRate * 100).toFixed(1)}%` : "0%"}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">平均耗时 (秒)</p>
+            <p className="text-2xl font-bold">{statistics ? (statistics.avgDuration / 1000).toFixed(1) : "0.0"}</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>趋势图</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-8 text-center text-muted-foreground">加载分析数据...</div>
+          ) : charts.length === 0 ? (
+            <div className="py-8 text-center text-muted-foreground">暂无趋势数据</div>
+          ) : (
+            <div className="space-y-2 text-sm text-muted-foreground">
+              {charts.map((entry) => (
+                <div key={entry.date} className="flex items-center justify-between rounded border border-border/60 p-2">
+                  <span>{entry.date}</span>
+                  <span>
+                    总计 {entry.total} · 完成 {entry.completed} · 失败 {entry.failed}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps) {
   const [activeTab, setActiveTab] = useState("list")
   const [searchQuery, setSearchQuery] = useState("")
   const [showFilters, setShowFilters] = useState(false)
-  const [dateRange, setDateRange] = useState<[Date, Date] | null>(null)
 
   const {
     tasks,
+    allTasks,
     loading,
     error,
     filters,
     pagination,
-    loadHistory,
+    refreshHistory,
     setFilters,
     setPagination,
-    refreshHistory
+    replayTask,
+    getTaskStatistics,
+    getStatisticsByType,
+    getStatisticsByDate,
   } = useTaskHistory()
-
-  const {
-    statistics,
-    charts,
-    loading: analyticsLoading,
-    loadAnalytics
-  } = useTaskAnalytics()
-
-  // 加载历史数据
-  useEffect(() => {
-    loadHistory(filters)
-  }, [loadHistory, filters])
-
-  // 加载分析数据
-  useEffect(() => {
-    if (activeTab === "analytics") {
-      loadAnalytics(dateRange)
-    }
-  }, [activeTab, dateRange, loadAnalytics])
 
   // 处理搜索
   const handleSearch = useCallback((query: string) => {
@@ -94,26 +304,54 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
   // 处理任务重新执行
   const handleTaskReplay = useCallback((taskId: string) => {
     onReplay?.(taskId)
-  }, [onReplay])
+    void replayTask(taskId)
+  }, [onReplay, replayTask])
 
-  // 处理日期范围变化
-  const handleDateRangeChange = useCallback((range: [Date, Date]) => {
-    setDateRange(range)
-    setFilters({ dateRange: range })
-  }, [setFilters])
+  const summary = useMemo<TaskStatistics>(
+    () => getTaskStatistics(),
+    [getTaskStatistics]
+  )
 
-  // 获取状态统计
-  const getStatusCounts = () => {
-    const counts = {
-      completed: tasks.filter(t => t.status === 'completed').length,
-      failed: tasks.filter(t => t.status === 'failed').length,
-      cancelled: tasks.filter(t => t.status === 'cancelled').length,
-      running: tasks.filter(t => t.status === 'running').length
-    }
-    return counts
-  }
+  const analyticsStatistics = useMemo<TaskStatistics | null>(
+    () => (summary.total > 0 ? summary : null),
+    [summary]
+  )
 
-  const statusCounts = getStatusCounts()
+  const analyticsChartData = useMemo(
+    () => getStatisticsByDate(),
+    [getStatisticsByDate]
+  )
+
+  const availableTypes = useMemo<string[]>(
+    () =>
+      Array.from(
+        new Set(
+          allTasks
+            .map((task) => task.type)
+            .filter((type) => type && type.length > 0)
+        )
+      ),
+    [allTasks]
+  )
+
+  const availableStatuses = useMemo<HistoryFilters["status"][]>(
+    () => {
+      const base = new Set<HistoryFilters["status"]>([
+        "completed",
+        "failed",
+        "cancelled",
+        "running",
+        "pending",
+      ])
+      allTasks.forEach((task) => {
+        if (task.status !== "unknown") {
+          base.add(task.status as HistoryFilters["status"])
+        }
+      })
+      return Array.from(base)
+    },
+    [allTasks]
+  )
 
   return (
     <div className="space-y-6">
@@ -166,12 +404,12 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
           </div>
 
           {/* 过滤条件 */}
-          {showFilters && (
+         {showFilters && (
             <TaskHistoryFilters
               filters={filters}
               onFilterChange={handleFilterChange}
-              availableStatuses={['completed', 'failed', 'cancelled']}
-              availableTypes={['ModelGeneration', 'SpatialTreeGeneration', 'FullSync', 'IncrementalSync']}
+              availableStatuses={availableStatuses}
+              availableTypes={availableTypes}
             />
           )}
         </CardContent>
@@ -194,7 +432,7 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
                   <CheckCircle className="h-4 w-4 text-green-600" />
                   <span className="text-sm font-medium">已完成</span>
                 </div>
-                <div className="text-2xl font-bold text-green-600">{statusCounts.completed}</div>
+                <div className="text-2xl font-bold text-green-600">{summary.completed}</div>
               </CardContent>
             </Card>
             
@@ -204,7 +442,7 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
                   <AlertTriangle className="h-4 w-4 text-red-600" />
                   <span className="text-sm font-medium">失败</span>
                 </div>
-                <div className="text-2xl font-bold text-red-600">{statusCounts.failed}</div>
+                <div className="text-2xl font-bold text-red-600">{summary.failed}</div>
               </CardContent>
             </Card>
             
@@ -214,7 +452,7 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
                   <XCircle className="h-4 w-4 text-gray-600" />
                   <span className="text-sm font-medium">已取消</span>
                 </div>
-                <div className="text-2xl font-bold text-gray-600">{statusCounts.cancelled}</div>
+                <div className="text-2xl font-bold text-gray-600">{summary.cancelled}</div>
               </CardContent>
             </Card>
             
@@ -224,7 +462,7 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
                   <Clock className="h-4 w-4 text-blue-600" />
                   <span className="text-sm font-medium">运行中</span>
                 </div>
-                <div className="text-2xl font-bold text-blue-600">{statusCounts.running}</div>
+                <div className="text-2xl font-bold text-blue-600">{summary.running}</div>
               </CardContent>
             </Card>
           </div>
@@ -291,11 +529,9 @@ export function TaskHistoryList({ onTaskSelect, onReplay }: TaskHistoryListProps
 
         <TabsContent value="analytics">
           <TaskAnalytics
-            statistics={statistics}
-            charts={charts}
-            loading={analyticsLoading}
-            dateRange={dateRange}
-            onDateRangeChange={handleDateRangeChange}
+            statistics={analyticsStatistics}
+            charts={analyticsChartData}
+            loading={loading}
           />
         </TabsContent>
 

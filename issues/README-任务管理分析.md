@@ -234,12 +234,12 @@
 - `frontend/v0-aios-database-management/components/sidebar.tsx`
 
 **后端**:
-- `src/web_ui/mod.rs` - 路由定义
-- `src/web_ui/handlers.rs` - API处理器（6158行）
-- `src/web_ui/models.rs` - 数据模型（1294行）
-- `src/web_ui/wizard_handlers.rs` - 向导处理器（1234行）
-- `src/web_ui/templates.rs` - HTML模板（4166行）
-- `src/web_ui/simple_templates.rs` - 简化模板（3395行）
+- `src/web_server/mod.rs` - 路由定义
+- `src/web_server/handlers.rs` - API处理器（6158行）
+- `src/web_server/models.rs` - 数据模型（1294行）
+- `src/web_server/wizard_handlers.rs` - 向导处理器（1234行）
+- `src/web_server/templates.rs` - HTML模板（4166行）
+- `src/web_server/simple_templates.rs` - 简化模板（3395行）
 
 **数据库**:
 - `deployment_sites.sqlite` - SQLite数据库文件

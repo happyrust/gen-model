@@ -1,20 +1,15 @@
+import { getPublicApiBaseUrl, getPublicXktApiBaseUrl } from "@/lib/env"
+
 const HTTP_PREFIX = /^https?:\/\//i
-
-function normalizeBaseUrl(value: string | undefined | null): string {
-  if (!value) return ""
-  return value.replace(/\/+$/, "")
-}
-
-export function getXktApiBaseUrl(): string {
-  const explicitBase = normalizeBaseUrl(process.env.NEXT_PUBLIC_XKT_API_BASE_URL)
-  if (explicitBase) return explicitBase
-  return normalizeBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL)
-}
 
 export function buildXktApiUrl(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`
-  const base = getXktApiBaseUrl()
-  if (!base) return normalizedPath
+  const base = getXktApiBaseUrlInternal()
+  if (!base) {
+    const fallback = getPublicApiBaseUrl()
+    if (!fallback) return normalizedPath
+    return `${fallback}${normalizedPath}`
+  }
   return `${base}${normalizedPath}`
 }
 
@@ -24,4 +19,10 @@ export function resolveXktResourceUrl(url: string | undefined | null): string {
     return url
   }
   return buildXktApiUrl(url)
+}
+
+function getXktApiBaseUrlInternal(): string {
+  const explicit = getPublicXktApiBaseUrl()
+  if (explicit) return explicit
+  return ""
 }

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -12,9 +12,12 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { AlertCircle, Loader2 } from "lucide-react"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { AlertCircle, Loader2, ChevronDown, ChevronRight } from "lucide-react"
 import type { CollaborationGroup } from "@/types/collaboration"
 import { createRemoteSyncEnv, envToGroup } from "@/lib/api/collaboration-adapter"
+import { getPublicApiBaseUrl } from "@/lib/env"
+import { buildApiUrl } from "@/lib/api"
 
 interface CreateGroupDialogProps {
   open: boolean
@@ -26,6 +29,8 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
   const [step, setStep] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mqttConfigOpen, setMqttConfigOpen] = useState(true)
+  const apiBaseUrl = getPublicApiBaseUrl()
 
   // Form data
   const [name, setName] = useState("")
@@ -36,6 +41,59 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
   const [mqttUser, setMqttUser] = useState("")
   const [mqttPassword, setMqttPassword] = useState("")
   const [fileServerHost, setFileServerHost] = useState("")
+
+  // 加载默认配置
+  useEffect(() => {
+    if (!open) return
+
+    const loadDefaultConfig = async () => {
+      try {
+        // 尝试从 API 获取运行时配置
+        const response = await fetch(buildApiUrl("/api/remote-sync/runtime/config"), {
+          method: "GET",
+          headers: { Accept: "application/json" },
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          if (data.status === "success" && data.config) {
+            const config = data.config
+            // 设置 MQTT 主机地址（优先使用配置，否则使用本机地址）
+            if (config.mqtt_host) {
+              setMqttHost(config.mqtt_host)
+            } else if (typeof window !== "undefined") {
+              setMqttHost(window.location.hostname)
+            }
+            // 设置 MQTT 端口
+            if (config.mqtt_port) {
+              setMqttPort(config.mqtt_port)
+            }
+            // 设置文件服务器地址
+            if (config.file_server_host) {
+              setFileServerHost(config.file_server_host)
+            }
+            // 设置位置（只在没有手动设置时使用配置值）
+            if (config.location) {
+              setLocation((prev) => prev || config.location)
+            }
+          }
+        } else {
+          // API 失败时使用本机地址作为默认值
+          if (typeof window !== "undefined") {
+            setMqttHost((prev) => prev || window.location.hostname)
+          }
+        }
+      } catch (err) {
+        // 出错时使用本机地址作为默认值
+        if (typeof window !== "undefined") {
+          setMqttHost((prev) => prev || window.location.hostname)
+        }
+      }
+    }
+
+    loadDefaultConfig()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const resetForm = () => {
     setStep(1)
@@ -80,6 +138,10 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
     }
     if (!mqttHost.trim()) {
       setError("请输入 MQTT 服务器地址")
+      return
+    }
+    if (!apiBaseUrl) {
+      setError("未配置 NEXT_PUBLIC_API_BASE_URL，无法创建协同组。请在 .env.local 中设置后重试。")
       return
     }
 
@@ -142,10 +204,16 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
                 />
               </div>
 
-              <div className="border-t pt-4 mt-4">
-                <h4 className="text-sm font-medium mb-3">MQTT 服务器配置</h4>
-
-                <div className="space-y-3">
+              <Collapsible open={mqttConfigOpen} onOpenChange={setMqttConfigOpen} className="border-t pt-4 mt-4">
+                <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-sm font-medium hover:bg-accent">
+                  <span>MQTT 服务器配置</span>
+                  {mqttConfigOpen ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-3 pt-3">
                   <div className="space-y-2">
                     <Label htmlFor="mqtt-host">MQTT 服务器地址 *</Label>
                     <Input
@@ -197,8 +265,8 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
                       placeholder="例如：http://files.example.com"
                     />
                   </div>
-                </div>
-              </div>
+                </CollapsibleContent>
+              </Collapsible>
             </div>
           )}
 

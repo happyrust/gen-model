@@ -11,6 +11,11 @@ interface SystemMetricsPanelProps {
 }
 
 export function SystemMetricsPanel({ metrics, onRefresh }: SystemMetricsPanelProps) {
+  const cpuValue = metrics.cpu ?? 0
+  const memoryValue = metrics.memory ?? 0
+  const diskValue = metrics.disk ?? 0
+  const networkValue = metrics.network ?? 0
+
   return (
     <Card>
       <CardHeader>
@@ -18,20 +23,20 @@ export function SystemMetricsPanel({ metrics, onRefresh }: SystemMetricsPanelPro
       </CardHeader>
       <CardContent className="space-y-4">
         <div>
-          <div className="mb-2 flex justify-between text-sm"><span>CPU</span><span>{metrics.cpu}%</span></div>
-          <Progress value={metrics.cpu} />
+          <div className="mb-2 flex justify-between text-sm"><span>CPU</span><span>{cpuValue}%</span></div>
+          <Progress value={cpuValue} />
         </div>
         <div>
-          <div className="mb-2 flex justify-between text-sm"><span>内存</span><span>{metrics.memory}%</span></div>
-          <Progress value={metrics.memory} />
+          <div className="mb-2 flex justify-between text-sm"><span>内存</span><span>{memoryValue}%</span></div>
+          <Progress value={memoryValue} />
         </div>
         <div>
-          <div className="mb-2 flex justify-between text-sm"><span>磁盘</span><span>{metrics.disk}%</span></div>
-          <Progress value={metrics.disk} />
+          <div className="mb-2 flex justify-between text-sm"><span>磁盘</span><span>{diskValue}%</span></div>
+          <Progress value={diskValue} />
         </div>
         <div>
-          <div className="mb-2 flex justify-between text-sm"><span>网络</span><span>{metrics.network}%</span></div>
-          <Progress value={metrics.network} />
+          <div className="mb-2 flex justify-between text-sm"><span>网络</span><span>{networkValue}%</span></div>
+          <Progress value={networkValue} />
         </div>
 
         <div className="flex justify-end">
@@ -41,5 +46,4 @@ export function SystemMetricsPanel({ metrics, onRefresh }: SystemMetricsPanelPro
     </Card>
   )
 }
-
 

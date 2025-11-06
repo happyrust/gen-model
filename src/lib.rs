@@ -13,7 +13,10 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
 use crate::fast_model::room_model::build_room_relations;
-use crate::fast_model::{EXIST_MESH_GEO_HASHES, mesh_generate::{gen_inst_meshes, process_meshes_update_db_deep}};
+use crate::fast_model::{
+    EXIST_MESH_GEO_HASHES,
+    mesh_generate::{gen_inst_meshes, process_meshes_update_db_deep},
+};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::init_inst_relate_indices;
@@ -372,7 +375,7 @@ pub mod data_state;
 // pub mod rvm;
 // pub mod ssc;
 pub mod version_management;
-#[cfg(feature = "web_ui")]
+#[cfg(feature = "web_server")]
 pub mod web_api;
-#[cfg(feature = "web_ui")]
-pub mod web_ui;
+#[cfg(feature = "web_server")]
+pub mod web_server;

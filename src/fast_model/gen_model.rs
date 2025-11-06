@@ -32,8 +32,8 @@ use crate::fast_model::query_provider::{
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
 use bevy_transform::prelude::Transform;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use glam::DVec3;
@@ -513,18 +513,18 @@ pub async fn gen_all_geos_data(
             target_root_refnos.len()
         );
         if db_option.gen_mesh {
-                let mesh_start = Instant::now();
-                println!(
-                    "[gen_model] 开始更新 {} 个根节点的 mesh 数据",
-                    target_root_refnos.len()
-                );
-                process_meshes_update_db_deep(db_option, &target_root_refnos)
-                    .await
-                    .expect("更新模型数据失败");
-                println!(
-                    "[gen_model] 完成 mesh 更新，用时 {} ms",
-                    mesh_start.elapsed().as_millis()
-                );
+            let mesh_start = Instant::now();
+            println!(
+                "[gen_model] 开始更新 {} 个根节点的 mesh 数据",
+                target_root_refnos.len()
+            );
+            process_meshes_update_db_deep(db_option, &target_root_refnos)
+                .await
+                .expect("更新模型数据失败");
+            println!(
+                "[gen_model] 完成 mesh 更新，用时 {} ms",
+                mesh_start.elapsed().as_millis()
+            );
         }
 
         if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, db_option).await {
@@ -1007,7 +1007,8 @@ pub async fn gen_geos_data(
                                     Ok(Some(catr_pe)) => {
                                         debug_model_debug!(
                                             "   CATR noun: {}, name: {}",
-                                            catr_pe.noun, catr_pe.name
+                                            catr_pe.noun,
+                                            catr_pe.name
                                         );
                                     }
                                     Ok(None) => {
@@ -1019,7 +1020,8 @@ pub async fn gen_geos_data(
                                     Err(err) => {
                                         debug_model_debug!(
                                             "   ❌ 查询 CATR 元素失败 {}: {}",
-                                            catr_refno, err
+                                            catr_refno,
+                                            err
                                         );
                                     }
                                 }
@@ -1031,8 +1033,7 @@ pub async fn gen_geos_data(
                                 // 查询 SPRE 指向的 CATR
                                 match aios_core::get_named_attmap(spre_refno).await {
                                     Ok(spre_att) => {
-                                        if let Some(catr_refno) =
-                                            spre_att.get_foreign_refno("CATR")
+                                        if let Some(catr_refno) = spre_att.get_foreign_refno("CATR")
                                         {
                                             debug_model_debug!(
                                                 "   通过 SPRE 的 CATR: {}",
@@ -1045,7 +1046,8 @@ pub async fn gen_geos_data(
                                     Err(err) => {
                                         debug_model_debug!(
                                             "   ❌ 查询 SPRE 属性失败 {}: {}",
-                                            spre_refno, err
+                                            spre_refno,
+                                            err
                                         );
                                     }
                                 }

@@ -9,7 +9,7 @@
   - 修复位置：
     - `src/fast_model/manifold_bool.rs` (第 79-85, 286-290 行) - 移除 2 处 `in.id != none` 条件
     - `src/fast_model/occ_generate.rs` (第 705-713 行) - 移除 `in.id != none` 条件
-    - `src/web_ui/handlers.rs` (第 1730-1735 行) - 移除 `in.id != none` 条件
+    - `src/web_server/handlers.rs` (第 1730-1735 行) - 移除 `in.id != none` 条件
   - 原理：`inst_relate` 关系表的 `in` 字段总是指向有效的 `pe:{refno}`，不需要额外的存在性检查
   - 结果：程序现在可以正常运行，成功处理 GLB 模型导出
 

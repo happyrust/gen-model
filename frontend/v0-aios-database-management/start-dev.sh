@@ -59,7 +59,7 @@ echo ""
 # Start Rust backend in background
 echo "🔧 Starting Rust backend service (port 8080)..."
 cd ../../
-cargo run --bin web_ui --features "web_ui,ws,gen_model,manifold,project_hd" &
+cargo run --bin web_server --features "web_server,ws,gen_model,manifold,project_hd" &
 BACKEND_PID=$!
 
 # Wait a moment for backend to start

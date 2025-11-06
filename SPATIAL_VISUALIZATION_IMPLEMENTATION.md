@@ -57,8 +57,8 @@ pub struct SpatialQueryResponse {
 
 ### 集成
 - 在 `src/lib.rs` 中添加 `web_api` 模块导出
-- 在 `src/web_ui/mod.rs` 中集成API路由
-- 在 `src/web_ui/handlers.rs` 中添加 `spatial_visualization_page` 处理器
+- 在 `src/web_server/mod.rs` 中集成API路由
+- 在 `src/web_server/handlers.rs` 中添加 `spatial_visualization_page` 处理器
 
 ## 前端实现
 
@@ -203,8 +203,8 @@ pnpm add reactflow
 - `src/web_api/spatial_query_api.rs` (315行)
 - `src/web_api/mod.rs` (8行)
 - `src/web_api/tests.rs` (60行)
-- `src/web_ui/handlers.rs` (修改: 添加spatial_visualization_page)
-- `src/web_ui/mod.rs` (修改: 集成API路由)
+- `src/web_server/handlers.rs` (修改: 添加spatial_visualization_page)
+- `src/web_server/mod.rs` (修改: 集成API路由)
 - `src/lib.rs` (修改: 导出web_api模块)
 
 ### 前端文件

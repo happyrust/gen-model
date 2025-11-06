@@ -86,7 +86,7 @@ cargo run --bin gen_model -- --grpc --port 50051
 
 ```bash
 # Start the web UI server
-cargo run --bin web_ui
+cargo run --bin web_server
 
 # The UI will be available at http://localhost:8000/spatial-query
 ```

@@ -1,4 +1,6 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? ""
+import { getPublicApiBaseUrl } from "@/lib/env"
+
+const API_BASE_URL = getPublicApiBaseUrl()
 
 /**
  * 构建完整的API URL
@@ -9,10 +11,9 @@ export function buildApiUrl(path: string): string {
   if (!path.startsWith("/")) {
     throw new Error(`API 路径必须以 / 开头: ${path}`)
   }
-  if (!API_BASE_URL) {
-    return path
-  }
-  return `${API_BASE_URL}${path}`
+  const base = getPublicApiBaseUrl()
+  if (!base) return path
+  return `${base}${path}`
 }
 
 export async function handleResponse<T>(response: Response): Promise<T> {

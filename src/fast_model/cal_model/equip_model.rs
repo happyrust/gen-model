@@ -1,7 +1,8 @@
 use crate::fast_model::utils::save_transforms_to_surreal;
-use aios_core::{
-    RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir,
-};
+use aios_core::{RefU64, RefnoEnum, SUL_DB, gen_bytes_hash};
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+use aios_core::{query_neareast_along_axis, query_neareast_by_pos_dir};
+
 use bevy_transform::components::Transform;
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 
 pub async fn update_cal_equip() -> anyhow::Result<()> {
     update_cal_equip_wtrans().await?;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     cal_equip_nearest_floor().await?;
     Ok(())
 }
@@ -59,6 +61,7 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
 }
 
 //取得设备下的所有aabb，然后取下面的点到楼板的最近距离
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
     let mut response = SUL_DB
         .query(format!(r#"select value record::id(id) from {} where type::record("cal_equi", record::id(id))!=none"#, "EQUI"))

@@ -114,7 +114,7 @@ deployment_sites_sqlite_path = "/litefs/deployment_sites.sqlite"
 FROM rust:1.75 as builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release --bin web_ui
+RUN cargo build --release --bin web_server
 
 FROM ubuntu:22.04
 
@@ -130,9 +130,9 @@ ADD https://github.com/superfly/litefs/releases/download/v0.5.11/litefs-v0.5.11-
 RUN tar -xzf /tmp/litefs.tar.gz -C /usr/local/bin && rm /tmp/litefs.tar.gz
 
 # 复制应用
-COPY --from=builder /app/target/release/web_ui /usr/local/bin/
+COPY --from=builder /app/target/release/web_server /usr/local/bin/
 COPY --from=builder /app/DbOption.toml /app/
-COPY --from=builder /app/src/web_ui /app/src/web_ui
+COPY --from=builder /app/src/web_server /app/src/web_server
 
 # 创建目录
 RUN mkdir -p /litefs /var/lib/litefs /app
@@ -155,7 +155,7 @@ litefs mount &
 sleep 3
 
 # 启动应用
-exec /usr/local/bin/web_ui
+exec /usr/local/bin/web_server
 EOF
 
 RUN chmod +x /entrypoint.sh
@@ -318,7 +318,7 @@ curl http://localhost:8082/api/remote-sync/envs
 
 ### 后端修改
 
-在 `src/web_ui/mod.rs` 添加中间件：
+在 `src/web_server/mod.rs` 添加中间件：
 
 ```rust
 use axum::{

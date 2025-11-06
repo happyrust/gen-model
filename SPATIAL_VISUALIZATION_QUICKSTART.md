@@ -137,7 +137,7 @@ cargo test web_api::tests
 │   │   ├── spatial_query_api.rs    # API实现
 │   │   ├── mod.rs                  # 模块导出
 │   │   └── tests.rs                # 单元测试
-│   ├── web_ui/
+│   ├── web_server/
 │   │   ├── handlers.rs             # 页面处理器
 │   │   └── mod.rs                  # 路由集成
 │   └── lib.rs                      # 模块导出

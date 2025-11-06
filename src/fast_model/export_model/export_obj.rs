@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::fast_model::unit_converter::UnitConverter;
 
-use super::export_common::{collect_export_data, ExportData};
+use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
     CommonExportConfig, ExportStats, ModelExporter, ObjExportConfig, collect_export_refnos,
     query_geometry_instances,

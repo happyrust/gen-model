@@ -55,19 +55,19 @@ start_mqtt_server() {
 }
 
 # 启动 Web UI
-start_web_ui() {
+start_web_server() {
     echo -e "${YELLOW}[2/3] 启动 Web UI 服务器...${NC}"
 
     # 检查是否已编译
-    if [ ! -f "target/release/web_ui" ]; then
+    if [ ! -f "target/release/web_server" ]; then
         echo "编译 Web UI..."
-        cargo build --release --features web_ui
+        cargo build --release --features web_server
     fi
 
     # 启动 Web UI
-    ./target/release/web_ui &
-    WEB_UI_PID=$!
-    echo -e "${GREEN}✓ Web UI 已启动 (PID: $WEB_UI_PID)${NC}"
+    ./target/release/web_server &
+    web_server_PID=$!
+    echo -e "${GREEN}✓ Web UI 已启动 (PID: $web_server_PID)${NC}"
 }
 
 # 显示访问信息
@@ -102,8 +102,8 @@ cleanup() {
     echo ""
     echo -e "${YELLOW}正在停止服务...${NC}"
 
-    if [ ! -z "$WEB_UI_PID" ]; then
-        kill $WEB_UI_PID 2>/dev/null || true
+    if [ ! -z "$web_server_PID" ]; then
+        kill $web_server_PID 2>/dev/null || true
         echo -e "${GREEN}✓ Web UI 已停止${NC}"
     fi
 
@@ -135,7 +135,7 @@ main() {
     # 启动服务
     start_mqtt_server
     sleep 2
-    start_web_ui
+    start_web_server
     sleep 2
     show_access_info
 

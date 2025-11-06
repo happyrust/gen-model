@@ -32,7 +32,7 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
 ```bash
 # 在项目根目录下
 cd /Volumes/DPC/work/plant-code/gen-model
-cargo run --bin web_ui --features "web_ui,ws,gen_model,manifold,project_hd"
+cargo run --bin web_server --features "web_server,ws,gen_model,manifold,project_hd"
 ```
 
 **步骤 2：启动 Next.js 前端**
@@ -53,7 +53,7 @@ pnpm run dev
 - **端口**: 8080
 - **功能**: 提供所有 API 端点，包括 `/api/deployment-sites`
 - **数据库**: SurrealDB + SQLite
-- **启动命令**: `cargo run --bin web_ui --features "web_ui,ws,gen_model,manifold,project_hd"`
+- **启动命令**: `cargo run --bin web_server --features "web_server,ws,gen_model,manifold,project_hd"`
 
 ### 前端服务（Next.js）
 - **端口**: 3000

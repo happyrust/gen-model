@@ -109,7 +109,7 @@
 ```
 gen-model/
 ├── src/
-│   ├── web_ui/           # Web UI 模块
+│   ├── web_server/           # Web UI 模块
 │   │   ├── handlers.rs   # HTTP 处理器
 │   │   ├── models.rs     # 数据模型
 │   │   ├── wizard_*.rs   # 向导相关

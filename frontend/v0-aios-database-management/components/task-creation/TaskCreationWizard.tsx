@@ -171,11 +171,13 @@ export function TaskCreationWizard({ onTaskCreated, onCancel }: TaskCreationWiza
   const validateCurrentStep = (): boolean => {
     switch (currentStep) {
       case 1:
-        return formData.taskName.trim() !== '' && 
-               formData.taskType !== '' &&
-               (nameValidation?.available ?? false)
+        return (
+          formData.taskName.trim().length > 0 &&
+          Boolean(formData.taskType) &&
+          (nameValidation?.available ?? false)
+        )
       case 2:
-        return formData.siteId !== ''
+        return formData.siteId.trim().length > 0
       case 3:
         return true // 参数配置步骤总是有效的
       case 4:
@@ -698,4 +700,3 @@ function TaskPreview({ formData, previewData, onPreview }: TaskPreviewProps) {
     </div>
   )
 }
-

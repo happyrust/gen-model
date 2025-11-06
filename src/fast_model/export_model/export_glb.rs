@@ -5,17 +5,17 @@ use std::path::Path;
 use std::time::Instant;
 
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{query_insts, RefnoEnum};
-use anyhow::{anyhow, Context, Result};
+use aios_core::{RefnoEnum, query_insts};
+use anyhow::{Context, Result, anyhow};
 use glam::Vec3;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::fast_model::material_config::MaterialLibrary;
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
 
-use super::export_common::{collect_export_data, ExportData};
+use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
-    collect_export_refnos, query_geometry_instances, ExportStats, GlbExportConfig, ModelExporter,
+    ExportStats, GlbExportConfig, ModelExporter, collect_export_refnos, query_geometry_instances,
 };
 
 /// 导出指定 refno 的整体 GLB 模型
@@ -707,4 +707,197 @@ impl ModelExporter for GlbExporter {
     fn format_name(&self) -> &str {
         "GLB"
     }
+}
+
+/// 导出单个 PlantMesh 到 GLB 文件（用于 LOD 生成）
+pub fn export_single_mesh_to_glb(mesh: &PlantMesh, output_path: &Path) -> Result<()> {
+    // 转换 Vec3 为 f32 数组
+    let positions: Vec<f32> = mesh
+        .vertices
+        .iter()
+        .flat_map(|v| [v.x, v.y, v.z])
+        .collect();
+
+    let normals: Vec<f32> = if !mesh.normals.is_empty() {
+        mesh.normals
+            .iter()
+            .flat_map(|n| [n.x, n.y, n.z])
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // 构建 buffer 数据
+    let mut buffer_data = Vec::new();
+    
+    // Positions buffer
+    let positions_bytes: Vec<u8> = positions
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    let positions_offset = buffer_data.len();
+    buffer_data.extend_from_slice(&positions_bytes);
+    
+    // Normals buffer
+    let normals_offset = if !normals.is_empty() {
+        let normals_bytes: Vec<u8> = normals
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let offset = buffer_data.len();
+        buffer_data.extend_from_slice(&normals_bytes);
+        Some(offset)
+    } else {
+        None
+    };
+    
+    // Indices buffer
+    let indices_bytes: Vec<u8> = mesh
+        .indices
+        .iter()
+        .flat_map(|i| i.to_le_bytes())
+        .collect();
+    let indices_offset = buffer_data.len();
+    buffer_data.extend_from_slice(&indices_bytes);
+
+    // 计算 bounding box
+    let mut min = [f32::MAX, f32::MAX, f32::MAX];
+    let mut max = [f32::MIN, f32::MIN, f32::MIN];
+    for v in &mesh.vertices {
+        min[0] = min[0].min(v.x);
+        min[1] = min[1].min(v.y);
+        min[2] = min[2].min(v.z);
+        max[0] = max[0].max(v.x);
+        max[1] = max[1].max(v.y);
+        max[2] = max[2].max(v.z);
+    }
+
+    // 构建 glTF JSON
+    let mut gltf = json!({
+        "asset": {
+            "version": "2.0",
+            "generator": "AIOS Instanced Bundle Exporter"
+        },
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{
+            "primitives": [{
+                "attributes": {
+                    "POSITION": 0
+                },
+                "indices": 2,
+                "mode": 4
+            }]
+        }],
+        "buffers": [{
+            "byteLength": buffer_data.len()
+        }],
+        "bufferViews": [
+            {
+                "buffer": 0,
+                "byteOffset": positions_offset,
+                "byteLength": positions_bytes.len(),
+                "target": 34962
+            },
+            {
+                "buffer": 0,
+                "byteOffset": indices_offset,
+                "byteLength": indices_bytes.len(),
+                "target": 34963
+            }
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": mesh.vertices.len(),
+                "type": "VEC3",
+                "min": min,
+                "max": max
+            },
+            {
+                "bufferView": 1,
+                "byteOffset": 0,
+                "componentType": 5125,
+                "count": mesh.indices.len(),
+                "type": "SCALAR"
+            }
+        ]
+    });
+
+    // 添加法线（如果存在）
+    if normals_offset.is_some() {
+        gltf["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .insert(
+                1,
+                json!({
+                    "buffer": 0,
+                    "byteOffset": normals_offset.unwrap(),
+                    "byteLength": normals.len() * 4,
+                    "target": 34962
+                }),
+            );
+
+        gltf["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .insert(
+                1,
+                json!({
+                    "bufferView": 1,
+                    "byteOffset": 0,
+                    "componentType": 5126,
+                    "count": mesh.normals.len(),
+                    "type": "VEC3"
+                }),
+            );
+
+        gltf["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = json!(1);
+        
+        // 更新 indices accessor index
+        gltf["meshes"][0]["primitives"][0]["indices"] = json!(2);
+    }
+
+    let json_string = serde_json::to_string(&gltf)?;
+    let json_bytes = json_string.as_bytes();
+
+    // 对齐到 4 字节边界
+    let json_padding = (4 - (json_bytes.len() % 4)) % 4;
+    let buffer_padding = (4 - (buffer_data.len() % 4)) % 4;
+
+    // GLB 文件结构
+    let mut glb_data = Vec::new();
+
+    // GLB header
+    glb_data.extend_from_slice(b"glTF"); // magic
+    glb_data.extend_from_slice(&2u32.to_le_bytes()); // version
+    
+    let total_length = 12 + // header
+        8 + json_bytes.len() + json_padding + // JSON chunk
+        8 + buffer_data.len() + buffer_padding; // BIN chunk
+    glb_data.extend_from_slice(&(total_length as u32).to_le_bytes()); // length
+
+    // JSON chunk
+    glb_data.extend_from_slice(&((json_bytes.len() + json_padding) as u32).to_le_bytes());
+    glb_data.extend_from_slice(b"JSON");
+    glb_data.extend_from_slice(json_bytes);
+    glb_data.extend(vec![0x20u8; json_padding]); // space padding
+
+    // BIN chunk
+    glb_data.extend_from_slice(&((buffer_data.len() + buffer_padding) as u32).to_le_bytes());
+    glb_data.extend_from_slice(b"BIN\0");
+    glb_data.extend_from_slice(&buffer_data);
+    glb_data.extend(vec![0u8; buffer_padding]); // zero padding
+
+    // 写入文件
+    let mut file = File::create(output_path)
+        .with_context(|| format!("创建文件失败: {}", output_path.display()))?;
+    file.write_all(&glb_data)
+        .with_context(|| format!("写入文件失败: {}", output_path.display()))?;
+
+    Ok(())
 }

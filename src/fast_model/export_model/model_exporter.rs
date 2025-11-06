@@ -3,7 +3,7 @@
 //! 本模块提供了统一的模型导出接口，支持多种格式（OBJ、XKT 等）。
 //! 通过实现 `ModelExporter` Trait，可以轻松扩展到其他导出格式。
 
-use aios_core::{query_insts, GeomInstQuery, RefnoEnum};
+use aios_core::{GeomInstQuery, RefnoEnum, query_insts};
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::time::Instant;

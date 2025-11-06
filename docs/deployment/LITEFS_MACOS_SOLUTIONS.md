@@ -76,7 +76,7 @@ multipass shell litefs-primary
 # 从 host 传输到 VM
 multipass transfer install-litefs.sh litefs-primary:/tmp/
 multipass transfer litefs-primary.yml litefs-primary:/tmp/
-multipass transfer target/release/web_ui litefs-primary:/tmp/
+multipass transfer target/release/web_server litefs-primary:/tmp/
 
 # 在 VM 中执行安装
 multipass shell litefs-primary
@@ -190,7 +190,7 @@ brew install orbstack
 ```bash
 # 上传文件到主节点
 scp install-litefs.sh user@server1:/tmp/
-scp target/release/web_ui user@server1:/opt/aios/
+scp target/release/web_server user@server1:/opt/aios/
 
 # SSH 连接并安装
 ssh user@server1
@@ -265,8 +265,8 @@ multipass transfer litefs-primary.yml litefs-primary:/tmp/
 multipass transfer litefs-replica.yml litefs-replica1:/tmp/
 
 # 传输应用程序
-multipass transfer target/release/web_ui litefs-primary:/tmp/
-multipass transfer target/release/web_ui litefs-replica1:/tmp/
+multipass transfer target/release/web_server litefs-primary:/tmp/
+multipass transfer target/release/web_server litefs-replica1:/tmp/
 ```
 
 ### 阶段 3: 安装 LiteFS（主节点，3 分钟）
@@ -312,18 +312,18 @@ ls -la /litefs/
 ```bash
 # 在主节点
 multipass shell litefs-primary
-sudo mv /tmp/web_ui /opt/aios/
-sudo chmod +x /opt/aios/web_ui
+sudo mv /tmp/web_server /opt/aios/
+sudo chmod +x /opt/aios/web_server
 export DATABASE_PATH=/litefs/deployment_sites.sqlite
-cd /opt/aios && ./web_ui
+cd /opt/aios && ./web_server
 
 # 在副本节点（新终端）
 multipass shell litefs-replica1
-sudo mv /tmp/web_ui /opt/aios/
-sudo chmod +x /opt/aios/web_ui
+sudo mv /tmp/web_server /opt/aios/
+sudo chmod +x /opt/aios/web_server
 export DATABASE_PATH=/litefs/deployment_sites.sqlite
 export PRIMARY_URL=http://<主节点IP>:8080
-cd /opt/aios && ./web_ui
+cd /opt/aios && ./web_server
 ```
 
 ### 阶段 6: 测试同步（3 分钟）

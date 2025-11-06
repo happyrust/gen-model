@@ -29,9 +29,8 @@ use aios_core::{
 use aios_core::{get_db_option, init_test_surreal};
 // 导入几何查询相关的结构体和方法
 use aios_core::{
-    CataNegGroup, GeoAabbTrans, GeoParam, GmGeoData, ManiGeoTransQuery, NegInfo,
-    ParamNegInfo, QueryAabbParam, QueryGeoParam, query_aabb_params, query_geo_params,
-    query_inst_geo_ids,
+    CataNegGroup, GeoAabbTrans, GeoParam, GmGeoData, ManiGeoTransQuery, NegInfo, ParamNegInfo,
+    QueryAabbParam, QueryGeoParam, query_aabb_params, query_geo_params, query_inst_geo_ids,
 };
 // 使用 aios_core 中查询方法的宏
 use aios_core::query_db;
@@ -506,20 +505,27 @@ pub async fn gen_inst_meshes(
                                         e
                                     );
                                     // 标记 bad，避免后续重复尝试
-                                    update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", mesh_id));
+                                    update_sql.push_str(&format!(
+                                        "update inst_geo:⟨{}⟩ set bad=true;",
+                                        mesh_id
+                                    ));
                                 }
                             }
                             None => {
                                 // CSG 生成失败
-                                let failed_refnos =
-                                    aios_core::query_refnos_by_geo_hash(&mesh_id).await.unwrap_or_default();
+                                let failed_refnos = aios_core::query_refnos_by_geo_hash(&mesh_id)
+                                    .await
+                                    .unwrap_or_default();
                                 debug_model_warn!(
                                     "{:?} CSG mesh generation not supported for type: {}",
                                     failed_refnos,
                                     geo_type_name
                                 );
                                 // 标记 bad，避免后续重复尝试
-                                update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", mesh_id));
+                                update_sql.push_str(&format!(
+                                    "update inst_geo:⟨{}⟩ set bad=true;",
+                                    mesh_id
+                                ));
                             }
                         }
                     }

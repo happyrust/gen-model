@@ -39,17 +39,17 @@ npm:     10.8.1
 
 ### 1. 后端编译
 
-**命令**: `cargo build --release --features web_ui --bin web_ui`
+**命令**: `cargo build --release --features web_server --bin web_server`
 
 **结果**: ✅ 成功
 - 编译时间: 44.85 秒
-- 生成文件: `target/release/web_ui`
+- 生成文件: `target/release/web_server`
 - 文件大小: ~28 MB
 
 **关键修改验证**:
-- ✅ `src/web_ui/litefs_handlers.rs` - 新增节点状态检测
-- ✅ `src/web_ui/remote_sync_handlers.rs` - LiteFS WAL 模式支持
-- ✅ `src/web_ui/mod.rs` - API 路由注册
+- ✅ `src/web_server/litefs_handlers.rs` - 新增节点状态检测
+- ✅ `src/web_server/remote_sync_handlers.rs` - LiteFS WAL 模式支持
+- ✅ `src/web_server/mod.rs` - API 路由注册
 
 ### 2. 前端构建
 
@@ -315,13 +315,13 @@ ls -la /litefs/
 **主节点和副本节点都执行**:
 ```bash
 # 上传编译好的二进制文件
-scp target/release/web_ui user@server:/opt/aios/
+scp target/release/web_server user@server:/opt/aios/
 
 # 配置环境变量
 export DATABASE_PATH=/litefs/deployment_sites.sqlite
 
 # 启动 Web UI
-/opt/aios/web_ui
+/opt/aios/web_server
 ```
 
 #### 步骤 6: 验证部署

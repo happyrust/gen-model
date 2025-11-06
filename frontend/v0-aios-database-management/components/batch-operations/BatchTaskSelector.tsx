@@ -7,26 +7,112 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { 
-  Search, 
-  CheckSquare, 
-  Square, 
+import {
+  Search,
+  CheckSquare,
+  Square,
   Filter,
   RefreshCw,
   AlertTriangle,
   CheckCircle,
   Clock,
   Play,
-  Pause
+  Pause,
 } from "lucide-react"
-import { TaskSelectionCard } from "./TaskSelectionCard"
 import { useBatchSelection } from "@/hooks/use-batch-selection"
-import { useTaskList } from "@/hooks/use-task-list"
+import { useTaskMonitor } from "@/hooks/use-task-monitor"
 import type { Task, TaskStatus, TaskType } from "@/types/task-monitor"
 
 interface BatchTaskSelectorProps {
   onSelectionChange: (selectedIds: string[]) => void
   onTaskAction?: (taskId: string, action: string) => void
+}
+
+interface TaskSelectionCardProps {
+  task: Task
+  isSelected: boolean
+  onToggle: () => void
+  onTaskAction?: (taskId: string, action: string) => void
+}
+
+const STATUS_INFO: Record<TaskStatus, { label: string; badgeClassName: string }> = {
+  pending: { label: "等待中", badgeClassName: "bg-yellow-100 text-yellow-800" },
+  running: { label: "运行中", badgeClassName: "bg-blue-100 text-blue-800" },
+  paused: { label: "已暂停", badgeClassName: "bg-gray-100 text-gray-800" },
+  completed: { label: "已完成", badgeClassName: "bg-green-100 text-green-800" },
+  failed: { label: "失败", badgeClassName: "bg-red-100 text-red-800" },
+  cancelled: { label: "已取消", badgeClassName: "bg-muted text-muted-foreground" },
+  unknown: { label: "未知", badgeClassName: "bg-muted text-muted-foreground" },
+}
+
+function TaskSelectionCard({ task, isSelected, onToggle, onTaskAction }: TaskSelectionCardProps) {
+  const statusInfo = STATUS_INFO[task.status] ?? {
+    label: task.status,
+    badgeClassName: "bg-muted text-muted-foreground",
+  }
+
+  const typeLabelMap: Record<TaskType, string> = {
+    ModelGeneration: "模型生成",
+    SpatialTreeGeneration: "空间树生成",
+    FullSync: "全量同步",
+    IncrementalSync: "增量同步",
+  }
+
+  return (
+    <Card className="transition-colors hover:border-primary">
+      <CardContent className="flex items-center justify-between gap-6 py-4">
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={onToggle}
+            className="h-6 w-6 rounded border border-input flex items-center justify-center bg-background"
+            aria-pressed={isSelected}
+          >
+            {isSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4 text-muted-foreground" />}
+          </button>
+
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium text-foreground">{task.name}</span>
+              <Badge variant="secondary">{typeLabelMap[task.type] ?? task.type}</Badge>
+              <span className={`rounded px-2 py-0.5 text-xs font-medium ${statusInfo.badgeClassName}`}>
+                {statusInfo.label}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+              <span>ID: {task.id}</span>
+              <span>进度: {Math.round(task.progress)}%</span>
+              {task.startTime && <span>开始于: {new Date(task.startTime).toLocaleString()}</span>}
+              {task.endTime && <span>结束: {new Date(task.endTime).toLocaleString()}</span>}
+            </div>
+          </div>
+        </div>
+
+        {onTaskAction && (
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onTaskAction(task.id, "start")}
+              className="gap-1"
+            >
+              <Play className="h-4 w-4" />
+              启动
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onTaskAction(task.id, "pause")}
+              className="gap-1"
+            >
+              <Pause className="h-4 w-4" />
+              暂停
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
 }
 
 export function BatchTaskSelector({ onSelectionChange, onTaskAction }: BatchTaskSelectorProps) {
@@ -35,13 +121,7 @@ export function BatchTaskSelector({ onSelectionChange, onTaskAction }: BatchTask
   const [typeFilter, setTypeFilter] = useState<TaskType | "all">("all")
   const [showFilters, setShowFilters] = useState(false)
 
-  const {
-    tasks,
-    loading,
-    error,
-    loadTasks,
-    refreshTasks
-  } = useTaskList()
+  const { tasks, loading, error, refreshData } = useTaskMonitor()
 
   const {
     selectedTasks,
@@ -74,8 +154,8 @@ export function BatchTaskSelector({ onSelectionChange, onTaskAction }: BatchTask
 
   // 加载任务列表
   useEffect(() => {
-    loadTasks()
-  }, [loadTasks])
+    refreshData()
+  }, [refreshData])
 
   // 处理全选/取消全选
   const handleSelectAll = useCallback(() => {
@@ -126,7 +206,7 @@ export function BatchTaskSelector({ onSelectionChange, onTaskAction }: BatchTask
               <Button
                 variant="outline"
                 size="sm"
-                onClick={refreshTasks}
+                onClick={refreshData}
                 disabled={loading}
               >
                 <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
@@ -198,10 +278,7 @@ export function BatchTaskSelector({ onSelectionChange, onTaskAction }: BatchTask
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Checkbox
-                checked={isAllSelected}
-                ref={(el) => {
-                  if (el) el.indeterminate = isIndeterminate
-                }}
+                checked={isIndeterminate ? "indeterminate" : isAllSelected}
                 onCheckedChange={handleSelectAll}
               />
               <span className="text-sm font-medium">

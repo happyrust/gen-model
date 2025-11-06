@@ -266,7 +266,7 @@ fn get_primary_url() -> Option<String> {
 FROM rust:1.75 as builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release --bin web_ui
+RUN cargo build --release --bin web_server
 
 FROM ubuntu:22.04
 
@@ -282,7 +282,7 @@ RUN apt-get update && apt-get install -y \
 RUN curl -L https://github.com/superfly/litefs/releases/download/v0.5.11/litefs-v0.5.11-linux-amd64.tar.gz | tar xz -C /usr/local/bin
 
 # 复制应用
-COPY --from=builder /app/target/release/web_ui /usr/local/bin/
+COPY --from=builder /app/target/release/web_server /usr/local/bin/
 COPY DbOption.toml /app/
 COPY litefs.yml /etc/litefs.yml
 
@@ -328,8 +328,8 @@ if [ "$IS_PRIMARY" = "true" ]; then
 fi
 
 # 启动应用
-echo "Starting web_ui service..."
-exec /usr/local/bin/web_ui
+echo "Starting web_server service..."
+exec /usr/local/bin/web_server
 ```
 
 #### 3.3 Docker Compose 配置
@@ -424,7 +424,7 @@ volumes:
 
 #### 4.1 添加节点状态检测 API
 
-在 `src/web_ui/mod.rs` 中添加：
+在 `src/web_server/mod.rs` 中添加：
 
 ```rust
 // 获取当前节点状态
@@ -660,7 +660,7 @@ sudo systemctl enable litefs
 sudo systemctl start litefs
 
 # 4. 启动应用
-./target/release/web_ui
+./target/release/web_server
 ```
 
 ## 故障处理

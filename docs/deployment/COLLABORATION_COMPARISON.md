@@ -8,7 +8,7 @@
 
 **核心文件结构：**
 ```
-src/web_ui/
+src/web_server/
 ├── remote_sync_handlers.rs       (733 行) - 远程同步 API 处理器
 ├── sync_control_handlers.rs      (多个接口) - 同步控制 API
 ├── sync_control_center.rs        (630 行) - 同步控制中心核心

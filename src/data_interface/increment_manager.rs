@@ -23,7 +23,8 @@ use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
 use rumqttc::QoS;
-use tokio::fs::create_dir_all;
+use serde::{Deserialize, Serialize};
+use tokio::fs::{self, create_dir_all};
 use walkdir::WalkDir;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
@@ -31,6 +32,12 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
+#[cfg(feature = "web_server")]
+use crate::web_server::{
+    remote_runtime::REMOTE_RUNTIME,
+    remote_sync_handlers,
+    sync_control_center::{NewSyncTaskParams, SYNC_CONTROL_CENTER},
+};
 use parse_pdms_db::parse::DbBasicInfo;
 
 /// 增量更新信息结构体
@@ -79,6 +86,105 @@ impl IncrementInfo {
     #[inline]
     pub fn is_added(&self) -> bool {
         matches!(self.operation, EleOperation::Add)
+    }
+}
+
+#[cfg(feature = "web_server")]
+#[derive(Debug)]
+struct GeneratedSyncArtifact {
+    path: PathBuf,
+    file_name: String,
+    file_size: u64,
+    file_hash: Option<String>,
+    record_count: Option<u64>,
+}
+
+#[cfg(feature = "web_server")]
+async fn enqueue_generated_sync_tasks(artifacts: Vec<GeneratedSyncArtifact>) {
+    if artifacts.is_empty() {
+        return;
+    }
+
+    let runtime_guard = REMOTE_RUNTIME.read().await;
+    let runtime_state = match runtime_guard.as_ref() {
+        Some(state) => state.clone(),
+        None => return,
+    };
+    drop(runtime_guard);
+
+    let env_id = runtime_state.env_id.clone();
+    let env_id_for_query = env_id.clone();
+
+    let query_result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<(Option<String>, Vec<(String, Option<String>)>)> {
+            let conn = remote_sync_handlers::open_sqlite()?;
+
+            let env_name = conn
+                .prepare("SELECT name FROM remote_sync_envs WHERE id = ?1 LIMIT 1")?
+                .query_row([env_id_for_query.as_str()], |row| row.get::<_, String>(0))
+                .ok();
+
+            let mut stmt_sites =
+                conn.prepare("SELECT id, name FROM remote_sync_sites WHERE env_id = ?1")?;
+            let site_iter = stmt_sites.query_map([env_id_for_query.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let mut sites = Vec::new();
+            for item in site_iter {
+                sites.push(item?);
+            }
+
+            Ok((env_name, sites))
+        },
+    )
+    .await;
+
+    let (env_name, site_entries) = match query_result {
+        Ok(Ok(data)) => data,
+        Ok(Err(err)) => {
+            eprintln!("查询远程同步站点失败: {}", err);
+            return;
+        }
+        Err(err) => {
+            eprintln!("查询远程同步站点失败: {}", err);
+            return;
+        }
+    };
+
+    let source_env = get_db_option().location.clone();
+
+    let targets: Vec<(Option<String>, Option<String>)> = if site_entries.is_empty() {
+        vec![(None, None)]
+    } else {
+        site_entries
+            .into_iter()
+            .map(|(id, name)| (Some(id), name))
+            .collect()
+    };
+
+    let mut center = SYNC_CONTROL_CENTER.write().await;
+    for artifact in artifacts {
+        let Some(path_str) = artifact.path.to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        for (site_id_opt, site_name_opt) in &targets {
+            center.add_task(NewSyncTaskParams {
+                file_path: path_str.clone(),
+                file_size: artifact.file_size,
+                priority: 5,
+                record_count: artifact.record_count,
+                file_name: Some(artifact.file_name.clone()),
+                file_hash: artifact.file_hash.clone(),
+                env_id: Some(env_id.clone()),
+                source_env: source_env.clone(),
+                target_site: site_id_opt.clone(),
+                direction: Some("UPLOAD".to_string()),
+                notes: site_name_opt
+                    .clone()
+                    .or_else(|| env_name.clone())
+                    .map(|name| format!("自动同步 - {}", name)),
+            });
+        }
     }
 }
 
@@ -368,6 +474,10 @@ impl AiosDBManager {
                     // dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         println!("成功扫描到 {} 个数据库头部", new_headers.len());
+                        #[cfg(feature = "web_server")]
+                        let mut generated_artifacts: Vec<
+                            GeneratedSyncArtifact,
+                        > = Vec::new();
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
                             println!("正在处理路径: {:?}", path);
@@ -376,6 +486,9 @@ impl AiosDBManager {
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 dbg!(path);
                                 dbg!(new_header.latest_ses_data.sesno);
+                                #[cfg(feature = "web_server")]
+                                let prev_sesno = old.latest_ses_data.sesno;
+                                let new_sesno = new_header.latest_ses_data.sesno;
 
                                 // 从数据库获取最新的sesno，而不是使用缓存的值
                                 let db_num = new_header.pdms_header.db_num;
@@ -390,17 +503,13 @@ impl AiosDBManager {
 
                                 // dbg!(&old.pdms_header);
                                 //未发生修改，直接跳过
-                                if db_latest_sesno as i32 == new_header.latest_ses_data.sesno {
+                                if db_latest_sesno as i32 == new_sesno {
                                     continue;
                                 }
                                 //比如给出准确的范围next_sesno..=end_sesno
                                 params.insert(
                                     path.clone(),
-                                    (
-                                        new_header.clone(),
-                                        (db_latest_sesno as i32 + 1)
-                                            ..=new_header.latest_ses_data.sesno,
-                                    ),
+                                    (new_header.clone(), (db_latest_sesno as i32 + 1)..=new_sesno),
                                 );
                             } else {
                                 println!("watcher.headers: {:?}", self.watcher.headers);
@@ -433,9 +542,9 @@ impl AiosDBManager {
                                         //     new_header.latest_ses_data.sesno
                                         // ));
                                         //未发生修改，直接跳过
-                                        if old.latest_ses_data.sesno
-                                            >= new_header.latest_ses_data.sesno
-                                        {
+                                        let prev_sesno = old.latest_ses_data.sesno;
+                                        let new_sesno = new_header.latest_ses_data.sesno;
+                                        if old.latest_ses_data.sesno >= new_sesno {
                                             continue;
                                         }
                                         *old.value_mut() = new_header;
@@ -456,6 +565,25 @@ impl AiosDBManager {
                                             .unwrap()
                                             .to_string();
                                         // dbg!(&file_hash);
+                                        #[cfg(feature = "web_server")]
+                                        {
+                                            let archive_size = fs::metadata(&output)
+                                                .await
+                                                .map(|m| m.len())
+                                                .unwrap_or(0);
+                                            let delta = new_sesno.saturating_sub(prev_sesno) as u64;
+                                            generated_artifacts.push(GeneratedSyncArtifact {
+                                                path: output.clone(),
+                                                file_name: format!("{file_name}.cba"),
+                                                file_size: archive_size,
+                                                file_hash: Some(file_hash.clone()),
+                                                record_count: if delta > 0 {
+                                                    Some(delta)
+                                                } else {
+                                                    None
+                                                },
+                                            });
+                                        }
 
                                         //如果location_dbs为空，则不进行筛选
                                         //说明是所有地区都推送，跳过检查
@@ -523,6 +651,8 @@ impl AiosDBManager {
                                 .await
                                 .unwrap();
                         }
+                        #[cfg(feature = "web_server")]
+                        enqueue_generated_sync_tasks(generated_artifacts).await;
                     } else {
                         println!("扫描数据库头部失败，错误路径: {:?}", &event.paths);
                     }

@@ -5,14 +5,14 @@
 ### 1. 后端实现
 
 #### 新增文件
-- **src/web_ui/litefs_handlers.rs** - LiteFS 节点状态 API
+- **src/web_server/litefs_handlers.rs** - LiteFS 节点状态 API
   - `/api/node-status` - 节点状态检测
   - `/api/health` - 健康检查
   - `/api/sync-status` - 同步状态监控
 
 #### 修改文件
-- **src/web_ui/mod.rs** - 注册新的 API 路由
-- **src/web_ui/remote_sync_handlers.rs** - 支持 LiteFS 数据库路径，自动配置 WAL 模式
+- **src/web_server/mod.rs** - 注册新的 API 路由
+- **src/web_server/remote_sync_handlers.rs** - 支持 LiteFS 数据库路径，自动配置 WAL 模式
 
 ### 2. 前端实现
 
@@ -176,7 +176,7 @@ gen-model/
 ├── LITEFS_SYNC_ARCHITECTURE.md     # 架构文档
 ├── LITEFS_QUICKSTART.md            # 快速入门
 ├── SYNC_SOLUTION_COMPARISON.md     # 方案对比
-├── src/web_ui/
+├── src/web_server/
 │   ├── litefs_handlers.rs          # ⭐ 新增
 │   ├── mod.rs                      # 修改
 │   └── remote_sync_handlers.rs     # 修改

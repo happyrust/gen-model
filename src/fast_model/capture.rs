@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use aios_core::{get_named_attmap, NamedAttrValue, RefnoEnum};
 use aios_core::options::DbOption;
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::{NamedAttrValue, RefnoEnum, get_named_attmap};
 use anyhow::{Context, Result, anyhow};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::{draw_text_mut, text_size};
-use rusttype::{Font, Scale};
 use once_cell::sync::Lazy;
+use rusttype::{Font, Scale};
 use tokio::fs;
 
 use crate::fast_model::export_model::export_obj::{
@@ -98,11 +98,10 @@ async fn capture_single(refno: RefnoEnum, mesh_dir: &Path, config: &CaptureConfi
         use_basic_materials: false,
     };
 
-    let mut prepared =
-        prepare_obj_export(&[refno], mesh_dir, &common_config).await?;
+    let mut prepared = prepare_obj_export(&[refno], mesh_dir, &common_config).await?;
     let mut mesh = prepared.mesh;
     let mut stats = prepared.stats;
-    
+
     println!(
         "[capture] 参考号 {} 初步查询结果: vertices={}, geometry_count={}, mesh_files_found={}, mesh_files_missing={}",
         refno,
@@ -118,10 +117,7 @@ async fn capture_single(refno: RefnoEnum, mesh_dir: &Path, config: &CaptureConfi
         alt_config.include_descendants = true;
         prepared = prepare_obj_export(&[refno], mesh_dir, &alt_config).await?;
         if !prepared.mesh.vertices.is_empty() && prepared.stats.geometry_count > 0 {
-            println!(
-                "[capture] 参考号 {} 自动启用子孙节点重新收集几何体",
-                refno
-            );
+            println!("[capture] 参考号 {} 自动启用子孙节点重新收集几何体", refno);
             mesh = prepared.mesh;
             stats = prepared.stats;
             common_config = alt_config;
@@ -146,7 +142,13 @@ async fn capture_single(refno: RefnoEnum, mesh_dir: &Path, config: &CaptureConfi
 
     let render_mesh = mesh_with_unit_conversion(&mesh, &common_config.unit_converter);
     let display_label = get_display_label(refno).await;
-    render_mesh_to_png(&render_mesh, config.width, config.height, &png_path, &display_label)?;
+    render_mesh_to_png(
+        &render_mesh,
+        config.width,
+        config.height,
+        &png_path,
+        &display_label,
+    )?;
 
     println!("📸 已生成截图: {}", png_path.display());
 
@@ -235,7 +237,7 @@ async fn get_display_label(refno: RefnoEnum) -> String {
                 return trimmed.trim_start_matches('/').to_string();
             }
         }
-        
+
         // 如果没有 NAME，使用 NOUN 或 TYPE + 参考号
         let noun = attmap
             .map
@@ -246,13 +248,19 @@ async fn get_display_label(refno: RefnoEnum) -> String {
         let refno_str = refno.to_string().trim_start_matches('/').to_string();
         return format!("{}_{}", noun, refno_str);
     }
-    
+
     // 如果无法获取属性，使用参考号（去掉开头的斜线）
     let refno_str = refno.to_string().trim_start_matches('/').to_string();
     format!("REFNO_{}", refno_str)
 }
 
-fn render_mesh_to_png(mesh: &PlantMesh, width: u32, height: u32, output_path: &Path, label: &str) -> Result<()> {
+fn render_mesh_to_png(
+    mesh: &PlantMesh,
+    width: u32,
+    height: u32,
+    output_path: &Path,
+    label: &str,
+) -> Result<()> {
     // 使用超采样抗锯齿：先渲染到高分辨率，然后下采样
     const SSAA_SCALE: u32 = 2; // 2x2 超采样
     let ssaa_width = width * SSAA_SCALE;
@@ -367,7 +375,11 @@ fn render_mesh_to_png(mesh: &PlantMesh, width: u32, height: u32, output_path: &P
         let x_min = p0.x.min(p1.x).min(p2.x).floor().max(0.0) as i32;
         let x_max = p0.x.max(p1.x).max(p2.x).ceil().min((ssaa_width - 1) as f32) as i32;
         let y_min = p0.y.min(p1.y).min(p2.y).floor().max(0.0) as i32;
-        let y_max = p0.y.max(p1.y).max(p2.y).ceil().min((ssaa_height - 1) as f32) as i32;
+        let y_max =
+            p0.y.max(p1.y)
+                .max(p2.y)
+                .ceil()
+                .min((ssaa_height - 1) as f32) as i32;
 
         for y in y_min..=y_max {
             for x in x_min..=x_max {
@@ -477,11 +489,11 @@ fn draw_label_on_image(image: &mut RgbaImage, label: &str, width: u32, height: u
     // 尝试加载系统字体（优先使用常规字体，避免粗体）
     let font_paths = vec![
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", // 常规字体
-        "/System/Library/Fonts/PingFang.ttc", // 常规字体
-        "/System/Library/Fonts/Helvetica.ttc", // 常规字体
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", // 常规字体
+        "/System/Library/Fonts/PingFang.ttc",                   // 常规字体
+        "/System/Library/Fonts/Helvetica.ttc",                  // 常规字体
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",      // 常规字体
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", // 常规字体
-        "/System/Library/Fonts/STHeiti Light.ttc", // 细体字体
+        "/System/Library/Fonts/STHeiti Light.ttc",              // 细体字体
     ];
 
     let font_data = match font_paths.iter().find_map(|path| std::fs::read(path).ok()) {

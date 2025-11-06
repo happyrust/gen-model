@@ -2,15 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Plus, RefreshCw, Network, AlertCircle } from "lucide-react"
 import { Sidebar } from "@/components/sidebar"
 import type { CollaborationGroup } from "@/types/collaboration"
 import { listRemoteSyncEnvs, envToGroup } from "@/lib/api/collaboration-adapter"
 import { CreateGroupDialog } from "@/components/collaboration/create-group-dialog"
-import Link from "next/link"
 import { toast } from "sonner"
+import { getPublicApiBaseUrl } from "@/lib/env"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { GroupDetailDialog } from "@/components/collaboration/group-detail-dialog"
 
 export default function CollaborationPage() {
   const [groups, setGroups] = useState<CollaborationGroup[]>([])
@@ -18,13 +20,18 @@ export default function CollaborationPage() {
   const [error, setError] = useState<string | null>(null)
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
   const [initialized, setInitialized] = useState(false)
+  const apiBaseUrl = getPublicApiBaseUrl()
+  const [activeGroup, setActiveGroup] = useState<CollaborationGroup | null>(null)
+  const [detailOpen, setDetailOpen] = useState(false)
 
   const loadGroups = useCallback(async (options?: { showToast?: boolean }) => {
     setLoading(true)
     setError(null)
     try {
       const envs = await listRemoteSyncEnvs()
-      const mappedGroups = envs.map(envToGroup)
+      // 确保 envs 是数组，处理可能的 API 响应格式差异
+      const envsArray = Array.isArray(envs) ? envs : (envs && typeof envs === 'object' && 'items' in envs && Array.isArray(envs.items) ? envs.items : [])
+      const mappedGroups = envsArray.map(envToGroup)
       setGroups(mappedGroups)
       if (options?.showToast) {
         toast.success("协同组数据已刷新")
@@ -81,10 +88,15 @@ export default function CollaborationPage() {
     toast.success(`已创建协同组「${group.name}」`)
   }
 
+  const handleViewDetail = (group: CollaborationGroup) => {
+    setActiveGroup(group)
+    setDetailOpen(true)
+  }
+
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="min-h-screen bg-background">
       <Sidebar />
-      <main className="flex-1 p-8">
+      <main className="ml-64 p-8">
         <div className="max-w-7xl mx-auto space-y-6">
           {/* Header */}
           <div className="flex items-center justify-between">
@@ -113,6 +125,17 @@ export default function CollaborationPage() {
               </Button>
             </div>
           </div>
+
+          {/* Config Warning */}
+          {!apiBaseUrl && (
+            <Alert variant="default" className="border-warning/60 bg-warning/10 text-warning-foreground">
+              <AlertTitle>未配置后端网关地址</AlertTitle>
+              <AlertDescription>
+                协同功能需要配置 <code>NEXT_PUBLIC_API_BASE_URL</code>。请参考 <code>docs/REMOTE_COLLABORATION_DEV_PLAN.md</code>{" "}
+                并在 <code>.env.local</code> 中填写正确的网关 URL。
+              </AlertDescription>
+            </Alert>
+          )}
 
           {/* Stats */}
           <div className="grid gap-4 md:grid-cols-4">
@@ -160,10 +183,22 @@ export default function CollaborationPage() {
           {/* Error Message */}
           {error && (
             <Card className="border-destructive">
-              <CardContent className="pt-6">
+              <CardContent className="pt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2 text-destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <span>{error}</span>
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <span className="text-sm">{error}</span>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => loadGroups({ showToast: true })}>
+                    重试拉取
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => navigator.clipboard?.writeText(".env.local -> NEXT_PUBLIC_API_BASE_URL")}
+                  >
+                    复制配置提示
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -201,45 +236,48 @@ export default function CollaborationPage() {
           ) : (
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               {groups.map((group) => (
-                <Link key={group.id} href={`/collaboration/${group.id}`}>
-                  <Card className="hover:shadow-md transition-shadow cursor-pointer">
-                    <CardHeader>
-                      <div className="flex items-start justify-between">
-                        <div className="space-y-1">
-                          <CardTitle className="text-lg">{group.name}</CardTitle>
-                          <CardDescription className="line-clamp-2">
-                            {group.description || "暂无描述"}
-                          </CardDescription>
-                        </div>
-                        {getStatusBadge(group.status)}
+                <Card key={group.id} className="hover:shadow-md transition-shadow">
+                  <CardHeader>
+                    <div className="flex items-start justify-between">
+                      <div className="space-y-1">
+                        <CardTitle className="text-lg">{group.name}</CardTitle>
+                        <CardDescription className="line-clamp-2">
+                          {group.description || "暂无描述"}
+                        </CardDescription>
                       </div>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">类型</span>
-                          {getTypeBadge(group.group_type)}
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">站点数量</span>
-                          <span className="font-medium">{group.site_ids?.length || 0}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">同步模式</span>
-                          <span className="font-medium">
-                            {group.sync_strategy?.mode === "OneWay" && "单向"}
-                            {group.sync_strategy?.mode === "TwoWay" && "双向"}
-                            {group.sync_strategy?.mode === "Manual" && "手动"}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">位置</span>
-                          <span className="font-medium">{group.location || "未指定"}</span>
-                        </div>
+                      {getStatusBadge(group.status)}
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">类型</span>
+                        {getTypeBadge(group.group_type)}
                       </div>
-                    </CardContent>
-                  </Card>
-                </Link>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">站点数量</span>
+                        <span className="font-medium">{group.site_ids?.length || 0}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">同步模式</span>
+                        <span className="font-medium">
+                          {group.sync_strategy?.mode === "OneWay" && "单向"}
+                          {group.sync_strategy?.mode === "TwoWay" && "双向"}
+                          {group.sync_strategy?.mode === "Manual" && "手动"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">位置</span>
+                        <span className="font-medium">{group.location || "未指定"}</span>
+                      </div>
+                    </div>
+                  </CardContent>
+                  <CardFooter className="border-t border-border/60 pt-4">
+                    <Button variant="outline" size="sm" onClick={() => handleViewDetail(group)}>
+                      查看详情
+                    </Button>
+                  </CardFooter>
+                </Card>
               ))}
               {loading && (
                 <Card className="flex items-center justify-center gap-2 border-dashed border-border text-muted-foreground">
@@ -253,6 +291,17 @@ export default function CollaborationPage() {
           )}
         </div>
       </main>
+      <GroupDetailDialog
+        group={activeGroup}
+        open={detailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open)
+          if (!open) {
+            setActiveGroup(null)
+          }
+        }}
+        onGroupUpdated={() => loadGroups()}
+      />
     </div>
   )
 }

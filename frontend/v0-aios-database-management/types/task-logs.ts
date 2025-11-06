@@ -9,7 +9,7 @@ export interface LogEntry {
   stackTrace?: string
 }
 
-export type LogLevel = 'info' | 'warn' | 'error' | 'debug'
+export type LogLevel = "info" | "warn" | "warning" | "error" | "debug" | "critical"
 
 export interface LogFilters {
   level: 'all' | LogLevel

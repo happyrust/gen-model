@@ -10,7 +10,7 @@ import ReactFlowVisualization from '@/components/spatial-query/ReactFlowVisualiz
 import { buildApiUrl } from '@/lib/api';
 
 interface SpatialNode {
-  refno: u64;
+  refno: number;
   name: string;
   noun: string;
   node_type: string;
@@ -223,4 +223,3 @@ export default function SpatialVisualizationPage() {
     </div>
   );
 }
-

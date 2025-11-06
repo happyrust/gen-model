@@ -132,7 +132,7 @@ Backend Status → Frontend Status
 
 ## 依赖的后端 API
 
-所有 API 端点位于 `src/web_ui/remote_sync_handlers.rs`：
+所有 API 端点位于 `src/web_server/remote_sync_handlers.rs`：
 
 - `GET /api/remote-sync/envs` - 列出环境
 - `GET /api/remote-sync/envs/{id}` - 获取环境详情

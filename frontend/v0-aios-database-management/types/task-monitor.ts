@@ -4,35 +4,33 @@ export interface Task {
   type: TaskType
   status: TaskStatus
   progress: number
-  startTime: string
+  startTime?: string
   endTime?: string
-  duration?: number
+  durationMs?: number
   estimatedTime?: number
-  priority: TaskPriority
-  parameters: Record<string, any>
+  priority?: TaskPriority
+  parameters?: Record<string, any>
   result?: TaskResult
   error?: string
+  raw?: Record<string, any>
 }
 
-export type TaskType = 
-  | 'ModelGeneration' 
-  | 'SpatialTreeGeneration' 
-  | 'FullSync' 
-  | 'IncrementalSync'
+export type TaskType = string
 
-export type TaskStatus = 
-  | 'pending' 
-  | 'running' 
-  | 'paused' 
-  | 'completed' 
-  | 'failed' 
-  | 'cancelled'
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown"
 
-export type TaskPriority = 'Low' | 'Normal' | 'High' | 'Critical'
+export type TaskPriority = "Low" | "Normal" | "High" | "Critical" | string
 
 export interface TaskResult {
   success: boolean
-  message: string
+  message?: string
   data?: any
   metrics?: TaskMetrics
 }
@@ -47,15 +45,17 @@ export interface TaskMetrics {
 export interface SystemMetrics {
   cpu: number
   memory: number
-  disk: number
-  network: number
-  uptime: number
-  services: ServiceStatus[]
+  disk?: number
+  network?: number
+  uptimeSeconds?: number
+  activeTasks?: number
+  databaseConnected?: boolean
+  surrealdbConnected?: boolean
 }
 
 export interface ServiceStatus {
   name: string
-  status: 'running' | 'stopped' | 'error'
+  status: "running" | "stopped" | "error"
   uptime: number
   lastCheck: string
 }

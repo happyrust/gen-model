@@ -8,12 +8,14 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Loader2, Server, Globe } from "lucide-react"
 import { fetchDeploymentSites } from "@/lib/api"
 import { fetchRemoteSites } from "@/lib/api/collaboration"
+import { getPublicApiBaseUrl } from "@/lib/env"
 
 interface SiteSelectorProps {
   selectedSites: string[]
   onSelectionChange: (sites: string[]) => void
   primarySiteId?: string
   onPrimaryChange: (siteId: string) => void
+  refreshKey?: number
 }
 
 export function SiteSelector({
@@ -21,15 +23,22 @@ export function SiteSelector({
   onSelectionChange,
   primarySiteId,
   onPrimaryChange,
+  refreshKey,
 }: SiteSelectorProps) {
   const [localSites, setLocalSites] = useState<any[]>([])
   const [remoteSites, setRemoteSites] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const apiBaseUrl = getPublicApiBaseUrl()
 
   useEffect(() => {
     const loadSites = async () => {
       setLoading(true)
       try {
+        if (!apiBaseUrl) {
+          setLocalSites([])
+          setRemoteSites([])
+          return
+        }
         const [localResult, remoteResult] = await Promise.all([
           fetchDeploymentSites({ page: 1, per_page: 100 }),
           fetchRemoteSites().catch(() => ({ items: [] })),
@@ -43,7 +52,7 @@ export function SiteSelector({
       }
     }
     loadSites()
-  }, [])
+  }, [apiBaseUrl, refreshKey])
 
   const toggleSite = (siteId: string) => {
     if (selectedSites.includes(siteId)) {
@@ -63,6 +72,15 @@ export function SiteSelector({
     return (
       <div className="flex items-center justify-center py-8">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (!apiBaseUrl) {
+    return (
+      <div className="space-y-2 rounded-lg border border-dashed border-warning/60 bg-warning/10 p-4 text-sm text-warning-foreground">
+        <p>检测到未配置 <code>NEXT_PUBLIC_API_BASE_URL</code>，无法加载本地或远程站点列表。</p>
+        <p>请在 <code>.env.local</code> 中填写网关地址后重新打开此对话框。</p>
       </div>
     )
   }

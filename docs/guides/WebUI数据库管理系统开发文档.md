@@ -63,7 +63,7 @@ AIOS Database WebUI 是一个用于管理 PDMS 数据解析、3D 模型生成和
 
 ### 模块结构
 ```rust
-src/web_ui/
+src/web_server/
 ├── mod.rs                          // 主模块定义和路由配置
 ├── handlers.rs                     // 基础请求处理器
 ├── database_status_handlers.rs    // 数据库状态管理
@@ -96,7 +96,7 @@ src/web_ui/
 
 #### 实现代码
 ```rust
-// src/web_ui/db_startup_manager.rs
+// src/web_server/db_startup_manager.rs
 pub async fn start_database_with_progress(
     ip: String,
     port: u16,
@@ -162,7 +162,7 @@ pub enum ProcessStatus {
 
 #### 前端表格实现
 ```javascript
-// src/web_ui/static/database_status.js
+// src/web_server/static/database_status.js
 class DatabaseStatusManager {
     async loadDatabases() {
         const params = new URLSearchParams({
@@ -210,7 +210,7 @@ class DatabaseStatusManager {
 
 #### 实现方案
 ```rust
-// src/web_ui/incremental_update_handlers.rs
+// src/web_server/incremental_update_handlers.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncrementalUpdateInfo {
     pub site_id: String,
@@ -250,7 +250,7 @@ pub async fn start_incremental_detection(
 
 ### 基础路由
 ```rust
-// src/web_ui/mod.rs
+// src/web_server/mod.rs
 pub fn create_router() -> Router {
     Router::new()
         // 页面路由
@@ -276,7 +276,7 @@ pub fn create_router() -> Router {
         .route("/api/incremental/sync/:site_id", post(start_sync))
 
         // 静态文件
-        .nest_service("/static", ServeDir::new("src/web_ui/static"))
+        .nest_service("/static", ServeDir::new("src/web_server/static"))
 }
 ```
 
@@ -397,10 +397,10 @@ git clone https://github.com/your-repo/gen-model.git
 cd gen-model
 
 # 2. 编译 WebUI
-cargo build --release --bin web_ui --features "web_ui,ws"
+cargo build --release --bin web_server --features "web_server,ws"
 
 # 3. 启动服务
-./target/release/web_ui
+./target/release/web_server
 
 # 服务将在 http://localhost:8080 启动
 ```
@@ -414,7 +414,7 @@ v_port = 8009
 v_user = "root"
 v_password = "1516"
 
-[web_ui]
+[web_server]
 port = 8080
 host = "0.0.0.0"
 
@@ -429,21 +429,21 @@ sqlite_index_path = "aabb_cache.sqlite"
 FROM rust:1.70 as builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release --bin web_ui --features "web_ui,ws"
+RUN cargo build --release --bin web_server --features "web_server,ws"
 
 FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/web_ui /usr/local/bin/
-COPY --from=builder /app/src/web_ui /app/src/web_ui
+COPY --from=builder /app/target/release/web_server /usr/local/bin/
+COPY --from=builder /app/src/web_server /app/src/web_server
 WORKDIR /app
 EXPOSE 8080
-CMD ["web_ui"]
+CMD ["web_server"]
 ```
 
 ```yaml
 # docker-compose.yml
 version: '3.8'
 services:
-  web_ui:
+  web_server:
     build: .
     ports:
       - "8080:8080"
@@ -557,7 +557,7 @@ services:
 ```
 
 ### 日志位置
-- WebUI日志: `web_ui.log`
+- WebUI日志: `web_server.log`
 - SurrealDB日志: `surreal.log`
 - 任务日志: `logs/tasks/`
 
@@ -587,7 +587,7 @@ services:
 
 1. **创建处理器**
    ```rust
-   // src/web_ui/your_handler.rs
+   // src/web_server/your_handler.rs
    pub async fn your_handler(
        State(state): State<AppState>,
    ) -> Result<Json<Value>, StatusCode> {
@@ -597,13 +597,13 @@ services:
 
 2. **注册路由**
    ```rust
-   // src/web_ui/mod.rs
+   // src/web_server/mod.rs
    .route("/api/your-endpoint", get(your_handler))
    ```
 
 3. **创建前端页面**
    ```javascript
-   // src/web_ui/static/your_page.js
+   // src/web_server/static/your_page.js
    class YourManager {
        async init() {
            // 初始化逻辑
@@ -614,7 +614,7 @@ services:
 ### 测试
 ```bash
 # 运行单元测试
-cargo test --features "web_ui"
+cargo test --features "web_server"
 
 # 运行集成测试
 cargo test --test integration_tests

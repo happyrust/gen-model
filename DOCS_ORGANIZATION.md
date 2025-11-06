@@ -50,7 +50,7 @@ development/           # 开发子目录 (独立保留)
 ## 保留在根目录的文档
 
 - `readme.md` - 项目主要说明文档
-- `README_WEB_UI.md` - Web UI 专项说明
+- `README_web_server.md` - Web UI 专项说明
 
 ## .gitignore 更新
 

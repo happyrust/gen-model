@@ -4,31 +4,29 @@ export interface TaskHistory {
   name: string
   type: TaskType
   status: TaskStatus
-  startTime: string
-  endTime: string
-  duration: number
-  result: TaskResult
-  parameters: Record<string, any>
+  startTime?: string
+  endTime?: string
+  durationMs?: number
+  result?: TaskResult
+  parameters?: Record<string, any>
   logs: LogEntry[]
-  createdAt: string
-  updatedAt: string
+  createdAt?: string
+  raw?: Record<string, any>
 }
 
-export type TaskType = 
-  | 'ModelGeneration' 
-  | 'SpatialTreeGeneration' 
-  | 'FullSync' 
-  | 'IncrementalSync'
+export type TaskType = string
 
-export type TaskStatus = 
-  | 'completed' 
-  | 'failed' 
-  | 'cancelled' 
-  | 'running'
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown"
 
 export interface TaskResult {
   success: boolean
-  message: string
+  message?: string
   data?: any
   metrics?: TaskMetrics
 }
@@ -42,11 +40,15 @@ export interface TaskMetrics {
 
 export interface LogEntry {
   id: string
-  level: 'info' | 'warn' | 'error' | 'debug'
+  taskId: string
+  level: LogLevel
   message: string
   timestamp: string
   source?: string
+  metadata?: Record<string, any>
 }
+
+export type LogLevel = "info" | "warn" | "warning" | "error" | "debug" | "critical"
 
 export interface HistoryFilters {
   status: 'all' | TaskStatus
@@ -70,6 +72,7 @@ export interface TaskStatistics {
   failed: number
   cancelled: number
   running: number
+  pending: number
   successRate: number
   failureRate: number
   avgDuration: number
@@ -95,11 +98,11 @@ export interface TaskReplayParams {
   priority?: TaskPriority
 }
 
-export type TaskPriority = 'Low' | 'Normal' | 'High' | 'Critical'
+export type TaskPriority = "Low" | "Normal" | "High" | "Critical" | string
 
 export interface TaskReplayResponse {
   success: boolean
-  message: string
+  message?: string
   newTaskId?: string
 }
 

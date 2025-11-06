@@ -6,11 +6,11 @@
 use crate::fast_model::gen_model::gen_geos_data;
 use crate::fast_model::pdms_inst::save_instance_data_optimize;
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
+use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::options::DbOption;
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::RefnoEnum;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use glam::{DMat4, Vec3};
 use rust_xlsxwriter::Workbook;
 use std::collections::HashMap;
@@ -22,9 +22,9 @@ use std::time::Instant;
 use gen_xkt::prelude::*;
 use gen_xkt::xkt::XKTGeometryType;
 
-use super::export_common::{collect_export_data, ExportData};
+use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
-    collect_export_refnos, query_geometry_instances, ExportStats, ModelExporter, XktExportConfig,
+    ExportStats, ModelExporter, XktExportConfig, collect_export_refnos, query_geometry_instances,
 };
 
 /// 几何体统计信息

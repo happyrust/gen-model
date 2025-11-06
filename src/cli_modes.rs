@@ -12,6 +12,7 @@ use aios_core::{DBType, query_mdb_db_nums};
 use aios_database::fast_model::export_glb::GlbExporter;
 use aios_database::fast_model::export_gltf::GltfExporter;
 use aios_database::fast_model::export_gltf::export_gltf_for_refnos;
+use aios_database::fast_model::export_instanced_bundle::export_instanced_bundle_for_refnos;
 use aios_database::fast_model::export_xkt::XktExporter;
 use aios_database::fast_model::model_exporter::{
     CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, XktExportConfig,
@@ -1482,6 +1483,62 @@ async fn export_xkt_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
     Ok(())
 }
 
+/// 导出 Instanced Bundle 模式
+pub async fn export_instanced_bundle_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
+    use std::sync::Arc;
+
+    println!("\n🎯 Instanced Bundle 导出模式");
+    println!("================");
+
+    // 解析参考号
+    let refnos: Vec<RefnoEnum> = if config.refnos_str.is_empty() {
+        return Err(anyhow!("请指定参考号"));
+    } else {
+        config
+            .refnos_str
+            .iter()
+            .map(|s| RefU64::from_str(s).map(|r| r.into()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("解析参考号失败: {}", e))?
+    };
+
+    println!("   - 参考号数量: {}", refnos.len());
+    if config.verbose {
+        for refno in &refnos {
+            println!("      {}", refno);
+        }
+    }
+
+    // 确定输出目录
+    let output_dir = config.output_path
+        .clone()
+        .unwrap_or_else(|| {
+            let first_refno = refnos[0].to_string().replace('/', "_");
+            format!("output/instanced-bundle/{}", first_refno)
+        });
+
+    println!("   - 输出目录: {}", output_dir);
+
+    // 获取 mesh 目录
+    let mesh_dir = PathBuf::from(db_option_ext.get_meshes_path());
+    println!("   - Mesh 目录: {}", mesh_dir.display());
+
+    // 执行导出
+    export_instanced_bundle_for_refnos(
+        &refnos,
+        &mesh_dir,
+        &PathBuf::from(&output_dir),
+        Arc::new(db_option_ext.inner.clone()),
+        config.verbose,
+    )
+    .await?;
+
+    println!("\n✅ Instanced Bundle 导出完成");
+    println!("   输出目录: {}", output_dir);
+
+    Ok(())
+}
+
 /// 统一的模型导出模式（支持多种格式）
 pub async fn export_model_mode(
     format: &str,
@@ -1505,8 +1562,11 @@ pub async fn export_model_mode(
             let xkt_config = config.with_unit_conversion("mm", "dm");
             export_xkt_mode(xkt_config, db_option_ext).await
         }
+        "instanced-bundle" | "instanced_bundle" => {
+            export_instanced_bundle_mode(config, db_option_ext).await
+        }
         _ => Err(anyhow!(
-            "不支持的导出格式: {}，支持的格式: obj, glb, gltf, xkt",
+            "不支持的导出格式: {}，支持的格式: obj, glb, gltf, xkt, instanced-bundle",
             format
         )),
     }

@@ -401,4 +401,3 @@ async fn test_boolean_refno_parse_error() {
         .await
         .unwrap();
 }
-

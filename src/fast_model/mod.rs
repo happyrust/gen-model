@@ -14,8 +14,8 @@ pub mod error_macros;
 
 pub mod capture;
 
-pub mod mesh_generate;
 pub mod manifold_bool;
+pub mod mesh_generate;
 
 pub mod room_model;
 
@@ -32,8 +32,8 @@ pub mod query_provider; // 新的统一查询提供者 // 查询兼容层
 pub mod utils;
 
 pub mod export_model;
-pub use export_model::{export_glb, export_gltf, export_xkt, model_exporter};
 pub use capture::*;
+pub use export_model::{export_glb, export_gltf, export_xkt, model_exporter};
 pub mod material_config;
 pub mod unit_converter;
 
@@ -57,9 +57,9 @@ pub use resolve::*;
 
 // Re-export mesh generation functions
 pub use mesh_generate::{
-    booleans_meshes_in_db, gen_inst_meshes, gen_meshes_in_db, 
-    process_meshes_update_db, process_meshes_update_db_deep,
-    process_meshes_update_db_deep_default, update_inst_relate_aabbs_by_refnos,
+    booleans_meshes_in_db, gen_inst_meshes, gen_meshes_in_db, process_meshes_update_db,
+    process_meshes_update_db_deep, process_meshes_update_db_deep_default,
+    update_inst_relate_aabbs_by_refnos,
 };
 
 pub const SEND_INST_SIZE: usize = 500;

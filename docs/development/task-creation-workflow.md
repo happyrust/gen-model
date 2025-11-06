@@ -81,7 +81,7 @@ pub struct DataParsingWizardConfig {
 #### Step 1: 参数验证
 
 ```rust
-// 文件：src/web_ui/wizard_handlers.rs
+// 文件：src/web_server/wizard_handlers.rs
 // 函数：create_wizard_task()
 
 // 1. 验证选中的项目
@@ -510,10 +510,10 @@ pub enum LogLevel {
 
 ### A. 相关文件
 
-- `/src/web_ui/wizard_handlers.rs` - 向导处理器
-- `/src/web_ui/models.rs` - 数据模型
-- `/src/web_ui/wizard_template.rs` - UI模板
-- `/src/web_ui/mod.rs` - 路由配置
+- `/src/web_server/wizard_handlers.rs` - 向导处理器
+- `/src/web_server/models.rs` - 数据模型
+- `/src/web_server/wizard_template.rs` - UI模板
+- `/src/web_server/mod.rs` - 路由配置
 - `/deployment_sites.sqlite` - 任务数据库
 
 ### B. 环境要求

@@ -276,9 +276,11 @@ export default function EnhancedWizardPage() {
     if (activeTab === "quick") {
       return formData.siteId && selectedTaskTypes.length > 0
     } else {
-      return formData.taskName.trim() !== '' && 
-             formData.taskType !== '' && 
-             formData.siteId !== ''
+      return (
+        formData.taskName.trim().length > 0 &&
+        Boolean(formData.taskType) &&
+        formData.siteId.trim().length > 0
+      )
     }
   }
 

@@ -35,13 +35,13 @@ AIOS 数据库管理平台是一个现代化的Web界面，专门用于管理数
 #### 真实执行版本（推荐）
 ```bash
 # 编译并启动真实执行版本的Web UI服务器
-cargo run --example real_task_execution --features "web_ui,ws,gen_model,manifold,project_hd"
+cargo run --example real_task_execution --features "web_server,ws,gen_model,manifold,project_hd"
 ```
 
 #### 演示版本
 ```bash
 # 编译并启动演示版本的Web UI服务器
-cargo run --example web_ui_server --features "web_ui,ws,gen_model,manifold,project_hd"
+cargo run --example web_server_server --features "web_server,ws,gen_model,manifold,project_hd"
 ```
 
 ### 2. 访问界面
@@ -142,8 +142,8 @@ cargo run --example web_ui_server --features "web_ui,ws,gen_model,manifold,proje
 ## 🛠️ 开发扩展
 
 ### 添加新的任务类型
-1. 在 `src/web_ui/models.rs` 中添加新的 `TaskType` 枚举值
-2. 在 `src/web_ui/handlers.rs` 中实现对应的处理逻辑
+1. 在 `src/web_server/models.rs` 中添加新的 `TaskType` 枚举值
+2. 在 `src/web_server/handlers.rs` 中实现对应的处理逻辑
 3. 在前端模板中添加相应的UI元素
 
 ### 自定义配置参数

@@ -78,7 +78,7 @@
 - `validateTaskName()` - 验证任务名称
 - `previewTaskConfig()` - 预览任务配置
 
-#### 后端API (`src/web_ui/task_creation_handlers.rs`)
+#### 后端API (`src/web_server/task_creation_handlers.rs`)
 - `POST /api/tasks` - 创建任务
 - `GET /api/deployment-sites` - 获取部署站点
 - `GET /api/task-templates` - 获取任务模板

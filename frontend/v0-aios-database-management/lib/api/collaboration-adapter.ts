@@ -1,4 +1,18 @@
-import type { CollaborationGroup, RemoteSite, SyncRecord, SyncStrategy, CollaborationGroupStatus, ConnectionStatus } from "@/types/collaboration"
+import type {
+  CollaborationGroup,
+  RemoteSite,
+  SyncStrategy,
+  CollaborationGroupStatus,
+  ConnectionStatus,
+  RemoteSyncLogEntry,
+  RemoteSyncLogQuery,
+  RemoteSyncLogResponse,
+  RemoteSyncDailyStat,
+  RemoteSyncDailyStatsResponse,
+  RemoteSyncFlowStat,
+  RemoteSyncFlowStatsResponse,
+  SiteMetadataResponse,
+} from "@/types/collaboration"
 
 interface NodeStatus {
   is_primary: boolean
@@ -68,16 +82,17 @@ export interface RemoteSyncSiteCreatePayload {
   is_local: boolean
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? ""
+import { getPublicApiBaseUrl } from "@/lib/env"
 
 function buildApiUrl(path: string) {
   if (!path.startsWith("/")) {
     throw new Error(`API 路径必须以 / 开头: ${path}`)
   }
-  if (!API_BASE_URL) {
+  const base = getPublicApiBaseUrl()
+  if (!base) {
     return path
   }
-  return `${API_BASE_URL}${path}`
+  return `${base}${path}`
 }
 
 async function getNodeStatus(): Promise<NodeStatus | null> {
@@ -88,7 +103,12 @@ async function getNodeStatus(): Promise<NodeStatus | null> {
 
   try {
     const response = await fetch(buildApiUrl("/api/node-status"))
-    if (!response.ok) return null
+  if (!response.ok) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[collaboration] 获取节点状态失败:", response.statusText)
+    }
+    return null
+  }
     const data = await response.json()
     cachedNodeStatus = data.node
     nodeStatusFetchTime = now
@@ -131,6 +151,16 @@ async function handleResponse<T>(response: Response): Promise<T> {
   }
 
   return data as T
+}
+
+function buildQueryString(params: Record<string, string | number | undefined>): string {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return
+    query.set(key, String(value))
+  })
+  const qs = query.toString()
+  return qs ? `?${qs}` : ""
 }
 
 export async function listRemoteSyncEnvs(): Promise<RemoteSyncEnv[]> {
@@ -211,6 +241,107 @@ export async function activateRemoteSyncEnv(id: string): Promise<{ message: stri
     method: "POST",
   })
   return handleResponse<{ message: string }>(response)
+}
+
+interface RemoteSyncLogsApiResponse {
+  status: string
+  items: RemoteSyncLogEntry[]
+  total: number
+  limit: number
+  offset: number
+}
+
+interface RemoteSyncDailyStatsApiResponse {
+  status: string
+  items: RemoteSyncDailyStat[]
+}
+
+interface RemoteSyncFlowStatsApiResponse {
+  status: string
+  items: RemoteSyncFlowStat[]
+}
+
+export async function fetchRemoteSyncLogs(params: RemoteSyncLogQuery): Promise<RemoteSyncLogResponse> {
+  const query = buildQueryString({
+    env_id: params.envId,
+    target_site: params.targetSite,
+    status: params.status,
+    direction: params.direction,
+    limit: params.limit,
+    offset: params.offset,
+  })
+  const response = await fetch(buildApiUrl(`/api/remote-sync/logs${query}`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  })
+  const data = await handleResponse<RemoteSyncLogsApiResponse>(response)
+  return {
+    items: data.items ?? [],
+    total: data.total ?? 0,
+    limit: data.limit ?? params.limit ?? 50,
+    offset: data.offset ?? params.offset ?? 0,
+  }
+}
+
+export async function fetchRemoteSyncDailyStats(params: {
+  envId?: string
+  targetSite?: string
+  days?: number
+}): Promise<RemoteSyncDailyStatsResponse> {
+  const query = buildQueryString({
+    env_id: params.envId,
+    target_site: params.targetSite,
+    days: params.days,
+  })
+  const response = await fetch(buildApiUrl(`/api/remote-sync/stats/daily${query}`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  })
+  return handleResponse<RemoteSyncDailyStatsApiResponse>(response)
+}
+
+export async function fetchRemoteSyncFlowStats(params: {
+  envId?: string
+  limit?: number
+}): Promise<RemoteSyncFlowStatsResponse> {
+  const query = buildQueryString({
+    env_id: params.envId,
+    limit: params.limit,
+  })
+  const response = await fetch(buildApiUrl(`/api/remote-sync/stats/flows${query}`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  })
+  return handleResponse<RemoteSyncFlowStatsApiResponse>(response)
+}
+
+export async function fetchSiteMetadata(
+  siteId: string,
+  options?: { refresh?: boolean; cacheOnly?: boolean },
+): Promise<SiteMetadataResponse> {
+  const query = buildQueryString({
+    refresh: options?.refresh ? 1 : undefined,
+    cache_only: options?.cacheOnly ? 1 : undefined,
+  })
+  const response = await fetch(buildApiUrl(`/api/remote-sync/sites/${siteId}/metadata${query}`), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  })
+  return handleResponse<SiteMetadataResponse>(response)
+}
+
+export function buildSiteMetadataDownloadUrl(
+  siteId: string,
+  fileName: string,
+  _options?: { refresh?: boolean; cacheOnly?: boolean; redirect?: boolean },
+): string {
+  const segments = fileName
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/")
+  const suffix = segments ? `/${segments}` : ""
+  return buildApiUrl(`/api/remote-sync/sites/${siteId}/files${suffix}`)
 }
 
 export async function stopRemoteSyncEnv(id: string): Promise<{ message: string }> {

@@ -84,8 +84,8 @@ export function SiteDetailModal({ site, open, onOpenChange }: SiteDetailModalPro
         const detail: SiteDetail = {
           id: siteData.id as string,
           name: siteData.name as string,
-          status: (siteData.status as string) || "configuring",
-          environment: (siteData.env as string) || "dev",
+          status: ((siteData.status as string) || "configuring") as Site["status"],
+          environment: ((siteData.env as string) || "dev") as Site["environment"],
           owner: siteData.owner as string,
           createdAt: siteData.created_at as string || new Date().toISOString(),
           updatedAt: siteData.updated_at as string || new Date().toISOString(),
@@ -665,7 +665,6 @@ export function SiteDetailModal({ site, open, onOpenChange }: SiteDetailModalPro
     </Dialog>
   )
 }
-
 
 
 

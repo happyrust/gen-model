@@ -2,38 +2,57 @@
 
 这是一个独立的 MQTT 服务器，用于支持 gen-model 项目的异步同步功能。
 
+本项目通过命令行驱动编译好的 `rumqttd` 二进制文件，而不是直接使用 rumqttd 库。
+
 ## 安装和运行
 
-### 1. 编译
+### 1. 准备 rumqttd 二进制文件
+
+`rumqttd` 二进制文件已经包含在本目录中（从 rumqtt 仓库编译的 v0.20.0 release 版本）。
+
+如果需要重新编译，可以：
+```bash
+# 在父目录克隆 rumqtt 仓库
+cd /path/to/gen-model
+git clone https://github.com/bytebeamio/rumqtt.git
+cd rumqtt
+git checkout rumqttd-0.20.0
+cargo build --release --bin rumqttd
+
+# 拷贝二进制文件到 rumqttd-server 目录
+cp target/release/rumqttd ../rumqttd-server/rumqttd
+```
+
+### 2. 编译 mqtt-server 包装程序
 
 ```bash
 cd rumqttd-server
 cargo build --release
 ```
 
-### 2. 运行
+### 3. 运行
 
 使用默认配置：
 ```bash
-cargo run --release
-```
-
-指定端口：
-```bash
-cargo run --release -- --port 1883
+./target/release/mqtt-server
 ```
 
 使用自定义配置文件：
 ```bash
-cargo run --release -- --config my-config.toml
+./target/release/mqtt-server --config my-config.toml
 ```
 
 启用调试日志：
 ```bash
-cargo run --release -- --debug
+./target/release/mqtt-server --debug
 ```
 
-### 3. 作为系统服务运行
+指定 rumqttd 二进制文件路径（如果需要）：
+```bash
+./target/release/mqtt-server --rumqttd-bin /path/to/rumqttd
+```
+
+### 4. 作为系统服务运行
 
 创建 systemd 服务文件 `/etc/systemd/system/mqtt-server.service`：
 
@@ -155,9 +174,21 @@ users = [
 
 ## 开发说明
 
-本项目使用 rumqttd v0.19，相关文档：
+本项目使用 rumqttd v0.20.0（从源码编译的 release 版本），通过命令行驱动。
+
+相关文档：
 - [rumqttd GitHub](https://github.com/bytebeamio/rumqtt)
 - [rumqttd 文档](https://docs.rs/rumqttd)
+
+### 架构说明
+
+- `mqtt-server`: 一个轻量级的包装程序，负责启动和管理 `rumqttd` 进程
+- `rumqttd`: 实际的 MQTT broker 二进制文件（从 rumqtt 仓库编译）
+
+这种设计的好处：
+- 不需要在项目中直接依赖 rumqttd 库
+- 可以使用官方编译的 release 版本，性能更优
+- 更容易升级 rumqttd 版本，只需替换二进制文件
 
 ## License
 

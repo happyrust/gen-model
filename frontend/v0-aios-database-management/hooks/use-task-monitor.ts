@@ -2,7 +2,120 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { fetchTaskStatus, startTask, stopTask, pauseTask } from "@/lib/api/task-monitor"
-import type { Task, SystemMetrics } from "@/types/task-monitor"
+import type { Task, SystemMetrics, TaskStatus } from "@/types/task-monitor"
+
+function normalizeStatus(value: unknown): TaskStatus {
+  if (typeof value === "string") {
+    const lower = value.toLowerCase()
+    if (
+      lower === "pending" ||
+      lower === "running" ||
+      lower === "completed" ||
+      lower === "failed" ||
+      lower === "cancelled"
+    ) {
+      return lower
+    }
+    if (lower === "canceled") {
+      return "cancelled"
+    }
+  }
+  return "unknown"
+}
+
+function normalizeType(value: unknown): string {
+  if (typeof value === "string") {
+    return value
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length > 0) {
+      const [key, val] = entries[0]
+      if (key === "Custom" && typeof val === "string") {
+        return val
+      }
+      return key
+    }
+  }
+  return "Unknown"
+}
+
+function toIsoTimestamp(value: unknown): string | undefined {
+  if (typeof value === "number") {
+    return new Date(value).toISOString()
+  }
+  if (typeof value === "string") {
+    if (/^\d+$/.test(value)) {
+      const asNumber = Number(value)
+      if (!Number.isNaN(asNumber)) {
+        return new Date(asNumber).toISOString()
+      }
+    }
+    return value
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    "secs" in (value as Record<string, unknown>)
+  ) {
+    const secs = Number(
+      (value as { secs?: number | string }).secs ?? 0
+    )
+    const nanos = Number(
+      (value as { nanos?: number | string }).nanos ?? 0
+    )
+    const millis = secs * 1000 + Math.floor(nanos / 1_000_000)
+    return new Date(millis).toISOString()
+  }
+  return undefined
+}
+
+function mapTask(raw: any): Task {
+  const status = normalizeStatus(raw?.status)
+  const startTime = toIsoTimestamp(raw?.started_at)
+  const endTime = toIsoTimestamp(raw?.completed_at)
+  const durationMs =
+    typeof raw?.actual_duration === "number"
+      ? raw.actual_duration
+      : startTime && endTime
+        ? Math.max(
+            0,
+            new Date(endTime).getTime() -
+              new Date(startTime).getTime()
+          )
+        : undefined
+
+  const progressPercentage =
+    typeof raw?.progress?.percentage === "number"
+      ? raw.progress.percentage
+      : 0
+
+  return {
+    id: String(raw?.id ?? ""),
+    name: String(raw?.name ?? "未命名任务"),
+    type: normalizeType(raw?.task_type),
+    status,
+    progress: progressPercentage,
+    startTime,
+    endTime,
+    durationMs,
+    estimatedTime:
+      typeof raw?.estimated_duration === "number"
+        ? raw.estimated_duration
+        : undefined,
+    priority: raw?.priority,
+    parameters: raw?.config ?? {},
+    result: {
+      success: status === "completed",
+      message:
+        typeof raw?.error === "string"
+          ? raw.error
+          : raw?.error_details?.detailed_message,
+    },
+    error: typeof raw?.error === "string" ? raw.error : undefined,
+    raw,
+  }
+}
 
 interface TaskMonitorState {
   tasks: Task[]
@@ -18,8 +131,6 @@ export function useTaskMonitor() {
     systemMetrics: {
       cpu: 0,
       memory: 0,
-      disk: 0,
-      network: 0
     },
     isConnected: false,
     lastUpdate: new Date().toISOString(),
@@ -38,7 +149,9 @@ export function useTaskMonitor() {
       
       setState(prev => ({
         ...prev,
-        tasks: response.tasks || [],
+        tasks: Array.isArray(response.tasks)
+          ? response.tasks.map(mapTask)
+          : [],
         systemMetrics: response.systemMetrics || prev.systemMetrics,
         lastUpdate: new Date().toISOString(),
         isConnected: true
