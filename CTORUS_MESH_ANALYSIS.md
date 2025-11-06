@@ -120,3 +120,7 @@ match generate_csg_mesh(&g.param, &profile.csg_settings, non_scalable_geo) {
 2. **中期**: 按照迁移计划实现 CTorus 的 CSG 生成
 3. **长期**: 完成所有基本体的 CSG 支持，减少对 OCC 的依赖
 
+
+
+
+

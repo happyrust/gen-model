@@ -484,8 +484,10 @@ pub async fn gen_all_geos_data(
         let (sender, receiver) = flume::unbounded();
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
 
-        // ⚠️  调试模式下，强制替换已存在的数据
-        let replace_exist = has_debug || has_manual_refnos;
+        // ⚠️  使用 replace_mesh 配置项控制是否替换已存在的 inst_relate
+        // plant3d 场景下默认不启用，避免删除已存在的 inst_relate
+        // 即使开启了 debug_model_debug，也默认不 replace exist
+        let replace_exist = db_option.is_replace_mesh();
 
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {

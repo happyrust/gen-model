@@ -18,7 +18,7 @@ project_path = "/Volumes/DPC/work/e3d_models"
 included_projects = ["YCYK-E3D"]
 project_dirs = ["YCYK-E3D"]
 
-mdb_name = "651YK"
+mdb_name = "SLYK"
 project_name = "YCYK-E3D"
 project_code = "1500"
 surreal_ns = "1500"
@@ -124,7 +124,7 @@ room_keyword = "-R-" # 2016  K-R-K100   (-R-)
 
 #test_refno = "24381_46952"
 
-debug_model_refnos = ["21491_18946"]
+debug_model_refnos = ["21485_13393"]
 gen_history_model = false
 
 # 空间索引开关（SQLite R*-Tree）

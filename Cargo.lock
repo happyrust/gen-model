@@ -12210,7 +12210,6 @@ dependencies = [
 [[package]]
 name = "rust-ploop-processor"
 version = "0.1.0"
-source = "git+https://gitee.com/happydpc/rust-ploop-processor#36da2856c1b8853b4e3204fe41b985840f6d0884"
 dependencies = [
  "anyhow",
  "chrono",

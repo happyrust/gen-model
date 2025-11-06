@@ -4,7 +4,7 @@ use aios_core::geometry::ShapeInstancesData;
 use aios_core::pdms_types::*;
 use aios_core::rs_surreal::delete_inst_relate_cascade;
 use aios_core::types::*;
-use aios_core::{SUL_DB, get_db_option};
+use aios_core::{SUL_DB, SurrealQueryExt, get_db_option};
 use bevy_transform::prelude::Transform;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -331,11 +331,11 @@ pub async fn save_instance_data(
     // 等待所有并发任务完成
     while let Some(result) = db_futures.next().await {
         if let Err(e) = result {
-            eprintln!("Task join error: {:?}", e);
+            debug_model_debug!("Task join error: {:?}", e);
             // 这里可以选择继续或者返回错误
         } else if let Ok(query_result) = result {
             if let Err(db_err) = query_result {
-                eprintln!("Database query error: {:?}", db_err);
+                debug_model_debug!("Database query error: {:?}", db_err);
                 // 处理数据库错误
             }
         }
@@ -572,6 +572,13 @@ pub async fn save_instance_data_optimize(
 
     // inst_info & inst_relate
     let mut inst_keys: Vec<RefnoEnum> = Vec::with_capacity(inst_mgr.inst_info_map.len());
+    debug_model_debug!(
+        "🔍 [DEBUG] inst_info_map keys: {:?}",
+        inst_mgr
+            .inst_info_map
+            .keys()
+            .collect::<Vec<&RefnoEnum>>()
+    );
     let mut inst_info_batcher = TransactionBatcher::new(MAX_TX_STATEMENTS, MAX_CONCURRENT_TX);
     let mut inst_info_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
     let mut inst_relate_batcher = TransactionBatcher::new(MAX_TX_STATEMENTS, MAX_CONCURRENT_TX);
@@ -626,15 +633,24 @@ pub async fn save_instance_data_optimize(
     }
 
     if !inst_relate_buffer.is_empty() {
+        debug_model_debug!(
+            "🔍 [DEBUG] save_instance_data_optimize flushing remaining inst_relate records: {}",
+            inst_relate_buffer.len()
+        );
+        
+        // 打印第一条 inst_relate 记录用于调试
+        if let Some(first) = inst_relate_buffer.first() {
+            debug_model_debug!("🔍 [DEBUG] First inst_relate record: {}", first);
+        }
+        
         let statement = format!(
             "INSERT RELATION INTO inst_relate [{}];",
             inst_relate_buffer.join(",")
         );
+        debug_model_debug!("🔍 [DEBUG] Executing inst_relate INSERT SQL: {}", statement);
+        debug_model_debug!("🔍 [DEBUG] Executing inst_relate INSERT with {} records", inst_relate_buffer.len());
         inst_relate_batcher.push(statement).await?;
-        debug_model_debug!(
-            "save_instance_data_optimize flushing remaining inst_relate records: {}",
-            inst_relate_buffer.len()
-        );
+        debug_model_debug!("✅ [DEBUG] inst_relate INSERT pushed successfully");
     }
 
     if !inst_info_buffer.is_empty() {
@@ -650,17 +666,42 @@ pub async fn save_instance_data_optimize(
         );
     }
 
-    for chunk in inst_keys.chunks(CHUNK_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let pe_keys = chunk.iter().map(|k| k.to_pe_key()).join(",");
-        let update_sql = format!("UPDATE [{}] SET has_inst = true;", pe_keys);
-        inst_relate_batcher.push(update_sql).await?;
-    }
+    // NOTE: 暂时跳过 has_inst 标记更新，后续单独处理以避免阻塞调试
 
+    debug_model_debug!("🔍 [DEBUG] Finishing inst_relate_batcher...");
     inst_relate_batcher.finish().await?;
+    debug_model_debug!("✅ [DEBUG] inst_relate_batcher finished successfully");
+
+    // 调试：确认 inst_relate 是否已写入数据库
+    if !inst_keys.is_empty() {
+        let pe_list = inst_keys.iter().map(|k| k.to_pe_key()).join(",");
+        let verify_sql = format!(
+            "SELECT count() AS cnt FROM inst_relate WHERE in IN [{}];",
+            pe_list
+        );
+        match SUL_DB.query_response(&verify_sql).await {
+            Ok(mut resp) => match resp.take::<Vec<serde_json::Value>>(0) {
+                Ok(counts) => debug_model_debug!(
+                    "🔍 [DEBUG] inst_relate verify counts for [{}]: {:?}",
+                    pe_list, counts
+                ),
+                Err(err) => debug_model_debug!(
+                    "❌ [DEBUG] inst_relate verify take failed (sql: {}): {}",
+                    verify_sql, err
+                ),
+            },
+            Err(e) => {
+                debug_model_debug!(
+                    "❌ [DEBUG] inst_relate verify query failed (sql: {}): {}",
+                    verify_sql, e
+                );
+            }
+        }
+    }
+    
+    debug_model_debug!("🔍 [DEBUG] Finishing inst_info_batcher...");
     inst_info_batcher.finish().await?;
+    debug_model_debug!("✅ [DEBUG] inst_info_batcher finished successfully");
 
     // aabb
     if !aabb_map.is_empty() {
@@ -779,12 +820,24 @@ impl TransactionBatcher {
         let statements = std::mem::take(&mut self.pending);
         let query = build_transaction_block(&statements);
         let db = SUL_DB.clone();
+        let debug_query = query.clone();
+        // debug_model_debug!(
+        //     "🔍 [DEBUG] TransactionBatcher flushing {} statements:\n{}",
+        //     statements.len(),
+        //     debug_query
+        // );
 
         self.tasks.push(tokio::spawn(async move {
-            db.query(query)
-                .await
-                .map(|_| ())
-                .map_err(anyhow::Error::from)
+            match db.query(query).await {
+                Ok(resp) => {
+                    // debug_model_debug!("✅ [DEBUG] TransactionBatcher query executed successfully: {:?}", resp);
+                    Ok(())
+                }
+                Err(err) => {
+                    debug_model_debug!("❌ [DEBUG] TransactionBatcher query error: {}", err);
+                    Err(anyhow::Error::from(err))
+                }
+            }
         }));
 
         self.await_if_needed().await
