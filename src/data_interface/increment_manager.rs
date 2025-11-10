@@ -24,7 +24,7 @@ use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
 use rumqttc::QoS;
 use serde::{Deserialize, Serialize};
-use tokio::fs::{self, create_dir_all};
+use tokio::fs::create_dir_all;
 use walkdir::WalkDir;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;

@@ -47,3 +47,4 @@ node_modules
 # Local SurrealDB datasets
 ams-8009-test.db
 surreal-8010.kv
+rumqttd-server/target

@@ -15,9 +15,11 @@ import { Label } from "@/components/ui/label"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { AlertCircle, Loader2, ChevronDown, ChevronRight } from "lucide-react"
 import type { CollaborationGroup } from "@/types/collaboration"
-import { createRemoteSyncEnv, envToGroup } from "@/lib/api/collaboration-adapter"
+import { createRemoteSyncEnv, createRemoteSyncSite, envToGroup } from "@/lib/api/collaboration-adapter"
 import { getPublicApiBaseUrl } from "@/lib/env"
 import { buildApiUrl } from "@/lib/api"
+import { Checkbox } from "@/components/ui/checkbox"
+import { toast } from "sonner"
 
 interface CreateGroupDialogProps {
   open: boolean
@@ -30,6 +32,8 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mqttConfigOpen, setMqttConfigOpen] = useState(true)
+  const [advancedNetworkOpen, setAdvancedNetworkOpen] = useState(false)
+  const [configLoading, setConfigLoading] = useState(false)
   const apiBaseUrl = getPublicApiBaseUrl()
 
   // Form data
@@ -41,12 +45,22 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
   const [mqttUser, setMqttUser] = useState("")
   const [mqttPassword, setMqttPassword] = useState("")
   const [fileServerHost, setFileServerHost] = useState("")
+  const [reconnectInitialMs, setReconnectInitialMs] = useState(1000)
+  const [reconnectMaxMs, setReconnectMaxMs] = useState(60000)
+
+  const [siteName, setSiteName] = useState("")
+  const [siteDescription, setSiteDescription] = useState("")
+  const [siteLocationDetail, setSiteLocationDetail] = useState("")
+  const [siteHost, setSiteHost] = useState("")
+  const [siteDbNums, setSiteDbNums] = useState("")
+  const [siteIsLocal, setSiteIsLocal] = useState(false)
 
   // 加载默认配置
   useEffect(() => {
     if (!open) return
 
     const loadDefaultConfig = async () => {
+      setConfigLoading(true)
       try {
         // 尝试从 API 获取运行时配置
         const response = await fetch(buildApiUrl("/api/remote-sync/runtime/config"), {
@@ -76,6 +90,12 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
             if (config.location) {
               setLocation((prev) => prev || config.location)
             }
+            if (config.reconnect_initial_ms) {
+              setReconnectInitialMs(config.reconnect_initial_ms)
+            }
+            if (config.reconnect_max_ms) {
+              setReconnectMaxMs(config.reconnect_max_ms)
+            }
           }
         } else {
           // API 失败时使用本机地址作为默认值
@@ -88,6 +108,8 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
         if (typeof window !== "undefined") {
           setMqttHost((prev) => prev || window.location.hostname)
         }
+      } finally {
+        setConfigLoading(false)
       }
     }
 
@@ -105,6 +127,14 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
     setMqttUser("")
     setMqttPassword("")
     setFileServerHost("")
+    setReconnectInitialMs(1000)
+    setReconnectMaxMs(60000)
+    setSiteName("")
+    setSiteDescription("")
+    setSiteLocationDetail("")
+    setSiteHost("")
+    setSiteDbNums("")
+    setSiteIsLocal(false)
     setError(null)
   }
 
@@ -140,6 +170,16 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
       setError("请输入 MQTT 服务器地址")
       return
     }
+    const hasSiteInput =
+      siteName.trim() ||
+      siteDescription.trim() ||
+      siteLocationDetail.trim() ||
+      siteHost.trim() ||
+      siteDbNums.trim()
+    if (hasSiteInput && !siteName.trim()) {
+      setError("请输入首个站点名称，或清空站点表单。")
+      return
+    }
     if (!apiBaseUrl) {
       setError("未配置 NEXT_PUBLIC_API_BASE_URL，无法创建协同组。请在 .env.local 中设置后重试。")
       return
@@ -157,9 +197,29 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
         mqtt_password: mqttPassword || undefined,
         file_server_host: fileServerHost || undefined,
         location: location || undefined,
-        reconnect_initial_ms: 1000,
-        reconnect_max_ms: 60000,
+        reconnect_initial_ms: reconnectInitialMs || undefined,
+        reconnect_max_ms: reconnectMaxMs || undefined,
       })
+
+      if (hasSiteInput) {
+        try {
+          await createRemoteSyncSite(env.id, {
+            site_name: siteName.trim(),
+            site_description: siteDescription || undefined,
+            site_host: siteHost || undefined,
+            site_location: siteLocationDetail || undefined,
+            site_location_dbs: siteDbNums || undefined,
+            is_local: siteIsLocal,
+          })
+          toast.success("已创建首个站点")
+        } catch (siteErr) {
+          toast.error(
+            siteErr instanceof Error
+              ? `环境创建成功，但站点创建失败：${siteErr.message}`
+              : "环境创建成功，但站点创建失败",
+          )
+        }
+      }
 
       const group = envToGroup(env)
       onSuccess(group)
@@ -203,6 +263,13 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
                   placeholder="例如：北京数据中心"
                 />
               </div>
+
+              {configLoading && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  正在读取运行时默认配置...
+                </div>
+              )}
 
               <Collapsible open={mqttConfigOpen} onOpenChange={setMqttConfigOpen} className="border-t pt-4 mt-4">
                 <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-sm font-medium hover:bg-accent">
@@ -262,7 +329,46 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
                       id="file-server"
                       value={fileServerHost}
                       onChange={(e) => setFileServerHost(e.target.value)}
-                      placeholder="例如：http://files.example.com"
+                      placeholder="例如：http://files.example.com 或 file:///data/dpcsync"
+                    />
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+
+              <Collapsible
+                open={advancedNetworkOpen}
+                onOpenChange={setAdvancedNetworkOpen}
+                className="border-t pt-4"
+              >
+                <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-sm font-medium hover:bg-accent">
+                  <span>高级容错与网络设置</span>
+                  {advancedNetworkOpen ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                </CollapsibleTrigger>
+                <CollapsibleContent className="grid gap-3 pt-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="reconnect-initial">重连初始间隔 (ms)</Label>
+                    <Input
+                      id="reconnect-initial"
+                      type="number"
+                      value={reconnectInitialMs}
+                      min={100}
+                      onChange={(e) => setReconnectInitialMs(Number(e.target.value))}
+                      placeholder="1000"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reconnect-max">重连最大间隔 (ms)</Label>
+                    <Input
+                      id="reconnect-max"
+                      type="number"
+                      value={reconnectMaxMs}
+                      min={1000}
+                      onChange={(e) => setReconnectMaxMs(Number(e.target.value))}
+                      placeholder="60000"
                     />
                   </div>
                 </CollapsibleContent>
@@ -274,8 +380,71 @@ export function CreateGroupDialog({ open, onOpenChange, onSuccess }: CreateGroup
           {step === 2 && (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                环境创建后，可以在详情页面添加和管理站点。
+                可选：立即登记首个同步站点，也可以留空并在协同详情页补充。
               </p>
+
+              <div className="grid gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="site-name">站点名称 {siteName ? "*" : "(可选)"}</Label>
+                  <Input
+                    id="site-name"
+                    value={siteName}
+                    onChange={(e) => setSiteName(e.target.value)}
+                    placeholder="例如：上海外场站"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="site-location">站点位置 / 备注</Label>
+                  <Input
+                    id="site-location"
+                    value={siteLocationDetail}
+                    onChange={(e) => setSiteLocationDetail(e.target.value)}
+                    placeholder="例如：上海机房 B1"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="site-host">文件/HTTP 地址</Label>
+                  <Input
+                    id="site-host"
+                    value={siteHost}
+                    onChange={(e) => setSiteHost(e.target.value)}
+                    placeholder="例如：http://192.168.1.10:8080 或 file:///data/site-a"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="site-dbnums">数据库编号（逗号分隔，可选）</Label>
+                  <Input
+                    id="site-dbnums"
+                    value={siteDbNums}
+                    onChange={(e) => setSiteDbNums(e.target.value)}
+                    placeholder="例如：DESI,GLB"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="site-description">站点说明（可选）</Label>
+                  <Input
+                    id="site-description"
+                    value={siteDescription}
+                    onChange={(e) => setSiteDescription(e.target.value)}
+                    placeholder="例如：负责结构模型增量"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="site-local"
+                    checked={siteIsLocal}
+                    onCheckedChange={(checked) => setSiteIsLocal(Boolean(checked))}
+                  />
+                  <Label htmlFor="site-local" className="text-sm text-muted-foreground">
+                    该站点位于当前节点（本地文件可直接写入）
+                  </Label>
+                </div>
+              </div>
             </div>
           )}
         </div>

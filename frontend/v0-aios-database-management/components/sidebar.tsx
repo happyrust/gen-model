@@ -1,20 +1,36 @@
-"use client"
+"use client";
 
-import type React from "react"
+import type React from "react";
 
-import { useState } from "react"
-import { useRouter, usePathname } from "next/navigation"
-import { Database, Server, Settings, Activity, Zap, Shield, BarChart3, ChevronDown, ChevronRight, Network, Package, Eye, TestTube, Plus, Monitor } from "lucide-react"
-import { cn } from "@/lib/utils"
-import { ThemeToggle } from "@/components/theme-toggle"
-import { NodeStatusBadge } from "@/components/node-status-badge"
+import { useState } from "react";
+import { useRouter, usePathname } from "next/navigation";
+import {
+  Database,
+  Server,
+  Settings,
+  Activity,
+  Zap,
+  Shield,
+  BarChart3,
+  ChevronDown,
+  ChevronRight,
+  Network,
+  Package,
+  Eye,
+  TestTube,
+  Plus,
+  Monitor,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { NodeStatusBadge } from "@/components/node-status-badge";
 
 interface NavItem {
-  title: string
-  icon: React.ComponentType<{ className?: string }>
-  href: string
-  isActive?: boolean
-  children?: NavItem[]
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  href: string;
+  isActive?: boolean;
+  children?: NavItem[];
 }
 
 const navigationItems: NavItem[] = [
@@ -46,7 +62,12 @@ const navigationItems: NavItem[] = [
     icon: Database,
     href: "/deployment-sites",
   },
-]
+  {
+    title: "Users",
+    icon: Users,
+    href: "/users",
+  },
+];
 
 const systemItems: NavItem[] = [
   {
@@ -67,7 +88,7 @@ const systemItems: NavItem[] = [
       { title: "可视化查询", icon: Eye, href: "/spatial-visualization" },
     ],
   },
-]
+];
 
 const toolItems: NavItem[] = [
   {
@@ -105,27 +126,27 @@ const toolItems: NavItem[] = [
     icon: Server,
     href: "/remote",
   },
-]
+];
 
 interface NavItemComponentProps {
-  item: NavItem
-  level?: number
+  item: NavItem;
+  level?: number;
 }
 
 function NavItemComponent({ item, level = 0 }: NavItemComponentProps) {
-  const [isExpanded, setIsExpanded] = useState(false)
-  const router = useRouter()
-  const pathname = usePathname()
-  const hasChildren = item.children && item.children.length > 0
-  const isCurrentPage = pathname === item.href
+  const [isExpanded, setIsExpanded] = useState(false);
+  const router = useRouter();
+  const pathname = usePathname();
+  const hasChildren = item.children && item.children.length > 0;
+  const isCurrentPage = pathname === item.href;
 
   const handleClick = () => {
     if (hasChildren) {
-      setIsExpanded(!isExpanded)
+      setIsExpanded(!isExpanded);
     } else {
-      router.push(item.href)
+      router.push(item.href);
     }
-  }
+  };
 
   return (
     <div>
@@ -141,7 +162,12 @@ function NavItemComponent({ item, level = 0 }: NavItemComponentProps) {
       >
         <item.icon className="h-4 w-4 flex-shrink-0" />
         <span className="flex-1">{item.title}</span>
-        {hasChildren && (isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />)}
+        {hasChildren &&
+          (isExpanded ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          ))}
       </button>
 
       {hasChildren && isExpanded && (
@@ -152,7 +178,7 @@ function NavItemComponent({ item, level = 0 }: NavItemComponentProps) {
         </div>
       )}
     </div>
-  )
+  );
 }
 
 export function Sidebar() {
@@ -166,8 +192,12 @@ export function Sidebar() {
               <Database className="h-6 w-6 text-sidebar-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-sidebar-foreground">AIOS</h1>
-              <p className="text-sm text-sidebar-foreground/60">数据库管理平台</p>
+              <h1 className="text-xl font-bold text-sidebar-foreground">
+                AIOS
+              </h1>
+              <p className="text-sm text-sidebar-foreground/60">
+                数据库管理平台
+              </p>
             </div>
           </div>
           {/* Theme Toggle Button */}
@@ -178,7 +208,9 @@ export function Sidebar() {
         <nav className="space-y-6">
           {/* Main Navigation */}
           <div>
-            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">导航</div>
+            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">
+              导航
+            </div>
             <div className="space-y-1">
               {navigationItems.map((item, index) => (
                 <NavItemComponent key={index} item={item} />
@@ -188,7 +220,9 @@ export function Sidebar() {
 
           {/* System Section */}
           <div>
-            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">系统</div>
+            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">
+              系统
+            </div>
             <div className="space-y-1">
               {systemItems.map((item, index) => (
                 <NavItemComponent key={index} item={item} />
@@ -198,7 +232,9 @@ export function Sidebar() {
 
           {/* Tools Section */}
           <div>
-            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">工具</div>
+            <div className="text-xs font-medium text-sidebar-foreground/40 uppercase tracking-wider mb-3">
+              工具
+            </div>
             <div className="space-y-1">
               {toolItems.map((item, index) => (
                 <NavItemComponent key={index} item={item} />
@@ -213,9 +249,13 @@ export function Sidebar() {
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <div className="w-2 h-2 bg-success rounded-full"></div>
-                <span className="text-sm font-medium text-sidebar-accent-foreground">系统状态</span>
+                <span className="text-sm font-medium text-sidebar-accent-foreground">
+                  系统状态
+                </span>
               </div>
-              <p className="text-xs text-sidebar-accent-foreground/70">所有服务正常运行</p>
+              <p className="text-xs text-sidebar-accent-foreground/70">
+                所有服务正常运行
+              </p>
             </div>
             <div className="border-t border-sidebar-border pt-2">
               <NodeStatusBadge />
@@ -224,5 +264,5 @@ export function Sidebar() {
         </div>
       </div>
     </div>
-  )
+  );
 }
