@@ -39,7 +39,10 @@ pub mod wizard_handlers;
 pub mod wizard_template;
 pub mod xkt_test_handlers;
 
-use crate::web_api::{create_spatial_query_routes, SpatialQueryApiState};
+use crate::web_api::{
+    create_noun_hierarchy_routes, create_spatial_query_routes, NounHierarchyApiState,
+    SpatialQueryApiState,
+};
 use handlers::*;
 use models::*;
 
@@ -139,16 +142,26 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
 
     // 🔧 修复：初始化数据库连接
     println!("🔄 正在初始化数据库连接...");
-    if let Err(e) = aios_core::init_surreal().await {
-        let error_msg = e.to_string();
-        if error_msg.contains("Already connected") {
-            println!("⚠️ 数据库已经连接，跳过重复初始化");
-        } else {
-            eprintln!("❌ 数据库初始化失败: {}", error_msg);
-            eprintln!("⚡ 服务器将继续启动，但数据库功能可能不可用");
+    println!("📂 当前工作目录: {:?}", std::env::current_dir()?);
+    println!("📄 尝试读取 DbOption.toml 配置文件...");
+    
+    match aios_core::init_surreal().await {
+        Ok(_) => {
+            println!("✅ 数据库连接初始化成功");
         }
-    } else {
-        println!("✅ 数据库连接初始化成功");
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("Already connected") {
+                println!("⚠️ 数据库已经连接，跳过重复初始化");
+            } else {
+                eprintln!("❌ 数据库初始化失败: {}", error_msg);
+                eprintln!("💡 请确保:");
+                eprintln!("   1. DbOption.toml 文件在当前目录");
+                eprintln!("   2. SurrealDB 服务运行在配置的端口 (默认 8020)");
+                eprintln!("   3. 配置文件中的连接信息正确");
+                return Err(anyhow::anyhow!("数据库连接初始化失败: {}", error_msg));
+            }
+        }
     }
 
     // 初始化 SurrealDB 中的 projects 表（若已存在忽略错误）
@@ -159,9 +172,15 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
     // 初始化空间查询API
     let db_manager = crate::AiosDBManager::init_form_config().await?;
     let spatial_query_state = SpatialQueryApiState {
-        db_manager: Arc::new(db_manager),
+        db_manager: Arc::new(db_manager.clone()),
     };
     let spatial_query_routes = create_spatial_query_routes(spatial_query_state);
+
+    // 初始化名词层级查询API
+    let noun_hierarchy_state = NounHierarchyApiState {
+        db_manager: Arc::new(db_manager),
+    };
+    let noun_hierarchy_routes = create_noun_hierarchy_routes(noun_hierarchy_state);
 
     let app = Router::new()
         // API路由
@@ -405,7 +424,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
             get(remote_sync_handlers::get_site_metadata),
         )
         .route(
-            "/api/remote-sync/sites/{id}/files/*path",
+            "/api/remote-sync/sites/{id}/files/{*path}",
             get(remote_sync_handlers::serve_site_files),
         )
         .route(
@@ -520,10 +539,10 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
                 .put(handlers::api_update_deployment_site)
                 .delete(handlers::api_delete_deployment_site),
         )
-        .route(
-            "/api/deployment-sites/{id}/browse-directory",
-            get(handlers::api_browse_deployment_site_directory),
-        )
+        // .route(
+        //     "/api/deployment-sites/{id}/browse-directory",
+        //     get(handlers::api_browse_deployment_site_directory),
+        // )
         .route(
             "/api/deployment-sites/{id}/tasks",
             post(handlers::api_create_deployment_site_task),
@@ -682,7 +701,8 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
                 .allow_headers(Any),
         )
         .with_state(app_state.clone())
-        .merge(spatial_query_routes);
+        .merge(spatial_query_routes)
+        .merge(noun_hierarchy_routes);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     println!("🚀 Web UI服务器启动成功！");
