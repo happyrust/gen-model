@@ -18,6 +18,7 @@ pub mod manifold_bool;
 pub mod mesh_generate;
 
 pub mod room_model;
+pub mod room_model_v2; // 改进版本的房间模型
 
 pub mod cal_model;
 

@@ -38,6 +38,8 @@ pub mod task_creation_handlers;
 pub mod wizard_handlers;
 pub mod wizard_template;
 pub mod xkt_test_handlers;
+pub mod room_api;
+pub mod room_page;
 
 use crate::web_api::{
     NounHierarchyApiState, SpatialQueryApiState, create_noun_hierarchy_routes,
@@ -195,6 +197,12 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         db_manager: Arc::new(db_manager),
     };
     let noun_hierarchy_routes = create_noun_hierarchy_routes(noun_hierarchy_state);
+
+    // 初始化房间 API
+    let room_api_state = room_api::RoomApiState {
+        task_manager: Arc::new(tokio::sync::RwLock::new(room_api::RoomTaskManager::default())),
+    };
+    let room_routes = room_api::create_room_api_routes().with_state(room_api_state);
 
     let app = Router::new()
         // API路由
@@ -708,6 +716,8 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
             "/spatial-visualization",
             get(handlers::spatial_visualization_page),
         )
+        // 房间计算管理页面
+        .route("/room-management", get(room_page::room_management_page))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -716,7 +726,8 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         )
         .with_state(app_state.clone())
         .merge(spatial_query_routes)
-        .merge(noun_hierarchy_routes);
+        .merge(noun_hierarchy_routes)
+        .merge(room_routes);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     println!("🚀 Web UI服务器启动成功！");

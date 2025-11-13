@@ -51,14 +51,16 @@ pub async fn init_surreal_with_config(config: &DatabaseConfig) -> Result<Arc<Con
         .cloned()
         .unwrap_or_else(|| config.project_name.clone());
 
-    println!("正在连接到 SurrealDB: {}:{}", core_cfg.host, core_cfg.port);
+    println!("🔧 正在初始化数据库连接...");
+    println!("📄 配置名称: {}", config.name);
+    println!("🌐 连接服务器: {}:{}", core_cfg.host, core_cfg.port);
+    println!("🏷️  命名空间: {}", namespace_label);
+    println!("💾 数据库名: {}", database_label);
+    println!("👤 用户名: {}", core_cfg.username);
 
     let handle = connect_with_config(&core_cfg).await?;
 
-    println!(
-        "✅ 成功连接到数据库 - NS: {}, DB: {}",
-        namespace_label, database_label
-    );
+    println!("✅ 数据库连接成功！");
 
     Ok(Arc::new(handle))
 }
