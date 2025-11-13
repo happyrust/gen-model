@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use aios_core::rs_surreal::query_tubi_insts_by_brans;
+use aios_core::rs_surreal::query::get_owner_refnos_by_types;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB, TubiInstQuery, get_named_attmap};
 use anyhow::{Context, Result, anyhow};
@@ -130,8 +131,31 @@ impl GltfMeshCache {
             geo_hash
         };
 
-        // 加载文件
-        let mesh_path = mesh_dir.join(format!("{}.mesh", actual_geo_hash));
+        // 尝试从目录名推断 LOD 级别
+        let lod_suffix = mesh_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|dir_name| {
+                if dir_name.starts_with("lod_") {
+                    Some(&dir_name[4..]) // 提取 "L1", "L2", "L3" 等
+                } else {
+                    None
+                }
+            });
+
+        // 优先尝试带 LOD 后缀的文件名（新格式）
+        let mesh_path = if let Some(lod) = lod_suffix {
+            let path_with_suffix = mesh_dir.join(format!("{}_{}.mesh", actual_geo_hash, lod));
+            if path_with_suffix.exists() {
+                path_with_suffix
+            } else {
+                // 回退到不带后缀的文件名（兼容旧格式）
+                mesh_dir.join(format!("{}.mesh", actual_geo_hash))
+            }
+        } else {
+            mesh_dir.join(format!("{}.mesh", actual_geo_hash))
+        };
+
         if !mesh_path.exists() {
             return Err(anyhow!("Mesh 文件不存在: {}", mesh_path.display()));
         }
@@ -195,14 +219,68 @@ pub async fn collect_export_data(
         println!("   - 总几何体实例数: {}", total_instances);
     }
 
+    // 查询 tubi 管道数据 - 需要先收集 inst_relate 的 owner，筛选 BRAN/HANG 类型
     if verbose {
         println!("\n📊 查询 tubi 管道数据...");
+        println!("   - 查询的 refno 数量: {}", refnos.len());
+        for (i, refno) in refnos.iter().take(5).enumerate() {
+            println!("   - refno[{}]: {}", i, refno);
+        }
+        if refnos.len() > 5 {
+            println!("   - ... 还有 {} 个 refno", refnos.len() - 5);
+        }
+        
+        println!("   🔍 收集 inst_relate 的 owner 信息...");
     }
-    // 使用 aios-core 中的 query_tubi_insts_by_brans 函数
-    let tubi_insts: Vec<TubiInstQuery> = query_tubi_insts_by_brans(refnos).await?;
+    
+    // 先查询所有相关的 inst_relate 记录，获取 owner 信息并用 hashset 去重
+    use std::collections::HashSet;
+    let mut owner_set: HashSet<RefnoEnum> = HashSet::new();
+    
+    // 使用 get_owner_refnos_by_types 批量查询 BRAN/HANG 类型的 owner
+    let owner_types = ["BRAN", "HANG"];
+    if let Ok(owners) = get_owner_refnos_by_types(refnos.iter(), &owner_types).await {
+        for owner_opt in owners {
+            if let Some(owner) = owner_opt {
+                owner_set.insert(owner);
+            }
+        }
+    } else if verbose {
+        println!("   - 批量查询 BRAN/HANG 类型的 owner 失败");
+    }
+    
+    // 转换为向量
+    let unique_owners: Vec<RefnoEnum> = owner_set.into_iter().collect();
+    
+    if verbose && !unique_owners.is_empty() {
+        println!("   - 找到 {} 个 BRAN/HANG 类型的 owner", unique_owners.len());
+        for (i, owner) in unique_owners.iter().take(5).enumerate() {
+            println!("   - owner[{}]: {}", i, owner);
+        }
+        if unique_owners.len() > 5 {
+            println!("   - ... 还有 {} 个 owner", unique_owners.len() - 5);
+        }
+    }
+    
+    // 使用唯一的 owner 查询 tubi 数据
+    let tubi_insts: Vec<TubiInstQuery> = if unique_owners.is_empty() {
+        Vec::new()
+    } else {
+        query_tubi_insts_by_brans(&unique_owners).await.unwrap_or_default()
+    };
+    
     let tubi_count = tubi_insts.len();
     if verbose {
         println!("   - 找到 {} 个 tubi 管道", tubi_count);
+        if tubi_count > 0 {
+            for (i, tubi) in tubi_insts.iter().take(3).enumerate() {
+                println!("   - tubi[{}]: refno={}, geo_hash={}", 
+                         i+1, tubi.refno, tubi.geo_hash);
+            }
+            if tubi_count > 3 {
+                println!("   - ... 还有 {} 个 tubi", tubi_count - 3);
+            }
+        }
     }
 
     total_instances += tubi_count;
@@ -218,7 +296,7 @@ pub async fn collect_export_data(
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
     let mut refno_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
 
-    // 收集所有需要查询的 refno
+    // 收集所有需要查询的 refno（包含 TUBI）
     let mut all_query_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.refno).collect();
     all_query_refnos.extend(tubi_insts.iter().map(|t| t.refno));
     all_query_refnos.sort();
@@ -452,6 +530,7 @@ pub async fn collect_export_data(
         }
     }
 
+    let tubi_count = tubings.len();
     Ok(ExportData {
         unique_geometries,
         components,
