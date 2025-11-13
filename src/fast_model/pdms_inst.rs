@@ -223,8 +223,15 @@ pub async fn save_instance_data(
             );
         }
 
+        // 获取所属参考号和类型
+        let (belong_refno, belong_type) = if let Some(owner_refno) = find_owner_refno(k) {
+            (owner_refno.to_string(), get_owner_type(&owner_refno).to_string())
+        } else {
+            ("".to_string(), "".to_string())
+        };
+
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}}}",
+            "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}, belong_refno: '{7}', belong_type: '{8}'}}",
             k.to_inst_relate_key(),
             k.to_pe_key(),
             v.id_str(),
@@ -232,6 +239,8 @@ pub async fn save_instance_data(
             v.generic_type.to_string(),
             v.has_cata_neg,
             v.is_solid,
+            belong_refno,
+            belong_type,
         );
         if let Some(t_refno) = test_refno {
             if *k == t_refno.into() {
@@ -607,8 +616,15 @@ pub async fn save_instance_data_optimize(
             entry.insert(serde_json::to_string(&info.world_transform)?);
         }
 
+        // 获取所属参考号和类型
+        let (belong_refno, belong_type) = if let Some(owner_refno) = find_owner_refno(key) {
+            (owner_refno.to_string(), get_owner_type(&owner_refno).to_string())
+        } else {
+            ("".to_string(), "".to_string())
+        };
+
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}}}",
+            "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}, belong_refno: '{7}', belong_type: '{8}'}}",
             key.to_inst_relate_key(),
             key.to_pe_key(),
             info.id_str(),
@@ -616,6 +632,8 @@ pub async fn save_instance_data_optimize(
             info.generic_type.to_string(),
             info.has_cata_neg,
             info.is_solid,
+            belong_refno,
+            belong_type,
         );
 
         inst_relate_buffer.push(relate_sql);
@@ -888,4 +906,71 @@ fn build_transaction_block(statements: &[String]) -> String {
     }
     block.push_str("COMMIT TRANSACTION;");
     block
+}
+
+/// 查找所属参考号
+/// 
+/// 根据参考号查找其所属的参考号，例如对于 BRAN HANG 返回其所属的管道参考号
+fn find_owner_refno(refno: &RefnoEnum) -> Option<RefnoEnum> {
+    // 这里需要根据实际业务逻辑实现
+    // 1. 查询数据库获取元素的 owner 信息
+    // 2. 检查 owner 的类型，如果是 BRAN 或 EUIQ 类型，则返回其参考号
+    // 3. 如果找不到或类型不匹配，则返回 None
+    
+    // 示例实现（需要根据实际数据库结构调整）
+    /*
+    let sql = format!(
+        "SELECT owner FROM pe WHERE refno = '{}' LIMIT 1",
+        refno.to_string()
+    );
+    
+    if let Ok(Some(owner_refno)) = SUL_DB.query_take::<Option<String>>(&sql, 0).await {
+        if let Some(owner_refno) = owner_refno {
+            // 检查 owner 类型
+            let type_sql = format!(
+                "SELECT noun FROM pe WHERE refno = '{}' LIMIT 1",
+                owner_refno
+            );
+            
+            if let Ok(Some(noun)) = SUL_DB.query_take::<Option<String>>(&type_sql, 0).await {
+                if let Some(noun) = noun {
+                    if noun == "BRAN" || noun == "EUIQ" {
+                        return Some(owner_refno.into());
+                    }
+                }
+            }
+        }
+    }
+    */
+    
+    None
+}
+
+/// 获取所有者类型
+/// 
+/// 根据参考号返回所有者类型，例如 "PIPE" 或 "EQUI"
+fn get_owner_type(owner_refno: &RefnoEnum) -> &'static str {
+    // 这里需要根据实际业务逻辑实现
+    // 1. 查询数据库获取元素的类型
+    // 2. 根据类型返回对应的字符串
+    
+    // 示例实现（需要根据实际数据库结构调整）
+    /*
+    let sql = format!(
+        "SELECT noun FROM pe WHERE refno = '{}' LIMIT 1",
+        owner_refno.to_string()
+    );
+    
+    if let Ok(Some(noun)) = SUL_DB.query_take::<Option<String>>(&sql, 0).await {
+        if let Some(noun) = noun {
+            return match noun.as_str() {
+                "BRAN" => "PIPE",
+                "EUIQ" => "EQUI",
+                _ => "",
+            };
+        }
+    }
+    */
+    
+    ""
 }

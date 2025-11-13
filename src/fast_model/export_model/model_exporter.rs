@@ -3,7 +3,7 @@
 //! 本模块提供了统一的模型导出接口，支持多种格式（OBJ、XKT 等）。
 //! 通过实现 `ModelExporter` Trait，可以轻松扩展到其他导出格式。
 
-use aios_core::{GeomInstQuery, RefnoEnum, query_insts};
+use aios_core::{GeomInstQuery, RefnoEnum, query_insts_with_batch};
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::time::Instant;
@@ -352,7 +352,8 @@ pub async fn query_geometry_instances(
         println!("   - 参考号数量: {}", refnos.len());
     }
 
-    let geom_insts = query_insts(refnos, enable_holes)
+    const DEFAULT_QUERY_BATCH: usize = 50;
+    let geom_insts = query_insts_with_batch(refnos, enable_holes, Some(DEFAULT_QUERY_BATCH))
         .await
         .context("查询 inst_relate 数据失败")?;
 

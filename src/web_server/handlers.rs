@@ -1,8 +1,9 @@
-use aios_core::{get_db_option, options::DbOption, RefU64, RefnoEnum};
+use aios_core::{RefU64, RefnoEnum, get_db_option, options::DbOption};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    handler::Handler,
+    http::{HeaderValue, StatusCode, header},
     response::{Html, Json, Response},
 };
 
@@ -26,10 +27,13 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::fast_model::{
-    export_model::{
-        CommonExportConfig, ExportStats, GlbExportConfig, GlbExporter, GltfExportConfig,
-        GltfExporter, XktExportConfig, XktExporter,
+    export_glb::GlbExporter,
+    export_gltf::GltfExporter,
+    export_model::model_exporter::{
+        CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, XktExportConfig,
     },
+    export_xkt::XktExporter,
+    model_exporter::ExportStats,
     unit_converter::UnitConverter,
 };
 
@@ -146,27 +150,25 @@ pub async fn kill_port_processes_api(
 }
 
 use super::{
-    // templates::*,  // 暂时禁用
-    batch_tasks_template,
-    models::*,
-    simple_templates::render_database_connection_page,
     AppState,
     CreateTaskRequest,
     TaskQuery,
     UpdateConfigRequest,
+    // templates::*,  // 暂时禁用
+    batch_tasks_template,
+    models::*,
+    simple_templates::render_database_connection_page,
 };
 use crate::fast_model::session::{PdmsTimeExtractor, SESSION_STORE};
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
 use aios_core::SUL_DB;
-use dashmap::DashMap;
 #[cfg(feature = "sqlite-index")]
 use nalgebra::{Point3, Vector3};
 #[cfg(feature = "sqlite-index")]
 use parry3d::bounding_volume::Aabb;
 #[cfg(feature = "sqlite-index")]
 use std::str::FromStr;
-use uuid::Uuid;
 
 // 可选：从本地 SQLite 读取项目列表（按 DbOption.toml 配置）
 // use rusqlite as _; // 确保依赖已链接 - 暂时禁用
@@ -403,11 +405,7 @@ pub async fn api_get_projects(
                 "updated_at" => a.updated_at.cmp(&b.updated_at),
                 _ => a.updated_at.cmp(&b.updated_at),
             };
-            if desc {
-                ord.reverse()
-            } else {
-                ord
-            }
+            if desc { ord.reverse() } else { ord }
         });
 
         // 分页
@@ -2222,13 +2220,14 @@ pub async fn api_get_deployment_sites(
     );
 
     // 只从SQLite获取部署站点数据
-    let mut all_items = match crate::web_server::wizard_handlers::load_deployment_sites_from_sqlite() {
-        Ok(sqlite_sites) => sqlite_sites,
-        Err(e) => {
-            eprintln!("Failed to load deployment sites from SQLite: {}", e);
-            Vec::new()
-        }
-    };
+    let mut all_items =
+        match crate::web_server::wizard_handlers::load_deployment_sites_from_sqlite() {
+            Ok(sqlite_sites) => sqlite_sites,
+            Err(e) => {
+                eprintln!("Failed to load deployment sites from SQLite: {}", e);
+                Vec::new()
+            }
+        };
 
     // 应用过滤和排序
     if let Some(q) = params.q.as_ref().filter(|s| !s.is_empty()) {
@@ -2526,7 +2525,9 @@ pub async fn api_create_deployment_site(
         Ok(site_id) => {
             eprintln!("成功保存站点到 SQLite，ID: {}", site_id);
 
-            match crate::web_server::wizard_handlers::load_deployment_site_by_id_from_sqlite(&site_id) {
+            match crate::web_server::wizard_handlers::load_deployment_site_by_id_from_sqlite(
+                &site_id,
+            ) {
                 Ok(Some(site_value)) => {
                     eprintln!("成功从 SQLite 加载站点数据");
                     Ok(Json(json!({"status":"success","item": site_value})))
@@ -3033,10 +3034,11 @@ pub async fn api_healthcheck_deployment_site(
             eprintln!("更新部署站点健康检查失败: {}", e);
         }
 
-        let updated = crate::web_server::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
-            .ok()
-            .flatten()
-            .unwrap_or(site_value);
+        let updated =
+            crate::web_server::wizard_handlers::load_deployment_site_by_id_from_sqlite(&id)
+                .ok()
+                .flatten()
+                .unwrap_or(site_value);
 
         return Ok(Json(json!({
             "status": "success",
@@ -3598,7 +3600,7 @@ pub async fn test_tcp_connection(addr: &str) -> bool {
 
 /// 测试SurrealDB数据库功能连接
 pub async fn test_database_functionality() -> (bool, Option<String>) {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     match timeout(Duration::from_secs(5), SUL_DB.query("SELECT 1 as test")).await {
         Ok(Ok(_)) => (true, None),
@@ -3707,7 +3709,7 @@ pub async fn get_surreal_status(
     _state: State<AppState>,
     Query(q): Query<SurrealStatusQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    use aios_core::{get_db_option, SUL_DB};
+    use aios_core::{SUL_DB, get_db_option};
 
     let opt = get_db_option();
     let ip_raw = q.ip.unwrap_or(opt.v_ip.clone());
@@ -3752,7 +3754,7 @@ pub async fn test_surreal_connection(
     Json(request): Json<SurrealTestRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     use aios_core::SUL_DB;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let connection_url = format!("ws://{}:{}", request.ip, request.port);
 
@@ -4008,15 +4010,15 @@ async fn execute_real_task(state: AppState, task_id: String) {
 
     // 使用 WebUI 配置连接数据库
     // 使用 init_surreal_with_config 函数来使用用户指定的配置
-    let db_connection = match crate::web_server::db_connection::init_surreal_with_config(&config).await
-    {
-        Ok(conn) => conn,
-        Err(e) => {
-            handle_database_connection_error(&state, &task_id, &config, e).await;
-            set_update_finalize(&config.manual_db_nums, "Failed").await;
-            return;
-        }
-    };
+    let db_connection =
+        match crate::web_server::db_connection::init_surreal_with_config(&config).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                handle_database_connection_error(&state, &task_id, &config, e).await;
+                set_update_finalize(&config.manual_db_nums, "Failed").await;
+                return;
+            }
+        };
 
     // 将连接存储到全局连接池中
     let deployment_id = format!("{}:{}", config.db_ip, config.db_port);
@@ -6875,7 +6877,7 @@ async fn execute_export_task(
                 .export(&refnos, &mesh_dir, output_path.to_str().unwrap(), config)
                 .await
             {
-                Ok(stats) => Ok(stats),
+                Ok(result) => Ok(result.stats),
                 Err(e) => Err(e.to_string()),
             }
         }
@@ -6903,7 +6905,13 @@ async fn execute_export_task(
     match export_result {
         Ok(stats) => {
             // 序列化统计信息
-            let stats_json = serde_json::to_value(&stats).unwrap();
+            let stats_json = serde_json::json!({
+                "refno_count": stats.refno_count,
+                "descendant_count": stats.descendant_count,
+                "geometry_count": stats.geometry_count,
+                "mesh_files_found": stats.mesh_files_found,
+                "mesh_files_missing": stats.mesh_files_missing
+            });
 
             let mut progress = EXPORT_TASKS.get_mut(&task_id).unwrap();
             progress.status = "completed".to_string();

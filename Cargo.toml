@@ -44,7 +44,7 @@ mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保�
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-web_server = ["dep:axum", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_server"]              #Web UI功能
+web_server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_server"]              #Web UI功能
 sqlite-index = ["dep:rusqlite"]
 debug_e3d = []
 
@@ -114,6 +114,7 @@ clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
 tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
+sha2 = "0.10"
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.30.8", features = ["serde", "rkyv"] }
 cached = "0.56.0"
@@ -161,7 +162,7 @@ toml = "0.9.5"
 toml_edit = "0.22"
 pollster = "0.4.0"
 async-std = "1.13.1"
-eframe = { version = "0.33.0", features = ["wgpu"], optional = true }
+eframe = { version = "0.33.0", optional = true }  # 使用默认的 glow (OpenGL) backend，避免 wgpu 27.x 的 naga 兼容性问题
 re_ui = { path = "../rerun/crates/viewer/re_ui", optional = true }
 
 # GRPC 相关依赖
@@ -178,6 +179,7 @@ env_logger = "0.11"
 # Web UI 相关依赖
 axum = { version = "0.8.6", optional = true }
 axum-extra = { version = "0.10.1", optional = true, features = [] }
+tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6.6", features = ["fs", "cors"], optional = true }
 sysinfo = { version = "0.37.0", optional = true }
 
@@ -243,3 +245,5 @@ path = "src/examples/verify_lod_feature.rs"
 [[example]]
 name = "debug_refno_21491_19209"
 path = "src/examples/debug_refno_21491_19209.rs"
+
+eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b8643f77b6a26561da44aad0", package = "eframe" }

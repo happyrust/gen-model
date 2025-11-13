@@ -1,0 +1,89 @@
+# LOD L1 配置（低精度，快速预览）- 修复版
+[mesh_precision.lod_profiles.L1]
+occ_linear_coeff = 2.0
+occ_linear_min = 2.0
+occ_linear_max = 100.0
+neg_multiplier = 0.5
+sweep_multiplier = 0.2
+polyhedron_fixed_tol = 0.05
+sphere_subdiv = 12
+radial_segments = 10                # 从 16 降低到 10
+mesh_tol_ratio = 12.0               # 从 10.0 提高到 12.0（更粗糙）
+
+[mesh_precision.lod_profiles.L1.csg_settings]
+radial_segments = 10                # 从 12 降低到 10
+height_segments = 1
+cap_segments = 1
+error_tolerance = 0.015             # 从 0.01 放宽到 0.015
+min_radial_segments = 6             # ⚠️ 关键修复：从 12 降低到 6
+max_radial_segments = 14            # 从 18 降低到 14
+min_height_segments = 1
+max_height_segments = 1             # 从 2 降低到 1
+target_segment_length = 350.0       # ⚠️ 关键修复：从 250.0 增加到 350.0
+non_scalable_factor = 1.0           # 从 0.9 提高到 1.0
+
+# LOD L2 配置（中等精度，平衡性能）- 修复版
+[mesh_precision.lod_profiles.L2]
+occ_linear_coeff = 1.0
+occ_linear_min = 1.0
+occ_linear_max = 80.0
+neg_multiplier = 0.4
+sweep_multiplier = 0.15
+polyhedron_fixed_tol = 0.02
+sphere_subdiv = 20                  # 从 18 提高到 20
+radial_segments = 24
+mesh_tol_ratio = 6.0
+
+[mesh_precision.lod_profiles.L2.csg_settings]
+radial_segments = 20
+height_segments = 2
+cap_segments = 1
+error_tolerance = 0.005
+min_radial_segments = 16            # ⚠️ 关键修复：从 12 提高到 16
+max_radial_segments = 32            # 从 30 提高到 32
+min_height_segments = 1
+max_height_segments = 3
+target_segment_length = 100.0       # ⚠️ 关键修复：从 140.0 降低到 100.0
+non_scalable_factor = 0.75          # 从 0.8 降低到 0.75
+
+# LOD L3 配置（高精度，详细展示）- 保持不变
+[mesh_precision.lod_profiles.L3]
+occ_linear_coeff = 0.05
+occ_linear_min = 0.01
+occ_linear_max = 50.0
+neg_multiplier = 0.3
+sweep_multiplier = 0.1
+polyhedron_fixed_tol = 0.01
+sphere_subdiv = 32
+radial_segments = 48
+mesh_tol_ratio = 3.0
+
+[mesh_precision.lod_profiles.L3.csg_settings]
+radial_segments = 32
+height_segments = 3
+cap_segments = 1
+error_tolerance = 0.002
+min_radial_segments = 16
+max_radial_segments = 60
+min_height_segments = 2
+max_height_segments = 6
+target_segment_length = 80.0
+non_scalable_factor = 0.7
+
+# 修复说明：
+#
+# L1 的关键修改：
+# - min_radial_segments: 12 → 6   （允许更粗糙的网格）
+# - target_segment_length: 250 → 350 （更大的段长，更少的分段）
+# - max_height_segments: 2 → 1   （限制高度分段）
+#
+# L2 的关键修改：
+# - min_radial_segments: 12 → 16  （确保中等精度的底限）
+# - target_segment_length: 140 → 100 （更小的段长，更多的分段）
+#
+# 预期效果：
+# - 小型几何体（直径 < 150mm）：L1 使用 6-8 段，L2 使用 16-20 段
+# - 中型几何体（直径 150-500mm）：L1 使用 8-12 段，L2 使用 20-28 段
+# - 大型几何体（直径 > 500mm）：都会根据尺寸自适应细分
+#
+# 文件大小预期差异：L2 约为 L1 的 3-5 倍

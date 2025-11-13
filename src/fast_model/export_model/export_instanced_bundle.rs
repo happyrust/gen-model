@@ -8,11 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::mesh_precision::{LodLevel, MeshPrecisionSettings, set_active_precision};
 use aios_core::options::DbOption;
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::RefnoEnum;
 use anyhow::{Context, Result};
 use glam::{DMat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -86,11 +86,7 @@ impl InstancedBundleExporter {
     }
 
     /// 导出 instanced bundle
-    pub async fn export(
-        &self,
-        export_data: &ExportData,
-        output_dir: &Path,
-    ) -> Result<()> {
+    pub async fn export(&self, export_data: &ExportData, output_dir: &Path) -> Result<()> {
         if self.verbose {
             println!("\n🚀 开始导出 Instanced Bundle...");
         }
@@ -98,10 +94,8 @@ impl InstancedBundleExporter {
         // 创建输出目录结构
         let archetypes_dir = output_dir.join("archetypes");
         let instances_dir = output_dir.join("instances");
-        fs::create_dir_all(&archetypes_dir)
-            .context("创建 archetypes 目录失败")?;
-        fs::create_dir_all(&instances_dir)
-            .context("创建 instances 目录失败")?;
+        fs::create_dir_all(&archetypes_dir).context("创建 archetypes 目录失败")?;
+        fs::create_dir_all(&instances_dir).context("创建 instances 目录失败")?;
 
         if self.verbose {
             println!("   ✅ 创建目录结构完成");
@@ -179,8 +173,12 @@ impl InstancedBundleExporter {
                 .unwrap_or_else(|| "UNKNOWN".to_string());
 
             if self.verbose {
-                println!("\n   处理 geo_hash: {} (noun: {}, {} 个实例)", 
-                    geo_hash, noun, instances.len());
+                println!(
+                    "\n   处理 geo_hash: {} (noun: {}, {} 个实例)",
+                    geo_hash,
+                    noun,
+                    instances.len()
+                );
             }
 
             // 获取原始 mesh
@@ -195,11 +193,9 @@ impl InstancedBundleExporter {
             };
 
             // 生成 LOD 几何体
-            let lod_levels = self.generate_lod_geometries(
-                geo_hash,
-                &plant_mesh,
-                &archetypes_dir,
-            ).await?;
+            let lod_levels = self
+                .generate_lod_geometries(geo_hash, &plant_mesh, &archetypes_dir)
+                .await?;
 
             // 写入实例数据
             let instances_data = InstancesData {
@@ -208,8 +204,8 @@ impl InstancedBundleExporter {
             };
 
             let instances_file = instances_dir.join(format!("{}.json", geo_hash));
-            let instances_json = serde_json::to_string_pretty(&instances_data)
-                .context("序列化实例数据失败")?;
+            let instances_json =
+                serde_json::to_string_pretty(&instances_data).context("序列化实例数据失败")?;
             fs::write(&instances_file, instances_json)
                 .with_context(|| format!("写入实例文件失败: {}", instances_file.display()))?;
 
@@ -238,8 +234,8 @@ impl InstancedBundleExporter {
         };
 
         let manifest_file = output_dir.join("manifest.json");
-        let manifest_json = serde_json::to_string_pretty(&manifest)
-            .context("序列化 manifest 失败")?;
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).context("序列化 manifest 失败")?;
         fs::write(&manifest_file, manifest_json)
             .with_context(|| format!("写入 manifest 文件失败: {}", manifest_file.display()))?;
 
@@ -259,10 +255,16 @@ impl InstancedBundleExporter {
     async fn generate_lod_geometries(
         &self,
         geo_hash: &str,
-        plant_mesh: &PlantMesh,
+        _plant_mesh: &PlantMesh,
         output_dir: &Path,
     ) -> Result<Vec<LodLevelInfo>> {
+        use super::export_common::GltfMeshCache;
+
         let mut lod_levels = Vec::new();
+        let mesh_cache = GltfMeshCache::new();
+
+        // 获取 mesh 基础目录
+        let base_mesh_dir = self.db_option.get_meshes_path();
 
         for (lod_index, &lod_level) in LOD_LEVELS.iter().enumerate() {
             if self.verbose {
@@ -278,19 +280,30 @@ impl InstancedBundleExporter {
 
             let output_path = output_dir.join(&filename);
 
-            // 生成 LOD 几何体
-            // 注意：这里导出的是当前 ExportData 中已生成的 mesh
-            // 如果需要真正的多级 LOD，需要：
-            // 1. 在导出前用不同的 LOD profile 重新生成 mesh
-            // 2. 或者使用网格简化算法（如 meshopt）从高精度 mesh 生成低精度版本
-            //
-            // 当前实现：为了快速验证流程，所有 LOD 级别使用相同的 mesh
-            // TODO: 集成真正的 LOD 生成逻辑
-            export_single_mesh_to_glb(plant_mesh, &output_path)
+            // 关键修复：根据 LOD 级别从对应目录加载不同精度的 mesh
+            let lod_dir = base_mesh_dir.join(format!("lod_{:?}", lod_level));
+
+            // 使用 mesh_cache.load_or_get 从对应的 LOD 目录加载 mesh
+            let lod_mesh = mesh_cache.load_or_get(geo_hash, &lod_dir)
+                .with_context(|| {
+                    format!(
+                        "加载 LOD {:?} mesh 失败: {} (目录: {})",
+                        lod_level,
+                        geo_hash,
+                        lod_dir.display()
+                    )
+                })?;
+
+            export_single_mesh_to_glb(&lod_mesh, &output_path)
                 .with_context(|| format!("导出 GLB 失败: {}", output_path.display()))?;
 
             if self.verbose {
-                println!("         ✅ 生成: {}", filename);
+                println!(
+                    "         ✅ 生成: {} (顶点数: {}, 三角形数: {})",
+                    filename,
+                    lod_mesh.vertices.len(),
+                    lod_mesh.indices.len() / 3
+                );
             }
 
             lod_levels.push(LodLevelInfo {
@@ -349,4 +362,3 @@ pub async fn export_instanced_bundle_for_refnos(
 
     Ok(())
 }
-

@@ -594,7 +594,7 @@ pub async fn export_glb_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
                     use_basic_materials: config.use_basic_materials,
                 },
             };
-            GlbExporter::new()
+            let _ = GlbExporter::new()
                 .export(&[*refno], &mesh_dir, &final_output_path, export_config)
                 .await?;
 
@@ -1484,7 +1484,10 @@ async fn export_xkt_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
 }
 
 /// 导出 Instanced Bundle 模式
-pub async fn export_instanced_bundle_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
+pub async fn export_instanced_bundle_mode(
+    config: ExportConfig,
+    db_option_ext: &DbOptionExt,
+) -> Result<()> {
     use std::sync::Arc;
 
     println!("\n🎯 Instanced Bundle 导出模式");
@@ -1510,12 +1513,10 @@ pub async fn export_instanced_bundle_mode(config: ExportConfig, db_option_ext: &
     }
 
     // 确定输出目录
-    let output_dir = config.output_path
-        .clone()
-        .unwrap_or_else(|| {
-            let first_refno = refnos[0].to_string().replace('/', "_");
-            format!("output/instanced-bundle/{}", first_refno)
-        });
+    let output_dir = config.output_path.clone().unwrap_or_else(|| {
+        let first_refno = refnos[0].to_string().replace('/', "_");
+        format!("output/instanced-bundle/{}", first_refno)
+    });
 
     println!("   - 输出目录: {}", output_dir);
 
@@ -1570,4 +1571,30 @@ pub async fn export_model_mode(
             format
         )),
     }
+}
+
+/// 导出所有 inst_relate 实体（Prepack LOD 格式）
+pub async fn export_all_relates_mode(
+    dbno: Option<u32>,
+    verbose: bool,
+    output_override: Option<PathBuf>,
+    db_option_ext: &DbOptionExt,
+) -> Result<()> {
+    use aios_database::fast_model::export_model::export_prepack_lod::export_all_relates_prepack_lod;
+    use std::sync::Arc;
+
+    println!("\n🎯 导出所有 inst_relate 实体模式");
+    println!("============================");
+
+    // 连接数据库
+    println!("📡 连接数据库...");
+    init_surreal().await?;
+    println!("✅ 数据库连接成功");
+
+    // 调用导出函数（通过 Deref 访问内部的 DbOption）
+    let db_option = Arc::new((**db_option_ext).clone());
+    export_all_relates_prepack_lod(dbno, verbose, output_override, db_option).await?;
+
+    println!("\n🎉 导出完成！");
+    Ok(())
 }

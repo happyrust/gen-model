@@ -81,7 +81,7 @@ pub async fn export_glb_for_refnos(
         println!("\n💾 导出 GLB 文件...");
         // 使用默认单位转换器（毫米，不转换）
         let unit_converter = UnitConverter::default();
-        let (node_count, mesh_count) = export_mesh_to_glb(
+        let (node_count, mesh_count, _) = export_mesh_to_glb(
             &export_data,
             output_path,
             &unit_converter,
@@ -108,7 +108,7 @@ pub async fn export_glb_for_refnos(
     println!("\n💾 导出 GLB 文件...");
     // 使用默认单位转换器（毫米，不转换）
     let unit_converter = UnitConverter::default();
-    let (node_count, mesh_count) = export_mesh_to_glb(
+    let (node_count, mesh_count, _) = export_mesh_to_glb(
         &export_data,
         output_path,
         &unit_converter,
@@ -127,7 +127,7 @@ fn export_mesh_to_glb(
     unit_converter: &UnitConverter,
     material_library: &MaterialLibrary,
     use_basic_materials: bool,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, HashMap<String, usize>)> {
     if export_data.unique_geometries.is_empty() {
         return Err(anyhow!("没有可导出的几何体"));
     }
@@ -336,37 +336,7 @@ fn export_mesh_to_glb(
     nodes.push(json!({"name": "root_placeholder"}));
     let mut current_node_index = 1;
 
-    // 辅助函数：创建变换矩阵数组
-    let create_matrix_array = |matrix: &glam::DMat4| -> [f32; 16] {
-        let scale_factor = unit_converter.conversion_factor() as f64;
-        let translation = Vec3::new(
-            matrix.w_axis.x as f32,
-            matrix.w_axis.y as f32,
-            matrix.w_axis.z as f32,
-        );
-        let converted_translation = unit_converter.convert_vec3(&translation);
-
-        [
-            (matrix.x_axis.x * scale_factor) as f32,
-            (matrix.x_axis.y * scale_factor) as f32,
-            (matrix.x_axis.z * scale_factor) as f32,
-            matrix.x_axis.w as f32,
-            (matrix.y_axis.x * scale_factor) as f32,
-            (matrix.y_axis.y * scale_factor) as f32,
-            (matrix.y_axis.z * scale_factor) as f32,
-            matrix.y_axis.w as f32,
-            (matrix.z_axis.x * scale_factor) as f32,
-            (matrix.z_axis.y * scale_factor) as f32,
-            (matrix.z_axis.z * scale_factor) as f32,
-            matrix.z_axis.w as f32,
-            converted_translation.x,
-            converted_translation.y,
-            converted_translation.z,
-            matrix.w_axis.w as f32,
-        ]
-    };
-
-    // 1. 生成元件节点（两级结构：元件父节点 -> 几何体子节点）
+    // 生成节点（两级层级结构）：元件父节点 -> 几何体子节点）
     let mut component_parent_indices = Vec::new();
 
     for component in &export_data.components {
@@ -399,7 +369,13 @@ fn export_mesh_to_glb(
                 )
             };
 
-            let matrix_array = create_matrix_array(&geometry.transform);
+            // 使用单位矩阵（无变换），确保 GLB 中的模型是原始的单位 mesh
+            let matrix_array = [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ];
 
             let geo_node = json!({
                 "name": geo_node_name,
@@ -457,7 +433,13 @@ fn export_mesh_to_glb(
             }
         };
 
-        let matrix_array = create_matrix_array(&tubing.transform);
+        // 使用单位矩阵（无变换），确保 GLB 中的模型是原始的单位 mesh
+        let matrix_array = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
 
         let tubing_node = json!({
             "name": tubing.name,
@@ -564,7 +546,7 @@ fn export_mesh_to_glb(
     let mesh_count = meshes.len();
 
     write_glb_file(&gltf, &buffer_data, output_path)?;
-    Ok((node_count, mesh_count))
+    Ok((node_count, mesh_count, geo_mesh_map))
 }
 
 fn write_glb_file(gltf: &Value, buffer_data: &[u8], output_path: &str) -> Result<()> {
@@ -602,7 +584,21 @@ fn pad_to_4_with_value(data: &mut Vec<u8>, value: u8) {
     data.extend(std::iter::repeat(value).take(padding));
 }
 
-/// GLB 导出器
+/// GLB 导出结果（统计 + mesh 映射）
+#[derive(Debug, Clone)]
+pub struct MeshIndexMap(pub HashMap<String, usize>);
+
+impl MeshIndexMap {
+    pub fn get(&self, geo_hash: &str) -> Option<usize> {
+        self.0.get(geo_hash).copied()
+    }
+}
+
+pub struct GlbExportResult {
+    pub stats: ExportStats,
+    pub mesh_map: MeshIndexMap,
+}
+
 pub struct GlbExporter;
 
 impl GlbExporter {
@@ -620,7 +616,7 @@ impl Default for GlbExporter {
 #[async_trait::async_trait]
 impl ModelExporter for GlbExporter {
     type Config = GlbExportConfig;
-    type Stats = ExportStats;
+    type Stats = GlbExportResult;
 
     async fn export(
         &self,
@@ -659,7 +655,10 @@ impl ModelExporter for GlbExporter {
         if geom_insts.is_empty() {
             println!("⚠️  未找到任何几何体数据");
             stats.elapsed_time = start_time.elapsed();
-            return Ok(stats);
+            return Ok(GlbExportResult {
+                stats,
+                mesh_map: MeshIndexMap(HashMap::new()),
+            });
         }
 
         stats.geometry_count = geom_insts.iter().map(|g| g.insts.len()).sum();
@@ -670,10 +669,10 @@ impl ModelExporter for GlbExporter {
         }
 
         let export_data =
-            collect_export_data(geom_insts, &all_refnos, mesh_dir, config.common.verbose).await?;
+            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
         let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
-        let (node_count, mesh_count) = export_mesh_to_glb(
+        let (node_count, mesh_count, mesh_lookup) = export_mesh_to_glb(
             &export_data,
             output_path,
             &config.common.unit_converter,
@@ -697,7 +696,10 @@ impl ModelExporter for GlbExporter {
             stats.print_summary("GLB");
         }
 
-        Ok(stats)
+        Ok(GlbExportResult {
+            stats,
+            mesh_map: MeshIndexMap(mesh_lookup),
+        })
     }
 
     fn file_extension(&self) -> &str {
@@ -712,51 +714,34 @@ impl ModelExporter for GlbExporter {
 /// 导出单个 PlantMesh 到 GLB 文件（用于 LOD 生成）
 pub fn export_single_mesh_to_glb(mesh: &PlantMesh, output_path: &Path) -> Result<()> {
     // 转换 Vec3 为 f32 数组
-    let positions: Vec<f32> = mesh
-        .vertices
-        .iter()
-        .flat_map(|v| [v.x, v.y, v.z])
-        .collect();
+    let positions: Vec<f32> = mesh.vertices.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
 
     let normals: Vec<f32> = if !mesh.normals.is_empty() {
-        mesh.normals
-            .iter()
-            .flat_map(|n| [n.x, n.y, n.z])
-            .collect()
+        mesh.normals.iter().flat_map(|n| [n.x, n.y, n.z]).collect()
     } else {
         Vec::new()
     };
 
     // 构建 buffer 数据
     let mut buffer_data = Vec::new();
-    
+
     // Positions buffer
-    let positions_bytes: Vec<u8> = positions
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    let positions_bytes: Vec<u8> = positions.iter().flat_map(|f| f.to_le_bytes()).collect();
     let positions_offset = buffer_data.len();
     buffer_data.extend_from_slice(&positions_bytes);
-    
+
     // Normals buffer
     let normals_offset = if !normals.is_empty() {
-        let normals_bytes: Vec<u8> = normals
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let normals_bytes: Vec<u8> = normals.iter().flat_map(|f| f.to_le_bytes()).collect();
         let offset = buffer_data.len();
         buffer_data.extend_from_slice(&normals_bytes);
         Some(offset)
     } else {
         None
     };
-    
+
     // Indices buffer
-    let indices_bytes: Vec<u8> = mesh
-        .indices
-        .iter()
-        .flat_map(|i| i.to_le_bytes())
-        .collect();
+    let indices_bytes: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
     let indices_offset = buffer_data.len();
     buffer_data.extend_from_slice(&indices_bytes);
 
@@ -829,35 +814,29 @@ pub fn export_single_mesh_to_glb(mesh: &PlantMesh, output_path: &Path) -> Result
 
     // 添加法线（如果存在）
     if normals_offset.is_some() {
-        gltf["bufferViews"]
-            .as_array_mut()
-            .unwrap()
-            .insert(
-                1,
-                json!({
-                    "buffer": 0,
-                    "byteOffset": normals_offset.unwrap(),
-                    "byteLength": normals.len() * 4,
-                    "target": 34962
-                }),
-            );
+        gltf["bufferViews"].as_array_mut().unwrap().insert(
+            1,
+            json!({
+                "buffer": 0,
+                "byteOffset": normals_offset.unwrap(),
+                "byteLength": normals.len() * 4,
+                "target": 34962
+            }),
+        );
 
-        gltf["accessors"]
-            .as_array_mut()
-            .unwrap()
-            .insert(
-                1,
-                json!({
-                    "bufferView": 1,
-                    "byteOffset": 0,
-                    "componentType": 5126,
-                    "count": mesh.normals.len(),
-                    "type": "VEC3"
-                }),
-            );
+        gltf["accessors"].as_array_mut().unwrap().insert(
+            1,
+            json!({
+                "bufferView": 1,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": mesh.normals.len(),
+                "type": "VEC3"
+            }),
+        );
 
         gltf["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = json!(1);
-        
+
         // 更新 indices accessor index
         gltf["meshes"][0]["primitives"][0]["indices"] = json!(2);
     }
@@ -875,7 +854,7 @@ pub fn export_single_mesh_to_glb(mesh: &PlantMesh, output_path: &Path) -> Result
     // GLB header
     glb_data.extend_from_slice(b"glTF"); // magic
     glb_data.extend_from_slice(&2u32.to_le_bytes()); // version
-    
+
     let total_length = 12 + // header
         8 + json_bytes.len() + json_padding + // JSON chunk
         8 + buffer_data.len() + buffer_padding; // BIN chunk

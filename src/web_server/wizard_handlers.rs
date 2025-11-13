@@ -12,8 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-use crate::web_server::models::*;
 use crate::web_server::AppState;
+use crate::web_server::models::*;
 use rusqlite as _;
 
 /// 扫描指定目录中的项目
@@ -1014,8 +1014,8 @@ pub fn restore_tasks_from_sqlite() -> Vec<TaskInfo> {
 }
 
 /// 从SQLite加载所有部署站点（简化版本，返回JSON Value）
-pub fn load_deployment_sites_from_sqlite(
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+pub fn load_deployment_sites_from_sqlite()
+-> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     let conn = open_deployment_sites_sqlite()?;
 
     let mut stmt = conn.prepare(

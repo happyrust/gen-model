@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -91,8 +91,18 @@ pub fn is_http_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+/// 判断是否为 HTTP URL (兼容引用的引用)
+pub fn is_http_url_ref(value: &&str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
 /// 判断是否为本地路径提示
 pub fn is_local_path_hint(value: &str) -> bool {
+    value.starts_with("file://") || value.starts_with('/') || value.starts_with(".")
+}
+
+/// 判断是否为本地路径提示 (兼容引用的引用)
+pub fn is_local_path_hint_ref(value: &&str) -> bool {
     value.starts_with("file://") || value.starts_with('/') || value.starts_with(".")
 }
 

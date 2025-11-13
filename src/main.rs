@@ -342,12 +342,29 @@ async fn main() -> anyhow::Result<()> {
                 .help("Split each SITE into separate files (default: merge all SITEs in the same dbno)")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .help("Override the export output directory (defaults vary by subcommand)")
+                .value_name("DIR"),
+        )
+        .arg(
+            Arg::new("export-all-relates")
+                .long("export-all-relates")
+                .help("Export all inst_relate entities in Prepack LOD format (按 zone 分组)")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     // 获取配置文件路径
     let config_path = matches
         .get_one::<String>("config")
         .expect("default value ensures this exists");
+
+    // 设置环境变量，让 rs-core 库使用正确的配置文件
+    unsafe {
+        std::env::set_var("DB_OPTION_FILE", config_path);
+    }
 
     // 创建自定义的 DbOptionExt
     let mut db_option_ext = get_db_option_ext_from_path(config_path)?;
@@ -823,6 +840,21 @@ async fn main() -> anyhow::Result<()> {
             split_by_site,
         );
         return export_xkt_mode(config, &db_option_ext).await;
+    }
+
+    if matches.get_flag("export-all-relates") {
+        use crate::cli_modes::export_all_relates_mode;
+
+        let dbno = matches.get_one::<u32>("dbno").copied();
+        let export_bundle_dir = matches.get_one::<String>("output").map(PathBuf::from);
+        println!("🎯 导出所有 inst_relate 实体 (Prepack LOD 格式)");
+        if let Some(dbno) = dbno {
+            println!("   - 按 dbno={} 过滤", dbno);
+        } else {
+            println!("   - 全表扫描（所有 dbno）");
+        }
+
+        return export_all_relates_mode(dbno, verbose, export_bundle_dir, &db_option_ext).await;
     }
 
     // ========== 处理 --debug-model + --capture 但无导出标志的情况 ==========

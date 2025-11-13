@@ -214,7 +214,6 @@ export default function ReactFlowVisualization({
         fitView
       >
         <Background />
-        <Controls />
         <MiniMap />
         <Panel position="top-left" className="bg-white p-4 rounded-lg shadow">
           <div className="text-sm text-gray-600">

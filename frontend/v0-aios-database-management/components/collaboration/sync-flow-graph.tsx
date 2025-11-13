@@ -116,7 +116,6 @@ export function SyncFlowGraph({ groupName, flows, sites }: SyncFlowGraphProps) {
         panOnDrag
       >
         <Background gap={28} size={1} color="rgba(148, 163, 184, 0.25)" />
-        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   )

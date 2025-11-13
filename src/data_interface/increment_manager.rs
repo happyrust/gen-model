@@ -105,19 +105,19 @@ async fn enqueue_generated_sync_tasks(artifacts: Vec<GeneratedSyncArtifact>) {
         return;
     }
 
-    let runtime_guard = REMOTE_RUNTIME.read().await;
-    let runtime_state = match runtime_guard.as_ref() {
-        Some(state) => state.clone(),
-        None => return,
+    let env_id = {
+        let runtime_guard = REMOTE_RUNTIME.read().await;
+        match runtime_guard.as_ref() {
+            Some(state) => state.env_id.clone(),
+            None => return,
+        }
     };
-    drop(runtime_guard);
-
-    let env_id = runtime_state.env_id.clone();
     let env_id_for_query = env_id.clone();
 
     let query_result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(Option<String>, Vec<(String, Option<String>)>)> {
-            let conn = remote_sync_handlers::open_sqlite()?;
+            let conn = remote_sync_handlers::open_sqlite()
+                .map_err(|e| anyhow::anyhow!("Failed to open SQLite: {}", e))?;
 
             let env_name = conn
                 .prepare("SELECT name FROM remote_sync_envs WHERE id = ?1 LIMIT 1")?
@@ -176,7 +176,7 @@ async fn enqueue_generated_sync_tasks(artifacts: Vec<GeneratedSyncArtifact>) {
                 file_name: Some(artifact.file_name.clone()),
                 file_hash: artifact.file_hash.clone(),
                 env_id: Some(env_id.clone()),
-                source_env: source_env.clone(),
+                source_env: Some(source_env.clone()),
                 target_site: site_id_opt.clone(),
                 direction: Some("UPLOAD".to_string()),
                 notes: site_name_opt
@@ -557,7 +557,7 @@ impl AiosDBManager {
 
                                         let compress_opt = CompressOptions::new(
                                             path.clone(),
-                                            output,
+                                            output.clone(),
                                             "assets/temp",
                                         );
                                         let file_hash = execute_compress(compress_opt)
@@ -567,9 +567,8 @@ impl AiosDBManager {
                                         // dbg!(&file_hash);
                                         #[cfg(feature = "web_server")]
                                         {
-                                            let archive_size = fs::metadata(&output)
-                                                .await
-                                                .map(|m| m.len())
+                                            let archive_size = std::fs::metadata(&output)
+                                                .map(|m: std::fs::Metadata| m.len())
                                                 .unwrap_or(0);
                                             let delta = new_sesno.saturating_sub(prev_sesno) as u64;
                                             generated_artifacts.push(GeneratedSyncArtifact {

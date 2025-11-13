@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 incr_sync =  false
 sync_history = false
 enable_log = false
@@ -12,16 +12,16 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1"
-# project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+# project_path = "D:/AVEVA/Projects/E3D2.1"
+project_path = "/Volumes/DPC/work/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
-project_code = 1516
-surreal_ns = 1516
+project_code = '1516'
+surreal_ns = '1516'
 module = "DESI"
 #是否生成模型数据
 gen_model = true
@@ -64,7 +64,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = 8009
+v_port = 8020
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
@@ -87,6 +87,8 @@ server_release_ip = "127.0.0.1:9099"
 # hash文件的站点
 remote_file_server_hosts = []
 file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+surreal_script_dir = "../rs-core/resource/surreal"
 
 
 #调试选项

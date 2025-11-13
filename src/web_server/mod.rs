@@ -1,9 +1,9 @@
 use axum::{
+    Router,
     extract::{Query, State},
-    http::{header, Method, StatusCode},
+    http::{Method, StatusCode, header},
     response::{Html, Json},
     routing::{delete, get, post, put},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -40,8 +40,8 @@ pub mod wizard_template;
 pub mod xkt_test_handlers;
 
 use crate::web_api::{
-    create_noun_hierarchy_routes, create_spatial_query_routes, NounHierarchyApiState,
-    SpatialQueryApiState,
+    NounHierarchyApiState, SpatialQueryApiState, create_noun_hierarchy_routes,
+    create_spatial_query_routes,
 };
 use handlers::*;
 use models::*;
@@ -138,13 +138,27 @@ impl ConfigManager {
 
 /// 启动Web UI服务器
 pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
+    start_web_server_with_config(port, None).await
+}
+
+pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) -> anyhow::Result<()> {
     let app_state = AppState::new();
+
+    // 如果指定了配置文件，设置环境变量
+    if let Some(config_path) = config_file {
+        unsafe {
+            std::env::set_var("DB_OPTION_FILE", config_path);
+        }
+        println!("⚙️  使用配置文件: {}.toml", config_path);
+    }
 
     // 🔧 修复：初始化数据库连接
     println!("🔄 正在初始化数据库连接...");
     println!("📂 当前工作目录: {:?}", std::env::current_dir()?);
-    println!("📄 尝试读取 DbOption.toml 配置文件...");
     
+    let config_name = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
+    println!("📄 尝试读取 {}.toml 配置文件...", config_name);
+
     match aios_core::init_surreal().await {
         Ok(_) => {
             println!("✅ 数据库连接初始化成功");
@@ -729,7 +743,7 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
 async fn auto_update_scheduler(state: AppState) {
     use crate::web_server::models::{IncrementalUpdateRequest, UpdateType};
     use aios_core::SUL_DB;
-    use axum::{extract::State as AxumState, Json};
+    use axum::{Json, extract::State as AxumState};
     use std::time::Duration;
 
     loop {

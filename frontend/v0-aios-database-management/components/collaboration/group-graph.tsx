@@ -105,7 +105,6 @@ export function GroupGraph({ group, sites, onPrimaryNodeClick }: GroupGraphProps
         onNodeClick={handleNodeClick}
       >
         <Background gap={24} size={1} color="rgba(148, 163, 184, 0.3)" />
-        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   )

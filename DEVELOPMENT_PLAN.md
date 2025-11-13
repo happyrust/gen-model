@@ -276,3 +276,67 @@
 **计划版本：** v1.0  
 **下次更新：** 2025-10-18
 
+---
+
+## Prepack Instanced Bundle 导出重构计划（更新于 2025-11-12）
+
+### 🎯 范围
+- 仅聚焦 `--export-all-relates` 模式，批量导出 SurrealDB 已存在的 `inst_relate` 数据。
+- 当前版本将所有实例写入单一 `instances.json`，暂不做按 dbno/ZONE 切分。
+- 重构完成后必须通过前端 InstancedMesh 加载器进行可视化验证。
+
+### 🧱 阶段划分
+1. **数据抓取与分批框架**（若某批缺项直接跳过，保持流程可继续）
+   - 全表扫描 `inst_relate`，生成 refno 列表。
+   - 实现 `BatchPlanner`（可配置 batch size）与 `BatchExecutor`，按批调用 `query_insts`，支持失败重试。
+2. **聚合与流式写入**（遇到缺失 LOD mesh 时记录 warning 并跳过该 LOD）
+   - 构建 `AggregationCore`：维护颜色/名称字典、`geo_hash → geo_index` 映射、components/tubings 分组。
+   - `instances.json` 使用流式写入避免 OOM，每批结束立即 flush，统计指标实时更新。
+3. **几何与清单生成**（仅对成功生成的 LOD 输出 geometry_L*.glb）
+   - 输出 `geometry_manifest.json`（含 LOD 元数据）、`geometry_L*.glb`、`manifest.json`、`export.log`。
+   - 在 manifest 中填入 `files/lod_profiles/stats`，并记录导出参数与哈希。
+4. **校验与前端加载测试**
+   - 自动校验 `geo_index` 连续性、`lod_mask` 合法性、名称/颜色索引。
+   - 将生成的 bundle 复制到前端 demo，跑 InstancedMesh Loader：
+     1. `pnpm install && pnpm dev`（或项目既有命令）启动示例；
+     2. 在浏览器验证低 LOD 快速成图、LOD 升级正确、名称/颜色无误；
+     3. 记录加载时间与控制台日志，结果写入 `export.log` 并截图归档。
+   - 测试通过后方可合并；如失败，回到阶段 2/3 修复。
+5. **文档与交付**
+   - 更新 `docs/PREPACK_FORMAT_SPECIFICATION.md`、`EXPORT_COMMANDS.md` 等，描述分批策略与测试方法。
+   - 在 README 或专门文档中附上示例命令、输出目录结构、前端验证步骤。
+
+### 📐 执行线框图
+
+```
+CLI (--export-all-relates)
+        |
+        v
+BatchPlanner ──> BatchExecutor ──> query_insts (按批)
+        |                          |
+        v                          v
+AggregationCore <────── batch results
+  - palette/names
+  - geo_hash→geo_index
+  - components/tubings
+        |
+        v
+Geometry Builder & Manifest Builder
+        |
+        v
+Validator & Logger ──> output/instanced-bundle
+                             ├─ geometry_manifest.json
+                             ├─ instances.json (单文件)
+                             ├─ geometry_L*.glb
+                             ├─ manifest.json
+                             └─ export.log + 前端测试记录
+
+前端加载测试
+  bundle → instanced-mesh demo → 浏览器验证 → 记录日志/截图
+```
+
+### ✅ 验收条件
+- 导出命令一次完成（分批执行无报错），日志记录所有批次耗时与失败重试次数。
+- 校验脚本通过，`manifest`/`geometry_manifest`/`instances` 与规范一致。
+- 前端加载器能在 5 秒内渲染低 LOD，并逐步升级到高 LOD，无错误日志。
+- `export.log` 中包含命令参数、文件哈希、校验结果、前端加载用时与截图链接。

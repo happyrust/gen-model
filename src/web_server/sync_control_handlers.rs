@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
-use crate::web_server::{remote_sync_handlers, sync_control_center::*, AppState};
+use crate::web_server::{AppState, remote_sync_handlers, sync_control_center::*};
 
 // ========= 控制接口 =========
 
@@ -536,22 +536,22 @@ async fn sample_system_metrics() -> (f32, f32) {
     match tokio::task::spawn_blocking(|| {
         use std::thread;
         use std::time::Duration as StdDuration;
-        use sysinfo::{CpuExt, CpuRefreshKind, RefreshKind, System, SystemExt};
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
         let mut system = System::new();
         system.refresh_specifics(
-            RefreshKind::new()
+            RefreshKind::everything()
                 .with_cpu(CpuRefreshKind::everything())
-                .with_memory(),
+                .with_memory(MemoryRefreshKind::everything()),
         );
         thread::sleep(StdDuration::from_millis(100));
         system.refresh_specifics(
-            RefreshKind::new()
+            RefreshKind::everything()
                 .with_cpu(CpuRefreshKind::everything())
-                .with_memory(),
+                .with_memory(MemoryRefreshKind::everything()),
         );
 
-        let cpu_usage = system.global_cpu_info().cpu_usage();
+        let cpu_usage = system.global_cpu_usage();
         let total_memory = system.total_memory();
         let used_memory = system.used_memory();
         let memory_usage = if total_memory == 0 {
@@ -605,11 +605,7 @@ fn collect_sync_totals() -> (u64, u64, u64, u64) {
 }
 
 fn clamp_u64(v: i64) -> u64 {
-    if v < 0 {
-        0
-    } else {
-        v as u64
-    }
+    if v < 0 { 0 } else { v as u64 }
 }
 
 // ========= 页面渲染 =========

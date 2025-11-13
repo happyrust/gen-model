@@ -1,12 +1,6 @@
 use aios_core::rs_surreal::query::NounHierarchyItem;
 use aios_core::{RefnoEnum, SUL_DB, SurrealQueryExt};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::post,
-    Router,
-};
+use axum::{Router, extract::State, http::StatusCode, response::Json, routing::post};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -37,6 +31,8 @@ pub struct NounHierarchyQueryRequest {
     pub nouns: Vec<String>,
     /// 过滤的关键词（可选，用于过滤名称）
     pub keyword: Option<String>,
+    /// 可选的父节点列表，当提供时仅返回这些父节点的直接子节点
+    pub parent_refnos: Option<Vec<RefnoEnum>>,
 }
 
 /// 名词层级节点（用于本地时间转换的包装结构）
@@ -54,6 +50,8 @@ pub struct NounHierarchyNode {
     pub owner: RefnoEnum,
     /// 最后修改日期（本地时间字符串格式）
     pub last_modified_date: Option<String>,
+    /// 直接子节点数量
+    pub children_cnt: Option<i32>,
 }
 
 /// 名词层级查询响应
@@ -103,8 +101,10 @@ async fn query_noun_hierarchy(
     State(_state): State<NounHierarchyApiState>,
     Json(request): Json<NounHierarchyQueryRequest>,
 ) -> Result<Json<NounHierarchyQueryResponse>, StatusCode> {
-    println!("📋 收到查询请求 - 项目: {} ({}), nouns: {:?}, keyword: {:?}", 
-             request.proj_name, request.proj_code, request.nouns, request.keyword);
+    println!(
+        "📋 收到查询请求 - 项目: {} ({}), nouns: {:?}, keyword: {:?}",
+        request.proj_name, request.proj_code, request.nouns, request.keyword
+    );
 
     // 验证 nouns 不为空
     if request.nouns.is_empty() {
@@ -117,18 +117,27 @@ async fn query_noun_hierarchy(
     }
 
     let keyword_filter = request.keyword.as_deref();
-    
+
     // 对每个名词类型调用 rs-core 中的实现
     let mut all_items = Vec::new();
-    
+
     for noun in &request.nouns {
-        println!("🔍 查询类型: {}, 关键词: {:?}", noun, keyword_filter);
-        
+        println!(
+            "🔍 查询类型: {}, 关键词: {:?}, 父节点: {:?}",
+            noun, keyword_filter, request.parent_refnos
+        );
+
         // 调用 rs-core 中的实现，并转换日期时间为本地时间
-        match aios_core::rs_surreal::query::query_noun_hierarchy(noun, keyword_filter).await {
+        match aios_core::rs_surreal::query::query_noun_hierarchy(
+            noun,
+            keyword_filter,
+            request.parent_refnos.clone(),
+        )
+        .await
+        {
             Ok(items) => {
                 println!("✅ 查询 {} 成功，返回 {} 条记录", noun, items.len());
-                
+
                 // 转换为包装结构，将 UTC 时间转换为本地时间字符串
                 for item in items {
                     let local_date = item.last_modified_date.map(|dt| {
@@ -136,7 +145,7 @@ async fn query_noun_hierarchy(
                         let naive_dt = dt.naive_local();
                         naive_dt.format("%Y-%m-%d %H:%M:%S").to_string()
                     });
-                    
+
                     all_items.push(NounHierarchyNode {
                         name: item.name,
                         id: item.id,
@@ -144,6 +153,7 @@ async fn query_noun_hierarchy(
                         owner_name: item.owner_name,
                         owner: item.owner,
                         last_modified_date: local_date,
+                        children_cnt: item.children_cnt,
                     });
                 }
             }
@@ -272,7 +282,10 @@ async fn build_tree_recursive(
 
     // 如果还未达到最大深度，查询子节点
     if depth < max_depth {
-        let mut children_query = format!("SELECT refno, name, noun, owner FROM pe WHERE owner = {}", refno);
+        let mut children_query = format!(
+            "SELECT refno, name, noun, owner FROM pe WHERE owner = {}",
+            refno
+        );
 
         // 如果指定了名词过滤，添加过滤条件
         if let Some(nouns) = filter_nouns {

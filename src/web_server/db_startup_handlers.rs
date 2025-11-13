@@ -6,8 +6,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::web_server::db_startup_manager::{start_database_with_progress, DB_STARTUP_MANAGER};
 use crate::web_server::AppState;
+use crate::web_server::db_startup_manager::{DB_STARTUP_MANAGER, start_database_with_progress};
 
 /// 启动数据库请求
 #[derive(Debug, Deserialize)]

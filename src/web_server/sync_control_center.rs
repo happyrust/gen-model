@@ -1,3 +1,4 @@
+use crate::web_server::site_metadata::sanitize_path_segment;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,12 +10,12 @@ use std::{
 };
 use tokio::{
     fs,
-    sync::{broadcast, RwLock},
-    task::{spawn_blocking, JoinHandle},
+    sync::{RwLock, broadcast},
+    task::{JoinHandle, spawn_blocking},
 };
 use uuid::Uuid;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 
 use crate::web_server::{
@@ -1194,12 +1195,12 @@ async fn refresh_remote_site_metadata(destination: &SyncDestination) -> anyhow::
     let Some(http_host) = destination
         .site_http_host
         .as_deref()
-        .filter(site_metadata::is_http_url)
+        .filter(site_metadata::is_http_url_ref)
         .or_else(|| {
             destination
                 .env_file_host
                 .as_deref()
-                .filter(site_metadata::is_http_url)
+                .filter(site_metadata::is_http_url_ref)
         })
     else {
         return Ok(());

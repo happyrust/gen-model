@@ -4,15 +4,11 @@ use axum::{
     http::{Request, StatusCode, Uri},
     response::{Html, Json, Response},
 };
-use rusqlite::{types::Value as SqlValue, OptionalExtension};
+use rusqlite::{OptionalExtension, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    convert::TryFrom,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
-use tokio::time::{timeout, Duration};
+use std::{convert::TryFrom, io::ErrorKind, path::PathBuf};
+use tokio::time::{Duration, timeout};
 use tokio::{fs, net::TcpStream};
 use uuid::Uuid;
 
@@ -1200,7 +1196,7 @@ async fn serve_site_files_impl(
 
     let local_base = resolve_local_base(&info).ok_or(StatusCode::NOT_FOUND)?;
 
-    let mut service = ServeDir::new(local_base).show_files_listing();
+    let mut service = ServeDir::new(local_base);
 
     let mut new_path = if requested_path.is_empty() {
         "/".to_string()
@@ -1216,10 +1212,11 @@ async fn serve_site_files_impl(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     *req.uri_mut() = new_uri;
 
-    service
+    let response = service
         .oneshot(req)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(response.map(Body::new))
 }
 
 async fn load_site_metadata(
@@ -1236,12 +1233,12 @@ async fn load_site_metadata(
     let http_base = info
         .site_host
         .as_deref()
-        .filter(site_metadata::is_http_url)
+        .filter(site_metadata::is_http_url_ref)
         .map(|s| s.to_string())
         .or_else(|| {
             info.env_file_host
                 .as_deref()
-                .filter(site_metadata::is_http_url)
+                .filter(site_metadata::is_http_url_ref)
                 .map(|s| s.to_string())
         });
 
@@ -1403,12 +1400,12 @@ fn load_site_info(conn: &rusqlite::Connection, site_id: &str) -> Result<SiteInfo
 fn resolve_local_base(info: &SiteInfo) -> Option<PathBuf> {
     info.site_host
         .as_deref()
-        .filter(site_metadata::is_local_path_hint)
+        .filter(site_metadata::is_local_path_hint_ref)
         .map(site_metadata::normalize_local_base)
         .or_else(|| {
             info.env_file_host
                 .as_deref()
-                .filter(site_metadata::is_local_path_hint)
+                .filter(site_metadata::is_local_path_hint_ref)
                 .map(site_metadata::normalize_local_base)
         })
 }

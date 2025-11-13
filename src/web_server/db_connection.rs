@@ -1,8 +1,8 @@
 use aios_core::{
-    connect_with_config, test_database_connection as core_test_database_connection,
-    ConnectionConfig as CoreConnectionConfig, ConnectionHandle,
+    ConnectionConfig as CoreConnectionConfig, ConnectionHandle, connect_with_config,
+    test_database_connection as core_test_database_connection,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::sync::RwLock;
