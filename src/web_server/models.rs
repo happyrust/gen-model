@@ -77,9 +77,9 @@ pub struct TaskInfo {
 pub enum TaskType {
     /// 数据生成
     DataGeneration,
-    /// 空间树生成
+    /// 房间计算
     SpatialTreeGeneration,
-    /// 完整生成（数据+空间树）
+    /// 完整生成（数据+房间计算）
     FullGeneration,
     /// 网格生成
     MeshGeneration,
@@ -216,7 +216,7 @@ pub struct DatabaseConfig {
     pub gen_model: bool,
     /// 是否生成网格
     pub gen_mesh: bool,
-    /// 是否生成空间树
+    /// 是否启用房间计算
     pub gen_spatial_tree: bool,
     /// 是否应用布尔运算
     pub apply_boolean_operation: bool,

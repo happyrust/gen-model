@@ -1184,7 +1184,7 @@ pub fn render_config_page() -> String {
                                 <div class="text-xs text-gray-400 mt-1">
                                     <span x-show="template.gen_model">模型</span>
                                     <span x-show="template.gen_mesh" class="ml-2">网格</span>
-                                    <span x-show="template.gen_spatial_tree" class="ml-2">空间树</span>
+                                    <span x-show="template.gen_spatial_tree" class="ml-2">房间计算</span>
                                 </div>
                             </div>
                         </template>
@@ -1251,7 +1251,7 @@ pub fn render_config_page() -> String {
                                     <label class="flex items-center">
                                         <input x-model="config.gen_spatial_tree" type="checkbox"
                                                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                                        <span class="ml-2 text-sm text-gray-700">生成空间树</span>
+                                        <span class="ml-2 text-sm text-gray-700">启用房间计算</span>
                                     </label>
 
                                     <label class="flex items-center">
@@ -1855,7 +1855,7 @@ pub fn render_tasks_page() -> String {
                             <div><span class="text-gray-600">数据库号：</span><span class="font-medium" x-text="(taskDetails?.config?.manual_db_nums||[]).join(', ')"></span></div>
                             <div><span class="text-gray-600">生成模型：</span><span class="font-medium" x-text="taskDetails?.config?.gen_model ? '是' : '否'"></span></div>
                             <div><span class="text-gray-600">生成网格：</span><span class="font-medium" x-text="taskDetails?.config?.gen_mesh ? '是' : '否'"></span></div>
-                            <div><span class="text-gray-600">生成空间树：</span><span class="font-medium" x-text="taskDetails?.config?.gen_spatial_tree ? '是' : '否'"></span></div>
+                            <div><span class="text-gray-600">启用房间计算：</span><span class="font-medium" x-text="taskDetails?.config?.gen_spatial_tree ? '是' : '否'"></span></div>
                             <div><span class="text-gray-600">布尔运算：</span><span class="font-medium" x-text="taskDetails?.config?.apply_boolean_operation ? '是' : '否'"></span></div>
                             <div><span class="text-gray-600">网格容差：</span><span class="font-medium" x-text="taskDetails?.config?.mesh_tol_ratio"></span></div>
                             <div><span class="text-gray-600">房间关键字：</span><span class="font-medium" x-text="taskDetails?.config?.room_keyword"></span></div>

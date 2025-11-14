@@ -245,19 +245,21 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
+        println!("🏠 启用房间计算功能");
         println!("房间关键字为: {:?}", db_option.get_room_key_word());
-        println!("正在生成空间树");
-        println!("正在计算房间");
+        println!("正在执行房间计算...");
+        println!("正在构建房间关系和空间索引...");
         // SQLite R*-tree will be used for spatial indexing
         let mut time = Instant::now();
         if let Err(e) = build_room_relations(&db_option).await {
-            eprintln!("计算房间失败: {}", e);
+            eprintln!("❌ 房间计算失败: {}", e);
             return Err(e);
         }
-        println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
-        // println!("正在计算设备");
+        println!("✅ 房间计算完成，耗时: {} ms", time.elapsed().as_millis());
+        // 未来可以在这里添加更多房间计算相关功能
+        // println!("正在计算设备房间关系");
         // update_cal_equip().await?;
-        // println!("正在计算分支");
+        // println!("正在计算分支房间关系");
         // update_cal_bran_component().await?;
     }
 

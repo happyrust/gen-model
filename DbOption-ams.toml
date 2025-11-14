@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 incr_sync =  false
 sync_history = false
 enable_log = false
@@ -30,8 +30,8 @@ replace_mesh = false
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
-#是否生成房间树
-gen_spatial_tree = false
+#是否启用房间计算
+gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
@@ -99,12 +99,12 @@ only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
-debug_refno_types = ["CATA", "LOOP", "PRIM"]
-# debug_refno_types = ["LOOP", "PRIM"]
+# debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_refno_types = ["LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
 #included_db_files = ["zdj7600_0001"]
 #manual_db_nums = [7999, 7997, 8000, 1112]
-# manual_db_nums = [1112]
+manual_db_nums = [1112]
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""
 

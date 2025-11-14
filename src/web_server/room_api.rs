@@ -314,17 +314,69 @@ pub async fn query_room_by_point(
     Query(request): Query<RoomQueryRequest>,
 ) -> Result<Json<RoomQueryResponse>, StatusCode> {
     let start_time = std::time::Instant::now();
-    let _point = Vec3::new(request.point[0] as f32, request.point[1] as f32, request.point[2] as f32);
+    let point = Vec3::new(request.point[0] as f32, request.point[1] as f32, request.point[2] as f32);
 
-    // 占位符实现 - 返回模拟的房间查询结果
-    let room_number = format!("ROOM_{}", (request.point[0] as i32).abs() % 1000);
-    let panel_refno = Some(123_456_789u64);
-    let confidence = Some(0.85);
+    // 使用 aios-core 的真实房间查询方法
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+    let query_result = {
+        use aios_core::room::query_v2::query_room_number_by_point_v2;
+        
+        match query_room_number_by_point_v2(point).await {
+            Ok(room_number) => {
+                let panel_refno = if room_number.is_some() {
+                    // 如果找到房间号，尝试获取面板引用号
+                    match aios_core::room::query_v2::query_room_panel_by_point_v2(point).await {
+                        Ok(Some(refno_enum)) => Some(refno_enum.refno().0),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                
+                // 计算置信度：基于查询结果的可靠性
+                let confidence = if room_number.is_some() && panel_refno.is_some() {
+                    Some(0.95) // 高置信度：找到房间号和面板
+                } else if room_number.is_some() {
+                    Some(0.80) // 中等置信度：只找到房间号
+                } else {
+                    None // 无置信度：未找到结果
+                };
+                
+                (true, room_number, panel_refno, confidence, None)
+            }
+            Err(e) => {
+                error!("房间查询失败: {}", e);
+                (false, None, None, None, Some(format!("查询失败: {}", e)))
+            }
+        }
+    };
+    
+    // 如果不支持 SQLite 特性，回退到占位符实现
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
+    let query_result = {
+        warn!("SQLite 特性未启用，使用占位符实现");
+        let room_number = format!("ROOM_{}", (request.point[0] as i32).abs() % 1000);
+        (true, Some(room_number), Some(123_456_789u64), Some(0.50), None::<String>)
+    };
 
+    let (success, room_number, panel_refno, confidence, error_msg) = query_result;
     let query_time = start_time.elapsed().as_millis() as f64;
+    
+    if let Some(ref room_num) = room_number {
+        info!(
+            "房间查询成功: point=[{:.2}, {:.2}, {:.2}] -> room={}, panel={:?}, 耗时={:.2}ms",
+            point.x, point.y, point.z, room_num, panel_refno, query_time
+        );
+    } else {
+        info!(
+            "房间查询无结果: point=[{:.2}, {:.2}, {:.2}], 耗时={:.2}ms",
+            point.x, point.y, point.z, query_time
+        );
+    }
+
     Ok(Json(RoomQueryResponse {
-        success: true,
-        room_number: Some(room_number),
+        success,
+        room_number,
         panel_refno,
         confidence,
         query_time_ms: query_time,
@@ -336,25 +388,111 @@ pub async fn batch_query_rooms(
     Json(request): Json<BatchRoomQueryRequest>,
 ) -> Result<Json<BatchRoomQueryResponse>, StatusCode> {
     let start_time = std::time::Instant::now();
-    let mut results = Vec::new();
+    
+    // 转换点坐标格式
+    let points: Vec<Vec3> = request.points
+        .iter()
+        .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+        .collect();
 
-    for point_array in request.points {
-        let query_start = std::time::Instant::now();
-        // 占位符实现：根据 X 生成一个房间号
-        let room_number = format!("ROOM_{}", (point_array[0] as i32).abs() % 1000);
-        let query_time = query_start.elapsed().as_millis() as f64;
-        results.push(RoomQueryResponse {
-            success: true,
-            room_number: Some(room_number),
-            panel_refno: Some(123_000_000u64),
-            confidence: Some(0.80),
-            query_time_ms: query_time,
-        });
-    }
+    // 使用 aios-core 的批量房间查询方法
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+    let batch_result = {
+        use aios_core::room::query_v2::batch_query_room_numbers;
+        
+        match batch_query_room_numbers(points.clone(), 8).await {
+            Ok(room_numbers) => {
+                let mut results = Vec::new();
+                
+                for (i, room_number) in room_numbers.into_iter().enumerate() {
+                    let query_start = std::time::Instant::now();
+                    let point = points[i];
+                    
+                    // 如果找到房间号，尝试获取面板引用号
+                    let panel_refno = if room_number.is_some() {
+                        match aios_core::room::query_v2::query_room_panel_by_point_v2(point).await {
+                            Ok(Some(refno_enum)) => Some(refno_enum.refno().0),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    // 计算置信度
+                    let confidence = if room_number.is_some() && panel_refno.is_some() {
+                        Some(0.95)
+                    } else if room_number.is_some() {
+                        Some(0.80)
+                    } else {
+                        None
+                    };
+                    
+                    let query_time = query_start.elapsed().as_millis() as f64;
+                    
+                    results.push(RoomQueryResponse {
+                        success: true,
+                        room_number,
+                        panel_refno,
+                        confidence,
+                        query_time_ms: query_time,
+                    });
+                }
+                
+                (true, results)
+            }
+            Err(e) => {
+                error!("批量房间查询失败: {}", e);
+                // 返回失败结果
+                let results = request.points
+                    .iter()
+                    .map(|_| RoomQueryResponse {
+                        success: false,
+                        room_number: None,
+                        panel_refno: None,
+                        confidence: None,
+                        query_time_ms: 0.0,
+                    })
+                    .collect();
+                (false, results)
+            }
+        }
+    };
+    
+    // 如果不支持 SQLite 特性，回退到占位符实现
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
+    let batch_result = {
+        warn!("SQLite 特性未启用，使用占位符批量查询实现");
+        let mut results = Vec::new();
+        
+        for point_array in &request.points {
+            let query_start = std::time::Instant::now();
+            let room_number = format!("ROOM_{}", (point_array[0] as i32).abs() % 1000);
+            let query_time = query_start.elapsed().as_millis() as f64;
+            
+            results.push(RoomQueryResponse {
+                success: true,
+                room_number: Some(room_number),
+                panel_refno: Some(123_000_000u64),
+                confidence: Some(0.50),
+                query_time_ms: query_time,
+            });
+        }
+        
+        (true, results)
+    };
 
+    let (success, results) = batch_result;
     let total_time = start_time.elapsed().as_millis() as f64;
+    
+    info!(
+        "批量房间查询完成: {} 个点, 成功: {}, 耗时: {:.2}ms",
+        request.points.len(),
+        success,
+        total_time
+    );
+
     Ok(Json(BatchRoomQueryResponse {
-        success: true,
+        success,
         results,
         total_query_time_ms: total_time,
     }))
@@ -394,22 +532,73 @@ pub async fn process_room_codes(
 }
 
 /// 获取系统状态
-pub async fn get_room_system_status() -> Result<Json<RoomSystemStatusResponse>, StatusCode> {
+pub async fn get_room_system_status(
+    State(state): State<RoomApiState>,
+) -> Result<Json<RoomSystemStatusResponse>, StatusCode> {
+    // 获取房间系统监控数据
     let monitor = get_global_monitor().await;
     let metrics = monitor.get_current_metrics().await;
     
-    let manager = get_global_manager().await;
-    let manager = manager.lock().await;
+    // 获取活跃任务数
+    let task_manager = state.task_manager.read().await;
+    let active_tasks = task_manager.active_tasks.len();
+    
+    // 获取缓存状态
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+    let cache_status = {
+        use aios_core::room::query_v2::get_room_query_stats;
+        
+        match get_room_query_stats().await {
+            stats => {
+                let hit_rate = if stats.total_queries > 0 {
+                    stats.cache_hits as f64 / stats.total_queries as f64
+                } else {
+                    0.0
+                };
+                
+                CacheStatus {
+                    geometry_cache_size: stats.geometry_cache_size,
+                    query_cache_size: stats.total_queries as usize,
+                    hit_rate,
+                }
+            }
+        }
+    };
+    
+    // 如果不支持 SQLite 特性，使用默认缓存状态
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
+    let cache_status = CacheStatus {
+        geometry_cache_size: 0,
+        query_cache_size: 0,
+        hit_rate: 0.0,
+    };
+    
+    // 系统健康检查
+    let total_queries = metrics.query.total_queries;
+    let success_rate = if total_queries > 0 {
+        metrics.query.successful_queries as f64 / total_queries as f64
+    } else {
+        1.0 // 没有查询时默认为正常
+    };
+    
+    let system_health = if total_queries > 0 && success_rate > 0.8 {
+        "正常".to_string()
+    } else if success_rate > 0.5 {
+        "警告".to_string()
+    } else {
+        "异常".to_string()
+    };
+    
+    info!(
+        "房间系统状态查询: 健康={}, 活跃任务={}, 缓存大小={}, 命中率={:.2}%",
+        system_health, active_tasks, cache_status.geometry_cache_size, cache_status.hit_rate * 100.0
+    );
     
     Ok(Json(RoomSystemStatusResponse {
-        system_health: "正常".to_string(), // TODO: 实际健康检查
+        system_health,
         metrics,
-        active_tasks: 0, // TODO: 获取实际活跃任务数
-        cache_status: CacheStatus {
-            geometry_cache_size: 0, // TODO: 获取实际缓存大小
-            query_cache_size: 0,
-            hit_rate: 0.85, // TODO: 获取实际命中率
-        },
+        active_tasks,
+        cache_status,
     }))
 }
 

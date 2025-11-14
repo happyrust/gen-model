@@ -423,11 +423,11 @@ fn step3_parameter_configuration() -> String {
                 <div class="flex flex-wrap items-center gap-6">
                     <label class="inline-flex items-center">
                         <input type="radio" class="mr-2" name="taskMode" value="ParseOnly" x-model="taskMode">
-                        仅解析（不进行建模与空间树）
+                        仅解析（不进行建模与房间计算）
                     </label>
                     <label class="inline-flex items-center">
                         <input type="radio" class="mr-2" name="taskMode" value="FullGeneration" x-model="taskMode">
-                        解析 + 建模 + 空间树
+                        解析 + 建模 + 房间计算
                     </label>
                 </div>
             </div>
@@ -689,7 +689,7 @@ fn step3_parameter_configuration() -> String {
                     </label>
                     <label class="flex items-center">
                         <input type="checkbox" x-model="config.gen_spatial_tree" class="mr-2 rounded border-gray-300 text-blue-600">
-                        <span class="text-sm text-gray-700">生成空间树</span>
+                        <span class="text-sm text-gray-700">启用房间计算</span>
                     </label>
                     <label class="flex items-center">
                         <input type="checkbox" x-model="config.apply_boolean_operation" class="mr-2 rounded border-gray-300 text-blue-600">
@@ -765,7 +765,7 @@ fn step3_parameter_configuration() -> String {
                         <p><strong>生成选项:</strong></p>
                         <p>• 生成模型: <span x-text="config.gen_model ? '是' : '否'"></span></p>
                         <p>• 生成网格: <span x-text="config.gen_mesh ? '是' : '否'"></span></p>
-                        <p>• 生成空间树: <span x-text="config.gen_spatial_tree ? '是' : '否'"></span></p>
+                        <p>• 启用房间计算: <span x-text="config.gen_spatial_tree ? '是' : '否'"></span></p>
                         <p>• 并行处理: <span x-text="parallelProcessing ? '是' : '否'"></span></p>
                     </div>
                 </div>
@@ -818,7 +818,7 @@ fn step4_task_execution() -> String {
                         <p><strong>生成选项:</strong></p>
                         <p>• 生成模型: <span x-text="config.gen_model ? '是' : '否'"></span></p>
                         <p>• 生成网格: <span x-text="config.gen_mesh ? '是' : '否'"></span></p>
-                        <p>• 生成空间树: <span x-text="config.gen_spatial_tree ? '是' : '否'"></span></p>
+                        <p>• 启用房间计算: <span x-text="config.gen_spatial_tree ? '是' : '否'"></span></p>
                         <p>• 并行处理: <span x-text="parallelProcessing ? '是' : '否'"></span></p>
                     </div>
                 </div>

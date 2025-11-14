@@ -7,7 +7,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test-xkt": "cd tests && npm test",
-    "test-xkt-auto": "./tests/run-test.sh"
+    "test-xkt-auto": "./tests/run-test.sh",
+    "test-room-api": "node test_room_api.js",
+    "test-real-room-api": "node test_real_room_api.js"
   },
   "keywords": [
     "xkt",
@@ -19,6 +21,7 @@
   "dependencies": {
     "@xeokit/xeokit-convert": "^1.3.1",
     "@xeokit/xeokit-sdk": "^2.6.7",
+    "axios": "^1.6.0",
     "canvas": "^2.11.2",
     "cors": "^2.8.5",
     "express": "^5.1.0",

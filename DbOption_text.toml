@@ -23,7 +23,7 @@ module = "DESI"
 gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
-#是否生成房间树
+#是否启用房间计算
 gen_spatial_tree = false
 load_spatial_tree = false
 save_spatial_tree_to_db = true

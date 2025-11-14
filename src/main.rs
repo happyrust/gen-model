@@ -95,6 +95,8 @@ use crate::cli_modes::{
 };
 #[cfg(not(feature = "gui"))]
 use aios_core::{DBType, init_surreal, query_mdb_db_nums};
+#[cfg(not(feature = "gui"))]
+use aios_core::geometry::csg::clear_ploop_debug_cache;
 #[cfg(feature = "gui")]
 use aios_database::gui;
 #[cfg(not(feature = "gui"))]
@@ -435,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
     // ========== 首先处理 --debug-model 参数（必须在所有导出逻辑之前） ==========
     let debug_model_refnos = if debug_model_requested {
         aios_database::fast_model::set_debug_model_enabled(true);
+        clear_ploop_debug_cache(); // 清理PLOOP调试文件缓存，允许重新生成
         println!("✅ 已启用 debug_model 调试信息打印");
 
         if !db_option_ext.inner.gen_mesh {
