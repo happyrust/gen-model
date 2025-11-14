@@ -91,6 +91,8 @@ pub struct RoomComputeConfig {
     pub batch_size: Option<usize>,
     /// 验证选项
     pub validation_options: ValidationOptions,
+    /// 模型生成选项
+    pub model_generation: ModelGenerationOptions,
 }
 
 /// 验证选项
@@ -99,6 +101,51 @@ pub struct ValidationOptions {
     pub check_room_codes: bool,
     pub check_spatial_consistency: bool,
     pub check_reference_integrity: bool,
+}
+
+/// 模型生成选项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelGenerationOptions {
+    /// 是否生成模型
+    pub generate_model: bool,
+    /// 是否生成网格
+    pub generate_mesh: bool,
+    /// 是否生成空间树
+    pub generate_spatial_tree: bool,
+    /// 是否应用布尔运算
+    pub apply_boolean_operation: bool,
+    /// 网格容差比例
+    pub mesh_tolerance_ratio: f64,
+    /// 输出格式
+    pub output_formats: Vec<ModelOutputFormat>,
+    /// 模型质量级别
+    pub quality_level: ModelQuality,
+}
+
+/// 模型输出格式
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModelOutputFormat {
+    /// XKT 格式
+    Xkt,
+    /// GLTF 格式
+    Gltf,
+    /// GLB 格式
+    Glb,
+    /// OBJ 格式
+    Obj,
+}
+
+/// 模型质量级别
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModelQuality {
+    /// 低质量 (快速预览)
+    Low,
+    /// 中等质量 (平衡)
+    Medium,
+    /// 高质量 (精细)
+    High,
+    /// 超高质量 (最佳)
+    Ultra,
 }
 
 /// 房间计算结果
