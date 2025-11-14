@@ -512,7 +512,7 @@ pub async fn gen_inst_meshes(
                             non_scalable_geo,
                             refno_for_mesh,
                         ) {
-                            Some(csg_mesh) => {
+                            Some(csg_mesh) => {  
                                 // 构造带 LOD 后缀的文件名，保持所有 LOD 级别命名一致
                                 let mesh_filename =
                                     format!("{}_{:?}", mesh_id, precision.default_lod);
