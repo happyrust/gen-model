@@ -149,6 +149,12 @@ async fn main() -> anyhow::Result<()> {
                 .num_args(0..),
         )
         .arg(
+            Arg::new("debug-model-errors-only")
+                .long("debug-model-errors-only")
+                .help("Only log errors during model generation (reduces log verbosity)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("capture")
                 .long("capture")
                 .help("After model generation, export OBJ and capture screenshots (optionally provide output directory)")
@@ -370,6 +376,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建自定义的 DbOptionExt
     let mut db_option_ext = get_db_option_ext_from_path(config_path)?;
+    
+    // 调试：显示配置加载结果
+    println!("🔧 配置加载完成:");
+    println!("   - 配置文件路径: {}", config_path);
+    println!("   - full_noun_enabled_categories: {:?}", db_option_ext.full_noun_enabled_categories);
+    println!("   - full_noun_excluded_nouns: {:?}", db_option_ext.full_noun_excluded_nouns);
 
     // 设置 Full Noun 模式环境变量
     if db_option_ext.full_noun_mode {
@@ -380,13 +392,20 @@ async fn main() -> anyhow::Result<()> {
     }
     let config_debug_refnos = db_option_ext.inner.debug_model_refnos.clone();
     let debug_model_requested = matches.contains_id("debug-model");
+    let debug_model_errors_only = matches.get_flag("debug-model-errors-only");
 
     if !debug_model_requested && db_option_ext.inner.debug_model_refnos.is_some() {
         println!("ℹ️ 未开启调试模式，本次运行将忽略配置中的 debug_model_refnos");
     }
     if !debug_model_requested {
-        aios_database::fast_model::set_debug_model_enabled(false);
+        aios_core::set_debug_model_enabled(false);
         db_option_ext.inner.debug_model_refnos = None;
+    }
+
+    // 设置错误日志模式
+    if debug_model_errors_only {
+        aios_database::fast_model::set_debug_model_errors_only(true);
+        println!("✅ 启用仅错误日志模式");
     }
 
     // 获取通用参数
@@ -444,7 +463,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ========== 首先处理 --debug-model 参数（必须在所有导出逻辑之前） ==========
     let debug_model_refnos = if debug_model_requested {
-        aios_database::fast_model::set_debug_model_enabled(true);
+        aios_core::set_debug_model_enabled(true);
         clear_ploop_debug_cache(); // 清理PLOOP调试文件缓存，允许重新生成
         println!("✅ 已启用 debug_model 调试信息打印");
 

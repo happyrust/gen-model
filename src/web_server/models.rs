@@ -1440,3 +1440,25 @@ pub struct RoomRelationUpdateStatus {
     /// 状态消息
     pub message: String,
 }
+
+/// 房间关系重建请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomRelationsRebuildRequest {
+    /// 房间号列表（可选，为空则处理所有房间）
+    #[serde(default)]
+    pub room_numbers: Option<Vec<String>>,
+    /// 是否强制重建（默认 true）
+    #[serde(default = "default_true")]
+    pub force_rebuild: bool,
+}
+
+/// 房间计算通用响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomComputeResponse {
+    /// 是否成功
+    pub success: bool,
+    /// 任务ID
+    pub task_id: String,
+    /// 提示信息
+    pub message: String,
+}

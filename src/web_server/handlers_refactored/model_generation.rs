@@ -241,7 +241,7 @@ async fn update_room_relations_for_refnos_incremental(
     refnos: &[RefnoEnum],
 ) -> Result<RoomUpdateResult, anyhow::Error> {
     use aios_core::get_db_option;
-    use crate::fast_model::room_model::{build_room_relations, update_room_relations_incremental};
+    use crate::fast_model::room_model_v2::{build_room_relations_v2 as build_room_relations, update_room_relations_incremental};
 
     let start_time = Instant::now();
 

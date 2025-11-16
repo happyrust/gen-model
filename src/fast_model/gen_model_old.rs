@@ -8,7 +8,7 @@ use crate::fast_model::{
     process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
 use crate::fast_model::{capture::capture_refnos_if_enabled, debug_model_debug, debug_model_trace};
-use crate::{e3d_dbg, e3d_info, e3d_trace};
+use crate::{e3d_dbg, e3d_info, e3d_trace, smart_debug_model, smart_debug_error};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{
@@ -139,15 +139,17 @@ async fn process_cate_refno_page(
 #[derive(Debug, Clone)]
 pub struct FullNounCollection {
     /// 按类别分组的 Noun 列表
-    pub cate_nouns: Vec<&'static str>,
-    pub loop_owner_nouns: Vec<&'static str>,
-    pub prim_nouns: Vec<&'static str>,
+    pub cate_nouns: Vec<String>,
+    pub loop_owner_nouns: Vec<String>,
+    pub prim_nouns: Vec<String>,
+    /// BRAN/HANG 特殊类型（需要单独处理）
+    pub bran_hanger_nouns: Vec<String>,
     /// 所有 Noun 的去重集合（用于快速查找）
-    pub all_nouns: HashSet<&'static str>,
+    pub all_nouns: HashSet<String>,
 }
 
 impl FullNounCollection {
-    /// 聚合并去重所有 Noun 列表
+    /// 聚合并去重所有 Noun 列表，支持类型过滤
     ///
     /// 从 pdms_types 中的常量收集：
     /// - USE_CATE_NOUN_NAMES
@@ -155,43 +157,148 @@ impl FullNounCollection {
     /// - GNERAL_PRIM_NOUN_NAMES
     ///
     /// 可选的 extra_nouns 用于扩展（调试或特殊场景）
-    pub fn collect(extra_nouns: Option<&[&'static str]>) -> Self {
+    /// 
+    /// # 参数
+    /// * `extra_nouns` - 可选的额外 Noun 列表
+    /// * `db_option_ext` - 数据库配置扩展，用于类型过滤
+    pub fn collect(extra_nouns: Option<&[&'static str]>, db_option_ext: &crate::options::DbOptionExt) -> Self {
         let mut all_nouns = HashSet::new();
-
-        // 收集 cate nouns
+        
+        // 检查是否配置了具体的 noun 名称
+        let has_specific_nouns = !db_option_ext.full_noun_enabled_categories.is_empty() && 
+            db_option_ext.full_noun_enabled_categories.iter().any(|cat| {
+                !matches!(cat.to_lowercase().as_str(), "cate" | "loop" | "prim")
+            });
+        
         let mut cate_nouns = Vec::new();
-        for &noun in USE_CATE_NOUN_NAMES.iter() {
-            if all_nouns.insert(noun) {
-                cate_nouns.push(noun);
-            }
-        }
-
-        // 收集 loop owner nouns
         let mut loop_owner_nouns = Vec::new();
-        for &noun in GNERAL_LOOP_OWNER_NOUN_NAMES.iter() {
-            if all_nouns.insert(noun) {
-                loop_owner_nouns.push(noun);
-            }
-        }
-
-        // 收集 prim nouns
         let mut prim_nouns = Vec::new();
-        for &noun in GNERAL_PRIM_NOUN_NAMES.iter() {
-            if all_nouns.insert(noun) {
-                prim_nouns.push(noun);
+        let mut bran_hanger_nouns = Vec::new();
+        
+        if has_specific_nouns {
+            // 如果配置了具体的 noun 名称，只处理这些 nouns
+            for enabled_noun in &db_option_ext.full_noun_enabled_categories {
+                let noun_str = enabled_noun.as_str();
+                
+                // 检查是否被排除
+                if db_option_ext.is_noun_excluded(noun_str) {
+                    continue;
+                }
+                
+                // 检查这个 noun 属于哪个类别
+                if noun_str == "BRAN" || noun_str == "HANG" {
+                    // BRAN/HANG 是特殊类型，单独收集
+                    if all_nouns.insert(noun_str.to_string()) {
+                        bran_hanger_nouns.push(noun_str.to_string());
+                    }
+                } else if USE_CATE_NOUN_NAMES.contains(&noun_str) {
+                    if all_nouns.insert(noun_str.to_string()) {
+                        cate_nouns.push(noun_str.to_string());
+                    }
+                } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&noun_str) {
+                    if all_nouns.insert(noun_str.to_string()) {
+                        loop_owner_nouns.push(noun_str.to_string());
+                    }
+                } else if GNERAL_PRIM_NOUN_NAMES.contains(&noun_str) {
+                    if all_nouns.insert(noun_str.to_string()) {
+                        prim_nouns.push(noun_str.to_string());
+                    }
+                }
+            }
+        } else {
+            // 原有逻辑：从常量数组中收集所有 nouns
+            
+            // 收集 cate nouns（应用类型过滤）
+            for &noun in USE_CATE_NOUN_NAMES.iter() {
+                // 检查是否被排除
+                if db_option_ext.is_noun_excluded(noun) {
+                    continue;
+                }
+                
+                // 检查是否在启用的类别中
+                let should_include = if db_option_ext.full_noun_enabled_categories.is_empty() {
+                    true // 启用所有类别
+                } else {
+                    // 检查是否启用了 cate 类别
+                    db_option_ext.is_noun_category_enabled("cate") 
+                        || db_option_ext.is_noun_category_enabled("CATE")
+                };
+                
+                if should_include && all_nouns.insert(noun.to_string()) {
+                    cate_nouns.push(noun.to_string());
+                }
+            }
+
+            // 收集 loop owner nouns（应用类型过滤）
+            for &noun in GNERAL_LOOP_OWNER_NOUN_NAMES.iter() {
+                // 检查是否被排除
+                if db_option_ext.is_noun_excluded(noun) {
+                    continue;
+                }
+                
+                // 检查是否在启用的类别中
+                let should_include = if db_option_ext.full_noun_enabled_categories.is_empty() {
+                    true // 启用所有类别
+                } else {
+                    // 检查是否启用了 loop 类别
+                    db_option_ext.is_noun_category_enabled("loop") 
+                        || db_option_ext.is_noun_category_enabled("LOOP")
+                };
+                
+                if should_include && all_nouns.insert(noun.to_string()) {
+                    loop_owner_nouns.push(noun.to_string());
+                }
+            }
+
+            // 收集 prim nouns（应用类型过滤）
+            for &noun in GNERAL_PRIM_NOUN_NAMES.iter() {
+                // 检查是否被排除
+                if db_option_ext.is_noun_excluded(noun) {
+                    continue;
+                }
+                
+                // 检查是否在启用的类别中
+                let should_include = if db_option_ext.full_noun_enabled_categories.is_empty() {
+                    true // 启用所有类别
+                } else {
+                    // 检查是否启用了 prim 类别
+                    db_option_ext.is_noun_category_enabled("prim") 
+                        || db_option_ext.is_noun_category_enabled("PRIM")
+                };
+                
+                if should_include && all_nouns.insert(noun.to_string()) {
+                    prim_nouns.push(noun.to_string());
+                }
+            }
+
+            // 默认情况下总是包含 BRAN 和 HANG（除非被明确排除）
+            for &noun in ["BRAN", "HANG"].iter() {
+                // 检查是否被排除
+                if db_option_ext.is_noun_excluded(noun) {
+                    continue;
+                }
+                
+                // 检查是否在启用的类别中
+                let should_include = if db_option_ext.full_noun_enabled_categories.is_empty() {
+                    true // 启用所有类别时，默认包含 BRAN/HANG
+                } else {
+                    // 检查是否明确指定了 BRAN 或 HANG，或者启用了 cate 类别
+                    db_option_ext.full_noun_enabled_categories.contains(&noun.to_string()) 
+                        || db_option_ext.is_noun_category_enabled("cate")
+                        || db_option_ext.is_noun_category_enabled("CATE")
+                };
+                
+                if should_include && all_nouns.insert(noun.to_string()) {
+                    bran_hanger_nouns.push(noun.to_string());
+                }
             }
         }
 
-        // 添加额外的 nouns（如果提供）
-        if let Some(extras) = extra_nouns {
-            for &noun in extras {
-                all_nouns.insert(noun);
-                // 简单策略：额外的 noun 默认归入 cate 类别
-                // 实际使用时可以根据需要调整
-                if !cate_nouns.contains(&noun)
-                    && !loop_owner_nouns.contains(&noun)
-                    && !prim_nouns.contains(&noun) {
-                    cate_nouns.push(noun);
+        // 处理额外的 nouns（如果有）
+        if let Some(extra_nouns) = extra_nouns {
+            for &noun in extra_nouns {
+                if all_nouns.insert(noun.to_string()) {
+                    cate_nouns.push(noun.to_string());
                 }
             }
         }
@@ -200,17 +307,18 @@ impl FullNounCollection {
             cate_nouns,
             loop_owner_nouns,
             prim_nouns,
+            bran_hanger_nouns,
             all_nouns,
         }
     }
 
     /// 根据 Noun 名称判断其类别
     pub fn get_category(&self, noun: &str) -> Option<NounCategory> {
-        if self.cate_nouns.contains(&noun) {
+        if self.cate_nouns.iter().any(|n| n == noun) {
             Some(NounCategory::Cate)
-        } else if self.loop_owner_nouns.contains(&noun) {
+        } else if self.loop_owner_nouns.iter().any(|n| n == noun) {
             Some(NounCategory::LoopOwner)
-        } else if self.prim_nouns.contains(&noun) {
+        } else if self.prim_nouns.iter().any(|n| n == noun) {
             Some(NounCategory::Prim)
         } else {
             None
@@ -266,7 +374,7 @@ impl DbModelInstRefnos {
                 let target_refnos = match get_children_batch(&bran_refnos).await {
                     Ok(refnos) => refnos,
                     Err(e) => {
-                        eprintln!("查询bran_hanger子节点refnos失败：{}", e);
+                        smart_debug_error!("查询bran_hanger子节点refnos失败：{}", e);
                         return;
                     }
                 };
@@ -580,7 +688,7 @@ fn compute_vertex_normals(vertices: &[Vec3], indices: &[u32]) -> Vec<f32> {
 /// * `anyhow::Result<bool>` - 返回生成结果，成功返回true，失败返回错误
 pub async fn gen_all_geos_data(
     manual_refnos: Vec<RefnoEnum>,
-    db_option: &DbOption,
+    db_option_ext: &crate::options::DbOptionExt,
     incr_updates: Option<IncrGeoUpdateLog>,
     target_sesno: Option<u32>,
 ) -> anyhow::Result<bool> {
@@ -603,7 +711,7 @@ pub async fn gen_all_geos_data(
                     }
                 }
                 Err(e) => {
-                    eprintln!("获取 sesno {} 的变更失败: {}", sesno, e);
+                    smart_debug_error!("获取 sesno {} 的变更失败: {}", sesno, e);
                     return Err(e);
                 }
             }
@@ -619,8 +727,8 @@ pub async fn gen_all_geos_data(
         manual_refnos.len(),
         incr_count,
         target_sesno,
-        db_option.gen_mesh,
-        db_option.gen_model
+        db_option_ext.inner.gen_mesh,
+        db_option_ext.inner.gen_model
     );
 
     // 检查是否启用 Full Noun 模式（优先级最高）
@@ -633,7 +741,7 @@ pub async fn gen_all_geos_data(
         // Full Noun 模式：直接按 Noun 全库扫描，忽略增量更新
         println!("[gen_model] 进入 Full Noun 模式（忽略增量更新）");
 
-        if db_option.manual_db_nums.is_some() || db_option.exclude_db_nums.is_some() {
+        if db_option_ext.inner.manual_db_nums.is_some() || db_option_ext.inner.exclude_db_nums.is_some() {
             println!(
                 "[gen_model] 警告: Full Noun 模式下 manual_db_nums 和 exclude_db_nums 配置将被忽略"
             );
@@ -646,7 +754,7 @@ pub async fn gen_all_geos_data(
         }
 
         let full_start = Instant::now();
-        let db_refnos = gen_full_noun_geos(db_option, None).await?;
+        let db_refnos = gen_full_noun_geos(db_option_ext, None).await?;
 
         println!(
             "[gen_model] Full Noun 模式 insts 入库完成，用时 {} ms",
@@ -654,22 +762,22 @@ pub async fn gen_all_geos_data(
         );
 
         // 可选执行 mesh 和布尔运算
-        if db_option.gen_mesh {
+        if db_option_ext.inner.gen_mesh {
             let mesh_start = Instant::now();
             println!("[gen_model] Full Noun 模式开始生成三角网格");
             db_refnos
-                .execute_gen_inst_meshes(Some(Arc::new(db_option.clone())))
+                .execute_gen_inst_meshes(Some(Arc::new(db_option_ext.inner.clone())))
                 .await;
             println!(
                 "[gen_model] Full Noun 模式三角网格生成完成，用时 {} ms",
                 mesh_start.elapsed().as_millis()
             );
 
-            if db_option.apply_boolean_operation {
+            if db_option_ext.inner.apply_boolean_operation {
                 let bool_start = Instant::now();
                 println!("[gen_model] Full Noun 模式开始布尔运算");
                 db_refnos
-                    .execute_boolean_meshes(Some(Arc::new(db_option.clone())))
+                    .execute_boolean_meshes(Some(Arc::new(db_option_ext.inner.clone())))
                     .await;
                 println!(
                     "[gen_model] Full Noun 模式布尔运算完成，用时 {} ms",
@@ -688,7 +796,7 @@ pub async fn gen_all_geos_data(
 
     let is_incr_update = final_incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
-    let has_debug = db_option.debug_model_refnos.is_some();
+    let has_debug = db_option_ext.inner.debug_model_refnos.is_some();
 
     if is_incr_update || has_manual_refnos || has_debug {
         let mode_label = if is_incr_update {
@@ -703,10 +811,10 @@ pub async fn gen_all_geos_data(
         } else if has_manual_refnos {
             manual_refnos.len()
         } else {
-            db_option
+            db_option_ext.inner
                 .debug_model_refnos
                 .as_ref()
-                .map(|items| items.len())
+                .map(|v| v.len())
                 .unwrap_or(0)
         };
         println!(
@@ -720,7 +828,7 @@ pub async fn gen_all_geos_data(
         // ⚠️  使用 replace_mesh 配置项控制是否替换已存在的 inst_relate
         // plant3d 场景下默认不启用，避免删除已存在的 inst_relate
         // 即使开启了 debug_model_debug，也默认不 replace exist
-        let replace_exist = db_option.is_replace_mesh();
+        let replace_exist = db_option_ext.inner.is_replace_mesh();
 
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
@@ -732,7 +840,7 @@ pub async fn gen_all_geos_data(
         let target_root_refnos = gen_geos_data(
             None,
             manual_refnos.clone(),
-            db_option,
+            &db_option_ext.inner,
             final_incr_updates.clone(),
             sender.clone(),
             target_sesno,
@@ -745,13 +853,13 @@ pub async fn gen_all_geos_data(
             mode_label,
             target_root_refnos.len()
         );
-        if db_option.gen_mesh {
+        if db_option_ext.inner.gen_mesh {
             let mesh_start = Instant::now();
             println!(
                 "[gen_model] 开始更新 {} 个根节点的 mesh 数据",
                 target_root_refnos.len()
             );
-            process_meshes_update_db_deep(db_option, &target_root_refnos)
+            process_meshes_update_db_deep(&db_option_ext.inner, &target_root_refnos)
                 .await
                 .expect("更新模型数据失败");
             println!(
@@ -760,19 +868,19 @@ pub async fn gen_all_geos_data(
             );
         }
 
-        if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, db_option).await {
-            eprintln!("[capture] 捕获截图失败: {}", err);
+        if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, &db_option_ext.inner).await {
+            smart_debug_error!("[capture] 捕获截图失败: {}", err);
         }
     } else {
         // 原有的按 dbno 循环生成路径
-        let dbnos = if db_option.manual_db_nums.is_some() {
-            db_option.manual_db_nums.clone().unwrap()
+        let dbnos = if db_option_ext.inner.manual_db_nums.is_some() {
+            db_option_ext.inner.manual_db_nums.clone().unwrap()
         } else {
             aios_core::query_mdb_db_nums(None, DBType::DESI).await?
         };
 
         // 过滤掉exclude_db_nums中的数据库编号
-        let dbnos = if let Some(exclude_nums) = &db_option.exclude_db_nums {
+        let dbnos = if let Some(exclude_nums) = &db_option_ext.inner.exclude_db_nums {
             dbnos
                 .into_iter()
                 .filter(|dbno| !exclude_nums.contains(dbno))
@@ -785,7 +893,7 @@ pub async fn gen_all_geos_data(
             "[gen_model] 进入全量生成路径，共 {} 个数据库待处理",
             dbnos.len()
         );
-        let db_option_arc = Arc::new(db_option.clone());
+        let db_option_arc = Arc::new(db_option_ext.inner.clone());
         if dbnos.is_empty() {
             println!("[gen_model] 未找到需要生成的数据库，直接结束");
         }
@@ -890,33 +998,58 @@ pub async fn gen_all_geos_data(
 /// 由于 Full Noun 模式跳过了 dbno 层级，某些需要预处理的数据（如 sjus_map、branch_map）
 /// 在此模式下会使用默认值或跳过相关逻辑。
 pub async fn gen_full_noun_geos(
-    db_option: &DbOption,
+    db_option_ext: &crate::options::DbOptionExt,
     extra_nouns: Option<&[&'static str]>,
 ) -> anyhow::Result<DbModelInstRefnos> {
-    use crate::options::DbOptionExt;
-
     let start_time = Instant::now();
-
-    // 从 DbOptionExt 获取 full noun 配置
-    let db_option_ext = DbOptionExt::from(db_option.clone());
     let max_concurrent = db_option_ext.get_full_noun_concurrency();
     let batch_size = db_option_ext.get_full_noun_batch_size();
     let batch_concurrency = max_concurrent.max(1);
 
-    println!(
+    smart_debug_model!(
         "[gen_full_noun_geos] 启动 Full Noun 模式，并发度: {}",
         max_concurrent
     );
+    
+    // 显示过滤配置
+    println!("[gen_full_noun_geos] 配置检查:");
+    println!("[gen_full_noun_geos] - full_noun_enabled_categories: {:?}", db_option_ext.full_noun_enabled_categories);
+    println!("[gen_full_noun_geos] - full_noun_excluded_nouns: {:?}", db_option_ext.full_noun_excluded_nouns);
+    println!("[gen_full_noun_geos] - is_empty: {}", db_option_ext.full_noun_enabled_categories.is_empty());
+    
+    // 检查是否有具体 noun 名称
+    let has_specific = !db_option_ext.full_noun_enabled_categories.is_empty() && 
+        db_option_ext.full_noun_enabled_categories.iter().any(|cat| {
+            let is_specific = !matches!(cat.to_lowercase().as_str(), "cate" | "loop" | "prim");
+            println!("[gen_full_noun_geos] - 检查 '{}': is_specific={}", cat, is_specific);
+            is_specific
+        });
+    println!("[gen_full_noun_geos] - has_specific_nouns: {}", has_specific);
 
-    // 1. 聚合 Noun 列表
-    let noun_collection = FullNounCollection::collect(extra_nouns);
+    // 1. 聚合 Noun 列表（应用类型过滤）
+    let noun_collection = FullNounCollection::collect(extra_nouns, &db_option_ext);
     println!(
-        "[gen_full_noun_geos] Noun 统计: cate={}, loop={}, prim={}, 总计={}",
+        "[gen_full_noun_geos] Noun 统计: cate={}, loop={}, prim={}, bran/hang={}, 总计={}",
         noun_collection.cate_nouns.len(),
         noun_collection.loop_owner_nouns.len(),
         noun_collection.prim_nouns.len(),
+        noun_collection.bran_hanger_nouns.len(),
         noun_collection.total_count()
     );
+    
+    // 显示具体的 noun 列表
+    if !noun_collection.cate_nouns.is_empty() {
+        println!("[gen_full_noun_geos] CATE nouns: {:?}", noun_collection.cate_nouns);
+    }
+    if !noun_collection.loop_owner_nouns.is_empty() {
+        println!("[gen_full_noun_geos] LOOP nouns: {:?}", noun_collection.loop_owner_nouns);
+    }
+    if !noun_collection.prim_nouns.is_empty() {
+        println!("[gen_full_noun_geos] PRIM nouns: {:?}", noun_collection.prim_nouns);
+    }
+    if !noun_collection.bran_hanger_nouns.is_empty() {
+        println!("[gen_full_noun_geos] BRAN/HANG nouns: {:?}", noun_collection.bran_hanger_nouns);
+    }
 
     // 2. 创建 flume 通道
     let channel_cap = batch_concurrency * 2;
@@ -938,7 +1071,7 @@ pub async fn gen_full_noun_geos(
     let all_prim_refnos = Arc::new(RwLock::new(HashSet::<RefnoEnum>::new()));
 
     // 4. 顺序处理各类别任务，内部使用批次并发
-    let db_option_arc = Arc::new(db_option.clone());
+    let db_option_arc = Arc::new(db_option_ext.inner.clone());
     let loop_sjus_map_arc = Arc::new(DashMap::new()); // Full Noun 模式下使用空的 sjus_map
 
     process_cate_nouns(
@@ -972,6 +1105,114 @@ pub async fn gen_full_noun_geos(
         all_prim_refnos.clone(),
     )
     .await?;
+
+    // 处理 BRAN/HANG 特殊类型
+    if !noun_collection.bran_hanger_nouns.is_empty() {
+        println!(
+            "[gen_full_noun_geos] 开始处理 BRAN/HANG: {:?}",
+            noun_collection.bran_hanger_nouns
+        );
+        
+        let bran_start = Instant::now();
+        
+        // 查询所有 BRAN/HANG 类型的 refnos（全库范围）
+        let noun_strs: Vec<&str> = noun_collection.bran_hanger_nouns.iter().map(|s| s.as_str()).collect();
+        let bran_hanger_refnos = match query_by_noun_all_db(&noun_strs).await {
+            Ok(refnos) => {
+                println!("[gen_full_noun_geos] 查询到 {} 个 BRAN/HANG 实例", refnos.len());
+                refnos
+            }
+            Err(e) => {
+                println!("[gen_full_noun_geos] 查询 BRAN/HANG 失败: {}", e);
+                vec![]
+            }
+        };
+        
+        if !bran_hanger_refnos.is_empty() {
+            let total_bran = bran_hanger_refnos.len();
+            println!("[gen_full_noun_geos] 开始分批处理 {} 个 BRAN/HANG...", total_bran);
+            
+            // 分批处理，每批 4 个 BRAN/HANG
+            let batch_size = 4;
+            let chunks: Vec<_> = bran_hanger_refnos.chunks(batch_size).collect();
+            let total_batches = chunks.len();
+            
+            for (batch_idx, chunk) in chunks.into_iter().enumerate() {
+                let batch_start = Instant::now();
+                let batch_num = batch_idx + 1;
+                
+                println!(
+                    "[gen_full_noun_geos] 处理 BRAN/HANG 批次 {}/{} ({}~{} 个)",
+                    batch_num,
+                    total_batches,
+                    batch_idx * batch_size + 1,
+                    (batch_idx * batch_size + chunk.len()).min(total_bran)
+                );
+                
+                // 1. 查询当前批次的子元素
+                let branch_refnos_map = DashMap::new();
+                let mut bran_comp_eles = HashSet::new();
+                
+                for &refno in chunk {
+                    match aios_core::collect_children_elements(refno, &[]).await {
+                        Ok(children) => {
+                            bran_comp_eles.extend(children.iter().map(|x| x.refno));
+                            branch_refnos_map.insert(refno, children);
+                        }
+                        Err(e) => {
+                            println!("[gen_full_noun_geos] 查询 {} 的子元素失败: {}", refno, e);
+                        }
+                    }
+                }
+                
+                println!(
+                    "[gen_full_noun_geos] 批次 {}: 查询到 {} 个 BRAN/HANG，{} 个子元素",
+                    batch_num,
+                    branch_refnos_map.len(),
+                    bran_comp_eles.len()
+                );
+                
+                // 2. 查询当前批次的元件库分组
+                let target_bran_reuse_cata_map = match aios_core::query_group_by_cata_hash(chunk).await {
+                    Ok(map) => {
+                        println!("[gen_full_noun_geos] 批次 {}: 查询到 {} 个元件库分组", batch_num, map.len());
+                        map
+                    }
+                    Err(e) => {
+                        println!("[gen_full_noun_geos] 批次 {}: 查询元件库分组失败: {}", batch_num, e);
+                        DashMap::new()
+                    }
+                };
+                
+                // 3. 调用 gen_cata_geos 处理当前批次
+                println!("[gen_full_noun_geos] 批次 {}: 开始生成几何体...", batch_num);
+                match cata_model::gen_cata_geos(
+                    db_option_arc.clone(),
+                    Arc::new(target_bran_reuse_cata_map),
+                    Arc::new(branch_refnos_map),
+                    loop_sjus_map_arc.clone(),
+                    sender.clone(),
+                ).await {
+                    Ok(_) => {
+                        println!(
+                            "[gen_full_noun_geos] 批次 {}/{} 完成，用时 {} ms",
+                            batch_num,
+                            total_batches,
+                            batch_start.elapsed().as_millis()
+                        );
+                    }
+                    Err(e) => {
+                        println!("[gen_full_noun_geos] 批次 {} 处理失败: {}", batch_num, e);
+                    }
+                }
+            }
+            
+            println!(
+                "[gen_full_noun_geos] 所有 BRAN/HANG 批次处理完成，总用时 {} ms",
+                bran_start.elapsed().as_millis()
+            );
+        }
+    }
 
     // 7. 关闭 sender，等待入库任务完成
     drop(sender);
@@ -1057,8 +1298,8 @@ async fn process_cate_nouns(
     let page_size = ctx.batch_size.max(1);
 
     let mut total_instances = 0usize;
-    for &noun in cate_nouns.iter() {
-        let total = count_noun_all_db(noun)
+    for noun in cate_nouns.iter() {
+        let total = count_noun_all_db(&noun)
             .await
             .map_err(|e| anyhow!("统计 cate noun {} 失败: {}", noun, e))? as usize;
 
@@ -1074,7 +1315,7 @@ async fn process_cate_nouns(
 
         let mut processed = 0usize;
         while processed < total {
-            let refnos = query_noun_page_all_db(noun, processed, page_size)
+            let refnos = query_noun_page_all_db(&noun, processed, page_size)
                 .await
                 .map_err(|e| anyhow!("分页查询 cate noun {} 失败: {}", noun, e))?;
 
@@ -1133,8 +1374,8 @@ async fn process_loop_nouns(
     let page_size = ctx.batch_size.max(1);
 
     let mut total_instances = 0usize;
-    for &noun in loop_nouns.iter() {
-        let total = count_noun_all_db(noun)
+    for noun in loop_nouns.iter() {
+        let total = count_noun_all_db(&noun)
             .await
             .map_err(|e| anyhow!("统计 loop noun {} 失败: {}", noun, e))? as usize;
 
@@ -1150,7 +1391,7 @@ async fn process_loop_nouns(
 
         let mut processed = 0usize;
         while processed < total {
-            let refnos = query_noun_page_all_db(noun, processed, page_size)
+            let refnos = query_noun_page_all_db(&noun, processed, page_size)
                 .await
                 .map_err(|e| anyhow!("分页查询 loop noun {} 失败: {}", noun, e))?;
 
@@ -1208,8 +1449,8 @@ async fn process_prim_nouns(
     let page_size = ctx.batch_size.max(1);
 
     let mut total_instances = 0usize;
-    for &noun in prim_nouns.iter() {
-        let total = count_noun_all_db(noun)
+    for noun in prim_nouns.iter() {
+        let total = count_noun_all_db(&noun)
             .await
             .map_err(|e| anyhow!("统计 prim noun {} 失败: {}", noun, e))? as usize;
 

@@ -15,7 +15,7 @@ pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
 
     // 🔍 调试：记录正在查询哪个 design 元素的几何体
-    crate::fast_model::debug_model_debug!(
+    crate::smart_debug_model_debug!(
         "🔍 query_gm_params: 查询 design 元素 {} 的几何体",
         refno
     );
@@ -29,10 +29,10 @@ pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
     )
     .await
     .unwrap_or_default();
-    debug_model_trace!("children: {:?}", &children);
+    crate::smart_debug_model_trace!("children: {:?}", &children);
 
     // 🔍 调试：记录查询到的几何体数量
-    crate::fast_model::debug_model_debug!("   查询到 {} 个几何体", children.len());
+    crate::smart_debug_model_debug!("   查询到 {} 个几何体", children.len());
 
     for geo_am in children {
         //todo visible 不应该在这里执行过滤

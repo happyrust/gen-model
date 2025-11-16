@@ -23,7 +23,7 @@ async fn query_iparam_from_desi(desi_refno: RefnoEnum) -> anyhow::Result<Vec<f32
 ///收集SCOM的信息, 暂时慎用缓存
 pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) -> anyhow::Result<ScomInfo> {
     // ⚠️  调试模式下清除缓存，确保使用最新的参数
-    if crate::fast_model::is_debug_model_enabled() {
+    if aios_core::is_debug_model_enabled() {
         SCOM_INFO_MAP.remove(&cata_refno);
         debug_model_debug!("Cleared SCOM_INFO_MAP cache for {}", cata_refno);
     }
@@ -290,16 +290,16 @@ pub async fn resolve_desi_comp(
             }
         }
         Err(e) => {
-            debug_model_debug!("Failed to query IPARAM: {}", e);
+            crate::smart_debug_error!("Failed to query IPARAM: {}", e);
         }
     }
 
-    debug_model_debug!("=== DEBUG: CataContext for {} ===", desi_refno.to_string());
-    debug_model_debug!("Context entries count: {}", context.context.len());
-    debug_model_debug!("PARA string: {}", para_str);
-    debug_model_debug!("Parsed {} PARAM values", para_values.len());
+    crate::smart_debug_model_debug!("=== DEBUG: CataContext for {} ===", desi_refno.to_string());
+    crate::smart_debug_model_debug!("Context entries count: {}", context.context.len());
+    crate::smart_debug_model_debug!("PARA string: {}", para_str);
+    crate::smart_debug_model_debug!("Parsed {} PARAM values", para_values.len());
     // 打印所有 PARAM 相关的键值对
-    if crate::fast_model::is_debug_model_enabled() {
+    if aios_core::is_debug_model_enabled() {
         for entry in context.context.iter() {
             let key = entry.key();
             let value = entry.value();

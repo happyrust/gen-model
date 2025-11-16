@@ -1188,7 +1188,7 @@ async fn execute_room_regenerate(
     request: crate::web_server::models::RoomRegenerateRequest,
 ) {
     use crate::fast_model::gen_model::gen_all_geos_data;
-    use crate::fast_model::room_model::build_room_relations;
+    use crate::fast_model::room_model_v2::build_room_relations_v2 as build_room_relations;
     use crate::options::get_db_option_ext;
 
     info!("📋 开始执行房间模型重新生成任务: {}", task_id);
@@ -1423,6 +1423,148 @@ async fn finalize_task_failed(state: &RoomApiState, task_id: &str, error_message
     }
 }
 
+/// 只重建房间关系（不生成模型）API
+pub async fn rebuild_room_relations_only(
+    State(state): State<RoomApiState>,
+    Json(request): Json<crate::web_server::models::RoomRelationsRebuildRequest>,
+) -> Result<Json<crate::web_server::models::RoomComputeResponse>, StatusCode> {
+    use crate::fast_model::room_model_v2::rebuild_room_relations_for_rooms;
+    use crate::options::get_db_option_ext;
+
+    info!("🔄 收到房间关系重建请求");
+
+    let task_id = Uuid::new_v4().to_string();
+
+    // 创建任务
+    let task = RoomComputeTask {
+        id: task_id.clone(),
+        task_type: RoomTaskType::RebuildRelations,
+        status: TaskStatus::Pending,
+        progress: 0.0,
+        message: "任务已创建，准备重建房间关系...".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        config: RoomComputeConfig {
+            project_code: None,
+            room_keywords: vec![],
+            database_numbers: vec![],
+            force_rebuild: request.force_rebuild,
+            batch_size: Some(16),
+            validation_options: ValidationOptions {
+                check_room_codes: false,
+                check_spatial_consistency: false,
+                check_reference_integrity: false,
+                max_errors: 100,
+            },
+            model_generation: ModelGenerationOptions {
+                generate_model: false,
+                generate_mesh: false,
+                generate_spatial_tree: false,
+                apply_boolean_operation: false,
+                mesh_tolerance_ratio: 3.0,
+                output_formats: vec![],
+                quality_level: ModelQuality::Medium,
+            },
+        },
+        result: None,
+    };
+
+    // 添加到任务管理器
+    {
+        let mut task_manager = state.task_manager.write().await;
+        task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    }
+
+    // 异步执行任务
+    let state_clone = state.clone();
+    let request_clone = request.clone();
+    let task_id_clone = task_id.clone();
+    tokio::spawn(async move {
+        execute_rebuild_relations_only(state_clone, task_id_clone, request_clone).await;
+    });
+
+    Ok(Json(crate::web_server::models::RoomComputeResponse {
+        success: true,
+        task_id,
+        message: "房间关系重建任务已创建".to_string(),
+    }))
+}
+
+/// 执行只重建房间关系的任务
+async fn execute_rebuild_relations_only(
+    state: RoomApiState,
+    task_id: String,
+    request: crate::web_server::models::RoomRelationsRebuildRequest,
+) {
+    use crate::fast_model::room_model_v2::rebuild_room_relations_for_rooms;
+    use crate::options::get_db_option_ext;
+
+    info!("📋 开始执行房间关系重建任务: {}", task_id);
+
+    // 更新任务状态
+    let mut update_status = |progress: f32, message: String| {
+        let state_clone = state.clone();
+        let task_id_clone = task_id.clone();
+        tokio::spawn(async move {
+            let mut task_manager = state_clone.task_manager.write().await;
+            if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
+                task.progress = progress;
+                task.message = message;
+                task.updated_at = Utc::now();
+            }
+        });
+    };
+
+    update_status(10.0, "正在准备重建房间关系...".to_string());
+
+    let db_option_ext = get_db_option_ext();
+
+    // 执行重建
+    update_status(30.0, "正在重建房间关系...".to_string());
+
+    let start_time = std::time::Instant::now();
+    match rebuild_room_relations_for_rooms(request.room_numbers, &db_option_ext).await {
+        Ok(stats) => {
+            info!(
+                "✅ 房间关系重建完成: {} 个房间, {} 个面板, {} 个构件",
+                stats.total_rooms, stats.total_panels, stats.total_components
+            );
+
+            // 任务完成
+            let mut task_manager = state.task_manager.write().await;
+            if let Some(mut task) = task_manager.active_tasks.remove(&task_id) {
+                task.status = TaskStatus::Completed;
+                task.progress = 100.0;
+                task.message = format!(
+                    "✅ 房间关系重建完成！处理了 {} 个房间，{} 个面板，{} 个构件，耗时 {}ms",
+                    stats.total_rooms, stats.total_panels, stats.total_components, stats.build_time_ms
+                );
+                task.updated_at = Utc::now();
+                task.result = Some(RoomComputeResult {
+                    success: true,
+                    processed_count: stats.total_components,
+                    error_count: 0,
+                    warnings: vec![],
+                    errors: vec![],
+                    statistics: RoomStatistics {
+                        total_rooms: stats.total_rooms,
+                        total_panels: stats.total_panels,
+                        total_relations: stats.total_components,
+                        room_types: HashMap::new(),
+                        avg_confidence: 0.9,
+                    },
+                    duration_ms: stats.build_time_ms,
+                });
+                task_manager.task_history.push(task);
+            }
+        }
+        Err(e) => {
+            error!("❌ 房间关系重建失败: {}", e);
+            finalize_task_failed(&state, &task_id, format!("房间关系重建失败: {}", e)).await;
+        }
+    }
+}
+
 /// 创建房间 API 路由
 pub fn create_room_api_routes() -> Router<RoomApiState> {
     Router::new()
@@ -1439,6 +1581,9 @@ pub fn create_room_api_routes() -> Router<RoomApiState> {
 
         // 房间模型重新生成
         .route("/api/room/regenerate-models", post(regenerate_room_models))
+        
+        // 房间关系重建（不生成模型）
+        .route("/api/room/rebuild-relations", post(rebuild_room_relations_only))
 
         // 系统管理
         .route("/api/room/status", get(get_room_system_status))

@@ -1,5 +1,4 @@
 #V2
-SELECT count() FROM inst_relate;
 SELECT * FROM inst_relate LIMIT 3;
 SELECT * FROM inst_relate:17496_201377;
 INFO FOR TABLE inst_relate;
@@ -99,3 +98,4 @@ SELECT * FROM information_schema.tables WHERE table_schema = '1500';
 SELECT * FROM pdms_inst_tubis LIMIT 5;
 SELECT * FROM pdms_inst_geos LIMIT 3;
 SELECT * FROM pdms_inst_tubis LIMIT 3;
+DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;

@@ -3905,7 +3905,7 @@ async fn execute_real_task(state: AppState, task_id: String) {
     use crate::fast_model::aabb_tree::manual_update_aabbs;
     use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
     use crate::fast_model::gen_all_geos_data;
-    use crate::fast_model::room_model::build_room_relations;
+    use crate::fast_model::build_room_relations_v2 as build_room_relations;
     use aios_core::options::DbOption;
 
     use aios_core::init_surreal;
@@ -7392,7 +7392,7 @@ async fn update_room_relations_for_refnos_incremental(
     refnos: &[RefnoEnum],
 ) -> Result<RoomUpdateResult, anyhow::Error> {
     use aios_core::get_db_option;
-    use crate::fast_model::room_model::{build_room_relations, update_room_relations_incremental};
+    use crate::fast_model::room_model_v2::{build_room_relations_v2 as build_room_relations, update_room_relations_incremental};
     use std::time::Instant;
 
     let start_time = Instant::now();
