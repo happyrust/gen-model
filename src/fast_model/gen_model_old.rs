@@ -8,6 +8,7 @@ use crate::fast_model::{
     process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
 use crate::fast_model::{capture::capture_refnos_if_enabled, debug_model_debug, debug_model_trace};
+use crate::{e3d_dbg, e3d_info, e3d_trace};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{
@@ -432,17 +433,15 @@ pub(crate) fn is_e3d_trace_enabled() -> bool {
     }
 }
 
-// Macros for leveled debugging
-#[macro_export]
-// 临时注释：使用 gen_model/mod.rs 中的宏定义
+// Macros for leveled debugging - 使用 gen_model 中的定义
+// #[macro_export]
 // macro_rules! e3d_dbg {
 //     ($($arg:tt)*) => {{
-//         if crate::fast_model::gen_model::is_e3d_debug_enabled() {
+//         if crate::fast_model::gen_model_old::is_e3d_debug_enabled() {
 //             println!($($arg)*);
 //         }
 //     }};
 // }
-use crate::e3d_dbg;  // 使用模块导出的宏
 
 #[macro_export]
 macro_rules! e3d_info {
@@ -1369,7 +1368,7 @@ pub async fn gen_geos_data_by_dbnum(
                 let tuples: Vec<(RefnoEnum, f32, String)> = response.take(0)?;
                 // dbg!(&tuples[0]);
                 for (owner, height, sjus) in tuples {
-                    let off_z = cata_model::cal_sjus_value(&sjus, height);
+                    let off_z = crate::fast_model::gen_model::cate_helpers::cal_sjus_value(&sjus, height);
                     //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
                     //插入方向和偏移距离
                     loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
@@ -1782,7 +1781,7 @@ pub async fn gen_geos_data(
                 let owner = loop_att.get_owner();
                 let mut height = loop_att.get_f32("HEIG").unwrap_or_default();
                 let sjus = loop_att.get_str("SJUS").unwrap_or_default();
-                let off_z = cata_model::cal_sjus_value(sjus, height);
+                let off_z = crate::fast_model::gen_model::cate_helpers::cal_sjus_value(sjus, height);
                 //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
                 //插入方向和偏移距离
                 loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
