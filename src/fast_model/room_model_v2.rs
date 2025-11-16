@@ -414,16 +414,6 @@ async fn cleanup_geometry_cache(cache: &DashMap<String, Arc<PlantMesh>>) {
     info!("几何缓存清理完成，当前大小: {}", cache.len());
 }
 
-/// 执行精确几何检测（仅在启用 sqlite 特性时可用）
-/// 暂时注释掉，因为依赖不存在的 hybrid_index 模块
-// #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
-// async fn perform_precise_geometry_check(
-//     tri_mesh: &TriMesh,
-//     candidates: &[aios_core::spatial::hybrid_index::QueryResult],
-//     exclude_refnos: &HashSet<RefnoEnum>,
-//     panel_refno: RefnoEnum,
-//     inside_tol: f32,
-// ) -> anyhow::Result<HashSet<RefnoEnum>> {
 #[allow(dead_code)]
 async fn perform_precise_geometry_check_placeholder(
     tri_mesh: &TriMesh,

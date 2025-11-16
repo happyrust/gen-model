@@ -499,9 +499,12 @@ pub async fn gen_cata_geos(
                         let generic_type = get_generic_type(ele_refno).await.unwrap_or_default();
                         db_time_get_generic_type += t_get_generic_type.elapsed().as_millis();
 
+                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&ele_att).await;
                         let mut geos_info = EleGeosInfo {
                             refno: ele_refno,
                             sesno: ele_att.sesno(),
+                            owner_refno,
+                            owner_type,
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type,
@@ -706,9 +709,12 @@ pub async fn gen_cata_geos(
                             local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                         }
                     };
+                    let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&ele_att).await;
                     let geos_info = EleGeosInfo {
                         refno: ele_refno,
                         sesno: ele_att.sesno(),
+                        owner_refno,
+                        owner_type,
                         cata_hash: Some(cata_hash.clone()),
                         visible: true,
                         generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -878,11 +884,14 @@ pub async fn gen_cata_geos(
                 if dist > TUBI_TOL && current_tubing.is_dir_ok() {
                     if let Some(t) = current_tubing.get_transform() {
                         let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
                         tubi_shape_insts_data.insert_tubi(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
                                 sesno: branch_att.sesno(),
+                                owner_refno,
+                                owner_type,
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
                                 generic_type: get_generic_type(branch_refno)
@@ -1011,11 +1020,14 @@ pub async fn gen_cata_geos(
                                     if let Some(t) = current_tubing.get_transform() {
                                         let aabb =
                                             shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
                                         tubi_shape_insts_data.insert_tubi(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
                                                 sesno: branch_att.sesno(),
+                                                owner_refno,
+                                                owner_type,
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
                                                 generic_type: get_generic_type(
@@ -1130,11 +1142,14 @@ pub async fn gen_cata_geos(
                         }
                         if let Some(t) = current_tubing.get_transform() {
                             let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                            let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
                             tubi_shape_insts_data.insert_tubi(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
                                     sesno: branch_att.sesno(),
+                                    owner_refno,
+                                    owner_type,
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
                                     generic_type: get_generic_type(current_tubing.leave_refno)

@@ -140,9 +140,12 @@ pub async fn gen_prim_geos(
 
                 let attr = aios_core::get_named_attmap(refno).await.unwrap_or_default();
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&attr).await;
                 let mut geos_info = EleGeosInfo {
                     refno,
                     sesno: attr.sesno(),
+                    owner_refno,
+                    owner_type,
                     visible,
                     generic_type: get_generic_type(refno).await.unwrap_or_default(),
                     aabb: None,

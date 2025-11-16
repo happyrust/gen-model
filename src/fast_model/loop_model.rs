@@ -132,9 +132,12 @@ pub async fn gen_loop_geos(
                         );
                     }
                 }
+                let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&target_att).await;
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
                     sesno: target_att.sesno(),
+                    owner_refno,
+                    owner_type,
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
