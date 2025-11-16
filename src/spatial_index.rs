@@ -505,6 +505,52 @@ impl SqliteSpatialIndex {
         Ok(best)
     }
 
+    /// 球形范围查询，返回中心点一定半径内的构件
+    #[cfg(feature = "sqlite-index")]
+    pub fn query_within_radius(
+        &self,
+        center: Point3<f32>,
+        radius: f32,
+        opts: &QueryOptions,
+    ) -> Result<Vec<SpatialHit>> {
+        if radius <= 0.0 {
+            return Ok(Vec::new());
+        }
+
+        let mut local_opts = opts.clone();
+        local_opts.include_bbox = true;
+        local_opts.limit = None;
+
+        let extent = Vector3::new(radius, radius, radius);
+        let query_bb = Aabb::new((center - extent).into(), (center + extent).into());
+        let mut hits = self.query_intersect_advanced(&query_bb, &local_opts)?;
+
+        let max_distance = radius + opts.tolerance.max(0.0);
+        for hit in hits.iter_mut() {
+            if let Some(bb) = &hit.bbox {
+                hit.distance = Some(distance_point_aabb(center, bb));
+            } else if let Some(bb) = self.get_aabb(hit.refno)? {
+                hit.distance = Some(distance_point_aabb(center, &bb));
+                hit.bbox = Some(bb);
+            }
+        }
+
+        hits.retain(|hit| hit.distance.map(|d| d <= max_distance).unwrap_or(false));
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if let Some(limit) = opts.limit {
+            if hits.len() > limit {
+                hits.truncate(limit);
+            }
+        }
+
+        Ok(hits)
+    }
+
     /// 射线相交
     #[cfg(feature = "sqlite-index")]
     fn query_ray_internal(

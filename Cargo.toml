@@ -95,10 +95,16 @@ parry2d = { version = "0.25.0", features = [
     "serde-serialize",
 ] }
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../rs-core", default-features = false, features = [ "web_server"] }
+aios_core = { path = "../rs-core", default-features = false, features = [
+    "web_server",
+    "bevy_transform",
+    "bevy_math",
+    "bevy_ecs",
+    "bevy_reflect",
+] }
 bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_transform", features = ["serialize",] }
 bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
-pdms_io = { path = "../pdms-io" }
+pdms_io = { path = "../pdms-io-fork" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 gen-xkt = { path = "../gen-xkt" }
 
@@ -177,7 +183,7 @@ async-trait = "0.1"
 env_logger = "0.11"
 
 # Web UI 相关依赖
-axum = { version = "0.8.6", optional = true }
+axum = { version = "0.8.6", optional = true, features = ["ws"] }
 axum-extra = { version = "0.10.1", optional = true, features = [] }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6.6", features = ["fs", "cors"], optional = true }
@@ -245,5 +251,10 @@ path = "src/examples/verify_lod_feature.rs"
 [[example]]
 name = "debug_refno_21491_19209"
 path = "src/examples/debug_refno_21491_19209.rs"
+
+[[example]]
+name = "room_calculation_demo"
+path = "examples/room_calculation_demo.rs"
+required-features = ["gen_model", "sqlite-index"]
 
 eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b8643f77b6a26561da44aad0", package = "eframe" }

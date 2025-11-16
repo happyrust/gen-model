@@ -99,6 +99,8 @@ pub enum TaskType {
     DataImport,
     /// 数据解析向导
     DataParsingWizard,
+    /// 基于 Refno 的模型生成
+    RefnoModelGeneration,
     /// 自定义任务
     Custom(String),
 }
@@ -190,6 +192,9 @@ pub struct DatabaseConfig {
     pub name: String,
     /// 手动指定的数据库编号
     pub manual_db_nums: Vec<u32>,
+    /// 手动指定的 Refno 列表 (字符串格式，如 "123" 或 "1/456")
+    #[serde(default)]
+    pub manual_refnos: Vec<String>,
     /// 项目名称
     pub project_name: String,
     /// 项目路径
@@ -227,6 +232,9 @@ pub struct DatabaseConfig {
     /// 目标会话号（可选）：基于特定sesno的增量生成
     #[serde(default)]
     pub target_sesno: Option<u32>,
+    /// Mesh 文件输出目录（可选）
+    #[serde(default)]
+    pub meshes_path: Option<String>,
 }
 
 impl Default for DatabaseConfig {
@@ -234,6 +242,7 @@ impl Default for DatabaseConfig {
         Self {
             name: "默认配置".to_string(),
             manual_db_nums: vec![],
+            manual_refnos: vec![],
             project_name: "AvevaMarineSample".to_string(),
             project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
             project_code: 1516,
@@ -242,7 +251,7 @@ impl Default for DatabaseConfig {
             db_type: "surrealdb".to_string(),
             surreal_ns: 1516,
             db_ip: "localhost".to_string(),
-            db_port: "8009".to_string(),
+            db_port: "8020".to_string(),  // 修改为与 DbOption.toml 一致的端口
             db_user: "root".to_string(),
             db_password: "root".to_string(),
             gen_model: true,
@@ -252,6 +261,7 @@ impl Default for DatabaseConfig {
             mesh_tol_ratio: 3.0,
             room_keyword: "-RM".to_string(),
             target_sesno: None,
+            meshes_path: None,
         }
     }
 }
@@ -276,6 +286,7 @@ impl DatabaseConfig {
                 format!("{} 配置", opt.project_name)
             },
             manual_db_nums,
+            manual_refnos: vec![],
             project_name: opt.project_name.clone(),
             project_path: opt.project_path.clone(),
             project_code,
@@ -294,6 +305,7 @@ impl DatabaseConfig {
             mesh_tol_ratio,
             room_keyword,
             target_sesno: None,
+            meshes_path: opt.meshes_path.clone(),
         }
     }
 }
@@ -1290,4 +1302,141 @@ pub struct TraySpanRequest {
     pub suppo_refno: Option<u64>,
     #[serde(default)]
     pub neighbor_window: Option<f64>,
+}
+
+// ===== 基于 Refno 的模型生成 =====
+
+/// 基于 Refno 的模型生成请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefnoModelGenerationRequest {
+    /// 数据库编号
+    pub db_num: u32,
+    /// Refno 列表 (字符串格式，支持 "123" 或 "1/456" 等)
+    pub refnos: Vec<String>,
+    /// 是否生成网格 (可选，默认从配置读取)
+    #[serde(default)]
+    pub gen_mesh: Option<bool>,
+    /// 是否生成模型 (可选，默认从配置读取)
+    #[serde(default)]
+    pub gen_model: Option<bool>,
+    /// 是否应用布尔运算 (可选，默认从配置读取)
+    #[serde(default)]
+    pub apply_boolean_operation: Option<bool>,
+    /// Mesh 文件输出目录 (可选，默认从配置读取)
+    #[serde(default)]
+    pub meshes_path: Option<String>,
+    /// 🆕 客户端指定的任务 ID (可选)
+    ///
+    /// 如果提供，服务器将使用此 ID 创建和跟踪任务，而不是自动生成。
+    /// 这确保前后端使用相同的 task_id 进行 WebSocket 订阅。
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+/// 基于 Refno 的模型生成响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefnoModelGenerationResponse {
+    /// 是否成功
+    pub success: bool,
+    /// 任务ID
+    pub task_id: String,
+    /// 任务状态
+    pub status: TaskStatus,
+    /// 提示信息
+    pub message: String,
+    /// 处理的 refno 数量
+    pub refno_count: usize,
+}
+
+// ===== 房间模型重新生成 =====
+
+/// 房间模型重新生成请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomRegenerateRequest {
+    /// 数据库编号
+    pub db_num: u32,
+    /// 房间关键词列表（可选，默认从配置读取）
+    #[serde(default)]
+    pub room_keywords: Option<Vec<String>>,
+    /// 是否强制重新生成所有模型（默认 true）
+    #[serde(default = "default_true")]
+    pub force_regenerate: bool,
+    /// 是否生成网格（默认 true）
+    #[serde(default = "default_true")]
+    pub gen_mesh: bool,
+    /// 是否应用布尔运算（默认 true）
+    #[serde(default = "default_true")]
+    pub apply_boolean_operation: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 房间模型重新生成响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomRegenerateResponse {
+    /// 是否成功
+    pub success: bool,
+    /// 任务ID
+    pub task_id: String,
+    /// 任务状态
+    pub status: TaskStatus,
+    /// 提示信息
+    pub message: String,
+    /// 查询到的房间数量
+    pub room_count: usize,
+    /// 需要生成的元素数量
+    pub element_count: usize,
+}
+
+/// 房间模型重新生成状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomRegenerateStatus {
+    /// 任务ID
+    pub task_id: String,
+    /// 当前阶段
+    pub phase: RoomRegeneratePhase,
+    /// 进度百分比 (0-100)
+    pub progress: f32,
+    /// 状态消息
+    pub message: String,
+    /// 查询到的房间数量
+    pub room_count: usize,
+    /// 需要生成的元素数量
+    pub element_count: usize,
+    /// 已生成的元素数量
+    pub generated_count: usize,
+    /// 房间关系更新状态
+    pub room_relation_status: Option<RoomRelationUpdateStatus>,
+}
+
+/// 房间模型重新生成阶段
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoomRegeneratePhase {
+    /// 查询房间参考号
+    QueryingRooms,
+    /// 生成模型
+    GeneratingModels,
+    /// 更新房间关系
+    UpdatingRoomRelations,
+    /// 完成
+    Completed,
+    /// 失败
+    Failed,
+}
+
+/// 房间关系更新状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomRelationUpdateStatus {
+    /// 是否完成
+    pub completed: bool,
+    /// 影响的房间数量
+    pub affected_rooms: usize,
+    /// 更新的元素数量
+    pub updated_elements: usize,
+    /// 耗时（毫秒）
+    pub duration_ms: u64,
+    /// 状态消息
+    pub message: String,
 }

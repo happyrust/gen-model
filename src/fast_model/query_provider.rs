@@ -18,6 +18,8 @@
 use aios_core::RefnoEnum;
 use aios_core::query_provider::*;
 use aios_core::types::{NamedAttrMap as NamedAttMap, SPdmsElement as PE};
+use aios_core::mdb;
+use aios_core::rs_surreal;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 
@@ -127,6 +129,53 @@ pub async fn query_by_type(
     let provider = get_model_query_provider().await?;
     provider
         .query_by_type(nouns, dbnum, has_children)
+        .await
+        .map_err(Into::into)
+}
+
+/// 按 Noun 全库查询（Full Noun 模式专用）
+///
+/// 直接按 Noun 类型查询全库范围内的所有实例，不加 dbno 或 refno 层级约束。
+///
+/// # 参数
+/// - `nouns`: Noun 类型列表（如 ["EQUI", "FITT", "BOX"]）
+///
+/// # 返回
+/// 全库范围内所有匹配 Noun 的 refno 列表
+///
+/// # 示例
+///
+/// ```rust,ignore
+/// // 查询全库所有 EQUI 和 FITT
+/// let refnos = query_by_noun_all_db(&["EQUI", "FITT"]).await?;
+/// ```
+///
+/// # 实现说明
+///
+/// 此函数使用 `rs_surreal::mdb::query_type_refnos_by_dbnums` 并传入空的 dbnums 列表，
+/// 这会触发"查询所有数据库"的逻辑（见 `query_type_refnos_by_dbnums` 实现中的 `if dbnums.is_empty()` 分支）。
+pub async fn query_by_noun_all_db(nouns: &[&str]) -> anyhow::Result<Vec<RefnoEnum>> {
+    // 传入空的 dbnums 列表，触发全库查询
+    let empty_dbnums: Vec<u32> = vec![];
+    mdb::query_type_refnos_by_dbnums(nouns, &empty_dbnums)
+        .await
+        .map_err(Into::into)
+}
+
+/// 统计指定 noun 在全库范围内的实例数量（GROUP ALL + LIMIT 1）
+pub async fn count_noun_all_db(noun: &str) -> anyhow::Result<u64> {
+    mdb::count_refnos_by_noun(noun)
+        .await
+        .map_err(Into::into)
+}
+
+/// 根据分页参数获取指定 noun 的 refno 列表
+pub async fn query_noun_page_all_db(
+    noun: &str,
+    start: usize,
+    limit: usize,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    mdb::query_refnos_by_noun_page(noun, start, limit)
         .await
         .map_err(Into::into)
 }

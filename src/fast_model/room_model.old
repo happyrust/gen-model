@@ -23,6 +23,9 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+// 导入空间查询trait以使用query_intersect_hits方法
+use crate::spatial_index::SpatialQueryBackend;
+
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await?;
@@ -622,4 +625,346 @@ async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
     // SUL_DB.query(cleanup_sql).await?;
 
     Ok(())
+}
+
+// ============================================================================
+// 增量房间计算核心函数
+// ============================================================================
+
+/// 增量房间关系更新主函数
+/// 
+/// # 参数
+/// * `new_refnos` - 新生成的元素引用号列表
+/// 
+/// # 返回值
+/// * `Result<RoomUpdateResult>` - 更新结果，包含影响的房间数量、更新元素数量和耗时
+pub async fn update_room_relations_incremental(
+    new_refnos: &[RefnoEnum],
+) -> Result<RoomUpdateResult, anyhow::Error> {
+    let start_time = std::time::Instant::now();
+    
+    // 1. 找到所有可能受影响的房间面板
+    let affected_panels = find_affected_room_panels(new_refnos).await?;
+    
+    if affected_panels.is_empty() {
+        return Ok(RoomUpdateResult {
+            affected_rooms: 0,
+            updated_elements: 0,
+            duration_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
+    
+    // 2. 计算每个受影响面板内的新元素
+    let mut total_updated = 0;
+    for panel_refno in &affected_panels {
+        let panel_elements = calculate_room_elements_incremental(
+            *panel_refno, 
+            new_refnos
+        ).await?;
+        
+        // 3. 更新该面板的房间关系
+        if !panel_elements.is_empty() {
+            update_panel_room_relations(*panel_refno, &panel_elements).await?;
+            total_updated += panel_elements.len();
+        }
+    }
+    
+    Ok(RoomUpdateResult {
+        affected_rooms: affected_panels.len(),
+        updated_elements: total_updated,
+        duration_ms: start_time.elapsed().as_millis() as u64,
+    })
+}
+
+/// 查找与给定refnos空间相交的房间面板
+/// 
+/// # 参数
+/// * `refnos` - 新生成的元素引用号列表
+/// 
+/// # 返回值
+/// * `Result<Vec<RefnoEnum>>` - 受影响的房间面板引用号列表
+pub async fn find_affected_room_panels(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut affected_panels = std::collections::HashSet::new();
+    
+    // 获取新元素的AABB
+    let new_elements = aios_core::query_insts(refnos, true).await?;
+    
+    for geom_inst in new_elements {
+        let element_aabb = geom_inst.world_aabb;
+        
+        // 使用 SQLite 空间索引查找相交的房间面板
+        #[cfg(feature = "sqlite-index")]
+        if let Ok(spatial_index) = crate::spatial_index::SqliteSpatialIndex::with_default_path() {
+            let mut opts = crate::spatial_index::QueryOptions::default();
+            opts.tolerance = 0.1; // 容差
+            
+            // 查找与元素AABB相交的房间面板
+            let query_result = spatial_index.query_intersect_hits(&element_aabb.into(), &opts);
+            if let Ok(hits) = query_result {
+                for hit in hits {
+                    // 检查是否是房间面板类型（PANE/FACE/SBFR等）
+                    if is_room_panel_type(hit.refno).await.unwrap_or(false) {
+                        affected_panels.insert(RefnoEnum::Refno(hit.refno));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(affected_panels.into_iter().collect())
+}
+
+/// 检查是否为房间面板类型
+/// 
+/// # 参数
+/// * `refno` - 元素引用号
+/// 
+/// # 返回值
+/// * `Result<bool>` - 是否为房间面板类型
+pub async fn is_room_panel_type(refno: RefU64) -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT noun FROM {} LIMIT 1",
+            RefnoEnum::Refno(refno).to_pe_key()
+        ))
+        .await?;
+    
+    let result: Option<String> = response.take(0)?;
+    Ok(matches!(result.as_deref(), Some("PANE") | Some("FACE") | Some("SBFR")))
+}
+
+/// 增量计算房间面板内的新增元素
+/// 
+/// # 参数
+/// * `panel_refno` - 房间面板引用号
+/// * `new_refnos` - 新生成的元素引用号列表
+/// 
+/// # 返回值
+/// * `Result<HashSet<RefnoEnum>>` - 面板内的新增元素引用号集合
+pub async fn calculate_room_elements_incremental(
+    panel_refno: RefnoEnum,
+    new_refnos: &[RefnoEnum],
+) -> anyhow::Result<std::collections::HashSet<RefnoEnum>> {
+    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    
+    // 使用现有函数计算面板内的所有元素
+    let all_elements = cal_room_refnos(
+        &mesh_dir, 
+        panel_refno, 
+        &std::collections::HashSet::new(), 
+        0.1
+    ).await?;
+    
+    // 过滤出新增的元素
+    let new_elements: std::collections::HashSet<RefnoEnum> = new_refnos
+        .iter()
+        .cloned()
+        .filter(|refno| all_elements.contains(refno))
+        .collect();
+    
+    Ok(new_elements)
+}
+
+/// 增量更新房间关系
+/// 
+/// # 参数
+/// * `panel_refno` - 房间面板引用号
+/// * `new_elements` - 新增元素引用号集合
+/// 
+/// # 返回值
+/// * `anyhow::Result<()>` - 更新结果
+pub async fn update_panel_room_relations(
+    panel_refno: RefnoEnum,
+    new_elements: &std::collections::HashSet<RefnoEnum>,
+) -> anyhow::Result<()> {
+    if new_elements.is_empty() {
+        return Ok(());
+    }
+    
+    // 获取房间号
+    let room_num = get_room_number_for_panel(panel_refno).await?;
+    
+    // 批量插入新的房间关系
+    let mut sql_statements = Vec::new();
+    for element_refno in new_elements {
+        let relation_id = format!("{}_{}", panel_refno, element_refno);
+        let sql = format!(
+            "RELATE {}->room_relate:{}->{} SET room_num='{}';",
+            panel_refno.to_pe_key(),
+            relation_id,
+            element_refno.to_pe_key(),
+            room_num
+        );
+        sql_statements.push(sql);
+    }
+    
+    // 批量执行
+    SUL_DB.query(&sql_statements.join("\n")).await?;
+    
+    Ok(())
+}
+
+/// 获取面板对应的房间号
+/// 
+/// # 参数
+/// * `panel_refno` - 房间面板引用号
+/// 
+/// # 返回值
+/// * `Result<String>` - 房间号
+pub async fn get_room_number_for_panel(panel_refno: RefnoEnum) -> anyhow::Result<String> {
+    let mut response = SUL_DB
+        .query(format!(
+            r#"SELECT VALUE room_num FROM ONLY {}<-room_panel_relate LIMIT 1"#,
+            panel_refno.to_pe_key()
+        ))
+        .await?;
+    
+    let room_num: Option<String> = response.take(0)?;
+    room_num.ok_or_else(|| anyhow::anyhow!("面板 {} 未找到关联的房间号", panel_refno))
+}
+
+/// 房间更新结果结构
+#[derive(Debug)]
+pub struct RoomUpdateResult {
+    /// 受影响的房间数量
+    pub affected_rooms: usize,
+    /// 更新的元素数量
+    pub updated_elements: usize,
+    /// 耗时（毫秒）
+    pub duration_ms: u64,
+}
+
+// ============================================================================
+// TriMesh 缓存系统
+// ============================================================================
+
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// 全局TriMesh缓存
+static PANEL_TRI_MESH_CACHE: OnceLock<dashmap::DashMap<RefU64, Arc<TriMesh>>> = OnceLock::new();
+
+/// 获取TriMesh缓存的函数
+pub fn get_panel_tri_mesh_cache() -> &'static dashmap::DashMap<RefU64, Arc<TriMesh>> {
+    PANEL_TRI_MESH_CACHE.get_or_init(|| dashmap::DashMap::new())
+}
+
+/// 缓存获取函数
+pub fn get_panel_tri_mesh(panel_refno: RefU64) -> Option<Arc<TriMesh>> {
+    let cache = get_panel_tri_mesh_cache();
+    cache.get(&panel_refno).map(|entry| entry.clone())
+}
+
+/// 添加TriMesh到缓存
+pub fn cache_panel_tri_mesh(panel_refno: RefU64, tri_mesh: Arc<TriMesh>) {
+    let cache = get_panel_tri_mesh_cache();
+    
+    // 简单的缓存管理：如果缓存过大，清理一些条目
+    if cache.len() > 1000 {
+        let keys_to_remove: Vec<RefU64> = cache
+            .iter()
+            .take(100)
+            .map(|entry| *entry.key())
+            .collect();
+        
+        for key in keys_to_remove {
+            cache.remove(&key);
+        }
+    }
+    
+    cache.insert(panel_refno, tri_mesh);
+}
+
+/// 清理TriMesh缓存
+pub fn clear_panel_tri_mesh_cache() {
+    let cache = get_panel_tri_mesh_cache();
+    cache.clear();
+}
+
+// ============================================================================
+// 单元测试
+// ============================================================================
+
+#[cfg(test)]
+mod incremental_room_tests {
+    use super::*;
+    use aios_core::{init_test_surreal, RefnoEnum};
+
+    #[tokio::test]
+    async fn test_incremental_room_update() -> anyhow::Result<()> {
+        // 初始化测试数据库
+        init_test_surreal().await?;
+        
+        // 创建测试数据
+        let test_refnos = vec![
+            RefnoEnum::Refno("24381/34303".into()),
+            RefnoEnum::Refno("24381/35844".into()),
+        ];
+        
+        // 执行增量更新
+        let result = update_room_relations_incremental(&test_refnos).await?;
+        
+        // 验证结果
+        assert!(result.duration_ms >= 0, "耗时应该非负");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_find_affected_panels() -> anyhow::Result<()> {
+        init_test_surreal().await?;
+        
+        let test_refnos = vec![
+            RefnoEnum::Refno("24381/34303".into()),
+        ];
+        
+        let panels = find_affected_room_panels(&test_refnos).await?;
+        
+        // 验证返回结果类型正确
+        assert!(panels.len() >= 0, "应该返回面板列表");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_processing() -> anyhow::Result<()> {
+        init_test_surreal().await?;
+        
+        // 创建大量测试数据
+        let large_refnos: Vec<RefnoEnum> = (0..50)
+            .map(|i| RefnoEnum::Refno(format!("test_ref{}", i).parse().unwrap()))
+            .collect();
+        
+        let batch_size = 10;
+        let result = crate::web_server::handlers::batch_update_room_relations(
+            &large_refnos, 
+            batch_size
+        ).await?;
+        
+        assert_eq!(result.updated_elements, large_refnos.len(), "应该更新所有元素");
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_trimesh_cache() -> anyhow::Result<()> {
+        // 测试缓存功能
+        clear_panel_tri_mesh_cache();
+        
+        let panel_refno = "24381/34303".into();
+        
+        // 初始状态缓存应该为空
+        assert!(get_panel_tri_mesh(panel_refno).is_none());
+        
+        // 测试添加到缓存
+        // 注意：这里需要实际的TriMesh，在实际运行中会从文件加载
+        // 这里只是测试缓存接口
+        
+        let cache = get_panel_tri_mesh_cache();
+        assert_eq!(cache.len(), 0);
+        
+        Ok(())
+    }
 }

@@ -5,6 +5,8 @@ use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
 use crate::fast_model::{SEND_INST_SIZE, get_generic_type, resolve_desi_comp, shared};
 use crate::fast_model::{debug_model, debug_model_debug};
+use crate::fast_model::gen_model::cate_single::{gen_cata_single_geoms, CateCsgShapeMap};
+use crate::fast_model::gen_model::cate_helpers::cal_sjus_value;
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
@@ -125,209 +127,8 @@ pub enum NgmrRemovedType {
     All = 7,
 }
 
-///获取单个元件的模型数据
-pub async fn gen_cata_single_geoms(
-    design_refno: RefnoEnum,
-    csg_shape_map: &CateCsgShapeMap,
-    design_axis_map: &DashMap<RefnoEnum, PlantAxisMap>,
-) -> anyhow::Result<bool> {
-    let total_start = std::time::Instant::now();
-
-    // Timing for get_named_attmap
-    let t_get_attmap = std::time::Instant::now();
-    let desi_att = aios_core::get_named_attmap(design_refno).await?;
-    let get_attmap_time = t_get_attmap.elapsed().as_millis();
-    // dbg!(&desi_att);
-
-    let type_name = desi_att.get_type_str();
-    let owner = desi_att.get_owner();
-    if !owner.is_valid() {
-        return Ok(false);
-    }
-
-    // Timing for resolve_desi_comp
-    let t_resolve = std::time::Instant::now();
-    let geoms_info = resolve_desi_comp(design_refno, None).await.unwrap();
-    let resolve_time = t_resolve.elapsed().as_millis();
-
-    // DEBUG: Print basic info
-    debug_model!(
-        "🎯 gen_cata_single_geoms: design_refno={}, type_name={}, owner={}",
-        design_refno,
-        type_name,
-        owner
-    );
-
-    // 🔍 调试：记录 design 元素的详细信息
-    if let Some(name) = desi_att.get_as_string("NAME") {
-        debug_model_debug!("   NAME: {}", name);
-    }
-    if let Some(desc) = desi_att.get_as_string("DESC") {
-        debug_model_debug!("   DESC: {}", desc);
-    }
-    if let Some(cat_refno) = aios_core::get_cat_refno(design_refno).await.ok().flatten() {
-        debug_model_debug!("   元件库参考号: {}", cat_refno);
-        if let Ok(cat_att) = aios_core::get_named_attmap(cat_refno).await {
-            if let Some(cat_name) = cat_att.get_as_string("NAME") {
-                debug_model_debug!("   元件库名称: {}", cat_name);
-            }
-        }
-    }
-
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
-    {
-        // Timing for profile geometry creation
-        let t_profile = std::time::Instant::now();
-        create_profile_geos(design_refno, &geoms_info, &csg_shape_map).await?;
-        let profile_time = t_profile.elapsed().as_millis();
-
-        #[cfg(feature = "profile")]
-        {
-            let timestamp = chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string();
-            tracing::info!(
-                "Performance - gen_cata_single_geoms profile: timestamp={}, refno={:?}, get_attmap={}ms, resolve={}ms, profile={}ms, total={}ms",
-                timestamp,
-                design_refno,
-                get_attmap_time,
-                resolve_time,
-                profile_time,
-                total_start.elapsed().as_millis()
-            );
-        }
-
-        #[cfg(not(feature = "profile"))]
-        let _ = (get_attmap_time, resolve_time, profile_time);
-
-        return Ok(true);
-    } else {
-        let CateGeomsInfo {
-            refno,
-            geometries,
-            n_geometries,
-            axis_map,
-        } = geoms_info;
-
-        // DEBUG: Print geometries info
-        debug_model!(
-            "geometries.len()={}, n_geometries.len()={}",
-            geometries.len(),
-            n_geometries.len()
-        );
-
-        // Timing for convert_to_csg_shapes (geometries)
-        let t_convert_geo = std::time::Instant::now();
-        let mut geo_count = 0;
-        for (idx, geom) in geometries.iter().enumerate() {
-            debug_model!("Processing geometry[{}]: {:?}", idx, geom);
-            match convert_to_csg_shapes(&geom) {
-                Some(cate_shape) => {
-                    debug_model!("Successfully converted geometry[{}] to csg shape", idx);
-                    csg_shape_map
-                        .entry(design_refno)
-                        .or_insert(Vec::new())
-                        .push(cate_shape);
-                    geo_count += 1;
-                }
-                None => {
-                    debug_model!(
-                        "Failed to convert geometry[{}] to csg shape (returned None)",
-                        idx
-                    );
-                }
-            }
-        }
-        let convert_geo_time = t_convert_geo.elapsed().as_millis();
-
-        // Timing for convert_to_csg_shapes (n_geometries)
-        let t_convert_ngeo = std::time::Instant::now();
-        let mut ngeo_count = 0;
-        for (idx, geom) in n_geometries.iter().enumerate() {
-            debug_model!("Processing n_geometry[{}]: {:?}", idx, geom);
-            match convert_to_csg_shapes(&geom) {
-                Some(mut cate_shape) => {
-                    debug_model!("Successfully converted n_geometry[{}] to csg shape", idx);
-                    cate_shape.is_ngmr = true;
-                    csg_shape_map
-                        .entry(design_refno)
-                        .or_insert(Vec::new())
-                        .push(cate_shape);
-                    ngeo_count += 1;
-                }
-                None => {
-                    debug_model!(
-                        "Failed to convert n_geometry[{}] to csg shape (returned None)",
-                        idx
-                    );
-                }
-            }
-        }
-        let convert_ngeo_time = t_convert_ngeo.elapsed().as_millis();
-
-        // Timing for axis_map insertion
-        let t_axis_map = std::time::Instant::now();
-        design_axis_map.insert(design_refno, axis_map);
-        let axis_map_time = t_axis_map.elapsed().as_millis();
-
-        // DEBUG: Print final statistics
-        debug_model!(
-            "Final stats: geo_count={}, ngeo_count={}, csg_shape_map entry count for design_refno={}",
-            geo_count,
-            ngeo_count,
-            csg_shape_map
-                .get(&design_refno)
-                .map(|v| v.len())
-                .unwrap_or(0)
-        );
-
-        #[cfg(feature = "profile")]
-        {
-            let timestamp = chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string();
-            tracing::info!(
-                "Performance - gen_cata_single_geoms regular: timestamp={}, refno={:?}, get_attmap={}ms, resolve={}ms, convert_geo(count={})={}ms, convert_ngeo(count={})={}ms, axis_map={}ms, total={}ms",
-                timestamp,
-                design_refno,
-                get_attmap_time,
-                resolve_time,
-                geo_count,
-                convert_geo_time,
-                ngeo_count,
-                convert_ngeo_time,
-                axis_map_time,
-                total_start.elapsed().as_millis()
-            );
-        }
-
-        #[cfg(not(feature = "profile"))]
-        let _ = (
-            get_attmap_time,
-            resolve_time,
-            geo_count,
-            convert_geo_time,
-            ngeo_count,
-            convert_ngeo_time,
-            axis_map_time,
-        );
-
-        return Ok(true);
-    }
-}
-
-///计算对齐偏移值
-#[inline]
-pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
-    let off_z = if sjus == "UTOP" || sjus == "DTOP" || sjus == "TOP" {
-        height
-    } else if sjus == "UCEN" || sjus == "DCEN" || sjus == "CENT" {
-        height / 2.0
-    } else {
-        0.0
-    };
-    off_z
-}
+// gen_cata_single_geoms 已移至 gen_model/cate_single.rs
+// cal_sjus_value 已移至 gen_model/cate_helpers.rs
 
 /// 生成元件库的branch型几何体
 /// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
@@ -369,12 +170,17 @@ pub async fn gen_cata_geos(
         target_cata_map.len(),
         branch_map.len()
     );
-    let mut batch_chunks_cnt = 4;
-    let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
+    let mut batch_chunks_cnt = 4usize.min(unique_cata_cnt.max(1));
+    let mut batch_size = (unique_cata_cnt + batch_chunks_cnt - 1) / batch_chunks_cnt;
+    if batch_size == 0 {
+        batch_size = 1;
+    }
     let test_refno = db_option.get_test_refno();
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
-        batch_chunks_cnt = all_unique_keys.len();
+        batch_chunks_cnt = unique_cata_cnt;
+    } else {
+        batch_chunks_cnt = (unique_cata_cnt + batch_size - 1) / batch_size;
     }
     #[cfg(feature = "profile")]
     tracing::info!(
@@ -397,6 +203,15 @@ pub async fn gen_cata_geos(
             tracing::info!(batch_id, "Starting batch processing");
 
             let start_idx = i * batch_size;
+            if start_idx >= unique_cata_cnt {
+                debug_model_debug!(
+                    "[gen_cata_geos] 批次 {} 起始索引 {} 超出总长度 {}, 跳过",
+                    batch_id,
+                    start_idx,
+                    unique_cata_cnt
+                );
+                continue;
+            }
             let mut end_idx = start_idx + batch_size;
             if end_idx > unique_cata_cnt {
                 end_idx = unique_cata_cnt;
@@ -968,7 +783,10 @@ pub async fn gen_cata_geos(
     // while let Some(_) = handles.next().await {}
 
     #[cfg(feature = "profile")]
-    tracing::info!("Processing branches");
+    tracing::info!(
+        branch_count = branch_map.len(),
+        "Processing branches (BRAN Tubing generation)"
+    );
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
     let mut tubi_shape_insts_data = ShapeInstancesData::default();
 
@@ -976,10 +794,14 @@ pub async fn gen_cata_geos(
     let mut db_time_get_children = 0;
     let mut db_time_get_branch_att = 0;
     let mut db_time_get_branch_transform = 0;
+    let mut tubi_count = 0;
 
     for bran_data in branch_map.iter() {
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
+        
+        #[cfg(feature = "profile")]
+        let branch_item_start = Instant::now();
 
         let t_get_children = Instant::now();
         // let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
@@ -1337,6 +1159,7 @@ pub async fn gen_cata_geos(
                                 current_tubing.tubi_size.to_string(),
                             ));
                             current_tubing.index += 1;
+                            tubi_count += 1;
                         }
                     } else {
                         debug_model!(
@@ -1349,8 +1172,28 @@ pub async fn gen_cata_geos(
             }
             leave_type = arrive_type.to_string();
         }
+        
+        #[cfg(feature = "profile")]
+        {
+            let branch_duration = branch_item_start.elapsed();
+            tracing::debug!(
+                branch_refno = ?branch_refno,
+                children_count = children.len(),
+                processing_ms = branch_duration.as_micros() as f64 / 1000.0,
+                "BRAN branch item processed"
+            );
+        }
     }
     let process_branch_time = t_process_branch.elapsed().as_millis();
+    
+    #[cfg(feature = "profile")]
+    tracing::info!(
+        branch_count = branch_map.len(),
+        tubi_generated = tubi_count,
+        total_time_ms = process_branch_time,
+        avg_time_per_branch_ms = if branch_map.len() > 0 { process_branch_time / branch_map.len() as u128 } else { 0 },
+        "BRAN Tubing generation completed"
+    );
 
     // 在发送之前提取需要更新has_tubi的refno列表
     let tubi_refnos: Vec<String> = tubi_shape_insts_data

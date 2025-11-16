@@ -29,9 +29,7 @@ export default function CollaborationPage() {
     setError(null)
     try {
       const envs = await listRemoteSyncEnvs()
-      // 确保 envs 是数组，处理可能的 API 响应格式差异
-      const envsArray = Array.isArray(envs) ? envs : (envs && typeof envs === 'object' && 'items' in envs && Array.isArray(envs.items) ? envs.items : [])
-      const mappedGroups = envsArray.map(envToGroup)
+      const mappedGroups = envs.map(envToGroup)
       setGroups(mappedGroups)
       if (options?.showToast) {
         toast.success("协同组数据已刷新")

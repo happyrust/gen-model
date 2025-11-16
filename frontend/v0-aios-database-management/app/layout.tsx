@@ -4,6 +4,8 @@ import { GeistSans } from "geist/font/sans"
 import { GeistMono } from "geist/font/mono"
 import { Analytics } from "@vercel/analytics/next"
 import { ThemeProvider } from "@/components/theme-provider"
+import { AlertProvider } from "@/contexts/alert-context"
+import { QueryProvider } from "@/components/providers/query-provider"
 import { Suspense } from "react"
 import "./globals.css"
 
@@ -22,9 +24,13 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable}`}>
         <Suspense fallback={null}>
-          <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
-            {children}
-          </ThemeProvider>
+          <AlertProvider>
+            <QueryProvider>
+              <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
+                {children}
+              </ThemeProvider>
+            </QueryProvider>
+          </AlertProvider>
           <Analytics />
         </Suspense>
       </body>

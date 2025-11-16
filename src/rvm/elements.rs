@@ -19,9 +19,9 @@ use crate::api::attr::{query_implicit_attr, query_position_from_id};
 use crate::api::element::{query_children_eles, query_ele_node};
 use crate::aql_api::children::*;
 use crate::aql_api::PdmsRefnoNameAql;
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::arangodb::ArDatabase;
+use aios_core::get_db_option;
+use aios_core::db_pool::get_project_pool;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};
@@ -31,9 +31,9 @@ pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow:
     let mut data = vec![];
     let database = aios_mgr.get_arango_db().await?;
     let db_option = &aios_mgr.db_option;
-    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
-    if pool.is_none() { return Ok(data); }
-    let (_, pool) = pool.unwrap();
+    let db_option = get_db_option();
+    let pool = get_project_pool(&db_option).await?;
+    // TODO: The original code was looking up project pool by refno, but now we use the global option
     let ancestor = query_ancestor_with_name_till_type_aql(&database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
     let cntb_len = ancestor.len();
@@ -57,9 +57,9 @@ pub async fn create_owner_data(refno: RefU64, aios_mgr: &AiosDBManager, database
     let ancestor = query_ancestor_with_name_till_type_aql(database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
     let mut ancestor_data = create_ancestor_data(refno, ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
-    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
-    if pool.is_none() { return Ok(data); }
-    let (_, pool) = pool.unwrap();
+    let db_option = get_db_option();
+    let pool = get_project_pool(&db_option).await?;
+    // TODO: The original code was looking up project pool by refno, but now we use the global option
     let mut element_data = vec![];
     data.append(&mut ancestor_data.0);
     if let Ok(_) = create_element_data(refno, aios_mgr, &mut data, ancestor_data.1, database, &pool).await {

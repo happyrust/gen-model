@@ -94,9 +94,9 @@ use crate::cli_modes::{
     export_obj_mode, export_xkt_mode, get_output_filename_for_refno,
 };
 #[cfg(not(feature = "gui"))]
-use aios_core::{DBType, init_surreal, query_mdb_db_nums};
-#[cfg(not(feature = "gui"))]
 use aios_core::geometry::csg::clear_ploop_debug_cache;
+#[cfg(not(feature = "gui"))]
+use aios_core::{DBType, init_surreal, query_mdb_db_nums};
 #[cfg(feature = "gui")]
 use aios_database::gui;
 #[cfg(not(feature = "gui"))]
@@ -370,6 +370,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建自定义的 DbOptionExt
     let mut db_option_ext = get_db_option_ext_from_path(config_path)?;
+
+    // 设置 Full Noun 模式环境变量
+    if db_option_ext.full_noun_mode {
+        unsafe {
+            std::env::set_var("FULL_NOUN_MODE", "true");
+        }
+        println!("✅ Full Noun 模式已启用");
+    }
     let config_debug_refnos = db_option_ext.inner.debug_model_refnos.clone();
     let debug_model_requested = matches.contains_id("debug-model");
 

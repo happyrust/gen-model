@@ -1,6 +1,7 @@
 use crate::consts::TEAM_DATA_TABLE;
-use aios_core::aios_db_mgr::PdmsDataInterface;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+use aios_core::{get_default_name, get_named_attmap, get_db_option};
+#[cfg(feature = "sql")]
+use aios_core::db_pool::get_project_pool;
 use aios_core::error::init_query_error;
 use aios_core::{RefU64, SUL_DB, init_test_surreal, query_filter_ancestors};
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ pub struct SysDBData {
 }
 
 ///同步system db的信息
-pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
+pub async fn sync_team_data() -> anyhow::Result<()> {
     match query_all_db_refnos().await {
         Ok(db_refnos) => {
             let mut r = vec![];
@@ -35,7 +36,7 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
                 let team_name = if team_name_map.contains_key(&team_refno) {
                     team_name_map.get(&team_refno).unwrap().to_string()
                 } else {
-                    let Ok(team_name) = mgr.get_name(team_refno).await else {
+                    let Ok(Some(team_name)) = get_default_name(team_refno.into()).await else {
                         continue;
                     };
                     team_name_map.entry(team_refno).or_insert(team_name.clone());
@@ -43,7 +44,7 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
                 };
 
                 // 获取db的属性
-                let db_attr = mgr.get_attr(refno).await?;
+                let db_attr = get_named_attmap(refno.into()).await?;
                 let db_name = db_attr.get_name_or_default();
                 let s_type = db_attr.get_str("STYP").unwrap_or("0");
                 let mut names = db_name.split('/').collect::<Vec<_>>();
@@ -72,7 +73,8 @@ pub async fn sync_team_data(mgr: &AiosDBMgr) -> anyhow::Result<()> {
             // 保存数据
             #[cfg(feature = "sql")]
             {
-                let pool = mgr.get_project_pool().await?;
+                let db_option = get_db_option();
+                let pool = get_project_pool(&db_option).await?;
                 let table_sql = gen_create_team_data_sql();
                 let result = sqlx::query(&table_sql).execute(&pool).await;
                 if let Err(e) = result {

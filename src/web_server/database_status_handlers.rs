@@ -435,6 +435,7 @@ pub async fn execute_batch_operation(
             project_code: db_num,
             project_path: format!("/data/projects/{}", db_num),
             manual_db_nums: vec![db_num],
+            manual_refnos: vec![],
             surreal_ns: 1516,
             gen_model: request.operation == "generate",
             gen_mesh: request.operation == "generate",
@@ -443,6 +444,7 @@ pub async fn execute_batch_operation(
             mesh_tol_ratio: 0.01,
             room_keyword: "-RM".to_string(),
             target_sesno: None,
+            meshes_path: None,
         };
 
         // 创建任务

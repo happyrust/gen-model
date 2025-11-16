@@ -378,34 +378,6 @@ export default function CollaborationDetailPage() {
     }
   }
 
-  const handleMetadataDownload = useCallback(
-    (entry: SiteMetadataEntry) => {
-      if (!metadataSiteId) return
-      if (!metadataBasePathRaw) {
-        if (entry.download_url) {
-          window.open(entry.download_url, "_blank")
-        }
-        return
-      }
-
-      let relative = entry.relative_path || ""
-      if (!relative) {
-        const normalizedBase = metadataBasePathRaw.replace(/\\/g, "/").replace(/\/+$/, "")
-        const normalizedFile = (entry.file_path ?? "").replace(/\\/g, "/")
-        if (normalizedFile.startsWith(normalizedBase)) {
-          relative = normalizedFile.slice(normalizedBase.length).replace(/^\/+/, "")
-        }
-        if (!relative) {
-          relative = entry.file_name
-        }
-      }
-
-      const url = buildSiteMetadataDownloadUrl(metadataSiteId, relative)
-      window.open(url, "_blank")
-    },
-    [metadataSiteId, metadataBasePathRaw],
-  )
-
   const handleDelete = async () => {
     if (!confirm("确定要删除这个协同环境吗？此操作不可恢复。")) {
       return
@@ -580,6 +552,34 @@ export default function CollaborationDetailPage() {
   const metadataBasePath = useMemo(() => {
     return metadataBasePathRaw ?? "未提供"
   }, [metadataBasePathRaw])
+
+  const handleMetadataDownload = useCallback(
+    (entry: SiteMetadataEntry) => {
+      if (!metadataSiteId) return
+      if (!metadataBasePathRaw) {
+        if (entry.download_url) {
+          window.open(entry.download_url, "_blank")
+        }
+        return
+      }
+
+      let relative = entry.relative_path || ""
+      if (!relative) {
+        const normalizedBase = metadataBasePathRaw.replace(/\\/g, "/").replace(/\/+$/, "")
+        const normalizedFile = (entry.file_path ?? "").replace(/\\/g, "/")
+        if (normalizedFile.startsWith(normalizedBase)) {
+          relative = normalizedFile.slice(normalizedBase.length).replace(/^\/+/, "")
+        }
+        if (!relative) {
+          relative = entry.file_name
+        }
+      }
+
+      const url = buildSiteMetadataDownloadUrl(metadataSiteId, relative)
+      window.open(url, "_blank")
+    },
+    [metadataSiteId, metadataBasePathRaw],
+  )
 
   const metadataRemoteHost = useMemo(() => siteMetadata?.http_base ?? siteMetadata?.metadata?.site_http_host ?? null, [siteMetadata])
 

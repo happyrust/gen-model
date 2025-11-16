@@ -467,6 +467,7 @@ pub async fn get_wizard_templates(
         default_config: DatabaseConfig {
             name: "向导解析配置".to_string(),
             manual_db_nums: vec![],
+            manual_refnos: vec![],
             project_name: "AvevaMarineSample".to_string(),
             project_path: "/Users/dongpengcheng/Documents/models/e3d_models".to_string(),
             project_code: 1516,
@@ -485,6 +486,7 @@ pub async fn get_wizard_templates(
             mesh_tol_ratio: 3.0,
             room_keyword: "-RM".to_string(),
             target_sesno: None,
+            meshes_path: None,
         },
         allow_custom_config: true,
         estimated_duration: Some(1800), // 30分钟

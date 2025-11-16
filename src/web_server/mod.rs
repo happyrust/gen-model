@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 pub mod handlers;
 pub mod models;
+pub mod ws;  // WebSocket 模块
 // pub mod templates; // 暂时禁用，有语法错误
 pub mod batch_tasks_template;
 pub mod database_diagnostics;
@@ -32,6 +33,7 @@ pub mod remote_sync_handlers;
 pub mod remote_sync_template;
 pub mod simple_templates;
 pub mod site_metadata;
+pub mod sse_handlers;  // SSE 事件流处理器
 pub mod sync_control_center;
 pub mod sync_control_handlers;
 pub mod task_creation_handlers;
@@ -55,6 +57,8 @@ pub struct AppState {
     pub task_manager: Arc<Mutex<TaskManager>>,
     /// 配置管理器
     pub config_manager: Arc<RwLock<ConfigManager>>,
+    /// 进度广播中心（用于 WebSocket 和 gRPC）
+    pub progress_hub: Arc<crate::shared::ProgressHub>,
 }
 
 /// 任务管理器
@@ -128,6 +132,7 @@ impl AppState {
         Self {
             task_manager: Arc::new(Mutex::new(task_manager)),
             config_manager: Arc::new(RwLock::new(config_manager)),
+            progress_hub: Arc::new(crate::shared::ProgressHub::default()),
         }
     }
 }
@@ -201,6 +206,7 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
     // 初始化房间 API
     let room_api_state = room_api::RoomApiState {
         task_manager: Arc::new(tokio::sync::RwLock::new(room_api::RoomTaskManager::default())),
+        progress_hub: app_state.progress_hub.clone(),
     };
     let room_routes = room_api::create_room_api_routes().with_state(room_api_state);
 
@@ -220,6 +226,8 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         .route("/api/config/templates", get(get_config_templates))
         .route("/api/databases", get(get_available_databases))
         .route("/api/status", get(get_system_status))
+        // 基于 Refno 的模型生成 API
+        .route("/api/model/generate-by-refno", post(handlers::api_generate_by_refno))
         // SurrealDB 控制 (暂时注释掉有编译问题的路由)
         // .route("/api/surreal/start", post(handlers::start_surreal_server))
         // .route("/api/surreal/stop", post(handlers::stop_surreal_server))
@@ -370,6 +378,9 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
             "/api/sync/history",
             get(sync_control_handlers::get_sync_history),
         )
+        // SSE 事件流
+        .route("/api/sync/events", get(sse_handlers::sync_events_handler))
+        .route("/api/sync/events/test", get(sse_handlers::test_sse_handler))
         .route(
             "/api/sync/mqtt/start",
             post(sync_control_handlers::start_mqtt_server_api),
@@ -718,6 +729,9 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         )
         // 房间计算管理页面
         .route("/room-management", get(room_page::room_management_page))
+        // WebSocket 路由
+        .route("/ws/progress/{task_id}", get(ws::ws_progress_handler))
+        .route("/ws/tasks", get(ws::ws_tasks_handler))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

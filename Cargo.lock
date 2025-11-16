@@ -390,6 +390,7 @@ dependencies = [
  "surrealdb",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "urlencoding",
  "uuid",
@@ -1476,6 +1477,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a18ed336352031311f4e0b4dd2ff392d4fbb370777c9d18d7fc9d7359f73871"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -1494,8 +1496,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",

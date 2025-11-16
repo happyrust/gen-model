@@ -12,13 +12,19 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
-use crate::fast_model::room_model::build_room_relations;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+use crate::fast_model::room_model_v2::build_room_relations_v2 as build_room_relations;
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
+pub async fn build_room_relations(_db_option: &aios_core::options::DbOption) -> anyhow::Result<()> {
+    println!("⚠️ build_room_relations 功能需要 sqlite 特性");
+    Ok(())
+}
 use crate::fast_model::{
     EXIST_MESH_GEO_HASHES,
     mesh_generate::{gen_inst_meshes, process_meshes_update_db_deep},
 };
 use crate::versioned_db::database::*;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+
 use aios_core::init_inst_relate_indices;
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
@@ -83,6 +89,7 @@ pub mod versioned_db;
 pub mod mqtt_service;
 
 pub mod options;
+pub mod shared;  // 共享模块（进度广播中心等）
 
 #[cfg(feature = "grpc")]
 pub mod grpc_service;
@@ -155,8 +162,11 @@ extern crate nom;
 //     Ok(())
 // }
 
-pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
+pub async fn run_cli(db_option_ext: options::DbOptionExt) -> anyhow::Result<()> {
     // dbg!("begin run task");
+    // 为了兼容性，创建对 inner 的引用
+    let db_option = &db_option_ext.inner;
+
     // 如果启用了日志功能
     if db_option.enable_log {
         let now = Local::now();
@@ -225,6 +235,25 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // 检查是否启用 Full Noun 模式（优先级最高，在增量更新之前检查）
+    let full_noun_mode = std::env::var("FULL_NOUN_MODE")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if full_noun_mode {
+        println!("[run_cli] 检测到 Full Noun 模式，跳过增量更新检测");
+
+        if db_option.is_gen_mesh_or_model() {
+            println!("正在生成模型（Full Noun 模式）");
+            let mut time = Instant::now();
+            fs::create_dir_all("assets/meshes")?;
+            gen_all_geos_data(vec![], &db_option_ext, None, None).await?;
+        }
+
+        // Full Noun 模式下跳过后续的增量更新和其他处理
+        return Ok(());
+    }
+
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     /// 创建db manager
     if sync_live {
@@ -241,7 +270,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         fs::create_dir_all("assets/meshes")?;
         //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
         let path: PathBuf = "assets/meshes".into();
-        gen_all_geos_data(vec![], &db_option, None, None).await?;
+        gen_all_geos_data(vec![], &db_option_ext, None, None).await?;
     }
 
     if db_option.gen_spatial_tree {
@@ -263,7 +292,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         // update_cal_bran_component().await?;
     }
 
-    let aios_mgr = AiosDBMgr::init_from_db_option().await?;
+    // For now we'll remove aios_mgr usage and migrate functions to not require it
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
@@ -272,7 +301,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // sync TEAM_DATA数据
     if db_option.only_sync_sys {
         println!("开始生成SYS DATA");
-        match sync_team_data(&aios_mgr).await {
+        match sync_team_data().await {
             Ok(_) => {
                 println!("TEAM DATA生成完成");
             }
@@ -284,7 +313,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     if db_option.rebuild_ssc_tree {
         dbg!("生成pbs节点");
-        set_pdms_major_code(&aios_mgr).await?;
+        // set_pdms_major_code(&aios_mgr).await?;  // TODO: Fix this function call
         let mut handles = vec![];
         set_pbs_fixed_node(&mut handles).await?;
         let rooms = set_pbs_room_node(&mut handles).await?;
@@ -316,9 +345,8 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     use crate::fast_model::aabb_tree::manual_update_aabbs;
 
-    // 如果传入的是DbOptionExt，则取其内部的DbOption
+    // 如果传入的是DbOptionExt，则使用它，否则从配置文件加载
     let db_option_ext = option.unwrap_or_else(|| get_db_option_ext());
-    let db_option: DbOption = db_option_ext.inner.clone();
 
     // 检查是否需要启动GRPC服务器
     #[cfg(feature = "grpc")]
@@ -336,7 +364,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         });
 
         // 继续执行正常的应用逻辑，但不阻塞GRPC服务器
-        let app_handle = tokio::spawn(async move { run_app_internal(db_option).await });
+        let app_handle = tokio::spawn(async move { run_app_internal(db_option_ext).await });
 
         // 等待任一任务完成
         tokio::select! {
@@ -347,21 +375,21 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         return Ok(());
     }
     // 调用内部实现
-    run_app_internal(db_option).await
+    run_app_internal(db_option_ext).await
 }
 
 /// 内部应用运行逻辑
-async fn run_app_internal(db_option: DbOption) -> anyhow::Result<()> {
+async fn run_app_internal(db_option_ext: options::DbOptionExt) -> anyhow::Result<()> {
     use crate::fast_model::aabb_tree::manual_update_aabbs;
 
     // 使用 aios_core 统一的数据库初始化函数
-    aios_core::initialize_databases(&db_option).await?;
+    aios_core::initialize_databases(&db_option_ext.inner).await?;
 
-    if db_option.gen_spatial_tree {
+    if db_option_ext.inner.gen_spatial_tree {
         // SQLite R*-tree initialization is handled in spatial_index_builder
     }
 
-    run_cli(db_option).await
+    run_cli(db_option_ext).await
 }
 
 /// aios_core 提供了 init_mem_db_with_retry

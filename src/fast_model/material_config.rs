@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use aios_core::color_scheme::ColorSchemeManager;
+use aios_core::pdms_types::PdmsGenericType;
 
 const DEFAULT_LIBRARY_PATH: &str = "assets/material/plant_pipeline_materials.json";
 
@@ -58,6 +60,7 @@ pub struct MaterialLibrary {
     index_map: HashMap<String, usize>,
     default_material: Option<String>,
     source_path: PathBuf,
+    color_scheme_manager: Option<ColorSchemeManager>,
 }
 
 impl MaterialLibrary {
@@ -77,12 +80,18 @@ impl MaterialLibrary {
             index_map.insert(material.name.clone(), idx);
         }
 
+        // 尝试加载颜色配置方案
+        let color_scheme_manager = ColorSchemeManager::load_from_file("ColorSchemes.toml")
+            .ok()
+            .or_else(|| Some(ColorSchemeManager::default_schemes()));
+
         Ok(Self {
             materials: file.materials,
             noun_bindings: file.noun_bindings,
             index_map,
             default_material: file.default_material,
             source_path: path_ref.to_path_buf(),
+            color_scheme_manager,
         })
     }
 
@@ -103,6 +112,92 @@ impl MaterialLibrary {
 
     pub fn source_path(&self) -> &Path {
         &self.source_path
+    }
+
+    /// 根据 PDMS 类型获取颜色 (RGBA, 0-255)
+    pub fn get_color_for_type(&self, pdms_type: PdmsGenericType) -> Option<[u8; 4]> {
+        self.color_scheme_manager
+            .as_ref()
+            .and_then(|manager| manager.get_color_for_type(pdms_type))
+    }
+
+    /// 根据 noun 字符串获取颜色 (RGBA, 0-255)
+    pub fn get_color_for_noun(&self, noun: &str) -> Option<[u8; 4]> {
+        // 尝试将 noun 转换为 PdmsGenericType
+        let noun_upper = noun.to_uppercase();
+        if let Ok(pdms_type) = noun_upper.parse::<PdmsGenericType>() {
+            self.get_color_for_type(pdms_type)
+        } else {
+            None
+        }
+    }
+
+    /// 将颜色从 [u8; 4] 转换为归一化的 [f32; 4]
+    pub fn color_to_normalized(color: [u8; 4]) -> [f32; 4] {
+        [
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+            color[3] as f32 / 255.0,
+        ]
+    }
+
+    /// 根据 noun 获取归一化的颜色 (0.0-1.0)
+    pub fn get_normalized_color_for_noun(&self, noun: &str) -> Option<[f32; 4]> {
+        self.get_color_for_noun(noun)
+            .map(Self::color_to_normalized)
+    }
+
+    /// 为指定的 noun 创建一个基于颜色配置的 glTF 材质
+    /// 如果颜色配置中没有该类型,则返回 None
+    pub fn create_color_based_material(&self, noun: &str, use_basic: bool) -> Option<Value> {
+        let color = self.get_normalized_color_for_noun(noun)?;
+
+        let mut material = json!({
+            "name": format!("{}_ColorScheme", noun.to_uppercase())
+        });
+
+        if use_basic {
+            // 使用 unlit 扩展的基础材质
+            material["pbrMetallicRoughness"] = json!({
+                "baseColorFactor": color
+            });
+            material["extensions"] = json!({
+                "KHR_materials_unlit": {}
+            });
+        } else {
+            // 标准 PBR 材质
+            material["pbrMetallicRoughness"] = json!({
+                "baseColorFactor": color,
+                "metallicFactor": 0.0,
+                "roughnessFactor": 0.8
+            });
+        }
+
+        Some(material)
+    }
+
+    /// 获取或创建材质索引
+    /// 优先使用材质库中的绑定,如果没有则使用颜色配置创建动态材质
+    pub fn get_or_create_material_for_noun(
+        &self,
+        noun: &str,
+        use_basic: bool,
+        dynamic_materials: &mut Vec<Value>,
+    ) -> Option<usize> {
+        // 首先尝试从材质库中获取
+        if let Some(idx) = self.material_index_for_noun(noun) {
+            return Some(idx);
+        }
+
+        // 如果材质库中没有,尝试使用颜色配置创建
+        if let Some(material_json) = self.create_color_based_material(noun, use_basic) {
+            let new_idx = self.materials.len() + dynamic_materials.len();
+            dynamic_materials.push(material_json);
+            return Some(new_idx);
+        }
+
+        None
     }
 }
 

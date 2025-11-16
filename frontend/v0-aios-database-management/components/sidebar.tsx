@@ -20,6 +20,7 @@ import {
   TestTube,
   Plus,
   Monitor,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -122,9 +123,18 @@ const toolItems: NavItem[] = [
     href: "/collaboration",
   },
   {
-    title: "异地环境",
+    title: "异地运维",
     icon: Server,
-    href: "/remote",
+    href: "/remote-sync",
+    children: [
+      { title: "环境列表", icon: Server, href: "/remote-sync" },
+      { title: "部署向导", icon: Plus, href: "/remote-sync/deploy" },
+      { title: "监控仪表板", icon: Monitor, href: "/remote-sync/monitor" },
+      { title: "数据流向", icon: Network, href: "/remote-sync/flow" },
+      { title: "日志查询", icon: Activity, href: "/remote-sync/logs" },
+      { title: "性能监控", icon: BarChart3, href: "/remote-sync/metrics" },
+      { title: "配置管理", icon: Settings, href: "/remote-sync/config" },
+    ],
   },
 ];
 

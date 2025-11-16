@@ -35,11 +35,16 @@ pub async fn gen_loop_geos(
     }
     //处理loop elements
     //todo 暂时不用多线程，有一些问题
-    let mut batch_chunks_cnt = 16;
-    let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
+    let mut batch_chunks_cnt = 16usize.min(loop_owner_cnt.max(1));
+    let mut batch_size = (loop_owner_cnt + batch_chunks_cnt - 1) / batch_chunks_cnt;
+    if batch_size == 0 {
+        batch_size = 1;
+    }
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
         batch_chunks_cnt = loop_owner_cnt;
+    } else {
+        batch_chunks_cnt = (loop_owner_cnt + batch_size - 1) / batch_size;
     }
     let mut handles = vec![];
     // dbg!(&loop_owner_refnos);
@@ -50,6 +55,15 @@ pub async fn gen_loop_geos(
         let sender = sender.clone();
         let handle = tokio::spawn(async move {
             let start_idx = i * batch_size;
+            if start_idx >= loop_owner_cnt {
+                if is_e3d_debug_enabled() {
+                    println!(
+                        "[gen_loop_geos] 批次 {} 起始索引 {} 超出总长度 {}, 跳过",
+                        i, start_idx, loop_owner_cnt
+                    );
+                }
+                return Ok::<_, anyhow::Error>(());
+            }
             let mut end_idx = start_idx + batch_size;
             if end_idx > loop_owner_cnt {
                 end_idx = loop_owner_cnt;
@@ -69,11 +83,22 @@ pub async fn gen_loop_geos(
                     continue;
                 };
                 //判断父节点是否有SJUS，需要调整位置
+                #[cfg(feature = "profile")]
+                let pane_sjus_start = std::time::Instant::now();
+                
                 if (target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
                 {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
+                    
+                    #[cfg(feature = "profile")]
+                    tracing::debug!(
+                        refno = ?target_refno,
+                        noun_type = target_type,
+                        sjus_adjust_ms = pane_sjus_start.elapsed().as_micros() as f64 / 1000.0,
+                        "PANE/FLOOR/GWALL SJUS adjustment applied"
+                    );
                 }
 
                 if !target_att.is_neg() {
@@ -146,6 +171,9 @@ pub async fn gen_loop_geos(
                     }
                     //todo 关于justline，可能需要jusline的信息才能判断中心点
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
+                        #[cfg(feature = "profile")]
+                        let extr_start = std::time::Instant::now();
+                        
                         if height < f32::EPSILON {
                             debug_model_warn!("{}： 的height太小为: {}", target_refno, height);
                             continue;
@@ -174,6 +202,21 @@ pub async fn gen_loop_geos(
                             .unwrap_or(PdmsGeoParam::Unknown);
                         item_trans = extrusion.get_trans();
                         geo_hash = extrusion.hash_unit_mesh_params();
+                        
+                        #[cfg(feature = "profile")]
+                        {
+                            let is_pane_type = matches!(target_type, "PANE" | "FLOOR" | "GWALL");
+                            if is_pane_type {
+                                tracing::debug!(
+                                    refno = ?target_refno,
+                                    noun_type = target_type,
+                                    height = height,
+                                    vert_count = extrusion.verts.len(),
+                                    processing_ms = extr_start.elapsed().as_micros() as f64 / 1000.0,
+                                    "PANE/FLOOR/GWALL extrusion processed"
+                                );
+                            }
+                        }
                     }
                     _ => {}
                 }

@@ -26,15 +26,17 @@ use aios_core::{RefU64, RefnoEnum, pdms_types::*};
 
 // 新的查询接口
 use crate::fast_model::query_provider::{
-    get_children_batch, query_by_type, query_multi_descendants,
+    count_noun_all_db, get_children_batch, query_noun_page_all_db, query_by_noun_all_db,
+    query_by_type, query_multi_descendants,
 };
+use anyhow::{anyhow, bail};
+use futures::stream::{self, StreamExt, TryStreamExt};
 
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use glam::DVec3;
 use glam::{DMat4, Vec3};
@@ -52,6 +54,173 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+
+/// Noun 分类枚举，用于 Full Noun 模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NounCategory {
+    /// 使用元件库的 Noun
+    Cate,
+    /// Loop owner Noun
+    LoopOwner,
+    /// 基本体 Noun
+    Prim,
+}
+
+async fn process_loop_refno_page(
+    ctx: &NounProcessContext,
+    loop_sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Ok(());
+    }
+
+    if !loop_model::gen_loop_geos(ctx.db_option.clone(), refnos, loop_sjus_map_arc, sender)
+        .await?
+    {
+        bail!("loop geos generation failed");
+    }
+    Ok(())
+}
+
+async fn process_prim_refno_page(
+    ctx: &NounProcessContext,
+    sender: flume::Sender<ShapeInstancesData>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Ok(());
+    }
+
+    if !prim_model::gen_prim_geos(ctx.db_option.clone(), refnos, sender).await? {
+        bail!("prim geos generation failed");
+    }
+    Ok(())
+}
+
+async fn process_cate_refno_page(
+    ctx: &NounProcessContext,
+    loop_sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Ok(());
+    }
+
+    let target_cata_map = Arc::new(
+        aios_core::query_group_by_cata_hash(refnos)
+            .await
+            .unwrap_or_default(),
+    );
+
+    if target_cata_map.is_empty() {
+        return Ok(());
+    }
+
+    if !cata_model::gen_cata_geos(
+        ctx.db_option.clone(),
+        target_cata_map,
+        Arc::new(Default::default()),
+        loop_sjus_map_arc,
+        sender,
+    )
+    .await?
+    {
+        bail!("cate geos generation failed");
+    }
+    Ok(())
+}
+
+/// Full Noun 模式下的 Noun 列表聚合结果
+#[derive(Debug, Clone)]
+pub struct FullNounCollection {
+    /// 按类别分组的 Noun 列表
+    pub cate_nouns: Vec<&'static str>,
+    pub loop_owner_nouns: Vec<&'static str>,
+    pub prim_nouns: Vec<&'static str>,
+    /// 所有 Noun 的去重集合（用于快速查找）
+    pub all_nouns: HashSet<&'static str>,
+}
+
+impl FullNounCollection {
+    /// 聚合并去重所有 Noun 列表
+    ///
+    /// 从 pdms_types 中的常量收集：
+    /// - USE_CATE_NOUN_NAMES
+    /// - GNERAL_LOOP_OWNER_NOUN_NAMES
+    /// - GNERAL_PRIM_NOUN_NAMES
+    ///
+    /// 可选的 extra_nouns 用于扩展（调试或特殊场景）
+    pub fn collect(extra_nouns: Option<&[&'static str]>) -> Self {
+        let mut all_nouns = HashSet::new();
+
+        // 收集 cate nouns
+        let mut cate_nouns = Vec::new();
+        for &noun in USE_CATE_NOUN_NAMES.iter() {
+            if all_nouns.insert(noun) {
+                cate_nouns.push(noun);
+            }
+        }
+
+        // 收集 loop owner nouns
+        let mut loop_owner_nouns = Vec::new();
+        for &noun in GNERAL_LOOP_OWNER_NOUN_NAMES.iter() {
+            if all_nouns.insert(noun) {
+                loop_owner_nouns.push(noun);
+            }
+        }
+
+        // 收集 prim nouns
+        let mut prim_nouns = Vec::new();
+        for &noun in GNERAL_PRIM_NOUN_NAMES.iter() {
+            if all_nouns.insert(noun) {
+                prim_nouns.push(noun);
+            }
+        }
+
+        // 添加额外的 nouns（如果提供）
+        if let Some(extras) = extra_nouns {
+            for &noun in extras {
+                all_nouns.insert(noun);
+                // 简单策略：额外的 noun 默认归入 cate 类别
+                // 实际使用时可以根据需要调整
+                if !cate_nouns.contains(&noun)
+                    && !loop_owner_nouns.contains(&noun)
+                    && !prim_nouns.contains(&noun) {
+                    cate_nouns.push(noun);
+                }
+            }
+        }
+
+        Self {
+            cate_nouns,
+            loop_owner_nouns,
+            prim_nouns,
+            all_nouns,
+        }
+    }
+
+    /// 根据 Noun 名称判断其类别
+    pub fn get_category(&self, noun: &str) -> Option<NounCategory> {
+        if self.cate_nouns.contains(&noun) {
+            Some(NounCategory::Cate)
+        } else if self.loop_owner_nouns.contains(&noun) {
+            Some(NounCategory::LoopOwner)
+        } else if self.prim_nouns.contains(&noun) {
+            Some(NounCategory::Prim)
+        } else {
+            None
+        }
+    }
+
+    /// 获取所有 Noun 的总数
+    pub fn total_count(&self) -> usize {
+        self.all_nouns.len()
+    }
+}
 
 ///一个db生成模型里，汇总的参考号集合
 #[derive(Debug, Clone, Default)]
@@ -265,13 +434,15 @@ pub(crate) fn is_e3d_trace_enabled() -> bool {
 
 // Macros for leveled debugging
 #[macro_export]
-macro_rules! e3d_dbg {
-    ($($arg:tt)*) => {{
-        if crate::fast_model::gen_model::is_e3d_debug_enabled() {
-            println!($($arg)*);
-        }
-    }};
-}
+// 临时注释：使用 gen_model/mod.rs 中的宏定义
+// macro_rules! e3d_dbg {
+//     ($($arg:tt)*) => {{
+//         if crate::fast_model::gen_model::is_e3d_debug_enabled() {
+//             println!($($arg)*);
+//         }
+//     }};
+// }
+use crate::e3d_dbg;  // 使用模块导出的宏
 
 #[macro_export]
 macro_rules! e3d_info {
@@ -453,6 +624,69 @@ pub async fn gen_all_geos_data(
         db_option.gen_model
     );
 
+    // 检查是否启用 Full Noun 模式（优先级最高）
+    // 从环境变量读取 full_noun_mode 配置
+    let full_noun_mode = std::env::var("FULL_NOUN_MODE")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if full_noun_mode {
+        // Full Noun 模式：直接按 Noun 全库扫描，忽略增量更新
+        println!("[gen_model] 进入 Full Noun 模式（忽略增量更新）");
+
+        if db_option.manual_db_nums.is_some() || db_option.exclude_db_nums.is_some() {
+            println!(
+                "[gen_model] 警告: Full Noun 模式下 manual_db_nums 和 exclude_db_nums 配置将被忽略"
+            );
+        }
+
+        if final_incr_updates.is_some() {
+            println!(
+                "[gen_model] 警告: Full Noun 模式下增量更新将被忽略，将执行全库重建"
+            );
+        }
+
+        let full_start = Instant::now();
+        let db_refnos = gen_full_noun_geos(db_option, None).await?;
+
+        println!(
+            "[gen_model] Full Noun 模式 insts 入库完成，用时 {} ms",
+            full_start.elapsed().as_millis()
+        );
+
+        // 可选执行 mesh 和布尔运算
+        if db_option.gen_mesh {
+            let mesh_start = Instant::now();
+            println!("[gen_model] Full Noun 模式开始生成三角网格");
+            db_refnos
+                .execute_gen_inst_meshes(Some(Arc::new(db_option.clone())))
+                .await;
+            println!(
+                "[gen_model] Full Noun 模式三角网格生成完成，用时 {} ms",
+                mesh_start.elapsed().as_millis()
+            );
+
+            if db_option.apply_boolean_operation {
+                let bool_start = Instant::now();
+                println!("[gen_model] Full Noun 模式开始布尔运算");
+                db_refnos
+                    .execute_boolean_meshes(Some(Arc::new(db_option.clone())))
+                    .await;
+                println!(
+                    "[gen_model] Full Noun 模式布尔运算完成，用时 {} ms",
+                    bool_start.elapsed().as_millis()
+                );
+            }
+        }
+
+        println!(
+            "[gen_model] Full Noun 模式全部完成，总用时 {} ms",
+            full_start.elapsed().as_millis()
+        );
+
+        return Ok(true);
+    }
+
     let is_incr_update = final_incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.debug_model_refnos.is_some();
@@ -531,6 +765,7 @@ pub async fn gen_all_geos_data(
             eprintln!("[capture] 捕获截图失败: {}", err);
         }
     } else {
+        // 原有的按 dbno 循环生成路径
         let dbnos = if db_option.manual_db_nums.is_some() {
             db_option.manual_db_nums.clone().unwrap()
         } else {
@@ -608,7 +843,7 @@ pub async fn gen_all_geos_data(
                 db_start.elapsed().as_millis()
             );
         }
-    }
+    } // 关闭最外层 else 分支（全量生成路径）
     // After generation, build SQLite RTree index from cached AABBs
     #[cfg(feature = "sqlite-index")]
     {
@@ -627,6 +862,406 @@ pub async fn gen_all_geos_data(
     );
 
     Ok(true)
+}
+
+/// Full Noun 模式：按 Noun 全库生成几何体数据
+///
+/// 直接以 Noun 表为根扫描全库，不引入 dbno 或 refno 层级约束。
+///
+/// # 参数
+/// * `db_option` - 数据库选项配置
+/// * `extra_nouns` - 可选的额外 Noun 列表（用于调试或扩展）
+///
+/// # 返回值
+/// * `anyhow::Result<DbModelInstRefnos>` - 返回聚合的 refno 集合
+///
+/// # 实现说明
+///
+/// 1. 聚合 Noun 列表（USE_CATE + LOOP_OWNER + PRIM + extra）
+/// 2. 创建 flume 通道用于异步数据入库
+/// 3. 按 Noun 类别并发查询和生成：
+///    - 使用 `query_by_noun_all_db` 查询全库 refno
+///    - 根据 Noun 类别调用对应的生成管线
+///    - 生成的 `ShapeInstancesData` 通过 flume 发送
+/// 4. 汇总并去重 refno，构建 `DbModelInstRefnos`
+/// 5. 可选执行 mesh 和布尔运算
+///
+/// # 注意
+///
+/// 由于 Full Noun 模式跳过了 dbno 层级，某些需要预处理的数据（如 sjus_map、branch_map）
+/// 在此模式下会使用默认值或跳过相关逻辑。
+pub async fn gen_full_noun_geos(
+    db_option: &DbOption,
+    extra_nouns: Option<&[&'static str]>,
+) -> anyhow::Result<DbModelInstRefnos> {
+    use crate::options::DbOptionExt;
+
+    let start_time = Instant::now();
+
+    // 从 DbOptionExt 获取 full noun 配置
+    let db_option_ext = DbOptionExt::from(db_option.clone());
+    let max_concurrent = db_option_ext.get_full_noun_concurrency();
+    let batch_size = db_option_ext.get_full_noun_batch_size();
+    let batch_concurrency = max_concurrent.max(1);
+
+    println!(
+        "[gen_full_noun_geos] 启动 Full Noun 模式，并发度: {}",
+        max_concurrent
+    );
+
+    // 1. 聚合 Noun 列表
+    let noun_collection = FullNounCollection::collect(extra_nouns);
+    println!(
+        "[gen_full_noun_geos] Noun 统计: cate={}, loop={}, prim={}, 总计={}",
+        noun_collection.cate_nouns.len(),
+        noun_collection.loop_owner_nouns.len(),
+        noun_collection.prim_nouns.len(),
+        noun_collection.total_count()
+    );
+
+    // 2. 创建 flume 通道
+    let channel_cap = batch_concurrency * 2;
+    let (sender, receiver) = flume::bounded::<ShapeInstancesData>(channel_cap);
+    let receiver_clone = receiver.clone();
+
+    // 启动异步入库任务
+    let insert_task = tokio::task::spawn(async move {
+        while let Ok(shape_insts) = receiver_clone.recv_async().await {
+            save_instance_data_optimize(&shape_insts, false)
+                .await
+                .unwrap();
+        }
+    });
+
+    // 3. 用于汇总所有 refno 的集合
+    let all_use_cate_refnos = Arc::new(RwLock::new(HashSet::<RefnoEnum>::new()));
+    let all_loop_owner_refnos = Arc::new(RwLock::new(HashSet::<RefnoEnum>::new()));
+    let all_prim_refnos = Arc::new(RwLock::new(HashSet::<RefnoEnum>::new()));
+
+    // 4. 顺序处理各类别任务，内部使用批次并发
+    let db_option_arc = Arc::new(db_option.clone());
+    let loop_sjus_map_arc = Arc::new(DashMap::new()); // Full Noun 模式下使用空的 sjus_map
+
+    process_cate_nouns(
+        &noun_collection,
+        db_option_arc.clone(),
+        loop_sjus_map_arc.clone(),
+        sender.clone(),
+        batch_size,
+        batch_concurrency,
+        all_use_cate_refnos.clone(),
+    )
+    .await?;
+
+    process_loop_nouns(
+        &noun_collection,
+        db_option_arc.clone(),
+        loop_sjus_map_arc.clone(),
+        sender.clone(),
+        batch_size,
+        batch_concurrency,
+        all_loop_owner_refnos.clone(),
+    )
+    .await?;
+
+    process_prim_nouns(
+        &noun_collection,
+        db_option_arc.clone(),
+        sender.clone(),
+        batch_size,
+        batch_concurrency,
+        all_prim_refnos.clone(),
+    )
+    .await?;
+
+    // 7. 关闭 sender，等待入库任务完成
+    drop(sender);
+    insert_task.await.unwrap();
+
+    println!(
+        "[gen_full_noun_geos] 所有 Noun 任务完成，用时 {} ms",
+        start_time.elapsed().as_millis()
+    );
+
+    // 8. 构建 DbModelInstRefnos
+    let use_cate_vec: Vec<RefnoEnum> = all_use_cate_refnos.read().await.iter().copied().collect();
+    let loop_owner_vec: Vec<RefnoEnum> = all_loop_owner_refnos.read().await.iter().copied().collect();
+    let prim_vec: Vec<RefnoEnum> = all_prim_refnos.read().await.iter().copied().collect();
+
+    println!(
+        "[gen_full_noun_geos] 汇总结果: use_cate={}, loop_owner={}, prim={}",
+        use_cate_vec.len(),
+        loop_owner_vec.len(),
+        prim_vec.len()
+    );
+
+    let db_refnos = DbModelInstRefnos {
+        bran_hanger_refnos: Arc::new(vec![]), // Full Noun 模式下不处理 bran_hanger
+        use_cate_refnos: Arc::new(use_cate_vec),
+        loop_owner_refnos: Arc::new(loop_owner_vec),
+        prim_refnos: Arc::new(prim_vec),
+    };
+
+    Ok(db_refnos)
+}
+
+#[derive(Clone)]
+struct NounProcessContext {
+    db_option: Arc<DbOption>,
+    batch_size: usize,
+    batch_concurrency: usize,
+}
+
+impl NounProcessContext {
+    fn new(db_option: Arc<DbOption>, batch_size: usize, batch_concurrency: usize) -> Self {
+        Self {
+            db_option,
+            batch_size,
+            batch_concurrency: batch_concurrency.max(1),
+        }
+    }
+
+    fn bounded_chunks(&self, total: usize) -> Vec<(usize, usize)> {
+        if total == 0 {
+            return vec![];
+        }
+
+        let chunk = self.batch_size.max(1);
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        while start < total {
+            let end = (start + chunk).min(total);
+            ranges.push((start, end));
+            start = end;
+        }
+        ranges
+    }
+}
+
+async fn process_cate_nouns(
+    collection: &FullNounCollection,
+    db_option: Arc<DbOption>,
+    loop_sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    batch_size: usize,
+    batch_concurrency: usize,
+    refno_sink: Arc<RwLock<HashSet<RefnoEnum>>>,
+) -> anyhow::Result<()> {
+    let ctx = NounProcessContext::new(db_option, batch_size, batch_concurrency);
+    let cate_nouns = collection.cate_nouns.clone();
+
+    if cate_nouns.is_empty() {
+        println!("[gen_full_noun_geos] cate nouns: 空列表，跳过");
+        return Ok(());
+    }
+
+    let page_size = ctx.batch_size.max(1);
+
+    let mut total_instances = 0usize;
+    for &noun in cate_nouns.iter() {
+        let total = count_noun_all_db(noun)
+            .await
+            .map_err(|e| anyhow!("统计 cate noun {} 失败: {}", noun, e))? as usize;
+
+        if total == 0 {
+            println!("[gen_full_noun_geos] cate noun {}: 无实例", noun);
+            continue;
+        }
+
+        println!(
+            "[gen_full_noun_geos] cate noun {}: 共 {} 个实例，分页大小 {}",
+            noun, total, page_size
+        );
+
+        let mut processed = 0usize;
+        while processed < total {
+            let refnos = query_noun_page_all_db(noun, processed, page_size)
+                .await
+                .map_err(|e| anyhow!("分页查询 cate noun {} 失败: {}", noun, e))?;
+
+            if refnos.is_empty() {
+                break;
+            }
+
+            {
+                let mut sink = refno_sink.write().await;
+                sink.extend(refnos.iter().copied());
+            }
+
+            let page_index = processed / page_size + 1;
+            println!(
+                "[gen_full_noun_geos] cate noun {}: 处理第 {} 页 ({} ~ {})",
+                noun,
+                page_index,
+                processed + 1,
+                processed + refnos.len()
+            );
+
+            let batch_len = refnos.len();
+            process_cate_refno_page(&ctx, loop_sjus_map_arc.clone(), sender.clone(), &refnos)
+                .await?;
+
+            processed += batch_len;
+        }
+
+        total_instances += total;
+    }
+
+    if total_instances == 0 {
+        println!("[gen_full_noun_geos] cate nouns: 无实例");
+    }
+
+    Ok(())
+}
+
+async fn process_loop_nouns(
+    collection: &FullNounCollection,
+    db_option: Arc<DbOption>,
+    loop_sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    batch_size: usize,
+    batch_concurrency: usize,
+    refno_sink: Arc<RwLock<HashSet<RefnoEnum>>>,
+) -> anyhow::Result<()> {
+    let ctx = NounProcessContext::new(db_option, batch_size, batch_concurrency);
+    let loop_nouns = collection.loop_owner_nouns.clone();
+
+    if loop_nouns.is_empty() {
+        println!("[gen_full_noun_geos] loop nouns: 空列表，跳过");
+        return Ok(());
+    }
+
+    let page_size = ctx.batch_size.max(1);
+
+    let mut total_instances = 0usize;
+    for &noun in loop_nouns.iter() {
+        let total = count_noun_all_db(noun)
+            .await
+            .map_err(|e| anyhow!("统计 loop noun {} 失败: {}", noun, e))? as usize;
+
+        if total == 0 {
+            println!("[gen_full_noun_geos] loop noun {}: 无实例", noun);
+            continue;
+        }
+
+        println!(
+            "[gen_full_noun_geos] loop noun {}: 共 {} 个实例，分页大小 {}",
+            noun, total, page_size
+        );
+
+        let mut processed = 0usize;
+        while processed < total {
+            let refnos = query_noun_page_all_db(noun, processed, page_size)
+                .await
+                .map_err(|e| anyhow!("分页查询 loop noun {} 失败: {}", noun, e))?;
+
+            if refnos.is_empty() {
+                break;
+            }
+
+            {
+                let mut sink = refno_sink.write().await;
+                sink.extend(refnos.iter().copied());
+            }
+
+            let page_index = processed / page_size + 1;
+            println!(
+                "[gen_full_noun_geos] loop noun {}: 处理第 {} 页 ({} ~ {})",
+                noun,
+                page_index,
+                processed + 1,
+                processed + refnos.len()
+            );
+
+            let batch_len = refnos.len();
+            process_loop_refno_page(&ctx, loop_sjus_map_arc.clone(), sender.clone(), &refnos)
+                .await?;
+
+            processed += batch_len;
+        }
+
+        total_instances += total;
+    }
+
+    if total_instances == 0 {
+        println!("[gen_full_noun_geos] loop nouns: 无实例");
+    }
+
+    Ok(())
+}
+
+async fn process_prim_nouns(
+    collection: &FullNounCollection,
+    db_option: Arc<DbOption>,
+    sender: flume::Sender<ShapeInstancesData>,
+    batch_size: usize,
+    batch_concurrency: usize,
+    refno_sink: Arc<RwLock<HashSet<RefnoEnum>>>,
+) -> anyhow::Result<()> {
+    let ctx = NounProcessContext::new(db_option, batch_size, batch_concurrency);
+    let prim_nouns = collection.prim_nouns.clone();
+
+    if prim_nouns.is_empty() {
+        println!("[gen_full_noun_geos] prim nouns: 空列表，跳过");
+        return Ok(());
+    }
+
+    let page_size = ctx.batch_size.max(1);
+
+    let mut total_instances = 0usize;
+    for &noun in prim_nouns.iter() {
+        let total = count_noun_all_db(noun)
+            .await
+            .map_err(|e| anyhow!("统计 prim noun {} 失败: {}", noun, e))? as usize;
+
+        if total == 0 {
+            println!("[gen_full_noun_geos] prim noun {}: 无实例", noun);
+            continue;
+        }
+
+        println!(
+            "[gen_full_noun_geos] prim noun {}: 共 {} 个实例，分页大小 {}",
+            noun, total, page_size
+        );
+
+        let mut processed = 0usize;
+        while processed < total {
+            let refnos = query_noun_page_all_db(noun, processed, page_size)
+                .await
+                .map_err(|e| anyhow!("分页查询 prim noun {} 失败: {}", noun, e))?;
+
+            if refnos.is_empty() {
+                break;
+            }
+
+            {
+                let mut sink = refno_sink.write().await;
+                sink.extend(refnos.iter().copied());
+            }
+
+            let page_index = processed / page_size + 1;
+            println!(
+                "[gen_full_noun_geos] prim noun {}: 处理第 {} 页 ({} ~ {})",
+                noun,
+                page_index,
+                processed + 1,
+                processed + refnos.len()
+            );
+
+            let batch_len = refnos.len();
+            process_prim_refno_page(&ctx, sender.clone(), &refnos).await?;
+
+            processed += batch_len;
+        }
+
+        total_instances += total;
+    }
+
+    if total_instances == 0 {
+        println!("[gen_full_noun_geos] prim nouns: 无实例");
+    }
+
+    Ok(())
 }
 
 ///更新模型数据

@@ -189,7 +189,7 @@ where
         r#"
         select value [  id,
                         array::last(string::split(NAME, '-')),
-                        array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
+                        array::flatten(REFNO.slice(1, 2 + collect).children).{{id, noun}})[?noun='PANE'].id
                     ] from FRMW where {filter}
     "#
     );
@@ -199,7 +199,7 @@ where
         r#"
         select value [  id,
                         array::last(string::split(NAME, '-')),
-                        array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
+                        REFNO.children[?noun='PANE'].id
                     ] from SBFR where {filter}
     "#
     );
@@ -209,7 +209,7 @@ where
         r#"
         select value [  id,
                         array::last(string::split(NAME, '-')),
-                        array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
+                        REFNO.children[?noun='PANE'].id
                     ] from FRMW where {filter}
     "#
     );

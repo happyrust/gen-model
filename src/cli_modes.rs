@@ -5,6 +5,7 @@ use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::{Result, anyhow};
 
 use aios_core::init_surreal;
+use aios_database::options::DbOptionExt;
 use aios_database::fast_model::export_glb::export_glb_for_refnos;
 // TODO: 更新 OBJ 导出器
 // use aios_database::fast_model::export_obj::export_obj_for_refnos;
@@ -18,7 +19,6 @@ use aios_database::fast_model::model_exporter::{
     CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, XktExportConfig,
 };
 use aios_database::fast_model::unit_converter::{LengthUnit, UnitConverter};
-use aios_database::options::DbOptionExt;
 
 /// 统一的导出配置结构体
 #[derive(Debug, Clone)]
@@ -378,7 +378,7 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
             println!("   - 强制开启 gen_mesh");
 
             // 传递配置，gen_all_geos_data 会使用配置中的 replace_mesh 和 gen_mesh 设置
-            gen_all_geos_data(refnos.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
 
             // 恢复原配置（如果需要的话）
             db_option_clone.replace_mesh = original_replace_mesh;
@@ -454,7 +454,7 @@ async fn export_obj_mode_for_db(
         let original_gen_mesh = db_option_clone.gen_mesh;
         db_option_clone.replace_mesh = Some(true);
         db_option_clone.gen_mesh = true;
-        gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+        let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
         db_option_clone.replace_mesh = original_replace_mesh;
         db_option_clone.gen_mesh = original_gen_mesh;
         unsafe { std::env::remove_var("FORCE_REPLACE_MESH"); }
@@ -558,7 +558,7 @@ pub async fn export_glb_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            gen_all_geos_data(refnos.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
 
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
@@ -635,7 +635,7 @@ async fn export_glb_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
         let original_gen_mesh = db_option_clone.gen_mesh;
         db_option_clone.replace_mesh = Some(true);
         db_option_clone.gen_mesh = true;
-        gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+        let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
         db_option_clone.replace_mesh = original_replace_mesh;
         db_option_clone.gen_mesh = original_gen_mesh;
         unsafe {
@@ -783,7 +783,7 @@ pub async fn export_gltf_mode(config: ExportConfig, db_option_ext: &DbOptionExt)
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
 
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
@@ -860,7 +860,7 @@ pub async fn export_gltf_mode(config: ExportConfig, db_option_ext: &DbOptionExt)
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            gen_all_geos_data(refnos.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
 
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
@@ -937,7 +937,7 @@ async fn export_gltf_mode_for_db(config: &ExportConfig, db_option_ext: &DbOption
         let original_gen_mesh = db_option_clone.gen_mesh;
         db_option_clone.replace_mesh = Some(true);
         db_option_clone.gen_mesh = true;
-        gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+        let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
         db_option_clone.replace_mesh = original_replace_mesh;
         db_option_clone.gen_mesh = original_gen_mesh;
         unsafe {
@@ -1215,7 +1215,7 @@ pub async fn export_xkt_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
 
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
@@ -1302,7 +1302,7 @@ pub async fn export_xkt_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            gen_all_geos_data(refnos.clone(), &db_option_clone, None, None).await?;
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
 
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
@@ -1390,7 +1390,7 @@ async fn export_xkt_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
         let original_gen_mesh = db_option_clone.gen_mesh;
         db_option_clone.replace_mesh = Some(true);
         db_option_clone.gen_mesh = true;
-        gen_all_geos_data(sites.clone(), &db_option_clone, None, None).await?;
+        let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
         db_option_clone.replace_mesh = original_replace_mesh;
         db_option_clone.gen_mesh = original_gen_mesh;
         unsafe {

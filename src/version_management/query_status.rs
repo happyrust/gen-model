@@ -1,21 +1,29 @@
 use aios_core::pdms_types::RefU64;
 use crate::version_management::{RefnoStatusDifference};
 use aios_core::data_state::RefnoStatusInfo;
+use aios_core::get_db_option;
+#[cfg(feature = "sql")]
+use aios_core::db_pool::get_project_pool;
 use sqlx::{Executor, MySql, Pool, Row};
 use crate::aql_api::children::query_travel_children_aql;
-use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::arangodb::ArDatabase;
 use std::str::FromStr;
 
 /// 查询该节点所有的数据状态,只返回状态信息，不返回attrmap
 ///
 /// 按照版本赋值顺序返回
-pub async fn query_refno_all_status(aios_mgr: &AiosDBManager, refno: String) -> Vec<RefnoStatusInfo> {
-    if let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) {
+#[cfg(feature = "sql")]
+pub async fn query_refno_all_status(refno: String) -> Vec<RefnoStatusInfo> {
+    let db_option = get_db_option();
+    if let Ok(pool) = get_project_pool(&db_option).await {
         if let Ok(result) = query_all_version(&pool, refno).await {
             return result;
         }
     };
+    vec![]
+}
+
+#[cfg(not(feature = "sql"))]
+pub async fn query_refno_all_status(_refno: String) -> Vec<RefnoStatusInfo> {
     vec![]
 }
 

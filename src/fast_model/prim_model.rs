@@ -39,11 +39,16 @@ pub async fn gen_prim_geos(
         e3d_dbg!("[gen_prim_geos] 警告: 基本体数量为0，直接返回");
         return Ok(true);
     }
-    let mut batch_chunks_cnt = 8;
-    let mut batch_size = prim_cnt / batch_chunks_cnt + 1;
+    let mut batch_chunks_cnt = 8usize.min(prim_cnt.max(1));
+    let mut batch_size = (prim_cnt + batch_chunks_cnt - 1) / batch_chunks_cnt;
+    if batch_size == 0 {
+        batch_size = 1;
+    }
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
         batch_chunks_cnt = prim_cnt;
+    } else {
+        batch_chunks_cnt = (prim_cnt + batch_size - 1) / batch_size;
     }
 
     e3d_dbg!(
@@ -63,9 +68,18 @@ pub async fn gen_prim_geos(
             let batch_start_time = Instant::now();
             let mut shape_insts_data = ShapeInstancesData::default();
             let start_idx = i * batch_size;
+            if start_idx >= prim_cnt {
+                e3d_dbg!(
+                    "[gen_prim_geos] 批次 {} 起始索引 {} 超出总长度 {}, 直接跳过",
+                    i,
+                    start_idx,
+                    prim_cnt
+                );
+                return Ok::<_, anyhow::Error>(());
+            }
             let mut end_idx = start_idx + batch_size;
-            if end_idx > prim_cnt as usize {
-                end_idx = prim_cnt as usize;
+            if end_idx > prim_cnt {
+                end_idx = prim_cnt;
             }
             let batch_item_count = end_idx - start_idx;
 

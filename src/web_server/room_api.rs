@@ -24,10 +24,13 @@ use aios_core::{
     RefnoEnum,
 };
 
+use crate::shared::{ProgressHub, ProgressMessage, ProgressMessageBuilder, TaskStatus as HubTaskStatus};
+
 /// 房间计算 API 状态
 #[derive(Clone)]
 pub struct RoomApiState {
     pub task_manager: Arc<RwLock<RoomTaskManager>>,
+    pub progress_hub: Arc<ProgressHub>,
 }
 
 /// 房间任务管理器
@@ -101,6 +104,7 @@ pub struct ValidationOptions {
     pub check_room_codes: bool,
     pub check_spatial_consistency: bool,
     pub check_reference_integrity: bool,
+    pub max_errors: usize,
 }
 
 /// 模型生成选项
@@ -278,7 +282,21 @@ pub async fn create_room_task(
     };
 
     let mut task_manager = state.task_manager.write().await;
-    task_manager.active_tasks.insert(task_id, task.clone());
+    task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    drop(task_manager); // 释放锁
+
+    // 在 ProgressHub 中注册任务
+    state.progress_hub.register(task_id.clone());
+    info!("📋 房间计算任务已注册到 ProgressHub: {}", task_id);
+
+    // 发布初始进度消息
+    let init_msg = ProgressMessageBuilder::new(&task_id)
+        .status(HubTaskStatus::Pending)
+        .percentage(0.0)
+        .step("初始化", 0, 4)
+        .message("任务已创建，等待执行")
+        .build();
+    let _ = state.progress_hub.publish(init_msg);
 
     // 异步执行任务
     let state_clone = state.clone();
@@ -621,10 +639,21 @@ pub async fn create_data_snapshot(
 
 /// 执行房间计算任务
 async fn execute_room_task(state: RoomApiState, mut task: RoomComputeTask) {
+    let task_id = task.id.clone();
+
     // 更新任务状态为运行中
     task.status = TaskStatus::Running;
     task.message = "任务执行中...".to_string();
     update_task_status(&state, &task).await;
+
+    // 发布开始进度消息
+    let start_msg = ProgressMessageBuilder::new(&task_id)
+        .status(HubTaskStatus::Running)
+        .percentage(0.0)
+        .step("开始执行", 1, 4)
+        .message("任务执行中...")
+        .build();
+    let _ = state.progress_hub.publish(start_msg);
 
     let result = match task.task_type {
         RoomTaskType::RebuildRelations => execute_rebuild_relations(&task.config).await,
@@ -640,18 +669,39 @@ async fn execute_room_task(state: RoomApiState, mut task: RoomComputeTask) {
             task.status = TaskStatus::Completed;
             task.message = "任务完成".to_string();
             task.result = Some(compute_result);
+
+            // 发布完成进度消息
+            let complete_msg = ProgressMessageBuilder::new(&task_id)
+                .status(HubTaskStatus::Completed)
+                .percentage(100.0)
+                .step("完成", 4, 4)
+                .message("任务完成")
+                .build();
+            let _ = state.progress_hub.publish(complete_msg);
         }
         Err(e) => {
             task.status = TaskStatus::Failed;
             task.message = format!("任务失败: {}", e);
+
+            // 发布失败进度消息
+            let failed_msg = ProgressMessageBuilder::new(&task_id)
+                .status(HubTaskStatus::Failed)
+                .percentage(0.0)
+                .message(format!("任务失败: {}", e))
+                .build();
+            let _ = state.progress_hub.publish(failed_msg);
         }
     }
 
     task.progress = 100.0;
     task.updated_at = chrono::Utc::now();
-    
+
     // 移动到历史记录
     move_task_to_history(&state, task).await;
+
+    // 从 ProgressHub 注销任务
+    state.progress_hub.unregister(&task_id);
+    info!("🗑️ 房间计算任务已从 ProgressHub 注销: {}", task_id);
 }
 
 async fn update_task_status(state: &RoomApiState, task: &RoomComputeTask) {
@@ -1062,20 +1112,334 @@ async fn execute_create_snapshot(config: &RoomComputeConfig) -> anyhow::Result<R
     })
 }
 
+/// 房间模型重新生成 API
+pub async fn regenerate_room_models(
+    State(state): State<RoomApiState>,
+    Json(request): Json<crate::web_server::models::RoomRegenerateRequest>,
+) -> Result<Json<crate::web_server::models::RoomRegenerateResponse>, StatusCode> {
+    use crate::web_server::models::TaskStatus as ModelsTaskStatus;
+
+    info!("🚀 收到房间模型重新生成请求: db_num={}", request.db_num);
+
+    let task_id = Uuid::new_v4().to_string();
+
+    // 创建任务
+    let task = RoomComputeTask {
+        id: task_id.clone(),
+        task_type: RoomTaskType::RebuildRelations, // 复用现有类型
+        status: TaskStatus::Pending,
+        progress: 0.0,
+        message: "任务已创建，准备查询房间参考号...".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        config: RoomComputeConfig {
+            project_code: None,
+            room_keywords: request.room_keywords.clone().unwrap_or_default(),
+            database_numbers: vec![request.db_num],
+            force_rebuild: request.force_regenerate,
+            batch_size: Some(16),
+            validation_options: ValidationOptions {
+                check_room_codes: false,
+                check_spatial_consistency: false,
+                check_reference_integrity: false,
+                max_errors: 100,
+            },
+            model_generation: ModelGenerationOptions {
+                generate_model: true,
+                generate_mesh: request.gen_mesh,
+                generate_spatial_tree: true,
+                apply_boolean_operation: request.apply_boolean_operation,
+                mesh_tolerance_ratio: 3.0,
+                output_formats: vec![],
+                quality_level: ModelQuality::Medium,
+            },
+        },
+        result: None,
+    };
+
+    // 添加到任务管理器
+    {
+        let mut task_manager = state.task_manager.write().await;
+        task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    }
+
+    // 异步执行任务
+    let state_clone = state.clone();
+    let request_clone = request.clone();
+    let task_id_clone = task_id.clone();
+    tokio::spawn(async move {
+        execute_room_regenerate(state_clone, task_id_clone, request_clone).await;
+    });
+
+    Ok(Json(crate::web_server::models::RoomRegenerateResponse {
+        success: true,
+        task_id,
+        status: ModelsTaskStatus::Pending,
+        message: "房间模型重新生成任务已创建".to_string(),
+        room_count: 0,
+        element_count: 0,
+    }))
+}
+
+/// 执行房间模型重新生成任务
+async fn execute_room_regenerate(
+    state: RoomApiState,
+    task_id: String,
+    request: crate::web_server::models::RoomRegenerateRequest,
+) {
+    use crate::fast_model::gen_model::gen_all_geos_data;
+    use crate::fast_model::room_model::build_room_relations;
+    use crate::options::get_db_option_ext;
+
+    info!("📋 开始执行房间模型重新生成任务: {}", task_id);
+
+    // 更新任务状态
+    let mut update_status = |progress: f32, message: String| {
+        let state_clone = state.clone();
+        let task_id_clone = task_id.clone();
+        tokio::spawn(async move {
+            let mut task_manager = state_clone.task_manager.write().await;
+            if let Some(task) = task_manager.active_tasks.get_mut(&task_id_clone) {
+                task.progress = progress;
+                task.message = message;
+                task.updated_at = Utc::now();
+            }
+        });
+    };
+
+    // 阶段 1: 查询房间参考号
+    update_status(10.0, "正在查询房间参考号...".to_string());
+
+    let db_option_ext = get_db_option_ext();
+    let room_keywords = if let Some(keywords) = request.room_keywords {
+        keywords
+    } else {
+        db_option_ext.get_room_key_word()
+    };
+
+    info!("🔍 使用房间关键词: {:?}", room_keywords);
+
+    // 查询房间和面板关系
+    let room_panel_map = match query_room_panels(&room_keywords).await {
+        Ok(map) => map,
+        Err(e) => {
+            error!("❌ 查询房间参考号失败: {}", e);
+            finalize_task_failed(&state, &task_id, format!("查询房间参考号失败: {}", e)).await;
+            return;
+        }
+    };
+
+    let room_count = room_panel_map.len();
+    info!("✅ 查询到 {} 个房间", room_count);
+
+    // 收集所有需要生成模型的参考号
+    let mut all_refnos = Vec::new();
+    for (_room_refno, _room_num, panel_refnos) in &room_panel_map {
+        for panel_refno in panel_refnos {
+            all_refnos.push(panel_refno.clone());
+        }
+    }
+
+    let element_count = all_refnos.len();
+    info!("📊 需要生成 {} 个房间面板的模型", element_count);
+
+    update_status(
+        20.0,
+        format!("查询完成，找到 {} 个房间，{} 个元素", room_count, element_count),
+    );
+
+    // 阶段 2: 强制重新生成模型
+    update_status(30.0, "正在强制重新生成模型...".to_string());
+
+    let mut db_option_clone = db_option_ext.clone();
+    db_option_clone.replace_mesh = Some(true); // 强制重新生成
+    db_option_clone.gen_mesh = request.gen_mesh;
+    db_option_clone.gen_model = true;
+    db_option_clone.apply_boolean_operation = request.apply_boolean_operation;
+    db_option_clone.manual_db_nums = Some(vec![request.db_num]);
+
+    info!("🔧 配置: replace_mesh=true, gen_mesh={}, apply_boolean={}",
+        request.gen_mesh, request.apply_boolean_operation);
+
+    // 设置环境变量强制替换
+    unsafe {
+        std::env::set_var("FORCE_REPLACE_MESH", "true");
+    }
+
+    match gen_all_geos_data(all_refnos.clone(), &db_option_clone, None, None).await {
+        Ok(_) => {
+            info!("✅ 模型生成完成");
+            update_status(70.0, format!("模型生成完成，已处理 {} 个元素", element_count));
+        }
+        Err(e) => {
+            error!("❌ 模型生成失败: {}", e);
+            unsafe {
+                std::env::remove_var("FORCE_REPLACE_MESH");
+            }
+            finalize_task_failed(&state, &task_id, format!("模型生成失败: {}", e)).await;
+            return;
+        }
+    }
+
+    unsafe {
+        std::env::remove_var("FORCE_REPLACE_MESH");
+    }
+
+    // 阶段 3: 更新房间关系
+    update_status(80.0, "正在更新房间关系...".to_string());
+
+    let start_time = std::time::Instant::now();
+    match build_room_relations(&db_option_ext).await {
+        Ok(_) => {
+            let duration = start_time.elapsed();
+            info!("✅ 房间关系更新完成，耗时 {:?}", duration);
+
+            // 任务完成
+            finalize_task_success(
+                &state,
+                &task_id,
+                room_count,
+                element_count,
+                duration.as_millis() as u64,
+            ).await;
+        }
+        Err(e) => {
+            error!("❌ 房间关系更新失败: {}", e);
+            finalize_task_failed(&state, &task_id, format!("房间关系更新失败: {}", e)).await;
+        }
+    }
+}
+
+/// 查询房间和面板关系
+async fn query_room_panels(
+    room_keywords: &Vec<String>,
+) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>> {
+    use aios_core::SUL_DB;
+    use aios_core::types::RecordId;
+    use itertools::Itertools;
+
+    let filter = room_keywords
+        .iter()
+        .map(|x| format!("'{}' in NAME", x))
+        .join(" or ");
+
+    #[cfg(feature = "project_hd")]
+    let sql = format!(
+        r#"
+        select value [  id,
+                        array::last(string::split(NAME, '-')),
+                        array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
+                    ] from FRMW where {filter}
+    "#
+    );
+
+    #[cfg(not(feature = "project_hd"))]
+    let sql = format!(
+        r#"
+        select value [  id,
+                        array::last(string::split(NAME, '-')),
+                        array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
+                    ] from SBFR where {filter}
+    "#
+    );
+
+    let mut response = SUL_DB.query(sql).await?;
+    let raw_result: Vec<(RecordId, String, Vec<RecordId>)> = response.take(0)?;
+
+    let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = raw_result
+        .into_iter()
+        .map(|(room_id, room_num, panel_ids): (RecordId, String, Vec<RecordId>)| {
+            let room_refno = RefnoEnum::from(room_id);
+            let panel_refnos = panel_ids
+                .into_iter()
+                .map(|id| RefnoEnum::from(id))
+                .collect();
+            (room_refno, room_num, panel_refnos)
+        })
+        .collect();
+
+    Ok(room_groups)
+}
+
+/// 任务成功完成
+async fn finalize_task_success(
+    state: &RoomApiState,
+    task_id: &str,
+    room_count: usize,
+    element_count: usize,
+    duration_ms: u64,
+) {
+    let mut task_manager = state.task_manager.write().await;
+    if let Some(mut task) = task_manager.active_tasks.remove(task_id) {
+        task.status = TaskStatus::Completed;
+        task.progress = 100.0;
+        task.message = format!(
+            "✅ 房间模型重新生成完成！处理了 {} 个房间，{} 个元素，耗时 {}ms",
+            room_count, element_count, duration_ms
+        );
+        task.updated_at = Utc::now();
+        task.result = Some(RoomComputeResult {
+            success: true,
+            processed_count: element_count,
+            error_count: 0,
+            warnings: vec![],
+            errors: vec![],
+            statistics: RoomStatistics {
+                total_rooms: room_count,
+                total_panels: element_count,
+                total_relations: 0,
+                room_types: HashMap::new(),
+                avg_confidence: 1.0,
+            },
+            duration_ms,
+        });
+        task_manager.task_history.push(task);
+    }
+}
+
+/// 任务失败
+async fn finalize_task_failed(state: &RoomApiState, task_id: &str, error_message: String) {
+    let mut task_manager = state.task_manager.write().await;
+    if let Some(mut task) = task_manager.active_tasks.remove(task_id) {
+        task.status = TaskStatus::Failed;
+        task.message = error_message.clone();
+        task.updated_at = Utc::now();
+        task.result = Some(RoomComputeResult {
+            success: false,
+            processed_count: 0,
+            error_count: 1,
+            warnings: vec![],
+            errors: vec![error_message],
+            statistics: RoomStatistics {
+                total_rooms: 0,
+                total_panels: 0,
+                total_relations: 0,
+                room_types: HashMap::new(),
+                avg_confidence: 0.0,
+            },
+            duration_ms: 0,
+        });
+        task_manager.task_history.push(task);
+    }
+}
+
 /// 创建房间 API 路由
 pub fn create_room_api_routes() -> Router<RoomApiState> {
     Router::new()
         // 任务管理
         .route("/api/room/tasks", post(create_room_task))
         .route("/api/room/tasks/{id}", get(get_task_status))
-        
+
         // 房间查询
         .route("/api/room/query", get(query_room_by_point))
         .route("/api/room/batch-query", post(batch_query_rooms))
-        
+
         // 房间代码处理
         .route("/api/room/process-codes", post(process_room_codes))
-        
+
+        // 房间模型重新生成
+        .route("/api/room/regenerate-models", post(regenerate_room_models))
+
         // 系统管理
         .route("/api/room/status", get(get_room_system_status))
         .route("/api/room/snapshot", post(create_data_snapshot))
