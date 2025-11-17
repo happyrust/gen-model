@@ -1,0 +1,130 @@
+name: Windows x64 Build
+
+on:
+  push:
+    branches: [ "master", "only-csg" ]
+    tags: [ "v*.*.*" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x64 Release
+    runs-on: windows-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "windows-release"
+      
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      
+      - name: Build web_server (Release)
+        run: |
+          cargo build --release --bin web_server --target x86_64-pc-windows-msvc --no-default-features --features ws,sqlite-index,surreal-save,web_server
+        shell: pwsh
+      
+      - name: Build aios-database library (Release)
+        run: |
+          cargo build --release --lib --target x86_64-pc-windows-msvc --no-default-features --features ws,sqlite-index,surreal-save,web_server
+        shell: pwsh
+      
+      - name: Package binaries
+        run: |
+          mkdir -p release-package
+          cp target/x86_64-pc-windows-msvc/release/web_server.exe release-package/
+          cp target/x86_64-pc-windows-msvc/release/aios_database.dll release-package/ || echo "DLL not found"
+          cp DbOption*.toml release-package/ || echo "No config files"
+          
+          # 创建版本信息文件
+          echo "Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" > release-package/BUILD_INFO.txt
+          echo "Commit: ${{ github.sha }}" >> release-package/BUILD_INFO.txt
+          echo "Branch: ${{ github.ref_name }}" >> release-package/BUILD_INFO.txt
+          echo "Target: x86_64-pc-windows-msvc" >> release-package/BUILD_INFO.txt
+        shell: pwsh
+      
+      - name: Create ZIP archive
+        run: |
+          Compress-Archive -Path release-package/* -DestinationPath aios-database-windows-x64.zip
+        shell: pwsh
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-release
+          path: |
+            aios-database-windows-x64.zip
+            release-package/web_server.exe
+          retention-days: 30
+      
+      # 如果是 tag 推送，创建 Release
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            aios-database-windows-x64.zip
+            release-package/web_server.exe
+          body: |
+            ## Windows x64 Release
+            
+            自动构建的 Windows x64 二进制文件
+            
+            ### 包含文件
+            - `web_server.exe` - Web 服务器主程序
+            - `aios_database.dll` - 核心库（如果可用）
+            - 配置文件示例
+            
+            ### 使用方法
+            1. 解压 ZIP 文件
+            2. 配置 `DbOption.toml`
+            3. 运行 `web_server.exe`
+            
+            ### 系统要求
+            - Windows 10/11 (x64)
+            - Visual C++ Redistributable 2015-2022
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-windows-binary:
+    name: Test Windows Binary
+    needs: build-windows-x64
+    runs-on: windows-latest
+    
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-release
+      
+      - name: Verify binary
+        run: |
+          if (Test-Path "web_server.exe") {
+            Write-Host "✓ web_server.exe found"
+            $size = (Get-Item "web_server.exe").Length
+            Write-Host "  Size: $([math]::Round($size/1MB, 2)) MB"
+          } else {
+            Write-Error "✗ web_server.exe not found!"
+            exit 1
+          }
+        shell: pwsh
+      
+      - name: Check binary info
+        run: |
+          # 检查二进制文件信息
+          dumpbin /headers web_server.exe | Select-String "machine"
+        shell: pwsh
+        continue-on-error: true

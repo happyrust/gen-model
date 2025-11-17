@@ -25,7 +25,7 @@ required-features = ["web_server"]
 
 [features]
 default = ["ws", "gen_model", "manifold", "project_hd", "sqlite-index", "surreal-save"]
-gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
+# gui = ["dep:gpui-component", "dep:gpui", "dep:story"]  # CI 中暂时禁用，需要本地路径依赖
 console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能
 truck = []
@@ -44,8 +44,8 @@ mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保�
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-web_server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "dep:re_ui", "aios_core/web_server"]              #Web UI功能
-sqlite-index = ["dep:rusqlite"]
+web_server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "aios_core/web_server"]              #Web UI功能 (移除 re_ui 以适配 CI)
+sqlite-index = ["dep:rusqlite", "aios_core/sqlite"]
 debug_e3d = []
 
 # 查询提供者选择 (用于模型生成时的层级查询)
@@ -94,8 +94,8 @@ parry3d = { version = "0.25.0", features = [
 parry2d = { version = "0.25.0", features = [
     "serde-serialize",
 ] }
-parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../rs-core", default-features = false, features = [
+parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
+aios_core = { git = "https://gitee.com/happydpc/rs-core.git", branch = "2.3", default-features = false, features = [
     "web_server",
     "bevy_transform",
     "bevy_math",
@@ -104,9 +104,9 @@ aios_core = { path = "../rs-core", default-features = false, features = [
 ] }
 bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_transform", features = ["serialize",] }
 bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
-pdms_io = { path = "../pdms-io-fork" }
+pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
-gen-xkt = { path = "../gen-xkt" }
+gen-xkt = { path = "../gen-xkt" }  # TODO: Git 仓库有 submodule 问题，暂时使用本地路径
 
 # 通用依赖
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -162,14 +162,14 @@ rand = "0.9.0"
 rust-embed = "8"
 
 gpui = { version = "0.2.2", optional = true }
-story = { path = "../gpui-component/crates/story", optional = true }
-gpui-component = { path = "../gpui-component/crates/ui", optional = true }
+# story = { path = "../gpui-component/crates/story", optional = true }
+# gpui-component = { path = "../gpui-component/crates/ui", optional = true }
 toml = "0.9.5"
 toml_edit = "0.22"
 pollster = "0.4.0"
 async-std = "1.13.1"
 eframe = { version = "0.33.0", optional = true }  # 使用默认的 glow (OpenGL) backend，避免 wgpu 27.x 的 naga 兼容性问题
-re_ui = { path = "../rerun/crates/viewer/re_ui", optional = true }
+# re_ui = { path = "../rerun/crates/viewer/re_ui", optional = true }
 
 # GRPC 相关依赖
 tonic = { version = "0.14.2", optional = true }
@@ -230,7 +230,7 @@ features = [
 #codegen-units = 1
 
 # [patch."https://gitee.com/happydpc/rs-core.git"]
-# aios_core = { path = "../rs-core" }
+# aios_core = { git = "https://gitee.com/happydpc/rs-core.git", branch = "2.3" }
 
 # [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
 # parse_pdms_db = { path = "../aios-parse-pdms-fork" }
