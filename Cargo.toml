@@ -95,7 +95,7 @@ parry2d = { version = "0.25.0", features = [
     "serde-serialize",
 ] }
 parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
-aios_core = { git = "https://gitee.com/happydpc/rs-core.git", branch = "2.3", default-features = false, features = [
+aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "2.3", default-features = false, features = [
     "web_server",
     "bevy_transform",
     "bevy_math",
@@ -106,7 +106,7 @@ bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_tr
 bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
 pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
-gen-xkt = { path = "../gen-xkt" }  # TODO: Git 仓库有 submodule 问题，暂时使用本地路径
+gen-xkt = { git = "https://gitee.com/happydpc/gen-xkt.git" }
 
 # 通用依赖
 uuid = { version = "1.0", features = ["v4", "serde"] }
