@@ -37,6 +37,65 @@ rustc-ice-*.txt
 *.db-shm
 *.db-wal
 
+# SQLite databases
+*.sqlite*
+*.db
+
+# JSON files that are likely large or generated
+all_attr_info.json
+
+# Build artifacts and binaries
+target/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.obj
+node_modules/
+
+# Web server binaries and test outputs
+web-server
+web-test
+rumqttd-server
+
+# Database files (should be generated, not committed)
+*.db
+*.sqlite*
+*.json
+*.log
+
+# Model and cache files
+all_attr_info.json
+*.cache
+*.xkt
+*.obj
+*.3dm
+
+# Log files (keep small ones like basic git logs)
+*.log.*
+debug_*.log
+
+# Temp directories
+tmp/
+temp/
+.cache/
+
+# Binary files and build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.obj
+
+# Build directories
+/target/
+/dist/
+/build/
+
 # Generated output directory
 output/
 
