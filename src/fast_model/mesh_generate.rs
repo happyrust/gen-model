@@ -512,7 +512,7 @@ pub async fn gen_inst_meshes(
                             non_scalable_geo,
                             refno_for_mesh,
                         ) {
-                            Some(csg_mesh) => {  
+                            Some(csg_mesh) => {
                                 // 构造带 LOD 后缀的文件名，保持所有 LOD 级别命名一致
                                 let mesh_filename =
                                     format!("{}_{:?}", mesh_id, precision.default_lod);
@@ -787,6 +787,43 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         const CHUNK: usize = 100;
         let aabb_map = DashMap::new();
 
+        // 🔥 创建 channel 用于异步 SQLite 写入
+        let (sqlite_sender, sqlite_receiver) = flume::unbounded::<(RefU64, Aabb, String)>();
+
+        // 🔥 启动异步 SQLite 批量写入任务
+        let sqlite_task = tokio::spawn(async move {
+            if !SqliteSpatialIndex::is_enabled() {
+                return;
+            }
+
+            let spatial_index = match SqliteSpatialIndex::with_default_path() {
+                Ok(idx) => idx,
+                Err(e) => {
+                    debug_model_warn!("SQLite 空间索引打开失败: {}", e);
+                    return;
+                }
+            };
+
+            let mut batch = Vec::with_capacity(100);
+            while let Ok((refno, aabb, noun)) = sqlite_receiver.recv() {
+                batch.push((refno, aabb, noun));
+
+                // 批量写入，减少 I/O 次数
+                if batch.len() >= 100 {
+                    for (r, a, n) in batch.drain(..) {
+                        let _ = spatial_index.insert_aabb(r, &a, Some(&n));
+                    }
+                }
+            }
+
+            // 处理剩余数据
+            for (r, a, n) in batch {
+                let _ = spatial_index.insert_aabb(r, &a, Some(&n));
+            }
+
+            debug_model_trace!("✅ SQLite 异步写入任务完成");
+        });
+
         for chunk in refnos.chunks(CHUNK) {
             if chunk.is_empty() {
                 continue;
@@ -844,11 +881,9 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
                 let bbox = RStarBoundingBox::new(aabb, r.refno, r.noun.clone());
 
-                // 写入 SQLite 空间索引
+                // 🔥 异步发送到 SQLite 写入任务
                 if SqliteSpatialIndex::is_enabled() {
-                    let spatial_index = SqliteSpatialIndex::with_default_path()
-                        .expect("Failed to open spatial index");
-                    let _ = spatial_index.insert_aabb(bbox.refno, &bbox.aabb, Some(&bbox.noun));
+                    let _ = sqlite_sender.send((bbox.refno, bbox.aabb, bbox.noun));
                 }
 
                 let sql = format!(
@@ -868,6 +903,12 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 debug_model_trace!("✅ AABB 批量更新成功");
             }
         }
+
+        // 🔥 关闭 sender，通知 SQLite 任务结束
+        drop(sqlite_sender);
+
+        // 🔥 等待 SQLite 写入任务完成
+        let _ = sqlite_task.await;
 
         utils::save_aabb_to_surreal(&aabb_map).await;
         Ok(())

@@ -1,30 +1,33 @@
+use anyhow::Result;
 use axum::{
+    Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post, put},
-    Router,
 };
+use chrono::{DateTime, Utc};
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 use uuid::Uuid;
-use glam::Vec3;
-use chrono::{DateTime, Utc};
-use anyhow::Result;
-use tracing::{info, warn, error};
 
 use aios_core::{
-    room::{
-        room_system_manager::{RoomSystemManager, SystemOperationResult, get_global_manager},
-        data_model::{RoomRelationType, RoomCode},
-        monitoring::{RoomSystemMetrics, get_global_monitor},
-    },
     RefnoEnum,
+    room::{
+        data_model::{RoomCode, RoomRelationType},
+        monitoring::{RoomSystemMetrics, get_global_monitor},
+        query_room_panels_by_keywords,
+        room_system_manager::{RoomSystemManager, SystemOperationResult, get_global_manager},
+    },
 };
 
-use crate::shared::{ProgressHub, ProgressMessage, ProgressMessageBuilder, TaskStatus as HubTaskStatus};
+use crate::shared::{
+    ProgressHub, ProgressMessage, ProgressMessageBuilder, TaskStatus as HubTaskStatus,
+};
 
 /// 房间计算 API 状态
 #[derive(Clone)]
@@ -282,7 +285,9 @@ pub async fn create_room_task(
     };
 
     let mut task_manager = state.task_manager.write().await;
-    task_manager.active_tasks.insert(task_id.clone(), task.clone());
+    task_manager
+        .active_tasks
+        .insert(task_id.clone(), task.clone());
     drop(task_manager); // 释放锁
 
     // 在 ProgressHub 中注册任务
@@ -314,7 +319,7 @@ pub async fn get_task_status(
     Path(task_id): Path<String>,
 ) -> Result<Json<RoomComputeTask>, StatusCode> {
     let task_manager = state.task_manager.read().await;
-    
+
     if let Some(task) = task_manager.active_tasks.get(&task_id) {
         Ok(Json(task.clone()))
     } else {
@@ -332,13 +337,17 @@ pub async fn query_room_by_point(
     Query(request): Query<RoomQueryRequest>,
 ) -> Result<Json<RoomQueryResponse>, StatusCode> {
     let start_time = std::time::Instant::now();
-    let point = Vec3::new(request.point[0] as f32, request.point[1] as f32, request.point[2] as f32);
+    let point = Vec3::new(
+        request.point[0] as f32,
+        request.point[1] as f32,
+        request.point[2] as f32,
+    );
 
     // 使用 aios-core 的真实房间查询方法
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     let query_result = {
         use aios_core::room::query_v2::query_room_number_by_point_v2;
-        
+
         match query_room_number_by_point_v2(point).await {
             Ok(room_number) => {
                 let panel_refno = if room_number.is_some() {
@@ -350,7 +359,7 @@ pub async fn query_room_by_point(
                 } else {
                     None
                 };
-                
+
                 // 计算置信度：基于查询结果的可靠性
                 let confidence = if room_number.is_some() && panel_refno.is_some() {
                     Some(0.95) // 高置信度：找到房间号和面板
@@ -359,7 +368,7 @@ pub async fn query_room_by_point(
                 } else {
                     None // 无置信度：未找到结果
                 };
-                
+
                 (true, room_number, panel_refno, confidence, None)
             }
             Err(e) => {
@@ -368,18 +377,24 @@ pub async fn query_room_by_point(
             }
         }
     };
-    
+
     // 如果不支持 SQLite 特性，回退到占位符实现
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
     let query_result = {
         warn!("SQLite 特性未启用，使用占位符实现");
         let room_number = format!("ROOM_{}", (request.point[0] as i32).abs() % 1000);
-        (true, Some(room_number), Some(123_456_789u64), Some(0.50), None::<String>)
+        (
+            true,
+            Some(room_number),
+            Some(123_456_789u64),
+            Some(0.50),
+            None::<String>,
+        )
     };
 
     let (success, room_number, panel_refno, confidence, error_msg) = query_result;
     let query_time = start_time.elapsed().as_millis() as f64;
-    
+
     if let Some(ref room_num) = room_number {
         info!(
             "房间查询成功: point=[{:.2}, {:.2}, {:.2}] -> room={}, panel={:?}, 耗时={:.2}ms",
@@ -406,9 +421,10 @@ pub async fn batch_query_rooms(
     Json(request): Json<BatchRoomQueryRequest>,
 ) -> Result<Json<BatchRoomQueryResponse>, StatusCode> {
     let start_time = std::time::Instant::now();
-    
+
     // 转换点坐标格式
-    let points: Vec<Vec3> = request.points
+    let points: Vec<Vec3> = request
+        .points
         .iter()
         .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
         .collect();
@@ -417,15 +433,15 @@ pub async fn batch_query_rooms(
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     let batch_result = {
         use aios_core::room::query_v2::batch_query_room_numbers;
-        
+
         match batch_query_room_numbers(points.clone(), 8).await {
             Ok(room_numbers) => {
                 let mut results = Vec::new();
-                
+
                 for (i, room_number) in room_numbers.into_iter().enumerate() {
                     let query_start = std::time::Instant::now();
                     let point = points[i];
-                    
+
                     // 如果找到房间号，尝试获取面板引用号
                     let panel_refno = if room_number.is_some() {
                         match aios_core::room::query_v2::query_room_panel_by_point_v2(point).await {
@@ -435,7 +451,7 @@ pub async fn batch_query_rooms(
                     } else {
                         None
                     };
-                    
+
                     // 计算置信度
                     let confidence = if room_number.is_some() && panel_refno.is_some() {
                         Some(0.95)
@@ -444,9 +460,9 @@ pub async fn batch_query_rooms(
                     } else {
                         None
                     };
-                    
+
                     let query_time = query_start.elapsed().as_millis() as f64;
-                    
+
                     results.push(RoomQueryResponse {
                         success: true,
                         room_number,
@@ -455,13 +471,14 @@ pub async fn batch_query_rooms(
                         query_time_ms: query_time,
                     });
                 }
-                
+
                 (true, results)
             }
             Err(e) => {
                 error!("批量房间查询失败: {}", e);
                 // 返回失败结果
-                let results = request.points
+                let results = request
+                    .points
                     .iter()
                     .map(|_| RoomQueryResponse {
                         success: false,
@@ -475,18 +492,18 @@ pub async fn batch_query_rooms(
             }
         }
     };
-    
+
     // 如果不支持 SQLite 特性，回退到占位符实现
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
     let batch_result = {
         warn!("SQLite 特性未启用，使用占位符批量查询实现");
         let mut results = Vec::new();
-        
+
         for point_array in &request.points {
             let query_start = std::time::Instant::now();
             let room_number = format!("ROOM_{}", (point_array[0] as i32).abs() % 1000);
             let query_time = query_start.elapsed().as_millis() as f64;
-            
+
             results.push(RoomQueryResponse {
                 success: true,
                 room_number: Some(room_number),
@@ -495,13 +512,13 @@ pub async fn batch_query_rooms(
                 query_time_ms: query_time,
             });
         }
-        
+
         (true, results)
     };
 
     let (success, results) = batch_result;
     let total_time = start_time.elapsed().as_millis() as f64;
-    
+
     info!(
         "批量房间查询完成: {} 个点, 成功: {}, 耗时: {:.2}ms",
         request.points.len(),
@@ -530,14 +547,18 @@ pub async fn process_room_codes(
         let result = RoomCodeProcessResult {
             input: code,
             success,
-            standardized_code: if success { Some(std_code.clone()) } else { None },
+            standardized_code: if success {
+                Some(std_code.clone())
+            } else {
+                None
+            },
             project_prefix: None,
             area_code: None,
             room_number: None,
             errors: Vec::new(),
             warnings: Vec::new(),
         };
-        
+
         results.push(result);
     }
 
@@ -556,16 +577,16 @@ pub async fn get_room_system_status(
     // 获取房间系统监控数据
     let monitor = get_global_monitor().await;
     let metrics = monitor.get_current_metrics().await;
-    
+
     // 获取活跃任务数
     let task_manager = state.task_manager.read().await;
     let active_tasks = task_manager.active_tasks.len();
-    
+
     // 获取缓存状态
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     let cache_status = {
         use aios_core::room::query_v2::get_room_query_stats;
-        
+
         match get_room_query_stats().await {
             stats => {
                 let hit_rate = if stats.total_queries > 0 {
@@ -573,7 +594,7 @@ pub async fn get_room_system_status(
                 } else {
                     0.0
                 };
-                
+
                 CacheStatus {
                     geometry_cache_size: stats.geometry_cache_size,
                     query_cache_size: stats.total_queries as usize,
@@ -582,7 +603,7 @@ pub async fn get_room_system_status(
             }
         }
     };
-    
+
     // 如果不支持 SQLite 特性，使用默认缓存状态
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
     let cache_status = CacheStatus {
@@ -590,7 +611,7 @@ pub async fn get_room_system_status(
         query_cache_size: 0,
         hit_rate: 0.0,
     };
-    
+
     // 系统健康检查
     let total_queries = metrics.query.total_queries;
     let success_rate = if total_queries > 0 {
@@ -598,7 +619,7 @@ pub async fn get_room_system_status(
     } else {
         1.0 // 没有查询时默认为正常
     };
-    
+
     let system_health = if total_queries > 0 && success_rate > 0.8 {
         "正常".to_string()
     } else if success_rate > 0.5 {
@@ -606,12 +627,15 @@ pub async fn get_room_system_status(
     } else {
         "异常".to_string()
     };
-    
+
     info!(
         "房间系统状态查询: 健康={}, 活跃任务={}, 缓存大小={}, 命中率={:.2}%",
-        system_health, active_tasks, cache_status.geometry_cache_size, cache_status.hit_rate * 100.0
+        system_health,
+        active_tasks,
+        cache_status.geometry_cache_size,
+        cache_status.hit_rate * 100.0
     );
-    
+
     Ok(Json(RoomSystemStatusResponse {
         system_health,
         metrics,
@@ -706,14 +730,16 @@ async fn execute_room_task(state: RoomApiState, mut task: RoomComputeTask) {
 
 async fn update_task_status(state: &RoomApiState, task: &RoomComputeTask) {
     let mut task_manager = state.task_manager.write().await;
-    task_manager.active_tasks.insert(task.id.clone(), task.clone());
+    task_manager
+        .active_tasks
+        .insert(task.id.clone(), task.clone());
 }
 
 async fn move_task_to_history(state: &RoomApiState, task: RoomComputeTask) {
     let mut task_manager = state.task_manager.write().await;
     task_manager.active_tasks.remove(&task.id);
     task_manager.task_history.push(task);
-    
+
     // 限制历史记录数量
     if task_manager.task_history.len() > 100 {
         task_manager.task_history.remove(0);
@@ -721,7 +747,9 @@ async fn move_task_to_history(state: &RoomApiState, task: RoomComputeTask) {
 }
 
 // 实现具体的任务执行函数
-async fn execute_rebuild_relations(config: &RoomComputeConfig) -> anyhow::Result<RoomComputeResult> {
+async fn execute_rebuild_relations(
+    config: &RoomComputeConfig,
+) -> anyhow::Result<RoomComputeResult> {
     let start_time = std::time::Instant::now();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -733,7 +761,7 @@ async fn execute_rebuild_relations(config: &RoomComputeConfig) -> anyhow::Result
     // 获取全局房间系统管理器
     let manager = get_global_manager().await;
     let mut mgr = manager.lock().await;
-    
+
     // 执行系统清理（如果需要强制重建）
     if config.force_rebuild {
         info!("执行强制重建，先清理现有关系");
@@ -747,12 +775,12 @@ async fn execute_rebuild_relations(config: &RoomComputeConfig) -> anyhow::Result
             }
         }
     }
-    
+
     // 如果指定了数据库编号，按数据库处理
     if !config.database_numbers.is_empty() {
         for &db_num in &config.database_numbers {
             info!("处理数据库 {} 的房间关系重建", db_num);
-            
+
             // 使用占位符处理逻辑
             processed_count += 100; // 假设每个数据库处理100个房间
             info!("✅ 数据库 {} 房间关系重建完成，处理 100 个房间", db_num);
@@ -768,7 +796,10 @@ async fn execute_rebuild_relations(config: &RoomComputeConfig) -> anyhow::Result
 
     info!(
         "重建关系任务完成 - 成功: {}, 错误: {}, 警告: {}, 耗时: {}ms",
-        processed_count, error_count, warnings.len(), duration_ms
+        processed_count,
+        error_count,
+        warnings.len(),
+        duration_ms
     );
 
     Ok(RoomComputeResult {
@@ -788,7 +819,9 @@ async fn execute_rebuild_relations(config: &RoomComputeConfig) -> anyhow::Result
     })
 }
 
-async fn execute_update_room_codes(config: &RoomComputeConfig) -> anyhow::Result<RoomComputeResult> {
+async fn execute_update_room_codes(
+    config: &RoomComputeConfig,
+) -> anyhow::Result<RoomComputeResult> {
     let start_time = std::time::Instant::now();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -804,10 +837,10 @@ async fn execute_update_room_codes(config: &RoomComputeConfig) -> anyhow::Result
     // 处理房间关键词
     if !config.room_keywords.is_empty() {
         info!("处理 {} 个房间关键词", config.room_keywords.len());
-        
+
         for keyword in &config.room_keywords {
             info!("处理房间关键词: {}", keyword);
-            
+
             // 使用占位符处理逻辑
             processed_count += 50; // 假设每个关键词处理50个房间
             info!("✅ 房间关键词 '{}' 处理完成，更新 50 个房间", keyword);
@@ -816,11 +849,14 @@ async fn execute_update_room_codes(config: &RoomComputeConfig) -> anyhow::Result
 
     // 按数据库更新房间代码
     if !config.database_numbers.is_empty() {
-        info!("处理 {} 个数据库的房间代码更新", config.database_numbers.len());
-        
+        info!(
+            "处理 {} 个数据库的房间代码更新",
+            config.database_numbers.len()
+        );
+
         for &db_num in &config.database_numbers {
             info!("处理数据库 {} 的房间代码更新", db_num);
-            
+
             // 使用占位符处理逻辑
             processed_count += 75; // 假设每个数据库处理75个房间
             info!("✅ 数据库 {} 房间代码更新完成，处理 75 个房间", db_num);
@@ -838,7 +874,10 @@ async fn execute_update_room_codes(config: &RoomComputeConfig) -> anyhow::Result
 
     info!(
         "房间代码更新任务完成 - 成功: {}, 错误: {}, 警告: {}, 耗时: {}ms",
-        processed_count, error_count, warnings.len(), duration_ms
+        processed_count,
+        error_count,
+        warnings.len(),
+        duration_ms
     );
 
     Ok(RoomComputeResult {
@@ -872,25 +911,31 @@ async fn execute_data_migration(config: &RoomComputeConfig) -> anyhow::Result<Ro
     let mut mgr = manager.lock().await;
 
     let batch_size = config.batch_size.unwrap_or(1000);
-    
+
     // 执行数据迁移
     if !config.database_numbers.is_empty() {
-        info!("执行指定数据库的数据迁移，数据库数量: {}", config.database_numbers.len());
-        
+        info!(
+            "执行指定数据库的数据迁移，数据库数量: {}",
+            config.database_numbers.len()
+        );
+
         for &db_num in &config.database_numbers {
             info!("开始迁移数据库 {} 的数据", db_num);
-            
+
             // 调用数据迁移方法
             match mgr.migrate_legacy_data().await {
                 Ok(migration_result) => {
                     processed_count += batch_size; // 使用批处理大小作为占位符
-                    
+
                     if !migration_result.success {
                         error_count += 1;
                         errors.push(format!("数据库 {} 迁移部分失败", db_num));
                     }
-                    
-                    info!("✅ 数据库 {} 数据迁移完成，处理 {} 条记录", db_num, batch_size);
+
+                    info!(
+                        "✅ 数据库 {} 数据迁移完成，处理 {} 条记录",
+                        db_num, batch_size
+                    );
                 }
                 Err(e) => {
                     error_count += 1;
@@ -902,16 +947,16 @@ async fn execute_data_migration(config: &RoomComputeConfig) -> anyhow::Result<Ro
     } else {
         // 执行全局数据迁移
         info!("执行全局数据迁移，批处理大小: {}", batch_size);
-        
+
         match mgr.migrate_legacy_data().await {
             Ok(migration_result) => {
                 processed_count = batch_size * 5; // 假设全局处理5倍批处理大小
-                
+
                 if !migration_result.success {
                     error_count += 1;
                     errors.push("全局迁移部分失败".to_string());
                 }
-                
+
                 info!("✅ 全局数据迁移完成，处理 {} 条记录", processed_count);
             }
             Err(e) => {
@@ -926,7 +971,10 @@ async fn execute_data_migration(config: &RoomComputeConfig) -> anyhow::Result<Ro
 
     info!(
         "数据迁移任务完成 - 成功: {}, 错误: {}, 警告: {}, 耗时: {}ms",
-        processed_count, error_count, warnings.len(), duration_ms
+        processed_count,
+        error_count,
+        warnings.len(),
+        duration_ms
     );
 
     Ok(RoomComputeResult {
@@ -964,12 +1012,12 @@ async fn execute_data_validation(config: &RoomComputeConfig) -> anyhow::Result<R
     match mgr.validate_system_data().await {
         Ok(validation_result) => {
             processed_count += 200; // 占位符：假设检查了200项
-            
+
             if !validation_result.success {
                 error_count += 1;
                 errors.push("系统级验证发现问题".to_string());
             }
-            
+
             info!("系统级验证完成，检查: 200 项");
         }
         Err(e) => {
@@ -1002,8 +1050,11 @@ async fn execute_data_validation(config: &RoomComputeConfig) -> anyhow::Result<R
 
     // 如果指定了数据库，执行数据库级验证
     if !config.database_numbers.is_empty() {
-        info!("执行指定数据库的验证，数据库数量: {}", config.database_numbers.len());
-        
+        info!(
+            "执行指定数据库的验证，数据库数量: {}",
+            config.database_numbers.len()
+        );
+
         for &db_num in &config.database_numbers {
             info!("验证数据库 {}", db_num);
             processed_count += 50; // 占位符：每个数据库验证50项
@@ -1015,7 +1066,10 @@ async fn execute_data_validation(config: &RoomComputeConfig) -> anyhow::Result<R
 
     info!(
         "数据验证任务完成 - 检查: {}, 错误: {}, 警告: {}, 耗时: {}ms",
-        processed_count, error_count, warnings.len(), duration_ms
+        processed_count,
+        error_count,
+        warnings.len(),
+        duration_ms
     );
 
     Ok(RoomComputeResult {
@@ -1049,36 +1103,48 @@ async fn execute_create_snapshot(config: &RoomComputeConfig) -> anyhow::Result<R
     let mut mgr = manager.lock().await;
 
     // 生成快照名称
-    let snapshot_name = format!("room_snapshot_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+    let snapshot_name = format!(
+        "room_snapshot_{}",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
 
     info!("创建快照: {}", snapshot_name);
 
     // 如果指定了数据库编号，为每个数据库创建快照
     if !config.database_numbers.is_empty() {
-        info!("为指定数据库创建快照，数据库数量: {}", config.database_numbers.len());
-        
+        info!(
+            "为指定数据库创建快照，数据库数量: {}",
+            config.database_numbers.len()
+        );
+
         for &db_num in &config.database_numbers {
             let db_snapshot_name = format!("{}_{}", snapshot_name, db_num);
             info!("创建数据库 {} 的快照: {}", db_num, db_snapshot_name);
-            
+
             // 使用占位符处理逻辑
             processed_count += 500; // 假设每个数据库快照包含500条记录
-            info!("✅ 数据库 {} 快照创建成功: {}，大小: 500 条记录", db_num, db_snapshot_name);
+            info!(
+                "✅ 数据库 {} 快照创建成功: {}，大小: 500 条记录",
+                db_num, db_snapshot_name
+            );
         }
     } else {
         // 创建全局系统快照
         info!("创建全局系统快照: {}", snapshot_name);
-        
+
         match mgr.create_manual_snapshot(snapshot_name.clone()).await {
             Ok(snapshot_result) => {
                 processed_count = 1000; // 占位符：假设快照包含1000条记录
-                
+
                 if !snapshot_result.success {
                     error_count += 1;
                     errors.push("快照创建部分失败".to_string());
                 }
-                
-                info!("✅ 全局系统快照创建成功: {}，大小: {} 条记录", snapshot_name, processed_count);
+
+                info!(
+                    "✅ 全局系统快照创建成功: {}，大小: {} 条记录",
+                    snapshot_name, processed_count
+                );
             }
             Err(e) => {
                 error_count += 1;
@@ -1092,7 +1158,10 @@ async fn execute_create_snapshot(config: &RoomComputeConfig) -> anyhow::Result<R
 
     info!(
         "快照创建任务完成 - 成功: {}, 错误: {}, 警告: {}, 耗时: {}ms",
-        if error_count == 0 { "是" } else { "否" }, error_count, warnings.len(), duration_ms
+        if error_count == 0 { "是" } else { "否" },
+        error_count,
+        warnings.len(),
+        duration_ms
     );
 
     Ok(RoomComputeResult {
@@ -1160,7 +1229,9 @@ pub async fn regenerate_room_models(
     // 添加到任务管理器
     {
         let mut task_manager = state.task_manager.write().await;
-        task_manager.active_tasks.insert(task_id.clone(), task.clone());
+        task_manager
+            .active_tasks
+            .insert(task_id.clone(), task.clone());
     }
 
     // 异步执行任务
@@ -1220,7 +1291,7 @@ async fn execute_room_regenerate(
     info!("🔍 使用房间关键词: {:?}", room_keywords);
 
     // 查询房间和面板关系
-    let room_panel_map = match query_room_panels(&room_keywords).await {
+    let room_panel_map = match query_room_panels_by_keywords(&room_keywords).await {
         Ok(map) => map,
         Err(e) => {
             error!("❌ 查询房间参考号失败: {}", e);
@@ -1245,7 +1316,10 @@ async fn execute_room_regenerate(
 
     update_status(
         20.0,
-        format!("查询完成，找到 {} 个房间，{} 个元素", room_count, element_count),
+        format!(
+            "查询完成，找到 {} 个房间，{} 个元素",
+            room_count, element_count
+        ),
     );
 
     // 阶段 2: 强制重新生成模型
@@ -1258,8 +1332,10 @@ async fn execute_room_regenerate(
     db_option_clone.apply_boolean_operation = request.apply_boolean_operation;
     db_option_clone.manual_db_nums = Some(vec![request.db_num]);
 
-    info!("🔧 配置: replace_mesh=true, gen_mesh={}, apply_boolean={}",
-        request.gen_mesh, request.apply_boolean_operation);
+    info!(
+        "🔧 配置: replace_mesh=true, gen_mesh={}, apply_boolean={}",
+        request.gen_mesh, request.apply_boolean_operation
+    );
 
     // 设置环境变量强制替换
     unsafe {
@@ -1269,7 +1345,10 @@ async fn execute_room_regenerate(
     match gen_all_geos_data(all_refnos.clone(), &db_option_clone, None, None).await {
         Ok(_) => {
             info!("✅ 模型生成完成");
-            update_status(70.0, format!("模型生成完成，已处理 {} 个元素", element_count));
+            update_status(
+                70.0,
+                format!("模型生成完成，已处理 {} 个元素", element_count),
+            );
         }
         Err(e) => {
             error!("❌ 模型生成失败: {}", e);
@@ -1301,64 +1380,14 @@ async fn execute_room_regenerate(
                 room_count,
                 element_count,
                 duration.as_millis() as u64,
-            ).await;
+            )
+            .await;
         }
         Err(e) => {
             error!("❌ 房间关系更新失败: {}", e);
             finalize_task_failed(&state, &task_id, format!("房间关系更新失败: {}", e)).await;
         }
     }
-}
-
-/// 查询房间和面板关系
-async fn query_room_panels(
-    room_keywords: &Vec<String>,
-) -> anyhow::Result<Vec<(RefnoEnum, String, Vec<RefnoEnum>)>> {
-    use aios_core::SUL_DB;
-    use aios_core::types::RecordId;
-    use itertools::Itertools;
-
-    let filter = room_keywords
-        .iter()
-        .map(|x| format!("'{}' in NAME", x))
-        .join(" or ");
-
-    #[cfg(feature = "project_hd")]
-    let sql = format!(
-        r#"
-        select value [  id,
-                        array::last(string::split(NAME, '-')),
-                        array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
-                    ] from FRMW where {filter}
-    "#
-    );
-
-    #[cfg(not(feature = "project_hd"))]
-    let sql = format!(
-        r#"
-        select value [  id,
-                        array::last(string::split(NAME, '-')),
-                        array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
-                    ] from SBFR where {filter}
-    "#
-    );
-
-    let mut response = SUL_DB.query(sql).await?;
-    let raw_result: Vec<(RecordId, String, Vec<RecordId>)> = response.take(0)?;
-
-    let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = raw_result
-        .into_iter()
-        .map(|(room_id, room_num, panel_ids): (RecordId, String, Vec<RecordId>)| {
-            let room_refno = RefnoEnum::from(room_id);
-            let panel_refnos = panel_ids
-                .into_iter()
-                .map(|id| RefnoEnum::from(id))
-                .collect();
-            (room_refno, room_num, panel_refnos)
-        })
-        .collect();
-
-    Ok(room_groups)
 }
 
 /// 任务成功完成
@@ -1472,7 +1501,9 @@ pub async fn rebuild_room_relations_only(
     // 添加到任务管理器
     {
         let mut task_manager = state.task_manager.write().await;
-        task_manager.active_tasks.insert(task_id.clone(), task.clone());
+        task_manager
+            .active_tasks
+            .insert(task_id.clone(), task.clone());
     }
 
     // 异步执行任务
@@ -1537,7 +1568,10 @@ async fn execute_rebuild_relations_only(
                 task.progress = 100.0;
                 task.message = format!(
                     "✅ 房间关系重建完成！处理了 {} 个房间，{} 个面板，{} 个构件，耗时 {}ms",
-                    stats.total_rooms, stats.total_panels, stats.total_components, stats.build_time_ms
+                    stats.total_rooms,
+                    stats.total_panels,
+                    stats.total_components,
+                    stats.build_time_ms
                 );
                 task.updated_at = Utc::now();
                 task.result = Some(RoomComputeResult {
@@ -1571,20 +1605,18 @@ pub fn create_room_api_routes() -> Router<RoomApiState> {
         // 任务管理
         .route("/api/room/tasks", post(create_room_task))
         .route("/api/room/tasks/{id}", get(get_task_status))
-
         // 房间查询
         .route("/api/room/query", get(query_room_by_point))
         .route("/api/room/batch-query", post(batch_query_rooms))
-
         // 房间代码处理
         .route("/api/room/process-codes", post(process_room_codes))
-
         // 房间模型重新生成
         .route("/api/room/regenerate-models", post(regenerate_room_models))
-        
         // 房间关系重建（不生成模型）
-        .route("/api/room/rebuild-relations", post(rebuild_room_relations_only))
-
+        .route(
+            "/api/room/rebuild-relations",
+            post(rebuild_room_relations_only),
+        )
         // 系统管理
         .route("/api/room/status", get(get_room_system_status))
         .route("/api/room/snapshot", post(create_data_snapshot))

@@ -16,10 +16,10 @@
 //! ```
 
 use aios_core::RefnoEnum;
-use aios_core::query_provider::*;
-use aios_core::types::{NamedAttrMap as NamedAttMap, SPdmsElement as PE};
 use aios_core::mdb;
+use aios_core::query_provider::*;
 use aios_core::rs_surreal;
+use aios_core::types::{NamedAttrMap as NamedAttMap, SPdmsElement as PE};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 
@@ -164,9 +164,7 @@ pub async fn query_by_noun_all_db(nouns: &[&str]) -> anyhow::Result<Vec<RefnoEnu
 
 /// 统计指定 noun 在全库范围内的实例数量（GROUP ALL + LIMIT 1）
 pub async fn count_noun_all_db(noun: &str) -> anyhow::Result<u64> {
-    mdb::count_refnos_by_noun(noun)
-        .await
-        .map_err(Into::into)
+    mdb::count_refnos_by_noun(noun).await.map_err(Into::into)
 }
 
 /// 根据分页参数获取指定 noun 的 refno 列表

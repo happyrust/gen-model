@@ -67,11 +67,9 @@ impl FullNounError {
     /// 获取用户友好的错误消息
     pub fn user_message(&self) -> String {
         match self {
-            FullNounError::EmptySjusMap => {
-                "⚠️ 警告：SJUS 映射为空，几何体生成可能不准确。\n\
+            FullNounError::EmptySjusMap => "⚠️ 警告：SJUS 映射为空，几何体生成可能不准确。\n\
                  建议：请确保在调用 Full Noun 模式前正确初始化 SJUS 数据。"
-                    .to_string()
-            }
+                .to_string(),
             FullNounError::ConfigIgnored(config) => {
                 format!(
                     "ℹ️ 提示：配置项 '{}' 在 Full Noun 模式下被忽略。\n\

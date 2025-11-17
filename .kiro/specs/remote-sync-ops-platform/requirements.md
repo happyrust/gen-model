@@ -391,3 +391,31 @@
 3. WHEN 运维人员比较多个环境的配置，THE 运维平台 SHALL 并排显示环境配置的差异项，并高亮不同的配置值
 4. WHEN 运维人员复制环境配置，THE 运维平台 SHALL 创建新环境并复制源环境的所有配置（除 ID 和名称外），并提示修改必要的参数
 5. WHEN 运维人员删除环境，THE 运维平台 SHALL 弹出确认对话框，显示该环境关联的站点数量，确认后级联删除所有关联站点和日志记录
+
+### Requirement 11: 可视化拓扑配置
+
+**User Story:** 作为运维人员，我希望通过可视化的 Canvas 画布配置主节点和同步节点之间的连接关系，以便直观地设计和管理复杂的同步拓扑结构
+
+#### Acceptance Criteria
+
+1. WHEN 运维人员访问拓扑配置页面，THE 运维平台 SHALL 显示一个可交互的 Canvas 画布，支持拖拽、缩放和平移操作
+2. WHEN 运维人员在画布上创建环境节点（主节点），THE 运维平台 SHALL 允许配置环境属性：名称、MQTT 地址和端口、文件服务器地址、地区标识、本地数据库编号列表、MQTT 重连参数
+3. WHEN 运维人员在画布上创建站点节点（同步节点），THE 运维平台 SHALL 允许配置站点属性：名称、所属环境、地区标识、HTTP 地址、数据库编号列表、备注信息
+4. WHEN 运维人员连接环境节点到站点节点，THE 运维平台 SHALL 创建有向连线表示同步关系，并自动设置站点的 env_id 关联
+5. WHEN 运维人员保存拓扑配置，THE 运维平台 SHALL 验证拓扑的有效性（环境节点必须有 MQTT 和文件服务器配置、站点节点必须关联到环境、数据库编号不为空），并将配置转换为 remote_sync_envs 和 remote_sync_sites 表记录
+6. WHEN 运维人员加载已有拓扑，THE 运维平台 SHALL 从数据库读取环境和站点配置，自动生成拓扑图并应用层次布局算法（环境节点在上层，站点节点在下层）
+7. WHEN 运维人员在画布上选中节点，THE 运维平台 SHALL 在侧边栏显示详细配置面板，支持实时编辑属性并立即反映到画布和数据库
+8. WHEN 运维人员删除环境节点，THE 运维平台 SHALL 弹出确认对话框，显示关联的站点数量，确认后级联删除所有关联站点和连线
+9. WHEN 运维人员导出拓扑配置，THE 运维平台 SHALL 支持导出为 JSON 格式，包含所有环境、站点和连接关系，并支持从 JSON 文件导入拓扑
+
+### Requirement 12: CBA 文件分发服务
+
+**User Story:** 作为运维人员，我希望系统自动提供 CBA 文件的 HTTP 访问服务，以便远程站点可以通过 HTTP 下载增量数据包
+
+#### Acceptance Criteria
+
+1. WHEN dpcsync 生成 CBA 文件到 assets/archives 目录，THE 运维平台 SHALL 自动通过 HTTP 端点 /assets/archives 提供文件访问服务
+2. WHEN 远程站点请求下载 CBA 文件，THE 运维平台 SHALL 支持通过 GET 请求访问 /assets/archives/{filename}.cba，并返回文件内容
+3. WHEN 环境配置中设置 file_server_host 参数，THE 运维平台 SHALL 使用该地址作为 CBA 文件的下载 URL 前缀（如 http://host:port/assets/archives）
+4. WHEN 生成站点元数据时，THE 运维平台 SHALL 在 metadata.json 中包含完整的 download_url（file_server_host + 相对路径）
+5. WHEN 运维人员查看站点元数据，THE 运维平台 SHALL 显示每个 CBA 文件的下载链接，点击后可直接下载文件

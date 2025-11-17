@@ -284,7 +284,8 @@ impl InstancedBundleExporter {
             let lod_dir = base_mesh_dir.join(format!("lod_{:?}", lod_level));
 
             // 使用 mesh_cache.load_or_get 从对应的 LOD 目录加载 mesh
-            let lod_mesh = mesh_cache.load_or_get(geo_hash, &lod_dir)
+            let lod_mesh = mesh_cache
+                .load_or_get(geo_hash, &lod_dir)
                 .with_context(|| {
                     format!(
                         "加载 LOD {:?} mesh 失败: {} (目录: {})",

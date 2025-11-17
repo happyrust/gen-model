@@ -2,9 +2,9 @@
 //
 // 这个模块提供与旧代码的兼容性，逐步迁移到新的优化版本
 
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
-use anyhow::Result;
 
 use aios_core::RefnoEnum;
 
@@ -12,9 +12,9 @@ use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::sesno_increment::get_changes_at_sesno;
 use crate::options::DbOptionExt;
 
-use super::models::DbModelInstRefnos;
 use super::config::FullNounConfig;
 use super::full_noun_mode::gen_full_noun_geos_optimized;
+use super::models::DbModelInstRefnos;
 
 /// 主入口函数：生成所有几何体数据
 ///
@@ -67,7 +67,8 @@ pub async fn gen_all_geos_data(
     );
 
     // 调试：打印 Full Noun 模式配置
-    println!("[gen_model] Full Noun 模式配置: full_noun_mode={}, concurrency={}, batch_size={}",
+    println!(
+        "[gen_model] Full Noun 模式配置: full_noun_mode={}, concurrency={}, batch_size={}",
         db_option.full_noun_mode,
         db_option.get_full_noun_concurrency(),
         db_option.get_full_noun_batch_size()
@@ -84,9 +85,7 @@ pub async fn gen_all_geos_data(
         }
 
         if final_incr_updates.is_some() {
-            println!(
-                "[gen_model] 警告: Full Noun 模式下增量更新将被忽略，将执行全库重建"
-            );
+            println!("[gen_model] 警告: Full Noun 模式下增量更新将被忽略，将执行全库重建");
         }
 
         // 使用优化版本的 Full Noun 生成
@@ -103,13 +102,10 @@ pub async fn gen_all_geos_data(
             }
         });
 
-        let categorized = gen_full_noun_geos_optimized(
-            Arc::new(db_option.inner.clone()),
-            &config,
-            sender,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Full Noun 生成失败: {}", e))?;
+        let categorized =
+            gen_full_noun_geos_optimized(Arc::new(db_option.inner.clone()), &config, sender)
+                .await
+                .map_err(|e| anyhow::anyhow!("Full Noun 生成失败: {}", e))?;
 
         drop(handle);
 

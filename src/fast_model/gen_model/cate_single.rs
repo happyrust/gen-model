@@ -2,12 +2,12 @@
 //
 // 从 cata_model.rs 提取的 gen_cata_single_geoms 函数及其依赖
 
-use aios_core::{RefnoEnum, NamedAttrMap};
+use crate::data_interface::structs::PlantAxisMap;
+use crate::fast_model::{debug_model, debug_model_debug, resolve_desi_comp};
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::prim_geo::category::{CateCsgShape, convert_to_csg_shapes};
 use aios_core::prim_geo::profile::create_profile_geos;
-use crate::data_interface::structs::PlantAxisMap;
-use crate::fast_model::{resolve_desi_comp, debug_model, debug_model_debug};
+use aios_core::{NamedAttrMap, RefnoEnum};
 use dashmap::DashMap;
 use std::sync::Arc;
 

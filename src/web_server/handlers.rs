@@ -8,7 +8,6 @@ use axum::{
 };
 
 use chrono::{Local, Utc};
-use tracing::info;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -25,6 +24,7 @@ use std::time::Duration as StdDuration;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Semaphore;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::fast_model::{
@@ -3903,9 +3903,9 @@ fn analyze_expression_error(error: &anyhow::Error, expression: &str) -> (String,
 
 async fn execute_real_task(state: AppState, task_id: String) {
     use crate::fast_model::aabb_tree::manual_update_aabbs;
+    use crate::fast_model::build_room_relations_v2 as build_room_relations;
     use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
     use crate::fast_model::gen_all_geos_data;
-    use crate::fast_model::build_room_relations_v2 as build_room_relations;
     use aios_core::options::DbOption;
 
     use aios_core::init_surreal;
@@ -7121,10 +7121,7 @@ pub async fn api_generate_by_refno(
 
     // 1. 参数校验
     if req.refnos.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "refnos 列表不能为空".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "refnos 列表不能为空".to_string()));
     }
 
     // 2. 获取或构造数据库配置
@@ -7169,7 +7166,10 @@ pub async fn api_generate_by_refno(
     task.estimated_duration = Some(req.refnos.len() as u32 * 10); // Rough estimate: 10 seconds per refno
     task.add_log(
         LogLevel::Info,
-        format!("Creating refno-based model generation task, refnos: {:?}", req.refnos),
+        format!(
+            "Creating refno-based model generation task, refnos: {:?}",
+            req.refnos
+        ),
     );
 
     let task_id = task.id.clone();
@@ -7234,10 +7234,7 @@ async fn execute_refno_model_generation(
                 // 解析失败，记录错误并跳过
                 let mut task_manager = state.task_manager.lock().await;
                 if let Some(task) = task_manager.active_tasks.get_mut(&task_id) {
-                    task.add_log(
-                        LogLevel::Warning,
-                        format!("无法解析 refno: {}", refno_str),
-                    );
+                    task.add_log(LogLevel::Warning, format!("无法解析 refno: {}", refno_str));
                 }
             }
         }
@@ -7259,12 +7256,7 @@ async fn execute_refno_model_generation(
     {
         let mut task_manager = state.task_manager.lock().await;
         if let Some(task) = task_manager.active_tasks.get_mut(&task_id) {
-            task.update_progress(
-                "生成几何数据".to_string(),
-                1,
-                2,
-                50.0,
-            );
+            task.update_progress("生成几何数据".to_string(), 1, 2, 50.0);
             task.add_log(
                 LogLevel::Info,
                 format!("开始为 {} 个 refno 生成几何数据", parsed_refnos.len()),
@@ -7316,8 +7308,11 @@ async fn execute_refno_model_generation(
                     match update_room_relations_for_refnos(&refnos_for_room).await {
                         Ok(room_update_result) => {
                             let mut task_manager = state_for_room.task_manager.lock().await;
-                            if let Some(task) = task_manager.task_history.iter_mut()
-                                .find(|t| t.id == task_id_for_room) {
+                            if let Some(task) = task_manager
+                                .task_history
+                                .iter_mut()
+                                .find(|t| t.id == task_id_for_room)
+                            {
                                 task.add_log(
                                     LogLevel::Info,
                                     format!(
@@ -7329,8 +7324,11 @@ async fn execute_refno_model_generation(
                         }
                         Err(e) => {
                             let mut task_manager = state_for_room.task_manager.lock().await;
-                            if let Some(task) = task_manager.task_history.iter_mut()
-                                .find(|t| t.id == task_id_for_room) {
+                            if let Some(task) = task_manager
+                                .task_history
+                                .iter_mut()
+                                .find(|t| t.id == task_id_for_room)
+                            {
                                 task.add_log(
                                     LogLevel::Warning,
                                     format!("房间关系更新失败: {}，但模型已生成成功", e),
@@ -7391,8 +7389,10 @@ struct RoomUpdateResult {
 async fn update_room_relations_for_refnos_incremental(
     refnos: &[RefnoEnum],
 ) -> Result<RoomUpdateResult, anyhow::Error> {
+    use crate::fast_model::room_model_v2::{
+        build_room_relations_v2 as build_room_relations, update_room_relations_incremental,
+    };
     use aios_core::get_db_option;
-    use crate::fast_model::room_model_v2::{build_room_relations_v2 as build_room_relations, update_room_relations_incremental};
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -7416,10 +7416,7 @@ async fn update_room_relations_for_refnos_incremental(
                 });
             }
             Err(e) => {
-                println!(
-                    "[Room] 增量更新失败，降级到全量更新: {}",
-                    e
-                );
+                println!("[Room] 增量更新失败，降级到全量更新: {}", e);
                 // 增量更新失败，降级到全量更新
             }
         }
@@ -7435,19 +7432,17 @@ async fn update_room_relations_for_refnos_incremental(
                 updated_elements: refnos.len(),
                 duration_ms: duration.as_millis() as u64,
             };
-            
+
             println!(
                 "[Room] 全量更新完成: {} 个(refnos) -> {} 个房间, 耗时 {}ms",
                 refnos.len(),
                 fallback_result.affected_rooms,
                 fallback_result.duration_ms
             );
-            
+
             Ok(fallback_result)
         }
-        Err(e) => {
-            Err(anyhow::anyhow!("房间关系更新失败: {}", e))
-        }
+        Err(e) => Err(anyhow::anyhow!("房间关系更新失败: {}", e)),
     }
 }
 
@@ -7459,22 +7454,30 @@ async fn batch_update_room_relations(
     let mut total_affected_rooms = 0;
     let mut total_updated_elements = 0;
     let start_time = std::time::Instant::now();
-    
-    println!("[Room] 开始分批处理 {} 个元素, 批次大小: {}", refnos.len(), batch_size);
-    
+
+    println!(
+        "[Room] 开始分批处理 {} 个元素, 批次大小: {}",
+        refnos.len(),
+        batch_size
+    );
+
     for (batch_index, chunk) in refnos.chunks(batch_size).enumerate() {
-        println!("[Room] 处理批次 {}/{}", batch_index + 1, (refnos.len() + batch_size - 1) / batch_size);
-        
+        println!(
+            "[Room] 处理批次 {}/{}",
+            batch_index + 1,
+            (refnos.len() + batch_size - 1) / batch_size
+        );
+
         let result = update_room_relations_for_refnos_incremental(chunk).await?;
         total_affected_rooms += result.affected_rooms;
         total_updated_elements += result.updated_elements;
-        
+
         // 添加批次间隔，避免数据库压力过大
         if batch_index < refnos.chunks(batch_size).count() - 1 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
-    
+
     Ok(RoomUpdateResult {
         affected_rooms: total_affected_rooms,
         updated_elements: total_updated_elements,

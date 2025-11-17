@@ -1,10 +1,8 @@
-use std::collections::HashSet;
-use aios_core::pdms_types::{
-    USE_CATE_NOUN_NAMES,
-    GNERAL_LOOP_OWNER_NOUN_NAMES,
-    GNERAL_PRIM_NOUN_NAMES
-};
 use super::models::NounCategory;
+use aios_core::pdms_types::{
+    GNERAL_LOOP_OWNER_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, USE_CATE_NOUN_NAMES,
+};
+use std::collections::HashSet;
 
 /// Full Noun 模式下的 Noun 列表聚合结果
 #[derive(Debug, Clone)]
@@ -48,7 +46,7 @@ impl FullNounCollection {
                     continue;
                 }
             }
-            
+
             if all_nouns.insert(noun) {
                 cate_nouns.push(noun);
             }
@@ -63,7 +61,7 @@ impl FullNounCollection {
                     continue;
                 }
             }
-            
+
             if all_nouns.insert(noun) {
                 loop_owner_nouns.push(noun);
             }
@@ -78,7 +76,7 @@ impl FullNounCollection {
                     continue;
                 }
             }
-            
+
             if all_nouns.insert(noun) {
                 prim_nouns.push(noun);
             }
@@ -93,7 +91,7 @@ impl FullNounCollection {
                         continue;
                     }
                 }
-                
+
                 if all_nouns.insert(noun) {
                     // 简单策略：额外的 noun 默认归入 cate 类别
                     // 实际使用时可以根据需要调整
@@ -110,8 +108,10 @@ impl FullNounCollection {
         // 如果有配置，打印过滤信息
         if let Some(config) = config {
             if !config.enabled_categories.is_empty() && !config.excluded_nouns.is_empty() {
-                println!("🔍 Noun 过滤: 启用 {:?}, 排除 {:?}", 
-                    config.enabled_categories, config.excluded_nouns);
+                println!(
+                    "🔍 Noun 过滤: 启用 {:?}, 排除 {:?}",
+                    config.enabled_categories, config.excluded_nouns
+                );
             } else if !config.enabled_categories.is_empty() {
                 println!("🔍 Noun 过滤: 启用 {:?}", config.enabled_categories);
             } else if !config.excluded_nouns.is_empty() {
@@ -176,7 +176,10 @@ mod tests {
 
         // 测试已知的noun
         if let Some(&first_cate) = collection.cate_nouns.first() {
-            assert_eq!(collection.get_category(first_cate), Some(NounCategory::Cate));
+            assert_eq!(
+                collection.get_category(first_cate),
+                Some(NounCategory::Cate)
+            );
         }
 
         // 测试不存在的noun

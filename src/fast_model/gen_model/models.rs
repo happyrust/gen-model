@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use aios_core::{RefnoEnum, options::DbOption};
+use crate::fast_model::{booleans_meshes_in_db, gen_meshes_in_db};
 use aios_core::geometry::ShapeInstancesData;
+use aios_core::{RefnoEnum, options::DbOption};
 use futures::stream::FuturesUnordered;
-use crate::fast_model::{gen_meshes_in_db, booleans_meshes_in_db};
+use std::sync::Arc;
 
 /// Noun 分类枚举，用于 Full Noun 模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

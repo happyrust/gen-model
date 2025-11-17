@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use aios_core::RefnoEnum;
 use super::models::NounCategory;
+use aios_core::RefnoEnum;
+use std::collections::HashMap;
 
 /// 分类的 refno 集合
 ///

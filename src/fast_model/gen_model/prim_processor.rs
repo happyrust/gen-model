@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use anyhow::{bail, Result};
+use super::context::NounProcessContext;
+use crate::fast_model::prim_model;
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
-use crate::fast_model::prim_model;
-use super::context::NounProcessContext;
+use anyhow::{Result, bail};
+use std::sync::Arc;
 
 /// 处理 Prim (基本体) 类型的 refno 页面
 ///
@@ -34,13 +34,7 @@ pub async fn process_prim_refno_page(
     }
 
     // 生成 prim 几何体
-    if !prim_model::gen_prim_geos(
-        ctx.db_option.clone(),
-        refnos,
-        sender,
-    )
-    .await?
-    {
+    if !prim_model::gen_prim_geos(ctx.db_option.clone(), refnos, sender).await? {
         bail!("prim geos generation failed");
     }
 
@@ -54,11 +48,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_refnos() {
-        let ctx = NounProcessContext::new(
-            Arc::new(DbOption::default()),
-            100,
-            4,
-        );
+        let ctx = NounProcessContext::new(Arc::new(DbOption::default()), 100, 4);
         let (sender, _receiver) = flume::unbounded();
 
         let result = process_prim_refno_page(&ctx, sender, &[]).await;

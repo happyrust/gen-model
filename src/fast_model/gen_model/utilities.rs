@@ -2,11 +2,11 @@
 //
 // 从旧 gen_model.rs 迁移的辅助函数
 
-use anyhow::Result;
-use aios_core::RefnoEnum;
-use aios_core::prim_geo::tubing::TubiSize;
-use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use crate::fast_model::resolve_desi_comp;
+use aios_core::RefnoEnum;
+use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
+use aios_core::prim_geo::tubing::TubiSize;
+use anyhow::Result;
 
 /// 检查是否启用 E3D 调试模式
 #[allow(dead_code)]
@@ -87,12 +87,8 @@ mod tests {
     #[tokio::test]
     async fn test_query_tubi_size_none() {
         // 测试不存在的 refno 返回 None
-        let result = query_tubi_size(
-            RefnoEnum::RefU64(999999),
-            RefnoEnum::RefU64(999999),
-            false,
-        )
-        .await;
+        let result =
+            query_tubi_size(RefnoEnum::RefU64(999999), RefnoEnum::RefU64(999999), false).await;
 
         assert!(result.is_ok());
         if let Ok(size) = result {

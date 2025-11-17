@@ -15,10 +15,7 @@ pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
 
     // 🔍 调试：记录正在查询哪个 design 元素的几何体
-    crate::smart_debug_model_debug!(
-        "🔍 query_gm_params: 查询 design 元素 {} 的几何体",
-        refno
-    );
+    crate::smart_debug_model_debug!("🔍 query_gm_params: 查询 design 元素 {} 的几何体", refno);
 
     // 一次性查询所有几何类型的子孙节点（深度1-2层）
     // 使用新的泛型函数，避免多次网络往返

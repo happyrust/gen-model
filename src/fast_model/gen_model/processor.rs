@@ -1,18 +1,18 @@
-use std::sync::Arc;
-use std::collections::HashSet;
-use tokio::sync::RwLock;
-use anyhow::{anyhow, Result};
+use super::context::NounProcessContext;
+use crate::fast_model::query_provider::{count_noun_all_db, query_noun_page_all_db};
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
-use crate::fast_model::query_provider::{count_noun_all_db, query_noun_page_all_db};
-use super::context::NounProcessContext;
+use anyhow::{Result, anyhow};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// 通用 Noun 处理器
 ///
 /// 统一了 process_cate_nouns, process_loop_nouns, process_prim_nouns 的重复逻辑
 /// 消除了90%的代码冗余
 pub struct NounProcessor {
-    pub ctx: NounProcessContext,  // 改为 pub
+    pub ctx: NounProcessContext, // 改为 pub
     pub category_name: &'static str,
 }
 
@@ -42,7 +42,10 @@ impl NounProcessor {
         Fut: std::future::Future<Output = Result<()>> + Send,
     {
         if nouns.is_empty() {
-            println!("[gen_full_noun_geos] {} nouns: 空列表，跳过", self.category_name);
+            println!(
+                "[gen_full_noun_geos] {} nouns: 空列表，跳过",
+                self.category_name
+            );
             return Ok(());
         }
 
@@ -53,10 +56,14 @@ impl NounProcessor {
             // 统计当前 noun 的总数
             let total = count_noun_all_db(noun)
                 .await
-                .map_err(|e| anyhow!("统计 {} noun {} 失败: {}", self.category_name, noun, e))? as usize;
+                .map_err(|e| anyhow!("统计 {} noun {} 失败: {}", self.category_name, noun, e))?
+                as usize;
 
             if total == 0 {
-                println!("[gen_full_noun_geos] {} noun {}: 无实例", self.category_name, noun);
+                println!(
+                    "[gen_full_noun_geos] {} noun {}: 无实例",
+                    self.category_name, noun
+                );
                 continue;
             }
 
@@ -71,7 +78,9 @@ impl NounProcessor {
                 // 查询当前页
                 let refnos = query_noun_page_all_db(noun, processed, page_size)
                     .await
-                    .map_err(|e| anyhow!("分页查询 {} noun {} 失败: {}", self.category_name, noun, e))?;
+                    .map_err(|e| {
+                        anyhow!("分页查询 {} noun {} 失败: {}", self.category_name, noun, e)
+                    })?;
 
                 if refnos.is_empty() {
                     break;

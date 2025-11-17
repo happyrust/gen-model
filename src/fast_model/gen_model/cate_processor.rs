@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use dashmap::DashMap;
-use anyhow::{bail, Result};
-use glam::Vec3;
-use aios_core::RefnoEnum;
-use aios_core::options::DbOption;
-use aios_core::geometry::ShapeInstancesData;
-use crate::fast_model::cata_model;
-use super::context::NounProcessContext;
 use super::cate_single;
+use super::context::NounProcessContext;
+use crate::fast_model::cata_model;
+use aios_core::RefnoEnum;
+use aios_core::geometry::ShapeInstancesData;
+use aios_core::options::DbOption;
+use anyhow::{Result, bail};
+use dashmap::DashMap;
+use glam::Vec3;
+use std::sync::Arc;
 
 /// 处理 Cate (元件库) 类型的 refno 页面
 ///
@@ -59,11 +59,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_refnos() {
-        let ctx = NounProcessContext::new(
-            Arc::new(DbOption::default()),
-            100,
-            4,
-        );
+        let ctx = NounProcessContext::new(Arc::new(DbOption::default()), 100, 4);
         let loop_sjus_map = Arc::new(DashMap::new());
         let (sender, _receiver) = flume::unbounded();
 

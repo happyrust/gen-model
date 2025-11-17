@@ -376,12 +376,18 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建自定义的 DbOptionExt
     let mut db_option_ext = get_db_option_ext_from_path(config_path)?;
-    
+
     // 调试：显示配置加载结果
     println!("🔧 配置加载完成:");
     println!("   - 配置文件路径: {}", config_path);
-    println!("   - full_noun_enabled_categories: {:?}", db_option_ext.full_noun_enabled_categories);
-    println!("   - full_noun_excluded_nouns: {:?}", db_option_ext.full_noun_excluded_nouns);
+    println!(
+        "   - full_noun_enabled_categories: {:?}",
+        db_option_ext.full_noun_enabled_categories
+    );
+    println!(
+        "   - full_noun_excluded_nouns: {:?}",
+        db_option_ext.full_noun_excluded_nouns
+    );
 
     // 设置 Full Noun 模式环境变量
     if db_option_ext.full_noun_mode {

@@ -85,13 +85,13 @@ pub async fn gen_loop_geos(
                 //判断父节点是否有SJUS，需要调整位置
                 #[cfg(feature = "profile")]
                 let pane_sjus_start = std::time::Instant::now();
-                
+
                 if (target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
                 {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
-                    
+
                     #[cfg(feature = "profile")]
                     tracing::debug!(
                         refno = ?target_refno,
@@ -176,7 +176,7 @@ pub async fn gen_loop_geos(
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                         #[cfg(feature = "profile")]
                         let extr_start = std::time::Instant::now();
-                        
+
                         if height < f32::EPSILON {
                             debug_model_warn!("{}： 的height太小为: {}", target_refno, height);
                             continue;
@@ -205,7 +205,7 @@ pub async fn gen_loop_geos(
                             .unwrap_or(PdmsGeoParam::Unknown);
                         item_trans = extrusion.get_trans();
                         geo_hash = extrusion.hash_unit_mesh_params();
-                        
+
                         #[cfg(feature = "profile")]
                         {
                             let is_pane_type = matches!(target_type, "PANE" | "FLOOR" | "GWALL");

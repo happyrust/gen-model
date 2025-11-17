@@ -66,7 +66,19 @@ src/web_server/
 ├── sync_control_center.rs          # 同步控制中心
 ├── site_metadata.rs                # 元数据管理
 ├── remote_runtime.rs               # 运行时管理
-└── sse_handlers.rs                 # SSE 事件流 (新增)
+├── sse_handlers.rs                 # SSE 事件流 (新增)
+└── topology_handlers.rs            # 拓扑配置 API (新增)
+
+assets/
+└── archives/                       # CBA 文件存储目录
+    ├── CATA_7999.cba
+    ├── CATA_8001.cba
+    └── ...
+
+路由配置:
+- /assets/archives                  # CBA 文件 HTTP 服务 (新增)
+- /files/output                     # 导出文件服务 (已有)
+- /static                           # 静态资源服务 (已有)
 ```
 
 ### 数据流架构
@@ -381,7 +393,86 @@ const operations: OpsOperation[] = [
 ]
 ```
 
-### 7. 配置管理组件
+### 7. 可视化拓扑配置组件
+
+#### TopologyCanvas Component
+
+**功能**: 使用 Canvas 画布可视化配置环境和站点的拓扑关系
+
+**Props**:
+```typescript
+interface TopologyCanvasProps {
+  onSave?: (topology: TopologyData) => void
+  readOnly?: boolean
+}
+```
+
+**State**:
+```typescript
+interface TopologyCanvasState {
+  nodes: Array<TopologyNode>
+  edges: Array<TopologyEdge>
+  selectedNode: TopologyNode | null
+  selectedEdge: TopologyEdge | null
+  mode: 'select' | 'add-env' | 'add-site' | 'connect'
+  zoom: number
+  pan: { x: number; y: number }
+}
+
+interface TopologyNode {
+  id: string
+  type: 'environment' | 'site'
+  position: { x: number; y: number }
+  data: EnvironmentNodeData | SiteNodeData
+}
+
+interface EnvironmentNodeData {
+  name: string
+  mqttHost: string
+  mqttPort: number
+  fileServerHost: string
+  location: string
+  locationDbs: string  // 逗号分隔
+  reconnectInitialMs: number
+  reconnectMaxMs: number
+}
+
+interface SiteNodeData {
+  name: string
+  envId: string  // 关联的环境节点 ID
+  location: string
+  httpHost: string
+  dbnums: string  // 逗号分隔
+  notes: string
+}
+
+interface TopologyEdge {
+  id: string
+  source: string  // 环境节点 ID
+  target: string  // 站点节点 ID
+  type: 'sync'
+}
+```
+
+**使用库**: React Flow 或自定义 Canvas
+
+**核心功能**:
+- 节点创建和编辑（环境节点、站点节点）
+- 连线创建（环境 → 站点）
+- 拖拽、缩放、平移
+- 自动布局（层次布局）
+- 配置面板（侧边栏）
+- 验证和保存
+- 导入/导出 JSON
+
+**子组件**:
+- `EnvironmentNode` - 环境节点渲染
+- `SiteNode` - 站点节点渲染
+- `SyncEdge` - 同步连线渲染
+- `NodeConfigPanel` - 节点配置面板
+- `ToolbarCanvas` - 工具栏（添加节点、连线、布局、导出）
+
+### 8. 配置管理组件
 
 #### ConfigManager Component
 
@@ -587,6 +678,73 @@ interface FlowEdge {
 ```
 
 ### 后端数据模型 (新增/扩展)
+
+#### TopologyData (拓扑配置)
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyData {
+    pub environments: Vec<RemoteSyncEnv>,
+    pub sites: Vec<RemoteSyncSite>,
+    pub connections: Vec<TopologyConnection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyConnection {
+    pub env_id: String,
+    pub site_id: String,
+}
+
+// 拓扑验证
+impl TopologyData {
+    pub fn validate(&self) -> Result<(), String> {
+        // 验证环境节点必须有 MQTT 和文件服务器配置
+        for env in &self.environments {
+            if env.mqtt_host.is_none() || env.file_server_host.is_none() {
+                return Err(format!("环境 {} 缺少 MQTT 或文件服务器配置", env.name));
+            }
+            if env.location_dbs.is_none() || env.location_dbs.as_ref().unwrap().is_empty() {
+                return Err(format!("环境 {} 缺少数据库编号配置", env.name));
+            }
+        }
+        
+        // 验证站点节点必须关联到环境
+        for site in &self.sites {
+            if !self.environments.iter().any(|e| e.id == site.env_id) {
+                return Err(format!("站点 {} 关联的环境不存在", site.name));
+            }
+            if site.dbnums.is_none() || site.dbnums.as_ref().unwrap().is_empty() {
+                return Err(format!("站点 {} 缺少数据库编号配置", site.name));
+            }
+        }
+        
+        Ok(())
+    }
+}
+```
+
+#### CBA 文件服务 API
+
+**路由配置**:
+```rust
+// 在 mod.rs 中添加
+.nest_service("/assets/archives", ServeDir::new("assets/archives"))
+```
+
+**文件访问**:
+- GET `/assets/archives/{filename}.cba` - 下载 CBA 文件
+- 自动支持 Range 请求（断点续传）
+- 自动设置 Content-Type: application/octet-stream
+
+**元数据中的下载 URL**:
+```rust
+// 在 site_metadata.rs 中生成下载 URL
+let download_url = format!(
+    "{}/{}",
+    env.file_server_host.trim_end_matches('/'),
+    file_name
+);
+// 例如: http://host:port/assets/archives/CATA_7999.cba
+```
 
 #### SyncEvent (SSE 事件)
 ```rust

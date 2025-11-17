@@ -3,7 +3,7 @@
 // 提供 SJUS 对齐计算、NGMR 查询等工具函数
 
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
-use aios_core::{RefnoEnum, NamedAttrMap};
+use aios_core::{NamedAttrMap, RefnoEnum};
 use anyhow::Result;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 

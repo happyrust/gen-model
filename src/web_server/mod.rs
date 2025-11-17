@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 pub mod handlers;
 pub mod models;
-pub mod ws;  // WebSocket 模块
+pub mod ws; // WebSocket 模块
 // pub mod templates; // 暂时禁用，有语法错误
 pub mod batch_tasks_template;
 pub mod database_diagnostics;
@@ -31,17 +31,18 @@ pub mod litefs_handlers;
 pub mod remote_runtime;
 pub mod remote_sync_handlers;
 pub mod remote_sync_template;
+pub mod room_api;
+pub mod room_page;
 pub mod simple_templates;
 pub mod site_metadata;
-pub mod sse_handlers;  // SSE 事件流处理器
+pub mod sse_handlers; // SSE 事件流处理器
 pub mod sync_control_center;
 pub mod sync_control_handlers;
 pub mod task_creation_handlers;
+pub mod topology_handlers; // 拓扑配置处理器
 pub mod wizard_handlers;
 pub mod wizard_template;
 pub mod xkt_test_handlers;
-pub mod room_api;
-pub mod room_page;
 
 use crate::web_api::{
     NounHierarchyApiState, SpatialQueryApiState, create_noun_hierarchy_routes,
@@ -148,7 +149,10 @@ pub async fn start_web_server(port: u16) -> anyhow::Result<()> {
     start_web_server_with_config(port, None).await
 }
 
-pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) -> anyhow::Result<()> {
+pub async fn start_web_server_with_config(
+    port: u16,
+    config_file: Option<&str>,
+) -> anyhow::Result<()> {
     let app_state = AppState::new();
 
     // 如果指定了配置文件，设置环境变量
@@ -162,7 +166,7 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
     // 🔧 修复：初始化数据库连接
     println!("🔄 正在初始化数据库连接...");
     println!("📂 当前工作目录: {:?}", std::env::current_dir()?);
-    
+
     let config_name = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
     println!("📄 尝试读取 {}.toml 配置文件...", config_name);
 
@@ -205,7 +209,9 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
 
     // 初始化房间 API
     let room_api_state = room_api::RoomApiState {
-        task_manager: Arc::new(tokio::sync::RwLock::new(room_api::RoomTaskManager::default())),
+        task_manager: Arc::new(tokio::sync::RwLock::new(
+            room_api::RoomTaskManager::default(),
+        )),
         progress_hub: app_state.progress_hub.clone(),
     };
     let room_routes = room_api::create_room_api_routes().with_state(room_api_state);
@@ -227,7 +233,10 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         .route("/api/databases", get(get_available_databases))
         .route("/api/status", get(get_system_status))
         // 基于 Refno 的模型生成 API
-        .route("/api/model/generate-by-refno", post(handlers::api_generate_by_refno))
+        .route(
+            "/api/model/generate-by-refno",
+            post(handlers::api_generate_by_refno),
+        )
         // SurrealDB 控制 (暂时注释掉有编译问题的路由)
         // .route("/api/surreal/start", post(handlers::start_surreal_server))
         // .route("/api/surreal/stop", post(handlers::stop_surreal_server))
@@ -350,6 +359,10 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
             get(sync_control_handlers::get_sync_metrics),
         )
         .route(
+            "/api/sync/metrics/history",
+            get(sync_control_handlers::get_sync_metrics_history),
+        )
+        .route(
             "/api/sync/queue",
             get(sync_control_handlers::get_sync_queue),
         )
@@ -459,6 +472,13 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         .route(
             "/api/remote-sync/sites/{id}/files/{*path}",
             get(remote_sync_handlers::serve_site_files),
+        )
+        // 拓扑配置 API
+        .route(
+            "/api/remote-sync/topology",
+            get(topology_handlers::get_topology)
+                .post(topology_handlers::save_topology)
+                .delete(topology_handlers::delete_topology),
         )
         .route(
             "/api/remote-sync/sites/{id}/files",
@@ -691,6 +711,8 @@ pub async fn start_web_server_with_config(port: u16, config_file: Option<&str>) 
         // 静态文件服务
         .nest_service("/static", ServeDir::new("src/web_server/static"))
         .nest_service("/files/output", ServeDir::new("output"))
+        // CBA 文件分发服务 - 用于远程站点下载增量数据包
+        .nest_service("/assets/archives", ServeDir::new("assets/archives"))
         // 主页面
         .route("/", get(index_page))
         .route("/dashboard", get(dashboard_page))

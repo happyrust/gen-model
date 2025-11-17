@@ -6,12 +6,11 @@ use aios_core::SUL_DB;
 #[allow(unused_imports)]
 use aios_core::SUL_MEM_DB;
 
-
+#[cfg(feature = "sql")]
+use aios_core::db_pool::get_global_pool;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::normalize_sql_string;
 use aios_core::options::DbOption;
-#[cfg(feature = "sql")]
-use aios_core::db_pool::get_global_pool;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::hash_tool::hash_str;
@@ -1173,7 +1172,7 @@ pub async fn sync_total_async_threaded(
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
-    
+
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表

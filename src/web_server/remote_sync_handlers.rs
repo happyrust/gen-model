@@ -1433,3 +1433,127 @@ fn fill_metadata_defaults(metadata: &mut SiteMetadataFile, info: &SiteInfo) {
         metadata.generated_at = site_metadata::timestamp_now();
     }
 }
+
+// ============================================================================
+// Helper functions for topology management
+// ============================================================================
+
+/// 列出所有环境（用于拓扑配置）
+pub async fn list_all_envs() -> anyhow::Result<Vec<RemoteSyncEnv>> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, mqtt_host, mqtt_port, file_server_host, location, location_dbs, 
+                reconnect_initial_ms, reconnect_max_ms, created_at, updated_at 
+         FROM remote_sync_envs 
+         ORDER BY created_at DESC",
+    )?;
+
+    let envs = stmt
+        .query_map([], |row| {
+            Ok(RemoteSyncEnv {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mqtt_host: row.get(2)?,
+                mqtt_port: row.get(3)?,
+                file_server_host: row.get(4)?,
+                location: row.get(5)?,
+                location_dbs: row.get(6)?,
+                reconnect_initial_ms: row.get(7)?,
+                reconnect_max_ms: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(envs)
+}
+
+/// 列出所有站点（用于拓扑配置）
+pub async fn list_all_sites() -> anyhow::Result<Vec<RemoteSyncSite>> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    let mut stmt = conn.prepare(
+        "SELECT id, env_id, name, location, http_host, dbnums, notes, created_at, updated_at 
+         FROM remote_sync_sites 
+         ORDER BY created_at DESC",
+    )?;
+
+    let sites = stmt
+        .query_map([], |row| {
+            Ok(RemoteSyncSite {
+                id: row.get(0)?,
+                env_id: row.get(1)?,
+                name: row.get(2)?,
+                location: row.get(3)?,
+                http_host: row.get(4)?,
+                dbnums: row.get(5)?,
+                notes: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(sites)
+}
+
+/// 创建或更新环境
+pub async fn create_or_update_env(env: &RemoteSyncEnv) -> anyhow::Result<()> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO remote_sync_envs 
+         (id, name, mqtt_host, mqtt_port, file_server_host, location, location_dbs, 
+          reconnect_initial_ms, reconnect_max_ms, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            &env.id,
+            &env.name,
+            &env.mqtt_host,
+            &env.mqtt_port,
+            &env.file_server_host,
+            &env.location,
+            &env.location_dbs,
+            &env.reconnect_initial_ms,
+            &env.reconnect_max_ms,
+            &env.created_at,
+            &env.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 创建或更新站点
+pub async fn create_or_update_site(site: &RemoteSyncSite) -> anyhow::Result<()> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO remote_sync_sites 
+         (id, env_id, name, location, http_host, dbnums, notes, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            &site.id,
+            &site.env_id,
+            &site.name,
+            &site.location,
+            &site.http_host,
+            &site.dbnums,
+            &site.notes,
+            &site.created_at,
+            &site.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 删除所有环境
+pub async fn delete_all_envs() -> anyhow::Result<()> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    conn.execute("DELETE FROM remote_sync_envs", [])?;
+    Ok(())
+}
+
+/// 删除所有站点
+pub async fn delete_all_sites() -> anyhow::Result<()> {
+    let conn = open_sqlite().map_err(|e| anyhow::anyhow!("打开数据库失败: {}", e))?;
+    conn.execute("DELETE FROM remote_sync_sites", [])?;
+    Ok(())
+}

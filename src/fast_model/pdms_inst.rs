@@ -563,4 +563,3 @@ fn build_transaction_block(statements: &[String]) -> String {
     block.push_str("COMMIT TRANSACTION;");
     block
 }
-

@@ -52,6 +52,12 @@ pub struct DbOptionExt {
     /// 即使类别启用，这里的 noun 也会被过滤掉
     #[serde(default)]
     pub full_noun_excluded_nouns: Vec<String>,
+
+    /// 调试模式：限制每种 Noun 类型的处理数量
+    /// 设置为 None 或 0 表示不限制，设置为具体数字则只处理前 N 个实例
+    /// 用于快速测试和调试，避免处理全库数据
+    #[serde(default)]
+    pub debug_limit_per_noun: Option<usize>,
 }
 
 impl Deref for DbOptionExt {
@@ -89,20 +95,23 @@ impl DbOptionExt {
     /// 空列表表示启用所有类别
     pub fn is_noun_category_enabled(&self, category: &str) -> bool {
         self.full_noun_enabled_categories.is_empty()
-            || self.full_noun_enabled_categories.iter()
+            || self
+                .full_noun_enabled_categories
+                .iter()
                 .any(|cat| cat == category || cat.to_lowercase() == category.to_lowercase())
     }
 
     /// 检查具体 noun 是否被排除
     pub fn is_noun_excluded(&self, noun: &str) -> bool {
-        self.full_noun_excluded_nouns.iter()
+        self.full_noun_excluded_nouns
+            .iter()
             .any(|excluded| excluded == noun || excluded.to_lowercase() == noun.to_lowercase())
     }
 
     /// 检查具体 noun 是否在启用的列表中（当使用具体 noun 名称时）
     pub fn is_noun_explicitly_enabled(&self, noun: &str) -> bool {
         // 如果启用了具体 noun 名称，则检查
-        !self.full_noun_enabled_categories.is_empty() 
+        !self.full_noun_enabled_categories.is_empty()
             && (self.full_noun_enabled_categories.iter()
                 .any(|cat| cat == noun || cat.to_lowercase() == noun.to_lowercase())
                 // 也检查类别名称
@@ -124,6 +133,7 @@ impl From<DbOption> for DbOptionExt {
             full_noun_batch_size: None,
             full_noun_enabled_categories: Vec::new(),
             full_noun_excluded_nouns: Vec::new(),
+            debug_limit_per_noun: None,
         }
     }
 }
@@ -144,7 +154,8 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build config: {}", e))?;
 
-    let db_option = s.try_deserialize::<DbOption>()
+    let db_option = s
+        .try_deserialize::<DbOption>()
         .map_err(|e| anyhow::anyhow!("Failed to deserialize DbOption: {}", e))?;
 
     // 读取 TOML 文件内容以提取扩展字段
@@ -157,20 +168,24 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         .map_err(|e| anyhow::anyhow!("Failed to parse TOML from {}: {}", config_file, e))?;
 
     // 提取扩展字段
-    let full_noun_mode = toml_value.get("full_noun_mode")
+    let full_noun_mode = toml_value
+        .get("full_noun_mode")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let full_noun_max_concurrent_nouns = toml_value.get("full_noun_max_concurrent_nouns")
+    let full_noun_max_concurrent_nouns = toml_value
+        .get("full_noun_max_concurrent_nouns")
         .and_then(|v| v.as_integer())
         .map(|v| v as usize);
 
-    let full_noun_batch_size = toml_value.get("full_noun_batch_size")
+    let full_noun_batch_size = toml_value
+        .get("full_noun_batch_size")
         .and_then(|v| v.as_integer())
         .map(|v| v as usize);
 
     // 解析启用的 noun 类别
-    let full_noun_enabled_categories = toml_value.get("full_noun_enabled_categories")
+    let full_noun_enabled_categories = toml_value
+        .get("full_noun_enabled_categories")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -180,7 +195,8 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         .unwrap_or_default();
 
     // 解析禁用的 noun 列表
-    let full_noun_excluded_nouns = toml_value.get("full_noun_excluded_nouns")
+    let full_noun_excluded_nouns = toml_value
+        .get("full_noun_excluded_nouns")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -188,6 +204,13 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
                 .collect()
         })
         .unwrap_or_default();
+
+    // 解析调试限制
+    let debug_limit_per_noun = toml_value
+        .get("debug_limit_per_noun")
+        .and_then(|v| v.as_integer())
+        .map(|v| v as usize)
+        .filter(|&v| v > 0); // 0 表示不限制，转换为 None
 
     // 构建 DbOptionExt
     let db_option_ext = DbOptionExt {
@@ -202,6 +225,7 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         full_noun_batch_size,
         full_noun_enabled_categories,
         full_noun_excluded_nouns,
+        debug_limit_per_noun,
     };
 
     // 打印加载的配置
@@ -214,10 +238,7 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         "   - LOD profiles 数量: {}",
         db_option_ext.inner.mesh_precision.lod_profiles.len()
     );
-    println!(
-        "   - full_noun_mode: {}",
-        db_option_ext.full_noun_mode
-    );
+    println!("   - full_noun_mode: {}", db_option_ext.full_noun_mode);
     if !db_option_ext.full_noun_enabled_categories.is_empty() {
         println!(
             "   - 启用的 noun 类别: {:?}",

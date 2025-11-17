@@ -768,3 +768,82 @@ fn render_sync_control_page() -> String {
 </html>"#
     )
 }
+
+// ============================================================================
+// Metrics History API
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct MetricsHistoryQuery {
+    pub time_range: Option<String>, // "hour", "day", "week", "month"
+    pub limit: Option<usize>,
+}
+
+/// 获取性能指标历史
+pub async fn get_sync_metrics_history(
+    Query(params): Query<MetricsHistoryQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    use rusqlite::Connection;
+
+    let time_range = params.time_range.as_deref().unwrap_or("day");
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    // 计算时间范围
+    let hours_ago = match time_range {
+        "hour" => 1,
+        "day" => 24,
+        "week" => 24 * 7,
+        "month" => 24 * 30,
+        _ => 24,
+    };
+
+    let conn = Connection::open("deployment_sites.sqlite")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 从日志中聚合历史指标
+    let sql = format!(
+        "SELECT 
+            datetime(created_at) as timestamp,
+            COUNT(*) as task_count,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+            SUM(CASE WHEN status = 'completed' THEN COALESCE(file_size, 0) ELSE 0 END) as total_bytes,
+            AVG(CASE WHEN status = 'completed' AND completed_at IS NOT NULL AND started_at IS NOT NULL 
+                THEN (julianday(completed_at) - julianday(started_at)) * 86400000 
+                ELSE NULL END) as avg_sync_time_ms
+         FROM remote_sync_logs
+         WHERE datetime(created_at) >= datetime('now', '-{} hours')
+         GROUP BY strftime('%Y-%m-%d %H:00:00', created_at)
+         ORDER BY timestamp DESC
+         LIMIT ?",
+        hours_ago
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok(json!({
+                "timestamp": row.get::<_, String>(0).unwrap_or_default(),
+                "task_count": row.get::<_, i64>(1).unwrap_or(0),
+                "completed_count": row.get::<_, i64>(2).unwrap_or(0),
+                "failed_count": row.get::<_, i64>(3).unwrap_or(0),
+                "total_bytes": row.get::<_, i64>(4).unwrap_or(0),
+                "avg_sync_time_ms": row.get::<_, Option<f64>>(5).unwrap_or(None).unwrap_or(0.0),
+            }))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut history = Vec::new();
+    for row in rows {
+        history.push(row.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
+    }
+
+    Ok(Json(json!({
+        "status": "success",
+        "time_range": time_range,
+        "history": history
+    })))
+}

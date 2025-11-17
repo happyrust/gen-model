@@ -251,7 +251,7 @@ impl Default for DatabaseConfig {
             db_type: "surrealdb".to_string(),
             surreal_ns: 1516,
             db_ip: "localhost".to_string(),
-            db_port: "8020".to_string(),  // 修改为与 DbOption.toml 一致的端口
+            db_port: "8020".to_string(), // 修改为与 DbOption.toml 一致的端口
             db_user: "root".to_string(),
             db_password: "root".to_string(),
             gen_model: true,

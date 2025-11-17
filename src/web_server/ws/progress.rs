@@ -6,8 +6,8 @@ use crate::shared::{ProgressHub, ProgressMessage};
 use crate::web_server::AppState;
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::Response,
 };
@@ -184,10 +184,7 @@ async fn handle_progress_socket(socket: WebSocket, task_id: String, hub: Arc<Pro
 /// { "action": "unsubscribe", "task_id": "task-123" }
 /// { "action": "list" }
 /// ```
-pub async fn ws_tasks_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+pub async fn ws_tasks_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     info!("WebSocket 多任务连接请求");
     let hub = state.progress_hub.clone();
     ws.on_upgrade(move |socket| handle_tasks_socket(socket, hub))

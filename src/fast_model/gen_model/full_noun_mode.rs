@@ -1,22 +1,22 @@
-use std::sync::Arc;
-use std::collections::HashSet;
-use std::time::Instant;
-use tokio::sync::RwLock;
-use dashmap::DashMap;
-use glam::Vec3;
-use aios_core::options::DbOption;
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
+use aios_core::options::DbOption;
+use dashmap::DashMap;
+use glam::Vec3;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::RwLock;
 
-use super::errors::{FullNounError, Result};
+use super::cate_processor::process_cate_refno_page;
+use super::categorized_refnos::CategorizedRefnos;
 use super::config::FullNounConfig;
 use super::context::NounProcessContext;
-use super::noun_collection::FullNounCollection;
-use super::processor::NounProcessor;
-use super::categorized_refnos::CategorizedRefnos;
-use super::cate_processor::process_cate_refno_page;
+use super::errors::{FullNounError, Result};
 use super::loop_processor::process_loop_refno_page;
+use super::noun_collection::FullNounCollection;
 use super::prim_processor::process_prim_refno_page;
+use super::processor::NounProcessor;
 
 // Performance profiling support
 #[cfg(feature = "profile")]
@@ -61,7 +61,7 @@ pub async fn gen_full_noun_geos_optimized(
     sender: flume::Sender<ShapeInstancesData>,
 ) -> Result<CategorizedRefnos> {
     let total_start = Instant::now();
-    
+
     println!("🚀 启动 Full Noun 模式（优化版本）");
     config.print_info();
 
@@ -121,7 +121,7 @@ pub async fn gen_full_noun_geos_optimized(
     };
     let loop_duration = loop_start.elapsed();
     println!("⏱️  LOOP processing took {} ms", loop_duration.as_millis());
-    
+
     #[cfg(feature = "profile")]
     info!(
         loop_count = collection.loop_owner_nouns.len(),
@@ -152,7 +152,7 @@ pub async fn gen_full_noun_geos_optimized(
     };
     let prim_duration = prim_start.elapsed();
     println!("⏱️  PRIM processing took {} ms", prim_duration.as_millis());
-    
+
     #[cfg(feature = "profile")]
     info!(
         prim_count = collection.prim_nouns.len(),
@@ -185,7 +185,7 @@ pub async fn gen_full_noun_geos_optimized(
     };
     let cate_duration = cate_start.elapsed();
     println!("⏱️  CATE processing took {} ms", cate_duration.as_millis());
-    
+
     #[cfg(feature = "profile")]
     info!(
         cate_count = collection.cate_nouns.len(),
@@ -203,7 +203,11 @@ pub async fn gen_full_noun_geos_optimized(
 
     {
         let cate_set = cate_refnos.read().await;
-        categorized.extend(cate_set.iter().map(|r| (*r, super::models::NounCategory::Cate)));
+        categorized.extend(
+            cate_set
+                .iter()
+                .map(|r| (*r, super::models::NounCategory::Cate)),
+        );
     }
 
     {
@@ -217,24 +221,37 @@ pub async fn gen_full_noun_geos_optimized(
 
     {
         let prim_set = prim_refnos.read().await;
-        categorized.extend(prim_set.iter().map(|r| (*r, super::models::NounCategory::Prim)));
+        categorized.extend(
+            prim_set
+                .iter()
+                .map(|r| (*r, super::models::NounCategory::Prim)),
+        );
     }
 
     let total_duration = total_start.elapsed();
     println!("✅ Full Noun 处理完成");
-    println!("⏱️  Total Full Noun processing: {} ms", total_duration.as_millis());
-    println!("   ├─ LOOP: {} ms ({:.1}%)", 
-             loop_duration.as_millis(), 
-             loop_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0);
-    println!("   ├─ PRIM: {} ms ({:.1}%)", 
-             prim_duration.as_millis(),
-             prim_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0);
-    println!("   └─ CATE: {} ms ({:.1}%)", 
-             cate_duration.as_millis(),
-             cate_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0);
-    
+    println!(
+        "⏱️  Total Full Noun processing: {} ms",
+        total_duration.as_millis()
+    );
+    println!(
+        "   ├─ LOOP: {} ms ({:.1}%)",
+        loop_duration.as_millis(),
+        loop_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
+    );
+    println!(
+        "   ├─ PRIM: {} ms ({:.1}%)",
+        prim_duration.as_millis(),
+        prim_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
+    );
+    println!(
+        "   └─ CATE: {} ms ({:.1}%)",
+        cate_duration.as_millis(),
+        cate_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
+    );
+
     categorized.print_statistics();
-    
+
     #[cfg(feature = "profile")]
     info!(
         total_duration_ms = total_duration.as_millis() as u64,

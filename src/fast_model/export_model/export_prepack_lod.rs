@@ -26,7 +26,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::fast_model::export_model::export_common::{ExportData, TubiRecord, collect_export_data};
-use crate::fast_model::export_model::export_unit_mesh_glb::{UnitMeshGlbExportResult, UnitMeshGlbExporter, UnitMeshIndexMap};
+use crate::fast_model::export_model::export_unit_mesh_glb::{
+    UnitMeshGlbExportResult, UnitMeshGlbExporter, UnitMeshIndexMap,
+};
 use crate::fast_model::export_model::model_exporter::{
     CommonExportConfig, ExportStats, GlbExportConfig, ModelExporter, collect_export_refnos,
     query_geometry_instances,

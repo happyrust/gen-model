@@ -1,11 +1,11 @@
 // SSE (Server-Sent Events) 事件流处理器
 
 use axum::{
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
-    },
     http::StatusCode,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,23 @@ pub enum SyncEvent {
         metrics: serde_json::Value,
         timestamp: String,
     },
+    ConnectionChanged {
+        mqtt_connected: bool,
+        watcher_active: bool,
+        timestamp: String,
+    },
+    ProgressUpdate {
+        total: u64,
+        completed: u64,
+        failed: u64,
+        pending: u64,
+        timestamp: String,
+    },
+    Alert {
+        level: String,
+        message: String,
+        timestamp: String,
+    },
 }
 
 impl SyncEvent {
@@ -98,38 +115,34 @@ impl SyncEvent {
 pub async fn sync_events_handler() -> impl IntoResponse {
     // 订阅事件广播通道
     let rx = SYNC_EVENT_TX.subscribe();
-    
+
     // 将 broadcast receiver 转换为 Stream
     let stream = BroadcastStream::new(rx);
-    
+
     // 转换为 SSE 事件流
-    let event_stream = stream
-        .filter_map(|result| async move {
-            match result {
-                Ok(event) => {
-                    // 序列化事件为 JSON
-                    match serde_json::to_string(&event) {
-                        Ok(json) => Some(Ok::<_, Infallible>(
-                            Event::default()
-                                .data(json)
-                                .event("message")
-                        )),
-                        Err(e) => {
-                            eprintln!("Failed to serialize SSE event: {}", e);
-                            None
-                        }
+    let event_stream = stream.filter_map(|result| async move {
+        match result {
+            Ok(event) => {
+                // 序列化事件为 JSON
+                match serde_json::to_string(&event) {
+                    Ok(json) => Some(Ok::<_, Infallible>(
+                        Event::default().data(json).event("message"),
+                    )),
+                    Err(e) => {
+                        eprintln!("Failed to serialize SSE event: {}", e);
+                        None
                     }
                 }
-                Err(e) => {
-                    eprintln!("SSE broadcast error: {}", e);
-                    None
-                }
             }
-        });
-    
+            Err(e) => {
+                eprintln!("SSE broadcast error: {}", e);
+                None
+            }
+        }
+    });
+
     // 返回 SSE 响应
-    Sse::new(event_stream)
-        .keep_alive(KeepAlive::default())
+    Sse::new(event_stream).keep_alive(KeepAlive::default())
 }
 
 /// 测试 SSE 连接的处理器
@@ -142,13 +155,16 @@ pub async fn test_sse_handler() -> impl IntoResponse {
         env_id: "test-env".to_string(),
         timestamp: SyncEvent::now(),
     };
-    
+
     // 发送测试事件
     match SYNC_EVENT_TX.send(test_event) {
         Ok(_) => (StatusCode::OK, "Test event sent"),
         Err(e) => {
             eprintln!("Failed to send test event: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to send test event")
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to send test event",
+            )
         }
     }
 }
@@ -156,7 +172,7 @@ pub async fn test_sse_handler() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sync_event_serialization() {
         let event = SyncEvent::SyncStarted {
@@ -165,7 +181,7 @@ mod tests {
             file_size: 1024000,
             timestamp: "1234567890".to_string(),
         };
-        
+
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("SyncStarted"));
         assert!(json.contains("task-123"));

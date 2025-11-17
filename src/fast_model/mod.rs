@@ -22,12 +22,9 @@ pub mod room_model_v2; // 改进版本的房间模型
 
 // Re-export room model v2 functions
 pub use room_model_v2::{
-    build_room_relations_v2,
+    IncrementalUpdateResult, RoomBuildStats, build_room_relations_v2,
+    rebuild_room_relations_for_rooms, regenerate_room_models_by_keywords,
     update_room_relations_incremental,
-    rebuild_room_relations_for_rooms,
-    regenerate_room_models_by_keywords,
-    IncrementalUpdateResult,
-    RoomBuildStats,
 };
 
 pub mod cal_model;
@@ -62,9 +59,9 @@ pub mod concurrency;
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 pub use gen_model::*;
+pub use gen_model_old::gen_all_geos_data;
+pub use gen_model_old::query_tubi_size;
 pub use gen_model_old::*;
-pub use gen_model_old::gen_all_geos_data as gen_all_geos_data;
-pub use gen_model_old::query_tubi_size as query_tubi_size;
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 // pub use gen_model_refactored::DbModelInstRefnos;
@@ -85,7 +82,8 @@ pub static EXIST_MESH_GEO_HASHES: Lazy<DashMap<String, Aabb>> = Lazy::new(DashMa
 pub use aios_core::{debug_model, debug_model_debug, debug_model_trace, debug_model_warn};
 
 // 错误日志模式的全局变量
-static DEBUG_MODEL_ERRORS_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DEBUG_MODEL_ERRORS_ONLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 设置调试模型错误日志模式
 pub fn set_debug_model_errors_only(enabled: bool) {
@@ -134,7 +132,7 @@ macro_rules! smart_debug_model_debug {
             if $crate::fast_model::is_debug_model_errors_only() {
                 // 在错误日志模式下，只输出包含错误关键词的信息
                 let message = format!($($arg)*);
-                if message.contains("错误") || message.contains("失败") || message.contains("Error") || message.contains("error") || message.contains("ERROR") || 
+                if message.contains("错误") || message.contains("失败") || message.contains("Error") || message.contains("error") || message.contains("ERROR") ||
                    message.contains("Failed") || message.contains("failed") || message.contains("❌") || message.contains("⚠️") {
                     $crate::fast_model::debug_model_debug!($($arg)*);
                 }

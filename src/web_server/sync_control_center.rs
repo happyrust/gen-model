@@ -37,66 +37,8 @@ pub static SYNC_CONTROL_CENTER: Lazy<Arc<RwLock<SyncControlCenter>>> =
 
 // ========= 数据结构定义 =========
 
-/// 同步事件类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum SyncEvent {
-    /// 服务启动
-    Started {
-        env_id: String,
-        timestamp: SystemTime,
-    },
-    /// 服务停止
-    Stopped {
-        reason: String,
-        timestamp: SystemTime,
-    },
-    /// 连接状态变更
-    ConnectionChanged {
-        mqtt_connected: bool,
-        watcher_active: bool,
-        timestamp: SystemTime,
-    },
-    /// 文件同步开始
-    SyncStarted {
-        file_path: String,
-        size: u64,
-        timestamp: SystemTime,
-    },
-    /// 文件同步完成
-    SyncCompleted {
-        file_path: String,
-        duration_ms: u64,
-        timestamp: SystemTime,
-    },
-    /// 文件同步失败
-    SyncFailed {
-        file_path: String,
-        error: String,
-        timestamp: SystemTime,
-    },
-    /// 进度更新
-    ProgressUpdate {
-        total: u64,
-        completed: u64,
-        failed: u64,
-        pending: u64,
-        timestamp: SystemTime,
-    },
-    /// 性能指标
-    MetricsUpdate {
-        sync_rate_mbps: f64,
-        cpu_usage: f32,
-        memory_usage: f32,
-        timestamp: SystemTime,
-    },
-    /// 错误告警
-    Alert {
-        level: AlertLevel,
-        message: String,
-        timestamp: SystemTime,
-    },
-}
+// Re-export SyncEvent from sse_handlers to avoid duplication
+pub use crate::web_server::sse_handlers::SyncEvent;
 
 /// 告警级别
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,7 +251,7 @@ impl SyncControlCenter {
         // 发送启动事件
         let _ = SYNC_EVENT_TX.send(SyncEvent::Started {
             env_id,
-            timestamp: SystemTime::now(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
 
         Ok(())
@@ -335,8 +277,8 @@ impl SyncControlCenter {
 
         // 发送停止事件
         let _ = SYNC_EVENT_TX.send(SyncEvent::Stopped {
-            reason: "用户手动停止".to_string(),
-            timestamp: SystemTime::now(),
+            env_id: self.state.current_env.clone().unwrap_or_default(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
 
         Ok(())
@@ -658,9 +600,10 @@ impl SyncControlCenter {
                         .as_millis() as u64;
 
                     let _ = SYNC_EVENT_TX.send(SyncEvent::SyncCompleted {
+                        task_id: task.id.clone(),
                         file_path: task.file_path.clone(),
                         duration_ms,
-                        timestamp: SystemTime::now(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
                     });
                 }
 
@@ -678,9 +621,10 @@ impl SyncControlCenter {
 
                 // 发送失败事件
                 let _ = SYNC_EVENT_TX.send(SyncEvent::SyncFailed {
+                    task_id: task.id.clone(),
                     file_path: task.file_path.clone(),
                     error: error.unwrap_or_else(|| "未知错误".to_string()),
-                    timestamp: SystemTime::now(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
                 });
 
                 // 重试逻辑
@@ -1138,8 +1082,13 @@ async fn update_site_metadata(
                 .cloned()
         });
 
-    let download_url =
-        download_host.map(|host| format!("{}/{}", host.trim_end_matches('/'), file_name.as_str()));
+    let download_url = download_host.map(|host| {
+        format!(
+            "{}/assets/archives/{}",
+            host.trim_end_matches('/'),
+            file_name.as_str()
+        )
+    });
 
     let updated_at = Utc::now().to_rfc3339();
     let file_path_display = final_path.to_string_lossy().to_string();
@@ -1323,7 +1272,7 @@ async fn update_connection_status() {
         let _ = SYNC_EVENT_TX.send(SyncEvent::ConnectionChanged {
             mqtt_connected,
             watcher_active,
-            timestamp: SystemTime::now(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
     }
 }
@@ -1337,7 +1286,7 @@ async fn send_progress_update() {
         completed: center.state.total_synced,
         failed: center.state.total_failed,
         pending: center.state.pending_count as u64,
-        timestamp: SystemTime::now(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
     });
 }
 
@@ -1349,9 +1298,9 @@ async fn check_alerts() {
     if center.state.is_running && !center.state.mqtt_connected {
         if center.state.mqtt_reconnect_count > 5 {
             let _ = SYNC_EVENT_TX.send(SyncEvent::Alert {
-                level: AlertLevel::Critical,
+                level: "critical".to_string(),
                 message: "MQTT连接持续失败，请检查网络和服务器配置".to_string(),
-                timestamp: SystemTime::now(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
             });
         }
     }
@@ -1359,12 +1308,12 @@ async fn check_alerts() {
     // 检查队列积压
     if center.state.queue_size > 100 {
         let _ = SYNC_EVENT_TX.send(SyncEvent::Alert {
-            level: AlertLevel::Warning,
+            level: "warning".to_string(),
             message: format!(
                 "同步队列积压严重，当前待处理: {} 个文件",
                 center.state.queue_size
             ),
-            timestamp: SystemTime::now(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
     }
 
@@ -1374,9 +1323,9 @@ async fn check_alerts() {
         let failure_rate = center.state.total_failed as f64 / total as f64;
         if failure_rate > 0.3 {
             let _ = SYNC_EVENT_TX.send(SyncEvent::Alert {
-                level: AlertLevel::Error,
+                level: "error".to_string(),
                 message: format!("同步失败率过高: {:.1}%", failure_rate * 100.0),
-                timestamp: SystemTime::now(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
             });
         }
     }

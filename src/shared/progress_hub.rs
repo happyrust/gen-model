@@ -115,8 +115,9 @@ impl ProgressHub {
             .clone();
 
         // 初始化任务状态
-        self.task_states.entry(task_id.clone()).or_insert(
-            ProgressMessage {
+        self.task_states
+            .entry(task_id.clone())
+            .or_insert(ProgressMessage {
                 task_id,
                 status: TaskStatus::Pending,
                 percentage: 0.0,
@@ -128,8 +129,7 @@ impl ProgressHub {
                 message: "任务已注册".to_string(),
                 timestamp: Utc::now(),
                 details: None,
-            },
-        );
+            });
 
         sender.subscribe()
     }
@@ -210,7 +210,10 @@ impl ProgressHub {
 
     /// 获取所有活跃任务的 ID 列表
     pub fn active_tasks(&self) -> Vec<String> {
-        self.task_states.iter().map(|entry| entry.key().clone()).collect()
+        self.task_states
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// 获取所有活跃任务的状态
@@ -225,7 +228,9 @@ impl ProgressHub {
     ///
     /// 用于监控和调试
     pub fn subscriber_count(&self, task_id: &str) -> Option<usize> {
-        self.channels.get(task_id).map(|sender| sender.receiver_count())
+        self.channels
+            .get(task_id)
+            .map(|sender| sender.receiver_count())
     }
 }
 

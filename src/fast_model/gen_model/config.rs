@@ -1,6 +1,6 @@
-use std::num::NonZeroUsize;
-use aios_core::options::DbOption;
 use super::errors::{FullNounError, Result};
+use aios_core::options::DbOption;
+use std::num::NonZeroUsize;
 
 /// 类型安全的并发配置
 ///
@@ -43,7 +43,10 @@ impl Concurrency {
         if clamped != n {
             log::warn!(
                 "并发数 {} 超出范围，已自动调整为 {}（范围：{}-{}）",
-                n, clamped, Self::MIN, Self::MAX
+                n,
+                clamped,
+                Self::MIN,
+                Self::MAX
             );
         }
 
@@ -94,7 +97,10 @@ impl BatchSize {
         if clamped != n {
             log::warn!(
                 "批次大小 {} 超出范围，已自动调整为 {}（范围：{}-{}）",
-                n, clamped, Self::MIN, Self::MAX
+                n,
+                clamped,
+                Self::MIN,
+                Self::MAX
             );
         }
 
@@ -173,7 +179,7 @@ impl FullNounConfig {
             concurrency,
             batch_size,
             validate_sjus_map: true,  // 默认启用验证
-            strict_validation: false,  // 默认只警告，不报错
+            strict_validation: false, // 默认只警告，不报错
             enabled_categories: opt.full_noun_enabled_categories.clone(),
             excluded_nouns: opt.full_noun_excluded_nouns.clone(),
         })
@@ -231,13 +237,16 @@ impl FullNounConfig {
     /// 检查 noun 类别是否启用
     pub fn is_category_enabled(&self, category: &str) -> bool {
         self.enabled_categories.is_empty()
-            || self.enabled_categories.iter()
+            || self
+                .enabled_categories
+                .iter()
                 .any(|cat| cat == category || cat.to_lowercase() == category.to_lowercase())
     }
 
     /// 检查具体 noun 是否被排除
     pub fn is_noun_excluded(&self, noun: &str) -> bool {
-        self.excluded_nouns.iter()
+        self.excluded_nouns
+            .iter()
             .any(|excluded| excluded == noun || excluded.to_lowercase() == noun.to_lowercase())
     }
 
@@ -250,12 +259,16 @@ impl FullNounConfig {
         }
 
         // 如果启用了具体 noun 名称，优先检查
-        let has_explicit_nouns = self.enabled_categories.iter()
+        let has_explicit_nouns = self
+            .enabled_categories
+            .iter()
             .any(|cat| !matches!(cat.to_lowercase().as_str(), "cate" | "loop" | "prim"));
 
         if has_explicit_nouns {
             // 如果有具体的 noun 名称，则检查 noun 是否在列表中
-            return self.enabled_categories.iter()
+            return self
+                .enabled_categories
+                .iter()
                 .any(|cat| cat == noun || cat.to_lowercase() == noun.to_lowercase());
         }
 
@@ -268,22 +281,43 @@ impl FullNounConfig {
         println!("╔════════════════════════════════════════╗");
         println!("║    Full Noun 模式配置                    ║");
         println!("╠════════════════════════════════════════╣");
-        println!("║ 启用状态: {:<28} ║", if self.enabled { "✅ 已启用" } else { "❌ 未启用" });
+        println!(
+            "║ 启用状态: {:<28} ║",
+            if self.enabled {
+                "✅ 已启用"
+            } else {
+                "❌ 未启用"
+            }
+        );
         println!("║ 并发 Noun 数: {:<24} ║", self.concurrency.get());
         println!("║ 批次大小: {:<28} ║", self.batch_size.get());
-        println!("║ SJUS 验证: {:<27} ║", if self.validate_sjus_map { "✅ 启用" } else { "❌ 禁用" });
-        println!("║ 严格模式: {:<28} ║", if self.strict_validation { "✅ 启用" } else { "❌ 禁用" });
-        
+        println!(
+            "║ SJUS 验证: {:<27} ║",
+            if self.validate_sjus_map {
+                "✅ 启用"
+            } else {
+                "❌ 禁用"
+            }
+        );
+        println!(
+            "║ 严格模式: {:<28} ║",
+            if self.strict_validation {
+                "✅ 启用"
+            } else {
+                "❌ 禁用"
+            }
+        );
+
         if !self.enabled_categories.is_empty() {
             println!("╠════════════════════════════════════════╣");
             println!("║ 启用类别: {:<27} ║", self.enabled_categories.join(", "));
         }
-        
+
         if !self.excluded_nouns.is_empty() {
             println!("╠════════════════════════════════════════╣");
             println!("║ 排除 Noun: {:<26} ║", self.excluded_nouns.join(", "));
         }
-        
+
         println!("╚════════════════════════════════════════╝");
     }
 }

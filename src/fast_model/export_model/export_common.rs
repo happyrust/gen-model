@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use aios_core::rs_surreal::query_tubi_insts_by_brans;
 use aios_core::rs_surreal::query::get_owner_refnos_by_types;
+use aios_core::rs_surreal::query_tubi_insts_by_brans;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB, TubiInstQuery, get_named_attmap};
 use anyhow::{Context, Result, anyhow};
@@ -229,14 +229,14 @@ pub async fn collect_export_data(
         if refnos.len() > 5 {
             println!("   - ... 还有 {} 个 refno", refnos.len() - 5);
         }
-        
+
         println!("   🔍 收集 inst_relate 的 owner 信息...");
     }
-    
+
     // 先查询所有相关的 inst_relate 记录，获取 owner 信息并用 hashset 去重
     use std::collections::HashSet;
     let mut owner_set: HashSet<RefnoEnum> = HashSet::new();
-    
+
     // 使用 get_owner_refnos_by_types 批量查询 BRAN/HANG 类型的 owner
     let owner_types = ["BRAN", "HANG"];
     if let Ok(owners) = get_owner_refnos_by_types(refnos.iter(), &owner_types).await {
@@ -248,12 +248,15 @@ pub async fn collect_export_data(
     } else if verbose {
         println!("   - 批量查询 BRAN/HANG 类型的 owner 失败");
     }
-    
+
     // 转换为向量
     let unique_owners: Vec<RefnoEnum> = owner_set.into_iter().collect();
-    
+
     if verbose && !unique_owners.is_empty() {
-        println!("   - 找到 {} 个 BRAN/HANG 类型的 owner", unique_owners.len());
+        println!(
+            "   - 找到 {} 个 BRAN/HANG 类型的 owner",
+            unique_owners.len()
+        );
         for (i, owner) in unique_owners.iter().take(5).enumerate() {
             println!("   - owner[{}]: {}", i, owner);
         }
@@ -261,21 +264,27 @@ pub async fn collect_export_data(
             println!("   - ... 还有 {} 个 owner", unique_owners.len() - 5);
         }
     }
-    
+
     // 使用唯一的 owner 查询 tubi 数据
     let tubi_insts: Vec<TubiInstQuery> = if unique_owners.is_empty() {
         Vec::new()
     } else {
-        query_tubi_insts_by_brans(&unique_owners).await.unwrap_or_default()
+        query_tubi_insts_by_brans(&unique_owners)
+            .await
+            .unwrap_or_default()
     };
-    
+
     let tubi_count = tubi_insts.len();
     if verbose {
         println!("   - 找到 {} 个 tubi 管道", tubi_count);
         if tubi_count > 0 {
             for (i, tubi) in tubi_insts.iter().take(3).enumerate() {
-                println!("   - tubi[{}]: refno={}, geo_hash={}", 
-                         i+1, tubi.refno, tubi.geo_hash);
+                println!(
+                    "   - tubi[{}]: refno={}, geo_hash={}",
+                    i + 1,
+                    tubi.refno,
+                    tubi.geo_hash
+                );
             }
             if tubi_count > 3 {
                 println!("   - ... 还有 {} 个 tubi", tubi_count - 3);

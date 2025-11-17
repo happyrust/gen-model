@@ -3,10 +3,10 @@ use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
+use crate::fast_model::gen_model::cate_helpers::cal_sjus_value;
+use crate::fast_model::gen_model::cate_single::{CateCsgShapeMap, gen_cata_single_geoms};
 use crate::fast_model::{SEND_INST_SIZE, get_generic_type, resolve_desi_comp, shared};
 use crate::fast_model::{debug_model, debug_model_debug};
-use crate::fast_model::gen_model::cate_single::{gen_cata_single_geoms, CateCsgShapeMap};
-use crate::fast_model::gen_model::cate_helpers::cal_sjus_value;
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
@@ -499,7 +499,8 @@ pub async fn gen_cata_geos(
                         let generic_type = get_generic_type(ele_refno).await.unwrap_or_default();
                         db_time_get_generic_type += t_get_generic_type.elapsed().as_millis();
 
-                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&ele_att).await;
+                        let (owner_refno, owner_type) =
+                            shared::get_owner_info_from_attr(&ele_att).await;
                         let mut geos_info = EleGeosInfo {
                             refno: ele_refno,
                             sesno: ele_att.sesno(),
@@ -709,7 +710,8 @@ pub async fn gen_cata_geos(
                             local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                         }
                     };
-                    let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&ele_att).await;
+                    let (owner_refno, owner_type) =
+                        shared::get_owner_info_from_attr(&ele_att).await;
                     let geos_info = EleGeosInfo {
                         refno: ele_refno,
                         sesno: ele_att.sesno(),
@@ -805,7 +807,7 @@ pub async fn gen_cata_geos(
     for bran_data in branch_map.iter() {
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
-        
+
         #[cfg(feature = "profile")]
         let branch_item_start = Instant::now();
 
@@ -884,7 +886,8 @@ pub async fn gen_cata_geos(
                 if dist > TUBI_TOL && current_tubing.is_dir_ok() {
                     if let Some(t) = current_tubing.get_transform() {
                         let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
+                        let (owner_refno, owner_type) =
+                            shared::get_owner_info_from_attr(&branch_att).await;
                         tubi_shape_insts_data.insert_tubi(
                             branch_refno,
                             EleGeosInfo {
@@ -1020,7 +1023,8 @@ pub async fn gen_cata_geos(
                                     if let Some(t) = current_tubing.get_transform() {
                                         let aabb =
                                             shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                                        let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
+                                        let (owner_refno, owner_type) =
+                                            shared::get_owner_info_from_attr(&branch_att).await;
                                         tubi_shape_insts_data.insert_tubi(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
@@ -1142,7 +1146,8 @@ pub async fn gen_cata_geos(
                         }
                         if let Some(t) = current_tubing.get_transform() {
                             let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                            let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
+                            let (owner_refno, owner_type) =
+                                shared::get_owner_info_from_attr(&branch_att).await;
                             tubi_shape_insts_data.insert_tubi(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
@@ -1187,7 +1192,7 @@ pub async fn gen_cata_geos(
             }
             leave_type = arrive_type.to_string();
         }
-        
+
         #[cfg(feature = "profile")]
         {
             let branch_duration = branch_item_start.elapsed();
@@ -1200,13 +1205,17 @@ pub async fn gen_cata_geos(
         }
     }
     let process_branch_time = t_process_branch.elapsed().as_millis();
-    
+
     #[cfg(feature = "profile")]
     tracing::info!(
         branch_count = branch_map.len(),
         tubi_generated = tubi_count,
         total_time_ms = process_branch_time,
-        avg_time_per_branch_ms = if branch_map.len() > 0 { process_branch_time / branch_map.len() as u128 } else { 0 },
+        avg_time_per_branch_ms = if branch_map.len() > 0 {
+            process_branch_time / branch_map.len() as u128
+        } else {
+            0
+        },
         "BRAN Tubing generation completed"
     );
 

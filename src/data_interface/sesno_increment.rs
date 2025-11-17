@@ -2,11 +2,28 @@ use std::collections::HashSet;
 use std::str::FromStr;
 
 use aios_core::Datetime;
-use aios_core::{RefnoEnum, SUL_DB};
+use aios_core::pdms_types::TOTAL_CATA_GEO_NOUN_NAMES;
+use aios_core::{RefnoEnum, SUL_DB, get_pe};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
+
+static CATA_NOUN_SET: Lazy<HashSet<&'static str>> =
+    Lazy::new(|| TOTAL_CATA_GEO_NOUN_NAMES.iter().copied().collect());
+
+async fn normalize_element_type(refno: RefnoEnum, element_type: &str) -> anyhow::Result<String> {
+    if element_type.eq_ignore_ascii_case("LOOP") {
+        if let Some(pe) = get_pe(refno).await? {
+            let noun_upper = pe.noun.to_uppercase();
+            if CATA_NOUN_SET.contains(noun_upper.as_str()) {
+                return Ok("CATA".to_string());
+            }
+        }
+    }
+    Ok(element_type.to_uppercase())
+}
 
 /// 元素变更操作类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,35 +91,32 @@ pub async fn get_changes_at_sesno(sesno: u32) -> anyhow::Result<IncrGeoUpdateLog
     for change in changes {
         let refno = RefnoEnum::Refno(aios_core::RefU64(change.refno.parse::<u64>()?));
 
+        let normalized_type = normalize_element_type(refno, &change.element_type).await?;
+
         match change.operation {
             ChangeOperation::Delete => {
                 update_log.delete_refnos.insert(refno);
             }
-            _ => {
-                // 根据元素类型分类
-                match change.element_type.as_str() {
-                    "PRIM" => {
-                        update_log.prim_refnos.insert(refno);
-                    }
-                    "LOOP" => {
-                        update_log.loop_owner_refnos.insert(refno);
-                    }
-                    "BRAN" | "HANGER" => {
-                        update_log.bran_hanger_refnos.insert(refno);
-                    }
-                    "CATA" => {
-                        update_log.basic_cata_refnos.insert(refno);
-                    }
-                    _ => {
-                        // 对于未知类型，根据其特征判断分类
-                        // 这里可以添加更复杂的分类逻辑
-                        println!(
-                            "警告：未知元素类型 {} 对于 refno {}",
-                            change.element_type, refno
-                        );
-                    }
+            _ => match normalized_type.as_str() {
+                "PRIM" => {
+                    update_log.prim_refnos.insert(refno);
                 }
-            }
+                "LOOP" => {
+                    update_log.loop_owner_refnos.insert(refno);
+                }
+                "BRAN" | "HANGER" => {
+                    update_log.bran_hanger_refnos.insert(refno);
+                }
+                "CATA" => {
+                    update_log.basic_cata_refnos.insert(refno);
+                }
+                _ => {
+                    println!(
+                        "警告：未知元素类型 {} 对于 refno {}",
+                        change.element_type, refno
+                    );
+                }
+            },
         }
     }
 
@@ -150,11 +164,13 @@ pub async fn get_changes_between_sesnos(
             update_log.delete_refnos.remove(&refno);
         }
 
+        let normalized_type = normalize_element_type(refno, &change.element_type).await?;
+
         match change.operation {
             ChangeOperation::Delete => {
                 update_log.delete_refnos.insert(refno);
             }
-            _ => match change.element_type.as_str() {
+            _ => match normalized_type.as_str() {
                 "PRIM" => {
                     update_log.prim_refnos.insert(refno);
                 }

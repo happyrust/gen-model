@@ -103,21 +103,6 @@ const toolItems: NavItem[] = [
     href: "/wizard",
   },
   {
-    title: "XKT 生成器",
-    icon: Package,
-    href: "/xkt-generator",
-  },
-  {
-    title: "XKT 查看器",
-    icon: Eye,
-    href: "/xkt-viewer",
-  },
-  {
-    title: "XKT 测试",
-    icon: TestTube,
-    href: "/xkt-test",
-  },
-  {
     title: "异地协同",
     icon: Network,
     href: "/collaboration",
@@ -129,10 +114,12 @@ const toolItems: NavItem[] = [
     children: [
       { title: "环境列表", icon: Server, href: "/remote-sync" },
       { title: "部署向导", icon: Plus, href: "/remote-sync/deploy" },
+      { title: "拓扑配置", icon: Network, href: "/remote-sync/topology" },
       { title: "监控仪表板", icon: Monitor, href: "/remote-sync/monitor" },
       { title: "数据流向", icon: Network, href: "/remote-sync/flow" },
       { title: "日志查询", icon: Activity, href: "/remote-sync/logs" },
       { title: "性能监控", icon: BarChart3, href: "/remote-sync/metrics" },
+      { title: "告警中心", icon: Shield, href: "/remote-sync/alerts" },
       { title: "配置管理", icon: Settings, href: "/remote-sync/config" },
     ],
   },

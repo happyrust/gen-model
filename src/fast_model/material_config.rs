@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aios_core::color_scheme::ColorSchemeManager;
+use aios_core::pdms_types::PdmsGenericType;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use aios_core::color_scheme::ColorSchemeManager;
-use aios_core::pdms_types::PdmsGenericType;
 
 const DEFAULT_LIBRARY_PATH: &str = "assets/material/plant_pipeline_materials.json";
 
@@ -144,8 +144,7 @@ impl MaterialLibrary {
 
     /// 根据 noun 获取归一化的颜色 (0.0-1.0)
     pub fn get_normalized_color_for_noun(&self, noun: &str) -> Option<[f32; 4]> {
-        self.get_color_for_noun(noun)
-            .map(Self::color_to_normalized)
+        self.get_color_for_noun(noun).map(Self::color_to_normalized)
     }
 
     /// 为指定的 noun 创建一个基于颜色配置的 glTF 材质
