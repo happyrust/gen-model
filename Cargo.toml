@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.2.0"
+version = "0.2.3"
 edition = "2024"
 
 [lib]
@@ -22,34 +22,6 @@ required-features = ["web_server"]
 # path = "src/bin/gen_xkt_new.rs"
 # required-features = ["gen_model"]
 
-
-[features]
-default = ["ws", "gen_model", "manifold", "project_hd", "sqlite-index", "surreal-save"]
-# gui = ["dep:gpui-component", "dep:gpui", "dep:story"]  # CI 中暂时禁用，需要本地路径依赖
-console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
-grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能
-truck = []
-local = []
-ws = []
-debug_obj_export = []
-debug_expr = ["aios_core/debug_expr"]
-mqtt = []
-viewer = []                                                           #是否开启视图
-gen_model = ["aios_core/gen_model"]
-manifold = ["aios_core/manifold"]
-sql = ["dep:sea-orm", "dep:sqlx"]
-debug_parse = ["pdms_io/debug_parse"]
-surreal-save = []
-mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保存PE数据到内存KV数据库
-project_hd = []
-project_hh = []
-profile = []                                                          #性能分析，包含tracing功能
-web_server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "aios_core/web_server"]              #Web UI功能 (移除 re_ui 以适配 CI)
-sqlite-index = ["dep:rusqlite", "aios_core/sqlite"]
-debug_e3d = []
-
-# 查询提供者选择 (用于模型生成时的层级查询)
-query-surreal = []                          # 使用 SurrealDB 查询 (默认)
 
 [dependencies]
 config = "0.15.18"
@@ -78,7 +50,7 @@ memchr = "2.5.0"
 nom = "7.1.1"
 nom-derive = "0.10.1"
 regex = "1.12.1"
-calamine = { git = "https://gitee.com/happydpc/calamine.git" }
+calamine = "0.31.0"
 #sled = "0.34.7"
 derive_more = { version = "1.0.0", features = ["deref", "deref_mut"] }
 bitflags = "2.9.4"
@@ -94,19 +66,16 @@ parry3d = { version = "0.25.0", features = [
 parry2d = { version = "0.25.0", features = [
     "serde-serialize",
 ] }
-parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
-aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "2.3", default-features = false, features = [
-    "web_server",
-    "bevy_transform",
-    "bevy_math",
-    "bevy_ecs",
-    "bevy_reflect",
-] }
+parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms"}
+aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "2.3" }
+
+
+
 bevy_transform = { git = "https://github.com/happyrust/bevy", package = "bevy_transform", features = ["serialize",] }
 bevy_reflect = { git = "https://github.com/happyrust/bevy", package = "bevy_reflect" }
-pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
+pdms_io = { git = "https://github.com/happyrust/pdms-io.git" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
-gen-xkt = { git = "https://gitee.com/happydpc/gen-xkt.git" }
+# gen-xkt = { path = "../gen-xkt" }
 
 # 通用依赖
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -159,7 +128,7 @@ simplelog = "0.12.2"
 downcast-rs = "1.2.0"
 flume = "0.11.0"
 rand = "0.9.0"
-rust-embed = "8"
+rust-embed = "8.2.0"
 
 gpui = { version = "0.2.2", optional = true }
 # story = { path = "../gpui-component/crates/story", optional = true }
@@ -194,10 +163,38 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 indicatif = "0.18.1"
 rust_xlsxwriter = "0.91.0"
 
+[features]
+default = ["ws", "gen_model", "manifold", "project_hd", "sqlite-index", "surreal-save"]
+# gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
+console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
+# grpc = ["dep:tonic", "dep:prost", "dep:tonic-reflection", "dep:tokio-util", "dep:jsonwebtoken", "dep:rstar"]  #GRPC服务功能
+truck = []
+local = []
+ws = []
+debug_obj_export = []
+debug_expr = ["aios_core/debug_expr"]
+mqtt = []
+viewer = []                                                           #是否开启视图
+gen_model = ["aios_core/gen_model"]
+manifold = ["aios_core/manifold"]
+sql = ["dep:sea-orm", "dep:sqlx"]
+# debug_parse = ["pdms_io/debug_parse"]  # 暂时禁用以避免冲突
+surreal-save = []
+mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保存PE数据到内存KV数据库
+project_hd = []
+project_hh = []
+profile = []                                                          #性能分析，包含tracing功能
+web_server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:sysinfo", "dep:axum-extra", "aios_core/web_server"]              #Web UI功能
+sqlite-index = ["dep:rusqlite", "aios_core/sqlite"]
+debug_e3d = []
+
+# 查询提供者选择 (用于模型生成时的层级查询)
+query-surreal = []                          # 使用 SurrealDB 查询 (默认)
+
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
-tonic-build = "0.14.2"
-prost-build = "0.14.1"
+# tonic-build = "0.14.2"  # 移到 grpc feature 中
+# prost-build = "0.14.1"  # 移到 grpc feature 中
 
 [dev-dependencies]
 tempfile = "3"
@@ -230,7 +227,7 @@ features = [
 #codegen-units = 1
 
 # [patch."https://gitee.com/happydpc/rs-core.git"]
-# aios_core = { git = "https://gitee.com/happydpc/rs-core.git", branch = "2.3" }
+# aios_core = { path = "../rs-core" }
 
 # [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
 # parse_pdms_db = { path = "../aios-parse-pdms-fork" }
@@ -258,3 +255,15 @@ path = "examples/room_calculation_demo.rs"
 required-features = ["gen_model", "sqlite-index"]
 
 eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b8643f77b6a26561da44aad0", package = "eframe" }
+
+# [patch."https://gitee.com/happydpc/rs-core"]
+# aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "2.3", default-features = false, features = [
+#     "web_server",
+#     "bevy_transform",
+#     "bevy_math",
+#     "bevy_ecs",
+#     "bevy_reflect",
+#     "debug_expr",
+#     "gen_model",
+#     "manifold",
+# ] }
