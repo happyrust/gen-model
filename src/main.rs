@@ -40,58 +40,18 @@ fn build_export_config(
         verbose,
         regenerate_plant_mesh,
         dbno,
-        xkt_config: XktSpecificConfig::default(),
         use_basic_materials: false,
         run_all_dbnos,
         split_by_site,
     }
 }
 
-/// 构建 XKT 导出配置的辅助函数
-fn build_xkt_export_config(
-    refnos_vec: Vec<String>,
-    output_path: Option<String>,
-    filter_nouns: Option<Vec<String>>,
-    include_descendants: bool,
-    source_unit: &str,
-    target_unit: &str,
-    verbose: bool,
-    regenerate_plant_mesh: bool,
-    compress: bool,
-    validate: bool,
-    skip_mesh: bool,
-    db_config: Option<String>,
-    dbno: Option<u32>,
-    split_by_site: bool,
-) -> ExportConfig {
-    let xkt_config = XktSpecificConfig {
-        compress,
-        validate,
-        skip_mesh,
-        db_config,
-        dbno,
-    };
-
-    let run_all_dbnos = refnos_vec.is_empty() && dbno.is_none();
-    ExportConfig::new(refnos_vec)
-        .with_output_path(output_path)
-        .with_filter_nouns(filter_nouns)
-        .with_include_descendants(include_descendants)
-        .with_unit_conversion(source_unit, target_unit)
-        .with_verbose(verbose)
-        .with_regenerate_plant_mesh(regenerate_plant_mesh)
-        .with_dbno(dbno)
-        .with_xkt_config(xkt_config)
-        .with_run_all_dbnos(run_all_dbnos)
-        .with_split_by_site(split_by_site)
-}
-
 #[cfg(all(not(feature = "gui"), feature = "grpc"))]
 use crate::cli_modes::start_grpc_server_mode;
 #[cfg(not(feature = "gui"))]
 use crate::cli_modes::{
-    ExportConfig, XktSpecificConfig, export_glb_mode, export_gltf_mode, export_model_mode,
-    export_obj_mode, export_xkt_mode, get_output_filename_for_refno,
+    ExportConfig, export_glb_mode, export_gltf_mode, export_model_mode,
+    export_obj_mode, get_output_filename_for_refno,
 };
 #[cfg(not(feature = "gui"))]
 use aios_core::geometry::csg::clear_ploop_debug_cache;
@@ -235,14 +195,6 @@ async fn main() -> anyhow::Result<()> {
                 .num_args(1..),
         )
         .arg(
-            Arg::new("export-xkt-refnos")
-                .long("export-xkt-refnos")
-                .help("Export XKT model for specified reference numbers (comma-separated, no debug mode)")
-                .value_name("REFNOS")
-                .value_delimiter(',')
-                .num_args(1..),
-        )
-        .arg(
             Arg::new("export-obj-output")
                 .long("export-obj-output")
                 .help("Output path for exported OBJ file (optional, defaults to PE name)")
@@ -267,48 +219,9 @@ async fn main() -> anyhow::Result<()> {
         .arg(
             Arg::new("export-format")
                 .long("export-format")
-                .help("Export format (obj, glb, gltf or xkt)")
+                .help("Export format (obj, glb, gltf)")
                 .value_name("FORMAT")
                 .default_value("obj"),
-        )
-        .arg(
-            Arg::new("export-xkt")
-                .long("export-xkt")
-                .help("Export XKT model when using --debug-model")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("xkt-compress")
-                .long("xkt-compress")
-                .help("Compress XKT file")
-                .value_name("BOOL")
-                .default_value("true")
-                .value_parser(clap::value_parser!(bool)),
-        )
-        .arg(
-            Arg::new("xkt-validate")
-                .long("xkt-validate")
-                .help("Validate XKT file after generation")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("xkt-skip-mesh")
-                .long("xkt-skip-mesh")
-                .help("Skip mesh generation (use existing mesh files)")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("xkt-db-config")
-                .long("xkt-db-config")
-                .help("Database config file path for mesh generation")
-                .value_name("CONFIG_PATH"),
-        )
-        .arg(
-            Arg::new("xkt-dbno")
-                .long("xkt-dbno")
-                .help("Database number for XKT mesh generation")
-                .value_name("DBNO")
-                .value_parser(clap::value_parser!(u32)),
         )
         .arg(
             Arg::new("dbno")
@@ -584,36 +497,6 @@ async fn main() -> anyhow::Result<()> {
             config.use_basic_materials = use_basic_materials;
             return export_gltf_mode(config, &db_option_ext).await;
         }
-
-        if matches.get_flag("export-xkt") {
-            println!("🎯 导出 XKT 模型 (调试模式): {:?}", refnos_vec);
-            let compress = matches
-                .get_one::<bool>("xkt-compress")
-                .copied()
-                .unwrap_or(true);
-            let validate = matches.get_flag("xkt-validate");
-            let skip_mesh = matches.get_flag("xkt-skip-mesh");
-            let db_config = matches.get_one::<String>("xkt-db-config").cloned();
-            let dbno = matches.get_one::<u32>("xkt-dbno").copied();
-
-            let config = build_xkt_export_config(
-                refnos_vec.clone(),
-                output_path,
-                filter_nouns,
-                include_descendants,
-                source_unit,
-                target_unit,
-                verbose,
-                matches.get_flag("regen-model"),
-                compress,
-                validate,
-                skip_mesh,
-                db_config,
-                dbno,
-                split_by_site,
-            );
-            return export_xkt_mode(config, &db_option_ext).await;
-        }
     }
 
     // ========== 然后处理导出命令 ==========
@@ -670,35 +553,6 @@ async fn main() -> anyhow::Result<()> {
             );
             config.use_basic_materials = use_basic_materials;
             return export_gltf_mode(config, &db_option_ext).await;
-        }
-
-        if matches.get_flag("export-xkt") {
-            println!("🎯 导出 XKT 模型 (按 dbno={} 的所有 SITE):", dbno);
-            let compress = matches
-                .get_one::<bool>("xkt-compress")
-                .copied()
-                .unwrap_or(true);
-            let validate = matches.get_flag("xkt-validate");
-            let skip_mesh = matches.get_flag("xkt-skip-mesh");
-            let db_config = matches.get_one::<String>("xkt-db-config").cloned();
-
-            let config = build_xkt_export_config(
-                vec![],
-                output_path,
-                filter_nouns,
-                include_descendants,
-                source_unit,
-                target_unit,
-                verbose,
-                matches.get_flag("regen-model"),
-                compress,
-                validate,
-                skip_mesh,
-                db_config,
-                Some(dbno),
-                split_by_site,
-            );
-            return export_xkt_mode(config, &db_option_ext).await;
         }
     }
 
@@ -767,39 +621,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(refnos) = matches.get_many::<String>("export-xkt-refnos") {
-        let refnos_vec: Vec<String> = refnos.map(|s| s.to_string()).collect();
-        if !refnos_vec.is_empty() {
-            println!("🎯 导出 XKT 模型 (非调试模式): {:?}", refnos_vec);
-            let compress = matches
-                .get_one::<bool>("xkt-compress")
-                .copied()
-                .unwrap_or(true);
-            let validate = matches.get_flag("xkt-validate");
-            let skip_mesh = matches.get_flag("xkt-skip-mesh");
-            let db_config = matches.get_one::<String>("xkt-db-config").cloned();
-            let dbno = matches.get_one::<u32>("xkt-dbno").copied();
-
-            let config = build_xkt_export_config(
-                refnos_vec,
-                output_path,
-                filter_nouns,
-                include_descendants,
-                source_unit,
-                target_unit,
-                verbose,
-                matches.get_flag("regen-model"),
-                compress,
-                validate,
-                skip_mesh,
-                db_config,
-                dbno,
-                split_by_site,
-            );
-            return export_xkt_mode(config, &db_option_ext).await;
-        }
-    }
-
     // ========== 处理单独的导出标志（无 dbno、无 refnos 时默认全库导出） ==========
     // 这是兜底逻辑：如果前面的条件都没匹配，说明用户只设置了导出标志
 
@@ -849,33 +670,6 @@ async fn main() -> anyhow::Result<()> {
             split_by_site,
         );
         return export_obj_mode(config, &db_option_ext).await;
-    }
-
-    if matches.get_flag("export-xkt") {
-        println!("🎯 导出 XKT 模型 (全库模式 - MDB 所有 dbno)");
-        let compress = matches
-            .get_one::<bool>("xkt-compress")
-            .copied()
-            .unwrap_or(true);
-        let validate = matches.get_flag("xkt-validate");
-        let skip_mesh = matches.get_flag("xkt-skip-mesh");
-        let db_config = matches.get_one::<String>("xkt-db-config").cloned();
-
-        let config = ExportConfig::build_xkt_for_all_dbnos(
-            output_path,
-            filter_nouns,
-            include_descendants,
-            source_unit.to_string(),
-            target_unit.to_string(),
-            verbose,
-            matches.get_flag("regen-model"),
-            compress,
-            validate,
-            skip_mesh,
-            db_config,
-            split_by_site,
-        );
-        return export_xkt_mode(config, &db_option_ext).await;
     }
 
     if matches.get_flag("export-all-relates") {

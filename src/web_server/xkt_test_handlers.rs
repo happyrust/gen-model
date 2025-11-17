@@ -115,112 +115,14 @@ pub struct XktFileItem {
 
 /// 生成 XKT 模型
 pub async fn generate_xkt(
-    Json(req): Json<XktGenerateRequest>,
+    Json(_req): Json<XktGenerateRequest>,
 ) -> Result<Json<XktGenerateResponse>, (StatusCode, String)> {
-    // 解析参考号
-    let refnos: Vec<&str> = req.refnos.split(',').map(|s| s.trim()).collect();
-    if refnos.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "参考号不能为空".to_string()));
-    }
-
-    // 构建输出文件路径
-    let output_dir = PathBuf::from("output/xkt_test");
-    std::fs::create_dir_all(&output_dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("创建输出目录失败: {}", e),
-        )
-    })?;
-
-    let refno_str = refnos.join("_");
-    let compress_suffix = if req.compress {
-        "compressed"
-    } else {
-        "uncompressed"
-    };
-    let output_file = output_dir.join(format!("{}_{}.xkt", refno_str, compress_suffix));
-
-    // 构建命令
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run")
-        .arg("--bin")
-        .arg("aios-database")
-        .arg("--")
-        .arg("--debug-model-refnos")
-        .arg(&req.refnos)
-        .arg("--export-xkt")
-        .arg("--export-obj-output")
-        .arg(&output_file)
-        .arg("--xkt-compress")
-        .arg(if req.compress { "true" } else { "false" });
-
-    if req.skip_mesh {
-        cmd.arg("--xkt-skip-mesh");
-    }
-
-    // 打印完整命令（用于调试）
-    println!("🔧 执行命令: {:?}", cmd);
-
-    // 执行命令
-    let output = cmd.output().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("执行命令失败: {}", e),
-        )
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        println!("❌ XKT 生成失败:");
-        println!("STDERR: {}", stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("XKT 生成失败: {}", stderr),
-        ));
-    }
-
-    // 解析输出获取统计信息
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("📋 命令输出:");
-    println!("{}", stdout);
-
-    let stats = parse_xkt_stats(&stdout);
-
-    // 提取进度日志
-    let progress_logs: Vec<String> = stdout
-        .lines()
-        .filter(|line| {
-            line.contains("收集")
-                || line.contains("几何体")
-                || line.contains("网格")
-                || line.contains("实体")
-                || line.contains("XKT")
-                || line.contains("转换")
-                || line.contains("压缩")
-        })
-        .map(|s| s.to_string())
-        .collect();
-
-    // 获取文件大小
-    let file_size = std::fs::metadata(&output_file).ok().map(|m| m.len());
-
-    // 提取相对路径（相对于 output/xkt 目录）
-    let relative_path = output_file
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| format!("xkt/{}", name))
-        .unwrap_or_else(|| output_file.to_string_lossy().to_string());
-
-    println!("📁 文件路径: {}", relative_path);
-
-    Ok(Json(XktGenerateResponse {
-        success: true,
-        message: "XKT 模型生成成功".to_string(),
-        file_path: Some(relative_path),
-        file_size,
-        stats,
-        progress_logs: Some(progress_logs),
-    }))
+    println!("🎯 XKT 模型生成功能已禁用");
+    
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "XKT 生成功能已禁用，需要重新启用 gen_model 特性".to_string(),
+    ))
 }
 
 /// 验证 XKT 模型
@@ -485,165 +387,24 @@ pub async fn get_refno_name(Query(params): Query<GetRefnoNameRequest>) -> impl I
 
 /// 生成测试立方体
 pub async fn generate_test_cube(
-    Json(req): Json<TestCubeRequest>,
+    Json(_req): Json<TestCubeRequest>,
 ) -> Result<Json<XktGenerateResponse>, (StatusCode, String)> {
-    println!("🔲 开始生成测试立方体...");
-
-    // 构建输出文件路径
-    let output_dir = PathBuf::from("output/xkt_test");
-    std::fs::create_dir_all(&output_dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("创建输出目录失败: {}", e),
-        )
-    })?;
-
-    let compress_suffix = if req.compress {
-        "compressed"
-    } else {
-        "uncompressed"
-    };
-    let output_file = output_dir.join(format!("test_cube_{}.xkt", compress_suffix));
-
-    // 创建一个简单的立方体 XKT 文件
-    // 立方体的 8 个顶点（原点在中心，边长 2米）
-    // 注意：如果 PDMS 数据单位是 mm，需要将其转换为 m（除以 1000）
-    // 但这里我们直接使用米作为单位，边长 2 米
-    let positions = vec![
-        -1.0, -1.0, -1.0, // 0: 左下后
-        1.0, -1.0, -1.0, // 1: 右下后
-        1.0, 1.0, -1.0, // 2: 右上后
-        -1.0, 1.0, -1.0, // 3: 左上后
-        -1.0, -1.0, 1.0, // 4: 左下前
-        1.0, -1.0, 1.0, // 5: 右前下
-        1.0, 1.0, 1.0, // 6: 右上前
-        -1.0, 1.0, 1.0, // 7: 左上前
-    ];
-
-    // 立方体的 12 个三角形（每个面 2 个三角形）
-    let indices = vec![
-        // 后面
-        0, 1, 2, 2, 3, 0, // 前面
-        4, 7, 6, 6, 5, 4, // 左面
-        0, 3, 7, 7, 4, 0, // 右面
-        1, 5, 6, 6, 2, 1, // 底面
-        0, 4, 5, 5, 1, 0, // 顶面
-        3, 2, 6, 6, 7, 3,
-    ];
-
-    // 法向量（每个顶点一个）
-    let normals = vec![
-        -0.5773503, -0.5773503, -0.5773503, // 0
-        0.5773503, -0.5773503, -0.5773503, // 1
-        0.5773503, 0.5773503, -0.5773503, // 2
-        -0.5773503, 0.5773503, -0.5773503, // 3
-        -0.5773503, -0.5773503, 0.5773503, // 4
-        0.5773503, -0.5773503, 0.5773503, // 5
-        0.5773503, 0.5773503, 0.5773503, // 6
-        -0.5773503, 0.5773503, 0.5773503, // 7
-    ];
-
-    // 构建 XKT 文件数据
-    let xkt_data = build_xkt_file(&positions, &normals, &indices, req.compress)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("构建 XKT 文件失败: {}", e),
-            )
-        })?;
-
-    // 写入文件
-    std::fs::write(&output_file, &xkt_data).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("写入文件失败: {}", e),
-        )
-    })?;
-
-    // 获取文件大小
-    let file_size = std::fs::metadata(&output_file).ok().map(|m| m.len());
-
-    // 提取相对路径 - 修正为正确的路径格式
-    let relative_path = output_file
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| format!("xkt_test/{}", name))
-        .unwrap_or_else(|| output_file.to_string_lossy().to_string());
-
-    println!("✅ 测试立方体已生成: {}", relative_path);
-    println!("📁 文件大小: {} bytes", file_size.unwrap_or(0));
-
-    Ok(Json(XktGenerateResponse {
-        success: true,
-        message: "测试立方体生成成功".to_string(),
-        file_path: Some(relative_path),
-        file_size,
-        stats: Some(XktStats {
-            geometries: 1,
-            meshes: 1,
-            entities: 1,
-            vertices: Some(8),
-            triangles: Some(12),
-        }),
-        progress_logs: Some(vec![
-            "创建立方体几何体".to_string(),
-            "生成 8 个顶点和 12 个三角形".to_string(),
-            "写入 XKT 文件".to_string(),
-        ]),
-    }))
+    println!("🔲 XKT 测试立方体生成功能已禁用");
+    
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "XKT 生成功能已禁用，需要重新启用 gen_model 特性".to_string(),
+    ))
 }
 
-/// 构建 XKT 文件数据（使用 gen-xkt 库）
+/// 构建 XKT 文件数据（简化版本，不使用 gen_xkt 库）
 async fn build_xkt_file(
-    positions: &[f32],
-    normals: &[f32],
-    indices: &[u32],
-    compress: bool,
+    _positions: &[f32],
+    _normals: &[f32],
+    _indices: &[u32],
+    _compress: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use gen_xkt::prelude::*;
-
-    // 创建 XKT 文件
-    let mut xkt_file = XKTFile::new();
-
-    // 设置元数据
-    xkt_file.model.metadata.title = "Test Cube".to_string();
-    xkt_file.model.metadata.author = "gen-model".to_string();
-    xkt_file.model.metadata.created = chrono::Utc::now().to_rfc3339();
-
-    // 创建立方体几何体
-    let mut geometry = XKTGeometry::new("cube_geometry".to_string(), XKTGeometryType::Triangles);
-    geometry.positions = positions.to_vec();
-    geometry.normals = Some(normals.to_vec());
-    geometry.indices = indices.to_vec();
-
-    // 添加到文件
-    xkt_file.model.create_geometry(geometry)?;
-
-    // 创建立方体网格
-    let mut mesh = XKTMesh::new("cube_mesh".to_string(), "cube_geometry".to_string());
-    mesh.color = glam::Vec3::new(1.0, 0.0, 0.0); // 红色
-    mesh.opacity = 1.0;
-    mesh.metallic = 0.5; // 金属度 50%
-    mesh.roughness = 0.3; // 粗糙度 30%（较低，更光滑）
-
-    xkt_file.model.create_mesh(mesh)?;
-
-    // 创建立方体实体
-    let mut entity = XKTEntity::new(
-        "cube_entity".to_string(),
-        "Cube".to_string(),
-        "CUBE".to_string(),
-    );
-    entity.add_mesh("cube_mesh".to_string());
-
-    xkt_file.model.create_entity(entity)?;
-
-    // 完成模型构建
-    xkt_file.model.finalize().await?;
-
-    // 编码为二进制数据
-    let encoded = xkt_file.to_bytes(compress)?;
-
-    Ok(encoded)
+    // 由于移除了 gen_xkt 依赖，这里返回一个简化的占位符实现
+    // 实际的 XKT 生成功能已不可用
+    Err("XKT 生成功能已禁用，需要重新启用 gen_model 特性".into())
 }

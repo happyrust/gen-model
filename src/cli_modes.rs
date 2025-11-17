@@ -41,41 +41,12 @@ pub struct ExportConfig {
     pub regenerate_plant_mesh: bool,
     /// 数据库编号（用于按 SITE 导出）
     pub dbno: Option<u32>,
-    /// XKT 特定配置
-    pub xkt_config: XktSpecificConfig,
     /// 是否使用基础颜色材质（非 PBR）
     pub use_basic_materials: bool,
     /// 未指定 dbno 且未指定 refnos 时，是否默认跑全库
     pub run_all_dbnos: bool,
     /// 是否按 SITE 拆分导出（默认 false，即合并导出）
     pub split_by_site: bool,
-}
-
-/// XKT 特定配置
-#[derive(Debug, Clone)]
-pub struct XktSpecificConfig {
-    /// 是否压缩 XKT 文件
-    pub compress: bool,
-    /// 生成完成后验证 XKT 文件
-    pub validate: bool,
-    /// 跳过 mesh 生成（默认会生成 mesh）
-    pub skip_mesh: bool,
-    /// 数据库配置文件路径
-    pub db_config: Option<String>,
-    /// 数据库编号（用于 mesh 生成）
-    pub dbno: Option<u32>,
-}
-
-impl Default for XktSpecificConfig {
-    fn default() -> Self {
-        Self {
-            compress: true,
-            validate: false,
-            skip_mesh: false,
-            db_config: None,
-            dbno: None,
-        }
-    }
 }
 
 impl Default for ExportConfig {
@@ -90,7 +61,6 @@ impl Default for ExportConfig {
             verbose: false,
             regenerate_plant_mesh: false,
             dbno: None,
-            xkt_config: XktSpecificConfig::default(),
             use_basic_materials: false,
             run_all_dbnos: false,
             split_by_site: false,
@@ -144,12 +114,6 @@ impl ExportConfig {
         self
     }
 
-    /// 设置 XKT 特定配置
-    pub fn with_xkt_config(mut self, xkt_config: XktSpecificConfig) -> Self {
-        self.xkt_config = xkt_config;
-        self
-    }
-
     /// 设置是否默认跑全库
     pub fn with_run_all_dbnos(mut self, run_all_dbnos: bool) -> Self {
         self.run_all_dbnos = run_all_dbnos;
@@ -190,7 +154,6 @@ impl ExportConfig {
             verbose,
             regenerate_plant_mesh,
             dbno: None,
-            xkt_config: XktSpecificConfig::default(),
             use_basic_materials,
             run_all_dbnos: true, // 关键：全库导出
             split_by_site,
@@ -222,13 +185,6 @@ impl ExportConfig {
             verbose,
             regenerate_plant_mesh,
             dbno: None,
-            xkt_config: XktSpecificConfig {
-                compress,
-                validate,
-                skip_mesh,
-                db_config,
-                dbno: None,
-            },
             use_basic_materials: false,
             run_all_dbnos: true, // 关键：全库导出
             split_by_site,
@@ -1149,353 +1105,7 @@ pub async fn start_grpc_server_mode(
     Ok(())
 }
 
-/// 导出 XKT 模型模式
-pub async fn export_xkt_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
-    // println!("\n🎯 XKT 导出模式");
-    // println!("================");
-
-    // // 初始化数据库连接
-    // println!("\n📡 连接数据库...");
-    // init_surreal().await?;
-    // println!("✅ 数据库连接成功");
-
-    // // 获取 mesh 目录
-    // let mesh_dir = config.get_mesh_dir(db_option_ext);
-
-    // // 打印导出参数
-    // config.print_export_params(&mesh_dir);
-    // println!("   - 压缩: {}", config.xkt_config.compress);
-    // println!("   - 验证: {}", config.xkt_config.validate);
-
-    // // 创建 XKT 导出器
-    // let exporter = XktExporter::new();
-
-    // // 全库导出（无 dbno 且无 refnos）
-    // if config.run_all_dbnos && config.dbno.is_none() && config.refnos_str.is_empty() {
-    //     println!("\n🔁 进入全库 XKT 导出模式 (MDB 所有 dbno)");
-    //     let dbnos = query_mdb_db_nums(None, DBType::DESI).await?;
-    //     if dbnos.is_empty() {
-    //         println!("⚠️ MDB 未返回任何 dbno，跳过导出");
-    //         return Ok(());
-    //     }
-    //     for db in dbnos {
-    //         let mut per_db_config = config.clone();
-    //         per_db_config.dbno = Some(db);
-    //         if let Err(e) = export_xkt_mode_for_db(&per_db_config, db_option_ext).await {
-    //             println!("❌ 导出 dbno={} 失败: {}", db, e);
-    //         }
-    //     }
-    //     println!("\n🎉 全库 XKT 导出完成");
-    //     return Ok(());
-    // }
-
-    // // 检查是否指定了 dbno
-    // if let Some(dbno) = config.dbno {
-    //     println!("\n🔍 检测到 dbno 参数: {}", dbno);
-    //     println!("📊 查询该数据库下的所有 SITE...");
-
-    //     use aios_database::fast_model::query_provider;
-    //     let sites = query_provider::query_by_type(&["SITE"], dbno as i32, None).await?;
-    //     println!("   - 找到 {} 个 SITE", sites.len());
-
-    //     if sites.is_empty() {
-    //         println!("⚠️  未找到任何 SITE，跳过导出");
-    //         return Ok(());
-    //     }
-
-    //     // 检查是否需要重新生成 plant mesh
-    //     if config.regenerate_plant_mesh {
-    //         println!("\n🔄 检测到 --regen-model 参数，开始重新生成几何体数据...");
-    //         println!("   - 强制开启 replace_mesh 和 gen_mesh");
-
-    //         use aios_database::fast_model::gen_all_geos_data;
-
-    //         unsafe {
-    //             std::env::set_var("FORCE_REPLACE_MESH", "true");
-    //         }
-
-    //         let mut db_option_clone = db_option_ext.inner.clone();
-    //         let original_replace_mesh = db_option_clone.replace_mesh;
-    //         let original_gen_mesh = db_option_clone.gen_mesh;
-    //         db_option_clone.replace_mesh = Some(true);
-    //         db_option_clone.gen_mesh = true;
-
-    //         let db_option_ext = DbOptionExt::from(db_option_clone.clone());
-    //         gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
-
-    //         db_option_clone.replace_mesh = original_replace_mesh;
-    //         db_option_clone.gen_mesh = original_gen_mesh;
-
-    //         unsafe {
-    //             std::env::remove_var("FORCE_REPLACE_MESH");
-    //         }
-
-    //         println!("✅ Plant mesh 重新生成完成");
-    //     }
-
-    //     for (idx, site_refno) in sites.iter().enumerate() {
-    //         let site_name = get_site_name_for_export(*site_refno, dbno, "xkt").await;
-    //         let output_file = format!("output/{}", site_name);
-
-    //         println!(
-    //             "\n🔄 [{}/{}] 导出 SITE: {} -> {}",
-    //             idx + 1,
-    //             sites.len(),
-    //             site_refno,
-    //             output_file
-    //         );
-
-    //         // 配置导出参数
-    //         let xkt_config = XktExportConfig {
-    //             common: CommonExportConfig {
-    //                 include_descendants: config.include_descendants,
-    //                 filter_nouns: config.filter_nouns.clone(),
-    //                 verbose: config.verbose,
-    //                 unit_converter: UnitConverter::new(
-    //                     parse_length_unit(&config.source_unit),
-    //                     parse_length_unit(&config.target_unit),
-    //                 ),
-    //                 use_basic_materials: false,
-    //             },
-    //             compress: config.xkt_config.compress,
-    //             validate: config.xkt_config.validate,
-    //             skip_mesh: config.xkt_config.skip_mesh,
-    //             db_config: config.xkt_config.db_config.clone(),
-    //             dbno: Some(dbno),
-    //         };
-
-    //         // 导出单个 SITE
-    //         match exporter
-    //             .export(&[*site_refno], &mesh_dir, &output_file, xkt_config)
-    //             .await
-    //         {
-    //             Ok(stats) => {
-    //                 println!("✅ [{}/{}] 导出成功: {}", idx + 1, sites.len(), output_file);
-    //                 if config.verbose {
-    //                     stats.print_summary("XKT");
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 println!(
-    //                     "❌ [{}/{}] 导出失败: {} - {}",
-    //                     idx + 1,
-    //                     sites.len(),
-    //                     output_file,
-    //                     e
-    //                 );
-    //             }
-    //         }
-    //     }
-    // } else {
-    //     // 原有逻辑：按 refnos 导出
-    //     // 解析参考号
-    //     let refnos = config.parse_refnos()?;
-
-    //     // 检查是否需要重新生成 plant mesh
-    //     if config.regenerate_plant_mesh {
-    //         println!("\n🔄 检测到 --regen-model 参数，开始重新生成几何体数据...");
-    //         println!("   - 强制开启 replace_mesh 和 gen_mesh");
-
-    //         use aios_database::fast_model::gen_all_geos_data;
-
-    //         unsafe {
-    //             std::env::set_var("FORCE_REPLACE_MESH", "true");
-    //         }
-
-    //         let mut db_option_clone = db_option_ext.inner.clone();
-    //         let original_replace_mesh = db_option_clone.replace_mesh;
-    //         let original_gen_mesh = db_option_clone.gen_mesh;
-    //         db_option_clone.replace_mesh = Some(true);
-    //         db_option_clone.gen_mesh = true;
-
-    //         let db_option_ext = DbOptionExt::from(db_option_clone.clone());
-    //         gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
-
-    //         db_option_clone.replace_mesh = original_replace_mesh;
-    //         db_option_clone.gen_mesh = original_gen_mesh;
-
-    //         unsafe {
-    //             std::env::remove_var("FORCE_REPLACE_MESH");
-    //         }
-
-    //         println!("✅ Plant mesh 重新生成完成");
-    //     }
-
-    //     for refno in &refnos {
-    //         // 确定输出文件名
-    //         let final_output_path = if let Some(ref path) = config.output_path {
-    //             path.clone()
-    //         } else {
-    //             let base_name = get_output_filename_for_refno(*refno).await;
-    //             // 确保输出到 output 目录
-    //             format!("output/{}.xkt", base_name.replace(".obj", ""))
-    //         };
-
-    //         println!("\n🔄 导出 {} -> {} ...", refno, final_output_path);
-
-    //         // 配置导出参数
-    //         let xkt_config = XktExportConfig {
-    //             common: CommonExportConfig {
-    //                 include_descendants: config.include_descendants,
-    //                 filter_nouns: config.filter_nouns.clone(),
-    //                 verbose: config.verbose,
-    //                 unit_converter: UnitConverter::new(
-    //                     parse_length_unit(&config.source_unit),
-    //                     parse_length_unit(&config.target_unit),
-    //                 ),
-    //                 use_basic_materials: false,
-    //             },
-    //             compress: config.xkt_config.compress,
-    //             validate: config.xkt_config.validate,
-    //             skip_mesh: config.xkt_config.skip_mesh,
-    //             db_config: config.xkt_config.db_config.clone(),
-    //             dbno: None,
-    //         };
-
-    //         // 导出 XKT
-    //         let stats = exporter
-    //             .export(&[*refno], &mesh_dir, &final_output_path, xkt_config)
-    //             .await?;
-
-    //         println!("✅ 导出成功: {}", final_output_path);
-    //         if config.verbose {
-    //             stats.print_summary("XKT");
-    //         }
-    //     }
-    // }
-
-    // println!("\n🎉 导出完成!");
-    Ok(())
-}
-
-async fn export_xkt_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
-    // let mesh_dir = config.get_mesh_dir(db_option_ext);
-    // let dbno = config
-    //     .dbno
-    //     .expect("dbno required in export_xkt_mode_for_db");
-    // println!("\n🔍 检测到 dbno 参数: {}", dbno);
-    // println!("📊 查询该数据库下的所有 SITE...");
-
-    // use aios_database::fast_model::query_provider;
-    // let sites = query_provider::query_by_type(&["SITE"], dbno as i32, None).await?;
-    // println!("   - 找到 {} 个 SITE", sites.len());
-
-    // if sites.is_empty() {
-    //     println!("⚠️  未找到任何 SITE，跳过导出");
-    //     return Ok(());
-    // }
-
-    // if config.regenerate_plant_mesh {
-    //     println!("\n🔄 检测到 --regen-model 参数，开始重新生成几何体数据...");
-    //     println!("   - 强制开启 replace_mesh 和 gen_mesh");
-    //     use aios_database::fast_model::gen_all_geos_data;
-    //     unsafe {
-    //         std::env::set_var("FORCE_REPLACE_MESH", "true");
-    //     }
-    //     let mut db_option_clone = db_option_ext.inner.clone();
-    //     let original_replace_mesh = db_option_clone.replace_mesh;
-    //     let original_gen_mesh = db_option_clone.gen_mesh;
-    //     db_option_clone.replace_mesh = Some(true);
-    //     db_option_clone.gen_mesh = true;
-    //     let db_option_ext = DbOptionExt::from(db_option_clone.clone());
-    //     gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
-    //     db_option_clone.replace_mesh = original_replace_mesh;
-    //     db_option_clone.gen_mesh = original_gen_mesh;
-    //     unsafe {
-    //         std::env::remove_var("FORCE_REPLACE_MESH");
-    //     }
-    //     println!("✅ Plant mesh 重新生成完成");
-    // }
-
-    // let exporter = XktExporter::new();
-
-    // // 检查是否按 SITE 拆分（默认合并）
-    // if config.split_by_site {
-    //     // 拆分模式：每个 SITE 单独导出
-    //     println!("\n📂 拆分模式：每个 SITE 导出为独立文件");
-    //     for (idx, site_refno) in sites.iter().enumerate() {
-    //         let site_name = get_site_name_for_export(*site_refno, dbno, "xkt").await;
-    //         let output_file = format!("output/{}", site_name);
-    //         println!(
-    //             "\n🔄 [{}/{}] 导出 SITE: {} -> {}",
-    //             idx + 1,
-    //             sites.len(),
-    //             site_refno,
-    //             output_file
-    //         );
-    //         let xkt_config = XktExportConfig {
-    //             common: CommonExportConfig {
-    //                 include_descendants: config.include_descendants,
-    //                 filter_nouns: config.filter_nouns.clone(),
-    //                 verbose: config.verbose,
-    //                 unit_converter: UnitConverter::default(),
-    //                 use_basic_materials: false,
-    //             },
-    //             compress: config.xkt_config.compress,
-    //             validate: config.xkt_config.validate,
-    //             skip_mesh: config.xkt_config.skip_mesh,
-    //             db_config: config.xkt_config.db_config.clone(),
-    //             dbno: Some(dbno),
-    //         };
-    //         if let Err(e) = exporter
-    //             .export(&[*site_refno], &mesh_dir, &output_file, xkt_config)
-    //             .await
-    //         {
-    //             println!(
-    //                 "❌ [{}/{}] 导出失败: {} - {}",
-    //                 idx + 1,
-    //                 sites.len(),
-    //                 output_file,
-    //                 e
-    //             );
-    //         } else {
-    //             println!("✅ [{}/{}] 导出成功: {}", idx + 1, sites.len(), output_file);
-    //         }
-    //     }
-    // } else {
-    //     // 默认合并模式：将所有 SITE 合并到一个文件
-    //     println!("\n🔀 合并模式：将所有 SITE 合并到一个文件（默认）");
-    //     let output_file = format!("output/dbno_{}.xkt", dbno);
-    //     println!(
-    //         "🔄 导出合并文件: {} (包含 {} 个 SITE)",
-    //         output_file,
-    //         sites.len()
-    //     );
-
-    //     let xkt_config = XktExportConfig {
-    //         common: CommonExportConfig {
-    //             include_descendants: config.include_descendants,
-    //             filter_nouns: config.filter_nouns.clone(),
-    //             verbose: config.verbose,
-    //             unit_converter: UnitConverter::default(),
-    //             use_basic_materials: false,
-    //         },
-    //         compress: config.xkt_config.compress,
-    //         validate: config.xkt_config.validate,
-    //         skip_mesh: config.xkt_config.skip_mesh,
-    //         db_config: config.xkt_config.db_config.clone(),
-    //         dbno: Some(dbno),
-    //     };
-
-    //     // 将所有 SITE 一次性导出
-    //     if let Err(e) = exporter
-    //         .export(&sites, &mesh_dir, &output_file, xkt_config)
-    //         .await
-    //     {
-    //         println!("❌ 导出失败: {} - {}", output_file, e);
-    //     } else {
-    //         println!("✅ 导出成功: {}", output_file);
-    //     }
-    // }
-
-    Ok(())
-}
-
-/// 导出 Instanced Bundle 模式
-pub async fn export_instanced_bundle_mode(
-    config: ExportConfig,
-    db_option_ext: &DbOptionExt,
-) -> Result<()> {
+async fn export_instanced_bundle_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
     use std::sync::Arc;
 
     println!("\n🎯 Instanced Bundle 导出模式");
@@ -1568,8 +1178,9 @@ pub async fn export_model_mode(
             export_gltf_mode(gltf_config, db_option_ext).await
         }
         "xkt" => {
-            let xkt_config = config.with_unit_conversion("mm", "dm");
-            export_xkt_mode(xkt_config, db_option_ext).await
+            return Err(anyhow!(
+                "XKT 导出功能已禁用，需要重新启用 gen_model 特性"
+            ));
         }
         "instanced-bundle" | "instanced_bundle" => {
             export_instanced_bundle_mode(config, db_option_ext).await

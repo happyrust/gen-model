@@ -31,9 +31,8 @@ use crate::fast_model::{
     export_glb::GlbExporter,
     export_gltf::GltfExporter,
     export_model::model_exporter::{
-        CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, XktExportConfig,
+        CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter,
     },
-    export_xkt::XktExporter,
     model_exporter::ExportStats,
     unit_converter::UnitConverter,
 };
@@ -6887,24 +6886,6 @@ async fn execute_export_task(
                 .await
             {
                 Ok(result) => Ok(result.stats),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-        "xkt" => {
-            let config = XktExportConfig {
-                common: common_config,
-                compress: true,
-                validate: false,
-                skip_mesh: false,
-                db_config: None,
-                dbno: None,
-            };
-            let exporter = XktExporter::new();
-            match exporter
-                .export(&refnos, &mesh_dir, output_path.to_str().unwrap(), config)
-                .await
-            {
-                Ok(stats) => Ok(stats),
                 Err(e) => Err(e.to_string()),
             }
         }

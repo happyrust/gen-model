@@ -42,7 +42,6 @@ pub mod task_creation_handlers;
 pub mod topology_handlers; // 拓扑配置处理器
 pub mod wizard_handlers;
 pub mod wizard_template;
-pub mod xkt_test_handlers;
 
 use crate::web_api::{
     NounHierarchyApiState, SpatialQueryApiState, create_noun_hierarchy_routes,
@@ -682,30 +681,11 @@ pub async fn start_web_server_with_config(
             post(handlers::api_space_steel_relative),
         )
         .route("/api/space/tray-span", post(handlers::api_space_tray_span))
-        // XKT 模型测试 API
-        .route("/api/xkt/generate", post(xkt_test_handlers::generate_xkt))
-        .route(
-            "/api/xkt/test-cube",
-            post(xkt_test_handlers::generate_test_cube),
-        )
-        .route("/api/xkt/validate", get(xkt_test_handlers::validate_xkt))
-        .route("/api/xkt/list", get(xkt_test_handlers::list_xkt_files))
-        .route(
-            "/api/xkt/refno-name",
-            get(xkt_test_handlers::get_refno_name),
-        )
         // 模型导出 API
         .route("/api/export/gltf", post(handlers::create_export_task))
         .route("/api/export/glb", post(handlers::create_export_task))
-        .route("/api/export/xkt", post(handlers::create_export_task))
-        .route(
-            "/api/export/status/{task_id}",
-            get(handlers::get_export_status),
-        )
-        .route(
-            "/api/export/download/{task_id}",
-            get(handlers::download_export),
-        )
+        .route("/api/export/status/{task_id}", get(handlers::get_export_status))
+        .route("/api/export/download/{task_id}", get(handlers::download_export))
         .route("/api/export/tasks", get(handlers::list_export_tasks))
         .route("/api/export/cleanup", post(handlers::cleanup_export_tasks))
         // 静态文件服务
@@ -742,8 +722,6 @@ pub async fn start_web_server_with_config(
             "/api/sctn-test/result/{id}",
             get(handlers::api_sctn_test_result),
         )
-        // XKT 模型测试页面
-        .route("/xkt-test", get(handlers::xkt_test_page))
         // 空间查询可视化页面
         .route(
             "/spatial-visualization",
