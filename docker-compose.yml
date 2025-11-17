@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  web-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aios-web-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./assets:/app/assets
+      - ./logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - DB_PATH=/app/data/ams-demo.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+  
+  # 可选：添加数据库服务
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: aios-surrealdb
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb-data:/data
+    command: start --user root --pass root memory --log trace  
+    restart: unless-stopped
+    
+  # 可选：添加Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: aios-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  surrealdb-data:
+  redis-data:
+
+networks:
+  default:
+    name: aios-network

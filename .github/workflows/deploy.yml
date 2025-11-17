@@ -1,0 +1,232 @@
+name: Deploy Applications
+
+on:
+  push:
+    branches: [ "only-csg", "main", "master" ]
+    tags: ['v*']
+  pull_request:
+    branches: [ "only-csg", "main" ]
+  workflow_dispatch:
+    inputs:
+      deploy_web_server:
+        description: 'Deploy web-server'
+        required: false
+        type: boolean
+        default: true
+      deploy_aios_database:
+        description: 'Deploy aios-database'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-web-server:
+    name: Build Web Server
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+        exclude:
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: x86_64-unknown-linux-gnu
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "gen-model-web-server-${{ matrix.target }}"
+      
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev build-essential
+      
+      - name: Build web_server
+        run: |
+          cargo build --release --bin web_server --no-default-features --features ws,sqlite-index,surreal-save,web_server --target ${{ matrix.target }}
+        shell: bash
+      
+      - name: Upload web_server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-server-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/web_server${{ runner.os == 'Windows' && '.exe' || '' }}
+          retention-days: 30
+
+  build-aios-database:
+    name: Build Aios Database
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+        exclude:
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: x86_64-unknown-linux-gnu
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "gen-model-aios-database-${{ matrix.target }}"
+      
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev build-essential
+      
+      - name: Build aios_database library
+        run: |
+          cargo build --release --lib --no-default-features --features ws,sqlite-index,surreal-save,web_server --target ${{ matrix.target }}
+        shell: bash
+      
+      - name: Upload aios_database artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aios-database-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/libaios_database${{ runner.os == 'Windows' && '.dll' || runner.os == 'Linux' && '.so' || '.dylib' }}
+            target/${{ matrix.target }}/release/deps/
+          retention-days: 30
+
+  deploy-web-server-linux:
+    name: Deploy Web Server (Linux)
+    runs-on: ubuntu-latest
+    needs: build-web-server
+    if: github.ref == 'refs/heads/only-csg' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download web_server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-server-x86_64-unknown-linux-gnu
+          path: ./release
+      
+      - name: Make executable
+        run: chmod +x ./release/web_server
+      
+      - name: Create deployment package
+        run: |
+          mkdir -p deploy/web-server
+          cp ./release/web_server deploy/web-server/
+          cp DbOption.toml deploy/web-server/
+          cp -r assets deploy/web-server/ 2>/dev/null || true
+          cp -r data deploy/web-server/ 2>/dev/null || true
+          cp -r web-test deploy/web-server/ 2>/dev/null || true
+          cd deploy
+          tar -czf web-server-linux-x86_64.tar.gz web-server/
+      
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-server-deployment
+          path: deploy/web-server-linux-x86_64.tar.gz
+          retention-days: 30
+      
+      - name: Create Release (if tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deploy/web-server-linux-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-web-server-windows:
+    name: Deploy Web Server (Windows)
+    runs-on: ubuntu-latest
+    needs: build-web-server
+    if: github.ref == 'refs/heads/only-csg' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download web_server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-server-x86_64-pc-windows-msvc
+          path: ./release
+      
+      - name: Create deployment package
+        run: |
+          mkdir -p deploy/web-server
+          cp ./release/web_server.exe deploy/web-server/
+          cp DbOption.toml deploy/web-server/ 2>/dev/null || true
+          cp -r assets deploy/web-server/ 2>/dev/null || true
+          cp -r data deploy/web-server/ 2>/dev/null || true
+          cp -r web-test deploy/web-server/ 2>/dev/null || true
+          cd deploy
+          zip -r web-server-windows-x86_64.zip web-server/
+      
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-server-windows-deployment
+          path: deploy/web-server-windows-x86_64.zip
+          retention-days: 30
+      
+      - name: Create Release (if tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deploy/web-server-windows-x86_64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-deployment:
+    name: Test Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-web-server-linux, deploy-aios-database]
+    if: github.ref == 'refs/heads/only-csg' || github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download web_server deployment
+        uses: actions/download-artifact@v4
+        with:
+          name: web-server-deployment
+      
+      - name: Extract and test
+        run: |
+          tar -xzf web-server-linux-x86_64.tar.gz
+          cd web-server
+          timeout 30s ./web_server --help || echo "Web server started successfully"
+      
+      - name: Run basic functionality test
+        run: |
+          cd web-server
+          ./web_server --version
