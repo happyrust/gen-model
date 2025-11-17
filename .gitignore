@@ -103,9 +103,36 @@ output/
 docs.surrealdb.com/
 external/rs-core/
 node_modules
+
 # Local SurrealDB datasets
 ams-8009-test.db
 ams-demo.db/
 ams-test.db/
 surreal-8010.kv
 rumqttd-server/target
+
+web-test
+
+# Process ID files
+*.pid
+surreal-*.pid
+
+# Chrome trace files
+chrome_trace_*.json
+
+# Additional database directories
+cmd/ams-8009-test.db/
+scripts/db/ams-8009-test.db/
+scripts/db/ams-demo.db/
+
+# Test database directory
+data/test_db/
+
+# Specific large binaries
+web_server
+aios-database
+
+# Lock files (optional - uncomment if you want to ignore them)
+# Cargo.lock
+# package-lock.json
+# pnpm-lock.yaml
