@@ -195,7 +195,7 @@ dependencies = [
 name = "aios-database"
 version = "0.2.3"
 dependencies = [
- "aios_core 0.2.3 (git+https://github.com/happyrust/rs-core.git?branch=main)",
+ "aios_core",
  "anyhow",
  "approx 0.5.1",
  "async-once-cell",
@@ -299,7 +299,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.3"
-source = "git+https://github.com/happyrust/rs-core.git?branch=main#9b8a3dec195da62615e3bb60e03981626616dff0"
+source = "git+https://github.com/happyrust/rs-core.git#d1ffa6587f4771733b62c17f74c9eebeef13af9a"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -359,87 +359,6 @@ dependencies = [
  "rkyv 0.8.12",
  "rstar 0.11.0",
  "rusqlite",
- "serde",
- "serde_derive",
- "serde_json",
- "serde_repr",
- "serde_with",
- "serde_yaml",
- "simplelog",
- "smallvec",
- "smol_str 0.3.4",
- "strum 0.27.2",
- "strum_macros 0.27.2",
- "surrealdb 3.0.0-alpha.11",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.23",
- "tracing",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "aios_core"
-version = "0.2.3"
-source = "git+https://github.com/happyrust/rs-core.git#d1ffa6587f4771733b62c17f74c9eebeef13af9a"
-dependencies = [
- "anyhow",
- "approx 0.5.1",
- "async-recursion",
- "async-trait",
- "base64 0.22.1",
- "bevy_ecs",
- "bevy_math",
- "bevy_reflect",
- "bevy_transform",
- "bincode",
- "bitflags 2.10.0",
- "cached 0.56.0",
- "calamine 0.26.1",
- "cavalier_contours",
- "chrono",
- "clap",
- "config 0.14.1",
- "dashmap 7.0.0-rc2",
- "deku",
- "derivative",
- "derive_more 1.0.0",
- "downcast-rs 2.0.2",
- "dyn-clone",
- "evalexpr",
- "flate2",
- "futures",
- "glam 0.30.9",
- "hash32 1.0.0",
- "hexasphere",
- "i_triangle",
- "id_tree 1.8.0 (git+https://gitee.com/happydpc/id_tree)",
- "indexmap 2.12.0",
- "itertools 0.14.0",
- "jsonxf",
- "lazy_static",
- "log",
- "lru",
- "memchr",
- "nalgebra 0.34.1",
- "nom 7.1.3",
- "num-traits",
- "num_cpus",
- "num_enum",
- "once_cell",
- "once_cell_serde",
- "ordered-float 5.1.0",
- "parking_lot",
- "parry2d",
- "parry3d",
- "petgraph 0.8.3",
- "phf",
- "ploop-rs",
- "pretty-hex",
- "regex",
- "rkyv 0.8.12",
- "rstar 0.11.0",
  "serde",
  "serde_derive",
  "serde_json",
@@ -1743,7 +1662,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1763,7 +1682,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2214,7 +2133,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "calamine"
 version = "0.26.1"
-source = "git+https://gitee.com/happydpc/calamine.git#f35ae176fa9f763851b236f7166e38a884efc8d6"
+source = "git+https://gitee.com/happydpc/calamine#f35ae176fa9f763851b236f7166e38a884efc8d6"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -2650,7 +2569,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -4688,7 +4607,7 @@ version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75a4dcd69d35b2c87a7c83bce9af69fd65c9d68d3833a0ded568983928f3fc99"
 dependencies = [
- "approx 0.4.0",
+ "approx 0.5.1",
  "arbitrary",
  "num-traits",
  "rayon",
@@ -5797,12 +5716,12 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
- "system-configuration 0.5.1",
+ "socket2 0.6.1",
+ "system-configuration 0.6.1",
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.4.0",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
@@ -5877,7 +5796,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -8352,7 +8271,7 @@ name = "parse_pdms_db"
 version = "3.0.0"
 source = "git+https://github.com/happyrust/aios-parse-pdms#4b8e8081cbd2bd229d50940dded07f497162553f"
 dependencies = [
- "aios_core 0.2.3 (git+https://github.com/happyrust/rs-core.git)",
+ "aios_core",
  "anyhow",
  "approx 0.5.1",
  "async-trait",
@@ -8460,7 +8379,7 @@ name = "pdms_io"
 version = "0.1.0"
 source = "git+https://github.com/happyrust/pdms-io.git#08ae154408254dc1e4b13868174d9a10d6cc8dd2"
 dependencies = [
- "aios_core 0.2.3 (git+https://github.com/happyrust/rs-core.git)",
+ "aios_core",
  "anyhow",
  "atty",
  "blake2",
@@ -9013,7 +8932,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -9047,7 +8966,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.110",
@@ -9227,7 +9146,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.35",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -9264,7 +9183,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -13997,7 +13916,7 @@ dependencies = [
  "ndk-sys",
  "objc",
  "once_cell",
- "ordered-float 4.6.0",
+ "ordered-float 5.1.0",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -14095,7 +14014,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14195,6 +14114,19 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
+dependencies = [
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
 ]
 
 [[package]]
@@ -14319,6 +14251,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-registry"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
+dependencies = [
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
 name = "windows-result"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14343,6 +14286,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
 dependencies = [
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+dependencies = [
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -14371,6 +14323,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57"
 dependencies = [
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
+dependencies = [
+ "windows-link 0.2.1",
 ]
 
 [[package]]
