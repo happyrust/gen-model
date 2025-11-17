@@ -67,7 +67,7 @@ parry2d = { version = "0.25.0", features = [
     "serde-serialize",
 ] }
 parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms"}
-aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "main" }
+aios_core = { git = "https://github.com/happyrust/rs-core.git" }
 
 
 
