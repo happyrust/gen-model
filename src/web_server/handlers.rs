@@ -15,8 +15,12 @@ use serde_json::json;
 use std::cmp::Ordering;
 use std::fs;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -6165,10 +6169,15 @@ pub async fn get_startup_scripts(
                     let port = extract_port_from_filename(file_name);
 
                     // 检查脚本是否可执行
+                    #[cfg(unix)]
                     let executable = path
                         .metadata()
                         .map(|m| m.permissions().mode() & 0o111 != 0)
                         .unwrap_or(false);
+                    #[cfg(windows)]
+                    let executable = path.extension().map_or(false, |ext| {
+                        ext == "sh" || ext == "bat" || ext == "cmd" || ext == "ps1"
+                    });
 
                     scripts.push(StartupScript {
                         name: file_name.to_string(),
