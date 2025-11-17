@@ -684,8 +684,14 @@ pub async fn start_web_server_with_config(
         // 模型导出 API
         .route("/api/export/gltf", post(handlers::create_export_task))
         .route("/api/export/glb", post(handlers::create_export_task))
-        .route("/api/export/status/{task_id}", get(handlers::get_export_status))
-        .route("/api/export/download/{task_id}", get(handlers::download_export))
+        .route(
+            "/api/export/status/{task_id}",
+            get(handlers::get_export_status),
+        )
+        .route(
+            "/api/export/download/{task_id}",
+            get(handlers::download_export),
+        )
         .route("/api/export/tasks", get(handlers::list_export_tasks))
         .route("/api/export/cleanup", post(handlers::cleanup_export_tasks))
         // 静态文件服务

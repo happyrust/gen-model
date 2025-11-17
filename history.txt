@@ -1,6 +1,4 @@
 #V2
-SELECT * FROM inst_relate LIMIT 3;
-SELECT * FROM inst_relate:17496_201377;
 INFO FOR TABLE inst_relate;
 SELECT * FROM pe WHERE refno CONTAINS '16596' AND refno CONTAINS '9189' LIMIT 1;
 SELECT count() FROM pe;
@@ -99,3 +97,5 @@ SELECT * FROM pdms_inst_tubis LIMIT 5;
 SELECT * FROM pdms_inst_geos LIMIT 3;
 SELECT * FROM pdms_inst_tubis LIMIT 3;
 DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
+SELECT refno FROM pe WHERE noun = 'GENSEC' LIMIT 5;
+SELECT noun, count() FROM pe GROUP BY noun LIMIT 10;

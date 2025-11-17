@@ -256,14 +256,5 @@ required-features = ["gen_model", "sqlite-index"]
 
 eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b8643f77b6a26561da44aad0", package = "eframe" }
 
-# [patch."https://gitee.com/happydpc/rs-core"]
-# aios_core = { git = "https://github.com/happyrust/rs-core.git", branch = "2.3", default-features = false, features = [
-#     "web_server",
-#     "bevy_transform",
-#     "bevy_math",
-#     "bevy_ecs",
-#     "bevy_reflect",
-#     "debug_expr",
-#     "gen_model",
-#     "manifold",
-# ] }
+[patch."https://github.com/happyrust/rs-core.git"]
+aios_core = { path = "../rs-core"}

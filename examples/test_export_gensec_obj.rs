@@ -42,13 +42,12 @@ async fn main() -> anyhow::Result<()> {
     // 1. 设置 debug-model 模式并强制重新生成
     println!("\n🔧 步骤 1: 设置 debug-model 模式...");
     aios_core::set_debug_model_enabled(true);
-    
+
     // 设置环境变量强制重新生成 mesh（不跳过已存在的文件）
     unsafe {
         std::env::set_var("FORCE_REPLACE_MESH", "true");
-        std::env::set_var("FULL_NOUN_MODE", "true"); // 确保 full noun 模式启用
     }
-    
+
     println!("✅ debug-model 模式已启用");
     println!("✅ 强制重新生成 mesh 已设置（不跳过已存在文件）");
 
@@ -59,20 +58,23 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. 获取配置并修改
     let mut db_option_ext = get_db_option_ext();
-    
+
     // 强制开启必要的生成选项
     db_option_ext.inner.gen_mesh = true;
     db_option_ext.inner.gen_model = true;
     db_option_ext.inner.replace_mesh = Some(true);
-    
+
     // 设置 debug_model_refnos
     db_option_ext.inner.debug_model_refnos = Some(vec!["25688_76336".to_string()]);
-    
+
     println!("📊 配置已更新:");
     println!("   - gen_mesh: {}", db_option_ext.inner.gen_mesh);
     println!("   - gen_model: {}", db_option_ext.inner.gen_model);
     println!("   - replace_mesh: {:?}", db_option_ext.inner.replace_mesh);
-    println!("   - debug_model_refnos: {:?}", db_option_ext.inner.debug_model_refnos);
+    println!(
+        "   - debug_model_refnos: {:?}",
+        db_option_ext.inner.debug_model_refnos
+    );
 
     // 4. 定义目标参考号
     let target_refno = RefnoEnum::from("25688_76336");
@@ -80,16 +82,13 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. 生成几何体（强制重新生成）
     println!("\n⚙️  步骤 4: 生成 GENSEC 几何体（强制重新生成）...");
-    let mut incr_log = aios_database::data_interface::increment_record::IncrGeoUpdateLog::default();
 
-    // GENSEC 属于 loop 类型（拉伸体）
-    incr_log.loop_owner_refnos.insert(target_refno.clone());
-
+    // 使用 manual_refnos 参数指定要生成的参考号
     gen_all_geos_data(
-        vec![],         // manual_refnos
-        &db_option_ext, // db_option_ext (使用修改后的配置)
-        Some(incr_log), // incr_updates
-        None,           // target_sesno
+        vec![target_refno.clone()], // manual_refnos: 指定要生成的参考号
+        &db_option_ext,             // db_option_ext (使用修改后的配置)
+        None,                       // incr_updates: 不使用增量更新
+        None,                       // target_sesno
     )
     .await?;
     println!("✅ 几何体生成完成（已强制重新生成，未跳过已存在文件）");

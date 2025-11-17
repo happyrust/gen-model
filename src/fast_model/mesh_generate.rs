@@ -14,7 +14,7 @@ use crate::fast_model::{debug_model, debug_model_debug, debug_model_trace, debug
 use crate::{batch_update_err, db_err, deser_err, log_err, query_err};
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
-use aios_core::geometry::csg::{GeneratedMesh, generate_csg_mesh};
+use aios_core::geometry::csg::GeneratedMesh;
 use aios_core::mesh_precision::MeshPrecisionSettings;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -46,6 +46,8 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use aios_core::geometry::csg::generate_csg_mesh;
 
 /// 在数据库中生成网格模型并更新包围盒
 ///

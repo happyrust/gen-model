@@ -41,9 +41,7 @@ pub mod utils;
 
 pub mod export_model;
 pub use capture::*;
-pub use export_model::{
-    export_glb, export_gltf, export_instanced_bundle, model_exporter,
-};
+pub use export_model::{export_glb, export_gltf, export_instanced_bundle, model_exporter};
 pub mod material_config;
 pub mod unit_converter;
 

@@ -1105,7 +1105,10 @@ pub async fn start_grpc_server_mode(
     Ok(())
 }
 
-async fn export_instanced_bundle_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
+async fn export_instanced_bundle_mode(
+    config: ExportConfig,
+    db_option_ext: &DbOptionExt,
+) -> Result<()> {
     use std::sync::Arc;
 
     println!("\n🎯 Instanced Bundle 导出模式");
@@ -1178,9 +1181,7 @@ pub async fn export_model_mode(
             export_gltf_mode(gltf_config, db_option_ext).await
         }
         "xkt" => {
-            return Err(anyhow!(
-                "XKT 导出功能已禁用，需要重新启用 gen_model 特性"
-            ));
+            return Err(anyhow!("XKT 导出功能已禁用，需要重新启用 gen_model 特性"));
         }
         "instanced-bundle" | "instanced_bundle" => {
             export_instanced_bundle_mode(config, db_option_ext).await

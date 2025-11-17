@@ -50,8 +50,8 @@ fn build_export_config(
 use crate::cli_modes::start_grpc_server_mode;
 #[cfg(not(feature = "gui"))]
 use crate::cli_modes::{
-    ExportConfig, export_glb_mode, export_gltf_mode, export_model_mode,
-    export_obj_mode, get_output_filename_for_refno,
+    ExportConfig, export_glb_mode, export_gltf_mode, export_model_mode, export_obj_mode,
+    get_output_filename_for_refno,
 };
 #[cfg(not(feature = "gui"))]
 use aios_core::geometry::csg::clear_ploop_debug_cache;
