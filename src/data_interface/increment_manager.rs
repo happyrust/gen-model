@@ -478,6 +478,9 @@ impl AiosDBManager {
                         let mut generated_artifacts: Vec<
                             GeneratedSyncArtifact,
                         > = Vec::new();
+                        // 收集本次事件中需要通过 MQTT 推送的文件名和哈希
+                        let mut notify_file_names = vec![];
+                        let mut notify_file_hashes = vec![];
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
                             println!("正在处理路径: {:?}", path);
@@ -514,14 +517,96 @@ impl AiosDBManager {
                             } else {
                                 println!("watcher.headers: {:?}", self.watcher.headers);
                                 println!("在 watcher.headers 中找不到路径: {:?}", path);
+                                // 新增文件的处理逻辑：初始化 headers、生成 archive 并准备同步通知
+                                self.watcher
+                                    .headers
+                                    .insert(path.clone(), new_header.clone());
+
+                                let file_name = match path.file_stem().and_then(|s| s.to_str()) {
+                                    Some(name) => name,
+                                    None => {
+                                        println!(
+                                            "无法从新文件路径中解析文件名: {:?}",
+                                            path
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                let dbno = new_header.pdms_header.db_num as u32;
+
+                                // 如果配置了 location_dbs，则只对本地区负责的 dbnum 发送通知
+                                if let Some(location_dbs) = &get_db_option().location_dbs {
+                                    if !location_dbs.contains(&dbno) {
+                                        continue;
+                                    }
+                                }
+
+                                // 为新文件生成对应的 CBA 压缩包，确保远端可以通过 HTTP 下载
+                                #[cfg(feature = "mqtt")]
+                                let file_hash = {
+                                    let output: PathBuf = format!(
+                                        "assets/archives/{}.cba",
+                                        file_name
+                                    )
+                                    .into();
+                                    let compress_opt = CompressOptions::new(
+                                        path.clone(),
+                                        output.clone(),
+                                        "assets/temp",
+                                    );
+                                    let hash = match execute_compress(compress_opt).await {
+                                        Ok(h) => h.to_string(),
+                                        Err(e) => {
+                                            println!(
+                                                "新文件压缩生成 CBA 失败: {:?}, 路径: {:?}",
+                                                e, path
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                    #[cfg(feature = "web_server")]
+                                    {
+                                        let archive_size = std::fs::metadata(&output)
+                                            .map(|m: std::fs::Metadata| m.len())
+                                            .unwrap_or(0);
+                                        generated_artifacts.push(GeneratedSyncArtifact {
+                                            path: output.clone(),
+                                            file_name: format!("{}.cba", file_name),
+                                            file_size: archive_size,
+                                            file_hash: Some(hash.clone()),
+                                            record_count: None,
+                                        });
+                                    }
+
+                                    hash
+                                };
+
+                                #[cfg(feature = "mqtt")]
+                                {
+                                    // 避免对已经同步过相同文件 hash 的记录重复发送
+                                    let sql = format!(
+                                        "select value <string>\
+                                        id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
+                                        get_db_option().location.as_str(),
+                                        file_name,
+                                        &file_hash
+                                    );
+                                    let mut response = SUL_DB.query(&sql).await.unwrap();
+                                    let id = response.take::<Vec<String>>(0).unwrap();
+                                    if id.is_empty() {
+                                        println!("发现新增 db 文件，推送：{}", &file_name);
+                                        notify_file_hashes.push(file_hash);
+                                        notify_file_names.push(file_name.to_owned());
+                                    }
+                                }
                             }
                         }
                         // dbg!(&params);
                         if params.is_empty() {
                             continue;
                         }
-                        let mut notify_file_names = vec![];
-                        let mut notify_file_hashes = vec![];
 
                         //如果数据没有发生变化，则不需要推出变化，不需要执行增量
                         match self.execute_incr_update(params).await {

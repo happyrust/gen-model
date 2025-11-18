@@ -1,3 +1,6 @@
+# BJ 区域 DbOption 配置（远程文件同步测试专用）
+# 基本结构拷贝自根目录 DbOption.toml，仅调整项目路径、location、location_dbs、MQTT 与 file_server_host
+
 #同步文件配置
 total_sync = false
 incr_sync =  false
@@ -12,8 +15,8 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-# project_path = "D:/AVEVA/Projects/E3D2.1"
-project_path = "/Volumes/DPC/work/e3d_models"
+# 原始示例: /Volumes/DPC/work/e3d_models
+project_path = "/Volumes/DPC/work/e3d_models/test_bj"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
@@ -26,7 +29,7 @@ module = "DESI"
 #是否生成模型数据
 gen_model = true
 gen_mesh = true
-replace_mesh = true
+replace_mesh = false
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
@@ -45,7 +48,7 @@ full_noun_batch_size = 200
 # 可选值: "cate", "loop", "prim" 或具体 noun 名称如 "BRAN", "PANE"
 # 空 vec 表示启用所有类别（默认行为）
 # 示例1: 只生成 BRAN 和 PANE 类型
-full_noun_enabled_categories = ["PANE"]
+full_noun_enabled_categories = ["BRAN", "PANE"]
 
 # 排除的 noun 列表
 # 即使类别启用，这里的 noun 也会被过滤掉
@@ -94,19 +97,21 @@ kv_ip = "localhost"
 kv_port = "8010"
 
 
-#mqtt 事件 ip
-mqtt_host = "192.168.31.58"
+#mqtt 事件 ip（测试环境使用本机 + 内置 MQTT 服务器）
+mqtt_host = "127.0.0.1"
 mqtt_port = 1883
 
-location = "SJZ"
-location_dbs = [1112]
+# 区域标识与本地区负责的 dbnums（示例：251270 属于 BJ）
+location = "bj"
+location_dbs = [251270]
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
 # hash文件的站点
 remote_file_server_hosts = []
-file_server_host = "http://192.168.31.58:8000/assets/archives"
+# BJ 侧文件服务器入口（web_server 静态目录挂载到 /assets/archives）
+file_server_host = "http://localhost:8081/assets/archives"
 
 surreal_script_dir = "../rs-core/resource/surreal"
 
