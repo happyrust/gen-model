@@ -312,5 +312,23 @@ pub async fn resolve_desi_comp(
 
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
     debug_model_trace!("geom_info: {:?}", &geom_info);
-    geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
+    
+    match geom_info {
+        Ok(info) => Ok(info),
+        Err(e) => {
+            use crate::fast_model::ModelErrorKind;
+            crate::model_error!(
+                code = "E-EXPR-001",
+                kind = ModelErrorKind::InvalidGeometry,
+                stage = "resolve_cata_comp",
+                refno = desi_refno,
+                desc = "表达式计算失败",
+                "design_refno={}, scom_ref={}, err={}",
+                desi_refno,
+                scom_ref,
+                e
+            );
+            Err(anyhow!("resolve_cata_comp 表达式计算失败: {}", e))
+        }
+    }
 }

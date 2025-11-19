@@ -115,6 +115,12 @@ async fn main() -> anyhow::Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("log-model-error")
+                .long("log-model-error")
+                .help("Record model generation errors for statistical analysis (automatically enables debug-model and errors-only mode)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("capture")
                 .long("capture")
                 .help("After model generation, export OBJ and capture screenshots (optionally provide output directory)")
@@ -310,8 +316,13 @@ async fn main() -> anyhow::Result<()> {
         println!("✅ Full Noun 模式已启用");
     }
     let config_debug_refnos = db_option_ext.inner.debug_model_refnos.clone();
-    let debug_model_requested = matches.contains_id("debug-model");
-    let debug_model_errors_only = matches.get_flag("debug-model-errors-only");
+    let log_model_error = matches.get_flag("log-model-error");
+    let debug_model_requested = matches.contains_id("debug-model") || log_model_error;
+    let debug_model_errors_only = matches.get_flag("debug-model-errors-only") || log_model_error;
+
+    if log_model_error {
+        println!("📊 启用模型错误记录模式（自动开启 debug-model + errors-only）");
+    }
 
     if !debug_model_requested && db_option_ext.inner.debug_model_refnos.is_some() {
         println!("ℹ️ 未开启调试模式，本次运行将忽略配置中的 debug_model_refnos");
@@ -324,7 +335,9 @@ async fn main() -> anyhow::Result<()> {
     // 设置错误日志模式
     if debug_model_errors_only {
         aios_database::fast_model::set_debug_model_errors_only(true);
-        println!("✅ 启用仅错误日志模式");
+        if !log_model_error {
+            println!("✅ 启用仅错误日志模式");
+        }
     }
 
     // 获取通用参数

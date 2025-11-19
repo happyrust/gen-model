@@ -131,7 +131,10 @@ pub async fn prepare_obj_export(
 
     let geom_insts = query_geometry_instances(&all_refnos, true, config.verbose).await?;
 
-    if geom_insts.is_empty() {
+    let export_data =
+        collect_export_data(geom_insts, &all_refnos, mesh_dir, config.verbose).await?;
+
+    if export_data.total_instances == 0 {
         if config.verbose {
             println!("⚠️  未找到任何几何体数据");
         }
@@ -141,14 +144,9 @@ pub async fn prepare_obj_export(
         });
     }
 
-    stats.geometry_count = geom_insts.iter().map(|g| g.insts.len()).sum();
-
-    let export_data =
-        collect_export_data(geom_insts, &all_refnos, mesh_dir, config.verbose).await?;
-
     stats.mesh_files_found = export_data.loaded_count;
     stats.mesh_files_missing = export_data.failed_count;
-    stats.geometry_count += export_data.tubi_count;
+    stats.geometry_count = export_data.total_instances;
 
     let merged_mesh = merge_export_data_into_mesh(&export_data);
 

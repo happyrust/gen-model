@@ -344,13 +344,13 @@ pub async fn export_instanced_bundle_for_refnos(
         .await
         .context("查询 inst_relate 数据失败")?;
 
-    if geom_insts.is_empty() {
+    // 收集导出数据
+    let export_data = collect_export_data(geom_insts, refnos, mesh_dir, verbose).await?;
+
+    if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体数据");
         return Ok(());
     }
-
-    // 收集导出数据
-    let export_data = collect_export_data(geom_insts, refnos, mesh_dir, verbose).await?;
 
     if export_data.unique_geometries.is_empty() {
         println!("⚠️  没有可导出的几何体");

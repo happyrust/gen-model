@@ -274,6 +274,17 @@ pub async fn gen_cata_geos(
                             ele_refno,
                             result
                         );
+                        use crate::fast_model::ModelErrorKind;
+                        crate::model_error!(
+                            code = "E-REF-001",
+                            kind = ModelErrorKind::InvalidReference,
+                            stage = "get_cat_refno",
+                            refno = ele_refno,
+                            desc = "获取元件库引用失败",
+                            "ele_refno={}, result={:?}",
+                            ele_refno,
+                            result
+                        );
                         #[cfg(feature = "profile")]
                         tracing::debug!(ele_refno = ?ele_refno, "元件库引用为空，跳过");
                         continue;
@@ -310,6 +321,18 @@ pub async fn gen_cata_geos(
                                 cata_refno,
                                 err
                             );
+                            use crate::fast_model::ModelErrorKind;
+                            crate::model_error!(
+                                code = "E-REF-002",
+                                kind = ModelErrorKind::DbInconsistent,
+                                stage = "query_gmse",
+                                refno = ele_refno,
+                                desc = "查询GMSE失败",
+                                "ele_refno={}, cata_refno={}, err={}",
+                                ele_refno,
+                                cata_refno,
+                                err
+                            );
                             continue;
                         }
                     }
@@ -327,6 +350,17 @@ pub async fn gen_cata_geos(
                     let valid_ngmr = ngmr_refno.as_ref().map(|r| r.is_valid()).unwrap_or(false);
 
                     if !valid_gmse && !valid_ngmr {
+                        use crate::fast_model::ModelErrorKind;
+                        crate::model_error!(
+                            code = "E-DATA-001",
+                            kind = ModelErrorKind::DataMissing,
+                            stage = "validate_gmse_ngmr",
+                            refno = ele_refno,
+                            desc = "GMSE和NGMR都无效",
+                            "ele_refno={}, cata_refno={}",
+                            ele_refno,
+                            cata_refno
+                        );
                         continue;
                     }
 
@@ -376,6 +410,39 @@ pub async fn gen_cata_geos(
                         Err(e) => {
                             #[cfg(feature = "profile")]
                             tracing::error!(ele_refno = ?ele_refno, error = ?e, "生成元件库模型失败");
+                            
+                            // 根据错误信息分类
+                            use crate::fast_model::ModelErrorKind;
+                            let err_str = e.to_string().to_lowercase();
+                            let (code, kind) = if err_str.contains("expression") 
+                                || err_str.contains("表达式") 
+                                || err_str.contains("resolve_cata_comp")
+                                || err_str.contains("eval") {
+                                ("E-EXPR-001", ModelErrorKind::InvalidGeometry)
+                            } else if err_str.contains("geometry") 
+                                || err_str.contains("profile") 
+                                || err_str.contains("polygon") {
+                                ("E-GEO-002", ModelErrorKind::InvalidGeometry)
+                            } else {
+                                ("E-PIPE-001", ModelErrorKind::PipelineError)
+                            };
+                            
+                            let desc = match code {
+                                "E-EXPR-001" => "表达式计算失败",
+                                "E-GEO-002" => "几何数据无效",
+                                _ => "生成模型失败",
+                            };
+                            
+                            crate::model_error!(
+                                code = code,
+                                kind = kind,
+                                stage = "gen_cata_single_geoms",
+                                refno = ele_refno,
+                                desc = desc,
+                                "ele_refno={}, err={}",
+                                ele_refno,
+                                e
+                            );
                             continue;
                         }
                     };
@@ -808,6 +875,12 @@ pub async fn gen_cata_geos(
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
 
+        debug_model!(
+            "[BRAN_TUBI] 开始处理 BRAN/HANG 分支: refno={}, children_len={}",
+            branch_refno.to_string(),
+            children.len()
+        );
+
         #[cfg(feature = "profile")]
         let branch_item_start = Instant::now();
 
@@ -878,50 +951,75 @@ pub async fn gen_cata_geos(
             .unwrap_or_default();
         let is_hvac = bran_owner_type == "HVAC";
         if children.len() == 0 && !is_hvac {
-            if bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
-                current_tubing.arrive_refno = tref;
-                current_tubing.end_pt = bran_ttube_pt;
-                current_tubing.desire_arrive_dir = tdir;
-                let dist = current_tubing.end_pt.distance(current_tubing.start_pt);
-                if dist > TUBI_TOL && current_tubing.is_dir_ok() {
-                    if let Some(t) = current_tubing.get_transform() {
-                        let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                        let (owner_refno, owner_type) =
-                            shared::get_owner_info_from_attr(&branch_att).await;
-                        tubi_shape_insts_data.insert_tubi(
-                            branch_refno,
-                            EleGeosInfo {
-                                refno: branch_refno,
-                                sesno: branch_att.sesno(),
-                                owner_refno,
-                                owner_type,
-                                cata_hash: Some(tubi_geo_hash.to_string()),
-                                visible: true,
-                                generic_type: get_generic_type(branch_refno)
-                                    .await
-                                    .unwrap_or_default(),
-                                aabb: Some(aabb),
-                                world_transform: t,
-                                flow_pt_indexs: vec![],
-                                cata_refno: None,
-                                is_solid: true,
-                                ..Default::default()
-                            },
-                        );
-                        tubi_relates.push(format!(
-                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                branch_refno.to_pe_key(),
-                                branch_refno.to_pe_key(),
-                                current_tubing.index,
-                                current_tubing.leave_refno.to_pe_key(),
-                                current_tubing.arrive_refno.to_pe_key(),
-                                gen_bytes_hash(&aabb),
-                                gen_bytes_hash(&t),
-                                current_tubing.tubi_size.to_string(),
-                            ));
-                        current_tubing.index += 1;
-                    }
+            let dist = bran_ttube_pt.distance(current_tubing.start_pt);
+            current_tubing.arrive_refno = tref;
+            current_tubing.end_pt = bran_ttube_pt;
+            current_tubing.desire_arrive_dir = tdir;
+            debug_model!(
+                "[BRAN_TUBI] 末端直段候选(无子元素): bran_refno={}, start={}, end={}, dist={:.3}, desire_arrive_dir={}",
+                branch_refno.to_string(),
+                to_pdms_vec_str(&current_tubing.start_pt, false),
+                to_pdms_vec_str(&current_tubing.end_pt, false),
+                dist,
+                to_pdms_vec_str(&current_tubing.desire_arrive_dir, false),
+            );
+            let dir_ok = current_tubing.is_dir_ok();
+            let dist_ok = dist > TUBI_TOL;
+            let transform = current_tubing.get_transform().or_else(|| {
+                debug_model!(
+                    "[BRAN_TUBI] 无法计算 transform (无子元素), 使用 fallback transform"
+                );
+                let mut fallback = Transform::IDENTITY;
+                fallback.translation = current_tubing.start_pt;
+                Some(fallback)
+            });
+            if let Some(t) = transform {
+                let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                let (owner_refno, owner_type) =
+                    shared::get_owner_info_from_attr(&branch_att).await;
+                tubi_shape_insts_data.insert_tubi(
+                    branch_refno,
+                    EleGeosInfo {
+                        refno: branch_refno,
+                        sesno: branch_att.sesno(),
+                        owner_refno,
+                        owner_type,
+                        cata_hash: Some(tubi_geo_hash.to_string()),
+                        visible: true,
+                        generic_type: get_generic_type(branch_refno)
+                            .await
+                            .unwrap_or_default(),
+                        aabb: Some(aabb),
+                        world_transform: t,
+                        flow_pt_indexs: vec![],
+                        cata_refno: None,
+                        is_solid: true,
+                        ..Default::default()
+                    },
+                );
+                let bad_flag = if dir_ok && dist_ok { "false" } else { "true" };
+                tubi_relates.push(format!(
+                    "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                    set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
+                    branch_refno.to_pe_key(),
+                    branch_refno.to_pe_key(),
+                    current_tubing.index,
+                    current_tubing.leave_refno.to_pe_key(),
+                    current_tubing.arrive_refno.to_pe_key(),
+                    gen_bytes_hash(&aabb),
+                    gen_bytes_hash(&t),
+                    current_tubing.tubi_size.to_string(),
+                    bad_flag,
+                ));
+                current_tubing.index += 1;
+                if dir_ok && dist_ok {
+                    tubi_count += 1;
+                } else {
+                    debug_model!(
+                        "[BRAN_TUBI] 无子元素直段标记为 bad: dir_ok={}, dist={:.3}",
+                        dir_ok,
+                        dist
+                    );
                 }
             }
             continue;
@@ -938,26 +1036,52 @@ pub async fn gen_cata_geos(
         let exist_al_map = aios_core::query_arrive_leave_points_of_component(&refus[..])
             .await
             .unwrap_or_default();
+        debug_model!(
+            "[BRAN_TUBI] exist_al_map 获取: total={}, 来自 db 查询={}, local_al_map_missing={}",
+            exist_al_map.len(),
+            refus.len(),
+            exist_refnos.len()
+        );
         let mut leave_type = "BRAN".to_string();
+        let branch_tubi_before: i32 = tubi_count;
         for (index, ele) in children.into_iter().enumerate() {
             let refno = ele.refno;
             let arrive_type = ele.noun.as_str();
             let exclude = (is_hvac && index == 0);
-            {
-                let world_trans = aios_core::get_world_transform(refno)
-                    .await?
+            debug_model!(
+                "[BRAN_TUBI] 子件 {} [{}] -> arrive_type={}, exclude={}",
+                refno.to_e3d_id(),
+                index + 1,
+                arrive_type,
+                exclude
+            );
+        {
+            let world_trans = aios_core::get_world_transform(refno)
+                .await?
                     .unwrap_or_default();
-                if let Some(axis_map) =
-                    exist_al_map
-                        .get(&refno)
-                        .or(local_al_map.get(&refno))
-                        .map(|x| {
-                            [
-                                x[0].transformed(&world_trans),
-                                x[1].transformed(&world_trans),
-                            ]
-                        })
-                {
+                let raw_axis = exist_al_map
+                    .get(&refno)
+                    .or(local_al_map.get(&refno));
+                if raw_axis.is_none() {
+                    debug_model!(
+                        "[BRAN_TUBI] 子件 {} 无 axis_map (exist={}, local={})",
+                        refno.to_e3d_id(),
+                        exist_al_map.get(&refno).is_some(),
+                        local_al_map.get(&refno).is_some()
+                    );
+                }
+                if let Some(axis_map) = raw_axis.map(|x| {
+                    [
+                        x[0].transformed(&world_trans),
+                        x[1].transformed(&world_trans),
+                    ]
+                }) {
+                    debug_model!(
+                        "[BRAN_TUBI] 子件 {} axis_map arrive_pt={}, leave_pt={}",
+                        refno.to_e3d_id(),
+                        to_pdms_vec_str(&axis_map[0].pt, false),
+                        to_pdms_vec_str(&axis_map[1].pt, false)
+                    );
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     let mut skip =
@@ -976,113 +1100,144 @@ pub async fn gen_cata_geos(
                         let same_dir = actual_dir.dot(**a_dir) > 0.99;
                         if same_dir {
                             debug_model!(
-                                "actual_dir: {:?}, a_dir: {:?}",
+                                "[BRAN_TUBI] actual_dir 与 a_dir 几乎同向: actual_dir={}, a_dir={}, refno={}",
                                 to_pdms_vec_str(&actual_dir, false),
-                                to_pdms_vec_str(&a_dir, false)
+                                to_pdms_vec_str(&a_dir, false),
+                                refno.to_string()
+                            );
+                        } else {
+                            debug_model!(
+                                "[BRAN_TUBI] 直段候选: leave_refno={}, arrive_refno={}, dist={:.3}, same_dir={}",
+                                current_tubing.leave_refno.to_e3d_id(),
+                                refno.to_e3d_id(),
+                                actual_vec.length(),
+                                same_dir
                             );
                         }
                         current_tubing.end_pt = **a_pos;
                         current_tubing.desire_arrive_dir = **a_dir;
                         let dist = actual_vec.length();
-                        if dist > TUBI_TOL && !same_dir {
-                            if !exclude {
-                                if current_tubing.is_dir_ok() {
-                                    if current_tubing.leave_refno == branch_refno {
-                                        debug_model!(
-                                            "current_tubing: {:?}, 管道 bran 开头有个直段.",
-                                            &current_tubing
-                                        );
-                                        current_tubing.tubi_size = h_tubi_size;
-                                    } else {
-                                        let lstube_cat_ref = aios_core::query_single_by_paths(
+                        if !exclude {
+                            let dir_ok = current_tubing.is_dir_ok();
+                            let dist_ok = dist > TUBI_TOL;
+                            let same_dir_bad = same_dir;
+                            if current_tubing.leave_refno == branch_refno {
+                                debug_model!(
+                                    "current_tubing: {:?}, 管道 bran 开头存在直段候选.",
+                                    &current_tubing
+                                );
+                                current_tubing.tubi_size = h_tubi_size;
+                            } else {
+                                let lstube_cat_ref = aios_core::query_single_by_paths(
+                                    current_tubing.leave_refno,
+                                    &["->LSTU->CATR"],
+                                    &["REFNO"],
+                                )
+                                .await
+                                .map(|x| x.get_refno_or_default())
+                                .unwrap_or_default();
+                                current_tubing.tubi_size = fast_model::query_tubi_size(
+                                    current_tubing.leave_refno,
+                                    lstube_cat_ref,
+                                    is_hang,
+                                )
+                                .await?;
+                            }
+                            debug_model!(
+                                "current_tubing.tubi_size: {:?}",
+                                &current_tubing.tubi_size
+                            );
+                            tubi_geo_hash =
+                                if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
+                                    BOXI_GEO_HASH
+                                } else {
+                                    TUBI_GEO_HASH
+                                };
+                            let transform = current_tubing.get_transform().or_else(|| {
+                                debug_model!(
+                                    "[BRAN_TUBI] 直段 {} -> {} 无法计算 transform，使用 fallback",
+                                    current_tubing.leave_refno.to_e3d_id(),
+                                    current_tubing.arrive_refno.to_e3d_id()
+                                );
+                                let mut fallback = Transform::IDENTITY;
+                                fallback.translation = current_tubing.start_pt;
+                                Some(fallback)
+                            });
+                            if let Some(t) = transform {
+                                let aabb =
+                                    shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                                let (owner_refno, owner_type) =
+                                    shared::get_owner_info_from_attr(&branch_att).await;
+                                tubi_shape_insts_data.insert_tubi(
+                                    current_tubing.leave_refno,
+                                    EleGeosInfo {
+                                        refno: current_tubing.leave_refno,
+                                        sesno: branch_att.sesno(),
+                                        owner_refno,
+                                        owner_type,
+                                        cata_hash: Some(tubi_geo_hash.to_string()),
+                                        visible: true,
+                                        generic_type: get_generic_type(
                                             current_tubing.leave_refno,
-                                            &["->LSTU->CATR"],
-                                            &["REFNO"],
                                         )
                                         .await
-                                        .map(|x| x.get_refno_or_default())
-                                        .unwrap_or_default();
-                                        current_tubing.tubi_size = fast_model::query_tubi_size(
-                                            current_tubing.leave_refno,
-                                            lstube_cat_ref,
-                                            is_hang,
-                                        )
-                                        .await?;
-                                    }
-                                    debug_model!(
-                                        "current_tubing.tubi_size: {:?}",
-                                        &current_tubing.tubi_size
-                                    );
-                                    tubi_geo_hash =
-                                        if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_))
-                                        {
-                                            BOXI_GEO_HASH
-                                        } else {
-                                            TUBI_GEO_HASH
-                                        };
-                                    if let Some(t) = current_tubing.get_transform() {
-                                        let aabb =
-                                            shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                                        let (owner_refno, owner_type) =
-                                            shared::get_owner_info_from_attr(&branch_att).await;
-                                        tubi_shape_insts_data.insert_tubi(
-                                            current_tubing.leave_refno,
-                                            EleGeosInfo {
-                                                refno: current_tubing.leave_refno,
-                                                sesno: branch_att.sesno(),
-                                                owner_refno,
-                                                owner_type,
-                                                cata_hash: Some(tubi_geo_hash.to_string()),
-                                                visible: true,
-                                                generic_type: get_generic_type(
-                                                    current_tubing.leave_refno,
-                                                )
-                                                .await
-                                                .unwrap_or_default(),
-                                                aabb: Some(aabb),
-                                                world_transform: t,
-                                                is_solid: true,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        debug_model!(
-                                            "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
-                                            current_tubing.leave_refno.to_e3d_id(),
-                                            current_tubing.arrive_refno.to_e3d_id(),
-                                            to_pdms_vec_str(
-                                                &current_tubing.desire_leave_dir,
-                                                false
-                                            ),
-                                            to_pdms_vec_str(
-                                                &current_tubing.leave_ref_dir.unwrap_or_default(),
-                                                false
-                                            ),
-                                            dist
-                                        );
-                                        let sql = format!(
-                                            "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                            branch_refno.to_pe_key(),
-                                            branch_refno.to_pe_key(),
-                                            current_tubing.index,
-                                            current_tubing.leave_refno.to_pe_key(),
-                                            current_tubing.arrive_refno.to_pe_key(),
-                                            gen_bytes_hash(&aabb),
-                                            gen_bytes_hash(&t),
-                                            current_tubing.tubi_size.to_string(),
-                                        );
-                                        tubi_relates.push(sql);
-                                        current_tubing.index += 1;
-                                    }
+                                        .unwrap_or_default(),
+                                        aabb: Some(aabb),
+                                        world_transform: t,
+                                        is_solid: true,
+                                        ..Default::default()
+                                    },
+                                );
+                                let good_segment =
+                                    dist_ok && !same_dir_bad && dir_ok;
+                                debug_model!(
+                                    "[BRAN_TUBI] 写入直段 {} -> {}, dist={:.3}, dist_ok={}, same_dir_bad={}, dir_ok={}",
+                                    current_tubing.leave_refno.to_e3d_id(),
+                                    current_tubing.arrive_refno.to_e3d_id(),
+                                    dist,
+                                    dist_ok,
+                                    same_dir_bad,
+                                    dir_ok
+                                );
+                                let bad_flag = if good_segment {
+                                    "false"
                                 } else {
-                                    debug_model!(
-                                        "current_tubing: {:?}, desire_arrive_dir: {}, desire_leave_dir: {}, {} 的直段方向有问题",
-                                        &current_tubing,
-                                        to_pdms_vec_str(&current_tubing.desire_arrive_dir, false),
-                                        to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
-                                        refno.to_string()
-                                    );
+                                    "true"
+                                };
+                                let sql = format!(
+                                    "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                    set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
+                                    branch_refno.to_pe_key(),
+                                    branch_refno.to_pe_key(),
+                                    current_tubing.index,
+                                    current_tubing.leave_refno.to_pe_key(),
+                                    current_tubing.arrive_refno.to_pe_key(),
+                                    gen_bytes_hash(&aabb),
+                                    gen_bytes_hash(&t),
+                                    current_tubing.tubi_size.to_string(),
+                                    bad_flag,
+                                );
+                                tubi_relates.push(sql);
+                                current_tubing.index += 1;
+                                if good_segment {
+                                    tubi_count += 1;
                                 }
+                            } else {
+                                debug_model!(
+                                    "[BRAN_TUBI] 直段 {} -> {} 无法计算 transform，跳过几何插入",
+                                    current_tubing.leave_refno.to_e3d_id(),
+                                    current_tubing.arrive_refno.to_e3d_id()
+                                );
+                            }
+
+                            if !(dist_ok && !same_dir_bad && dir_ok) {
+                                debug_model!(
+                                    "current_tubing: {:?}, dist={:.3}, same_dir={}, dir_ok={} -> 标记为 bad tubi",
+                                    &current_tubing,
+                                    dist,
+                                    same_dir_bad,
+                                    dir_ok
+                                );
                             }
                         }
                     }
@@ -1122,68 +1277,88 @@ pub async fn gen_cata_geos(
 
             if index == len - 1 && !exclude {
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
-
-                if last_dist > TUBI_TOL {
-                    current_tubing.end_pt = bran_ttube_pt;
-                    current_tubing.arrive_refno = tref;
-                    current_tubing.desire_arrive_dir = tdir;
-                    if current_tubing.is_dir_ok() {
-                        if matches!(current_tubing.tubi_size, TubiSize::None) {
-                            let lstube_cat_ref = aios_core::query_single_by_paths(
-                                current_tubing.leave_refno,
-                                &["->LSTU->CATR"],
-                                &["REFNO"],
-                            )
-                            .await
-                            .map(|x| x.get_refno_or_default())
-                            .unwrap_or_default();
-                            current_tubing.tubi_size = fast_model::query_tubi_size(
-                                current_tubing.leave_refno,
-                                lstube_cat_ref,
-                                is_hang,
-                            )
-                            .await?;
-                        }
-                        if let Some(t) = current_tubing.get_transform() {
-                            let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                            let (owner_refno, owner_type) =
-                                shared::get_owner_info_from_attr(&branch_att).await;
-                            tubi_shape_insts_data.insert_tubi(
-                                current_tubing.leave_refno,
-                                EleGeosInfo {
-                                    refno: current_tubing.leave_refno,
-                                    sesno: branch_att.sesno(),
-                                    owner_refno,
-                                    owner_type,
-                                    cata_hash: Some(tubi_geo_hash.to_string()),
-                                    visible: true,
-                                    generic_type: get_generic_type(current_tubing.leave_refno)
-                                        .await
-                                        .unwrap_or_default(),
-                                    aabb: Some(aabb),
-                                    world_transform: t,
-                                    is_solid: true,
-                                    ..Default::default()
-                                },
-                            );
-                            tubi_relates.push(format!(
-                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                                branch_refno.to_pe_key(),
-                                branch_refno.to_pe_key(),
-                                current_tubing.index,
-                                current_tubing.leave_refno.to_pe_key(),
-                                current_tubing.arrive_refno.to_pe_key(),
-                                gen_bytes_hash(&aabb),
-                                gen_bytes_hash(&t),
-                                current_tubing.tubi_size.to_string(),
-                            ));
-                            current_tubing.index += 1;
-                            tubi_count += 1;
-                        }
+                current_tubing.end_pt = bran_ttube_pt;
+                current_tubing.arrive_refno = tref;
+                current_tubing.desire_arrive_dir = tdir;
+                let dir_ok = current_tubing.is_dir_ok();
+                let dist_ok = last_dist > TUBI_TOL;
+                debug_model!(
+                    "[BRAN_TUBI] 最后一段候选: leave_refno={}, arrive_refno={}, last_dist={:.3}, dir_ok={}, dist_ok={}",
+                    current_tubing.leave_refno.to_e3d_id(),
+                    current_tubing.arrive_refno.to_e3d_id(),
+                    last_dist,
+                    dir_ok,
+                    dist_ok
+                );
+                if matches!(current_tubing.tubi_size, TubiSize::None) {
+                    let lstube_cat_ref = aios_core::query_single_by_paths(
+                        current_tubing.leave_refno,
+                        &["->LSTU->CATR"],
+                        &["REFNO"],
+                    )
+                    .await
+                    .map(|x| x.get_refno_or_default())
+                    .unwrap_or_default();
+                    current_tubing.tubi_size = fast_model::query_tubi_size(
+                        current_tubing.leave_refno,
+                        lstube_cat_ref,
+                        is_hang,
+                    )
+                    .await?;
+                }
+                let transform = current_tubing.get_transform().or_else(|| {
+                    debug_model!(
+                        "[BRAN_TUBI] 最后一段 {} -> {} 无法计算 transform，使用 fallback",
+                        current_tubing.leave_refno.to_e3d_id(),
+                        current_tubing.arrive_refno.to_e3d_id()
+                    );
+                    let mut fallback = Transform::IDENTITY;
+                    fallback.translation = current_tubing.start_pt;
+                    Some(fallback)
+                });
+                if let Some(t) = transform {
+                    let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                    let (owner_refno, owner_type) =
+                        shared::get_owner_info_from_attr(&branch_att).await;
+                    tubi_shape_insts_data.insert_tubi(
+                        current_tubing.leave_refno,
+                        EleGeosInfo {
+                            refno: current_tubing.leave_refno,
+                            sesno: branch_att.sesno(),
+                            owner_refno,
+                            owner_type,
+                            cata_hash: Some(tubi_geo_hash.to_string()),
+                            visible: true,
+                            generic_type: get_generic_type(current_tubing.leave_refno)
+                                .await
+                                .unwrap_or_default(),
+                            aabb: Some(aabb),
+                            world_transform: t,
+                            is_solid: true,
+                            ..Default::default()
+                        },
+                    );
+                    let good_segment = dir_ok && dist_ok;
+                    let bad_flag = if good_segment { "false" } else { "true" };
+                    tubi_relates.push(format!(
+                        "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                        set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
+                        branch_refno.to_pe_key(),
+                        branch_refno.to_pe_key(),
+                        current_tubing.index,
+                        current_tubing.leave_refno.to_pe_key(),
+                        current_tubing.arrive_refno.to_pe_key(),
+                        gen_bytes_hash(&aabb),
+                        gen_bytes_hash(&t),
+                        current_tubing.tubi_size.to_string(),
+                        bad_flag,
+                    ));
+                    current_tubing.index += 1;
+                    if good_segment {
+                        tubi_count += 1;
                     } else {
                         debug_model!(
-                            "desire_arrive_dir: {:?}, {} 的直段方向有问题",
+                            "desire_arrive_dir: {:?}, {} 的直段方向/距离异常(已标记为 bad tubi)",
                             current_tubing.desire_arrive_dir,
                             refno.to_string()
                         );
@@ -1192,6 +1367,13 @@ pub async fn gen_cata_geos(
             }
             leave_type = arrive_type.to_string();
         }
+
+        let branch_tubi_added: i32 = tubi_count - branch_tubi_before;
+        debug_model!(
+            "[BRAN_TUBI] 分支处理完成: refno={}, 生成 tubi 段数={}",
+            branch_refno.to_string(),
+            branch_tubi_added
+        );
 
         #[cfg(feature = "profile")]
         {
@@ -1236,16 +1418,43 @@ pub async fn gen_cata_geos(
 
     let mut tubi_query_time = 0;
     if !tubi_relates.is_empty() {
+        let sql = tubi_relates.join("");
+        debug_model!(
+            "[BRAN_TUBI] 准备写入 {} 条 tubi_relate 记录，示例 SQL: {}",
+            tubi_relates.len(),
+            tubi_relates
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("<empty>")
+        );
+
         let t_query = Instant::now();
-        SUL_DB.query(tubi_relates.join("")).await.unwrap();
+        if let Err(e) = SUL_DB.query(sql).await {
+            debug_model!("[BRAN_TUBI] 写入 tubi_relate 失败: {}", e);
+            // 保持原来的 unwrap 语义
+            panic!("写入 tubi_relate 失败: {}", e);
+        }
         tubi_query_time = t_query.elapsed().as_millis();
+        debug_model!(
+            "[BRAN_TUBI] 写入 tubi_relate 成功，用时 {} ms",
+            tubi_query_time
+        );
 
         // 更新PE表的has_tubi字段，标记哪些元素有隐式管道
         if !tubi_refnos.is_empty() {
             let update_pe_tubi_sql =
                 format!("UPDATE [{}] SET has_tubi = true;", tubi_refnos.join(","));
-            SUL_DB.query(update_pe_tubi_sql).await.unwrap();
+            debug_model!(
+                "[BRAN_TUBI] 更新 has_tubi 标记，refnos: {}",
+                tubi_refnos.join(",")
+            );
+            if let Err(e) = SUL_DB.query(update_pe_tubi_sql).await {
+                debug_model!("[BRAN_TUBI] 更新 has_tubi 失败: {}", e);
+                panic!("更新 has_tubi 失败: {}", e);
+            }
         }
+    } else {
+        debug_model!("[BRAN_TUBI] tubi_relates 为空，本次未写入任何 tubi_relate 记录");
     }
 
     // 获取并打印汇总统计信息

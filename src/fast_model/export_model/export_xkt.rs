@@ -605,14 +605,14 @@ impl ModelExporter for XktExporter {
 
         let geom_insts = query_geometry_instances(&all_refnos, true, config.common.verbose).await?;
 
-        if geom_insts.is_empty() {
+        let export_data =
+            collect_export_data(geom_insts, &all_refnos, mesh_dir, config.common.verbose).await?;
+
+        if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");
             stats.elapsed_time = start_time.elapsed();
             return Ok(stats);
         }
-
-        let export_data =
-            collect_export_data(geom_insts, &all_refnos, mesh_dir, config.common.verbose).await?;
 
         if export_data.unique_geometries.is_empty() {
             println!("⚠️  未加载到任何 mesh 数据");

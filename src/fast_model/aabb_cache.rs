@@ -8,7 +8,7 @@ use parry3d::bounding_volume::Aabb;
 use pdms_io::io::PdmsIO;
 
 use config as cfg;
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, Result as SqlResult, Row, Statement, params};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct StoredAabb {
@@ -290,7 +290,7 @@ impl AabbCache {
         )?;
 
         let mut count = 0;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([], |row: &Row| {
             let refno: i64 = row.get(0)?;
             let data: Vec<u8> = row.get(1)?;
             Ok((refno, data))
@@ -332,7 +332,7 @@ impl AabbCache {
         )?;
 
         let ids = stmt
-            .query_map(params![minx, maxx, miny, maxy, minz, maxz], |row| {
+            .query_map(params![minx, maxx, miny, maxy, minz, maxz], |row: &Row| {
                 let id: i64 = row.get(0)?;
                 Ok(RefU64(id as u64))
             })?
@@ -349,7 +349,7 @@ impl AabbCache {
             "SELECT min_x, max_x, min_y, max_y, min_z, max_z FROM aabb_index WHERE id=?1",
         )?;
 
-        let result = stmt.query_row(params![refno.0 as i64], |row| {
+        let result = stmt.query_row(params![refno.0 as i64], |row: &Row| {
             let min_x: f64 = row.get(0)?;
             let max_x: f64 = row.get(1)?;
             let min_y: f64 = row.get(2)?;
@@ -373,11 +373,11 @@ impl AabbCache {
     // ---------- Basic CRUD operations ----------
 
     pub fn get_geo_aabb(&self, geo_hash: &str) -> Option<Aabb> {
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM geo_aabb WHERE geo_hash = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row: &Row| row.get(0)).ok()?;
         let stored: StoredAabb = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
     }
@@ -394,11 +394,11 @@ impl AabbCache {
     }
 
     pub fn get_deps_for_geo(&self, geo_hash: &str) -> Option<DepsForGeo> {
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM refs_by_geo WHERE geo_hash = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row: &Row| row.get(0)).ok()?;
         bincode::deserialize(&data).ok()
     }
 
@@ -413,11 +413,11 @@ impl AabbCache {
     }
 
     pub fn get_geos_for_ref(&self, refno: RefU64) -> Option<GeosForRef> {
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM deps_by_ref WHERE refno = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![refno.0], |row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt.query_row(params![refno.0], |row: &Row| row.get(0)).ok()?;
         bincode::deserialize(&data).ok()
     }
 
@@ -432,11 +432,11 @@ impl AabbCache {
     }
 
     pub fn get_ref_bbox(&self, refno: RefU64) -> Option<RStarBoundingBox> {
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM ref_bbox WHERE refno = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![refno.0], |row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt.query_row(params![refno.0], |row: &Row| row.get(0)).ok()?;
         let stored: StoredRStarBBox = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
     }
@@ -527,13 +527,13 @@ impl AabbCache {
         };
 
         let refno_key = refno_enum.to_string();
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM versioned_ref_bbox WHERE refno_key = ?1 AND session = ?2")
             .ok()?;
 
         let data: Vec<u8> = stmt
-            .query_row(params![refno_key, session], |row| row.get(0))
+            .query_row(params![refno_key, session], |row: &Row| row.get(0))
             .ok()?;
         let versioned: VersionedStoredAabb = bincode::deserialize(&data).ok()?;
 
@@ -549,7 +549,7 @@ impl AabbCache {
             let query = "SELECT session, data FROM versioned_ref_bbox WHERE refno_key LIKE ?1 ORDER BY session";
             if let Ok(mut stmt) = conn.prepare(query) {
                 let prefix = format!("{}%", refno.0);
-                if let Ok(rows) = stmt.query_map(params![prefix], |row| {
+                if let Ok(rows) = stmt.query_map(params![prefix], |row: &Row| {
                     let session: u32 = row.get(0)?;
                     let data: Vec<u8> = row.get(1)?;
                     Ok((session, data))
@@ -624,13 +624,13 @@ impl AabbCache {
         };
 
         let refno_key = refno_enum.to_string();
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn
             .prepare("SELECT data FROM refno_time_data WHERE refno_key = ?1 AND session = ?2")
             .ok()?;
 
         let data: Vec<u8> = stmt
-            .query_row(params![refno_key, session], |row| row.get(0))
+            .query_row(params![refno_key, session], |row: &Row| row.get(0))
             .ok()?;
         bincode::deserialize(&data).ok()
     }
@@ -645,13 +645,13 @@ impl AabbCache {
     }
 
     pub fn get_sesno_time_mapping(&self, dbnum: u32, sesno: u32) -> Option<SesnoTimeMapping> {
-        let conn = self.get_connection().ok()?;
-        let mut stmt = conn.prepare(
+        let conn: Connection = self.get_connection().ok()?;
+        let mut stmt: Statement = conn.prepare(
             "SELECT timestamp, description FROM sesno_time_mapping WHERE dbnum = ?1 AND sesno = ?2"
         ).ok()?;
 
-        let result = stmt
-            .query_row(params![dbnum, sesno], |row| {
+        let result: SesnoTimeMapping = stmt
+            .query_row(params![dbnum, sesno], |row: &Row| {
                 Ok(SesnoTimeMapping {
                     dbnum,
                     sesno,
@@ -670,18 +670,18 @@ impl AabbCache {
         let conn = self.get_connection()?;
 
         let ref_bbox_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row: &Row| row.get(0))?;
 
         let versioned_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM versioned_ref_bbox", [], |row| {
+            conn.query_row("SELECT COUNT(*) FROM versioned_ref_bbox", [], |row: &Row| {
                 row.get(0)
             })?;
 
         let time_data_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM refno_time_data", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM refno_time_data", [], |row: &Row| row.get(0))?;
 
         let sesno_mapping_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM sesno_time_mapping", [], |row| {
+            conn.query_row("SELECT COUNT(*) FROM sesno_time_mapping", [], |row: &Row| {
                 row.get(0)
             })?;
 
@@ -713,7 +713,7 @@ impl AabbCache {
     pub fn load_all_ref_bboxes(&self) -> anyhow::Result<Vec<RStarBoundingBox>> {
         let conn = self.get_connection()?;
         let mut stmt = conn.prepare("SELECT data FROM ref_bbox")?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([], |row: &Row| {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         })?;
@@ -753,7 +753,7 @@ impl AabbCache {
     pub fn get_all_geo_hashes(&self) -> anyhow::Result<Vec<String>> {
         let conn = self.get_connection()?;
         let mut stmt = conn.prepare("SELECT geo_hash FROM geo_aabb")?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([], |row: &Row| {
             let hash: String = row.get(0)?;
             Ok(hash)
         })?;
@@ -777,9 +777,9 @@ impl AabbCache {
 
     pub fn count_ref_bboxes(&self) -> usize {
         if let Ok(conn) = self.get_connection() {
-            if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row| {
-                let count: i64 = row.get(0)?;
-                Ok(count as usize)
+            if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row: &Row| {
+                let c: i64 = row.get(0)?;
+                Ok(c as usize)
             }) {
                 return count;
             }

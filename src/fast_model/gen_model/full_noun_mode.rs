@@ -1,6 +1,10 @@
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::options::DbOption;
+use aios_core::pdms_types::{
+    GNERAL_LOOP_OWNER_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, USE_CATE_NOUN_NAMES,
+};
+use aios_core::pe::SPdmsElement;
 use dashmap::DashMap;
 use glam::Vec3;
 use std::collections::HashSet;
@@ -8,16 +12,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+use crate::fast_model::{cata_model, query_provider};
 use super::cate_processor::process_cate_refno_page;
 use super::categorized_refnos::CategorizedRefnos;
 use super::config::FullNounConfig;
 use super::context::NounProcessContext;
 use super::errors::{FullNounError, Result};
 use super::loop_processor::process_loop_refno_page;
-use super::noun_collection::FullNounCollection;
 use super::prim_processor::process_prim_refno_page;
-use super::processor::NounProcessor;
-
 // Performance profiling support
 #[cfg(feature = "profile")]
 use tracing::{info, instrument};
@@ -62,174 +64,406 @@ pub async fn gen_full_noun_geos_optimized(
 ) -> Result<CategorizedRefnos> {
     let total_start = Instant::now();
 
-    println!("🚀 启动 Full Noun 模式（优化版本）");
+    println!("🚀 启动 Full Noun 模式（入口 Noun 深度查询版本）");
     config.print_info();
 
-    // 收集所有 Noun（应用配置过滤）
-    let collection = FullNounCollection::collect_with_config(None, Some(config));
+    // 🔥 读取 manual_db_nums 配置（用于过滤数据库）
+    let dbnums: Vec<u32> = db_option.manual_db_nums.clone().unwrap_or_default();
+    if !dbnums.is_empty() {
+        println!("🗂️  数据库过滤: 仅查询 dbnum = {:?}", dbnums);
+    } else {
+        println!("🗂️  数据库过滤: 查询所有数据库（未设置 manual_db_nums）");
+    }
+
+    let has_explicit_entry_nouns = config
+        .enabled_categories
+        .iter()
+        .any(|cat| {
+            let lower = cat.to_lowercase();
+            !matches!(lower.as_str(), "cate" | "loop" | "prim")
+        });
+
+    let entry_nouns: Vec<String> = if has_explicit_entry_nouns {
+        config
+            .enabled_categories
+            .iter()
+            .filter(|cat| {
+                let lower = cat.to_lowercase();
+                !matches!(lower.as_str(), "cate" | "loop" | "prim")
+            })
+            .cloned()
+            .collect()
+    } else {
+        let mut set = HashSet::new();
+        for &noun in GNERAL_LOOP_OWNER_NOUN_NAMES
+            .iter()
+            .chain(GNERAL_PRIM_NOUN_NAMES.iter())
+            .chain(USE_CATE_NOUN_NAMES.iter())
+        {
+            set.insert(noun.to_string());
+        }
+        set.into_iter().collect()
+    };
+
+    if entry_nouns.is_empty() {
+        println!("[gen_full_noun_geos] 入口 Noun 列表为空，直接返回");
+        return Ok(CategorizedRefnos::new());
+    }
+
+    println!("📌 入口 Noun 列表: {:?}", entry_nouns);
+
+    let mut all_roots: HashSet<RefnoEnum> = HashSet::new();
+    let mut loop_refnos: HashSet<RefnoEnum> = HashSet::new();
+    let mut prim_refnos: HashSet<RefnoEnum> = HashSet::new();
+    let mut cate_refnos: HashSet<RefnoEnum> = HashSet::new();
+    // BRAN/HANG 根节点单独收集，避免混入普通 CATE 流程
+    let mut bran_hanger_roots: HashSet<RefnoEnum> = HashSet::new();
+
+    for entry in &entry_nouns {
+        let noun_upper = entry.to_uppercase();
+        let noun_str = noun_upper.as_str();
+        let nouns_slice = [noun_str];
+
+        // 🔥 使用 manual_db_nums 过滤（如果配置了）
+        let mut refnos = aios_core::mdb::query_type_refnos_by_dbnums(&nouns_slice, &dbnums)
+            .await
+            .map_err(|e| {
+                FullNounError::DatabaseError(format!(
+                    "query_type_refnos_by_dbnums({}, dbnums={:?}) failed: {}",
+                    noun_str, dbnums, e
+                ))
+            })?;
+
+        if let Some(limit) = config.debug_limit_per_noun {
+            if refnos.len() > limit {
+                println!(
+                    "[gen_full_noun_geos] 入口 noun {}: 调试模式限制实例数量从 {} 到 {}",
+                    noun_str,
+                    refnos.len(),
+                    limit
+                );
+                refnos.truncate(limit);
+            }
+        }
+
+        if refnos.is_empty() {
+            println!(
+                "[gen_full_noun_geos] 入口 noun {}: 未找到实例，跳过",
+                noun_str
+            );
+            continue;
+        }
+
+        all_roots.extend(refnos.iter().copied());
+
+        // 🔥 BRAN/HANG 作为特殊类型单独处理（用于 Tubing 生成）
+        if noun_str == "BRAN" || noun_str == "HANG" {
+            bran_hanger_roots.extend(refnos.iter().copied());
+            println!(
+                "[gen_full_noun_geos] {} 作为 BRAN/HANG 特殊处理（Tubing）",
+                noun_str
+            );
+        }
+
+        if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&noun_str) {
+            loop_refnos.extend(refnos.iter().copied());
+        }
+        if GNERAL_PRIM_NOUN_NAMES.contains(&noun_str) {
+            prim_refnos.extend(refnos.iter().copied());
+        }
+        if USE_CATE_NOUN_NAMES.contains(&noun_str) {
+            cate_refnos.extend(refnos.iter().copied());
+        }
+    }
+
+    if all_roots.is_empty() {
+        println!(
+            "[gen_full_noun_geos] 入口 Noun {:?}: 未找到任何实例，直接返回",
+            entry_nouns
+        );
+        return Ok(CategorizedRefnos::new());
+    }
+
     println!(
-        "📋 收集到 {} 个 Noun 类型（Cate: {}, Loop: {}, Prim: {}）",
-        collection.total_count(),
-        collection.cate_nouns.len(),
-        collection.loop_owner_nouns.len(),
-        collection.prim_nouns.len()
+        "[gen_full_noun_geos] 入口 Noun {:?}: 根节点总数 {}",
+        entry_nouns,
+        all_roots.len()
     );
 
-    // 创建共享的 SJUS map（空的，需要验证）
-    let loop_sjus_map_arc = Arc::new(DashMap::new());
+    let roots_vec: Vec<RefnoEnum> = all_roots.iter().copied().collect();
 
-    // 验证 SJUS map
+    let loop_descendants = aios_core::collect_descendant_filter_ids(
+        &roots_vec,
+        &GNERAL_LOOP_OWNER_NOUN_NAMES,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        FullNounError::DatabaseError(format!(
+            "collect_descendant_filter_ids(loop) failed: {}",
+            e
+        ))
+    })?;
+    loop_refnos.extend(loop_descendants);
+
+    let prim_descendants = aios_core::collect_descendant_filter_ids(
+        &roots_vec,
+        &GNERAL_PRIM_NOUN_NAMES,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        FullNounError::DatabaseError(format!(
+            "collect_descendant_filter_ids(prim) failed: {}",
+            e
+        ))
+    })?;
+    prim_refnos.extend(prim_descendants);
+
+    let cate_descendants = aios_core::collect_descendant_filter_ids(
+        &roots_vec,
+        &USE_CATE_NOUN_NAMES,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        FullNounError::DatabaseError(format!(
+            "collect_descendant_filter_ids(cate) failed: {}",
+            e
+        ))
+    })?;
+    cate_refnos.extend(cate_descendants);
+
+    println!(
+        " 深度查询结果：Loop={}，Prim={}，Cate={}",
+        loop_refnos.len(),
+        prim_refnos.len(),
+        cate_refnos.len()
+    );
+
+    let loop_sjus_map_arc = Arc::new(DashMap::new());
     validate_sjus_map(&loop_sjus_map_arc, config)?;
 
-    // 创建处理上下文
     let ctx = NounProcessContext::new(
         db_option.clone(),
         config.batch_size.get(),
         config.concurrency.get(),
     );
 
-    // 创建三个独立的收集器（用于并发处理）
-    let cate_sink = Arc::new(RwLock::new(HashSet::new()));
-    let loop_sink = Arc::new(RwLock::new(HashSet::new()));
-    let prim_sink = Arc::new(RwLock::new(HashSet::new()));
+    let mut categorized = CategorizedRefnos::new();
 
-    // ⚡ 顺序执行：LOOP -> PRIM -> CATE（内部批量并发）
-    println!("⚡ 开始顺序处理三个 Noun 类别（LOOP -> PRIM -> CATE）...");
-
-    // 1️⃣ 先执行 LOOP 处理
-    println!("📍 [1/3] 处理 LOOP Nouns...");
+    println!("📍 [1/3] 处理 LOOP Refno 集合...");
     let loop_start = Instant::now();
-    let loop_result = {
-        let processor = NounProcessor::new(ctx.clone(), "loop");
-        let loop_nouns = collection.loop_owner_nouns.clone();
-        let loop_sjus_map = loop_sjus_map_arc.clone();
-        let loop_sender = sender.clone();
-
-        processor
-            .process_nouns(&loop_nouns, loop_sink.clone(), |refnos| {
-                let ctx_clone = processor.ctx.clone();
-                let sjus_map_clone = loop_sjus_map.clone();
-                let sender_clone = loop_sender.clone();
-                async move {
-                    process_loop_refno_page(&ctx_clone, sjus_map_clone, sender_clone, &refnos)
-                        .await
-                        .map_err(Into::into)
-                }
-            })
-            .await?;
-        loop_sink
-    };
+    let loop_vec: Vec<RefnoEnum> = loop_refnos.iter().copied().collect();
+    {
+        let ranges = ctx.bounded_chunks(loop_vec.len());
+        for (page_index, (start, end)) in ranges.into_iter().enumerate() {
+            let slice = &loop_vec[start..end];
+            println!(
+                "[gen_full_noun_geos] loop: 处理第 {} 页 ({} ~ {})",
+                page_index + 1,
+                start + 1,
+                end
+            );
+            process_loop_refno_page(&ctx, loop_sjus_map_arc.clone(), sender.clone(), slice)
+                .await
+                .map_err(|e| {
+                    FullNounError::GeometryGenerationFailed(
+                        "loop".to_string(),
+                        e.to_string(),
+                    )
+                })?;
+        }
+    }
     let loop_duration = loop_start.elapsed();
     println!("⏱️  LOOP processing took {} ms", loop_duration.as_millis());
 
     #[cfg(feature = "profile")]
     info!(
-        loop_count = collection.loop_owner_nouns.len(),
+        loop_count = loop_vec.len(),
         duration_ms = loop_duration.as_millis() as u64,
-        "LOOP Noun processing completed"
+        "LOOP Noun processing completed (entry-based)"
     );
 
-    // 2️⃣ 再执行 PRIM 处理
-    println!("📍 [2/3] 处理 PRIM Nouns...");
+    println!("📍 [2/3] 处理 PRIM Refno 集合...");
     let prim_start = Instant::now();
-    let prim_result = {
-        let processor = NounProcessor::new(ctx.clone(), "prim");
-        let prim_nouns = collection.prim_nouns.clone();
-        let prim_sender = sender.clone();
-
-        processor
-            .process_nouns(&prim_nouns, prim_sink.clone(), |refnos| {
-                let ctx_clone = processor.ctx.clone();
-                let sender_clone = prim_sender.clone();
-                async move {
-                    process_prim_refno_page(&ctx_clone, sender_clone, &refnos)
-                        .await
-                        .map_err(Into::into)
-                }
-            })
-            .await?;
-        prim_sink
-    };
+    let prim_vec: Vec<RefnoEnum> = prim_refnos.iter().copied().collect();
+    {
+        let ranges = ctx.bounded_chunks(prim_vec.len());
+        for (page_index, (start, end)) in ranges.into_iter().enumerate() {
+            let slice = &prim_vec[start..end];
+            println!(
+                "[gen_full_noun_geos] prim: 处理第 {} 页 ({} ~ {})",
+                page_index + 1,
+                start + 1,
+                end
+            );
+            process_prim_refno_page(&ctx, sender.clone(), slice)
+                .await
+                .map_err(|e| {
+                    FullNounError::GeometryGenerationFailed(
+                        "prim".to_string(),
+                        e.to_string(),
+                    )
+                })?;
+        }
+    }
     let prim_duration = prim_start.elapsed();
     println!("⏱️  PRIM processing took {} ms", prim_duration.as_millis());
 
     #[cfg(feature = "profile")]
     info!(
-        prim_count = collection.prim_nouns.len(),
+        prim_count = prim_vec.len(),
         duration_ms = prim_duration.as_millis() as u64,
-        "PRIM Noun processing completed"
+        "PRIM Noun processing completed (entry-based)"
     );
 
-    // 3️⃣ 最后执行 CATE 处理（包含 BRAN/HANG）
-    println!("📍 [3/3] 处理 CATE Nouns (包含 BRAN/HANG)...");
+    println!("📍 [3/3] 处理 CATE Refno 集合 (不含 BRAN/HANG Tubing)...");
     let cate_start = Instant::now();
-    let cate_result = {
-        let processor = NounProcessor::new(ctx.clone(), "cate");
-        let cate_nouns = collection.cate_nouns.clone();
-        let cate_sjus_map = loop_sjus_map_arc.clone();
-        let cate_sender = sender;
-
-        processor
-            .process_nouns(&cate_nouns, cate_sink.clone(), |refnos| {
-                let ctx_clone = processor.ctx.clone();
-                let sjus_map_clone = cate_sjus_map.clone();
-                let sender_clone = cate_sender.clone();
-                async move {
-                    process_cate_refno_page(&ctx_clone, sjus_map_clone, sender_clone, &refnos)
-                        .await
-                        .map_err(Into::into)
-                }
-            })
-            .await?;
-        cate_sink
-    };
+    let cate_vec: Vec<RefnoEnum> = cate_refnos.iter().copied().collect();
+    {
+        let ranges = ctx.bounded_chunks(cate_vec.len());
+        for (page_index, (start, end)) in ranges.into_iter().enumerate() {
+            let slice = &cate_vec[start..end];
+            println!(
+                "[gen_full_noun_geos] cate: 处理第 {} 页 ({} ~ {})",
+                page_index + 1,
+                start + 1,
+                end
+            );
+            process_cate_refno_page(&ctx, loop_sjus_map_arc.clone(), sender.clone(), slice)
+                .await
+                .map_err(|e| {
+                    FullNounError::GeometryGenerationFailed(
+                        "cate".to_string(),
+                        e.to_string(),
+                    )
+                })?;
+        }
+    }
     let cate_duration = cate_start.elapsed();
     println!("⏱️  CATE processing took {} ms", cate_duration.as_millis());
 
     #[cfg(feature = "profile")]
     info!(
-        cate_count = collection.cate_nouns.len(),
+        cate_count = cate_vec.len(),
         duration_ms = cate_duration.as_millis() as u64,
-        "CATE Noun processing completed (includes BRAN/HANG)"
+        "CATE Noun processing completed (entry-based)"
     );
 
-    // 提取结果
-    let loop_refnos = loop_result;
-    let prim_refnos = prim_result;
-    let cate_refnos = cate_result;
-
-    // 合并到统一的分类存储（内存优化）
-    let mut categorized = CategorizedRefnos::new();
-
-    {
-        let cate_set = cate_refnos.read().await;
-        categorized.extend(
-            cate_set
-                .iter()
-                .map(|r| (*r, super::models::NounCategory::Cate)),
+    // 📍 [4/3] 专门处理 BRAN/HANG Tubing（需要 branch_map 支持）
+    let bran_start = Instant::now();
+    let bran_roots: Vec<RefnoEnum> = bran_hanger_roots.iter().copied().collect();
+    if !bran_roots.is_empty() {
+        println!(
+            "📍 [4/3] 处理 BRAN/HANG 根节点集合 (count={})...",
+            bran_roots.len()
         );
+
+        // 参考旧版实现：每批处理少量 BRAN/HANG，避免单次 SQL 过大
+        let batch_size = 4usize;
+        let total_bran = bran_roots.len();
+        let chunks: Vec<&[RefnoEnum]> = bran_roots.chunks(batch_size).collect();
+        let total_batches = chunks.len();
+
+        for (batch_idx, chunk) in chunks.into_iter().enumerate() {
+            let batch_num = batch_idx + 1;
+            println!(
+                "[gen_full_noun_geos] 处理 BRAN/HANG 批次 {}/{} ({}~{} 个)",
+                batch_num,
+                total_batches,
+                batch_idx * batch_size + 1,
+                (batch_idx * batch_size + chunk.len()).min(total_bran)
+            );
+
+            // 1. 查询当前批次的子元素
+            let branch_refnos_map: DashMap<RefnoEnum, Vec<SPdmsElement>> = DashMap::new();
+
+            for &refno in chunk {
+                match aios_core::collect_children_elements(refno, &[]).await {
+                    Ok(children) => {
+                        if !children.is_empty() {
+                            branch_refnos_map.insert(refno, children);
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "[gen_full_noun_geos] 查询 BRAN/HANG 子元素失败 (refno={}): {}",
+                            refno, e
+                        );
+                    }
+                }
+            }
+
+            if branch_refnos_map.is_empty() {
+                println!(
+                    "[gen_full_noun_geos] 批次 {}: 未找到任何 BRAN/HANG 子元素，跳过 Tubing 生成",
+                    batch_num
+                );
+                continue;
+            }
+
+            // 2. 查询当前批次的元件库分组（按 cata_hash）
+            let target_bran_reuse_cata_map = match aios_core::query_group_by_cata_hash(chunk).await
+            {
+                Ok(map) => map,
+                Err(e) => {
+                    println!(
+                        "[gen_full_noun_geos] 批次 {}: 查询 BRAN/HANG 元件库分组失败: {}",
+                        batch_num, e
+                    );
+                    DashMap::new()
+                }
+            };
+
+            // 3. 调用 cata_model::gen_cata_geos 生成 Tubing 几何体
+            if let Err(e) = cata_model::gen_cata_geos(
+                db_option.clone(),
+                Arc::new(target_bran_reuse_cata_map),
+                Arc::new(branch_refnos_map),
+                loop_sjus_map_arc.clone(),
+                sender.clone(),
+            )
+            .await
+            {
+                println!(
+                    "[gen_full_noun_geos] 批次 {}: BRAN/HANG Tubing 几何生成失败: {}",
+                    batch_num, e
+                );
+            } else {
+                println!(
+                    "[gen_full_noun_geos] 批次 {}/{} BRAN/HANG Tubing 生成完成",
+                    batch_num, total_batches
+                );
+            }
+        }
+    } else {
+        println!("[gen_full_noun_geos] BRAN/HANG 根节点集合为空，跳过 Tubing 生成");
     }
+    let bran_duration = bran_start.elapsed();
+    println!(
+        "⏱️  BRAN/HANG Tubing processing took {} ms",
+        bran_duration.as_millis()
+    );
 
-    {
-        let loop_set = loop_refnos.read().await;
-        categorized.extend(
-            loop_set
-                .iter()
-                .map(|r| (*r, super::models::NounCategory::LoopOwner)),
-        );
+    // 将 BRAN/HANG 根节点也归类为 Cate，便于后续 mesh 深度遍历
+    let bran_vec: Vec<RefnoEnum> = bran_hanger_roots.iter().copied().collect();
+
+    for r in &cate_vec {
+        categorized.insert(*r, super::models::NounCategory::Cate);
     }
-
-    {
-        let prim_set = prim_refnos.read().await;
-        categorized.extend(
-            prim_set
-                .iter()
-                .map(|r| (*r, super::models::NounCategory::Prim)),
-        );
+    for r in &bran_vec {
+        categorized.insert(*r, super::models::NounCategory::Cate);
+    }
+    for r in &loop_vec {
+        categorized.insert(*r, super::models::NounCategory::LoopOwner);
+    }
+    for r in &prim_vec {
+        categorized.insert(*r, super::models::NounCategory::Prim);
     }
 
     let total_duration = total_start.elapsed();
-    println!("✅ Full Noun 处理完成");
+    println!("✅ Full Noun 处理完成（入口 Noun 深度查询版本）");
     println!(
         "⏱️  Total Full Noun processing: {} ms",
         total_duration.as_millis()
@@ -245,9 +479,14 @@ pub async fn gen_full_noun_geos_optimized(
         prim_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
     );
     println!(
-        "   └─ CATE: {} ms ({:.1}%)",
+        "   ├─ CATE: {} ms ({:.1}%)",
         cate_duration.as_millis(),
         cate_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
+    );
+    println!(
+        "   └─ BRAN/HANG Tubing: {} ms ({:.1}%)",
+        bran_duration.as_millis(),
+        bran_duration.as_secs_f64() / total_duration.as_secs_f64() * 100.0
     );
 
     categorized.print_statistics();
@@ -258,8 +497,7 @@ pub async fn gen_full_noun_geos_optimized(
         loop_ms = loop_duration.as_millis() as u64,
         prim_ms = prim_duration.as_millis() as u64,
         cate_ms = cate_duration.as_millis() as u64,
-        total_nouns = collection.total_count(),
-        "Full Noun generation completed with performance metrics"
+        "Full Noun generation completed with performance metrics (entry-based)"
     );
 
     Ok(categorized)

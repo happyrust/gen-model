@@ -45,12 +45,24 @@ pub async fn gen_cata_single_geoms(
     let type_name = desi_att.get_type_str();
     let owner = desi_att.get_owner();
     if !owner.is_valid() {
+        use crate::fast_model::ModelErrorKind;
+        crate::model_error!(
+            code = "E-REF-002",
+            kind = ModelErrorKind::InvalidReference,
+            stage = "validate_owner",
+            refno = design_refno,
+            desc = "DESI元件owner无效",
+            "design_refno={}, owner={}, type_name={}",
+            design_refno,
+            owner,
+            type_name
+        );
         return Ok(false);
     }
 
     // Timing for resolve_desi_comp
     let t_resolve = std::time::Instant::now();
-    let geoms_info = resolve_desi_comp(design_refno, None).await.unwrap();
+    let geoms_info = resolve_desi_comp(design_refno, None).await?;
     let resolve_time = t_resolve.elapsed().as_millis();
 
     // DEBUG: Print basic info
@@ -183,6 +195,23 @@ pub async fn gen_cata_single_geoms(
             .map(|v| v.len())
             .unwrap_or(0)
     );
+
+    // 检查是否完全没有几何成功转换
+    if geo_count == 0 && ngeo_count == 0 {
+        use crate::fast_model::ModelErrorKind;
+        crate::model_error!(
+            code = "E-GEO-003",
+            kind = ModelErrorKind::UnsupportedGeometry,
+            stage = "convert_to_csg_shapes",
+            refno = design_refno,
+            desc = "元件未生成任何几何",
+            "design_refno={}, type_name={}, geometries_len={}, n_geometries_len={}",
+            design_refno,
+            type_name,
+            geometries.len(),
+            n_geometries.len()
+        );
+    }
 
     #[cfg(feature = "profile")]
     {

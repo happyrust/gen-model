@@ -12,6 +12,7 @@ pub mod loop_model;
 pub mod shared;
 
 pub mod error_macros;
+pub use error_macros::ModelErrorKind;
 
 pub mod capture;
 
@@ -21,6 +22,7 @@ pub mod mesh_generate;
 pub mod room_model_v2; // 改进版本的房间模型
 
 // Re-export room model v2 functions
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
 pub use room_model_v2::{
     IncrementalUpdateResult, RoomBuildStats, build_room_relations_v2,
     rebuild_room_relations_for_rooms, regenerate_room_models_by_keywords,
@@ -49,7 +51,9 @@ pub mod aabb_tree;
 
 pub mod incremental;
 
+#[cfg(feature = "sqlite-index")]
 pub mod aabb_cache;
+#[cfg(feature = "sqlite-index")]
 pub mod session;
 
 pub mod concurrency;

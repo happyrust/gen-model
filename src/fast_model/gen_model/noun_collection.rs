@@ -35,9 +35,7 @@ impl FullNounCollection {
         extra_nouns: Option<&[&'static str]>,
         config: Option<&super::config::FullNounConfig>,
     ) -> Self {
-        let mut all_nouns = HashSet::new();
-
-        // 收集 cate nouns
+        // 收集 cate nouns（仅在类别内部去重，不做跨类别互斥）
         let mut cate_nouns = Vec::new();
         for &noun in USE_CATE_NOUN_NAMES.iter() {
             // 应用配置过滤
@@ -47,7 +45,7 @@ impl FullNounCollection {
                 }
             }
 
-            if all_nouns.insert(noun) {
+            if !cate_nouns.contains(&noun) {
                 cate_nouns.push(noun);
             }
         }
@@ -62,7 +60,7 @@ impl FullNounCollection {
                 }
             }
 
-            if all_nouns.insert(noun) {
+            if !loop_owner_nouns.contains(&noun) {
                 loop_owner_nouns.push(noun);
             }
         }
@@ -77,7 +75,7 @@ impl FullNounCollection {
                 }
             }
 
-            if all_nouns.insert(noun) {
+            if !prim_nouns.contains(&noun) {
                 prim_nouns.push(noun);
             }
         }
@@ -92,16 +90,29 @@ impl FullNounCollection {
                     }
                 }
 
-                if all_nouns.insert(noun) {
-                    // 简单策略：额外的 noun 默认归入 cate 类别
-                    // 实际使用时可以根据需要调整
-                    if !cate_nouns.contains(&noun)
-                        && !loop_owner_nouns.contains(&noun)
-                        && !prim_nouns.contains(&noun)
-                    {
-                        cate_nouns.push(noun);
-                    }
+                // 简单策略：额外的 noun 默认归入 cate 类别
+                // 实际使用时可以根据需要调整
+                if !cate_nouns.contains(&noun)
+                    && !loop_owner_nouns.contains(&noun)
+                    && !prim_nouns.contains(&noun)
+                {
+                    cate_nouns.push(noun);
                 }
+            }
+        }
+
+        // 汇总所有 noun，构建去重集合（允许同一个 noun 同时属于多个类别）
+        let mut all_nouns = HashSet::new();
+        for &noun in cate_nouns
+            .iter()
+            .chain(loop_owner_nouns.iter())
+            .chain(prim_nouns.iter())
+        {
+            all_nouns.insert(noun);
+        }
+        if let Some(extras) = extra_nouns {
+            for &noun in extras {
+                all_nouns.insert(noun);
             }
         }
 
@@ -163,11 +174,21 @@ mod tests {
     fn test_collect_nouns() {
         let collection = FullNounCollection::collect(None);
 
-        // 验证没有重复
+        // 所有类别中的 noun 都应该出现在 all_nouns 中
+        for &noun in collection
+            .cate_nouns
+            .iter()
+            .chain(collection.loop_owner_nouns.iter())
+            .chain(collection.prim_nouns.iter())
+        {
+            assert!(collection.all_nouns.contains(noun));
+        }
+
+        // all_nouns 去重后的数量不大于各类别总和
         let total_in_lists = collection.cate_nouns.len()
             + collection.loop_owner_nouns.len()
             + collection.prim_nouns.len();
-        assert_eq!(total_in_lists, collection.all_nouns.len());
+        assert!(collection.all_nouns.len() <= total_in_lists);
     }
 
     #[test]

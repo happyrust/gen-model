@@ -122,7 +122,7 @@ impl CategorizedRefnos {
         println!("║      Refno 分类统计                      ║");
         println!("╠════════════════════════════════════════╣");
         println!("║ Cate (元件库):  {:<21} ║", stats.cate_count);
-        println!("║ Loop (管道):    {:<21} ║", stats.loop_count);
+        println!("║ Loop (拉伸旋转体):    {:<17} ║", stats.loop_count);
         println!("║ Prim (基本体):  {:<21} ║", stats.prim_count);
         println!("╟────────────────────────────────────────╢");
         println!("║ 总计:           {:<21} ║", stats.total_count());

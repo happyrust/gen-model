@@ -263,3 +263,72 @@ mod tests {
         assert_eq!(emoji_for_key("unknown"), "ℹ️");
     }
 }
+
+/// 模型生成错误类型枚举
+#[derive(Debug, Clone, Copy)]
+pub enum ModelErrorKind {
+    /// 数据缺失
+    DataMissing,
+    /// 数据库不一致
+    DbInconsistent,
+    /// 无效引用
+    InvalidReference,
+    /// 无效几何
+    InvalidGeometry,
+    /// 拓扑错误
+    TopologyError,
+    /// 不支持的几何类型
+    UnsupportedGeometry,
+    /// 流水线错误
+    PipelineError,
+    /// 性能超时
+    PerformanceTimeout,
+    /// 导出错误
+    ExportError,
+    /// 实例化错误
+    InstanceError,
+    /// Panic
+    Panic,
+    /// 未知错误
+    Unknown,
+}
+
+/// 模型错误记录宏 - 用于统一记录模型生成过程中的错误
+/// 
+/// # 使用示例
+/// ```rust
+/// model_error!(
+///     code = "E-REF-001",
+///     kind = ModelErrorKind::InvalidReference,
+///     stage = "get_cat_refno",
+///     refno = ele_refno,
+///     desc = "获取元件库引用失败",
+///     "详细信息: ele_refno={}, result={:?}",
+///     ele_refno,
+///     result
+/// );
+/// ```
+#[macro_export]
+macro_rules! model_error {
+    (
+        code = $code:expr,
+        kind = $kind:expr,
+        stage = $stage:expr,
+        refno = $refno:expr,
+        desc = $desc:expr,
+        $($fmt:tt)*
+    ) => {{
+        let msg = format!($($fmt)*);
+        let line = format!(
+            "[MODEL_ERROR] code={} kind={:?} stage={} refno={} desc=\"{}\" msg={}",
+            $code,
+            $kind,
+            $stage,
+            $refno,
+            $desc,
+            msg
+        );
+        // 使用 smart_debug_error 确保在 errors-only 模式下也能输出
+        $crate::smart_debug_error!("{}", line);
+    }};
+}

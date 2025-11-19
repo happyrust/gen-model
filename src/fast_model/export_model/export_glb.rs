@@ -66,16 +66,14 @@ pub async fn export_glb_for_refnos(
             .await
             .context("查询 inst_relate 数据失败")?;
 
-        if geom_insts.is_empty() {
+        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true).await?;
+        let total_instances: usize = export_data.total_instances;
+        println!("   - 总几何体实例数: {}", total_instances);
+
+        if total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");
             return Ok(());
         }
-
-        println!("   - 找到 {} 个几何体组", geom_insts.len());
-        let total_instances: usize = geom_insts.iter().map(|g| g.insts.len()).sum();
-        println!("   - 总几何体实例数: {}", total_instances);
-
-        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true).await?;
         let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
         println!("\n💾 导出 GLB 文件...");
@@ -97,12 +95,11 @@ pub async fn export_glb_for_refnos(
         .await
         .context("查询 inst_relate 数据失败")?;
 
-    if geom_insts.is_empty() {
+    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true).await?;
+    if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体数据");
         return Ok(());
     }
-
-    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true).await?;
     let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
     println!("\n💾 导出 GLB 文件...");
@@ -646,7 +643,10 @@ impl ModelExporter for GlbExporter {
 
         let geom_insts = query_geometry_instances(&all_refnos, true, config.common.verbose).await?;
 
-        if geom_insts.is_empty() {
+        let export_data =
+            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
+
+        if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");
             stats.elapsed_time = start_time.elapsed();
             return Ok(GlbExportResult {
@@ -655,15 +655,11 @@ impl ModelExporter for GlbExporter {
             });
         }
 
-        stats.geometry_count = geom_insts.iter().map(|g| g.insts.len()).sum();
-
         // 创建输出目录（如果不存在）
         if let Some(parent) = Path::new(output_path).parent() {
             std::fs::create_dir_all(parent).context("创建输出目录失败")?;
         }
 
-        let export_data =
-            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
         let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
         let (node_count, mesh_count, mesh_lookup) = export_mesh_to_glb(
@@ -676,7 +672,7 @@ impl ModelExporter for GlbExporter {
 
         stats.mesh_files_found = export_data.loaded_count;
         stats.mesh_files_missing = export_data.failed_count;
-        stats.geometry_count += export_data.tubi_count;
+        stats.geometry_count = export_data.total_instances;
         stats.node_count = node_count;
         stats.mesh_count = mesh_count;
 

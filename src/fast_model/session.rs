@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use once_cell::sync::Lazy;
 use pdms_io::io::PdmsIO;
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, Error, Result as SqlResult, Row, params};
 
 // 仅管理与"会话/版本"相关的数据结构与逻辑
 
@@ -68,11 +68,11 @@ impl SessionStore {
 
     /// 读取某个 dbnum 在本地缓存中记录到的最大 sesno
     pub fn get_max_sesno_for_dbnum(&self, dbnum: u32) -> Option<u32> {
-        let conn = self.get_connection().ok()?;
+        let conn: Connection = self.get_connection().ok()?;
         let result: Result<u32, _> = conn.query_row(
             "SELECT MAX(sesno) FROM sesno_time_mapping WHERE dbnum = ?1",
             params![dbnum],
-            |row| row.get(0),
+            |row: &Row| row.get(0),
         );
         result.ok()
     }
@@ -94,11 +94,11 @@ impl SessionStore {
 
     /// 获取指定 sesno 的时间映射
     pub fn get_sesno_time_mapping(&self, dbnum: u32, sesno: u32) -> Option<u64> {
-        let conn = self.get_connection().ok()?;
+        let conn: Connection = self.get_connection().ok()?;
         let result: Result<u64, _> = conn.query_row(
             "SELECT timestamp FROM sesno_time_mapping WHERE dbnum = ?1 AND sesno = ?2",
             params![dbnum, sesno],
-            |row| row.get(0),
+            |row: &Row| row.get(0),
         );
         result.ok()
     }
@@ -109,12 +109,16 @@ impl SessionStore {
             if let Ok(mut stmt) = conn.prepare(
                 "SELECT sesno, timestamp FROM sesno_time_mapping WHERE dbnum = ?1 ORDER BY sesno",
             ) {
-                if let Ok(rows) = stmt.query_map(params![dbnum], |row| {
-                    let sesno: u32 = row.get(0)?;
-                    let timestamp: u64 = row.get(1)?;
-                    Ok((sesno, timestamp))
-                }) {
-                    return rows.filter_map(|r| r.ok()).collect();
+                if let Ok(rows) =
+                    stmt.query_map(params![dbnum], |row: &Row| -> Result<(u32, u64), Error> {
+                        let sesno: u32 = row.get(0)?;
+                        let timestamp: u64 = row.get(1)?;
+                        Ok((sesno, timestamp))
+                    })
+                {
+                    return rows
+                        .filter_map(|r: Result<(u32, u64), Error>| r.ok())
+                        .collect();
                 }
             }
         }

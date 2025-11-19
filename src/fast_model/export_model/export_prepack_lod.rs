@@ -243,14 +243,14 @@ pub async fn export_prepack_lod_for_refnos(
     let geom_insts = query_geometry_instances(&expanded_refnos, true, verbose)
         .await
         .context("查询几何体实例失败")?;
-    if geom_insts.is_empty() {
-        println!("⚠️  未找到任何几何体实例，跳过 manifest 生成");
-        return Ok(());
-    }
-
     let export_data = collect_export_data(geom_insts, &expanded_refnos, &primary_mesh_dir, verbose)
         .await
         .context("收集导出数据失败")?;
+
+    if export_data.total_instances == 0 {
+        println!("⚠️  未找到任何几何体实例，跳过 manifest 生成");
+        return Ok(());
+    }
 
     // 加载材质与配色信息（严格按照 ColorSchemes.toml / 默认方案）
     let material_library =

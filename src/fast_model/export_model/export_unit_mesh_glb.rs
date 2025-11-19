@@ -77,16 +77,13 @@ pub async fn export_unit_mesh_glb_for_refnos(
             .await
             .context("查询 inst_relate 数据失败")?;
 
-        if geom_insts.is_empty() {
+        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true).await?;
+
+        if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");
             return Ok(());
         }
 
-        println!("   - 找到 {} 个几何体组", geom_insts.len());
-        let total_instances: usize = geom_insts.iter().map(|g| g.insts.len()).sum();
-        println!("   - 总几何体实例数: {}", total_instances);
-
-        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true).await?;
         let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
         println!("\n💾 导出单位 mesh GLB 文件...");
@@ -108,12 +105,12 @@ pub async fn export_unit_mesh_glb_for_refnos(
         .await
         .context("查询 inst_relate 数据失败")?;
 
-    if geom_insts.is_empty() {
+    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true).await?;
+
+    if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体数据");
         return Ok(());
     }
-
-    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true).await?;
     let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
     println!("\n💾 导出单位 mesh GLB 文件...");
@@ -147,9 +144,10 @@ fn export_unit_mesh_to_glb(
     let mut sorted_geo_hashes: Vec<_> = export_data.unique_geometries.keys().collect();
     sorted_geo_hashes.sort();
 
-    // 构建 buffer 数据：为每个唯一几何体生成 positions/normals/indices
+    // 构建 buffer 数据：为每个唯一几何体生成 positions/normals/uvs/indices
     let mut all_positions_bytes = Vec::new();
     let mut all_normals_bytes = Vec::new();
+    let mut all_uvs_bytes = Vec::new();
     let mut all_indices_bytes = Vec::new();
 
     // 记录每个几何体在 buffer 中的偏移和范围
@@ -158,6 +156,8 @@ fn export_unit_mesh_to_glb(
         positions_count: usize,
         normals_offset: usize,
         normals_count: usize,
+        uvs_offset: usize,
+        uvs_count: usize,
         indices_offset: usize,
         indices_count: usize,
         min_pos: Vec3,
@@ -202,6 +202,20 @@ fn export_unit_mesh_to_glb(
             all_normals_bytes.extend_from_slice(&normal.z.to_le_bytes());
         }
 
+        // UVs（若数量与顶点数不一致，则填充 0.0，保证导出稳定）
+        let uvs_offset = all_uvs_bytes.len();
+        if mesh.uvs.len() == vertex_count {
+            for uv in &mesh.uvs {
+                all_uvs_bytes.extend_from_slice(&uv[0].to_le_bytes());
+                all_uvs_bytes.extend_from_slice(&uv[1].to_le_bytes());
+            }
+        } else {
+            for _ in 0..vertex_count {
+                all_uvs_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+                all_uvs_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+            }
+        }
+
         // Indices
         let indices_offset = all_indices_bytes.len();
         for index in &mesh.indices {
@@ -215,6 +229,8 @@ fn export_unit_mesh_to_glb(
                 positions_count: vertex_count,
                 normals_offset,
                 normals_count: mesh.normals.len(),
+                uvs_offset,
+                uvs_count: vertex_count,
                 indices_offset,
                 indices_count: mesh.indices.len(),
                 min_pos,
@@ -226,16 +242,20 @@ fn export_unit_mesh_to_glb(
     // 组装最终 buffer
     let positions_byte_length = all_positions_bytes.len();
     let normals_byte_length = all_normals_bytes.len();
+    let uvs_byte_length = all_uvs_bytes.len();
     let indices_byte_length = all_indices_bytes.len();
 
     let positions_buffer_offset = 0usize;
     let normals_buffer_offset = positions_buffer_offset + positions_byte_length;
-    let indices_buffer_offset = normals_buffer_offset + normals_byte_length;
+    let uvs_buffer_offset = normals_buffer_offset + normals_byte_length;
+    let indices_buffer_offset = uvs_buffer_offset + uvs_byte_length;
 
-    let mut buffer_data =
-        Vec::with_capacity(positions_byte_length + normals_byte_length + indices_byte_length);
+    let mut buffer_data = Vec::with_capacity(
+        positions_byte_length + normals_byte_length + uvs_byte_length + indices_byte_length,
+    );
     buffer_data.extend_from_slice(&all_positions_bytes);
     buffer_data.extend_from_slice(&all_normals_bytes);
+    buffer_data.extend_from_slice(&all_uvs_bytes);
     buffer_data.extend_from_slice(&all_indices_bytes);
     let buffer_length = buffer_data.len();
 
@@ -244,8 +264,8 @@ fn export_unit_mesh_to_glb(
     let mut accessors = Vec::new();
 
     // 为每个唯一几何体生成 accessors
-    // geo_hash -> (position_accessor_idx, normal_accessor_idx, indices_accessor_idx)
-    let mut geo_accessor_map: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    // geo_hash -> (position_accessor_idx, normal_accessor_idx, uv_accessor_idx, indices_accessor_idx)
+    let mut geo_accessor_map: HashMap<String, (u32, u32, u32, u32)> = HashMap::new();
 
     for geo_hash in &sorted_geo_hashes {
         let info = geo_buffer_info.get(*geo_hash).unwrap();
@@ -284,6 +304,22 @@ fn export_unit_mesh_to_glb(
             "type": "VEC3",
         }));
 
+        // UV BufferView & Accessor (TEXCOORD_0)
+        let uv_buffer_view_idx = buffer_views.len() as u32;
+        buffer_views.push(json!({
+            "buffer": 0,
+            "byteOffset": (uvs_buffer_offset + info.uvs_offset) as u32,
+            "byteLength": (info.uvs_count * 8) as u32,
+            "target": 34962u32
+        }));
+        let uv_accessor_idx = accessors.len() as u32;
+        accessors.push(json!({
+            "bufferView": uv_buffer_view_idx,
+            "componentType": 5126u32,
+            "count": info.uvs_count as u32,
+            "type": "VEC2",
+        }));
+
         // Indices BufferView & Accessor
         let indices_buffer_view_idx = buffer_views.len() as u32;
         buffer_views.push(json!({
@@ -305,6 +341,7 @@ fn export_unit_mesh_to_glb(
             (
                 position_accessor_idx,
                 normal_accessor_idx,
+                uv_accessor_idx,
                 indices_accessor_idx,
             ),
         );
@@ -316,11 +353,12 @@ fn export_unit_mesh_to_glb(
     let mut meshes = Vec::new();
 
     for geo_hash in &sorted_geo_hashes {
-        let (pos_acc, norm_acc, idx_acc) = geo_accessor_map.get(*geo_hash).unwrap();
+        let (pos_acc, norm_acc, uv_acc, idx_acc) = geo_accessor_map.get(*geo_hash).unwrap();
 
         let mut attributes_map = serde_json::Map::new();
         attributes_map.insert("POSITION".to_string(), Value::from(*pos_acc));
         attributes_map.insert("NORMAL".to_string(), Value::from(*norm_acc));
+        attributes_map.insert("TEXCOORD_0".to_string(), Value::from(*uv_acc));
 
         // 简单起见，每个几何体一个 primitive（后续可按材质拆分）
         let primitive = json!({
@@ -513,7 +551,10 @@ impl ModelExporter for UnitMeshGlbExporter {
 
         let geom_insts = query_geometry_instances(&all_refnos, true, config.common.verbose).await?;
 
-        if geom_insts.is_empty() {
+        let export_data =
+            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
+
+        if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");
             stats.elapsed_time = start_time.elapsed();
             return Ok(UnitMeshGlbExportResult {
@@ -522,15 +563,10 @@ impl ModelExporter for UnitMeshGlbExporter {
             });
         }
 
-        stats.geometry_count = geom_insts.iter().map(|g| g.insts.len()).sum();
-
         // 创建输出目录（如果不存在）
         if let Some(parent) = Path::new(output_path).parent() {
             std::fs::create_dir_all(parent).context("创建输出目录失败")?;
         }
-
-        let export_data =
-            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
         let material_library = MaterialLibrary::load_default().context("加载默认材质库失败")?;
 
         let (node_count, mesh_count, mesh_lookup) = export_unit_mesh_to_glb(
@@ -543,7 +579,7 @@ impl ModelExporter for UnitMeshGlbExporter {
 
         stats.mesh_files_found = export_data.loaded_count;
         stats.mesh_files_missing = export_data.failed_count;
-        stats.geometry_count += export_data.tubi_count;
+        stats.geometry_count = export_data.total_instances;
         stats.node_count = node_count;
         stats.mesh_count = mesh_count;
 

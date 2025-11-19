@@ -149,6 +149,9 @@ pub struct FullNounConfig {
 
     /// 禁用的 noun 列表
     pub excluded_nouns: Vec<String>,
+
+    /// 调试模式：限制每种 Noun 类型的处理数量（None 表示不限制）
+    pub debug_limit_per_noun: Option<usize>,
 }
 
 impl FullNounConfig {
@@ -182,6 +185,7 @@ impl FullNounConfig {
             strict_validation: false, // 默认只警告，不报错
             enabled_categories: opt.full_noun_enabled_categories.clone(),
             excluded_nouns: opt.full_noun_excluded_nouns.clone(),
+            debug_limit_per_noun: opt.debug_limit_per_noun,
         })
     }
 
@@ -195,6 +199,7 @@ impl FullNounConfig {
             strict_validation: false,
             enabled_categories: Vec::new(),
             excluded_nouns: Vec::new(),
+            debug_limit_per_noun: None,
         }
     }
 
@@ -316,6 +321,11 @@ impl FullNounConfig {
         if !self.excluded_nouns.is_empty() {
             println!("╠════════════════════════════════════════╣");
             println!("║ 排除 Noun: {:<26} ║", self.excluded_nouns.join(", "));
+        }
+
+        if let Some(limit) = self.debug_limit_per_noun {
+            println!("╠════════════════════════════════════════╣");
+            println!("║ 调试限制: 每个 Noun 最多 {:<8} 个实例 ║", limit);
         }
 
         println!("╚════════════════════════════════════════╝");

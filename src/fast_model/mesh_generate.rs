@@ -345,7 +345,7 @@ pub async fn process_meshes_update_db_deep(
                     eprintln!("⚠️  查询负实例失败 (refno: {}): {}", refno, e);
                     e
                 })?;
-                update_refnos.extend(neg_refnos);
+                update_refnos.extend(neg_refnos.clone());
 
                 if update_refnos.is_empty() {
                     debug_model_trace!("跳过空的 update_refnos for refno: {}", refno);
@@ -411,11 +411,7 @@ pub async fn process_meshes_update_db_deep(
                         );
                         e
                     })?;
-                    apply_insts_boolean_manifold(
-                        &target_visible_refnos,
-                        replace_exist,
-                        dir.clone(),
-                    )
+                    apply_insts_boolean_manifold(&neg_refnos, replace_exist, dir.clone())
                     .await
                     .map_err(|e| {
                         eprintln!(
