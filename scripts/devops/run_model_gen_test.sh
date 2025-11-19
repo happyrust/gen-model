@@ -57,11 +57,20 @@ echo "开始生成模型数据..."
 echo "日志保存到: model_gen_output.log"
 echo ""
 
-# 运行生成，最长等待5分钟
-timeout 300 cargo run --release 2>&1 | tee model_gen_output.log || {
-    echo ""
-    echo "⚠️ 模型生成超时或出错，但继续检查结果..."
-}
+# 运行生成，最长等待5分钟；如果系统没有 timeout 命令，则直接运行
+if command -v timeout >/dev/null 2>&1; then
+    # 使用 timeout 限制最长执行时间
+    timeout 300 cargo run --bin aios-database --release 2>&1 | tee model_gen_output.log || {
+        echo ""
+        echo "⚠️ 模型生成超时或出错，但继续检查结果..."
+    }
+else
+    echo "⚠️ 未找到 timeout 命令，直接运行 cargo run --bin aios-database --release（无超时限制）..."
+    cargo run --bin aios-database --release 2>&1 | tee model_gen_output.log || {
+        echo ""
+        echo "⚠️ 模型生成出错，但继续检查结果..."
+    }
+fi
 
 # 验证结果
 echo ""

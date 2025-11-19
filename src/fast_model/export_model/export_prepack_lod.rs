@@ -33,6 +33,7 @@ use crate::fast_model::export_model::model_exporter::{
     CommonExportConfig, ExportStats, GlbExportConfig, ModelExporter, collect_export_refnos,
     query_geometry_instances,
 };
+use crate::fast_model::material_config::MaterialLibrary;
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
 
 /// LOD 配置
@@ -251,6 +252,10 @@ pub async fn export_prepack_lod_for_refnos(
         .await
         .context("收集导出数据失败")?;
 
+    // 加载材质与配色信息（严格按照 ColorSchemes.toml / 默认方案）
+    let material_library =
+        MaterialLibrary::load_default().context("加载默认材质库失败（用于颜色配置）")?;
+
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
 
     let (geo_hashes, geo_index_map) = build_geo_index_map(&export_data);
@@ -269,6 +274,7 @@ pub async fn export_prepack_lod_for_refnos(
         &generated_at,
         &generated_assets,
         &unit_converter,
+        &material_library,
     );
 
     let mut manifest_stats = stats_snapshot;
@@ -584,51 +590,104 @@ fn build_instances_payload(
     generated_at: &str,
     lod_assets: &[LodAssetSummary],
     unit_converter: &UnitConverter,
+    material_library: &MaterialLibrary,
 ) -> (serde_json::Value, usize) {
     let mut name_table = NameTable::new();
     let unknown_site_index = name_table.get_or_insert("site", "UNKNOWN_SITE");
-    let mut color_palette = ColorPalette::new();
+    let mut color_palette = ColorPalette::new(material_library);
 
     let mut component_entries = Vec::new();
     let mut component_instance_count = 0usize;
 
-    for component in &export_data.components {
-        let component_label = component
-            .name
-            .as_ref()
-            .filter(|name| !name.is_empty())
-            .cloned()
-            .unwrap_or_else(|| component.refno.to_string());
-        let name_index = name_table.get_or_insert("component", &component_label);
-        let site_name_index = unknown_site_index;
-        let color_index = color_palette.index_for_noun(&component.noun);
+    // 辅助函数：将一批组件写入 JSON，附带 owner / owner_type 信息
+    let mut push_components = |components: Vec<&crate::fast_model::export_model::export_common::ComponentRecord>| {
+        for component in components {
+            let component_label = component
+                .name
+                .as_ref()
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| component.refno.to_string());
+            let name_index = name_table.get_or_insert("component", &component_label);
+            let site_name_index = unknown_site_index;
+            let color_index = color_palette.index_for_noun(&component.noun);
+            let color_rgba = color_palette.color_at(color_index);
 
-        let mut instances = Vec::new();
-        for geom in &component.geometries {
-            if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
-                component_instance_count += 1;
-                let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
-                instances.push(json!({
-                    "geo_hash": geom.geo_hash,
-                    "geo_index": geo_index,
-                    "matrix": mat4_to_vec(&geom.transform, unit_converter),
-                    "color_index": color_index,
-                    "name_index": name_index,
-                    "site_name_index": site_name_index,
-                    "zone_name_index": serde_json::Value::Null,
-                    "lod_mask": lod_mask,
-                    "uniforms": { "refno": component.refno.to_string() },
-                }));
+            let mut instances = Vec::new();
+            for geom in &component.geometries {
+                if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
+                    component_instance_count += 1;
+                    let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
+
+                    // uniforms 中加入设备分组信息
+                    let mut uniforms = json!({
+                        "refno": component.refno.to_string(),
+                        "color_index": color_index,
+                    });
+                    if let Some(owner) = component.owner_refno {
+                        uniforms["owner_refno"] = json!(owner.to_string());
+                    }
+                    if let Some(owner_noun) = &component.owner_noun {
+                        uniforms["owner_noun"] = json!(owner_noun);
+                    }
+                    if let Some(owner_type) = &component.owner_type {
+                        uniforms["owner_type"] = json!(owner_type);
+                    }
+                    if let Some(color) = color_rgba {
+                        uniforms["color"] = json!(color);
+                    }
+
+                    instances.push(json!({
+                        "geo_hash": geom.geo_hash,
+                        "geo_index": geo_index,
+                        "matrix": mat4_to_vec(&geom.transform, unit_converter),
+                        "color_index": color_index,
+                        "name_index": name_index,
+                        "site_name_index": site_name_index,
+                        "zone_name_index": serde_json::Value::Null,
+                        "lod_mask": lod_mask,
+                        "uniforms": uniforms,
+                    }));
+                }
             }
-        }
 
-        component_entries.push(json!({
-            "refno": component.refno.to_string(),
-            "noun": component.noun,
-            "name_index": name_index,
-            "instances": instances,
-        }));
-    }
+            // 组件级别 owner 元数据
+            let owner_json = match (&component.owner_refno, &component.owner_noun, &component.owner_type) {
+                (Some(refno), Some(noun), owner_type) => json!({
+                    "refno": refno.to_string(),
+                    "noun": noun,
+                    "type": owner_type,
+                    "color_index": color_index,
+                    "color": color_rgba,
+                }),
+                _ => serde_json::Value::Null,
+            };
+
+            component_entries.push(json!({
+                "refno": component.refno.to_string(),
+                "noun": component.noun,
+                "name_index": name_index,
+                "owner": owner_json,
+                "instances": instances,
+            }));
+        }
+    };
+
+    // 先输出设备（EQUI）拥有的组件，便于前端按设备分组
+    let equip_components: Vec<_> = export_data
+        .components
+        .iter()
+        .filter(|c| matches!(c.owner_noun.as_deref(), Some("EQUI")))
+        .collect();
+    push_components(equip_components);
+
+    // 再输出其他组件
+    let other_components: Vec<_> = export_data
+        .components
+        .iter()
+        .filter(|c| !matches!(c.owner_noun.as_deref(), Some("EQUI")))
+        .collect();
+    push_components(other_components);
 
     let mut tubing_entries = Vec::new();
     let mut tubing_groups: BTreeMap<String, Vec<&TubiRecord>> = BTreeMap::new();
@@ -643,10 +702,19 @@ fn build_instances_payload(
         let name_index = name_table.get_or_insert("pipe", &group[0].name);
         let site_name_index = unknown_site_index;
         let color_index = color_palette.index_for_noun("TUBI");
+        let color_rgba = color_palette.color_at(color_index);
         let mut instances = Vec::new();
         for tubing in group {
             if let Some(&geo_index) = geo_index_map.get(&tubing.geo_hash) {
                 let lod_mask = compute_lod_mask(&tubing.geo_hash, lod_assets);
+                let mut uniforms = json!({
+                    "refno": refno,
+                    "color_index": color_index,
+                });
+                if let Some(color) = color_rgba {
+                    uniforms["color"] = json!(color);
+                }
+
                 instances.push(json!({
                     "geo_hash": tubing.geo_hash,
                     "geo_index": geo_index,
@@ -656,7 +724,7 @@ fn build_instances_payload(
                     "site_name_index": site_name_index,
                     "zone_name_index": serde_json::Value::Null,
                     "lod_mask": lod_mask,
-                    "uniforms": { "refno": refno },
+                    "uniforms": uniforms,
                 }));
             }
         }
@@ -749,16 +817,18 @@ impl NameTable {
     }
 }
 
-struct ColorPalette {
+struct ColorPalette<'a> {
     colors: Vec<[f32; 4]>,
     index_map: HashMap<String, usize>,
+    material_library: &'a MaterialLibrary,
 }
 
-impl ColorPalette {
-    fn new() -> Self {
+impl<'a> ColorPalette<'a> {
+    fn new(material_library: &'a MaterialLibrary) -> Self {
         Self {
             colors: Vec::new(),
             index_map: HashMap::new(),
+            material_library,
         }
     }
 
@@ -768,11 +838,15 @@ impl ColorPalette {
             return *idx;
         }
 
-        let color = noun_to_color(&key);
+        let color = self.color_for_noun(&key);
         let idx = self.colors.len();
         self.colors.push(color);
         self.index_map.insert(key, idx);
         idx
+    }
+
+    fn color_at(&self, index: usize) -> Option<[f32; 4]> {
+        self.colors.get(index).cloned()
     }
 
     fn into_colors(mut self) -> Vec<[f32; 4]> {
@@ -781,16 +855,27 @@ impl ColorPalette {
         }
         self.colors
     }
-}
 
-fn noun_to_color(noun: &str) -> [f32; 4] {
-    match noun {
-        "PIPE" | "TUBI" | "TUBING" => [0.25, 0.5, 1.0, 1.0],
-        "BRAN" | "BRANCH" => [0.76, 0.38, 0.94, 1.0],
-        "EQUI" => [0.95, 0.75, 0.30, 1.0],
-        "VALV" => [1.0, 1.0, 1.0, 1.0],
-        "FLAN" | "GASK" | "TEE" | "REDU" | "STRU" | "FRAME" => [0.65, 0.65, 0.65, 1.0],
-        _ => [0.82, 0.83, 0.84, 1.0],
+    /// 严格依据 ColorSchemes.toml / 默认方案获取颜色；
+    /// 若配色表中不存在该类型，则回退到 UNKOWN，再不行才给固定灰色。
+    fn color_for_noun(&self, noun: &str) -> [f32; 4] {
+        if let Some(c) = self
+            .material_library
+            .get_normalized_color_for_noun(noun)
+        {
+            return c;
+        }
+
+        // 回退到 UNKOWN 类型（注意拼写与 PdmsGenericType::UNKOWN 保持一致）
+        if let Some(c) = self
+            .material_library
+            .get_normalized_color_for_noun("UNKOWN")
+        {
+            return c;
+        }
+
+        // 最终兜底颜色
+        [0.82, 0.83, 0.84, 1.0]
     }
 }
 

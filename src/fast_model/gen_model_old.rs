@@ -421,75 +421,18 @@ impl DbModelInstRefnos {
 
     //执行布尔运算的操作
     pub async fn execute_boolean_meshes(&self, db_option_arc: Option<Arc<DbOption>>) {
-        let mut handles = FuturesUnordered::new();
-        let prim_refnos = self.prim_refnos.clone();
-        let loop_owner_refnos = self.loop_owner_refnos.clone();
-        let use_cate_refnos = self.use_cate_refnos.clone();
-        let bran_hanger_refnos = self.bran_hanger_refnos.clone();
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            booleans_meshes_in_db(db_option, &prim_refnos)
-                .await
-                .expect("布尔运算prim模型数据失败");
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            booleans_meshes_in_db(db_option, &loop_owner_refnos)
-                .await
-                .expect("布尔运算loop模型数据失败");
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            booleans_meshes_in_db(db_option, &use_cate_refnos)
-                .await
-                .expect("布尔运算use_cate模型数据失败");
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            // 🔥 重要修复：bran_hanger_refnos 已经是子元素列表，直接执行布尔运算
-            println!(
-                "[execute_boolean_meshes] 开始处理 {} 个 BRAN/HANG 子元素的布尔运算",
-                bran_hanger_refnos.len()
-            );
-
-            for (idx, chunk) in bran_hanger_refnos.chunks(20).enumerate() {
-                let db_option_clone = db_option.clone();
-                let batch_num = idx + 1;
-                let total_batches = (bran_hanger_refnos.len() + 19) / 20;
-
-                println!(
-                    "[execute_boolean_meshes] BRAN/HANG 布尔运算批次 {}/{} ({} 个元素)",
-                    batch_num,
-                    total_batches,
-                    chunk.len()
-                );
-
-                // 直接使用 chunk（已经是子元素），不再查询
-                match booleans_meshes_in_db(db_option_clone, chunk).await {
-                    Ok(_) => {
-                        println!(
-                            "[execute_boolean_meshes] BRAN/HANG 布尔运算批次 {}/{} 完成",
-                            batch_num, total_batches
-                        );
-                    }
-                    Err(e) => {
-                        let chunk_str = chunk
-                            .iter()
-                            .map(|r| r.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        eprintln!(
-                            "布尔运算bran_hanger模型数据失败：{}，相关refnos: {}",
-                            e, chunk_str
-                        );
-                        continue;
-                    }
-                }
+        if let Some(db_option) = db_option_arc {
+            // 新逻辑：通过 inst_relate 状态驱动的布尔运算 Worker
+            // 不再依赖 DbModelInstRefnos 内部的 refno 向量。
+            if let Err(e) = crate::fast_model::mesh_generate::run_boolean_worker(
+                db_option,
+                100,
+            )
+            .await
+            {
+                eprintln!("[execute_boolean_meshes] boolean worker failed: {}", e);
             }
-
-            println!("[execute_boolean_meshes] 所有 BRAN/HANG 布尔运算完成");
-        }));
-        while let Some(_) = handles.next().await {}
+        }
     }
 }
 
@@ -1959,203 +1902,18 @@ pub async fn gen_geos_data_by_dbnum(
     Ok(db_refnos)
 }
 
-///生成几何体数据
-///
-/// # 参数
-/// * `dbno` - 可选的数据库编号
-/// * `manual_refnos` - 手动指定的引用号列表
-/// * `db_option` - 数据库选项
-/// * `incr_updates` - 增量更新日志
-/// * `sender` - 数据发送通道
-/// * `target_sesno` - 目标会话号，用于历史模型生成
-pub async fn gen_geos_data(
-    dbno: Option<u32>,
-    manual_refnos: Vec<RefnoEnum>,
-    db_option: &DbOption,
+async fn process_gen_geos_data_chunks(
+    origin_root_refnos: &[RefnoEnum],
+    db_option_arc: Arc<DbOption>,
     incr_updates: Option<IncrGeoUpdateLog>,
+    is_incr_update: bool,
+    has_manual_refnos: bool,
+    skip_exist: bool,
+    chunk_size: usize,
     sender: flume::Sender<ShapeInstancesData>,
-    target_sesno: Option<u32>,
-) -> anyhow::Result<Vec<RefnoEnum>> {
+) -> anyhow::Result<()> {
     let mut all_handles = FuturesUnordered::new();
-    // dbg!(&incr_updates);
-    const CHUNK_SIZE: usize = 100;
-    //根据需要拉入数据到本地数据库也可以
-    let is_incr_update = incr_updates.is_some();
-    let has_manual_refnos = !manual_refnos.is_empty();
-    //排除增量更新的情况，如果debug_model_refnos 为空，即没有模型需要生成
-    let debug_model_refnos = db_option.get_all_debug_refnos().await;
-    let has_debug = !debug_model_refnos.is_empty();
-    let skip_exist = !(db_option.is_replace_mesh() || has_manual_refnos || has_debug);
-    println!("========== DEBUG: gen_geos_data ==========");
-    println!(
-        "debug_model_refnos 配置: {:?}",
-        db_option.debug_model_refnos
-    );
-    println!("解析后的 debug_model_refnos: {:?}", debug_model_refnos);
-    println!("debug_model_refnos 数量: {}", debug_model_refnos.len());
-    println!(
-        "is_incr_update: {}, has_manual_refnos: {}",
-        is_incr_update, has_manual_refnos
-    );
-    debug_model_trace!("debug_model_refnos: {:?}", &debug_model_refnos);
-    if !is_incr_update
-        //debug_model_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
-        && (db_option.debug_model_refnos.is_some() && debug_model_refnos.is_empty())
-        && (!has_manual_refnos)
-    {
-        println!("DEBUG: 没有模型需要生成，提前返回");
-        return Ok(vec![]);
-    }
-    if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
-        return Ok(vec![]);
-    }
-    let db_option_arc = Arc::new(db_option.clone());
-    let is_debug = debug_model_refnos.len() > 0;
 
-    let include_history = db_option_arc.is_gen_history_model();
-    let is_replace_mesh = db_option_arc.is_replace_mesh();
-    let incr_count = if is_incr_update {
-        incr_updates.as_ref().unwrap().count()
-    } else {
-        0
-    };
-    let mut target_root_refnos = vec![];
-    if is_incr_update {
-        // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
-        target_root_refnos = incr_updates
-            .as_ref()
-            .unwrap()
-            .get_all_visible_refnos()
-            .into_iter()
-            .collect();
-    } else if is_debug || has_manual_refnos {
-        target_root_refnos = if has_manual_refnos {
-            manual_refnos.clone()
-        } else {
-            debug_model_refnos.clone()
-        };
-        debug_model_debug!(
-            "DEBUG: 使用调试模式，target_root_refnos: {:?}",
-            target_root_refnos
-        );
-
-        // 查询目标节点的基本信息
-        for refno in &target_root_refnos {
-            match aios_core::get_pe(*refno).await {
-                Ok(Some(pe)) => {
-                    debug_model_debug!("========== 目标节点详细信息 ==========");
-                    debug_model_debug!("refno: {}", refno);
-                    debug_model_debug!("noun: {}", pe.noun);
-                    debug_model_debug!("name: {}", pe.name);
-                    debug_model_debug!("cata_hash: {}", pe.cata_hash);
-                    debug_model_debug!("owner: {:?}", pe.owner);
-
-                    // 查询元件库关系
-                    match aios_core::get_named_attmap(*refno).await {
-                        Ok(att_map) => {
-                            // 先检查是否有直接的 CATR 关系（如 NOZZ）
-                            if let Some(catr_refno) = att_map.get_foreign_refno("CATR") {
-                                debug_model_debug!("✅ 直接 CATR 关系: {}", catr_refno);
-                                if let Some(catr_attr) = att_map.get_as_string("CATR") {
-                                    debug_model_debug!("   CATR 属性原始值: {}", catr_attr);
-                                }
-
-                                // 查询 CATR 的详细信息
-                                match aios_core::get_pe(catr_refno).await {
-                                    Ok(Some(catr_pe)) => {
-                                        debug_model_debug!(
-                                            "   CATR noun: {}, name: {}",
-                                            catr_pe.noun,
-                                            catr_pe.name
-                                        );
-                                    }
-                                    Ok(None) => {
-                                        debug_model_debug!(
-                                            "   ⚠️ 未找到 CATR 元素: {}",
-                                            catr_refno
-                                        );
-                                    }
-                                    Err(err) => {
-                                        debug_model_debug!(
-                                            "   ❌ 查询 CATR 元素失败 {}: {}",
-                                            catr_refno,
-                                            err
-                                        );
-                                    }
-                                }
-                            }
-                            // 再检查是否有 SPRE 关系
-                            else if let Some(spre_refno) = att_map.get_foreign_refno("SPRE") {
-                                debug_model_debug!("SPRE refno: {}", spre_refno);
-
-                                // 查询 SPRE 指向的 CATR
-                                match aios_core::get_named_attmap(spre_refno).await {
-                                    Ok(spre_att) => {
-                                        if let Some(catr_refno) = spre_att.get_foreign_refno("CATR")
-                                        {
-                                            debug_model_debug!(
-                                                "   通过 SPRE 的 CATR: {}",
-                                                catr_refno
-                                            );
-                                        } else {
-                                            debug_model_debug!("   ⚠️ SPRE 没有 CATR 关系");
-                                        }
-                                    }
-                                    Err(err) => {
-                                        debug_model_debug!(
-                                            "   ❌ 查询 SPRE 属性失败 {}: {}",
-                                            spre_refno,
-                                            err
-                                        );
-                                    }
-                                }
-                            } else {
-                                debug_model_debug!("⚠️ 没有 CATR 或 SPRE 关系");
-                            }
-                        }
-                        Err(err) => {
-                            debug_model_debug!("❌ 查询 attmap 失败 {}: {}", refno, err);
-                        }
-                    }
-                }
-                Ok(None) => {
-                    debug_model_debug!("⚠️ 找不到元素 {}", refno);
-                }
-                Err(err) => {
-                    debug_model_debug!("❌ 查询元素失败 {}: {}", refno, err);
-                }
-            }
-        }
-    } else if dbno.is_some() {
-        // 检查是否需要进行历史查询
-        if let Some(sesno) = target_sesno {
-            println!(
-                "使用历史查询，目标会话号: {} (注意：当前使用当前数据替代)",
-                sesno
-            );
-            target_root_refnos = query_by_type(&["SITE"], dbno.unwrap() as i32, Some(true))
-                .await?
-                .into_iter()
-                .collect();
-        } else {
-            // 使用当前数据查询
-            target_root_refnos = query_by_type(&["SITE"], dbno.unwrap() as i32, Some(true))
-                .await?
-                .into_iter()
-                .collect();
-        }
-    }
-    if dbno.is_some() {
-    } else {
-    }
-    let origin_root_refnos = target_root_refnos.clone();
-    // let process_handle = tokio::spawn(async move {
-    // let mut handles = vec![]
-    if is_incr_update {
-    } else if has_manual_refnos {
-    } else if is_debug {
-    } else if dbno.is_some() {
-    }
     let d_types = db_option_arc.debug_refno_types.clone();
     let mut gen_cata_flag =
         d_types.iter().any(|x| x == "CATA") || is_incr_update || has_manual_refnos;
@@ -2164,10 +1922,8 @@ pub async fn gen_geos_data(
     let mut gen_prim_flag =
         d_types.iter().any(|x| x == "PRIM") || is_incr_update || has_manual_refnos;
 
-    // dbg!(origin_root_refnos.len());
     let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
-    //需要在这里把origin_root_refnos 打断成小块
-    let mut chunked_root_refnos = origin_root_refnos.chunks(CHUNK_SIZE);
+    let mut chunked_root_refnos = origin_root_refnos.chunks(chunk_size);
     let gen_model = db_option_arc.gen_model || is_incr_update || has_manual_refnos;
 
     debug_model_debug!("========== gen_geos_data 配置检查 ==========");
@@ -2175,7 +1931,10 @@ pub async fn gen_geos_data(
     debug_model_debug!("is_incr_update: {}", is_incr_update);
     debug_model_debug!("has_manual_refnos: {}", has_manual_refnos);
     debug_model_debug!("gen_model (最终值): {}", gen_model);
-    debug_model_debug!("origin_root_refnos 数量: {}", origin_root_refnos.len());
+    debug_model_debug!(
+        "origin_root_refnos 数量: {}",
+        origin_root_refnos.len()
+    );
     //遍历小块
     debug_model_debug!("========== 开始遍历 root_refnos 小块 ==========");
     debug_model_debug!("准备进入 while 循环");
@@ -2439,10 +2198,222 @@ pub async fn gen_geos_data(
             break;
         }
     }
-    //Ok::<_, anyhow::Error>(())
-    while let Some(result) = all_handles.next().await {
-        // 处理每个完成的 future 的结果
+
+    while let Some(_result) = all_handles.next().await {
+        // 处理每个完成的 future 的结果（当前忽略具体结果）
     }
+
+    Ok(())
+}
+
+///生成几何体数据
+///
+/// # 参数
+/// * `dbno` - 可选的数据库编号
+/// * `manual_refnos` - 手动指定的引用号列表
+/// * `db_option` - 数据库选项
+/// * `incr_updates` - 增量更新日志
+/// * `sender` - 数据发送通道
+/// * `target_sesno` - 目标会话号，用于历史模型生成
+pub async fn gen_geos_data(
+    dbno: Option<u32>,
+    manual_refnos: Vec<RefnoEnum>,
+    db_option: &DbOption,
+    incr_updates: Option<IncrGeoUpdateLog>,
+    sender: flume::Sender<ShapeInstancesData>,
+    target_sesno: Option<u32>,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    // dbg!(&incr_updates);
+    const CHUNK_SIZE: usize = 100;
+    //根据需要拉入数据到本地数据库也可以
+    let is_incr_update = incr_updates.is_some();
+    let has_manual_refnos = !manual_refnos.is_empty();
+    //排除增量更新的情况，如果debug_model_refnos 为空，即没有模型需要生成
+    let debug_model_refnos = db_option.get_all_debug_refnos().await;
+    let has_debug = !debug_model_refnos.is_empty();
+    let skip_exist = !(db_option.is_replace_mesh() || has_manual_refnos || has_debug);
+    println!("========== DEBUG: gen_geos_data ==========");
+    println!(
+        "debug_model_refnos 配置: {:?}",
+        db_option.debug_model_refnos
+    );
+    println!("解析后的 debug_model_refnos: {:?}", debug_model_refnos);
+    println!("debug_model_refnos 数量: {}", debug_model_refnos.len());
+    println!(
+        "is_incr_update: {}, has_manual_refnos: {}",
+        is_incr_update, has_manual_refnos
+    );
+    debug_model_trace!("debug_model_refnos: {:?}", &debug_model_refnos);
+    if !is_incr_update
+        //debug_model_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
+        && (db_option.debug_model_refnos.is_some() && debug_model_refnos.is_empty())
+        && (!has_manual_refnos)
+    {
+        println!("DEBUG: 没有模型需要生成，提前返回");
+        return Ok(vec![]);
+    }
+    if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
+        return Ok(vec![]);
+    }
+    let db_option_arc = Arc::new(db_option.clone());
+    let is_debug = debug_model_refnos.len() > 0;
+
+    let include_history = db_option_arc.is_gen_history_model();
+    let is_replace_mesh = db_option_arc.is_replace_mesh();
+    let incr_count = if is_incr_update {
+        incr_updates.as_ref().unwrap().count()
+    } else {
+        0
+    };
+    let mut target_root_refnos = vec![];
+    if is_incr_update {
+        // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
+        target_root_refnos = incr_updates
+            .as_ref()
+            .unwrap()
+            .get_all_visible_refnos()
+            .into_iter()
+            .collect();
+    } else if is_debug || has_manual_refnos {
+        target_root_refnos = if has_manual_refnos {
+            manual_refnos.clone()
+        } else {
+            debug_model_refnos.clone()
+        };
+        debug_model_debug!(
+            "DEBUG: 使用调试模式，target_root_refnos: {:?}",
+            target_root_refnos
+        );
+
+        // 查询目标节点的基本信息
+        for refno in &target_root_refnos {
+            match aios_core::get_pe(*refno).await {
+                Ok(Some(pe)) => {
+                    debug_model_debug!("========== 目标节点详细信息 ==========");
+                    debug_model_debug!("refno: {}", refno);
+                    debug_model_debug!("noun: {}", pe.noun);
+                    debug_model_debug!("name: {}", pe.name);
+                    debug_model_debug!("cata_hash: {}", pe.cata_hash);
+                    debug_model_debug!("owner: {:?}", pe.owner);
+
+                    // 查询元件库关系
+                    match aios_core::get_named_attmap(*refno).await {
+                        Ok(att_map) => {
+                            // 先检查是否有直接的 CATR 关系（如 NOZZ）
+                            if let Some(catr_refno) = att_map.get_foreign_refno("CATR") {
+                                debug_model_debug!("✅ 直接 CATR 关系: {}", catr_refno);
+                                if let Some(catr_attr) = att_map.get_as_string("CATR") {
+                                    debug_model_debug!("   CATR 属性原始值: {}", catr_attr);
+                                }
+
+                                // 查询 CATR 的详细信息
+                                match aios_core::get_pe(catr_refno).await {
+                                    Ok(Some(catr_pe)) => {
+                                        debug_model_debug!(
+                                            "   CATR noun: {}, name: {}",
+                                            catr_pe.noun,
+                                            catr_pe.name
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        debug_model_debug!(
+                                            "   ⚠️ 未找到 CATR 元素: {}",
+                                            catr_refno
+                                        );
+                                    }
+                                    Err(err) => {
+                                        debug_model_debug!(
+                                            "   ❌ 查询 CATR 元素失败 {}: {}",
+                                            catr_refno,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                            // 再检查是否有 SPRE 关系
+                            else if let Some(spre_refno) = att_map.get_foreign_refno("SPRE") {
+                                debug_model_debug!("SPRE refno: {}", spre_refno);
+
+                                // 查询 SPRE 指向的 CATR
+                                match aios_core::get_named_attmap(spre_refno).await {
+                                    Ok(spre_att) => {
+                                        if let Some(catr_refno) = spre_att.get_foreign_refno("CATR")
+                                        {
+                                            debug_model_debug!(
+                                                "   通过 SPRE 的 CATR: {}",
+                                                catr_refno
+                                            );
+                                        } else {
+                                            debug_model_debug!("   ⚠️ SPRE 没有 CATR 关系");
+                                        }
+                                    }
+                                    Err(err) => {
+                                        debug_model_debug!(
+                                            "   ❌ 查询 SPRE 属性失败 {}: {}",
+                                            spre_refno,
+                                            err
+                                        );
+                                    }
+                                }
+                            } else {
+                                debug_model_debug!("⚠️ 没有 CATR 或 SPRE 关系");
+                            }
+                        }
+                        Err(err) => {
+                            debug_model_debug!("❌ 查询 attmap 失败 {}: {}", refno, err);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    debug_model_debug!("⚠️ 找不到元素 {}", refno);
+                }
+                Err(err) => {
+                    debug_model_debug!("❌ 查询元素失败 {}: {}", refno, err);
+                }
+            }
+        }
+    } else if dbno.is_some() {
+        // 检查是否需要进行历史查询
+        if let Some(sesno) = target_sesno {
+            println!(
+                "使用历史查询，目标会话号: {} (注意：当前使用当前数据替代)",
+                sesno
+            );
+            target_root_refnos = query_by_type(&["SITE"], dbno.unwrap() as i32, Some(true))
+                .await?
+                .into_iter()
+                .collect();
+        } else {
+            // 使用当前数据查询
+            target_root_refnos = query_by_type(&["SITE"], dbno.unwrap() as i32, Some(true))
+                .await?
+                .into_iter()
+                .collect();
+        }
+    }
+    if dbno.is_some() {
+    } else {
+    }
+    let origin_root_refnos = target_root_refnos.clone();
+    // let process_handle = tokio::spawn(async move {
+    // let mut handles = vec![]
+    if is_incr_update {
+    } else if has_manual_refnos {
+    } else if is_debug {
+    } else if dbno.is_some() {
+    }
+
+    process_gen_geos_data_chunks(
+        &origin_root_refnos,
+        db_option_arc.clone(),
+        incr_updates.clone(),
+        is_incr_update,
+        has_manual_refnos,
+        skip_exist,
+        CHUNK_SIZE,
+        sender.clone(),
+    )
+    .await?;
 
     if dbno.is_some() {
         println!("数据库号： {} 生成instances完毕。", dbno.unwrap());

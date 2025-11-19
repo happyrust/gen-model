@@ -16,7 +16,7 @@ sync_chunk_size = 10_0000
 
 #项目设置
 # 原始示例: /Volumes/DPC/work/e3d_models
-project_path = "/Volumes/DPC/work/e3d_models/test_bj"
+project_path = "/Volumes/DPC/work/e3d_models/test_bj/AvevaMarineSample/ams000"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]

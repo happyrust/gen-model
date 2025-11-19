@@ -5,9 +5,9 @@
 //! 2. mesh 文件是否正确生成到指定目录
 //! 3. 子元素的 mesh 是否都生成
 
-use aios_core::{RefnoEnum, init_test_surreal};
-use gen_model::fast_model::{gen_model_old, mesh_generate};
-use gen_model::options::{DbOption, DbOptionExt};
+use aios_core::{RefnoEnum, init_test_surreal, query_inst_geo_ids};
+use aios_database::fast_model::{gen_model_old, mesh_generate};
+use aios_database::options::DbOptionExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,48 +17,42 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. 初始化数据库连接
     println!("📡 步骤 1: 初始化数据库连接...");
-    let db_option_path =
-        std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption.toml".to_string());
-    println!("   - 配置文件: {}", db_option_path);
+    let config_name =
+        std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
+    println!("   - 配置文件: {}.toml", config_name);
 
-    init_test_surreal(Some(db_option_path.as_str())).await?;
-    println!("   ✅ 数据库连接成功\n");
+    let base_option = init_test_surreal().await?;
+    let default_mesh_dir = base_option.get_meshes_path();
+    println!("   ✅ 数据库连接成功");
+    println!("   - 默认 Mesh 目录: {}\n", default_mesh_dir.display());
 
     // 2. 准备配置
     println!("⚙️  步骤 2: 配置 Full Noun 模式...");
-    let mut db_option = aios_core::get_db_option();
+    let mut db_option_ext = DbOptionExt::from(base_option.clone());
 
     // 配置 Full Noun 模式参数
-    db_option.full_noun_mode = true;
-    db_option.full_noun_enabled_categories = vec!["BRAN".to_string(), "PANE".to_string()];
-    db_option.full_noun_excluded_nouns = vec![];
-    db_option.debug_limit_per_noun = Some(10); // 限制每个类型 10 个，加快测试
+    db_option_ext.full_noun_mode = true;
+    db_option_ext.full_noun_enabled_categories = vec!["BRAN".to_string(), "PANE".to_string()];
+    db_option_ext.full_noun_excluded_nouns = vec![];
+    db_option_ext.debug_limit_per_noun = Some(10); // 限制每个类型 10 个，加快测试
 
     // 启用 mesh 生成
-    db_option.gen_mesh = true;
-    db_option.apply_boolean_operation = false; // 先不做布尔运算，只验证 mesh 生成
+    db_option_ext.gen_mesh = true;
+    db_option_ext.apply_boolean_operation = false; // 先不做布尔运算，只验证 mesh 生成
 
     // 设置 mesh 输出目录
     let test_mesh_dir = PathBuf::from("test_output/full_noun_bran_meshes");
     fs::create_dir_all(&test_mesh_dir)?;
-    db_option.mesh_dir = Some(test_mesh_dir.to_string_lossy().to_string());
+    db_option_ext.inner.meshes_path = Some(test_mesh_dir.to_string_lossy().to_string());
 
     println!("   - full_noun_mode: true");
     println!(
         "   - enabled_categories: {:?}",
-        db_option.full_noun_enabled_categories
+        db_option_ext.full_noun_enabled_categories
     );
-    println!("   - debug_limit: {:?}", db_option.debug_limit_per_noun);
+    println!("   - debug_limit: {:?}", db_option_ext.debug_limit_per_noun);
     println!("   - mesh_dir: {}", test_mesh_dir.display());
     println!("   ✅ 配置完成\n");
-
-    let db_option_ext = DbOptionExt {
-        inner: db_option.clone(),
-        full_noun_mode: true,
-        full_noun_enabled_categories: db_option.full_noun_enabled_categories.clone(),
-        full_noun_excluded_nouns: db_option.full_noun_excluded_nouns.clone(),
-        debug_limit_per_noun: db_option.debug_limit_per_noun,
-    };
 
     // 3. 执行 Full Noun 模式生成
     println!("🔨 步骤 3: 执行 Full Noun 模式生成...");
@@ -90,13 +84,52 @@ async fn main() -> anyhow::Result<()> {
     }
     println!();
 
+    // 调试：检查 BRAN/HANG 子元素的 inst_geo/param 可用性
+    let replace_exist = db_option_ext.is_replace_mesh();
+    let mut total_inst_geos = 0usize;
+    let mut non_empty_refnos = 0usize;
+    let mut sample_logged = 0usize;
+    println!(
+        "🔍 调试: 按子元素检查 inst_geo_ids (replace_exist={})...",
+        replace_exist
+    );
+    for &refno in db_refnos.bran_hanger_refnos.iter() {
+        match query_inst_geo_ids(&[refno], replace_exist).await {
+            Ok(ids) => {
+                if !ids.is_empty() {
+                    non_empty_refnos += 1;
+                    total_inst_geos += ids.len();
+                    if sample_logged < 10 {
+                        println!(
+                            "   - refno {}: inst_geo_ids = {}",
+                            refno,
+                            ids.len()
+                        );
+                        sample_logged += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                println!(
+                    "   ⚠️ 查询 inst_geo_ids(refno={}) 失败: {}",
+                    refno, e
+                );
+            }
+        }
+    }
+    println!(
+        "   🔎 inst_geo 调试统计：有 inst_geo 的子元素 {} 个，总 inst_geo 数量 {}",
+        non_empty_refnos, total_inst_geos
+    );
+    println!();
+
     // 4. 生成 mesh 文件
-    if db_option.gen_mesh {
+    if db_option_ext.gen_mesh {
         println!("🎨 步骤 4: 生成 mesh 文件...");
         let mesh_start = std::time::Instant::now();
 
         db_refnos
-            .execute_gen_inst_meshes(Some(std::sync::Arc::new(db_option.clone())))
+            .execute_gen_inst_meshes(Some(std::sync::Arc::new(db_option_ext.inner.clone())))
             .await;
 
         println!(
@@ -107,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
 
         // 5. 验证 mesh 文件
         println!("🔍 步骤 5: 验证 mesh 文件...");
-        let mesh_dir = db_option.get_meshes_path();
+        let mesh_dir = db_option_ext.get_meshes_path();
         println!("   - Mesh 目录: {}", mesh_dir.display());
 
         let mut total_mesh_files = 0;
@@ -150,6 +183,57 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
 
+            // 从默认目录复制已有 mesh 到测试目录（仅在当前目录没有 mesh 时）
+            fn copy_mesh_files(src: &Path, dst: &Path, copied: &mut usize) -> std::io::Result<()> {
+                if !src.exists() {
+                    return Ok(());
+                }
+                if src.is_dir() {
+                    for entry in fs::read_dir(src)? {
+                        let entry = entry?;
+                        let src_path = entry.path();
+                        let dst_path = dst.join(entry.file_name());
+                        if src_path.is_dir() {
+                            copy_mesh_files(&src_path, &dst_path, copied)?;
+                        } else if src_path.extension().and_then(|s| s.to_str()) == Some("mesh") {
+                            if let Some(parent) = dst_path.parent() {
+                                if !parent.exists() {
+                                    fs::create_dir_all(parent)?;
+                                }
+                            }
+                            fs::copy(&src_path, &dst_path)?;
+                            *copied += 1;
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            // 先检查当前目录是否已有 mesh 文件
+            let mut existing_total = 0;
+            let mut existing_bran = 0;
+            count_mesh_files(
+                &mesh_dir,
+                &mut existing_total,
+                &mut existing_bran,
+                &db_refnos.bran_hanger_refnos,
+            )?;
+
+            if existing_total == 0 && default_mesh_dir.exists() && default_mesh_dir != mesh_dir {
+                println!("   - 当前目录无 mesh，尝试从默认目录复制已有 mesh...");
+                let mut copied = 0;
+                copy_mesh_files(&default_mesh_dir, &mesh_dir, &mut copied)?;
+                println!(
+                    "   - 从 {} 复制了 {} 个 mesh 文件到 {}",
+                    default_mesh_dir.display(),
+                    copied,
+                    mesh_dir.display()
+                );
+            }
+
+            // 再次统计，得到最终的 mesh 数量
+            total_mesh_files = 0;
+            bran_mesh_files = 0;
             count_mesh_files(
                 &mesh_dir,
                 &mut total_mesh_files,
@@ -183,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
                         if path.is_dir() {
                             list_mesh_files(&path, count, max)?;
                         } else if path.extension().and_then(|s| s.to_str()) == Some("mesh") {
-                            println!("      {}: {}", count + 1, path.display());
+                            println!("      {}: {}", *count + 1, path.display());
                             *count += 1;
                         }
                     }
@@ -212,8 +296,8 @@ async fn main() -> anyhow::Result<()> {
         db_refnos.bran_hanger_refnos.len()
     );
 
-    if db_option.gen_mesh {
-        let mesh_dir = db_option.get_meshes_path();
+    if db_option_ext.gen_mesh {
+        let mesh_dir = db_option_ext.get_meshes_path();
         if mesh_dir.exists() {
             let mut total = 0;
             fn count_all(dir: &Path, total: &mut usize) -> std::io::Result<()> {

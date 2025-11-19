@@ -88,6 +88,12 @@ pub struct ComponentRecord {
     pub noun: String,
     pub name: Option<String>,
     pub geometries: Vec<GeometryInstance>,
+    /// inst_relate 的 owner refno（例如设备 EQUI、结构 BRAN 等）
+    pub owner_refno: Option<RefnoEnum>,
+    /// owner 的 noun（EQUI/BRAN/HANG/...），大写
+    pub owner_noun: Option<String>,
+    /// 设备类型（仅当 owner_noun = Some(\"EQUI\") 时有意义）
+    pub owner_type: Option<String>,
 }
 
 /// TUBI 记录
@@ -304,6 +310,9 @@ pub async fn collect_export_data(
     // 查询所有构件的名称和 noun（包括普通构件和 TUBI）
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
     let mut refno_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
+    // 记录 owner 的 noun / 设备类型（目前仅关心 EQUI）
+    let mut owner_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
+    let mut owner_type_map: HashMap<RefnoEnum, String> = HashMap::new();
 
     // 收集所有需要查询的 refno（包含 TUBI）
     let mut all_query_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.refno).collect();
@@ -358,6 +367,55 @@ pub async fn collect_export_data(
         }
     }
 
+    // 准备所有 owner 的 refno 集合（用于按 EQUI 分租）
+    let mut owner_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.owner).collect();
+    owner_refnos.sort();
+    owner_refnos.dedup();
+
+    if !owner_refnos.is_empty() {
+        let mut owner_tasks = FuturesUnordered::new();
+        for owner in &owner_refnos {
+            let owner_ref = *owner;
+            owner_tasks.push(async move {
+                let mut noun: Option<String> = None;
+                let mut owner_type: Option<String> = None;
+
+                if let Ok(Some(pe)) = query_provider::get_pe(owner_ref).await {
+                    if !pe.noun.is_empty() {
+                        noun = Some(pe.noun.to_uppercase());
+                    }
+                }
+
+                // 对于设备 EQUI，尝试从命名属性中获取类型信息
+                if matches!(noun.as_deref(), Some("EQUI")) {
+                    if let Ok(attmap) = get_named_attmap(owner_ref).await {
+                        // 根据现有命名习惯，尝试几个常见字段；若需要可以再细化
+                        let keys = ["EQUI_TYPE", "EQUIP_TYPE", "TYPE"];
+                        for key in keys {
+                            if let Some(t) = attmap.get_as_string(key) {
+                                if !t.is_empty() {
+                                    owner_type = Some(t);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                (owner_ref, noun, owner_type)
+            });
+        }
+
+        while let Some((owner_ref, noun, owner_type)) = owner_tasks.next().await {
+            if let Some(noun) = noun {
+                owner_noun_map.insert(owner_ref, noun);
+            }
+            if let Some(owner_type) = owner_type {
+                owner_type_map.insert(owner_ref, owner_type);
+            }
+        }
+    }
+
     // 收集元件记录（按 refno 分组）
     let mut components: Vec<ComponentRecord> = Vec::new();
 
@@ -380,7 +438,7 @@ pub async fn collect_export_data(
                     .max(inst.transform.scale.y)
                     .max(inst.transform.scale.z);
                 if max_scale > 100000.0 {
-                    println!("       ⚠️  警告：scale 异常大！");
+                    println!("       ⚠️  警告:scale 异常大!");
                 }
             }
 
@@ -396,11 +454,18 @@ pub async fn collect_export_data(
         }
 
         if !geometries.is_empty() {
+            let owner_refno = Some(geom_inst.owner);
+            let owner_noun = owner_noun_map.get(&geom_inst.owner).cloned();
+            let owner_type = owner_type_map.get(&geom_inst.owner).cloned();
+
             components.push(ComponentRecord {
                 refno: geom_inst.refno,
                 noun,
                 name,
                 geometries,
+                owner_refno,
+                owner_noun,
+                owner_type,
             });
         }
     }
@@ -418,7 +483,7 @@ pub async fn collect_export_data(
                 .max(tubi.world_trans.scale.y)
                 .max(tubi.world_trans.scale.z);
             if max_scale > 100000.0 {
-                println!("       ⚠️  警告：scale 异常大！");
+                println!("       ⚠️  警告:scale 异常大!");
             }
         }
 

@@ -1,4 +1,4 @@
-use crate::fast_model::{booleans_meshes_in_db, gen_meshes_in_db};
+use crate::fast_model::mesh_generate::process_meshes_update_db_deep;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::{RefnoEnum, options::DbOption};
 use futures::stream::FuturesUnordered;
@@ -26,44 +26,20 @@ pub struct DbModelInstRefnos {
 
 impl DbModelInstRefnos {
     pub async fn execute_gen_inst_meshes(&self, db_option_arc: Option<Arc<DbOption>>) {
-        let mut handles = FuturesUnordered::new();
-        let prim_refnos = self.prim_refnos.clone();
-        let loop_owner_refnos = self.loop_owner_refnos.clone();
-        let use_cate_refnos = self.use_cate_refnos.clone();
-        let bran_hanger_refnos = self.bran_hanger_refnos.clone();
+        if let Some(db_option) = db_option_arc {
+            let mut roots = Vec::new();
 
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            gen_meshes_in_db(db_option, &prim_refnos)
-                .await
-                .expect("更新prim模型数据失败");
-        }));
+            roots.extend(self.bran_hanger_refnos.iter().copied());
+            roots.extend(self.use_cate_refnos.iter().copied());
+            roots.extend(self.loop_owner_refnos.iter().copied());
+            roots.extend(self.prim_refnos.iter().copied());
 
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            booleans_meshes_in_db(db_option, &loop_owner_refnos)
-                .await
-                .expect("更新loop模型数据失败");
-        }));
+            if roots.is_empty() {
+                return;
+            }
 
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            gen_meshes_in_db(db_option, &use_cate_refnos)
-                .await
-                .expect("更新cate模型数据失败");
-        }));
-
-        let db_option = db_option_arc.clone();
-        handles.push(tokio::spawn(async move {
-            gen_meshes_in_db(db_option, &bran_hanger_refnos)
-                .await
-                .expect("更新bran_hanger模型数据失败");
-        }));
-
-        use futures::StreamExt;
-        while let Some(result) = handles.next().await {
-            if let Err(e) = result {
-                eprintln!("Task failed: {:?}", e);
+            if let Err(e) = process_meshes_update_db_deep(&db_option, &roots).await {
+                eprintln!("process_meshes_update_db_deep failed: {:?}", e);
             }
         }
     }

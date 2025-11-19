@@ -11,7 +11,46 @@ use crate::web_server::{AppState, remote_sync_handlers, sync_control_center::*};
 
 // ========= 控制接口 =========
 
-/// 启动同步服务
+/// 测试触发文件下载（仅用于测试）
+pub async fn trigger_file_download(
+    _state: State<AppState>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    use crate::data_interface::tidb_manager::AiosDBManager;
+    use crate::mqtt_service::SyncE3dFileMsg;
+    
+    let file_names = request["file_names"].as_array()
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    
+    let file_server_host = request["file_server_host"].as_str()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    
+    let sync_e3d = SyncE3dFileMsg {
+        file_names,
+        file_hashes: vec![],
+        file_server_host: file_server_host.to_string(),
+        location: "test".to_string(),
+        timestamp: aios_core::Datetime::default(),
+    };
+    
+    // 创建一个临时的 watcher（实际使用时应该从全局状态获取）
+    let watcher = pdms_io::watch::PdmsWatcher::new(Vec::<std::path::PathBuf>::new());
+    
+    match AiosDBManager::exec_delta_clone_remotes(&watcher, sync_e3d).await {
+        Ok(_) => Ok(Json(json!({
+            "status": "success",
+            "message": "文件下载已触发"
+        }))),
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("下载失败: {}", e)
+        }))),
+    }
+}
 pub async fn start_sync_service(
     _state: State<AppState>,
     Json(request): Json<StartSyncRequest>,

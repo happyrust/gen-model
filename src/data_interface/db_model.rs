@@ -109,8 +109,11 @@ impl AiosDBManager {
             let url = format!("{}/{}.cba", remote_url, file_name);
             dbg!(&file_name);
             //todo 如果没有需要新加数据
-            let Some(pb) = watcher.file_name_full_path_map.get(file_name) else {
-                continue;
+            let pb = if let Some(pb) = watcher.file_name_full_path_map.get(file_name) {
+                pb.value().clone()
+            } else {
+                // 如果找不到文件名，使用 SJZ 项目路径和正确的扩展名（仅用于测试）
+                std::path::PathBuf::from(format!("/Volumes/DPC/work/e3d_models/test_sjz/AvevaMarineSample/ams000/{}_clone", file_name))
             };
             dbg!(&pb);
 
@@ -131,23 +134,58 @@ impl AiosDBManager {
                 sync_msg.file_names.len(),
                 &url
             );
-            let e3d_file: PathBuf = pb.value().clone();
+            let e3d_file: PathBuf = pb.clone();
             let mut clone_time = Instant::now();
             let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
-            if let Ok(r) = execute_clone(remote_clone_opt).await {
-                if r {
-                    //需要保存更新记录
-                    println!(
-                        "Clone {} cost: {:?}s",
-                        file_name,
-                        clone_time.elapsed().as_secs_f64()
-                    );
-                    //clone完了,再执行增量更新
+            match execute_clone(remote_clone_opt).await {
+                Ok(r) => {
+                    if r {
+                        //需要保存更新记录
+                        println!(
+                            "Clone {} cost: {:?}s",
+                            file_name,
+                            clone_time.elapsed().as_secs_f64()
+                        );
+                        //clone完了,再执行增量更新
+                    } else {
+                        println!("Clone {} returned false", file_name);
+                    }
+                }
+                Err(e) => {
+                    println!("Clone {} failed: {}", file_name, e);
                 }
             }
         }
 
         Ok(true)
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn test_debug_clone() {
+        use pdms_io::sync::clone::{CloneOptions, execute_clone};
+        
+        // 测试本地文件克隆
+        let source_file = "/Volumes/DPC/work/e3d_models/test_sjz/AvevaMarineSample/ams000/test1112.cba";
+        let target_file = "/Volumes/DPC/work/e3d_models/test_sjz/AvevaMarineSample/ams000/test1112_debug";
+        
+        println!("Testing local clone from {} to {}", source_file, target_file);
+        
+        let clone_opt = CloneOptions::new_local(source_file, target_file);
+        
+        match execute_clone(clone_opt).await {
+            Ok(success) => {
+                if success {
+                    println!("Clone successful!");
+                } else {
+                    println!("Clone returned false");
+                }
+            }
+            Err(e) => {
+                println!("Clone failed: {}", e);
+                panic!("Clone failed: {}", e);
+            }
+        }
     }
 
     pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
@@ -426,9 +464,14 @@ impl AiosDBManager {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let projects = db_option.get_project_dir_names().clone();
 
-        let db_paths =
+        let mut db_paths =
             collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()))
                 .unwrap_or_default();
+        // 临时修复：如果 db_paths 为空，直接手动添加 project_path
+        if db_paths.is_empty() {
+            db_paths.push(db_option.project_path.clone().into());
+        }
+        dbg!(&db_paths); // 调试输出：看看收集到的目录路径
         let mut watcher = PdmsWatcher::new(db_paths);
         #[cfg(feature = "debug_watch")]
         {
@@ -486,7 +529,7 @@ impl AiosDBManager {
                 }
             }
         });
-        Ok(Self {
+        let mut mgr = AiosDBManager {
             #[cfg(feature = "sql")]
             project_map,
             projects,
@@ -496,7 +539,10 @@ impl AiosDBManager {
             watcher: Arc::new(watcher),
             mqtt_client,
             rtree: None,
-        })
+        };
+        // 临时修复：手动初始化 watcher 以便监听文件变更
+        mgr.init_watcher().await?;
+        Ok(mgr)
     }
 
     /// 根据project获取连接池

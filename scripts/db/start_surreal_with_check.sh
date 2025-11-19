@@ -7,6 +7,16 @@ DB_USER="${DB_USER:-root}"
 DB_PASS="${DB_PASS:-root}"
 DB_FILE="${DB_FILE:-ams-8009-test.db}"
 
+#!/usr/bin/env bash
+ 
+PORT=$DB_PORT
+ 
+PIDS=$(lsof -ti :"$PORT" 2>/dev/null)
+if [ -n "$PIDS" ]; then
+  echo "Killing process on port $PORT: $PIDS"
+  kill -9 $PIDS
+fi
+
 # 健康检查地址（用于检查服务是否启动）
 CHECK_HOST="${CHECK_HOST:-127.0.0.1}"  # 本地检查地址
 CHECK_PORT="${CHECK_PORT:-$DB_PORT}"   # 检查端口（默认与监听端口相同）

@@ -22,6 +22,7 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use crate::spatial_index::SqliteSpatialIndex;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
+use aios_core::SurrealQueryExt;
 use aios_core::{
     RecordId, RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, get_inst_relate_keys,
     query_deep_neg_inst_refnos, query_deep_visible_inst_refnos, utils::RecordIdExt,
@@ -108,6 +109,95 @@ pub async fn gen_meshes_in_db(
         //     time.elapsed().as_millis()
         // );
     }
+    Ok(())
+}
+
+/// 查询需要执行 catalog 级布尔运算的实例列表
+async fn query_pending_cata_boolean(
+    limit: usize,
+    replace_exist: bool,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let filter_booled = if replace_exist {
+        String::new()
+    } else {
+        "AND (booled = false OR booled = NONE)".to_string()
+    };
+
+    let sql = format!(
+        r#"SELECT VALUE in
+FROM inst_relate
+WHERE has_cata_neg = true
+  AND (bad_bool = false OR bad_bool = NONE)
+  {filter_booled}
+LIMIT {limit};"#,
+    );
+
+    let refnos: Vec<RefnoEnum> = SUL_DB.query_take(&sql, 0).await?;
+    Ok(refnos)
+}
+
+/// 查询需要执行实例级布尔运算的实例列表
+async fn query_pending_inst_boolean(
+    limit: usize,
+    replace_exist: bool,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let filter_booled = if replace_exist {
+        String::new()
+    } else {
+        "AND booled_id = NONE".to_string()
+    };
+
+    let sql = format!(
+        r#"SELECT VALUE in
+FROM inst_relate
+WHERE ((in<-neg_relate)[0] != NONE OR (in<-ngmr_relate)[0] != NONE)
+  AND aabb.d != NONE
+  AND (bad_bool = false OR bad_bool = NONE)
+  {filter_booled}
+LIMIT {limit};"#,
+    );
+
+    let refnos: Vec<RefnoEnum> = SUL_DB.query_take(&sql, 0).await?;
+    Ok(refnos)
+}
+
+/// 基于 inst_relate 状态的布尔运算 Worker
+///
+/// 按批次扫描需要布尔运算的实例（catalog & 实例级），并复用现有
+/// `booleans_meshes_in_db` 管道完成实际计算。
+pub async fn run_boolean_worker(
+    db_option: Arc<DbOption>,
+    batch_size: usize,
+) -> anyhow::Result<()> {
+    let batch_size = batch_size.max(1);
+    let replace_exist = db_option.is_replace_mesh();
+
+    loop {
+        let cata_refnos = query_pending_cata_boolean(batch_size, replace_exist).await?;
+        let inst_refnos = query_pending_inst_boolean(batch_size, replace_exist).await?;
+
+        if cata_refnos.is_empty() && inst_refnos.is_empty() {
+            debug_model!("[boolean_worker] no pending boolean tasks, exit");
+            break;
+        }
+
+        if !cata_refnos.is_empty() {
+            debug_model!(
+                "[boolean_worker] processing {} catalog-boolean refnos",
+                cata_refnos.len()
+            );
+            booleans_meshes_in_db(Some(db_option.clone()), &cata_refnos).await?;
+        }
+
+        if !inst_refnos.is_empty() {
+            debug_model!(
+                "[boolean_worker] processing {} instance-boolean refnos",
+                inst_refnos.len()
+            );
+            booleans_meshes_in_db(Some(db_option.clone()), &inst_refnos).await?;
+        }
+    }
+
     Ok(())
 }
 

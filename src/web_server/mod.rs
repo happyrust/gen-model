@@ -382,6 +382,7 @@ pub async fn start_web_server_with_config(
             post(sync_control_handlers::test_sync_connection),
         )
         .route("/api/sync/task", post(sync_control_handlers::add_sync_task))
+        .route("/api/sync/trigger-download", post(sync_control_handlers::trigger_file_download))
         .route(
             "/api/sync/task/{id}/cancel",
             post(sync_control_handlers::cancel_sync_task),
@@ -390,8 +391,8 @@ pub async fn start_web_server_with_config(
             "/api/sync/history",
             get(sync_control_handlers::get_sync_history),
         )
-        // SSE 事件流
-        .route("/api/sync/events", get(sse_handlers::sync_events_handler))
+        // SSE 事件流（使用独立路径避免与轮询接口冲突）
+        .route("/api/sync/events/stream", get(sse_handlers::sync_events_handler))
         .route("/api/sync/events/test", get(sse_handlers::test_sse_handler))
         .route(
             "/api/sync/mqtt/start",
