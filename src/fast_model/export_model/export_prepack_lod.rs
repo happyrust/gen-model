@@ -921,69 +921,57 @@ pub async fn export_all_relates_prepack_lod(
 
     println!("\n🔍 查询 inst_relate 表...");
 
-    // 查询所有 ZONE
-    let zones = if let Some(dbno) = dbno {
+    // 1. 可选按 dbno 限定 inst_relate 范围
+    //    如果提供了 dbno，只查询该 db 下的 inst_relate；否则全表扫描。
+    let db_filter = if let Some(dbno) = dbno {
         println!("   - 模式: 按 dbno={} 过滤", dbno);
-
-        // 使用 SurrealDB 函数查询 SITE
-        let sql = format!("RETURN fn::get_sites_of_dbnum({})", dbno);
-        let sites: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql, 0).await?;
-        println!("      - 找到 {} 个 SITE", sites.len());
-
-        // 查询所有 ZONE (SITE 的子节点)
-        let mut zones = Vec::new();
-        for site in &sites {
-            let sql = format!(
-                "SELECT VALUE in FROM {}<-pe_owner WHERE in.noun = 'ZONE'",
-                site.to_pe_key()
-            );
-            let site_zones: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql, 0).await?;
-            zones.extend(site_zones);
-        }
-        println!("      - 找到 {} 个 ZONE", zones.len());
-        zones
+        format!("WHERE dbno = {} ", dbno)
     } else {
-        println!("   - 模式: 全表扫描（所有 ZONE）");
-        let sql = "SELECT VALUE REFNO FROM ZONE WHERE !deleted";
-        aios_core::SUL_DB.query_take(sql, 0).await?
+        println!("   - 模式: 全表扫描（所有 dbno）");
+        String::new()
     };
 
-    if zones.is_empty() {
-        println!("⚠️  未找到任何 ZONE");
-        return Ok(());
-    }
+    // 2. 首先筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息
+    //    注意：这里只是统计/记录，不作为导出 refno 集的一部分。
+    let sql_equi = format!(
+        "SELECT in.id AS refno FROM inst_relate {}AND owner_type = 'EQUI'",
+        db_filter
+    );
+    let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_equi, 0).await?;
+    let equi_set: HashSet<RefnoEnum> = equi_refnos.iter().cloned().collect();
 
-    // 查询各 ZONE 下的 inst_relate refno
-    println!("   - 逐 Zone 拉取 inst_relate 数据...");
+    println!(
+        "   - 找到 {} 条 owner_type = 'EQUI' 的 inst_relate 记录（用于设备分组）",
+        equi_set.len()
+    );
+
+    // 3. 再次扫描 inst_relate，收集需要导出的实体：
+    //    条件：
+    //      - aabb.d != none （已生成模型）
+    //      - owner_type != 'EQUI' （跳过设备自身的 inst_relate，只导出实体）
+    //    这里一次性扫描 inst_relate 表，而不是按 ZONE 逐个查询。
+    let sql_all = format!(
+        "SELECT in.id AS refno FROM inst_relate {}AND aabb.d != none",
+        db_filter
+    );
+    let all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;
+
     let mut unique_refnos = HashSet::new();
     let mut refnos = Vec::new();
-    for (idx, zone) in zones.iter().enumerate() {
-        let zone_key = zone.to_pe_key();
-        let sql = format!(
-            "SELECT VALUE in.id FROM inst_relate WHERE zone_refno = {} AND aabb.d != none",
-            zone_key
-        );
-        let zone_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql, 0).await?;
-        let mut new_count = 0usize;
-        for r in zone_refnos {
-            if unique_refnos.insert(r.clone()) {
-                refnos.push(r);
-                new_count += 1;
-            }
+    for r in all_refnos {
+        // 跳过 owner_type 为 EQUI 的 inst_relate（设备节点），只保留实际实体
+        if equi_set.contains(&r) {
+            continue;
         }
-        if verbose {
-            println!(
-                "      [{} / {}] Zone {} 新增 {} 个 refno (累计 {})",
-                idx + 1,
-                zones.len(),
-                zone_key,
-                new_count,
-                refnos.len()
-            );
+        if unique_refnos.insert(r.clone()) {
+            refnos.push(r);
         }
     }
 
-    println!("      - 找到 {} 个有 inst_relate 数据的实体", refnos.len());
+    println!(
+        "      - 最终需要导出的 inst_relate 实体数: {} (已排除 EQUI 节点)",
+        refnos.len()
+    );
 
     if refnos.is_empty() {
         println!("⚠️  未找到任何 inst_relate 实体");

@@ -6,6 +6,7 @@
 //! 3. 子元素的 mesh 是否都生成
 
 use aios_core::{RefnoEnum, init_test_surreal, query_inst_geo_ids};
+use aios_database::fast_model::export_model::export_obj::export_obj_for_refnos;
 use aios_database::fast_model::{gen_model_old, mesh_generate};
 use aios_database::options::DbOptionExt;
 use std::fs;
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     db_option_ext.full_noun_mode = true;
     db_option_ext.full_noun_enabled_categories = vec!["BRAN".to_string(), "PANE".to_string()];
     db_option_ext.full_noun_excluded_nouns = vec![];
-    db_option_ext.debug_limit_per_noun = Some(10); // 限制每个类型 10 个，加快测试
+    db_option_ext.debug_limit_per_noun = Some(1); // 限制每个类型 1 个，加快测试
 
     // 启用 mesh 生成
     db_option_ext.gen_mesh = true;
@@ -295,6 +296,28 @@ async fn main() -> anyhow::Result<()> {
         "   - BRAN/HANG 子元素数: {}",
         db_refnos.bran_hanger_refnos.len()
     );
+
+    // 使用 Full Noun 生成结果导出一个 BRAN/HANG 子元素的 OBJ，用于直观验证
+    if let Some(first_refno) = db_refnos.bran_hanger_refnos.first() {
+        let mesh_dir = db_option_ext.get_meshes_path();
+        let output_dir = Path::new("test_output/full_noun_bran_exports");
+        std::fs::create_dir_all(output_dir)?;
+        let output_path = output_dir.join(format!("bran_child_{}.obj", first_refno));
+
+        println!("\n📤 额外步骤: 导出第一个 BRAN/HANG 子元素的 OBJ...");
+        println!("   - 目标子元素 refno: {}", first_refno);
+        println!("   - Mesh 目录: {}", mesh_dir.display());
+        println!("   - OBJ 输出路径: {}", output_path.display());
+
+        export_obj_for_refnos(
+            &[*first_refno],
+            &mesh_dir,
+            output_path.to_str().unwrap(),
+            None,
+            true,
+        )
+        .await?;
+    }
 
     if db_option_ext.gen_mesh {
         let mesh_dir = db_option_ext.get_meshes_path();
