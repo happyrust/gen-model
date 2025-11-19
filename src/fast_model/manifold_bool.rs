@@ -25,8 +25,52 @@ use nalgebra::Isometry;
 use parry3d::bounding_volume::Aabb;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// 根据 mesh_id 和当前 LOD 配置构建完整的 mesh 文件路径
+///
+/// # 参数
+///
+/// * `base_dir` - mesh 基础目录（通常是 DbOption.meshes_path 或其父目录）
+/// * `mesh_id` - mesh 文件 ID
+///
+/// # 返回
+///
+/// 完整的 mesh 文件路径，格式为：
+/// - `{base_dir}/lod_{LOD}/{mesh_id}_{LOD}.mesh`（启用 LOD 时）
+/// - `{base_dir}/{mesh_id}.mesh`（无 LOD 或旧格式）
+///
+/// # 示例
+///
+/// ```ignore
+/// let path = build_lod_mesh_path(Path::new("/assets/meshes"), "12232319344565648304");
+/// // 返回: /assets/meshes/lod_L2/12232319344565648304_L2.mesh
+/// ```
+fn build_lod_mesh_path(base_dir: &Path, mesh_id: &str) -> PathBuf {
+    use aios_core::mesh_precision::LodLevel;
+    
+    let db_option = aios_core::get_db_option();
+    let default_lod = db_option.mesh_precision().default_lod;
+    
+    // 检查 base_dir 是否已经是 LOD 子目录（如 "lod_L2"）
+    let is_already_lod_dir = base_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.starts_with("lod_"))
+        .unwrap_or(false);
+    
+    let lod_filename = format!("{}_{:?}.mesh", mesh_id, default_lod);
+    
+    if is_already_lod_dir {
+        // 已经在 LOD 目录下，直接拼接文件名
+        base_dir.join(lod_filename)
+    } else {
+        // 需要添加 LOD 子目录
+        let lod_dir = base_dir.join(format!("lod_{:?}", default_lod));
+        lod_dir.join(lod_filename)
+    }
+}
 
 /// 从文件加载网格数据
 ///
@@ -39,7 +83,9 @@ use std::sync::Arc;
 /// 返回 `anyhow::Result<PlantMesh>` 表示加载是否成功以及加载的网格数据
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
-    let mesh = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", id))?;
+    let base_dir = Path::new("assets/meshes");
+    let mesh_path = build_lod_mesh_path(base_dir, id);
+    let mesh = PlantMesh::des_mesh_file(&mesh_path)?;
     Ok(mesh)
 }
 
@@ -62,7 +108,8 @@ fn load_manifold(
     mat: DMat4,
     more_precision: bool,
 ) -> anyhow::Result<ManifoldRust> {
-    let mesh = PlantMesh::des_mesh_file(&dir.join(format!("{}.mesh", id)))?;
+    let mesh_path = build_lod_mesh_path(dir, id);
+    let mesh = PlantMesh::des_mesh_file(&mesh_path)?;
     let manifold = ManifoldRust::convert_to_manifold(mesh, mat, more_precision);
     Ok(manifold)
 }
@@ -254,6 +301,7 @@ pub async fn apply_insts_boolean_manifold_single(
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
+    // dbg!(&dir);
     // Query manifold boolean operations data using the extracted method
     match query_manifold_boolean_operations(refno).await {
         Ok(boolean_query) => {
