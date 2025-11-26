@@ -20,6 +20,9 @@ use super::errors::{FullNounError, Result};
 use super::loop_processor::process_loop_refno_page;
 use super::prim_processor::process_prim_refno_page;
 use crate::fast_model::{cata_model, query_provider};
+use crate::fast_model::refno_errors::{
+    record_refno_error, RefnoErrorKind, RefnoErrorStage, REFNO_ERROR_STORE,
+};
 // Performance profiling support
 #[cfg(feature = "profile")]
 use tracing::{info, instrument};
@@ -43,6 +46,39 @@ pub fn validate_sjus_map(
         }
     }
     Ok(())
+}
+
+fn track_refno_issues(refnos: &[RefnoEnum], context: &str, stage: RefnoErrorStage) {
+    let mut seen = HashSet::new();
+    for &refno in refnos {
+        if matches!(refno, RefnoEnum::Refno(r) if r.0 == 0) {
+            record_refno_error(
+                RefnoErrorKind::ZeroOrNegative,
+                stage,
+                "fast_model/gen_model/full_noun_mode.rs",
+                "collect_refnos",
+                format!("{} 返回无效 RefNo=0", context),
+                Some(&refno),
+                None,
+                &[],
+                None,
+            );
+        }
+
+        if !seen.insert(refno) {
+            record_refno_error(
+                RefnoErrorKind::Duplicate,
+                stage,
+                "fast_model/gen_model/full_noun_mode.rs",
+                "collect_refnos",
+                format!("{} 中检测到重复 RefNo", context),
+                Some(&refno),
+                None,
+                &[],
+                None,
+            );
+        }
+    }
 }
 
 /// Full Noun 模式下生成所有几何体（优化版本）
@@ -143,6 +179,8 @@ pub async fn gen_full_noun_geos_optimized(
             }
         }
 
+        track_refno_issues(&refnos, noun_str, RefnoErrorStage::InputParse);
+
         if refnos.is_empty() {
             println!(
                 "[gen_full_noun_geos] 入口 noun {}: 未找到实例，跳过",
@@ -198,6 +236,11 @@ pub async fn gen_full_noun_geos_optimized(
                     e
                 ))
             })?;
+    track_refno_issues(
+        &loop_descendants,
+        "loop_descendants",
+        RefnoErrorStage::Query,
+    );
     loop_refnos.extend(loop_descendants);
 
     let prim_descendants =
@@ -209,6 +252,11 @@ pub async fn gen_full_noun_geos_optimized(
                     e
                 ))
             })?;
+    track_refno_issues(
+        &prim_descendants,
+        "prim_descendants",
+        RefnoErrorStage::Query,
+    );
     prim_refnos.extend(prim_descendants);
 
     let cate_descendants =
@@ -220,6 +268,11 @@ pub async fn gen_full_noun_geos_optimized(
                     e
                 ))
             })?;
+    track_refno_issues(
+        &cate_descendants,
+        "cate_descendants",
+        RefnoErrorStage::Query,
+    );
     cate_refnos.extend(cate_descendants);
 
     println!(
@@ -395,13 +448,37 @@ pub async fn gen_full_noun_geos_optimized(
                 }
             };
 
-            // 3. 调用 cata_model::gen_cata_geos 生成 Tubing 几何体
-            if let Err(e) = cata_model::gen_cata_geos(
+            // 3. 先生成 BRAN/HANG 相关的 CATE 几何（不触发 tubing）
+            let cate_outcome = match cata_model::gen_cata_instances(
                 db_option.clone(),
                 Arc::new(target_bran_reuse_cata_map),
+                loop_sjus_map_arc.clone(),
+                sender.clone(),
+            )
+            .await
+            {
+                Ok(outcome) => Some(outcome),
+                Err(e) => {
+                    println!(
+                        "[gen_full_noun_geos] 批次 {}: BRAN/HANG 关联 CATE 生成失败: {}",
+                        batch_num, e
+                    );
+                    None
+                }
+            };
+
+            // 4. 单独生成 BRAN/HANG tubing
+            let local_al_map = cate_outcome
+                .as_ref()
+                .map(|o| o.local_al_map.clone())
+                .unwrap_or_else(|| Arc::new(DashMap::new()));
+
+            if let Err(e) = cata_model::gen_branch_tubi(
+                db_option.clone(),
                 Arc::new(branch_refnos_map),
                 loop_sjus_map_arc.clone(),
                 sender.clone(),
+                local_al_map,
             )
             .await
             {
@@ -469,6 +546,17 @@ pub async fn gen_full_noun_geos_optimized(
     );
 
     categorized.print_statistics();
+
+    let error_summary = REFNO_ERROR_STORE.summary();
+    if error_summary.total > 0 {
+        println!("📊 RefNo 错误统计: 总计 {}", error_summary.total);
+        for (kind, count) in error_summary.by_kind.iter() {
+            println!("   - {:?}: {}", kind, count);
+        }
+        for (stage, count) in error_summary.by_stage.iter() {
+            println!("   - 阶段 {:?}: {}", stage, count);
+        }
+    }
 
     #[cfg(feature = "profile")]
     info!(

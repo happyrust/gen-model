@@ -4,7 +4,7 @@ use crate::fast_model::cata_model;
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::options::DbOption;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use dashmap::DashMap;
 use glam::Vec3;
 use std::sync::Arc;
@@ -38,17 +38,8 @@ pub async fn process_cate_refno_page(
     }
 
     // 生成 cata 几何体
-    if !cata_model::gen_cata_geos(
-        ctx.db_option.clone(),
-        target_cata_map,
-        Arc::new(Default::default()),
-        loop_sjus_map_arc,
-        sender,
-    )
-    .await?
-    {
-        bail!("cate geos generation failed");
-    }
+    cata_model::gen_cata_instances(ctx.db_option.clone(), target_cata_map, loop_sjus_map_arc, sender)
+        .await?;
 
     Ok(())
 }

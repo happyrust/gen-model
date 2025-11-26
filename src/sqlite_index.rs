@@ -105,6 +105,30 @@ impl SqliteAabbIndex {
         }
         Ok(ids)
     }
+
+    // Query all AABBs: returns all (id, min_x, max_x, min_y, max_y, min_z, max_z) tuples
+    pub fn query_all_aabbs(&self) -> Result<Vec<(i64, f64, f64, f64, f64, f64, f64)>> {
+        let conn = Connection::open(&self.path)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, min_x, max_x, min_y, max_y, min_z, max_z FROM aabb_index"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        })?;
+        let mut aabbs = Vec::new();
+        for r in rows {
+            aabbs.push(r?);
+        }
+        Ok(aabbs)
+    }
 }
 
 #[cfg(all(test, feature = "sqlite-index"))]

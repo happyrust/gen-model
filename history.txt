@@ -1,11 +1,4 @@
 #V2
-SELECT dbno, refno FROM pe WHERE refno = '21485_13393';
-SELECT id, refno, type FROM pe WHERE refno = '21485/13393';
-SELECT id, refno, type FROM pe WHERE type = 'FLOOR' LIMIT 5;
-SELECT id, refno, type FROM pe WHERE refno = '21485_13393';
-SELECT count() AS cnt FROM inst_relate WHERE in IN [pe:38293_8920];
-INSERT RELATION INTO inst_relate [{id: inst_relate:38293_8920_manual,  in: pe:38293_8920, out: inst_info:⟨497198134178187283⟩, world_trans: trans:⟨10691071172886780531⟩, generic: 'PIPE', zone_refno: fn::find_ancestor_type(pe:38293_8920, 'ZONE'), dt: fn::ses_date(pe:38293_8920), has_cata_neg: false, solid: true}];
-RETURN fn::find_ancestor_type(pe:38293_8920, 'ZONE');
 SELECT id FROM inst_relate WHERE in = pe:⟨38293_8920⟩;
 DELETE inst_relate:38293_8920_manual;
 SELECT id FROM inst_relate WHERE in = pe:⟨38293_8920⟩;
@@ -99,3 +92,10 @@ SELECT * FROM inst_info:⟨25688_7957_3⟩;
 SELECT * FROM inst_info:⟨25688_7957_2⟩;
 SELECT * FROM inst_info:⟨25688_7957⟩;
 select        in as refno,        in.sesno as sesno,        in.noun as noun,        world_trans.d as wt,        aabb.d as aabb,        (select value [out, trans.d] from out->geo_relate where geo_type in ['Compound', 'Pos'] and trans.d != NONE ) as ts,        (select value [in, world_trans.d,            (select out as id, geo_type, para_type ?? '' as para_type, trans.d as trans, out.aabb.d as aabb            from array::flatten(out->geo_relate) where trans.d != NONE and ( geo_type=='Neg' or (geo_type=='CataCrossNeg'                and geom_refno in (select value ngmr from pe:⟨25688_7957⟩<-ngmr_relate) ) ))]                from array::flatten([array::flatten(in<-neg_relate.in->inst_relate), array::flatten(in<-ngmr_relate.in->inst_relate)]) where world_trans.d!=none        ) as neg_ts     from inst_relate:⟨25688_7957⟩ where in.id != none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE;
+SELECT count() FROM inst_relate;
+SELECT count() FROM tubi_relate;
+SELECT * FROM inst_relate LIMIT 3;
+SELECT * FROM tubi_relate LIMIT 3;
+SELECT count() AS c FROM inst_relate GROUP ALL;
+SELECT count() AS c FROM tubi_relate GROUP ALL;
+SELECT dbnum FROM pe WHERE id = pe:⟨21909_10188⟩;

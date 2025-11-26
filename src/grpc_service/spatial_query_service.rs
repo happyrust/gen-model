@@ -151,43 +151,54 @@ impl SpatialQueryServiceImpl {
         Ok(())
     }
 
-    /// 构建初始空间索引
+    /// 构建初始空间索引（从 SQLite 数据库加载）
     async fn build_initial_index() -> anyhow::Result<RTree<SpatialElement>> {
-        let mut elements = Vec::new();
+        use crate::spatial_index::SqliteSpatialIndex;
+        use crate::sqlite_index::SqliteAabbIndex;
 
-        // 模拟数据 - 在实际应用中这里应该从数据库查询
-        // 创建一些测试数据
-        elements.push(SpatialElement {
-            refno: RefU64(1001),
-            bbox: Aabb::new(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
-            element_type: "PIPE".to_string(),
-            element_name: "管道001".to_string(),
-            last_updated: SystemTime::now(),
-        });
+        // 复用 SqliteSpatialIndex::default_path，确保与查询使用同一索引文件
+        let db_path = SqliteSpatialIndex::default_path();
 
-        elements.push(SpatialElement {
-            refno: RefU64(1002),
-            bbox: Aabb::new(Point3::new(0.5, 0.5, 0.5), Point3::new(1.5, 1.5, 1.5)),
-            element_type: "EQUI".to_string(),
-            element_name: "设备001".to_string(),
-            last_updated: SystemTime::now(),
-        });
+        let sqlite_index = match SqliteAabbIndex::open(&db_path) {
+            Ok(index) => index,
+            Err(e) => {
+                log::warn!("无法打开 SQLite 索引数据库 {:?}: {}，返回空索引", db_path, e);
+                return Ok(RTree::new());
+            }
+        };
 
-        elements.push(SpatialElement {
-            refno: RefU64(1003),
-            bbox: Aabb::new(Point3::new(2.0, 2.0, 2.0), Point3::new(3.0, 3.0, 3.0)),
-            element_type: "PIPE".to_string(),
-            element_name: "管道002".to_string(),
-            last_updated: SystemTime::now(),
-        });
+        // 查询所有 AABB 数据
+        let aabb_data = match sqlite_index.query_all_aabbs() {
+            Ok(data) => data,
+            Err(e) => {
+                log::warn!("查询 SQLite AABB 数据失败: {}，返回空索引", e);
+                return Ok(RTree::new());
+            }
+        };
 
-        elements.push(SpatialElement {
-            refno: RefU64(1004),
-            bbox: Aabb::new(Point3::new(0.8, 0.8, 0.8), Point3::new(2.2, 2.2, 2.2)),
-            element_type: "STRU".to_string(),
-            element_name: "结构001".to_string(),
-            last_updated: SystemTime::now(),
-        });
+        if aabb_data.is_empty() {
+            log::info!("SQLite 索引数据库为空，返回空索引");
+            return Ok(RTree::new());
+        }
+
+        log::info!("从 SQLite 加载 {} 个空间元素", aabb_data.len());
+
+        // 转换为 SpatialElement（仍然在内存中构建 RTree，用于非 sqlite 分支或调试）
+        let elements: Vec<SpatialElement> = aabb_data
+            .into_iter()
+            .map(|(id, min_x, max_x, min_y, max_y, min_z, max_z)| {
+                SpatialElement {
+                    refno: aios_core::pdms_types::RefU64(id as u64),
+                    bbox: Aabb::new(
+                        Point3::new(min_x as f32, min_y as f32, min_z as f32),
+                        Point3::new(max_x as f32, max_y as f32, max_z as f32),
+                    ),
+                    element_type: "UNKNOWN".to_string(), // SQLite 中目前只存 AABB
+                    element_name: format!("Element_{}", id),
+                    last_updated: SystemTime::now(),
+                }
+            })
+            .collect();
 
         Ok(RTree::bulk_load(elements))
     }

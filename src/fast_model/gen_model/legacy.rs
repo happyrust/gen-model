@@ -90,7 +90,7 @@ pub async fn gen_all_geos_data(
 
         if db_option.manual_db_nums.is_some() || db_option.exclude_db_nums.is_some() {
             println!(
-                "[gen_model] 警告: Full Noun 模式下 manual_db_nums 和 exclude_db_nums 配置将被忽略"
+                "[gen_model] 提示: Full Noun 新管线已支持 manual_db_nums / exclude_db_nums 过滤，当前仍按配置执行"
             );
         }
 

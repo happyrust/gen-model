@@ -567,7 +567,7 @@ pub async fn gen_inst_meshes(
         "gen_inst_meshes fetched inst_geo_ids: {}",
         inst_geo_ids.len()
     );
-    println!("inst_geo_ids: {:?}", &inst_geo_ids);
+    // println!("inst_geo_ids: {:?}", &inst_geo_ids);
     // 无可处理对象则直接返回
     if inst_geo_ids.is_empty() {
         debug_model_debug!(
@@ -913,7 +913,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     replace_exist: bool,
 ) -> anyhow::Result<()> {
     // 如果没有启用 SQLite 索引，直接使用 aios_core 的基础版本
-    #[cfg(not(feature = "sqlite-index"))]
+    // #[cfg(not(feature = "sqlite-index"))]
     {
         return aios_core::update_inst_relate_aabbs_by_refnos(refnos, replace_exist).await;
     }

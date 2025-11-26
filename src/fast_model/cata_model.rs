@@ -1,16 +1,18 @@
 use crate::consts::*;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
 use crate::fast_model::gen_model::cate_helpers::cal_sjus_value;
 use crate::fast_model::gen_model::cate_single::{CateCsgShapeMap, gen_cata_single_geoms};
 use crate::fast_model::{SEND_INST_SIZE, get_generic_type, resolve_desi_comp, shared};
 use crate::fast_model::{debug_model, debug_model_debug};
+use crate::fast_model::refno_errors::{
+    record_refno_error, RefnoErrorKind, RefnoErrorStage,
+};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
-use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
@@ -127,13 +129,34 @@ pub enum NgmrRemovedType {
     All = 7,
 }
 
+/// 普通 CATE 生成阶段的输出
+pub struct CateGenOutcome {
+    pub local_al_map: Arc<DashMap<RefnoEnum, [CateAxisParam; 2]>>,
+    pub time_stats: HashMap<String, u64>,
+    pub unique_cata_cnt: usize,
+    pub elapsed_ms: u128,
+}
+
+/// BRAN/HANG tubing 生成阶段的输出
+pub struct BranchTubiOutcome {
+    pub tubi_relates: Vec<String>,
+    pub tubi_refnos: Vec<String>,
+    pub time_stats: HashMap<String, u64>,
+    pub tubi_count: i32,
+    pub elapsed_ms: u128,
+}
+
+pub struct GenOutcome {
+    pub cate: Option<CateGenOutcome>,
+    pub branch: Option<BranchTubiOutcome>,
+}
+
 // gen_cata_single_geoms 已移至 gen_model/cate_single.rs
 // cal_sjus_value 已移至 gen_model/cate_helpers.rs
 
 /// 生成元件库的branch型几何体
 /// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
 /// 先暂时整个重新生成？
-#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender))]
 pub async fn gen_cata_geos(
     db_option: Arc<DbOption>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
@@ -141,6 +164,77 @@ pub async fn gen_cata_geos(
     sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
+    gen_cata_geos_inner(
+        db_option,
+        target_cata_map,
+        branch_map,
+        sjus_map_arc,
+        sender,
+        Arc::new(DashMap::new()),
+        true,
+        true,
+    )
+    .await
+    .map(|_| true)
+}
+
+/// 仅处理普通 CATE 元件库几何体（不处理 BRAN/HANG tubing）
+pub async fn gen_cata_instances(
+    db_option: Arc<DbOption>,
+    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+) -> anyhow::Result<CateGenOutcome> {
+    let local_al_map = Arc::new(DashMap::new());
+    gen_cata_geos_inner(
+        db_option,
+        target_cata_map,
+        Arc::new(DashMap::new()),
+        sjus_map_arc,
+        sender,
+        local_al_map,
+        true,
+        false,
+    )
+    .await?
+    .cate
+    .ok_or_else(|| anyhow::anyhow!("cate outcome missing"))
+}
+
+/// 仅处理 BRAN/HANG tubing（不生成普通 CATE 几何体）
+pub async fn gen_branch_tubi(
+    db_option: Arc<DbOption>,
+    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    local_al_map: Arc<DashMap<RefnoEnum, [CateAxisParam; 2]>>,
+) -> anyhow::Result<BranchTubiOutcome> {
+    gen_cata_geos_inner(
+        db_option,
+        Arc::new(DashMap::new()),
+        branch_map,
+        sjus_map_arc,
+        sender,
+        local_al_map,
+        false,
+        true,
+    )
+    .await?
+    .branch
+    .ok_or_else(|| anyhow::anyhow!("branch outcome missing"))
+}
+
+#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender))]
+async fn gen_cata_geos_inner(
+    db_option: Arc<DbOption>,
+    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
+    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+    local_al_map: Arc<DashMap<RefnoEnum, [CateAxisParam; 2]>>,
+    process_cata: bool,
+    process_branch: bool,
+) -> anyhow::Result<GenOutcome> {
     // Initialize Chrome tracing
     #[cfg(feature = "profile")]
     init_chrome_tracing()?;
@@ -149,7 +243,6 @@ pub async fn gen_cata_geos(
     // let mut handles = FuturesUnordered::new();
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
-    let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
 
     // 用于收集总耗时的互斥锁
@@ -189,7 +282,7 @@ pub async fn gen_cata_geos(
         "Starting to process catalog models"
     );
 
-    if !all_unique_keys.is_empty() {
+    if process_cata && !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt {
             let all_unique_keys = all_unique_keys.clone();
             let target_cata_map = target_cata_map.clone();
@@ -374,9 +467,23 @@ pub async fn gen_cata_geos(
                     let t_get_named_attmap = Instant::now();
                     #[cfg(feature = "profile")]
                     tracing::debug!(ele_refno = ?ele_refno, "Getting named attmap");
-                    let desi_att = aios_core::get_named_attmap(ele_refno)
-                        .await
-                        .unwrap_or_default();
+                    let desi_att = match aios_core::get_named_attmap(ele_refno).await {
+                        Ok(att) => att,
+                        Err(e) => {
+                            record_refno_error(
+                                RefnoErrorKind::NotFound,
+                                RefnoErrorStage::Query,
+                                "fast_model/cata_model.rs",
+                                "get_named_attmap",
+                                format!("DESI 属性获取失败: {}", e),
+                                Some(&ele_refno),
+                                None,
+                                &[],
+                                None,
+                            );
+                            continue;
+                        }
+                    };
                     db_time_get_named_attmap += t_get_named_attmap.elapsed().as_millis();
 
                     let mut design_axis_map = DashMap::new();
@@ -495,24 +602,57 @@ pub async fn gen_cata_geos(
                             shapes.len()
                         );
                         let t_get_world_transform = Instant::now();
-                        let Ok(Some(mut world_transform)) =
-                            aios_core::get_world_transform(ele_refno).await
-                        else {
-                            debug_model!(
-                                "Failed to get world_transform for ele_refno={}, skipping",
-                                ele_refno
-                            );
-                            continue;
-                        };
+                        let mut world_transform =
+                            match aios_core::get_world_transform(ele_refno).await {
+                                Ok(Some(trans)) => trans,
+                                Ok(None) => {
+                                    record_refno_error(
+                                        RefnoErrorKind::Missing,
+                                        RefnoErrorStage::Query,
+                                        "fast_model/cata_model.rs",
+                                        "get_world_transform",
+                                        "未获取到 world_transform",
+                                        Some(&ele_refno),
+                                        None,
+                                        &[],
+                                        None,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    record_refno_error(
+                                        RefnoErrorKind::NotFound,
+                                        RefnoErrorStage::Query,
+                                        "fast_model/cata_model.rs",
+                                        "get_world_transform",
+                                        format!("查询 world_transform 失败: {}", e),
+                                        Some(&ele_refno),
+                                        None,
+                                        &[],
+                                        None,
+                                    );
+                                    continue;
+                                }
+                            };
                         db_time_get_world_transform += t_get_world_transform.elapsed().as_millis();
 
                         let t_get_named_attmap2 = Instant::now();
-                        let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await else {
-                            debug_model!(
-                                "Failed to get named_attmap for ele_refno={}, skipping",
-                                ele_refno
-                            );
-                            continue;
+                        let ele_att = match aios_core::get_named_attmap(ele_refno).await {
+                            Ok(att) => att,
+                            Err(e) => {
+                                record_refno_error(
+                                    RefnoErrorKind::NotFound,
+                                    RefnoErrorStage::Query,
+                                    "fast_model/cata_model.rs",
+                                    "get_named_attmap",
+                                    format!("获取 named_attmap 失败: {}", e),
+                                    Some(&ele_refno),
+                                    None,
+                                    &[],
+                                    None,
+                                );
+                                continue;
+                            }
                         };
                         db_time_get_named_attmap += t_get_named_attmap2.elapsed().as_millis();
 
@@ -859,21 +999,28 @@ pub async fn gen_cata_geos(
     // Wait for batches to complete
     // while let Some(_) = handles.next().await {}
 
-    #[cfg(feature = "profile")]
-    tracing::info!(
-        branch_count = branch_map.len(),
-        "Processing branches (BRAN Tubing generation)"
-    );
-    let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
-    let mut tubi_shape_insts_data = ShapeInstancesData::default();
-
-    let t_process_branch = Instant::now();
+    let mut process_branch_time: u128 = 0;
     let mut db_time_get_children = 0;
     let mut db_time_get_branch_att = 0;
     let mut db_time_get_branch_transform = 0;
     let mut tubi_count = 0;
+    let mut send_data_time = 0;
+    let mut tubi_query_time = 0;
 
-    for bran_data in branch_map.iter() {
+    let mut tubi_refnos: Vec<String> = Vec::new();
+    if process_branch {
+        #[cfg(feature = "profile")]
+        tracing::info!(
+            branch_count = branch_map.len(),
+            "Processing branches (BRAN Tubing generation)"
+        );
+        let unit_cyli_aabb =
+            Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
+        let mut tubi_shape_insts_data = ShapeInstancesData::default();
+
+        let t_process_branch = Instant::now();
+
+        for bran_data in branch_map.iter() {
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
 
@@ -893,18 +1040,71 @@ pub async fn gen_cata_geos(
         db_time_get_children += t_get_children.elapsed().as_millis();
 
         let t_get_named_attmap = Instant::now();
-        let Ok(branch_att) = aios_core::get_named_attmap(branch_refno).await else {
-            continue;
+        let branch_att = match aios_core::get_named_attmap(branch_refno).await {
+            Ok(att) => att,
+            Err(e) => {
+                record_refno_error(
+                    RefnoErrorKind::NotFound,
+                    RefnoErrorStage::Query,
+                    "fast_model/cata_model.rs",
+                    "get_named_attmap",
+                    format!("BRAN/HANG 获取属性失败: {}", e),
+                    Some(&branch_refno),
+                    None,
+                    &[],
+                    None,
+                );
+                continue;
+            }
         };
         db_time_get_branch_att += t_get_named_attmap.elapsed().as_millis();
 
         let t_get_world_transform = Instant::now();
-        let Ok(Some(branch_transform)) = aios_core::get_world_transform(branch_refno).await else {
-            continue;
+        let branch_transform = match aios_core::get_world_transform(branch_refno).await {
+            Ok(Some(trans)) => trans,
+            Ok(None) => {
+                record_refno_error(
+                    RefnoErrorKind::Missing,
+                    RefnoErrorStage::Query,
+                    "fast_model/cata_model.rs",
+                    "get_world_transform",
+                    "BRAN/HANG 缺少 world_transform",
+                    Some(&branch_refno),
+                    None,
+                    &[],
+                    None,
+                );
+                continue;
+            }
+            Err(e) => {
+                record_refno_error(
+                    RefnoErrorKind::NotFound,
+                    RefnoErrorStage::Query,
+                    "fast_model/cata_model.rs",
+                    "get_world_transform",
+                    format!("BRAN/HANG world_transform 查询失败: {}", e),
+                    Some(&branch_refno),
+                    None,
+                    &[],
+                    None,
+                );
+                continue;
+            }
         };
         db_time_get_branch_transform += t_get_world_transform.elapsed().as_millis();
 
         let Some(hpt) = branch_att.get_vec3("HPOS") else {
+            record_refno_error(
+                RefnoErrorKind::Missing,
+                RefnoErrorStage::Build,
+                "fast_model/cata_model.rs",
+                "branch_hpos",
+                "BRAN/HANG 缺少 HPOS",
+                Some(&branch_refno),
+                None,
+                &[],
+                None,
+            );
             continue;
         };
         let htube_pt = branch_transform.transform_point(hpt);
@@ -1373,75 +1573,76 @@ pub async fn gen_cata_geos(
             );
         }
     }
-    let process_branch_time = t_process_branch.elapsed().as_millis();
+    process_branch_time = t_process_branch.elapsed().as_millis();
 
-    #[cfg(feature = "profile")]
-    tracing::info!(
-        branch_count = branch_map.len(),
-        tubi_generated = tubi_count,
-        total_time_ms = process_branch_time,
-        avg_time_per_branch_ms = if branch_map.len() > 0 {
-            process_branch_time / branch_map.len() as u128
-        } else {
-            0
-        },
-        "BRAN Tubing generation completed"
-    );
-
-    // 在发送之前提取需要更新has_tubi的refno列表
-    let tubi_refnos: Vec<String> = tubi_shape_insts_data
-        .inst_tubi_map
-        .iter()
-        .map(|(refno, _)| refno.to_pe_key())
-        .collect();
-
-    let t_send_data = Instant::now();
-    if tubi_shape_insts_data.inst_cnt() > 0 {
-        sender
-            .send(tubi_shape_insts_data)
-            .expect("send tubi shape_insts_data failed.");
-    }
-    let send_data_time = t_send_data.elapsed().as_millis();
-
-    let mut tubi_query_time = 0;
-    if !tubi_relates.is_empty() {
-        let sql = tubi_relates.join("");
-        debug_model!(
-            "[BRAN_TUBI] 准备写入 {} 条 tubi_relate 记录，示例 SQL: {}",
-            tubi_relates.len(),
-            tubi_relates
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("<empty>")
+        #[cfg(feature = "profile")]
+        tracing::info!(
+            branch_count = branch_map.len(),
+            tubi_generated = tubi_count,
+            total_time_ms = process_branch_time,
+            avg_time_per_branch_ms = if branch_map.len() > 0 {
+                process_branch_time / branch_map.len() as u128
+            } else {
+                0
+            },
+            "BRAN Tubing generation completed"
         );
 
-        let t_query = Instant::now();
-        if let Err(e) = SUL_DB.query(sql).await {
-            debug_model!("[BRAN_TUBI] 写入 tubi_relate 失败: {}", e);
-            // 保持原来的 unwrap 语义
-            panic!("写入 tubi_relate 失败: {}", e);
+        // 在发送之前提取需要更新has_tubi的refno列表
+        tubi_refnos = tubi_shape_insts_data
+            .inst_tubi_map
+            .iter()
+            .map(|(refno, _)| refno.to_pe_key())
+            .collect();
+
+        let t_send_data = Instant::now();
+        if tubi_shape_insts_data.inst_cnt() > 0 {
+            sender
+                .send(tubi_shape_insts_data)
+                .expect("send tubi shape_insts_data failed.");
         }
-        tubi_query_time = t_query.elapsed().as_millis();
-        debug_model!(
-            "[BRAN_TUBI] 写入 tubi_relate 成功，用时 {} ms",
-            tubi_query_time
-        );
+        send_data_time = t_send_data.elapsed().as_millis();
 
-        // 更新PE表的has_tubi字段，标记哪些元素有隐式管道
-        if !tubi_refnos.is_empty() {
-            let update_pe_tubi_sql =
-                format!("UPDATE [{}] SET has_tubi = true;", tubi_refnos.join(","));
+        tubi_query_time = 0;
+        if !tubi_relates.is_empty() {
+            let sql = tubi_relates.join("");
             debug_model!(
-                "[BRAN_TUBI] 更新 has_tubi 标记，refnos: {}",
-                tubi_refnos.join(",")
+                "[BRAN_TUBI] 准备写入 {} 条 tubi_relate 记录，示例 SQL: {}",
+                tubi_relates.len(),
+                tubi_relates
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("<empty>")
             );
-            if let Err(e) = SUL_DB.query(update_pe_tubi_sql).await {
-                debug_model!("[BRAN_TUBI] 更新 has_tubi 失败: {}", e);
-                panic!("更新 has_tubi 失败: {}", e);
+
+            let t_query = Instant::now();
+            if let Err(e) = SUL_DB.query(sql).await {
+                debug_model!("[BRAN_TUBI] 写入 tubi_relate 失败: {}", e);
+                // 保持原来的 unwrap 语义
+                panic!("写入 tubi_relate 失败: {}", e);
             }
+            tubi_query_time = t_query.elapsed().as_millis();
+            debug_model!(
+                "[BRAN_TUBI] 写入 tubi_relate 成功，用时 {} ms",
+                tubi_query_time
+            );
+
+            // 更新PE表的has_tubi字段，标记哪些元素有隐式管道
+            if !tubi_refnos.is_empty() {
+                let update_pe_tubi_sql =
+                    format!("UPDATE [{}] SET has_tubi = true;", tubi_refnos.join(","));
+                debug_model!(
+                    "[BRAN_TUBI] 更新 has_tubi 标记，refnos: {}",
+                    tubi_refnos.join(",")
+                );
+                if let Err(e) = SUL_DB.query(update_pe_tubi_sql).await {
+                    debug_model!("[BRAN_TUBI] 更新 has_tubi 失败: {}", e);
+                    panic!("更新 has_tubi 失败: {}", e);
+                }
+            }
+        } else {
+            debug_model!("[BRAN_TUBI] tubi_relates 为空，本次未写入任何 tubi_relate 记录");
         }
-    } else {
-        debug_model!("[BRAN_TUBI] tubi_relates 为空，本次未写入任何 tubi_relate 记录");
     }
 
     // 获取并打印汇总统计信息
@@ -1451,19 +1652,22 @@ pub async fn gen_cata_geos(
     }
 
     // 添加分支处理的时间统计
-    time_stats.insert("process_branch".to_string(), process_branch_time as u64);
-    time_stats.insert("get_children".to_string(), db_time_get_children as u64);
-    time_stats.insert("get_branch_att".to_string(), db_time_get_branch_att as u64);
-    time_stats.insert(
-        "get_branch_transform".to_string(),
-        db_time_get_branch_transform as u64,
-    );
-    time_stats.insert("send_data".to_string(), send_data_time as u64);
-    time_stats.insert("tubi_query".to_string(), tubi_query_time as u64);
+    if process_branch {
+        time_stats.insert("process_branch".to_string(), process_branch_time as u64);
+        time_stats.insert("get_children".to_string(), db_time_get_children as u64);
+        time_stats.insert("get_branch_att".to_string(), db_time_get_branch_att as u64);
+        time_stats.insert(
+            "get_branch_transform".to_string(),
+            db_time_get_branch_transform as u64,
+        );
+        time_stats.insert("send_data".to_string(), send_data_time as u64);
+        time_stats.insert("tubi_query".to_string(), tubi_query_time as u64);
+    }
 
     // 打印汇总统计信息
     println!("\n==== 数据库操作总耗时统计 (ms) ====");
-    let mut stats_vec: Vec<(String, u64)> = time_stats.into_iter().collect();
+    let mut stats_vec: Vec<(String, u64)> =
+        time_stats.iter().map(|(k, v)| (k.clone(), *v)).collect();
     stats_vec.sort_by(|a, b| b.1.cmp(&a.1)); // 按耗时降序排序
 
     #[cfg(feature = "profile")]
@@ -1482,12 +1686,39 @@ pub async fn gen_cata_geos(
         );
     }
 
+    let total_elapsed_ms = total_t.elapsed().as_millis();
     println!(
         "处理元件库几何体: {} 花费总时间: {} ms",
-        unique_cata_cnt,
-        total_t.elapsed().as_millis()
+        unique_cata_cnt, total_elapsed_ms
     );
-    Ok(true)
+
+    let cate_outcome = if process_cata {
+        Some(CateGenOutcome {
+            local_al_map: local_al_map.clone(),
+            time_stats: time_stats.clone(),
+            unique_cata_cnt,
+            elapsed_ms: total_elapsed_ms,
+        })
+    } else {
+        None
+    };
+
+    let branch_outcome = if process_branch {
+        Some(BranchTubiOutcome {
+            tubi_relates,
+            tubi_refnos,
+            time_stats,
+            tubi_count,
+            elapsed_ms: process_branch_time,
+        })
+    } else {
+        None
+    };
+
+    Ok(GenOutcome {
+        cate: cate_outcome,
+        branch: branch_outcome,
+    })
 }
 
 //收集ngmr的信息

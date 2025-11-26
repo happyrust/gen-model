@@ -327,27 +327,77 @@ pub async fn save_instance_data_optimize(
     }
 
     if !inst_relate_buffer.is_empty() {
-        debug_model_debug!(
-            "🔍 [DEBUG] save_instance_data_optimize flushing remaining inst_relate records: {}",
-            inst_relate_buffer.len()
-        );
-
-        // 打印第一条 inst_relate 记录用于调试
-        if let Some(first) = inst_relate_buffer.first() {
-            debug_model_debug!("🔍 [DEBUG] First inst_relate record: {}", first);
-        }
-
         let statement = format!(
             "INSERT RELATION INTO inst_relate [{}];",
             inst_relate_buffer.join(",")
         );
-        debug_model_debug!("🔍 [DEBUG] Executing inst_relate INSERT SQL: {}", statement);
+        inst_relate_batcher.push(statement).await?;
         debug_model_debug!(
-            "🔍 [DEBUG] Executing inst_relate INSERT with {} records",
+            "save_instance_data_optimize flushing inst_relate from inst_info_map: {}",
             inst_relate_buffer.len()
         );
-        inst_relate_batcher.push(statement).await?;
-        debug_model_debug!("✅ [DEBUG] inst_relate INSERT pushed successfully");
+    }
+
+    // 为 inst_tubi_map 也创建 inst_relate 记录（BRAN/HANG Tubing 几何体）
+    if !inst_mgr.inst_tubi_map.is_empty() {
+        debug_model_debug!(
+            "save_instance_data_optimize processing inst_tubi_map: {} Tubing records",
+            inst_mgr.inst_tubi_map.len()
+        );
+        
+        let mut tubi_relate_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
+        
+        for (key, info) in &inst_mgr.inst_tubi_map {
+            inst_keys.push(*key);
+            
+            if info.world_transform.translation.is_nan()
+                || info.world_transform.rotation.is_nan()
+                || info.world_transform.scale.is_nan()
+            {
+                continue;
+            }
+            
+            let transform_hash = gen_bytes_hash(&info.world_transform);
+            if let Entry::Vacant(entry) = transform_map.entry(transform_hash) {
+                entry.insert(serde_json::to_string(&info.world_transform)?);
+            }
+            
+            // 为 Tubing 创建 inst_relate 记录
+            let relate_sql = format!(
+                "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}, owner_refno: {7}, owner_type: '{8}'}}",
+                key.to_inst_relate_key(),
+                key.to_pe_key(),
+                info.id_str(),
+                transform_hash,
+                info.generic_type.to_string(),
+                info.has_cata_neg,
+                info.is_solid,
+                info.owner_refno.to_pe_key(),
+                info.owner_type,
+            );
+            
+            tubi_relate_buffer.push(relate_sql);
+            if tubi_relate_buffer.len() >= CHUNK_SIZE {
+                let statement = format!(
+                    "INSERT RELATION INTO inst_relate [{}];",
+                    tubi_relate_buffer.join(",")
+                );
+                inst_relate_batcher.push(statement).await?;
+                tubi_relate_buffer.clear();
+            }
+        }
+        
+        if !tubi_relate_buffer.is_empty() {
+            let statement = format!(
+                "INSERT RELATION INTO inst_relate [{}];",
+                tubi_relate_buffer.join(",")
+            );
+            inst_relate_batcher.push(statement).await?;
+            debug_model_debug!(
+                "save_instance_data_optimize flushing inst_relate from inst_tubi_map: {}",
+                tubi_relate_buffer.len()
+            );
+        }
     }
 
     if !inst_info_buffer.is_empty() {

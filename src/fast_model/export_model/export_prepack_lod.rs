@@ -923,10 +923,14 @@ fn default_material_for_level(level: u32) -> &'static str {
 }
 
 /// 导出所有 inst_relate 实体（Prepack LOD 格式）
+///
+/// # 参数
+/// - `owner_types`: 可选的 owner_type 过滤列表，如 `Some(vec!["BRAN", "HANG"])` 只导出这些类型
 pub async fn export_all_relates_prepack_lod(
     dbno: Option<u32>,
     verbose: bool,
     output_override: Option<PathBuf>,
+    owner_types: Option<Vec<String>>,
     db_option: Arc<DbOption>,
 ) -> Result<()> {
     use aios_core::rs_surreal::query_ext::SurrealQueryExt;
@@ -944,28 +948,50 @@ pub async fn export_all_relates_prepack_lod(
         "1=1 ".to_string()
     };
 
-    // 2. 首先筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息
+    // 2. 构建 owner_type 过滤条件
+    let owner_type_filter = if let Some(ref types) = owner_types {
+        if types.is_empty() {
+            "".to_string()
+        } else {
+            let types_str = types
+                .iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("   - 按 owner_type 过滤: [{}]", types_str);
+            format!(" AND owner_type IN [{}]", types_str)
+        }
+    } else {
+        "".to_string()
+    };
+
+    // 3. 首先筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息
     //    注意：这里只是统计/记录，不作为导出 refno 集的一部分。
-    let sql_equi = format!(
-        "SELECT value in.id  FROM inst_relate WHERE {} AND owner_type = 'EQUI'",
-        db_filter
-    );
-    let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_equi, 0).await?;
-    let equi_set: HashSet<RefnoEnum> = equi_refnos.iter().cloned().collect();
+    //    如果指定了 owner_types 且不包含 EQUI，则跳过此查询
+    let equi_set: HashSet<RefnoEnum> = if owner_types.as_ref().map_or(true, |t| t.contains(&"EQUI".to_string())) {
+        let sql_equi = format!(
+            "SELECT value in.id FROM inst_relate WHERE {} AND owner_type = 'EQUI'",
+            db_filter
+        );
+        let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_equi, 0).await?;
+        println!(
+            "   - 找到 {} 条 owner_type = 'EQUI' 的 inst_relate 记录（用于设备分组）",
+            equi_refnos.len()
+        );
+        equi_refnos.into_iter().collect()
+    } else {
+        HashSet::new()
+    };
 
-    println!(
-        "   - 找到 {} 条 owner_type = 'EQUI' 的 inst_relate 记录（用于设备分组）",
-        equi_set.len()
-    );
-
-    // 3. 再次扫描 inst_relate，收集需要导出的实体：
+    // 4. 再次扫描 inst_relate，收集需要导出的实体：
     //    条件：
     //      - aabb.d != none （已生成模型）
+    //      - owner_type 匹配过滤条件（如果指定）
     //      - owner_type != 'EQUI' （跳过设备自身的 inst_relate，只导出实体）
     //    这里一次性扫描 inst_relate 表，而不是按 ZONE 逐个查询。
     let sql_all = format!(
-        "SELECT value in.id  FROM inst_relate WHERE {} AND aabb.d != none",
-        db_filter
+        "SELECT value in.id FROM inst_relate WHERE {} AND aabb.d != none{}",
+        db_filter, owner_type_filter
     );
     let all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;
 

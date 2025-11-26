@@ -14,6 +14,11 @@ pub mod shared;
 pub mod error_macros;
 pub use error_macros::ModelErrorKind;
 
+pub mod refno_errors;
+pub use refno_errors::{
+    record_refno_error, RefnoErrorKind, RefnoErrorStage, RefnoErrorSummary, REFNO_ERROR_STORE,
+};
+
 pub mod capture;
 
 pub mod manifold_bool;
