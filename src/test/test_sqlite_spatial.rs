@@ -277,4 +277,145 @@ mod tests {
 
         println!("\n✅ 性能测试完成！");
     }
+
+    #[test]
+    fn test_sqlite_spatial_point_query() {
+        println!("\n🎯 测试 SQLite 空间索引点查询功能...\n");
+
+        if !SqliteSpatialIndex::is_enabled() {
+            println!("⚠️ SQLite 索引未启用，跳过点查询测试");
+            return;
+        }
+
+        // 创建空间索引（使用临时文件，避免并发干扰）
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let db_path = tmp.path().join("aabb_cache.sqlite");
+        let spatial_index = match SqliteSpatialIndex::new(&db_path) {
+            Ok(idx) => idx,
+            Err(e) => panic!("❌ 初始化 SQLite 空间索引失败: {}", e),
+        };
+
+        // 1. 插入测试数据
+        println!("📦 插入测试数据...");
+        let test_data = vec![
+            (
+                RefU64(2001),
+                Aabb::new(Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 10.0, 10.0)),
+                "EQUI",
+            ),
+            (
+                RefU64(2002),
+                Aabb::new(Point3::new(5.0, 5.0, 5.0), Point3::new(15.0, 15.0, 15.0)),
+                "PIPE",
+            ),
+            (
+                RefU64(2003),
+                Aabb::new(Point3::new(20.0, 20.0, 20.0), Point3::new(30.0, 30.0, 30.0)),
+                "EQUI",
+            ),
+            (
+                RefU64(2004),
+                Aabb::new(Point3::new(-10.0, -10.0, -10.0), Point3::new(0.0, 0.0, 0.0)),
+                "PIPE",
+            ),
+            (
+                RefU64(2005),
+                Aabb::new(
+                    Point3::new(100.0, 100.0, 100.0),
+                    Point3::new(110.0, 110.0, 110.0),
+                ),
+                "EQUI",
+            ),
+        ];
+
+        for (refno, aabb, noun) in &test_data {
+            spatial_index
+                .insert_aabb(*refno, aabb, Some(noun))
+                .expect("插入失败");
+        }
+        println!("✅ 成功插入 {} 条记录", test_data.len());
+
+        // 2. 测试点查询 - 查询最近的 k 个点
+        println!("\n🔍 测试点查询 (query_nearest_to_point)...");
+        use crate::spatial_index::{QueryOptions, SpatialQueryBackend};
+
+        // 测试点：在第一个和第二个 AABB 的交集附近
+        let query_point = Point3::new(7.5, 7.5, 7.5);
+
+        println!("  查询点: ({:.1}, {:.1}, {:.1})", query_point.x, query_point.y, query_point.z);
+
+        // 查询最近的 3 个点
+        let results = spatial_index
+            .query_nearest_to_point(query_point, 3, Some(50.0), &QueryOptions::default())
+            .expect("点查询失败");
+
+        println!("  找到 {} 个最近的对象:", results.len());
+        for (i, hit) in results.iter().enumerate() {
+            println!(
+                "    {}. RefNo: {}, 距离: {:.2}",
+                i + 1,
+                hit.refno.0,
+                hit.distance.unwrap_or(0.0)
+            );
+        }
+
+        // 验证结果
+        assert!(!results.is_empty(), "应该至少找到一个结果");
+        assert!(results.len() <= 3, "结果数量不应超过 3 个");
+        
+        // 第一个结果应该是最近的（2001 或 2002）
+        let first_refno = results[0].refno;
+        assert!(
+            first_refno == RefU64(2001) || first_refno == RefU64(2002),
+            "最近的应该是 2001 或 2002"
+        );
+
+        // 3. 测试球形范围查询
+        println!("\n🌐 测试球形范围查询 (query_within_radius)...");
+        let center = Point3::new(7.5, 7.5, 7.5);
+        let radius = 20.0;
+
+        let radius_results = spatial_index
+            .query_within_radius(center, radius, &QueryOptions::default())
+            .expect("范围查询失败");
+
+        println!("  中心点: ({:.1}, {:.1}, {:.1}), 半径: {:.1}", center.x, center.y, center.z, radius);
+        println!("  找到 {} 个在范围内的对象:", radius_results.len());
+        for hit in &radius_results {
+            println!(
+                "    - RefNo: {}, 距离: {:.2}",
+                hit.refno.0,
+                hit.distance.unwrap_or(0.0)
+            );
+        }
+
+        // 验证结果：应该包含 2001, 2002, 2004（2003 和 2005 太远）
+        let refnos: Vec<u64> = radius_results.iter().map(|h| h.refno.0).collect();
+        assert!(refnos.contains(&2001), "应该包含 2001");
+        assert!(refnos.contains(&2002), "应该包含 2002");
+        assert!(refnos.contains(&2004), "应该包含 2004");
+        assert!(!refnos.contains(&2003), "不应该包含 2003（太远）");
+        assert!(!refnos.contains(&2005), "不应该包含 2005（太远）");
+
+        // 4. 测试类型过滤
+        println!("\n🏷️ 测试类型过滤...");
+        let mut type_opts = QueryOptions::default();
+        type_opts.types = vec!["EQUI".to_string()];
+
+        let type_results = spatial_index
+            .query_within_radius(center, radius, &type_opts)
+            .expect("类型过滤查询失败");
+
+        println!("  过滤类型: EQUI");
+        println!("  找到 {} 个 EQUI 类型的对象:", type_results.len());
+        for hit in &type_results {
+            println!("    - RefNo: {}", hit.refno.0);
+        }
+
+        // 验证：只应该包含 EQUI 类型（2001, 2005，但 2005 太远，所以只有 2001）
+        assert_eq!(type_results.len(), 1, "应该只有 1 个 EQUI 类型在范围内");
+        assert_eq!(type_results[0].refno, RefU64(2001), "应该是 2001");
+
+        println!("\n✅ 所有点查询测试通过！");
+    }
 }

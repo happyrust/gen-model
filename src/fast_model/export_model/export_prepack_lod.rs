@@ -151,7 +151,8 @@ pub async fn export_prepack_lod_for_refnos(
         total_instances: 0,
     };
 
-    let unit_converter = UnitConverter::new(LengthUnit::Millimeter, LengthUnit::Millimeter);
+    // 导出为米 (m) 单位，前端可直接渲染
+    let unit_converter = UnitConverter::new(LengthUnit::Millimeter, LengthUnit::Meter);
     let primary_mesh_dir = mesh_dir.to_path_buf();
     let mut base_mesh_dir = mesh_dir.to_path_buf();
     let default_lod_dir = format!("lod_{:?}", db_option.mesh_precision.default_lod);
@@ -196,12 +197,14 @@ pub async fn export_prepack_lod_for_refnos(
             println!("\n🎯 导出 LOD {} → {}", level_tag, asset_path.display());
         }
 
+        // GLB 中的几何体是单位几何体（无量纲），不需要单位转换
+        // 实际尺寸由实例矩阵中的缩放控制
         let mut common = CommonExportConfig::with_unit_conversion(
             include_descendants,
             filter_cache.clone(),
             verbose,
-            unit_converter.source_unit,
-            unit_converter.target_unit,
+            LengthUnit::Millimeter,
+            LengthUnit::Millimeter, // 不转换，保持单位几何体
         );
         common.use_basic_materials = true;
 
@@ -600,78 +603,83 @@ fn build_instances_payload(
     let mut component_instance_count = 0usize;
 
     // 辅助函数：将一批组件写入 JSON，附带 owner / owner_type 信息
-    let mut push_components = |components: Vec<&crate::fast_model::export_model::export_common::ComponentRecord>| {
-        for component in components {
-            let component_label = component
-                .name
-                .as_ref()
-                .filter(|name| !name.is_empty())
-                .cloned()
-                .unwrap_or_else(|| component.refno.to_string());
-            let name_index = name_table.get_or_insert("component", &component_label);
-            let site_name_index = unknown_site_index;
-            let color_index = color_palette.index_for_noun(&component.noun);
-            let color_rgba = color_palette.color_at(color_index);
+    let mut push_components =
+        |components: Vec<&crate::fast_model::export_model::export_common::ComponentRecord>| {
+            for component in components {
+                let component_label = component
+                    .name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| component.refno.to_string());
+                let name_index = name_table.get_or_insert("component", &component_label);
+                let site_name_index = unknown_site_index;
+                let color_index = color_palette.index_for_noun(&component.noun);
+                let color_rgba = color_palette.color_at(color_index);
 
-            let mut instances = Vec::new();
-            for geom in &component.geometries {
-                if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
-                    component_instance_count += 1;
-                    let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
+                let mut instances = Vec::new();
+                for geom in &component.geometries {
+                    if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
+                        component_instance_count += 1;
+                        let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
 
-                    // uniforms 中加入设备分组信息
-                    let mut uniforms = json!({
-                        "refno": component.refno.to_string(),
-                        "color_index": color_index,
-                    });
-                    if let Some(owner) = component.owner_refno {
-                        uniforms["owner_refno"] = json!(owner.to_string());
-                    }
-                    if let Some(owner_noun) = &component.owner_noun {
-                        uniforms["owner_noun"] = json!(owner_noun);
-                    }
-                    if let Some(owner_type) = &component.owner_type {
-                        uniforms["owner_type"] = json!(owner_type);
-                    }
-                    if let Some(color) = color_rgba {
-                        uniforms["color"] = json!(color);
-                    }
+                        // uniforms 中加入设备分组信息
+                        let mut uniforms = json!({
+                            "refno": component.refno.to_string(),
+                            "color_index": color_index,
+                        });
+                        if let Some(owner) = component.owner_refno {
+                            uniforms["owner_refno"] = json!(owner.to_string());
+                        }
+                        if let Some(owner_noun) = &component.owner_noun {
+                            uniforms["owner_noun"] = json!(owner_noun);
+                        }
+                        if let Some(owner_type) = &component.owner_type {
+                            uniforms["owner_type"] = json!(owner_type);
+                        }
+                        if let Some(color) = color_rgba {
+                            uniforms["color"] = json!(color);
+                        }
 
-                    instances.push(json!({
-                        "geo_hash": geom.geo_hash,
-                        "geo_index": geo_index,
-                        "matrix": mat4_to_vec(&geom.transform, unit_converter),
-                        "color_index": color_index,
-                        "name_index": name_index,
-                        "site_name_index": site_name_index,
-                        "zone_name_index": serde_json::Value::Null,
-                        "lod_mask": lod_mask,
-                        "uniforms": uniforms,
-                    }));
+                        instances.push(json!({
+                            "geo_hash": geom.geo_hash,
+                            "geo_index": geo_index,
+                            "matrix": mat4_to_vec(&geom.transform, unit_converter),
+                            "color_index": color_index,
+                            "name_index": name_index,
+                            "site_name_index": site_name_index,
+                            "zone_name_index": serde_json::Value::Null,
+                            "lod_mask": lod_mask,
+                            "uniforms": uniforms,
+                        }));
+                    }
                 }
+
+                // 组件级别 owner 元数据
+                let owner_json = match (
+                    &component.owner_refno,
+                    &component.owner_noun,
+                    &component.owner_type,
+                ) {
+                    (Some(refno), Some(noun), owner_type) => json!({
+                        "refno": refno.to_string(),
+                        "noun": noun,
+                        "type": owner_type,
+                        "color_index": color_index,
+                        "color": color_rgba,
+                    }),
+                    _ => serde_json::Value::Null,
+                };
+
+                component_entries.push(json!({
+                    "refno": component.refno.to_string(),
+                    "noun": component.noun,
+                    "name_index": name_index,
+                    "owner": owner_json,
+                    "instances": instances,
+                }));
             }
-
-            // 组件级别 owner 元数据
-            let owner_json = match (&component.owner_refno, &component.owner_noun, &component.owner_type) {
-                (Some(refno), Some(noun), owner_type) => json!({
-                    "refno": refno.to_string(),
-                    "noun": noun,
-                    "type": owner_type,
-                    "color_index": color_index,
-                    "color": color_rgba,
-                }),
-                _ => serde_json::Value::Null,
-            };
-
-            component_entries.push(json!({
-                "refno": component.refno.to_string(),
-                "noun": component.noun,
-                "name_index": name_index,
-                "owner": owner_json,
-                "instances": instances,
-            }));
-        }
-    };
+        };
 
     // 先输出设备（EQUI）拥有的组件，便于前端按设备分组
     let equip_components: Vec<_> = export_data
@@ -779,6 +787,14 @@ fn mat4_to_vec(matrix: &DMat4, unit_converter: &UnitConverter) -> Vec<f32> {
     let mut cols = matrix.to_cols_array();
     if unit_converter.needs_conversion() {
         let factor = unit_converter.conversion_factor() as f64;
+        // 转换 3x3 旋转/缩放子矩阵（缩放值也需要转换）
+        // 列主序：cols[0..3] = col0, cols[4..7] = col1, cols[8..11] = col2
+        for i in 0..3 {
+            cols[i] *= factor;      // 第一列
+            cols[4 + i] *= factor;  // 第二列
+            cols[8 + i] *= factor;  // 第三列
+        }
+        // 转换平移部分
         cols[12] *= factor;
         cols[13] *= factor;
         cols[14] *= factor;
@@ -859,10 +875,7 @@ impl<'a> ColorPalette<'a> {
     /// 严格依据 ColorSchemes.toml / 默认方案获取颜色；
     /// 若配色表中不存在该类型，则回退到 UNKOWN，再不行才给固定灰色。
     fn color_for_noun(&self, noun: &str) -> [f32; 4] {
-        if let Some(c) = self
-            .material_library
-            .get_normalized_color_for_noun(noun)
-        {
+        if let Some(c) = self.material_library.get_normalized_color_for_noun(noun) {
             return c;
         }
 
@@ -925,16 +938,16 @@ pub async fn export_all_relates_prepack_lod(
     //    如果提供了 dbno，只查询该 db 下的 inst_relate；否则全表扫描。
     let db_filter = if let Some(dbno) = dbno {
         println!("   - 模式: 按 dbno={} 过滤", dbno);
-        format!("WHERE dbno = {} ", dbno)
+        format!("in.dbno = {} ", dbno)
     } else {
         println!("   - 模式: 全表扫描（所有 dbno）");
-        String::new()
+        "1=1 ".to_string()
     };
 
     // 2. 首先筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息
     //    注意：这里只是统计/记录，不作为导出 refno 集的一部分。
     let sql_equi = format!(
-        "SELECT in.id AS refno FROM inst_relate {}AND owner_type = 'EQUI'",
+        "SELECT value in.id  FROM inst_relate WHERE {} AND owner_type = 'EQUI'",
         db_filter
     );
     let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_equi, 0).await?;
@@ -951,7 +964,7 @@ pub async fn export_all_relates_prepack_lod(
     //      - owner_type != 'EQUI' （跳过设备自身的 inst_relate，只导出实体）
     //    这里一次性扫描 inst_relate 表，而不是按 ZONE 逐个查询。
     let sql_all = format!(
-        "SELECT in.id AS refno FROM inst_relate {}AND aabb.d != none",
+        "SELECT value in.id  FROM inst_relate WHERE {} AND aabb.d != none",
         db_filter
     );
     let all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;

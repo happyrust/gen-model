@@ -123,24 +123,26 @@ impl SqliteSpatialIndex {
     }
 
     /// Check if SQLite index is enabled via configuration
+    /// 默认启用，可通过配置禁用
     pub fn is_enabled() -> bool {
         #[cfg(feature = "sqlite-index")]
         {
             use config as cfg;
-            // Read from DbOption.toml if present; default false
+            // Read from DbOption.toml if present; default true (默认启用)
             let mut s = cfg::Config::builder();
             if std::path::Path::new("DbOption.toml").exists() {
                 s = s.add_source(cfg::File::with_name("DbOption"));
             }
             if let Ok(built) = s.build() {
                 // 兼容两个键：enable_sqlite_rtree 与 sqlite_index_enabled
+                // 如果配置中明确设置为 false，则禁用；否则默认启用
                 built
                     .get_bool("enable_sqlite_rtree")
                     .ok()
                     .or_else(|| built.get_bool("sqlite_index_enabled").ok())
-                    .unwrap_or(false)
+                    .unwrap_or(true)  // 默认启用
             } else {
-                false
+                true  // 配置文件读取失败时也默认启用
             }
         }
         #[cfg(not(feature = "sqlite-index"))]

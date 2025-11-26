@@ -525,10 +525,7 @@ impl AiosDBManager {
                                 let file_name = match path.file_stem().and_then(|s| s.to_str()) {
                                     Some(name) => name,
                                     None => {
-                                        println!(
-                                            "无法从新文件路径中解析文件名: {:?}",
-                                            path
-                                        );
+                                        println!("无法从新文件路径中解析文件名: {:?}", path);
                                         continue;
                                     }
                                 };
@@ -545,11 +542,8 @@ impl AiosDBManager {
                                 // 为新文件生成对应的 CBA 压缩包，确保远端可以通过 HTTP 下载
                                 #[cfg(feature = "mqtt")]
                                 let file_hash = {
-                                    let output: PathBuf = format!(
-                                        "assets/archives/{}.cba",
-                                        file_name
-                                    )
-                                    .into();
+                                    let output: PathBuf =
+                                        format!("assets/archives/{}.cba", file_name).into();
                                     let compress_opt = CompressOptions::new(
                                         path.clone(),
                                         output.clone(),

@@ -312,7 +312,7 @@ pub async fn resolve_desi_comp(
 
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
     debug_model_trace!("geom_info: {:?}", &geom_info);
-    
+
     match geom_info {
         Ok(info) => Ok(info),
         Err(e) => {

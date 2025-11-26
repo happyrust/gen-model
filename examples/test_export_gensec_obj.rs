@@ -26,17 +26,17 @@ fn get_mesh_dir_with_lod(db_option_ext: &aios_database::options::DbOptionExt) ->
     lod_dir
 }
 
-/// 测试导出 GENSEC 25688/76336 的 OBJ 模型
+/// 测试导出指定 GENSEC（默认 17496/266222）的 OBJ 模型
 ///
 /// 这个例子展示如何：
 /// 1. 设置 debug-model 模式并强制重新生成
 /// 2. 初始化数据库连接
-/// 3. 生成指定参考号的几何体
+/// 3. 生成指定参考号的几何体（可通过命令行传入 `17496/266222` 类似的 refno）
 /// 4. 导出为 OBJ 文件
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let separator = "=".repeat(60);
-    println!("🚀 开始测试 GENSEC 25688/76336 导出为 OBJ (debug-model 模式)");
+    println!("🚀 开始测试 GENSEC 导出为 OBJ (debug-model 模式)");
     println!("{}", separator);
 
     // 1. 设置 debug-model 模式并强制重新生成
@@ -64,8 +64,26 @@ async fn main() -> anyhow::Result<()> {
     db_option_ext.inner.gen_model = true;
     db_option_ext.inner.replace_mesh = Some(true);
 
+    // 额外读取命令行参数来决定调试 refno
+    const DEFAULT_DEBUG_REFNO: &str = "17496/266210";
+    let raw_refno_input = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_DEBUG_REFNO.to_string());
+    let normalized_refno = raw_refno_input.replace('/', "_");
+    let display_refno = raw_refno_input.replace('_', "/");
+
+    if raw_refno_input != display_refno {
+        println!(
+            "ℹ️  将命令行输入 `{}` 转换为标准显示 `{}`",
+            raw_refno_input, display_refno
+        );
+    }
+
     // 设置 debug_model_refnos
-    db_option_ext.inner.debug_model_refnos = Some(vec!["25688_76336".to_string()]);
+    db_option_ext
+        .inner
+        .debug_model_refnos
+        .replace(vec![normalized_refno.clone()]);
 
     println!("📊 配置已更新:");
     println!("   - gen_mesh: {}", db_option_ext.inner.gen_mesh);
@@ -77,8 +95,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 4. 定义目标参考号
-    let target_refno = RefnoEnum::from("25688_76336");
-    println!("\n🎯 步骤 3: 目标参考号: {} (debug-mode)", target_refno);
+    let target_refno = RefnoEnum::from(normalized_refno.as_str());
+    println!(
+        "\n🎯 步骤 3: 目标参考号: {} (归一化: {}, debug-mode)",
+        display_refno, normalized_refno
+    );
 
     // 5. 生成几何体（强制重新生成）
     println!("\n⚙️  步骤 4: 生成 GENSEC 几何体（强制重新生成）...");
@@ -98,7 +119,8 @@ async fn main() -> anyhow::Result<()> {
 
     let output_dir = Path::new("test_output/gensec_exports");
     std::fs::create_dir_all(output_dir)?;
-    let output_path = output_dir.join("gensec_25688_76336.obj");
+    let output_file_name = format!("gensec_{}.obj", normalized_refno);
+    let output_path = output_dir.join(output_file_name);
 
     println!("\n📤 步骤 4: 导出 OBJ 文件...");
     println!("   - 输出路径: {}", output_path.display());

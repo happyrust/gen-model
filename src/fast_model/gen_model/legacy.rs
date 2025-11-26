@@ -14,6 +14,7 @@ use crate::fast_model::capture::capture_refnos_if_enabled;
 use crate::fast_model::mesh_generate::process_meshes_update_db_deep;
 use crate::fast_model::pdms_inst::save_instance_data_optimize;
 use crate::options::DbOptionExt;
+use crate::{e3d_info};
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
 
@@ -125,12 +126,11 @@ pub async fn gen_all_geos_data(
             if db_option.inner.apply_boolean_operation {
                 let bool_start = Instant::now();
                 println!("[gen_model] Full Noun 模式开始布尔运算（boolean worker）");
-                if let Err(e) =
-                    crate::fast_model::mesh_generate::run_boolean_worker(
-                        Arc::new(db_option.inner.clone()),
-                        100,
-                    )
-                    .await
+                if let Err(e) = crate::fast_model::mesh_generate::run_boolean_worker(
+                    Arc::new(db_option.inner.clone()),
+                    100,
+                )
+                .await
                 {
                     eprintln!("[gen_model] Full Noun 布尔运算失败: {}", e);
                 } else {
@@ -206,6 +206,7 @@ pub async fn gen_all_geos_data(
             final_incr_updates.clone(),
             sender.clone(),
             target_sesno,
+            has_manual_refnos, // 手动模式时启用手动布尔运算
         )
         .await?;
 
@@ -235,10 +236,57 @@ pub async fn gen_all_geos_data(
                     mesh_start.elapsed().as_millis()
                 );
             }
+
+            // 手动布尔运算模式：在 mesh 生成完成后执行布尔运算
+            if has_manual_refnos && db_option.inner.apply_boolean_operation {
+                use crate::fast_model::manifold_bool::{apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold};
+                use std::collections::HashSet;
+                
+                e3d_info!("[gen_model] 手动布尔运算模式：开始执行布尔运算");
+                
+                // 查询需要布尔运算的实例（基于 target_root_refnos 的子孙节点）
+                let mut boolean_refnos = vec![];
+                for &root_refno in &target_root_refnos {
+                    // 查询深度可见实例
+                    if let Ok(visible_refnos) = aios_core::query_deep_visible_inst_refnos(root_refno).await {
+                        boolean_refnos.extend(visible_refnos);
+                    }
+                    // 查询深度负实例
+                    if let Ok(neg_refnos) = aios_core::query_deep_neg_inst_refnos(root_refno).await {
+                        boolean_refnos.extend(neg_refnos);
+                    }
+                }
+                
+                // 去重
+                let boolean_refnos: Vec<aios_core::RefnoEnum> = boolean_refnos.into_iter().collect::<HashSet<_>>().into_iter().collect();
+                
+                if !boolean_refnos.is_empty() {
+                    let replace_exist = db_option.inner.is_replace_mesh();
+                    e3d_info!("[gen_model] 手动布尔运算模式：找到 {} 个需要布尔运算的实例", boolean_refnos.len());
+                    
+                    let boolean_start = Instant::now();
+                    
+                    // 执行元件库级布尔运算
+                    if let Err(e) = apply_cata_neg_boolean_manifold(&boolean_refnos, replace_exist).await {
+                        eprintln!("[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}", e);
+                    }
+                    
+                    // 执行实例级布尔运算
+                    if let Err(e) = apply_insts_boolean_manifold(&boolean_refnos, replace_exist).await {
+                        eprintln!("[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}", e);
+                    } else {
+                        e3d_info!(
+                            "[gen_model] 手动布尔运算模式：布尔运算完成，用时 {} ms",
+                            boolean_start.elapsed().as_millis()
+                        );
+                    }
+                } else {
+                    e3d_info!("[gen_model] 手动布尔运算模式：没有需要布尔运算的实例");
+                }
+            }
         }
 
-        if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, &db_option.inner).await
-        {
+        if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, &db_option.inner).await {
             eprintln!("[capture] 捕获截图失败: {}", err);
         }
 
@@ -395,13 +443,10 @@ pub async fn gen_full_noun_geos(
         }
     });
 
-    let categorized = gen_full_noun_geos_optimized(
-        Arc::new(db_option.inner.clone()),
-        &config,
-        sender,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Full Noun 生成失败: {}", e))?;
+    let categorized =
+        gen_full_noun_geos_optimized(Arc::new(db_option.inner.clone()), &config, sender)
+            .await
+            .map_err(|e| anyhow::anyhow!("Full Noun 生成失败: {}", e))?;
 
     let _ = insert_handle.await;
 
@@ -430,6 +475,7 @@ pub async fn gen_geos_data(
     incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<aios_core::geometry::ShapeInstancesData>,
     target_sesno: Option<u32>,
+    manual_boolean_mode: bool,
 ) -> Result<Vec<RefnoEnum>> {
     println!(
         "[gen_model] 兼容层 gen_geos_data -> 转发到 gen_model_old::gen_geos_data (dbno={:?}, manual_refnos_len={})",
@@ -440,11 +486,12 @@ pub async fn gen_geos_data(
     // 直接转发到旧实现，保持行为一致
     crate::fast_model::gen_model_old::gen_geos_data(
         dbno,
-        manual_refnos,
+        manual_refnos.clone(),
         &db_option.inner,
         incr_updates,
         sender,
         target_sesno,
+        manual_boolean_mode, // 传递手动布尔运算模式参数
     )
     .await
 }

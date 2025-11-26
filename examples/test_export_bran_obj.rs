@@ -64,7 +64,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let target_refno = RefnoEnum::from(target_refno_str.as_str());
-    println!("\n🎯 步骤 2: 目标 BRAN 参考号: {} (debug-mode)", target_refno);
+    println!(
+        "\n🎯 步骤 2: 目标 BRAN 参考号: {} (debug-mode)",
+        target_refno
+    );
 
     // 3. 初始化数据库
     println!("\n📦 步骤 3: 初始化数据库连接...");

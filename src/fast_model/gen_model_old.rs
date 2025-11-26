@@ -7,6 +7,7 @@ use crate::fast_model::{
     booleans_meshes_in_db, cata_model, gen_meshes_in_db, loop_model, prim_model,
     process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
+use crate::fast_model::manifold_bool::{apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold};
 use crate::fast_model::{capture::capture_refnos_if_enabled, debug_model_debug, debug_model_trace};
 use crate::{e3d_dbg, e3d_info, e3d_trace, smart_debug_error, smart_debug_model};
 #[cfg(feature = "gen_model")]
@@ -424,11 +425,8 @@ impl DbModelInstRefnos {
         if let Some(db_option) = db_option_arc {
             // 新逻辑：通过 inst_relate 状态驱动的布尔运算 Worker
             // 不再依赖 DbModelInstRefnos 内部的 refno 向量。
-            if let Err(e) = crate::fast_model::mesh_generate::run_boolean_worker(
-                db_option,
-                100,
-            )
-            .await
+            if let Err(e) =
+                crate::fast_model::mesh_generate::run_boolean_worker(db_option, 100).await
             {
                 eprintln!("[execute_boolean_meshes] boolean worker failed: {}", e);
             }
@@ -817,6 +815,7 @@ pub async fn gen_all_geos_data(
             final_incr_updates.clone(),
             sender.clone(),
             target_sesno,
+            !manual_refnos.is_empty(), // 手动模式时启用手动布尔运算
         )
         .await?;
         drop(sender);
@@ -839,6 +838,51 @@ pub async fn gen_all_geos_data(
                 "[gen_model] 完成 mesh 更新，用时 {} ms",
                 mesh_start.elapsed().as_millis()
             );
+
+            // 手动布尔运算模式：在 mesh 生成完成后执行布尔运算
+            if !manual_refnos.is_empty() && db_option_ext.inner.apply_boolean_operation {
+                e3d_info!("[gen_model] 手动布尔运算模式：开始执行布尔运算");
+                
+                // 查询需要布尔运算的实例（基于 target_root_refnos 的子孙节点）
+                let mut boolean_refnos = vec![];
+                for &root_refno in &target_root_refnos {
+                    // 查询深度可见实例
+                    if let Ok(visible_refnos) = aios_core::query_deep_visible_inst_refnos(root_refno).await {
+                        boolean_refnos.extend(visible_refnos);
+                    }
+                    // 查询深度负实例
+                    if let Ok(neg_refnos) = aios_core::query_deep_neg_inst_refnos(root_refno).await {
+                        boolean_refnos.extend(neg_refnos);
+                    }
+                }
+                
+                // 去重
+                let boolean_refnos: Vec<RefnoEnum> = boolean_refnos.into_iter().collect::<HashSet<_>>().into_iter().collect();
+                
+                if !boolean_refnos.is_empty() {
+                    let replace_exist = db_option_ext.inner.is_replace_mesh();
+                    e3d_info!("[gen_model] 手动布尔运算模式：找到 {} 个需要布尔运算的实例", boolean_refnos.len());
+                    
+                    let boolean_start = Instant::now();
+                    
+                    // 执行元件库级布尔运算
+                    if let Err(e) = apply_cata_neg_boolean_manifold(&boolean_refnos, replace_exist).await {
+                        eprintln!("[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}", e);
+                    }
+                    
+                    // 执行实例级布尔运算
+                    if let Err(e) = apply_insts_boolean_manifold(&boolean_refnos, replace_exist).await {
+                        eprintln!("[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}", e);
+                    } else {
+                        e3d_info!(
+                            "[gen_model] 手动布尔运算模式：布尔运算完成，用时 {} ms",
+                            boolean_start.elapsed().as_millis()
+                        );
+                    }
+                } else {
+                    e3d_info!("[gen_model] 手动布尔运算模式：没有需要布尔运算的实例");
+                }
+            }
         }
 
         if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, &db_option_ext.inner).await
@@ -1931,10 +1975,7 @@ async fn process_gen_geos_data_chunks(
     debug_model_debug!("is_incr_update: {}", is_incr_update);
     debug_model_debug!("has_manual_refnos: {}", has_manual_refnos);
     debug_model_debug!("gen_model (最终值): {}", gen_model);
-    debug_model_debug!(
-        "origin_root_refnos 数量: {}",
-        origin_root_refnos.len()
-    );
+    debug_model_debug!("origin_root_refnos 数量: {}", origin_root_refnos.len());
     //遍历小块
     debug_model_debug!("========== 开始遍历 root_refnos 小块 ==========");
     debug_model_debug!("准备进入 while 循环");
@@ -2222,6 +2263,7 @@ pub async fn gen_geos_data(
     incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<ShapeInstancesData>,
     target_sesno: Option<u32>,
+    manual_boolean_mode: bool,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
     // dbg!(&incr_updates);
     const CHUNK_SIZE: usize = 100;

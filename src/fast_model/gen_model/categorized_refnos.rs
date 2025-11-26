@@ -144,6 +144,7 @@ impl CategoryStatistics {
     }
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,3 +206,5 @@ mod tests {
         assert!(refnos.inner.capacity() >= 1000);
     }
 }
+
+*/

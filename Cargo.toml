@@ -17,6 +17,10 @@ name = "db_option_ui"
 path = "src/bin/db_option_ui/main.rs"
 required-features = ["web_server"]
 
+[[bin]]
+name = "test_dblist"
+path = "src/bin/test_dblist.rs"
+
 # [[bin]]
 # name = "gen_xkt_new"
 # path = "src/bin/gen_xkt_new.rs"
@@ -37,6 +41,7 @@ lazy_static = "1.4.0"
 approx = "0.5.1"
 #flate2 = "1.0.23"
 log = "0.4.17"
+env_logger = "0.11"
 
 # MQTT 服务器和客户端
 rumqttc = "0.25.0"
@@ -95,6 +100,7 @@ glam = { version = "0.30.8", features = ["serde", "rkyv"] }
 cached = "0.56.0"
 rkyv = { version = "0.8.12", features = ["hashbrown-0_15"] }
 rfd = { version = "0.15.4", features = ["async-std"] }
+cavalier_contours = { git = "https://gitee.com/happydpc/cavalier_contours", features = ["serde"] }
 # redb = "3.0.1" # Removed - using SQLite for all storage
 
 image = { version = "0.24", default-features = false, features = ["png"] }
@@ -113,10 +119,6 @@ notify = "8.0.0"
 walkdir = "2.5.0"
 num_enum = "0.7.2"
 jsonxf = "1.1.1"
-sea-orm = { version = "1.1.1", features = [
-    "sqlx-mysql",
-    "runtime-async-std",
-], optional = true }
 async-once-cell = "0.5.3"
 petgraph = { version = "0.8.2", features = ["serde-1"] }
 tracing = "0.1.40"
@@ -149,7 +151,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "1.0"
 jsonwebtoken = { version = "9.0", optional = true }
 async-trait = "0.1"
-env_logger = "0.11"
 
 # Web UI 相关依赖
 axum = { version = "0.8.6", optional = true, features = ["ws"] }
@@ -159,7 +160,7 @@ tower-http = { version = "0.6.6", features = ["fs", "cors"], optional = true }
 sysinfo = { version = "0.37.0", optional = true }
 
 # SQLite driver for spatial tests and cache
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 indicatif = "0.18.1"
 rust_xlsxwriter = "0.91.0"
 
@@ -177,9 +178,9 @@ mqtt = []
 viewer = []                                                           #是否开启视图
 gen_model = ["aios_core/gen_model"]
 manifold = ["aios_core/manifold"]
-sql = ["dep:sea-orm", "dep:sqlx"]
 # debug_parse = ["pdms_io/debug_parse"]  # 暂时禁用以避免冲突
 surreal-save = []
+test = ["aios_core/test"]
 mem-kv-save = ["aios_core/mem-kv-save"]                              #额外保存PE数据到内存KV数据库
 project_hd = []
 project_hh = []
@@ -198,25 +199,6 @@ cc = { version = "1.0", features = ["parallel"] }
 
 [dev-dependencies]
 tempfile = "3"
-
-
-[dependencies.sqlx]
-version = "0.8.6"
-default-features = false
-optional = true
-features = [
-    "runtime-tokio-rustls",
-    #    "runtime-async-std-native-tls",
-    "macros",
-    "mysql",
-    # "tls",
-    "chrono",
-    "json",
-    # "decimal",
-    "bigdecimal",
-    "uuid",
-    "time",
-]
 
 
 #[profile.release]
@@ -258,3 +240,7 @@ eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b86
 
 [patch."https://github.com/happyrust/rs-core.git"]
 aios_core = { path = "../rs-core"}
+
+
+[patch."https://gitee.com/happydpc/rust-ploop-processor.git"]   
+ploop-rs = { path = "../rust-ploop-processor/ploop-rs" }

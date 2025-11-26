@@ -18,17 +18,19 @@ pub async fn trigger_file_download(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     use crate::data_interface::tidb_manager::AiosDBManager;
     use crate::mqtt_service::SyncE3dFileMsg;
-    
-    let file_names = request["file_names"].as_array()
+
+    let file_names = request["file_names"]
+        .as_array()
         .ok_or(StatusCode::BAD_REQUEST)?
         .iter()
         .filter_map(|v| v.as_str())
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-    
-    let file_server_host = request["file_server_host"].as_str()
+
+    let file_server_host = request["file_server_host"]
+        .as_str()
         .ok_or(StatusCode::BAD_REQUEST)?;
-    
+
     let sync_e3d = SyncE3dFileMsg {
         file_names,
         file_hashes: vec![],
@@ -36,10 +38,10 @@ pub async fn trigger_file_download(
         location: "test".to_string(),
         timestamp: aios_core::Datetime::default(),
     };
-    
+
     // 创建一个临时的 watcher（实际使用时应该从全局状态获取）
     let watcher = pdms_io::watch::PdmsWatcher::new(Vec::<std::path::PathBuf>::new());
-    
+
     match AiosDBManager::exec_delta_clone_remotes(&watcher, sync_e3d).await {
         Ok(_) => Ok(Json(json!({
             "status": "success",

@@ -294,7 +294,7 @@ pub enum ModelErrorKind {
 }
 
 /// 模型错误记录宏 - 用于统一记录模型生成过程中的错误
-/// 
+///
 /// # 使用示例
 /// ```rust
 /// model_error!(

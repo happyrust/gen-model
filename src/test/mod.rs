@@ -15,3 +15,5 @@ mod test_sctn_contact;
 #[cfg(feature = "grpc")]
 mod test_sctn_with_spatial_index;
 mod test_sqlite_spatial; // 房间计算 V2 改进验证
+// mod test_gensec_rotation_analysis;
+// mod test_gensec_rotation_fix;

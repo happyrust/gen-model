@@ -60,8 +60,8 @@ pub mod concurrency;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
-pub use gen_model::*;
 pub use gen_model::gen_all_geos_data;
+pub use gen_model::*;
 pub use gen_model_old::query_tubi_size;
 pub use gen_model_old::*;
 use once_cell::sync::Lazy;

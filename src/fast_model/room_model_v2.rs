@@ -36,6 +36,7 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -51,10 +52,70 @@ pub struct RoomBuildStats {
     pub memory_usage_mb: f32,
 }
 
+#[derive(Clone, Copy)]
+struct RoomComputeOptions {
+    inside_tol: f32,
+    concurrency: usize,
+}
+
+impl Default for RoomComputeOptions {
+    fn default() -> Self {
+        Self {
+            inside_tol: 0.1,
+            concurrency: default_room_concurrency(),
+        }
+    }
+}
+
+fn default_room_concurrency() -> usize {
+    std::env::var("ROOM_RELATION_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|c| *c > 0)
+        .unwrap_or(4)
+}
+
+#[derive(Default)]
+struct CacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl CacheMetrics {
+    const fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn reset(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
+
+    fn hit_rate(&self) -> f32 {
+        let hits = self.hits.load(Ordering::Relaxed) as f32;
+        let misses = self.misses.load(Ordering::Relaxed) as f32;
+        let total = hits + misses;
+        if total == 0.0 { 0.0 } else { hits / total }
+    }
+}
+
 /// 改进的几何网格缓存
 /// 使用 Arc 和 DashMap 提升并发性能和内存效率
 static ENHANCED_GEOMETRY_CACHE: tokio::sync::OnceCell<DashMap<String, Arc<PlantMesh>>> =
     tokio::sync::OnceCell::const_new();
+
+static CACHE_METRICS: CacheMetrics = CacheMetrics::new();
 
 async fn get_enhanced_geometry_cache() -> &'static DashMap<String, Arc<PlantMesh>> {
     ENHANCED_GEOMETRY_CACHE
@@ -71,11 +132,13 @@ async fn get_enhanced_geometry_cache() -> &'static DashMap<String, Arc<PlantMesh
 /// 4. 支持并发处理和批量操作
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
 pub async fn build_room_relations_v2(db_option: &DbOption) -> anyhow::Result<RoomBuildStats> {
-    let start_time = Instant::now();
     info!("开始构建房间关系 (改进版本)");
 
     let mesh_dir = db_option.get_meshes_path();
     let room_key_words = db_option.get_room_key_word();
+    let compute_options = RoomComputeOptions::default();
+
+    CACHE_METRICS.reset();
 
     // 1. 构建房间面板映射关系
     let room_panel_map = build_room_panels_relate_v2(&room_key_words).await?;
@@ -87,70 +150,78 @@ pub async fn build_room_relations_v2(db_option: &DbOption) -> anyhow::Result<Roo
 
     info!("找到 {} 个房间面板映射关系", room_panel_map.len());
 
-    let mut total_components = 0;
-    let mut processed_rooms = 0;
-    let total_panels = exclude_panel_refnos.len();
+    let stats = compute_room_relations(
+        &mesh_dir,
+        room_panel_map,
+        exclude_panel_refnos,
+        compute_options,
+    )
+    .await;
 
-    // 4. 并发处理房间关系构建
+    info!(
+        "房间关系构建完成: 处理 {} 个房间, {} 个面板, {} 个构件, 耗时 {:?}, 缓存命中率 {:.2}%",
+        stats.total_rooms,
+        stats.total_panels,
+        stats.total_components,
+        Duration::from_millis(stats.build_time_ms),
+        stats.cache_hit_rate * 100.0
+    );
+
+    Ok(stats)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
+async fn compute_room_relations(
+    mesh_dir: &PathBuf,
+    room_panel_map: Vec<(RefnoEnum, String, Vec<RefnoEnum>)>,
+    exclude_panel_refnos: HashSet<RefnoEnum>,
+    options: RoomComputeOptions,
+) -> RoomBuildStats {
+    let start_time = Instant::now();
+    let total_panels = exclude_panel_refnos.len();
+    let exclude_panel_refnos = Arc::new(exclude_panel_refnos);
+
     use futures::stream::{self, StreamExt};
 
     let results = stream::iter(room_panel_map)
         .map(|(room_refno, room_num, panel_refnos)| {
             let mesh_dir = mesh_dir.clone();
             let exclude_panel_refnos = exclude_panel_refnos.clone();
+            let room_num = room_num.clone();
+            let options = options;
             async move {
                 let mut room_components = 0;
 
                 for panel_refno in panel_refnos {
-                    match cal_room_refnos_v2(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
-                        .await
-                    {
-                        Ok(refnos) => {
-                            if !refnos.is_empty() {
-                                room_components += refnos.len();
-                                if let Err(e) =
-                                    save_room_relate_v2(panel_refno, &refnos, &room_num).await
-                                {
-                                    error!("保存房间关系失败: panel={}, error={}", panel_refno, e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("计算房间构件失败: panel={}, error={}", panel_refno, e);
-                        }
-                    }
+                    room_components += process_panel_for_room(
+                        &mesh_dir,
+                        panel_refno,
+                        &room_num,
+                        exclude_panel_refnos.as_ref(),
+                        options,
+                    )
+                    .await;
                 }
 
-                (room_refno, room_num, room_components)
+                (room_refno, room_components)
             }
         })
-        .buffer_unordered(4) // 限制并发数量
+        .buffer_unordered(options.concurrency.max(1))
         .collect::<Vec<_>>()
         .await;
 
-    // 5. 统计结果
-    for (_, _, components) in results {
-        total_components += components;
-        processed_rooms += 1;
-    }
-
+    let total_rooms = results.len();
+    let total_components: usize = results.iter().map(|(_, count)| *count).sum();
     let build_time = start_time.elapsed();
 
-    let stats = RoomBuildStats {
-        total_rooms: processed_rooms,
+    RoomBuildStats {
+        total_rooms,
         total_panels,
         total_components,
         build_time_ms: build_time.as_millis() as u64,
-        cache_hit_rate: 0.0, // 暂时不统计缓存命中率
+        cache_hit_rate: CACHE_METRICS.hit_rate(),
         memory_usage_mb: estimate_memory_usage().await,
-    };
-
-    info!(
-        "房间关系构建完成: 处理 {} 个房间, {} 个面板, {} 个构件, 耗时 {:?}",
-        stats.total_rooms, stats.total_panels, stats.total_components, build_time
-    );
-
-    Ok(stats)
+    }
 }
 
 /// 改进版本的房间面板关系构建
@@ -292,6 +363,41 @@ async fn create_room_panel_relations_batch(
     Ok(())
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
+async fn process_panel_for_room(
+    mesh_dir: &PathBuf,
+    panel_refno: RefnoEnum,
+    room_num: &str,
+    exclude_panel_refnos: &HashSet<RefnoEnum>,
+    options: RoomComputeOptions,
+) -> usize {
+    match cal_room_refnos_v2(
+        mesh_dir,
+        panel_refno,
+        exclude_panel_refnos,
+        options.inside_tol,
+    )
+    .await
+    {
+        Ok(refnos) => {
+            if refnos.is_empty() {
+                return 0;
+            }
+
+            if let Err(e) = save_room_relate_v2(panel_refno, &refnos, room_num).await {
+                error!("保存房间关系失败: panel={}, error={}", panel_refno, e);
+                0
+            } else {
+                refnos.len()
+            }
+        }
+        Err(e) => {
+            warn!("计算房间构件失败: panel={}, error={}", panel_refno, e);
+            0
+        }
+    }
+}
+
 /// 改进版本的房间构件计算（基于关键点检测）
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
 pub async fn cal_room_refnos_v2(
@@ -429,6 +535,7 @@ async fn load_geometry_with_enhanced_cache(
             (world_trans * inst.transform).to_matrix(),
             TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
         ) {
+            CACHE_METRICS.record_hit();
             return Ok(Arc::new(tri_mesh));
         }
     }
@@ -448,6 +555,7 @@ async fn load_geometry_with_enhanced_cache(
 
     // 更新缓存 - 使用 L0 LOD 键
     cache.insert(cache_key, Arc::new(mesh));
+    CACHE_METRICS.record_miss();
 
     // 缓存管理
     if cache.len() > 2000 {
@@ -534,16 +642,20 @@ fn extract_geom_key_points(geom_insts: &[GeomInstQuery]) -> Vec<Point<Real>> {
 
 /// 判断关键点是否在面板 TriMesh 内
 /// 使用投票策略：超过 50% 的关键点在面板内即判定为属于该房间
-fn is_geom_in_panel(key_points: &[Point<Real>], panel_tri_mesh: &TriMesh, _tolerance: f32) -> bool {
+fn is_geom_in_panel(key_points: &[Point<Real>], panel_tri_mesh: &TriMesh, tolerance: f32) -> bool {
     if key_points.is_empty() {
         return false;
     }
 
     let mut points_inside = 0;
     let total_points = key_points.len();
+    let tolerance_sq = (tolerance as Real).powi(2);
 
     for point in key_points {
-        if panel_tri_mesh.contains_point(&Isometry::identity(), point) {
+        let projection = panel_tri_mesh.project_point(&Isometry::identity(), point, true);
+        let distance_sq = (projection.point - point).norm_squared();
+
+        if projection.is_inside || distance_sq <= tolerance_sq {
             points_inside += 1;
         }
     }
@@ -726,6 +838,10 @@ pub async fn update_room_relations_incremental(
         .iter()
         .flat_map(|(_, _, panels)| panels.clone())
         .collect();
+    let exclude_panel_refnos = Arc::new(exclude_panel_refnos);
+
+    let compute_options = RoomComputeOptions::default();
+    CACHE_METRICS.reset();
 
     let mut updated_elements = 0;
     let affected_rooms = affected_panels.len();
@@ -737,28 +853,19 @@ pub async fn update_room_relations_incremental(
         .map(|(panel_refno, room_num)| {
             let mesh_dir = mesh_dir.clone();
             let exclude_panel_refnos = exclude_panel_refnos.clone();
+            let options = compute_options;
             async move {
-                match cal_room_refnos_v2(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1).await {
-                    Ok(refnos) => {
-                        if !refnos.is_empty() {
-                            if let Err(e) =
-                                save_room_relate_v2(panel_refno, &refnos, &room_num).await
-                            {
-                                error!("保存房间关系失败: panel={}, error={}", panel_refno, e);
-                                return 0;
-                            }
-                            return refnos.len();
-                        }
-                        0
-                    }
-                    Err(e) => {
-                        warn!("计算房间构件失败: panel={}, error={}", panel_refno, e);
-                        0
-                    }
-                }
+                process_panel_for_room(
+                    &mesh_dir,
+                    panel_refno,
+                    &room_num,
+                    exclude_panel_refnos.as_ref(),
+                    options,
+                )
+                .await
             }
         })
-        .buffer_unordered(4)
+        .buffer_unordered(compute_options.concurrency.max(1))
         .collect::<Vec<_>>()
         .await;
 
@@ -914,11 +1021,12 @@ pub async fn rebuild_room_relations_for_rooms(
     room_numbers: Option<Vec<String>>,
     db_option: &DbOption,
 ) -> anyhow::Result<RoomBuildStats> {
-    let start_time = Instant::now();
     info!("开始重建房间关系");
+    let start_time = Instant::now();
 
     let mesh_dir = db_option.get_meshes_path();
     let room_key_words = db_option.get_room_key_word();
+    let compute_options = RoomComputeOptions::default();
 
     // 1. 查询房间面板关系
     let mut room_panel_map = build_room_panels_relate_v2(&room_key_words).await?;
@@ -955,65 +1063,23 @@ pub async fn rebuild_room_relations_for_rooms(
     delete_room_relations_for_panels(&panels_to_delete).await?;
     info!("已删除 {} 个面板的旧关系", panels_to_delete.len());
 
-    // 4. 重新计算并保存关系
-    let mut total_components = 0;
-    let mut processed_rooms = 0;
+    CACHE_METRICS.reset();
 
-    use futures::stream::{self, StreamExt};
-
-    let results = stream::iter(room_panel_map)
-        .map(|(room_refno, room_num, panel_refnos)| {
-            let mesh_dir = mesh_dir.clone();
-            let exclude_panel_refnos = exclude_panel_refnos.clone();
-            async move {
-                let mut room_components = 0;
-
-                for panel_refno in panel_refnos {
-                    match cal_room_refnos_v2(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
-                        .await
-                    {
-                        Ok(refnos) => {
-                            if !refnos.is_empty() {
-                                room_components += refnos.len();
-                                if let Err(e) =
-                                    save_room_relate_v2(panel_refno, &refnos, &room_num).await
-                                {
-                                    error!("保存房间关系失败: panel={}, error={}", panel_refno, e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("计算房间构件失败: panel={}, error={}", panel_refno, e);
-                        }
-                    }
-                }
-
-                (room_refno, room_num, room_components)
-            }
-        })
-        .buffer_unordered(4)
-        .collect::<Vec<_>>()
-        .await;
-
-    for (_, _, components) in results {
-        total_components += components;
-        processed_rooms += 1;
-    }
-
-    let build_time = start_time.elapsed();
-
-    let stats = RoomBuildStats {
-        total_rooms: processed_rooms,
-        total_panels: exclude_panel_refnos.len(),
-        total_components,
-        build_time_ms: build_time.as_millis() as u64,
-        cache_hit_rate: 0.0,
-        memory_usage_mb: estimate_memory_usage().await,
-    };
+    let stats = compute_room_relations(
+        &mesh_dir,
+        room_panel_map,
+        exclude_panel_refnos,
+        compute_options,
+    )
+    .await;
 
     info!(
-        "房间关系重建完成: {} 个房间, {} 个面板, {} 个构件, 耗时 {:?}",
-        stats.total_rooms, stats.total_panels, stats.total_components, build_time
+        "房间关系重建完成: {} 个房间, {} 个面板, {} 个构件, 耗时 {:?}, 缓存命中率 {:.2}%",
+        stats.total_rooms,
+        stats.total_panels,
+        stats.total_components,
+        Duration::from_millis(stats.build_time_ms),
+        stats.cache_hit_rate * 100.0
     );
 
     Ok(stats)

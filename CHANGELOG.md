@@ -1,5 +1,37 @@
 # Changelog
 
+## 2025-11-26
+
+### Added
+- **为 `test_full_boolean_flow` 添加 OBJ 模型导出功能**
+  - 功能：在布尔运算完成后自动导出布尔前后的 OBJ 模型用于可视化验证
+  - 实现位置：`src/bin/test_full_boolean_flow.rs`
+  - 新增函数：`get_mesh_dir_with_lod()` - 根据配置获取正确的 LOD mesh 目录
+  - 导出文件：
+    - `test_output/boolean_exports/before_boolean_{refno}.obj` - 布尔运算前的正实体
+    - `test_output/boolean_exports/after_boolean_{refno}.obj` - 布尔运算后的结果
+  - 用途：
+    - 可在 Blender、MeshLab 等 3D 软件中打开查看
+    - 对比布尔运算前后的几何变化
+    - 验证负实体是否正确被减去
+  - 依赖：`aios_database::fast_model::export_model::export_obj::export_obj_for_refnos`
+
+### Changed
+- **更新完整布尔运算测试指南**
+  - 文件：`llmdoc/guides/complete_boolean_test_guide.md`
+  - 更新内容：
+    - 在测试流程中添加"步骤 4: 导出 OBJ 模型"
+    - 更新测试输出示例，包含 OBJ 导出日志
+    - 添加输出文件路径和使用说明
+    - 在总结部分添加 OBJ 相关的关键指标和成功标准
+  - 新增章节：详细说明如何导出和查看 OBJ 模型
+
+### Documentation
+- **新增 `llmdoc/agent/boolean_obj_export_implementation.md`**
+  - 完整记录 OBJ 导出功能的实现细节
+  - 包含技术实现、使用方法、示例输出
+  - 提供后续改进建议
+
 ## 2025-10-27
 
 ### Fixed

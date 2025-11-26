@@ -18,8 +18,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. 初始化数据库连接
     println!("📡 步骤 1: 初始化数据库连接...");
-    let config_name =
-        std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
+    let config_name = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string());
     println!("   - 配置文件: {}.toml", config_name);
 
     let base_option = init_test_surreal().await?;
@@ -101,20 +100,13 @@ async fn main() -> anyhow::Result<()> {
                     non_empty_refnos += 1;
                     total_inst_geos += ids.len();
                     if sample_logged < 10 {
-                        println!(
-                            "   - refno {}: inst_geo_ids = {}",
-                            refno,
-                            ids.len()
-                        );
+                        println!("   - refno {}: inst_geo_ids = {}", refno, ids.len());
                         sample_logged += 1;
                     }
                 }
             }
             Err(e) => {
-                println!(
-                    "   ⚠️ 查询 inst_geo_ids(refno={}) 失败: {}",
-                    refno, e
-                );
+                println!("   ⚠️ 查询 inst_geo_ids(refno={}) 失败: {}", refno, e);
             }
         }
     }

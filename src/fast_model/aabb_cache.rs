@@ -377,7 +377,9 @@ impl AabbCache {
         let mut stmt: Statement = conn
             .prepare("SELECT data FROM geo_aabb WHERE geo_hash = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row: &Row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt
+            .query_row(params![geo_hash], |row: &Row| row.get(0))
+            .ok()?;
         let stored: StoredAabb = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
     }
@@ -398,7 +400,9 @@ impl AabbCache {
         let mut stmt: Statement = conn
             .prepare("SELECT data FROM refs_by_geo WHERE geo_hash = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![geo_hash], |row: &Row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt
+            .query_row(params![geo_hash], |row: &Row| row.get(0))
+            .ok()?;
         bincode::deserialize(&data).ok()
     }
 
@@ -417,7 +421,9 @@ impl AabbCache {
         let mut stmt: Statement = conn
             .prepare("SELECT data FROM deps_by_ref WHERE refno = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![refno.0], |row: &Row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt
+            .query_row(params![refno.0], |row: &Row| row.get(0))
+            .ok()?;
         bincode::deserialize(&data).ok()
     }
 
@@ -436,7 +442,9 @@ impl AabbCache {
         let mut stmt: Statement = conn
             .prepare("SELECT data FROM ref_bbox WHERE refno = ?1")
             .ok()?;
-        let data: Vec<u8> = stmt.query_row(params![refno.0], |row: &Row| row.get(0)).ok()?;
+        let data: Vec<u8> = stmt
+            .query_row(params![refno.0], |row: &Row| row.get(0))
+            .ok()?;
         let stored: StoredRStarBBox = bincode::deserialize(&data).ok()?;
         Some((&stored).into())
     }
@@ -672,18 +680,22 @@ impl AabbCache {
         let ref_bbox_count: u64 =
             conn.query_row("SELECT COUNT(*) FROM ref_bbox", [], |row: &Row| row.get(0))?;
 
-        let versioned_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM versioned_ref_bbox", [], |row: &Row| {
-                row.get(0)
-            })?;
+        let versioned_count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM versioned_ref_bbox",
+            [],
+            |row: &Row| row.get(0),
+        )?;
 
         let time_data_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM refno_time_data", [], |row: &Row| row.get(0))?;
-
-        let sesno_mapping_count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM sesno_time_mapping", [], |row: &Row| {
+            conn.query_row("SELECT COUNT(*) FROM refno_time_data", [], |row: &Row| {
                 row.get(0)
             })?;
+
+        let sesno_mapping_count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM sesno_time_mapping",
+            [],
+            |row: &Row| row.get(0),
+        )?;
 
         Ok(CacheStats {
             ref_bbox_count,

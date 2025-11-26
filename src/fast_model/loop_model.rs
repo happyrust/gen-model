@@ -109,7 +109,11 @@ pub async fn gen_loop_geos(
                     )
                     .await
                     .unwrap_or_default();
-                    // dbg!(&neg_refnos);
+
+                    if !neg_refnos.is_empty() {
+                        println!("🔍 [LOOP] 找到负实体: target={}, neg_count={}", target_refno, neg_refnos.len());
+                    }
+
                     shape_insts_data.insert_negs(target_refno, &neg_refnos);
                     //检查是否有CMPF
                     let cmpf_refnos =

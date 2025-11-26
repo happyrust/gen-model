@@ -8,6 +8,7 @@ use crate::{db_err, deser_err, log_err, query_err};
 use aios_core::SurrealQueryExt;
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
+use aios_core::get_db_option;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{
     CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo, ParamNegInfo,
@@ -49,19 +50,19 @@ use std::sync::Arc;
 /// ```
 fn build_lod_mesh_path(base_dir: &Path, mesh_id: &str) -> PathBuf {
     use aios_core::mesh_precision::LodLevel;
-    
-    let db_option = aios_core::get_db_option();
+
+    let db_option = get_db_option();
     let default_lod = db_option.mesh_precision().default_lod;
-    
+
     // 检查 base_dir 是否已经是 LOD 子目录（如 "lod_L2"）
     let is_already_lod_dir = base_dir
         .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.starts_with("lod_"))
         .unwrap_or(false);
-    
+
     let lod_filename = format!("{}_{:?}.mesh", mesh_id, default_lod);
-    
+
     if is_already_lod_dir {
         // 已经在 LOD 目录下，直接拼接文件名
         base_dir.join(lod_filename)
@@ -70,6 +71,10 @@ fn build_lod_mesh_path(base_dir: &Path, mesh_id: &str) -> PathBuf {
         let lod_dir = base_dir.join(format!("lod_{:?}", default_lod));
         lod_dir.join(lod_filename)
     }
+}
+
+fn mesh_base_dir() -> PathBuf {
+    get_db_option().get_meshes_path()
 }
 
 /// 从文件加载网格数据
@@ -83,8 +88,8 @@ fn build_lod_mesh_path(base_dir: &Path, mesh_id: &str) -> PathBuf {
 /// 返回 `anyhow::Result<PlantMesh>` 表示加载是否成功以及加载的网格数据
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
-    let base_dir = Path::new("assets/meshes");
-    let mesh_path = build_lod_mesh_path(base_dir, id);
+    let base_dir = mesh_base_dir();
+    let mesh_path = build_lod_mesh_path(&base_dir, id);
     let mesh = PlantMesh::des_mesh_file(&mesh_path)?;
     Ok(mesh)
 }
@@ -102,13 +107,9 @@ fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
 ///
 /// 返回 `anyhow::Result<ManifoldRust>` 表示加载是否成功以及加载的流形数据
 #[inline]
-fn load_manifold(
-    dir: &PathBuf,
-    id: &str,
-    mat: DMat4,
-    more_precision: bool,
-) -> anyhow::Result<ManifoldRust> {
-    let mesh_path = build_lod_mesh_path(dir, id);
+fn load_manifold(id: &str, mat: DMat4, more_precision: bool) -> anyhow::Result<ManifoldRust> {
+    let base_dir = mesh_base_dir();
+    let mesh_path = build_lod_mesh_path(&base_dir, id);
     let mesh = PlantMesh::des_mesh_file(&mesh_path)?;
     let manifold = ManifoldRust::convert_to_manifold(mesh, mat, more_precision);
     Ok(manifold)
@@ -120,11 +121,9 @@ fn load_manifold(
 ///
 /// * `refnos` - 参考号数组
 /// * `replace_exist` - 是否替换已存在的布尔运算结果
-/// * `dir` - 模型文件目录路径
 pub async fn apply_cata_neg_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
-    dir: PathBuf,
 ) -> anyhow::Result<()> {
     // Query catalog negative boolean groups using the extracted method
     let params = query_cata_neg_boolean_groups(refnos, replace_exist)
@@ -139,12 +138,13 @@ pub async fn apply_cata_neg_boolean_manifold(
     }
 
     let mut tasks = Vec::new();
+    let mesh_dir = mesh_base_dir();
     let chunk = (params.len() / 16).max(1);
     // let chunk = params.len();
     // dbg!(&params);
     for chunk in params.chunks(chunk) {
         let group: Vec<CataNegGroup> = chunk.iter().cloned().collect();
-        let dir_clone = dir.clone();
+        let dir_clone = mesh_dir.clone();
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             for g in group {
                 let pes = g
@@ -182,7 +182,6 @@ pub async fn apply_cata_neg_boolean_manifold(
                     debug_model_debug!("正在负实体计算的mesh hash: {}", &pos.id.to_mesh_id());
 
                     let Ok(mut pos_manifold) = load_manifold(
-                        &dir_clone,
                         &pos.id.to_mesh_id(),
                         pos.trans.0.to_matrix().as_dmat4(),
                         false,
@@ -203,9 +202,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                             continue;
                         };
                         let m = neg_geo.trans.0.to_matrix().as_dmat4();
-                        if let Ok(manifold) =
-                            load_manifold(&dir_clone, &neg_geo.id.to_mesh_id(), m, true)
-                        {
+                        if let Ok(manifold) = load_manifold(&neg_geo.id.to_mesh_id(), m, true) {
                             neg_manifolds.push(manifold);
                         }
                     }
@@ -269,7 +266,6 @@ pub async fn apply_cata_neg_boolean_manifold(
 ///
 /// * `refnos` - 参考号数组
 /// * `replace_exist` - 是否替换已存在的布尔运算结果
-/// * `dir` - 模型文件目录路径
 ///
 /// # 返回值
 ///
@@ -277,10 +273,9 @@ pub async fn apply_cata_neg_boolean_manifold(
 pub async fn apply_insts_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
-    dir: PathBuf,
 ) -> anyhow::Result<()> {
     for refno in refnos {
-        apply_insts_boolean_manifold_single(*refno, replace_exist, dir.clone()).await?;
+        apply_insts_boolean_manifold_single(*refno, replace_exist).await?;
     }
     Ok(())
 }
@@ -291,7 +286,6 @@ pub async fn apply_insts_boolean_manifold(
 ///
 /// * `refno` - 参考号
 /// * `replace_exist` - 是否替换已存在的布尔运算结果
-/// * `dir` - 模型文件目录路径
 ///
 /// # 返回值
 ///
@@ -299,9 +293,8 @@ pub async fn apply_insts_boolean_manifold(
 pub async fn apply_insts_boolean_manifold_single(
     refno: RefnoEnum,
     replace_exist: bool,
-    dir: PathBuf,
 ) -> anyhow::Result<()> {
-    // dbg!(&dir);
+    let output_dir = mesh_base_dir();
     // Query manifold boolean operations data using the extracted method
     match query_manifold_boolean_operations(refno).await {
         Ok(boolean_query) => {
@@ -309,7 +302,6 @@ pub async fn apply_insts_boolean_manifold_single(
             //排除有NREV的情况，因为NREV的布尔计算不是很准，还要判断这个NREV的包围盒和实体的包围盒是否差不多大
             for chunk in boolean_query.chunks(chunk) {
                 let group = chunk.to_vec();
-                let dir_clone = dir.clone();
                 {
                     let mut update_sql = String::new();
                     for mut b in group {
@@ -317,12 +309,9 @@ pub async fn apply_insts_boolean_manifold_single(
                         for (pos_id, pos_t) in b.ts.iter() {
                             let pos_mesh_id = pos_id.to_mesh_id();
                             debug_model_debug!("正在负实体计算的mesh hash: {}", &pos_mesh_id);
-                            if let Ok(manifold) = load_manifold(
-                                &dir_clone,
-                                &pos_mesh_id,
-                                pos_t.0.to_matrix().as_dmat4(),
-                                false,
-                            ) {
+                            if let Ok(manifold) =
+                                load_manifold(&pos_mesh_id, pos_t.0.to_matrix().as_dmat4(), false)
+                            {
                                 pos_manifolds.push(manifold);
                             }
                         }
@@ -355,21 +344,32 @@ pub async fn apply_insts_boolean_manifold_single(
                             // pos_mesh.export_obj(false, "pos_t.obj").unwrap();
                         }
 
+                        let mut neg_ts = std::mem::take(&mut b.neg_ts);
+                        let has_neg_input = !neg_ts.is_empty();
+                        if !has_neg_input {
+                            println!("布尔运算失败: 未找到负实体关系, refno: {}", &b.refno);
+                            update_sql.push_str(&format!(
+                                "update {} set bad_bool=true;",
+                                &inst_relate_id
+                            ));
+                            continue;
+                        }
+
                         let mut neg_manifolds = vec![];
-                        for (neg_refno, mut neg_t, negs) in b.neg_ts.into_iter() {
+                        let mut missing_neg_refs = vec![];
+                        for (neg_refno, mut neg_t, negs) in neg_ts.into_iter() {
+                            let mut loaded_any = false;
                             for NegInfo {
                                 id, trans, aabb, ..
                             } in negs
                             {
-                                let Some(mut neg_aabb) = aabb else {
+                                let Some(_) = aabb else {
                                     continue;
                                 };
                                 let m = inverse_mat
                                     * neg_t.0.to_matrix().as_dmat4()
                                     * trans.0.to_matrix().as_dmat4();
-                                if let Ok(manifold) =
-                                    load_manifold(&dir_clone, &id.to_mesh_id(), m, true)
-                                {
+                                if let Ok(manifold) = load_manifold(&id.to_mesh_id(), m, true) {
                                     #[cfg(feature = "debug_model")]
                                     {
                                         let neg_mesh = PlantMesh::from(&manifold);
@@ -381,41 +381,54 @@ pub async fn apply_insts_boolean_manifold_single(
                                         //     .unwrap();
                                     }
                                     neg_manifolds.push(manifold);
+                                    loaded_any = true;
                                 }
+                            }
+                            if !loaded_any {
+                                missing_neg_refs.push(neg_refno);
                             }
                         }
 
-                        if !neg_manifolds.is_empty() {
-                            let mut success = false;
-                            let final_manifold =
-                                pos_manifold.batch_boolean_subtract(&neg_manifolds);
-                            let mesh = PlantMesh::from(&final_manifold);
-                            // 生成mesh_id: 如果是当前版本(sesno==0)用refno，否则用refno_sesno
-                            let mesh_id = if b.sesno == 0 {
-                                b.refno.to_string()
-                            } else {
-                                format!("{}_{}", b.refno, b.sesno)
-                            };
-                            // dbg!(&mesh_id);
-                            //保存到文件到dir下
-                            if mesh
-                                .ser_to_file(&dir_clone.join(format!("{}.mesh", mesh_id)))
-                                .is_ok()
-                            {
-                                update_sql.push_str(&format!(
-                                    "update {} set booled_id='{}';",
-                                    &inst_relate_id, mesh_id
-                                ));
-                                success = true;
-                            }
+                        if neg_manifolds.is_empty() {
+                            println!(
+                                "布尔运算失败: 负实体 manifold 未加载成功, refno: {}, neg_refs: {:?}",
+                                &b.refno, missing_neg_refs
+                            );
+                            update_sql.push_str(&format!(
+                                "update {} set bad_bool=true;",
+                                &inst_relate_id
+                            ));
+                            continue;
+                        }
 
-                            if !success {
-                                println!("布尔运算失败: 无法保存结果 mesh, refno: {}", &b.refno);
-                                update_sql.push_str(&format!(
-                                    "update {} set bad_bool=true;",
-                                    &inst_relate_id
-                                ));
-                            }
+                        let mut success = false;
+                        let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
+                        let mesh = PlantMesh::from(&final_manifold);
+                        // 生成mesh_id: 如果是当前版本(sesno==0)用refno，否则用refno_sesno
+                        let mesh_id = if b.sesno == 0 {
+                            b.refno.to_string()
+                        } else {
+                            format!("{}_{}", b.refno, b.sesno)
+                        };
+                        // dbg!(&mesh_id);
+                        //保存到文件到dir下
+                        if mesh
+                            .ser_to_file(&output_dir.join(format!("{}.mesh", mesh_id)))
+                            .is_ok()
+                        {
+                            update_sql.push_str(&format!(
+                                "update {} set booled_id='{}';",
+                                &inst_relate_id, mesh_id
+                            ));
+                            success = true;
+                        }
+
+                        if !success {
+                            println!("布尔运算失败: 无法保存结果 mesh, refno: {}", &b.refno);
+                            update_sql.push_str(&format!(
+                                "update {} set bad_bool=true;",
+                                &inst_relate_id
+                            ));
                         }
                         // dbg!(&update_sql);
                     }
@@ -444,8 +457,70 @@ async fn test_boolean_refno_parse_error() {
     init_test_surreal().await;
 
     let refno: RefnoEnum = "17496_172792".into();
-    let path: PathBuf = "assets/meshes".into();
-    apply_insts_boolean_manifold_single(refno, false, path)
+    apply_insts_boolean_manifold_single(refno, false)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn generate_pane_boolean_obj() {
+    init_test_surreal().await;
+
+    let refno: RefnoEnum = "17496/260345".into();
+
+    match query_manifold_boolean_operations(refno).await {
+        Ok(boolean_query) => {
+            for mut b in boolean_query {
+                let mut pos_manifolds = vec![];
+                for (pos_id, pos_t) in b.ts.iter() {
+                    if let Ok(manifold) =
+                        load_manifold(&pos_id.to_mesh_id(), pos_t.0.to_matrix().as_dmat4(), false)
+                    {
+                        pos_manifolds.push(manifold);
+                    }
+                }
+
+                if pos_manifolds.is_empty() {
+                    println!(
+                        "Boolean operation failed: No positive manifold found for refno: {}",
+                        &b.refno
+                    );
+                    continue;
+                }
+
+                let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
+                if pos_manifold.num_tri() == 0 {
+                    println!(
+                        "Boolean operation failed: Positive manifold has no triangles for refno: {}",
+                        &b.refno
+                    );
+                    continue;
+                }
+
+                let mut neg_manifolds = vec![];
+                for (neg_refno, mut neg_t, negs) in b.neg_ts.into_iter() {
+                    for NegInfo { id, trans, .. } in negs {
+                        let m = b.wt.0.to_matrix().as_dmat4().inverse()
+                            * neg_t.0.to_matrix().as_dmat4()
+                            * trans.0.to_matrix().as_dmat4();
+                        if let Ok(manifold) = load_manifold(&id.to_mesh_id(), m, true) {
+                            neg_manifolds.push(manifold);
+                        }
+                    }
+                }
+
+                let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
+                let mesh = PlantMesh::from(&final_manifold);
+
+                let output_path = format!("{}.obj", refno.to_string().replace("/", "_"));
+                match mesh.export_obj(false, &output_path) {
+                    Ok(_) => println!("Successfully exported boolean result to {}", output_path),
+                    Err(e) => eprintln!("Failed to export OBJ file: {}", e),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to query boolean operations for {}: {:?}", refno, e);
+        }
+    }
 }

@@ -1,29 +1,28 @@
 #同步文件配置
 total_sync = false
-incr_sync = false
+incr_sync =  false
 sync_history = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
-sync_live = false
+sync_live = true
 replace_dbs = false
 enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-#project_path = "D:/AVEVA/Projects/E3D2.1"
+# project_path = "D:/AVEVA/Projects/E3D2.1"
 project_path = "/Volumes/DPC/work/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
-included_projects = ["YCYK-E3D"]
-project_dirs = ["YCYK-E3D"]
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+#project_dirs = ["AvevaMarineSample"]
 
-mdb_name = "SLYK"
-project_name = "YCYK-E3D"
-project_code = "1500"
-surreal_ns = "1500"
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = '1516'
+surreal_ns = '1516'
 module = "DESI"
-
 #是否生成模型数据
 gen_model = true
 gen_mesh = true
@@ -37,11 +36,29 @@ load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
 
+# Full Noun 模式配置
+full_noun_mode = false
+full_noun_max_concurrent_nouns = 6
+full_noun_batch_size = 200
 
+# 启用的 noun 类别/具体 noun 名称
+# 可选值: "cate", "loop", "prim" 或具体 noun 名称如 "BRAN", "PANE"
+# 空 vec 表示启用所有类别（默认行为）
+# 示例1: 只生成 BRAN 和 PANE 类型
+full_noun_enabled_categories = []
+
+# 排除的 noun 列表
+# 即使类别启用，这里的 noun 也会被过滤掉
+full_noun_excluded_nouns = []
+
+# 调试模式：限制每种 Noun 类型的处理数量
+# 设置为 10 表示只处理每种类型的前 10 个实例
+# 注释掉或设置为 0 表示不限制
+debug_limit_per_noun = 20
 
 build_cate_relate = false
 
-#meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
+# meshes_path = "/Volumes/DPC/work/plant-code/rs-core/assets/meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -66,8 +83,8 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
 #版本数据库服务配置
-v_ip = "127.0.0.1"
-v_port = 8009
+v_ip = "localhost"
+v_port = 8020
 v_user = "root"
 v_password = "root"
 pe_chunk = 300
@@ -76,25 +93,42 @@ att_chunk = 200
 kv_ip = "localhost"
 kv_port = "8010"
 
-# 内存KV数据库配置（额外备份，需要启用 mem-kv-save feature）
-mem_kv_ip = "127.0.0.1"
-mem_kv_port = "8008"
-mem_kv_user = "root"
-mem_kv_password = "root"
 
 #mqtt 事件 ip
-mqtt_host = "192.168.31.58"
+mqtt_host = "127.0.0.1"
+
+
+
+
 mqtt_port = 1883
 
-location = "SJZ"
-location_dbs = [1112]
+
+
+
+
+location = "sjz"
+
+
+
+
+location_dbs = [251181]
+
+
+
+
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
 # hash文件的站点
 remote_file_server_hosts = []
-file_server_host = "http://192.168.31.58:8000/assets/archives"
+file_server_host = "http://localhost:8082/assets/archives"
+
+
+
+
+
+surreal_script_dir = "../rs-core/resource/surreal"
 
 
 #调试选项
@@ -108,8 +142,9 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # debug_refno_types = ["LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
-# included_db_files = ["acw8191_0001"]
-# manual_db_nums = [5511]
+#included_db_files = ["zdj7600_0001"]
+#manual_db_nums = [7999, 7997, 8000, 1112]
+manual_db_nums = [1112, 25688, 7999, 8000, 7997]  # Full Noun 模式下此配置会被忽略
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""
 
@@ -124,17 +159,12 @@ room_keyword = "-R-" # 2016  K-R-K100   (-R-)
 
 #test_refno = "24381_46952"
 
-# debug_model_refnos = ["21491_18946"]
+# debug_model_refnos = ["25688/7960"]
 gen_history_model = false
+# debug_model_refnos = ["17496/201375"]
 
-# 空间索引开关（SQLite R*-Tree）
-enable_sqlite_rtree = true
-# sqlite_index_enabled = true # 兼容键（可选）
+# debug_model_refnos = ["17496_195578"]
 
-
-# SQLite R*-tree 索引文件路径（与 AabbCache 保持一致）
-sqlite_index_path = "assets/aabb_index.sqlite"
-surreal_script_dir = "../rs-core/resource/surreal"
 
 
 # 精度配置（LOD 分级：数字越大，几何更粗，用于远距渲染）

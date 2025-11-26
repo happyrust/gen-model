@@ -506,7 +506,7 @@ impl XktExporter {
 
         // 启动几何体生成
         let db_option_ext = crate::options::DbOptionExt::from(db_option.clone());
-        gen_geos_data(dbno, refnos.to_vec(), &db_option_ext, None, sender, None)
+        gen_geos_data(dbno, refnos.to_vec(), &db_option_ext, None, sender, None, false)
             .await
             .context("生成几何体数据失败")?;
 

@@ -410,29 +410,31 @@ pub async fn gen_cata_geos(
                         Err(e) => {
                             #[cfg(feature = "profile")]
                             tracing::error!(ele_refno = ?ele_refno, error = ?e, "生成元件库模型失败");
-                            
+
                             // 根据错误信息分类
                             use crate::fast_model::ModelErrorKind;
                             let err_str = e.to_string().to_lowercase();
-                            let (code, kind) = if err_str.contains("expression") 
-                                || err_str.contains("表达式") 
+                            let (code, kind) = if err_str.contains("expression")
+                                || err_str.contains("表达式")
                                 || err_str.contains("resolve_cata_comp")
-                                || err_str.contains("eval") {
+                                || err_str.contains("eval")
+                            {
                                 ("E-EXPR-001", ModelErrorKind::InvalidGeometry)
-                            } else if err_str.contains("geometry") 
-                                || err_str.contains("profile") 
-                                || err_str.contains("polygon") {
+                            } else if err_str.contains("geometry")
+                                || err_str.contains("profile")
+                                || err_str.contains("polygon")
+                            {
                                 ("E-GEO-002", ModelErrorKind::InvalidGeometry)
                             } else {
                                 ("E-PIPE-001", ModelErrorKind::PipelineError)
                             };
-                            
+
                             let desc = match code {
                                 "E-EXPR-001" => "表达式计算失败",
                                 "E-GEO-002" => "几何数据无效",
                                 _ => "生成模型失败",
                             };
-                            
+
                             crate::model_error!(
                                 code = code,
                                 kind = kind,
@@ -966,17 +968,14 @@ pub async fn gen_cata_geos(
             let dir_ok = current_tubing.is_dir_ok();
             let dist_ok = dist > TUBI_TOL;
             let transform = current_tubing.get_transform().or_else(|| {
-                debug_model!(
-                    "[BRAN_TUBI] 无法计算 transform (无子元素), 使用 fallback transform"
-                );
+                debug_model!("[BRAN_TUBI] 无法计算 transform (无子元素), 使用 fallback transform");
                 let mut fallback = Transform::IDENTITY;
                 fallback.translation = current_tubing.start_pt;
                 Some(fallback)
             });
             if let Some(t) = transform {
                 let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                let (owner_refno, owner_type) =
-                    shared::get_owner_info_from_attr(&branch_att).await;
+                let (owner_refno, owner_type) = shared::get_owner_info_from_attr(&branch_att).await;
                 tubi_shape_insts_data.insert_tubi(
                     branch_refno,
                     EleGeosInfo {
@@ -986,9 +985,7 @@ pub async fn gen_cata_geos(
                         owner_type,
                         cata_hash: Some(tubi_geo_hash.to_string()),
                         visible: true,
-                        generic_type: get_generic_type(branch_refno)
-                            .await
-                            .unwrap_or_default(),
+                        generic_type: get_generic_type(branch_refno).await.unwrap_or_default(),
                         aabb: Some(aabb),
                         world_transform: t,
                         flow_pt_indexs: vec![],
@@ -1055,13 +1052,11 @@ pub async fn gen_cata_geos(
                 arrive_type,
                 exclude
             );
-        {
-            let world_trans = aios_core::get_world_transform(refno)
-                .await?
+            {
+                let world_trans = aios_core::get_world_transform(refno)
+                    .await?
                     .unwrap_or_default();
-                let raw_axis = exist_al_map
-                    .get(&refno)
-                    .or(local_al_map.get(&refno));
+                let raw_axis = exist_al_map.get(&refno).or(local_al_map.get(&refno));
                 if raw_axis.is_none() {
                     debug_model!(
                         "[BRAN_TUBI] 子件 {} 无 axis_map (exist={}, local={})",
@@ -1164,8 +1159,7 @@ pub async fn gen_cata_geos(
                                 Some(fallback)
                             });
                             if let Some(t) = transform {
-                                let aabb =
-                                    shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                                let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
                                 let (owner_refno, owner_type) =
                                     shared::get_owner_info_from_attr(&branch_att).await;
                                 tubi_shape_insts_data.insert_tubi(
@@ -1177,19 +1171,16 @@ pub async fn gen_cata_geos(
                                         owner_type,
                                         cata_hash: Some(tubi_geo_hash.to_string()),
                                         visible: true,
-                                        generic_type: get_generic_type(
-                                            current_tubing.leave_refno,
-                                        )
-                                        .await
-                                        .unwrap_or_default(),
+                                        generic_type: get_generic_type(current_tubing.leave_refno)
+                                            .await
+                                            .unwrap_or_default(),
                                         aabb: Some(aabb),
                                         world_transform: t,
                                         is_solid: true,
                                         ..Default::default()
                                     },
                                 );
-                                let good_segment =
-                                    dist_ok && !same_dir_bad && dir_ok;
+                                let good_segment = dist_ok && !same_dir_bad && dir_ok;
                                 debug_model!(
                                     "[BRAN_TUBI] 写入直段 {} -> {}, dist={:.3}, dist_ok={}, same_dir_bad={}, dir_ok={}",
                                     current_tubing.leave_refno.to_e3d_id(),
@@ -1199,11 +1190,7 @@ pub async fn gen_cata_geos(
                                     same_dir_bad,
                                     dir_ok
                                 );
-                                let bad_flag = if good_segment {
-                                    "false"
-                                } else {
-                                    "true"
-                                };
+                                let bad_flag = if good_segment { "false" } else { "true" };
                                 let sql = format!(
                                     "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
                                     set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
