@@ -72,7 +72,29 @@ struct LodAssetSummary {
 pub struct ComponentGroup {
     pub refno: String,
     pub noun: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub instances: Vec<InstanceEntry>,
+}
+
+/// 层级分组节点（BRAN/EQUI 作为组节点）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchyGroup {
+    /// 组节点的 refno
+    pub refno: String,
+    /// 组节点类型：BRAN / EQUI
+    pub noun: String,
+    /// 组节点名称
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 组节点的 name_index
+    pub name_index: usize,
+    /// 子构件（非 TUBI）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ComponentGroup>,
+    /// 管道实例（按顺序排列的 TUBI）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tubings: Vec<TubingInstance>,
 }
 
 /// 实例条目
@@ -248,9 +270,24 @@ pub async fn export_prepack_lod_for_refnos(
     let geom_insts = query_geometry_instances(&expanded_refnos, true, verbose)
         .await
         .context("查询几何体实例失败")?;
-    let export_data = collect_export_data(geom_insts, &expanded_refnos, &primary_mesh_dir, verbose)
-        .await
-        .context("收集导出数据失败")?;
+    
+    // 先按 Noun 获取 BRAN 入口，作为 bran_roots 传入
+    let bran_roots = {
+        let nouns = ["BRAN"];
+        query_provider::query_by_noun_all_db(&nouns)
+            .await
+            .unwrap_or_default()
+    };
+    
+    let export_data = collect_export_data(
+        geom_insts,
+        &expanded_refnos,
+        &primary_mesh_dir,
+        verbose,
+        Some(&bran_roots),
+    )
+    .await
+    .context("收集导出数据失败")?;
 
     // 为组件准备名称映射
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
@@ -629,14 +666,60 @@ fn build_instances_payload(
     let mut name_table = NameTable::new();
     let unknown_site_index = name_table.get_or_insert("site", "UNKNOWN_SITE");
     let mut color_palette = ColorPalette::new(material_library);
-
-    let mut component_entries = Vec::new();
     let mut component_instance_count = 0usize;
 
-    // 辅助函数：将一批组件写入 JSON，附带 owner / owner_type 信息
-    let mut push_components =
-        |components: Vec<&crate::fast_model::export_model::export_common::ComponentRecord>| {
-            for component in components {
+    // ========== 第一步：按 BRAN 分组 ==========
+    // 收集所有 BRAN owner 的 refno
+    let mut bran_owners: HashSet<RefnoEnum> = HashSet::new();
+    for component in &export_data.components {
+        if matches!(component.owner_noun.as_deref(), Some("BRAN") | Some("HANG")) {
+            if let Some(owner) = component.owner_refno {
+                bran_owners.insert(owner);
+            }
+        }
+    }
+    // TUBI 的 owner 也加入
+    for tubing in &export_data.tubings {
+        if !tubing.owner_refno.is_unset() {
+            bran_owners.insert(tubing.owner_refno);
+        }
+    }
+
+    // 按 BRAN owner 分组构件
+    let mut bran_children_map: HashMap<RefnoEnum, Vec<&crate::fast_model::export_model::export_common::ComponentRecord>> = HashMap::new();
+    for component in &export_data.components {
+        if matches!(component.owner_noun.as_deref(), Some("BRAN") | Some("HANG")) {
+            if let Some(owner) = component.owner_refno {
+                bran_children_map.entry(owner).or_default().push(component);
+            }
+        }
+    }
+
+    // 按 BRAN owner 分组 TUBI（保持顺序）
+    let mut bran_tubi_map: BTreeMap<RefnoEnum, Vec<&TubiRecord>> = BTreeMap::new();
+    for tubing in &export_data.tubings {
+        let key_refno = if tubing.owner_refno.is_unset() {
+            tubing.refno
+        } else {
+            tubing.owner_refno
+        };
+        bran_tubi_map.entry(key_refno).or_default().push(tubing);
+    }
+
+    // 构建 BRAN 层级分组
+    let mut bran_groups: Vec<serde_json::Value> = Vec::new();
+    let mut bran_owners_sorted: Vec<_> = bran_owners.iter().copied().collect();
+    bran_owners_sorted.sort();
+
+    for bran_refno in bran_owners_sorted {
+        let bran_name = refno_name_map.get(&bran_refno).cloned();
+        let bran_label = bran_name.clone().unwrap_or_else(|| bran_refno.to_string());
+        let bran_name_index = name_table.get_or_insert("bran", &bran_label);
+
+        // 构建子构件列表
+        let mut children_entries: Vec<serde_json::Value> = Vec::new();
+        if let Some(children) = bran_children_map.get(&bran_refno) {
+            for component in children {
                 let component_label = component
                     .name
                     .as_ref()
@@ -644,7 +727,6 @@ fn build_instances_payload(
                     .cloned()
                     .unwrap_or_else(|| component.refno.to_string());
                 let name_index = name_table.get_or_insert("component", &component_label);
-                let site_name_index = unknown_site_index;
                 let color_index = color_palette.index_for_noun(&component.noun);
                 let color_rgba = color_palette.color_at(color_index);
 
@@ -653,19 +735,146 @@ fn build_instances_payload(
                     if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
                         component_instance_count += 1;
                         let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
-                        let scale_matrix = !geom.geo_hash.contains('_'); // 复用几何用矩阵换算，专用几何已在顶点层做换算
+                        let scale_matrix = !geom.geo_hash.contains('_');
 
-                        // uniforms 中加入设备分组信息
                         let mut uniforms = json!({
                             "refno": component.refno.to_string(),
                             "color_index": color_index,
+                            "owner_refno": bran_refno.to_string(),
+                            "owner_noun": "BRAN",
                         });
-                        if let Some(owner) = component.owner_refno {
-                            uniforms["owner_refno"] = json!(owner.to_string());
+                        if let Some(color) = color_rgba {
+                            uniforms["color"] = json!(color);
                         }
-                        if let Some(owner_noun) = &component.owner_noun {
-                            uniforms["owner_noun"] = json!(owner_noun);
-                        }
+
+                        instances.push(json!({
+                            "geo_hash": geom.geo_hash,
+                            "geo_index": geo_index,
+                            "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
+                            "color_index": color_index,
+                            "name_index": name_index,
+                            "site_name_index": unknown_site_index,
+                            "lod_mask": lod_mask,
+                            "uniforms": uniforms,
+                        }));
+                    }
+                }
+
+                if !instances.is_empty() {
+                    children_entries.push(json!({
+                        "refno": component.refno.to_string(),
+                        "noun": component.noun,
+                        "name": component.name,
+                        "name_index": name_index,
+                        "instances": instances,
+                    }));
+                }
+            }
+        }
+
+        // 构建 TUBI 列表（按顺序）
+        let mut tubi_entries: Vec<serde_json::Value> = Vec::new();
+        if let Some(tubings) = bran_tubi_map.get(&bran_refno) {
+            let color_index = color_palette.index_for_noun("TUBI");
+            let color_rgba = color_palette.color_at(color_index);
+
+            for (tubi_order, tubing) in tubings.iter().enumerate() {
+                if let Some(&geo_index) = geo_index_map.get(&tubing.geo_hash) {
+                    let tubi_name_index = name_table.get_or_insert("tubi", &tubing.name);
+                    let lod_mask = compute_lod_mask(&tubing.geo_hash, lod_assets);
+                    
+                    let mut uniforms = json!({
+                        "refno": tubing.refno.to_string(),
+                        "color_index": color_index,
+                        "order": tubi_order,
+                    });
+                    if let Some(color) = color_rgba {
+                        uniforms["color"] = json!(color);
+                    }
+
+                    tubi_entries.push(json!({
+                        "refno": tubing.refno.to_string(),
+                        "noun": "TUBI",
+                        "geo_hash": tubing.geo_hash,
+                        "geo_index": geo_index,
+                        "matrix": mat4_to_vec(&tubing.transform, unit_converter, true),
+                        "color_index": color_index,
+                        "name_index": tubi_name_index,
+                        "order": tubi_order,
+                        "lod_mask": lod_mask,
+                        "uniforms": uniforms,
+                    }));
+                }
+            }
+        }
+
+        bran_groups.push(json!({
+            "refno": bran_refno.to_string(),
+            "noun": "BRAN",
+            "name": bran_name,
+            "name_index": bran_name_index,
+            "children": children_entries,
+            "tubings": tubi_entries,
+        }));
+    }
+
+    // ========== 第二步：按 EQUI 分组 ==========
+    let mut equi_owners: HashSet<RefnoEnum> = HashSet::new();
+    for component in &export_data.components {
+        if matches!(component.owner_noun.as_deref(), Some("EQUI")) {
+            if let Some(owner) = component.owner_refno {
+                equi_owners.insert(owner);
+            }
+        }
+    }
+
+    // 按 EQUI owner 分组构件
+    let mut equi_children_map: HashMap<RefnoEnum, Vec<&crate::fast_model::export_model::export_common::ComponentRecord>> = HashMap::new();
+    for component in &export_data.components {
+        if matches!(component.owner_noun.as_deref(), Some("EQUI")) {
+            if let Some(owner) = component.owner_refno {
+                equi_children_map.entry(owner).or_default().push(component);
+            }
+        }
+    }
+
+    // 构建 EQUI 层级分组
+    let mut equi_groups: Vec<serde_json::Value> = Vec::new();
+    let mut equi_owners_sorted: Vec<_> = equi_owners.iter().copied().collect();
+    equi_owners_sorted.sort();
+
+    for equi_refno in equi_owners_sorted {
+        let equi_name = refno_name_map.get(&equi_refno).cloned();
+        let equi_label = equi_name.clone().unwrap_or_else(|| equi_refno.to_string());
+        let equi_name_index = name_table.get_or_insert("equi", &equi_label);
+
+        // 构建子构件列表
+        let mut children_entries: Vec<serde_json::Value> = Vec::new();
+        if let Some(children) = equi_children_map.get(&equi_refno) {
+            for component in children {
+                let component_label = component
+                    .name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| component.refno.to_string());
+                let name_index = name_table.get_or_insert("component", &component_label);
+                let color_index = color_palette.index_for_noun(&component.noun);
+                let color_rgba = color_palette.color_at(color_index);
+
+                let mut instances = Vec::new();
+                for geom in &component.geometries {
+                    if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
+                        component_instance_count += 1;
+                        let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
+                        let scale_matrix = !geom.geo_hash.contains('_');
+
+                        let mut uniforms = json!({
+                            "refno": component.refno.to_string(),
+                            "color_index": color_index,
+                            "owner_refno": equi_refno.to_string(),
+                            "owner_noun": "EQUI",
+                        });
                         if let Some(owner_type) = &component.owner_type {
                             uniforms["owner_type"] = json!(owner_type);
                         }
@@ -679,127 +888,105 @@ fn build_instances_payload(
                             "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
                             "color_index": color_index,
                             "name_index": name_index,
-                            "site_name_index": site_name_index,
-                            "zone_name_index": serde_json::Value::Null,
+                            "site_name_index": unknown_site_index,
                             "lod_mask": lod_mask,
                             "uniforms": uniforms,
                         }));
                     }
                 }
 
-                // 组件级别 owner 元数据
-                let owner_json = match (
-                    &component.owner_refno,
-                    &component.owner_noun,
-                    &component.owner_type,
-                ) {
-                    (Some(refno), Some(noun), owner_type) => json!({
-                        "refno": refno.to_string(),
-                        "noun": noun,
-                        "type": owner_type,
-                        "color_index": color_index,
-                        "color": color_rgba,
-                    }),
-                    _ => serde_json::Value::Null,
-                };
-
-                component_entries.push(json!({
-                    "refno": component.refno.to_string(),
-                    "noun": component.noun,
-                    "name_index": name_index,
-                    "owner": owner_json,
-                    "instances": instances,
-                }));
+                if !instances.is_empty() {
+                    children_entries.push(json!({
+                        "refno": component.refno.to_string(),
+                        "noun": component.noun,
+                        "name": component.name,
+                        "name_index": name_index,
+                        "instances": instances,
+                    }));
+                }
             }
-        };
+        }
 
-    // 先输出设备（EQUI）拥有的组件，便于前端按设备分组
-    let equip_components: Vec<_> = export_data
-        .components
-        .iter()
-        .filter(|c| matches!(c.owner_noun.as_deref(), Some("EQUI")))
-        .collect();
-    push_components(equip_components);
-
-    // 再输出其他组件
-    let other_components: Vec<_> = export_data
-        .components
-        .iter()
-        .filter(|c| !matches!(c.owner_noun.as_deref(), Some("EQUI")))
-        .collect();
-    push_components(other_components);
-
-    let mut tubing_entries = Vec::new();
-    let mut tubing_groups: BTreeMap<String, Vec<&TubiRecord>> = BTreeMap::new();
-    for tubing in &export_data.tubings {
-        let key_refno = if tubing.owner_refno.is_unset() {
-            tubing.refno
-        } else {
-            tubing.owner_refno
-        };
-        tubing_groups
-            .entry(key_refno.to_string())
-            .or_default()
-            .push(tubing);
+        equi_groups.push(json!({
+            "refno": equi_refno.to_string(),
+            "noun": "EQUI",
+            "name": equi_name,
+            "name_index": equi_name_index,
+            "children": children_entries,
+        }));
     }
 
-    for (group_refno_str, group) in tubing_groups {
-        // 名称优先使用 BRAN/HANG 的 name，否则回退管段名称
-        let fallback_name = &group[0].name;
-        let group_refno = if group[0].owner_refno.is_unset() {
-            group[0].refno
-        } else {
-            group[0].owner_refno
-        };
-        let name_index = name_table.get_or_insert(
-            "pipe",
-            refno_name_map.get(&group_refno).unwrap_or(fallback_name),
-        );
-        let site_name_index = unknown_site_index;
-        let color_index = color_palette.index_for_noun("TUBI");
+    // ========== 第三步：收集未分组的构件 ==========
+    let mut ungrouped_entries: Vec<serde_json::Value> = Vec::new();
+    for component in &export_data.components {
+        // 跳过已经在 BRAN/EQUI 分组中的构件
+        if matches!(component.owner_noun.as_deref(), Some("BRAN") | Some("HANG") | Some("EQUI")) {
+            continue;
+        }
+
+        let component_label = component
+            .name
+            .as_ref()
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| component.refno.to_string());
+        let name_index = name_table.get_or_insert("component", &component_label);
+        let color_index = color_palette.index_for_noun(&component.noun);
         let color_rgba = color_palette.color_at(color_index);
+
         let mut instances = Vec::new();
-        for tubing in group {
-            if let Some(&geo_index) = geo_index_map.get(&tubing.geo_hash) {
-                let lod_mask = compute_lod_mask(&tubing.geo_hash, lod_assets);
+        for geom in &component.geometries {
+            if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
+                component_instance_count += 1;
+                let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
+                let scale_matrix = !geom.geo_hash.contains('_');
+
                 let mut uniforms = json!({
-                    "refno": tubing.refno,
+                    "refno": component.refno.to_string(),
                     "color_index": color_index,
                 });
+                if let Some(owner) = component.owner_refno {
+                    uniforms["owner_refno"] = json!(owner.to_string());
+                }
+                if let Some(owner_noun) = &component.owner_noun {
+                    uniforms["owner_noun"] = json!(owner_noun);
+                }
                 if let Some(color) = color_rgba {
                     uniforms["color"] = json!(color);
                 }
 
                 instances.push(json!({
-                    "geo_hash": tubing.geo_hash,
+                    "geo_hash": geom.geo_hash,
                     "geo_index": geo_index,
-                    // Tubing 复用几何按 transform 做单位换算
-                    "matrix": mat4_to_vec(&tubing.transform, unit_converter, true),
+                    "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
                     "color_index": color_index,
                     "name_index": name_index,
-                    "site_name_index": site_name_index,
-                    "zone_name_index": serde_json::Value::Null,
+                    "site_name_index": unknown_site_index,
                     "lod_mask": lod_mask,
                     "uniforms": uniforms,
                 }));
             }
         }
 
-        tubing_entries.push(json!({
-            "refno": group_refno_str,
-            "noun": "TUBING",
-            "name_index": name_index,
-            "instances": instances,
-        }));
+        if !instances.is_empty() {
+            ungrouped_entries.push(json!({
+                "refno": component.refno.to_string(),
+                "noun": component.noun,
+                "name": component.name,
+                "name_index": name_index,
+                "instances": instances,
+            }));
+        }
     }
 
     let instances_json = json!({
-        "version": 1,
+        "version": 2,
         "generated_at": generated_at,
         "colors": color_palette.into_colors(),
         "names": name_table.into_entries(),
-        "components": component_entries,
-        "tubings": tubing_entries,
+        "bran_groups": bran_groups,
+        "equi_groups": equi_groups,
+        "ungrouped": ungrouped_entries,
     });
 
     (instances_json, component_instance_count)
@@ -1072,45 +1259,6 @@ pub async fn export_all_relates_prepack_lod(
         }
         if unique_refnos.insert(r.clone()) {
             refnos.push(r);
-        }
-    }
-
-    // BRAN 相关：按 BRAN 为单位补充其直接挂载的实例（如 TUBI），不再展开 BRAN 子节点
-    // - 默认也启用，确保即使 owner_type 过滤导致 TUBI 遗漏，仍可通过 owner_refno 找回
-    let include_bran_owned = normalized_owner_types
-        .as_ref()
-        .map(|ts| ts.iter().any(|t| t == "BRAN"))
-        .unwrap_or(true);
-    if include_bran_owned {
-        let bran_sql = format!(
-            "SELECT value in.id FROM inst_relate WHERE {} AND generic = 'BRAN' AND aabb.d != none",
-            db_filter
-        );
-        let bran_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&bran_sql, 0).await?;
-
-        if !bran_refnos.is_empty() {
-            let bran_keys = bran_refnos.iter().map(|r| r.to_pe_key()).collect::<Vec<_>>();
-            let owner_sql = format!(
-                "SELECT value in.id FROM inst_relate WHERE {} AND owner_refno IN [{}] AND aabb.d != none",
-                db_filter,
-                bran_keys.join(", "),
-            );
-            let owned_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&owner_sql, 0).await?;
-
-            let before = refnos.len();
-            for r in bran_refnos.into_iter().chain(owned_refnos.into_iter()) {
-                if equi_set.contains(&r) {
-                    continue;
-                }
-                if unique_refnos.insert(r.clone()) {
-                    refnos.push(r);
-                }
-            }
-            if verbose {
-                println!("   - BRAN/BRAN-owned 补充: +{} 条", refnos.len().saturating_sub(before));
-            }
-        } else if verbose {
-            println!("   - 未找到 BRAN 记录，跳过 BRAN-owned 补充");
         }
     }
 
