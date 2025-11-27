@@ -1196,17 +1196,18 @@ async fn gen_cata_geos_inner(
                 );
                 let bad_flag = if dir_ok && dist_ok { "false" } else { "true" };
                 tubi_relates.push(format!(
-                    "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                    set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
-                    branch_refno.to_pe_key(),
+                    "relate {}->tubi_relate:[{}, {}]->{}  \
+                    set geo=inst_geo:⟨{tubi_geo_hash}⟩,aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={}, system={}, dt=fn::ses_date({});",
+                    current_tubing.leave_refno.to_pe_key(),
                     branch_refno.to_pe_key(),
                     current_tubing.index,
-                    current_tubing.leave_refno.to_pe_key(),
                     current_tubing.arrive_refno.to_pe_key(),
                     gen_bytes_hash(&aabb),
                     gen_bytes_hash(&t),
                     current_tubing.tubi_size.to_string(),
                     bad_flag,
+                    owner_refno.to_pe_key(),
+                    current_tubing.leave_refno.to_pe_key(),
                 ));
                 current_tubing.index += 1;
                 if dir_ok && dist_ok {
@@ -1392,17 +1393,18 @@ async fn gen_cata_geos_inner(
                                 );
                                 let bad_flag = if good_segment { "false" } else { "true" };
                                 let sql = format!(
-                                    "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                    set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
-                                    branch_refno.to_pe_key(),
+                                    "relate {}->tubi_relate:[{}, {}]->{}  \
+                                    set geo=inst_geo:⟨{tubi_geo_hash}⟩,aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={}, system={}, dt=fn::ses_date({});",
+                                    current_tubing.leave_refno.to_pe_key(),
                                     branch_refno.to_pe_key(),
                                     current_tubing.index,
-                                    current_tubing.leave_refno.to_pe_key(),
                                     current_tubing.arrive_refno.to_pe_key(),
                                     gen_bytes_hash(&aabb),
                                     gen_bytes_hash(&t),
                                     current_tubing.tubi_size.to_string(),
                                     bad_flag,
+                                    owner_refno.to_pe_key(),
+                                    current_tubing.leave_refno.to_pe_key(),
                                 );
                                 tubi_relates.push(sql);
                                 current_tubing.index += 1;
@@ -1528,17 +1530,18 @@ async fn gen_cata_geos_inner(
                     let good_segment = dir_ok && dist_ok;
                     let bad_flag = if good_segment { "false" } else { "true" };
                     tubi_relates.push(format!(
-                        "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                        set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={};",
-                        branch_refno.to_pe_key(),
+                        "relate {}->tubi_relate:[{}, {}]->{}  \
+                        set geo=inst_geo:⟨{tubi_geo_hash}⟩,aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, bad={}, system={}, dt=fn::ses_date({});",
+                        current_tubing.leave_refno.to_pe_key(),
                         branch_refno.to_pe_key(),
                         current_tubing.index,
-                        current_tubing.leave_refno.to_pe_key(),
                         current_tubing.arrive_refno.to_pe_key(),
                         gen_bytes_hash(&aabb),
                         gen_bytes_hash(&t),
                         current_tubing.tubi_size.to_string(),
                         bad_flag,
+                        owner_refno.to_pe_key(),
+                        current_tubing.leave_refno.to_pe_key(),
                     ));
                     current_tubing.index += 1;
                     if good_segment {
@@ -1588,7 +1591,7 @@ async fn gen_cata_geos_inner(
             "BRAN Tubing generation completed"
         );
 
-        // 在发送之前提取需要更新has_tubi的refno列表
+        // 提取tubi相关的refno列表
         tubi_refnos = tubi_shape_insts_data
             .inst_tubi_map
             .iter()
@@ -1627,19 +1630,11 @@ async fn gen_cata_geos_inner(
                 tubi_query_time
             );
 
-            // 更新PE表的has_tubi字段，标记哪些元素有隐式管道
-            if !tubi_refnos.is_empty() {
-                let update_pe_tubi_sql =
-                    format!("UPDATE [{}] SET has_tubi = true;", tubi_refnos.join(","));
-                debug_model!(
-                    "[BRAN_TUBI] 更新 has_tubi 标记，refnos: {}",
-                    tubi_refnos.join(",")
-                );
-                if let Err(e) = SUL_DB.query(update_pe_tubi_sql).await {
-                    debug_model!("[BRAN_TUBI] 更新 has_tubi 失败: {}", e);
-                    panic!("更新 has_tubi 失败: {}", e);
-                }
-            }
+            // 不再更新PE表的has_tubi字段，直接使用tubi_relate表判断
+            debug_model!(
+                "[BRAN_TUBI] 跳过更新 has_tubi 标记，改用 tubi_relate 表判断，refnos: {}",
+                tubi_refnos.join(",")
+            );
         } else {
             debug_model!("[BRAN_TUBI] tubi_relates 为空，本次未写入任何 tubi_relate 记录");
         }

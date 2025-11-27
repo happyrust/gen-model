@@ -169,6 +169,9 @@ fn export_unit_mesh_to_glb(
     // 为每个唯一几何体构建 buffer 数据
     for geo_hash in &sorted_geo_hashes {
         let mesh = export_data.unique_geometries.get(*geo_hash).unwrap();
+        // 约定：带下划线的 geo_hash 为非复用几何，直接在顶点上做单位换算；
+        // 其他复用几何保持原始单位，交由实例变换的缩放完成换算。
+        let convert_vertices = geo_hash.contains('_');
 
         let vertex_count = mesh.vertices.len();
         let mut min_pos = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
@@ -177,7 +180,11 @@ fn export_unit_mesh_to_glb(
         // Positions
         let positions_offset = all_positions_bytes.len();
         for vertex in &mesh.vertices {
-            let converted = unit_converter.convert_vec3(vertex);
+            let converted = if convert_vertices {
+                unit_converter.convert_vec3(vertex)
+            } else {
+                *vertex
+            };
             all_positions_bytes.extend_from_slice(&converted.x.to_le_bytes());
             all_positions_bytes.extend_from_slice(&converted.y.to_le_bytes());
             all_positions_bytes.extend_from_slice(&converted.z.to_le_bytes());

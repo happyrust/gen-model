@@ -100,6 +100,8 @@ pub struct ComponentRecord {
 #[derive(Debug, Clone)]
 pub struct TubiRecord {
     pub refno: RefnoEnum,
+    /// BRAN/HANG 所在的 owner（tubi_relate 的 leave）
+    pub owner_refno: RefnoEnum,
     pub geo_hash: String,
     pub transform: DMat4,
     pub index: usize,
@@ -282,17 +284,69 @@ pub async fn collect_export_data(
         }
     }
 
-    // 基于已有 owner_noun_map 过滤 BRAN/HANG，直接查询 tubi
-    let bran_hang_owners: Vec<RefnoEnum> = owner_noun_map
-        .iter()
-        .filter_map(|(owner, noun)| {
-            if matches!(noun.as_str(), "BRAN" | "HANG") {
-                Some(*owner)
-            } else {
-                None
+    // 先为输入 refnos 预取名称/类型，便于判定 BRAN/HANG
+    let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
+    let mut refno_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
+
+    if !refnos.is_empty() {
+        let mut name_tasks = FuturesUnordered::new();
+        for refno in refnos {
+            let refno = *refno;
+            name_tasks.push(async move {
+                let mut name = None;
+                let mut noun = None;
+
+                if let Ok(Some(pe)) = query_provider::get_pe(refno).await {
+                    if !pe.name.is_empty() {
+                        name = Some(pe.name);
+                    }
+                    noun = Some(pe.noun);
+                }
+
+                if name.is_none() {
+                    if let Ok(attmap) = get_named_attmap(refno).await {
+                        if let Some(attr_name) = attmap.get_as_string("NAME") {
+                            if !attr_name.is_empty() {
+                                name = Some(attr_name);
+                            }
+                        }
+                        if noun.is_none() {
+                            noun = Some(attmap.get_type_str().to_string());
+                        }
+                    }
+                }
+
+                (refno, name, noun)
+            });
+        }
+
+        while let Some((refno, name, noun)) = name_tasks.next().await {
+            if let Some(name) = name {
+                let sanitized = sanitize_node_name(&name);
+                if !sanitized.is_empty() {
+                    refno_name_map.insert(refno, sanitized);
+                }
             }
-        })
+            if let Some(noun) = noun {
+                refno_noun_map.insert(refno, noun.to_uppercase());
+            }
+        }
+    }
+
+    // 基于 refno_noun_map/owner_noun_map 过滤 BRAN/HANG，直接查询 tubi
+    let mut bran_hang_owners: Vec<RefnoEnum> = refno_noun_map
+        .iter()
+        .filter_map(|(r, n)| if matches!(n.as_str(), "BRAN" | "HANG") { Some(*r) } else { None })
         .collect();
+    bran_hang_owners.extend(owner_noun_map.iter().filter_map(|(owner, noun)| {
+        if matches!(noun.as_str(), "BRAN" | "HANG") {
+            Some(*owner)
+        } else {
+            None
+        }
+    }));
+    bran_hang_owners.sort();
+    bran_hang_owners.dedup();
 
     if verbose {
         println!("\n📊 查询 tubi 管道数据...");
@@ -349,12 +403,10 @@ pub async fn collect_export_data(
     total_instances += tubi_count;
 
     // 查询所有构件的名称和 noun（包括普通构件和 TUBI）
-    let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
-    let mut refno_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
-
-    // 收集所有需要查询的 refno（包含 TUBI）
+    // 收集所有需要查询的 refno（包含 TUBI 及其 owner）
     let mut all_query_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.refno).collect();
     all_query_refnos.extend(tubi_insts.iter().map(|t| t.refno));
+    all_query_refnos.extend(tubi_insts.iter().map(|t| t.leave));
     all_query_refnos.sort();
     all_query_refnos.dedup();
 
@@ -362,6 +414,10 @@ pub async fn collect_export_data(
         let mut name_tasks = FuturesUnordered::new();
         for refno in &all_query_refnos {
             let refno = *refno;
+            // 已有的跳过
+            if refno_name_map.contains_key(&refno) && refno_noun_map.contains_key(&refno) {
+                continue;
+            }
             name_tasks.push(async move {
                 // 优先从 PE 获取 name
                 let mut name = None;
@@ -490,6 +546,7 @@ pub async fn collect_export_data(
 
         tubings.push(TubiRecord {
             refno: tubi.refno,
+            owner_refno: tubi.leave,
             geo_hash: tubi_geo_hash,
             transform: world_matrix,
             index: *tubi_index - 1,

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2025-11-27
+
+### Fixed
+- **修复 `has_tubi` 字段反序列化错误问题**
+  - 问题：数据库中某些 `SPdmsElement` 记录的 `has_tubi` 字段为 null，而不是期望的 bool 类型，导致反序列化失败
+  - 错误信息：`Failed to deserialize field 'has_tubi' on type 'SPdmsElement': Expected bool, got none`
+  - 修复方案：
+    - 从 [`../rs-core/src/types/pe.rs`](../rs-core/src/types/pe.rs:26) 中移除了 `has_tubi` 字段定义
+    - 从 [`../rs-core/src/rs_surreal/inst_structs.rs`](../rs-core/src/rs_surreal/inst_structs.rs:85) 中移除了 `TubiRelate::to_surql` 方法中对 `has_tubi = true` 的设置
+    - 修改了 [`src/fast_model/cata_model.rs`](src/fast_model/cata_model.rs:1633) 中的代码，移除了对 `has_tubi` 字段的更新逻辑，改为直接使用 `tubi_relate` 表判断
+    - 修复了 [`src/dblist_parser/db_loader.rs`](src/dblist_parser/db_loader.rs:49) 中的导入路径问题
+  - 影响：解决了 `cargo run --bin aios-database` 编译和运行时的反序列化错误
+  - 相关提交：gen-model@f41002f4, rs-core@2dd7c11
+
+### Changed
+- **优化 tubi 关系查询逻辑**
+  - 不再依赖 `has_tubi` 字段来判断是否有 tubi 关系
+  - 直接使用 `tubi_relate` 表的 `in` 字段来判断，更加可靠和准确
+  - [`../rs-core/src/rs_surreal/inst.rs`](../rs-core/src/rs_surreal/inst.rs:71) 中的 `query_tubi_insts_by_brans` 函数已经使用这种方式查询
+  - 提高了数据一致性和查询性能
+
 ## 2025-11-26
 
 ### Added

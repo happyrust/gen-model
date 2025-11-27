@@ -46,7 +46,7 @@ impl DblistLoader {
         // 使用 rs-core 的内存数据库初始化
         #[cfg(feature = "test")]
         {
-            aios_core::test::test_surreal::test_helpers::init_sul_db_with_memory().await?;
+            aios_core::test_surreal_adapter::init_sul_db_with_memory().await?;
             println!("🧠 初始化内存数据库完成");
         }
         #[cfg(not(feature = "test"))]

@@ -496,13 +496,13 @@ DEFINE FUNCTION fn::next_connect_pe_data($pe:record) {
 REMOVE FUNCTION fn::query_tubi_to;
 -- 查询连接到指定节点的直段
 DEFINE FUNCTION fn::query_tubi_to($pe:record) {
-    return select arrive from only $pe.owner->tubi_relate where leave=$pe limit 1;
+    return select out from only $pe->tubi_relate limit 1;
 };
 
 REMOVE FUNCTION fn::query_tubi_from;
 -- 查询从指定节点出发的直段
 DEFINE FUNCTION fn::query_tubi_from($pe:record) {
-    return select leave from only $pe.owner->tubi_relate where arrive=$pe limit 1;
+    return select in from only $pe<-tubi_relate limit 1;
 };
 
 REMOVE FUNCTION fn::query_bran_first_tubi;

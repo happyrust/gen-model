@@ -1,6 +1,7 @@
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::options::DbOption;
+use aios_core::{DBType, query_mdb_db_nums};
 use aios_core::pdms_types::{
     GNERAL_LOOP_OWNER_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, USE_CATE_NOUN_NAMES,
 };
@@ -103,12 +104,30 @@ pub async fn gen_full_noun_geos_optimized(
     println!("🚀 启动 Full Noun 模式（入口 Noun 深度查询版本）");
     config.print_info();
 
-    // 🔥 读取 manual_db_nums 配置（用于过滤数据库）
-    let dbnums: Vec<u32> = db_option.manual_db_nums.clone().unwrap_or_default();
+    // 🔥 读取数据库过滤配置：优先 manual_db_nums，否则按当前 MDB 的 DB 列表，并应用 exclude_db_nums
+    let mut dbnums: Vec<u32> = if let Some(manual) = db_option.manual_db_nums.clone() {
+        manual
+    } else {
+        // 从 MDB 获取当前项目允许的 DB 列表（DESI）
+        query_mdb_db_nums(None, DBType::DESI)
+            .await
+            .map_err(|e| {
+                FullNounError::DatabaseError(format!(
+                    "query_mdb_db_nums(None, DESI) failed: {}",
+                    e
+                ))
+            })?
+    };
+
+    // 应用排除列表
+    if let Some(exclude) = &db_option.exclude_db_nums {
+        dbnums.retain(|dbno| !exclude.contains(dbno));
+    }
+
     if !dbnums.is_empty() {
         println!("🗂️  数据库过滤: 仅查询 dbnum = {:?}", dbnums);
     } else {
-        println!("🗂️  数据库过滤: 查询所有数据库（未设置 manual_db_nums）");
+        println!("🗂️  数据库过滤: 查询所有数据库（未设置 manual_db_nums），或过滤后为空");
     }
 
     let has_explicit_entry_nouns = config.enabled_categories.iter().any(|cat| {

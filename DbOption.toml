@@ -46,6 +46,7 @@ full_noun_batch_size = 200
 # 空 vec 表示启用所有类别（默认行为）
 # 示例1: 只生成 BRAN 和 PANE 类型
 full_noun_enabled_categories = ["BRAN"]
+# full_noun_enabled_categories = []
 
 # 排除的 noun 列表
 # 即使类别启用，这里的 noun 也会被过滤掉
@@ -143,7 +144,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # debug_refno_types = ["LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
 #included_db_files = ["zdj7600_0001"]
-manual_db_nums = [5525]
+# manual_db_nums = [5525]
 # manual_db_nums = [1112, 25688, 7999, 8000, 7997]  # Full Noun 模式下此配置会被忽略
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""

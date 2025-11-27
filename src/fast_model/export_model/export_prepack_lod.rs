@@ -26,6 +26,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::fast_model::export_model::export_common::{ExportData, TubiRecord, collect_export_data};
+use crate::fast_model::query_provider;
 use crate::fast_model::export_model::export_unit_mesh_glb::{
     UnitMeshGlbExportResult, UnitMeshGlbExporter, UnitMeshIndexMap,
 };
@@ -153,6 +154,8 @@ pub async fn export_prepack_lod_for_refnos(
 
     // 导出为米 (m) 单位，前端可直接渲染
     let unit_converter = UnitConverter::new(LengthUnit::Millimeter, LengthUnit::Meter);
+    // manifest 记录采用最终单位（米）避免运行时重复缩放
+    let manifest_unit_converter = UnitConverter::new(LengthUnit::Meter, LengthUnit::Meter);
     let primary_mesh_dir = mesh_dir.to_path_buf();
     let mut base_mesh_dir = mesh_dir.to_path_buf();
     let default_lod_dir = format!("lod_{:?}", db_option.mesh_precision.default_lod);
@@ -197,14 +200,13 @@ pub async fn export_prepack_lod_for_refnos(
             println!("\n🎯 导出 LOD {} → {}", level_tag, asset_path.display());
         }
 
-        // GLB 中的几何体是单位几何体（无量纲），不需要单位转换
-        // 实际尺寸由实例矩阵中的缩放控制
+        // GLB 中的几何体转换到米 (m)，实例矩阵仅做平移转换
         let mut common = CommonExportConfig::with_unit_conversion(
             include_descendants,
             filter_cache.clone(),
             verbose,
             LengthUnit::Millimeter,
-            LengthUnit::Millimeter, // 不转换，保持单位几何体
+            LengthUnit::Meter, // 统一转为米
         );
         common.use_basic_materials = true;
 
@@ -250,6 +252,21 @@ pub async fn export_prepack_lod_for_refnos(
         .await
         .context("收集导出数据失败")?;
 
+    // 为组件准备名称映射
+    let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
+    if !expanded_refnos.is_empty() {
+        for refno in &expanded_refnos {
+            if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
+                if !pe.name.is_empty() {
+                    let sanitized = crate::fast_model::export_model::export_common::sanitize_node_name(&pe.name);
+                    if !sanitized.is_empty() {
+                        refno_name_map.insert(*refno, sanitized);
+                    }
+                }
+            }
+        }
+    }
+
     if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体实例，跳过 manifest 生成");
         return Ok(());
@@ -269,6 +286,7 @@ pub async fn export_prepack_lod_for_refnos(
         &geo_nouns,
         &generated_assets,
         &export_data.unique_geometries,
+        &unit_converter,
     );
 
     let (instances_json, component_instance_count) = build_instances_payload(
@@ -278,6 +296,7 @@ pub async fn export_prepack_lod_for_refnos(
         &generated_assets,
         &unit_converter,
         &material_library,
+        &refno_name_map,
     );
 
     let mut manifest_stats = stats_snapshot;
@@ -293,7 +312,7 @@ pub async fn export_prepack_lod_for_refnos(
         geometry_entries,
         instances_json,
         &generated_at,
-        &unit_converter,
+        &manifest_unit_converter,
     )?;
 
     if verbose {
@@ -495,13 +514,14 @@ fn build_geometry_entries(
     geo_nouns: &HashMap<String, Vec<String>>,
     lod_assets: &[LodAssetSummary],
     unique_geometries: &HashMap<String, Arc<PlantMesh>>,
+    unit_converter: &UnitConverter,
 ) -> Vec<serde_json::Value> {
     geo_hashes
         .iter()
         .map(|geo_hash| {
             let metrics = unique_geometries
                 .get(geo_hash)
-                .map(|mesh| extract_geometry_metrics(mesh))
+                .map(|mesh| extract_geometry_metrics(mesh, unit_converter))
                 .unwrap_or_default();
 
             let mut lods = Vec::new();
@@ -554,20 +574,24 @@ struct GeometryMetrics {
     bounding_sphere: Option<([f32; 3], f32)>,
 }
 
-fn extract_geometry_metrics(mesh: &PlantMesh) -> GeometryMetrics {
+fn extract_geometry_metrics(mesh: &PlantMesh, unit_converter: &UnitConverter) -> GeometryMetrics {
     let vertex_count = mesh.vertices.len();
     let triangle_count = mesh.indices.len() / 3;
     let bounds = mesh.aabb.clone().or_else(|| mesh.cal_aabb());
 
     let bounding_box = bounds.as_ref().map(|aabb| {
-        (
-            [aabb.mins.x, aabb.mins.y, aabb.mins.z],
-            [aabb.maxs.x, aabb.maxs.y, aabb.maxs.z],
-        )
+        let mut min = [aabb.mins.x, aabb.mins.y, aabb.mins.z];
+        let mut max = [aabb.maxs.x, aabb.maxs.y, aabb.maxs.z];
+        if unit_converter.needs_conversion() {
+            for v in min.iter_mut().chain(max.iter_mut()) {
+                *v = unit_converter.convert_value(*v);
+            }
+        }
+        (min, max)
     });
 
     let bounding_sphere = bounds.as_ref().map(|aabb| {
-        let center = [
+        let mut center = [
             (aabb.mins.x + aabb.maxs.x) * 0.5,
             (aabb.mins.y + aabb.maxs.y) * 0.5,
             (aabb.mins.z + aabb.maxs.z) * 0.5,
@@ -575,7 +599,13 @@ fn extract_geometry_metrics(mesh: &PlantMesh) -> GeometryMetrics {
         let dx = aabb.maxs.x - aabb.mins.x;
         let dy = aabb.maxs.y - aabb.mins.y;
         let dz = aabb.maxs.z - aabb.mins.z;
-        let radius = 0.5 * (dx * dx + dy * dy + dz * dz).sqrt();
+        let mut radius = 0.5 * (dx * dx + dy * dy + dz * dz).sqrt();
+        if unit_converter.needs_conversion() {
+            for v in center.iter_mut() {
+                *v = unit_converter.convert_value(*v);
+            }
+            radius = unit_converter.convert_value(radius);
+        }
         (center, radius)
     });
 
@@ -594,6 +624,7 @@ fn build_instances_payload(
     lod_assets: &[LodAssetSummary],
     unit_converter: &UnitConverter,
     material_library: &MaterialLibrary,
+    refno_name_map: &HashMap<RefnoEnum, String>,
 ) -> (serde_json::Value, usize) {
     let mut name_table = NameTable::new();
     let unknown_site_index = name_table.get_or_insert("site", "UNKNOWN_SITE");
@@ -622,6 +653,7 @@ fn build_instances_payload(
                     if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
                         component_instance_count += 1;
                         let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
+                        let scale_matrix = !geom.geo_hash.contains('_'); // 复用几何用矩阵换算，专用几何已在顶点层做换算
 
                         // uniforms 中加入设备分组信息
                         let mut uniforms = json!({
@@ -644,7 +676,7 @@ fn build_instances_payload(
                         instances.push(json!({
                             "geo_hash": geom.geo_hash,
                             "geo_index": geo_index,
-                            "matrix": mat4_to_vec(&geom.transform, unit_converter),
+                            "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
                             "color_index": color_index,
                             "name_index": name_index,
                             "site_name_index": site_name_index,
@@ -700,14 +732,29 @@ fn build_instances_payload(
     let mut tubing_entries = Vec::new();
     let mut tubing_groups: BTreeMap<String, Vec<&TubiRecord>> = BTreeMap::new();
     for tubing in &export_data.tubings {
+        let key_refno = if tubing.owner_refno.is_unset() {
+            tubing.refno
+        } else {
+            tubing.owner_refno
+        };
         tubing_groups
-            .entry(tubing.refno.to_string())
+            .entry(key_refno.to_string())
             .or_default()
             .push(tubing);
     }
 
-    for (refno, group) in tubing_groups {
-        let name_index = name_table.get_or_insert("pipe", &group[0].name);
+    for (group_refno_str, group) in tubing_groups {
+        // 名称优先使用 BRAN/HANG 的 name，否则回退管段名称
+        let fallback_name = &group[0].name;
+        let group_refno = if group[0].owner_refno.is_unset() {
+            group[0].refno
+        } else {
+            group[0].owner_refno
+        };
+        let name_index = name_table.get_or_insert(
+            "pipe",
+            refno_name_map.get(&group_refno).unwrap_or(fallback_name),
+        );
         let site_name_index = unknown_site_index;
         let color_index = color_palette.index_for_noun("TUBI");
         let color_rgba = color_palette.color_at(color_index);
@@ -716,7 +763,7 @@ fn build_instances_payload(
             if let Some(&geo_index) = geo_index_map.get(&tubing.geo_hash) {
                 let lod_mask = compute_lod_mask(&tubing.geo_hash, lod_assets);
                 let mut uniforms = json!({
-                    "refno": refno,
+                    "refno": tubing.refno,
                     "color_index": color_index,
                 });
                 if let Some(color) = color_rgba {
@@ -726,7 +773,8 @@ fn build_instances_payload(
                 instances.push(json!({
                     "geo_hash": tubing.geo_hash,
                     "geo_index": geo_index,
-                    "matrix": mat4_to_vec(&tubing.transform, unit_converter),
+                    // Tubing 复用几何按 transform 做单位换算
+                    "matrix": mat4_to_vec(&tubing.transform, unit_converter, true),
                     "color_index": color_index,
                     "name_index": name_index,
                     "site_name_index": site_name_index,
@@ -738,7 +786,7 @@ fn build_instances_payload(
         }
 
         tubing_entries.push(json!({
-            "refno": refno,
+            "refno": group_refno_str,
             "noun": "TUBING",
             "name_index": name_index,
             "instances": instances,
@@ -783,18 +831,18 @@ fn compute_lod_mask(geo_hash: &str, lod_assets: &[LodAssetSummary]) -> u32 {
     mask
 }
 
-fn mat4_to_vec(matrix: &DMat4, unit_converter: &UnitConverter) -> Vec<f32> {
+fn mat4_to_vec(matrix: &DMat4, unit_converter: &UnitConverter, scale_matrix: bool) -> Vec<f32> {
     let mut cols = matrix.to_cols_array();
     if unit_converter.needs_conversion() {
         let factor = unit_converter.conversion_factor() as f64;
-        // 转换 3x3 旋转/缩放子矩阵（缩放值也需要转换）
-        // 列主序：cols[0..3] = col0, cols[4..7] = col1, cols[8..11] = col2
-        for i in 0..3 {
-            cols[i] *= factor;      // 第一列
-            cols[4 + i] *= factor;  // 第二列
-            cols[8 + i] *= factor;  // 第三列
+        // 复用几何：用矩阵缩放完成单位换算；专用几何（已做顶点换算）仅转换平移。
+        if scale_matrix {
+            for i in 0..3 {
+                cols[i] *= factor;      // 第一列
+                cols[4 + i] *= factor;  // 第二列
+                cols[8 + i] *= factor;  // 第三列
+            }
         }
-        // 转换平移部分
         cols[12] *= factor;
         cols[13] *= factor;
         cols[14] *= factor;
@@ -925,7 +973,7 @@ fn default_material_for_level(level: u32) -> &'static str {
 /// 导出所有 inst_relate 实体（Prepack LOD 格式）
 ///
 /// # 参数
-/// - `owner_types`: 可选的 owner_type 过滤列表，如 `Some(vec!["BRAN", "HANG"])` 只导出这些类型
+/// - `owner_types`: 可选 owner_type 过滤（如 ["BRAN", "HANG"]），默认不过滤但仍排除 EQUI
 pub async fn export_all_relates_prepack_lod(
     dbno: Option<u32>,
     verbose: bool,
@@ -938,6 +986,35 @@ pub async fn export_all_relates_prepack_lod(
 
     println!("\n🔍 查询 inst_relate 表...");
 
+    // 先通过 Noun 获取核心入口（BRAN/EQUI），避免 inst_relate 过滤遗漏
+    let noun_roots = {
+        let nouns = ["BRAN", "EQUI"];
+        if let Some(dbno) = dbno {
+            query_provider::query_by_type(&nouns, dbno as i32, None)
+                .await
+                .unwrap_or_default()
+        } else {
+            query_provider::query_by_noun_all_db(&nouns)
+                .await
+                .unwrap_or_default()
+        }
+    };
+
+    // 为 BRAN/HANG 准备名称映射
+    let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
+    if !noun_roots.is_empty() {
+        for refno in &noun_roots {
+            if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
+                if !pe.name.is_empty() {
+                    let sanitized = crate::fast_model::export_model::export_common::sanitize_node_name(&pe.name);
+                    if !sanitized.is_empty() {
+                        refno_name_map.insert(*refno, sanitized);
+                    }
+                }
+            }
+        }
+    }
+
     // 1. 可选按 dbno 限定 inst_relate 范围
     //    如果提供了 dbno，只查询该 db 下的 inst_relate；否则全表扫描。
     let db_filter = if let Some(dbno) = dbno {
@@ -948,52 +1025,43 @@ pub async fn export_all_relates_prepack_lod(
         "1=1 ".to_string()
     };
 
-    // 2. 构建 owner_type 过滤条件
-    let owner_type_filter = if let Some(ref types) = owner_types {
-        if types.is_empty() {
-            "".to_string()
-        } else {
-            let types_str = types
-                .iter()
-                .map(|t| format!("'{}'", t))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("   - 按 owner_type 过滤: [{}]", types_str);
-            format!(" AND owner_type IN [{}]", types_str)
-        }
+    // 2. 可选 owner_type 过滤
+    let normalized_owner_types = owner_types
+        .as_ref()
+        .map(|types| types.iter().map(|t| t.to_uppercase()).collect::<Vec<_>>());
+    let owner_filter_clause = if let Some(types) = normalized_owner_types.as_ref().filter(|v| !v.is_empty()) {
+        let list = types
+            .iter()
+            .map(|t| format!("'{}'", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("   - 按 owner_type/generic 过滤 inst_relate: {:?}", types);
+        // 说明：generic 用于包含 BRAN/HANG 对应的 TUBI（其 owner_type 可能是上层 FLOW/HVAC），避免被误过滤
+        format!(" AND (owner_type IN [{list}] OR generic IN [{list}])")
     } else {
-        "".to_string()
+        println!("   - 未指定 owner_type 过滤（仅排除 EQUI）");
+        String::new()
     };
 
-    // 3. 首先筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息
-    //    注意：这里只是统计/记录，不作为导出 refno 集的一部分。
-    //    如果指定了 owner_types 且不包含 EQUI，则跳过此查询
-    let equi_set: HashSet<RefnoEnum> = if owner_types.as_ref().map_or(true, |t| t.contains(&"EQUI".to_string())) {
-        let sql_equi = format!(
-            "SELECT value in.id FROM inst_relate WHERE {} AND owner_type = 'EQUI'",
-            db_filter
-        );
-        let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_equi, 0).await?;
-        println!(
-            "   - 找到 {} 条 owner_type = 'EQUI' 的 inst_relate 记录（用于设备分组）",
-            equi_refnos.len()
-        );
-        equi_refnos.into_iter().collect()
-    } else {
-        HashSet::new()
-    };
+    // 3. 筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息（始终排除）
+    let equi_sql = format!(
+        "SELECT value in.id FROM inst_relate WHERE {} AND owner_type = 'EQUI'",
+        db_filter
+    );
+    let equi_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&equi_sql, 0).await?;
+    println!(
+        "   - 找到 {} 条 owner_type = 'EQUI' 的 inst_relate 记录（用于设备分组）",
+        equi_refnos.len()
+    );
+    let equi_set: HashSet<RefnoEnum> = equi_refnos.into_iter().collect();
 
-    // 4. 再次扫描 inst_relate，收集需要导出的实体：
-    //    条件：
-    //      - aabb.d != none （已生成模型）
-    //      - owner_type 匹配过滤条件（如果指定）
-    //      - owner_type != 'EQUI' （跳过设备自身的 inst_relate，只导出实体）
-    //    这里一次性扫描 inst_relate 表，而不是按 ZONE 逐个查询。
+    // 4. 再次扫描 inst_relate，收集需要导出的实体（不按 owner_type 过滤，仅排除 EQUI）
     let sql_all = format!(
         "SELECT value in.id FROM inst_relate WHERE {} AND aabb.d != none{}",
-        db_filter, owner_type_filter
+        db_filter, owner_filter_clause
     );
-    let all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;
+    let mut all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;
+    all_refnos.extend(noun_roots.into_iter());
 
     let mut unique_refnos = HashSet::new();
     let mut refnos = Vec::new();
@@ -1007,8 +1075,47 @@ pub async fn export_all_relates_prepack_lod(
         }
     }
 
+    // BRAN 相关：按 BRAN 为单位补充其直接挂载的实例（如 TUBI），不再展开 BRAN 子节点
+    // - 默认也启用，确保即使 owner_type 过滤导致 TUBI 遗漏，仍可通过 owner_refno 找回
+    let include_bran_owned = normalized_owner_types
+        .as_ref()
+        .map(|ts| ts.iter().any(|t| t == "BRAN"))
+        .unwrap_or(true);
+    if include_bran_owned {
+        let bran_sql = format!(
+            "SELECT value in.id FROM inst_relate WHERE {} AND generic = 'BRAN' AND aabb.d != none",
+            db_filter
+        );
+        let bran_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&bran_sql, 0).await?;
+
+        if !bran_refnos.is_empty() {
+            let bran_keys = bran_refnos.iter().map(|r| r.to_pe_key()).collect::<Vec<_>>();
+            let owner_sql = format!(
+                "SELECT value in.id FROM inst_relate WHERE {} AND owner_refno IN [{}] AND aabb.d != none",
+                db_filter,
+                bran_keys.join(", "),
+            );
+            let owned_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&owner_sql, 0).await?;
+
+            let before = refnos.len();
+            for r in bran_refnos.into_iter().chain(owned_refnos.into_iter()) {
+                if equi_set.contains(&r) {
+                    continue;
+                }
+                if unique_refnos.insert(r.clone()) {
+                    refnos.push(r);
+                }
+            }
+            if verbose {
+                println!("   - BRAN/BRAN-owned 补充: +{} 条", refnos.len().saturating_sub(before));
+            }
+        } else if verbose {
+            println!("   - 未找到 BRAN 记录，跳过 BRAN-owned 补充");
+        }
+    }
+
     println!(
-        "      - 最终需要导出的 inst_relate 实体数: {} (已排除 EQUI 节点)",
+        "      - 最终需要导出的 inst_relate 实体数: {} (已排除 EQUI 节点，含 Noun 入口)",
         refnos.len()
     );
 

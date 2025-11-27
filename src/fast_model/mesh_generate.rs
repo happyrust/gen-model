@@ -137,29 +137,76 @@ LIMIT {limit};"#,
     Ok(refnos)
 }
 
-/// 查询需要执行实例级布尔运算的实例列表
+/// 扫描关系表，提取指向正实体的目标 refno（去重后返回）
+async fn query_relation_targets(table: &str) -> anyhow::Result<Vec<RefnoEnum>> {
+    let sql = format!(
+        r#"SELECT VALUE out
+FROM {table}
+GROUP BY out;"#
+    );
+    let refnos: Vec<RefnoEnum> = SUL_DB.query_take(&sql, 0).await?;
+    Ok(refnos)
+}
+
+/// 聚合 neg_relate 与 ngmr_relate 的目标集合（去重）
+async fn query_relation_targets_combined() -> anyhow::Result<HashSet<RefnoEnum>> {
+    let neg_targets = query_relation_targets("neg_relate").await?;
+    let ngmr_targets = query_relation_targets("ngmr_relate").await?;
+    let mut candidates: HashSet<RefnoEnum> = HashSet::new();
+    candidates.extend(neg_targets.iter().copied());
+    candidates.extend(ngmr_targets.iter().copied());
+
+    println!(
+        "[boolean_worker] 关系扫描: neg_targets={} ngmr_targets={} unique_targets={}",
+        neg_targets.len(),
+        ngmr_targets.len(),
+        candidates.len()
+    );
+
+    Ok(candidates)
+}
+
+/// 查询需要执行实例级布尔运算的实例列表（仅限存在负关系的目标）
 async fn query_pending_inst_boolean(
     limit: usize,
     replace_exist: bool,
+    candidates: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let filter_booled = if replace_exist {
         String::new()
     } else {
         "AND booled_id = NONE".to_string()
     };
 
-    let sql = format!(
-        r#"SELECT VALUE in
+    const CHUNK_SIZE: usize = 200;
+    let candidate_keys: Vec<String> = candidates.iter().map(|r| r.to_pe_key()).collect();
+    let mut pending: Vec<RefnoEnum> = Vec::new();
+    for chunk in candidate_keys.chunks(CHUNK_SIZE) {
+        if pending.len() >= limit {
+            break;
+        }
+        let remaining = limit - pending.len();
+        let sql = format!(
+            r#"SELECT VALUE in
 FROM inst_relate
-WHERE ((in<-neg_relate)[0] != NONE OR (in<-ngmr_relate)[0] != NONE)
+WHERE in IN [{}]
   AND aabb.d != NONE
   AND (bad_bool = false OR bad_bool = NONE)
   {filter_booled}
-LIMIT {limit};"#,
-    );
+LIMIT {remaining};"#,
+            chunk.join(",")
+        );
 
-    let refnos: Vec<RefnoEnum> = SUL_DB.query_take(&sql, 0).await?;
-    Ok(refnos)
+        let mut refnos: Vec<RefnoEnum> = SUL_DB.query_take(&sql, 0).await?;
+        pending.append(&mut refnos);
+    }
+
+    pending.truncate(limit);
+    Ok(pending)
 }
 
 /// 基于 inst_relate 状态的布尔运算 Worker
@@ -173,11 +220,13 @@ pub async fn run_boolean_worker(db_option: Arc<DbOption>, batch_size: usize) -> 
     let mut total_processed = 0usize;
     let mut stalled_rounds = 0usize;
     let mut last_pending: Option<HashSet<RefnoEnum>> = None;
+    let relation_targets = query_relation_targets_combined().await?;
 
     loop {
         let round_start = std::time::Instant::now();
         let cata_refnos = query_pending_cata_boolean(batch_size, replace_exist).await?;
-        let inst_refnos = query_pending_inst_boolean(batch_size, replace_exist).await?;
+        let inst_refnos =
+            query_pending_inst_boolean(batch_size, replace_exist, &relation_targets).await?;
 
         let pending: HashSet<_> = cata_refnos
             .iter()
