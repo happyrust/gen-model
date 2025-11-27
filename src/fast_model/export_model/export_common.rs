@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use aios_core::rs_surreal::query::get_owner_refnos_by_types;
 use aios_core::rs_surreal::query_tubi_insts_by_brans;
+use aios_core::SurrealQueryExt;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB, TubiInstQuery, get_named_attmap};
 use anyhow::{Context, Result, anyhow};
@@ -225,7 +225,75 @@ pub async fn collect_export_data(
         println!("   - 总几何体实例数: {}", total_instances);
     }
 
-    // 查询 tubi 管道数据 - 需要先收集 inst_relate 的 owner，筛选 BRAN/HANG 类型
+    if verbose {
+        println!("\n🔨 收集实例信息...");
+    }
+
+    // 记录 owner 的 noun / 设备类型（目前仅关心 EQUI）
+    let mut owner_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
+    let mut owner_type_map: HashMap<RefnoEnum, String> = HashMap::new();
+
+    // 先准备 owner 集合，后续用来过滤 BRAN/HANG 查询 tubi
+    let mut owner_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.owner).collect();
+    owner_refnos.sort();
+    owner_refnos.dedup();
+
+    if !owner_refnos.is_empty() {
+        let mut owner_tasks = FuturesUnordered::new();
+        for owner in &owner_refnos {
+            let owner_ref = *owner;
+            owner_tasks.push(async move {
+                let mut noun: Option<String> = None;
+                let mut owner_type: Option<String> = None;
+
+                if let Ok(Some(pe)) = query_provider::get_pe(owner_ref).await {
+                    if !pe.noun.is_empty() {
+                        noun = Some(pe.noun.to_uppercase());
+                    }
+                }
+
+                // 对于设备 EQUI，尝试从命名属性中获取类型信息
+                if matches!(noun.as_deref(), Some("EQUI")) {
+                    if let Ok(attmap) = get_named_attmap(owner_ref).await {
+                        // 根据现有命名习惯，尝试几个常见字段；若需要可以再细化
+                        let keys = ["EQUI_TYPE", "EQUIP_TYPE", "TYPE"];
+                        for key in keys {
+                            if let Some(t) = attmap.get_as_string(key) {
+                                if !t.is_empty() {
+                                    owner_type = Some(t);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                (owner_ref, noun, owner_type)
+            });
+        }
+
+        while let Some((owner_ref, noun, owner_type)) = owner_tasks.next().await {
+            if let Some(noun) = noun {
+                owner_noun_map.insert(owner_ref, noun);
+            }
+            if let Some(owner_type) = owner_type {
+                owner_type_map.insert(owner_ref, owner_type);
+            }
+        }
+    }
+
+    // 基于已有 owner_noun_map 过滤 BRAN/HANG，直接查询 tubi
+    let bran_hang_owners: Vec<RefnoEnum> = owner_noun_map
+        .iter()
+        .filter_map(|(owner, noun)| {
+            if matches!(noun.as_str(), "BRAN" | "HANG") {
+                Some(*owner)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     if verbose {
         println!("\n📊 查询 tubi 管道数据...");
         println!("   - 查询的 refno 数量: {}", refnos.len());
@@ -235,50 +303,28 @@ pub async fn collect_export_data(
         if refnos.len() > 5 {
             println!("   - ... 还有 {} 个 refno", refnos.len() - 5);
         }
-
-        println!("   🔍 收集 inst_relate 的 owner 信息...");
+        println!("   🔍 BRAN/HANG owner 数量: {}", bran_hang_owners.len());
     }
 
-    // 先查询所有相关的 inst_relate 记录，获取 owner 信息并用 hashset 去重
-    use std::collections::HashSet;
-    let mut owner_set: HashSet<RefnoEnum> = HashSet::new();
-
-    // 使用 get_owner_refnos_by_types 批量查询 BRAN/HANG 类型的 owner
-    let owner_types = ["BRAN", "HANG"];
-    if let Ok(owners) = get_owner_refnos_by_types(refnos.iter(), &owner_types).await {
-        for owner_opt in owners {
-            if let Some(owner) = owner_opt {
-                owner_set.insert(owner);
+    // 分批查询 tubi，避免单条 SQL 过长
+    let mut tubi_insts: Vec<TubiInstQuery> = Vec::new();
+    if !bran_hang_owners.is_empty() {
+        const TUBI_QUERY_CHUNK: usize = 256;
+        for (idx, chunk) in bran_hang_owners.chunks(TUBI_QUERY_CHUNK.max(1)).enumerate() {
+            if verbose {
+                println!(
+                    "   - 查询 tubi 分批 {}/{} (批大小 {})",
+                    idx + 1,
+                    (bran_hang_owners.len() + TUBI_QUERY_CHUNK - 1) / TUBI_QUERY_CHUNK,
+                    chunk.len()
+                );
             }
-        }
-    } else if verbose {
-        println!("   - 批量查询 BRAN/HANG 类型的 owner 失败");
-    }
-
-    // 转换为向量
-    let unique_owners: Vec<RefnoEnum> = owner_set.into_iter().collect();
-
-    if verbose && !unique_owners.is_empty() {
-        println!(
-            "   - 找到 {} 个 BRAN/HANG 类型的 owner",
-            unique_owners.len()
-        );
-        for (i, owner) in unique_owners.iter().take(5).enumerate() {
-            println!("   - owner[{}]: {}", i, owner);
-        }
-        if unique_owners.len() > 5 {
-            println!("   - ... 还有 {} 个 owner", unique_owners.len() - 5);
+            let chunk_result = query_tubi_insts_by_brans(chunk)
+                .await
+                .unwrap_or_default();
+            tubi_insts.extend(chunk_result);
         }
     }
-
-    // 使用唯一的 owner 查询 tubi 数据
-    let tubi_insts: Vec<TubiInstQuery> = if unique_owners.is_empty() {
-        Vec::new()
-    } else {
-        query_tubi_insts_by_brans(&unique_owners)
-            .await
-            .unwrap_or_default()
-    };
 
     let tubi_count = tubi_insts.len();
     if verbose {
@@ -295,24 +341,16 @@ pub async fn collect_export_data(
             if tubi_count > 3 {
                 println!("   - ... 还有 {} 个 tubi", tubi_count - 3);
             }
+        } else {
+            println!("   ⚠️  未找到 tubi 管道数据");
         }
     }
 
     total_instances += tubi_count;
-    if tubi_count == 0 && verbose {
-        println!("   ⚠️  未找到 tubi 管道数据");
-    }
-
-    if verbose {
-        println!("\n🔨 收集实例信息...");
-    }
 
     // 查询所有构件的名称和 noun（包括普通构件和 TUBI）
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
     let mut refno_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
-    // 记录 owner 的 noun / 设备类型（目前仅关心 EQUI）
-    let mut owner_noun_map: HashMap<RefnoEnum, String> = HashMap::new();
-    let mut owner_type_map: HashMap<RefnoEnum, String> = HashMap::new();
 
     // 收集所有需要查询的 refno（包含 TUBI）
     let mut all_query_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.refno).collect();
@@ -367,54 +405,6 @@ pub async fn collect_export_data(
         }
     }
 
-    // 准备所有 owner 的 refno 集合（用于按 EQUI 分租）
-    let mut owner_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.owner).collect();
-    owner_refnos.sort();
-    owner_refnos.dedup();
-
-    if !owner_refnos.is_empty() {
-        let mut owner_tasks = FuturesUnordered::new();
-        for owner in &owner_refnos {
-            let owner_ref = *owner;
-            owner_tasks.push(async move {
-                let mut noun: Option<String> = None;
-                let mut owner_type: Option<String> = None;
-
-                if let Ok(Some(pe)) = query_provider::get_pe(owner_ref).await {
-                    if !pe.noun.is_empty() {
-                        noun = Some(pe.noun.to_uppercase());
-                    }
-                }
-
-                // 对于设备 EQUI，尝试从命名属性中获取类型信息
-                if matches!(noun.as_deref(), Some("EQUI")) {
-                    if let Ok(attmap) = get_named_attmap(owner_ref).await {
-                        // 根据现有命名习惯，尝试几个常见字段；若需要可以再细化
-                        let keys = ["EQUI_TYPE", "EQUIP_TYPE", "TYPE"];
-                        for key in keys {
-                            if let Some(t) = attmap.get_as_string(key) {
-                                if !t.is_empty() {
-                                    owner_type = Some(t);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                (owner_ref, noun, owner_type)
-            });
-        }
-
-        while let Some((owner_ref, noun, owner_type)) = owner_tasks.next().await {
-            if let Some(noun) = noun {
-                owner_noun_map.insert(owner_ref, noun);
-            }
-            if let Some(owner_type) = owner_type {
-                owner_type_map.insert(owner_ref, owner_type);
-            }
-        }
-    }
 
     // 收集元件记录（按 refno 分组）
     let mut components: Vec<ComponentRecord> = Vec::new();
