@@ -217,6 +217,7 @@ pub async fn collect_export_data(
     refnos: &[RefnoEnum],
     mesh_dir: &Path,
     verbose: bool,
+    bran_roots: Option<&[RefnoEnum]>,
 ) -> Result<ExportData> {
     if verbose {
         println!("   - 找到 {} 个几何体组", geom_insts.len());
@@ -345,6 +346,9 @@ pub async fn collect_export_data(
             None
         }
     }));
+    if let Some(roots) = bran_roots {
+        bran_hang_owners.extend_from_slice(roots);
+    }
     bran_hang_owners.sort();
     bran_hang_owners.dedup();
 
@@ -373,9 +377,32 @@ pub async fn collect_export_data(
                     chunk.len()
                 );
             }
-            let chunk_result = query_tubi_insts_by_brans(chunk)
-                .await
-                .unwrap_or_default();
+            
+            // 使用 SurrealDB ID ranges 查询 tubi_relate 表
+            let mut chunk_result = Vec::new();
+            for bran_refno in chunk {
+                let pe_key = bran_refno.to_pe_key();
+                let sql = format!(
+                    r#"
+                    SELECT
+                        id[0] as refno,
+                        in as leave,
+                        id[0].old_pe as old_refno,
+                        id[0].owner.noun as generic,
+                        aabb.d as world_aabb,
+                        world_trans.d as world_trans,
+                        record::id(geo) as geo_hash,
+                        id[0].dt as date
+                    FROM tubi_relate:[{}, 0]..[{}, ..]
+                    WHERE aabb.d != NONE
+                    "#,
+                    pe_key, pe_key
+                );
+                
+                let mut result: Vec<TubiInstQuery> = SUL_DB.query_take(&sql, 0).await.unwrap_or_default();
+                chunk_result.append(&mut result);
+            }
+            
             tubi_insts.extend(chunk_result);
         }
     }
@@ -407,6 +434,9 @@ pub async fn collect_export_data(
     let mut all_query_refnos: Vec<RefnoEnum> = geom_insts.iter().map(|g| g.refno).collect();
     all_query_refnos.extend(tubi_insts.iter().map(|t| t.refno));
     all_query_refnos.extend(tubi_insts.iter().map(|t| t.leave));
+    if let Some(roots) = bran_roots {
+        all_query_refnos.extend(roots.iter().copied());
+    }
     all_query_refnos.sort();
     all_query_refnos.dedup();
 
@@ -541,12 +571,26 @@ pub async fn collect_export_data(
         // TUBI 命名格式: TUBI_refno_序号
         let tubi_name = format!("TUBI_{}_{}", tubi.refno, tubi_index);
 
-        // 为 TUBI 的 geo_hash 添加 t_ 前缀，与普通元件区分
-        let tubi_geo_hash = format!("t_{}", tubi.geo_hash);
+        // 移除 t_ 前缀，与普通组件共享几何体索引
+        let tubi_geo_hash = if tubi.geo_hash.starts_with("t_") {
+            tubi.geo_hash[2..].to_string() // 移除 "t_" 前缀
+        } else {
+            tubi.geo_hash.clone()
+        };
+
+        // 使用 tubi.leave 作为 owner_refno，但如果是 TUBI 自身，则使用 BRAN/HANG owner
+        let owner_refno = if tubi.leave == tubi.refno {
+            // 如果 leave 指向自身，说明这是一个 TUBI 节点，需要查找真正的 BRAN/HANG owner
+            // 由于我们使用 SurrealDB ID ranges 查询，tubi.leave 应该指向正确的 BRAN/HANG owner
+            // 但如果仍然指向自身，则使用当前 BRAN/HANG 列表中的第一个作为 owner
+            bran_hang_owners.first().copied().unwrap_or(tubi.refno)
+        } else {
+            tubi.leave
+        };
 
         tubings.push(TubiRecord {
             refno: tubi.refno,
-            owner_refno: tubi.leave,
+            owner_refno,
             geo_hash: tubi_geo_hash,
             transform: world_matrix,
             index: *tubi_index - 1,
@@ -564,9 +608,14 @@ pub async fn collect_export_data(
         }
     }
 
-    // 统计 TUBI 的几何体
+    // 统计 TUBI 的几何体（移除 t_ 前缀，与普通组件共享几何体）
     for tubing in &tubings {
-        *geo_hash_usage.entry(tubing.geo_hash.clone()).or_insert(0) += 1;
+        let clean_geo_hash = if tubing.geo_hash.starts_with("t_") {
+            &tubing.geo_hash[2..] // 移除 "t_" 前缀
+        } else {
+            &tubing.geo_hash
+        };
+        *geo_hash_usage.entry(clean_geo_hash.to_string()).or_insert(0) += 1;
     }
 
     let total_component_instances: usize = components.iter().map(|c| c.geometries.len()).sum();

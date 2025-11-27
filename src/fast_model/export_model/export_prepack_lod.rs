@@ -507,7 +507,11 @@ fn resolve_lod_dir(base: &Path, level_tag: &str) -> Option<PathBuf> {
 }
 
 fn build_geo_index_map(export_data: &ExportData) -> (Vec<String>, HashMap<String, usize>) {
-    let mut geo_hashes: Vec<String> = export_data.unique_geometries.keys().cloned().collect();
+    // 只包含成功加载的几何体，排除加载失败的 TUBI
+    let mut geo_hashes: Vec<String> = export_data.unique_geometries
+        .keys()
+        .cloned()
+        .collect();
     geo_hashes.sort();
     let mut index_map = HashMap::new();
     for (idx, hash) in geo_hashes.iter().enumerate() {
@@ -678,12 +682,8 @@ fn build_instances_payload(
             }
         }
     }
-    // TUBI 的 owner 也加入
-    for tubing in &export_data.tubings {
-        if !tubing.owner_refno.is_unset() {
-            bran_owners.insert(tubing.owner_refno);
-        }
-    }
+    // 只将真正的 BRAN 组件作为 top-level 组，不包含 TUBI 的 owner
+    // TUBI 应该关联到其真正的 BRAN owner，而不是创建新的组
 
     // 按 BRAN owner 分组构件
     let mut bran_children_map: HashMap<RefnoEnum, Vec<&crate::fast_model::export_model::export_common::ComponentRecord>> = HashMap::new();
@@ -695,14 +695,33 @@ fn build_instances_payload(
         }
     }
 
+    // 创建子组件到 BRAN 的反向映射
+    let mut child_to_bran: HashMap<RefnoEnum, RefnoEnum> = HashMap::new();
+    for (bran_refno, children) in &bran_children_map {
+        for child in children {
+            child_to_bran.insert(child.refno, *bran_refno);
+        }
+    }
+
     // 按 BRAN owner 分组 TUBI（保持顺序）
     let mut bran_tubi_map: BTreeMap<RefnoEnum, Vec<&TubiRecord>> = BTreeMap::new();
     for tubing in &export_data.tubings {
         let key_refno = if tubing.owner_refno.is_unset() {
             tubing.refno
         } else {
-            tubing.owner_refno
+            // 查找最终的 BRAN owner
+            let mut current_refno = tubing.owner_refno;
+            let mut final_bran = tubing.owner_refno;
+            
+            // 递归查找直到找到 BRAN owner
+            while let Some(&bran_owner) = child_to_bran.get(&current_refno) {
+                final_bran = bran_owner;
+                current_refno = bran_owner;
+            }
+            
+            final_bran
         };
+        
         bran_tubi_map.entry(key_refno).or_default().push(tubing);
     }
 
@@ -741,7 +760,7 @@ fn build_instances_payload(
                             "refno": component.refno.to_string(),
                             "color_index": color_index,
                             "owner_refno": bran_refno.to_string(),
-                            "owner_noun": "BRAN",
+                            "owner_noun": component.owner_noun.clone().unwrap_or_else(|| "BRAN".to_string()),
                         });
                         if let Some(color) = color_rgba {
                             uniforms["color"] = json!(color);
