@@ -1,101 +1,101 @@
 #V2
-SELECT id FROM inst_relate WHERE in = pe:⟨38293_8920⟩;
-DELETE inst_relate:38293_8920_manual;
-SELECT id FROM inst_relate WHERE in = pe:⟨38293_8920⟩;
-UPDATE pe:38293_8920 SET has_inst = true;
-UPDATE pe:⟨38293_8920⟩ SET has_inst = true;
-UPDATE pe SET has_inst = true WHERE id = pe:⟨38293_8920⟩;
--- 查询 PLOO 节点的基本信息
-SELECT * FROM pe:⟨21909_41078⟩;
--- 查询 PLOO 的所有子节点
-SELECT value in FROM pe:⟨21909_41078⟩<-pe_owner WHERE !deleted;
--- 查询 PLOO 的子节点详细信息
-SELECT in.* FROM pe:⟨21909_41078⟩<-pe_owner WHERE !deleted;
--- 查询 PLOO 的 LOOP 子节点
-SELECT in.* FROM pe:⟨21909_41078⟩<-pe_owner WHERE in.noun = 'LOOP' AND !deleted;
--- 查询 PLOO 的所有属性
-SELECT refno.* FROM pe:⟨21909_41078⟩;
--- 查询 PLOO 节点的基本信息
-SELECT * FROM pe:⟨21909_41078⟩;
--- 查询 PLOO 节点（使用不同的格式）
-SELECT * FROM pe WHERE id = pe:⟨21909_41078⟩;
-SELECT * FROM pe WHERE refno.dbnum = 21909 AND refno.eleno = 41078;
-SELECT count() FROM pe WHERE noun = 'PLOO' GROUP ALL;
--- 测试不同的查询格式
-SELECT * FROM pe:21909_41078 LIMIT 1;
-SELECT * FROM ONLY pe:21909_41078;
-SELECT * FROM PLOO WHERE refno.dbnum = 21909 AND refno.eleno = 41078 LIMIT 1;
-SELECT count() FROM PLOO GROUP ALL;
--- 查看数据库中有哪些表
-INFO FOR DB;
--- 查看 pe 表的记录数
-SELECT count() FROM pe GROUP ALL;
--- 查看有哪些 noun 类型
-SELECT noun, count() as cnt FROM pe GROUP BY noun ORDER BY cnt DESC LIMIT 20;
--- 查询 LOOP 的所有 VERTEX 子节点
-DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
-INFO FOR DB;
-SELECT refno, name, noun, owner FROM pe WHERE noun IN ['PIPE'] AND name CONTAINS 'RCV' LIMIT 5;
-SELECT * FROM tubi_insts LIMIT 5;
-INFO FOR DB;
-SELECT * FROM information_schema.tables WHERE table_schema = '1500';
-SELECT * FROM pdms_inst_tubis LIMIT 5;
-SELECT * FROM pdms_inst_geos LIMIT 3;
-SELECT * FROM pdms_inst_tubis LIMIT 3;
-DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
-SELECT refno FROM pe WHERE noun = 'GENSEC' LIMIT 5;
-SELECT noun, count() FROM pe GROUP BY noun LIMIT 10;
-SELECT refno,noun,owner FROM pe WHERE refno='17496_266217';
-SELECT refno,noun,owner FROM pe WHERE refno='17496/266217';
-INFO FOR NS;
-INFO FOR DB;
-SELECT refno,noun FROM pe LIMIT 5;
-SELECT * FROM pe WHERE refno='pe:⟨17496_266217⟩';
-SELECT * FROM ONLY pe:⟨17496_266217⟩;
-SELECT * FROM inst_relate WHERE in=pe:⟨17496_266217⟩;
-SELECT * FROM trans:⟨10971954622644334293⟩;
-SELECT noun,name FROM ONLY pe:⟨17496_266218⟩;
-SELECT * FROM ONLY SPINE:⟨17496_266218⟩;
-SELECT in.noun,in FROM pe:⟨17496_266218⟩<-pe_owner LIMIT 20;
-SELECT noun,name,POSE,poss FROM ONLY pe:⟨17496_266219⟩;
-SELECT * FROM ONLY POINSP:⟨17496_266219⟩;
-SELECT * FROM ONLY POINSP:⟨17496_266220⟩;
-SELECT VALUE world_trans FROM inst_relate WHERE in=pe:⟨17496_266218⟩;
-SELECT in, out FROM pe:⟨17496_266217⟩->pe_owner LIMIT 5;
-SELECT in, out FROM pe:⟨17496_266217⟩<-pe_owner LIMIT 5;
-SELECT param FROM inst_geo:⟨3238752935153612499⟩;
-SELECT * FROM inst_info:⟨17496_266217_767⟩;
-SELECT trans.d as transform, out as inst_geo FROM inst_info:⟨17496_266217_767⟩->geo_relate;
-SELECT POS,POSS FROM ONLY POINSP:⟨17496_266219⟩;
-SELECT POS FROM ONLY POINSP:⟨17496_266220⟩;
-SELECT DRNS,DRNE FROM SPINE:⟨17496_266218⟩;
-DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
-INFO FOR NS;
-INFO FOR DB;
-SELECT count() FROM pe;
-INFO FOR KV;
-INFO FOR NS;
-SELECT count() FROM pe;
-SELECT * FROM pe LIMIT 1;
-INFO FOR DB;
-SELECT * FROM pe:⟨25688_7957⟩;
-SELECT * FROM inst_relate:⟨25688_7957⟩;
-SELECT * FROM inst_relate WHERE in = pe:⟨25688_7957⟩;
-SELECT * FROM neg_relate WHERE out = pe:⟨25688_7957⟩;
-SELECT * FROM pe:⟨25688_7957⟩;
-SELECT id, in, out FROM inst_relate LIMIT 5;
-SELECT count() FROM inst_relate WHERE in = pe:⟨25688_7957⟩;
-SELECT * FROM pe:⟨25688_7957⟩->inst_relate;
-SELECT id,in,out FROM neg_relate LIMIT 5;
-SELECT * FROM inst_relate LIMIT 1;
-SELECT * FROM inst_info:⟨25688_7957_3⟩;
-SELECT * FROM inst_info:⟨25688_7957_2⟩;
-SELECT * FROM inst_info:⟨25688_7957⟩;
-select        in as refno,        in.sesno as sesno,        in.noun as noun,        world_trans.d as wt,        aabb.d as aabb,        (select value [out, trans.d] from out->geo_relate where geo_type in ['Compound', 'Pos'] and trans.d != NONE ) as ts,        (select value [in, world_trans.d,            (select out as id, geo_type, para_type ?? '' as para_type, trans.d as trans, out.aabb.d as aabb            from array::flatten(out->geo_relate) where trans.d != NONE and ( geo_type=='Neg' or (geo_type=='CataCrossNeg'                and geom_refno in (select value ngmr from pe:⟨25688_7957⟩<-ngmr_relate) ) ))]                from array::flatten([array::flatten(in<-neg_relate.in->inst_relate), array::flatten(in<-ngmr_relate.in->inst_relate)]) where world_trans.d!=none        ) as neg_ts     from inst_relate:⟨25688_7957⟩ where in.id != none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE;
-SELECT count() FROM inst_relate;
 SELECT count() FROM tubi_relate;
-SELECT * FROM inst_relate LIMIT 3;
-SELECT * FROM tubi_relate LIMIT 3;
-SELECT count() AS c FROM inst_relate GROUP ALL;
-SELECT count() AS c FROM tubi_relate GROUP ALL;
-SELECT dbnum FROM pe WHERE id = pe:⟨21909_10188⟩;
+USE NS n1500 DB YCYK_E3D;
+-- 查看所有表
+INFO FOR DB;
+-- 查找包含 tubi 的表
+USE NS n1500 DB YCYK_E3D;
+-- 列出所有表
+USE NS n1500 DB YCYK_E3D;
+-- 检查 tubi_relate 表是否存在
+INFO FOR DB;
+-- 如果表存在，查看表结构
+INFO FOR TABLE tubi_relate;
+-- 查看所有表名
+SELECT * FROM information_schema.tables WHERE table_name = 'tubi_relate';
+USE NS n1500 DB YCYK_E3D;
+-- 查看是否有任何 TUBI 数据
+SELECT * FROM pe WHERE noun = 'TUBI' LIMIT 5;
+-- 查看是否有任何 tubi_relate 关系
+SELECT * FROM tubi_relate LIMIT 5;
+-- 查看是否有任何包含 'tubi' 的表
+USE NS n1500 DB YCYK_E3D;
+-- 查看是否有任何 TUBI 数据
+SELECT * FROM pe WHERE noun = 'TUBI' LIMIT 5;
+-- 查看所有表
+USE NS n1500 DB YCYK_E3D;
+-- 查看是否有任何 TUBI 数据
+SELECT * FROM pe WHERE noun = 'TUBI' LIMIT 5;
+-- 查看 BRAN 数据
+SELECT * FROM pe WHERE noun = 'BRAN' LIMIT 5;
+-- 查看 HANG 数据
+SELECT * FROM pe WHERE noun = 'HANG' LIMIT 5;
+USE NS n1500 DB YCYK_E3D;
+-- 查看数据库中是否有任何数据
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+-- 查看命名空间
+INFO FOR NS;
+-- 查看数据库
+INFO FOR DB;
+-- 尝试使用另一个数据库
+USE NS n1500 DB YCYK_E3D;
+-- 查看数据库中是否有任何数据
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+-- 查看所有命名空间
+INFO FOR ROOT;
+USE NS n1500 DB YCYK_E3D;
+-- 查看数据库中是否有任何数据
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+-- 查看 n1500 命名空间下的所有数据库
+INFO FOR NS;
+USE NS n1500 DB YCYK_E3D;
+-- 查看数据库中是否有任何数据
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+-- 直接查询数据库中的数据，不指定命名空间和数据库
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+SELECT count() FROM pe;
+INFO FOR DB;
+INFO FOR ROOT;
+INFO FOR DB;
+USE NS n1500 DB YCYK_E3D;
+-- 查看数据库中是否有任何数据
+SELECT count() FROM pe;
+-- 查看所有不同的 noun 类型
+SELECT noun FROM pe GROUP BY noun LIMIT 10;
+USE NS n1500 DB YCYK_E3D;
+-- 检查 tubi_relate 表是否存在
+INFO FOR DB;
+-- 如果表存在，查看表结构
+INFO FOR TABLE tubi_relate;
+-- 查看所有表名
+SELECT * FROM information_schema.tables WHERE table_name = 'tubi_relate';
+INFO FOR DB;
+SELECT * FROM pe LIMIT 5;
+INFO FOR DB;
+-- 检查 tubi_relate 表是否存在
+INFO FOR DB;
+-- 如果表存在，查看表结构
+INFO FOR TABLE tubi_relate;
+-- 查看所有表名
+SELECT * FROM information_schema.tables WHERE table_name = 'tubi_relate';
+-- 简单查询 tubi_relate 表
+SELECT * FROM tubi_relate LIMIT 5;
+SELECT in as refno, in.sesno as sesno, in.noun as noun, world_trans.d as wt, aabb.d as aabb FROM inst_relate:30101_14380 WHERE in.id != none and !bad_bool and aabb.d != NONE;
+exit
+SELECT in as refno, in.sesno as sesno, in.noun as noun, world_trans.d as wt, aabb.d as aabb FROM inst_relate:30101_14380 WHERE in.id != none and !bad_bool and aabb.d != NONE;
+-- 查询负实体关系
+SELECT * FROM array::flatten(pe:30101_14380<-neg_relate.in<-inst_relate);
+SELECT * FROM array::flatten(pe:30101_14380<-ngmr_relate.in->inst_relate);
+-- 检查是否存在正实体几何
+SELECT out as id, trans.d as trans FROM inst_relate:30101_14380.out->geo_relate WHERE geo_type in ["Compound", "Pos"] and trans.d != NONE;
+INFO FOR DB;

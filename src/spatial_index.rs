@@ -140,9 +140,9 @@ impl SqliteSpatialIndex {
                     .get_bool("enable_sqlite_rtree")
                     .ok()
                     .or_else(|| built.get_bool("sqlite_index_enabled").ok())
-                    .unwrap_or(true)  // 默认启用
+                    .unwrap_or(true) // 默认启用
             } else {
-                true  // 配置文件读取失败时也默认启用
+                true // 配置文件读取失败时也默认启用
             }
         }
         #[cfg(not(feature = "sqlite-index"))]

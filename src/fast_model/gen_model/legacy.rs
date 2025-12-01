@@ -14,7 +14,6 @@ use crate::fast_model::capture::capture_refnos_if_enabled;
 use crate::fast_model::mesh_generate::process_meshes_update_db_deep;
 use crate::fast_model::pdms_inst::save_instance_data_optimize;
 use crate::options::DbOptionExt;
-use crate::{e3d_info};
 #[cfg(feature = "sqlite-index")]
 use crate::spatial_index::SqliteSpatialIndex;
 
@@ -238,51 +237,70 @@ pub async fn gen_all_geos_data(
             }
 
             // 手动布尔运算模式：在 mesh 生成完成后执行布尔运算
+            // TODO: 需要重新实现布尔运算函数（apply_cata_neg_boolean_manifold 和 apply_insts_boolean_manifold）
+            // 这些函数在 manifold_bool 模块重构后已移除
             if has_manual_refnos && db_option.inner.apply_boolean_operation {
-                use crate::fast_model::manifold_bool::{apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold};
-                use std::collections::HashSet;
-                
-                e3d_info!("[gen_model] 手动布尔运算模式：开始执行布尔运算");
-                
-                // 查询需要布尔运算的实例（基于 target_root_refnos 的子孙节点）
-                let mut boolean_refnos = vec![];
-                for &root_refno in &target_root_refnos {
-                    // 查询深度可见实例
-                    if let Ok(visible_refnos) = aios_core::query_deep_visible_inst_refnos(root_refno).await {
-                        boolean_refnos.extend(visible_refnos);
-                    }
-                    // 查询深度负实例
-                    if let Ok(neg_refnos) = aios_core::query_deep_neg_inst_refnos(root_refno).await {
-                        boolean_refnos.extend(neg_refnos);
-                    }
-                }
-                
-                // 去重
-                let boolean_refnos: Vec<aios_core::RefnoEnum> = boolean_refnos.into_iter().collect::<HashSet<_>>().into_iter().collect();
-                
-                if !boolean_refnos.is_empty() {
-                    let replace_exist = db_option.inner.is_replace_mesh();
-                    e3d_info!("[gen_model] 手动布尔运算模式：找到 {} 个需要布尔运算的实例", boolean_refnos.len());
-                    
-                    let boolean_start = Instant::now();
-                    
-                    // 执行元件库级布尔运算
-                    if let Err(e) = apply_cata_neg_boolean_manifold(&boolean_refnos, replace_exist).await {
-                        eprintln!("[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}", e);
-                    }
-                    
-                    // 执行实例级布尔运算
-                    if let Err(e) = apply_insts_boolean_manifold(&boolean_refnos, replace_exist).await {
-                        eprintln!("[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}", e);
-                    } else {
-                        e3d_info!(
-                            "[gen_model] 手动布尔运算模式：布尔运算完成，用时 {} ms",
-                            boolean_start.elapsed().as_millis()
-                        );
-                    }
-                } else {
-                    e3d_info!("[gen_model] 手动布尔运算模式：没有需要布尔运算的实例");
-                }
+                eprintln!("[gen_model] 警告：手动布尔运算模式暂时禁用，等待 manifold_bool 模块重构完成");
+                // use crate::fast_model::manifold_bool::{
+                //     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
+                // };
+                // use std::collections::HashSet;
+
+                // println!("[gen_model] 手动布尔运算模式：开始执行布尔运算");
+
+                // // 查询需要布尔运算的实例（基于 target_root_refnos 的子孙节点）
+                // let mut boolean_refnos = vec![];
+                // for &root_refno in &target_root_refnos {
+                //     // 查询深度可见实例
+                //     if let Ok(visible_refnos) =
+                //         aios_core::query_deep_visible_inst_refnos(root_refno).await
+                //     {
+                //         boolean_refnos.extend(visible_refnos);
+                //     }
+                //     // 查询深度负实例
+                //     if let Ok(neg_refnos) = aios_core::query_deep_neg_inst_refnos(root_refno).await
+                //     {
+                //         boolean_refnos.extend(neg_refnos);
+                //     }
+                // }
+
+                // // 去重
+                // let boolean_refnos: Vec<aios_core::RefnoEnum> = boolean_refnos
+                //     .into_iter()
+                //     .collect::<HashSet<_>>()
+                //     .into_iter()
+                //     .collect();
+
+                // if !boolean_refnos.is_empty() {
+                //     let replace_exist = db_option.inner.is_replace_mesh();
+                //     println!(
+                //         "[gen_model] 手动布尔运算模式：找到 {} 个需要布尔运算的实例",
+                //         boolean_refnos.len()
+                //     );
+
+                //     let boolean_start = Instant::now();
+
+                //     // 执行元件库级布尔运算
+                //     if let Err(e) =
+                //         apply_cata_neg_boolean_manifold(&boolean_refnos, replace_exist).await
+                //     {
+                //         eprintln!("[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}", e);
+                //     }
+
+                //     // 执行实例级布尔运算
+                //     if let Err(e) =
+                //         apply_insts_boolean_manifold(&boolean_refnos, replace_exist).await
+                //     {
+                //         eprintln!("[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}", e);
+                //     } else {
+                //         println!(
+                //             "[gen_model] 手动布尔运算模式：布尔运算完成，用时 {} ms",
+                //             boolean_start.elapsed().as_millis()
+                //         );
+                //     }
+                // } else {
+                //     println!("[gen_model] 手动布尔运算模式：没有需要布尔运算的实例");
+                // }
             }
         }
 
@@ -350,7 +368,7 @@ pub async fn gen_all_geos_data(
                 }
             });
 
-            let db_refnos = crate::fast_model::gen_model_old::gen_geos_data_by_dbnum(
+            let db_refnos = super::non_full_noun::gen_geos_data_by_dbnum(
                 dbno,
                 db_option_arc.clone(),
                 sender.clone(),
@@ -381,16 +399,17 @@ pub async fn gen_all_geos_data(
                     mesh_start.elapsed().as_millis()
                 );
 
-                let boolean_start = Instant::now();
-                println!("[gen_model] -> 数据库 {} 开始布尔运算", dbno);
-                db_refnos
-                    .execute_boolean_meshes(Some(db_option_arc.clone()))
-                    .await;
-                println!(
-                    "[gen_model] -> 数据库 {} 布尔运算完成，用时 {} ms",
-                    dbno,
-                    boolean_start.elapsed().as_millis()
-                );
+                // TODO: 布尔运算已被移除，等待 manifold_bool 模块重构完成
+                // let boolean_start = Instant::now();
+                // println!("[gen_model] -> 数据库 {} 开始布尔运算", dbno);
+                // db_refnos
+                //     .execute_boolean_meshes(Some(db_option_arc.clone()))
+                //     .await;
+                // println!(
+                //     "[gen_model] -> 数据库 {} 布尔运算完成，用时 {} ms",
+                //     dbno,
+                //     boolean_start.elapsed().as_millis()
+                // );
             }
 
             println!(
@@ -464,10 +483,9 @@ pub async fn gen_full_noun_geos(
     Ok(result)
 }
 
-/// 兼容函数：旧版的 gen_geos_data
+/// 兼容函数：gen_geos_data（已迁移到 non_full_noun 模块）
 ///
-/// 这个函数在优化版本中暂未实现，需要从 gen_model_old.rs 迁移
-#[deprecated(note = "此函数未在优化版本中实现，需要迁移")]
+/// 这是一个兼容层，直接转发到新的实现
 pub async fn gen_geos_data(
     dbno: Option<u32>,
     manual_refnos: Vec<RefnoEnum>,
@@ -478,20 +496,20 @@ pub async fn gen_geos_data(
     manual_boolean_mode: bool,
 ) -> Result<Vec<RefnoEnum>> {
     println!(
-        "[gen_model] 兼容层 gen_geos_data -> 转发到 gen_model_old::gen_geos_data (dbno={:?}, manual_refnos_len={})",
+        "[gen_model] 兼容层 gen_geos_data -> 转发到 non_full_noun::gen_geos_data (dbno={:?}, manual_refnos_len={})",
         dbno,
         manual_refnos.len()
     );
 
-    // 直接转发到旧实现，保持行为一致
-    crate::fast_model::gen_model_old::gen_geos_data(
+    // 转发到新的实现（已从 gen_model_old.rs 迁移）
+    super::non_full_noun::gen_geos_data(
         dbno,
-        manual_refnos.clone(),
+        manual_refnos,
         &db_option.inner,
         incr_updates,
         sender,
         target_sesno,
-        manual_boolean_mode, // 传递手动布尔运算模式参数
+        manual_boolean_mode,
     )
     .await
 }

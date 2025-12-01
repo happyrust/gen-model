@@ -6,9 +6,10 @@
 //! - 布尔运算处理
 //! - SQLite 空间索引优化支持
 
-use crate::fast_model::manifold_bool::{
-    apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
-};
+// TODO: 这些布尔运算函数已被移除，等待 manifold_bool 模块重构完成
+// use crate::fast_model::manifold_bool::{
+//     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
+// };
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
 use crate::fast_model::{debug_model, debug_model_debug, debug_model_warn};
 use crate::{batch_update_err, db_err, deser_err, log_err, query_err};
@@ -40,6 +41,7 @@ use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::DMat4;
 use itertools::Itertools;
+use log::info;
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
 use parse_pdms_db::parse::round_f32;
@@ -47,7 +49,6 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use log::info;
 
 use aios_core::geometry::csg::generate_csg_mesh;
 
@@ -320,15 +321,17 @@ pub async fn booleans_meshes_in_db(
         .as_ref()
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
-    for chunk in refnos.chunks(100) {
-        let time = std::time::Instant::now();
-        //生成元件库内部几何体的负实体运算
-        apply_cata_neg_boolean_manifold(chunk, replace_exist)
-            .await
-            .unwrap();
-        apply_insts_boolean_manifold(chunk, replace_exist).await?;
-        // 布尔运算已统一使用 Manifold 库实现
-    }
+    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
+    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
+    // for chunk in refnos.chunks(100) {
+    //     let time = std::time::Instant::now();
+    //     //生成元件库内部几何体的负实体运算
+    //     apply_cata_neg_boolean_manifold(chunk, replace_exist)
+    //         .await
+    //         .unwrap();
+    //     apply_insts_boolean_manifold(chunk, replace_exist).await?;
+    //     // 布尔运算已统一使用 Manifold 库实现
+    // }
     Ok(())
 }
 
@@ -380,13 +383,15 @@ pub async fn process_meshes_update_db(
         time.elapsed().as_millis()
     );
 
-    let time = std::time::Instant::now();
-    //生成元件库内部几何体的负实体运算
-    apply_cata_neg_boolean_manifold(&refnos, replace_exist)
-        .await
-        .unwrap();
-    // 使用 Manifold 库进行布尔运算
-    apply_insts_boolean_manifold(&refnos, replace_exist).await?;
+    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
+    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
+    // let time = std::time::Instant::now();
+    // //生成元件库内部几何体的负实体运算
+    // apply_cata_neg_boolean_manifold(&refnos, replace_exist)
+    //     .await
+    //     .unwrap();
+    // // 使用 Manifold 库进行布尔运算
+    // apply_insts_boolean_manifold(&refnos, replace_exist).await?;
 
     Ok(())
 }
@@ -499,27 +504,29 @@ pub async fn process_meshes_update_db_deep(
                 }
 
                 if dboption.apply_boolean_operation {
-                    let bool_time = std::time::Instant::now();
-                    //生成元件库内部几何体的负实体运算
-                    apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
-                        .await
-                        .map_err(|e| {
-                            eprintln!(
-                                "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
-                                refno, e
-                            );
-                            e
-                        })?;
-                    apply_insts_boolean_manifold(&neg_refnos, replace_exist)
-                        .await
-                        .map_err(|e| {
-                            eprintln!(
-                                "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
-                                refno, e
-                            );
-                            e
-                        })?;
-                    debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
+                    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
+                    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
+                    // let bool_time = std::time::Instant::now();
+                    // //生成元件库内部几何体的负实体运算
+                    // apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
+                    //     .await
+                    //     .map_err(|e| {
+                    //         eprintln!(
+                    //             "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
+                    //             refno, e
+                    //         );
+                    //         e
+                    //     })?;
+                    // apply_insts_boolean_manifold(&neg_refnos, replace_exist)
+                    //     .await
+                    //     .map_err(|e| {
+                    //         eprintln!(
+                    //             "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
+                    //             refno, e
+                    //         );
+                    //         e
+                    //     })?;
+                    // debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
                 }
 
                 Ok(())
@@ -656,7 +663,10 @@ pub async fn gen_inst_meshes(
         // 每批一个异步任务：查询参数 -> CSG 网格化 -> 回写
         let task = tokio::spawn(async move {
             // 查询本批所有 inst_geo 的参数
-            let sql = format!("select id, param from [{}] where param != NONE", ids);
+            let sql = format!(
+                "select id, param, unit_flag ?? false as unit_flag from [{}] where param != NONE",
+                ids
+            );
             match SUL_DB.query(&sql).await {
                 Ok(mut response) => {
                     let result: Vec<QueryGeoParam> = response.take(0).unwrap();
@@ -972,12 +982,12 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     {
         const CHUNK: usize = 100;
         let aabb_map = DashMap::new();
-        
+
         info!("🔍 [空间索引] 开始更新 AABB，共 {} 个 refno", refnos.len());
 
         // 🔥 创建 channel 用于异步 SQLite 写入
         let (sqlite_sender, sqlite_receiver) = flume::unbounded::<(RefU64, Aabb, String)>();
-        
+
         // 用于统计发送到 SQLite 的 AABB 数量
         let sqlite_send_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1000,7 +1010,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             let mut total_inserted = 0usize;
             let mut batch = Vec::with_capacity(100);
             let mut batch_count = 0usize;
-            
+
             while let Ok((refno, aabb, noun)) = sqlite_receiver.recv() {
                 batch.push((refno, aabb, noun));
 
@@ -1008,14 +1018,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 if batch.len() >= 100 {
                     batch_count += 1;
                     let batch_size = batch.len();
-                    let batch_data: Vec<_> = batch.drain(..)
-                        .map(|(r, a, n)| (r, a, Some(n)))
-                        .collect();
+                    let batch_data: Vec<_> =
+                        batch.drain(..).map(|(r, a, n)| (r, a, Some(n))).collect();
                     match spatial_index.insert_many(batch_data) {
                         Ok(count) => {
                             total_inserted += count;
-                            println!("📦 [空间索引] 批量插入第 {} 批，{} 个 AABB，累计 {} 个", 
-                                batch_count, batch_size, total_inserted);
+                            println!(
+                                "📦 [空间索引] 批量插入第 {} 批，{} 个 AABB，累计 {} 个",
+                                batch_count, batch_size, total_inserted
+                            );
                         }
                         Err(e) => {
                             debug_model_warn!("批量插入 AABB 失败: {}", e);
@@ -1028,14 +1039,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             if !batch.is_empty() {
                 batch_count += 1;
                 let batch_size = batch.len();
-                let batch_data: Vec<_> = batch.into_iter()
-                    .map(|(r, a, n)| (r, a, Some(n)))
-                    .collect();
+                let batch_data: Vec<_> =
+                    batch.into_iter().map(|(r, a, n)| (r, a, Some(n))).collect();
                 match spatial_index.insert_many(batch_data) {
                     Ok(count) => {
                         total_inserted += count;
-                        println!("📦 [空间索引] 批量插入最后一批，{} 个 AABB，累计 {} 个", 
-                            batch_size, total_inserted);
+                        println!(
+                            "📦 [空间索引] 批量插入最后一批，{} 个 AABB，累计 {} 个",
+                            batch_size, total_inserted
+                        );
                     }
                     Err(e) => {
                         debug_model_warn!("批量插入剩余 AABB 失败: {}", e);
@@ -1043,13 +1055,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 }
             }
 
-            info!("✅ [空间索引] SQLite 异步写入任务完成，共插入 {} 个 AABB（{} 批）", 
-                total_inserted, batch_count);
+            info!(
+                "✅ [空间索引] SQLite 异步写入任务完成，共插入 {} 个 AABB（{} 批）",
+                total_inserted, batch_count
+            );
         });
 
         // 克隆用于在循环中使用
         let sqlite_send_count_for_loop = sqlite_send_count.clone();
-        
+
         for chunk in refnos.chunks(CHUNK) {
             if chunk.is_empty() {
                 continue;
@@ -1073,7 +1087,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             let mut computed_count = 0usize;
             let mut cached_count = 0usize;
             let mut sent_to_sqlite_count = 0usize;
-            
+
             for r in result {
                 // 优先尝试从 SQLite 空间索引读取
                 if SqliteSpatialIndex::is_enabled() {
@@ -1117,9 +1131,13 @@ pub async fn update_inst_relate_aabbs_by_refnos(
 
                 // 🔥 异步发送到 SQLite 写入任务
                 if SqliteSpatialIndex::is_enabled() {
-                    if sqlite_sender.send((bbox.refno, bbox.aabb, bbox.noun)).is_ok() {
+                    if sqlite_sender
+                        .send((bbox.refno, bbox.aabb, bbox.noun))
+                        .is_ok()
+                    {
                         sent_to_sqlite_count += 1;
-                        sqlite_send_count_for_loop.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        sqlite_send_count_for_loop
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
 
@@ -1139,9 +1157,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 ))?;
                 println!("✅ AABB 批量更新成功");
             }
-            
-            println!("📊 [空间索引] Chunk 统计: 查询到 {} 条，缓存命中 {} 个，新计算 {} 个，发送到 SQLite {} 个", 
-                result_len, cached_count, computed_count, sent_to_sqlite_count);
+
+            println!(
+                "📊 [空间索引] Chunk 统计: 查询到 {} 条，缓存命中 {} 个，新计算 {} 个，发送到 SQLite {} 个",
+                result_len, cached_count, computed_count, sent_to_sqlite_count
+            );
         }
 
         // 🔥 关闭 sender，通知 SQLite 任务结束
@@ -1151,8 +1171,12 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         // 🔥 等待 SQLite 写入任务完成
         let _ = sqlite_task.await;
 
-        info!("📊 [空间索引] 更新完成统计: 共处理 {} 个 refno，发送到 SQLite {} 个 AABB，SurrealDB 更新 {} 个 AABB", 
-            refnos.len(), total_sent, aabb_map.len());
+        info!(
+            "📊 [空间索引] 更新完成统计: 共处理 {} 个 refno，发送到 SQLite {} 个 AABB，SurrealDB 更新 {} 个 AABB",
+            refnos.len(),
+            total_sent,
+            aabb_map.len()
+        );
 
         utils::save_aabb_to_surreal(&aabb_map).await;
         Ok(())

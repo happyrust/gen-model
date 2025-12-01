@@ -2,7 +2,10 @@
 //!
 //! 使用新的基于 NamedAttrMap 的解析器
 
-#![cfg_attr(not(feature = "test"), allow(dead_code, unused_imports, unused_variables))]
+#![cfg_attr(
+    not(feature = "test"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 
 #[cfg(feature = "test")]
 mod impls {
@@ -11,9 +14,9 @@ mod impls {
     use std::str::FromStr;
 
     // 使用 aios-core 中的新解析器
+    use aios_core::RefnoEnum;
     use aios_core::dblist_parser::DblistParser;
     use aios_core::test::test_surreal::test_helpers::init_sul_db_with_memory;
-    use aios_core::RefnoEnum;
     use aios_core::{SUL_DB, SurrealQueryExt};
     use serde_json::json;
 
@@ -212,7 +215,10 @@ mod impls {
                 attrs_map.insert(name.clone(), convert_named_attr_value_to_json(value));
             }
 
-            attributes_obj.insert("attributes".to_string(), serde_json::Value::Object(attrs_map));
+            attributes_obj.insert(
+                "attributes".to_string(),
+                serde_json::Value::Object(attrs_map),
+            );
         }
 
         data
@@ -224,9 +230,12 @@ mod impls {
 
         match value {
             NamedAttrValue::StringType(s) => serde_json::Value::String(s.clone()),
-            NamedAttrValue::IntegerType(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            NamedAttrValue::IntegerType(i) => {
+                serde_json::Value::Number(serde_json::Number::from(*i))
+            }
             NamedAttrValue::F32Type(f) => serde_json::Value::Number(
-                serde_json::Number::from_f64(*f as f64).unwrap_or_else(|| serde_json::Number::from(0)),
+                serde_json::Number::from_f64(*f as f64)
+                    .unwrap_or_else(|| serde_json::Number::from(0)),
             ),
             NamedAttrValue::BoolType(b) => serde_json::Value::Bool(*b),
             NamedAttrValue::ElementType(s) => serde_json::Value::String(s.clone()),
@@ -234,21 +243,28 @@ mod impls {
             NamedAttrValue::RefU64Type(r) => serde_json::Value::String(format!("{}", r.0)),
             NamedAttrValue::Vec3Type(v) => serde_json::Value::Array(vec![
                 serde_json::Value::Number(
-                    serde_json::Number::from_f64(v.x as f64).unwrap_or_else(|| serde_json::Number::from(0)),
+                    serde_json::Number::from_f64(v.x as f64)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
                 ),
                 serde_json::Value::Number(
-                    serde_json::Number::from_f64(v.y as f64).unwrap_or_else(|| serde_json::Number::from(0)),
+                    serde_json::Number::from_f64(v.y as f64)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
                 ),
                 serde_json::Value::Number(
-                    serde_json::Number::from_f64(v.z as f64).unwrap_or_else(|| serde_json::Number::from(0)),
+                    serde_json::Number::from_f64(v.z as f64)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
                 ),
             ]),
-            NamedAttrValue::IntArrayType(arr) => {
-                serde_json::Value::Array(arr.iter().map(|&i| serde_json::Value::Number(serde_json::Number::from(i))).collect())
-            }
-            NamedAttrValue::StringArrayType(arr) => {
-                serde_json::Value::Array(arr.iter().map(|s| serde_json::Value::String(s.clone())).collect())
-            }
+            NamedAttrValue::IntArrayType(arr) => serde_json::Value::Array(
+                arr.iter()
+                    .map(|&i| serde_json::Value::Number(serde_json::Number::from(i)))
+                    .collect(),
+            ),
+            NamedAttrValue::StringArrayType(arr) => serde_json::Value::Array(
+                arr.iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            ),
             NamedAttrValue::BoolArrayType(arr) => {
                 serde_json::Value::Array(arr.iter().map(|&b| serde_json::Value::Bool(b)).collect())
             }

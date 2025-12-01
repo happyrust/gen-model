@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use aios_core::rs_surreal::query_tubi_insts_by_brans;
 use aios_core::SurrealQueryExt;
+use aios_core::rs_surreal::query_tubi_insts_by_brans;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB, TubiInstQuery, get_named_attmap};
 use anyhow::{Context, Result, anyhow};
@@ -79,6 +79,7 @@ pub struct GeometryInstance {
     pub geo_hash: String,
     pub transform: DMat4, // 世界变换矩阵
     pub index: usize,     // 几何体索引
+    pub unit_flag: bool,  // 是否为单位 mesh（缩放已在 mesh 上，transform 保持单位矩阵）
 }
 
 /// 元件记录（包含多个几何体）
@@ -334,23 +335,22 @@ pub async fn collect_export_data(
         }
     }
 
-    // 基于 refno_noun_map/owner_noun_map 过滤 BRAN/HANG，直接查询 tubi
-    let mut bran_hang_owners: Vec<RefnoEnum> = refno_noun_map
-        .iter()
-        .filter_map(|(r, n)| if matches!(n.as_str(), "BRAN" | "HANG") { Some(*r) } else { None })
-        .collect();
-    bran_hang_owners.extend(owner_noun_map.iter().filter_map(|(owner, noun)| {
-        if matches!(noun.as_str(), "BRAN" | "HANG") {
-            Some(*owner)
-        } else {
-            None
+    // 🏗️ 分层导出架构：使用从 inst_relate 查询的 BRAN/HANG owner
+    // bran_roots 已经包含真正有子节点的 BRAN/HANG，无需额外过滤
+    let bran_owners: Vec<RefnoEnum> = if let Some(roots) = bran_roots {
+        if verbose {
+            println!(
+                "   ✅ 使用 inst_relate 查询的 BRAN/HANG owner: {} 个",
+                roots.len()
+            );
         }
-    }));
-    if let Some(roots) = bran_roots {
-        bran_hang_owners.extend_from_slice(roots);
-    }
-    bran_hang_owners.sort();
-    bran_hang_owners.dedup();
+        roots.to_vec()
+    } else {
+        if verbose {
+            println!("   ⚠️  bran_roots 参数未提供，跳过 TUBI 查询");
+        }
+        Vec::new()
+    };
 
     if verbose {
         println!("\n📊 查询 tubi 管道数据...");
@@ -361,23 +361,24 @@ pub async fn collect_export_data(
         if refnos.len() > 5 {
             println!("   - ... 还有 {} 个 refno", refnos.len() - 5);
         }
-        println!("   🔍 BRAN/HANG owner 数量: {}", bran_hang_owners.len());
+        println!("   🔍 BRAN/HANG owner 数量: {}", bran_owners.len());
     }
 
-    // 分批查询 tubi，避免单条 SQL 过长
+    // 🏗️ 分层导出架构：TUBI 查询 - 跟随 BRAN/HANG 有序生成
+    // 使用从 inst_relate 查询的真正有子节点的 BRAN/HANG，提高查询效率
     let mut tubi_insts: Vec<TubiInstQuery> = Vec::new();
-    if !bran_hang_owners.is_empty() {
+    if !bran_owners.is_empty() {
         const TUBI_QUERY_CHUNK: usize = 256;
-        for (idx, chunk) in bran_hang_owners.chunks(TUBI_QUERY_CHUNK.max(1)).enumerate() {
+        for (idx, chunk) in bran_owners.chunks(TUBI_QUERY_CHUNK.max(1)).enumerate() {
             if verbose {
                 println!(
                     "   - 查询 tubi 分批 {}/{} (批大小 {})",
                     idx + 1,
-                    (bran_hang_owners.len() + TUBI_QUERY_CHUNK - 1) / TUBI_QUERY_CHUNK,
+                    (bran_owners.len() + TUBI_QUERY_CHUNK - 1) / TUBI_QUERY_CHUNK,
                     chunk.len()
                 );
             }
-            
+
             // 使用 SurrealDB ID ranges 查询 tubi_relate 表
             let mut chunk_result = Vec::new();
             for bran_refno in chunk {
@@ -398,11 +399,12 @@ pub async fn collect_export_data(
                     "#,
                     pe_key, pe_key
                 );
-                
-                let mut result: Vec<TubiInstQuery> = SUL_DB.query_take(&sql, 0).await.unwrap_or_default();
+
+                let mut result: Vec<TubiInstQuery> =
+                    SUL_DB.query_take(&sql, 0).await.unwrap_or_default();
                 chunk_result.append(&mut result);
             }
-            
+
             tubi_insts.extend(chunk_result);
         }
     }
@@ -491,7 +493,6 @@ pub async fn collect_export_data(
         }
     }
 
-
     // 收集元件记录（按 refno 分组）
     let mut components: Vec<ComponentRecord> = Vec::new();
 
@@ -526,6 +527,7 @@ pub async fn collect_export_data(
                 geo_hash: inst.geo_hash.clone(),
                 transform: world_matrix,
                 index: geo_index,
+                unit_flag: inst.unit_flag, // 使用独立的 unit_flag 字段
             });
         }
 
@@ -583,7 +585,7 @@ pub async fn collect_export_data(
             // 如果 leave 指向自身，说明这是一个 TUBI 节点，需要查找真正的 BRAN/HANG owner
             // 由于我们使用 SurrealDB ID ranges 查询，tubi.leave 应该指向正确的 BRAN/HANG owner
             // 但如果仍然指向自身，则使用当前 BRAN/HANG 列表中的第一个作为 owner
-            bran_hang_owners.first().copied().unwrap_or(tubi.refno)
+            bran_owners.first().copied().unwrap_or(tubi.refno)
         } else {
             tubi.leave
         };
@@ -615,7 +617,9 @@ pub async fn collect_export_data(
         } else {
             &tubing.geo_hash
         };
-        *geo_hash_usage.entry(clean_geo_hash.to_string()).or_insert(0) += 1;
+        *geo_hash_usage
+            .entry(clean_geo_hash.to_string())
+            .or_insert(0) += 1;
     }
 
     let total_component_instances: usize = components.iter().map(|c| c.geometries.len()).sum();

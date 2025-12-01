@@ -342,7 +342,10 @@ mod tests {
         // 测试点：在第一个和第二个 AABB 的交集附近
         let query_point = Point3::new(7.5, 7.5, 7.5);
 
-        println!("  查询点: ({:.1}, {:.1}, {:.1})", query_point.x, query_point.y, query_point.z);
+        println!(
+            "  查询点: ({:.1}, {:.1}, {:.1})",
+            query_point.x, query_point.y, query_point.z
+        );
 
         // 查询最近的 3 个点
         let results = spatial_index
@@ -362,7 +365,7 @@ mod tests {
         // 验证结果
         assert!(!results.is_empty(), "应该至少找到一个结果");
         assert!(results.len() <= 3, "结果数量不应超过 3 个");
-        
+
         // 第一个结果应该是最近的（2001 或 2002）
         let first_refno = results[0].refno;
         assert!(
@@ -379,7 +382,10 @@ mod tests {
             .query_within_radius(center, radius, &QueryOptions::default())
             .expect("范围查询失败");
 
-        println!("  中心点: ({:.1}, {:.1}, {:.1}), 半径: {:.1}", center.x, center.y, center.z, radius);
+        println!(
+            "  中心点: ({:.1}, {:.1}, {:.1}), 半径: {:.1}",
+            center.x, center.y, center.z, radius
+        );
         println!("  找到 {} 个在范围内的对象:", radius_results.len());
         for hit in &radius_results {
             println!(

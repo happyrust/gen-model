@@ -1,8 +1,8 @@
 //! dblist 文件解析器
-//! 
+//!
 //! 解析 PDMS dblist 文本格式，提取 FRMWORK、PANEL、GENSEC 等元素信息
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -119,19 +119,19 @@ impl DblistParser {
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
         let mut parser = Self::new();
-        
+
         for line in reader.lines() {
             let line = line?;
             parser.parse_line(&line)?;
         }
-        
+
         parser.finalize()
     }
 
     /// 解析单行内容
     fn parse_line(&mut self, line: &str) -> Result<()> {
         let trimmed = line.trim();
-        
+
         // 跳过空行和注释
         if trimmed.is_empty() || trimmed.starts_with("--") || trimmed.starts_with('$') {
             return Ok(());
@@ -178,11 +178,11 @@ impl DblistParser {
         self.next_elno += 1;
 
         let element = PdmsElement::new(element_type, refno);
-        
+
         if let Some(current) = self.current_element.take() {
             self.element_stack.push(current);
         }
-        
+
         self.current_element = Some(element);
         Ok(())
     }
@@ -192,7 +192,7 @@ impl DblistParser {
         if let Some(space_pos) = line.find(' ') {
             let key = line[..space_pos].trim().to_string();
             let value = line[space_pos..].trim().to_string();
-            
+
             if !key.is_empty() && !value.is_empty() {
                 return Some((key, value));
             }
@@ -237,7 +237,7 @@ impl DblistParser {
                 break;
             }
         }
-        
+
         Ok(self.elements)
     }
 }
@@ -248,8 +248,14 @@ mod tests {
 
     #[test]
     fn test_element_type_from_str() {
-        assert_eq!(ElementType::from_str("FRMWORK").unwrap(), ElementType::FrmFramework);
-        assert_eq!(ElementType::from_str("GENSEC").unwrap(), ElementType::Gensec);
+        assert_eq!(
+            ElementType::from_str("FRMWORK").unwrap(),
+            ElementType::FrmFramework
+        );
+        assert_eq!(
+            ElementType::from_str("GENSEC").unwrap(),
+            ElementType::Gensec
+        );
         assert!(ElementType::from_str("UNKNOWN").is_err());
     }
 
@@ -268,7 +274,7 @@ BUIL false
 END
 END
 "#;
-        
+
         // 这里可以添加更详细的测试
         // 由于 parse_line 是私有方法，可以通过 parse_file 来测试
     }

@@ -66,7 +66,7 @@ pub async fn export_glb_for_refnos(
             .await
             .context("查询 inst_relate 数据失败")?;
 
-        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true).await?;
+        let export_data = collect_export_data(geom_insts, refnos, mesh_dir, true, None).await?;
         let total_instances: usize = export_data.total_instances;
         println!("   - 总几何体实例数: {}", total_instances);
 
@@ -95,7 +95,7 @@ pub async fn export_glb_for_refnos(
         .await
         .context("查询 inst_relate 数据失败")?;
 
-    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true).await?;
+    let export_data = collect_export_data(geom_insts, &all_refnos, mesh_dir, true, None).await?;
     if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体数据");
         return Ok(());
@@ -643,8 +643,14 @@ impl ModelExporter for GlbExporter {
 
         let geom_insts = query_geometry_instances(&all_refnos, true, config.common.verbose).await?;
 
-        let export_data =
-            collect_export_data(geom_insts, &all_refnos, &mesh_dir, config.common.verbose).await?;
+        let export_data = collect_export_data(
+            geom_insts,
+            &all_refnos,
+            &mesh_dir,
+            config.common.verbose,
+            None,
+        )
+        .await?;
 
         if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");

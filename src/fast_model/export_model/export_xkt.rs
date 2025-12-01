@@ -606,7 +606,8 @@ impl ModelExporter for XktExporter {
         let geom_insts = query_geometry_instances(&all_refnos, true, config.common.verbose).await?;
 
         let export_data =
-            collect_export_data(geom_insts, &all_refnos, mesh_dir, config.common.verbose).await?;
+            collect_export_data(geom_insts, &all_refnos, mesh_dir, config.common.verbose, None)
+                .await?;
 
         if export_data.total_instances == 0 {
             println!("⚠️  未找到任何几何体数据");

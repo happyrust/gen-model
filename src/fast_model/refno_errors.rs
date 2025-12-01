@@ -178,10 +178,7 @@ mod tests {
 
     #[test]
     fn record_and_summarize() {
-        let store = RefnoErrorStore::new(
-            std::env::temp_dir().join("refno_errors_test.jsonl"),
-            16,
-        );
+        let store = RefnoErrorStore::new(std::env::temp_dir().join("refno_errors_test.jsonl"), 16);
 
         let sample_refno = RefnoEnum::Refno(aios_core::RefU64(1));
         store.record(RefnoErrorRecord {
@@ -201,7 +198,10 @@ mod tests {
         let summary = store.summary();
         assert_eq!(summary.total, 1);
         assert_eq!(
-            *summary.by_kind.get(&RefnoErrorKind::Duplicate).unwrap_or(&0),
+            *summary
+                .by_kind
+                .get(&RefnoErrorKind::Duplicate)
+                .unwrap_or(&0),
             1
         );
         assert_eq!(

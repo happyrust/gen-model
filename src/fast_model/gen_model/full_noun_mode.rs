@@ -1,11 +1,11 @@
 use aios_core::RefnoEnum;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::options::DbOption;
-use aios_core::{DBType, query_mdb_db_nums};
 use aios_core::pdms_types::{
     GNERAL_LOOP_OWNER_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, USE_CATE_NOUN_NAMES,
 };
 use aios_core::pe::SPdmsElement;
+use aios_core::{DBType, query_mdb_db_nums};
 use dashmap::DashMap;
 use glam::Vec3;
 use std::collections::HashSet;
@@ -20,10 +20,10 @@ use super::context::NounProcessContext;
 use super::errors::{FullNounError, Result};
 use super::loop_processor::process_loop_refno_page;
 use super::prim_processor::process_prim_refno_page;
-use crate::fast_model::{cata_model, query_provider};
 use crate::fast_model::refno_errors::{
-    record_refno_error, RefnoErrorKind, RefnoErrorStage, REFNO_ERROR_STORE,
+    REFNO_ERROR_STORE, RefnoErrorKind, RefnoErrorStage, record_refno_error,
 };
+use crate::fast_model::{cata_model, query_provider};
 // Performance profiling support
 #[cfg(feature = "profile")]
 use tracing::{info, instrument};
@@ -109,14 +109,9 @@ pub async fn gen_full_noun_geos_optimized(
         manual
     } else {
         // 从 MDB 获取当前项目允许的 DB 列表（DESI）
-        query_mdb_db_nums(None, DBType::DESI)
-            .await
-            .map_err(|e| {
-                FullNounError::DatabaseError(format!(
-                    "query_mdb_db_nums(None, DESI) failed: {}",
-                    e
-                ))
-            })?
+        query_mdb_db_nums(None, DBType::DESI).await.map_err(|e| {
+            FullNounError::DatabaseError(format!("query_mdb_db_nums(None, DESI) failed: {}", e))
+        })?
     };
 
     // 应用排除列表

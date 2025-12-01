@@ -162,7 +162,11 @@ impl SpatialQueryServiceImpl {
         let sqlite_index = match SqliteAabbIndex::open(&db_path) {
             Ok(index) => index,
             Err(e) => {
-                log::warn!("无法打开 SQLite 索引数据库 {:?}: {}，返回空索引", db_path, e);
+                log::warn!(
+                    "无法打开 SQLite 索引数据库 {:?}: {}，返回空索引",
+                    db_path,
+                    e
+                );
                 return Ok(RTree::new());
             }
         };

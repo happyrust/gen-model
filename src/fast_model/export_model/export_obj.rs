@@ -132,7 +132,7 @@ pub async fn prepare_obj_export(
     let geom_insts = query_geometry_instances(&all_refnos, true, config.verbose).await?;
 
     let export_data =
-        collect_export_data(geom_insts, &all_refnos, mesh_dir, config.verbose).await?;
+        collect_export_data(geom_insts, &all_refnos, mesh_dir, config.verbose, None).await?;
 
     if export_data.total_instances == 0 {
         if config.verbose {

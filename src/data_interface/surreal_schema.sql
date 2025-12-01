@@ -94,6 +94,21 @@ DEFINE FIELD timestamp ON TABLE increment_records TYPE datetime DEFAULT time::no
 DEFINE INDEX idx_incr_timestamp ON TABLE increment_records COLUMNS timestamp;
 DEFINE INDEX idx_incr_refno ON TABLE increment_records COLUMNS refno;
 
+-- Instance relationship table (实例关系表)
+-- 用于存储组件间的层级关系，支持 BRAN/HANG/EQUI 分组查询
+DEFINE TABLE inst_relate SCHEMAFULL;
+DEFINE FIELD in ON TABLE inst_relate TYPE record<any>;
+DEFINE FIELD out ON TABLE inst_relate TYPE record<any>;
+DEFINE FIELD owner_type ON TABLE inst_relate TYPE string;
+DEFINE FIELD owner_refno ON TABLE inst_relate TYPE number;
+DEFINE FIELD created_at ON TABLE inst_relate TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE inst_relate TYPE datetime DEFAULT time::now();
+
+-- 优化 BRAN/HANG/EQUI 分组查询的索引
+DEFINE INDEX idx_owner_type ON TABLE inst_relate COLUMNS owner_type;
+DEFINE INDEX idx_owner_refno ON TABLE inst_relate COLUMNS owner_refno;
+DEFINE INDEX idx_owner_type_refno ON TABLE inst_relate COLUMNS owner_type, owner_refno;
+
 -- Functions for common queries
 
 -- Get element with attributes

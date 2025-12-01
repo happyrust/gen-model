@@ -38,8 +38,13 @@ pub async fn process_cate_refno_page(
     }
 
     // 生成 cata 几何体
-    cata_model::gen_cata_instances(ctx.db_option.clone(), target_cata_map, loop_sjus_map_arc, sender)
-        .await?;
+    cata_model::gen_cata_instances(
+        ctx.db_option.clone(),
+        target_cata_map,
+        loop_sjus_map_arc,
+        sender,
+    )
+    .await?;
 
     Ok(())
 }

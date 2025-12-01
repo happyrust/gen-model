@@ -104,6 +104,7 @@ pub async fn save_instance_data_optimize(
             let relate_id = gen_bytes_hash(&relate_json);
             geo_relate_buffer.push(format!("{{ {relate_json}, id: '{relate_id}' }}"));
 
+            // 直接使用 EleInstGeo，它已经包含了正确的 unit_flag
             inst_geo_buffer.push(inst.gen_unit_geo_sur_json());
 
             if inst_geo_buffer.len() >= CHUNK_SIZE {
@@ -174,7 +175,7 @@ pub async fn save_instance_data_optimize(
     // - in: 负实体 refno
     // - out: 正实体 refno (被减实体)
     // 查询时使用反向查找：inst_relate:{正实体}<-neg_relate 来找到所有指向该正实体的负实体
-    println!("🔍 [DEBUG] neg_relate_map 大小: {}", inst_mgr.neg_relate_map.len());
+    // println!("🔍 [DEBUG] neg_relate_map 大小: {}", inst_mgr.neg_relate_map.len());
     if !inst_mgr.neg_relate_map.is_empty() {
         println!("🔍 [DEBUG] 开始创建 neg_relate 关系:");
         for (target, refnos) in &inst_mgr.neg_relate_map {
@@ -188,9 +189,9 @@ pub async fn save_instance_data_optimize(
             for (index, refno) in refnos.iter().enumerate() {
                 neg_buffer.push(format!(
                     "{{ in: {}, id: [{}, {index}], out: {} }}",
-                    refno.to_pe_key(),      // 负实体
+                    refno.to_pe_key(), // 负实体
                     refno.to_string(),
-                    target.to_pe_key(),     // 正实体（被减实体）
+                    target.to_pe_key(), // 正实体（被减实体）
                 ));
 
                 if neg_buffer.len() >= CHUNK_SIZE {
@@ -221,7 +222,7 @@ pub async fn save_instance_data_optimize(
     // - out: 目标k (正实体)
     // - ngmr: ngmr_geom_refno (NGMR 几何引用)
     // 查询时使用反向查找：inst_relate:{正实体}<-ngmr_relate 来找到所有指向该正实体的负实体相关元素
-    println!("🔍 [DEBUG] ngmr_neg_relate_map 大小: {}", inst_mgr.ngmr_neg_relate_map.len());
+    // println!("🔍 [DEBUG] ngmr_neg_relate_map 大小: {}", inst_mgr.ngmr_neg_relate_map.len());
     if !inst_mgr.ngmr_neg_relate_map.is_empty() {
         println!("🔍 [DEBUG] 开始创建 ngmr_relate 关系:");
         for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
@@ -238,9 +239,9 @@ pub async fn save_instance_data_optimize(
                 let ngmr_pe = ngmr_geom_refno.to_pe_key();
                 ngmr_buffer.push(format!(
                     "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
-                    ele_pe,    // 负实体相关元素
-                    kpe,       // 正实体（目标）
-                    ngmr_pe    // NGMR 几何引用
+                    ele_pe,  // 负实体相关元素
+                    kpe,     // 正实体（目标）
+                    ngmr_pe  // NGMR 几何引用
                 ));
 
                 if ngmr_buffer.len() >= CHUNK_SIZE {
@@ -344,24 +345,24 @@ pub async fn save_instance_data_optimize(
             "save_instance_data_optimize processing inst_tubi_map: {} Tubing records",
             inst_mgr.inst_tubi_map.len()
         );
-        
+
         let mut tubi_relate_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
-        
+
         for (key, info) in &inst_mgr.inst_tubi_map {
             inst_keys.push(*key);
-            
+
             if info.world_transform.translation.is_nan()
                 || info.world_transform.rotation.is_nan()
                 || info.world_transform.scale.is_nan()
             {
                 continue;
             }
-            
+
             let transform_hash = gen_bytes_hash(&info.world_transform);
             if let Entry::Vacant(entry) = transform_map.entry(transform_hash) {
                 entry.insert(serde_json::to_string(&info.world_transform)?);
             }
-            
+
             // 为 Tubing 创建 inst_relate 记录
             let relate_sql = format!(
                 "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}, owner_refno: {7}, owner_type: '{8}'}}",
@@ -375,7 +376,7 @@ pub async fn save_instance_data_optimize(
                 info.owner_refno.to_pe_key(),
                 info.owner_type,
             );
-            
+
             tubi_relate_buffer.push(relate_sql);
             if tubi_relate_buffer.len() >= CHUNK_SIZE {
                 let statement = format!(
@@ -386,7 +387,7 @@ pub async fn save_instance_data_optimize(
                 tubi_relate_buffer.clear();
             }
         }
-        
+
         if !tubi_relate_buffer.is_empty() {
             let statement = format!(
                 "INSERT RELATION INTO inst_relate [{}];",

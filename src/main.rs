@@ -696,12 +696,12 @@ async fn main() -> anyhow::Result<()> {
 
         let dbno = matches.get_one::<u32>("dbno").copied();
         let export_bundle_dir = matches.get_one::<String>("output").map(PathBuf::from);
-        
+
         // 解析 owner-types 参数（逗号分隔）
         let owner_types: Option<Vec<String>> = matches
             .get_one::<String>("owner-types")
             .map(|s| s.split(',').map(|t| t.trim().to_uppercase()).collect());
-        
+
         println!("🎯 导出所有 inst_relate 实体 (Prepack LOD 格式)");
         if let Some(dbno) = dbno {
             println!("   - 按 dbno={} 过滤", dbno);
@@ -712,7 +712,14 @@ async fn main() -> anyhow::Result<()> {
             println!("   - 按 owner_type 过滤: {:?}", types);
         }
 
-        return export_all_relates_mode(dbno, verbose, export_bundle_dir, owner_types, &db_option_ext).await;
+        return export_all_relates_mode(
+            dbno,
+            verbose,
+            export_bundle_dir,
+            owner_types,
+            &db_option_ext,
+        )
+        .await;
     }
 
     // ========== 处理 --debug-model + --capture 但无导出标志的情况 ==========

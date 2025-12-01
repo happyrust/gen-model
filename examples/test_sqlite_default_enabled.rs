@@ -1,8 +1,7 @@
 /// 验证 SQLite 空间索引默认启用功能
-/// 
+///
 /// 运行方式：
 /// cargo run --example test_sqlite_default_enabled --features sqlite-index
-
 use aios_database::spatial_index::SqliteSpatialIndex;
 
 fn main() {
@@ -10,7 +9,7 @@ fn main() {
 
     // 检查是否启用
     let is_enabled = SqliteSpatialIndex::is_enabled();
-    
+
     if is_enabled {
         println!("✅ SQLite 空间索引已启用（默认启用）");
     } else {
@@ -24,7 +23,7 @@ fn main() {
     match SqliteSpatialIndex::with_default_path() {
         Ok(index) => {
             println!("✅ 空间索引创建成功");
-            
+
             // 获取统计信息
             match index.get_stats() {
                 Ok(stats) => {
@@ -45,5 +44,3 @@ fn main() {
 
     println!("\n✅ 验证完成！SQLite 空间索引默认启用功能正常工作。");
 }
-
-

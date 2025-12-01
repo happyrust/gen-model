@@ -345,7 +345,7 @@ pub async fn export_instanced_bundle_for_refnos(
         .context("查询 inst_relate 数据失败")?;
 
     // 收集导出数据
-    let export_data = collect_export_data(geom_insts, refnos, mesh_dir, verbose).await?;
+    let export_data = collect_export_data(geom_insts, refnos, mesh_dir, verbose, None).await?;
 
     if export_data.total_instances == 0 {
         println!("⚠️  未找到任何几何体数据");

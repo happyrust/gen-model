@@ -1,0 +1,4 @@
+USE NS n1500 DB YCYK_E3D;
+
+-- 列出所有表
+SHOW TABLES;

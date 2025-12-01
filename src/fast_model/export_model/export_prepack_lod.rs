@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aios_core::RefnoEnum;
+use aios_core::SurrealQueryExt;
 use aios_core::mesh_precision::LodLevel;
 use aios_core::options::DbOption;
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -26,7 +27,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::fast_model::export_model::export_common::{ExportData, TubiRecord, collect_export_data};
-use crate::fast_model::query_provider;
 use crate::fast_model::export_model::export_unit_mesh_glb::{
     UnitMeshGlbExportResult, UnitMeshGlbExporter, UnitMeshIndexMap,
 };
@@ -35,6 +35,7 @@ use crate::fast_model::export_model::model_exporter::{
     query_geometry_instances,
 };
 use crate::fast_model::material_config::MaterialLibrary;
+use crate::fast_model::query_provider;
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
 
 /// LOD 配置
@@ -117,6 +118,7 @@ pub struct TubingInstance {
     pub geo_index: usize,
     pub color_index: usize,
     pub name_index: usize,
+    pub unit_flag: bool, // 是否为单位 mesh
 }
 
 /// 几何体清单
@@ -165,6 +167,47 @@ pub async fn export_prepack_lod_for_refnos(
     .await
     .context("收集子孙节点失败")?;
 
+    // 🏗️ 添加 EQUI 的子组件到 expanded_refnos
+    // 确保所有 EQUI 相关的组件都被包含在导出范围内
+    let equi_children = {
+        if verbose {
+            println!("🔍 收集 EQUI 子组件...");
+        }
+
+        // 查询所有 EQUI 的子组件 refno
+        let sql = r#"
+            SELECT VALUE in.id FROM inst_relate WHERE owner_type = 'EQUI'
+        "#;
+
+        let children: Vec<RefnoEnum> = aios_core::SUL_DB
+            .query_take(sql, 0)
+            .await
+            .with_context(|| format!("查询 EQUI 子组件失败"))?;
+
+        if verbose {
+            println!("   ✅ 找到 {} 个 EQUI 子组件", children.len());
+        }
+
+        children
+    };
+
+    // 合并 BRAN 子节点和 EQUI 子组件
+    let mut all_refnos = expanded_refnos.clone();
+    for child in &equi_children {
+        if !all_refnos.contains(child) {
+            all_refnos.push(*child);
+        }
+    }
+
+    if verbose {
+        println!(
+            "   📊 最终 refno 总数: {} (BRAN: {} + EQUI: {})",
+            all_refnos.len(),
+            expanded_refnos.len(),
+            equi_children.len()
+        );
+    }
+
     let stats_snapshot = ManifestStatsSnapshot {
         refno_count: refnos.len(),
         descendant_count: expanded_refnos.len().saturating_sub(refnos.len()),
@@ -175,7 +218,7 @@ pub async fn export_prepack_lod_for_refnos(
     };
 
     // 导出为米 (m) 单位，前端可直接渲染
-    let unit_converter = UnitConverter::new(LengthUnit::Millimeter, LengthUnit::Meter);
+    let unit_converter = UnitConverter::new(LengthUnit::Millimeter, LengthUnit::Decimeter);
     // manifest 记录采用最终单位（米）避免运行时重复缩放
     let manifest_unit_converter = UnitConverter::new(LengthUnit::Meter, LengthUnit::Meter);
     let primary_mesh_dir = mesh_dir.to_path_buf();
@@ -267,21 +310,74 @@ pub async fn export_prepack_lod_for_refnos(
         return Ok(());
     }
 
-    let geom_insts = query_geometry_instances(&expanded_refnos, true, verbose)
+    let geom_insts = query_geometry_instances(&all_refnos, true, verbose)
         .await
         .context("查询几何体实例失败")?;
-    
-    // 先按 Noun 获取 BRAN 入口，作为 bran_roots 传入
+
+    // 🏗️ 分层导出架构：从 inst_relate 查询真正有聚合的 BRAN/HANG owner
+    // 使用 DISTINCT owner_refno 确保只查询有实际子节点的分组节点
     let bran_roots = {
-        let nouns = ["BRAN"];
-        query_provider::query_by_noun_all_db(&nouns)
+        if verbose {
+            println!("🔍 从 inst_relate 查询 BRAN/HANG owner...");
+        }
+
+        // 查询所有有子节点的 BRAN/HANG owner
+        let sql = r#"
+            SELECT VALUE owner_refno FROM inst_relate WHERE owner_type in ['BRAN', 'HANG']
+        "#;
+
+        let mut bran_hang_owners: Vec<RefnoEnum> = aios_core::SUL_DB
+            .query_take(sql, 0)
             .await
-            .unwrap_or_default()
+            .with_context(|| format!("查询 BRAN/HANG owner 失败"))?;
+
+        // 在 Rust 中去重，避免 SurrealDB 复杂的数组操作
+        bran_hang_owners.sort();
+        bran_hang_owners.dedup();
+
+        if verbose {
+            println!(
+                "   ✅ 找到 {} 个有子节点的 BRAN/HANG owner",
+                bran_hang_owners.len()
+            );
+        }
+
+        bran_hang_owners
     };
-    
+
+    // 🏗️ 从 inst_relate 查询真正有聚合的 EQUI owner
+    let equi_owners = {
+        if verbose {
+            println!("🔍 从 inst_relate 查询 EQUI owner...");
+        }
+
+        // 查询所有有子节点的 EQUI owner
+        let sql = r#"
+            SELECT VALUE owner_refno FROM inst_relate WHERE owner_type = 'EQUI'
+        "#;
+
+        let mut equi_owner_list: Vec<RefnoEnum> = aios_core::SUL_DB
+            .query_take(sql, 0)
+            .await
+            .with_context(|| format!("查询 EQUI owner 失败"))?;
+
+        // 在 Rust 中去重
+        equi_owner_list.sort();
+        equi_owner_list.dedup();
+
+        if verbose {
+            println!(
+                "   ✅ 找到 {} 个有子节点的 EQUI owner",
+                equi_owner_list.len()
+            );
+        }
+
+        equi_owner_list
+    };
+
     let export_data = collect_export_data(
         geom_insts,
-        &expanded_refnos,
+        &all_refnos,
         &primary_mesh_dir,
         verbose,
         Some(&bran_roots),
@@ -291,11 +387,14 @@ pub async fn export_prepack_lod_for_refnos(
 
     // 为组件准备名称映射
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
-    if !expanded_refnos.is_empty() {
-        for refno in &expanded_refnos {
+    if !all_refnos.is_empty() {
+        for refno in &all_refnos {
             if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
                 if !pe.name.is_empty() {
-                    let sanitized = crate::fast_model::export_model::export_common::sanitize_node_name(&pe.name);
+                    let sanitized =
+                        crate::fast_model::export_model::export_common::sanitize_node_name(
+                            &pe.name,
+                        );
                     if !sanitized.is_empty() {
                         refno_name_map.insert(*refno, sanitized);
                     }
@@ -334,6 +433,8 @@ pub async fn export_prepack_lod_for_refnos(
         &unit_converter,
         &material_library,
         &refno_name_map,
+        &equi_owners,
+        verbose,
     );
 
     let mut manifest_stats = stats_snapshot;
@@ -508,10 +609,7 @@ fn resolve_lod_dir(base: &Path, level_tag: &str) -> Option<PathBuf> {
 
 fn build_geo_index_map(export_data: &ExportData) -> (Vec<String>, HashMap<String, usize>) {
     // 只包含成功加载的几何体，排除加载失败的 TUBI
-    let mut geo_hashes: Vec<String> = export_data.unique_geometries
-        .keys()
-        .cloned()
-        .collect();
+    let mut geo_hashes: Vec<String> = export_data.unique_geometries.keys().cloned().collect();
     geo_hashes.sort();
     let mut index_map = HashMap::new();
     for (idx, hash) in geo_hashes.iter().enumerate() {
@@ -666,6 +764,8 @@ fn build_instances_payload(
     unit_converter: &UnitConverter,
     material_library: &MaterialLibrary,
     refno_name_map: &HashMap<RefnoEnum, String>,
+    equi_owners: &[RefnoEnum],
+    verbose: bool,
 ) -> (serde_json::Value, usize) {
     let mut name_table = NameTable::new();
     let unknown_site_index = name_table.get_or_insert("site", "UNKNOWN_SITE");
@@ -686,7 +786,10 @@ fn build_instances_payload(
     // TUBI 应该关联到其真正的 BRAN owner，而不是创建新的组
 
     // 按 BRAN owner 分组构件
-    let mut bran_children_map: HashMap<RefnoEnum, Vec<&crate::fast_model::export_model::export_common::ComponentRecord>> = HashMap::new();
+    let mut bran_children_map: HashMap<
+        RefnoEnum,
+        Vec<&crate::fast_model::export_model::export_common::ComponentRecord>,
+    > = HashMap::new();
     for component in &export_data.components {
         if matches!(component.owner_noun.as_deref(), Some("BRAN") | Some("HANG")) {
             if let Some(owner) = component.owner_refno {
@@ -712,16 +815,16 @@ fn build_instances_payload(
             // 查找最终的 BRAN owner
             let mut current_refno = tubing.owner_refno;
             let mut final_bran = tubing.owner_refno;
-            
+
             // 递归查找直到找到 BRAN owner
             while let Some(&bran_owner) = child_to_bran.get(&current_refno) {
                 final_bran = bran_owner;
                 current_refno = bran_owner;
             }
-            
+
             final_bran
         };
-        
+
         bran_tubi_map.entry(key_refno).or_default().push(tubing);
     }
 
@@ -754,7 +857,6 @@ fn build_instances_payload(
                     if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
                         component_instance_count += 1;
                         let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
-                        let scale_matrix = !geom.geo_hash.contains('_');
 
                         let mut uniforms = json!({
                             "refno": component.refno.to_string(),
@@ -769,7 +871,7 @@ fn build_instances_payload(
                         instances.push(json!({
                             "geo_hash": geom.geo_hash,
                             "geo_index": geo_index,
-                            "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
+                            "matrix": mat4_to_vec(&geom.transform, unit_converter, geom.unit_flag),
                             "color_index": color_index,
                             "name_index": name_index,
                             "site_name_index": unknown_site_index,
@@ -801,7 +903,7 @@ fn build_instances_payload(
                 if let Some(&geo_index) = geo_index_map.get(&tubing.geo_hash) {
                     let tubi_name_index = name_table.get_or_insert("tubi", &tubing.name);
                     let lod_mask = compute_lod_mask(&tubing.geo_hash, lod_assets);
-                    
+
                     let mut uniforms = json!({
                         "refno": tubing.refno.to_string(),
                         "color_index": color_index,
@@ -816,7 +918,7 @@ fn build_instances_payload(
                         "noun": "TUBI",
                         "geo_hash": tubing.geo_hash,
                         "geo_index": geo_index,
-                        "matrix": mat4_to_vec(&tubing.transform, unit_converter, true),
+                        "matrix": mat4_to_vec(&tubing.transform, unit_converter, !tubing.geo_hash.contains('_')),
                         "color_index": color_index,
                         "name_index": tubi_name_index,
                         "order": tubi_order,
@@ -838,31 +940,60 @@ fn build_instances_payload(
     }
 
     // ========== 第二步：按 EQUI 分组 ==========
-    let mut equi_owners: HashSet<RefnoEnum> = HashSet::new();
-    for component in &export_data.components {
-        if matches!(component.owner_noun.as_deref(), Some("EQUI")) {
-            if let Some(owner) = component.owner_refno {
-                equi_owners.insert(owner);
+    // 🏗️ 使用从 inst_relate 查询的 EQUI owner，而不是重新过滤
+    let mut equi_children_map: HashMap<
+        RefnoEnum,
+        Vec<&crate::fast_model::export_model::export_common::ComponentRecord>,
+    > = HashMap::new();
+
+    if verbose {
+        println!("🔍 调试 EQUI 数据匹配...");
+        println!("   - EQUI owners 列表: {:?}", equi_owners);
+        println!("   - 总 components 数量: {}", export_data.components.len());
+
+        // 统计所有 owner_refno 为 EQUI 的 components
+        let mut equi_components = 0;
+        for component in &export_data.components {
+            if matches!(component.owner_noun.as_deref(), Some("EQUI")) {
+                equi_components += 1;
+                if equi_components <= 5 {
+                    println!(
+                        "   - EQUI component[{}]: owner_refno={:?}, refno={}",
+                        equi_components, component.owner_refno, component.refno
+                    );
+                }
             }
         }
+        println!("   - 总 EQUI components 数量: {}", equi_components);
     }
 
-    // 按 EQUI owner 分组构件
-    let mut equi_children_map: HashMap<RefnoEnum, Vec<&crate::fast_model::export_model::export_common::ComponentRecord>> = HashMap::new();
     for component in &export_data.components {
-        if matches!(component.owner_noun.as_deref(), Some("EQUI")) {
-            if let Some(owner) = component.owner_refno {
+        if let Some(owner) = component.owner_refno {
+            if equi_owners.contains(&owner) {
+                if verbose {
+                    println!(
+                        "   ✅ 匹配成功: owner={:?} -> component refno={}",
+                        owner, component.refno
+                    );
+                }
                 equi_children_map.entry(owner).or_default().push(component);
             }
         }
     }
 
+    if verbose {
+        println!("   - EQUI children_map 大小: {}", equi_children_map.len());
+        for (owner, children) in &equi_children_map {
+            println!("   - owner {:?} 有 {} 个子构件", owner, children.len());
+        }
+    }
+
     // 构建 EQUI 层级分组
     let mut equi_groups: Vec<serde_json::Value> = Vec::new();
-    let mut equi_owners_sorted: Vec<_> = equi_owners.iter().copied().collect();
+    let mut equi_owners_sorted = equi_owners.to_vec();
     equi_owners_sorted.sort();
 
-    for equi_refno in equi_owners_sorted {
+    for equi_refno in &equi_owners_sorted {
         let equi_name = refno_name_map.get(&equi_refno).cloned();
         let equi_label = equi_name.clone().unwrap_or_else(|| equi_refno.to_string());
         let equi_name_index = name_table.get_or_insert("equi", &equi_label);
@@ -886,7 +1017,6 @@ fn build_instances_payload(
                     if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
                         component_instance_count += 1;
                         let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
-                        let scale_matrix = !geom.geo_hash.contains('_');
 
                         let mut uniforms = json!({
                             "refno": component.refno.to_string(),
@@ -904,7 +1034,7 @@ fn build_instances_payload(
                         instances.push(json!({
                             "geo_hash": geom.geo_hash,
                             "geo_index": geo_index,
-                            "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
+                            "matrix": mat4_to_vec(&geom.transform, unit_converter, geom.unit_flag),
                             "color_index": color_index,
                             "name_index": name_index,
                             "site_name_index": unknown_site_index,
@@ -936,11 +1066,31 @@ fn build_instances_payload(
     }
 
     // ========== 第三步：收集未分组的构件 ==========
+    // 🏗️ 使用 NOT IN 排除已处理的 BRAN/HANG/EQUI owner_refno
+    let processed_owners: HashSet<RefnoEnum> = {
+        let mut set = HashSet::new();
+        // 添加已处理的 BRAN/HANG owner (从 bran_groups 中提取)
+        for bran_group in &bran_groups {
+            if let Some(refno_str) = bran_group.get("refno").and_then(|v| v.as_str()) {
+                if let Ok(refno) = refno_str.parse::<RefnoEnum>() {
+                    set.insert(refno);
+                }
+            }
+        }
+        // 添加已处理的 EQUI owner
+        for equi_refno in &equi_owners_sorted {
+            set.insert(*equi_refno);
+        }
+        set
+    };
+
     let mut ungrouped_entries: Vec<serde_json::Value> = Vec::new();
     for component in &export_data.components {
-        // 跳过已经在 BRAN/EQUI 分组中的构件
-        if matches!(component.owner_noun.as_deref(), Some("BRAN") | Some("HANG") | Some("EQUI")) {
-            continue;
+        // 🎯 使用 NOT IN 逻辑排除已处理的 owner_refno
+        if let Some(owner_refno) = component.owner_refno {
+            if processed_owners.contains(&owner_refno) {
+                continue; // 跳过已经在 BRAN/HANG/EQUI 分组中的构件
+            }
         }
 
         let component_label = component
@@ -958,7 +1108,6 @@ fn build_instances_payload(
             if let Some(&geo_index) = geo_index_map.get(&geom.geo_hash) {
                 component_instance_count += 1;
                 let lod_mask = compute_lod_mask(&geom.geo_hash, lod_assets);
-                let scale_matrix = !geom.geo_hash.contains('_');
 
                 let mut uniforms = json!({
                     "refno": component.refno.to_string(),
@@ -977,7 +1126,7 @@ fn build_instances_payload(
                 instances.push(json!({
                     "geo_hash": geom.geo_hash,
                     "geo_index": geo_index,
-                    "matrix": mat4_to_vec(&geom.transform, unit_converter, scale_matrix),
+                    "matrix": mat4_to_vec(&geom.transform, unit_converter, geom.unit_flag),
                     "color_index": color_index,
                     "name_index": name_index,
                     "site_name_index": unknown_site_index,
@@ -1037,18 +1186,20 @@ fn compute_lod_mask(geo_hash: &str, lod_assets: &[LodAssetSummary]) -> u32 {
     mask
 }
 
-fn mat4_to_vec(matrix: &DMat4, unit_converter: &UnitConverter, scale_matrix: bool) -> Vec<f32> {
+fn mat4_to_vec(matrix: &DMat4, unit_converter: &UnitConverter, unit_flag: bool) -> Vec<f32> {
     let mut cols = matrix.to_cols_array();
     if unit_converter.needs_conversion() {
         let factor = unit_converter.conversion_factor() as f64;
-        // 复用几何：用矩阵缩放完成单位换算；专用几何（已做顶点换算）仅转换平移。
-        if scale_matrix {
+        // Unit mesh：缩放旋转/缩放部分；普通 mesh：不缩放旋转/缩放部分（已在顶点上）
+        if unit_flag {
+            // 缩放旋转部分（前3列）
             for i in 0..3 {
-                cols[i] *= factor;      // 第一列
-                cols[4 + i] *= factor;  // 第二列
-                cols[8 + i] *= factor;  // 第三列
+                cols[i] *= factor; // 第一列
+                cols[4 + i] *= factor; // 第二列
+                cols[8 + i] *= factor; // 第三列
             }
         }
+        // 平移部分始终需要缩放（世界坐标必须单位转换）
         cols[12] *= factor;
         cols[13] *= factor;
         cols[14] *= factor;
@@ -1192,17 +1343,28 @@ pub async fn export_all_relates_prepack_lod(
 
     println!("\n🔍 查询 inst_relate 表...");
 
-    // 先通过 Noun 获取核心入口（BRAN/EQUI），避免 inst_relate 过滤遗漏
+    // 2. 可选 owner_type 过滤
+    let normalized_owner_types = owner_types
+        .as_ref()
+        .map(|types| types.iter().map(|t| t.to_uppercase()).collect::<Vec<_>>());
+
+    // 先通过 Noun 获取核心入口，但只在未指定 owner_types 时使用
     let noun_roots = {
-        let nouns = ["BRAN", "EQUI"];
-        if let Some(dbno) = dbno {
-            query_provider::query_by_type(&nouns, dbno as i32, None)
-                .await
-                .unwrap_or_default()
+        if normalized_owner_types.is_some() {
+            // 如果指定了 owner_types，不通过 Noun 查询，完全依赖 inst_relate 过滤
+            Vec::new()
         } else {
-            query_provider::query_by_noun_all_db(&nouns)
-                .await
-                .unwrap_or_default()
+            // 未指定 owner_types 时，才通过 Noun 获取 BRAN/EQUI 作为入口
+            let nouns = ["BRAN", "EQUI"];
+            if let Some(dbno) = dbno {
+                query_provider::query_by_type(&nouns, dbno as i32, None)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                query_provider::query_by_noun_all_db(&nouns)
+                    .await
+                    .unwrap_or_default()
+            }
         }
     };
 
@@ -1212,7 +1374,10 @@ pub async fn export_all_relates_prepack_lod(
         for refno in &noun_roots {
             if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
                 if !pe.name.is_empty() {
-                    let sanitized = crate::fast_model::export_model::export_common::sanitize_node_name(&pe.name);
+                    let sanitized =
+                        crate::fast_model::export_model::export_common::sanitize_node_name(
+                            &pe.name,
+                        );
                     if !sanitized.is_empty() {
                         refno_name_map.insert(*refno, sanitized);
                     }
@@ -1235,19 +1400,20 @@ pub async fn export_all_relates_prepack_lod(
     let normalized_owner_types = owner_types
         .as_ref()
         .map(|types| types.iter().map(|t| t.to_uppercase()).collect::<Vec<_>>());
-    let owner_filter_clause = if let Some(types) = normalized_owner_types.as_ref().filter(|v| !v.is_empty()) {
-        let list = types
-            .iter()
-            .map(|t| format!("'{}'", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("   - 按 owner_type/generic 过滤 inst_relate: {:?}", types);
-        // 说明：generic 用于包含 BRAN/HANG 对应的 TUBI（其 owner_type 可能是上层 FLOW/HVAC），避免被误过滤
-        format!(" AND (owner_type IN [{list}] OR generic IN [{list}])")
-    } else {
-        println!("   - 未指定 owner_type 过滤（仅排除 EQUI）");
-        String::new()
-    };
+    let owner_filter_clause =
+        if let Some(types) = normalized_owner_types.as_ref().filter(|v| !v.is_empty()) {
+            let list = types
+                .iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("   - 按 owner_type 过滤 inst_relate: {:?}", types);
+            // 修复：只按 owner_type 过滤，不使用 generic 字段避免不精确匹配
+            format!(" AND owner_type IN [{list}]")
+        } else {
+            println!("   - 未指定 owner_type 过滤（仅排除 EQUI）");
+            String::new()
+        };
 
     // 3. 筛出 owner_type = 'EQUI' 的 inst_relate，用于设备分租信息（始终排除）
     let equi_sql = format!(
@@ -1267,7 +1433,11 @@ pub async fn export_all_relates_prepack_lod(
         db_filter, owner_filter_clause
     );
     let mut all_refnos: Vec<RefnoEnum> = aios_core::SUL_DB.query_take(&sql_all, 0).await?;
-    all_refnos.extend(noun_roots.into_iter());
+
+    // 只有在未指定 owner_types 时才添加 noun_roots，避免绕过过滤
+    if normalized_owner_types.is_none() {
+        all_refnos.extend(noun_roots.into_iter());
+    }
 
     let mut unique_refnos = HashSet::new();
     let mut refnos = Vec::new();

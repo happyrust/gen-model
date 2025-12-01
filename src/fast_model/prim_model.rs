@@ -332,6 +332,7 @@ pub async fn gen_prim_geos(
                         GeoBasicType::Pos
                     },
                     cata_neg_refnos: vec![],
+                    unit_flag: true, // 使用 hash_unit_mesh_params，为单位 mesh
                 };
                 geo_insts.push(inst_geo);
                 if geo_insts.len() > 0 {

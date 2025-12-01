@@ -338,7 +338,7 @@ dependencies = [
  "manifold-sys",
  "memchr",
  "nalgebra 0.34.1",
- "nom 7.1.3",
+ "nom 8.0.0",
  "num-traits",
  "num_cpus",
  "num_enum",
