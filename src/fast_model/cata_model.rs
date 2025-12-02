@@ -827,9 +827,16 @@ async fn gen_cata_geos_inner(
                                     || geo_type == GeoBasicType::Compound,
                                 is_tubi,
                                 geo_type,
-                                cata_neg_refnos,
+                                cata_neg_refnos: cata_neg_refnos.clone(),
                                 unit_flag: true, // 使用 hash_unit_mesh_params，为单位 mesh
                             };
+
+                            // 将 CATE 的负实体关系写入 neg_relate_map
+                            // 这样可以统一 LOOP/PRIM/CATE 的负实体存储方式
+                            if !cata_neg_refnos.is_empty() {
+                                shape_insts_data.insert_negs(geom_refno, &cata_neg_refnos);
+                            }
+
                             if is_ngmr {
                                 if let Ok(target_owners) =
                                     query_ngmr_owner(ele_refno, geom_refno).await

@@ -626,3 +626,57 @@ mod tests {
     //     assert!(result.is_ok());
     // }
 }
+
+// ============================================================================
+// 兼容层函数（从 legacy.rs 迁移）
+// ============================================================================
+
+use crate::fast_model::pdms_inst::save_instance_data_optimize;
+use crate::options::DbOptionExt;
+use anyhow::Result as AnyhowResult;
+
+/// 兼容函数：旧版的 gen_full_noun_geos
+///
+/// 为了保持向后兼容，保留这个函数签名。
+/// 内部转发到优化版本 gen_full_noun_geos_optimized
+#[deprecated(note = "请使用 gen_full_noun_geos_optimized 替代")]
+pub async fn gen_full_noun_geos(
+    db_option: &DbOptionExt,
+    _extra_nouns: Option<Vec<&'static str>>,
+) -> AnyhowResult<super::models::DbModelInstRefnos> {
+    println!("⚠️ 警告：使用已弃用的 gen_full_noun_geos，内部已转发到优化版本");
+
+    let config = FullNounConfig::from_db_option_ext(db_option)
+        .map_err(|e| anyhow::anyhow!("配置错误: {}", e))?;
+
+    let (sender, receiver) = flume::unbounded();
+    let replace_exist = db_option.inner.is_replace_mesh();
+
+    let insert_handle = tokio::spawn(async move {
+        while let Ok(shape_insts) = receiver.recv_async().await {
+            if let Err(e) = save_instance_data_optimize(&shape_insts, replace_exist).await {
+                eprintln!("保存实例数据失败: {}", e);
+            }
+        }
+    });
+
+    let categorized =
+        gen_full_noun_geos_optimized(Arc::new(db_option.inner.clone()), &config, sender)
+            .await
+            .map_err(|e| anyhow::anyhow!("Full Noun 生成失败: {}", e))?;
+
+    let _ = insert_handle.await;
+
+    let cate = categorized.get_by_category(super::models::NounCategory::Cate);
+    let loops = categorized.get_by_category(super::models::NounCategory::LoopOwner);
+    let prims = categorized.get_by_category(super::models::NounCategory::Prim);
+
+    let result = super::models::DbModelInstRefnos {
+        bran_hanger_refnos: Arc::new(Vec::new()),
+        use_cate_refnos: Arc::new(cate),
+        loop_owner_refnos: Arc::new(loops),
+        prim_refnos: Arc::new(prims),
+    };
+
+    Ok(result)
+}

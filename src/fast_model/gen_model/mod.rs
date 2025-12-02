@@ -35,8 +35,8 @@ pub mod processor; // 通用处理器（消除冗余） // Prim 处理器
 // Full Noun 主逻辑 (Phase 3 - 优化版本)
 pub mod full_noun_mode;
 
-// 兼容层：保留旧 API
-pub mod legacy;
+// 编排器模块：主入口函数和流程协调
+pub mod orchestrator;
 
 // 非 Full Noun 模式（增量更新、手动 refno、调试模式等）
 pub mod non_full_noun;
@@ -59,15 +59,15 @@ pub use errors::{FullNounError, Result};
 
 // Phase 3: 优化后的数据结构和主函数
 pub use categorized_refnos::{CategorizedRefnos, CategoryStatistics};
-pub use full_noun_mode::{gen_full_noun_geos_optimized, validate_sjus_map};
+pub use full_noun_mode::{gen_full_noun_geos, gen_full_noun_geos_optimized, validate_sjus_map};
 
 // 重新导出处理函数
 pub use cate_processor::process_cate_refno_page;
 pub use loop_processor::process_loop_refno_page;
 pub use prim_processor::process_prim_refno_page;
 
-// 兼容层：重新导出旧API
-pub use legacy::{gen_all_geos_data, gen_full_noun_geos};
+// 编排器：主入口函数
+pub use orchestrator::gen_all_geos_data;
 
 // 非 Full Noun 模式导出
 pub use non_full_noun::{gen_geos_data, gen_geos_data_by_dbnum};

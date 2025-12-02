@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use futures::stream::{FuturesUnordered, StreamExt};
 use glam::Vec3;
 

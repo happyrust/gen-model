@@ -6,10 +6,9 @@
 //! - 布尔运算处理
 //! - SQLite 空间索引优化支持
 
-// TODO: 这些布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-// use crate::fast_model::manifold_bool::{
-//     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
-// };
+use crate::fast_model::manifold_bool::{
+    apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
+};
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
 use crate::fast_model::{debug_model, debug_model_debug, debug_model_warn};
 use crate::{batch_update_err, db_err, deser_err, log_err, query_err};
@@ -321,17 +320,11 @@ pub async fn booleans_meshes_in_db(
         .as_ref()
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
-    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
-    // for chunk in refnos.chunks(100) {
-    //     let time = std::time::Instant::now();
-    //     //生成元件库内部几何体的负实体运算
-    //     apply_cata_neg_boolean_manifold(chunk, replace_exist)
-    //         .await
-    //         .unwrap();
-    //     apply_insts_boolean_manifold(chunk, replace_exist).await?;
-    //     // 布尔运算已统一使用 Manifold 库实现
-    // }
+
+    for chunk in refnos.chunks(100) {
+        apply_cata_neg_boolean_manifold(chunk, replace_exist).await?;
+        apply_insts_boolean_manifold(chunk, replace_exist).await?;
+    }
     Ok(())
 }
 
@@ -383,15 +376,8 @@ pub async fn process_meshes_update_db(
         time.elapsed().as_millis()
     );
 
-    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
-    // let time = std::time::Instant::now();
-    // //生成元件库内部几何体的负实体运算
-    // apply_cata_neg_boolean_manifold(&refnos, replace_exist)
-    //     .await
-    //     .unwrap();
-    // // 使用 Manifold 库进行布尔运算
-    // apply_insts_boolean_manifold(&refnos, replace_exist).await?;
+    apply_cata_neg_boolean_manifold(&refnos, replace_exist).await?;
+    apply_insts_boolean_manifold(&refnos, replace_exist).await?;
 
     Ok(())
 }
@@ -505,7 +491,9 @@ pub async fn process_meshes_update_db_deep(
 
                 if dboption.apply_boolean_operation {
                     // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-                    eprintln!("[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成");
+                    eprintln!(
+                        "[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成"
+                    );
                     // let bool_time = std::time::Instant::now();
                     // //生成元件库内部几何体的负实体运算
                     // apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)

@@ -58,7 +58,7 @@ debug_limit_per_noun = 20
 
 build_cate_relate = false
 
-# meshes_path = "/Volumes/DPC/work/plant-code/rs-core/assets/meshes"
+meshes_path = "/Volumes/DPC/work/plant-code/rs-plant3-d/assets/meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -82,7 +82,7 @@ sql_threads_number = 10
 batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
-#版本数据库服务配置
+# surrealdb数据库配置
 v_ip = "localhost"
 v_port = 8020
 v_user = "root"

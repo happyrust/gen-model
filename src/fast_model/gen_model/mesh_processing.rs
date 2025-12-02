@@ -6,8 +6,8 @@ use aios_core::options::DbOption;
 use anyhow::Result;
 use std::time::Instant;
 
-use crate::fast_model::query_provider::query_by_type;
 use crate::fast_model::process_meshes_update_db_deep;
+use crate::fast_model::query_provider::query_by_type;
 
 /// 根据数据库编号批量处理网格数据
 ///
