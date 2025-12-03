@@ -140,6 +140,9 @@ pub struct GeometryEntry {
 }
 
 /// 导出 Prepack LOD 格式（公共接口）
+///
+/// # 参数
+/// - `name_config`: 可选名称配置，用于将三维模型节点名称转换为 PID 对象名称
 pub async fn export_prepack_lod_for_refnos(
     refnos: &[RefnoEnum],
     mesh_dir: &Path,
@@ -148,6 +151,7 @@ pub async fn export_prepack_lod_for_refnos(
     include_descendants: bool,
     filter_nouns: Option<Vec<String>>,
     verbose: bool,
+    name_config: Option<&super::name_config::NameConfig>,
 ) -> Result<()> {
     if verbose {
         println!("🚀 开始导出 Prepack LOD 格式...");
@@ -385,18 +389,24 @@ pub async fn export_prepack_lod_for_refnos(
     .await
     .context("收集导出数据失败")?;
 
-    // 为组件准备名称映射
+    // 为组件准备名称映射（使用 full name）
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
     if !all_refnos.is_empty() {
         for refno in &all_refnos {
-            if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
-                if !pe.name.is_empty() {
+            if let Ok(full_name) = aios_core::get_default_full_name(*refno).await {
+                if !full_name.is_empty() {
                     let sanitized =
                         crate::fast_model::export_model::export_common::sanitize_node_name(
-                            &pe.name,
+                            &full_name,
                         );
                     if !sanitized.is_empty() {
-                        refno_name_map.insert(*refno, sanitized);
+                        // 如果有名称配置，使用配置转换名称
+                        let final_name = if let Some(config) = name_config {
+                            config.convert_name(&sanitized)
+                        } else {
+                            sanitized
+                        };
+                        refno_name_map.insert(*refno, final_name);
                     }
                 }
             }
@@ -1331,11 +1341,13 @@ fn default_material_for_level(level: u32) -> &'static str {
 ///
 /// # 参数
 /// - `owner_types`: 可选 owner_type 过滤（如 ["BRAN", "HANG"]），默认不过滤但仍排除 EQUI
+/// - `name_config`: 可选名称配置，用于将三维模型节点名称转换为 PID 对象名称
 pub async fn export_all_relates_prepack_lod(
     dbno: Option<u32>,
     verbose: bool,
     output_override: Option<PathBuf>,
     owner_types: Option<Vec<String>>,
+    name_config: Option<super::name_config::NameConfig>,
     db_option: Arc<DbOption>,
 ) -> Result<()> {
     use aios_core::rs_surreal::query_ext::SurrealQueryExt;
@@ -1368,18 +1380,24 @@ pub async fn export_all_relates_prepack_lod(
         }
     };
 
-    // 为 BRAN/HANG 准备名称映射
+    // 为 BRAN/HANG 准备名称映射（使用 full name）
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
     if !noun_roots.is_empty() {
         for refno in &noun_roots {
-            if let Ok(Some(pe)) = query_provider::get_pe(*refno).await {
-                if !pe.name.is_empty() {
+            if let Ok(full_name) = aios_core::get_default_full_name(*refno).await {
+                if !full_name.is_empty() {
                     let sanitized =
                         crate::fast_model::export_model::export_common::sanitize_node_name(
-                            &pe.name,
+                            &full_name,
                         );
                     if !sanitized.is_empty() {
-                        refno_name_map.insert(*refno, sanitized);
+                        // 如果有名称配置，使用配置转换名称
+                        let final_name = if let Some(ref config) = name_config {
+                            config.convert_name(&sanitized)
+                        } else {
+                            sanitized
+                        };
+                        refno_name_map.insert(*refno, final_name);
                     }
                 }
             }
@@ -1484,6 +1502,7 @@ pub async fn export_all_relates_prepack_lod(
         false, // include_descendants
         None,  // filter_nouns
         verbose,
+        name_config.as_ref(),
     )
     .await?;
 

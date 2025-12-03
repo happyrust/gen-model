@@ -287,6 +287,12 @@ async fn main() -> anyhow::Result<()> {
                 .help("Filter by owner_type (comma-separated, e.g., 'BRAN,HANG')")
                 .value_name("TYPES"),
         )
+        .arg(
+            Arg::new("name-config")
+                .long("name-config")
+                .help("Excel file for name mapping (三维模型节点 -> PID对象)")
+                .value_name("EXCEL_PATH"),
+        )
         .get_matches();
 
     // 获取配置文件路径
@@ -702,6 +708,9 @@ async fn main() -> anyhow::Result<()> {
             .get_one::<String>("owner-types")
             .map(|s| s.split(',').map(|t| t.trim().to_uppercase()).collect());
 
+        // 获取名称配置文件路径
+        let name_config_path = matches.get_one::<String>("name-config").map(PathBuf::from);
+
         println!("🎯 导出所有 inst_relate 实体 (Prepack LOD 格式)");
         if let Some(dbno) = dbno {
             println!("   - 按 dbno={} 过滤", dbno);
@@ -711,12 +720,16 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref types) = owner_types {
             println!("   - 按 owner_type 过滤: {:?}", types);
         }
+        if let Some(ref path) = name_config_path {
+            println!("   - 名称配置文件: {}", path.display());
+        }
 
         return export_all_relates_mode(
             dbno,
             verbose,
             export_bundle_dir,
             owner_types,
+            name_config_path,
             &db_option_ext,
         )
         .await;

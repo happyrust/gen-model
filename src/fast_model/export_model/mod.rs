@@ -7,5 +7,7 @@ pub mod export_prepack_lod;
 pub mod export_unit_mesh_glb;
 // pub mod export_xkt;
 pub mod model_exporter;
+pub mod name_config;
 
 pub use export_common::*;
+pub use name_config::NameConfig;

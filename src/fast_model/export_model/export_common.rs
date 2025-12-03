@@ -28,6 +28,9 @@ use crate::fast_model::query_provider;
 pub fn sanitize_node_name(name: &str) -> String {
     // 移除前后空白
     let trimmed = name.trim();
+    
+    // 去掉开头的 /
+    let trimmed = trimmed.trim_start_matches('/');
 
     if trimmed.is_empty() {
         return String::new();
