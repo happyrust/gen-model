@@ -28,34 +28,47 @@ use crate::fast_model::query_provider;
 pub fn sanitize_node_name(name: &str) -> String {
     // 移除前后空白
     let trimmed = name.trim();
-    
+
     // 去掉开头的 /
     let trimmed = trimmed.trim_start_matches('/');
 
     if trimmed.is_empty() {
         return String::new();
     }
+    trimmed.into()
 
     // 替换或移除非法字符
-    let sanitized: String = trimmed
-        .chars()
-        .map(|c| {
-            match c {
-                // 保留字母、数字、常见符号
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | ' ' => c,
-                // 中文字符保留
-                '\u{4e00}'..='\u{9fff}' => c,
-                // 其他字符替换为下划线
-                _ => '_',
-            }
-        })
-        .collect();
+    // let sanitized: String = trimmed
+    //     .chars()
+    //     .map(|c| {
+    //         match c {
+    //             // 保留字母、数字、常见符号
+    //             'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | ' ' => c,
+    //             // 中文字符保留
+    //             '\u{4e00}'..='\u{9fff}' => c,
+    //             // 其他字符替换为下划线
+    //             _ => '_',
+    //         }
+    //     })
+    //     .collect();
 
-    // 限制长度
-    if sanitized.len() > 128 {
-        sanitized.chars().take(128).collect()
+    // // 限制长度
+    // if sanitized.len() > 128 {
+    //     sanitized.chars().take(128).collect()
+    // } else {
+    //     sanitized
+    // }
+}
+
+/// 简单处理节点名称：只去掉开头的斜线，保持其他字符原样
+///
+/// 用于名称匹配场景，不需要严格的 glTF 字符清洗
+pub fn trim_leading_slash(name: &str) -> String {
+    let trimmed = name.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        String::new()
     } else {
-        sanitized
+        trimmed.to_string()
     }
 }
 
@@ -327,9 +340,9 @@ pub async fn collect_export_data(
 
         while let Some((refno, name, noun)) = name_tasks.next().await {
             if let Some(name) = name {
-                let sanitized = sanitize_node_name(&name);
-                if !sanitized.is_empty() {
-                    refno_name_map.insert(refno, sanitized);
+                let trimmed = trim_leading_slash(&name);
+                if !trimmed.is_empty() {
+                    refno_name_map.insert(refno, trimmed);
                 }
             }
             if let Some(noun) = noun {
@@ -485,9 +498,9 @@ pub async fn collect_export_data(
 
         while let Some((refno, name, noun)) = name_tasks.next().await {
             if let Some(name) = name {
-                let sanitized = sanitize_node_name(&name);
-                if !sanitized.is_empty() {
-                    refno_name_map.insert(refno, sanitized);
+                let trimmed = trim_leading_slash(&name);
+                if !trimmed.is_empty() {
+                    refno_name_map.insert(refno, trimmed);
                 }
             }
             if let Some(noun) = noun {

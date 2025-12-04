@@ -8,8 +8,7 @@
 //! 5. 导出 OBJ 文件验证
 
 use aios_core::{
-    get_db_option, query_negative_entities, RefnoEnum, SurrealQueryExt,
-    init_test_surreal, SUL_DB,
+    RefnoEnum, SUL_DB, SurrealQueryExt, get_db_option, init_test_surreal, query_negative_entities,
 };
 use aios_database::fast_model::export_model::export_obj::prepare_obj_export;
 use aios_database::fast_model::export_model::model_exporter::CommonExportConfig;
@@ -57,7 +56,10 @@ async fn main() -> Result<()> {
 
     println!("   配置:");
     println!("      gen_mesh: {}", db_option.inner.gen_mesh);
-    println!("      apply_boolean_operation: {}", db_option.inner.apply_boolean_operation);
+    println!(
+        "      apply_boolean_operation: {}",
+        db_option.inner.apply_boolean_operation
+    );
     println!("      full_noun_mode: {}", db_option.full_noun_mode);
 
     // 指定要生成的 refno（只需要正实体，负实体会自动处理）
@@ -69,9 +71,10 @@ async fn main() -> Result<()> {
     let success = gen_all_geos_data(
         manual_refnos,
         &db_option,
-        None,  // 不使用增量更新
-        None,  // 不使用历史 sesno
-    ).await?;
+        None, // 不使用增量更新
+        None, // 不使用历史 sesno
+    )
+    .await?;
 
     if success {
         println!("   ✅ gen_all_geos_data 执行成功");
@@ -138,10 +141,7 @@ async fn query_negative_entities_wrapper(refno: RefnoEnum) -> Result<Vec<RefnoEn
 /// 检查布尔运算结果
 async fn check_boolean_result(refno: RefnoEnum) -> Result<()> {
     let inst_key = refno.to_inst_relate_key();
-    let inst_sql = format!(
-        "SELECT in, bad_bool, booled_id FROM {}",
-        inst_key
-    );
+    let inst_sql = format!("SELECT in, bad_bool, booled_id FROM {}", inst_key);
 
     #[derive(Debug, Deserialize, SurrealValue)]
     struct InstRelateRow {
@@ -240,10 +240,7 @@ async fn export_obj_models(pos_refno: RefnoEnum, neg_refnos: &[RefnoEnum]) -> Re
 }
 
 /// 分析正实体和负实体的变换矩阵和包围盒
-async fn analyze_transforms_and_aabb(
-    pos_refno: RefnoEnum,
-    neg_refnos: &[RefnoEnum],
-) -> Result<()> {
+async fn analyze_transforms_and_aabb(pos_refno: RefnoEnum, neg_refnos: &[RefnoEnum]) -> Result<()> {
     // // 使用项目中已有的查询接口获取布尔运算需要的数据
     // use aios_core::query_manifold_boolean_operations_batch;
 

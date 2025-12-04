@@ -1,0 +1,32 @@
+#V2
+DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
+SELECT count() as cnt FROM inst_relate WHERE in.dbno = 5525;
+SELECT in.dbno, count() as cnt FROM inst_relate GROUP BY in.dbno LIMIT 10;
+SELECT * FROM inst_relate LIMIT 2;
+SELECT count() as cnt FROM pe WHERE dbno = 5525;
+SELECT dbno, count() as cnt FROM pe GROUP BY dbno;
+SELECT id, dbno FROM pe LIMIT 3;
+SELECT id FROM pe WHERE id = pe:⟨5525_0⟩;
+SELECT name, full_name FROM pe WHERE noun = 'BRAN' LIMIT 5;
+SELECT id, name, full_name FROM pe WHERE name != '' LIMIT 5;
+SELECT * FROM pe:21491_16837;
+-- 查询阀门的 cata 数据
+SELECT * FROM cata WHERE id = cata:18399200182918633584;
+-- 1. 查询阀门基本信息和 CAT 引用
+SELECT * FROM pe:21491_16837;
+SELECT id, name, noun, cata_hash FROM pe WHERE owner = pe:21491_16837;
+SELECT * FROM pe WHERE noun = 'SCOM' AND cata_hash = '18399200182918633584' LIMIT 1;
+SELECT *, ->SPRF as sprf_ref, ->SPRE as spre_ref FROM pe:21491_16837;
+SELECT id, name, noun FROM pe WHERE cata_hash = '18399200182918633584' LIMIT 10;
+SELECT id, name, noun FROM pe WHERE owner = pe:21491_10078;
+SELECT * FROM attr WHERE id.id = pe:21491_16837;
+SELECT * FROM attr:21491_16837;
+SELECT id, noun, TUFL, CLFL FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10583, pe:16596_10584, pe:16596_10585, pe:16596_10595, pe:16596_10596, pe:16596_10597];
+SELECT id, noun, TUFL FROM pe WHERE id IN [pe:16596_10569, pe:16596_10570, pe:16596_10571, pe:16596_10577];
+SELECT * FROM attr WHERE id IN [attr:16596_10567, attr:16596_10568, attr:16596_10569, attr:16596_10577] LIMIT 10;
+SELECT * FROM pe:16596_10567;
+SELECT id, noun, LEVE FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10569, pe:16596_10570, pe:16596_10577];
+SELECT * FROM pe:16596_10569 LIMIT 1;
+SELECT id, noun, TUFL FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10583, pe:16596_10584, pe:16596_10585, pe:16596_10595, pe:16596_10596];
+SELECT ptset FROM inst_info LIMIT 1
+SELECT ptset FROM inst_info LIMIT 2

@@ -1202,8 +1202,8 @@ pub async fn export_all_relates_mode(
     name_config_path: Option<PathBuf>,
     db_option_ext: &DbOptionExt,
 ) -> Result<()> {
-    use aios_database::fast_model::export_model::export_prepack_lod::export_all_relates_prepack_lod;
     use aios_database::fast_model::export_model::NameConfig;
+    use aios_database::fast_model::export_model::export_prepack_lod::export_all_relates_prepack_lod;
     use std::sync::Arc;
 
     println!("\n🎯 导出所有 inst_relate 实体模式");
@@ -1223,7 +1223,15 @@ pub async fn export_all_relates_mode(
 
     // 调用导出函数（通过 Deref 访问内部的 DbOption）
     let db_option = Arc::new((**db_option_ext).clone());
-    export_all_relates_prepack_lod(dbno, verbose, output_override, owner_types, name_config, db_option).await?;
+    export_all_relates_prepack_lod(
+        dbno,
+        verbose,
+        output_override,
+        owner_types,
+        name_config,
+        db_option,
+    )
+    .await?;
 
     println!("\n🎉 导出完成！");
     Ok(())

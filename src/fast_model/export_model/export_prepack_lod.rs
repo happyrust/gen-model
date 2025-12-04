@@ -391,20 +391,19 @@ pub async fn export_prepack_lod_for_refnos(
 
     // 为组件准备名称映射（使用 full name）
     let mut refno_name_map: HashMap<RefnoEnum, String> = HashMap::new();
+    let mut debug_count = 0;
     if !all_refnos.is_empty() {
         for refno in &all_refnos {
             if let Ok(full_name) = aios_core::get_default_full_name(*refno).await {
                 if !full_name.is_empty() {
-                    let sanitized =
-                        crate::fast_model::export_model::export_common::sanitize_node_name(
-                            &full_name,
-                        );
-                    if !sanitized.is_empty() {
-                        // 如果有名称配置，使用配置转换名称
+                    // 只去掉开头的斜线，保持其他字符原样
+                    let trimmed_name = full_name.trim().trim_start_matches('/').to_string();
+                    if !trimmed_name.is_empty() {
+                        // 如果有名称配置，使用配置转换名称；否则保持原样
                         let final_name = if let Some(config) = name_config {
-                            config.convert_name(&sanitized)
+                            config.convert_name(&trimmed_name)
                         } else {
-                            sanitized
+                            trimmed_name
                         };
                         refno_name_map.insert(*refno, final_name);
                     }
@@ -1386,16 +1385,15 @@ pub async fn export_all_relates_prepack_lod(
         for refno in &noun_roots {
             if let Ok(full_name) = aios_core::get_default_full_name(*refno).await {
                 if !full_name.is_empty() {
-                    let sanitized =
-                        crate::fast_model::export_model::export_common::sanitize_node_name(
-                            &full_name,
-                        );
-                    if !sanitized.is_empty() {
-                        // 如果有名称配置，使用配置转换名称
+                    // 只去掉开头的斜线，保持其他字符原样
+                    let trimmed_name = full_name.trim().trim_start_matches('/').to_string();
+                    if !trimmed_name.is_empty() {
+                        // 如果有名称配置，尝试转换名称；否则保持原样
                         let final_name = if let Some(ref config) = name_config {
-                            config.convert_name(&sanitized)
+                            // convert_name 如果没有匹配会返回原名称
+                            config.convert_name(&trimmed_name)
                         } else {
-                            sanitized
+                            trimmed_name
                         };
                         refno_name_map.insert(*refno, final_name);
                     }

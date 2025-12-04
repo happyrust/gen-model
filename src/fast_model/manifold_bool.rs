@@ -7,12 +7,12 @@ use crate::fast_model::{debug_model, debug_model_debug};
 use aios_core::SurrealQueryExt;
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::get_db_option;
+use aios_core::rs_surreal::boolean_query_optimized::query_manifold_boolean_operations_batch_optimized;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{
     CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo, query_cata_neg_boolean_groups,
     query_geom_mesh_data, query_negative_entities_batch,
 };
-use aios_core::rs_surreal::boolean_query_optimized::query_manifold_boolean_operations_batch_optimized;
 use aios_core::{RefnoEnum, SUL_DB, utils::RecordIdExt};
 use glam::DMat4;
 use std::path::{Path, PathBuf};
@@ -252,7 +252,10 @@ async fn apply_boolean_for_query(
     let mut pos_manifolds = Vec::new();
     for (pos_id, pos_t) in query.ts.iter() {
         let pos_mesh_id = pos_id.to_mesh_id();
-        debug_model_debug!("加载正实体 mesh: {} (使用单位矩阵，基准坐标系)", pos_mesh_id);
+        debug_model_debug!(
+            "加载正实体 mesh: {} (使用单位矩阵，基准坐标系)",
+            pos_mesh_id
+        );
         // 正实体使用单位矩阵，因为它定义了基准坐标系
         if let Ok(manifold) = load_manifold(&pos_mesh_id, glam::DMat4::IDENTITY, false) {
             pos_manifolds.push(manifold);
@@ -300,10 +303,7 @@ async fn apply_boolean_for_query(
             let neg_world_mat = carrier_world_mat * trans.0.to_matrix().as_dmat4();
             let relative_mat = inverse_pos_world * neg_world_mat;
 
-            debug_model_debug!(
-                "加载负实体 mesh: {} (相对于正实体坐标系)",
-                id.to_mesh_id()
-            );
+            debug_model_debug!("加载负实体 mesh: {} (相对于正实体坐标系)", id.to_mesh_id());
 
             if let Ok(manifold) = load_manifold(&id.to_mesh_id(), relative_mat, true) {
                 neg_manifolds.push(manifold);

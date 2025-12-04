@@ -287,7 +287,8 @@ pub async fn save_instance_data_optimize(
             continue;
         }
 
-        inst_info_buffer.push(info.gen_sur_json(&mut vec3_map));
+        // 使用压缩格式存储 ptset（减少约 70-80% 存储空间）
+        inst_info_buffer.push(info.gen_sur_json_compact(false));
         if inst_info_buffer.len() >= CHUNK_SIZE {
             let statement = format!(
                 "INSERT IGNORE INTO {} [{}];",

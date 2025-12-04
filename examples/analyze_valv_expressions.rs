@@ -2,7 +2,7 @@
 //!
 //! 运行: cargo run --example analyze_valv_expressions
 
-use aios_core::{RefnoEnum, init_surreal, get_named_attmap};
+use aios_core::{RefnoEnum, get_named_attmap, init_surreal};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,11 +45,8 @@ async fn main() -> anyhow::Result<()> {
 
         // 5. 查询 GMSE（几何集合）引用
         println!("\n📐 步骤 5: 查询几何集合引用 (GMRE/GSTR)...");
-        let gmse_result = aios_core::query_single_by_paths(
-            cat_ref, 
-            &["->GMRE", "->GSTR"], 
-            &["REFNO"]
-        ).await;
+        let gmse_result =
+            aios_core::query_single_by_paths(cat_ref, &["->GMRE", "->GSTR"], &["REFNO"]).await;
         println!("   GMSE 查询结果: {:?}", gmse_result);
 
         if let Ok(gmse_attr) = gmse_result {
@@ -66,22 +63,28 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n   --- 几何体 {} ---", i);
                     println!("   类型: {}", geo.get_type_str());
                     println!("   REFNO: {:?}", geo.get_refno());
-                    
+
                     // 打印关键几何表达式
-                    let attrs = ["PDIA", "PBDM", "PTDM", "DIAM", "PDIS", "PBDI", "PTDI", 
-                                 "PHEI", "PRAD", "PANG", "PWID", "POFF", 
-                                 "PX", "PY", "PZ", "PAXI", "PBAX", "PCAX"];
-                    
+                    let attrs = [
+                        "PDIA", "PBDM", "PTDM", "DIAM", "PDIS", "PBDI", "PTDI", "PHEI", "PRAD",
+                        "PANG", "PWID", "POFF", "PX", "PY", "PZ", "PAXI", "PBAX", "PCAX",
+                    ];
+
                     for attr in attrs {
                         if let Some(val) = geo.get_as_string(attr) {
                             if !val.is_empty() && val != "unset" && val != "0" {
                                 // 检查是否包含表达式
-                                let has_expr = val.contains("PARAM") || val.contains("PARA") 
-                                    || val.contains("DESP") || val.contains("ATTRIB")
-                                    || val.contains("*") || val.contains("/") 
-                                    || val.contains("+") || val.contains("-")
-                                    || val.contains("IF") || val.contains("THEN");
-                                
+                                let has_expr = val.contains("PARAM")
+                                    || val.contains("PARA")
+                                    || val.contains("DESP")
+                                    || val.contains("ATTRIB")
+                                    || val.contains("*")
+                                    || val.contains("/")
+                                    || val.contains("+")
+                                    || val.contains("-")
+                                    || val.contains("IF")
+                                    || val.contains("THEN");
+
                                 let marker = if has_expr { "📝" } else { "  " };
                                 println!("   {} {}: {}", marker, attr, val);
                             }
@@ -102,9 +105,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("\n   --- 轴点 {} ---", i);
                 println!("   类型: {}", axis.get_type_str());
                 println!("   NUMB: {:?}", axis.get_i32("NUMB"));
-                
-                let attrs = ["PDIS", "PAXI", "PZAXI", "PX", "PY", "PZ", 
-                            "PCON", "PBOR", "PWID", "PHEI", "PTCD", "PTCP", "PTCPOS"];
+
+                let attrs = [
+                    "PDIS", "PAXI", "PZAXI", "PX", "PY", "PZ", "PCON", "PBOR", "PWID", "PHEI",
+                    "PTCD", "PTCP", "PTCPOS",
+                ];
                 for attr in attrs {
                     if let Some(val) = axis.get_as_string(attr) {
                         if !val.is_empty() && val != "unset" {
@@ -130,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         println!("   类型: {}", desi.get_type_str());
         println!("   REFNO: {:?}", desi.get_refno());
         println!("   NAME: {:?}", desi.get_as_string("NAME"));
-        
+
         // 查询 DESI 的 DESP 参数
         if let Some(desp) = desi.get_f32_vec("DESP") {
             println!("   DESP: {:?}", desp);
@@ -149,20 +154,20 @@ async fn main() -> anyhow::Result<()> {
 
     // 9. 尝试解析并生成模型
     println!("\n🔨 步骤 9: 尝试解析表达式并生成模型...");
-    
+
     // 使用 resolve_desi_comp 来分析表达式
     use aios_database::fast_model::resolve_desi_comp;
-    
+
     // 如果有 CAT 引用，尝试解析
     if let Some(cat_ref) = cat_refno {
         println!("   尝试解析 CAT: {}", cat_ref);
-        
+
         match resolve_desi_comp(target_refno, None).await {
             Ok(geoms_info) => {
                 println!("   ✅ 解析成功!");
                 println!("   几何体数量: {}", geoms_info.geometries.len());
                 println!("   负几何体数量: {}", geoms_info.n_geometries.len());
-                
+
                 for (i, geo) in geoms_info.geometries.iter().enumerate() {
                     println!("\n   --- 解析后几何体 {} ---", i);
                     println!("   {:?}", geo);

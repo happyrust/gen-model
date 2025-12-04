@@ -60,10 +60,11 @@ impl NameConfig {
                 .unwrap_or_default();
 
             // I 列（索引 8）: 三维模型节点
+            // 去掉开头的斜线，保持与 sanitize_node_name 一致的处理
             let model_node: String = row
                 .get(8)
                 .and_then(|cell| cell.as_string())
-                .map(|s| s.trim().to_string())
+                .map(|s| s.trim().trim_start_matches('/').to_string())
                 .unwrap_or_default();
 
             // 只有当两列都有值时才添加映射
@@ -77,6 +78,21 @@ impl NameConfig {
             "   ✅ 读取 {} 行数据，有效映射 {} 条",
             row_count, valid_count
         );
+
+        // 调试：打印前 5 条映射
+        println!("   📋 前 5 条映射（调试）:");
+        for (i, (model, pid)) in name_map.iter().take(5).enumerate() {
+            println!("      {}: {:?} -> {:?}", i + 1, model, pid);
+        }
+        
+        // 调试：打印包含"石楼"或"BRAN"或"SITE"的映射
+        println!("   📋 包含'石楼/BRAN/SITE/PIPE'的映射:");
+        for (model, pid) in name_map.iter()
+            .filter(|(k, _)| k.contains("石楼") || k.contains("BRAN") || k.contains("SITE") || k.contains("PIPE"))
+            .take(10) 
+        {
+            println!("      {:?} -> {:?}", model, pid);
+        }
 
         Ok(Self { name_map })
     }
@@ -115,7 +131,9 @@ mod tests {
     #[test]
     fn test_convert_name() {
         let mut config = NameConfig::default();
-        config.name_map.insert("MODEL-001".to_string(), "PID-001".to_string());
+        config
+            .name_map
+            .insert("MODEL-001".to_string(), "PID-001".to_string());
 
         assert_eq!(config.convert_name("MODEL-001"), "PID-001");
         assert_eq!(config.convert_name("UNKNOWN"), "UNKNOWN");

@@ -300,9 +300,7 @@ async fn process_targeted_generation(
             target_root_refnos.len()
         );
 
-        if let Err(e) =
-            process_meshes_update_db_deep(&db_option.inner, &target_root_refnos).await
-        {
+        if let Err(e) = process_meshes_update_db_deep(&db_option.inner, &target_root_refnos).await {
             eprintln!("[gen_model] 更新模型数据失败: {}", e);
         } else {
             println!(
@@ -368,8 +366,7 @@ async fn process_full_database_generation(
         let db_start = Instant::now();
 
         let (sender, receiver) = flume::unbounded();
-        let receiver: flume::Receiver<aios_core::geometry::ShapeInstancesData> =
-            receiver.clone();
+        let receiver: flume::Receiver<aios_core::geometry::ShapeInstancesData> = receiver.clone();
 
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
@@ -471,18 +468,12 @@ async fn execute_manual_boolean_operations(
 
         // 执行元件库级布尔运算
         if let Err(e) = apply_cata_neg_boolean_manifold(&boolean_refnos, replace_exist).await {
-            eprintln!(
-                "[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}",
-                e
-            );
+            eprintln!("[gen_model] 手动布尔运算模式：元件库级布尔运算失败: {}", e);
         }
 
         // 执行实例级布尔运算
         if let Err(e) = apply_insts_boolean_manifold(&boolean_refnos, replace_exist).await {
-            eprintln!(
-                "[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}",
-                e
-            );
+            eprintln!("[gen_model] 手动布尔运算模式：实例级布尔运算失败: {}", e);
         } else {
             println!(
                 "[gen_model] 手动布尔运算模式：布尔运算完成，用时 {} ms",
