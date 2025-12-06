@@ -36,8 +36,9 @@ use aios_core::ssc_setting::{
     set_pdms_major_code,
 };
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::{DbOptionSurrealExt, connect_local_rocksdb, init_surreal_with_retry};
-use aios_core::{SUL_DB, build_cate_relate, pdms_types::*};
+use aios_core::{SUL_DB, SurrealQueryExt, init_test_surreal, init_surreal_with_retry, build_cate_relate};
+use aios_core::utils::RecordIdExt;
+use aios_core::{DbOptionSurrealExt, connect_local_rocksdb};
 use aios_core::{get_db_option, init_demo_test_surreal};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, Timelike};

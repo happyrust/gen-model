@@ -48,6 +48,8 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::io::Write;
+use chrono;
 
 use aios_core::geometry::csg::generate_csg_mesh;
 
@@ -490,31 +492,39 @@ pub async fn process_meshes_update_db_deep(
                 }
 
                 if dboption.apply_boolean_operation {
-                    // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-                    eprintln!(
-                        "[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成"
-                    );
-                    // let bool_time = std::time::Instant::now();
-                    // //生成元件库内部几何体的负实体运算
-                    // apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
-                    //     .await
-                    //     .map_err(|e| {
-                    //         eprintln!(
-                    //             "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
-                    //             refno, e
-                    //         );
-                    //         e
-                    //     })?;
-                    // apply_insts_boolean_manifold(&neg_refnos, replace_exist)
-                    //     .await
-                    //     .map_err(|e| {
-                    //         eprintln!(
-                    //             "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
-                    //             refno, e
-                    //         );
-                    //         e
-                    //     })?;
-                    // debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
+                    // 检查环境变量，默认禁用
+                    let enable_boolean = std::env::var("ENABLE_BOOLEAN_OP")
+                        .map(|v| v.to_lowercase() == "true")
+                        .unwrap_or(false);
+
+                    if enable_boolean {
+                        let bool_time = std::time::Instant::now();
+                        // 生成元件库内部几何体的负实体运算
+                        apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
+                            .await
+                            .map_err(|e| {
+                                eprintln!(
+                                    "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
+                                    refno, e
+                                );
+                                e
+                            })?;
+                        apply_insts_boolean_manifold(&neg_refnos, replace_exist)
+                            .await
+                            .map_err(|e| {
+                                eprintln!(
+                                    "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
+                                    refno, e
+                                );
+                                e
+                            })?;
+                        debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
+                    } else {
+                        // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
+                        eprintln!(
+                            "[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成 (设置 ENABLE_BOOLEAN_OP=true 以强制开启)"
+                        );
+                    }
                 }
 
                 Ok(())
@@ -611,6 +621,24 @@ pub async fn gen_inst_meshes(
         "gen_inst_meshes fetched inst_geo_ids: {}",
         inst_geo_ids.len()
     );
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+    {
+        let ids: Vec<String> = inst_geo_ids.iter().map(|x| x.geo_id.to_raw()).collect();
+        let _ = writeln!(
+            f,
+            r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H5","location":"mesh_generate.rs:query_inst_geo_ids","message":"inst_geo_ids fetched","data":{{"refnos":{},"count":{},"ids":{}}},"timestamp":{}}}"#,
+            serde_json::to_string(&refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>())
+                .unwrap_or("[]".to_string()),
+            ids.len(),
+            serde_json::to_string(&ids).unwrap_or("[]".to_string()),
+            chrono::Utc::now().timestamp_millis()
+        );
+    }
+    // #endregion
     // println!("inst_geo_ids: {:?}", &inst_geo_ids);
     // 无可处理对象则直接返回
     if inst_geo_ids.is_empty() {
@@ -663,6 +691,24 @@ pub async fn gen_inst_meshes(
                         chunk_idx,
                         result.len()
                     );
+                    // #region agent log
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+                    {
+                        let ids_list: Vec<String> =
+                            result.iter().map(|g| g.id.to_raw()).collect();
+                        let _ = writeln!(
+                            f,
+                            r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"mesh_generate.rs:query_geo_params","message":"query_geo_params chunk","data":{{"chunk_idx":{},"ids":{},"count":{}}},"timestamp":{}}}"#,
+                            chunk_idx,
+                            serde_json::to_string(&ids_list).unwrap_or("[]".to_string()),
+                            result.len(),
+                            chrono::Utc::now().timestamp_millis()
+                        );
+                    }
+                    // #endregion
                     if result.is_empty() {
                         debug_model_debug!(
                             "[WARN] gen_inst_meshes chunk {} returned empty query result (ids={})",
@@ -675,6 +721,54 @@ pub async fn gen_inst_meshes(
                     let mut update_sql = String::new();
                     // 遍历每个几何参数并使用 CSG 生成网格
                     for g in result {
+                        // #region agent log
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+                        {
+                            let (pdia, phei, btm0, btm1, top0, top1, unit_flag, is_sscl) =
+                                match &g.param {
+                                    PdmsGeoParam::PrimSCylinder(s) => (
+                                        s.pdia,
+                                        s.phei,
+                                        s.btm_shear_angles[0],
+                                        s.btm_shear_angles[1],
+                                        s.top_shear_angles[0],
+                                        s.top_shear_angles[1],
+                                        s.unit_flag,
+                                        s.is_sscl(),
+                                    ),
+                                    PdmsGeoParam::PrimLSnout(_s) => (
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        false,
+                                        false,
+                                    ),
+                                    _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false),
+                                };
+                            let _ = writeln!(
+                                f,
+                                r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H6","location":"mesh_generate.rs:query_geo_params","message":"geo param fetched","data":{{"chunk_idx":{},"geo_id":"{}","geo_type":"{}","pdia":{},"phei":{},"btm":[{},{}],"top":[{},{}],"unit_flag":{},"is_sscl":{}}},"timestamp":{}}}"#,
+                                chunk_idx,
+                                g.id.to_raw(),
+                                g.param.type_name(),
+                                pdia,
+                                phei,
+                                btm0,
+                                btm1,
+                                top0,
+                                top1,
+                                unit_flag,
+                                is_sscl,
+                                chrono::Utc::now().timestamp_millis()
+                            );
+                        }
+                        // #endregion
                         debug_model_debug!("gen mesh param: {:?}", &g.param);
                         let geo_type_name = g.param.type_name();
                         let profile = precision.profile_for_geo(geo_type_name);

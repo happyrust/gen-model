@@ -84,12 +84,15 @@ impl NameConfig {
         for (i, (model, pid)) in name_map.iter().take(5).enumerate() {
             println!("      {}: {:?} -> {:?}", i + 1, model, pid);
         }
-        
+
         // 调试：打印包含"石楼"或"BRAN"或"SITE"的映射
         println!("   📋 包含'石楼/BRAN/SITE/PIPE'的映射:");
-        for (model, pid) in name_map.iter()
-            .filter(|(k, _)| k.contains("石楼") || k.contains("BRAN") || k.contains("SITE") || k.contains("PIPE"))
-            .take(10) 
+        for (model, pid) in name_map
+            .iter()
+            .filter(|(k, _)| {
+                k.contains("石楼") || k.contains("BRAN") || k.contains("SITE") || k.contains("PIPE")
+            })
+            .take(10)
         {
             println!("      {:?} -> {:?}", model, pid);
         }

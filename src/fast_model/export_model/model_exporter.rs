@@ -9,6 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
+use std::io::Write;
+use chrono;
 
 /// 模型导出器 Trait
 ///
@@ -376,6 +378,34 @@ pub async fn query_geometry_instances(
             println!("   ... 还有 {} 个几何体组未显示", geom_insts.len() - 5);
         }
     }
+
+    // #region agent log: dump inst transforms for alignment check
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+    {
+        for geom_inst in &geom_insts {
+            for inst in &geom_inst.insts {
+                let t = inst.transform.to_matrix();
+                let _ = writeln!(
+                    f,
+                    r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H8","location":"model_exporter.rs:query_geometry_instances","message":"export inst","data":{{"refno":"{}","geo_hash":"{}","is_neg":{},"is_tubing":{},"inv_transform":{},"transform":[[{},{},{},{}],[{},{},{},{}],[{},{},{},{}],[{},{},{},{}]]}},"timestamp":{}}}"#,
+                    geom_inst.refno.to_string(),
+                    inst.geo_hash,
+                    false,
+                    inst.is_tubi,
+                    false,
+                    t.row(0).x, t.row(0).y, t.row(0).z, t.row(0).w,
+                    t.row(1).x, t.row(1).y, t.row(1).z, t.row(1).w,
+                    t.row(2).x, t.row(2).y, t.row(2).z, t.row(2).w,
+                    t.row(3).x, t.row(3).y, t.row(3).z, t.row(3).w,
+                    chrono::Utc::now().timestamp_millis()
+                );
+            }
+        }
+    }
+    // #endregion
 
     Ok(geom_insts)
 }

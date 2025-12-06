@@ -814,21 +814,26 @@ async fn gen_cata_geos_inner(
                             } else {
                                 GeoBasicType::Pos
                             };
+                            let geo_param = csg_shape
+                                .convert_to_geo_param()
+                                .unwrap_or(PdmsGeoParam::Unknown);
+                            let unit_flag = match &geo_param {
+                                PdmsGeoParam::PrimSCylinder(s) => s.unit_flag,
+                                _ => false,
+                            };
                             let geom_inst = EleInstGeo {
                                 geo_hash,
                                 refno: geom_refno,
                                 pts,
                                 aabb: None,
                                 transform,
-                                geo_param: csg_shape
-                                    .convert_to_geo_param()
-                                    .unwrap_or(PdmsGeoParam::Unknown),
+                                geo_param,
                                 visible: geo_type == GeoBasicType::Pos
                                     || geo_type == GeoBasicType::Compound,
                                 is_tubi,
                                 geo_type,
                                 cata_neg_refnos: cata_neg_refnos.clone(),
-                                unit_flag: true, // 使用 hash_unit_mesh_params，为单位 mesh
+                                unit_flag,
                             };
 
                             // 将 CATE 的负实体关系写入 neg_relate_map

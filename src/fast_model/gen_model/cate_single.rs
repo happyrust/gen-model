@@ -64,6 +64,11 @@ pub async fn gen_cata_single_geoms(
     let t_resolve = std::time::Instant::now();
     let geoms_info = resolve_desi_comp(design_refno, None).await?;
     let resolve_time = t_resolve.elapsed().as_millis();
+    debug_model!(
+        "📦 resolve_desi_comp 返回: geometries={}, n_geometries={}",
+        geoms_info.geometries.len(),
+        geoms_info.n_geometries.len()
+    );
 
     // DEBUG: Print basic info
     debug_model!(

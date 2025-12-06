@@ -5,6 +5,7 @@ use aios_core::pdms_types::*;
 use aios_core::rs_surreal::delete_inst_relate_cascade;
 use aios_core::types::*;
 use aios_core::{SUL_DB, SurrealQueryExt, get_db_option};
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use bevy_transform::prelude::Transform;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -15,6 +16,9 @@ use tokio::task::JoinHandle;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::debug_model_debug;
 // use crate::fast_model::EXIST_MESH_GEOS;
+use std::fs::OpenOptions;
+use std::io::Write;
+use chrono;
 
 /// 保存 instance 数据到数据库（事务化批处理版本）
 pub async fn save_instance_data_optimize(
@@ -54,6 +58,58 @@ pub async fn save_instance_data_optimize(
 
     for inst_geo_data in inst_mgr.inst_geos_map.values() {
         for inst in &inst_geo_data.insts {
+            // #region agent log
+            if let Ok(mut f) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+            {
+                let (pdia, phei, btm0, btm1, top0, top1) = match &inst.geo_param {
+                    PdmsGeoParam::PrimSCylinder(s) => (
+                        s.pdia,
+                        s.phei,
+                        s.btm_shear_angles[0],
+                        s.btm_shear_angles[1],
+                        s.top_shear_angles[0],
+                        s.top_shear_angles[1],
+                    ),
+                    _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                };
+                let geo_type = match &inst.geo_param {
+                    PdmsGeoParam::PrimBox(_) => "PrimBox",
+                    PdmsGeoParam::PrimLSnout(_) => "PrimLSnout",
+                    PdmsGeoParam::PrimDish(_) => "PrimDish",
+                    PdmsGeoParam::PrimSphere(_) => "PrimSphere",
+                    PdmsGeoParam::PrimCTorus(_) => "PrimCTorus",
+                    PdmsGeoParam::PrimRTorus(_) => "PrimRTorus",
+                    PdmsGeoParam::PrimPyramid(_) => "PrimPyramid",
+                    PdmsGeoParam::PrimLPyramid(_) => "PrimLPyramid",
+                    PdmsGeoParam::PrimSCylinder(_) => "PrimSCylinder",
+                    PdmsGeoParam::PrimLCylinder(_) => "PrimLCylinder",
+                    PdmsGeoParam::PrimRevolution(_) => "PrimRevolution",
+                    PdmsGeoParam::PrimExtrusion(_) => "PrimExtrusion",
+                    PdmsGeoParam::PrimPolyhedron(_) => "PrimPolyhedron",
+                    PdmsGeoParam::PrimLoft(_) => "PrimLoft",
+                    PdmsGeoParam::CompoundShape => "CompoundShape",
+                    PdmsGeoParam::Unknown => "Unknown",
+                };
+                let _ = writeln!(
+                    f,
+                    r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"pdms_inst.rs:save_instance_data_optimize","message":"inst_geo_buffer push","data":{{"geo_hash":{},"refno":"{}","geo_type":"{}","unit_flag":{},"pdia":{},"phei":{},"btm":[{},{}],"top":[{},{}]}},"timestamp":{}}}"#,
+                    inst.geo_hash,
+                    inst.refno.to_string(),
+                    geo_type,
+                    inst.unit_flag,
+                    pdia,
+                    phei,
+                    btm0,
+                    btm1,
+                    top0,
+                    top1,
+                    chrono::Utc::now().timestamp_millis()
+                );
+            }
+            // #endregion
             if inst.transform.translation.is_nan()
                 || inst.transform.rotation.is_nan()
                 || inst.transform.scale.is_nan()
@@ -105,6 +161,46 @@ pub async fn save_instance_data_optimize(
             geo_relate_buffer.push(format!("{{ {relate_json}, id: '{relate_id}' }}"));
 
             // 直接使用 EleInstGeo，它已经包含了正确的 unit_flag
+            // #region agent log
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
+            {
+                // 尝试提取圆柱/斜切圆柱的关键参数；其他类型留零
+                let (pdia, phei, btm0, btm1, top0, top1, unit_flag, is_sscl) =
+                    match &inst.geo_param {
+                        aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimSCylinder(s) => (
+                            s.pdia,
+                            s.phei,
+                            s.btm_shear_angles[0],
+                            s.btm_shear_angles[1],
+                            s.top_shear_angles[0],
+                            s.top_shear_angles[1],
+                            s.unit_flag,
+                            s.is_sscl(),
+                        ),
+                        _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, inst.unit_flag, false),
+                    };
+                let _ = writeln!(
+                    f,
+                    r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"pdms_inst.rs:save_instance_data_optimize","message":"push inst_geo","data":{{"geo_hash":{},"refno":"{}","geo_type":"{}","pdia":{},"phei":{},"btm":[{},{}],"top":[{},{}],"unit_flag":{},"is_sscl":{},"inst_geo_buffer_len":{}}},"timestamp":{}}}"#,
+                    inst.geo_hash,
+                    inst.refno.to_string(),
+                    inst.geo_type.to_string(),
+                    pdia,
+                    phei,
+                    btm0,
+                    btm1,
+                    top0,
+                    top1,
+                    unit_flag,
+                    is_sscl,
+                    inst_geo_buffer.len() + 1,
+                    chrono::Utc::now().timestamp_millis()
+                );
+            }
+            // #endregion
             inst_geo_buffer.push(inst.gen_unit_geo_sur_json());
 
             if inst_geo_buffer.len() >= CHUNK_SIZE {

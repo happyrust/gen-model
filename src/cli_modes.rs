@@ -5,18 +5,17 @@ use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::{Result, anyhow};
 
 use aios_core::init_surreal;
-use aios_database::fast_model::export_glb::export_glb_for_refnos;
 use aios_database::options::DbOptionExt;
-// TODO: 更新 OBJ 导出器
-// use aios_database::fast_model::export_obj::export_obj_for_refnos;
 use aios_core::{DBType, query_mdb_db_nums};
 use aios_database::fast_model::export_glb::GlbExporter;
 use aios_database::fast_model::export_gltf::GltfExporter;
 use aios_database::fast_model::export_gltf::export_gltf_for_refnos;
 use aios_database::fast_model::export_instanced_bundle::export_instanced_bundle_for_refnos;
+use aios_database::fast_model::export_model::export_obj::ObjExporter;
 // use aios_database::fast_model::export_xkt::XktExporter;
 use aios_database::fast_model::model_exporter::{
-    CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, XktExportConfig,
+    CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, ObjExportConfig,
+    XktExportConfig,
 };
 use aios_database::fast_model::unit_converter::{LengthUnit, UnitConverter};
 
@@ -261,16 +260,10 @@ fn parse_length_unit(unit: &str) -> LengthUnit {
 }
 
 /// 导出 OBJ 模型模式
-pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt) -> Result<()> {
-    // TODO: 更新 OBJ 导出器以使用新的 ExportData API
-    return Err(anyhow!("OBJ 导出功能暂时禁用，等待更新"));
-
-    /* use aios_database::fast_model::export_obj::export_obj_for_refnos;
-
+pub async fn export_obj_mode(config: ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
     println!("\n🎯 OBJ 导出模式");
     println!("================");
 
-    // 初始化数据库连接
     println!("\n📡 连接数据库...");
     init_surreal().await?;
     println!("✅ 数据库连接成功");
@@ -279,7 +272,7 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
     let mesh_dir = config.get_mesh_dir(db_option_ext);
 
     // 打印导出参数
-    config.print_export_params(mesh_dir);
+    config.print_export_params(&mesh_dir);
 
     // 如果未指定 dbno 且未提供 refnos，但要求全库导出，则在此处理
     if config.run_all_dbnos && config.dbno.is_none() && config.refnos_str.is_empty() {
@@ -287,7 +280,7 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
         let dbnos = query_mdb_db_nums(None, DBType::DESI).await?;
         if dbnos.is_empty() {
             println!("⚠️ MDB 未返回任何 dbno，跳过导出");
-            return Ok(())
+            return Ok(());
         }
         for db in dbnos {
             let mut per_db_config = config.clone();
@@ -301,7 +294,7 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
     }
 
     // 检查是否指定了 dbno
-    if let Some(dbno) = config.dbno {
+    if config.dbno.is_some() {
         export_obj_mode_for_db(&config, db_option_ext).await?;
     } else {
         // 原有逻辑：按 refnos 导出
@@ -311,36 +304,26 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
         // 检查是否需要重新生成 plant mesh
         if config.regenerate_plant_mesh {
             println!("\n🔄 检测到 --regen-model 参数，开始重新生成几何体数据...");
+            println!("   - 强制开启 replace_mesh 和 gen_mesh");
 
-            // 强制开启 replace_mesh
-            println!("   - 强制开启 replace_mesh");
-
-            // 生成几何体数据（包括 instances）
             use aios_database::fast_model::gen_all_geos_data;
 
-            // 创建一个临时配置，强制开启 replace_mesh
-            // 由于我们不能直接修改 aios_core::DbOption，我们通过环境变量来传递这个信息
             unsafe {
                 std::env::set_var("FORCE_REPLACE_MESH", "true");
             }
 
-            // 创建一个副本并设置 replace_mesh 和 gen_mesh 为 true
             let mut db_option_clone = db_option_ext.inner.clone();
             let original_replace_mesh = db_option_clone.replace_mesh;
             let original_gen_mesh = db_option_clone.gen_mesh;
             db_option_clone.replace_mesh = Some(true);
             db_option_clone.gen_mesh = true;
 
-            println!("   - 强制开启 gen_mesh");
+            let db_option_ext = DbOptionExt::from(db_option_clone.clone());
+            gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
 
-            // 传递配置，gen_all_geos_data 会使用配置中的 replace_mesh 和 gen_mesh 设置
-            let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(refnos.clone(), &db_option_ext, None, None).await?;
-
-            // 恢复原配置（如果需要的话）
             db_option_clone.replace_mesh = original_replace_mesh;
             db_option_clone.gen_mesh = original_gen_mesh;
 
-            // 清理环境变量
             unsafe {
                 std::env::remove_var("FORCE_REPLACE_MESH");
             }
@@ -348,7 +331,7 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
             println!("✅ Plant mesh 重新生成完成");
         }
 
-        // 为每个 refno 导出 OBJ
+        let exporter = ObjExporter::new();
         for refno in &refnos {
             // 确定输出文件名
             let final_output_path = if let Some(ref path) = config.output_path {
@@ -361,15 +344,22 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
 
             println!("\n🔄 导出 {} -> {} ...", refno, final_output_path);
 
-            // 导出 OBJ
-            export_obj_for_refnos(
-                &[*refno],
-                mesh_dir,
-                &final_output_path,
-                config.filter_nouns.as_deref(),
-                config.include_descendants,
-            )
-            .await?;
+            let export_config = ObjExportConfig {
+                common: CommonExportConfig {
+                    include_descendants: config.include_descendants,
+                    filter_nouns: config.filter_nouns.clone(),
+                    verbose: config.verbose,
+                    unit_converter: UnitConverter::new(
+                        parse_length_unit(&config.source_unit),
+                        parse_length_unit(&config.target_unit),
+                    ),
+                    use_basic_materials: config.use_basic_materials,
+                },
+            };
+
+            exporter
+                .export(&[*refno], &mesh_dir, &final_output_path, export_config)
+                .await?;
 
             println!("✅ 导出成功: {}", final_output_path);
         }
@@ -377,17 +367,16 @@ pub async fn export_obj_mode(_config: ExportConfig, _db_option_ext: &DbOptionExt
 
     println!("\n🎉 导出完成!");
     Ok(())
-    */
 }
 
 async fn export_obj_mode_for_db(
-    _config: &ExportConfig,
-    _db_option_ext: &DbOptionExt,
+    config: &ExportConfig,
+    db_option_ext: &DbOptionExt,
 ) -> Result<()> {
-    return Err(anyhow!("OBJ 导出功能暂时禁用，等待更新"));
-    /*
     let mesh_dir = config.get_mesh_dir(db_option_ext);
-    let dbno = config.dbno.expect("dbno required in export_obj_mode_for_db");
+    let dbno = config
+        .dbno
+        .expect("dbno required in export_obj_mode_for_db");
     println!("\n🔍 检测到 dbno 参数: {}", dbno);
     println!("📊 查询该数据库下的所有 SITE...");
 
@@ -397,49 +386,60 @@ async fn export_obj_mode_for_db(
 
     if sites.is_empty() {
         println!("⚠️  未找到任何 SITE，跳过导出");
-        return Ok(())
+        return Ok(());
     }
 
     if config.regenerate_plant_mesh {
         println!("\n🔄 检测到 --regen-model 参数，开始重新生成几何体数据...");
         println!("   - 强制开启 replace_mesh 和 gen_mesh");
         use aios_database::fast_model::gen_all_geos_data;
-        unsafe { std::env::set_var("FORCE_REPLACE_MESH", "true"); }
+        unsafe {
+            std::env::set_var("FORCE_REPLACE_MESH", "true");
+        }
         let mut db_option_clone = db_option_ext.inner.clone();
         let original_replace_mesh = db_option_clone.replace_mesh;
         let original_gen_mesh = db_option_clone.gen_mesh;
         db_option_clone.replace_mesh = Some(true);
         db_option_clone.gen_mesh = true;
-        let db_option_ext = DbOptionExt::from(db_option_clone.clone()); gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
+        let db_option_ext = DbOptionExt::from(db_option_clone.clone());
+        gen_all_geos_data(sites.clone(), &db_option_ext, None, None).await?;
         db_option_clone.replace_mesh = original_replace_mesh;
         db_option_clone.gen_mesh = original_gen_mesh;
-        unsafe { std::env::remove_var("FORCE_REPLACE_MESH"); }
+        unsafe {
+            std::env::remove_var("FORCE_REPLACE_MESH");
+        }
         println!("✅ Plant mesh 重新生成完成");
     }
 
-    for (idx, site_refno) in sites.iter().enumerate() {
-        let site_name = get_site_name_for_export(*site_refno, dbno, "obj").await;
-        let output_file = format!("output/{}", site_name);
-        println!(
-            "\n🔄 [{}/{}] 导出 SITE: {} -> {}",
-            idx + 1,
-            sites.len(),
-            site_refno,
-            output_file
-        );
-        match export_obj_for_refnos(
-            &[*site_refno],
-            mesh_dir,
-            &output_file,
-            config.filter_nouns.as_deref(),
-            config.include_descendants,
-        )
-        .await
-        {
-            Ok(_) => {
-                println!("✅ [{}/{}] 导出成功: {}", idx + 1, sites.len(), output_file);
-            }
-            Err(e) => {
+    let exporter = ObjExporter::new();
+
+    // 检查是否按 SITE 拆分（默认合并）
+    if config.split_by_site {
+        // 拆分模式：每个 SITE 单独导出
+        println!("\n📂 拆分模式：每个 SITE 导出为独立文件");
+        for (idx, site_refno) in sites.iter().enumerate() {
+            let site_name = get_site_name_for_export(*site_refno, dbno, "obj").await;
+            let output_file = format!("output/{}", site_name);
+            println!(
+                "\n🔄 [{}/{}] 导出 SITE: {} -> {}",
+                idx + 1,
+                sites.len(),
+                site_refno,
+                output_file
+            );
+            let export_config = ObjExportConfig {
+                common: CommonExportConfig {
+                    include_descendants: config.include_descendants,
+                    filter_nouns: config.filter_nouns.clone(),
+                    verbose: config.verbose,
+                    unit_converter: UnitConverter::default(),
+                    use_basic_materials: config.use_basic_materials,
+                },
+            };
+            if let Err(e) = exporter
+                .export(&[*site_refno], &mesh_dir, &output_file, export_config)
+                .await
+            {
                 println!(
                     "❌ [{}/{}] 导出失败: {} - {}",
                     idx + 1,
@@ -447,12 +447,42 @@ async fn export_obj_mode_for_db(
                     output_file,
                     e
                 );
+            } else {
+                println!("✅ [{}/{}] 导出成功: {}", idx + 1, sites.len(), output_file);
             }
+        }
+    } else {
+        // 默认合并模式：将所有 SITE 合并到一个文件
+        println!("\n🔀 合并模式：将所有 SITE 合并到一个文件（默认）");
+        let output_file = format!("output/dbno_{}.obj", dbno);
+        println!(
+            "🔄 导出合并文件: {} (包含 {} 个 SITE)",
+            output_file,
+            sites.len()
+        );
+
+        let export_config = ObjExportConfig {
+            common: CommonExportConfig {
+                include_descendants: config.include_descendants,
+                filter_nouns: config.filter_nouns.clone(),
+                verbose: config.verbose,
+                unit_converter: UnitConverter::default(),
+                use_basic_materials: config.use_basic_materials,
+            },
+        };
+
+        // 将所有 SITE 一次性导出
+        if let Err(e) = exporter
+            .export(&sites, &mesh_dir, &output_file, export_config)
+            .await
+        {
+            println!("❌ 导出失败: {} - {}", output_file, e);
+        } else {
+            println!("✅ 导出成功: {}", output_file);
         }
     }
 
     Ok(())
-    */
 }
 
 /// 导出 GLB 模型模式

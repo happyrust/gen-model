@@ -240,6 +240,10 @@ pub async fn gen_loop_geos(
                     continue;
                 }
                 let tr: Transform = item_trans;
+                let unit_flag = match &geo_param {
+                    PdmsGeoParam::PrimSCylinder(s) => s.unit_flag,
+                    _ => false,
+                };
                 //需要判断多个PLOO、LOOP的情况，第二个开始都是负实体
                 let geom_inst = EleInstGeo {
                     geo_hash,
@@ -256,7 +260,7 @@ pub async fn gen_loop_geos(
                         GeoBasicType::Pos
                     },
                     cata_neg_refnos: Default::default(),
-                    unit_flag: true, // 使用 hash_unit_mesh_params，为单位 mesh
+                    unit_flag,
                 };
                 geos_info.is_solid = geom_inst.geo_type == GeoBasicType::Pos;
                 let inst_key = geos_info.get_inst_key();

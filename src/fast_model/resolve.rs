@@ -8,16 +8,15 @@ use aios_core::pdms_data::{PlinParam, ScomInfo};
 use aios_core::{CataContext, RefU64, RefnoEnum, SUL_DB};
 use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::SurrealQueryExt;
 
 /// 查询 DESI 元素的 IPARAM 数据
 /// 使用 SurrealDB 的 fn::get_ipara 函数
 async fn query_iparam_from_desi(desi_refno: RefnoEnum) -> anyhow::Result<Vec<f32>> {
-    let sql = format!("return fn::get_ipara(pe:{})", desi_refno.to_string());
+    let sql = format!("return fn::get_ipara({})", desi_refno.to_pe_key());
+    let result:Vec<f32> = SUL_DB.query_take(&sql, 0).await.unwrap();
 
-    let mut response = SUL_DB.query(sql).await?;
-    let result: Option<Vec<f32>> = response.take(0)?;
-
-    Ok(result.unwrap_or(vec![]))
+    Ok(result)
 }
 
 ///收集SCOM的信息, 暂时慎用缓存
