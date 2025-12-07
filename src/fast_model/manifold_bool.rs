@@ -225,18 +225,30 @@ pub async fn apply_cata_neg_boolean_manifold(
                     eprintln!("导出 OBJ 失败: refno={} err={}", g.refno, e);
                 }
 
+                // 1. 创建布尔后的 Compound 几何体记录
                 update_sql.push_str(&format!(
-                    "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
+                    "CREATE inst_geo:⟨{}⟩ SET meshed = true, aabb = {};",
                     new_id,
                     &pos.aabb_id.to_raw()
                 ));
+                
+                // 2. 创建 geo_relate 关系，类型为 Compound
                 let relate_sql = format!(
-                    "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩, visible = true;",
+                    "RELATE {}->geo_relate->inst_geo:⟨{}⟩ SET geom_refno=pe:⟨{}⟩, geo_type='Compound', trans=trans:⟨0⟩, visible=true;",
                     &g.inst_info_id.to_raw(),
                     new_id,
                     format!("{}_b", bg[0]),
                 );
                 update_sql.push_str(relate_sql.as_str());
+                
+                // 3. 更新原始 Pos 的 geo_relate，设置 booled_id 指向新的 Compound
+                update_sql.push_str(&format!(
+                    "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩ WHERE out = {};",
+                    new_id,
+                    &pos.id.to_raw()
+                ));
+                
+                // 4. 更新 inst_relate 状态（不设置 booled_id，只标记状态）
                 if let Some(aabb) = mesh.cal_aabb() {
                     let aabb_hash = gen_bytes_hash(&aabb).to_string();
                     let aabb_json =
@@ -246,16 +258,14 @@ pub async fn apply_cata_neg_boolean_manifold(
                         aabb_hash, aabb_json
                     ));
                     update_sql.push_str(&format!(
-                        "update {}<-inst_relate set bool_status='Success', booled=true, booled_id='{}', aabb = aabb:⟨{}⟩;",
+                        "UPDATE {}<-inst_relate SET bool_status='Success', aabb = aabb:⟨{}⟩;",
                         &g.inst_info_id.to_raw(),
-                        new_id,
                         aabb_hash,
                     ));
                 } else {
                     update_sql.push_str(&format!(
-                        "update {}<-inst_relate set bool_status='Success', booled=true, booled_id='{}';",
+                        "UPDATE {}<-inst_relate SET bool_status='Success';",
                         &g.inst_info_id.to_raw(),
-                        new_id,
                     ));
                 }
             } else {
@@ -394,26 +404,62 @@ async fn apply_boolean_for_query(
             eprintln!("导出 OBJ 失败: refno={} err={}", query.refno, e);
         }
 
+        // 获取 inst_info_id（geo_relate 的 in 端）
+        let inst_info_sql = format!("SELECT value string::concat('inst_info:', record::id(out)) FROM inst_relate WHERE in = {} LIMIT 1", pe_key);
+        let inst_info_id: Option<String> = SUL_DB.query_take(&inst_info_sql, 0).await.ok().flatten();
+        
+        let mut update_sql = String::new();
+        
+        // 1. 创建布尔后的 Compound 几何体记录
+        update_sql.push_str(&format!(
+            "CREATE inst_geo:⟨{}⟩ SET meshed = true;",
+            mesh_id
+        ));
+        
+        // 2. 创建 geo_relate 关系，类型为 Compound，trans 为单位变换
+        if let Some(ref info_id) = inst_info_id {
+            update_sql.push_str(&format!(
+                "RELATE {}->geo_relate->inst_geo:⟨{}⟩ SET geom_refno=pe:⟨{}_b⟩, geo_type='Compound', trans=trans:⟨0⟩, visible=true;",
+                info_id,
+                mesh_id,
+                query.refno
+            ));
+        }
+        
+        // 3. 更新所有参与布尔的原始 Pos 的 geo_relate，设置 booled_id 指向新的 Compound
+        for (pos_id, _) in query.pos_geos.iter() {
+            update_sql.push_str(&format!(
+                "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩ WHERE out = {};",
+                mesh_id,
+                pos_id.to_raw()
+            ));
+        }
+        
+        // 4. 更新 inst_relate 状态（不设置 booled_id，只标记状态）
         if let Some(aabb) = mesh.cal_aabb() {
             let aabb_hash = gen_bytes_hash(&aabb).to_string();
             let aabb_json = serde_json::to_string(&aabb).unwrap_or_else(|_| "{}".to_string());
-            let sql = format!(
-                "INSERT IGNORE INTO aabb {{ 'id': aabb:⟨{}⟩, 'd': {} }}; UPDATE inst_relate SET bool_status='Success', booled=true, booled_id='{}', aabb = aabb:⟨{}⟩ WHERE in = {};",
-                aabb_hash, aabb_json, mesh_id, aabb_hash, pe_key
-            );
-            debug_model!("[布尔更新] 执行 SQL: {}", sql);
-            SUL_DB.query(&sql).await?;
+            update_sql.push_str(&format!(
+                "INSERT IGNORE INTO aabb {{ 'id': aabb:⟨{}⟩, 'd': {} }};",
+                aabb_hash, aabb_json
+            ));
+            update_sql.push_str(&format!(
+                "UPDATE inst_relate SET bool_status='Success', aabb = aabb:⟨{}⟩ WHERE in = {};",
+                aabb_hash, pe_key
+            ));
         } else {
-            let sql = format!(
-                "UPDATE inst_relate SET bool_status='Success', booled=true, booled_id='{}' WHERE in = {};",
-                mesh_id, pe_key
-            );
-            debug_model!("[布尔更新] 执行 SQL: {}", sql);
-            SUL_DB.query(&sql).await?;
+            update_sql.push_str(&format!(
+                "UPDATE inst_relate SET bool_status='Success' WHERE in = {};",
+                pe_key
+            ));
         }
+        
+        debug_model!("[布尔更新] 执行 SQL: {}", update_sql);
+        SUL_DB.query(&update_sql).await?;
+        
         println!("布尔运算完成: refno={} mesh={}", query.refno, mesh_id);
         // 验证更新是否成功
-        let verify_sql = format!("SELECT booled_id, bool_status FROM inst_relate WHERE in = {}", pe_key);
+        let verify_sql = format!("SELECT bool_status FROM inst_relate WHERE in = {}", pe_key);
         if let Ok(result) = SUL_DB.query(&verify_sql).await {
             debug_model!("[布尔验证] 查询结果: {:?}", result);
         }
