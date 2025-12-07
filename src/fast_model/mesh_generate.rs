@@ -37,6 +37,7 @@ use aios_core::{
 use aios_core::query_db;
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
+use chrono;
 use dashmap::DashMap;
 use glam::DMat4;
 use itertools::Itertools;
@@ -46,10 +47,9 @@ use parry3d::math::Isometry;
 use parse_pdms_db::parse::round_f32;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::io::Write;
-use chrono;
 
 use aios_core::geometry::csg::generate_csg_mesh;
 
@@ -123,14 +123,13 @@ async fn query_pending_cata_boolean(
     let filter_booled = if replace_exist {
         String::new()
     } else {
-        "AND (booled = false OR booled = NONE)".to_string()
+        String::new()
     };
 
     let sql = format!(
         r#"SELECT VALUE in
 FROM inst_relate
 WHERE has_cata_neg = true
-  AND (bad_bool = false OR bad_bool = NONE)
   {filter_booled}
 LIMIT {limit};"#,
     );
@@ -197,7 +196,6 @@ async fn query_pending_inst_boolean(
 FROM inst_relate
 WHERE in IN [{}]
   AND aabb.d != NONE
-  AND (bad_bool = false OR bad_bool = NONE)
   {filter_booled}
 LIMIT {remaining};"#,
             chunk.join(",")
@@ -492,39 +490,29 @@ pub async fn process_meshes_update_db_deep(
                 }
 
                 if dboption.apply_boolean_operation {
-                    // 检查环境变量，默认禁用
-                    let enable_boolean = std::env::var("ENABLE_BOOLEAN_OP")
-                        .map(|v| v.to_lowercase() == "true")
-                        .unwrap_or(false);
-
-                    if enable_boolean {
-                        let bool_time = std::time::Instant::now();
-                        // 生成元件库内部几何体的负实体运算
-                        apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
-                            .await
-                            .map_err(|e| {
-                                eprintln!(
-                                    "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
-                                    refno, e
-                                );
-                                e
-                            })?;
-                        apply_insts_boolean_manifold(&neg_refnos, replace_exist)
-                            .await
-                            .map_err(|e| {
-                                eprintln!(
-                                    "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
-                                    refno, e
-                                );
-                                e
-                            })?;
-                        debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
-                    } else {
-                        // TODO: 布尔运算函数已被移除，等待 manifold_bool 模块重构完成
-                        eprintln!(
-                            "[mesh_generate] 警告：布尔运算暂时禁用，等待 manifold_bool 模块重构完成 (设置 ENABLE_BOOLEAN_OP=true 以强制开启)"
-                        );
-                    }
+                    let bool_time = std::time::Instant::now();
+                    // 生成元件库内部几何体的负实体运算（catalog-level: 同一元件库内的正负几何体布尔）
+                    apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
+                        .await
+                        .map_err(|e| {
+                            eprintln!(
+                                "❌ apply_cata_neg_boolean_manifold 失败 (refno: {}): {}",
+                                refno, e
+                            );
+                            e
+                        })?;
+                    // 实例级布尔运算（instance-level: 通过 ngmr 关系切割的正实体）
+                    // 传入正实体列表，函数内部会查询它们关联的负实体
+                    apply_insts_boolean_manifold(&target_visible_refnos, replace_exist)
+                        .await
+                        .map_err(|e| {
+                            eprintln!(
+                                "❌ apply_insts_boolean_manifold 失败 (refno: {}): {}",
+                                refno, e
+                            );
+                            e
+                        })?;
+                    debug_model!("  ✅ 布尔运算完成: {} ms", bool_time.elapsed().as_millis());
                 }
 
                 Ok(())
@@ -697,8 +685,7 @@ pub async fn gen_inst_meshes(
                         .append(true)
                         .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
                     {
-                        let ids_list: Vec<String> =
-                            result.iter().map(|g| g.id.to_raw()).collect();
+                        let ids_list: Vec<String> = result.iter().map(|g| g.id.to_raw()).collect();
                         let _ = writeln!(
                             f,
                             r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"mesh_generate.rs:query_geo_params","message":"query_geo_params chunk","data":{{"chunk_idx":{},"ids":{},"count":{}}},"timestamp":{}}}"#,
@@ -739,16 +726,9 @@ pub async fn gen_inst_meshes(
                                         s.unit_flag,
                                         s.is_sscl(),
                                     ),
-                                    PdmsGeoParam::PrimLSnout(_s) => (
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        false,
-                                        false,
-                                    ),
+                                    PdmsGeoParam::PrimLSnout(_s) => {
+                                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false)
+                                    }
                                     _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false),
                                 };
                             let _ = writeln!(

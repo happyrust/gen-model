@@ -24,11 +24,35 @@
 
 1. **元件库布尔** (`apply_cata_neg_boolean_manifold`)
    - 处理 `has_cata_neg=true` 的实例
-   - 结果: 更新 `booled=true`
+   - 结果: 更新 `bool_status='Success'`, `booled=true`
 
 2. **实例级布尔** (`apply_insts_boolean_manifold`)
    - 处理有 `neg_relate`/`ngmr_relate` 的实例
-   - 结果: 更新 `booled_id`
+   - 结果: 更新 `bool_status='Success'`, `booled_id='{mesh_id}'`, `aabb=aabb:⟨hash⟩`
+
+## 重要更新 (2024-12)
+
+### neg_relate / ngmr_relate 新结构
+
+```sql
+-- 旧结构：in = 负载体 PE
+neg_relate { in: pe:xxx, out: pe:target }
+
+-- 新结构：in = 切割几何 geo_relate
+neg_relate { 
+    in: geo_relate:⟨id⟩,   -- 切割几何
+    out: pe:⟨target⟩,      -- 被切正实体
+    pe: pe:⟨carrier⟩       -- 负载体
+}
+```
+
+**优点**：
+
+- 查询直接 `SELECT in.* FROM pe:target<-neg_relate` 获取切割几何
+- 无需遍历 carrier -> inst_relate -> geo_relate
+- ID 简化为 `[geo_relate_id, target_pe]`
+
+详见 [02_数据模型.md](./02_数据模型.md#3-关系说明)
 
 ## 相关文档
 

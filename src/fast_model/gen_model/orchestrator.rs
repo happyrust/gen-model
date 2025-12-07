@@ -309,10 +309,8 @@ async fn process_targeted_generation(
             );
         }
 
-        // 手动布尔运算模式：在 mesh 生成完成后执行布尔运算
-        if has_manual_refnos && db_option.inner.apply_boolean_operation {
-            execute_manual_boolean_operations(&target_root_refnos, db_option).await;
-        }
+        // 注意：布尔运算已在 process_meshes_update_db_deep 内部执行
+        // 无需在此重复调用 execute_manual_boolean_operations
     }
 
     if let Err(err) = capture_refnos_if_enabled(&target_root_refnos, &db_option.inner).await {

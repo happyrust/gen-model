@@ -9,12 +9,15 @@ use aios_core::csg::manifold::ManifoldRust;
 use aios_core::get_db_option;
 use aios_core::rs_surreal::boolean_query_optimized::query_manifold_boolean_operations_batch_optimized;
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::transform::get_local_transform;
 use aios_core::{
     CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo, query_cata_neg_boolean_groups,
     query_geom_mesh_data, query_negative_entities_batch,
 };
-use aios_core::{RefnoEnum, SUL_DB, utils::RecordIdExt};
-use glam::DMat4;
+use aios_core::{RefnoEnum, SUL_DB, gen_bytes_hash, utils::RecordIdExt};
+use bevy_transform::components::Transform;
+use glam::{DMat4, DVec4, Mat4};
+use serde_json;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
@@ -104,22 +107,41 @@ fn load_manifold(id: &str, mat: DMat4, more_precision: bool) -> anyhow::Result<M
     Ok(manifold)
 }
 
+#[inline]
+fn transform_to_dmat4(t: &Transform) -> DMat4 {
+    let m = t.to_matrix();
+    DMat4::from_cols(
+        DVec4::new(
+            m.x_axis.x as f64,
+            m.x_axis.y as f64,
+            m.x_axis.z as f64,
+            m.x_axis.w as f64,
+        ),
+        DVec4::new(
+            m.y_axis.x as f64,
+            m.y_axis.y as f64,
+            m.y_axis.z as f64,
+            m.y_axis.w as f64,
+        ),
+        DVec4::new(
+            m.z_axis.x as f64,
+            m.z_axis.y as f64,
+            m.z_axis.z as f64,
+            m.z_axis.w as f64,
+        ),
+        DVec4::new(
+            m.w_axis.x as f64,
+            m.w_axis.y as f64,
+            m.w_axis.z as f64,
+            m.w_axis.w as f64,
+        ),
+    )
+}
+
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    Ok(())
-}
-
-async fn mark_bad_bool(inst_relate_id: &str) -> anyhow::Result<()> {
-    let sql = format!("update {} set bad_bool=true;", inst_relate_id);
-    SUL_DB.query(sql).await?;
-    Ok(())
-}
-
-async fn update_booled_id(inst_relate_id: &str, mesh_id: &str) -> anyhow::Result<()> {
-    let sql = format!("update {} set booled_id='{}';", inst_relate_id, mesh_id);
-    SUL_DB.query(sql).await?;
     Ok(())
 }
 
@@ -152,21 +174,23 @@ pub async fn apply_cata_neg_boolean_manifold(
         for bg in g.boolean_group {
             let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
                 update_sql.push_str(&format!(
-                    "update {}<-inst_relate set bad_bool=true;",
+                    "update {}<-inst_relate set bool_status='Failed';",
                     &g.inst_info_id.to_raw(),
                 ));
                 continue;
             };
 
             debug_model_debug!("加载 catalog 正实体 mesh: {}", pos.id.to_mesh_id());
-            let Ok(mut pos_manifold) = load_manifold(
-                &pos.id.to_mesh_id(),
-                pos.trans.0.to_matrix().as_dmat4(),
-                false,
-            ) else {
+            // 组合父子局部变换（get_local_transform）与几何体自身变换
+            // let pos_local_mat = match get_local_transform(pos.geom_refno).await {
+            //     Ok(Some(t)) => transform_to_dmat4(&t),
+            //     _ => DMat4::IDENTITY,
+            // };
+            let pos_mat = pos.trans.0.to_matrix().as_dmat4();
+            let Ok(mut pos_manifold) = load_manifold(&pos.id.to_mesh_id(), pos_mat, false) else {
                 println!("布尔运算失败: 无法加载正实体 manifold, refno: {}", &g.refno);
                 update_sql.push_str(&format!(
-                    "update {}<-inst_relate set bad_bool=true;",
+                    "update {}<-inst_relate set bool_status='Failed';",
                     &g.inst_info_id.to_raw(),
                 ));
                 continue;
@@ -177,8 +201,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                 let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
                     continue;
                 };
-                let m = neg_geo.trans.0.to_matrix().as_dmat4();
-                if let Ok(manifold) = load_manifold(&neg_geo.id.to_mesh_id(), m, true) {
+                // 负实体 = get_local_transform(相对父) * 几何体 transform
+                let neg_local_mat = match get_local_transform(neg_geo.geom_refno).await {
+                    Ok(Some(t)) => transform_to_dmat4(&t),
+                    _ => DMat4::IDENTITY,
+                };
+                let neg_mat = neg_local_mat * neg_geo.trans.0.to_matrix().as_dmat4();
+                if let Ok(manifold) = load_manifold(&neg_geo.id.to_mesh_id(), neg_mat, true) {
                     neg_manifolds.push(manifold);
                 }
             }
@@ -208,13 +237,30 @@ pub async fn apply_cata_neg_boolean_manifold(
                     format!("{}_b", bg[0]),
                 );
                 update_sql.push_str(relate_sql.as_str());
-                update_sql.push_str(&format!(
-                    "update {}<-inst_relate set booled=true;",
-                    &g.inst_info_id.to_raw(),
-                ));
+                if let Some(aabb) = mesh.cal_aabb() {
+                    let aabb_hash = gen_bytes_hash(&aabb).to_string();
+                    let aabb_json =
+                        serde_json::to_string(&aabb).unwrap_or_else(|_| "{}".to_string());
+                    update_sql.push_str(&format!(
+                        "INSERT IGNORE INTO aabb {{ 'id': aabb:⟨{}⟩, 'd': {} }};",
+                        aabb_hash, aabb_json
+                    ));
+                    update_sql.push_str(&format!(
+                        "update {}<-inst_relate set bool_status='Success', booled=true, booled_id='{}', aabb = aabb:⟨{}⟩;",
+                        &g.inst_info_id.to_raw(),
+                        new_id,
+                        aabb_hash,
+                    ));
+                } else {
+                    update_sql.push_str(&format!(
+                        "update {}<-inst_relate set bool_status='Success', booled=true, booled_id='{}';",
+                        &g.inst_info_id.to_raw(),
+                        new_id,
+                    ));
+                }
             } else {
                 update_sql.push_str(&format!(
-                    "update {}<-inst_relate set bad_bool=true;",
+                    "update {}<-inst_relate set bool_status='Failed';",
                     &g.inst_info_id.to_raw(),
                 ));
             }
@@ -233,11 +279,12 @@ async fn apply_boolean_for_query(
     query: ManiGeoTransQuery,
     replace_exist: bool,
 ) -> anyhow::Result<()> {
-    let inst_relate_id = query.refno.to_table_key("inst_relate");
+    // inst_relate 是关系表，需要用 WHERE in = pe:xxx 来更新
+    let pe_key = query.refno.to_pe_key();
 
     // 非替换模式下，已有 booled_id 则跳过
     if !replace_exist {
-        let check_sql = format!("select value booled_id from {} limit 1", inst_relate_id);
+        let check_sql = format!("SELECT value booled_id FROM inst_relate WHERE in = {} LIMIT 1", pe_key);
         if let Ok(Some(existing)) = SUL_DB.query_take::<Option<String>>(&check_sql, 0).await {
             if !existing.is_empty() {
                 return Ok(());
@@ -246,18 +293,18 @@ async fn apply_boolean_for_query(
     }
 
     // 使用正实体的世界坐标系作为基准坐标系
-    // 正实体在基准坐标系中，使用单位矩阵（相对于自身的坐标系）
-    let pos_world_mat = query.wt.0.to_matrix().as_dmat4();
+    let inst_world_mat = query.inst_world_trans.0.to_matrix().as_dmat4();
 
     let mut pos_manifolds = Vec::new();
-    for (pos_id, pos_t) in query.ts.iter() {
+    for (pos_id, geo_local_trans) in query.pos_geos.iter() {
         let pos_mesh_id = pos_id.to_mesh_id();
+        // 正实体使用其局部变换（相对于 inst_relate 的变换）
+        let geo_local_mat = geo_local_trans.0.to_matrix().as_dmat4();
         debug_model_debug!(
-            "加载正实体 mesh: {} (使用单位矩阵，基准坐标系)",
+            "加载正实体 mesh: {} (应用局部变换)",
             pos_mesh_id
         );
-        // 正实体使用单位矩阵，因为它定义了基准坐标系
-        if let Ok(manifold) = load_manifold(&pos_mesh_id, glam::DMat4::IDENTITY, false) {
+        if let Ok(manifold) = load_manifold(&pos_mesh_id, geo_local_mat, false) {
             pos_manifolds.push(manifold);
         }
     }
@@ -266,9 +313,10 @@ async fn apply_boolean_for_query(
         println!(
             "布尔运算失败: 未找到正实体 manifold，refno: {}, 正几何数量={}",
             query.refno,
-            query.ts.len()
+            query.pos_geos.len()
         );
-        mark_bad_bool(&inst_relate_id).await?;
+        let sql = format!("UPDATE inst_relate SET bool_status='Failed' WHERE in = {};", pe_key);
+        SUL_DB.query(sql).await?;
         return Ok(());
     }
 
@@ -278,32 +326,40 @@ async fn apply_boolean_for_query(
             "布尔运算失败: 正实体 manifold 没有三角形, refno: {}",
             query.refno
         );
-        mark_bad_bool(&inst_relate_id).await?;
+        let sql = format!("UPDATE inst_relate SET bool_status='Failed' WHERE in = {};", pe_key);
+        SUL_DB.query(sql).await?;
         return Ok(());
     }
 
-    // 计算正实体世界坐标系的逆矩阵，用于将负实体转换到正实体的相对坐标系
-    let inverse_pos_world = pos_world_mat.inverse();
+    // 计算实例世界坐标系的逆矩阵，用于将负实体转换到实例的相对坐标系
+    let inverse_inst_world = inst_world_mat.inverse();
     let mut neg_manifolds = Vec::new();
-    for (_, carrier_wt, neg_infos) in query.neg_ts.iter() {
-        // 负实体载体的世界坐标变换
-        let carrier_world_mat = carrier_wt.0.to_matrix().as_dmat4();
-
+    for (_, _, neg_infos) in query.neg_ts.iter() {
         for NegInfo {
-            id, trans, aabb, ..
+            id,
+            geo_local_trans,
+            aabb,
+            carrier_world_trans,
+            ..
         } in neg_infos.iter().cloned()
         {
             if aabb.is_none() {
                 continue;
             }
 
-            // 计算负实体相对于正实体坐标系的变换矩阵
-            // 相对变换 = inverse(正实体世界坐标) × 负实体世界坐标
-            // 负实体世界坐标 = carrier_world_mat × trans
-            let neg_world_mat = carrier_world_mat * trans.0.to_matrix().as_dmat4();
-            let relative_mat = inverse_pos_world * neg_world_mat;
+            // 获取负载体的世界坐标变换
+            // 如果没有 carrier_world_trans，使用单位矩阵（兼容旧数据）
+            let carrier_world_mat = carrier_world_trans
+                .map(|wt| wt.0.to_matrix().as_dmat4())
+                .unwrap_or(glam::DMat4::IDENTITY);
 
-            debug_model_debug!("加载负实体 mesh: {} (相对于正实体坐标系)", id.to_mesh_id());
+            // 计算负实体相对于实例坐标系的变换矩阵
+            // 相对变换 = inverse(实例世界坐标) × 负实体世界坐标
+            // 负实体世界坐标 = carrier_world_mat × geo_local_trans
+            let neg_world_mat = carrier_world_mat * geo_local_trans.0.to_matrix().as_dmat4();
+            let relative_mat = inverse_inst_world * neg_world_mat;
+
+            debug_model_debug!("加载负实体 mesh: {} (相对于实例坐标系)", id.to_mesh_id());
 
             if let Ok(manifold) = load_manifold(&id.to_mesh_id(), relative_mat, true) {
                 neg_manifolds.push(manifold);
@@ -317,7 +373,8 @@ async fn apply_boolean_for_query(
             query.refno,
             query.neg_ts.len()
         );
-        mark_bad_bool(&inst_relate_id).await?;
+        let sql = format!("UPDATE inst_relate SET bool_status='Failed' WHERE in = {};", pe_key);
+        SUL_DB.query(sql).await?;
         return Ok(());
     }
 
@@ -337,13 +394,36 @@ async fn apply_boolean_for_query(
             eprintln!("导出 OBJ 失败: refno={} err={}", query.refno, e);
         }
 
-        update_booled_id(&inst_relate_id, &mesh_id).await?;
-        debug_model!("布尔运算完成: refno={} mesh={}", query.refno, mesh_id);
+        if let Some(aabb) = mesh.cal_aabb() {
+            let aabb_hash = gen_bytes_hash(&aabb).to_string();
+            let aabb_json = serde_json::to_string(&aabb).unwrap_or_else(|_| "{}".to_string());
+            let sql = format!(
+                "INSERT IGNORE INTO aabb {{ 'id': aabb:⟨{}⟩, 'd': {} }}; UPDATE inst_relate SET bool_status='Success', booled=true, booled_id='{}', aabb = aabb:⟨{}⟩ WHERE in = {};",
+                aabb_hash, aabb_json, mesh_id, aabb_hash, pe_key
+            );
+            debug_model!("[布尔更新] 执行 SQL: {}", sql);
+            SUL_DB.query(&sql).await?;
+        } else {
+            let sql = format!(
+                "UPDATE inst_relate SET bool_status='Success', booled=true, booled_id='{}' WHERE in = {};",
+                mesh_id, pe_key
+            );
+            debug_model!("[布尔更新] 执行 SQL: {}", sql);
+            SUL_DB.query(&sql).await?;
+        }
+        println!("布尔运算完成: refno={} mesh={}", query.refno, mesh_id);
+        // 验证更新是否成功
+        let verify_sql = format!("SELECT booled_id, bool_status FROM inst_relate WHERE in = {}", pe_key);
+        if let Ok(result) = SUL_DB.query(&verify_sql).await {
+            debug_model!("[布尔验证] 查询结果: {:?}", result);
+        }
         return Ok(());
     }
 
     println!("布尔运算失败: 无法保存结果 mesh, refno: {}", query.refno);
-    mark_bad_bool(&inst_relate_id).await
+    let sql = format!("UPDATE inst_relate SET bool_status='Failed' WHERE in = {};", pe_key);
+    SUL_DB.query(sql).await?;
+    Ok(())
 }
 
 /// 对多个实例进行布尔运算（使用 Manifold，新查询流程）

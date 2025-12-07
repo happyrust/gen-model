@@ -1,11 +1,11 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use aios_core::geometry::ShapeInstancesData;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::rs_surreal::delete_inst_relate_cascade;
 use aios_core::types::*;
 use aios_core::{SUL_DB, SurrealQueryExt, get_db_option};
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use bevy_transform::prelude::Transform;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -16,9 +16,9 @@ use tokio::task::JoinHandle;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::debug_model_debug;
 // use crate::fast_model::EXIST_MESH_GEOS;
+use chrono;
 use std::fs::OpenOptions;
 use std::io::Write;
-use chrono;
 
 /// 保存 instance 数据到数据库（事务化批处理版本）
 pub async fn save_instance_data_optimize(
@@ -42,6 +42,14 @@ pub async fn save_instance_data_optimize(
         entry.insert(serde_json::to_string(&Transform::IDENTITY)?);
     }
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
+
+    // 收集 Neg 和 CataCrossNeg 类型的 geo_relate 映射
+    // neg_geo_by_carrier: key=carrier_refno -> value=Vec<geo_relate_id>
+    //   用于 neg_relate: 通过负实体 refno 找到其所有 Neg 类型的 geo_relate
+    // cata_cross_neg_geo_map: key=(carrier_refno, geom_refno) -> value=Vec<geo_relate_id>
+    //   用于 ngmr_relate: 通过 (负载体, ngmr_geom_refno) 找到对应的 CataCrossNeg geo_relate
+    let mut neg_geo_by_carrier: HashMap<RefnoEnum, Vec<u64>> = HashMap::new();
+    let mut cata_cross_neg_geo_map: HashMap<(RefnoEnum, RefnoEnum), Vec<u64>> = HashMap::new();
     if replace_exist {
         let refnos: Vec<RefnoEnum> = inst_mgr.inst_info_map.keys().copied().collect();
         debug_model_debug!(
@@ -160,6 +168,30 @@ pub async fn save_instance_data_optimize(
             let relate_id = gen_bytes_hash(&relate_json);
             geo_relate_buffer.push(format!("{{ {relate_json}, id: '{relate_id}' }}"));
 
+            // 收集 Neg 和 CataCrossNeg 类型的 geo_relate 映射
+            // carrier_refno: 拥有这个 geo_relate 的实体
+            // geom_refno: inst.refno (geo_relate 中的 geom_refno 字段)
+            use aios_core::geometry::GeoBasicType;
+            let carrier_refno = inst_geo_data.refno;
+            let geom_refno = inst.refno;
+            match inst.geo_type {
+                GeoBasicType::Neg => {
+                    // neg_relate: 按 carrier_refno 收集所有 Neg geo_relate
+                    neg_geo_by_carrier
+                        .entry(carrier_refno)
+                        .or_insert_with(Vec::new)
+                        .push(relate_id);
+                }
+                GeoBasicType::CataCrossNeg => {
+                    // ngmr_relate: 按 (carrier_refno, geom_refno) 收集 CataCrossNeg geo_relate
+                    cata_cross_neg_geo_map
+                        .entry((carrier_refno, geom_refno))
+                        .or_insert_with(Vec::new)
+                        .push(relate_id);
+                }
+                _ => {}
+            }
+
             // 直接使用 EleInstGeo，它已经包含了正确的 unit_flag
             // #region agent log
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -168,20 +200,20 @@ pub async fn save_instance_data_optimize(
                 .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
             {
                 // 尝试提取圆柱/斜切圆柱的关键参数；其他类型留零
-                let (pdia, phei, btm0, btm1, top0, top1, unit_flag, is_sscl) =
-                    match &inst.geo_param {
-                        aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimSCylinder(s) => (
-                            s.pdia,
-                            s.phei,
-                            s.btm_shear_angles[0],
-                            s.btm_shear_angles[1],
-                            s.top_shear_angles[0],
-                            s.top_shear_angles[1],
-                            s.unit_flag,
-                            s.is_sscl(),
-                        ),
-                        _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, inst.unit_flag, false),
-                    };
+                let (pdia, phei, btm0, btm1, top0, top1, unit_flag, is_sscl) = match &inst.geo_param
+                {
+                    aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimSCylinder(s) => (
+                        s.pdia,
+                        s.phei,
+                        s.btm_shear_angles[0],
+                        s.btm_shear_angles[1],
+                        s.top_shear_angles[0],
+                        s.top_shear_angles[1],
+                        s.unit_flag,
+                        s.is_sscl(),
+                    ),
+                    _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, inst.unit_flag, false),
+                };
                 let _ = writeln!(
                     f,
                     r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"pdms_inst.rs:save_instance_data_optimize","message":"push inst_geo","data":{{"geo_hash":{},"refno":"{}","geo_type":"{}","pdia":{},"phei":{},"btm":[{},{}],"top":[{},{}],"unit_flag":{},"is_sscl":{},"inst_geo_buffer_len":{}}},"timestamp":{}}}"#,
@@ -266,14 +298,14 @@ pub async fn save_instance_data_optimize(
         }
     }
 
-    // neg_relate
-    // 关系方向：负实体 -[neg_relate]-> 正实体
-    // - in: 负实体 refno
+    // neg_relate - 新结构
+    // 关系方向：切割几何 -[neg_relate]-> 正实体
+    // - in: geo_relate ID (切割几何)
     // - out: 正实体 refno (被减实体)
-    // 查询时使用反向查找：inst_relate:{正实体}<-neg_relate 来找到所有指向该正实体的负实体
-    // println!("🔍 [DEBUG] neg_relate_map 大小: {}", inst_mgr.neg_relate_map.len());
+    // - pe: 负实体 refno (负载体，原来的 in)
+    // 查询时：SELECT in.* FROM pe:正实体<-neg_relate 直接获取切割几何
     if !inst_mgr.neg_relate_map.is_empty() {
-        println!("🔍 [DEBUG] 开始创建 neg_relate 关系:");
+        println!("🔍 [DEBUG] 开始创建 neg_relate 关系 (新结构: in=geo_relate):");
         for (target, refnos) in &inst_mgr.neg_relate_map {
             println!("  目标: {}, 负实体数量: {}", target, refnos.len());
         }
@@ -281,22 +313,34 @@ pub async fn save_instance_data_optimize(
         let mut neg_batcher = TransactionBatcher::new(MAX_TX_STATEMENTS, MAX_CONCURRENT_TX);
         let mut neg_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
 
-        for (target, refnos) in &inst_mgr.neg_relate_map {
-            for (index, refno) in refnos.iter().enumerate() {
-                neg_buffer.push(format!(
-                    "{{ in: {}, id: [{}, {index}], out: {} }}",
-                    refno.to_pe_key(), // 负实体
-                    refno.to_string(),
-                    target.to_pe_key(), // 正实体（被减实体）
-                ));
+        for (target, neg_refnos) in &inst_mgr.neg_relate_map {
+            for neg_refno in neg_refnos.iter() {
+                // 查找该负实体的所有 Neg geo_relate
+                if let Some(geo_relate_ids) = neg_geo_by_carrier.get(neg_refno) {
+                    for geo_relate_id in geo_relate_ids.iter() {
+                        // ID 简化：[geo_relate_id, target_pe] 唯一确定一条关系
+                        neg_buffer.push(format!(
+                            "{{ in: geo_relate:⟨{0}⟩, id: ['{0}', {2}], out: {2}, pe: {1} }}",
+                            geo_relate_id,         // 切割几何
+                            neg_refno.to_pe_key(), // 负载体
+                            target.to_pe_key(),    // 正实体（被减实体）
+                        ));
 
-                if neg_buffer.len() >= CHUNK_SIZE {
-                    let statement = format!(
-                        "INSERT RELATION INTO neg_relate [{}];",
-                        neg_buffer.join(",")
+                        if neg_buffer.len() >= CHUNK_SIZE {
+                            let statement = format!(
+                                "INSERT RELATION INTO neg_relate [{}];",
+                                neg_buffer.join(",")
+                            );
+                            neg_batcher.push(statement).await?;
+                            neg_buffer.clear();
+                        }
+                    }
+                } else {
+                    // 没有找到 geo_relate，记录警告但不创建关系
+                    debug_model_debug!(
+                        "[WARN] neg_relate: 负实体 {} 没有找到 Neg 类型的 geo_relate",
+                        neg_refno
                     );
-                    neg_batcher.push(statement).await?;
-                    neg_buffer.clear();
                 }
             }
         }
@@ -312,15 +356,15 @@ pub async fn save_instance_data_optimize(
         neg_batcher.finish().await?;
     }
 
-    // ngmr_relate
-    // 关系方向：负实体相关元素 -[ngmr_relate]-> 正实体
-    // - in: ele_refno (负实体相关元素)
+    // ngmr_relate - 新结构
+    // 关系方向：切割几何 -[ngmr_relate]-> 正实体
+    // - in: geo_relate ID (CataCrossNeg 切割几何)
     // - out: 目标k (正实体)
-    // - ngmr: ngmr_geom_refno (NGMR 几何引用)
-    // 查询时使用反向查找：inst_relate:{正实体}<-ngmr_relate 来找到所有指向该正实体的负实体相关元素
-    // println!("🔍 [DEBUG] ngmr_neg_relate_map 大小: {}", inst_mgr.ngmr_neg_relate_map.len());
+    // - pe: ele_refno (负载体，原来的 in)
+    // - ngmr: ngmr_geom_refno (NGMR 几何引用，保留用于调试)
+    // 查询时：SELECT in.* FROM pe:正实体<-ngmr_relate 直接获取切割几何
     if !inst_mgr.ngmr_neg_relate_map.is_empty() {
-        println!("🔍 [DEBUG] 开始创建 ngmr_relate 关系:");
+        println!("🔍 [DEBUG] 开始创建 ngmr_relate 关系 (新结构: in=geo_relate):");
         for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
             println!("  目标: {}, NGMR 数量: {}", k, refnos.len());
         }
@@ -328,25 +372,40 @@ pub async fn save_instance_data_optimize(
         let mut ngmr_batcher = TransactionBatcher::new(MAX_TX_STATEMENTS, MAX_CONCURRENT_TX);
         let mut ngmr_buffer: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
 
-        for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
-            let kpe = k.to_pe_key();
+        for (target_k, refnos) in &inst_mgr.ngmr_neg_relate_map {
+            let target_pe = target_k.to_pe_key();
             for (ele_refno, ngmr_geom_refno) in refnos {
-                let ele_pe = ele_refno.to_pe_key();
-                let ngmr_pe = ngmr_geom_refno.to_pe_key();
-                ngmr_buffer.push(format!(
-                    "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
-                    ele_pe,  // 负实体相关元素
-                    kpe,     // 正实体（目标）
-                    ngmr_pe  // NGMR 几何引用
-                ));
+                // 查找该 (负载体, ngmr_geom_refno) 的 CataCrossNeg geo_relate
+                let key = (*ele_refno, *ngmr_geom_refno);
+                if let Some(geo_relate_ids) = cata_cross_neg_geo_map.get(&key) {
+                    for geo_relate_id in geo_relate_ids.iter() {
+                        let ele_pe = ele_refno.to_pe_key();
+                        let ngmr_pe = ngmr_geom_refno.to_pe_key();
+                        // ID 简化：[geo_relate_id, target_pe] 唯一确定一条关系
+                        ngmr_buffer.push(format!(
+                            "{{ in: geo_relate:⟨{0}⟩, id: ['{0}', {2}], out: {2}, pe: {1}, ngmr: {3} }}",
+                            geo_relate_id,  // 切割几何
+                            ele_pe,         // 负载体
+                            target_pe,      // 正实体（目标）
+                            ngmr_pe         // NGMR 几何引用
+                        ));
 
-                if ngmr_buffer.len() >= CHUNK_SIZE {
-                    let statement = format!(
-                        "INSERT RELATION INTO ngmr_relate [{}];",
-                        ngmr_buffer.join(",")
+                        if ngmr_buffer.len() >= CHUNK_SIZE {
+                            let statement = format!(
+                                "INSERT RELATION INTO ngmr_relate [{}];",
+                                ngmr_buffer.join(",")
+                            );
+                            ngmr_batcher.push(statement).await?;
+                            ngmr_buffer.clear();
+                        }
+                    }
+                } else {
+                    // 没有找到 geo_relate，记录警告但不创建关系
+                    debug_model_debug!(
+                        "[WARN] ngmr_relate: 负载体 {} + ngmr {} 没有找到 CataCrossNeg 类型的 geo_relate",
+                        ele_refno,
+                        ngmr_geom_refno
                     );
-                    ngmr_batcher.push(statement).await?;
-                    ngmr_buffer.clear();
                 }
             }
         }
