@@ -92,18 +92,15 @@ pub async fn gen_all_geos_data(
     // =========================
     // Full Noun 模式：新管线
     // =========================
-    if db_option.full_noun_mode {
-        return process_full_noun_mode(db_option, final_incr_updates, time).await;
-    }
-
     // =========================
-    // 非 Full Noun 模式
+    // 判断是否有调试/手动指定的 refno
     // =========================
     let is_incr_update = final_incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.inner.debug_model_refnos.is_some();
 
-    if is_incr_update || has_manual_refnos || has_debug {
+    // 如果有调试 refno 或手动 refno，优先走调试路径（即使在 Full Noun 模式下）
+    if has_debug || has_manual_refnos || is_incr_update {
         // 增量/手动/调试路径
         process_targeted_generation(
             manual_refnos,
@@ -113,6 +110,9 @@ pub async fn gen_all_geos_data(
             time,
         )
         .await
+    } else if db_option.full_noun_mode {
+        // Full Noun 模式：新管线
+        process_full_noun_mode(db_option, final_incr_updates, time).await
     } else {
         // 全量生成路径（按 dbno 循环）
         process_full_database_generation(db_option, target_sesno, time).await

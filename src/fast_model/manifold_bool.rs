@@ -241,9 +241,10 @@ pub async fn apply_cata_neg_boolean_manifold(
                 );
                 update_sql.push_str(relate_sql.as_str());
                 
-                // 3. 更新原始 Pos 的 geo_relate，设置 booled_id 指向新的 Compound
+                // 3. 更新原始 Pos 的 geo_relate，设置 booled_id 并将 geo_type 改为 CataPos
+                // （表示这是被布尔运算替换的元件库原始几何）
                 update_sql.push_str(&format!(
-                    "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩ WHERE out = {};",
+                    "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩, geo_type = 'CataPos' WHERE out = {} AND geo_type = 'Pos';",
                     new_id,
                     &pos.id.to_raw()
                 ));
@@ -426,10 +427,11 @@ async fn apply_boolean_for_query(
             ));
         }
         
-        // 3. 更新所有参与布尔的原始 Pos 的 geo_relate，设置 booled_id 指向新的 Compound
+        // 3. 更新所有参与布尔的原始 Pos 的 geo_relate，设置 booled_id 并将 geo_type 改为 DesiPos
+        // （表示这是被布尔运算替换的 Design 原始几何）
         for (pos_id, _) in query.pos_geos.iter() {
             update_sql.push_str(&format!(
-                "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩ WHERE out = {};",
+                "UPDATE geo_relate SET booled_id = inst_geo:⟨{}⟩, geo_type = 'DesiPos' WHERE out = {} AND geo_type = 'Pos';",
                 mesh_id,
                 pos_id.to_raw()
             ));

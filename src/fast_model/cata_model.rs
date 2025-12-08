@@ -812,6 +812,7 @@ async fn gen_cata_geos_inner(
                             } else if !cata_neg_refnos.is_empty() {
                                 GeoBasicType::Compound
                             } else {
+                                // 初始正实体，布尔运算时会被改为 CataPos
                                 GeoBasicType::Pos
                             };
                             let geo_param = csg_shape
