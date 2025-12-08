@@ -463,6 +463,12 @@ pub async fn cal_room_refnos(
     let panel_tri_mesh = {
         let geom_inst = &panel_geom_insts[0];
         let world_trans = geom_inst.world_trans;
+        
+        // 检查 insts 是否为空
+        if geom_inst.insts.is_empty() {
+            debug!("面板 {} 的 insts 数组为空", panel_refno);
+            return Ok(Default::default());
+        }
         let inst = &geom_inst.insts[0];
 
         match load_geometry_with_enhanced_cache(mesh_dir, &inst.geo_hash, world_trans, inst).await {
@@ -1254,8 +1260,10 @@ mod tests {
     #[test]
     fn test_cache_metrics_new() {
         let metrics = CacheMetrics::new();
-        assert_eq!(metrics.hits.load(Ordering::Relaxed), 0);
-        assert_eq!(metrics.misses.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.plant_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.plant_misses.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.trimesh_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.trimesh_misses.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1266,9 +1274,9 @@ mod tests {
         assert_eq!(metrics.hit_rate(), 0.0);
         
         // 记录一些命中和未命中
-        metrics.record_hit();
-        metrics.record_hit();
-        metrics.record_miss();
+        metrics.record_plant_hit();
+        metrics.record_plant_hit();
+        metrics.record_plant_miss();
         
         // 2 命中 / 3 总计 = 0.666...
         let hit_rate = metrics.hit_rate();
@@ -1279,13 +1287,17 @@ mod tests {
     fn test_cache_metrics_reset() {
         let metrics = CacheMetrics::new();
         
-        metrics.record_hit();
-        metrics.record_miss();
+        metrics.record_plant_hit();
+        metrics.record_plant_miss();
+        metrics.record_trimesh_hit();
+        metrics.record_trimesh_miss();
         
         metrics.reset();
         
-        assert_eq!(metrics.hits.load(Ordering::Relaxed), 0);
-        assert_eq!(metrics.misses.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.plant_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.plant_misses.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.trimesh_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.trimesh_misses.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.hit_rate(), 0.0);
     }
 

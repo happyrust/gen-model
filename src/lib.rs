@@ -12,11 +12,11 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
-#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
 use crate::fast_model::room_model::build_room_relations;
-#[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite-index")))]
 pub async fn build_room_relations(_db_option: &aios_core::options::DbOption) -> anyhow::Result<()> {
-    println!("⚠️ build_room_relations 功能需要 sqlite 特性");
+    println!("⚠️ build_room_relations 功能需要 sqlite-index 特性");
     Ok(())
 }
 use crate::fast_model::{
