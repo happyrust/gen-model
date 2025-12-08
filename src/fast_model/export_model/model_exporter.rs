@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::fast_model::unit_converter::{LengthUnit, UnitConverter};
-use std::io::Write;
 use chrono;
+use std::io::Write;
 
 /// 模型导出器 Trait
 ///
@@ -379,6 +379,15 @@ pub async fn query_geometry_instances(
         }
     }
 
+    // Debug: 打印查询到的 geo_hash
+    for geom_inst in &geom_insts {
+        println!("[导出调试] refno={}, has_neg={}, insts数量={}", 
+            geom_inst.refno, geom_inst.has_neg, geom_inst.insts.len());
+        for inst in &geom_inst.insts {
+            println!("  - geo_hash={}", inst.geo_hash);
+        }
+    }
+
     // #region agent log: dump inst transforms for alignment check
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -396,10 +405,22 @@ pub async fn query_geometry_instances(
                     false,
                     inst.is_tubi,
                     false,
-                    t.row(0).x, t.row(0).y, t.row(0).z, t.row(0).w,
-                    t.row(1).x, t.row(1).y, t.row(1).z, t.row(1).w,
-                    t.row(2).x, t.row(2).y, t.row(2).z, t.row(2).w,
-                    t.row(3).x, t.row(3).y, t.row(3).z, t.row(3).w,
+                    t.row(0).x,
+                    t.row(0).y,
+                    t.row(0).z,
+                    t.row(0).w,
+                    t.row(1).x,
+                    t.row(1).y,
+                    t.row(1).z,
+                    t.row(1).w,
+                    t.row(2).x,
+                    t.row(2).y,
+                    t.row(2).z,
+                    t.row(2).w,
+                    t.row(3).x,
+                    t.row(3).y,
+                    t.row(3).z,
+                    t.row(3).w,
                     chrono::Utc::now().timestamp_millis()
                 );
             }

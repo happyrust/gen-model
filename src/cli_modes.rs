@@ -5,13 +5,13 @@ use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::{Result, anyhow};
 
 use aios_core::init_surreal;
-use aios_database::options::DbOptionExt;
 use aios_core::{DBType, query_mdb_db_nums};
 use aios_database::fast_model::export_glb::GlbExporter;
 use aios_database::fast_model::export_gltf::GltfExporter;
 use aios_database::fast_model::export_gltf::export_gltf_for_refnos;
 use aios_database::fast_model::export_instanced_bundle::export_instanced_bundle_for_refnos;
 use aios_database::fast_model::export_model::export_obj::ObjExporter;
+use aios_database::options::DbOptionExt;
 // use aios_database::fast_model::export_xkt::XktExporter;
 use aios_database::fast_model::model_exporter::{
     CommonExportConfig, GlbExportConfig, GltfExportConfig, ModelExporter, ObjExportConfig,
@@ -369,10 +369,7 @@ pub async fn export_obj_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
     Ok(())
 }
 
-async fn export_obj_mode_for_db(
-    config: &ExportConfig,
-    db_option_ext: &DbOptionExt,
-) -> Result<()> {
+async fn export_obj_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionExt) -> Result<()> {
     let mesh_dir = config.get_mesh_dir(db_option_ext);
     let dbno = config
         .dbno

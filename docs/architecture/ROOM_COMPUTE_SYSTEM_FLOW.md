@@ -100,16 +100,16 @@
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  build_room_relations_v2()                                  │
-│  📍 src/fast_model/room_model_v2.rs:73                      │
+│  build_room_relations()                                    │
+│  📍 src/fast_model/room_model.rs:73                       │
 │  └─ 房间关系构建主函数 (改进版)                             │
 └────────────────────┬────────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  第一阶段：构建房间面板映射                                  │
-│  build_room_panels_relate_v2()                              │
-│  📍 src/fast_model/room_model_v2.rs:81                      │
+│  build_room_panels_relate()                                │
+│  📍 src/fast_model/room_model.rs:81                       │
 │  ├─ 查询房间关键词                                          │
 │  ├─ 匹配面板与房间                                          │
 │  └─ 返回 room_panel_map: HashMap<RoomNum, Vec<PanelRefno>> │
@@ -119,7 +119,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  第二阶段：并发处理每个房间面板                              │
 │  for_each_room_panel()                                      │
-│  📍 src/fast_model/room_model_v2.rs:97                      │
+│  📍 src/fast_model/room_model.rs:97                       │
 │  └─ 使用 buffer_unordered(4) 并发控制                       │
 └────────────────────┬────────────────────────────────────────┘
                      │
@@ -130,8 +130,8 @@
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  第三阶段：计算房间内构件                                    │
-│  cal_room_refnos_v2()                                       │
-│  📍 src/fast_model/room_model_v2.rs:105                     │
+│  cal_room_refnos()                                         │
+│  📍 src/fast_model/room_model.rs:105                      │
 │  ├─ 加载面板几何网格                                        │
 │  ├─ 使用空间索引查询候选构件                                │
 │  ├─ 精确几何包含检测                                        │
@@ -141,12 +141,12 @@
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  第四阶段：保存房间关系到数据库                              │
-│  save_room_relate_v2()                                      │
-│  📍 src/fast_model/room_model_v2.rs:109                     │
+│  save_room_relate()                                        │
+│  📍 src/fast_model/room_model.rs:109                      │
 │  ├─ 构建 room_panel_relate 关系                             │
 │  ├─ 批量创建 SurrealDB RELATE语句                           │
 │  └─ 执行数据库写入                                          │
-│      (src/fast_model/room_model_v2.rs:268)                  │
+│      (src/fast_model/room_model.rs:268)                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -170,7 +170,7 @@
                    │
                    ▼
             统计构建结果
-         (room_model_v2.rs:127)
+         (room_model.rs:127)
 ```
 
 ---
@@ -448,7 +448,7 @@
 ### 核心实现文件
 
 - **任务管理**：`src/web_server/room_api.rs`
-- **关系重建**：`src/fast_model/room_model_v2.rs`
+- **关系重建**：`src/fast_model/room_model.rs`
 - **空间查询**：`rs-core/src/room/query_v2.rs`
 - **系统管理**：`rs-core/src/room/room_system_manager.rs`
 
@@ -457,6 +457,6 @@
 - API入口：`room_api.rs:268` (create_room_task)
 - 异步启动：`room_api.rs:305` (tokio::spawn)
 - 任务调度：`room_api.rs:659` (match task_type)
-- 关系构建：`room_model_v2.rs:73` (build_room_relations_v2)
+- 关系构建：`room_model.rs:73` (build_room_relations)
 - 空间查询：`query_v2.rs:109` (query_containing_point)
 - 数据迁移：`room_system_manager.rs:189` (migrate_legacy_data)

@@ -8,6 +8,10 @@ pub struct DbOptionExt {
     #[serde(flatten)]
     pub inner: DbOption,
 
+    /// 预烘 TriMesh(L0) 输出目录（默认 meshes/trimesh_L0）
+    #[serde(default)]
+    pub trimesh_l0_dir: Option<String>,
+
     /// MQTT服务器地址，用于异地部署
     #[serde(default)]
     pub mqtt_server: Option<String>,
@@ -91,6 +95,21 @@ impl DbOptionExt {
             .unwrap_or(self.inner.gen_model_batch_size)
     }
 
+    /// 获取预烘 TriMesh(L0) 目录，默认在 meshes/trimesh_L0
+    pub fn get_trimesh_l0_dir(&self) -> std::path::PathBuf {
+        let base = self.inner.get_meshes_path();
+        let dir = self
+            .trimesh_l0_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| base.join("trimesh_L0"));
+        // 确保目录存在（若创建失败，调用侧再处理）
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("创建 trimesh L0 目录失败: {}, err={}", dir.display(), e);
+        }
+        dir
+    }
+
     /// 检查 noun 类别是否启用
     /// 空列表表示启用所有类别
     pub fn is_noun_category_enabled(&self, category: &str) -> bool {
@@ -123,6 +142,7 @@ impl From<DbOption> for DbOptionExt {
     fn from(option: DbOption) -> Self {
         Self {
             inner: option,
+            trimesh_l0_dir: None,
             mqtt_server: None,
             mqtt_port: None,
             http_server: None,
@@ -212,9 +232,16 @@ pub fn get_db_option_ext_from_path(config_path: &str) -> anyhow::Result<DbOption
         .map(|v| v as usize)
         .filter(|&v| v > 0); // 0 表示不限制，转换为 None
 
+    // 解析预烘 TriMesh(L0) 目录
+    let trimesh_l0_dir = toml_value
+        .get("trimesh_l0_dir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     // 构建 DbOptionExt
     let db_option_ext = DbOptionExt {
         inner: db_option,
+        trimesh_l0_dir,
         mqtt_server: None,
         mqtt_port: None,
         http_server: None,

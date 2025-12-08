@@ -1,67 +1,101 @@
 #V2
-DEFINE NAMESPACE `1516`; USE NS `1516`; DEFINE DATABASE AvevaMarineSample;
-SELECT count() as cnt FROM inst_relate WHERE in.dbno = 5525;
-SELECT in.dbno, count() as cnt FROM inst_relate GROUP BY in.dbno LIMIT 10;
-SELECT * FROM inst_relate LIMIT 2;
-SELECT count() as cnt FROM pe WHERE dbno = 5525;
-SELECT dbno, count() as cnt FROM pe GROUP BY dbno;
-SELECT id, dbno FROM pe LIMIT 3;
-SELECT id FROM pe WHERE id = pe:⟨5525_0⟩;
-SELECT name, full_name FROM pe WHERE noun = 'BRAN' LIMIT 5;
-SELECT id, name, full_name FROM pe WHERE name != '' LIMIT 5;
-SELECT * FROM pe:21491_16837;
--- 查询阀门的 cata 数据
-SELECT * FROM cata WHERE id = cata:18399200182918633584;
--- 1. 查询阀门基本信息和 CAT 引用
-SELECT * FROM pe:21491_16837;
-SELECT id, name, noun, cata_hash FROM pe WHERE owner = pe:21491_16837;
-SELECT * FROM pe WHERE noun = 'SCOM' AND cata_hash = '18399200182918633584' LIMIT 1;
-SELECT *, ->SPRF as sprf_ref, ->SPRE as spre_ref FROM pe:21491_16837;
-SELECT id, name, noun FROM pe WHERE cata_hash = '18399200182918633584' LIMIT 10;
-SELECT id, name, noun FROM pe WHERE owner = pe:21491_10078;
-SELECT * FROM attr WHERE id.id = pe:21491_16837;
-SELECT * FROM attr:21491_16837;
-SELECT id, noun, TUFL, CLFL FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10583, pe:16596_10584, pe:16596_10585, pe:16596_10595, pe:16596_10596, pe:16596_10597];
-SELECT id, noun, TUFL FROM pe WHERE id IN [pe:16596_10569, pe:16596_10570, pe:16596_10571, pe:16596_10577];
-SELECT * FROM attr WHERE id IN [attr:16596_10567, attr:16596_10568, attr:16596_10569, attr:16596_10577] LIMIT 10;
-SELECT * FROM pe:16596_10567;
-SELECT id, noun, LEVE FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10569, pe:16596_10570, pe:16596_10577];
-SELECT * FROM pe:16596_10569 LIMIT 1;
-SELECT id, noun, TUFL FROM pe WHERE id IN [pe:16596_10567, pe:16596_10568, pe:16596_10583, pe:16596_10584, pe:16596_10585, pe:16596_10595, pe:16596_10596];
-SELECT ptset FROM inst_info LIMIT 1
-SELECT ptset FROM inst_info LIMIT 2
-select * from pe:24381_46958;
-INFO FOR KV;
-INFO FOR NS;
-select * from pe:24381_46958;
-INFO FOR NS;
-select * from pe:24381_46958;
-INFO FOR NS;
-select * from pe:24381_46958;
-INFO FOR NS;
-select * from pe:24381_46958;
-SELECT GMRE, PTRE, DTRE, PARA FROM SCOM:15194_5835;
-SELECT id,noun,name FROM pe WHERE owner = pe:⟨15194_5835⟩;
-SELECT id,noun,name FROM pe WHERE owner = pe:⟨15194_5835⟩ AND noun='SSLC';
-SELECT id,noun,name,owner FROM pe:15194_5793;
-SELECT id,noun,name,owner FROM pe:15194_5779;
-SELECT id,noun,name,owner FROM pe:15194_15490;
-SELECT id,noun,name,owner FROM pe:15194_5778;
-SELECT noun,count() as cnt, array::group(id) as ids FROM pe WHERE owner = pe:⟨15194_5778⟩ GROUP BY noun;
-SELECT noun,count() as cnt, array::group(id) as ids FROM pe WHERE owner = pe:⟨15194_132⟩ GROUP BY noun;
-SELECT count() FROM pe WHERE noun='SSLC';
-SELECT id,owner,name FROM pe WHERE noun='SSLC' LIMIT 20;
-SELECT id,noun,name,owner FROM pe WHERE owner = pe:⟨15194_5778⟩ AND noun='SSLC';
-SELECT * FROM pe:15194_5793.children;
-SELECT id,noun,name,owner,children,refno FROM pe:15194_5795;
-SELECT * FROM pe:15194_5796;
-SELECT id,noun,name,owner,children,refno FROM pe:15194_5797;
-SELECT * FROM pe:15194_5798;
-SELECT id,noun,name,owner,children,refno FROM pe:15194_5799;
-SELECT * FROM pe:15194_5800;
-SELECT refno.* FROM pe:15194_5795;
-SELECT refno.* FROM pe:15194_5797;
-SELECT refno.* FROM pe:15194_5799;
-SELECT id,noun,owner,phei,pdia,dist_to_btm,height,length,width,btm_shear_angles,top_shear_angles,btm_diameter,top_diameter,offset FROM inst_geo WHERE owner = pe:⟨24381_46958⟩;
-SELECT id,owner,noun,pdia,phei,height,btm_shear_angles,top_shear_angles FROM inst_geo LIMIT 5;
-SELECT * FROM inst_geo WHERE id = inst_geo:⟨11223052186545859511⟩;
+-- 检查 PANE 的父节点
+select id, NAME, noun from PE where noun = 'PANE' limit 5;
+-- 检查所有表
+INFO FOR DATABASE;
+-- 检查 PE 表中的 ZONE 和 SBFR 数据
+select count() as zone_count from PE where noun = 'ZONE' group all;
+select count() as sbfr_count from PE where noun = 'SBFR' group all;
+select count() as pane_count from PE where noun = 'PANE' group all;
+-- 检查有 -RM 或 -R- 关键词的元素
+select count() as rm_in_name from PE where '-RM' in NAME or '-R-' in NAME group all;
+-- 查看 ZONE 的结构
+select id, NAME, noun, children from PE where noun = 'ZONE' limit 5;
+-- 查看 SBFR 的结构
+select id, NAME, noun, children from PE where noun = 'SBFR' limit 5;
+INFO FOR ROOT;
+USE NS `1516`; INFO FOR NAMESPACE;
+USE NS `1516` DB ams; INFO FOR DATABASE;
+USE NS `1516` DB AvevaMarineSample; INFO FOR DATABASE;
+USE NS `1516` DB AvevaMarineSample;
+-- 检查 PE 表数据总量
+select count() as pe_count from PE group all;
+-- 检查各 noun 类型的分布
+select noun, count() as cnt from PE group by noun order by cnt desc limit 20;
+-- 检查有 -R- 关键词的元素
+select count() as rm_name_count from PE where NAME contains '-R-' group all;
+-- 检查 FRMW 表
+select count() as frmw_count from FRMW group all;
+-- 检查 SBFR 表
+select count() as sbfr_count from SBFR group all;
+-- 查看 ZONE 数据
+select id, NAME, noun, owner from PE where noun = 'ZONE' limit 5;
+USE NS `1516` DB AvevaMarineSample;
+-- 查看 FRMW 表结构
+select id, NAME, children from FRMW limit 3;
+-- 检查有 -R- 关键词的 FRMW
+select id, NAME from FRMW where NAME contains '-R-' limit 10;
+-- 检查 children 是什么类型
+select id, NAME, type::is_array(children) as is_arr, array::len(children) as children_cnt from FRMW limit 5;
+USE NS `1516` DB AvevaMarineSample;
+-- 查看 FRMW 表的完整结构（取一条记录）
+select * from FRMW limit 1;
+-- 查看 SBFR 表结构
+select * from SBFR limit 1;
+-- 查看名称包含房间关键词的 FRMW
+select id, NAME from FRMW where string::contains(NAME, '-R-') limit 10;
+USE NS `1516` DB AvevaMarineSample;
+-- 查找有名称的 FRMW
+USE NS `1516` DB AvevaMarineSample;
+select id, NAME from FRMW where NAME IS NOT NONE limit 20;
+select count() as named_frmw from FRMW where NAME IS NOT NONE group all;
+select id, NAME from FRMW where NAME IS NOT NONE AND '-R-' in NAME limit 10;
+USE NS `1516` DB AvevaMarineSample;
+-- 检查有 -RM 关键词的 FRMW
+select id, NAME from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 10;
+-- 检查 FRMW 的 REFNO 字段
+select id, NAME, REFNO from FRMW where NAME IS NOT NONE limit 3;
+-- 使用 pe_owner 关系检查 PANE
+select id, NAME, array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE'] as panels from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 3;
+USE NS `1516` DB AvevaMarineSample;
+-- 检查 pe_owner 表是否存在数据
+select count() as pe_owner_count from pe_owner group all;
+-- 检查特定 FRMW 的子节点
+select id, NAME, REFNO, REFNO<-pe_owner as direct_children from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
+-- 检查 PE 表中的 owner 字段
+select count() as pe_count from PE group all;
+-- 检查是否有 noun='PANE' 的 PE
+select id, NAME, noun, owner from PE where noun = 'PANE' limit 5;
+-- 查看 PANE 表
+select count() as pane_count from PANE group all;
+select id, NAME, OWNER, REFNO from PANE limit 3;
+USE NS `1516` DB AvevaMarineSample;
+-- 检查特定 FRMW 下的所有子节点
+select id, NAME, REFNO, (select in.id, in.noun from $parent.REFNO<-pe_owner) as children from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
+-- 检查从 PANE 反向找到 FRMW
+select id, OWNER, OWNER.owner, OWNER.owner.owner from PANE limit 5;
+-- 查看 PANE 的 OWNER 层级
+USE NS `1516` DB AvevaMarineSample;
+-- 从特定 FRMW 开始递归查询子节点和孙节点
+LET $frmw_refno = pe:⟨17496_197731⟩;
+-- 查询第一层子节点 (SBFR)
+select id, (select in.id, in.noun from $parent.REFNO<-pe_owner) as level1 from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
+-- 查看 SBFR 的子节点
+select id, noun, (select in.id, in.noun from $parent.REFNO<-pe_owner) as children from SBFR where OWNER = pe:⟨17496_197731⟩ limit 3;
+USE NS `1516` DB AvevaMarineSample;
+-- 测试新的查询方式：通过 OWNER 字段查询
+-- 从 FRMW 查询 -> SBFR (OWNER = FRMW.REFNO) -> PANE (OWNER = SBFR.REFNO)
+USE NS `1516` DB AvevaMarineSample;
+-- 简化查询：从 FRMW 到 PANE 的层级
+-- Step 1: 找到 FRMW
+LET $frmw = (select id, NAME, REFNO from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 1)[0];
+RETURN $frmw;
+-- Step 2: 找到 SBFR (OWNER = FRMW.REFNO)
+LET $sbfrs = (select id, REFNO from SBFR where OWNER = $frmw.REFNO);
+RETURN $sbfrs;
+-- Step 3: 找到 PANE (OWNER = SBFR.REFNO)
+LET $panes = (select id, REFNO from PANE where OWNER IN array::map($sbfrs, |$s: any| $s.REFNO));
+RETURN $panes;
+USE NS `1516` DB AvevaMarineSample;
+-- 完整查询：从 FRMW 获取房间和所有 PANE
+select value [    id,    array::last(string::split(NAME, '-')),    array::flatten((select value (select value REFNO from PANE where OWNER = $parent.REFNO) from SBFR where OWNER = $parent.REFNO))] from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 5;

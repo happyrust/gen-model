@@ -66,7 +66,7 @@ cargo run --example room_calculation_demo --features "gen_model,sqlite-index"
   - `gen_model/` - 模型生成主模块，包含完整和非完整名词模式、网格处理、编排器等
   - `mesh_generate.rs` - 网格生成和布尔运算
   - `manifold_bool.rs` - Manifold 库布尔运算集成
-  - `room_model_v2.rs` - 改进版房间模型构建（需要 sqlite-index）
+  - `room_model.rs` - 改进版房间模型构建（需要 sqlite-index）
   - `export_model/` - 模型导出功能（GLB、GLTF、实例化包等）
   - `query.rs` - 数据库查询逻辑
   - `aabb_cache.rs` - AABB 缓存（需要 sqlite-index）

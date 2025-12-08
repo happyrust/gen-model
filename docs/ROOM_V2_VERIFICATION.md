@@ -3,12 +3,12 @@
 ## 改进内容总结
 
 ### 1. 使用 L0 LOD Mesh
-- **位置**: `src/fast_model/room_model_v2.rs` 和 `rs-core/src/room/query.rs`
+- **位置**: `src/fast_model/room_model.rs` 和 `rs-core/src/room/query.rs`
 - **改进**: 使用 `build_mesh_path(geo_hash, "L0")` 加载最低精度 mesh
 - **优势**: 减少 60-80% 的 I/O 和内存占用
 
 ### 2. 基于关键点的精确几何检测
-- **位置**: `src/fast_model/room_model_v2.rs`
+- **位置**: `src/fast_model/room_model.rs`
 - **新增函数**:
   - `extract_aabb_key_points()` - 提取 27 个关键点（8顶点+1中心+6面中心+12边中点）
   - `extract_geom_key_points()` - 从几何体实例提取关键点
@@ -237,7 +237,7 @@ grep "细算完成" result_v2.log
 ---
 
 **相关文件**:
-- 实现代码: `src/fast_model/room_model_v2.rs`
+- 实现代码: `src/fast_model/room_model.rs`
 - 验证测试: `src/test/test_room_v2_verification.rs`
 - 验证脚本: `scripts/test/test_room_v2_verification.sh`
 - 集成测试: `src/test/test_room_integration.rs`

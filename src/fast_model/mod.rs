@@ -24,12 +24,12 @@ pub mod capture;
 pub mod manifold_bool;
 pub mod mesh_generate;
 
-pub mod room_model_v2; // 改进版本的房间模型
+pub mod room_model; // 改进版本的房间模型
 
-// Re-export room model v2 functions
+// Re-export room model functions
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-index"))]
-pub use room_model_v2::{
-    IncrementalUpdateResult, RoomBuildStats, build_room_relations_v2,
+pub use room_model::{
+    IncrementalUpdateResult, RoomBuildStats, build_room_relations,
     rebuild_room_relations_for_rooms, regenerate_room_models_by_keywords,
     update_room_relations_incremental,
 };

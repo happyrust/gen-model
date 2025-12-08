@@ -92,7 +92,7 @@ mod tests {
         println!("\n🔬 步骤 3: 单面板房间计算详细验证");
         println!("{}", "-".repeat(80));
 
-        use crate::fast_model::room_model_v2::cal_room_refnos_v2;
+        use crate::fast_model::room_model::cal_room_refnos;
         use std::collections::HashSet;
 
         // 准备排除列表（所有其他房间的面板）
@@ -110,7 +110,7 @@ mod tests {
         println!("\n🚀 开始房间计算（关注粗算和细算日志）...");
         let calc_start = Instant::now();
 
-        let result = cal_room_refnos_v2(&mesh_dir, *test_panel, &exclude_panels, 0.1).await;
+        let result = cal_room_refnos(&mesh_dir, *test_panel, &exclude_panels, 0.1).await;
 
         let calc_duration = calc_start.elapsed();
 
@@ -158,11 +158,11 @@ mod tests {
         println!("\n🏠 步骤 4: 完整房间计算性能测试");
         println!("{}", "-".repeat(80));
 
-        use crate::fast_model::room_model_v2::build_room_relations_v2;
+        use crate::fast_model::room_model::build_room_relations;
 
         let full_calc_start = Instant::now();
 
-        match build_room_relations_v2(&db_option).await {
+        match build_room_relations(&db_option).await {
             Ok(stats) => {
                 let full_calc_duration = full_calc_start.elapsed();
 

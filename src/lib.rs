@@ -13,7 +13,7 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-use crate::fast_model::room_model_v2::build_room_relations_v2 as build_room_relations;
+use crate::fast_model::room_model::build_room_relations;
 #[cfg(not(all(not(target_arch = "wasm32"), feature = "sqlite")))]
 pub async fn build_room_relations(_db_option: &aios_core::options::DbOption) -> anyhow::Result<()> {
     println!("⚠️ build_room_relations 功能需要 sqlite 特性");
@@ -36,9 +36,11 @@ use aios_core::ssc_setting::{
     set_pdms_major_code,
 };
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::{SUL_DB, SurrealQueryExt, init_test_surreal, init_surreal_with_retry, build_cate_relate};
 use aios_core::utils::RecordIdExt;
 use aios_core::{DbOptionSurrealExt, connect_local_rocksdb};
+use aios_core::{
+    SUL_DB, SurrealQueryExt, build_cate_relate, init_surreal_with_retry, init_test_surreal,
+};
 use aios_core::{get_db_option, init_demo_test_surreal};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, Timelike};

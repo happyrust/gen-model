@@ -2,8 +2,8 @@
 //!
 //! 运行: cargo run --example debug_bend_24381_46958
 
-use aios_core::{RefnoEnum, SUL_DB, SurrealQueryExt, init_surreal_with_retry, init_test_surreal};
 use aios_core::utils::RecordIdExt;
+use aios_core::{RefnoEnum, SUL_DB, SurrealQueryExt, init_surreal_with_retry, init_test_surreal};
 use anyhow::Result;
 use serde::Deserialize;
 use surrealdb::types::{self as surrealdb_types, SurrealValue};
@@ -93,9 +93,7 @@ fn fmt_record(id: &Option<surrealdb_types::RecordId>) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     // 连接数据库
     let db_option = init_test_surreal().await?;
@@ -107,7 +105,8 @@ async fn main() -> Result<()> {
 
     // 1. 查询 BEND 基本信息
     println!("### 1. 查询 BEND 基本信息和 SPRE/CATR 引用 ###");
-    let sql = "SELECT noun, name, refno.SPRE as spre_value, refno.CATR as catr_value FROM pe:24381_46958";
+    let sql =
+        "SELECT noun, name, refno.SPRE as spre_value, refno.CATR as catr_value FROM pe:24381_46958";
     let basic_rows: Vec<BendBasicRow> = SUL_DB.query_take(sql, 0).await?;
     println!("BEND 基本信息:");
     if basic_rows.is_empty() {
@@ -317,7 +316,8 @@ async fn main() -> Result<()> {
 
     // 5. 直接查询 BEND 的 owner chain
     println!("\n### 5. 查询 BEND 的完整 owner 链 ###");
-    let sql = "SELECT id, noun, name, owner.id as owner_id, owner.noun as owner_noun FROM pe:24381_46958";
+    let sql =
+        "SELECT id, noun, name, owner.id as owner_id, owner.noun as owner_noun FROM pe:24381_46958";
     let owner_rows: Vec<OwnerRow> = SUL_DB.query_take(sql, 0).await?;
     println!("Owner 链:");
     if owner_rows.is_empty() {

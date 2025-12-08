@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::fast_model::unit_converter::UnitConverter;
-use std::io::Write;
 use chrono;
+use std::io::Write;
 
 use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
@@ -82,10 +82,22 @@ fn merge_export_data_into_mesh(export_data: &ExportData) -> PlantMesh {
                     f,
                     r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H7","location":"export_obj.rs:merge_export_data_into_mesh","message":"merge component inst","data":{{"geo_hash":"{}","transform":[[{},{},{},{}],[{},{},{},{}],[{},{},{},{}],[{},{},{},{}]]}},"timestamp":{}}}"#,
                     instance.geo_hash,
-                    t.row(0).x, t.row(0).y, t.row(0).z, t.row(0).w,
-                    t.row(1).x, t.row(1).y, t.row(1).z, t.row(1).w,
-                    t.row(2).x, t.row(2).y, t.row(2).z, t.row(2).w,
-                    t.row(3).x, t.row(3).y, t.row(3).z, t.row(3).w,
+                    t.row(0).x,
+                    t.row(0).y,
+                    t.row(0).z,
+                    t.row(0).w,
+                    t.row(1).x,
+                    t.row(1).y,
+                    t.row(1).z,
+                    t.row(1).w,
+                    t.row(2).x,
+                    t.row(2).y,
+                    t.row(2).z,
+                    t.row(2).w,
+                    t.row(3).x,
+                    t.row(3).y,
+                    t.row(3).z,
+                    t.row(3).w,
                     chrono::Utc::now().timestamp_millis()
                 );
             }
@@ -111,10 +123,22 @@ fn merge_export_data_into_mesh(export_data: &ExportData) -> PlantMesh {
                 f,
                 r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H7","location":"export_obj.rs:merge_export_data_into_mesh","message":"merge tubing inst","data":{{"geo_hash":"{}","transform":[[{},{},{},{}],[{},{},{},{}],[{},{},{},{}],[{},{},{},{}]]}},"timestamp":{}}}"#,
                 tubing.geo_hash,
-                t.row(0).x, t.row(0).y, t.row(0).z, t.row(0).w,
-                t.row(1).x, t.row(1).y, t.row(1).z, t.row(1).w,
-                t.row(2).x, t.row(2).y, t.row(2).z, t.row(2).w,
-                t.row(3).x, t.row(3).y, t.row(3).z, t.row(3).w,
+                t.row(0).x,
+                t.row(0).y,
+                t.row(0).z,
+                t.row(0).w,
+                t.row(1).x,
+                t.row(1).y,
+                t.row(1).z,
+                t.row(1).w,
+                t.row(2).x,
+                t.row(2).y,
+                t.row(2).z,
+                t.row(2).w,
+                t.row(3).x,
+                t.row(3).y,
+                t.row(3).z,
+                t.row(3).w,
                 chrono::Utc::now().timestamp_millis()
             );
         }

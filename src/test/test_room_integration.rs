@@ -142,7 +142,7 @@ mod tests {
 
         let room_start = Instant::now();
 
-        use crate::fast_model::room_model_v2::build_room_relations_v2 as build_room_relations;
+        use crate::fast_model::room_model::build_room_relations;
 
         match build_room_relations(&db_option).await {
             Ok(stats) => {
@@ -263,7 +263,7 @@ mod tests {
         println!("🎯 测试房间: {:?}", test_room_numbers);
 
         // 执行重建
-        use crate::fast_model::room_model_v2::rebuild_room_relations_for_rooms;
+        use crate::fast_model::room_model::rebuild_room_relations_for_rooms;
 
         let rebuild_start = Instant::now();
 
@@ -341,7 +341,7 @@ mod tests {
 
         // 房间计算
         println!("\n🏠 执行房间计算...");
-        use crate::fast_model::room_model_v2::build_room_relations_v2 as build_room_relations;
+        use crate::fast_model::room_model::build_room_relations;
 
         let stats = build_room_relations(&db_option)
             .await

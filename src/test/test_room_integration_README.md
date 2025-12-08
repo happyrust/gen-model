@@ -260,7 +260,7 @@ DELETE FROM room_panel_relate;
 调用 `gen_all_geos_data()` 生成面板的几何模型和 Mesh
 
 ### 房间计算
-调用 `build_room_relations_v2()` 构建房间-构件空间关系
+调用 `build_room_relations()` 构建房间-构件空间关系
 
 ### 空间索引
 使用 SQLite 空间索引加速房间内构件查询
@@ -269,6 +269,6 @@ DELETE FROM room_panel_relate;
 
 - 测试实现：`src/test/test_room_integration.rs`
 - 房间查询 API：`src/web_server/room_api.rs`
-- 房间计算逻辑：`src/fast_model/room_model_v2.rs`
+- 房间计算逻辑：`src/fast_model/room_model.rs`
 - 模型生成逻辑：`src/fast_model/gen_model.rs`
 - 配置文件：`DbOption.toml`
