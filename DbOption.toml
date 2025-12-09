@@ -37,7 +37,7 @@ save_spatial_tree_to_db = false
 gen_model_batch_size = 16
 
 # Full Noun 模式配置
-full_noun_mode = true
+full_noun_mode = false
 full_noun_max_concurrent_nouns = 6
 full_noun_batch_size = 200
 
@@ -45,7 +45,7 @@ full_noun_batch_size = 200
 # 可选值: "cate", "loop", "prim" 或具体 noun 名称如 "BRAN", "PANE"
 # 空 vec 表示启用所有类别（默认行为）
 # 示例1: 只生成 BRAN 和 PANE 类型
-full_noun_enabled_categories = ["BRAN"]
+full_noun_enabled_categories = []
 
 # 排除的 noun 列表
 # 即使类别启用，这里的 noun 也会被过滤掉
@@ -54,11 +54,11 @@ full_noun_excluded_nouns = []
 # 调试模式：限制每种 Noun 类型的处理数量
 # 设置为 10 表示只处理每种类型的前 10 个实例
 # 注释掉或设置为 0 表示不限制
-debug_limit_per_noun = 10
+debug_limit_per_noun = 20
 
 build_cate_relate = false
 
-# meshes_path = "/Volumes/DPC/work/plant-code/rs-plant3-d/assets/meshes"
+# meshes_path = "D:/work/plant/gen-model/assets/meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -154,8 +154,8 @@ puhua_database_user = ""
 puhua_database_password = ""
 
 
-room_keyword = "-RM" # 2016  K-R-K100   (-R-)
-# room_keyword = "-R-" # 2016  K-R-K100   (-R-)
+# room_keyword = "-RM" # 2016  K-R-K100   (-R-)
+room_keyword = "-R-" # 2016  K-R-K100   (-R-)
 
 #test_refno = "24381_46952"
 

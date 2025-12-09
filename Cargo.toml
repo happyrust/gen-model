@@ -246,5 +246,5 @@ eframe = { git = "https://github.com/emilk/egui.git", rev = "fa4cfec777c9ea21b86
 aios_core = { path = "../rs-core"}
 
 
-[patch."https://gitee.com/happydpc/rust-ploop-processor.git"]   
-ploop-rs = { path = "../rust-ploop-processor/ploop-rs" }
+# [patch."https://gitee.com/happydpc/rust-ploop-processor.git"]   
+# ploop-rs = { path = "../rust-ploop-processor/ploop-rs" }

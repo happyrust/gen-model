@@ -8162,6 +8162,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "ploop-rs"
 version = "0.1.0"
+source = "git+https://gitee.com/happydpc/rust-ploop-processor.git?branch=1.0#33985df43dc86b7716b07942be86d65f17bcfa34"
 dependencies = [
  "anyhow",
  "glam 0.30.9",
