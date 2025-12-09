@@ -117,8 +117,27 @@ async fn mark_bad_bool(inst_relate_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn update_booled_id(inst_relate_id: &str, mesh_id: &str) -> anyhow::Result<()> {
-    let sql = format!("update {} set booled_id='{}';", inst_relate_id, mesh_id);
+/// 更新布尔运算结果到数据库
+/// 
+/// 设置 bool_status='Success'、booled_id、aabb
+/// 查询时直接使用 booled_id 加载布尔后的 mesh 文件
+async fn update_booled_result(
+    inst_relate_id: &str,
+    mesh_id: &str,
+    mesh: &PlantMesh,
+) -> anyhow::Result<()> {
+    // 计算布尔后的 aabb
+    let aabb = mesh.cal_aabb();
+    let aabb_json = aabb
+        .as_ref()
+        .map(|a| serde_json::to_string(a).unwrap_or_default())
+        .unwrap_or_default();
+    
+    let sql = format!(
+        "UPDATE {} SET bool_status = 'Success', booled_id = '{}', aabb = {{ d: {} }};",
+        inst_relate_id, mesh_id, aabb_json
+    );
+    
     SUL_DB.query(sql).await?;
     Ok(())
 }
@@ -252,12 +271,13 @@ async fn apply_boolean_for_query(
     let mut pos_manifolds = Vec::new();
     for (pos_id, pos_t) in query.pos_geos.iter() {
         let pos_mesh_id = pos_id.to_mesh_id();
+        // 正实体使用局部变换
+        let pos_local_mat = pos_t.0.to_matrix().as_dmat4();
         debug_model_debug!(
-            "加载正实体 mesh: {} (使用单位矩阵，基准坐标系)",
+            "加载正实体 mesh: {} (应用局部变换)",
             pos_mesh_id
         );
-        // 正实体使用单位矩阵，因为它定义了基准坐标系
-        if let Ok(manifold) = load_manifold(&pos_mesh_id, glam::DMat4::IDENTITY, false) {
+        if let Ok(manifold) = load_manifold(&pos_mesh_id, pos_local_mat, false) {
             pos_manifolds.push(manifold);
         }
     }
@@ -280,6 +300,15 @@ async fn apply_boolean_for_query(
         );
         mark_bad_bool(&inst_relate_id).await?;
         return Ok(());
+    }
+
+    // 调试：导出正实体 OBJ
+    let pos_mesh = PlantMesh::from(&pos_manifold);
+    let pos_obj_path = format!("test_output/debug_{}_pos.obj", query.refno);
+    if let Err(e) = pos_mesh.export_obj(false, &pos_obj_path) {
+        eprintln!("导出正实体 OBJ 失败: {}", e);
+    } else {
+        println!("✅ 导出正实体 OBJ: {}", pos_obj_path);
     }
 
     // 计算正实体世界坐标系的逆矩阵，用于将负实体转换到正实体的相对坐标系
@@ -321,6 +350,16 @@ async fn apply_boolean_for_query(
         return Ok(());
     }
 
+    // 调试：导出负实体 OBJ（合并所有负实体）
+    let neg_union = ManifoldRust::batch_boolean(&neg_manifolds, 0);
+    let neg_mesh = PlantMesh::from(&neg_union);
+    let neg_obj_path = format!("test_output/debug_{}_neg.obj", query.refno);
+    if let Err(e) = neg_mesh.export_obj(false, &neg_obj_path) {
+        eprintln!("导出负实体 OBJ 失败: {}", e);
+    } else {
+        println!("✅ 导出负实体 OBJ: {}", neg_obj_path);
+    }
+
     let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
     let mesh = PlantMesh::from(&final_manifold);
     let mesh_id = if query.sesno == 0 {
@@ -337,7 +376,7 @@ async fn apply_boolean_for_query(
             eprintln!("导出 OBJ 失败: refno={} err={}", query.refno, e);
         }
 
-        update_booled_id(&inst_relate_id, &mesh_id).await?;
+        update_booled_result(&inst_relate_id, &mesh_id, &mesh).await?;
         debug_model!("布尔运算完成: refno={} mesh={}", query.refno, mesh_id);
         return Ok(());
     }
