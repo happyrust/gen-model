@@ -311,11 +311,11 @@ async fn apply_boolean_for_query(
         let pos_mesh_id = pos_id.to_mesh_id();
         // 正实体使用其局部变换（相对于 inst_relate 的变换）
         let geo_local_mat = geo_local_trans.0.to_matrix().as_dmat4();
-        debug_model_debug!(
-            "加载正实体 mesh: {} (应用局部变换)",
-            pos_mesh_id
-        );
+        println!("🔍 [BOOL DEBUG] 正实体 mesh: {}", pos_mesh_id);
+        println!("   geo_local_mat: {:?}", geo_local_mat);
+        println!("   inst_world_mat: {:?}", inst_world_mat);
         if let Ok(manifold) = load_manifold(&pos_mesh_id, geo_local_mat, false) {
+            println!("   pos manifold num_tri: {}", manifold.num_tri());
             pos_manifolds.push(manifold);
         }
     }
@@ -370,9 +370,23 @@ async fn apply_boolean_for_query(
             let neg_world_mat = carrier_world_mat * geo_local_trans.0.to_matrix().as_dmat4();
             let relative_mat = inverse_inst_world * neg_world_mat;
 
-            debug_model_debug!("加载负实体 mesh: {} (相对于实例坐标系)", id.to_mesh_id());
+            println!("🔍 [BOOL DEBUG] 负实体 mesh: {}", id.to_mesh_id());
+            println!("   carrier_world_mat: {:?}", carrier_world_mat);
+            println!("   geo_local_trans: {:?}", geo_local_trans.0.to_matrix());
+            println!("   inst_world_mat: {:?}", inst_world_mat);
+            println!("   relative_mat: {:?}", relative_mat);
+            println!("   aabb: {:?}", aabb);
 
-            if let Ok(manifold) = load_manifold(&id.to_mesh_id(), relative_mat, true) {
+            // 测试不同精度模式
+            if let Ok(test_manifold) = load_manifold(&id.to_mesh_id(), glam::DMat4::IDENTITY, true) {
+                println!("   原始 neg manifold (precision=true) num_tri: {}", test_manifold.num_tri());
+            }
+            if let Ok(test_manifold) = load_manifold(&id.to_mesh_id(), glam::DMat4::IDENTITY, false) {
+                println!("   原始 neg manifold (precision=false) num_tri: {}", test_manifold.num_tri());
+            }
+            // 使用 false 精度模式
+            if let Ok(manifold) = load_manifold(&id.to_mesh_id(), relative_mat, false) {
+                println!("   变换后 neg manifold num_tri: {}", manifold.num_tri());
                 neg_manifolds.push(manifold);
             }
         }

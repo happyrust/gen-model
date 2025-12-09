@@ -245,6 +245,11 @@ pub async fn gen_loop_geos(
                     _ => false,
                 };
                 //需要判断多个PLOO、LOOP的情况，第二个开始都是负实体
+                let geo_type = if target_att.is_neg() {
+                    GeoBasicType::Neg
+                } else {
+                    GeoBasicType::Pos
+                };
                 let geom_inst = EleInstGeo {
                     geo_hash,
                     refno: target_refno,
@@ -254,11 +259,7 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if target_att.is_neg() {
-                        GeoBasicType::Neg
-                    } else {
-                        GeoBasicType::Pos
-                    },
+                    geo_type,
                     cata_neg_refnos: Default::default(),
                     unit_flag,
                 };

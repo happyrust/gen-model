@@ -319,7 +319,7 @@ pub async fn save_instance_data_optimize(
 
         for (target, neg_refnos) in &inst_mgr.neg_relate_map {
             for neg_refno in neg_refnos.iter() {
-                // 查找该负实体的所有 Neg geo_relate
+                // 首先尝试从当前 batch 的 neg_geo_by_carrier 查找
                 if let Some(geo_relate_ids) = neg_geo_by_carrier.get(neg_refno) {
                     for geo_relate_id in geo_relate_ids.iter() {
                         // ID 简化：[geo_relate_id, target_pe] 唯一确定一条关系
@@ -340,11 +340,60 @@ pub async fn save_instance_data_optimize(
                         }
                     }
                 } else {
-                    // 没有找到 geo_relate，记录警告但不创建关系
-                    debug_model_debug!(
-                        "[WARN] neg_relate: 负实体 {} 没有找到 Neg 类型的 geo_relate",
-                        neg_refno
+                    // 当前 batch 中没有，尝试从数据库查询已存在的 geo_relate
+                    // 这种情况发生在负实体在不同 batch 中被处理时
+                    let sql = format!(
+                        "SELECT value id FROM geo_relate WHERE geom_refno = {} AND geo_type = 'Neg'",
+                        neg_refno.to_pe_key()
                     );
+                    // 直接使用 query 获取原始响应
+                    match aios_core::SUL_DB.query(&sql).await {
+                        Ok(mut response) => {
+                            // 手动提取结果
+                            let raw_result: Result<Vec<aios_core::RecordId>, _> = response.take(0);
+                            match raw_result {
+                                Ok(db_geo_relate_ids) if !db_geo_relate_ids.is_empty() => {
+                                    for geo_relate_id in db_geo_relate_ids.iter() {
+                                        // 从 RecordId 提取 ID（格式为 "geo_relate:⟨xxx⟩"）
+                                        let id_str = format!("{:?}", geo_relate_id.key)
+                                            .trim_matches('"')
+                                            .trim_start_matches("String(\"")
+                                            .trim_end_matches("\")")
+                                            .to_string();
+                                        neg_buffer.push(format!(
+                                            "{{ in: geo_relate:⟨{0}⟩, id: ['{0}', {2}], out: {2}, pe: {1} }}",
+                                            id_str,                // 切割几何
+                                            neg_refno.to_pe_key(), // 负载体
+                                            target.to_pe_key(),    // 正实体（被减实体）
+                                        ));
+
+                                        if neg_buffer.len() >= CHUNK_SIZE {
+                                            let statement = format!(
+                                                "INSERT RELATION INTO neg_relate [{}];",
+                                                neg_buffer.join(",")
+                                            );
+                                            neg_batcher.push(statement).await?;
+                                            neg_buffer.clear();
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // 数据库中也没有找到或提取失败
+                                    println!(
+                                        "[WARN] neg_relate: 负实体 {} 没有找到 Neg 类型的 geo_relate",
+                                        neg_refno
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // 查询失败
+                            println!(
+                                "[WARN] neg_relate: 查询负实体 {} 的 geo_relate 失败: {}",
+                                neg_refno, e
+                            );
+                        }
+                    }
                 }
             }
         }

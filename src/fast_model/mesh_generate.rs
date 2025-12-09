@@ -382,6 +382,96 @@ pub async fn process_meshes_update_db(
     Ok(())
 }
 
+/// 修复缺失的 neg_relate 关系
+/// 
+/// 当正实体和其负实体在不同 batch 中保存时，neg_relate 可能没有正确创建。
+/// 此函数检查并补充缺失的 neg_relate。
+///
+/// # 参数
+/// * `refnos` - 正实体 refno 列表
+async fn fix_missing_neg_relates(refnos: &[RefnoEnum]) -> anyhow::Result<()> {
+    use aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES;
+    
+    for &refno in refnos {
+        // 1. 查询该正实体的负实体子节点
+        let neg_refnos = aios_core::collect_descendant_filter_ids(
+            &[refno],
+            &TOTAL_NEG_NOUN_NAMES,
+            Some("1..3"), // 限制深度，负实体通常是直接子节点
+        )
+        .await
+        .unwrap_or_default();
+        
+        if neg_refnos.is_empty() {
+            continue;
+        }
+        
+        // 2. 检查每个负实体是否有对应的 neg_relate
+        for neg_refno in &neg_refnos {
+            // 检查是否已有 neg_relate
+            let check_sql = format!(
+                "SELECT count() FROM neg_relate WHERE pe = {} AND out = {} GROUP ALL",
+                neg_refno.to_pe_key(),
+                refno.to_pe_key()
+            );
+            let existing: Vec<serde_json::Value> = SUL_DB.query_take(&check_sql, 0).await.unwrap_or_default();
+            let count = existing.first()
+                .and_then(|v| v.get("count"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            
+            if count > 0 {
+                continue; // 已有 neg_relate，跳过
+            }
+            
+            // 3. 查询负实体的 Neg 类型 geo_relate
+            let geo_sql = format!(
+                "SELECT value id FROM geo_relate WHERE geom_refno = {} AND geo_type = 'Neg'",
+                neg_refno.to_pe_key()
+            );
+            let geo_relate_ids: Vec<String> = SUL_DB.query_take(&geo_sql, 0).await.unwrap_or_default();
+            
+            if geo_relate_ids.is_empty() {
+                debug_model_debug!(
+                    "[fix_missing_neg_relates] 负实体 {} 没有 Neg 类型的 geo_relate",
+                    neg_refno
+                );
+                continue;
+            }
+            
+            // 4. 创建缺失的 neg_relate
+            for geo_relate_id in &geo_relate_ids {
+                // 提取 geo_relate ID（处理 "geo_relate:⟨...⟩" 格式）
+                let id_str = geo_relate_id
+                    .trim_start_matches("geo_relate:")
+                    .trim_start_matches("⟨")
+                    .trim_end_matches("⟩");
+                
+                let insert_sql = format!(
+                    "INSERT RELATION INTO neg_relate {{ in: geo_relate:⟨{0}⟩, id: ['{0}', {2}], out: {2}, pe: {1} }}",
+                    id_str,
+                    neg_refno.to_pe_key(),
+                    refno.to_pe_key()
+                );
+                
+                if let Err(e) = SUL_DB.query_response(&insert_sql).await {
+                    debug_model_warn!(
+                        "[fix_missing_neg_relates] 创建 neg_relate 失败: {} -> {}: {}",
+                        neg_refno, refno, e
+                    );
+                } else {
+                    println!(
+                        "✅ [fix_missing_neg_relates] 创建 neg_relate: {} -> {}",
+                        neg_refno, refno
+                    );
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 /// 使用默认数据库选项更新深层模型网格数据
 ///
 /// # 参数
@@ -491,6 +581,12 @@ pub async fn process_meshes_update_db_deep(
 
                 if dboption.apply_boolean_operation {
                     let bool_time = std::time::Instant::now();
+                    
+                    // 修复缺失的 neg_relate（处理跨 batch 保存的情况）
+                    if let Err(e) = fix_missing_neg_relates(&target_visible_refnos).await {
+                        debug_model_warn!("修复缺失的 neg_relate 失败: {}", e);
+                    }
+                    
                     // 生成元件库内部几何体的负实体运算（catalog-level: 同一元件库内的正负几何体布尔）
                     apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist)
                         .await

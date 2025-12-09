@@ -1,101 +1,101 @@
 #V2
--- 查看 ZONE 数据
-select id, NAME, noun, owner from PE where noun = 'ZONE' limit 5;
+-- 检查 pe_7997 的 refno 字段
+SELECT refno FROM pe_7997:`24381_36946`;
 USE NS `1516` DB AvevaMarineSample;
--- 查看 FRMW 表结构
-select id, NAME, children from FRMW limit 3;
--- 检查有 -R- 关键词的 FRMW
-select id, NAME from FRMW where NAME contains '-R-' limit 10;
--- 检查 children 是什么类型
-select id, NAME, type::is_array(children) as is_arr, array::len(children) as children_cnt from FRMW limit 5;
+-- 查询 pe:24381_36946.refno 的完整内容
+SELECT * FROM pe:`24381_36946`.refno;
 USE NS `1516` DB AvevaMarineSample;
--- 查看 FRMW 表的完整结构（取一条记录）
-select * from FRMW limit 1;
--- 查看 SBFR 表结构
-select * from SBFR limit 1;
--- 查看名称包含房间关键词的 FRMW
-select id, NAME from FRMW where string::contains(NAME, '-R-') limit 10;
+-- 检查 pe:24381_36946 的结构
+SELECT *, refno FROM pe:`24381_36946`;
 USE NS `1516` DB AvevaMarineSample;
--- 查找有名称的 FRMW
+-- 模拟 get_named_attmap 的查询
+(SELECT * FROM pe:`24381_36946`.refno)[0];
 USE NS `1516` DB AvevaMarineSample;
-select id, NAME from FRMW where NAME IS NOT NONE limit 20;
-select count() as named_frmw from FRMW where NAME IS NOT NONE group all;
-select id, NAME from FRMW where NAME IS NOT NONE AND '-R-' in NAME limit 10;
+-- 查看 NREV 的 geo_relate
+SELECT * FROM geo_relate WHERE geom_refno = pe:`24381_36946`;
+-- 查看所有 geo_relate 的 geo_type
+SELECT geom_refno, geo_type FROM geo_relate LIMIT 10;
 USE NS `1516` DB AvevaMarineSample;
--- 检查有 -RM 关键词的 FRMW
-select id, NAME from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 10;
--- 检查 FRMW 的 REFNO 字段
-select id, NAME, REFNO from FRMW where NAME IS NOT NONE limit 3;
--- 使用 pe_owner 关系检查 PANE
-select id, NAME, array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE'] as panels from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 3;
+-- 查看所有 geo_type='Neg' 的 geo_relate
+SELECT * FROM geo_relate WHERE geo_type = 'Neg';
+-- 查看 geom_refno 包含 36946 的 geo_relate
+SELECT * FROM geo_relate WHERE string::contains(geom_refno.id(), '36946');
 USE NS `1516` DB AvevaMarineSample;
--- 检查 pe_owner 表是否存在数据
-select count() as pe_owner_count from pe_owner group all;
--- 检查特定 FRMW 的子节点
-select id, NAME, REFNO, REFNO<-pe_owner as direct_children from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
--- 检查 PE 表中的 owner 字段
-select count() as pe_count from PE group all;
--- 检查是否有 noun='PANE' 的 PE
-select id, NAME, noun, owner from PE where noun = 'PANE' limit 5;
--- 查看 PANE 表
-select count() as pane_count from PANE group all;
-select id, NAME, OWNER, REFNO from PANE limit 3;
+-- 测试查询语句
+SELECT value id FROM geo_relate WHERE geom_refno = pe:`24381_36946` AND geo_type = 'Neg';
 USE NS `1516` DB AvevaMarineSample;
--- 检查特定 FRMW 下的所有子节点
-select id, NAME, REFNO, (select in.id, in.noun from $parent.REFNO<-pe_owner) as children from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
--- 检查从 PANE 反向找到 FRMW
-select id, OWNER, OWNER.owner, OWNER.owner.owner from PANE limit 5;
--- 查看 PANE 的 OWNER 层级
-USE NS `1516` DB AvevaMarineSample;
--- 从特定 FRMW 开始递归查询子节点和孙节点
-LET $frmw_refno = pe:⟨17496_197731⟩;
--- 查询第一层子节点 (SBFR)
-select id, (select in.id, in.noun from $parent.REFNO<-pe_owner) as level1 from FRMW where NAME = '/6RX-RM-02-R201' limit 1;
--- 查看 SBFR 的子节点
-select id, noun, (select in.id, in.noun from $parent.REFNO<-pe_owner) as children from SBFR where OWNER = pe:⟨17496_197731⟩ limit 3;
-USE NS `1516` DB AvevaMarineSample;
--- 测试新的查询方式：通过 OWNER 字段查询
--- 从 FRMW 查询 -> SBFR (OWNER = FRMW.REFNO) -> PANE (OWNER = SBFR.REFNO)
-USE NS `1516` DB AvevaMarineSample;
--- 简化查询：从 FRMW 到 PANE 的层级
--- Step 1: 找到 FRMW
-LET $frmw = (select id, NAME, REFNO from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 1)[0];
-RETURN $frmw;
--- Step 2: 找到 SBFR (OWNER = FRMW.REFNO)
-LET $sbfrs = (select id, REFNO from SBFR where OWNER = $frmw.REFNO);
-RETURN $sbfrs;
--- Step 3: 找到 PANE (OWNER = SBFR.REFNO)
-LET $panes = (select id, REFNO from PANE where OWNER IN array::map($sbfrs, |$s: any| $s.REFNO));
-RETURN $panes;
-USE NS `1516` DB AvevaMarineSample;
--- 完整查询：从 FRMW 获取房间和所有 PANE
-select value [    id,    array::last(string::split(NAME, '-')),    array::flatten((select value (select value REFNO from PANE where OWNER = $parent.REFNO) from SBFR where OWNER = $parent.REFNO))] from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 5;
-SELECT count() FROM room_relate GROUP ALL;
-SELECT count() FROM room_panel_relate GROUP ALL;
-SELECT * FROM room_panel_relate LIMIT 3;
-SELECT room_num, count() FROM room_panel_relate GROUP BY room_num ORDER BY room_num LIMIT 20;
-SELECT * FROM room_panel_relate WHERE room_num != NONE AND room_num != '' LIMIT 5;
-INFO FOR NS;
-SELECT count() FROM tubi_info GROUP ALL;
-SELECT id, tubi_info FROM inst_info WHERE tubi_info != NONE LIMIT 5;
-SELECT id, refno.ARRI, refno.LEAV FROM pe WHERE owner.noun = 'BRAN' LIMIT 5;
-SELECT id, ptset FROM inst_info LIMIT 3;
-SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
+-- 检查返回的格式
+SELECT value id FROM geo_relate WHERE geom_refno = pe:`24381_36946` AND geo_type = 'Neg';
+SELECT id FROM geo_relate WHERE geom_refno = pe:`24381_36946` AND geo_type = 'Neg';
+SELECT id, bool_status, booled_id FROM inst_relate WHERE in = pe:24381_36945;
+SELECT id, geo_type, booled_id FROM geo_relate WHERE geom_refno = pe:24381_36945;
+SELECT * FROM inst_geo:⟨24381_36945_63⟩;
+SELECT out.id, geo_type FROM geo_relate WHERE geom_refno = pe:24381_36945 OR geom_refno = pe:24381_36946;
+SELECT * FROM neg_relate WHERE out = pe:24381_36945;
+SELECT * FROM geo_relate:⟨1690521579953134704⟩;
+SELECT * FROM trans:⟨14744298638330291557⟩;
+SELECT PPOS, PORI FROM pe:24381_36946;
+SELECT * FROM pe:24381_36946;
+SELECT * FROM pe:24381_36947;
+SELECT * FROM pe:24381_36948, pe:24381_36949, pe:24381_36950, pe:24381_36951;
+SELECT PPOS FROM pe:24381_36948, pe:24381_36949, pe:24381_36950, pe:24381_36951;
+SELECT * FROM loop WHERE owner = pe:24381_36946 OR owner = pe:24381_36947;
+SELECT * FROM loop WHERE string::contains(id, '24381_36946') LIMIT 5;
+SELECT count() FROM loop GROUP ALL; SELECT * FROM loop LIMIT 2;
+SELECT count() FROM ploop GROUP ALL; SELECT * FROM ploop LIMIT 2;
 INFO FOR DB;
-INFO FOR NS;
-SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
-SELECT count() FROM pe GROUP ALL;
-INFO FOR ROOT;
-SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
-INFO FOR NS;
-SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
-SELECT count() FROM pe GROUP ALL;
-SELECT count() FROM tubi_info GROUP ALL;
-SELECT id, cata_hash FROM inst_info LIMIT 3;
-SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL;
-SELECT * FROM tubi_info LIMIT 3;
-SELECT id, tubi_info FROM inst_info WHERE tubi_info != NONE LIMIT 5;
-SELECT count() FROM inst_info WHERE tubi_info != NONE GROUP ALL;
-SELECT * FROM tubi_info LIMIT 3;
-DELETE FROM tubi_info;
-SELECT * FROM tubi_info LIMIT 3;
+SELECT refno.POS FROM pe:24381_36948;
+select value (select value [in.refno.POS[0], in.refno.POS[1], in.refno.FRAD] from <-pe_owner) from    (select value in from pe:24381_36946<-pe_owner where in.noun in ['LOOP', 'PLOO']);
+array::complement((select value refno.HEIG from [ (select value in.id from only pe:24381_36946<-pe_owner where in.noun in ['LOOP', 'PLOO'] limit 1), pe:24381_36946]), [none])[0];
+SELECT trans FROM geo_relate WHERE geom_refno = pe:24381_36945; SELECT * FROM trans:0;
+SELECT * FROM trans:⟨5430116214555442907⟩;
+SELECT in.trans, pe FROM neg_relate WHERE out = pe:24381_36945;
+SELECT * FROM trans:⟨14744298638330291557⟩; SELECT world_trans FROM inst_relate WHERE in = pe:24381_36946;
+SELECT * FROM trans:⟨17639679335641264787⟩;
+SELECT world_trans FROM inst_relate WHERE in = pe:24381_36945;
+SELECT * FROM trans:⟨18009234654622203438⟩;
+SELECT in, in.in, array::first(in.in<-inst_relate).world_trans.d AS carrier_wt FROM pe:24381_36945<-neg_relate;
+select value (select value [in.refno.POS[0], in.refno.POS[1], in.refno.FRAD] from <-pe_owner) from    (select value in from pe:24381_36945<-pe_owner where in.noun in ['LOOP', 'PLOO']);
+SELECT refno.PPOS, refno.PORI, refno.HEIG, refno.ANGL FROM pe:24381_36946;
+SELECT refno.PPOS, refno.PORI FROM pe:24381_36945;
+SELECT id, aabb.d FROM inst_geo WHERE id IN [inst_geo:⟨17460176651502030641⟩, inst_geo:⟨17293411045193599063⟩];
+SELECT owner, owner.noun, owner.refno.PPOS FROM pe:24381_36945;
+SELECT owner.owner, owner.owner.noun, owner.owner.refno.PPOS FROM pe:24381_36945;
+SELECT world_trans, world_trans.d FROM inst_relate WHERE in = pe:24381_36945;
+SELECT world_trans, world_trans.d FROM inst_relate WHERE in = pe:24381_36946;
+SELECT geom_refno, trans.d FROM geo_relate WHERE geom_refno IN [pe:24381_36945, pe:24381_36946];
+SELECT id, refno.POS, refno.FRAD FROM pe WHERE owner = pe:24381_36947;
+SELECT value in FROM pe:24381_36945<-pe_owner WHERE in.noun = 'LOOP';
+SELECT children, children.noun FROM pe:24381_36945;
+SELECT id, noun FROM pe WHERE owner = pe:24381_36945;
+SELECT id, refno.POS, refno.FRAD FROM pe WHERE owner = pe:24381_36952;
+SELECT *, refno.* FROM pe WHERE owner = pe:24381_36947 ORDER BY id;
+SELECT id, noun, owner, owner.noun, refno.PPOS, refno.PORI FROM pe:24381_36945;
+SELECT id, noun, owner, owner.noun, refno.PPOS, refno.PORI FROM pe WHERE id = (SELECT value owner FROM pe:24381_36945);
+SELECT id, noun, owner, refno.PPOS FROM pe WHERE id = (SELECT value owner.owner FROM pe:24381_36945);
+SELECT id, noun, refno.PPOS FROM pe:24381_36945.owner; SELECT id, noun, refno.PPOS FROM pe:24381_36945.owner.owner;
+-- 检查 NREV 相对于 PANE 的局部变换
+SELECT local_trans FROM inst_relate WHERE in = pe:24381_36946;
+-- 检查是否有 pe_owner 关系中的局部变换
+SELECT * FROM pe_owner WHERE out = pe:24381_36945 AND in.noun = 'NREV';
+-- 找到 FRMW 的祖先
+SELECT id, noun, refno.PPOS FROM pe:24381_36943.owner;
+SELECT id, noun, refno.PPOS FROM pe:24381_36943.owner.owner;
+SELECT id, noun, refno.PPOS FROM pe:24381_36943.owner.owner.owner;
+SELECT id, noun, owner FROM pe:24381_36946;
+-- PANE 的 inst_geo AABB
+SELECT id, aabb.d FROM inst_geo:⟨17460176651502030641⟩;
+-- NREV 的 inst_geo AABB  
+SELECT id, aabb.d FROM inst_geo:⟨17293411045193599063⟩;
+-- PANE 的 world_trans
+SELECT world_trans.d as wt FROM inst_relate WHERE in = pe:24381_36945;
+-- NREV 的 world_trans  
+SELECT world_trans.d as wt FROM inst_relate WHERE in = pe:24381_36946;
+-- NREV 相对于 PANE 的 local_trans (如果有)
+SELECT local_trans FROM inst_relate WHERE in = pe:24381_36946;
+-- 检查 NREV 的 geo_relate
+SELECT * FROM geo_relate WHERE geom_refno = pe:24381_36946;
+SELECT bool_status, aabb.d FROM inst_relate WHERE in = pe:24381_36945;
+SELECT refno.ANGL FROM pe:24381_36946;
+SELECT refno.ANGL, refno.RODI, refno.ROPT FROM pe:24381_36946;
+SELECT id, refno.POS FROM pe WHERE owner = pe:24381_36947;
