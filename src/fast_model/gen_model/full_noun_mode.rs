@@ -23,7 +23,7 @@ use super::prim_processor::process_prim_refno_page;
 use crate::fast_model::refno_errors::{
     REFNO_ERROR_STORE, RefnoErrorKind, RefnoErrorStage, record_refno_error,
 };
-use crate::fast_model::{cata_model, query_provider};
+use crate::fast_model::{cata_model, pdms_inst, query_provider};
 // Performance profiling support
 #[cfg(feature = "profile")]
 use tracing::{info, instrument};
@@ -480,6 +480,31 @@ pub async fn gen_full_noun_geos_optimized(
                     None
                 }
             };
+
+            // 3.1 保存 tubi_info（增量写入）
+            if let Some(ref outcome) = cate_outcome {
+                println!(
+                    "[gen_full_noun_geos] 批次 {}: tubi_info_map 收集数量 = {}, local_al_map 数量 = {}",
+                    batch_num,
+                    outcome.tubi_info_map.len(),
+                    outcome.local_al_map.len()
+                );
+                
+                match pdms_inst::save_tubi_info_batch(&outcome.tubi_info_map).await {
+                    Ok(inserted) => {
+                        println!(
+                            "[gen_full_noun_geos] 批次 {}: 新增 {} 条 tubi_info 记录",
+                            batch_num, inserted
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "[gen_full_noun_geos] 批次 {}: 保存 tubi_info 失败: {}",
+                            batch_num, e
+                        );
+                    }
+                }
+            }
 
             // 4. 单独生成 BRAN/HANG tubing
             let local_al_map = cate_outcome

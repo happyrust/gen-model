@@ -11,7 +11,7 @@ use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo, TubiInfoData};
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
@@ -130,6 +130,8 @@ pub enum NgmrRemovedType {
 /// 普通 CATE 生成阶段的输出
 pub struct CateGenOutcome {
     pub local_al_map: Arc<DashMap<RefnoEnum, [CateAxisParam; 2]>>,
+    /// tubi_info 收集器: 组合键 ID -> TubiInfoData
+    pub tubi_info_map: Arc<DashMap<String, TubiInfoData>>,
     pub time_stats: HashMap<String, u64>,
     pub unique_cata_cnt: usize,
     pub elapsed_ms: u128,
@@ -242,6 +244,9 @@ async fn gen_cata_geos_inner(
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
     let is_bran = branch_map.len() > 0;
+    
+    // tubi_info 收集容器: 组合键 "{cata_hash}_{arrive}_{leave}" -> TubiInfoData
+    let tubi_info_map: Arc<DashMap<String, TubiInfoData>> = Arc::new(DashMap::new());
 
     // 用于收集总耗时的互斥锁
     let total_time_stats = Arc::new(Mutex::new(HashMap::new()));
@@ -286,6 +291,7 @@ async fn gen_cata_geos_inner(
             let target_cata_map = target_cata_map.clone();
             let sjus_map_clone = sjus_map_arc.clone();
             let local_al_map_clone = local_al_map.clone();
+            let tubi_info_map_clone = tubi_info_map.clone();
             let sender = sender.clone();
             let total_time_stats = total_time_stats.clone();
             let batch_id = i + 1;
@@ -731,6 +737,13 @@ async fn gen_cata_geos_inner(
                                 && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave)
                             {
                                 local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
+                                
+                                // 收集 tubi_info（增量，自动去重）
+                                let tubi_info_id = TubiInfoData::make_id(&cata_hash, arrive, leave);
+                                tubi_info_map_clone.entry(tubi_info_id.clone()).or_insert_with(|| {
+                                    TubiInfoData::from_axis_params(&cata_hash, a, l)
+                                });
+                                geos_info.tubi_info_id = Some(tubi_info_id);
                             }
                             ptset_map = Some(cur_ptset_map);
                         };
@@ -922,6 +935,8 @@ async fn gen_cata_geos_inner(
                         }
                     }
 
+                    // 收集 arrive/leave 点信息
+                    let mut tubi_info_id = None;
                     if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
                         let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
                         let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
@@ -929,6 +944,13 @@ async fn gen_cata_geos_inner(
                             && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave)
                         {
                             local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
+                            
+                            // 收集 tubi_info（增量，自动去重）
+                            let id = TubiInfoData::make_id(&cata_hash, arrive, leave);
+                            tubi_info_map_clone.entry(id.clone()).or_insert_with(|| {
+                                TubiInfoData::from_axis_params(&cata_hash, a, l)
+                            });
+                            tubi_info_id = Some(id);
                         }
                     };
                     let (owner_refno, owner_type) =
@@ -944,6 +966,7 @@ async fn gen_cata_geos_inner(
                         world_transform: origin_trans,
                         ptset_map: cur_ptset_map,
                         is_solid: true,
+                        tubi_info_id,
                         ..Default::default()
                     };
                     if let Some(r_refno) = test_refno
@@ -1706,8 +1729,13 @@ async fn gen_cata_geos_inner(
     );
 
     let cate_outcome = if process_cata {
+        debug_model_debug!(
+            "收集到 tubi_info 数量: {}",
+            tubi_info_map.len()
+        );
         Some(CateGenOutcome {
             local_al_map: local_al_map.clone(),
+            tubi_info_map: tubi_info_map.clone(),
             time_stats: time_stats.clone(),
             unique_cata_cnt,
             elapsed_ms: total_elapsed_ms,
@@ -1786,4 +1814,85 @@ pub async fn query_ngmr_owner(
         }
     }
     Ok(target_refnos)
+}
+
+// ============================================================================
+// 基于 tubi_info 的独立 Tubi 生成（第二阶段）
+// ============================================================================
+
+/// 基于数据库 tubi_info 表独立生成 BRAN/HANG tubing
+/// 
+/// 这是两阶段 BRAN 生成的第二阶段：
+/// - 阶段 1: gen_cata_instances() 生成元件几何 + 写入 tubi_info
+/// - 阶段 2: gen_tubi_from_db() 读取 tubi_info 生成 tubi_relate
+/// 
+/// # 参数
+/// - `db_option`: 数据库配置
+/// - `branch_refnos`: BRAN/HANG 根节点 refno 列表
+/// - `sjus_map_arc`: SJUS 调整 map
+/// - `sender`: 几何数据发送通道
+pub async fn gen_tubi_from_db(
+    db_option: Arc<DbOption>,
+    branch_refnos: &[RefnoEnum],
+    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
+) -> anyhow::Result<BranchTubiOutcome> {
+    let start_time = Instant::now();
+    
+    if branch_refnos.is_empty() {
+        return Ok(BranchTubiOutcome {
+            tubi_relates: vec![],
+            tubi_refnos: vec![],
+            time_stats: HashMap::new(),
+            tubi_count: 0,
+            elapsed_ms: 0,
+        });
+    }
+    
+    debug_model!("[gen_tubi_from_db] 开始处理 {} 个 BRAN/HANG", branch_refnos.len());
+    
+    // 1. 从数据库查询 arrive/leave 点（基于 tubi_info）
+    let al_map = aios_core::rs_surreal::point::query_arrive_leave_from_tubi_info(branch_refnos).await?;
+    
+    debug_model!(
+        "[gen_tubi_from_db] 从 tubi_info 获取到 {} 个元件的 arrive/leave 点",
+        al_map.len()
+    );
+    
+    // 2. 转换为 local_al_map 格式
+    let local_al_map: Arc<DashMap<RefnoEnum, [CateAxisParam; 2]>> = Arc::new(al_map);
+    
+    // 3. 查询 branch 下的子元件
+    let branch_map: DashMap<RefnoEnum, Vec<SPdmsElement>> = DashMap::new();
+    for &branch_refno in branch_refnos {
+        match aios_core::collect_children_elements(branch_refno, &[]).await {
+            Ok(children) => {
+                if !children.is_empty() {
+                    branch_map.insert(branch_refno, children);
+                }
+            }
+            Err(e) => {
+                debug_model!("[gen_tubi_from_db] 查询子元件失败: {} - {}", branch_refno, e);
+            }
+        }
+    }
+    
+    // 4. 调用现有的 gen_branch_tubi 逻辑
+    let outcome = gen_branch_tubi(
+        db_option,
+        Arc::new(branch_map),
+        sjus_map_arc,
+        sender,
+        local_al_map,
+    )
+    .await?;
+    
+    let elapsed = start_time.elapsed().as_millis();
+    debug_model!(
+        "[gen_tubi_from_db] 完成，生成 {} 条 tubi，耗时 {} ms",
+        outcome.tubi_count,
+        elapsed
+    );
+    
+    Ok(outcome)
 }

@@ -1,11 +1,15 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use aios_core::geometry::ShapeInstancesData;
+use aios_core::parsed_data::TubiInfoData;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::rs_surreal::delete_inst_relate_cascade;
 use aios_core::types::*;
 use aios_core::{SUL_DB, SurrealQueryExt, get_db_option};
+use dashmap::DashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 use bevy_transform::prelude::Transform;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -792,4 +796,92 @@ fn build_transaction_block(statements: &[String]) -> String {
     }
     block.push_str("COMMIT TRANSACTION;");
     block
+}
+
+/// 增量保存 tubi_info 数据到数据库
+/// 
+/// 仅写入尚不存在的 tubi_info 记录，返回新增记录数量。
+/// 
+/// # 参数
+/// - `tubi_info_map`: 组合键 ID -> TubiInfoData 的映射
+/// 
+/// # 返回
+/// - `Ok(usize)`: 新增的记录数量
+pub async fn save_tubi_info_batch(
+    tubi_info_map: &DashMap<String, TubiInfoData>,
+) -> anyhow::Result<usize> {
+    if tubi_info_map.is_empty() {
+        return Ok(0);
+    }
+    
+    const CHUNK_SIZE: usize = 200;
+    
+    // 1. 查询已存在的 tubi_info ID
+    let ids: Vec<String> = tubi_info_map.iter().map(|e| e.key().clone()).collect();
+    let existing = query_existing_tubi_info_ids(&ids).await?;
+    
+    debug_model_debug!(
+        "save_tubi_info_batch: total={}, existing={}, to_insert={}",
+        ids.len(),
+        existing.len(),
+        ids.len() - existing.len()
+    );
+    
+    // 2. 过滤出需要新建的
+    let new_entries: Vec<_> = tubi_info_map
+        .iter()
+        .filter(|e| !existing.contains(e.key()))
+        .collect();
+    
+    if new_entries.is_empty() {
+        return Ok(0);
+    }
+    
+    // 3. 批量 INSERT
+    let mut inserted = 0;
+    for chunk in new_entries.chunks(CHUNK_SIZE) {
+        let values: Vec<String> = chunk
+            .iter()
+            .map(|e| e.value().to_surreal_json())
+            .collect();
+        
+        let sql = format!("INSERT INTO tubi_info [{}];", values.join(","));
+        SUL_DB.query(&sql).await?;
+        inserted += chunk.len();
+        
+        debug_model_debug!(
+            "save_tubi_info_batch: inserted chunk of {} records",
+            chunk.len()
+        );
+    }
+    
+    Ok(inserted)
+}
+
+/// 查询已存在的 tubi_info ID 列表
+async fn query_existing_tubi_info_ids(ids: &[String]) -> anyhow::Result<HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    
+    // 分批查询以避免 SQL 过长
+    const BATCH_SIZE: usize = 500;
+    let mut existing = HashSet::new();
+    
+    for chunk in ids.chunks(BATCH_SIZE) {
+        let id_list: String = chunk
+            .iter()
+            .map(|id| format!("tubi_info:⟨{}⟩", id))
+            .join(",");
+        
+        let sql = format!(
+            "SELECT VALUE meta::id(id) FROM tubi_info WHERE id IN [{}];",
+            id_list
+        );
+        
+        let result: Vec<String> = SUL_DB.query_take(&sql, 0).await.unwrap_or_default();
+        existing.extend(result);
+    }
+    
+    Ok(existing)
 }

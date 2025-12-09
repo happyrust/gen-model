@@ -1,33 +1,4 @@
 #V2
--- 检查 PANE 的父节点
-select id, NAME, noun from PE where noun = 'PANE' limit 5;
--- 检查所有表
-INFO FOR DATABASE;
--- 检查 PE 表中的 ZONE 和 SBFR 数据
-select count() as zone_count from PE where noun = 'ZONE' group all;
-select count() as sbfr_count from PE where noun = 'SBFR' group all;
-select count() as pane_count from PE where noun = 'PANE' group all;
--- 检查有 -RM 或 -R- 关键词的元素
-select count() as rm_in_name from PE where '-RM' in NAME or '-R-' in NAME group all;
--- 查看 ZONE 的结构
-select id, NAME, noun, children from PE where noun = 'ZONE' limit 5;
--- 查看 SBFR 的结构
-select id, NAME, noun, children from PE where noun = 'SBFR' limit 5;
-INFO FOR ROOT;
-USE NS `1516`; INFO FOR NAMESPACE;
-USE NS `1516` DB ams; INFO FOR DATABASE;
-USE NS `1516` DB AvevaMarineSample; INFO FOR DATABASE;
-USE NS `1516` DB AvevaMarineSample;
--- 检查 PE 表数据总量
-select count() as pe_count from PE group all;
--- 检查各 noun 类型的分布
-select noun, count() as cnt from PE group by noun order by cnt desc limit 20;
--- 检查有 -R- 关键词的元素
-select count() as rm_name_count from PE where NAME contains '-R-' group all;
--- 检查 FRMW 表
-select count() as frmw_count from FRMW group all;
--- 检查 SBFR 表
-select count() as sbfr_count from SBFR group all;
 -- 查看 ZONE 数据
 select id, NAME, noun, owner from PE where noun = 'ZONE' limit 5;
 USE NS `1516` DB AvevaMarineSample;
@@ -99,3 +70,32 @@ RETURN $panes;
 USE NS `1516` DB AvevaMarineSample;
 -- 完整查询：从 FRMW 获取房间和所有 PANE
 select value [    id,    array::last(string::split(NAME, '-')),    array::flatten((select value (select value REFNO from PANE where OWNER = $parent.REFNO) from SBFR where OWNER = $parent.REFNO))] from FRMW where NAME IS NOT NONE AND '-RM' in NAME limit 5;
+SELECT count() FROM room_relate GROUP ALL;
+SELECT count() FROM room_panel_relate GROUP ALL;
+SELECT * FROM room_panel_relate LIMIT 3;
+SELECT room_num, count() FROM room_panel_relate GROUP BY room_num ORDER BY room_num LIMIT 20;
+SELECT * FROM room_panel_relate WHERE room_num != NONE AND room_num != '' LIMIT 5;
+INFO FOR NS;
+SELECT count() FROM tubi_info GROUP ALL;
+SELECT id, tubi_info FROM inst_info WHERE tubi_info != NONE LIMIT 5;
+SELECT id, refno.ARRI, refno.LEAV FROM pe WHERE owner.noun = 'BRAN' LIMIT 5;
+SELECT id, ptset FROM inst_info LIMIT 3;
+SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
+INFO FOR DB;
+INFO FOR NS;
+SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
+SELECT count() FROM pe GROUP ALL;
+INFO FOR ROOT;
+SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
+INFO FOR NS;
+SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL; SELECT count() FROM pe WHERE noun = 'BRAN' GROUP ALL;
+SELECT count() FROM pe GROUP ALL;
+SELECT count() FROM tubi_info GROUP ALL;
+SELECT id, cata_hash FROM inst_info LIMIT 3;
+SELECT count() FROM tubi_info GROUP ALL; SELECT count() FROM inst_info GROUP ALL;
+SELECT * FROM tubi_info LIMIT 3;
+SELECT id, tubi_info FROM inst_info WHERE tubi_info != NONE LIMIT 5;
+SELECT count() FROM inst_info WHERE tubi_info != NONE GROUP ALL;
+SELECT * FROM tubi_info LIMIT 3;
+DELETE FROM tubi_info;
+SELECT * FROM tubi_info LIMIT 3;
