@@ -46,6 +46,8 @@ pub struct ExportConfig {
     pub run_all_dbnos: bool,
     /// 是否按 SITE 拆分导出（默认 false，即合并导出）
     pub split_by_site: bool,
+    /// 是否包含负实体（Neg 类型几何体）
+    pub include_negative: bool,
 }
 
 impl Default for ExportConfig {
@@ -63,6 +65,7 @@ impl Default for ExportConfig {
             use_basic_materials: false,
             run_all_dbnos: false,
             split_by_site: false,
+            include_negative: false,
         }
     }
 }
@@ -142,6 +145,7 @@ impl ExportConfig {
         regenerate_plant_mesh: bool,
         use_basic_materials: bool,
         split_by_site: bool,
+        include_negative: bool,
     ) -> Self {
         Self {
             refnos_str: vec![],
@@ -156,6 +160,7 @@ impl ExportConfig {
             use_basic_materials,
             run_all_dbnos: true, // 关键：全库导出
             split_by_site,
+            include_negative,
         }
     }
 
@@ -187,6 +192,7 @@ impl ExportConfig {
             use_basic_materials: false,
             run_all_dbnos: true, // 关键：全库导出
             split_by_site,
+            include_negative: false,
         }
     }
 
@@ -354,6 +360,7 @@ pub async fn export_obj_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
                         parse_length_unit(&config.target_unit),
                     ),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
 
@@ -431,6 +438,7 @@ async fn export_obj_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
                     verbose: config.verbose,
                     unit_converter: UnitConverter::default(),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             if let Err(e) = exporter
@@ -465,6 +473,7 @@ async fn export_obj_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
                 verbose: config.verbose,
                 unit_converter: UnitConverter::default(),
                 use_basic_materials: config.use_basic_materials,
+                include_negative: config.include_negative,
             },
         };
 
@@ -576,6 +585,7 @@ pub async fn export_glb_mode(config: ExportConfig, db_option_ext: &DbOptionExt) 
                         parse_length_unit(&config.target_unit),
                     ),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             let _ = GlbExporter::new()
@@ -652,6 +662,7 @@ async fn export_glb_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
                     verbose: config.verbose,
                     unit_converter: UnitConverter::default(),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             if let Err(e) = exporter
@@ -686,6 +697,7 @@ async fn export_glb_mode_for_db(config: &ExportConfig, db_option_ext: &DbOptionE
                 verbose: config.verbose,
                 unit_converter: UnitConverter::default(),
                 use_basic_materials: config.use_basic_materials,
+                include_negative: config.include_negative,
             },
         };
 
@@ -804,6 +816,7 @@ pub async fn export_gltf_mode(config: ExportConfig, db_option_ext: &DbOptionExt)
                         parse_length_unit(&config.target_unit),
                     ),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             match exporter
@@ -881,6 +894,7 @@ pub async fn export_gltf_mode(config: ExportConfig, db_option_ext: &DbOptionExt)
                         parse_length_unit(&config.target_unit),
                     ),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             exporter
@@ -957,6 +971,7 @@ async fn export_gltf_mode_for_db(config: &ExportConfig, db_option_ext: &DbOption
                     verbose: config.verbose,
                     unit_converter: UnitConverter::default(),
                     use_basic_materials: config.use_basic_materials,
+                    include_negative: config.include_negative,
                 },
             };
             if let Err(e) = exporter
@@ -991,6 +1006,7 @@ async fn export_gltf_mode_for_db(config: &ExportConfig, db_option_ext: &DbOption
                 verbose: config.verbose,
                 unit_converter: UnitConverter::default(),
                 use_basic_materials: config.use_basic_materials,
+                include_negative: config.include_negative,
             },
         };
 

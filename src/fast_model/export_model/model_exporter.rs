@@ -67,6 +67,10 @@ pub struct CommonExportConfig {
 
     /// 是否使用基础颜色材质（不使用 PBR）。为 true 时导出 KHR_materials_unlit
     pub use_basic_materials: bool,
+
+    /// 是否包含负实体（Neg 类型几何体）
+    /// 默认为 false，只导出正实体（Pos、Compound 等）
+    pub include_negative: bool,
 }
 
 impl Default for CommonExportConfig {
@@ -77,6 +81,7 @@ impl Default for CommonExportConfig {
             verbose: false,
             unit_converter: UnitConverter::default(),
             use_basic_materials: false,
+            include_negative: false,
         }
     }
 }
@@ -96,6 +101,7 @@ impl CommonExportConfig {
             verbose,
             unit_converter: UnitConverter::new(source_unit, target_unit),
             use_basic_materials: false,
+            include_negative: false,
         }
     }
 
@@ -342,6 +348,27 @@ pub async fn query_geometry_instances(
     enable_holes: bool,
     verbose: bool,
 ) -> Result<Vec<GeomInstQuery>> {
+    query_geometry_instances_ext(refnos, enable_holes, false, verbose).await
+}
+
+/// 共享的辅助函数：查询几何体实例数据（支持负实体）
+///
+/// # 参数
+///
+/// * `refnos` - 参考号列表
+/// * `enable_holes` - 是否启用布尔运算后的 mesh
+/// * `include_negative` - 是否包含负实体（Neg 类型）
+/// * `verbose` - 是否输出详细日志
+///
+/// # 返回值
+///
+/// 返回几何体实例数据
+pub async fn query_geometry_instances_ext(
+    refnos: &[RefnoEnum],
+    enable_holes: bool,
+    include_negative: bool,
+    verbose: bool,
+) -> Result<Vec<GeomInstQuery>> {
     if refnos.is_empty() {
         if verbose {
             println!("⚠️  输入参考号为空，跳过查询");
@@ -355,7 +382,7 @@ pub async fn query_geometry_instances(
     }
 
     const DEFAULT_QUERY_BATCH: usize = 50;
-    let geom_insts = query_insts_with_batch(refnos, enable_holes, Some(DEFAULT_QUERY_BATCH))
+    let geom_insts = aios_core::query_insts_ext(refnos, enable_holes, include_negative, Some(DEFAULT_QUERY_BATCH))
         .await
         .context("查询 inst_relate 数据失败")?;
 

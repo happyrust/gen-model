@@ -96,6 +96,7 @@ async fn capture_single(refno: RefnoEnum, mesh_dir: &Path, config: &CaptureConfi
         verbose: true, // 启用详细输出以便调试
         unit_converter: UnitConverter::default(),
         use_basic_materials: false,
+        include_negative: false,
     };
 
     let mut prepared = prepare_obj_export(&[refno], mesh_dir, &common_config).await?;

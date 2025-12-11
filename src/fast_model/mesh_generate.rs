@@ -705,24 +705,6 @@ pub async fn gen_inst_meshes(
         "gen_inst_meshes fetched inst_geo_ids: {}",
         inst_geo_ids.len()
     );
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
-    {
-        let ids: Vec<String> = inst_geo_ids.iter().map(|x| x.geo_id.to_raw()).collect();
-        let _ = writeln!(
-            f,
-            r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H5","location":"mesh_generate.rs:query_inst_geo_ids","message":"inst_geo_ids fetched","data":{{"refnos":{},"count":{},"ids":{}}},"timestamp":{}}}"#,
-            serde_json::to_string(&refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>())
-                .unwrap_or("[]".to_string()),
-            ids.len(),
-            serde_json::to_string(&ids).unwrap_or("[]".to_string()),
-            chrono::Utc::now().timestamp_millis()
-        );
-    }
-    // #endregion
     // println!("inst_geo_ids: {:?}", &inst_geo_ids);
     // 无可处理对象则直接返回
     if inst_geo_ids.is_empty() {
@@ -770,79 +752,29 @@ pub async fn gen_inst_meshes(
             match SUL_DB.query(&sql).await {
                 Ok(mut response) => {
                     let result: Vec<QueryGeoParam> = response.take(0).unwrap();
-                    debug_model_debug!(
-                        "chunk {} query_geo_params count={}",
-                        chunk_idx,
-                        result.len()
-                    );
-                    // #region agent log
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
-                    {
-                        let ids_list: Vec<String> = result.iter().map(|g| g.id.to_raw()).collect();
-                        let _ = writeln!(
-                            f,
-                            r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"mesh_generate.rs:query_geo_params","message":"query_geo_params chunk","data":{{"chunk_idx":{},"ids":{},"count":{}}},"timestamp":{}}}"#,
-                            chunk_idx,
-                            serde_json::to_string(&ids_list).unwrap_or("[]".to_string()),
-                            result.len(),
-                            chrono::Utc::now().timestamp_millis()
-                        );
-                    }
-                    // #endregion
-                    if result.is_empty() {
-                        debug_model_debug!(
-                            "[WARN] gen_inst_meshes chunk {} returned empty query result (ids={})",
-                            chunk_idx,
-                            ids
-                        );
-                        return;
-                    }
                     i += 1;
                     let mut update_sql = String::new();
                     // 遍历每个几何参数并使用 CSG 生成网格
                     for g in result {
-                        // #region agent log
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/Volumes/DPC/work/plant-code/rs-plant3-d/.cursor/debug.log")
-                        {
-                            let (pdia, phei, btm0, btm1, top0, top1, unit_flag, is_sscl) =
-                                match &g.param {
-                                    PdmsGeoParam::PrimSCylinder(s) => (
-                                        s.pdia,
-                                        s.phei,
-                                        s.btm_shear_angles[0],
-                                        s.btm_shear_angles[1],
-                                        s.top_shear_angles[0],
-                                        s.top_shear_angles[1],
-                                        s.unit_flag,
-                                        s.is_sscl(),
-                                    ),
-                                    PdmsGeoParam::PrimLSnout(_s) => {
-                                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false)
-                                    }
-                                    _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false),
-                                };
-                            let _ = writeln!(
-                                f,
-                                r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H6","location":"mesh_generate.rs:query_geo_params","message":"geo param fetched","data":{{"chunk_idx":{},"geo_id":"{}","geo_type":"{}","pdia":{},"phei":{},"btm":[{},{}],"top":[{},{}],"unit_flag":{},"is_sscl":{}}},"timestamp":{}}}"#,
-                                chunk_idx,
-                                g.id.to_raw(),
-                                g.param.type_name(),
-                                pdia,
-                                phei,
-                                btm0,
-                                btm1,
-                                top0,
-                                top1,
-                                unit_flag,
-                                is_sscl,
-                                chrono::Utc::now().timestamp_millis()
-                            );
+                        // #region SSLC debug log - 导出 SSLC 数据到 JSON
+                        if aios_core::is_debug_model_enabled() {
+                            if let PdmsGeoParam::PrimSCylinder(s) = &g.param {
+                                if s.is_sscl() {
+                                    let sslc_json = serde_json::json!({
+                                        "refno": g.id.to_raw(),
+                                        "noun": "SSLC",
+                                        "pdia": s.pdia,
+                                        "phei": s.phei,
+                                        "pxts": s.top_shear_angles[0],
+                                        "pyts": s.top_shear_angles[1],
+                                        "pxbs": s.btm_shear_angles[0],
+                                        "pybs": s.btm_shear_angles[1],
+                                        "paxi": [s.paxi_dir.x, s.paxi_dir.y, s.paxi_dir.z],
+                                        "ppos": [s.paxi_pt.x, s.paxi_pt.y, s.paxi_pt.z],
+                                    });
+                                    debug_model!("SSLC_DATA: {}", sslc_json);
+                                }
+                            }
                         }
                         // #endregion
                         debug_model_debug!("gen mesh param: {:?}", &g.param);

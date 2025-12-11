@@ -28,6 +28,7 @@ fn build_export_config(
     regenerate_plant_mesh: bool,
     dbno: Option<u32>,
     split_by_site: bool,
+    include_negative: bool,
 ) -> ExportConfig {
     let run_all_dbnos = refnos_vec.is_empty() && dbno.is_none();
     ExportConfig {
@@ -43,6 +44,7 @@ fn build_export_config(
         use_basic_materials: false,
         run_all_dbnos,
         split_by_site,
+        include_negative,
     }
 }
 
@@ -205,6 +207,12 @@ async fn main() -> anyhow::Result<()> {
                 .long("export-obj-output")
                 .help("Output path for exported OBJ file (optional, defaults to PE name)")
                 .value_name("OUTPUT_PATH"),
+        )
+        .arg(
+            Arg::new("include-negative")
+                .long("include-negative")
+                .help("Include negative entities (Neg type geometries) in export")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("export-filter-nouns")
@@ -380,6 +388,9 @@ async fn main() -> anyhow::Result<()> {
     // 获取 split-site 参数（默认合并，有此参数才拆分）
     let split_by_site = matches.get_flag("split-site");
 
+    // 获取 include-negative 参数（是否包含负实体）
+    let include_negative = matches.get_flag("include-negative");
+
     let capture_dir = matches.get_one::<String>("capture").cloned();
     let capture_width = matches
         .get_one::<u32>("capture-width")
@@ -483,6 +494,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 None,
                 split_by_site,
+                include_negative,
             );
             return export_obj_mode(config, &db_option_ext).await;
         }
@@ -500,6 +512,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 None,
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_glb_mode(config, &db_option_ext).await;
@@ -518,6 +531,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 None,
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_gltf_mode(config, &db_option_ext).await;
@@ -540,6 +554,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 Some(dbno),
                 split_by_site,
+                include_negative,
             );
             return export_obj_mode(config, &db_option_ext).await;
         }
@@ -557,6 +572,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 Some(dbno),
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_glb_mode(config, &db_option_ext).await;
@@ -575,6 +591,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 Some(dbno),
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_gltf_mode(config, &db_option_ext).await;
@@ -599,6 +616,7 @@ async fn main() -> anyhow::Result<()> {
                 matches.get_flag("regen-model"),
                 None,
                 split_by_site,
+                include_negative,
             );
             return export_obj_mode(config, &db_option_ext).await;
         }
@@ -619,6 +637,7 @@ async fn main() -> anyhow::Result<()> {
                 false, // GLB 不需要 regenerate_plant_mesh
                 None,
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_glb_mode(config, &db_option_ext).await;
@@ -640,6 +659,7 @@ async fn main() -> anyhow::Result<()> {
                 false, // glTF 不需要 regenerate_plant_mesh
                 None,
                 split_by_site,
+                include_negative,
             );
             config.use_basic_materials = use_basic_materials;
             return export_gltf_mode(config, &db_option_ext).await;
@@ -661,6 +681,7 @@ async fn main() -> anyhow::Result<()> {
             matches.get_flag("regen-model"),
             use_basic_materials,
             split_by_site,
+            include_negative,
         );
         return export_gltf_mode(config, &db_option_ext).await;
     }
@@ -677,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
             matches.get_flag("regen-model"),
             use_basic_materials,
             split_by_site,
+            include_negative,
         );
         return export_glb_mode(config, &db_option_ext).await;
     }
@@ -693,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
             matches.get_flag("regen-model"),
             use_basic_materials,
             split_by_site,
+            include_negative,
         );
         return export_obj_mode(config, &db_option_ext).await;
     }

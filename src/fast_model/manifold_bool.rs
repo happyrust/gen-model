@@ -292,8 +292,8 @@ async fn apply_boolean_for_query(
         return Ok(());
     }
 
-    let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
-    if pos_manifold.num_tri() == 0 {
+    let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, aios_core::csg::manifold::ManifoldOpType::Union);
+    if pos_manifold.get_mesh().indices.is_empty() {
         println!(
             "布尔运算失败: 正实体 manifold 没有三角形, refno: {}",
             query.refno
@@ -351,7 +351,7 @@ async fn apply_boolean_for_query(
     }
 
     // 调试：导出负实体 OBJ（合并所有负实体）
-    let neg_union = ManifoldRust::batch_boolean(&neg_manifolds, 0);
+    let neg_union = ManifoldRust::batch_boolean(&neg_manifolds, aios_core::csg::manifold::ManifoldOpType::Union);
     let neg_mesh = PlantMesh::from(&neg_union);
     let neg_obj_path = format!("test_output/debug_{}_neg.obj", query.refno);
     if let Err(e) = neg_mesh.export_obj(false, &neg_obj_path) {

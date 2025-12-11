@@ -1,0 +1,14 @@
+warning: unused manifest key: example.3.eframe
+warning: unexpected `cfg` condition value: `grpc`
+ --> build.rs:3:11
+  |
+3 |     #[cfg(feature = "grpc")]
+  |           ^^^^^^^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `console`, `debug_e3d`, `debug_expr`, `debug_obj_export`, `default`, `eframe`, `gen_model`, `gpui`, `jsonwebtoken`, `local`, `manifold`, `mem-kv-save`, `mqtt`, `profile`, `project_hd`, `project_hh`, `prost`, `query-surreal`, `rstar`, `sqlite-index`, `surreal-save`, `test`, `tokio-util`, `tonic`, `tonic-reflection`, `truck`, `viewer`, `web_server`, and `ws`
+  = help: consider adding `grpc` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: `aios-database` (build script) generated 1 warning
+   Compiling aios-database v0.2.3 (D:\work\plant\gen-model)

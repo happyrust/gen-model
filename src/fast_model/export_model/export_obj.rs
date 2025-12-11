@@ -11,7 +11,7 @@ use std::io::Write;
 use super::export_common::{ExportData, collect_export_data};
 use super::model_exporter::{
     CommonExportConfig, ExportStats, ModelExporter, ObjExportConfig, collect_export_refnos,
-    query_geometry_instances,
+    query_geometry_instances_ext,
 };
 
 /// 带单位转换的 OBJ 导出函数
@@ -193,7 +193,7 @@ pub async fn prepare_obj_export(
 
     stats.descendant_count = all_refnos.len().saturating_sub(refnos.len());
 
-    let geom_insts = query_geometry_instances(&all_refnos, true, config.verbose).await?;
+    let geom_insts = query_geometry_instances_ext(&all_refnos, true, config.include_negative, config.verbose).await?;
 
     let export_data =
         collect_export_data(geom_insts, &all_refnos, mesh_dir, config.verbose, None).await?;
@@ -256,6 +256,7 @@ pub async fn export_obj_for_refnos(
         verbose: true,
         unit_converter: UnitConverter::default(),
         use_basic_materials: false,
+        include_negative: false,
     };
 
     let PreparedObjExport { mesh, mut stats } =

@@ -189,6 +189,7 @@ async fn export_obj_models(pos_refno: RefnoEnum, neg_refnos: &[RefnoEnum]) -> Re
         verbose: true,
         unit_converter: UnitConverter::default(),
         use_basic_materials: false,
+        include_negative: false,
     };
 
     // 导出正实体（布尔运算后）
