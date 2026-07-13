@@ -6,6 +6,7 @@ use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+#[cfg(feature = "occ")]
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
@@ -20,6 +21,7 @@ use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::DMat4;
 use itertools::Itertools;
+#[cfg(feature = "occ")]
 use opencascade::primitives::IntoShape;
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
@@ -302,6 +304,14 @@ pub async fn gen_inst_meshes(
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
+    #[cfg(not(feature = "occ"))]
+    {
+        let _ = (refnos, replace_exist, dir);
+        eprintln!("warning: gen_inst_meshes skipped (feature `occ` disabled)");
+        return Ok(());
+    }
+    #[cfg(feature = "occ")]
+    {
     const PAGE_NUM: usize = 100;
     let mut i = 0;
     let inst_keys = get_inst_relate_keys(refnos);
@@ -549,6 +559,7 @@ pub async fn gen_inst_meshes(
     utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(())
+    } // cfg(feature = "occ")
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -703,6 +714,7 @@ fn round_dmat4(m: DMat4) -> DMat4 {
     }
 }
 
+#[cfg(feature = "occ")]
 pub async fn apply_insts_boolean_occ(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -923,6 +935,7 @@ pub struct GmGeoData {
 }
 
 //处理元件库有负实体的布尔运算
+#[cfg(feature = "occ")]
 pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     let sql = r#"
         select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
