@@ -257,3 +257,24 @@ impl IncrementPipeline {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::data_interface::tidb_manager::AiosDBManager;
+
+    /// Manual: requires local Surreal `ws://127.0.0.1:8009` + E3D project files.
+    /// Example: lower `dbnum_watermark:8191` then
+    /// `cargo test -p aios-database force_init_watcher_incr_once -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "manual live incr against local Surreal/E3D"]
+    async fn force_init_watcher_incr_once() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let mgr = AiosDBManager::init_form_config()
+            .await
+            .expect("init mgr");
+        mgr.init_watcher().await.expect("init_watcher");
+    }
+}

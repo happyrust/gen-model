@@ -34,6 +34,8 @@ impl SyncPublisher {
 
     /// Ensure a single `.cba` archive exists/refreshed for `path` (used by init too).
     pub async fn ensure_archive(path: &PathBuf) -> anyhow::Result<String> {
+        tokio::fs::create_dir_all("assets/archives").await?;
+        tokio::fs::create_dir_all("assets/temp").await?;
         let file_name = path
             .file_stem()
             .and_then(|s| s.to_str())

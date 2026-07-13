@@ -510,8 +510,9 @@ impl AiosDBManager {
     /// 7. 成功后由 SyncPublisher 发布异地同步（与 async_watch 对齐）
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
-        // 创建存档目录
+        // 创建存档与压缩临时目录（SyncPublisher 依赖 assets/temp）
         fs::create_dir_all("assets/archives")?;
+        fs::create_dir_all("assets/temp")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
 
