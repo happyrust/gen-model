@@ -1,0 +1,288 @@
+//! SideEffectCompensator — durable retry for post-watermark side effects.
+//!
+//! PE persist advances [`crate::data_interface::increment_pipeline::IncrementPipeline`]
+//! watermarks and must not roll back. Model refresh / SYST derived sync can fail
+//! afterward; this module records those jobs in Surreal and retries on drain.
+//!
+//! Compensation for `model_refresh` always uses the Owner regen path (idempotent
+//! on owner sets). Classified payloads are not replayed from disk.
+
+use aios_core::options::ModelRefreshMode;
+use aios_core::pdms_types::*;
+use aios_core::SUL_DB;
+use serde::{Deserialize, Serialize};
+
+use crate::data_interface::increment_pipeline::{IncrResult, SYS_META_DB_TYPES};
+use crate::data_interface::model_refresh::ModelRefreshPolicy;
+use crate::data_interface::tidb_manager::AiosDBManager;
+
+const TABLE: &str = "incr_side_effect_pending";
+const MAX_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideEffectKind {
+    ModelRefresh,
+    SystDerived,
+}
+
+impl SideEffectKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelRefresh => "model_refresh",
+            Self::SystDerived => "syst_derived",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingJob {
+    pub kind: String,
+    pub dbnum: u32,
+    pub end_sesno: i32,
+    pub db_type: String,
+    #[serde(default)]
+    pub changed_refnos: Vec<String>,
+    pub status: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Independent module: enqueue / complete / drain side-effect jobs.
+#[derive(Debug, Default, Clone)]
+pub struct SideEffectCompensator;
+
+impl SideEffectCompensator {
+    fn record_id(kind: SideEffectKind, dbnum: u32, end_sesno: i32) -> String {
+        format!("{}:{}_{}_{}", TABLE, kind.as_str(), dbnum, end_sesno)
+    }
+
+    /// After PE+watermark success: enqueue jobs that still need side effects.
+    pub async fn enqueue_from_incr(
+        mgr: &AiosDBManager,
+        incr: &IncrResult,
+    ) -> anyhow::Result<()> {
+        if !incr.had_work() {
+            return Ok(());
+        }
+
+        if !matches!(mgr.db_option.model_refresh, ModelRefreshMode::Noop) {
+            for success in &incr.successes {
+                if SYS_META_DB_TYPES.contains(&success.db_type.as_str()) {
+                    continue;
+                }
+                if success.changed_refnos.is_empty() {
+                    continue;
+                }
+                Self::upsert_pending(
+                    SideEffectKind::ModelRefresh,
+                    success.dbnum,
+                    success.end_sesno,
+                    &success.db_type,
+                    &success.changed_refnos,
+                )
+                .await?;
+            }
+        }
+
+        if incr.has_db_type("SYST") {
+            let end_sesno = incr
+                .successes
+                .iter()
+                .filter(|s| s.db_type == "SYST")
+                .map(|s| s.end_sesno)
+                .max()
+                .unwrap_or(0);
+            let dbnum = incr
+                .successes
+                .iter()
+                .find(|s| s.db_type == "SYST")
+                .map(|s| s.dbnum)
+                .unwrap_or(0);
+            Self::upsert_pending(
+                SideEffectKind::SystDerived,
+                dbnum,
+                end_sesno,
+                "SYST",
+                &[],
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn upsert_pending(
+        kind: SideEffectKind,
+        dbnum: u32,
+        end_sesno: i32,
+        db_type: &str,
+        changed_refnos: &[RefU64],
+    ) -> anyhow::Result<()> {
+        let id = Self::record_id(kind, dbnum, end_sesno);
+        let refno_json = serde_json::to_string(
+            &changed_refnos
+                .iter()
+                .map(|r| r.to_pdms_str())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".into());
+        let sql = format!(
+            "UPSERT {id} SET \
+             kind = '{}', dbnum = {dbnum}, end_sesno = {end_sesno}, \
+             db_type = '{db_type}', changed_refnos = {refno_json}, \
+             status = 'pending', attempts = attempts?:0, \
+             updated_at = time::now();",
+            kind.as_str(),
+        );
+        SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("enqueue {id} failed: {e}"))?;
+        println!("SideEffectCompensator: enqueued {id}");
+        Ok(())
+    }
+
+    pub async fn mark_done(
+        kind: SideEffectKind,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<()> {
+        let id = Self::record_id(kind, dbnum, end_sesno);
+        let sql = format!(
+            "UPDATE {id} SET status = 'done', last_error = NONE, updated_at = time::now();"
+        );
+        SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("mark_done {id} failed: {e}"))?;
+        Ok(())
+    }
+
+    pub async fn mark_failed(
+        kind: SideEffectKind,
+        dbnum: u32,
+        end_sesno: i32,
+        err: &str,
+    ) -> anyhow::Result<()> {
+        let id = Self::record_id(kind, dbnum, end_sesno);
+        let escaped = err.replace('\'', "\\'");
+        let sql = format!(
+            "UPDATE {id} SET status = 'failed', attempts = (attempts?:0) + 1, \
+             last_error = '{escaped}', updated_at = time::now();"
+        );
+        SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("mark_failed {id} failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Replay pending/failed jobs (attempts < MAX_ATTEMPTS). Safe to call at init.
+    pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+        let sql = format!(
+            "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+             AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC LIMIT 50;"
+        );
+        let mut response = SUL_DB.query(sql).await?;
+        let jobs: Vec<PendingJob> = response.take(0).unwrap_or_default();
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+
+        println!(
+            "SideEffectCompensator: draining {} pending side-effect job(s)",
+            jobs.len()
+        );
+        let mut done = 0usize;
+
+        for job in jobs {
+            let kind = match job.kind.as_str() {
+                "model_refresh" => SideEffectKind::ModelRefresh,
+                "syst_derived" => SideEffectKind::SystDerived,
+                other => {
+                    println!("SideEffectCompensator: unknown kind {other}, skip");
+                    continue;
+                }
+            };
+
+            let result = match kind {
+                SideEffectKind::ModelRefresh => {
+                    let refnos: Vec<RefU64> = job
+                        .changed_refnos
+                        .iter()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    ModelRefreshPolicy::compensate_owners(mgr, &refnos).await
+                }
+                SideEffectKind::SystDerived => {
+                    let aios_mgr =
+                        aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option()
+                            .await?;
+                    crate::team_data::sync_team_data(&aios_mgr).await
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    Self::mark_done(kind, job.dbnum, job.end_sesno).await?;
+                    done += 1;
+                    println!(
+                        "SideEffectCompensator: done {:?} dbnum={} sesno={}",
+                        kind, job.dbnum, job.end_sesno
+                    );
+                }
+                Err(e) => {
+                    let msg = format!("{e:?}");
+                    println!(
+                        "SideEffectCompensator: retry failed {:?} dbnum={}: {msg}",
+                        kind, job.dbnum
+                    );
+                    let _ = Self::mark_failed(kind, job.dbnum, job.end_sesno, &msg).await;
+                }
+            }
+        }
+
+        Ok(done)
+    }
+
+    /// Mark all model_refresh jobs covered by this incr as done (after live refresh ok).
+    pub async fn complete_model_jobs(incr: &IncrResult) -> anyhow::Result<()> {
+        for success in &incr.successes {
+            if SYS_META_DB_TYPES.contains(&success.db_type.as_str()) {
+                continue;
+            }
+            if success.changed_refnos.is_empty() {
+                continue;
+            }
+            Self::mark_done(
+                SideEffectKind::ModelRefresh,
+                success.dbnum,
+                success.end_sesno,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn complete_syst_jobs(incr: &IncrResult) -> anyhow::Result<()> {
+        let end_sesno = incr
+            .successes
+            .iter()
+            .filter(|s| s.db_type == "SYST")
+            .map(|s| s.end_sesno)
+            .max();
+        let Some(end_sesno) = end_sesno else {
+            return Ok(());
+        };
+        let dbnum = incr
+            .successes
+            .iter()
+            .find(|s| s.db_type == "SYST")
+            .map(|s| s.dbnum)
+            .unwrap_or(0);
+        Self::mark_done(SideEffectKind::SystDerived, dbnum, end_sesno).await
+    }
+}

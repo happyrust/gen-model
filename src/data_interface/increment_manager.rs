@@ -7,13 +7,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // AIOS核心模块导入
-use aios_core::data_center::DataCenterRecordOperate;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
 use aios_core::{RefU64Vec, RefnoEnum, get_db_option};
-use aios_core::{SUL_DB, clear_all_caches, get_default_name, get_pe};
+use aios_core::{clear_all_caches, get_default_name, get_pe};
 
 // 异步和工具库导入
 use futures::StreamExt;
@@ -25,12 +24,10 @@ use notify::{RecursiveMode, Watcher};
 use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
-use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use pdms_io::watch::PdmsWatcher;
 
 // 其他依赖导入
 use petgraph::visit::Walker;
-use rumqttc::QoS;
 use tokio::fs::create_dir_all;
 use walkdir::WalkDir;
 
@@ -41,13 +38,10 @@ use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
-use crate::mqtt_service::SyncE3dFileMsg;
 use parse_pdms_db::parse::DbBasicInfo;
 use tracing_subscriber::fmt::format;
 
 use crate::consts::PDMS_ELEMENTS_TABLE;
-
-const DATACENTER_VERSION: &'static str = "datacenter_version";
 
 #[cfg(test)]
 mod tests {
@@ -333,8 +327,12 @@ impl AiosDBManager {
     /// # 过滤规则
     ///
     /// 1. 检查数据库类型是否在支持列表中
-    /// 2. 检查是否在手动指定的数据库编号列表中（如果配置了）
-    /// 3. 检查是否在排除的数据库编号列表中
+    /// 2. `only_sync_sys` 时仅允许 SYS meta（与全量同步路径一致）
+    /// 3. 检查是否在手动指定的数据库编号列表中（如果配置了）
+    /// 4. 检查是否在排除的数据库编号列表中
+    ///
+    /// init_watcher / async_watch 共用此门控；SesnoRangeResolver 的 `skip_cata`
+    /// 两侧均传 `false`，避免双路径对 CATA 分叉。
     fn should_process_database(&self, db_type: &str, db_num: u32) -> bool {
         // 检查数据库类型是否支持
         if !CHECK_DB_TYPES.contains(&db_type) {
@@ -342,6 +340,14 @@ impl AiosDBManager {
         }
 
         let db_option = get_db_option();
+
+        // 与 versioned_db 全量 only_sync_sys 对齐：跳过 DESI/CATA
+        if db_option.only_sync_sys
+            && !crate::data_interface::sesno_range::COLD_START_DB_TYPES.contains(&db_type)
+        {
+            return false;
+        }
+
         let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
         let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
 
@@ -359,165 +365,129 @@ impl AiosDBManager {
     }
     /// 执行增量更新操作
     ///
-    /// 该函数是增量更新的核心方法，负责处理多个数据库文件的增量更新。
-    /// 它会遍历所有需要更新的数据库文件，收集增量元素数据，并执行相应的更新操作。
+    /// 编排：IncrementPipeline → enqueue side-effects → 可选 MySQL → SYST 派生 → ModelRefresh。
+    /// 返回 [`IncrResult`] 供调用方（如 SyncPublisher）继续处理。
     ///
-    /// # 参数
+    /// 模型刷新 / SYST 派生同步失败不会使整体返回 Err：持久化与水位已完成，
+    /// 错误只记入 `IncrResult::warnings`，并以 [`SideEffectCompensator`] 落库待补偿，
+    /// 以保证调用方仍能对成功文件执行异地同步发布。
     ///
-    /// * `increment_ranges_map` - 增量更新范围映射表
-    ///   - 键：数据库文件路径
-    ///   - 值：元组(数据库页面基本信息, 需要更新的会话号范围)
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<bool>` - 成功返回Ok(true)，失败返回错误信息
-    ///
-    /// # 处理流程
-    ///
-    /// 1. 遍历每个需要更新的数据库文件
-    /// 2. 打开PDMS IO对象
-    /// 3. 收集指定会话号范围内的增量元素
-    /// 4. 将元素更新到数据库
-    /// 5. 处理相关的模型更新
-    ///
-    /// # 错误处理
-    ///
-    /// 当PDMS IO打开失败或数据库操作失败时会返回错误
+    /// Map value: `(basic_info, sesno_range, db_type)`.
     pub async fn execute_incr_update(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>)>,
-    ) -> anyhow::Result<bool> {
-        // 遍历所有需要增量更新的文件
-        for (path, (basic_info, sesno_range)) in increment_ranges_map {
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            // 跳过复制的副本文件
-            if file_name.contains("-") {
-                continue;
-            };
-            println!("正在处理文件: {:?}, 会话号范围: {:?}", path, &sesno_range);
-            // 创建并打开PDMS IO对象
-            let mut io = PdmsIO::new("", path.clone(), true);
-            io.open()
-                .map_err(|e| anyhow::anyhow!("打开PDMS IO失败: {}", e))?;
-            // 获取会话号范围的结束值（在移动之前）
-            let end_sesno = *sesno_range.end();
-            // 收集指定范围内的增量元素
-            let range_eles = io.collect_increment_eles(Some(sesno_range))?;
-            // 将元素更新到数据库
-            io.update_elements_to_database(&range_eles).await?;
-            // 更新MySQL pdms_element表
-            #[cfg(feature = "sql")]
-            {
-                match self.update_mysql_pdms_elements(&range_eles).await {
-                    Ok(_) => {
-                        println!("MySQL pdms_element表更新成功");
-                    }
-                    Err(e) => {
-                        println!("MySQL pdms_element表更新失败: {}", e);
-                    }
-                }
-            }
-            //更新 sesno 到 db_file_info 中
-            let file_name = path.file_stem().unwrap().to_str().unwrap();
-            //更新 sesno 到 db_file_info 中的sql
-            let sql = format!("UPDATE db_file_info:{} SET sesno={};", file_name, end_sesno);
-            //执行更新
-            SUL_DB.query(sql).await.unwrap();
-            // 更新元数据增量发布
-            match self.update_datacenter_version(&range_eles).await {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                }
-            }
-            // 执行相关的模型更新操作
-            let mut db_option = self.db_option.clone();
-            let refnos = range_eles
-                .values()
-                .flat_map(|vec| vec.iter())
-                .map(|p| p.refno)
-                .collect::<Vec<RefU64>>();
-            let mut owner = HashSet::new();
-            // 直接重新生成owner的模型，防止修改管件之后，tubi发生变化，没有修改到
-            for refno in refnos {
-                if let Ok(Some(pe)) = self.get_owner_ele_node(refno).await {
-                    // 如果owner的类型是zone或者site，证明修改的不是模型，则可以跳过
-                    if pe.noun == "SITE" || pe.noun == "ZONE" {
-                        continue;
-                    };
-                    owner.insert(pe.refno.to_pdms_str());
-                }
-            }
-            dbg!(&owner);
-            if !owner.is_empty() {
-                // 确保 gen_model 和 gen_mesh 为 true，以便触发模型生成和数据发送
-                db_option.gen_model = true;
-                db_option.gen_mesh = true;
-                db_option.debug_refno_types = vec!["CATA".into(), "LOOP".into(), "PRIM".into()];
-                db_option.debug_root_refnos = Some(owner.into_iter().collect::<Vec<_>>());
-                println!(
-                    "开始生成增量更新的模型数据，owner数量: {}",
-                    db_option.debug_root_refnos.as_ref().unwrap().len()
-                );
-                gen_all_geos_data(vec![], &db_option, None).await?;
-            } else {
-                println!("没有找到需要更新的owner元件，跳过模型生成");
-            }
-            // self.process_model_updates(&range_eles, basic_info.pdms_header.db_num).await?;
+        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
+    ) -> anyhow::Result<crate::data_interface::increment_pipeline::IncrResult> {
+        use crate::data_interface::increment_pipeline::IncrementPipeline;
+        use crate::data_interface::side_effect_pending::{
+            SideEffectCompensator, SideEffectKind,
+        };
+
+        if increment_ranges_map.is_empty() {
+            return Ok(Default::default());
         }
 
-        Ok(true)
-    }
+        let mut incr = IncrementPipeline::new()
+            .apply(increment_ranges_map)
+            .await;
 
-    /// 通过文件名查询数据库中最新的会话号
-    ///
-    /// # 参数
-    ///
-    /// * `file_name` - 要查询的数据库文件名
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<u32>` - 成功则返回最新会话号,失败返回错误
-    ///
-    /// # 错误
-    ///
-    /// 当数据库查询失败时会返回错误
-    async fn query_latest_sesno_by_file_name(file_name: &str) -> anyhow::Result<u32> {
-        let mut response = SUL_DB
-            .query(format!(
-                r#"
-                select value sesno from only db_file_info:{} limit 1;
-                "#,
-                file_name
-            ))
-            .await?;
-        let sesno: Option<u32> = response.take(0)?;
-        Ok(sesno.unwrap_or_default())
-    }
+        for err in &incr.errors {
+            println!("增量文件失败: {:?} — {}", err.path, err.error);
+        }
+        for w in &incr.warnings {
+            println!("增量警告: {}", w);
+        }
 
-    /// 通过数据库编号查询数据库中最新的会话号
-    ///
-    /// # 参数
-    ///
-    /// * `dbnum` - 要查询的数据库编号
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<u32>` - 成功则返回最新会话号,失败返回错误
-    ///
-    /// # 错误
-    ///
-    /// 当数据库查询失败时会返回错误
-    async fn query_latest_sesno_by_dbnum(dbnum: u32) -> anyhow::Result<u32> {
-        // 从dbnum_info_table中查询对应dbnum的最大sesno
-        // 使用更高效的查询，直接获取该dbnum的最大sesno值
-        let sql = format!(
-            "math::max(array::flatten([SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {}])); ",
-            dbnum
-        );
-        let mut response = SUL_DB.query(&sql).await?;
-        let sesno: Option<u32> = response.take(0)?;
-        Ok(sesno.unwrap_or_default())
+        if let Err(e) = SideEffectCompensator::enqueue_from_incr(self, &incr).await {
+            let warn = format!("副作用任务入队失败（不影响水位）: {e:?}");
+            println!("{warn}");
+            incr.warnings.push(warn);
+        }
+
+        #[cfg(feature = "sql")]
+        {
+            for success in &incr.successes {
+                match self.update_mysql_pdms_elements(&success.range_eles).await {
+                    Ok(_) => println!(
+                        "MySQL pdms_element 更新成功: dbnum={}",
+                        success.dbnum
+                    ),
+                    Err(e) => println!(
+                        "MySQL pdms_element 更新失败 dbnum={}: {}",
+                        success.dbnum, e
+                    ),
+                }
+            }
+        }
+
+        // SYST 增量落 PE 后，刷新 TEAM 等派生表（与全量 only_sync_sys 路径一致；失败不回滚水位）
+        if incr.has_db_type("SYST") {
+            match (async {
+                let aios_mgr =
+                    aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option().await?;
+                crate::team_data::sync_team_data(&aios_mgr).await
+            })
+            .await
+            {
+                Ok(_) => {
+                    println!("SYST 增量后派生同步 sync_team_data 完成");
+                    if let Err(e) = SideEffectCompensator::complete_syst_jobs(&incr).await {
+                        println!("标记 syst_derived done 失败: {e:?}");
+                    }
+                }
+                Err(e) => {
+                    let warn = format!("SYST 派生同步失败（持久化与水位不受影响）: {e:?}");
+                    println!("{warn}");
+                    incr.warnings.push(warn);
+                    let end_sesno = incr
+                        .successes
+                        .iter()
+                        .filter(|s| s.db_type == "SYST")
+                        .map(|s| s.end_sesno)
+                        .max()
+                        .unwrap_or(0);
+                    let dbnum = incr
+                        .successes
+                        .iter()
+                        .find(|s| s.db_type == "SYST")
+                        .map(|s| s.dbnum)
+                        .unwrap_or(0);
+                    let _ = SideEffectCompensator::mark_failed(
+                        SideEffectKind::SystDerived,
+                        dbnum,
+                        end_sesno,
+                        &format!("{e:?}"),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        if let Err(e) =
+            crate::data_interface::model_refresh::ModelRefreshPolicy::refresh(self, &incr).await
+        {
+            let warn = format!("模型刷新失败（持久化与水位不受影响）: {e:?}");
+            println!("{warn}");
+            incr.warnings.push(warn);
+            for success in &incr.successes {
+                if crate::data_interface::increment_pipeline::SYS_META_DB_TYPES
+                    .contains(&success.db_type.as_str())
+                    || success.changed_refnos.is_empty()
+                {
+                    continue;
+                }
+                let _ = SideEffectCompensator::mark_failed(
+                    SideEffectKind::ModelRefresh,
+                    success.dbnum,
+                    success.end_sesno,
+                    &format!("{e:?}"),
+                )
+                .await;
+            }
+        } else if let Err(e) = SideEffectCompensator::complete_model_jobs(&incr).await {
+            println!("标记 model_refresh done 失败: {e:?}");
+        }
+
+        Ok(incr)
     }
 
     /// 初始化文件监控器
@@ -537,12 +507,22 @@ impl AiosDBManager {
     /// 4. 检查是否需要增量更新
     /// 5. 生成压缩包(如果启用MQTT功能)
     /// 6. 执行增量更新操作
+    /// 7. 成功后由 SyncPublisher 发布异地同步（与 async_watch 对齐）
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
         // 创建存档目录
         fs::create_dir_all("assets/archives")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
+
+        // 先补偿上次未完成的副作用（水位已推过的 mesh / SYST 派生）
+        match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self)
+            .await
+        {
+            Ok(n) if n > 0 => println!("启动补偿完成 {n} 个副作用任务"),
+            Ok(_) => {}
+            Err(e) => println!("启动副作用补偿失败（继续增量扫描）: {e:?}"),
+        }
 
         // 获取数据库配置选项
         let db_option = get_db_option();
@@ -595,18 +575,6 @@ impl AiosDBManager {
                     .get_latest_sesno()
                     .unwrap_or_default();
                 dbg!(&file_latest_sesno);
-                // 查询数据库中的最新会话号
-                // TODO: 对于数据库中不存在的文件，需要考虑全新解析
-                let Ok(db_latest_sesno) = Self::query_latest_sesno_by_dbnum(db_no).await else {
-                    // 暂时跳过数据库里没有的文件，后续考虑自动追加文件全新解析
-                    continue;
-                };
-                dbg!(&db_latest_sesno);
-
-                // 跳过会话号为0的情况
-                if db_latest_sesno == 0 {
-                    continue;
-                }
 
                 // 建立文件名到完整路径的映射
                 self.watcher
@@ -616,43 +584,48 @@ impl AiosDBManager {
                 // 只有开启MQTT功能时，才需要初始化压缩数据包用于异地同步
                 #[cfg(feature = "mqtt")]
                 {
-                    // 初始化CBA存档文件，确保后续增量下载功能正常
-                    // 后续可能需要添加环境变量来控制是否重新生成存档文件
-                    let input = path.to_path_buf();
-                    let output: PathBuf = format!("assets/archives/{}.cba", file_name).into();
-                    let compress_opt = CompressOptions::new(input, output, "assets/temp");
-                    execute_compress(compress_opt).await.expect("压缩失败");
+                    use crate::data_interface::sync_publisher::SyncPublisher;
+                    if let Err(e) =
+                        SyncPublisher::ensure_archive(&path.to_path_buf()).await
+                    {
+                        eprintln!("初始化存档失败 {:?}: {}", file_name, e);
+                    }
                 }
 
-                // 检查每个文件是否需要增量更新
+                // 统一 sesno 范围解析（水位=dbnum，nearest 跳跃）
                 {
-                    let mut io = PdmsIO::new(&project, path, true);
-                    io.open()?;
-                    if let Ok(basic_info) = io.get_page_basic_info() {
-                        // 如果文件的会话号大于数据库中的会话号，说明需要增量更新
-                        if file_latest_sesno > db_latest_sesno {
-                            println!(
-                                "发现需要增量更新的文件: {:?}, 当前数据库最大sesno: {db_latest_sesno}, \
-                                    文件最新sesno: {file_latest_sesno}",
-                                &file_name
-                            );
-
-                            // 获取最接近的大于指定值的会话号
-                            // 注意: db_latest_sesno + 1 不一定存在，需要找最近的会话号
-                            let nearest_sesno = io
-                                .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
-                                .unwrap_or_default();
-
-                            // 元件库暂时不执行增量更新
-                            if db_type != "CATA" {
-                                // 添加到待更新参数列表
-                                params.insert(
-                                    path.to_path_buf(),
-                                    (basic_info.clone(), nearest_sesno..=file_latest_sesno as i32),
+                    use crate::data_interface::sesno_range::SesnoRangeResolver;
+                    let resolver = SesnoRangeResolver::new();
+                    match resolver
+                        .resolve(
+                            path,
+                            &project,
+                            db_no,
+                            file_latest_sesno as i32,
+                            false, // CATA 仅由 should_process_database 门控（与 watch 对齐）
+                            &db_type,
+                        )
+                        .await
+                    {
+                        Ok(Some(plan)) => {
+                            if plan.cold_start {
+                                println!(
+                                    "发现需要冷启动的 SYS meta 文件: {:?}, db_type={}, 水位=0, 文件最新sesno: {}, range={:?}",
+                                    &file_name, plan.db_type, plan.file_latest_sesno, plan.range
+                                );
+                            } else {
+                                println!(
+                                    "发现需要增量更新的文件: {:?}, 当前数据库最大sesno: {}, \
+                                    文件最新sesno: {}",
+                                    &file_name, plan.db_latest_sesno, plan.file_latest_sesno
                                 );
                             }
+                            params.insert(plan.path, (plan.basic_info, plan.range, plan.db_type));
                         }
-                        // 注意：不再初始化缓存，因为我们已经移除了对缓存的依赖
+                        Ok(None) => {}
+                        Err(e) => {
+                            println!("sesno 范围解析失败 {:?}: {:?}", file_name, e);
+                        }
                     }
                 }
             }
@@ -663,12 +636,29 @@ impl AiosDBManager {
             dbg!(params.len());
         }
 
-        // 执行增量更新并处理结果
+        // 执行增量更新；成功后与 async_watch 一致，走 SyncPublisher 异地同步
         match self.execute_incr_update(params).await {
-            Ok(true) => {
-                println!("启动时自动增量更新执行完成。")
+            Ok(incr) if incr.had_work() => {
+                println!(
+                    "启动时自动增量更新执行完成。成功 {} 个文件，失败 {} 个",
+                    incr.successes.len(),
+                    incr.errors.len()
+                );
+                let publisher =
+                    crate::data_interface::sync_publisher::SyncPublisher::new(
+                        self.mqtt_client.clone(),
+                    );
+                let outcome = publisher.publish(&incr).await;
+                for e in &outcome.errors {
+                    println!("SyncPublisher 错误: {}", e);
+                }
+                println!(
+                    "SyncPublisher(init): published={}, skipped={}",
+                    outcome.published.len(),
+                    outcome.skipped.len()
+                );
             }
-            Ok(false) => {
+            Ok(_) => {
                 println!("没有发现需要增量更新的内容。")
             }
             Err(e) => {
@@ -698,6 +688,7 @@ impl AiosDBManager {
     /// 4. 扫描变化文件的头部信息
     /// 5. 比较会话号确定是否需要增量更新
     /// 6. 执行增量更新和模型同步
+    /// 7. 启动时与每次数据变更事件前 drain 副作用补偿队列
     pub async fn async_watch(&self) -> notify::Result<()> {
         // 创建异步文件监控器
         let (mut watcher, mut rx) = PdmsWatcher::async_watcher()?;
@@ -718,6 +709,15 @@ impl AiosDBManager {
             .await
             .map_err(|e| notify::Error::io(e))?;
 
+        // 启动时先补偿一次（与 init_watcher 对齐；仅 watch 场景也会覆盖）
+        match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self)
+            .await
+        {
+            Ok(n) if n > 0 => println!("watch 启动补偿完成 {n} 个副作用任务"),
+            Ok(_) => {}
+            Err(e) => println!("watch 启动副作用补偿失败（继续监听）: {e:?}"),
+        }
+
         // 持续监听文件变化事件
         while let Some(res) = rx.next().await {
             match res {
@@ -733,6 +733,15 @@ impl AiosDBManager {
                     );
                     if !data_changed {
                         continue;
+                    }
+
+                    // 每次有数据变更时顺带 drain：覆盖「水位已推、刷新失败」的积压
+                    if let Err(e) = crate::data_interface::side_effect_pending::SideEffectCompensator::drain(
+                        self,
+                    )
+                    .await
+                    {
+                        println!("watch 周期副作用补偿失败: {e:?}");
                     }
 
                     // 记录文件变化事件
@@ -796,156 +805,76 @@ impl AiosDBManager {
                                 file_name, db_num, new_header.latest_ses_data.sesno
                             );
 
-                            // 直接从数据库获取最新的会话号，不依赖缓存
-                            let db_latest_sesno =
-                                match Self::query_latest_sesno_by_dbnum(db_num).await {
-                                    Ok(sesno) => sesno,
-                                    Err(e) => {
-                                        println!("查询数据库最新sesno失败: {:?}", e);
-                                        continue;
-                                    }
-                                };
-
-                            println!(
-                                "数据库最新会话号: {}, 文件会话号: {}",
-                                db_latest_sesno, new_header.latest_ses_data.sesno
-                            );
-
-                            // 如果数据库中的会话号与文件中的会话号相同，说明未发生修改
-                            if db_latest_sesno as i32 >= new_header.latest_ses_data.sesno {
-                                println!(
-                                    "文件 {} 无需更新，数据库会话号({}) >= 文件会话号({})",
-                                    file_name, db_latest_sesno, new_header.latest_ses_data.sesno
-                                );
-                                continue;
-                            }
-
-                            println!(
-                                "发现需要增量更新的文件: {}, 数据库会话号: {}, 文件会话号: {}",
-                                file_name, db_latest_sesno, new_header.latest_ses_data.sesno
-                            );
-
-                            // 构建增量更新参数，指定准确的会话号范围
-                            params.insert(
-                                path.clone(),
-                                (
+                            use crate::data_interface::sesno_range::SesnoRangeResolver;
+                            let project = get_db_option().project_name.clone();
+                            let resolver = SesnoRangeResolver::new();
+                            match resolver
+                                .resolve_with_header(
+                                    path,
+                                    &project,
                                     new_header.clone(),
-                                    (db_latest_sesno as i32 + 1)..=new_header.latest_ses_data.sesno,
-                                ),
-                            );
+                                    false, // CATA 仅由 should_process_database 门控（与 init 对齐）
+                                    db_type,
+                                )
+                                .await
+                            {
+                                Ok(Some(plan)) => {
+                                    if plan.cold_start {
+                                        println!(
+                                            "发现需要冷启动的 SYS meta 文件: {}, db_type={}, 水位=0, 文件会话号: {}, range={:?}",
+                                            file_name, plan.db_type, plan.file_latest_sesno, plan.range
+                                        );
+                                    } else {
+                                        println!(
+                                            "发现需要增量更新的文件: {}, 数据库会话号: {}, 文件会话号: {}",
+                                            file_name, plan.db_latest_sesno, plan.file_latest_sesno
+                                        );
+                                    }
+                                    params.insert(
+                                        plan.path,
+                                        (plan.basic_info, plan.range, plan.db_type),
+                                    );
+                                }
+                                Ok(None) => {
+                                    println!(
+                                        "文件 {} 无需更新（水位已覆盖或不可解析）",
+                                        file_name
+                                    );
+                                }
+                                Err(e) => {
+                                    println!("sesno 范围解析失败 {}: {:?}", file_name, e);
+                                }
+                            }
                         }
                         // 如果没有需要更新的参数，跳过后续处理
                         if params.is_empty() {
                             continue;
                         }
 
-                        // 用于收集需要通知的文件信息
-                        let mut notify_file_names = vec![];
-                        let mut notify_file_hashes = vec![];
-
-                        // 执行增量更新操作
+                        // 执行增量更新，成功后由 SyncPublisher 负责异地同步
                         match self.execute_incr_update(params).await {
-                            Ok(true) => {
-                                // 增量更新成功，处理文件同步（不再依赖缓存）
-                                for (path, new_header) in new_headers {
-                                    let file_name = match path.file_stem().and_then(|s| s.to_str())
-                                    {
-                                        Some(name) => name,
-                                        None => {
-                                            println!("无法获取文件名: {:?}", path);
-                                            continue;
-                                        }
-                                    };
-                                    let dbno = new_header.pdms_header.db_num as u32;
-
-                                    // 跳过目录
-                                    if path.is_dir() {
-                                        continue;
-                                    }
-
-                                    println!("处理增量更新成功后的同步: {}", file_name);
-
-                                    // 为发生修改的文件重新生成压缩存档
-                                    let output: PathBuf =
-                                        format!("assets/archives/{}.cba", file_name).into();
-
-                                    let compress_opt =
-                                        CompressOptions::new(path.clone(), output, "assets/temp");
-                                    let file_hash =
-                                        execute_compress(compress_opt).await.unwrap().to_string();
-
-                                    // 检查地区数据库配置
-                                    // 如果location_dbs为空，则所有地区都推送
-                                    // 否则只有指定地区对应的数据库编号才能推送
-                                    if let Some(location_dbs) = &get_db_option().location_dbs {
-                                        if !location_dbs.contains(&dbno) {
-                                            println!(
-                                                "数据库编号 {} 不在地区配置中，跳过推送",
-                                                dbno
-                                            );
-                                            continue;
-                                        }
-                                    }
-
-                                    // 检查数据库中是否已存在相同的文件哈希记录
-                                    // 只有自己创建的、在记录中还没有的文件才发送消息
-                                    // 如果是其他地方创建的，则跳过避免重复同步
-                                    let sql = format!(
-                                        "select value <string>\
-                                        id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
-                                        get_db_option().location.as_str(),
-                                        file_name,
-                                        &file_hash
+                            Ok(incr) if incr.had_work() => {
+                                let publisher =
+                                    crate::data_interface::sync_publisher::SyncPublisher::new(
+                                        self.mqtt_client.clone(),
                                     );
-
-                                    let mut response = SUL_DB.query(&sql).await.unwrap();
-                                    let id = response.take::<Vec<String>>(0).unwrap();
-
-                                    // 如果查询结果为空，说明是新的变化，需要推送通知
-                                    if id.is_empty() {
-                                        println!("检测到增量更新，准备推送文件: {}", &file_name);
-                                        notify_file_hashes.push(file_hash);
-                                        notify_file_names.push(file_name.to_owned());
-                                    } else {
-                                        println!("文件 {} 的哈希已存在，跳过推送", file_name);
-                                    }
+                                let outcome = publisher.publish(&incr).await;
+                                for e in &outcome.errors {
+                                    println!("SyncPublisher 错误: {}", e);
                                 }
+                                println!(
+                                    "SyncPublisher: published={}, skipped={}",
+                                    outcome.published.len(),
+                                    outcome.skipped.len()
+                                );
                             }
-                            Ok(false) => {
+                            Ok(_) => {
                                 println!("文件 {:?} 发生修改，但未触发增量更新。", &event.paths);
                                 continue;
                             }
                             Err(e) => {
                                 println!("执行增量更新时发生错误: {:?}", e);
                             }
-                        }
-
-                        // 发布数据库文件更新通知
-                        dbg!(&notify_file_names);
-                        #[cfg(feature = "mqtt")]
-                        if !notify_file_names.is_empty() {
-                            // 创建同步消息载荷
-                            let payload =
-                                SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
-
-                            // 在本地数据库中保存同步记录
-                            // TODO: 后续需要配置哪些数据库可以修改，哪些不能修改
-                            SUL_DB
-                                .query(format!(
-                                    "INSERT IGNORE INTO e3d_sync {} ",
-                                    serde_json::to_string(&payload).unwrap()
-                                ))
-                                .await
-                                .unwrap();
-
-                            // 通过MQTT发布同步消息
-                            // TODO: 检查是否只是claim page的变化，如果只是claim修改，是否需要每次都同步？
-                            // 需要避免出现循环同步的情况
-                            self.mqtt_client
-                                .clone()
-                                .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
-                                .await
-                                .unwrap();
                         }
                     } else {
                         println!("扫描数据库头部信息失败，路径: {:?}", &event.paths);
@@ -1284,67 +1213,6 @@ impl AiosDBManager {
         Ok(())
     }
 
-    /// 更新元数据版本表
-    async fn update_datacenter_version(
-        &self,
-        data: &BTreeMap<u32, Vec<EleOperationData>>,
-    ) -> anyhow::Result<()> {
-        let unit = vec!["SUPPO", "BRAN", "EQUI", "ZONE"];
-        for (_, data) in data {
-            for d in data {
-                match &d.detail {
-                    EleOperationDetail::Deleted => {
-                        // 删除操作
-                        let sql = format!("let $pe = {};
-                                            let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};
-                                            update type::thing('{}',$pe) set status = '{:?}',belong_zone = $belong_zone;",
-                                          d.refno.to_pe_key(), DATACENTER_VERSION, DataCenterRecordOperate::Delete);
-                        match SUL_DB.query(&sql).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e.to_string());
-                                dbg!(&sql);
-                            }
-                        }
-                    }
-                    EleOperationDetail::Modified(modify_data) => {
-                        // 最小交付单元，直接修改对应的值
-                        let sql = if unit.contains(&modify_data.noun.as_str()) {
-                            format!(
-                                "update {} set status = '{:?}'",
-                                d.refno.to_table_key(DATACENTER_VERSION),
-                                DataCenterRecordOperate::Modify
-                            )
-                        } else {
-                            // 其他的找owner
-                            let unit_str = unit
-                                .iter()
-                                .map(|unit| format!("'{}'", unit))
-                                .collect::<Vec<String>>()
-                                .join(",");
-                            format!(
-                                "let $pe = fn::find_ancestor_types({},[{}])[0];
-                                        update type::thing('{}',$pe) set status = '{:?}';",
-                                d.refno.to_pe_key(),
-                                unit_str,
-                                DATACENTER_VERSION,
-                                DataCenterRecordOperate::Modify
-                            )
-                        };
-                        match SUL_DB.query(&sql).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e.to_string());
-                                dbg!(&sql);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
     /// 处理模型更新
     ///
     /// 这是增量更新系统中的核心模型处理方法。根据增量元素数据的变化类型，
@@ -1377,7 +1245,7 @@ impl AiosDBManager {
     /// - 使用HashSet收集需要处理的refnos，避免重复处理
     /// - 分批处理数据库操作，提高执行效率
     /// - 智能判断更新类型，只处理必要的操作
-    async fn process_model_updates(
+    pub(crate) async fn process_model_updates(
         &self,
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
         db_num: i32,
