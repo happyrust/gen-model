@@ -17,7 +17,10 @@
 ### 阶段 0 · 已完成（本会话）
 NounClassifier + 守护（名单 ⊆ flag）+ 缺口清单 §1-5 + noun_flags.json + 三角定性（无真漏几何，上界 291/278）。
 
-### 阶段 1 · 负体来源 + 全局分类器接入（只读，零行为变化）
+### 阶段 1 · 负体来源 + 全局分类器接入（只读，零行为变化）  ✅ 已完成（2026-07-24 · gen-model-10）
+
+> **负体来源定论（经验校验 TOTAL_NEG vs 全表 N-前缀∩几何）**：`TOTAL_NEG`(23 unique) 是**干净子集**（全是真负体、全被 dict 标几何）；N-前缀∩几何(28) 相对它 **多 4 个候选真负体** `NBXI/NPOLYH/NSLC/NTUB` + **误纳 1 个** `NOZZ`(喷嘴正体，primitive=true)。⇒ **纯 N-前缀不可作负体源**；采 `负体 = TOTAL_NEG ∪ {NBXI,NPOLYH,NSLC,NTUB}` 且排除 `NOZZ`（或将来 RE dict negative 字段做数据驱动）。
+> **已落地**（`vendor/aios-parse-pdms/src/dict.rs`）：`default_noun_classifier()`（内嵌 `noun_flags.json` via `include_str!`，无运行期文件依赖，解析失败退化空分类器）+ `negative_candidate_nouns()`（N-前缀启发式，文档标注 NOZZ 假阳性）+ 测试 `default_classifier_loads_and_spot_checks`（非 ignore，`dict::tests` 6 passed）。**未接入生成代码 → 行为零变化。**
 - 定"负体 flag 来源"（ADR-006 未决三选一）：① RE dabacon 负体字段；② N-前缀 over 全 noun 集；③ graphicsBehaviour 映射。先做经验校验：对 TOTAL_NEG 的 26 个与 NounClassifier 全表 N-前缀交叉核对，若一致则 N-前缀足够。
 - 全局 `default_noun_classifier()`（OnceLock + embed `noun_flags.json`，仿 all_attr_info 加载）。
 - 派生名单接口：`primitive_nouns()/extrusion_nouns()/geomset_nouns()/negative_nouns()`（已有前三个）。
