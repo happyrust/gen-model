@@ -1,0 +1,4518 @@
+//! Manual model update — read-only preview pipeline (spec §用户流程/§预览结构).
+//!
+//! Preview is strictly side-effect-free with respect to element data, models and
+//! the applied watermark: it only opens E3D files, collects the pending delta via
+//! the shared [`IncrementPipeline::collect_changes`], refreshes scan-observation
+//! fields through [`DbnumState::record_scan`], and returns a DTO.
+//!
+//! Net-change merging (add→modify, multi-modify, modify→delete, add→delete) is a
+//! pure state machine ([`fold_net_op`]) so every cross-session sequence is unit
+//! testable without a database. Model-impact is decided by the single authority
+//! [`classify_operation_impact`] — no second attribute list is maintained here.
+//!
+//! Minimal-delivery-unit resolution (spec §最小交付单元) is a pure walk over an
+//! [`OwnershipSnapshot`]: the pre-update state is the ACTIVE Surreal PE/OWNER
+//! graph (loaded via [`aios_core::get_pe`]; the unexported `ssc.rs` / Arango
+//! paths stay off), and the post-update state overlays the OWNER coverage graph
+//! built from the pending window ops ([`build_owner_overlay`]) so adds, moves
+//! and ancestors changing in the same window all resolve correctly. Deletions
+//! resolve against the pre-update snapshot; moves join both the old and the new
+//! delivery unit or normal-granularity significant owner
+//! ([`build_unit_rollup`]). There is no whole-ZONE fallback; only changes that
+//! cannot resolve any legal generation root are counted in `no_generation`.
+//!
+//! Manual execution ([`AiosDBManager::execute_manual_update`]) re-scans, fixes
+//! each `dbnum` batch's `end_sesno` at scan time, reuses [`IncrementPipeline`]
+//! per `dbnum` (watermark advances only on its success path), then generates
+//! each affected delivery unit independently. Data success + model failure
+//! never rolls back data: the unit lands in the `manual_model_pending` table
+//! ([`PendingModelUnit`]) and is retried — merged and deduped with newer data —
+//! on the next run, even when no new sesno exists.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
+
+use aios_core::pdms_types::RefU64;
+use aios_core::{NamedAttrMap, NamedAttrValue, RefnoEnum, SUL_DB};
+use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info, parse_file_db_basic_data};
+use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
+
+use crate::data_interface::dbnum_state::{
+    DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
+};
+use crate::data_interface::increment_pipeline::IncrementPipeline;
+use crate::data_interface::model_impact::{
+    AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
+    classify_attribute_effect_with_meta, classify_operation_impact, owner_change,
+};
+use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
+use crate::data_interface::tidb_manager::AiosDBManager;
+
+/// Max owner-chain depth to walk when resolving delivery units. PDMS
+/// hierarchies (WORLD/SITE/ZONE/…/leaf) are shallow; this only guards cycles.
+const MAX_ANCESTOR_DEPTH: usize = 32;
+
+/// Default minimal delivery-unit types (spec §最小交付单元). Projects may
+/// replace the whole set via [`crate::options::DbOptionExt::delivery_unit_types`]
+/// or extend it via [`crate::options::DbOptionExt::append_delivery_unit_types`].
+pub const DEFAULT_DELIVERY_UNIT_TYPES: &[&str] =
+    crate::data_interface::generation_root::DEFAULT_DELIVERY_UNIT_TYPES;
+
+/// Resolve the effective delivery-unit type set: defaults ∪ appended, upper-cased
+/// and de-duplicated.
+pub fn resolve_delivery_unit_types(appended: &[String]) -> Vec<String> {
+    crate::data_interface::generation_root::resolve_delivery_unit_types(appended)
+}
+
+/// Resolve delivery-unit types from the current runtime config.
+pub fn configured_delivery_unit_types() -> Vec<String> {
+    crate::data_interface::generation_root::configured_delivery_unit_types()
+}
+
+fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32, db_type: &str) -> bool {
+    applied_sesno == 0 && file_latest_sesno > 0 && !COLD_START_DB_TYPES.contains(&db_type)
+}
+
+/// One incoming element operation kind within a session (drops `None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncomingKind {
+    Add,
+    Modify,
+    Delete,
+}
+
+impl IncomingKind {
+    fn from_op(op: &EleOperationData) -> Option<Self> {
+        match &op.detail {
+            EleOperationDetail::Add(_) => Some(Self::Add),
+            EleOperationDetail::Modified(_) => Some(Self::Modify),
+            EleOperationDetail::Deleted => Some(Self::Delete),
+            EleOperationDetail::None => None,
+        }
+    }
+}
+
+/// Net operation for one `refno` after merging all its ops across the whole
+/// pending window (spec §预览结构).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetOp {
+    Added,
+    Modified,
+    Deleted,
+    /// Add-then-delete within the window: no net model change (session detail
+    /// remains traceable, but the element neither exists nor needs generation).
+    Cancelled,
+}
+
+/// Fold one incoming op into the running net op for a `refno` (pure).
+///
+/// Rules (spec §预览结构): 新增后修改→新增; 多次修改→修改; 修改后删除→删除;
+/// 新增后删除→无净变化(Cancelled). Re-creation after delete/cancel restarts from
+/// the incoming op.
+pub fn fold_net_op(prev: Option<NetOp>, incoming: IncomingKind) -> NetOp {
+    use IncomingKind::*;
+    use NetOp::*;
+    let Some(prev) = prev else {
+        return match incoming {
+            Add => Added,
+            Modify => Modified,
+            Delete => Deleted,
+        };
+    };
+    match (prev, incoming) {
+        (Added, Add) => Added,
+        (Added, Modify) => Added,
+        (Added, Delete) => Cancelled,
+        (Modified, Add) => Modified,
+        (Modified, Modify) => Modified,
+        (Modified, Delete) => Deleted,
+        (Deleted, Add) => Added,
+        (Deleted, Modify) => Modified,
+        (Deleted, Delete) => Deleted,
+        (Cancelled, Add) => Added,
+        (Cancelled, Modify) => Modified,
+        (Cancelled, Delete) => Cancelled,
+    }
+}
+
+/// Net change for one `refno` after merging the whole window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetChange {
+    pub refno: String,
+    pub net: NetOp,
+    /// `true` when this net change should trigger model (re)generation.
+    /// Always `false` for [`NetOp::Cancelled`].
+    pub model_affecting: bool,
+}
+
+/// Net change of one `refno` with its identity kept for graph resolution.
+///
+/// Internal richer form of [`NetChange`]: the delivery-unit rollup needs
+/// the actual [`RefnoEnum`] to walk the ownership graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetChangeDetail {
+    pub refno: RefnoEnum,
+    pub net: NetOp,
+    pub model_affecting: bool,
+}
+
+/// Merge per-session ops into per-`refno` net change details (ordered by `sesno`).
+///
+/// `range_eles` is a `BTreeMap<sesno, ops>` so iteration is already in session
+/// order. Model-impact accumulates across contributing ops via
+/// [`classify_operation_impact`]; a cancelled element is never model-affecting.
+pub fn merge_net_change_details(
+    range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+) -> Vec<NetChangeDetail> {
+    // refno -> (net op, any contributing op affected the model)
+    let mut acc: IndexMap<RefU64, (NetOp, bool)> = IndexMap::new();
+    for ops in range_eles.values() {
+        for op in ops {
+            let Some(kind) = IncomingKind::from_op(op) else {
+                continue;
+            };
+            let affected = !matches!(classify_operation_impact(op), OperationImpact::Skip);
+            match acc.get_mut(&op.refno) {
+                Some(entry) => {
+                    entry.0 = fold_net_op(Some(entry.0), kind);
+                    entry.1 = entry.1 || affected;
+                }
+                None => {
+                    acc.insert(op.refno, (fold_net_op(None, kind), affected));
+                }
+            }
+        }
+    }
+
+    acc.into_iter()
+        .map(|(refno, (net, any_affected))| NetChangeDetail {
+            refno: RefnoEnum::from(refno),
+            net,
+            model_affecting: net != NetOp::Cancelled && any_affected,
+        })
+        .collect()
+}
+
+/// Serializable form of [`merge_net_change_details`] (kept for API stability).
+pub fn merge_net_changes(
+    range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+) -> Vec<NetChange> {
+    merge_net_change_details(range_eles)
+        .into_iter()
+        .map(|d| NetChange {
+            refno: d.refno.to_pdms_str(),
+            net: d.net,
+            model_affecting: d.model_affecting,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Minimal delivery unit resolution (spec §最小交付单元, plan 阶段 3)
+// ---------------------------------------------------------------------------
+
+/// One affected minimal delivery unit (spec §预览结构).
+///
+/// Counts are deduped by `refno` over the whole pending window; the same element
+/// contributes at most once per unit (a cross-unit move touches both units).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeliveryUnitSummary {
+    /// Delivery-unit root as `a/b` pdms string.
+    pub root_refno: String,
+    /// Matched delivery type (`BRAN`/`HANG`/…).
+    pub noun: String,
+    pub name: String,
+    pub added: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    /// Elements that moved into / out of this unit within the window.
+    pub moved_in: u32,
+    pub moved_out: u32,
+    /// Reverse-cascade hits (ADR-003 workflow B): a change ELSEWHERE (a shared
+    /// catalogue/spec element or a connected element such as a NOZZ) whose
+    /// forward reference points into this unit, forcing it to regenerate even
+    /// though nothing inside it changed directly. Deduped by referrer.
+    #[serde(default)]
+    pub cascaded: u32,
+    /// Deduped changes mapped here that trigger model (re)generation.
+    pub model_affecting: u32,
+    /// `true` when the execute phase will (re)generate this unit.
+    pub will_generate: bool,
+    /// Delivery-unit root's OWNER (parent) in the PRE-update state (`a/b`), if
+    /// resolvable. Lets the frontend refresh / prune the OLD tree branch when the
+    /// unit itself moved or was deleted (plan 阶段 6.2 「原 OWNER」).
+    #[serde(default)]
+    pub old_owner: Option<String>,
+    /// Delivery-unit root's OWNER (parent) in the POST-update state (`a/b`), if
+    /// resolvable. Lets the frontend refresh the NEW tree branch when the unit
+    /// was added or moved in (plan 阶段 6.2 「新 OWNER」).
+    #[serde(default)]
+    pub new_owner: Option<String>,
+}
+
+/// Net change statistics grouped by the nearest owning ZONE. ZONE is a
+/// reporting bucket only; it never becomes an incremental data boundary or a
+/// model generation root.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoneSummary {
+    /// Empty for the explicit "ZONE 归属未知" bucket.
+    pub zone_refno: String,
+    pub name: String,
+    pub added: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    pub moved_in: u32,
+    pub moved_out: u32,
+    pub model_affecting: u32,
+    /// Affected model roots belonging to this ZONE in either the pre- or
+    /// post-update ownership graph. A moved root may appear in both buckets.
+    pub units: Vec<DeliveryUnitSummary>,
+}
+
+/// One node of the ownership graph used for delivery-unit resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerNode {
+    /// `None` ends the chain (top element or owner not recorded).
+    pub owner: Option<RefnoEnum>,
+    pub noun: String,
+    pub name: String,
+}
+
+/// Pre/post ownership snapshot for the pending window.
+///
+/// `base` is the current (pre-update) Surreal PE/OWNER graph. `overlay` is the
+/// OWNER coverage graph from the window ops: the post-update owner/noun of every
+/// added or modified element — including ancestors that move within the same
+/// window. `deleted_post` holds net-deleted refnos (absent in the post state).
+#[derive(Debug, Clone, Default)]
+pub struct OwnershipSnapshot {
+    pub base: HashMap<RefnoEnum, OwnerNode>,
+    pub overlay: HashMap<RefnoEnum, OwnerNode>,
+    pub deleted_post: HashSet<RefnoEnum>,
+    /// ADR-003 reverse-reference index: `referenced_refno → [referrer_refnos]`,
+    /// the reversal of forward reference attributes (`SPRE`/`CATR`/`HREF`/`TREF`/
+    /// `PRTREF`/`DESP`/…). Empty until the persist path (workflow B1) populates it;
+    /// when present, [`build_unit_rollup`] cascades a changed referenced element to
+    /// every referrer's delivery unit — closing the「改共享目录/规格 or 被连接元件
+    /// → 重生成引用它的设计实例（含其 TUBI）」缺口. Empty ⇒ behaviour unchanged.
+    pub ref_reversal: HashMap<RefnoEnum, Vec<RefnoEnum>>,
+}
+
+impl OwnershipSnapshot {
+    /// Node visible in the pre (`post = false`) or post (`post = true`) state.
+    pub fn node(&self, refno: RefnoEnum, post: bool) -> Option<&OwnerNode> {
+        if post {
+            if self.deleted_post.contains(&refno) {
+                return None;
+            }
+            if let Some(node) = self.overlay.get(&refno) {
+                return Some(node);
+            }
+        }
+        self.base.get(&refno)
+    }
+}
+
+fn resolve_zone(
+    snap: &OwnershipSnapshot,
+    refno: RefnoEnum,
+    post: bool,
+) -> Option<(RefnoEnum, String)> {
+    let mut cur = refno;
+    let mut seen = HashSet::new();
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if !seen.insert(cur) {
+            return None;
+        }
+        let node = snap.node(cur, post)?;
+        if node.noun.trim().eq_ignore_ascii_case("ZONE") {
+            return Some((cur, node.name.clone()));
+        }
+        match node.owner {
+            Some(owner) if owner != cur => cur = owner,
+            _ => return None,
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct ZoneAccumulator {
+    summary: ZoneSummary,
+    unit_roots: HashSet<String>,
+}
+
+fn zone_key(zone: &Option<(RefnoEnum, String)>) -> String {
+    zone.as_ref()
+        .map(|(refno, _)| refno.to_pdms_str())
+        .unwrap_or_default()
+}
+
+fn zone_accumulator<'a>(
+    zones: &'a mut BTreeMap<String, ZoneAccumulator>,
+    zone: Option<(RefnoEnum, String)>,
+) -> &'a mut ZoneAccumulator {
+    let key = zone_key(&zone);
+    zones.entry(key.clone()).or_insert_with(|| ZoneAccumulator {
+        summary: ZoneSummary {
+            zone_refno: key,
+            name: zone
+                .map(|(_, name)| name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "ZONE 归属未知".to_string()),
+            ..Default::default()
+        },
+        unit_roots: HashSet::new(),
+    })
+}
+
+/// Pure ZONE report rollup. Counts are deduplicated net changes over the fixed
+/// sesno window; moves affect both the source and destination buckets.
+pub fn build_zone_rollup(
+    snap: &OwnershipSnapshot,
+    details: &[NetChangeDetail],
+    units: &[DeliveryUnitSummary],
+) -> Vec<ZoneSummary> {
+    let mut zones: BTreeMap<String, ZoneAccumulator> = BTreeMap::new();
+
+    for change in details {
+        if change.net == NetOp::Cancelled {
+            continue;
+        }
+        let old_zone = resolve_zone(snap, change.refno, false);
+        let new_zone = resolve_zone(snap, change.refno, true);
+        match change.net {
+            NetOp::Added => {
+                let acc = zone_accumulator(&mut zones, new_zone);
+                acc.summary.added += 1;
+                acc.summary.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Deleted => {
+                let acc = zone_accumulator(&mut zones, old_zone);
+                acc.summary.deleted += 1;
+                acc.summary.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Modified if zone_key(&old_zone) == zone_key(&new_zone) => {
+                let acc = zone_accumulator(&mut zones, new_zone.or(old_zone));
+                acc.summary.modified += 1;
+                acc.summary.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Modified => {
+                let old = zone_accumulator(&mut zones, old_zone);
+                old.summary.modified += 1;
+                old.summary.moved_out += 1;
+                old.summary.model_affecting += u32::from(change.model_affecting);
+                let new = zone_accumulator(&mut zones, new_zone);
+                new.summary.modified += 1;
+                new.summary.moved_in += 1;
+                new.summary.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Cancelled => {}
+        }
+    }
+
+    for unit in units {
+        let root = RefnoEnum::from(unit.root_refno.as_str());
+        let mut unit_zones = vec![
+            resolve_zone(snap, root, false),
+            resolve_zone(snap, root, true),
+        ];
+        unit_zones.sort_by_key(zone_key);
+        unit_zones.dedup_by_key(|zone| zone_key(zone));
+        for zone in unit_zones {
+            let acc = zone_accumulator(&mut zones, zone);
+            if acc.unit_roots.insert(unit.root_refno.clone()) {
+                acc.summary.units.push(unit.clone());
+            }
+        }
+    }
+
+    zones
+        .into_values()
+        .map(|mut acc| {
+            acc.summary
+                .units
+                .sort_by(|a, b| a.root_refno.cmp(&b.root_refno));
+            acc.summary
+        })
+        .collect()
+}
+
+/// Nearest self-or-ancestor whose noun is one of `unit_types` (upper-cased set
+/// from [`resolve_delivery_unit_types`]). Walking bottom-up guarantees nested
+/// delivery types pick the NEAREST ancestor. Returns `(root, noun, name)`;
+/// `None` when nothing matches before the chain ends.
+pub fn resolve_delivery_unit(
+    snap: &OwnershipSnapshot,
+    refno: RefnoEnum,
+    unit_types: &[String],
+    post: bool,
+) -> Option<(RefnoEnum, String, String)> {
+    let mut cur = refno;
+    let mut seen: HashSet<RefnoEnum> = HashSet::new();
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if !seen.insert(cur) {
+            return None;
+        }
+        let node = snap.node(cur, post)?;
+        let noun = node.noun.trim().to_ascii_uppercase();
+        if unit_types.iter().any(|t| t == &noun) {
+            return Some((cur, noun, node.name.clone()));
+        }
+        match node.owner {
+            Some(owner) if owner != cur => cur = owner,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A resolved delivery unit for one change in one state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnit {
+    pub root: RefnoEnum,
+    pub noun: String,
+    pub name: String,
+    pub kind: crate::data_interface::generation_root::GenerationRootKind,
+}
+
+/// Resolve the minimal delivery unit of one change in one state.
+///
+/// `None` means no delivery-unit ancestor matched (the change sits above every
+/// delivery unit, or the ownership chain is broken) — the model-generation skip
+/// + warning case. There is NO whole-ZONE fallback: generation happens strictly
+/// per minimal delivery unit.
+pub fn resolve_change_unit(
+    snap: &OwnershipSnapshot,
+    refno: RefnoEnum,
+    unit_types: &[String],
+    post: bool,
+) -> Option<ResolvedUnit> {
+    crate::data_interface::generation_root::resolve_element_generation_root(
+        refno,
+        unit_types,
+        |candidate| {
+            snap.node(candidate, post).map(|node| {
+                crate::data_interface::generation_root::GenerationNode {
+                    owner: node.owner,
+                    noun: node.noun.clone(),
+                    name: node.name.clone(),
+                }
+            })
+        },
+    )
+    .map(|root| ResolvedUnit {
+        root: root.root,
+        noun: root.noun,
+        name: root.name,
+        kind: root.kind,
+    })
+}
+
+fn direct_root_allowed(
+    snap: &OwnershipSnapshot,
+    change: &NetChangeDetail,
+    unit: &ResolvedUnit,
+) -> bool {
+    use crate::data_interface::generation_root::GenerationRootKind;
+
+    // A changed catalogue/spec normal root is only an intermediate when it has
+    // referrers: regenerate the dependent design roots, not the catalogue node
+    // itself. Ordinary normal-granularity design roots still run directly.
+    unit.kind == GenerationRootKind::DeliveryUnit
+        || snap
+            .ref_reversal
+            .get(&change.refno)
+            .map_or(true, Vec::is_empty)
+}
+
+fn valid_refno(refno: RefnoEnum) -> Option<RefnoEnum> {
+    refno.is_valid().then_some(refno)
+}
+
+/// Build the post-state OWNER coverage graph + net-deleted set from the pending
+/// window ops. Ops fold in ascending `sesno` order so the overlay reflects the
+/// FINAL post-update state (re-adds revive, later deletes win).
+pub fn build_owner_overlay(
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+) -> (HashMap<RefnoEnum, OwnerNode>, HashSet<RefnoEnum>) {
+    let mut overlay: HashMap<RefnoEnum, OwnerNode> = HashMap::new();
+    let mut deleted: HashSet<RefnoEnum> = HashSet::new();
+
+    for ops in range_eles.values() {
+        for op in ops {
+            let refno = RefnoEnum::from(op.refno);
+            match &op.detail {
+                EleOperationDetail::Add(ele) => {
+                    deleted.remove(&refno);
+                    let owner = valid_refno(RefnoEnum::from(ele.owner))
+                        .or_else(|| valid_refno(ele.att_map().get_owner()));
+                    overlay.insert(
+                        refno,
+                        OwnerNode {
+                            owner,
+                            noun: ele.att_map().get_type(),
+                            name: ele.name.clone(),
+                        },
+                    );
+                }
+                EleOperationDetail::Modified(modified) => {
+                    deleted.remove(&refno);
+                    // Post owner: prefer the element's own current data, then an
+                    // explicit OWNER attribute change. When neither is known the
+                    // base (unchanged) owner keeps applying — no overlay entry.
+                    let (_, new_owner) = owner_change(op);
+                    let owner = valid_refno(RefnoEnum::from(modified.current_data.owner))
+                        .or(new_owner)
+                        .or_else(|| valid_refno(modified.current_data.att_map().get_owner()));
+                    if let Some(owner) = owner {
+                        overlay.insert(
+                            refno,
+                            OwnerNode {
+                                owner: Some(owner),
+                                noun: modified.noun.clone(),
+                                name: modified.current_data.name.clone(),
+                            },
+                        );
+                    }
+                }
+                EleOperationDetail::Deleted => {
+                    overlay.remove(&refno);
+                    deleted.insert(refno);
+                }
+                EleOperationDetail::None => {}
+            }
+        }
+    }
+
+    (overlay, deleted)
+}
+
+// ---------------------------------------------------------------------------
+// ADR-003 workflow B1: forward-reference reversal (reverse-cascade index build)
+//
+// Pure core only. The persist path (increment_pipeline) will call
+// [`extract_reverse_ref_edges`] per changed element and store each
+// `referenced → referrer` edge; [`resolve_unit_rollup`] then loads that index
+// into `OwnershipSnapshot::ref_reversal` so [`build_unit_rollup`] cascades a
+// shared-catalogue/spec or connection change to every referrer's delivery unit.
+// SurrealQL emit + query are the remaining DB wiring (need a live Surreal/E3D).
+// ---------------------------------------------------------------------------
+
+/// Every element refno one attribute value points at (single ref or ref-list).
+fn value_ref_targets(value: &NamedAttrValue) -> Vec<RefnoEnum> {
+    match value {
+        NamedAttrValue::RefU64Type(r) => vec![RefnoEnum::from(*r)],
+        NamedAttrValue::RefnoEnumType(r) => vec![*r],
+        NamedAttrValue::RefU64Array(arr) => arr.iter().copied().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Post-state DependencyCascade element references of one attr map (deduped,
+/// self-excluded, valid only).
+///
+/// Only attributes classified [`AttributeEffect::DependencyCascade`] by
+/// [`classify_attribute_effect`] are reversed (`SPRE`/`CATR`/`HREF`/`TREF`/
+/// `PRTREF`/`DESP`/…) — single-sourcing the「哪些属性算引用级联」definition with
+/// the consumer. Structural `OWNER` (handled by the ownership graph) and pure
+/// geometry params are intentionally excluded, so the reverse index stays a
+/// genuine cross-reference index.
+pub fn reference_cascade_targets(att: &NamedAttrMap, referrer: RefnoEnum) -> Vec<RefnoEnum> {
+    let mut out: Vec<RefnoEnum> = Vec::new();
+    for (name, value) in att.map.iter() {
+        if classify_attribute_effect_with_meta(name, attribute_is_reference(name))
+            != AttributeEffect::DependencyCascade
+        {
+            continue;
+        }
+        for target in value_ref_targets(value) {
+            if target.is_valid() && target != referrer && !out.contains(&target) {
+                out.push(target);
+            }
+        }
+    }
+    out
+}
+
+/// One changed element's contribution to the ADR-003 reverse-reference index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseRefEdges {
+    /// The changed element that carries the forward references (the referrer).
+    pub referrer: RefnoEnum,
+    /// Post-state referenced targets — the elements this referrer points at
+    /// through DependencyCascade reference attributes (deduped, self excluded).
+    pub referenced: Vec<RefnoEnum>,
+    /// `true` when the referrer was deleted → drop all its outgoing edges.
+    pub purge: bool,
+}
+
+/// Extract the reverse-reference edges from one element operation (ADR-003 B1, pure).
+///
+/// Reverses the changed element's forward DependencyCascade references into
+/// `referenced → referrer` edges. Add / Modified read the post-state full attr
+/// map (`att_map()` / `current_data.att_map()`); Deleted asks to purge the
+/// referrer's outgoing edges; None is a no-op. The DB adapter turns each edge
+/// into a stored row and the rollup consults it via
+/// [`OwnershipSnapshot::ref_reversal`].
+pub fn extract_reverse_ref_edges(op: &EleOperationData) -> ReverseRefEdges {
+    let referrer = RefnoEnum::from(op.refno);
+    let referenced = match &op.detail {
+        EleOperationDetail::Add(ele) => reference_cascade_targets(ele.att_map(), referrer),
+        EleOperationDetail::Modified(m) => {
+            reference_cascade_targets(m.current_data.att_map(), referrer)
+        }
+        EleOperationDetail::Deleted | EleOperationDetail::None => Vec::new(),
+    };
+    ReverseRefEdges {
+        referrer,
+        referenced,
+        purge: matches!(op.detail, EleOperationDetail::Deleted),
+    }
+}
+
+/// One `referrer → referenced` graph edge, keyed by a deterministic composite id
+/// so re-emitting the same edge is idempotent. Same shape as the `pe_owner`
+/// edges written by `cata_closure` / `versioned_db::pe`.
+fn render_ref_rev_edge(referrer: &str, referenced: RefnoEnum) -> String {
+    let referenced = referenced.to_pe_key();
+    format!("{{ id: ref_rev:[{referrer}, {referenced}], in: {referrer}, out: {referenced} }}")
+}
+
+/// Render the per-window reverse-index maintenance statements (ADR-003 B1-emit, pure).
+///
+/// `ref_rev` is a graph edge table (`in` = referrer, `out` = referenced), so per
+/// changed element (skipping `None`) `DELETE <ele>->ref_rev` clears its stale
+/// outgoing edges through the element's own adjacency — no table scan and no
+/// secondary index needed. Unless the element was deleted or now has no
+/// references, one `INSERT RELATION INTO ref_rev [...]` re-asserts its edges.
+///
+/// The persist path runs these BEST-EFFORT / non-fatal: a failure must never
+/// block the data batch or the applied watermark (a missing edge only means a
+/// possibly-missed cascade, self-healed on the next touch or a full rebuild).
+pub fn build_reverse_index_statements(
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+) -> Vec<String> {
+    let mut stmts = Vec::new();
+    for ops in range_eles.values() {
+        for op in ops {
+            if matches!(op.detail, EleOperationDetail::None) {
+                continue; // a no-op must not touch the element's edges
+            }
+            let edges = extract_reverse_ref_edges(op);
+            let referrer = edges.referrer.to_pe_key();
+            stmts.push(format!("DELETE {referrer}->ref_rev;"));
+            if edges.purge || edges.referenced.is_empty() {
+                continue; // deleted, or genuinely no references now → cleared only
+            }
+            let rows = edges
+                .referenced
+                .iter()
+                .map(|t| render_ref_rev_edge(&referrer, *t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            stmts.push(format!("INSERT RELATION INTO ref_rev [{rows}];"));
+        }
+    }
+    stmts
+}
+
+/// Result of a full `ref_rev` rebuild from the current live `pe → noun-table`
+/// records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReverseIndexRebuildReport {
+    /// Non-deleted `pe` rows captured at rebuild start.
+    pub candidate_elements: usize,
+    /// Noun-table rows whose `REFNO` points at an absent common `pe` row.
+    pub orphan_noun_elements: usize,
+    /// Noun-table attribute records successfully loaded.
+    pub scanned_elements: usize,
+    /// Elements which contributed at least one dependency edge.
+    pub indexed_referrers: usize,
+    /// Total deduplicated `(referrer, referenced)` edges installed.
+    pub inserted_edges: usize,
+}
+
+/// Extract all reverse-reference rows represented by complete current-state
+/// attribute maps. This is the pure seam shared by the live full rebuild and
+/// its regression tests.
+pub fn collect_reverse_index_rows<'a>(
+    attmaps: impl IntoIterator<Item = &'a NamedAttrMap>,
+) -> Vec<(RefnoEnum, RefnoEnum)> {
+    let mut rows = Vec::new();
+    for att in attmaps {
+        let Some(referrer) = att.get_refno().filter(|r| r.is_valid()) else {
+            continue;
+        };
+        rows.extend(
+            reference_cascade_targets(att, referrer)
+                .into_iter()
+                .map(|referenced| (referrer, referenced)),
+        );
+    }
+    rows
+}
+
+/// Staging rows are plain `{ in, out }` records: a staging table cannot hold
+/// `ref_rev:[…]` ids, so the composite edge ids are minted during the swap.
+fn render_reverse_index_insert(table: &str, rows: &[(RefnoEnum, RefnoEnum)]) -> String {
+    let values = rows
+        .iter()
+        .map(|(referrer, referenced)| {
+            format!(
+                "{{ in: {}, out: {} }}",
+                referrer.to_pe_key(),
+                referenced.to_pe_key()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO {table} [{values}];")
+}
+
+fn decode_reverse_index_attmaps(value: surrealdb::Value) -> anyhow::Result<Vec<NamedAttrMap>> {
+    let values: Vec<surrealdb::sql::Value> = value
+        .into_inner()
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("expand reverse-index attribute rows failed: {e}"))?;
+    Ok(values.into_iter().map(NamedAttrMap::from).collect())
+}
+
+async fn insert_reverse_index_stage_rows(
+    table: &str,
+    rows: &[(RefnoEnum, RefnoEnum)],
+    chunk_size: usize,
+) -> anyhow::Result<()> {
+    for edge_chunk in rows.chunks(chunk_size) {
+        if edge_chunk.is_empty() {
+            continue;
+        }
+        SUL_DB
+            .query(render_reverse_index_insert(table, edge_chunk))
+            .await
+            .map_err(|e| anyhow::anyhow!("write reverse-index staging chunk failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("write reverse-index staging statement failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Rebuild the complete reverse-reference index from all current, non-deleted
+/// `pe` rows.
+///
+/// The build is isolated in `ref_rev_rebuild`; the live `ref_rev` table is
+/// replaced only after every source attribute record has been scanned and all
+/// staging writes have succeeded. The final delete/copy is one Surreal
+/// transaction, so a failed rebuild cannot leave the live index half-empty.
+///
+/// This is intentionally an explicit service operation rather than part of the
+/// increment watermark path: cold imports/backfills call it once, while later
+/// changes remain covered by [`build_reverse_index_statements`].
+pub async fn rebuild_reverse_index() -> anyhow::Result<ReverseIndexRebuildReport> {
+    const STAGE_TABLE: &str = "ref_rev_rebuild";
+    const READ_CHUNK: usize = 500;
+    const WRITE_CHUNK: usize = 500;
+
+    SUL_DB
+        .query(format!("DELETE {STAGE_TABLE};"))
+        .await
+        .map_err(|e| anyhow::anyhow!("clear reverse-index staging table failed: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("clear reverse-index staging statement failed: {e}"))?;
+
+    let build_result = async {
+        // Snapshot the source ids first. Chunked direct-record reads avoid both
+        // a giant websocket response and unstable OFFSET pagination.
+        let mut response = SUL_DB
+            .query("SELECT VALUE id FROM pe WHERE !deleted;")
+            .await
+            .map_err(|e| anyhow::anyhow!("load reverse-index source ids failed: {e}"))?;
+        let source_ids: Vec<RefnoEnum> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("decode reverse-index source ids failed: {e}"))?;
+
+        let mut scanned_elements = 0usize;
+        let mut orphan_noun_elements = 0usize;
+        let mut indexed_referrer_ids = HashSet::new();
+        let mut seen_edges = HashSet::new();
+        let mut inserted_edges = 0usize;
+
+        for id_chunk in source_ids.chunks(READ_CHUNK) {
+            let ids = id_chunk
+                .iter()
+                .map(RefnoEnum::to_pe_key)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("SELECT VALUE refno.* FROM [{ids}];");
+            let mut response = SUL_DB
+                .query(&sql)
+                .await
+                .map_err(|e| anyhow::anyhow!("load reverse-index attribute chunk failed: {e}"))?;
+            let value: surrealdb::Value = response
+                .take(0)
+                .map_err(|e| anyhow::anyhow!("decode reverse-index attribute chunk failed: {e}"))?;
+            let attmaps = decode_reverse_index_attmaps(value)?;
+            scanned_elements += attmaps.len();
+
+            let rows = collect_reverse_index_rows(&attmaps)
+                .into_iter()
+                .filter(|edge| seen_edges.insert(*edge))
+                .collect::<Vec<_>>();
+            indexed_referrer_ids.extend(rows.iter().map(|(referrer, _)| *referrer));
+            inserted_edges += rows.len();
+            insert_reverse_index_stage_rows(STAGE_TABLE, &rows, WRITE_CHUNK).await?;
+        }
+
+        // Some implicit/structural members exist only in their noun table while
+        // their common `pe` row is absent. Scan those dictionary noun tables as
+        // a supplement; otherwise genuine consumers such as 11 of the 72 DAMP
+        // rows referencing SPCO 23274/295504 are invisible to a pe-only rebuild.
+        let mut nouns = aios_core::get_default_pdms_db_info()
+            .named_attr_info_map
+            .iter()
+            .map(|entry| entry.key().to_string())
+            .collect::<Vec<_>>();
+        nouns.sort_unstable();
+        nouns.dedup();
+        for noun in nouns {
+            let mut start = 0usize;
+            loop {
+                let sql = format!(
+                    "SELECT * FROM {noun} \
+                     WHERE REFNO != NONE AND !record::exists(REFNO) \
+                     LIMIT {READ_CHUNK} START {start};"
+                );
+                let mut response = SUL_DB.query(&sql).await.map_err(|e| {
+                    anyhow::anyhow!("load orphan noun rows from {noun} failed: {e}")
+                })?;
+                let value: surrealdb::Value = response.take(0).map_err(|e| {
+                    anyhow::anyhow!("decode orphan noun rows from {noun} failed: {e}")
+                })?;
+                let attmaps = decode_reverse_index_attmaps(value)?;
+                if attmaps.is_empty() {
+                    break;
+                }
+                let count = attmaps.len();
+                orphan_noun_elements += count;
+                scanned_elements += count;
+                let rows = collect_reverse_index_rows(&attmaps)
+                    .into_iter()
+                    .filter(|edge| seen_edges.insert(*edge))
+                    .collect::<Vec<_>>();
+                indexed_referrer_ids.extend(rows.iter().map(|(referrer, _)| *referrer));
+                inserted_edges += rows.len();
+                insert_reverse_index_stage_rows(STAGE_TABLE, &rows, WRITE_CHUNK).await?;
+                start += count;
+            }
+        }
+
+        // The composite `ref_rev:[in, out]` id makes the swap deduplicate by
+        // itself, and graph adjacency replaces the old secondary indexes — which
+        // would otherwise linger on legacy databases indexing fields the edge
+        // rows no longer carry.
+        let swap_sql = format!(
+            "BEGIN TRANSACTION;\n\
+             DELETE ref_rev;\n\
+             INSERT RELATION INTO ref_rev \
+                 (SELECT type::thing('ref_rev', [in, out]) AS id, in, out FROM {STAGE_TABLE});\n\
+             DELETE {STAGE_TABLE};\n\
+             COMMIT TRANSACTION;\n\
+             REMOVE INDEX IF EXISTS ref_rev_unique ON TABLE ref_rev;\n\
+             REMOVE INDEX IF EXISTS ref_rev_by_referenced ON TABLE ref_rev;\n\
+             REMOVE INDEX IF EXISTS ref_rev_by_referrer ON TABLE ref_rev;"
+        );
+        SUL_DB
+            .query(swap_sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("swap rebuilt reverse index failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("swap rebuilt reverse index statement failed: {e}"))?;
+
+        Ok::<_, anyhow::Error>(ReverseIndexRebuildReport {
+            candidate_elements: source_ids.len(),
+            orphan_noun_elements,
+            scanned_elements,
+            indexed_referrers: indexed_referrer_ids.len(),
+            inserted_edges,
+        })
+    }
+    .await;
+
+    if build_result.is_err() {
+        // Best-effort cleanup only; the live table was never touched unless the
+        // final transaction committed successfully.
+        let _ = SUL_DB.query(format!("DELETE {STAGE_TABLE};")).await;
+    }
+    build_result
+}
+
+/// Assemble the `referenced → [referrers]` index consumed by [`build_unit_rollup`]
+/// from flat `(referrer, referenced)` edge rows (ADR-003 B1-query, pure; deduped).
+pub fn assemble_ref_reversal(
+    rows: &[(RefnoEnum, RefnoEnum)],
+) -> HashMap<RefnoEnum, Vec<RefnoEnum>> {
+    let mut map: HashMap<RefnoEnum, Vec<RefnoEnum>> = HashMap::new();
+    for &(referrer, referenced) in rows {
+        let entry = map.entry(referenced).or_default();
+        if !entry.contains(&referrer) {
+            entry.push(referrer);
+        }
+    }
+    map
+}
+
+/// Fetch the raw `(referrer, referenced)` edges whose `referenced` is one of
+/// `seeds`, chunked so a wide window cannot build an oversized statement.
+///
+/// Walks the seeds' own incoming `ref_rev` adjacency (`<-ref_rev`) instead of
+/// filtering the edge table, so the lookup cost follows the number of matching
+/// edges rather than the table size. `array::flatten` is required because a
+/// multi-record traversal otherwise groups `in`/`out` per source record.
+async fn fetch_ref_rev_edges(
+    seeds: &HashSet<RefnoEnum>,
+) -> anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(rename = "in")]
+        referrer: RefnoEnum,
+        #[serde(rename = "out")]
+        referenced: RefnoEnum,
+    }
+    const QUERY_CHUNK: usize = 500;
+
+    let ids = seeds
+        .iter()
+        .filter(|r| r.is_valid())
+        .map(|r| r.to_pe_key())
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    for chunk in ids.chunks(QUERY_CHUNK) {
+        let sql = format!(
+            "SELECT in, out FROM array::flatten([{}]<-ref_rev);",
+            chunk.join(", ")
+        );
+        let mut response = SUL_DB.query(&sql).await?;
+        let rows: Vec<Row> = response.take(0)?;
+        edges.extend(rows.into_iter().map(|r| (r.referrer, r.referenced)));
+    }
+    Ok(edges)
+}
+
+/// Load the reverse-reference edges whose `referenced` is one of `seeds` (one hop).
+///
+/// Callers decide whether a read failure is fatal. The increment planner turns
+/// it into a durable `CascadeExpand` item, while the normal path consumes the
+/// returned index directly.
+pub(crate) async fn load_ref_reversal(
+    seeds: &HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
+    Ok(assemble_ref_reversal(&fetch_ref_rev_edges(seeds).await?))
+}
+
+/// Catalogue/spec reference chains (`TABITE→SPCO→SCOM→BRAN`) are only a few hops
+/// deep; this bound exists purely to terminate on malformed data.
+const MAX_REVERSE_CASCADE_HOPS: usize = 8;
+
+/// Stop expanding once this many distinct referrers are known, so one
+/// pathologically shared element cannot pull the whole index into one window.
+const MAX_REVERSE_CASCADE_REFERRERS: usize = 50_000;
+
+/// Drive the transitive reverse-reference load over an injectable edge fetcher.
+///
+/// Each round asks for the edges of the referrers discovered by the previous
+/// round, so [`build_unit_rollup`] can walk through catalogue intermediates
+/// (SPCO/SCOM) that carry no delivery unit of their own. `visited` makes cycles
+/// terminate and keeps every `referenced` key queried at most once.
+async fn collect_ref_reversal_closure<F, Fut>(
+    seeds: &HashSet<RefnoEnum>,
+    mut fetch: F,
+) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>>
+where
+    F: FnMut(HashSet<RefnoEnum>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>>>,
+{
+    let mut edges: Vec<(RefnoEnum, RefnoEnum)> = Vec::new();
+    let mut visited: HashSet<RefnoEnum> = seeds.iter().copied().collect();
+    let mut frontier: HashSet<RefnoEnum> = seeds.clone();
+    let mut referrers = 0usize;
+
+    for hop in 0..MAX_REVERSE_CASCADE_HOPS {
+        if frontier.is_empty() {
+            break;
+        }
+        let hop_edges = fetch(std::mem::take(&mut frontier)).await?;
+        for &(referrer, _) in &hop_edges {
+            if visited.insert(referrer) {
+                referrers += 1;
+                frontier.insert(referrer);
+            }
+        }
+        edges.extend(hop_edges);
+
+        if referrers >= MAX_REVERSE_CASCADE_REFERRERS {
+            log::warn!(
+                "reverse cascade closure hit the {MAX_REVERSE_CASCADE_REFERRERS} referrer cap \
+                 at hop {hop}; deeper referrers are not expanded"
+            );
+            break;
+        }
+    }
+
+    Ok(assemble_ref_reversal(&edges))
+}
+
+/// Load the TRANSITIVE `referenced → [referrers]` closure for `seeds`.
+///
+/// A single-hop load would silently stop [`build_unit_rollup`]'s cascade walk at
+/// the first catalogue intermediate, because that intermediate is not itself a
+/// changed element and so would have no entry in the map (ADR-003 B3).
+pub(crate) async fn load_ref_reversal_closure(
+    seeds: &HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
+    collect_ref_reversal_closure(seeds, |frontier| async move {
+        fetch_ref_rev_edges(&frontier).await
+    })
+    .await
+}
+
+/// Load the pre-update ownership chains for `seeds` from the ACTIVE Surreal
+/// PE/OWNER graph (plan 阶段 3: 不启用未导出的 `ssc.rs` / Arango 路径).
+///
+/// Walks `owner` links with memoization; a missing record simply ends its chain
+/// (that element then has no resolvable delivery unit). Note preview runs
+/// BEFORE any data is applied, so this graph IS the pre-update snapshot —
+/// including elements the window will delete.
+async fn load_base_graph(seeds: HashSet<RefnoEnum>) -> HashMap<RefnoEnum, OwnerNode> {
+    let mut base: HashMap<RefnoEnum, OwnerNode> = HashMap::new();
+    let mut missing: HashSet<RefnoEnum> = HashSet::new();
+    let mut stack: Vec<RefnoEnum> = seeds.into_iter().filter(|r| r.is_valid()).collect();
+
+    while let Some(refno) = stack.pop() {
+        if base.contains_key(&refno) || missing.contains(&refno) {
+            continue;
+        }
+        let pe = match aios_core::get_pe(refno).await {
+            Ok(Some(pe)) => pe,
+            _ => {
+                missing.insert(refno);
+                continue;
+            }
+        };
+        let owner = (pe.owner.is_valid() && pe.owner != refno).then_some(pe.owner);
+        if let Some(owner) = owner {
+            stack.push(owner);
+        }
+        base.insert(
+            refno,
+            OwnerNode {
+                owner,
+                noun: pe.noun,
+                name: pe.name,
+            },
+        );
+    }
+
+    base
+}
+
+/// Delivery-unit accumulator (internal to [`build_unit_rollup`]).
+struct UnitAccum {
+    root: RefnoEnum,
+    noun: String,
+    name: String,
+    added: u32,
+    modified: u32,
+    deleted: u32,
+    moved_in: u32,
+    moved_out: u32,
+    cascaded: u32,
+    model_affecting: u32,
+    will_generate: bool,
+}
+
+impl UnitAccum {
+    fn new(unit: &ResolvedUnit) -> Self {
+        Self {
+            root: unit.root,
+            noun: unit.noun.clone(),
+            name: unit.name.clone(),
+            added: 0,
+            modified: 0,
+            deleted: 0,
+            moved_in: 0,
+            moved_out: 0,
+            cascaded: 0,
+            model_affecting: 0,
+            will_generate: false,
+        }
+    }
+}
+
+/// Count one change against one delivery unit (deduped by root over the window).
+fn touch_unit(
+    units: &mut BTreeMap<String, UnitAccum>,
+    unit: &ResolvedUnit,
+    model_affecting: bool,
+    bump: impl FnOnce(&mut UnitAccum),
+) {
+    let entry = units
+        .entry(unit.root.to_pdms_str())
+        .or_insert_with(|| UnitAccum::new(unit));
+    bump(entry);
+    if model_affecting {
+        entry.model_affecting += 1;
+        entry.will_generate = true;
+    }
+}
+
+/// Record a model-affecting change that cannot generate (no delivery unit).
+fn record_generation_skip(
+    change: &NetChangeDetail,
+    no_generation: &mut u32,
+    skipped: &mut Vec<String>,
+) {
+    if !change.model_affecting {
+        return;
+    }
+    *no_generation += 1;
+    skipped.push(change.refno.to_pdms_str());
+}
+
+fn skip_samples(refnos: &[String]) -> String {
+    const SAMPLE_LIMIT: usize = 5;
+    let mut sample = refnos
+        .iter()
+        .take(SAMPLE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if refnos.len() > SAMPLE_LIMIT {
+        sample.push_str(", …");
+    }
+    sample
+}
+
+/// Build the deduped delivery-unit rollup for one `dbnum` window (pure).
+///
+/// Rules (spec §最小交付单元 + plan 阶段 3):
+/// - each net change resolves in the post state (Added/Modified) or the
+///   pre-update snapshot (Deleted);
+/// - a modified element whose delivery-unit root differs pre→post counts as a
+///   move: the old unit records `moved_out`, the new unit `moved_in`, and BOTH
+///   units regenerate;
+/// - reverse cascade (ADR-003 workflow B + B3): a model-affecting change that is a
+///   referenced element in `snap.ref_reversal` also regenerates every referrer's
+///   delivery unit (`cascaded`), so editing a shared catalogue/spec element or a
+///   connected NOZZ/neighbour regenerates the design instances that point at it
+///   (incl. their TUBI). The walk is TRANSITIVE (bounded BFS): referrers with no
+///   delivery unit (catalogue intermediates like SPCO) are followed through to
+///   their own referrers, so spec-table chains (TABITE→SPCO→BRAN) still cascade.
+///   Empty index ⇒ this is a no-op;
+/// - no matching delivery type AND no reverse-cascade referrer → the change is
+///   counted in `no_generation` + a returned warning, never blocking the data
+///   batch (there is no whole-ZONE fallback).
+///
+/// Returns `(units, no_generation, warnings)`.
+pub fn build_unit_rollup(
+    snap: &OwnershipSnapshot,
+    changes: &[NetChangeDetail],
+    unit_types: &[String],
+) -> (Vec<DeliveryUnitSummary>, u32, Vec<String>) {
+    let mut units: BTreeMap<String, UnitAccum> = BTreeMap::new();
+    let mut no_generation: u32 = 0;
+    let mut skipped: Vec<String> = Vec::new();
+
+    for change in changes {
+        // Direct resolution: does the change itself land in a delivery unit?
+        let mut direct_hit = false;
+        match change.net {
+            NetOp::Cancelled => continue,
+            NetOp::Added => {
+                if let Some(unit) = resolve_change_unit(snap, change.refno, unit_types, true) {
+                    if direct_root_allowed(snap, change, &unit) {
+                        touch_unit(&mut units, &unit, change.model_affecting, |u| u.added += 1);
+                        direct_hit = true;
+                    }
+                }
+            }
+            NetOp::Deleted => {
+                // 删除使用更新前快照：影响原交付单元。
+                if let Some(unit) = resolve_change_unit(snap, change.refno, unit_types, false) {
+                    if direct_root_allowed(snap, change, &unit) {
+                        touch_unit(&mut units, &unit, change.model_affecting, |u| {
+                            u.deleted += 1
+                        });
+                        direct_hit = true;
+                    }
+                }
+            }
+            NetOp::Modified => {
+                let unit_pre = resolve_change_unit(snap, change.refno, unit_types, false)
+                    .filter(|unit| direct_root_allowed(snap, change, unit));
+                let unit_post = resolve_change_unit(snap, change.refno, unit_types, true)
+                    .filter(|unit| direct_root_allowed(snap, change, unit));
+                let unit_moved = match (&unit_pre, &unit_post) {
+                    (Some(pre), Some(post)) => pre.root != post.root,
+                    (None, None) => false,
+                    _ => true,
+                };
+
+                if let Some(unit) = &unit_post {
+                    touch_unit(&mut units, unit, change.model_affecting, |u| {
+                        u.modified += 1;
+                        if unit_moved {
+                            u.moved_in += 1;
+                        }
+                    });
+                    direct_hit = true;
+                }
+
+                // 移动同时加入原、新交付单元：两端都要重生成。
+                if unit_moved {
+                    if let Some(unit) = &unit_pre {
+                        touch_unit(&mut units, unit, change.model_affecting, |u| {
+                            u.moved_out += 1;
+                        });
+                        direct_hit = true;
+                    }
+                }
+            }
+        }
+
+        // ADR-003 反向级联（workflow B + B3 间接引用）：被改动元素若被其它元素正向引用
+        // （reverse index 命中），把引用者并入其交付单元一起重生成。覆盖「改共享目录/规格
+        // 或被连接的接管/邻居 → 重生成所有引用它的设计实例（含其头/尾 TUBI）」。
+        // **传递式（bounded BFS）**：引用者若本身无交付单元（目录中间体，如 SPCO/SCOM），
+        // 继续沿它的引用者上溯，直到命中有交付单元的设计实例——这样 spec 表链
+        // （TABITE→SPCO→设计 BRAN）等间接引用也能级联。引用者在 post 态归一、已删除回退
+        // pre；`visited` 去重防环、天然有界。仅 model_affecting 触发；`ref_reversal` 为空
+        // （B1 未落地）时此段是 no-op，行为与旧实现完全一致。
+        let mut cascade_hit = false;
+        if change.model_affecting {
+            let mut visited: HashSet<RefnoEnum> = HashSet::new();
+            visited.insert(change.refno);
+            let mut stack: Vec<RefnoEnum> = snap
+                .ref_reversal
+                .get(&change.refno)
+                .cloned()
+                .unwrap_or_default();
+            while let Some(referrer) = stack.pop() {
+                if !visited.insert(referrer) {
+                    continue; // 去重 / 防环
+                }
+                match resolve_change_unit(snap, referrer, unit_types, true)
+                    .or_else(|| resolve_change_unit(snap, referrer, unit_types, false))
+                {
+                    Some(unit)
+                        if unit.kind
+                            == crate::data_interface::generation_root::GenerationRootKind::DeliveryUnit =>
+                    {
+                        // 命中交付单元：整单重生成，止步（不再穿过它继续上溯）。
+                        touch_unit(&mut units, &unit, true, |u| u.cascaded += 1);
+                        cascade_hit = true;
+                    }
+                    Some(unit) => {
+                        if let Some(next) = snap.ref_reversal.get(&referrer) {
+                            stack.extend(next.iter().copied());
+                        } else {
+                            touch_unit(&mut units, &unit, true, |u| u.cascaded += 1);
+                            cascade_hit = true;
+                        }
+                    }
+                    None => {
+                        // 目录中间体（无交付单元）：继续沿它的引用者传递。
+                        if let Some(next) = snap.ref_reversal.get(&referrer) {
+                            stack.extend(next.iter().copied());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 直接命中与级联都没有 → 计入「无法生成」（无 MDU 祖先且无引用者）。
+        // `record_generation_skip` 自身对非 model_affecting 变更是 no-op。
+        if !direct_hit && !cascade_hit {
+            record_generation_skip(change, &mut no_generation, &mut skipped);
+        }
+    }
+
+    // The unit root's OWNER (parent) pre/post update: enables the frontend to
+    // refresh the OLD branch (move-out/delete) and the NEW branch (add/move-in).
+    let owner_pdms = |root: RefnoEnum, post: bool| -> Option<String> {
+        snap.node(root, post)
+            .and_then(|node| node.owner)
+            .filter(|owner| owner.is_valid())
+            .map(|owner| owner.to_pdms_str())
+    };
+    let units = units
+        .into_values()
+        .map(|a| DeliveryUnitSummary {
+            root_refno: a.root.to_pdms_str(),
+            noun: a.noun,
+            name: a.name,
+            added: a.added,
+            modified: a.modified,
+            deleted: a.deleted,
+            moved_in: a.moved_in,
+            moved_out: a.moved_out,
+            cascaded: a.cascaded,
+            model_affecting: a.model_affecting,
+            will_generate: a.will_generate,
+            old_owner: owner_pdms(a.root, false),
+            new_owner: owner_pdms(a.root, true),
+        })
+        .collect();
+
+    let mut warnings = Vec::new();
+    if !skipped.is_empty() {
+        warnings.push(format!(
+            "{} 个变更无法解析合法生成根，跳过模型生成（样例: {}）",
+            skipped.len(),
+            skip_samples(&skipped)
+        ));
+    }
+
+    (units, no_generation, warnings)
+}
+
+/// Resolve the full delivery-unit rollup for one `dbnum` window.
+///
+/// Read-only: loads the pre-update PE/OWNER chains from Surreal, overlays the
+/// window's OWNER coverage graph, then runs the pure [`build_unit_rollup`]. The
+/// reverse index is loaded as a TRANSITIVE closure
+/// ([`load_ref_reversal_closure`]) because the rollup walks it hop by hop.
+/// Returns `(units, no_generation, warnings)`.
+pub(crate) async fn resolve_unit_rollup(
+    dbnum: u32,
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    details: &[NetChangeDetail],
+) -> anyhow::Result<(Vec<DeliveryUnitSummary>, u32, Vec<String>)> {
+    if details.iter().all(|d| d.net == NetOp::Cancelled) {
+        return Ok((Vec::new(), 0, Vec::new()));
+    }
+
+    let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
+    let ref_reversal = load_ref_reversal_closure(&change_refnos).await?;
+
+    Ok(resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, ref_reversal).await)
+}
+
+/// Fallback used only after a reverse-index read failure. It retains direct
+/// root work; callers additionally persist a `CascadeExpand` seed for every
+/// model-affecting changed element.
+pub(crate) async fn resolve_unit_rollup_without_reverse_index(
+    dbnum: u32,
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    details: &[NetChangeDetail],
+) -> (Vec<DeliveryUnitSummary>, u32, Vec<String>) {
+    resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, HashMap::new()).await
+}
+
+async fn resolve_unit_rollup_with_ref_reversal(
+    dbnum: u32,
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    details: &[NetChangeDetail],
+    ref_reversal: HashMap<RefnoEnum, Vec<RefnoEnum>>,
+) -> (Vec<DeliveryUnitSummary>, u32, Vec<String>) {
+    if details.iter().all(|d| d.net == NetOp::Cancelled) {
+        return (Vec::new(), 0, Vec::new());
+    }
+
+    let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
+    let (overlay, deleted_post) = build_owner_overlay(range_eles);
+
+    let mut seeds: HashSet<RefnoEnum> = change_refnos;
+    seeds.extend(overlay.values().filter_map(|node| node.owner));
+    // Referrers must be resolvable in the owner graph, else their cascade is lost.
+    seeds.extend(ref_reversal.values().flatten().copied());
+
+    let snap = OwnershipSnapshot {
+        base: load_base_graph(seeds).await,
+        overlay,
+        deleted_post,
+        ref_reversal,
+    };
+
+    let (units, no_generation, warnings) =
+        build_unit_rollup(&snap, details, &configured_delivery_unit_types());
+    (
+        units,
+        no_generation,
+        warnings
+            .into_iter()
+            .map(|w| format!("dbnum={dbnum}: {w}"))
+            .collect(),
+    )
+}
+
+async fn resolve_zone_rollup(
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    details: &[NetChangeDetail],
+    units: &[DeliveryUnitSummary],
+) -> Vec<ZoneSummary> {
+    if details.iter().all(|detail| detail.net == NetOp::Cancelled) {
+        return Vec::new();
+    }
+    let (overlay, deleted_post) = build_owner_overlay(range_eles);
+    let mut seeds: HashSet<RefnoEnum> = details.iter().map(|detail| detail.refno).collect();
+    seeds.extend(overlay.values().filter_map(|node| node.owner));
+    let snap = OwnershipSnapshot {
+        base: load_base_graph(seeds).await,
+        overlay,
+        deleted_post,
+        ref_reversal: HashMap::new(),
+    };
+    build_zone_rollup(&snap, details, units)
+}
+
+/// Re-expand a deferred reverse-cascade seed against the current graph. The
+/// walk is deterministic, deduplicated, and cycle-safe; each discovered
+/// referrer is resolved through the same generation-root authority as normal
+/// incremental planning.
+pub(crate) async fn expand_live_reverse_cascade(
+    seed: RefnoEnum,
+) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
+    use crate::data_interface::generation_root::{
+        configured_delivery_unit_types, resolve_live_element_generation_root,
+    };
+
+    let unit_types = configured_delivery_unit_types();
+    let mut pending = vec![seed];
+    let mut visited = HashSet::from([seed]);
+    let mut roots = BTreeMap::new();
+
+    while let Some(referenced) = pending.pop() {
+        let referrers = load_ref_reversal(&HashSet::from([referenced]))
+            .await?
+            .remove(&referenced)
+            .unwrap_or_default();
+        let mut referrers = referrers;
+        referrers.sort_by_key(|refno| refno.to_pdms_str());
+        for referrer in referrers {
+            if !visited.insert(referrer) {
+                continue;
+            }
+            if let Some(root) = resolve_live_element_generation_root(referrer, &unit_types).await? {
+                roots.insert(root.root.to_pdms_str(), root);
+            }
+            pending.push(referrer);
+        }
+    }
+    Ok(roots.into_values().collect())
+}
+
+// ---------------------------------------------------------------------------
+// Manual execution + per-unit pending retry (spec §失败与重试, plan 阶段 4)
+// ---------------------------------------------------------------------------
+
+/// Final status of one manual update run (spec §失败与重试 最终任务状态).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualUpdateStatus {
+    /// Every executable data batch and model delivery unit succeeded.
+    Success,
+    /// At least one thing succeeded AND at least one failed / went pending.
+    Partial,
+    /// Executable work existed but nothing succeeded.
+    Failed,
+    /// Nothing to do (no pending sessions, no pending model retries).
+    #[default]
+    UpToDate,
+}
+
+/// Outcome of one `dbnum` data batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchStatus {
+    /// Data persisted and the applied watermark advanced.
+    Applied,
+    /// Batch failed before the watermark could advance (watermark unchanged).
+    Failed,
+    /// Batch intentionally not executed (blocked file anomaly / uninitialized).
+    Skipped,
+}
+
+/// Result of one `dbnum` data batch within a manual execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataBatchResult {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file_path: String,
+    /// Executed sesno window (both 0 for skipped batches).
+    pub start_sesno: i32,
+    pub end_sesno: i32,
+    pub status: BatchStatus,
+    /// Error (Failed) or skip reason (Skipped).
+    pub message: Option<String>,
+    /// Sessions merged into this run AFTER the last preview scan observation
+    /// (spec §确认与合并: 结果摘要必须列出相对预览新增合并的会话).
+    pub merged_sesnos: Vec<u32>,
+    /// Raw changed-element operation count in the window.
+    pub changed_elements: usize,
+}
+
+/// Outcome of one model delivery-unit generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitGenStatus {
+    Generated,
+    /// Generation failed → recorded as an independent pending-retry task.
+    Failed,
+}
+
+/// Result of one model delivery unit within a manual execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelUnitResult {
+    pub dbnum: u32,
+    /// Delivery-unit root as `a/b` pdms string.
+    pub root_refno: String,
+    pub noun: String,
+    pub status: UnitGenStatus,
+    /// Total attempts so far (including this one; carried across retries).
+    pub attempts: u32,
+    pub message: Option<String>,
+    /// Pre-update OWNER (parent) of the unit root (`a/b`), for OLD-branch
+    /// refresh/prune on the client (plan 阶段 6.2). `None` for retry-only tasks.
+    #[serde(default)]
+    pub old_owner: Option<String>,
+    /// Post-update OWNER (parent) of the unit root (`a/b`), for NEW-branch
+    /// refresh on the client (plan 阶段 6.2). `None` for retry-only tasks.
+    #[serde(default)]
+    pub new_owner: Option<String>,
+}
+
+/// Full result of one manual update execution.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManualUpdateResult {
+    pub project: String,
+    pub status: ManualUpdateStatus,
+    pub batches: Vec<DataBatchResult>,
+    pub units: Vec<ModelUnitResult>,
+    pub warnings: Vec<String>,
+}
+
+impl ManualUpdateResult {
+    fn failed(project: &str, reason: String) -> Self {
+        Self {
+            project: project.to_string(),
+            status: ManualUpdateStatus::Failed,
+            warnings: vec![reason],
+            ..Default::default()
+        }
+    }
+}
+
+/// Two-stage progress events (spec §任务与进度: 数据批次 + 模型交付单元，无百分比).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManualUpdateEvent {
+    DataBatchStarted {
+        dbnum: u32,
+        start_sesno: i32,
+        end_sesno: i32,
+    },
+    DataBatchFinished {
+        dbnum: u32,
+        success: bool,
+        message: Option<String>,
+    },
+    ModelUnitStarted {
+        dbnum: u32,
+        root_refno: String,
+        noun: String,
+    },
+    ModelUnitFinished {
+        dbnum: u32,
+        root_refno: String,
+        success: bool,
+        message: Option<String>,
+    },
+}
+
+/// Progress sink for [`AiosDBManager::execute_manual_update`]. The frontend
+/// forwards events into its own task state; `None` runs silently.
+pub type ManualUpdateProgress = Arc<dyn Fn(ManualUpdateEvent) + Send + Sync>;
+
+fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateEvent) {
+    if let Some(sink) = progress {
+        sink(event);
+    }
+}
+
+/// Surreal table holding per-unit model pending-retry tasks (spec §失败与重试).
+pub const MANUAL_MODEL_PENDING_TABLE: &str = "manual_model_pending";
+
+/// One persisted model pending-retry task: `dbnum` + delivery-unit root +
+/// source `end_sesno` + attempts + last error (spec §失败与重试 最小字段).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingModelUnit {
+    pub dbnum: u32,
+    /// `a/b` pdms string.
+    pub root_refno: String,
+    #[serde(default)]
+    pub noun: String,
+    pub source_end_sesno: i32,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Record id: one row per (dbnum, unit root) so a unit re-affected by newer
+/// data keeps exactly ONE latest task (spec: 同一待重试单元只保留一个最新任务).
+fn pending_record_id(dbnum: u32, root_refno: &str) -> String {
+    format!(
+        "{MANUAL_MODEL_PENDING_TABLE}:{dbnum}_{}",
+        root_refno.replace('/', "_")
+    )
+}
+
+/// Load all pending model-retry tasks (read-only; used by preview + execute).
+pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
+    let sql = format!(
+        "SELECT dbnum, root_refno, noun, source_end_sesno, attempts, \
+         last_error FROM {MANUAL_MODEL_PENDING_TABLE};"
+    );
+    let mut response = SUL_DB
+        .query(sql)
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("读取旧模型待重试语句失败: {error}"))?;
+    let mut pending: Vec<PendingModelUnit> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解码旧模型待重试失败: {error}"))?;
+
+    // New work is written before the data watermark. Read it alongside the
+    // legacy manual table so retry-only manual runs consume the same roots as
+    // automatic updates without a stop-the-world migration.
+    let sql = "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
+               last_error FROM model_update_pending \
+               WHERE action = 'regen_root' AND status IN ['pending', 'failed'];";
+    let mut response = SUL_DB
+        .query(sql)
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("读取模型待重试语句失败: {error}"))?;
+    let mut current: Vec<PendingModelUnit> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))?;
+    pending.append(&mut current);
+    Ok(pending)
+}
+
+/// Record (or refresh) a pending-retry task after a unit generation failure.
+async fn upsert_pending_model_unit(task: &UnitTask, error: &str) -> anyhow::Result<()> {
+    let id = pending_record_id(task.dbnum, &task.root_refno);
+    let sql = format!(
+        "UPSERT {id} SET dbnum = {dbnum}, root_refno = '{root}', noun = '{noun}', \
+         source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}]), \
+         attempts = (attempts?:0) + 1, last_error = '{error}', updated_at = time::now();",
+        dbnum = task.dbnum,
+        root = escape_surql_str(&task.root_refno),
+        noun = escape_surql_str(&task.noun),
+        end_sesno = task.source_end_sesno,
+        error = escape_surql_str(error),
+    );
+    SUL_DB
+        .query(sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("记录模型待重试失败 {id}: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("记录模型待重试语句失败 {id}: {e}"))?;
+    Ok(())
+}
+
+/// Drop the pending-retry task after the unit generates successfully.
+async fn clear_pending_model_unit(dbnum: u32, root_refno: &str) -> anyhow::Result<()> {
+    let id = pending_record_id(dbnum, root_refno);
+    SUL_DB
+        .query(format!("DELETE {id};"))
+        .await
+        .map_err(|e| anyhow::anyhow!("清除模型待重试失败 {id}: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("清除模型待重试语句失败 {id}: {e}"))?;
+    Ok(())
+}
+
+/// One model delivery-unit generation task inside an execution run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitTask {
+    pub dbnum: u32,
+    /// `a/b` pdms string (generation root).
+    pub root_refno: String,
+    pub noun: String,
+    pub source_end_sesno: i32,
+    /// Attempts BEFORE this run (carried from a pending record; 0 for new).
+    pub attempts: u32,
+    /// Pre/post-update OWNER (parent) of the unit root (`a/b`); carried to the
+    /// result for client tree refresh. `None` for pending-only (retry) tasks.
+    pub old_owner: Option<String>,
+    pub new_owner: Option<String>,
+}
+
+/// Derive the generation worklist of one applied DESI batch from its delivery-
+/// unit rollup: every unit with `will_generate`, deduped by root.
+pub fn collect_unit_tasks(
+    units: &[DeliveryUnitSummary],
+    dbnum: u32,
+    end_sesno: i32,
+) -> Vec<UnitTask> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut tasks = Vec::new();
+    for unit in units {
+        if !unit.will_generate || !seen.insert(unit.root_refno.as_str()) {
+            continue;
+        }
+        tasks.push(UnitTask {
+            dbnum,
+            root_refno: unit.root_refno.clone(),
+            noun: unit.noun.clone(),
+            source_end_sesno: end_sesno,
+            attempts: 0,
+            old_owner: unit.old_owner.clone(),
+            new_owner: unit.new_owner.clone(),
+        });
+    }
+    tasks
+}
+
+/// Merge this run's new unit tasks with the persisted pending-retry tasks.
+///
+/// Dedup key is `(dbnum, root)`: a pending unit re-affected by new data keeps
+/// ONE task with the latest `end_sesno` and its accumulated attempts; pending
+/// units without new data still run (spec: 无新会话时可以只重试模型).
+/// Output order is deterministic: `(dbnum, root)` ascending.
+pub fn merge_unit_worklist(
+    new_units: Vec<UnitTask>,
+    pending: Vec<PendingModelUnit>,
+) -> Vec<UnitTask> {
+    let mut merged: BTreeMap<(u32, String), UnitTask> = BTreeMap::new();
+
+    for p in pending {
+        merged.insert(
+            (p.dbnum, p.root_refno.clone()),
+            UnitTask {
+                dbnum: p.dbnum,
+                root_refno: p.root_refno,
+                noun: p.noun,
+                source_end_sesno: p.source_end_sesno,
+                attempts: p.attempts,
+                // Pending records don't persist owners; a fresh run (below)
+                // fills them in when the same unit is re-affected this window.
+                old_owner: None,
+                new_owner: None,
+            },
+        );
+    }
+
+    for task in new_units {
+        match merged.get_mut(&(task.dbnum, task.root_refno.clone())) {
+            Some(existing) => {
+                existing.source_end_sesno = existing.source_end_sesno.max(task.source_end_sesno);
+                if !task.noun.is_empty() {
+                    existing.noun = task.noun;
+                }
+                // Prefer this run's freshly-resolved owners over the pending None.
+                if task.old_owner.is_some() {
+                    existing.old_owner = task.old_owner;
+                }
+                if task.new_owner.is_some() {
+                    existing.new_owner = task.new_owner;
+                }
+            }
+            None => {
+                merged.insert((task.dbnum, task.root_refno.clone()), task);
+            }
+        }
+    }
+
+    merged.into_values().collect()
+}
+
+/// Sessions of this window that were merged AFTER the last preview scan
+/// observation (pure; spec §确认与合并).
+pub fn sessions_merged_after(range_sesnos: &[u32], previous_observed: i32) -> Vec<u32> {
+    range_sesnos
+        .iter()
+        .copied()
+        .filter(|&s| (s as i64) > previous_observed as i64)
+        .collect()
+}
+
+/// Aggregate the final run status (pure; spec §失败与重试 最终任务状态).
+pub fn aggregate_manual_status(
+    batches: &[DataBatchResult],
+    units: &[ModelUnitResult],
+) -> ManualUpdateStatus {
+    let any_ok = batches.iter().any(|b| b.status == BatchStatus::Applied)
+        || units.iter().any(|u| u.status == UnitGenStatus::Generated);
+    let any_fail = batches.iter().any(|b| b.status == BatchStatus::Failed)
+        || units.iter().any(|u| u.status == UnitGenStatus::Failed);
+    match (any_ok, any_fail) {
+        (true, false) => ManualUpdateStatus::Success,
+        (true, true) => ManualUpdateStatus::Partial,
+        (false, true) => ManualUpdateStatus::Failed,
+        (false, false) => ManualUpdateStatus::UpToDate,
+    }
+}
+
+/// Per-process guard: one manual update per project at a time (spec §可用条件).
+static EXECUTING_PROJECTS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+
+struct ProjectExecGuard(String);
+
+impl ProjectExecGuard {
+    fn try_acquire(project: &str) -> Option<Self> {
+        let lock = EXECUTING_PROJECTS.get_or_init(|| StdMutex::new(HashSet::new()));
+        let mut set = lock.lock().expect("EXECUTING_PROJECTS poisoned");
+        set.insert(project.to_string())
+            .then(|| Self(project.to_string()))
+    }
+}
+
+impl Drop for ProjectExecGuard {
+    fn drop(&mut self) {
+        if let Some(lock) = EXECUTING_PROJECTS.get() {
+            if let Ok(mut set) = lock.lock() {
+                set.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Generate ONE delivery unit through the existing generation path (same call
+/// shape as `ModelRefreshPolicy::run_owner_regen`, but per unit root so每个
+/// 单元独立成败). Deliberately does NOT call any combined entry that would
+/// re-trigger the legacy classified refresh (plan 阶段 4 实现约束).
+pub(crate) async fn generate_unit_model(
+    mgr: &AiosDBManager,
+    root_refno: &str,
+) -> anyhow::Result<()> {
+    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
+        mgr,
+        &[root_refno.to_string()],
+    )
+    .await
+}
+
+/// Raw per-session change counts (spec §预览结构: 会话层保留原始变化记录).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionPreview {
+    pub sesno: u32,
+    pub added: u32,
+    pub modified: u32,
+    pub deleted: u32,
+}
+
+/// Preview for one `dbnum` batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DbnumPreview {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file_name: String,
+    pub file_path: String,
+    /// Authoritative applied watermark (unchanged by preview).
+    pub applied_sesno: i32,
+    /// Observed latest sesno in the file.
+    pub file_latest_sesno: i32,
+    /// Raw per-session counts across the pending window.
+    pub sessions: Vec<SessionPreview>,
+    /// Net add/modify/delete counts after merging the whole window.
+    pub net_added: u32,
+    pub net_modified: u32,
+    pub net_deleted: u32,
+    /// Net changes that will trigger model (re)generation.
+    pub model_affecting: u32,
+    /// Deduped delivery-unit rollup across the whole pending window
+    /// (spec §预览结构: 「交付单元汇总按 refno 去重，按整个待更新范围的最终结果归类」).
+    pub units: Vec<DeliveryUnitSummary>,
+    /// Net changes grouped by nearest ZONE. This is reporting-only and never
+    /// changes the `dbnum + sesno` execution boundary.
+    #[serde(default)]
+    pub zones: Vec<ZoneSummary>,
+    /// Model-affecting changes that could not resolve to any minimal delivery
+    /// unit (no BRAN/HANG/… ancestor): counted, warned, and NOT generated.
+    pub no_generation: u32,
+    /// File-identity anomaly, if any (rollback/duplicate/etc.).
+    pub anomaly: Option<FileAnomaly>,
+    /// When `true` this `dbnum` is blocked (e.g. rollback/duplicate) and no data
+    /// batch will be applied for it.
+    pub blocked: bool,
+    /// The selected DESI/CATA file has never been imported. Confirmed execution
+    /// initializes only this file, then establishes its authoritative watermark.
+    #[serde(default)]
+    pub initialization_required: bool,
+}
+
+/// Full read-only preview of a project's pending manual update.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManualUpdatePreview {
+    pub project: String,
+    pub dbnums: Vec<DbnumPreview>,
+    /// Model units still awaiting a retry from earlier runs. Shown even when
+    /// no new sesno is pending (spec §失败与重试: 下次预览即使没有新 sesno 也
+    /// 显示并允许重试).
+    #[serde(default)]
+    pub pending_model_retries: Vec<PendingModelUnit>,
+    /// Non-fatal per-file scan issues (unreadable header, collect error, …).
+    pub warnings: Vec<String>,
+    /// `true` when there is nothing pending to show (no sessions, no anomalies,
+    /// no pending model retries).
+    pub up_to_date: bool,
+}
+
+/// A candidate DB file discovered during the project scan.
+struct FileCandidate {
+    path: PathBuf,
+    file_name: String,
+    db_type: String,
+    db_num: u32,
+    file_latest_sesno: i32,
+    file_size: u64,
+    file_modified_at: Option<String>,
+}
+
+fn baseline_sync_options(
+    source: &aios_core::options::DbOption,
+    file_name: &str,
+    dbnum: u32,
+) -> aios_core::options::DbOption {
+    let mut options = source.clone();
+    options.total_sync = true;
+    options.replace_dbs = false;
+    options.included_db_files = Some(vec![file_name.to_string()]);
+    options.manual_db_nums = Some(vec![dbnum]);
+    options.gen_model = false;
+    options.gen_mesh = false;
+    options
+}
+
+fn baseline_needs_full_parse(pe_count: usize, expected_count: usize) -> bool {
+    pe_count != expected_count
+}
+
+fn baseline_stats_need_rebuild(pe_count: usize, info_count: usize) -> bool {
+    pe_count != info_count
+}
+
+fn expected_baseline_pe_count(project: &str, candidate: &FileCandidate) -> anyhow::Result<usize> {
+    let db_basic = parse_file_db_basic_data(&candidate.path, &candidate.file_name, project)?;
+    Ok(db_basic.children_map.len().saturating_sub(1))
+}
+
+fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
+    meta.modified().ok().map(|t| {
+        let dt: chrono::DateTime<chrono::Utc> = t.into();
+        dt.to_rfc3339()
+    })
+}
+
+impl AiosDBManager {
+    /// Idempotently establish the current-file baseline for one project dbnum.
+    ///
+    /// This is the non-UI entry point used by regression tooling. It shares the
+    /// same scoped initializer as confirmed manual update execution.
+    pub async fn initialize_project_dbnum_baseline(
+        &self,
+        project: &str,
+        dbnum: u32,
+    ) -> anyhow::Result<usize> {
+        let project_dir = self
+            .db_option
+            .get_project_path(project)
+            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
+        let mut warnings = Vec::new();
+        let candidates = self
+            .scan_project_candidates(&project_dir, &mut warnings)
+            .shift_remove(&dbnum)
+            .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
+        if candidates.len() != 1 {
+            anyhow::bail!(
+                "项目 {project} 的 dbnum={dbnum} 候选文件数量为 {}",
+                candidates.len()
+            );
+        }
+        self.initialize_dbnum_baseline(project, &candidates[0])
+            .await
+    }
+
+    async fn initialize_dbnum_baseline(
+        &self,
+        project: &str,
+        cand: &FileCandidate,
+    ) -> anyhow::Result<usize> {
+        #[derive(Deserialize)]
+        struct CountRow {
+            count: usize,
+        }
+
+        async fn scalar_count(sql: String) -> anyhow::Result<usize> {
+            let rows = SUL_DB.query(sql).await?.check()?.take::<Vec<CountRow>>(0)?;
+            Ok(rows.first().map(|row| row.count).unwrap_or_default())
+        }
+
+        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
+            let pe_count = scalar_count(format!(
+                "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"
+            ))
+            .await?;
+            let info_count = scalar_count(format!(
+                "SELECT math::sum(count) AS count \
+                 FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL"
+            ))
+            .await?;
+            Ok((pe_count, info_count))
+        }
+
+        let expected_count = expected_baseline_pe_count(project, cand)?;
+        let (mut count, mut info_count) = baseline_counts(cand.db_num).await?;
+        if baseline_needs_full_parse(count, expected_count) {
+            let options = baseline_sync_options(&self.db_option, &cand.file_name, cand.db_num);
+            crate::versioned_db::database::sync_total_async_threaded(
+                &options,
+                project,
+                Arc::new(dashmap::DashSet::new()),
+                &[cand.db_type.as_str()],
+                100,
+            )
+            .await?;
+            (count, info_count) = baseline_counts(cand.db_num).await?;
+        } else if baseline_stats_need_rebuild(count, info_count) {
+            crate::versioned_db::database::rebuild_dbnum_info_from_pe(
+                cand.db_num,
+                &cand.file_name,
+                &cand.db_type,
+            )
+            .await?;
+            (count, info_count) = baseline_counts(cand.db_num).await?;
+        }
+        if count == 0 {
+            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", cand.db_num);
+        }
+        if count != info_count {
+            anyhow::bail!(
+                "dbnum={} 基线不完整: PE={} dbnum_info={}; 不推进 applied_sesno",
+                cand.db_num,
+                count,
+                info_count
+            );
+        }
+        if count != expected_count {
+            anyhow::bail!(
+                "dbnum={} 基线不完整: PE={} 文件索引预期={}; 不推进 applied_sesno",
+                cand.db_num,
+                count,
+                expected_count
+            );
+        }
+
+        DbnumState::advance_applied(cand.db_num, cand.file_latest_sesno).await?;
+        Ok(count)
+    }
+
+    /// Read-only preview of the current project's pending manual update.
+    ///
+    /// Rejects execution when `sync_live = true` (the automatic file watcher owns
+    /// updates then). Scans ONLY the current project's directory — it never walks
+    /// other `included_projects`. Never writes element data, models or
+    /// `applied_sesno`; it may refresh scan-observation fields only.
+    pub async fn preview_manual_update(
+        &self,
+        project: &str,
+    ) -> anyhow::Result<ManualUpdatePreview> {
+        if self.db_option.sync_live.unwrap_or(false) {
+            anyhow::bail!("sync_live=true 时不允许手动更新（请改用自动更新模式）");
+        }
+
+        let project_dir = self
+            .db_option
+            .get_project_path(project)
+            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
+        if !project_dir.exists() {
+            anyhow::bail!("项目目录不存在: {}", project_dir.display());
+        }
+
+        let mut warnings = Vec::new();
+        let by_dbnum = self.scan_project_candidates(&project_dir, &mut warnings);
+        let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
+
+        let mut dbnums = Vec::new();
+        match DbnumState::list_registered().await {
+            Ok(states) => {
+                let project_prefix = format!(
+                    "{}\\",
+                    project_dir
+                        .to_string_lossy()
+                        .replace('/', "\\")
+                        .to_ascii_lowercase()
+                        .trim_end_matches('\\')
+                );
+                for state in states {
+                    let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
+                    if !state.file_path.is_empty()
+                        && stored_path.starts_with(&project_prefix)
+                        && !observed_dbnums.contains(&state.dbnum)
+                    {
+                        dbnums.push(DbnumPreview {
+                            dbnum: state.dbnum,
+                            db_type: state.db_type,
+                            file_name: state.file_name,
+                            file_path: state.file_path.clone(),
+                            applied_sesno: state.applied_sesno,
+                            file_latest_sesno: state.file_latest_sesno,
+                            anomaly: Some(FileAnomaly::Missing {
+                                path: state.file_path,
+                            }),
+                            blocked: true,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!("读取已登记 DBNUM 文件失败: {error}")),
+        }
+        for (db_num, candidates) in by_dbnum {
+            // 同一 dbnum 多个文件：展示全部路径，阻断该 dbnum，不自动挑选。
+            if candidates.len() > 1 {
+                let paths = candidates
+                    .iter()
+                    .map(|c| c.path.display().to_string())
+                    .collect::<Vec<_>>();
+                let first = &candidates[0];
+                dbnums.push(DbnumPreview {
+                    dbnum: db_num,
+                    db_type: first.db_type.clone(),
+                    file_name: first.file_name.clone(),
+                    file_path: first.path.display().to_string(),
+                    anomaly: Some(FileAnomaly::Duplicate { paths }),
+                    blocked: true,
+                    ..Default::default()
+                });
+                continue;
+            }
+
+            let cand = &candidates[0];
+            match self.preview_one_dbnum(project, cand, &mut warnings).await {
+                Ok(Some(preview)) => dbnums.push(preview),
+                Ok(None) => {}
+                Err(e) => warnings.push(format!("预览 dbnum={} 失败: {e}", db_num)),
+            }
+        }
+
+        let pending_model_retries = match load_pending_model_units().await {
+            Ok(pending) => pending,
+            Err(e) => {
+                warnings.push(format!("读取模型待重试列表失败: {e}"));
+                Vec::new()
+            }
+        };
+
+        dbnums.sort_by_key(|d| d.dbnum);
+        Ok(ManualUpdatePreview {
+            project: project.to_string(),
+            up_to_date: dbnums.is_empty() && pending_model_retries.is_empty(),
+            dbnums,
+            pending_model_retries,
+            warnings,
+        })
+    }
+
+    /// Pass 1: walk the project directory and group candidate DB files by `dbnum`.
+    fn scan_project_candidates(
+        &self,
+        project_dir: &std::path::Path,
+        warnings: &mut Vec<String>,
+    ) -> IndexMap<u32, Vec<FileCandidate>> {
+        let mut by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
+
+        for entry in WalkDir::new(project_dir) {
+            let dir_entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warnings.push(format!("遍历目录失败: {e}"));
+                    continue;
+                }
+            };
+            let path = dir_entry.path();
+            if path.is_dir() || self.should_exclude_file(path) {
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            // 副本文件（名字含 '-'）与增量应用保持一致地跳过。
+            if file_name.contains('-') {
+                continue;
+            }
+
+            let metadata = path.metadata().ok();
+            if metadata.as_ref().is_some_and(|meta| meta.len() < 60) {
+                // Definitely not a PDMS database. Avoid both the legacy parser's
+                // short-read panic and noisy warnings for tiny config/data files.
+                continue;
+            }
+            let mut header = [0u8; 60];
+            let header_result = std::fs::File::open(path).and_then(|mut file| {
+                file.read_exact(&mut header)?;
+                Ok(())
+            });
+            if let Err(error) = header_result {
+                warnings.push(format!(
+                    "跳过无法读取数据库头的文件 {}: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+            let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
+            if !self.should_process_database(&db_type, db_no) {
+                continue;
+            }
+
+            let file_latest_sesno = match PdmsIO::new(
+                project_dir.to_string_lossy().as_ref(),
+                path.to_path_buf(),
+                true,
+            )
+            .get_latest_sesno()
+            {
+                Ok(sesno) => sesno as i32,
+                Err(error) => {
+                    warnings.push(format!(
+                        "跳过无法读取最新会话的数据库文件 {}: {error}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or_default();
+            let file_modified_at = metadata.as_ref().and_then(file_modified_rfc3339);
+
+            by_dbnum.entry(db_no).or_default().push(FileCandidate {
+                path: path.to_path_buf(),
+                file_name,
+                db_type,
+                db_num: db_no,
+                file_latest_sesno,
+                file_size,
+                file_modified_at,
+            });
+        }
+
+        by_dbnum
+    }
+
+    /// Pass 2: build a preview for a single (unique) candidate file.
+    ///
+    /// Returns `None` when the `dbnum` is fully up to date with no anomaly.
+    /// Non-fatal issues (e.g. 无法解析交付单元) append to `warnings`.
+    async fn preview_one_dbnum(
+        &self,
+        project: &str,
+        cand: &FileCandidate,
+        warnings: &mut Vec<String>,
+    ) -> anyhow::Result<Option<DbnumPreview>> {
+        // Read PRIOR stored state before recording the new observation, so file
+        // anomalies compare against the previously registered identity.
+        let prior = DbnumState::read(cand.db_num).await.ok().flatten();
+        let applied = prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0);
+        let prior_db_type = prior
+            .as_ref()
+            .map(|s| s.db_type.as_str())
+            .filter(|s| !s.is_empty());
+        let prior_path = prior
+            .as_ref()
+            .map(|s| s.file_path.as_str())
+            .filter(|s| !s.is_empty());
+
+        let anomaly = check_file_against_state(
+            prior_db_type,
+            prior_path,
+            applied,
+            &cand.db_type,
+            &cand.path.display().to_string(),
+            cand.file_latest_sesno,
+        );
+
+        // Refresh scan observation (identity + file_latest_sesno + scanned_at).
+        // This is the only write preview performs and never advances applied_sesno.
+        let obs = FileObservation {
+            dbnum: cand.db_num,
+            db_type: cand.db_type.clone(),
+            file_name: cand.file_name.clone(),
+            file_path: cand.path.display().to_string(),
+            file_size: cand.file_size,
+            file_latest_sesno: cand.file_latest_sesno,
+            file_modified_at: cand.file_modified_at.clone(),
+        };
+        if let Err(e) = DbnumState::record_scan(&obs).await {
+            return Err(anyhow::anyhow!("记录扫描观察失败: {e}"));
+        }
+
+        let blocked = matches!(
+            anomaly,
+            Some(FileAnomaly::Rollback { .. } | FileAnomaly::TypeChanged { .. })
+        );
+
+        let mut preview = DbnumPreview {
+            dbnum: cand.db_num,
+            db_type: cand.db_type.clone(),
+            file_name: cand.file_name.clone(),
+            file_path: cand.path.display().to_string(),
+            applied_sesno: applied,
+            file_latest_sesno: cand.file_latest_sesno,
+            anomaly,
+            blocked,
+            initialization_required: needs_initial_load(
+                applied,
+                cand.file_latest_sesno,
+                &cand.db_type,
+            ),
+            ..Default::default()
+        };
+
+        if !blocked && !preview.initialization_required && cand.file_latest_sesno > applied {
+            match SesnoRangeResolver::new()
+                .resolve(
+                    &cand.path,
+                    project,
+                    cand.db_num,
+                    cand.file_latest_sesno,
+                    false,
+                    &cand.db_type,
+                )
+                .await?
+            {
+                Some(plan) => {
+                    let range_eles = IncrementPipeline::collect_changes(&cand.path, plan.range)?;
+                    let details = fill_change_summary(&mut preview, &range_eles);
+                    // Delivery units are a model-delivery concept: only DESI dbs
+                    // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
+                    // 但不触发模型生成), so only DESI gets a rollup.
+                    if cand.db_type == "DESI" && !details.is_empty() {
+                        let (units, no_generation, unit_warnings) = match resolve_unit_rollup(
+                            cand.db_num,
+                            &range_eles,
+                            &details,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                let (units, no_generation, mut unit_warnings) =
+                                    resolve_unit_rollup_without_reverse_index(
+                                        cand.db_num,
+                                        &range_eles,
+                                        &details,
+                                    )
+                                    .await;
+                                unit_warnings.push(format!(
+                                    "dbnum={}: reverse-reference lookup deferred to durable cascade work: {error:#}",
+                                    cand.db_num
+                                ));
+                                (units, no_generation, unit_warnings)
+                            }
+                        };
+                        preview.units = units;
+                        preview.zones =
+                            resolve_zone_rollup(&range_eles, &details, &preview.units).await;
+                        preview.no_generation = no_generation;
+                        warnings.extend(unit_warnings);
+                    }
+                }
+                None => {}
+            }
+        }
+
+        if preview.sessions.is_empty()
+            && preview.anomaly.is_none()
+            && !preview.initialization_required
+        {
+            return Ok(None);
+        }
+        Ok(Some(preview))
+    }
+
+    /// Execute the pending manual update for the current project.
+    ///
+    /// Flow (spec §用户流程 / plan 阶段 4): re-scan → fix each `dbnum` batch's
+    /// `end_sesno` at scan time (sessions arriving DURING execution wait for the
+    /// next run) → apply data batches per `dbnum` through the shared
+    /// [`IncrementPipeline`] (watermark advances inside its success path only) →
+    /// dedupe affected delivery units (DESI only) + merge persisted pending
+    /// retries → generate each unit independently, recording failures as
+    /// per-unit pending tasks.
+    ///
+    /// Never returns `Err`: precondition and per-batch failures land in the
+    /// returned [`ManualUpdateResult`] so the frontend has one shape to render.
+    pub async fn execute_manual_update(
+        &self,
+        project: &str,
+        progress: Option<ManualUpdateProgress>,
+    ) -> ManualUpdateResult {
+        if self.db_option.sync_live.unwrap_or(false) {
+            return ManualUpdateResult::failed(
+                project,
+                "sync_live=true 时不允许手动更新（自动更新模式独占）".to_string(),
+            );
+        }
+        let Some(project_dir) = self.db_option.get_project_path(project) else {
+            return ManualUpdateResult::failed(project, format!("无法解析项目目录: {project}"));
+        };
+        if !project_dir.exists() {
+            return ManualUpdateResult::failed(
+                project,
+                format!("项目目录不存在: {}", project_dir.display()),
+            );
+        }
+        let Some(_guard) = ProjectExecGuard::try_acquire(project) else {
+            return ManualUpdateResult::failed(
+                project,
+                format!("项目 {project} 已有手动更新任务正在执行"),
+            );
+        };
+
+        let mut result = ManualUpdateResult {
+            project: project.to_string(),
+            ..Default::default()
+        };
+
+        // Re-scan the project (execution owns its own scan; preview may be stale).
+        let by_dbnum = self.scan_project_candidates(&project_dir, &mut result.warnings);
+        let mut new_units: Vec<UnitTask> = Vec::new();
+
+        let mut dbnums: Vec<u32> = by_dbnum.keys().copied().collect();
+        dbnums.sort_unstable();
+
+        for dbnum in dbnums {
+            let candidates = &by_dbnum[&dbnum];
+            if candidates.len() > 1 {
+                let paths = candidates
+                    .iter()
+                    .map(|c| c.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                result.batches.push(DataBatchResult {
+                    dbnum,
+                    db_type: candidates[0].db_type.clone(),
+                    file_path: candidates[0].path.display().to_string(),
+                    start_sesno: 0,
+                    end_sesno: 0,
+                    status: BatchStatus::Skipped,
+                    message: Some(format!("同 dbnum 存在多个文件，已阻断: {paths}")),
+                    merged_sesnos: Vec::new(),
+                    changed_elements: 0,
+                });
+                continue;
+            }
+
+            let cand = &candidates[0];
+            let (batch, units) = self
+                .execute_one_dbnum(project, cand, &progress, &mut result.warnings)
+                .await;
+            if let Some(batch) = batch {
+                result.batches.push(batch);
+            }
+            new_units.extend(units);
+        }
+
+        // Merge with persisted pending retries: retry-only runs work with zero
+        // new sessions, and a re-affected unit keeps exactly one latest task.
+        let pending = match load_pending_model_units().await {
+            Ok(pending) => pending,
+            Err(e) => {
+                result
+                    .warnings
+                    .push(format!("读取模型待重试列表失败（本次仅处理新单元）: {e}"));
+                Vec::new()
+            }
+        };
+        let worklist = merge_unit_worklist(new_units, pending);
+
+        for task in worklist {
+            emit(
+                &progress,
+                ManualUpdateEvent::ModelUnitStarted {
+                    dbnum: task.dbnum,
+                    root_refno: task.root_refno.clone(),
+                    noun: task.noun.clone(),
+                },
+            );
+
+            let outcome = generate_unit_model(self, &task.root_refno).await;
+            let (status, attempts, message) = match &outcome {
+                Ok(()) => {
+                    if let Err(e) = clear_pending_model_unit(task.dbnum, &task.root_refno).await {
+                        result.warnings.push(e.to_string());
+                    }
+                    if let Err(e) = crate::data_interface::model_update_pending::clear_regen_work(
+                        task.dbnum,
+                        &task.root_refno,
+                    )
+                    .await
+                    {
+                        result.warnings.push(e.to_string());
+                    }
+                    (UnitGenStatus::Generated, task.attempts, None)
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if let Err(e) = upsert_pending_model_unit(&task, &msg).await {
+                        result.warnings.push(e.to_string());
+                    }
+                    if let Err(e) = crate::data_interface::model_update_pending::mark_regen_failed(
+                        task.dbnum,
+                        &task.root_refno,
+                        &msg,
+                    )
+                    .await
+                    {
+                        result.warnings.push(e.to_string());
+                    }
+                    (UnitGenStatus::Failed, task.attempts + 1, Some(msg))
+                }
+            };
+
+            emit(
+                &progress,
+                ManualUpdateEvent::ModelUnitFinished {
+                    dbnum: task.dbnum,
+                    root_refno: task.root_refno.clone(),
+                    success: status == UnitGenStatus::Generated,
+                    message: message.clone(),
+                },
+            );
+            result.units.push(ModelUnitResult {
+                dbnum: task.dbnum,
+                root_refno: task.root_refno,
+                noun: task.noun,
+                status,
+                attempts,
+                message,
+                old_owner: task.old_owner,
+                new_owner: task.new_owner,
+            });
+        }
+
+        if let Err(e) = crate::data_interface::model_update_pending::drain_non_regen(self).await {
+            result
+                .warnings
+                .push(format!("执行位姿/删除模型任务失败（可重试）: {e}"));
+        }
+
+        result.status = aggregate_manual_status(&result.batches, &result.units);
+        result
+    }
+
+    /// Execute the data batch of ONE `dbnum` and derive its delivery units.
+    ///
+    /// Returns `(batch, unit_tasks)`; `batch` is `None` when the `dbnum` is
+    /// fully up to date. The pre-update ownership snapshot loads BEFORE the
+    /// data persists (spec: 执行数据更新前必须保存旧归属 — deletes and moves
+    /// must still see the old owners).
+    async fn execute_one_dbnum(
+        &self,
+        project: &str,
+        cand: &FileCandidate,
+        progress: &Option<ManualUpdateProgress>,
+        warnings: &mut Vec<String>,
+    ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
+        let dbnum = cand.db_num;
+        let prior = DbnumState::read(dbnum).await.ok().flatten();
+        let applied = prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0);
+        let previous_observed = prior.as_ref().map(|s| s.file_latest_sesno).unwrap_or(0);
+
+        // Rollback / replacement blocks this dbnum; the watermark never regresses.
+        if cand.file_latest_sesno < applied {
+            return (
+                Some(DataBatchResult {
+                    dbnum,
+                    db_type: cand.db_type.clone(),
+                    file_path: cand.path.display().to_string(),
+                    start_sesno: 0,
+                    end_sesno: 0,
+                    status: BatchStatus::Skipped,
+                    message: Some(format!(
+                        "文件回退或被替换（file_latest_sesno={} < applied_sesno={}），已阻断",
+                        cand.file_latest_sesno, applied
+                    )),
+                    merged_sesnos: Vec::new(),
+                    changed_elements: 0,
+                }),
+                Vec::new(),
+            );
+        }
+
+        // Refresh the scan observation (identity/path/file_latest_sesno).
+        let obs = FileObservation {
+            dbnum,
+            db_type: cand.db_type.clone(),
+            file_name: cand.file_name.clone(),
+            file_path: cand.path.display().to_string(),
+            file_size: cand.file_size,
+            file_latest_sesno: cand.file_latest_sesno,
+            file_modified_at: cand.file_modified_at.clone(),
+        };
+        if let Err(e) = DbnumState::record_scan(&obs).await {
+            warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
+        }
+
+        if needs_initial_load(applied, cand.file_latest_sesno, &cand.db_type) {
+            return match self.initialize_dbnum_baseline(project, cand).await {
+                Ok(count) => (
+                    Some(DataBatchResult {
+                        dbnum,
+                        db_type: cand.db_type.clone(),
+                        file_path: cand.path.display().to_string(),
+                        start_sesno: 0,
+                        end_sesno: cand.file_latest_sesno,
+                        status: BatchStatus::Applied,
+                        message: Some(format!(
+                            "首次按需初始化完成：解析 {count} 个元素并建立增量水位"
+                        )),
+                        merged_sesnos: Vec::new(),
+                        changed_elements: count,
+                    }),
+                    Vec::new(),
+                ),
+                Err(error) => (
+                    Some(DataBatchResult {
+                        dbnum,
+                        db_type: cand.db_type.clone(),
+                        file_path: cand.path.display().to_string(),
+                        start_sesno: 0,
+                        end_sesno: cand.file_latest_sesno,
+                        status: BatchStatus::Failed,
+                        message: Some(format!("首次按需初始化失败: {error:#}")),
+                        merged_sesnos: Vec::new(),
+                        changed_elements: 0,
+                    }),
+                    Vec::new(),
+                ),
+            };
+        }
+
+        // Resolve and FIX this batch's window now (sessions arriving during
+        // execution stay out of the range and wait for the next run).
+        let plan = match SesnoRangeResolver::new()
+            .resolve(
+                &cand.path,
+                project,
+                dbnum,
+                cand.file_latest_sesno,
+                false,
+                &cand.db_type,
+            )
+            .await
+        {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return (None, Vec::new()),
+            Err(e) => {
+                return (
+                    Some(DataBatchResult {
+                        dbnum,
+                        db_type: cand.db_type.clone(),
+                        file_path: cand.path.display().to_string(),
+                        start_sesno: 0,
+                        end_sesno: 0,
+                        status: BatchStatus::Failed,
+                        message: Some(format!("解析增量范围失败: {e}")),
+                        merged_sesnos: Vec::new(),
+                        changed_elements: 0,
+                    }),
+                    Vec::new(),
+                );
+            }
+        };
+
+        let start_sesno = *plan.range.start();
+        let end_sesno = *plan.range.end();
+        emit(
+            progress,
+            ManualUpdateEvent::DataBatchStarted {
+                dbnum,
+                start_sesno,
+                end_sesno,
+            },
+        );
+
+        // Collect the window once for unit resolution, and snapshot the OLD
+        // ownership graph BEFORE anything persists.
+        let mut batch = DataBatchResult {
+            dbnum,
+            db_type: cand.db_type.clone(),
+            file_path: cand.path.display().to_string(),
+            start_sesno,
+            end_sesno,
+            status: BatchStatus::Failed,
+            message: None,
+            merged_sesnos: Vec::new(),
+            changed_elements: 0,
+        };
+
+        let pre_state = match IncrementPipeline::collect_changes(&cand.path, plan.range.clone()) {
+            Ok(range_eles) => {
+                batch.merged_sesnos = sessions_merged_after(
+                    &range_eles.keys().copied().collect::<Vec<_>>(),
+                    previous_observed,
+                );
+                batch.changed_elements = range_eles.values().map(|v| v.len()).sum();
+
+                if cand.db_type == "DESI" {
+                    let details = merge_net_change_details(&range_eles);
+                    let (unit_summaries, _no_generation, unit_warnings) = match resolve_unit_rollup(
+                        dbnum,
+                        &range_eles,
+                        &details,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let (units, no_generation, mut unit_warnings) =
+                                resolve_unit_rollup_without_reverse_index(
+                                    dbnum,
+                                    &range_eles,
+                                    &details,
+                                )
+                                .await;
+                            unit_warnings.push(format!(
+                                    "dbnum={dbnum}: reverse-reference lookup deferred to durable cascade work: {error:#}"
+                                ));
+                            (units, no_generation, unit_warnings)
+                        }
+                    };
+                    warnings.extend(unit_warnings);
+                    Some(unit_summaries)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                batch.message = Some(format!("读取增量数据失败: {e}"));
+                emit(
+                    progress,
+                    ManualUpdateEvent::DataBatchFinished {
+                        dbnum,
+                        success: false,
+                        message: batch.message.clone(),
+                    },
+                );
+                return (Some(batch), Vec::new());
+            }
+        };
+
+        // Apply through the shared pipeline: persist + datacenter side meta +
+        // watermark advance on ITS success path only (per-file isolation).
+        let mut apply_map = IndexMap::new();
+        apply_map.insert(
+            cand.path.clone(),
+            (
+                plan.basic_info.clone(),
+                plan.range.clone(),
+                cand.db_type.clone(),
+            ),
+        );
+        let incr = IncrementPipeline::new().apply(apply_map).await;
+        warnings.extend(incr.warnings.iter().map(|w| format!("dbnum={dbnum}: {w}")));
+
+        let mut units = Vec::new();
+        if let Some(err) = incr.errors.first() {
+            batch.status = BatchStatus::Failed;
+            batch.message = Some(err.error.clone());
+        } else {
+            batch.status = BatchStatus::Applied;
+            // Only DESI batches feed model generation (CATA/SYS meta: data only).
+            if let Some(unit_summaries) = &pre_state {
+                units = collect_unit_tasks(unit_summaries, dbnum, end_sesno);
+            }
+        }
+
+        emit(
+            progress,
+            ManualUpdateEvent::DataBatchFinished {
+                dbnum,
+                success: batch.status == BatchStatus::Applied,
+                message: batch.message.clone(),
+            },
+        );
+        (Some(batch), units)
+    }
+}
+
+/// Populate per-session counts + net change summary onto a [`DbnumPreview`].
+///
+/// Returns the merged net-change details for reuse by the delivery-unit rollup
+/// so the preview never merges the window twice.
+fn fill_change_summary(
+    preview: &mut DbnumPreview,
+    range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+) -> Vec<NetChangeDetail> {
+    for (&sesno, ops) in range_eles {
+        let mut session = SessionPreview {
+            sesno,
+            ..Default::default()
+        };
+        for op in ops {
+            match &op.detail {
+                EleOperationDetail::Add(_) => session.added += 1,
+                EleOperationDetail::Modified(_) => session.modified += 1,
+                EleOperationDetail::Deleted => session.deleted += 1,
+                EleOperationDetail::None => {}
+            }
+        }
+        preview.sessions.push(session);
+    }
+
+    let details = merge_net_change_details(range_eles);
+    for change in &details {
+        match change.net {
+            NetOp::Added => preview.net_added += 1,
+            NetOp::Modified => preview.net_modified += 1,
+            NetOp::Deleted => preview.net_deleted += 1,
+            NetOp::Cancelled => {}
+        }
+        if change.model_affecting {
+            preview.model_affecting += 1;
+        }
+    }
+    details
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seq(kinds: &[IncomingKind]) -> NetOp {
+        let mut net: Option<NetOp> = None;
+        for &k in kinds {
+            net = Some(fold_net_op(net, k));
+        }
+        net.expect("non-empty sequence")
+    }
+
+    #[test]
+    fn add_then_modify_is_a_single_add() {
+        assert_eq!(
+            seq(&[IncomingKind::Add, IncomingKind::Modify]),
+            NetOp::Added
+        );
+    }
+
+    #[test]
+    fn multiple_modify_is_a_single_modify() {
+        assert_eq!(
+            seq(&[
+                IncomingKind::Modify,
+                IncomingKind::Modify,
+                IncomingKind::Modify
+            ]),
+            NetOp::Modified
+        );
+    }
+
+    #[test]
+    fn modify_then_delete_is_a_delete() {
+        assert_eq!(
+            seq(&[IncomingKind::Modify, IncomingKind::Delete]),
+            NetOp::Deleted
+        );
+    }
+
+    #[test]
+    fn add_then_delete_cancels_out() {
+        assert_eq!(
+            seq(&[IncomingKind::Add, IncomingKind::Delete]),
+            NetOp::Cancelled
+        );
+    }
+
+    #[test]
+    fn add_modify_delete_cancels_out() {
+        assert_eq!(
+            seq(&[
+                IncomingKind::Add,
+                IncomingKind::Modify,
+                IncomingKind::Delete
+            ]),
+            NetOp::Cancelled
+        );
+    }
+
+    #[test]
+    fn delete_then_readd_is_added() {
+        assert_eq!(
+            seq(&[IncomingKind::Delete, IncomingKind::Add]),
+            NetOp::Added
+        );
+    }
+
+    #[test]
+    fn cancelled_then_readd_is_added() {
+        assert_eq!(
+            seq(&[IncomingKind::Add, IncomingKind::Delete, IncomingKind::Add]),
+            NetOp::Added
+        );
+    }
+
+    #[test]
+    fn delivery_types_union_uppercases_and_dedups() {
+        let resolved = resolve_delivery_unit_types(&["PIPE".into(), "bran".into(), "  ".into()]);
+        // Defaults first, in declaration order.
+        assert_eq!(&resolved[..4], &["BRAN", "HANG", "SUPPO", "EQUI"]);
+        // Only the genuinely new type is appended (BRAN is already a default).
+        assert_eq!(resolved.len(), 5);
+        assert!(resolved.contains(&"PIPE".to_string()));
+    }
+
+    #[test]
+    fn default_delivery_types_are_used_with_empty_config() {
+        assert_eq!(
+            resolve_delivery_unit_types(&[]),
+            vec!["BRAN", "HANG", "SUPPO", "EQUI"]
+        );
+    }
+
+    #[test]
+    fn uninitialized_design_files_are_detected_for_on_demand_baseline() {
+        assert!(needs_initial_load(0, 76, "DESI"));
+        assert!(needs_initial_load(0, 12, "CATA"));
+        assert!(!needs_initial_load(76, 76, "DESI"));
+        assert!(!needs_initial_load(0, 76, "SYST"));
+    }
+
+    #[test]
+    fn on_demand_baseline_is_scoped_to_one_file_without_replacing_data() {
+        let mut source = aios_core::options::DbOption::default();
+        source.replace_dbs = true;
+        source.gen_model = true;
+        source.gen_mesh = true;
+        source.included_db_files = Some(vec!["other".into()]);
+        source.manual_db_nums = Some(vec![7997, 8000]);
+
+        let scoped = baseline_sync_options(&source, "ams7999_0001", 7999);
+        assert!(scoped.total_sync);
+        assert!(!scoped.replace_dbs);
+        assert!(!scoped.gen_model);
+        assert!(!scoped.gen_mesh);
+        assert_eq!(scoped.included_db_files, Some(vec!["ams7999_0001".into()]));
+        assert_eq!(scoped.manual_db_nums, Some(vec![7999]));
+    }
+
+    #[test]
+    fn partial_baseline_is_rebuilt_before_advancing_watermark() {
+        assert!(baseline_needs_full_parse(21_000, 34_653));
+        assert!(baseline_stats_need_rebuild(21_000, 55_653));
+        assert!(!baseline_needs_full_parse(34_653, 34_653));
+        assert!(!baseline_stats_need_rebuild(34_653, 34_653));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: delivery-unit resolution / rollup (plan 阶段 3 最小检查)
+    // -----------------------------------------------------------------------
+
+    fn r(n: u64) -> RefnoEnum {
+        RefnoEnum::from(RefU64((1u64 << 32) | n))
+    }
+
+    fn owner_node(owner: Option<RefnoEnum>, noun: &str) -> OwnerNode {
+        OwnerNode {
+            owner,
+            noun: noun.to_string(),
+            name: String::new(),
+        }
+    }
+
+    /// Base-only snapshot from `(refno, owner, noun)` triples (owner `None` = top).
+    fn base_snap(edges: &[(u64, Option<u64>, &str)]) -> OwnershipSnapshot {
+        let mut base = HashMap::new();
+        for &(refno, owner, noun) in edges {
+            base.insert(r(refno), owner_node(owner.map(r), noun));
+        }
+        OwnershipSnapshot {
+            base,
+            overlay: HashMap::new(),
+            deleted_post: HashSet::new(),
+            ref_reversal: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn zone_rollup_reports_both_sides_of_a_cross_zone_move() {
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (30, Some(2), "ZONE"),
+            (5, Some(3), "EQUI"),
+            (6, Some(5), "BOX"),
+        ]);
+        snap.overlay.insert(r(6), owner_node(Some(r(30)), "BOX"));
+        let details = [NetChangeDetail {
+            refno: r(6),
+            net: NetOp::Modified,
+            model_affecting: true,
+        }];
+
+        let zones = build_zone_rollup(&snap, &details, &[]);
+        assert_eq!(zones.len(), 2);
+        let old = zones
+            .iter()
+            .find(|zone| zone.zone_refno == r(3).to_pdms_str())
+            .expect("old zone");
+        let new = zones
+            .iter()
+            .find(|zone| zone.zone_refno == r(30).to_pdms_str())
+            .expect("new zone");
+        assert_eq!((old.modified, old.moved_out), (1, 1));
+        assert_eq!((new.modified, new.moved_in), (1, 1));
+    }
+
+    #[test]
+    fn zone_rollup_keeps_unknown_as_an_explicit_reporting_bucket() {
+        let snap = base_snap(&[(6, None, "BOX")]);
+        let zones = build_zone_rollup(
+            &snap,
+            &[NetChangeDetail {
+                refno: r(6),
+                net: NetOp::Modified,
+                model_affecting: true,
+            }],
+            &[],
+        );
+        assert_eq!(zones.len(), 1);
+        assert!(zones[0].zone_refno.is_empty());
+        assert_eq!(zones[0].name, "ZONE 归属未知");
+        assert_eq!(zones[0].modified, 1);
+    }
+
+    /// `base_snap` plus a reverse-reference index (ADR-003): each
+    /// `(referenced_refno, &[referrer_refnos])` pair seeds `ref_reversal`.
+    fn snap_with_refs(
+        edges: &[(u64, Option<u64>, &str)],
+        refs: &[(u64, &[u64])],
+    ) -> OwnershipSnapshot {
+        let mut snap = base_snap(edges);
+        for &(referenced, referrers) in refs {
+            snap.ref_reversal
+                .insert(r(referenced), referrers.iter().map(|&x| r(x)).collect());
+        }
+        snap
+    }
+
+    fn change(refno: u64, net: NetOp, model_affecting: bool) -> NetChangeDetail {
+        NetChangeDetail {
+            refno: r(refno),
+            net,
+            model_affecting,
+        }
+    }
+
+    fn default_unit_types() -> Vec<String> {
+        resolve_delivery_unit_types(&[])
+    }
+
+    #[test]
+    fn normal_granularity_uses_significant_owner_without_an_mdu() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (4, Some(3), "PIPE"),
+            (5, Some(4), "GASK"),
+        ]);
+
+        let root = resolve_change_unit(&snap, r(5), &default_unit_types(), false)
+            .expect("normal-granularity root must be resolved");
+
+        assert_eq!(root.root, r(4));
+        assert_eq!(root.noun, "PIPE");
+    }
+
+    fn unit_of<'a>(units: &'a [DeliveryUnitSummary], refno: u64) -> &'a DeliveryUnitSummary {
+        let key = r(refno).to_pdms_str();
+        units
+            .iter()
+            .find(|u| u.root_refno == key)
+            .unwrap_or_else(|| panic!("missing unit {key}"))
+    }
+
+    #[test]
+    fn default_unit_types_pick_nearest_ancestor() {
+        for unit_noun in DEFAULT_DELIVERY_UNIT_TYPES {
+            let snap = base_snap(&[
+                (1, None, "WORL"),
+                (2, Some(1), "SITE"),
+                (3, Some(2), "ZONE"),
+                (10, Some(3), unit_noun),
+                (11, Some(10), "GASK"),
+            ]);
+            let unit = resolve_change_unit(&snap, r(11), &default_unit_types(), false)
+                .expect("unit must resolve");
+            assert_eq!(unit.root, r(10), "{unit_noun}");
+            assert_eq!(unit.noun, *unit_noun);
+        }
+    }
+
+    /// FTUB has no dedicated handling: it is an ordinary branch component and
+    /// only reaches the model through its owning BRAN. Projects that really do
+    /// want FTUB as its own delivery unit configure `delivery_unit_types`.
+    #[test]
+    fn ftub_change_rolls_up_to_its_branch() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (10, Some(3), "PIPE"),
+            (11, Some(10), "BRAN"),
+            (12, Some(11), "FTUB"),
+        ]);
+
+        let unit = resolve_change_unit(&snap, r(12), &default_unit_types(), false)
+            .expect("FTUB must resolve to its owning BRAN");
+        assert_eq!(unit.root, r(11));
+        assert_eq!(unit.noun, "BRAN");
+    }
+
+    #[test]
+    fn appended_custom_type_matches_and_no_zone_fallback() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (4, Some(3), "PIPE"),
+            (11, Some(4), "GASK"),
+        ]);
+
+        // With PIPE appended, the nearest PIPE ancestor is the delivery unit.
+        let custom = resolve_delivery_unit_types(&["pipe".to_string()]);
+        let unit = resolve_change_unit(&snap, r(11), &custom, false).expect("unit must resolve");
+        assert_eq!(unit.root, r(4));
+        assert_eq!(unit.noun, "PIPE");
+
+        // Without it, the shared normal-granularity rule uses significant owner.
+        let normal = resolve_change_unit(&snap, r(11), &default_unit_types(), false)
+            .expect("normal root must resolve");
+        assert_eq!(normal.root, r(4));
+        assert_eq!(normal.noun, "PIPE");
+    }
+
+    #[test]
+    fn nested_delivery_types_pick_only_the_nearest() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (7, Some(3), "SUPPO"),
+            (8, Some(7), "HANG"),
+            (9, Some(8), "GASK"),
+        ]);
+
+        // Leaf under HANG-inside-SUPPO resolves to HANG (nearest), never SUPPO.
+        let unit = resolve_change_unit(&snap, r(9), &default_unit_types(), false).expect("unit");
+        assert_eq!(unit.root, r(8));
+
+        // A change on the SUPPO element itself resolves to itself (self match).
+        let unit = resolve_change_unit(&snap, r(7), &default_unit_types(), false).expect("unit");
+        assert_eq!(unit.root, r(7));
+        assert_eq!(unit.noun, "SUPPO");
+    }
+
+    #[test]
+    fn same_unit_moving_zones_is_just_a_modify() {
+        // BRAN 5 moves from ZONE 3 to ZONE 30. The delivery-unit root (BRAN 5)
+        // is unchanged, so without ZONE tracking this is a plain modify — no
+        // move — on unit 5.
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (30, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+        ]);
+        snap.overlay.insert(r(5), owner_node(Some(r(30)), "BRAN"));
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(5, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1);
+
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.modified, 1);
+        assert_eq!(unit.moved_in, 0);
+        assert_eq!(unit.moved_out, 0);
+        assert!(unit.will_generate);
+    }
+
+    #[test]
+    fn cross_unit_move_regenerates_both_units() {
+        // GASK 6 moves from BRAN 5 to BRAN 50 (different delivery-unit roots).
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (30, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+            (50, Some(30), "BRAN"),
+            (6, Some(5), "GASK"),
+        ]);
+        snap.overlay.insert(r(6), owner_node(Some(r(50)), "GASK"));
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(6, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+
+        // Old side: the original BRAN regenerates (element left it).
+        let old_unit = unit_of(&units, 5);
+        assert_eq!(old_unit.moved_out, 1);
+        assert!(old_unit.will_generate);
+
+        // New side: the receiving BRAN regenerates too.
+        let new_unit = unit_of(&units, 50);
+        assert_eq!(new_unit.modified, 1);
+        assert_eq!(new_unit.moved_in, 1);
+        assert!(new_unit.will_generate);
+    }
+
+    #[test]
+    fn unit_resolves_even_when_owner_chain_breaks_above_it() {
+        // Owner 99 is missing from the graph, but the nearest BRAN ancestor
+        // still resolves, so the unit generates.
+        let snap = base_snap(&[(5, Some(99), "BRAN"), (6, Some(5), "GASK")]);
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(6, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+
+        assert!(
+            warnings.is_empty(),
+            "unit resolved → no warning: {warnings:?}"
+        );
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1);
+        assert!(unit_of(&units, 5).will_generate);
+    }
+
+    #[test]
+    fn missing_owner_uses_the_changed_element_as_normal_root() {
+        // GASK under a missing owner: no BRAN/EQUI/… ancestor at all.
+        let snap = base_snap(&[(6, Some(99), "GASK")]);
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(6, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].root_refno, r(6).to_pdms_str());
+        assert_eq!(no_gen, 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn above_delivery_unit_change_is_skipped() {
+        // A change on SITE itself has no delivery-unit ancestor → skip + warn.
+        let snap = base_snap(&[(1, None, "WORL"), (2, Some(1), "SITE")]);
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(2, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+
+        assert!(units.is_empty());
+        assert_eq!(no_gen, 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("跳过模型生成"), "{warnings:?}");
+    }
+
+    #[test]
+    fn delete_resolves_against_pre_update_snapshot() {
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+            (6, Some(5), "GASK"),
+        ]);
+        snap.deleted_post.insert(r(6));
+
+        // Post state no longer sees the element; pre state does.
+        assert!(snap.node(r(6), true).is_none());
+        assert!(snap.node(r(6), false).is_some());
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(6, NetOp::Deleted, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.deleted, 1);
+        assert!(unit.will_generate, "unit must regenerate to drop geometry");
+    }
+
+    #[test]
+    fn added_element_resolves_through_the_overlay() {
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+        ]);
+        snap.overlay.insert(r(20), owner_node(Some(r(5)), "GASK"));
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(20, NetOp::Added, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.added, 1);
+        assert!(unit.will_generate);
+    }
+
+    #[test]
+    fn ancestor_moving_in_the_same_window_keeps_the_same_unit() {
+        // PIPE 4 moves ZONE 3 → ZONE 30 inside the window; leaf 6 keeps its
+        // owner and its delivery unit (BRAN 5) is unchanged, so it is a plain
+        // modify — the removed ZONE tracking no longer records a move.
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (30, Some(2), "ZONE"),
+            (4, Some(3), "PIPE"),
+            (5, Some(4), "BRAN"),
+            (6, Some(5), "GASK"),
+        ]);
+        snap.overlay.insert(r(4), owner_node(Some(r(30)), "PIPE"));
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(6, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1);
+
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.modified, 1);
+        assert_eq!(unit.moved_in, 0);
+        assert_eq!(unit.moved_out, 0);
+        assert!(unit.will_generate);
+    }
+
+    #[test]
+    fn delivery_unit_resolution_handles_self_missing_and_cycles() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+            (40, Some(41), "GASK"),
+            (41, Some(40), "GASK"),
+        ]);
+
+        // A delivery-unit element resolves to itself.
+        assert_eq!(
+            resolve_change_unit(&snap, r(5), &default_unit_types(), false)
+                .expect("unit")
+                .root,
+            r(5)
+        );
+        // Above every delivery unit (ZONE) → None.
+        assert!(resolve_change_unit(&snap, r(3), &default_unit_types(), false).is_none());
+        // Missing element → None.
+        assert!(resolve_change_unit(&snap, r(99), &default_unit_types(), false).is_none());
+        // Ownership cycles terminate as None instead of looping.
+        assert!(resolve_change_unit(&snap, r(40), &default_unit_types(), false).is_none());
+    }
+
+    #[test]
+    fn cancelled_changes_never_reach_the_rollup() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+        ]);
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(5, NetOp::Cancelled, false)],
+            &default_unit_types(),
+        );
+        assert!(units.is_empty());
+        assert_eq!(no_gen, 0);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn overlay_wins_over_base_and_deletion_hides_post_state() {
+        let mut snap = base_snap(&[(6, Some(5), "GASK")]);
+        snap.overlay.insert(r(6), owner_node(Some(r(50)), "GASK"));
+
+        assert_eq!(
+            snap.node(r(6), true).and_then(|n| n.owner),
+            Some(r(50)),
+            "post state must read the overlay"
+        );
+        assert_eq!(
+            snap.node(r(6), false).and_then(|n| n.owner),
+            Some(r(5)),
+            "pre state must ignore the overlay"
+        );
+
+        snap.deleted_post.insert(r(6));
+        assert!(snap.node(r(6), true).is_none());
+        assert!(snap.node(r(6), false).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // TUBI 行为对齐语料 (plan §5：设计变更 → 期望重生成根集合)
+    //
+    // TUBI（隐式管段）无独立持久几何，是在整条 BRAN 生成时由 `cata_model::gen_cata_geos`
+    // 遍历分支成员表「现场推导」出来的：相邻元件的 arrive/leave 点 + 分支自身
+    // HPOS/TPOS/HDIR/TDIR + HSTU/LSTU 管件规格（见 cata_model.rs:822-839、insert_tubi）。
+    // 因此 TUBI 从不作为独立交付单元、也从不单独重生成——它的更新完全依赖「其所属 BRAN
+    // 被选为重生成根」。BRAN 是内置 MDU，所以分支内任何变更都会归一到 BRAN → 整条分支
+    // （含所有管段）一起重算。选「分支」而非「叶子元件」当交付单元，正是为了把管段的
+    // 跨元件依赖关进分支内部。
+    //
+    // 下列语料把三类场景 + 两个已知缺口钉死（断言的是「重生成根集合」，即 plan §5 口径）：
+    //   S1  分支内变更（元件移动/增删、管段自身、分支头尾属性）→ ✅ 覆盖（TUBI 随 BRAN 重算）
+    //   缺口 A  只动相连的 NOZZ/EQUI/相邻分支、不动本分支 → ❌ 无 HREF/TREF 反向连接级联
+    //   缺口 B  改被共享的目录/管件规格本身            → ❌ 无 CATA 反向级联（本期规格明确不做）
+    // 缺口用例断言的是「当前行为」；一旦补齐对应级联，用例须同步更新为期望行为（含被连接分支）。
+    // -----------------------------------------------------------------------
+
+    /// S1: 一条 TUBI 元素自身变更 → 归一到其所属 BRAN（TUBI 本身永远不是交付单元）。
+    #[test]
+    fn tubi_change_regenerates_its_owning_branch() {
+        // TUBI 从不在默认 MDU 集合里：它只能靠上溯到 BRAN 才会被重生成。
+        assert!(
+            !DEFAULT_DELIVERY_UNIT_TYPES.contains(&"TUBI"),
+            "TUBI must never be a delivery unit on its own"
+        );
+
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (4, Some(3), "PIPE"),
+            (5, Some(4), "BRAN"),
+            (60, Some(5), "TUBI"),
+        ]);
+
+        let unit = resolve_change_unit(&snap, r(60), &default_unit_types(), false)
+            .expect("TUBI must resolve up to its owning BRAN");
+        assert_eq!(unit.root, r(5));
+        assert_eq!(unit.noun, "BRAN");
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(60, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1, "the only regen root is the owning BRAN");
+        assert!(unit_of(&units, 5).will_generate);
+    }
+
+    /// S1: 分支内元件移动与其相邻 TUBI 变更共用同一个 BRAN 重生成根（去重为一次生成）。
+    #[test]
+    fn component_and_tubi_share_one_branch_regen_root() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+            (60, Some(5), "TUBI"),
+            (61, Some(5), "ELBO"),
+        ]);
+
+        let (units, no_gen, _) = build_unit_rollup(
+            &snap,
+            &[
+                change(61, NetOp::Modified, true), // 弯头移动
+                change(60, NetOp::Modified, true), // 相邻管段
+            ],
+            &default_unit_types(),
+        );
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1, "elbow + tube collapse to one BRAN root");
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.modified, 2);
+        assert!(unit.will_generate);
+
+        // 一次分支重生成即可同时重算弯头与相邻管段——生成任务只有一个。
+        let tasks = collect_unit_tasks(&units, 1, 42);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].root_refno, r(5).to_pdms_str());
+    }
+
+    /// S1b: 分支自身头/尾属性（HPOS/TPOS/HDIR/HSTU…）变更 → self-match 到该 BRAN，
+    /// 头/尾管段随分支重生成而重算。
+    #[test]
+    fn branch_head_tail_attr_change_regenerates_its_tubi() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (4, Some(3), "PIPE"),
+            (5, Some(4), "BRAN"),
+            (60, Some(5), "TUBI"),
+        ]);
+
+        // 改动落在 BRAN 自身（如 HPOS/TPOS/HDIR/HSTU）→ 自匹配到 BRAN(5)。
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(5, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1);
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.noun, "BRAN");
+        assert_eq!(unit.modified, 1);
+        assert!(unit.will_generate);
+    }
+
+    /// 缺口 A（反向索引「未落地 B1」时的行为）：只移动分支相连的 NOZZ/EQUI、不动分支
+    /// 自身，且 `ref_reversal` 为空（base_snap 不带反向索引）→ 仅 EQUI 重生成；被连接
+    /// 分支（及其头/尾 TUBI）不被级联，管段会陈旧。级联「消费」逻辑已就位（见
+    /// `reverse_cascade_nozzle_move_regenerates_connected_branch`），只待 B1 落库把
+    /// 反向索引填上，此缺口即在生产闭合。
+    #[test]
+    fn gap_a_neighbor_nozzle_move_without_reverse_index_leaves_branch_tubi_stale() {
+        // 现实场景：BRAN(5) 的 HREF 指向 EQUI(7) 上的 NOZZ(70)（跨表引用，不是 owner 边，
+        // 故不在 owner 图里）。这次只移动了 NOZZ(70)，分支自身属性没有任何变化。
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (7, Some(3), "EQUI"),
+            (70, Some(7), "NOZZ"),
+            (4, Some(3), "PIPE"),
+            (5, Some(4), "BRAN"),
+            (60, Some(5), "TUBI"), // 头段几何本应随 NOZZ 位置变，本用例证明它不会被重算
+        ]);
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(70, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(no_gen, 0);
+        // 当前行为：只有 NOZZ 所属的 EQUI 被重生成。
+        assert_eq!(units.len(), 1);
+        assert_eq!(unit_of(&units, 7).noun, "EQUI");
+        // 反向索引为空 → 被连接分支（及其 TUBI）不进入重生成集 —— 缺口 A 未闭合。
+        assert!(
+            units.iter().all(|u| u.root_refno != r(5).to_pdms_str()),
+            "GAP A: with an empty reverse index the connected BRAN head TUBI is NOT cascaded"
+        );
+    }
+
+    /// 缺口 B（反向索引「未落地 B1」时的行为）：改动被多分支共享的目录/管件规格元件
+    /// 本身（HSTU/LSTU→CATR 指向的 SPCO），其 owner 链在目录树里、无任何 MDU 祖先，且
+    /// `ref_reversal` 为空 → 计入 no_generation + 告警；引用它的分支（及其 TUBI 口径）
+    /// 不被级联。级联「消费」逻辑已就位（见
+    /// `reverse_cascade_shared_spec_regenerates_referring_branches`），只待 B1 落库
+    /// 把反向索引填上（本期规格 docs/specs/manual-model-update.md:40 暂列不做）。
+    #[test]
+    fn shared_tube_spec_without_reverse_index_uses_normal_root() {
+        let snap = base_snap(&[
+            // 目录/规格树：无 BRAN/EQUI/… 祖先。
+            (80, None, "SPWL"),
+            (81, Some(80), "CATA"),
+            (82, Some(81), "SPCO"), // 被分支 HSTU/LSTU→CATR 引用的共享管件规格
+            // 引用它的设计分支（跨表引用，不在 owner 图里），本次未改动。
+            (3, None, "ZONE"),
+            (5, Some(3), "BRAN"),
+            (60, Some(5), "TUBI"),
+        ]);
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(82, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        // 没有反向索引时仍按 Normal Granularity 重建目录父节点；不会跳过。
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].root_refno, r(81).to_pdms_str());
+        assert_eq!(no_gen, 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// 缺口 B「已消费」：反向索引把共享规格 SPCO 反查到两条引用分支 → 两条 BRAN 都被
+    /// 级联重生成，规格自身无 MDU 也不再计入 no_generation / 告警（TUBI 口径随之更新）。
+    #[test]
+    fn reverse_cascade_shared_spec_regenerates_referring_branches() {
+        let snap = snap_with_refs(
+            &[
+                (80, None, "SPWL"),
+                (81, Some(80), "CATA"),
+                (82, Some(81), "SPCO"), // 被 BRAN 5/50 经 HSTU/LSTU→CATR 引用的共享规格
+                (3, None, "ZONE"),
+                (5, Some(3), "BRAN"),
+                (50, Some(3), "BRAN"),
+                (60, Some(5), "TUBI"),
+            ],
+            &[(82, &[5, 50])],
+        );
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(82, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(
+            no_gen, 0,
+            "referrers resolved → not an ungeneratable change"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(units.len(), 2, "both referring branches regenerate");
+        for root in [5u64, 50] {
+            let unit = unit_of(&units, root);
+            assert_eq!(unit.noun, "BRAN");
+            assert_eq!(unit.cascaded, 1);
+            assert_eq!(
+                unit.modified, 0,
+                "the branch itself did not change directly"
+            );
+            assert!(unit.will_generate);
+        }
+    }
+
+    /// 缺口 A「已消费」：反向索引把被移动的 NOZZ 反查到相连分支 → EQUI 直接重生成 +
+    /// 被连接 BRAN 级联重生成（其头段 TUBI 随接管位置更新）。
+    #[test]
+    fn reverse_cascade_nozzle_move_regenerates_connected_branch() {
+        let snap = snap_with_refs(
+            &[
+                (1, None, "WORL"),
+                (2, Some(1), "SITE"),
+                (3, Some(2), "ZONE"),
+                (7, Some(3), "EQUI"),
+                (70, Some(7), "NOZZ"),
+                (4, Some(3), "PIPE"),
+                (5, Some(4), "BRAN"),
+                (60, Some(5), "TUBI"),
+            ],
+            &[(70, &[5])], // BRAN(5) 的 HREF 引用 NOZZ(70)
+        );
+
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(70, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(no_gen, 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(units.len(), 2, "EQUI (direct) + connected BRAN (cascaded)");
+
+        // NOZZ 自身归一到 EQUI（直接重生成）。
+        let equi = unit_of(&units, 7);
+        assert_eq!(equi.noun, "EQUI");
+        assert_eq!(equi.modified, 1);
+        assert!(equi.will_generate);
+
+        // 被连接分支经反向级联重生成（头段 TUBI 更新），非直接改动。
+        let bran = unit_of(&units, 5);
+        assert_eq!(bran.noun, "BRAN");
+        assert_eq!(bran.cascaded, 1);
+        assert_eq!(bran.modified, 0);
+        assert!(bran.will_generate);
+    }
+
+    /// 级联去重 + 空索引不改行为：一次改共享规格、多引用者归一到同一 BRAN 时只累计到
+    /// 一个单元；反向索引缺省为空时 `build_unit_rollup` 行为与旧实现完全一致。
+    #[test]
+    fn reverse_cascade_dedupes_and_empty_index_is_a_noop() {
+        // 两个引用者都在同一条 BRAN(5) 下 → 级联归一到同一个单元根。
+        let snap = snap_with_refs(
+            &[
+                (3, None, "ZONE"),
+                (5, Some(3), "BRAN"),
+                (61, Some(5), "ELBO"),
+                (62, Some(5), "GASK"),
+                (82, None, "SPCO"),
+            ],
+            &[(82, &[61, 62])],
+        );
+        let (units, no_gen, _) = build_unit_rollup(
+            &snap,
+            &[change(82, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(no_gen, 0);
+        assert_eq!(
+            units.len(),
+            1,
+            "both referrers collapse to their shared BRAN"
+        );
+        assert_eq!(unit_of(&units, 5).cascaded, 2);
+
+        // 反向索引为空时没有级联，但 Normal Granularity 仍重建变更本身。
+        let empty = base_snap(&[(82, None, "SPCO")]);
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &empty,
+            &[change(82, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].root_refno, r(82).to_pdms_str());
+        assert_eq!(no_gen, 0);
+        assert!(warnings.is_empty());
+    }
+
+    /// ADR-003 B3（间接引用）：改动 TABITE，经目录中间体 SPCO 传递级联到设计 BRAN。
+    /// SPCO 无交付单元（目录里），BFS 应穿过它继续上溯到有 MDU 的 BRAN。
+    #[test]
+    fn reverse_cascade_is_transitive_through_catalog_intermediates() {
+        let snap = snap_with_refs(
+            &[
+                (90, None, "TABI"), // 被 SPCO 引用的表项（目录，无 MDU）
+                (80, None, "SPWL"),
+                (81, Some(80), "CATA"),
+                (82, Some(81), "SPCO"), // 目录中间体，无 MDU
+                (3, None, "ZONE"),
+                (5, Some(3), "BRAN"),
+            ],
+            &[
+                (90, &[82]), // SPCO 引用 TABITE
+                (82, &[5]),  // BRAN 引用 SPCO
+            ],
+        );
+        let (units, no_gen, warnings) = build_unit_rollup(
+            &snap,
+            &[change(90, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(no_gen, 0, "reached a delivery unit transitively");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(units.len(), 1);
+        let bran = unit_of(&units, 5);
+        assert_eq!(bran.cascaded, 1);
+        assert!(bran.will_generate);
+    }
+
+    /// 传递级联对环安全（visited 去重）：SPCO 与另一目录体互相引用，仍收敛到 BRAN。
+    #[test]
+    fn reverse_cascade_transitive_is_cycle_safe() {
+        let snap = snap_with_refs(
+            &[
+                (90, None, "TABI"),
+                (82, None, "SPCO"),
+                (83, None, "SCOM"),
+                (3, None, "ZONE"),
+                (5, Some(3), "BRAN"),
+            ],
+            &[
+                (90, &[82]),
+                (82, &[83]),
+                (83, &[82, 5]), // 82<->83 互引成环 + 83->5
+            ],
+        );
+        let (units, no_gen, _) = build_unit_rollup(
+            &snap,
+            &[change(90, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+        assert_eq!(no_gen, 0);
+        assert_eq!(units.len(), 1);
+        assert!(unit_of(&units, 5).will_generate);
+    }
+
+    /// Collect the stored edges visible from `frontier`, recording every queried
+    /// element so a test can assert the loader's query pattern.
+    fn fake_ref_rev(
+        stored: &[(RefnoEnum, RefnoEnum)],
+        queried: &mut Vec<RefnoEnum>,
+        frontier: HashSet<RefnoEnum>,
+    ) -> Vec<(RefnoEnum, RefnoEnum)> {
+        queried.extend(frontier.iter().copied());
+        stored
+            .iter()
+            .copied()
+            .filter(|(_, referenced)| frontier.contains(referenced))
+            .collect()
+    }
+
+    /// The rollup above only cascades through a catalogue intermediate when the
+    /// LOADER supplies that intermediate's own referrers. A single-hop load
+    /// leaves SPCO keyless, so the BRAN behind it is never reached and the
+    /// change is silently counted as「无法解析最小交付单元」(ADR-003 B3).
+    #[tokio::test]
+    async fn reverse_cascade_closure_loads_every_hop() {
+        // TABITE 90 <- SPCO 82 <- BRAN 5
+        let stored = [(r(82), r(90)), (r(5), r(82))];
+        let mut queried = Vec::new();
+
+        let closure = collect_ref_reversal_closure(&HashSet::from([r(90)]), |frontier| {
+            let edges = fake_ref_rev(&stored, &mut queried, frontier);
+            async move { anyhow::Ok(edges) }
+        })
+        .await
+        .expect("load reverse-reference closure");
+
+        assert_eq!(closure.get(&r(90)), Some(&vec![r(82)]), "hop 1 TABITE→SPCO");
+        assert_eq!(closure.get(&r(82)), Some(&vec![r(5)]), "hop 2 SPCO→BRAN");
+    }
+
+    /// Mutually referencing catalogue elements must not make the loader spin:
+    /// each element is queried at most once and the walk still reaches the BRAN.
+    #[tokio::test]
+    async fn reverse_cascade_closure_terminates_on_cycles() {
+        // 82 <-> 83 reference each other; BRAN 5 references 83.
+        let stored = [
+            (r(82), r(90)),
+            (r(83), r(82)),
+            (r(82), r(83)),
+            (r(5), r(83)),
+        ];
+        let mut queried = Vec::new();
+
+        let closure = collect_ref_reversal_closure(&HashSet::from([r(90)]), |frontier| {
+            let edges = fake_ref_rev(&stored, &mut queried, frontier);
+            async move { anyhow::Ok(edges) }
+        })
+        .await
+        .expect("load reverse-reference closure");
+
+        assert!(
+            closure
+                .get(&r(83))
+                .is_some_and(|referrers| referrers.contains(&r(5))),
+            "cycle must not hide the design referrer: {closure:?}"
+        );
+        let unique: HashSet<RefnoEnum> = queried.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            queried.len(),
+            "每个元素最多查询一次: {queried:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-003 B1: reverse-reference extraction (pure core, feeds `ref_reversal`)
+    // -----------------------------------------------------------------------
+
+    /// Build a NamedAttrMap from `(attr_name, target_refno)` element-ref pairs.
+    fn ref_attmap(entries: &[(&str, RefnoEnum)]) -> NamedAttrMap {
+        let mut m = NamedAttrMap::default();
+        for &(name, target) in entries {
+            m.insert(name.to_string(), NamedAttrValue::RefnoEnumType(target));
+        }
+        m
+    }
+
+    #[test]
+    fn reference_cascade_targets_reverses_only_dependency_cascade_refs() {
+        let referrer = r(100);
+        let att = ref_attmap(&[
+            ("SPRE", r(1)),  // DependencyCascade → kept
+            ("CATR", r(2)),  // DependencyCascade → kept
+            ("HREF", r(3)),  // connection (DependencyCascade) → kept
+            ("OWNER", r(4)), // StructuralMembership → excluded (ownership graph handles it)
+            ("NAME", r(5)),  // DataOnly → excluded
+        ]);
+        let targets = reference_cascade_targets(&att, referrer);
+        assert!(targets.contains(&r(1)));
+        assert!(targets.contains(&r(2)));
+        assert!(targets.contains(&r(3)));
+        assert!(
+            !targets.contains(&r(4)),
+            "OWNER is structural, not a reversed cross-reference"
+        );
+        assert!(!targets.contains(&r(5)));
+        assert_eq!(targets.len(), 3);
+    }
+
+    #[test]
+    fn reference_cascade_targets_dedupes_and_excludes_self() {
+        let referrer = r(100);
+        let att = ref_attmap(&[
+            ("SPRE", r(1)),
+            ("CATR", r(1)),   // same target twice → dedup to one
+            ("HREF", r(100)), // self reference → excluded
+        ]);
+        assert_eq!(reference_cascade_targets(&att, referrer), vec![r(1)]);
+    }
+
+    #[test]
+    fn reference_cascade_targets_handles_ref_lists() {
+        let referrer = r(100);
+        let mut att = NamedAttrMap::default();
+        // PRTREF is DependencyCascade and can carry a ref list.
+        att.insert(
+            "PRTREF".to_string(),
+            NamedAttrValue::RefU64Array(vec![r(1), r(2)]),
+        );
+        let targets = reference_cascade_targets(&att, referrer);
+        assert!(targets.contains(&r(1)) && targets.contains(&r(2)));
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn reference_cascade_targets_includes_schema_element_refs_not_in_curated_names() {
+        let info = aios_core::get_default_pdms_db_info();
+        let dynamic_ref_name = info
+            .named_attr_info_map
+            .iter()
+            .flat_map(|noun| {
+                noun.value()
+                    .iter()
+                    .map(|entry| entry.value().name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .find(|name| {
+                attribute_is_reference(name)
+                    && classify_attribute_effect(name) == AttributeEffect::Unknown
+            })
+            .expect("default schema must contain an ELEMENT ref outside curated names");
+        let referrer = r(100);
+        let target = r(77);
+        let att = ref_attmap(&[(&dynamic_ref_name, target)]);
+
+        assert_eq!(
+            reference_cascade_targets(&att, referrer),
+            vec![target],
+            "schema ELEMENT ref {dynamic_ref_name} must be indexed"
+        );
+    }
+
+    #[test]
+    fn collect_reverse_index_rows_backfills_all_current_referrers() {
+        let target = r(82);
+        let mut first = ref_attmap(&[("SPRE", target)]);
+        first.insert("REFNO".into(), NamedAttrValue::RefnoEnumType(r(5)));
+        let mut second = ref_attmap(&[("SPRE", target), ("CATR", r(70))]);
+        second.insert("REFNO".into(), NamedAttrValue::RefnoEnumType(r(50)));
+
+        let rows = collect_reverse_index_rows([&first, &second]);
+
+        assert!(rows.contains(&(r(5), target)));
+        assert!(rows.contains(&(r(50), target)));
+        assert!(rows.contains(&(r(50), r(70))));
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn extract_reverse_ref_edges_deleted_purges_and_none_is_noop() {
+        let refno = RefU64((1u64 << 32) | 7);
+
+        let del = EleOperationData::new(refno, 1, EleOperationDetail::Deleted);
+        let edges = extract_reverse_ref_edges(&del);
+        assert_eq!(edges.referrer, RefnoEnum::from(refno));
+        assert!(
+            edges.purge,
+            "a deleted referrer must purge its outgoing edges"
+        );
+        assert!(edges.referenced.is_empty());
+
+        let none = EleOperationData::new(refno, 1, EleOperationDetail::None);
+        let edges = extract_reverse_ref_edges(&none);
+        assert!(!edges.purge);
+        assert!(edges.referenced.is_empty());
+    }
+
+    #[test]
+    fn build_reverse_index_statements_skips_none_and_deletes_by_referrer() {
+        let a = RefU64((1u64 << 32) | 7);
+        let b = RefU64((1u64 << 32) | 8);
+        let mut range: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
+        range.insert(
+            1,
+            vec![
+                EleOperationData::new(a, 1, EleOperationDetail::Deleted), // → DELETE only
+                EleOperationData::new(b, 1, EleOperationDetail::None),    // → nothing (no-op)
+            ],
+        );
+        let stmts = build_reverse_index_statements(&range);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "None emits nothing; Deleted emits one DELETE"
+        );
+        // Adjacency-local arrow delete, not a `WHERE` filter over the table.
+        assert_eq!(
+            stmts[0],
+            format!("DELETE {}->ref_rev;", RefnoEnum::from(a).to_pe_key())
+        );
+        assert!(stmts.iter().all(|s| !s.contains("INSERT")));
+    }
+
+    /// A referrer with references must emit an idempotent RELATION insert whose
+    /// composite id is derived from the edge itself, so replaying a window
+    /// cannot duplicate edges.
+    #[test]
+    fn build_reverse_index_statements_emit_keyed_relation_edges() {
+        let referrer = RefnoEnum::from(RefU64((1u64 << 32) | 7));
+        let target = RefnoEnum::from(RefU64((1u64 << 32) | 9));
+        let edge = render_ref_rev_edge(&referrer.to_pe_key(), target);
+
+        assert_eq!(
+            edge,
+            format!(
+                "{{ id: ref_rev:[{referrer}, {target}], in: {referrer}, out: {target} }}",
+                referrer = referrer.to_pe_key(),
+                target = target.to_pe_key()
+            )
+        );
+    }
+
+    #[test]
+    fn build_reverse_index_statements_empty_window_is_empty() {
+        let range: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
+        assert!(build_reverse_index_statements(&range).is_empty());
+    }
+
+    #[test]
+    fn assemble_ref_reversal_groups_by_referenced_and_dedupes() {
+        let rows = vec![
+            (r(5), r(82)),
+            (r(50), r(82)),
+            (r(5), r(82)), // duplicate referrer for same referenced → deduped
+            (r(9), r(70)),
+        ];
+        let map = assemble_ref_reversal(&rows);
+        assert_eq!(map.get(&r(82)).unwrap(), &vec![r(5), r(50)]);
+        assert_eq!(map.get(&r(70)).unwrap(), &vec![r(9)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: manual execution + per-unit pending retry (plan 阶段 4 最小检查)
+    // -----------------------------------------------------------------------
+
+    fn batch(dbnum: u32, status: BatchStatus) -> DataBatchResult {
+        DataBatchResult {
+            dbnum,
+            db_type: "DESI".into(),
+            file_path: String::new(),
+            start_sesno: 1,
+            end_sesno: 2,
+            status,
+            message: None,
+            merged_sesnos: Vec::new(),
+            changed_elements: 0,
+        }
+    }
+
+    fn unit_result(root: u64, status: UnitGenStatus) -> ModelUnitResult {
+        ModelUnitResult {
+            dbnum: 1,
+            root_refno: r(root).to_pdms_str(),
+            noun: "BRAN".into(),
+            status,
+            attempts: 1,
+            message: None,
+            old_owner: None,
+            new_owner: None,
+        }
+    }
+
+    fn unit_task(dbnum: u32, root: u64, end_sesno: i32, attempts: u32) -> UnitTask {
+        UnitTask {
+            dbnum,
+            root_refno: r(root).to_pdms_str(),
+            noun: "BRAN".into(),
+            source_end_sesno: end_sesno,
+            attempts,
+            old_owner: None,
+            new_owner: None,
+        }
+    }
+
+    fn pending_unit(dbnum: u32, root: u64, end_sesno: i32, attempts: u32) -> PendingModelUnit {
+        PendingModelUnit {
+            dbnum,
+            root_refno: r(root).to_pdms_str(),
+            noun: "BRAN".into(),
+            source_end_sesno: end_sesno,
+            attempts,
+            last_error: Some("boom".into()),
+        }
+    }
+
+    #[test]
+    fn one_dbnum_failing_while_others_succeed_is_partial() {
+        let status = aggregate_manual_status(
+            &[
+                batch(1, BatchStatus::Applied),
+                batch(2, BatchStatus::Failed),
+            ],
+            &[],
+        );
+        assert_eq!(status, ManualUpdateStatus::Partial);
+    }
+
+    #[test]
+    fn data_success_with_model_failure_is_partial() {
+        // 数据成功后模型失败：数据批次不回滚（Applied 保持），任务整体部分完成。
+        let status = aggregate_manual_status(
+            &[batch(1, BatchStatus::Applied)],
+            &[unit_result(5, UnitGenStatus::Failed)],
+        );
+        assert_eq!(status, ManualUpdateStatus::Partial);
+    }
+
+    #[test]
+    fn nothing_succeeding_is_failed_and_nothing_executable_is_up_to_date() {
+        assert_eq!(
+            aggregate_manual_status(&[batch(1, BatchStatus::Failed)], &[]),
+            ManualUpdateStatus::Failed
+        );
+        // Skipped batches are not executable work.
+        assert_eq!(
+            aggregate_manual_status(&[batch(1, BatchStatus::Skipped)], &[]),
+            ManualUpdateStatus::UpToDate
+        );
+        assert_eq!(
+            aggregate_manual_status(&[], &[]),
+            ManualUpdateStatus::UpToDate
+        );
+    }
+
+    #[test]
+    fn retry_only_run_with_all_units_generated_is_success() {
+        // 无新会话（无数据批次）时只重试模型，全部成功 → Success。
+        let status = aggregate_manual_status(&[], &[unit_result(5, UnitGenStatus::Generated)]);
+        assert_eq!(status, ManualUpdateStatus::Success);
+    }
+
+    #[test]
+    fn worklist_merges_pending_with_new_units_keeping_latest_state() {
+        // Unit 5: pending (attempts=2, end=10) re-affected by new data (end=12)
+        // → ONE task with the newest end_sesno and accumulated attempts.
+        // Unit 7: pending only → still runs (retry without new sessions).
+        // Unit 9: new only.
+        let merged = merge_unit_worklist(
+            vec![unit_task(1, 5, 12, 0), unit_task(1, 9, 12, 0)],
+            vec![pending_unit(1, 5, 10, 2), pending_unit(1, 7, 8, 1)],
+        );
+
+        assert_eq!(merged.len(), 3);
+        let five = merged
+            .iter()
+            .find(|t| t.root_refno == r(5).to_pdms_str())
+            .unwrap();
+        assert_eq!(five.source_end_sesno, 12);
+        assert_eq!(five.attempts, 2);
+        let seven = merged
+            .iter()
+            .find(|t| t.root_refno == r(7).to_pdms_str())
+            .unwrap();
+        assert_eq!(seven.source_end_sesno, 8);
+        assert_eq!(seven.attempts, 1);
+        assert!(merged.iter().any(|t| t.root_refno == r(9).to_pdms_str()));
+    }
+
+    #[test]
+    fn collect_unit_tasks_dedupes_by_root_and_skips_non_generating() {
+        // GASK 6 is deleted (resolves pre-state under BRAN 5) and GASK 20 is
+        // added (resolves post-state under BRAN 5): both map to the SAME unit
+        // root, which the flat rollup already dedupes; the generation worklist
+        // must contain it exactly once.
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "BRAN"),
+            (6, Some(5), "GASK"),
+        ]);
+        snap.overlay.insert(r(20), owner_node(Some(r(5)), "GASK"));
+        snap.deleted_post.insert(r(6));
+
+        let (units, _no_gen, _) = build_unit_rollup(
+            &snap,
+            &[
+                change(6, NetOp::Deleted, true),
+                change(20, NetOp::Added, true),
+            ],
+            &default_unit_types(),
+        );
+        let root_key = r(5).to_pdms_str();
+        assert_eq!(units.len(), 1, "both changes map to one unit root");
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.deleted, 1);
+        assert_eq!(unit.added, 1);
+
+        let tasks = collect_unit_tasks(&units, 1, 42);
+        assert_eq!(tasks.len(), 1, "same root dedupes to one generation task");
+        assert_eq!(tasks[0].root_refno, root_key);
+        assert_eq!(tasks[0].source_end_sesno, 42);
+
+        // A data-only change never becomes a generation task.
+        let (units, _no_gen, _) = build_unit_rollup(
+            &snap,
+            &[change(20, NetOp::Added, false)],
+            &default_unit_types(),
+        );
+        assert!(collect_unit_tasks(&units, 1, 42).is_empty());
+    }
+
+    #[test]
+    fn unit_rollup_reports_old_and_new_owner_when_unit_changes_zone() {
+        // EQUI 5 (a delivery unit itself) moves from ZONE 3 to ZONE 30: the unit
+        // root is unchanged (5), but its OWNER changed, so both the old and the
+        // new branch must be refreshable by the client (plan 阶段 6.2).
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (30, Some(2), "ZONE"),
+            (5, Some(3), "EQUI"),
+        ]);
+        snap.overlay.insert(r(5), owner_node(Some(r(30)), "EQUI"));
+
+        let (units, _no_gen, _) = build_unit_rollup(
+            &snap,
+            &[change(5, NetOp::Modified, true)],
+            &default_unit_types(),
+        );
+
+        let unit = unit_of(&units, 5);
+        assert_eq!(unit.old_owner.as_deref(), Some(r(3).to_pdms_str().as_str()));
+        assert_eq!(
+            unit.new_owner.as_deref(),
+            Some(r(30).to_pdms_str().as_str())
+        );
+    }
+
+    #[test]
+    fn unit_rollup_added_unit_has_new_owner_only() {
+        // A newly-added EQUI 7 under ZONE 3: no pre-update owner, new owner = 3.
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+        ]);
+        snap.overlay.insert(r(7), owner_node(Some(r(3)), "EQUI"));
+
+        let (units, _no_gen, _) = build_unit_rollup(
+            &snap,
+            &[change(7, NetOp::Added, true)],
+            &default_unit_types(),
+        );
+
+        let unit = unit_of(&units, 7);
+        assert_eq!(unit.old_owner, None);
+        assert_eq!(unit.new_owner.as_deref(), Some(r(3).to_pdms_str().as_str()));
+    }
+
+    #[test]
+    fn sessions_after_the_previous_observation_count_as_merged() {
+        // 预览时文件观察到 sesno=5；执行时窗口到 7 → 6、7 是预览后合并的会话。
+        assert_eq!(sessions_merged_after(&[4, 5, 6, 7], 5), vec![6, 7]);
+        // 从未预览过（观察值 0）→ 全部视为新合并。
+        assert_eq!(sessions_merged_after(&[4, 5], 0), vec![4, 5]);
+        // 无新增。
+        assert!(sessions_merged_after(&[4, 5], 7).is_empty());
+    }
+
+    #[test]
+    fn pending_record_id_is_stable_per_dbnum_and_root() {
+        let id = pending_record_id(8191, "16777216/5");
+        assert_eq!(id, "manual_model_pending:8191_16777216_5");
+    }
+
+    #[test]
+    fn project_exec_guard_is_exclusive_per_project() {
+        let first = ProjectExecGuard::try_acquire("proj-a");
+        assert!(first.is_some());
+        assert!(
+            ProjectExecGuard::try_acquire("proj-a").is_none(),
+            "second acquire on the same project must fail"
+        );
+        assert!(ProjectExecGuard::try_acquire("proj-b").is_some());
+        drop(first);
+        assert!(
+            ProjectExecGuard::try_acquire("proj-a").is_some(),
+            "guard must release on drop"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Manual end-to-end update against the configured local E3D project.
+    ///
+    /// Example:
+    /// `AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample cargo test
+    /// live_manual_update_project -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "manual live: execute incremental data/model update"]
+    async fn live_manual_update_project() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project =
+            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let mgr = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+
+        let preview = mgr
+            .preview_manual_update(&project)
+            .await
+            .expect("preview manual update");
+        println!(
+            "preview = {}",
+            serde_json::to_string_pretty(&preview).expect("serialize preview")
+        );
+
+        let result = mgr.execute_manual_update(&project, None).await;
+        println!(
+            "result = {}",
+            serde_json::to_string_pretty(&result).expect("serialize result")
+        );
+        assert!(
+            matches!(
+                result.status,
+                ManualUpdateStatus::Success | ManualUpdateStatus::UpToDate
+            ),
+            "manual update was not complete: {result:?}"
+        );
+    }
+
+    /// Read-only live self-check for the ADR-003 reverse index (needs local Surreal).
+    ///
+    /// Validates the one thing the pure unit tests cannot: the real `ref_rev`
+    /// SurrealQL round-trip and `pe → RefnoEnum` deserialization through the
+    /// production adapter [`load_ref_reversal`]. Writes nothing (safe to re-run).
+    /// Populate the index first with an increment
+    /// (`increment_pipeline::live_tests::force_init_watcher_incr_once`).
+    ///
+    /// Run: `cargo test -p aios-database live_ref_rev_roundtrip_selfcheck -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "manual live: verify ref_rev round-trips against local Surreal"]
+    async fn live_ref_rev_roundtrip_selfcheck() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        #[derive(serde::Deserialize)]
+        struct Cnt {
+            count: i64,
+        }
+        let mut resp = SUL_DB
+            .query("SELECT count() AS count FROM ref_rev GROUP ALL;")
+            .await
+            .expect("ref_rev count query must execute");
+        let rows: Vec<Cnt> = resp.take(0).unwrap_or_default();
+        let n = rows.first().map(|c| c.count).unwrap_or(0);
+        println!("ref_rev rows = {n}");
+        if n == 0 {
+            println!("(ref_rev 为空：先跑 force_init_watcher_incr_once 触发增量落库再验证)");
+            return;
+        }
+
+        // The risky path: deserialize an edge's `out` pe-link back into RefnoEnum.
+        let mut resp = SUL_DB
+            .query("SELECT VALUE out FROM ref_rev LIMIT 1;")
+            .await
+            .expect("sample query must execute");
+        let sample: Vec<RefnoEnum> = resp
+            .take(0)
+            .expect("edge `out` must deserialize into RefnoEnum");
+        let seed = sample.into_iter().next().expect("one sampled referenced");
+
+        // Full round-trip through the production query adapter.
+        let mut seeds = HashSet::new();
+        seeds.insert(seed);
+        let map = load_ref_reversal(&seeds)
+            .await
+            .expect("production reverse-index query must succeed");
+        let referrers = map.get(&seed).map(|v| v.len()).unwrap_or(0);
+        println!(
+            "load_ref_reversal({}) -> {} referrer(s)",
+            seed.to_pdms_str(),
+            referrers
+        );
+        assert!(
+            map.contains_key(&seed),
+            "round-trip: a referenced element must map back to >= 1 referrer"
+        );
+    }
+
+    /// Full-backfill regression for the shared HVAC catalogue component used
+    /// by the dbnum-7997 test data. Before the fix this is red: the live DAMP
+    /// table has 72 consumers while `ref_rev` contains only two incrementally
+    /// touched rows.
+    #[tokio::test]
+    #[ignore = "manual live: rebuild complete ref_rev from current Surreal data"]
+    async fn live_rebuild_ref_rev_covers_shared_spco_consumers() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let report = rebuild_reverse_index()
+            .await
+            .expect("full reverse-index rebuild");
+        println!(
+            "rebuild = {}",
+            serde_json::to_string_pretty(&report).expect("serialize report")
+        );
+
+        let shared_spco = RefnoEnum::from("23274/295504");
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE REFNO FROM DAMP \
+                 WHERE SPRE = pe:23274_295504;",
+            )
+            .await
+            .expect("query real DAMP consumers");
+        let consumers: Vec<RefnoEnum> = response.take(0).expect("decode DAMP consumers");
+        assert_eq!(consumers.len(), 72, "7997 fixture consumer count changed");
+
+        let reversal = load_ref_reversal(&HashSet::from([shared_spco]))
+            .await
+            .expect("load rebuilt shared-SPCO reversal");
+        let indexed: HashSet<RefnoEnum> = reversal
+            .get(&shared_spco)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let missing = consumers
+            .into_iter()
+            .filter(|consumer| !indexed.contains(consumer))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "shared SPCO consumers missing after full rebuild: {missing:?}"
+        );
+    }
+}

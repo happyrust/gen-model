@@ -1,14 +1,14 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{get_generic_type, SEND_INST_SIZE, shared};
+use crate::fast_model::{SEND_INST_SIZE, get_generic_type, shared};
+use aios_core::RefU64;
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::{Extrusion, Revolution};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
-use aios_core::RefU64;
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
 use glam::Vec3;
@@ -48,6 +48,7 @@ pub async fn gen_loop_geos(
         let sjus_map_clone = sjus_map_arc.clone();
         let sender = sender.clone();
         let handle = tokio::spawn(async move {
+            let negative_nouns = shared::negative_noun_refs();
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;
             if end_idx > loop_owner_cnt {
@@ -73,9 +74,9 @@ pub async fn gen_loop_geos(
                     trans_origin.translation += offset;
                 }
 
-                if !target_att.is_neg() {
+                if !shared::is_negative_noun(target_type) {
                     let neg_refnos =
-                        aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
+                        aios_core::query_filter_children(target_refno, &negative_nouns)
                             .await
                             .unwrap_or_default();
                     // dbg!(&neg_refnos);
@@ -88,7 +89,7 @@ pub async fn gen_loop_geos(
                         //查询cmpf里面的元素
                         let cmpf_neg_refnos = aios_core::query_multi_filter_deep_children(
                             &cmpf_refnos,
-                            &GENRAL_NEG_NOUN_NAMES,
+                            &negative_nouns,
                         )
                         .await
                         .unwrap_or_default();
@@ -186,7 +187,7 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if target_att.is_neg() {
+                    geo_type: if shared::is_negative_noun(target_type) {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
@@ -206,7 +207,7 @@ pub async fn gen_loop_geos(
                 );
                 shape_insts_data.insert_info(target_refno, geos_info);
 
-                if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                     sender
                         .send(std::mem::take(&mut shape_insts_data))
                         .expect("send loop shape_insts_data error");
@@ -232,4 +233,55 @@ pub async fn gen_loop_geos(
         t.elapsed().as_millis()
     );
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+    use aios_core::prim_geo::Extrusion;
+    use aios_core::prim_geo::wire::gen_polyline;
+    use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh};
+    use glam::Vec3;
+
+    #[test]
+    fn structural_floor_extreme_fillet_remains_finite() {
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 24450.0, 0.0),
+            Vec3::new(24450.0, 24450.0, 24450.0),
+            Vec3::new(24450.0, 0.0, 0.0),
+        ];
+
+        let polyline = gen_polyline(&vertices).expect("extreme fillet must remain renderable");
+
+        assert!(polyline.vertex_data.len() >= 3);
+        assert!(
+            polyline
+                .vertex_data
+                .iter()
+                .all(|vertex| vertex.x.is_finite()
+                    && vertex.y.is_finite()
+                    && vertex.bulge.is_finite())
+        );
+
+        #[cfg(feature = "occ")]
+        {
+            let param = PdmsGeoParam::PrimExtrusion(Extrusion {
+                verts: vec![vertices],
+                height: 100.0,
+                ..Default::default()
+            });
+            let shape = param.gen_occ_shape().expect("extrusion must be generated");
+            assert!(
+                shape
+                    .edges()
+                    .flat_map(|edge| { edge.approximation_segments_custom(2.0, 2.0) })
+                    .all(|point| point.x.is_finite() && point.y.is_finite() && point.z.is_finite())
+            );
+            let mesh = PlantMesh::gen_occ_mesh(&shape, 50.0).expect("mesh must be generated");
+            let aabb = mesh.aabb.expect("mesh must have an aabb");
+            assert!(aabb.mins.coords.iter().all(|value| value.is_finite()));
+            assert!(aabb.maxs.coords.iter().all(|value| value.is_finite()));
+        }
+    }
 }

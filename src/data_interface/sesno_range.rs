@@ -14,7 +14,6 @@
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-use aios_core::SUL_DB;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::PdmsIO;
 
@@ -53,22 +52,14 @@ impl SesnoRangeResolver {
 
     /// Authoritative watermark for this dbnum.
     ///
-    /// Primary source is the dedicated `dbnum_watermark:{dbnum}` record
-    /// (advanced by `IncrementPipeline` after each successful persist).
-    /// Falls back to the max per-ref_0 sesno in `dbnum_info_table` (maintained
-    /// by `pe` table events) so databases populated by a full parse before the
-    /// watermark record existed still resolve a non-zero watermark.
+    /// Delegates to [`DbnumState::applied_sesno`], which reads the single
+    /// authoritative `applied_sesno` (with a one-time migration from the legacy
+    /// `dbnum_watermark.sesno`, and — only when no dedicated watermark exists —
+    /// the max `sesno` in `dbnum_info_table`). Per ADR-001 the running path no
+    /// longer takes a cross-table max: `applied_sesno` is the only source.
     pub async fn query_watermark(dbnum: u32) -> anyhow::Result<u32> {
-        let sql = format!(
-            "math::max(array::flatten([\
-                (SELECT VALUE sesno FROM dbnum_watermark WHERE dbnum = {0}),\
-                (SELECT VALUE sesno FROM dbnum_info_table WHERE dbnum = {0})\
-            ]));",
-            dbnum
-        );
-        let mut response = SUL_DB.query(&sql).await?;
-        let sesno: Option<u32> = response.take(0)?;
-        Ok(sesno.unwrap_or_default())
+        let applied = crate::data_interface::dbnum_state::DbnumState::applied_sesno(dbnum).await?;
+        Ok(applied.max(0) as u32)
     }
 
     /// Build an update plan when `file_latest_sesno > watermark`, or SYS-meta cold start.

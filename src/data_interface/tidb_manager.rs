@@ -10,13 +10,17 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::types::AttrVal::*;
-use aios_core::{CataContext, rs_surreal, SUL_DB};
 use aios_core::{AttrMap, RefU64Vec};
+use aios_core::{CataContext, SUL_DB, rs_surreal};
 use anyhow::anyhow;
 
+use crate::consts::*;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::defines::*;
+use aios_core::pe::SPdmsElement;
 use bevy_transform::prelude::Transform;
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 use futures::StreamExt;
 use glam::Vec3;
 use itertools::Itertools;
@@ -32,10 +36,6 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use aios_core::pe::SPdmsElement;
-use crate::consts::*;
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::defines::*;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -85,7 +85,9 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得类型名称
     async fn get_type_name(&self, refno: RefU64) -> String {
-        aios_core::get_type_name(refno.into()).await.unwrap_or_default()
+        aios_core::get_type_name(refno.into())
+            .await
+            .unwrap_or_default()
     }
 
     ///获得下一个构件的参考号
@@ -102,7 +104,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获取owner的参考号，从缓存读取
     #[inline]
     fn get_owner(&self, refno: RefU64) -> RefU64 {
-       Default::default() 
+        Default::default()
     }
 
     /// t_types 为目标的类型
@@ -718,6 +720,4 @@ impl PdmsDataInterface for AiosDBManager {
         // aios_core::get_cat_attmap(refno.into()).await.ok()
         None
     }
-
-
 }
