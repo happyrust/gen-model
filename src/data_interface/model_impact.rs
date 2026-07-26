@@ -13,7 +13,7 @@
 //! 设计变化层，非 `wnoevt` 事件门）+ 运行库 `att_meta`(702) 交叉校验（100% 命中），
 //! 详见 `plant-model-gen/docs/reverse/core_dll_noun_att_model_update.md` §13/§14。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use aios_core::pdms_types::{DbAttributeType, TOTAL_LOOP_NOUN_NAMES, TOTAL_VERT_NOUN_NAMES};
@@ -130,6 +130,61 @@ pub const DEPENDENCY_CASCADE_ATTR_NAMES: &[&str] = &[
     "PKEY", "PPRO", "PSTR", "PTRE", "PTYP", "PVER", "PKDI",
 ];
 
+/// 直接几何输入：尺寸、图元 / P-point 参数、loop/profile 定义等直接改元素自身网格的属性。
+///
+/// 曾经写在 `attribute_affects_model` 的 `matches!` 里，既无法在运行期枚举（守护测试覆盖
+/// 不到），又和上面四张表大量重名——因为旧判定链是短路的，73 条重名项永远走不到，
+/// 属于静默失效。改成常量数组后重名即为错误，见 `attribute_effect_tables_have_no_duplicate_names`。
+pub const DIRECT_GEOMETRY_ATTR_NAMES: &[&str] = &[
+    // 管路、连接与方向依赖。
+    "ANGF", "ANGL", "ABOR", "LBOR", "PBOR", "SBOR", "BORE",
+    // 通用 primitive 尺寸/形状参数。
+    "XLEN", "YLEN", "ZLEN", "LENG", "HEIG", "DIAM", "RADI", "IRAD", "ORAD", "FRAD", "DRAD", "CRAD",
+    "DTOP", "DBOT", "XBOT", "YBOT", "XTOP", "YTOP", "XOFF", "YOFF", "ZOFF", "THIC", "WIDE", "DEPT",
+    "SIZE", "SHEA", "TAPER", "ECC", "DWID", "DHEI", "DIMD", "SDIA", "SDIS", "SHEI", "STHI", "SWID",
+    "ARRHEI", "ARRI", "ARRWID", "LEAHEI", "LEAWID", "MAXA", "CENT", "DCEN", "UBOT", "UCEN", "UTOP",
+    // P-point / profile 参数。
+    "PTDI", "PTCI", "PAXI", "PHEI", "PANG", "PPOS", "PORI", "PXDI", "PYDI", "PZDI", "PAAX", "PBAX",
+    "PBBT", "PBDI", "PBDM", "PBOF", "PBTP", "PCAX", "PCBT", "PCOF", "PCON", "PCTP", "PDIA", "PDIS",
+    "PLAX", "PLIN", "POFF", "PRAD", "PTAX", "PTCA", "PTCD", "PTCP", "PTCPOS", "PTDM", "PTMI",
+    "PTPOS", "PWID", "PXBS", "PXLE", "PXTS", "PYBS", "PYLE", "PYTS", "PZAXI", "PZLE", "PARA",
+    "PARAM", "UNIPAR", // loop/profile/negative geometry definitions。
+    "ATTA", "NAPP", "NGMR", "SJUS", "SCTN", "STWALL", "AEXTR", "CMPF", "EXTR", "NREV", "NXTR",
+    "PANE", "REVO", "SCREED", "ORRF", "POHE", "POIN", "POLOOP", "POLPTL", "POLYHE", "PTOF",
+    "VXREF", "CLFL", "JUSL", "NSEX", "NSRE", "NUMB", "RPRO", "SEXT", "SLOO", "SPRO", "SPVE",
+    "SREV", "SVER", "TUFL", // 可见性、负实体和布尔生成开关。
+    "OBST", "NEG", "POSI", "BOOL",
+    // 顶点/坐标：SPVE/SVER/PVER 等顶点改坐标时 modified_attrs 为 PX/PY/PZ。
+    "PX", "PY", "PZ", "DX", "DY", // 定位变体、朝向 Y/Z 轴分量与弯角。
+    "POSL", "POSS", "POSE", "NPOS", "CPOS", "YDIR", "ZDIR", "BANG",
+];
+
+/// 属性 → 效果的**唯一**事实源：按效果分组声明，组间顺序不再携带语义。
+///
+/// 以前 `classify_attribute_effect` 用 if-else 链逐张表试，「一个属性归哪一类」由它写在链上
+/// 的位置决定而不是由语义决定。现在合并成一张映射，重名由测试直接报错。
+pub const ATTRIBUTE_EFFECT_TABLES: &[(&[&str], AttributeEffect)] = &[
+    (DATA_ONLY_ATTR_NAMES, AttributeEffect::DataOnly),
+    (STRUCTURAL_ATTR_NAMES, AttributeEffect::StructuralMembership),
+    (TRANSFORM_ONLY_ATTR_NAMES, AttributeEffect::TransformOnly),
+    (
+        DEPENDENCY_CASCADE_ATTR_NAMES,
+        AttributeEffect::DependencyCascade,
+    ),
+    (DIRECT_GEOMETRY_ATTR_NAMES, AttributeEffect::DirectGeometry),
+];
+
+/// 合并后的查找表，懒加载一次。
+fn attribute_effects() -> &'static HashMap<&'static str, AttributeEffect> {
+    static TABLE: OnceLock<HashMap<&'static str, AttributeEffect>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        ATTRIBUTE_EFFECT_TABLES
+            .iter()
+            .flat_map(|(names, effect)| names.iter().map(move |name| (*name, *effect)))
+            .collect()
+    })
+}
+
 /// 归一化属性名：去掉 `att.` 前缀与限定段，大写。
 pub fn normalize_attribute_name(raw_name: &str) -> String {
     raw_name
@@ -142,23 +197,17 @@ pub fn normalize_attribute_name(raw_name: &str) -> String {
         .to_ascii_uppercase()
 }
 
-/// 细粒度效果分类：按显式效果集合归类，未命中但在影响清单里→DirectGeometry，否则→Unknown。
+/// 细粒度效果分类：查 [`ATTRIBUTE_EFFECT_TABLES`] 合并出的映射，未命中则 `Unknown`。
 pub fn classify_attribute_effect(raw_name: &str) -> AttributeEffect {
     let name = normalize_attribute_name(raw_name);
-    let n = name.as_str();
-    if DATA_ONLY_ATTR_NAMES.contains(&n) {
-        AttributeEffect::DataOnly
-    } else if STRUCTURAL_ATTR_NAMES.contains(&n) {
-        AttributeEffect::StructuralMembership
-    } else if TRANSFORM_ONLY_ATTR_NAMES.contains(&n) {
-        AttributeEffect::TransformOnly
-    } else if DEPENDENCY_CASCADE_ATTR_NAMES.contains(&n) {
-        AttributeEffect::DependencyCascade
-    } else if attribute_affects_model(&name) {
-        AttributeEffect::DirectGeometry
-    } else {
-        AttributeEffect::Unknown
+    if let Some(effect) = attribute_effects().get(name.as_str()) {
+        return *effect;
     }
+    // `PARA1`/`PARAM7` 这类带序号的参数变体不逐个登记，按前缀归入几何输入。
+    if name.starts_with("PARA") {
+        return AttributeEffect::DirectGeometry;
+    }
+    AttributeEffect::Unknown
 }
 
 /// 带 att_meta 提示的效果分类（A2 · ELEMENT 自动级联）。
@@ -226,70 +275,15 @@ pub fn raw_dchc_code(raw_name: &str) -> Option<i32> {
     }
 }
 
-/// 判断单个 E3D/PDMS 属性是否会改变生成器的模型输入。
+/// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
 ///
-/// 名称统一按大写比较。清单来自当前生成链路读取的定位、目录引用、布尔关系、
-/// 管路连接和 primitive 参数，经 core.dll/Core3D 逆向 + `att_meta`(702) 三方交叉校验补齐，
-/// 取「宁多勿漏」。此 bool 只表示「命中已知影响集合」；未命中项由
-/// `classify_attribute_model_impact` 标为 Unknown，在采集层保守触发。
+/// 只表示「命中已知影响集合」；未命中项由 [`classify_attribute_model_impact`] 标为
+/// `Unknown`，在采集层保守触发（宁多勿漏）。
 pub fn attribute_affects_model(raw_name: &str) -> bool {
-    let name = normalize_attribute_name(raw_name);
-
-    matches!(
-        name.as_str(),
-        // 层级/类型与世界定位。
-        "OWNER" | "CHILDREN" | "NOUN" | "TYPE" | "POS" | "ORI" |
-        // catalogue / specification / design-template 依赖。
-        "CATR" | "CREF" | "SPRE" | "SPREF" | "PSPREF" | "FSPREF" |
-        "SPCO" | "SCOM" | "SCREF" | "PRTREF" |
-        "DESP" | "DDSE" | "DDAT" | "DKEY" | "DDPR" | "GMREF" | "GMRE" |
-        "GSTR" | "GTYP" | "DPRO" | "DTRE" | "ISPE" | "TMPL" |
-        "DDANGLE" | "DDHEIGHT" | "DDRADIUS" | "IPARAM" |
-        // 管路、连接与方向依赖。
-        "HREF" | "TREF" | "LSTU" | "STYP" | "ANGF" | "ANGL" |
-        "ABOR" | "LBOR" | "PBOR" | "SBOR" | "BORE" | "CONN" |
-        "HBOR" | "TBOR" | "ADIR" | "RDIR" | "LDIR" | "HDIR" | "TDIR" |
-        "HPOS" | "TPOS" | "HSTU" | "BRCO" |
-        // 通用 primitive 尺寸/形状参数。
-        "XLEN" | "YLEN" | "ZLEN" | "LENG" | "HEIG" | "DIAM" |
-        "RADI" | "IRAD" | "ORAD" | "FRAD" | "DRAD" | "CRAD" |
-        "DTOP" | "DBOT" | "XBOT" | "YBOT" | "XTOP" | "YTOP" |
-        "XOFF" | "YOFF" | "ZOFF" | "THIC" | "WIDE" | "DEPT" |
-        "SIZE" | "SHEA" | "TAPER" | "ECC" | "DWID" | "DHEI" | "DIMD" |
-        "SDIA" | "SDIS" | "SHEI" | "STHI" | "SWID" | "ARRHEI" |
-        "ARRI" | "ARRWID" | "LEAHEI" | "LEAWID" | "MAXA" |
-        "CENT" | "DCEN" | "UBOT" | "UCEN" | "UTOP" |
-        // P-point / profile 参数。
-        "PTDI" | "PTCI" | "PAXI" | "PHEI" | "PANG" | "PPOS" |
-        "PORI" | "PXDI" | "PYDI" | "PZDI" | "PAAX" | "PBAX" |
-        "PBBT" | "PBDI" | "PBDM" | "PBOF" | "PBTP" | "PCAX" |
-        "PCBT" | "PCOF" | "PCON" | "PCTP" | "PDIA" | "PDIS" |
-        "PLAX" | "PLIN" | "POFF" | "PRAD" | "PTAX" | "PTCA" |
-        "PTCD" | "PTCP" | "PTCPOS" | "PTDM" | "PTMI" | "PTPOS" |
-        "PWID" | "PXBS" | "PXLE" | "PXTS" | "PYBS" | "PYLE" |
-        "PYTS" | "PZAXI" | "PZLE" | "PARA" | "PARAM" | "UNIPAR" |
-        "PKEY" | "PPRO" | "PSTR" | "PTRE" | "PTYP" | "PVER" |
-        // loop/profile/negative geometry definitions。
-        "ATTA" | "NAPP" | "NGMR" | "SJUS" | "SCTN" | "STWALL" |
-        "AEXTR" | "CMPF" | "EXTR" | "NREV" | "NXTR" | "PANE" |
-        "REVO" | "SCREED" | "ORRF" | "POHE" | "POIN" | "POLOOP" |
-        "POLPTL" | "POLYHE" | "PTOF" | "VXREF" | "CLFL" | "JUSL" |
-        "NSEX" | "NSRE" | "NUMB" | "RPRO" | "SEXT" | "SLOO" | "SPRO" |
-        "SPVE" | "SREV" | "SVER" | "TUFL" |
-        // 可见性、负实体和布尔生成开关。
-        "LEVE" | "LEVEL" | "OBST" | "NEG" | "POSI" | "BOOL" |
-        // 顶点/坐标：SPVE/SVER/PVER 等顶点改坐标时 modified_attrs 为 PX/PY/PZ。
-        "PX" | "PY" | "PZ" | "DX" | "DY" |
-        // 定位变体、朝向 Y/Z 轴分量与弯角。
-        "POSL" | "POSS" | "POSE" | "NPOS" | "CPOS" | "YDIR" | "ZDIR" | "BANG" |
-        // 管路布线/几何：坡降/离开点/曲率/外径/路由/排水端点。
-        "ZDIS" | "LEAV" | "CURD" | "CURTYP" | "OPDI" | "ROUT" | "DRNS" | "DRNE" | "DETR" |
-        // 规格/类型/布线定位（CTYP/JFRE 系 Core3D VDESPT (noun,attr) 特例）。
-        "PSPE" | "CTYP" | "JFRE" | "JLIN" |
-        // 设计增量位置 / 保温半径 / P-line 方向键。
-        "DELP" | "RINS" | "PKDI"
-    ) || name.starts_with("PARA")
-        || name.starts_with("PARAM")
+    !matches!(
+        classify_attribute_effect(raw_name),
+        AttributeEffect::DataOnly | AttributeEffect::Unknown
+    )
 }
 
 /// 收集一次修改里所有变动过的属性名（归一化 + UDA 以 `UDA:<id>` 表示）。
@@ -1329,6 +1323,73 @@ mod tests {
             "ADIR, BRCO, CONN, DDANGLE, DDAT, DDHEIGHT, DDRADIUS, DDSE, FSPREF, \
              GMREF, IPARAM, LDIR, PVER, RDIR, SCOM, SCREF, SPCO, SPREF, TMPL"
         );
+
+        // DirectGeometry 表最脏：70 条对不上 schema，其中相当一部分是被当成属性
+        // 写进来的 dabacon noun 名。先钉住总数，清理是另一件事。
+        let direct = unmatched(DIRECT_GEOMETRY_ATTR_NAMES);
+        assert_eq!(
+            direct.split(", ").count(),
+            70,
+            "DIRECT_GEOMETRY 对不上 schema 的条目数漂移：{direct}"
+        );
+        for noun_name in ["POHE", "POLYHE", "SEXT", "SPVE"] {
+            assert!(
+                direct.contains(noun_name),
+                "{noun_name} 是 noun 名而非属性名，应当仍在待清理名单里"
+            );
+        }
+    }
+
+    /// B 改造的核心不变量：合并后的映射不得有重名。
+    ///
+    /// 同一个属性出现在两张效果表里，说明它的语义没定清楚，而不是「靠顺序解决」。
+    /// 旧实现里这种重名有 73 条，全部静默失效。
+    #[test]
+    fn attribute_effect_tables_have_no_duplicate_names() {
+        let mut seen: BTreeMap<&str, AttributeEffect> = BTreeMap::new();
+        let mut duplicates = Vec::new();
+        for (names, effect) in ATTRIBUTE_EFFECT_TABLES {
+            for name in *names {
+                if let Some(previous) = seen.insert(name, *effect) {
+                    duplicates.push(format!("{name}({previous:?} vs {effect:?})"));
+                }
+            }
+        }
+        assert!(
+            duplicates.is_empty(),
+            "同一属性出现在多张效果表里：{}",
+            duplicates.join(", ")
+        );
+    }
+
+    /// 原有的 `curated_attribute_tables_map_to_their_declared_effects_and_actions`
+    /// 只覆盖前四张表（当时第五张还是 `matches!` 无法枚举），这里补上。
+    #[test]
+    fn direct_geometry_table_maps_to_its_declared_effect_and_action() {
+        for name in DIRECT_GEOMETRY_ATTR_NAMES {
+            assert_eq!(
+                classify_attribute_effect(name),
+                AttributeEffect::DirectGeometry,
+                "{name}"
+            );
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Regen,
+                "{name}"
+            );
+        }
+    }
+
+    /// 带序号的参数变体不在表里，靠前缀规则兜底。
+    #[test]
+    fn numbered_parameter_variants_fall_back_to_the_prefix_rule() {
+        for name in ["PARA1", "PARAM7", "PARAXYZ"] {
+            assert_eq!(
+                classify_attribute_effect(name),
+                AttributeEffect::DirectGeometry,
+                "{name}"
+            );
+        }
     }
 
     /// 外部对账 · 二：两张「减免」白名单必须与 E3D 字典的设计变化类一致。
