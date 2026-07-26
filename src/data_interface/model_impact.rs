@@ -636,7 +636,7 @@ pub fn gated_children_delta(noun: &str, old: &RefU64Vec, new: &RefU64Vec) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     fn modified_operation(attr_name: &str) -> EleOperationData {
         modified_operation_with_attrs(&[attr_name])
@@ -1246,6 +1246,131 @@ mod tests {
         }
     }
 
+    /// 独立数据源：运行库属性 schema（`all_attr_info.json` 经 `aios_core` 载入）。
+    /// 它与本文件的手工清单没有任何共同来源，因此可以拿来对账。
+    fn runtime_attribute_names() -> BTreeSet<String> {
+        let info = aios_core::get_default_pdms_db_info();
+        let mut names = BTreeSet::new();
+        for noun in info.named_attr_info_map.iter() {
+            for ai in noun.value().iter() {
+                let name = ai.name.trim().to_ascii_uppercase();
+                if !name.is_empty() {
+                    names.insert(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// E3D 属性字典导出的 per-attribute 设计变化码（ADR-008 的 `NounLayoutExport`）。
+    /// 该产物未入库，缺失时调用方软跳过。
+    fn dictionary_change_classes() -> Option<BTreeMap<String, i64>> {
+        let raw = std::fs::read_to_string("output/noun_attr_fields.json").ok()?;
+        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let mut out = BTreeMap::new();
+        for record in json.as_object()?.values() {
+            let Some(name) = record.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(code) = record
+                .get("f")
+                .and_then(|f| f.get("DCHC"))
+                .and_then(|d| d.get("i"))
+                .and_then(|i| i.as_i64())
+            else {
+                continue;
+            };
+            let name = name.trim().to_ascii_uppercase();
+            if !name.is_empty() {
+                out.insert(name, code);
+            }
+        }
+        Some(out)
+    }
+
+    /// 外部对账 · 一：清单里的每个名字都应当是真实存在的属性名。
+    ///
+    /// 手工清单长期混进了 noun 名、伪属性和短名别名——它们永远匹配不到任何属性，
+    /// 纯属噪声（`attribute_affects_model` 里就有 40 条 dabacon noun 名）。这里把
+    /// 每张表「对不上 schema 的条目」钉成明确名单：多一条会失败，清掉一条也会失败，
+    /// 后者是提醒同步更新本快照。
+    ///
+    /// `attribute_affects_model` 是 `matches!` 而非常量数组，运行期无法枚举，
+    /// 故不在本测试覆盖范围内。
+    #[test]
+    fn curated_tables_are_reconciled_against_the_runtime_schema() {
+        let runtime = runtime_attribute_names();
+        if runtime.is_empty() {
+            return; // 无 schema 的环境软跳过
+        }
+        let unmatched = |table: &[&str]| -> String {
+            table
+                .iter()
+                .map(|n| n.to_ascii_uppercase())
+                .filter(|n| !runtime.contains(n))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        assert!(
+            unmatched(TRANSFORM_ONLY_ATTR_NAMES).is_empty(),
+            "走便宜路径的属性必须真实存在，否则等于白写：{}",
+            unmatched(TRANSFORM_ONLY_ATTR_NAMES)
+        );
+        // FUNCTION 在 schema 与字典里都查无此名，疑为历史遗留，保留待查。
+        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "FUNCTION");
+        // CHILDREN / NOUN 是元素元数据而非属性；LEVEL 是 LEVE 的别名写法。
+        assert_eq!(unmatched(STRUCTURAL_ATTR_NAMES), "CHILDREN, LEVEL, NOUN");
+        // 目录/连接类里的短名与 noun 名，多数可由 att_meta 的 ELEMENT 升级兜住。
+        assert_eq!(
+            unmatched(DEPENDENCY_CASCADE_ATTR_NAMES),
+            "ADIR, BRCO, CONN, DDANGLE, DDAT, DDHEIGHT, DDRADIUS, DDSE, FSPREF, \
+             GMREF, IPARAM, LDIR, PVER, RDIR, SCOM, SCREF, SPCO, SPREF, TMPL"
+        );
+    }
+
+    /// 外部对账 · 二：两张「减免」白名单必须与 E3D 字典的设计变化类一致。
+    ///
+    /// `DataOnly` 与 `TransformOnly` 是仅有的两处「少做事」判定，写宽一条的后果是
+    /// **模型陈旧且没有任何测试会变红**——`POSS`/`POSE` 当纯位姿处理就这样潜伏了很久。
+    /// 字典的 DCHC 是完全独立的第二意见：0 = 无设计变化，3 = 纯位姿类（内核只放了
+    /// `POS`/`ORI`/`BFORI` 三条）。依据见 `docs/2026-07-26_p3-t903-t904-assessment.md`。
+    #[test]
+    fn exemption_tables_match_the_dictionary_change_class() {
+        let Some(dchc) = dictionary_change_classes() else {
+            return; // 未导出字典的环境软跳过
+        };
+
+        for name in DATA_ONLY_ATTR_NAMES {
+            if let Some(code) = dchc.get(&name.to_ascii_uppercase()) {
+                assert_eq!(
+                    *code, 0,
+                    "{name} 被判为 DataOnly（完全跳过），字典却给了设计变化码 {code}"
+                );
+            }
+        }
+
+        for name in TRANSFORM_ONLY_ATTR_NAMES {
+            assert_eq!(
+                dchc.get(&name.to_ascii_uppercase()).copied(),
+                Some(3),
+                "{name} 走 world-transform 便宜路径，但它不在内核位姿类（DCHC=3）里"
+            );
+        }
+
+        let pose_class = dchc
+            .iter()
+            .filter(|(_, code)| **code == 3)
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pose_class,
+            BTreeSet::from(["BFORI", "ORI", "POS"]),
+            "内核位姿类成员漂移，TRANSFORM_ONLY 的取值范围需要重新评估"
+        );
+    }
     #[test]
     fn dchc_forced_codes_preserved() {
         assert_eq!(raw_dchc_code("REDRAW"), Some(4));
