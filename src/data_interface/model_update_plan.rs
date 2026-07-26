@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use aios_core::RefnoEnum;
+use aios_core::{RefnoEnum, SUL_DB};
 use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +118,49 @@ fn discard_cancelled(refnos: &mut HashSet<RefnoEnum>, details: &[NetChangeDetail
     refnos.retain(|refno| !cancelled.contains(refno));
 }
 
+fn restore_baseline_deletes(
+    details: &mut [NetChangeDetail],
+    baseline_existing: &HashSet<RefnoEnum>,
+) {
+    for detail in details.iter_mut().filter(|detail| {
+        detail.net == NetOp::Cancelled && baseline_existing.contains(&detail.refno)
+    }) {
+        detail.net = NetOp::Deleted;
+        detail.model_affecting = true;
+    }
+}
+
+async fn baseline_existing_cancelled(
+    details: &[NetChangeDetail],
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    use crate::data_interface::helper::pe_thing_to_refno;
+    use surrealdb::sql::Thing;
+
+    let cancelled = details
+        .iter()
+        .filter(|detail| detail.net == NetOp::Cancelled)
+        .map(|detail| detail.refno)
+        .collect::<Vec<_>>();
+    let mut existing = HashSet::new();
+    for chunk in cancelled.chunks(500) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM [{keys}] WHERE record::exists(id);"
+            ))
+            .await?
+            .check()?;
+        for thing in response.take::<Vec<Thing>>(0)? {
+            existing.insert(pe_thing_to_refno(thing)?);
+        }
+    }
+    Ok(existing)
+}
+
 /// Prepare model work before PE persistence, while the pre-update owner graph
 /// and reverse-reference index are still available.
 pub(crate) async fn build_model_update_plan(
@@ -130,7 +173,22 @@ pub(crate) async fn build_model_update_plan(
         return ModelUpdatePlan::default();
     }
 
-    let details = merge_net_change_details(range_eles);
+    let mut details = merge_net_change_details(range_eles);
+    let mut baseline_warnings = Vec::new();
+    match baseline_existing_cancelled(&details).await {
+        Ok(existing) => restore_baseline_deletes(&mut details, &existing),
+        Err(error) => {
+            let cancelled = details
+                .iter()
+                .filter(|detail| detail.net == NetOp::Cancelled)
+                .map(|detail| detail.refno)
+                .collect::<HashSet<_>>();
+            restore_baseline_deletes(&mut details, &cancelled);
+            baseline_warnings.push(format!(
+                "dbnum={dbnum}: baseline existence lookup failed; treating cancelled changes as deletes: {error:#}"
+            ));
+        }
+    }
     let mut regen_refnos = HashSet::new();
     let mut transform_refnos = HashSet::new();
     for op in range_eles.values().flatten() {
@@ -182,6 +240,7 @@ pub(crate) async fn build_model_update_plan(
             (units, no_generation, warnings, true)
         }
     };
+    warnings.extend(baseline_warnings);
     let mut work_items = work_items_from_units(
         dbnum,
         end_sesno,
@@ -268,5 +327,133 @@ mod tests {
         );
 
         assert_eq!(refnos, HashSet::from([kept]));
+    }
+
+    #[test]
+    fn add_then_delete_of_a_baseline_element_remains_a_delete() {
+        let refno = RefnoEnum::from(aios_core::RefU64((1u64 << 32) | 4));
+        let mut details = vec![NetChangeDetail {
+            refno,
+            net: NetOp::Cancelled,
+            model_affecting: false,
+        }];
+
+        restore_baseline_deletes(&mut details, &HashSet::from([refno]));
+
+        assert_eq!(details[0].net, NetOp::Deleted);
+        assert!(details[0].model_affecting);
+    }
+
+    fn modified_op(refno: aios_core::RefU64, sesno: u32, attr: &str) -> EleOperationData {
+        use aios_core::NamedAttrValue;
+        use pdms_io::io::ModifiedElement;
+        let mut modified_attrs = std::collections::HashMap::new();
+        modified_attrs.insert(
+            attr.to_string(),
+            (
+                NamedAttrValue::StringType("old".into()),
+                NamedAttrValue::StringType("new".into()),
+            ),
+        );
+        EleOperationData::new(
+            refno,
+            sesno,
+            EleOperationDetail::Modified(ModifiedElement {
+                current_data: Default::default(),
+                added_attrs: Default::default(),
+                deleted_attrs: Default::default(),
+                modified_attrs,
+                added_explicit_attrs: Default::default(),
+                deleted_explicit_attrs: Default::default(),
+                modified_explicit_attrs: Default::default(),
+                added_uda_attrs: Default::default(),
+                deleted_uda_attrs: Default::default(),
+                modified_uda_attrs: Default::default(),
+                noun: "SCOM".to_string(),
+                children_changed: None,
+            }),
+        )
+    }
+
+    fn live_modified_op(
+        refno: RefnoEnum,
+        owner: RefnoEnum,
+        noun: &str,
+        attr: &str,
+    ) -> EleOperationData {
+        let mut op = modified_op(refno.refno(), 42, attr);
+        let EleOperationDetail::Modified(modified) = &mut op.detail else {
+            unreachable!()
+        };
+        modified.current_data.owner = owner.refno();
+        modified.noun = noun.to_string();
+        op
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: plans and executes attribute effects on one ProjAMS EQUI"]
+    async fn live_projams_direct_transform_and_data_only_actions_are_distinct() {
+        use crate::data_interface::model_refresh::ModelRefreshPolicy;
+        use crate::data_interface::tidb_manager::AiosDBManager;
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let equi = RefnoEnum::from("24384/24776");
+        let box_ = RefnoEnum::from("24384/24777");
+
+        let direct = build_model_update_plan(
+            8000,
+            42,
+            "DESI",
+            &BTreeMap::from([(42, vec![live_modified_op(box_, equi, "BOX", "XLEN")])]),
+        )
+        .await;
+        assert_eq!(
+            direct
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::RegenRoot, "24384/24776")]
+        );
+        ModelRefreshPolicy::generate_roots(&manager, &["24384/24776".into()])
+            .await
+            .expect("regenerate EQUI for BOX.XLEN");
+
+        let transform = build_model_update_plan(
+            8000,
+            42,
+            "DESI",
+            &BTreeMap::from([(42, vec![live_modified_op(box_, equi, "BOX", "POS")])]),
+        )
+        .await;
+        assert_eq!(
+            transform
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::Transform, "24384/24777")]
+        );
+        manager
+            .update_world_transforms(&HashSet::from([box_]))
+            .await
+            .expect("refresh BOX.POS transform");
+
+        let data_only = build_model_update_plan(
+            8000,
+            42,
+            "DESI",
+            &BTreeMap::from([(42, vec![live_modified_op(equi, equi, "EQUI", "NAME")])]),
+        )
+        .await;
+        assert!(
+            data_only.work_items.is_empty(),
+            "NAME must not schedule model work: {data_only:?}"
+        );
     }
 }
