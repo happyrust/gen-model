@@ -49,7 +49,7 @@ use crate::data_interface::dbnum_state::{
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
-    classify_attribute_effect_with_meta, classify_operation_impact, owner_change,
+    classify_operation_impact, owner_change,
 };
 use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -616,21 +616,33 @@ fn value_ref_targets(value: &NamedAttrValue) -> Vec<RefnoEnum> {
     }
 }
 
-/// Post-state DependencyCascade element references of one attr map (deduped,
+/// 建边资格：该属性携带的 element 引用是否写入反向索引。
+///
+/// 「是不是引用」由 schema（`att_type == ELEMENT`）决定，与「改它产生什么效果」
+/// （效果分类）**解耦**——绑在一起时，被归入 DirectGeometry 的引用属性
+/// （`NGMR`/`ORRF`/`VXREF`）会静默丢失级联边：引用目标变化时引用者不重生成，
+/// 布尔/朝向结果陈旧。curated `DependencyCascade` 名单继续兜底，覆盖 schema
+/// 缺失、或值为引用数组而 `att_type` 非 ELEMENT 的属性（如 `PRTREF`）。
+/// `OWNER` 是唯一显式排除项：所有权走 ownership 图，反向索引只保留真正的
+/// 交叉引用。
+fn reference_edge_eligible(name: &str) -> bool {
+    if attribute_is_reference(name) {
+        return crate::data_interface::model_impact::normalize_attribute_name(name) != "OWNER";
+    }
+    classify_attribute_effect(name) == AttributeEffect::DependencyCascade
+}
+
+/// Post-state reversible element references of one attr map (deduped,
 /// self-excluded, valid only).
 ///
-/// Only attributes classified [`AttributeEffect::DependencyCascade`] by
-/// [`classify_attribute_effect`] are reversed (`SPRE`/`CATR`/`HREF`/`TREF`/
-/// `PRTREF`/`DESP`/…) — single-sourcing the「哪些属性算引用级联」definition with
-/// the consumer. Structural `OWNER` (handled by the ownership graph) and pure
-/// geometry params are intentionally excluded, so the reverse index stays a
-/// genuine cross-reference index.
+/// Admission is [`reference_edge_eligible`]: every schema ELEMENT reference
+/// except structural `OWNER`, plus the curated
+/// [`AttributeEffect::DependencyCascade`] names as fallback (`SPRE`/`CATR`/
+/// `HREF`/`TREF`/`PRTREF`/`DESP`/…).
 pub fn reference_cascade_targets(att: &NamedAttrMap, referrer: RefnoEnum) -> Vec<RefnoEnum> {
     let mut out: Vec<RefnoEnum> = Vec::new();
     for (name, value) in att.map.iter() {
-        if classify_attribute_effect_with_meta(name, attribute_is_reference(name))
-            != AttributeEffect::DependencyCascade
-        {
+        if !reference_edge_eligible(name) {
             continue;
         }
         for target in value_ref_targets(value) {
@@ -3937,14 +3949,14 @@ mod tests {
     }
 
     #[test]
-    fn reference_cascade_targets_reverses_only_dependency_cascade_refs() {
+    fn reference_cascade_targets_admits_references_and_cascade_names_only() {
         let referrer = r(100);
         let att = ref_attmap(&[
             ("SPRE", r(1)),  // DependencyCascade → kept
             ("CATR", r(2)),  // DependencyCascade → kept
             ("HREF", r(3)),  // connection (DependencyCascade) → kept
-            ("OWNER", r(4)), // StructuralMembership → excluded (ownership graph handles it)
-            ("NAME", r(5)),  // DataOnly → excluded
+            ("OWNER", r(4)), // ELEMENT ref, but ownership graph handles it → excluded
+            ("NAME", r(5)),  // non-reference, DataOnly → excluded
         ]);
         let targets = reference_cascade_targets(&att, referrer);
         assert!(targets.contains(&r(1)));
@@ -4009,6 +4021,43 @@ mod tests {
             vec![target],
             "schema ELEMENT ref {dynamic_ref_name} must be indexed"
         );
+    }
+
+    /// P1 审核修复的钉子：ELEMENT 引用即便被效果分类归入 DirectGeometry
+    /// （`NGMR`/`ORRF`/`VXREF`），也必须建反向边——分类不应吞掉级联。
+    #[test]
+    fn reference_cascade_targets_indexes_geometry_classified_element_refs() {
+        let referrer = r(100);
+        let att = ref_attmap(&[("NGMR", r(1)), ("ORRF", r(2)), ("VXREF", r(3))]);
+        let targets = reference_cascade_targets(&att, referrer);
+        for expected in [r(1), r(2), r(3)] {
+            assert!(targets.contains(&expected), "{targets:?}");
+        }
+        assert_eq!(targets.len(), 3);
+    }
+
+    /// 系统性守护：schema 里所有 ELEMENT 引用属性（唯一例外 `OWNER`）都有
+    /// 建边资格。防止未来某个引用名被写进非 CASCADE 名单后静默丢边。
+    #[test]
+    fn all_schema_element_refs_except_owner_are_edge_eligible() {
+        let info = aios_core::get_default_pdms_db_info();
+        let mut names = std::collections::BTreeSet::new();
+        for noun in info.named_attr_info_map.iter() {
+            for entry in noun.value().iter() {
+                let name = entry.value().name.trim().to_ascii_uppercase();
+                if !name.is_empty() && attribute_is_reference(&name) {
+                    names.insert(name);
+                }
+            }
+        }
+        assert!(names.len() > 50, "ELEMENT 引用属性过少：{}", names.len());
+        for name in &names {
+            assert_eq!(
+                reference_edge_eligible(name),
+                name != "OWNER",
+                "{name} 的建边资格与预期不符"
+            );
+        }
     }
 
     #[test]
