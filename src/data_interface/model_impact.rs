@@ -101,9 +101,14 @@ impl OperationEffectSummary {
 }
 
 /// 纯位姿/方位属性：只改这些时走「仅更新 world transform」的便宜路径（网格不变）。
-pub const TRANSFORM_ONLY_ATTR_NAMES: &[&str] = &[
-    "POS", "POSL", "POSS", "POSE", "NPOS", "CPOS", "ORI", "YDIR", "ZDIR",
-];
+///
+/// 口径对齐 E3D 字典的设计变化类（DCHC）：内核只把 `POS`/`ORI`/`BFORI` 归入位姿类（码 3）。
+/// 原先还收了 `POSL`/`POSS`/`POSE`/`NPOS`/`CPOS`/`YDIR`/`ZDIR`，但它们在内核里属通用类（码 4），
+/// 且都是几何定义参数而非摆放参数——`POSS`/`POSE` 只属于 `SCTN`/`STWALL`（型材几何就是沿起点
+/// →终点拉伸而成），`CPOS` 属于 `CURVE`，`YDIR` 属于 `SPINE`。移出后它们经
+/// `attribute_affects_model` 落 `DirectGeometry` 走重生成。`BFORI` 未补入：往便宜路径里加属性
+/// 是「少算」方向，无实证不做。依据见 `docs/2026-07-26_p3-t903-t904-assessment.md`。
+pub const TRANSFORM_ONLY_ATTR_NAMES: &[&str] = &["POS", "ORI"];
 
 /// 业务元数据（不影响模型）。
 pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNCTION"];
