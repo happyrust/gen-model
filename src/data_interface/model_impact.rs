@@ -111,7 +111,7 @@ impl OperationEffectSummary {
 pub const TRANSFORM_ONLY_ATTR_NAMES: &[&str] = &["POS", "ORI"];
 
 /// 业务元数据（不影响模型）。
-pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNCTION"];
+pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNCTION", "CACHID", "LCHKDA"];
 
 /// 结构/成员/类型属性（改变层级、生成分派或参与范围）。
 pub const STRUCTURAL_ATTR_NAMES: &[&str] = &["OWNER", "CHILDREN", "NOUN", "TYPE", "LEVE", "LEVEL"];
@@ -746,7 +746,9 @@ mod tests {
 
     #[test]
     fn metadata_only_changes_are_known_neutral() {
-        for name in ["NAME", "DESC", "PURP", "FUNCTION", "att.NAME", "att.DESC"] {
+        for name in [
+            "NAME", "DESC", "PURP", "FUNCTION", "CACHID", "LCHKDA", "att.NAME", "att.DESC",
+        ] {
             assert!(!attribute_affects_model(name), "{name}");
             assert_eq!(
                 classify_attribute_model_impact(name),
@@ -1312,8 +1314,8 @@ mod tests {
             "走便宜路径的属性必须真实存在，否则等于白写：{}",
             unmatched(TRANSFORM_ONLY_ATTR_NAMES)
         );
-        // FUNCTION 在 schema 与字典里都查无此名，疑为历史遗留，保留待查。
-        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "FUNCTION");
+        // CACHID 是项目 UDA；LCHKDA 来自 BRAN 检查元数据；FUNCTION 是历史遗留。
+        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "CACHID, FUNCTION, LCHKDA");
         // CHILDREN / NOUN 是元素元数据而非属性；LEVEL 是 LEVE 的别名写法。
         assert_eq!(unmatched(STRUCTURAL_ATTR_NAMES), "CHILDREN, LEVEL, NOUN");
         // 目录/连接类短名：字典有名（如 ADIR/CONN/SPREF），339-noun 快照未含属主，保留。
