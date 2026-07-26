@@ -117,17 +117,19 @@ pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNCTION"];
 pub const STRUCTURAL_ATTR_NAMES: &[&str] = &["OWNER", "CHILDREN", "NOUN", "TYPE", "LEVE", "LEVEL"];
 
 /// 目录/规格/设计表/连接依赖属性（经外部目录或邻居级联影响几何；含未来可反向传播的引用）。
+///
+/// 三组，按序：catalogue / specification / design-template 引用（`CATR`…`IPARAM`）、
+/// 管路连接/方向/布线（`HREF`…`JLIN`，依赖邻居与目录）、设计表默认值 / 属性覆盖
+/// （`PKEY`…`PKDI`）。2026-07-26 清理：`SPCO`/`SCOM`/`DDSE`/`DDAT`/`TMPL`/`BRCO` 是
+/// dabacon noun 名而非属性，字典 4270 名与运行库 701 名中均不存在，永远不会命中，已移除
+/// （推导见 `output/gen_dchc_fixture.py`）。
 pub const DEPENDENCY_CASCADE_ATTR_NAMES: &[&str] = &[
-    // catalogue / specification / design-template 引用
-    "CATR", "CREF", "SPRE", "SPREF", "PSPREF", "FSPREF", "SPCO", "SCOM", "SCREF", "PSPE", "PRTREF",
-    "DESP", "DDSE", "DDAT", "DKEY", "DDPR", "GMREF", "GMRE", "GSTR", "GTYP", "DPRO", "DTRE",
-    "ISPE", "TMPL", "DDANGLE", "DDHEIGHT", "DDRADIUS", "IPARAM",
-    // 管路连接/方向/布线（依赖邻居与目录）
-    "HREF", "TREF", "LSTU", "HSTU", "STYP", "CONN", "BRCO", "HPOS", "TPOS", "HDIR", "TDIR", "HBOR",
-    "TBOR", "ADIR", "RDIR", "LDIR", "ZDIS", "LEAV", "CURD", "CURTYP", "OPDI", "ROUT", "DRNS",
-    "DRNE", "DETR", "DELP", "RINS", "CTYP", "JFRE", "JLIN",
-    // 设计表默认值 / 属性覆盖
-    "PKEY", "PPRO", "PSTR", "PTRE", "PTYP", "PVER", "PKDI",
+    "CATR", "CREF", "SPRE", "SPREF", "PSPREF", "FSPREF", "SCREF", "PSPE", "PRTREF", "DESP", "DKEY",
+    "DDPR", "GMREF", "GMRE", "GSTR", "GTYP", "DPRO", "DTRE", "ISPE", "DDANGLE", "DDHEIGHT",
+    "DDRADIUS", "IPARAM", "HREF", "TREF", "LSTU", "HSTU", "STYP", "CONN", "HPOS", "TPOS", "HDIR",
+    "TDIR", "HBOR", "TBOR", "ADIR", "RDIR", "LDIR", "ZDIS", "LEAV", "CURD", "CURTYP", "OPDI",
+    "ROUT", "DRNS", "DRNE", "DETR", "DELP", "RINS", "CTYP", "JFRE", "JLIN", "PKEY", "PPRO", "PSTR",
+    "PTRE", "PTYP", "PVER", "PKDI",
 ];
 
 /// 直接几何输入：尺寸、图元 / P-point 参数、loop/profile 定义等直接改元素自身网格的属性。
@@ -141,18 +143,19 @@ pub const DIRECT_GEOMETRY_ATTR_NAMES: &[&str] = &[
     // 通用 primitive 尺寸/形状参数。
     "XLEN", "YLEN", "ZLEN", "LENG", "HEIG", "DIAM", "RADI", "IRAD", "ORAD", "FRAD", "DRAD", "CRAD",
     "DTOP", "DBOT", "XBOT", "YBOT", "XTOP", "YTOP", "XOFF", "YOFF", "ZOFF", "THIC", "WIDE", "DEPT",
-    "SIZE", "SHEA", "TAPER", "ECC", "DWID", "DHEI", "DIMD", "SDIA", "SDIS", "SHEI", "STHI", "SWID",
+    "SIZE", "SHEA", "TAPER", "ECC", "DWID", "DHEI", "DIMD", "SDIA", "SHEI", "STHI", "SWID",
     "ARRHEI", "ARRI", "ARRWID", "LEAHEI", "LEAWID", "MAXA", "CENT", "DCEN", "UBOT", "UCEN", "UTOP",
     // P-point / profile 参数。
-    "PTDI", "PTCI", "PAXI", "PHEI", "PANG", "PPOS", "PORI", "PXDI", "PYDI", "PZDI", "PAAX", "PBAX",
-    "PBBT", "PBDI", "PBDM", "PBOF", "PBTP", "PCAX", "PCBT", "PCOF", "PCON", "PCTP", "PDIA", "PDIS",
-    "PLAX", "PLIN", "POFF", "PRAD", "PTAX", "PTCA", "PTCD", "PTCP", "PTCPOS", "PTDM", "PTMI",
-    "PTPOS", "PWID", "PXBS", "PXLE", "PXTS", "PYBS", "PYLE", "PYTS", "PZAXI", "PZLE", "PARA",
-    "PARAM", "UNIPAR", // loop/profile/negative geometry definitions。
-    "ATTA", "NAPP", "NGMR", "SJUS", "SCTN", "STWALL", "AEXTR", "CMPF", "EXTR", "NREV", "NXTR",
-    "PANE", "REVO", "SCREED", "ORRF", "POHE", "POIN", "POLOOP", "POLPTL", "POLYHE", "PTOF",
-    "VXREF", "CLFL", "JUSL", "NSEX", "NSRE", "NUMB", "RPRO", "SEXT", "SLOO", "SPRO", "SPVE",
-    "SREV", "SVER", "TUFL", // 可见性、负实体和布尔生成开关。
+    // （2026-07-26 清理：曾混入 31 条 dabacon noun 名（SCTN/STWALL/POHE/POLYHE/SPVE…），
+    //  与 noun 表精确同名、在字典与运行库中均无同名属性，永远不会命中，已移除；
+    //  推导见 output/gen_dchc_fixture.py。）
+    "PTDI", "PTCI", "PAXI", "PHEI", "PANG", "PPOS", "PXDI", "PYDI", "PZDI", "PAAX", "PBAX", "PBBT",
+    "PBDI", "PBDM", "PBOF", "PBTP", "PCAX", "PCBT", "PCOF", "PCON", "PCTP", "PDIA", "PDIS", "PLAX",
+    "POFF", "PRAD", "PTCD", "PTCP", "PTCPOS", "PTDM", "PWID", "PXBS", "PXLE", "PXTS", "PYBS",
+    "PYLE", "PYTS", "PZAXI", "PZLE", "PARA", "PARAM",
+    "UNIPAR", // loop/profile/negative geometry definitions。
+    "NAPP", "NGMR", "SJUS", "ORRF", "PTOF", "VXREF", "CLFL", "JUSL", "NUMB", "RPRO",
+    "TUFL", // 可见性、负实体和布尔生成开关。
     "OBST", "NEG", "POSI", "BOOL",
     // 顶点/坐标：SPVE/SVER/PVER 等顶点改坐标时 modified_attrs 为 PX/PY/PZ。
     "PX", "PY", "PZ", "DX", "DY", // 定位变体、朝向 Y/Z 轴分量与弯角。
@@ -263,16 +266,27 @@ pub fn classify_attribute_model_impact(raw_name: &str) -> AttributeModelImpact {
 
 /// 保留的 Core3D 原始设计变化码（DCHC，字段 596407）。
 ///
-/// 目前只有逆向已确认的**强制 code** 是静态可得：`REDRAW` 强制 code 4、`INTUBE` 强制
-/// code 1（见 reverse §4.3/§11.2.1）。其余属性的 DCHC 编在 E3D 内核字典里、未随模型库
-/// 同步（reverse §14.2），需活 E3D 会话或字典导入才能补全 —— 故此处对其它属性返回
-/// `None`（占位；接口已就绪，日后可从字典 / 实时 dump 填充）。
+/// 逆向确认的两个**强制 code** 优先且不走字典：`REDRAW` 强制 4、`INTUBE` 强制 1
+/// （reverse §4.3/§11.2.1）。其余属性查 E3D 字典快照 [`dchc_change_classes`]——
+/// 4270 条（0 码 3941 / 码 1×7 / 码 2×4 / 码 3×3 / 码 4×315）。字典没有的属性
+/// （UDA、伪属性）返回 `None`。
 pub fn raw_dchc_code(raw_name: &str) -> Option<i32> {
     match normalize_attribute_name(raw_name).as_str() {
         "REDRAW" => Some(4),
         "INTUBE" => Some(1),
-        _ => None,
+        name => dchc_change_classes().get(name).copied(),
     }
+}
+
+/// E3D 属性字典的 DCHC 快照：由 `output/gen_dchc_fixture.py` 从字典导出
+/// （`output/noun_attr_fields.json`，ADR-008）提炼为 `dchc_change_classes.json`
+/// 并随源码入库，编译期嵌入 —— 运行期与测试均无外部文件依赖。懒解析一次。
+fn dchc_change_classes() -> &'static HashMap<String, i32> {
+    static TABLE: OnceLock<HashMap<String, i32>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        serde_json::from_str(include_str!("dchc_change_classes.json"))
+            .expect("dchc_change_classes.json 随源码入库，必须是合法 JSON")
+    })
 }
 
 /// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
@@ -1256,41 +1270,26 @@ mod tests {
         names
     }
 
-    /// E3D 属性字典导出的 per-attribute 设计变化码（ADR-008 的 `NounLayoutExport`）。
-    /// 该产物未入库，缺失时调用方软跳过。
+    /// E3D 属性字典的 per-attribute 设计变化码，来自随源码入库的嵌入快照
+    /// （见 [`raw_dchc_code`] / `dchc_change_classes.json`）。快照入库后本函数
+    /// 恒返回 `Some`——保留 `Option` 签名只为不动既有调用方的解构写法；
+    /// 对账测试从此不再依赖未入库的 `output/noun_attr_fields.json`，任何环境都必跑。
     fn dictionary_change_classes() -> Option<BTreeMap<String, i64>> {
-        let raw = std::fs::read_to_string("output/noun_attr_fields.json").ok()?;
-        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let mut out = BTreeMap::new();
-        for record in json.as_object()?.values() {
-            let Some(name) = record.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(code) = record
-                .get("f")
-                .and_then(|f| f.get("DCHC"))
-                .and_then(|d| d.get("i"))
-                .and_then(|i| i.as_i64())
-            else {
-                continue;
-            };
-            let name = name.trim().to_ascii_uppercase();
-            if !name.is_empty() {
-                out.insert(name, code);
-            }
-        }
-        Some(out)
+        Some(
+            dchc_change_classes()
+                .iter()
+                .map(|(name, code)| (name.clone(), i64::from(*code)))
+                .collect(),
+        )
     }
 
     /// 外部对账 · 一：清单里的每个名字都应当是真实存在的属性名。
     ///
-    /// 手工清单长期混进了 noun 名、伪属性和短名别名——它们永远匹配不到任何属性，
-    /// 纯属噪声（`attribute_affects_model` 里就有 40 条 dabacon noun 名）。这里把
-    /// 每张表「对不上 schema 的条目」钉成明确名单：多一条会失败，清掉一条也会失败，
-    /// 后者是提醒同步更新本快照。
-    ///
-    /// `attribute_affects_model` 是 `matches!` 而非常量数组，运行期无法枚举，
-    /// 故不在本测试覆盖范围内。
+    /// 手工清单曾混进 37 条 dabacon noun 名死分支（与 noun 表精确同名、字典与
+    /// 运行库均无同名属性），2026-07-26 已清理（推导见 `output/gen_dchc_fixture.py`）。
+    /// 这里把每张表「对不上 schema 的条目」钉成明确名单：多一条会失败，清掉一条
+    /// 也会失败，后者是提醒同步更新本快照。剩余对不上的条目多为字典有名、但
+    /// 339-noun schema 快照未含属主的真属性，保留。
     #[test]
     fn curated_tables_are_reconciled_against_the_runtime_schema() {
         let runtime = runtime_attribute_names();
@@ -1317,25 +1316,25 @@ mod tests {
         assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "FUNCTION");
         // CHILDREN / NOUN 是元素元数据而非属性；LEVEL 是 LEVE 的别名写法。
         assert_eq!(unmatched(STRUCTURAL_ATTR_NAMES), "CHILDREN, LEVEL, NOUN");
-        // 目录/连接类里的短名与 noun 名，多数可由 att_meta 的 ELEMENT 升级兜住。
+        // 目录/连接类短名：字典有名（如 ADIR/CONN/SPREF），339-noun 快照未含属主，保留。
         assert_eq!(
             unmatched(DEPENDENCY_CASCADE_ATTR_NAMES),
-            "ADIR, BRCO, CONN, DDANGLE, DDAT, DDHEIGHT, DDRADIUS, DDSE, FSPREF, \
-             GMREF, IPARAM, LDIR, PVER, RDIR, SCOM, SCREF, SPCO, SPREF, TMPL"
+            "ADIR, CONN, DDANGLE, DDHEIGHT, DDRADIUS, FSPREF, \
+             GMREF, IPARAM, LDIR, PVER, RDIR, SCREF, SPREF"
         );
 
-        // DirectGeometry 表最脏：70 条对不上 schema，其中相当一部分是被当成属性
-        // 写进来的 dabacon noun 名。先钉住总数，清理是另一件事。
+        // DirectGeometry：31 条 noun 名死分支清理后剩 39 条，均为字典有名但
+        // 快照无属主的真属性（ABOR/ANGF/PARAM/…），钉住总数防再混入。
         let direct = unmatched(DIRECT_GEOMETRY_ATTR_NAMES);
         assert_eq!(
             direct.split(", ").count(),
-            70,
+            39,
             "DIRECT_GEOMETRY 对不上 schema 的条目数漂移：{direct}"
         );
-        for noun_name in ["POHE", "POLYHE", "SEXT", "SPVE"] {
+        for noun_name in ["POHE", "POLYHE", "SEXT", "SPVE", "SCTN", "STWALL"] {
             assert!(
-                direct.contains(noun_name),
-                "{noun_name} 是 noun 名而非属性名，应当仍在待清理名单里"
+                !direct.contains(noun_name),
+                "{noun_name} 是 noun 名死分支，2026-07-26 已从清单移除，不应回流"
             );
         }
     }
@@ -1433,11 +1432,18 @@ mod tests {
         );
     }
     #[test]
-    fn dchc_forced_codes_preserved() {
+    fn dchc_codes_cover_forced_and_dictionary_snapshot() {
+        // 逆向确认的强制码优先。
         assert_eq!(raw_dchc_code("REDRAW"), Some(4));
         assert_eq!(raw_dchc_code("INTUBE"), Some(1));
-        assert_eq!(raw_dchc_code("POS"), None);
+        // 其余走嵌入字典快照：位姿/头端/中性/通用各取一条锚点。
+        assert_eq!(raw_dchc_code("POS"), Some(3));
+        assert_eq!(raw_dchc_code("HBOR"), Some(1));
+        assert_eq!(raw_dchc_code("NAME"), Some(0));
+        assert_eq!(raw_dchc_code("DIAM"), Some(4));
+        // 字典没有的（UDA、未知名）仍是 None。
         assert_eq!(raw_dchc_code("UDA:42"), None);
+        assert_eq!(raw_dchc_code("NO_SUCH_ATTR"), None);
     }
 
     #[test]
