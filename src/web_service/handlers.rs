@@ -11,7 +11,6 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::data_interface::dbnum_state::DbnumState;
 use crate::data_interface::manual_update::load_pending_model_units;
 use crate::data_interface::on_demand_model::UnresolvableRoot;
 use crate::web_service::{ApiError, AppState};
@@ -29,12 +28,20 @@ fn resolve_project(state: &AppState, requested: Option<String>) -> String {
 }
 
 /// GET /api/v1/health
+///
+/// `started_at` 是进程启动时刻——队列不持久，重启后由重扫重建（ADR-011 §4），
+/// 界面靠它说出「服务 xx:xx 重启过，这条队列是按水位重建的」；`gen_spatial_tree`
+/// 关着时房间增量一条不排，界面要说的是「房间增量没开」而不是画一条空泳道
+/// （ADR-011 §8 / rollout 服务端第 7 项）。
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
         "project": state.default_project,
         "sync_live": state.sync_live,
         "version": env!("CARGO_PKG_VERSION"),
+        "started_at": crate::data_interface::task_registry::process_started_at(),
+        "gen_spatial_tree": aios_core::get_db_option().gen_spatial_tree,
+        "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
     }))
 }
 
@@ -165,10 +172,55 @@ pub async fn pending_units(
     Ok(Json(json!({ "units": units })))
 }
 
-/// GET /api/v1/dbnums — 映射 `DbnumState::list_registered`（spec §4.7）。
-pub async fn dbnums(State(_state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let states = DbnumState::list_registered()
+/// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
+///
+/// 登记表 ∪ 项目扫描，每行带 `anomaly` / `blocked` / `excluded`：阻断与排除的库
+/// 压根不入队，队列面板没有它们的行，这里是「这个库的水位为什么一直不动」的
+/// 唯一出处（rollout 服务端第 8 项）。原字段是新形状的子集，旧消费者不受影响。
+pub async fn dbnums(
+    State(state): State<AppState>,
+    Query(query): Query<ProjectReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let project = resolve_project(&state, query.project);
+    let report = state
+        .mgr
+        .dbnum_statuses(&project)
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "dbnums": states })))
+    Ok(Json(json!({ "dbnums": report.dbnums, "warnings": report.warnings })))
+}
+
+/// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
+///
+/// 行按队列序（运行中在前），字段与任务行经 task_id 对得上；`paused` 是界面上
+/// 「队列已暂停 · 不再出队」横幅的数据源。
+pub async fn queue_snapshot(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    Json(json!({ "paused": scheduler.is_paused(), "rows": scheduler.snapshot() }))
+}
+
+/// POST /api/v1/queue/pause — 暂停出队（ADR-011 §9）。
+///
+/// 只挡出队与空闲轮，**正在跑的那条会跑完为止**——服务端没有中止接口，界面
+/// 文案只能说「不再出队」。标志持久化、活过重启：人按暂停多半正是为了
+/// 「别再动数据了，我要查问题 / 改配置 / 重启」。
+pub async fn queue_pause(State(_state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    scheduler
+        .set_paused_persistent(true)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(json!({ "paused": true })))
+}
+
+/// POST /api/v1/queue/resume — 恢复出队并唤醒 worker（ADR-011 §9）。
+pub async fn queue_resume(
+    State(_state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    scheduler
+        .set_paused_persistent(false)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(json!({ "paused": false })))
 }

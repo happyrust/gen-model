@@ -22,9 +22,16 @@
 - **§12（删单飞预检）已落地**：HTTP 409 与 `sync_live` 422、领域层 `sync_live` 检查与
   `ProjectExecGuard` 四处守卫全部退役；`POST /update/execute` 一律 202 返回入队回执
   `{project, scanned, enqueued[], merged[], already_covered[], blocked[], up_to_date, warnings}`。
-- 尚未做：**§9 暂停**的 HTTP 端点与持久化（调度器已有 paused 旗标与语义）；
-  **§10 房间轮详情**（面板/构件/死信分项计数）；`GET /dbnums` 补 `anomaly`/`blocked`；
-  `GET /health` 补进程启动时刻与 `gen_spatial_tree`（rollout 服务端第 5–9 项）。
+- **第二片（rollout 服务端 5–9 项）也已落地**：
+  **§9 暂停**——`POST /queue/pause` / `resume` + `GET /queue` 快照；标志持久化在
+  `queue_control:main`（与水位同库，不进队列表），worker 起跑前恢复，暂停同时挡出队
+  与空闲轮；**§10 房间轮详情**——`TaskEntry.detail` 携带 `{panels, elements,
+  dead_letters}`（`count_room_targets` 分项统计）；`GET /dbnums` 改走
+  `dbnum_statuses`（登记表 ∪ 项目扫描，带 `anomaly`/`blocked`/`excluded`，判定与
+  预览共用 `FileAnomaly::blocks`——五种异常里只有路径迁移不阻断）；`GET /health`
+  补 `started_at`（进程启动时刻，「队列是重建的」靠它）、`gen_spatial_tree` 与
+  `queue_paused`。预览的 `sync_live` 422 一并退役（§12：预览与批次并发时「待应用」
+  可能偏大，界面按快照标注）。
 - 验证：`cargo test --lib` 238 passed / 0 failed（新增 10 条队列层单测）；
   lib/bins × default/http_api 四种编译形态全过。**curl 验收（排队/合并/冻结实况）欠一次**：
   验证当晚 8021 有在跑的旧服务 + 活动客户端，未做本机实跑，留待下次服务重启窗口。

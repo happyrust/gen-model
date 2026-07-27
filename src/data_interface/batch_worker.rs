@@ -47,6 +47,8 @@ pub struct DataBatchTaskResult {
 /// FIFO 串行执行破坏掉。多个入口（`run_cli`、`exec_watcher`、测试）都可能想
 /// 拉起 worker，守卫放在这里而不是约定在调用方。
 pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>) {
+    // 锚定进程启动时刻（/health 的 started_at；ADR-011 §4「队列是重建的」）。
+    let _ = crate::data_interface::task_registry::process_started_at();
     static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let mut newly_started = false;
     STARTED.get_or_init(|| {
@@ -63,6 +65,13 @@ pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>) {
 async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     let scheduler = BatchScheduler::global();
     let registry = TaskRegistry::global();
+    // 暂停是持久化的操作意图（ADR-011 §9）：重启后必须原样恢复，
+    // 否则「别再动数据」的用意会被重启抹掉且毫无提示。
+    match scheduler.restore_persisted_pause().await {
+        Ok(true) => println!("队列处于暂停状态（重启前设置），恢复前不出队、不消化积压"),
+        Ok(false) => {}
+        Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
+    }
     println!("数据批次 worker 已启动（单消费者，队列空时消化积压并收房间轮）");
     loop {
         let ran = drain_queue_until_empty(&mgr).await;
@@ -336,20 +345,22 @@ async fn room_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, a
     if !mgr.db_option.gen_spatial_tree {
         return;
     }
-    let live = match model_update_pending::count_live_room_targets().await {
-        Ok(count) => count,
+    let counts = match model_update_pending::count_room_targets().await {
+        Ok(counts) => counts,
         Err(error) => {
             println!("统计待重算房间目标失败: {error:#}");
             return;
         }
     };
+    let live = counts.live();
     if live == 0 {
         return;
     }
 
     let task_id = TaskRegistry::new_task_id("room");
     let project = mgr.db_option.project_name.clone();
-    registry.insert_running_room_round(&task_id, &project, live as u32);
+    let detail = serde_json::to_value(counts).unwrap_or_default();
+    registry.insert_running_room_round(&task_id, &project, live as u32, detail);
     #[cfg(feature = "http_api")]
     crate::web_service::events::publish(
         crate::web_service::events::Topic::Tasks,
@@ -363,7 +374,10 @@ async fn room_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, a
         }),
     );
     if after_batches {
-        println!("队列已跑空，收一轮房间归属重算（{live} 个目标）");
+        println!(
+            "队列已跑空，收一轮房间归属重算（{live} 个目标：{} 块面板 / {} 个构件，另有 {} 条死信）",
+            counts.panels, counts.elements, counts.dead_letters
+        );
     }
 
     let (state, result_json) = match model_update_pending::drain_rooms(&mgr.db_option).await {

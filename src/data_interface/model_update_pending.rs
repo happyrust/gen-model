@@ -784,25 +784,65 @@ pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
     Ok(done)
 }
 
-/// 还活着（未到重试上限）的待重算房间目标数，供空闲轮决定要不要收房间
-/// 并给 `room_recalc` 任务当 total。
-pub async fn count_live_room_targets() -> anyhow::Result<usize> {
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-             AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER} GROUP ALL;"
-        ))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("count pending room work statement failed: {error}"))?;
+/// 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct RoomTargetCounts {
+    /// 还活着的整间任务数（PANE / 房间节点）。
+    pub panels: usize,
+    /// 还活着的元素任务数。
+    pub elements: usize,
+    /// 已达重试上限的死信数——自动路径不会再碰它们，只有界面能把它们暴露出来。
+    pub dead_letters: usize,
+}
+
+impl RoomTargetCounts {
+    /// 本轮 drain 会处理的目标总数（死信不算）。
+    pub fn live(&self) -> usize {
+        self.panels + self.elements
+    }
+}
+
+/// 统计待重算房间目标，供空闲轮决定要不要收房间并给 `room_recalc` 任务当
+/// total 与详情。
+pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
+    #[derive(serde::Deserialize)]
+    struct ActionRow {
+        action: String,
+        c: usize,
+    }
     #[derive(serde::Deserialize)]
     struct CountRow {
         c: usize,
     }
-    let rows: Vec<CountRow> = response
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT action, count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+             AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER} GROUP BY action;\
+             SELECT count() AS c FROM {TABLE} WHERE (attempts?:0) >= {MAX_ATTEMPTS} \
+             {ROOM_ACTION_FILTER} GROUP ALL;"
+        ))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("count pending room work statement failed: {error}"))?;
+    let live: Vec<ActionRow> = response
         .take(0)
         .map_err(|error| anyhow::anyhow!("decode pending room count failed: {error}"))?;
-    Ok(rows.first().map(|r| r.c).unwrap_or(0))
+    let dead: Vec<CountRow> = response
+        .take(1)
+        .map_err(|error| anyhow::anyhow!("decode dead room count failed: {error}"))?;
+
+    let mut counts = RoomTargetCounts {
+        dead_letters: dead.first().map(|r| r.c).unwrap_or(0),
+        ..Default::default()
+    };
+    for row in live {
+        match row.action.as_str() {
+            "room_recalc_panel" => counts.panels = row.c,
+            "room_recalc_element" => counts.elements = row.c,
+            other => anyhow::bail!("房间目标计数遇到未知 action: {other}"),
+        }
+    }
+    Ok(counts)
 }
 
 /// 第三阶段：房间归属重算。

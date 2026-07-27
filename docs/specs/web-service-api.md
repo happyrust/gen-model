@@ -65,7 +65,18 @@
 ## 4. REST 接口定义
 
 ### 4.1 `GET /api/v1/health`
-存活探针。响应：`{ "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3" }`。
+存活探针。响应：
+
+```json
+{ "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
+  "started_at": "2026-07-27T21:02:11+08:00", "gen_spatial_tree": false, "queue_paused": false }
+```
+
+- `started_at`：进程启动时刻。队列不持久、重启由重扫重建（ADR-011 §4），界面靠它
+  说出「服务 xx:xx 重启过，这条队列是按水位重建的；排队时长从重启起算」。
+- `gen_spatial_tree`：关着时房间增量一条不排，界面要说「房间增量没开」，
+  不许显示一条永远为 0 的泳道（ADR-011 §8）。
+- `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
 
 ### 4.2 `POST /api/v1/update/preview` — 手动更新预览
 - 映射：`AiosDBManager::preview_manual_update(project)`（只读，可能刷新扫描观察字段，故用 POST）。
@@ -87,7 +98,9 @@
   "up_to_date": false
 }
 ```
-- 错误：422（`sync_live=true`）、500（项目目录不存在等）。
+- 错误：500（项目目录不存在等）。`sync_live=true` 时同样可用（ADR-011 §12 合流：
+  预览与数据批次并发时「待应用」可能偏大——正在被应用的会话也会算进去，界面按
+  队列快照里的运行中批次数标注「N 个库正在应用，数字可能偏大」。
 
 ### 4.3 `POST /api/v1/update/execute` — 扫描 + 入队（ADR-011 合流后）
 - 映射：`AiosDBManager::enqueue_manual_update(project)`；执行由进程内唯一的数据批次
@@ -148,8 +161,37 @@
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。
 
-### 4.7 `GET /api/v1/dbnums` — 水位状态
-- 映射：`DbnumState::list_registered()`，响应每个 dbnum 的 `db_type / file_name / file_path / applied_sesno / file_latest_sesno`，前端据此展示"是否有待更新会话"。
+### 4.7 `GET /api/v1/dbnums` — 水位状态 + 阻断/排除（rollout 服务端第 8 项）
+- 映射：`AiosDBManager::dbnum_statuses(project)`（登记表 ∪ 项目扫描；只读头部与
+  最新会话号，不收集增量窗口）。可选 `?project=`，缺省当前项目。
+- 响应：`{ "dbnums": [...], "warnings": [...] }`，每行：
+
+```json
+{ "dbnum": 8003, "db_type": "DESI", "file_name": "ams8003_0001", "file_path": "...",
+  "file_size": 57948160, "file_latest_sesno": 812, "applied_sesno": 1005,
+  "initialized": true,
+  "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
+  "blocked": true, "excluded": false }
+```
+
+- `anomaly` 五种（spec §文件异常）：`rollback` / `path_migrated` / `type_changed` /
+  `duplicate`（带 `paths[]` 交给人挑）/ `missing`。**只有 `path_migrated` 不阻断**。
+- `blocked`：阻断的库压根不入队，队列面板没有它们的行——这里是「这个库的水位为
+  什么一直不动」的唯一出处。`excluded`：不在本期执行范围（`manual_db_nums` /
+  类型门控），与阻断不是一回事，界面上不许合成一行。
+- 旧字段是新形状的子集，既有消费者不受影响。
+
+### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
+- `GET /queue` → `{ "paused": false, "rows": [{ "task_id": "db-…", "dbnum": 7997,
+  "db_type": "DESI", "state": "running", "start_sesno": 85, "end_sesno": 92 }, …] }`：
+  队列快照，行按队列序（运行中在前），经 `task_id` 与 §4.4 的任务行对得上。
+- `POST /queue/pause` → `{ "paused": true }`：**只挡出队与空闲轮**，正在跑的那条会
+  跑完为止（服务端没有中止接口，界面文案只能说「不再出队」）。标志持久化在
+  `queue_control:main`（与水位同库，不进队列表），**活过重启**：重启后 worker 起跑
+  前恢复它，队列重建完成也不开吃，直到 `resume`。
+- `POST /queue/resume` → `{ "paused": false }`：恢复出队并立即唤醒 worker。
+- 没有单条取消：队列是派生态，从队里移掉一行不会推水位，下一轮轮询照样把它发现
+  回来——那是个会自己撤销的按钮（ADR-011 §9）。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
@@ -189,12 +231,13 @@
 - 注册表住在 feature 无关层（`data_interface::task_registry`，进程级单例）；`web_service`
   只是它的 HTTP 视图。`TaskEntry { task_id, kind, state, project, created_at, started_at?,
   finished_at?, dbnum?, db_type?, start_sesno?, end_sesno?, units_done?, total_units?,
-  events_seen, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
+  events_seen, detail?, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
   「已排」与「已用」是两个起点。
 - 状态机：`queued -> running -> succeeded | partial | failed`。kind 三种：
   `data_batch`（一行 = 一个数据批次；同一 dbnum 至多两行——运行中一行 + 排队中一行）、
-  `room_recalc`（队列跑空时收的一轮房间收敛，创建即 running）、`manual_update`（已退役，
-  不再产生新行）。
+  `room_recalc`（队列跑空时收的一轮房间收敛，创建即 running；`detail` 携带
+  `{ panels, elements, dead_letters }` 分项计数，done/total 用 `units_done`/`total_units`，
+  ADR-011 §10）、`manual_update`（已退役，不再产生新行）。
 - TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/ `room-…`（房间轮）。
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建

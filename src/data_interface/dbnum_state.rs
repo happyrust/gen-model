@@ -108,6 +108,16 @@ pub enum FileAnomaly {
     Missing { path: String },
 }
 
+impl FileAnomaly {
+    /// 该异常是否阻断执行（不入队、不应用）。
+    ///
+    /// 五种异常里**只有路径迁移不阻断**——它是良性搬家，登记路径跟着更新即可
+    /// （QUEUE-FIELD-MAP §3「本期不执行」一格的判定，从预览里提出来复用）。
+    pub fn blocks(&self) -> bool {
+        !matches!(self, FileAnomaly::PathMigrated { .. })
+    }
+}
+
 /// Resolve the effective applied watermark from the three ordered sources.
 ///
 /// Pure decision function (ADR-001 §兼容迁移). Priority:

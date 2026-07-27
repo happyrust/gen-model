@@ -2046,6 +2046,34 @@ pub struct ManualUpdatePreview {
     pub up_to_date: bool,
 }
 
+/// `GET /dbnums` 的一行：登记状态 + 文件异常 + 阻断/排除标志。
+#[derive(Debug, Clone, Serialize)]
+pub struct DbnumStatus {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub file_size: u64,
+    pub file_latest_sesno: i32,
+    pub applied_sesno: i32,
+    pub initialized: bool,
+    /// 五种文件异常之一（会话号回退 / 路径迁移 / 类型变化 / 同号重复 / 文件缺失）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomaly: Option<FileAnomaly>,
+    /// 阻断：不入队、不应用，水位不动。五种异常里只有路径迁移不阻断。
+    pub blocked: bool,
+    /// 排除在本期执行范围之外（`manual_db_nums` / 类型门控）——与阻断不是一回事，
+    /// 界面上不许合成一行（QUEUE-FIELD-MAP §3）。
+    pub excluded: bool,
+}
+
+/// [`AiosDBManager::dbnum_statuses`] 的整体结果。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DbnumStatusReport {
+    pub dbnums: Vec<DbnumStatus>,
+    pub warnings: Vec<String>,
+}
+
 /// A candidate DB file discovered during the project scan.
 ///
 /// `pub(crate)`：数据批次 worker 在冻结点重扫时也要构造它（rollout 第九节第 6 条，
@@ -2322,18 +2350,15 @@ impl AiosDBManager {
 
     /// Read-only preview of the current project's pending manual update.
     ///
-    /// Rejects execution when `sync_live = true` (the automatic file watcher owns
-    /// updates then). Scans ONLY the current project's directory — it never walks
-    /// other `included_projects`. Never writes element data, models or
-    /// `applied_sesno`; it may refresh scan-observation fields only.
+    /// `sync_live = true` 时同样可用（ADR-011 §12：合流后手动与自动不再互斥）；
+    /// 预览与数据批次并发时结果可能偏大——正在被应用的会话也会算进「待应用」，
+    /// 界面按快照里的运行中批次数标注即可。Scans ONLY the current project's
+    /// directory — it never walks other `included_projects`. Never writes element
+    /// data, models or `applied_sesno`; it may refresh scan-observation fields only.
     pub async fn preview_manual_update(
         &self,
         project: &str,
     ) -> anyhow::Result<ManualUpdatePreview> {
-        if self.db_option.sync_live.unwrap_or(false) {
-            anyhow::bail!("sync_live=true 时不允许手动更新（请改用自动更新模式）");
-        }
-
         let project_dir = self
             .db_option
             .get_project_path(project)
@@ -2425,6 +2450,115 @@ impl AiosDBManager {
             pending_model_retries,
             warnings,
         })
+    }
+
+    /// `GET /dbnums` 的富化视图：登记表 ∪ 项目扫描，带 `anomaly` / `blocked` /
+    /// `excluded`（rollout 服务端第 8 项；QUEUE-FIELD-MAP §3「本期不执行」一格）。
+    ///
+    /// 阻断与排除的库压根不入队，队列面板里没有它们的行——而阻断恰恰是「这个库
+    /// 的水位为什么一直不动」的唯一解释，自动同步常开时人可能从不点预览，一个库
+    /// 能默默阻断好几周。判定与预览同源（`check_file_against_state` +
+    /// [`FileAnomaly::blocks`]），只扫头部与最新会话号、不收集增量窗口，纯读。
+    pub async fn dbnum_statuses(&self, project: &str) -> anyhow::Result<DbnumStatusReport> {
+        let mut report = DbnumStatusReport::default();
+        let Some(project_dir) = self.db_option.get_project_path(project) else {
+            anyhow::bail!("无法解析项目目录: {project}");
+        };
+        if !project_dir.exists() {
+            anyhow::bail!("项目目录不存在: {}", project_dir.display());
+        }
+
+        let by_dbnum = self.scan_project_candidates(&project_dir, &mut report.warnings);
+        let registered = DbnumState::list_registered().await?;
+        let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
+        let project_prefix = format!(
+            "{}\\",
+            project_dir
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_lowercase()
+                .trim_end_matches('\\')
+        );
+
+        for state in registered {
+            let excluded = !self.should_process_database(&state.db_type, state.dbnum);
+            let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
+            let in_this_project =
+                !state.file_path.is_empty() && stored_path.starts_with(&project_prefix);
+
+            let anomaly = if let Some(candidates) = by_dbnum.get(&state.dbnum) {
+                if candidates.len() > 1 {
+                    Some(FileAnomaly::Duplicate {
+                        paths: candidates
+                            .iter()
+                            .map(|c| c.path.display().to_string())
+                            .collect(),
+                    })
+                } else {
+                    let cand = &candidates[0];
+                    check_file_against_state(
+                        Some(&state.db_type).filter(|s| !s.is_empty()).map(|s| s.as_str()),
+                        Some(&state.file_path).filter(|s| !s.is_empty()).map(|s| s.as_str()),
+                        state.applied_sesno,
+                        &cand.db_type,
+                        &cand.path.display().to_string(),
+                        cand.file_latest_sesno,
+                    )
+                }
+            } else if in_this_project && !excluded {
+                // 排除的库不参与扫描，「登记了却没扫到」对它不构成 Missing。
+                Some(FileAnomaly::Missing {
+                    path: state.file_path.clone(),
+                })
+            } else {
+                None
+            };
+            let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+            report.dbnums.push(DbnumStatus {
+                dbnum: state.dbnum,
+                db_type: state.db_type,
+                file_name: state.file_name,
+                file_path: state.file_path,
+                file_size: state.file_size,
+                file_latest_sesno: state.file_latest_sesno,
+                applied_sesno: state.applied_sesno,
+                initialized: state.initialized,
+                anomaly,
+                blocked,
+                excluded,
+            });
+        }
+
+        // 扫到了、但从未登记过的库（从未解析）：水位 0，同样要有一行。
+        for (dbnum, candidates) in &by_dbnum {
+            if registered_dbnums.contains(dbnum) {
+                continue;
+            }
+            let first = &candidates[0];
+            let anomaly = (candidates.len() > 1).then(|| FileAnomaly::Duplicate {
+                paths: candidates
+                    .iter()
+                    .map(|c| c.path.display().to_string())
+                    .collect(),
+            });
+            let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+            report.dbnums.push(DbnumStatus {
+                dbnum: *dbnum,
+                db_type: first.db_type.clone(),
+                file_name: first.file_name.clone(),
+                file_path: first.path.display().to_string(),
+                file_size: first.file_size,
+                file_latest_sesno: first.file_latest_sesno,
+                applied_sesno: 0,
+                initialized: false,
+                anomaly,
+                blocked,
+                excluded: false,
+            });
+        }
+
+        report.dbnums.sort_by_key(|d| d.dbnum);
+        Ok(report)
     }
 
     /// Pass 1: walk the project directory and group candidate DB files by `dbnum`.
@@ -2560,10 +2694,7 @@ impl AiosDBManager {
             return Err(anyhow::anyhow!("记录扫描观察失败: {e}"));
         }
 
-        let blocked = matches!(
-            anomaly,
-            Some(FileAnomaly::Rollback { .. } | FileAnomaly::TypeChanged { .. })
-        );
+        let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
 
         let mut preview = DbnumPreview {
             dbnum: cand.db_num,
