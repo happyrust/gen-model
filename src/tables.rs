@@ -137,9 +137,16 @@ pub fn gen_create_project_mdb_sql() -> String {
 }
 
 pub fn gen_insert_project_mdb_sql(att_map: &NamedAttrMap) -> String {
-    let Some(refno) = att_map.get_refno().map(|x| x.refno()) else { return "".to_string(); };
+    let Some(refno) = att_map.get_refno().map(|x| x.refno()) else {
+        return "".to_string();
+    };
     let name = att_map.get_name().unwrap_or("".to_string());
-    format!("insert ignore into {PDMS_PROJECT_MDB_TABLE} (ID, MDB_NAME, REFNO) values ({},'{}','`{}`');", refno.0, name, refno.to_pdms_str())
+    format!(
+        "insert ignore into {PDMS_PROJECT_MDB_TABLE} (ID, MDB_NAME, REFNO) values ({},'{}','`{}`');",
+        refno.0,
+        name,
+        refno.to_pdms_str()
+    )
 }
 
 #[inline]

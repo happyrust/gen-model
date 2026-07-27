@@ -455,4 +455,103 @@ mod tests {
             r"C:\\proj\\d\'esi".to_string()
         );
     }
+
+    /// F6 · T605（live）：扫描观察落库，但**永不**触碰应用水位。
+    ///
+    /// 上面那批纯函数用例已经覆盖了 Rollback / PathMigrated 的判定口径；这里补的是
+    /// 落库那一半：`record_scan` 只写文件身份与观察字段，`applied_sesno` 必须纹丝不动
+    /// （ADR-001）。换成更旧的会话文件时同样不得让水位倒退，只把观察值照实记下来，
+    /// 由调用方拿判定结果去阻断该 dbnum。
+    ///
+    /// 用 `999_999_001` 这个不会出现在真实工程里的 dbnum，跑完即清理。
+    #[tokio::test]
+    #[ignore = "manual live: requires the configured Surreal database"]
+    async fn live_record_scan_never_moves_the_applied_watermark() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let dbnum = 999_999_001u32;
+        let cleanup = format!("delete {WATERMARK_TABLE}:{dbnum};");
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("clear stale fixture")
+            .check()
+            .expect("valid pre-cleanup");
+
+        // 先把水位建立在 50——模拟这个 dbnum 已经成功应用到第 50 个会话。
+        DbnumState::advance_applied(dbnum, 50)
+            .await
+            .expect("establish watermark");
+
+        // 扫描到文件被移动且带来更新的会话：身份字段该更新，水位不该动。
+        DbnumState::record_scan(&FileObservation {
+            dbnum,
+            db_type: "DESI".to_string(),
+            file_name: "zz_t605.dbnum".to_string(),
+            file_path: r"D:\zz_t605\moved\desi_1".to_string(),
+            file_size: 4096,
+            file_latest_sesno: 60,
+            file_modified_at: None,
+        })
+        .await
+        .expect("record moved-file scan");
+
+        let moved = DbnumState::read(dbnum)
+            .await
+            .expect("read state after move")
+            .expect("state exists");
+
+        // 再扫到一个更旧的文件（回退观察）：观察值照实写，水位仍不得倒退。
+        DbnumState::record_scan(&FileObservation {
+            dbnum,
+            db_type: "DESI".to_string(),
+            file_name: "zz_t605.dbnum".to_string(),
+            file_path: r"D:\zz_t605\moved\desi_1".to_string(),
+            file_size: 2048,
+            file_latest_sesno: 10,
+            file_modified_at: None,
+        })
+        .await
+        .expect("record rolled-back scan");
+
+        let rolled_back = DbnumState::read(dbnum)
+            .await
+            .expect("read state after rollback")
+            .expect("state exists");
+
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("cleanup fixture")
+            .check()
+            .expect("valid cleanup");
+
+        assert_eq!(moved.file_path, r"D:\zz_t605\moved\desi_1");
+        assert_eq!(moved.file_latest_sesno, 60);
+        assert_eq!(moved.applied_sesno, 50, "预览扫描不得推进 applied_sesno");
+
+        assert_eq!(
+            rolled_back.file_latest_sesno, 10,
+            "观察字段应如实记录更旧的文件"
+        );
+        assert_eq!(
+            rolled_back.applied_sesno, 50,
+            "回退文件不得让 applied_sesno 倒退"
+        );
+
+        // 判定口径与落库状态一致：这一观察应被判为 Rollback，由调用方阻断该 dbnum。
+        assert!(matches!(
+            check_file_against_state(
+                Some("DESI"),
+                Some(r"D:\zz_t605\moved\desi_1"),
+                rolled_back.applied_sesno,
+                "DESI",
+                r"D:\zz_t605\moved\desi_1",
+                rolled_back.file_latest_sesno,
+            ),
+            Some(FileAnomaly::Rollback { .. })
+        ));
+    }
 }

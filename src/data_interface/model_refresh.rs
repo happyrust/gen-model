@@ -18,6 +18,14 @@ use aios_core::pdms_types::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::gen_all_geos_data;
 
+#[cfg(test)]
+static FAIL_GENERATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn fail_generations_for_test(count: usize) {
+    FAIL_GENERATIONS.store(count, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Deep module: one interface, swappable refresh adapters.
 pub struct ModelRefreshPolicy;
 
@@ -30,6 +38,17 @@ impl ModelRefreshPolicy {
     ) -> anyhow::Result<()> {
         if roots.is_empty() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if FAIL_GENERATIONS
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            anyhow::bail!("injected model generation failure");
         }
         let mut db_option = mgr.db_option.clone();
         db_option.gen_model = true;

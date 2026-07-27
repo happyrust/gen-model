@@ -39,6 +39,16 @@ pub struct DbOptionExt {
     /// [`crate::data_interface::generation_root::resolve_delivery_unit_types_from_config`]。
     #[serde(default)]
     pub append_delivery_unit_types: Option<Vec<String>>,
+
+    /// Web 服务（REST + WebSocket）监听地址，如 `0.0.0.0:8020`。
+    /// 未配置时即使编译了 `http_api` feature 也不启动服务。
+    #[serde(default)]
+    pub http_api_addr: Option<String>,
+
+    /// Web 服务允许的 CORS origin 列表；`["*"]` 表示放开（开发期）。
+    /// 未配置时默认放开。
+    #[serde(default)]
+    pub http_api_cors: Option<Vec<String>>,
 }
 
 impl Deref for DbOptionExt {
@@ -65,6 +75,8 @@ impl From<DbOption> for DbOptionExt {
             http_port: None,
             delivery_unit_types: None,
             append_delivery_unit_types: None,
+            http_api_addr: None,
+            http_api_cors: None,
         }
     }
 }
@@ -87,6 +99,10 @@ struct DbOptionExtFields {
     delivery_unit_types: Option<Vec<String>>,
     #[serde(default)]
     append_delivery_unit_types: Option<Vec<String>>,
+    #[serde(default)]
+    http_api_addr: Option<String>,
+    #[serde(default)]
+    http_api_cors: Option<Vec<String>>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
@@ -112,5 +128,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_port: ext.http_port,
         delivery_unit_types: ext.delivery_unit_types.clone(),
         append_delivery_unit_types: ext.append_delivery_unit_types.clone(),
+        http_api_addr: ext.http_api_addr.clone(),
+        http_api_cors: ext.http_api_cors.clone(),
     }
 }

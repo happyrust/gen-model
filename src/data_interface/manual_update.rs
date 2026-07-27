@@ -42,10 +42,12 @@ use aios_core::pdms_types::RefU64;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefnoEnum, SUL_DB};
 use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info, parse_file_db_basic_data};
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
+use surrealdb::sql::Thing;
 
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
+use crate::data_interface::helper::pe_thing_to_refno;
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
@@ -845,10 +847,16 @@ pub async fn rebuild_reverse_index() -> anyhow::Result<ReverseIndexRebuildReport
         let mut response = SUL_DB
             .query("SELECT VALUE id FROM pe WHERE !deleted;")
             .await
-            .map_err(|e| anyhow::anyhow!("load reverse-index source ids failed: {e}"))?;
-        let source_ids: Vec<RefnoEnum> = response
-            .take(0)
+            .map_err(|e| anyhow::anyhow!("load reverse-index source ids failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("load reverse-index source ids statement failed: {e}"))?;
+        let source_ids = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
             .map_err(|e| anyhow::anyhow!("decode reverse-index source ids failed: {e}"))?;
+        let source_ids = source_ids
+            .into_iter()
+            .map(pe_thing_to_refno)
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let mut scanned_elements = 0usize;
         let mut orphan_noun_elements = 0usize;
@@ -898,7 +906,7 @@ pub async fn rebuild_reverse_index() -> anyhow::Result<ReverseIndexRebuildReport
             loop {
                 let sql = format!(
                     "SELECT * FROM {noun} \
-                     WHERE REFNO != NONE AND !record::exists(REFNO) \
+                     WHERE type::is::record(REFNO) AND !record::exists(REFNO) \
                      LIMIT {READ_CHUNK} START {start};"
                 );
                 let mut response = SUL_DB.query(&sql).await.map_err(|e| {
@@ -993,9 +1001,9 @@ async fn fetch_ref_rev_edges(
     #[derive(serde::Deserialize)]
     struct Row {
         #[serde(rename = "in")]
-        referrer: RefnoEnum,
+        referrer: Thing,
         #[serde(rename = "out")]
-        referenced: RefnoEnum,
+        referenced: Thing,
     }
     const QUERY_CHUNK: usize = 500;
 
@@ -1012,7 +1020,12 @@ async fn fetch_ref_rev_edges(
         );
         let mut response = SUL_DB.query(&sql).await?;
         let rows: Vec<Row> = response.take(0)?;
-        edges.extend(rows.into_iter().map(|r| (r.referrer, r.referenced)));
+        for row in rows {
+            edges.push((
+                pe_thing_to_refno(row.referrer)?,
+                pe_thing_to_refno(row.referenced)?,
+            ));
+        }
     }
     Ok(edges)
 }
@@ -1484,10 +1497,38 @@ async fn resolve_zone_rollup(
     build_zone_rollup(&snap, details, units)
 }
 
+/// Registered dbnums whose db_type is known and is NOT `DESI` (CATA / SYST /
+/// DICT / …). Exclusion set on purpose: a row with a missing db_type keeps the
+/// conservative design-side treatment, so a legacy watermark record can only
+/// over-regenerate, never drop a cascade root.
+async fn load_non_design_dbnums() -> anyhow::Result<HashSet<u32>> {
+    #[derive(Deserialize)]
+    struct Row {
+        dbnum: Option<u32>,
+    }
+    let table = crate::data_interface::dbnum_state::WATERMARK_TABLE;
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT dbnum FROM {table} WHERE db_type != NONE AND db_type != '' \
+             AND db_type != 'DESI';"
+        ))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("load non-design dbnums statement failed: {error}"))?;
+    let rows: Vec<Row> = response.take(0)?;
+    Ok(rows.into_iter().filter_map(|row| row.dbnum).collect())
+}
+
 /// Re-expand a deferred reverse-cascade seed against the current graph. The
 /// walk is deterministic, deduplicated, and cycle-safe; each discovered
 /// referrer is resolved through the same generation-root authority as normal
 /// incremental planning.
+///
+/// Only design-database referrers become generation roots. Catalogue/spec
+/// intermediates (e.g. the SPCO between an edited SCOM and its consumers) are
+/// walked through but never rooted: their catalogue owner chain (SELE/SPEC/…)
+/// would otherwise be mistaken for a normal-granularity root and enqueue
+/// junk regen work that fails forever.
 pub(crate) async fn expand_live_reverse_cascade(
     seed: RefnoEnum,
 ) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
@@ -1496,6 +1537,7 @@ pub(crate) async fn expand_live_reverse_cascade(
     };
 
     let unit_types = configured_delivery_unit_types();
+    let non_design_dbnums = load_non_design_dbnums().await?;
     let mut pending = vec![seed];
     let mut visited = HashSet::from([seed]);
     let mut roots = BTreeMap::new();
@@ -1511,10 +1553,17 @@ pub(crate) async fn expand_live_reverse_cascade(
             if !visited.insert(referrer) {
                 continue;
             }
+            pending.push(referrer);
+            // No pe row → no owner chain → no root; skip the resolve round-trip.
+            let Some(pe) = aios_core::get_pe(referrer).await? else {
+                continue;
+            };
+            if non_design_dbnums.contains(&(pe.dbnum as u32)) {
+                continue;
+            }
             if let Some(root) = resolve_live_element_generation_root(referrer, &unit_types).await? {
                 roots.insert(root.root.to_pdms_str(), root);
             }
-            pending.push(referrer);
         }
     }
     Ok(roots.into_values().collect())
@@ -1875,6 +1924,20 @@ pub fn aggregate_manual_status(
     }
 }
 
+fn include_model_side_effect_failure(
+    status: ManualUpdateStatus,
+    failed: bool,
+) -> ManualUpdateStatus {
+    if !failed {
+        return status;
+    }
+    match status {
+        ManualUpdateStatus::Success => ManualUpdateStatus::Partial,
+        ManualUpdateStatus::UpToDate => ManualUpdateStatus::Failed,
+        other => other,
+    }
+}
+
 /// Per-process guard: one manual update per project at a time (spec §可用条件).
 static EXECUTING_PROJECTS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
@@ -2006,17 +2069,19 @@ fn baseline_sync_options(
     options
 }
 
-fn baseline_needs_full_parse(pe_count: usize, expected_count: usize) -> bool {
-    pe_count != expected_count
+fn baseline_needs_full_parse(pe_count: usize, applied_sesno: i32) -> bool {
+    pe_count == 0 || applied_sesno == 0
 }
 
 fn baseline_stats_need_rebuild(pe_count: usize, info_count: usize) -> bool {
     pe_count != info_count
 }
 
-fn expected_baseline_pe_count(project: &str, candidate: &FileCandidate) -> anyhow::Result<usize> {
-    let db_basic = parse_file_db_basic_data(&candidate.path, &candidate.file_name, project)?;
-    Ok(db_basic.children_map.len().saturating_sub(1))
+/// `Some(0)` means this run's full parse succeeded and confirmed the db file
+/// holds no business elements (root-only, e.g. an empty DESIGN db) — a
+/// legitimate baseline. `None` (no parse ran) or a positive count are not.
+fn baseline_parse_confirmed_empty(parsed_count: Option<usize>) -> bool {
+    parsed_count == Some(0)
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -2083,11 +2148,12 @@ impl AiosDBManager {
             Ok((pe_count, info_count))
         }
 
-        let expected_count = expected_baseline_pe_count(project, cand)?;
+        let applied_sesno = DbnumState::applied_sesno(cand.db_num).await?;
         let (mut count, mut info_count) = baseline_counts(cand.db_num).await?;
-        if baseline_needs_full_parse(count, expected_count) {
+        let mut parsed_count = None;
+        if baseline_needs_full_parse(count, applied_sesno) {
             let options = baseline_sync_options(&self.db_option, &cand.file_name, cand.db_num);
-            crate::versioned_db::database::sync_total_async_threaded(
+            let parsed_counts = crate::versioned_db::database::sync_total_async_threaded(
                 &options,
                 project,
                 Arc::new(dashmap::DashSet::new()),
@@ -2095,6 +2161,12 @@ impl AiosDBManager {
                 100,
             )
             .await?;
+            parsed_count = Some(*parsed_counts.get(&cand.db_num).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "dbnum={} 基线解析未返回目标文件结果；不推进 applied_sesno",
+                    cand.db_num
+                )
+            })?);
             (count, info_count) = baseline_counts(cand.db_num).await?;
         } else if baseline_stats_need_rebuild(count, info_count) {
             crate::versioned_db::database::rebuild_dbnum_info_from_pe(
@@ -2106,6 +2178,13 @@ impl AiosDBManager {
             (count, info_count) = baseline_counts(cand.db_num).await?;
         }
         if count == 0 {
+            if baseline_parse_confirmed_empty(parsed_count) {
+                // 空库（仅根元素，如 TEST dbnum=1/TES500）：全量解析成功但确实
+                // 没有业务元素。这是合法基线——必须推进水位，否则该 dbnum 会在
+                // 之后每次手动执行中反复以失败批次出现并阻塞增量窗口。
+                DbnumState::advance_applied(cand.db_num, cand.file_latest_sesno).await?;
+                return Ok(0);
+            }
             anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", cand.db_num);
         }
         if count != info_count {
@@ -2116,12 +2195,14 @@ impl AiosDBManager {
                 info_count
             );
         }
-        if count != expected_count {
+        if let Some(parsed_count) = parsed_count
+            && count != parsed_count
+        {
             anyhow::bail!(
-                "dbnum={} 基线不完整: PE={} 文件索引预期={}; 不推进 applied_sesno",
+                "dbnum={} 基线不完整: PE={} 本次成功解析={}; 不推进 applied_sesno",
                 cand.db_num,
                 count,
-                expected_count
+                parsed_count
             );
         }
 
@@ -2536,6 +2617,20 @@ impl AiosDBManager {
             new_units.extend(units);
         }
 
+        // Expand deferred cascades before loading regen work so recovered roots
+        // are generated in this same manual run. Transform/delete work is also
+        // safe to consume before root generation.
+        let model_side_effect_failed = if let Err(e) =
+            crate::data_interface::model_update_pending::drain_non_regen(self).await
+        {
+            result.warnings.push(format!(
+                "执行位姿/删除/级联模型任务失败（已保留待重试）: {e}"
+            ));
+            true
+        } else {
+            false
+        };
+
         // Merge with persisted pending retries: retry-only runs work with zero
         // new sessions, and a re-affected unit keeps exactly one latest task.
         let pending = match load_pending_model_units().await {
@@ -2614,13 +2709,10 @@ impl AiosDBManager {
             });
         }
 
-        if let Err(e) = crate::data_interface::model_update_pending::drain_non_regen(self).await {
-            result
-                .warnings
-                .push(format!("执行位姿/删除模型任务失败（可重试）: {e}"));
-        }
-
-        result.status = aggregate_manual_status(&result.batches, &result.units);
+        result.status = include_model_side_effect_failure(
+            aggregate_manual_status(&result.batches, &result.units),
+            model_side_effect_failed,
+        );
         result
     }
 
@@ -2756,8 +2848,8 @@ impl AiosDBManager {
             },
         );
 
-        // Collect the window once for unit resolution, and snapshot the OLD
-        // ownership graph BEFORE anything persists.
+        // Collect the window ONCE and hand it to the pipeline so the file is not
+        // parsed twice; snapshot the OLD ownership graph BEFORE anything persists.
         let mut batch = DataBatchResult {
             dbnum,
             db_type: cand.db_type.clone(),
@@ -2770,44 +2862,8 @@ impl AiosDBManager {
             changed_elements: 0,
         };
 
-        let pre_state = match IncrementPipeline::collect_changes(&cand.path, plan.range.clone()) {
-            Ok(range_eles) => {
-                batch.merged_sesnos = sessions_merged_after(
-                    &range_eles.keys().copied().collect::<Vec<_>>(),
-                    previous_observed,
-                );
-                batch.changed_elements = range_eles.values().map(|v| v.len()).sum();
-
-                if cand.db_type == "DESI" {
-                    let details = merge_net_change_details(&range_eles);
-                    let (unit_summaries, _no_generation, unit_warnings) = match resolve_unit_rollup(
-                        dbnum,
-                        &range_eles,
-                        &details,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let (units, no_generation, mut unit_warnings) =
-                                resolve_unit_rollup_without_reverse_index(
-                                    dbnum,
-                                    &range_eles,
-                                    &details,
-                                )
-                                .await;
-                            unit_warnings.push(format!(
-                                    "dbnum={dbnum}: reverse-reference lookup deferred to durable cascade work: {error:#}"
-                                ));
-                            (units, no_generation, unit_warnings)
-                        }
-                    };
-                    warnings.extend(unit_warnings);
-                    Some(unit_summaries)
-                } else {
-                    None
-                }
-            }
+        let collected = match IncrementPipeline::collect_changes(&cand.path, plan.range.clone()) {
+            Ok(range_eles) => range_eles,
             Err(e) => {
                 batch.message = Some(format!("读取增量数据失败: {e}"));
                 emit(
@@ -2822,6 +2878,36 @@ impl AiosDBManager {
             }
         };
 
+        batch.merged_sesnos = sessions_merged_after(
+            &collected.keys().copied().collect::<Vec<_>>(),
+            previous_observed,
+        );
+        batch.changed_elements = collected.values().map(|v| v.len()).sum();
+
+        let pre_state = if cand.db_type == "DESI" {
+            let details = merge_net_change_details(&collected);
+            let (unit_summaries, _no_generation, unit_warnings) = match resolve_unit_rollup(
+                dbnum, &collected, &details,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let (units, no_generation, mut unit_warnings) =
+                        resolve_unit_rollup_without_reverse_index(dbnum, &collected, &details)
+                            .await;
+                    unit_warnings.push(format!(
+                            "dbnum={dbnum}: reverse-reference lookup deferred to durable cascade work: {error:#}"
+                        ));
+                    (units, no_generation, unit_warnings)
+                }
+            };
+            warnings.extend(unit_warnings);
+            Some(unit_summaries)
+        } else {
+            None
+        };
+
         // Apply through the shared pipeline: persist + datacenter side meta +
         // watermark advance on ITS success path only (per-file isolation).
         let mut apply_map = IndexMap::new();
@@ -2833,7 +2919,11 @@ impl AiosDBManager {
                 cand.db_type.clone(),
             ),
         );
-        let incr = IncrementPipeline::new().apply(apply_map).await;
+        let mut precollected = IndexMap::new();
+        precollected.insert(cand.path.clone(), (plan.range.clone(), collected));
+        let incr = IncrementPipeline::new()
+            .apply_with_precollected(apply_map, precollected)
+            .await;
         warnings.extend(incr.warnings.iter().map(|w| format!("dbnum={dbnum}: {w}")));
 
         let mut units = Vec::new();
@@ -2902,6 +2992,38 @@ fn fill_change_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `execute_one_dbnum` 曾经收集一次增量窗口只为算 `changed_elements` 和 DESI 单元
+    /// 归并，把结果丢掉后 `IncrementPipeline::apply` 内部又把**同一文件、同一窗口**
+    /// 完整解析第二遍。非 DESI 库（SYST/CATA/DICT）尤其亏——第一趟整份结果只换来两个
+    /// 标量；实测 dbnum=250206 单趟 collect 就要 5 分多钟。
+    ///
+    /// 修法是把已收集结果交给 `apply_with_precollected`。这条链跨两个模块、要真实
+    /// E3D 文件才能端到端验证，所以在源码上钉住接线：谁把它换回 `apply`、或者再加
+    /// 一次 `collect_changes`，这里立刻红。
+    #[test]
+    fn execute_one_dbnum_collects_the_window_exactly_once() {
+        let src = include_str!("manual_update.rs");
+        let body = src
+            .split_once(concat!("async fn ", "execute_one_dbnum"))
+            .expect("execute_one_dbnum 未找到")
+            .1;
+        // 截到测试模块为止，免得把本测试自己的字面量算进去。
+        let body = body
+            .split_once(concat!("\n#[cfg", "(test)]"))
+            .map(|(head, _)| head)
+            .unwrap_or(body);
+
+        let collects = body.matches("collect_changes(").count();
+        assert_eq!(
+            collects, 1,
+            "execute_one_dbnum 只应收集一次增量窗口，实际 {collects} 次"
+        );
+        assert!(
+            body.contains("apply_with_precollected("),
+            "收集结果必须交给 apply_with_precollected，否则 pipeline 会把同一文件重新解析一遍"
+        );
+    }
 
     fn seq(kinds: &[IncomingKind]) -> NetOp {
         let mut net: Option<NetOp> = None;
@@ -3021,10 +3143,20 @@ mod tests {
 
     #[test]
     fn partial_baseline_is_rebuilt_before_advancing_watermark() {
-        assert!(baseline_needs_full_parse(21_000, 34_653));
+        assert!(baseline_needs_full_parse(21_000, 0));
+        assert!(baseline_needs_full_parse(0, 83));
         assert!(baseline_stats_need_rebuild(21_000, 55_653));
-        assert!(!baseline_needs_full_parse(34_653, 34_653));
+        assert!(!baseline_needs_full_parse(34_653, 83));
         assert!(!baseline_stats_need_rebuild(34_653, 34_653));
+    }
+
+    /// TEST dbnum=1（TES500）回归：空库（仅根元素）全量解析成功后 PE=0，
+    /// 必须视为合法基线并推进水位，而不是每次执行都报“没有 PE 数据”。
+    #[test]
+    fn root_only_empty_db_is_a_legitimate_baseline() {
+        assert!(baseline_parse_confirmed_empty(Some(0)));
+        assert!(!baseline_parse_confirmed_empty(None));
+        assert!(!baseline_parse_confirmed_empty(Some(34_653)));
     }
 
     // -----------------------------------------------------------------------
@@ -3174,11 +3306,8 @@ mod tests {
         }
     }
 
-    /// FTUB has no dedicated handling: it is an ordinary branch component and
-    /// only reaches the model through its owning BRAN. Projects that really do
-    /// want FTUB as its own delivery unit configure `delivery_unit_types`.
     #[test]
-    fn ftub_change_rolls_up_to_its_branch() {
+    fn ftub_and_its_children_roll_up_to_their_branch() {
         let snap = base_snap(&[
             (1, None, "WORL"),
             (2, Some(1), "SITE"),
@@ -3186,12 +3315,18 @@ mod tests {
             (10, Some(3), "PIPE"),
             (11, Some(10), "BRAN"),
             (12, Some(11), "FTUB"),
+            (13, Some(12), "TUBE"),
         ]);
 
         let unit = resolve_change_unit(&snap, r(12), &default_unit_types(), false)
             .expect("FTUB must resolve to its owning BRAN");
         assert_eq!(unit.root, r(11));
         assert_eq!(unit.noun, "BRAN");
+
+        let child_unit = resolve_change_unit(&snap, r(13), &default_unit_types(), false)
+            .expect("FTUB child must resolve to its owning BRAN");
+        assert_eq!(child_unit.root, r(11));
+        assert_eq!(child_unit.noun, "BRAN");
     }
 
     #[test]
@@ -4060,6 +4195,116 @@ mod tests {
         }
     }
 
+    /// C-REF-02（v2 测试计划 批次 C·级联范围**下界**）：core.dll 的依赖订阅按
+    /// `(noun, attribute)` 建键（`DB_UserChangesDependency::addSubsciber` 0x59a1140），
+    /// 使用者反查必须一个不少。离线下界 = curated `DependencyCascade` 名单 ∪ 运行库
+    /// schema 全部 ELEMENT 引用属性（结构性 `OWNER` 除外，归 ownership 图）——逐名
+    /// 断言建边资格，漏一个名字就存在「共享元件变了、引用者不刷新」的路径。
+    #[test]
+    fn c_ref_02_cascade_lower_bound_covers_every_dependency_reference() {
+        let referrer = r(100);
+        let target = r(77);
+
+        // 下界的 curated 半边：DependencyCascade 名单逐名建边。
+        for name in crate::data_interface::model_impact::DEPENDENCY_CASCADE_ATTR_NAMES {
+            let att = ref_attmap(&[(name, target)]);
+            assert_eq!(
+                reference_cascade_targets(&att, referrer),
+                vec![target],
+                "curated cascade name {name} must produce a reverse edge"
+            );
+        }
+
+        // 下界的 schema 半边：运行库全部 ELEMENT 引用属性（除 OWNER）逐名建边。
+        let info = aios_core::get_default_pdms_db_info();
+        let mut schema_names = std::collections::BTreeSet::new();
+        for noun in info.named_attr_info_map.iter() {
+            for entry in noun.value().iter() {
+                schema_names.insert(entry.value().name.clone());
+            }
+        }
+        if schema_names.is_empty() {
+            return; // 无 schema 的环境软跳过（与 curated 对账守护同口径）
+        }
+        let mut checked = 0usize;
+        for name in &schema_names {
+            if !attribute_is_reference(name) {
+                continue;
+            }
+            let expected =
+                if crate::data_interface::model_impact::normalize_attribute_name(name) == "OWNER" {
+                    Vec::new()
+                } else {
+                    vec![target]
+                };
+            let att = ref_attmap(&[(name, target)]);
+            assert_eq!(
+                reference_cascade_targets(&att, referrer),
+                expected,
+                "schema ELEMENT ref {name} violates the cascade lower bound"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 100,
+            "lower-bound sweep looks vacuous: only {checked} schema ELEMENT refs seen"
+        );
+    }
+
+    /// C-REF-03（v2 测试计划 批次 C·级联范围**上界**）：`ref_rev` 不带属性维度（G8），
+    /// 守住上界的方式是钉死建边资格 = 「schema ELEMENT 引用（除 OWNER）∪ curated
+    /// DependencyCascade」，其余一切属性（数据、几何数值、位姿…）即使值长得像引用
+    /// 也不得建边——否则传播范围会静默放大、把无关 noun 拉进重生成集合。
+    #[test]
+    fn c_ref_03_cascade_upper_bound_rejects_every_non_dependency_attribute() {
+        let referrer = r(100);
+        let target = r(77);
+
+        // 典型非级联属性显式拒绝（值刻意给成引用形态，资格必须按名字裁决）。
+        for name in ["NAME", "DESC", "POS", "ORI", "HEIG", "OWNER"] {
+            let att = ref_attmap(&[(name, target)]);
+            assert_eq!(
+                reference_cascade_targets(&att, referrer),
+                Vec::<RefnoEnum>::new(),
+                "{name} must never widen the cascade"
+            );
+        }
+
+        // 全 schema 扫描：既非 ELEMENT 引用、又非 curated DependencyCascade 的属性
+        // 一律不建边。
+        let info = aios_core::get_default_pdms_db_info();
+        let mut schema_names = std::collections::BTreeSet::new();
+        for noun in info.named_attr_info_map.iter() {
+            for entry in noun.value().iter() {
+                schema_names.insert(entry.value().name.clone());
+            }
+        }
+        if schema_names.is_empty() {
+            return; // 无 schema 的环境软跳过
+        }
+        let mut checked = 0usize;
+        for name in &schema_names {
+            if attribute_is_reference(name)
+                || classify_attribute_effect(name) == AttributeEffect::DependencyCascade
+            {
+                continue;
+            }
+            let att = ref_attmap(&[(name, target)]);
+            assert_eq!(
+                reference_cascade_targets(&att, referrer),
+                Vec::<RefnoEnum>::new(),
+                "non-dependency attribute {name} violates the cascade upper bound"
+            );
+            checked += 1;
+        }
+        // schema_names 按属性名去重，当前 schema 去重后约 558 个非依赖属性；
+        // 门槛只为识破 schema 加载失败导致的空转，不追口径。
+        assert!(
+            checked > 300,
+            "upper-bound sweep looks vacuous: only {checked} non-dependency attributes seen"
+        );
+    }
+
     #[test]
     fn collect_reverse_index_rows_backfills_all_current_referrers() {
         let target = r(82);
@@ -4260,6 +4505,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_side_effect_cannot_be_reported_as_success_or_up_to_date() {
+        assert_eq!(
+            include_model_side_effect_failure(ManualUpdateStatus::Success, true),
+            ManualUpdateStatus::Partial
+        );
+        assert_eq!(
+            include_model_side_effect_failure(ManualUpdateStatus::UpToDate, true),
+            ManualUpdateStatus::Failed
+        );
+        assert_eq!(
+            include_model_side_effect_failure(ManualUpdateStatus::Success, false),
+            ManualUpdateStatus::Success
+        );
+    }
+
+    #[test]
     fn worklist_merges_pending_with_new_units_keeping_latest_state() {
         // Unit 5: pending (attempts=2, end=10) re-affected by new data (end=12)
         // → ONE task with the newest end_sesno and accumulated attempts.
@@ -4416,6 +4677,34 @@ mod tests {
 mod live_tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "manual live: initialize real design-db baselines"]
+    async fn live_manual_baseline_all_design_dbnums() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project =
+            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let mgr = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+
+        for dbnum in [7997, 7999, 8000] {
+            let count = mgr
+                .initialize_project_dbnum_baseline(&project, dbnum)
+                .await
+                .unwrap_or_else(|error| panic!("initialize dbnum={dbnum}: {error:#}"));
+            assert!(count > 0, "dbnum={dbnum} baseline must not be empty");
+            assert!(
+                DbnumState::applied_sesno(dbnum)
+                    .await
+                    .expect("read applied sesno")
+                    > 0,
+                "dbnum={dbnum} watermark must advance after a complete baseline"
+            );
+        }
+    }
+
     /// Manual end-to-end update against the configured local E3D project.
     ///
     /// Example:
@@ -4490,13 +4779,14 @@ mod live_tests {
 
         // The risky path: deserialize an edge's `out` pe-link back into RefnoEnum.
         let mut resp = SUL_DB
-            .query("SELECT VALUE out FROM ref_rev LIMIT 1;")
+            .query("SELECT VALUE out FROM ref_rev WHERE out != NONE LIMIT 1;")
             .await
             .expect("sample query must execute");
-        let sample: Vec<RefnoEnum> = resp
+        let sample: Vec<Thing> = resp
             .take(0)
-            .expect("edge `out` must deserialize into RefnoEnum");
-        let seed = sample.into_iter().next().expect("one sampled referenced");
+            .expect("edge `out` must deserialize into Thing");
+        let seed = pe_thing_to_refno(sample.into_iter().next().expect("one sampled referenced"))
+            .expect("edge `out` must contain a valid PE refno");
 
         // Full round-trip through the production query adapter.
         let mut seeds = HashSet::new();
@@ -4562,6 +4852,38 @@ mod live_tests {
         assert!(
             missing.is_empty(),
             "shared SPCO consumers missing after full rebuild: {missing:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "manual live: verify shared SPCO expands to real generation roots"]
+    async fn live_shared_spco_expands_to_generation_roots() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let roots = expand_live_reverse_cascade(RefnoEnum::from("23274/295504"))
+            .await
+            .expect("expand shared-SPCO cascade");
+        println!(
+            "shared SPCO generation roots = {:?}",
+            roots
+                .iter()
+                .map(|root| (root.root.to_pdms_str(), &root.noun, root.kind))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            roots.len(),
+            67,
+            "72 shared-SPCO consumers must consolidate into 67 delivery roots"
+        );
+        assert!(
+            roots.iter().all(|root| {
+                root.noun == "BRAN"
+                    && root.kind
+                        == crate::data_interface::generation_root::GenerationRootKind::DeliveryUnit
+            }),
+            "shared SPCO must regenerate BRAN delivery units only"
         );
     }
 }

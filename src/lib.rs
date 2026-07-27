@@ -13,20 +13,20 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
 use crate::fast_model::room_model::build_room_relations;
-use crate::fast_model::{gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES};
+use crate::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
 use aios_core::pdms_types::*;
-use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
+use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::ssc_setting::{
     set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,
     set_pdms_major_code,
 };
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::{build_cate_relate, pdms_types::*, SUL_DB};
+use aios_core::{SUL_DB, build_cate_relate, pdms_types::*};
 use aios_core::{get_db_option, init_demo_test_surreal, init_surreal};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, Timelike};
@@ -46,12 +46,12 @@ use std::time::Instant;
 use surrealdb::opt::auth::Root;
 use team_data::sync_team_data;
 // use tokio::sync::mpsc::Sender;
+use aios_core::material::save_all_material_data;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
-use aios_core::material::save_all_material_data;
 use versioned_db::database::{define_dbnum_event, sync_pdms};
 
-use log::{error, LevelFilter};
+use log::{LevelFilter, error};
 use simplelog::*;
 
 pub mod api;
@@ -64,6 +64,7 @@ pub mod defines;
 pub mod team_data;
 
 pub mod graph_db;
+pub mod noun_layout;
 pub mod test;
 
 #[cfg(feature = "gui")]
@@ -78,9 +79,12 @@ pub mod mqtt_service;
 
 pub mod options;
 
+#[cfg(feature = "http_api")]
+pub mod web_service;
+
 // 添加options模块的重导出
-pub use options::get_db_option_ext;
 pub use options::DbOptionExt;
+pub use options::get_db_option_ext;
 
 #[macro_use]
 extern crate derive_more;
@@ -270,23 +274,52 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         futures::future::join_all(handles).await;
     }
 
+    // Web 服务（REST + WebSocket）：配置了 http_api_addr 才真正监听；
+    // 与 async_watch 并行运行，未启用时零影响（docs/specs/web-service-api.md）。
+    #[cfg(feature = "http_api")]
+    let web_task = {
+        let mgr = mgr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
+                eprintln!("Web 服务异常退出: {e:?}");
+            }
+        })
+    };
+
     if sync_live {
         // cur_mgr.clone().unwrap().async_watch().await.unwrap();
 
         //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
         //是否需要重构下面的这行代码？
+        // 看门狗退出必须留下痕迹，不能把 Result 直接丢掉（T903）。
         #[cfg(feature = "mqtt")]
-        tokio::join!(
-            mgr.async_watch(),
-            AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
-        );
+        {
+            let (watch_result, _) = tokio::join!(
+                mgr.async_watch(),
+                AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
+            );
+            if let Err(e) = watch_result {
+                log::error!("async_watch 退出，增量看门狗已停止: {e:?}");
+                eprintln!("async_watch 退出，增量看门狗已停止: {e:?}");
+            }
+        }
         #[cfg(not(feature = "mqtt"))]
-        mgr.async_watch().await;
+        if let Err(e) = mgr.async_watch().await {
+            log::error!("async_watch 退出，增量看门狗已停止: {e:?}");
+            eprintln!("async_watch 退出，增量看门狗已停止: {e:?}");
+        }
+    }
+
+    // 手动模式（sync_live=false）下若 Web 服务已启用，保持进程长驻对外服务，
+    // 供前端触发 preview/execute 手动更新与按需生成。
+    #[cfg(feature = "http_api")]
+    if !sync_live && crate::get_db_option_ext().http_api_addr.is_some() {
+        println!("手动模式下 Web 服务保持运行（Ctrl+C 退出）...");
+        let _ = web_task.await;
     }
 
     Ok(())
 }
-
 
 /// 运行app
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
@@ -348,4 +381,3 @@ pub mod data_state;
 // pub mod rvm;
 // pub mod ssc;
 pub mod version_management;
-pub mod xkt_generator;

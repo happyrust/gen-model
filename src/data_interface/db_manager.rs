@@ -54,8 +54,6 @@ impl AiosDBManager {
         db_nos: &[i32],
         is_parent: bool,
     ) -> anyhow::Result<Vec<RefU64>> {
-
         Ok(Vec::new())
     }
-
 }

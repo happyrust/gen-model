@@ -403,19 +403,20 @@ pub fn classify_operation_impact(op: &EleOperationData) -> OperationImpact {
     classify_operation_effects(op).impact()
 }
 
-/// 是否为 loop 容器类型（LOOP/PLOO/VERT/PAVE 等）：这些自身不是几何生成根，
-/// 需上溯到非容器 owner（如 PANE/EXTR/…）再重生成。
+/// 是否为 loop/坐标辅助类型（LOOP/PLOO/VERT/PAVE、*DATU 等）：这些自身不是
+/// 几何生成根，需上溯到非容器 owner（如 PANE/EXTR/WALL/GENSEC）再重生成。
 pub fn is_loop_container_noun(noun: &str) -> bool {
     let n = noun.trim().to_ascii_uppercase();
-    parse_pdms_db::dict::default_noun_capabilities()
-        .get(&n)
-        .map(|caps| caps.point)
-        // Keep the established lists as a safe fallback for custom nouns absent
-        // from the bundled dabacon snapshot.
-        .unwrap_or_else(|| {
-            TOTAL_LOOP_NOUN_NAMES.contains(&n.as_str())
-                || TOTAL_VERT_NOUN_NAMES.contains(&n.as_str())
-        })
+    matches!(n.as_str(), "JLDATU" | "PLDATU" | "ENDATU")
+        || parse_pdms_db::dict::default_noun_capabilities()
+            .get(&n)
+            .map(|caps| caps.point)
+            // Keep the established lists as a safe fallback for custom nouns absent
+            // from the bundled dabacon snapshot.
+            .unwrap_or_else(|| {
+                TOTAL_LOOP_NOUN_NAMES.contains(&n.as_str())
+                    || TOTAL_VERT_NOUN_NAMES.contains(&n.as_str())
+            })
 }
 
 pub fn named_attr_refno(value: &NamedAttrValue) -> Option<RefnoEnum> {
@@ -439,18 +440,30 @@ pub fn owner_change(op: &EleOperationData) -> (Option<RefnoEnum>, Option<RefnoEn
     };
     let mut old_owner = None;
     let mut new_owner = None;
-    for (name, (old, new)) in &modified.modified_attrs {
+    for (name, (old, new)) in modified
+        .modified_attrs
+        .iter()
+        .chain(&modified.modified_explicit_attrs)
+    {
         if normalize_attribute_name(name) == "OWNER" {
             old_owner = named_attr_refno(old);
             new_owner = named_attr_refno(new);
         }
     }
-    for (name, old) in &modified.deleted_attrs {
+    for (name, old) in modified
+        .deleted_attrs
+        .iter()
+        .chain(&modified.deleted_explicit_attrs)
+    {
         if normalize_attribute_name(name) == "OWNER" {
             old_owner = named_attr_refno(old);
         }
     }
-    for (name, new) in &modified.added_attrs {
+    for (name, new) in modified
+        .added_attrs
+        .iter()
+        .chain(&modified.added_explicit_attrs)
+    {
         if normalize_attribute_name(name) == "OWNER" {
             new_owner = named_attr_refno(new);
         }
@@ -460,35 +473,8 @@ pub fn owner_change(op: &EleOperationData) -> (Option<RefnoEnum>, Option<RefnoEn
 
 /// 提取一次修改里 OWNER 属性的新旧引用（元素被搬迁时，新旧 owner 两侧都需重生成）。
 pub fn changed_owner_refnos(op: &EleOperationData) -> Vec<RefnoEnum> {
-    let EleOperationDetail::Modified(modified) = &op.detail else {
-        return Vec::new();
-    };
-    let mut owners = Vec::new();
-    for (name, (old, new)) in &modified.modified_attrs {
-        if normalize_attribute_name(name) == "OWNER" {
-            if let Some(r) = named_attr_refno(old) {
-                owners.push(r);
-            }
-            if let Some(r) = named_attr_refno(new) {
-                owners.push(r);
-            }
-        }
-    }
-    for (name, old) in &modified.deleted_attrs {
-        if normalize_attribute_name(name) == "OWNER" {
-            if let Some(r) = named_attr_refno(old) {
-                owners.push(r);
-            }
-        }
-    }
-    for (name, new) in &modified.added_attrs {
-        if normalize_attribute_name(name) == "OWNER" {
-            if let Some(r) = named_attr_refno(new) {
-                owners.push(r);
-            }
-        }
-    }
-    owners
+    let (old, new) = owner_change(op);
+    old.into_iter().chain(new).collect()
 }
 
 // ── core.dll DB_UserChanges 六变化桶（P2 · G1/G2/G3）─────────────────────────
@@ -1178,6 +1164,32 @@ mod tests {
     }
 
     #[test]
+    fn explicit_owner_move_retains_both_membership_sides() {
+        let old = aios_core::RefU64((7997u64 << 32) | 10);
+        let new = aios_core::RefU64((7997u64 << 32) | 20);
+        let mut op = modified_operation_with_attrs(&[]);
+        if let EleOperationDetail::Modified(modified) = &mut op.detail {
+            modified.modified_explicit_attrs.insert(
+                "OWNER".into(),
+                (
+                    NamedAttrValue::RefU64Type(old),
+                    NamedAttrValue::RefU64Type(new),
+                ),
+            );
+        }
+
+        assert_eq!(
+            owner_change(&op),
+            (Some(RefnoEnum::from(old)), Some(RefnoEnum::from(new)))
+        );
+        assert_eq!(
+            changed_owner_refnos(&op),
+            vec![RefnoEnum::from(old), RefnoEnum::from(new)]
+        );
+        assert_eq!(classify_operation_impact(&op), OperationImpact::Regen);
+    }
+
+    #[test]
     fn all_dictionary_nouns_have_a_total_incremental_update_policy() {
         let capabilities = parse_pdms_db::dict::default_noun_capabilities();
         let nouns = capabilities
@@ -1240,6 +1252,20 @@ mod tests {
             );
         }
         assert!(!is_loop_container_noun("BOX"));
+    }
+
+    #[test]
+    fn datum_coordinate_helpers_regenerate_their_owner_geometry() {
+        for noun in ["JLDATU", "PLDATU", "ENDATU"] {
+            assert!(is_loop_container_noun(noun), "{noun}");
+            let mut moved = modified_operation("POS");
+            set_operation_noun(&mut moved, noun);
+            assert_eq!(
+                classify_operation_impact(&moved),
+                OperationImpact::Regen,
+                "{noun} coordinates are inputs of the owner geometry"
+            );
+        }
     }
 
     #[test]
@@ -1433,6 +1459,53 @@ mod tests {
             "内核位姿类成员漂移，TRANSFORM_ONLY 的取值范围需要重新评估"
         );
     }
+
+    #[test]
+    fn runtime_noun_attribute_pairs_respect_dictionary_change_classes() {
+        let Some(dchc) = dictionary_change_classes() else {
+            return; // 未导出字典的环境软跳过
+        };
+        let info = aios_core::get_default_pdms_db_info();
+        let mut pairs = 0usize;
+        let mut compared = 0usize;
+        for noun in info.named_attr_info_map.iter() {
+            for attr in noun.value().iter() {
+                let name = attr.name.trim().to_ascii_uppercase();
+                if name.is_empty() {
+                    continue;
+                }
+                pairs += 1;
+                let Some(code) = dchc.get(&name) else {
+                    continue;
+                };
+                compared += 1;
+                let effect =
+                    classify_attribute_effect_with_meta(&name, attribute_is_reference(&name));
+                if *code != 0 {
+                    assert_ne!(
+                        effect,
+                        AttributeEffect::DataOnly,
+                        "{}.{name}: DCHC={code} 不能被完全跳过",
+                        noun.key()
+                    );
+                }
+                if effect == AttributeEffect::TransformOnly {
+                    assert_eq!(
+                        *code,
+                        3,
+                        "{}.{name}: 只有 DCHC=3 才能走纯位姿便宜路径",
+                        noun.key()
+                    );
+                }
+            }
+        }
+        assert!(pairs > 6_000, "运行时 noun/attribute 对过少: {pairs}");
+        assert!(
+            compared > 5_000,
+            "与活字典 DCHC 可比的 noun/attribute 对过少: {compared}/{pairs}"
+        );
+    }
+
     #[test]
     fn dchc_codes_cover_forced_and_dictionary_snapshot() {
         // 逆向确认的强制码优先。

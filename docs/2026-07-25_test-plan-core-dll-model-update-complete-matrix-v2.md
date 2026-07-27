@@ -373,3 +373,72 @@ Invoke-WebRequest -Uri 'http://127.0.0.1:13338/mcp' -Method Post -Body $body `
 | `DB_Noun::point` | `0x58da1c0` |
 | `DB_Noun::positiveEquivalent` | `0x58da1e0` |
 | `DB_Noun::primaryList` | `0x58da260` |
+---
+
+## 8. 批次 A 执行记录（2026-07-25）
+
+批次 A **已完成**，G5 一并修完。
+
+### 8.1 结果
+
+执行：
+
+```powershell
+cargo test -p parse_pdms_db dict::tests::
+cargo test -p parse_pdms_db a_dict_01 -- --ignored --nocapture
+```
+
+| ID | 断言 | 结果 |
+|---|---|---|
+| A-DICT-01 | 29 个能力字段能从真实 `attlib.dat` 读出；`primaryList` 断言**不在**字典；实时读取与内嵌快照逐条一致 | 通过（`--ignored`，需本机字典） |
+| A-DICT-02 | 计数快照不漂移：1931 noun / 347 primitive / 44 geomset / 38 extrusion / 395 并集 / 44 point / 4 pointsetPoint / 12 positiveEquivalent / 117 changeType / 10 pseudo / 279 graphicsBehaviour | 通过 |
+| A-DICT-03 | `positiveEquivalent` 精确等于 §2.1 的 12 对 | 通过 |
+| A-DICT-04 | 变化等价类精确等于 25 类；4 个抽象类由 `db1_dehash` 还原为 `MULTC/INLINE/LINEAR/PCONN`；`PANE`/`GENSEC`/`SCTN`/`SUPPO`/`LINEAR` 的成员名单逐个比对 | 通过 |
+| A-DICT-05 | 手写 `TOTAL_LOOP_NOUN_NAMES ∪ TOTAL_VERT_NOUN_NAMES` ⊆ 字典 `point==true` | 通过 |
+| A-DICT-06 | 五个整型能力字段的值域封闭 | 通过 |
+
+`dict::tests::` 整体回归：**12 passed / 0 failed / 8 ignored**，原有 6 项字典测试无回归。
+
+§4 批次 A 表里 A-DICT-01 原写「31 个字段」，实际字典里只有 29 个：
+`primaryList` 走 `db_get_element_info` 不在字典（已改成反向断言），
+`primitive/geomset/extrusion` 之外还要算上 `base_type`（继承用，不算能力位）。
+A-DICT-05 的位置也从 `model_impact` 挪到了 `parse_pdms_db::dict`，
+因为断言的数据两侧（手写名单、字典名单）都能在 vendor crate 里拿到。
+
+### 8.2 副产物：`point` 名单缺口
+
+手写名单只有 `LOOP, PLOO, VERT, PAVE` 四个，字典 `point==true` 有 44 个。
+**未收录的 40 个**是 `is_loop_container_noun` 的潜在漏判：
+
+```text
+AIDTEX, BPFEAT, BPOPEN, CURVE, DIMPLI, DIMPOS, DIMPPT, EXTGEO, FCUTPL, HATTA,
+HNODE, HRFEAT, HRGATE, HTFEAT, IPOI, JNODE, KSUSVE, LOOPTS, POGO, POIN,
+POINSP, POINTR, POLFAC, POLOOP, POLPTL, PULLN, RLCAGE, RLGATE, RNODE, RPATH,
+RSECT, SLRAIL, SPINE, TANP, TATTA, WLFEAT, WLOPEN, XCELL, XCELS, XCLTN
+```
+
+A-DICT-05 只断言「手写名单不超出字典」，并把这 40 个打印出来，**不断言必须全收**：
+`AIDTEX`/`DIM*` 这类本就不参与生成，而 `SPINE`/`RPATH`/`WLFEAT` 明显该审。
+逐个确认是 P3 的输入，不在本批次范围内。
+
+### 8.3 实现产物
+
+| 新增 | 位置 |
+|---|---|
+| 26 个能力字段常量 + `FIELD_PRIMARY_LIST_NOT_IN_DICT` | `vendor/aios-parse-pdms/src/dict.rs` |
+| `NounCapabilities`（30 个能力字段 + hash/name） | 同上 |
+| `AttrDataFile::noun_capabilities` / `all_noun_capabilities` | 同上 |
+| `export_noun_capabilities` + `regenerate_noun_caps_snapshot`（ignored，改字段集合后手动重跑） | 同上 |
+| `NounCapabilityTable`：`point_nouns` / `positive_equivalents` / `change_classes` / `change_class_name` / `pseudo_nouns` / `direct_geometry_nouns` | 同上 |
+| 内嵌快照 `noun_caps.json`（1931 noun，1.15 MB 紧凑 JSON） | `vendor/aios-parse-pdms/noun_caps.json` |
+
+内嵌快照的意义：A-DICT-02…06 **不依赖本机 E3D 安装**即可在 CI 跑；
+A-DICT-01 负责在有字典的机器上校验快照没和真实字典脱节。
+改了 `NounCapabilities` 的字段集合后必须重跑 `regenerate_noun_caps_snapshot` 并提交 JSON，
+否则 A-DICT-01 会失败——这正是设计意图。
+
+### 8.4 下一步
+
+P1 完成，P2（批次 B：`OWNER → Moved`、新建标记 owner、`primaryList` 门控成员差分）解锁。
+P3 的 G6/G7 现在也有了数据源：`point_nouns()` 替换手写 loop 名单、
+`positive_equivalents()` 替换 `manifold_bool` 里按名字前缀猜负体。

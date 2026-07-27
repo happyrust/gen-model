@@ -30,6 +30,7 @@ surreal_v2 = []
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
+http_api = ["dep:axum", "dep:tower-http"]                             #前端Web服务(REST+WebSocket)
 
 [dependencies]
 config = "0.14.1"
@@ -67,18 +68,12 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms.git" }
-aios_core = { git = "https://gitee.com/happydpc/rs-core.git", default-features = false }
+parse_pdms_db = { path = "vendor/aios-parse-pdms" }
+aios_core = { git = "https://gitee.com/happydpc/rs-core.git", rev = "5667b70bd0c8f1668e7c4a3cae50060bfc97b64a", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://gitee.com/happydpc/pdms-io.git" }
+pdms_io = { path = "../pdms-io" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
-
-# XKT 格式生成相关依赖
-uuid = { version = "1.0", features = ["v4", "serde"] }
-base64 = "0.22"
-flate2 = "1.0"
-byteorder = "1.5"
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
@@ -92,7 +87,7 @@ rfd = { version = "0.15.1", features = ["async-std"] }
 
 
 #造型功能，先在database测试
-opencascade = { git = "https://gitee.com/happydpc/occt-rs.git", package = "opencascade", optional = true }
+opencascade = { path = "vendor/occt-rs/crates/opencascade", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
 indexmap = "2.2.6"
@@ -115,7 +110,7 @@ petgraph = { version = "0.8.1", features = ["serde-1"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["registry", "json"] }
 tracing-chrome = "0.7.1"
-strum = { version = "0.26.3", features = ["derive"] }
+strum = { version = "0.27.2", features = ["derive"] }
 strum_macros = "0.27.1"
 simplelog = "0.12.2"
 downcast-rs = "1.2.0"
@@ -129,6 +124,16 @@ gpui-component = { git = "https://gitee.com/happydpc/gpui-compoents", optional =
 toml = "0.8.19"
 pollster = "0.4.0"
 async-std = "1.13.1"
+axum = { version = "0.8.9", features = ["ws"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
+
+[patch."https://gitee.com/happydpc/occt-rs.git"]
+opencascade = { path = "vendor/occt-rs/crates/opencascade" }
+opencascade-sys = { path = "vendor/occt-rs/crates/opencascade-sys" }
+kicad-parser = { path = "vendor/occt-rs/crates/kicad-parser" }
+
+[patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
+parse_pdms_db = { path = "vendor/aios-parse-pdms" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
@@ -160,8 +165,10 @@ features = [
 #panic = 'abort'
 #codegen-units = 1
 
-# [patch."https://gitee.com/happydpc/rs-core.git"]
-# aios_core = { path = "../new-crates/aios-core" }
+# 临时：把 aios_core 指向带 get_world/get_world_refno「顺延到已解析设计库」修复的钉版拷贝
+# （= git rev 5667b70 源码 + 该 2 函数改动），用于验证 app 层 1112→8000 顺延。
+[patch."https://gitee.com/happydpc/rs-core.git"]
+aios_core = { path = "../../rs-core-pin" }
 
 # [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
 # parse_pdms_db = { path = "../aios-parse-pdms" }

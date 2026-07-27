@@ -46,22 +46,19 @@ impl AiosDBManager {
         &self,
         requested_refno: RefnoEnum,
     ) -> anyhow::Result<OnDemandModelResult> {
+        let (root, root_noun) = resolve_generation_root(requested_refno).await?;
         let initial_count = renderable_instance_count(requested_refno).await?;
         if initial_count > 0 {
-            let pe = aios_core::get_pe(requested_refno)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("构件 {} 不存在", requested_refno))?;
             return Ok(OnDemandModelResult {
                 requested_refno: requested_refno.to_pdms_str(),
-                generation_root: requested_refno.to_pdms_str(),
-                generation_root_noun: pe.noun,
+                generation_root: root.to_pdms_str(),
+                generation_root_noun: root_noun,
                 status: OnDemandModelStatus::AlreadyAvailable,
                 model_available: true,
                 model_instance_count: initial_count,
             });
         }
 
-        let (root, root_noun) = resolve_generation_root(requested_refno).await?;
         let lock = GENERATION_LOCKS
             .entry(root)
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -182,5 +179,11 @@ mod tests {
 
         assert!(result.model_available);
         assert!(result.model_instance_count > 0);
+        if let Ok(expected) = std::env::var("AIOS_ON_DEMAND_EXPECT_ROOT_NOUN") {
+            assert_eq!(result.generation_root_noun, expected);
+        }
+        if let Ok(expected) = std::env::var("AIOS_ON_DEMAND_EXPECT_ROOT") {
+            assert_eq!(result.generation_root, expected);
+        }
     }
 }

@@ -1,18 +1,7 @@
-use crate::data_interface::tidb_manager::AiosDBManager;
-use aios_core::pdms_types::*;
-use aios_core::{AttrMap, RefnoEnum};
-use chrono::{DateTime, Datelike, Local, Timelike};
+use aios_core::RefnoEnum;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use serde_with::DisplayFromStr;
-#[cfg(feature = "sql")]
-use sqlx::types::Uuid;
-#[cfg(feature = "sql")]
-use sqlx::{Executor, MySql, Pool, Row};
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::sync::Arc;
-use surrealdb::sql::Thing;
+use std::collections::HashSet;
 
 pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 
@@ -63,27 +52,4 @@ impl IncrGeoUpdateLog {
         refnos.extend(children);
         refnos
     }
-}
-
-//各个db的信息记录，需要跟踪起来？
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct IncrEleUpdateLog {
-    pub refno: RefnoEnum,
-    pub data_operate: EleOperation,
-    pub numbdb: i32,
-    // pub children: RefnoEnumVec,
-    pub old_attr: AttrMap,
-    pub new_attr: AttrMap,
-    pub new_version: u32,
-    pub old_version: u32,
-
-    //按时间戳去对比更新是否完成
-    pub timestamp: surrealdb::sql::Datetime,
-}
-
-#[derive(Debug, Deserialize)]
-struct Record {
-    #[allow(dead_code)]
-    id: Thing,
 }

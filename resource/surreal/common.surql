@@ -575,7 +575,12 @@ DEFINE FUNCTION fn::find_door_from_wall($pe:array) {
 
 remove function fn::get_mdb_dbnums;
 DEFINE FUNCTION fn::get_mdb_dbnums($mdb: string, $db_type: int) {
-        let $dbnos = select value (select value DBNO from CURD.refno where STYP=$db_type) from only MDB where NAME=$mdb limit 1;
+        -- 同名 MDB 可能并存(设计库/目录库各一份 /ALL；目录库的设计 CURD 常为空)。
+        -- 不再 `only ... limit 1`(会误选到 CURD 为空的目录 MDB → 返回空树)，改为
+        -- flatten 所有同名 MDB 的设计 DBNO 列表：空列表自然消失，非空者按入库顺序
+        -- (included_projects 主项目先入库)拼接，dbnum 冲突时下方 find_index 取首次出现即“首个为准”。
+        let $dbnos = array::flatten(select value (select value DBNO from CURD.refno where STYP=$db_type) from MDB where NAME=$mdb);
+        -- 只保留已解析(存在 WORL)的 dbnum，按 CURD 顺序返回(首个有数据者在前)。
         return (select value dbnum from (
             select REFNO.dbnum as dbnum, array::find_index($dbnos, REFNO.dbnum) as o
             from WORL

@@ -28,6 +28,8 @@ pub const DEFAULT_DELIVERY_UNIT_TYPES: &[&str] = &["BRAN", "HANG", "SUPPO", "EQU
 
 /// Hierarchy containers that must never become generation roots.
 pub const COARSE_HIERARCHY_NOUNS: &[&str] = &["WORL", "WORLD", "SITE", "ZONE"];
+/// Known component nouns that are never valid minimum delivery units.
+pub const NON_DELIVERY_UNIT_NOUNS: &[&str] = &["FTUB"];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,14 +61,21 @@ pub fn is_coarse_hierarchy_noun(noun: &str) -> bool {
 
 pub fn is_delivery_unit_noun(noun: &str, unit_types: &[String]) -> bool {
     let noun = noun.trim().to_ascii_uppercase();
+    if NON_DELIVERY_UNIT_NOUNS.contains(&noun.as_str()) {
+        return false;
+    }
     unit_types.iter().any(|candidate| candidate == &noun)
+}
+
+fn is_component_only_noun(noun: &str) -> bool {
+    let noun = noun.trim().to_ascii_uppercase();
+    NON_DELIVERY_UNIT_NOUNS.contains(&noun.as_str())
 }
 
 /// Append trimmed, upper-cased, de-duplicated nouns to `out`.
 ///
-/// Hierarchy containers are dropped whatever the configuration says: making
-/// SITE/ZONE/WORL a delivery unit would turn any single edit back into a
-/// whole-container rebuild. Rejected entries are returned so the caller can
+/// Hierarchy containers and known component-only nouns are dropped whatever
+/// the configuration says. Rejected entries are returned so the caller can
 /// report a misconfiguration instead of silently narrowing the set.
 fn extend_unit_types<'a>(
     out: &mut Vec<String>,
@@ -78,7 +87,7 @@ fn extend_unit_types<'a>(
         if noun.is_empty() || out.iter().any(|candidate| candidate == &noun) {
             continue;
         }
-        if is_coarse_hierarchy_noun(&noun) {
+        if is_coarse_hierarchy_noun(&noun) || NON_DELIVERY_UNIT_NOUNS.contains(&noun.as_str()) {
             rejected.push(noun);
             continue;
         }
@@ -116,10 +125,7 @@ pub fn resolve_delivery_unit_types_from_config(
         }
     };
     if !rejected.is_empty() {
-        log::warn!(
-            "最小交付单元配置忽略了层级容器类型 {:?}（它们不能作为生成根）",
-            rejected
-        );
+        log::warn!("最小交付单元配置忽略了非交付类型 {:?}", rejected);
     }
     out
 }
@@ -214,7 +220,7 @@ pub fn resolve_element_generation_root(
     }
 
     for (owner_refno, owner_node) in chain.iter().skip(1) {
-        if is_loop_container_noun(&owner_node.noun) {
+        if is_loop_container_noun(&owner_node.noun) || is_component_only_noun(&owner_node.noun) {
             continue;
         }
         if is_coarse_hierarchy_noun(&owner_node.noun) {
@@ -242,7 +248,9 @@ pub fn resolve_owner_generation_root(
 
     chain
         .iter()
-        .find(|(_, node)| !is_loop_container_noun(&node.noun))
+        .find(|(_, node)| {
+            !is_loop_container_noun(&node.noun) && !is_component_only_noun(&node.noun)
+        })
         .and_then(|(root, node)| {
             (!is_coarse_hierarchy_noun(&node.noun)).then(|| normal_root(*root, node))
         })
@@ -342,10 +350,10 @@ mod tests {
     fn configured_types_replace_defaults_and_ignore_appended() {
         assert_eq!(
             resolve_delivery_unit_types_from_config(
-                Some(&owned(&["equi", " ftub ", "EQUI"])),
-                &owned(&["PIPE"])
+                Some(&owned(&["equi", " pipe ", "EQUI"])),
+                &owned(&["HANG"])
             ),
-            owned(&["EQUI", "FTUB"])
+            owned(&["EQUI", "PIPE"])
         );
     }
 
@@ -355,14 +363,128 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_containers_are_rejected_from_any_config() {
+    fn invalid_delivery_types_are_rejected_from_any_config() {
+        assert!(!is_delivery_unit_noun("FTUB", &owned(&["FTUB"])));
         assert_eq!(
-            resolve_delivery_unit_types_from_config(Some(&owned(&["ZONE", "SITE", "EQUI"])), &[]),
+            resolve_delivery_unit_types_from_config(
+                Some(&owned(&["ZONE", "SITE", "FTUB", "EQUI"])),
+                &[]
+            ),
             owned(&["EQUI"])
         );
         assert_eq!(
             resolve_delivery_unit_types_from_config(None, &owned(&["worl", "WORLD"])),
             owned(&["BRAN", "HANG", "SUPPO", "EQUI"])
+        );
+    }
+
+    #[test]
+    fn components_resolve_to_their_nearest_delivery_unit() {
+        let nodes = HashMap::from([
+            (
+                r(3),
+                GenerationNode {
+                    owner: None,
+                    noun: "ZONE".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(5),
+                GenerationNode {
+                    owner: Some(r(3)),
+                    noun: "BRAN".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(6),
+                GenerationNode {
+                    owner: Some(r(5)),
+                    noun: "FTUB".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(7),
+                GenerationNode {
+                    owner: Some(r(6)),
+                    noun: "TUBE".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(8),
+                GenerationNode {
+                    owner: Some(r(3)),
+                    noun: "EQUI".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(9),
+                GenerationNode {
+                    owner: Some(r(8)),
+                    noun: "NOZZ".into(),
+                    name: String::new(),
+                },
+            ),
+        ]);
+        let units = resolve_delivery_unit_types(&[]);
+        let resolve = |refno| {
+            resolve_element_generation_root(refno, &units, |id| nodes.get(&id).cloned())
+                .map(|root| (root.root, root.noun))
+        };
+
+        assert_eq!(resolve(r(6)), Some((r(5), "BRAN".into())));
+        assert_eq!(resolve(r(7)), Some((r(5), "BRAN".into())));
+        assert_eq!(resolve(r(8)), Some((r(8), "EQUI".into())));
+        assert_eq!(resolve(r(9)), Some((r(8), "EQUI".into())));
+        assert_eq!(resolve(r(3)), None);
+    }
+
+    #[test]
+    fn ftub_is_never_a_normal_generation_root() {
+        let nodes = HashMap::from([
+            (
+                r(5),
+                GenerationNode {
+                    owner: Some(r(3)),
+                    noun: "BRAN".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(6),
+                GenerationNode {
+                    owner: Some(r(5)),
+                    noun: "FTUB".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(7),
+                GenerationNode {
+                    owner: Some(r(6)),
+                    noun: "TUBE".into(),
+                    name: String::new(),
+                },
+            ),
+        ]);
+
+        let resolve = |refno| {
+            resolve_element_generation_root(refno, &[], |id| nodes.get(&id).cloned())
+                .map(|root| (root.root, root.noun, root.kind))
+        };
+
+        assert_eq!(
+            resolve(r(7)),
+            Some((r(5), "BRAN".into(), GenerationRootKind::Normal))
+        );
+        assert_eq!(
+            resolve_owner_generation_root(r(6), &[], |id| nodes.get(&id).cloned())
+                .map(|root| (root.root, root.noun, root.kind)),
+            Some((r(5), "BRAN".into(), GenerationRootKind::Normal))
         );
     }
 
@@ -457,6 +579,22 @@ mod tests {
                     name: "/TEST-SUPPO".into(),
                 },
             ),
+            (
+                r(11),
+                GenerationNode {
+                    owner: Some(r(12)),
+                    noun: "PLDATU".into(),
+                    name: String::new(),
+                },
+            ),
+            (
+                r(12),
+                GenerationNode {
+                    owner: Some(r(5)),
+                    noun: "JLDATU".into(),
+                    name: String::new(),
+                },
+            ),
         ]);
         let units = resolve_delivery_unit_types(&[]);
 
@@ -495,5 +633,9 @@ mod tests {
             (spine_root.root, spine_root.noun.as_str()),
             (r(10), "SUPPO")
         );
+
+        let datum_root =
+            resolve_element_generation_root(r(11), &units, |id| nodes.get(&id).cloned()).unwrap();
+        assert_eq!((datum_root.root, datum_root.noun.as_str()), (r(5), "WALL"));
     }
 }

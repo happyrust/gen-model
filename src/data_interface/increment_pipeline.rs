@@ -4,15 +4,17 @@
 //! Does NOT own model refresh or MQTT sync (callers consume `IncrResult`).
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use aios_core::data_center::DataCenterRecordOperate;
 use aios_core::pdms_types::*;
-use aios_core::{RefnoEnum, SUL_DB, clear_all_caches};
+use aios_core::{RefnoEnum, SUL_DB, clear_all_caches_batch};
 use indexmap::IndexMap;
 use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
+use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO};
 
 use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 
@@ -78,9 +80,11 @@ impl IncrResult {
     }
 }
 
-/// Wrap rendered SurrealQL statements into a single atomic transaction so a
-/// per-file incremental persist is all-or-nothing (ADR-001: the applied
-/// watermark must never advance on a partially-applied batch). Returns `None`
+/// Wrap the given SurrealQL statements into one atomic transaction: that batch
+/// lands whole or not at all. A per-file window is split across several such
+/// batches (see `persist_latest_main_data`), so the window itself is NOT
+/// all-or-nothing — ADR-001 holds because a failed batch never advances the
+/// applied watermark and the same window replays idempotently. Returns `None`
 /// when there is nothing to run. Statements keep the original `;\n` separator
 /// (SurrealDB tolerates the resulting empty statements).
 fn wrap_in_transaction(statements: &[String]) -> Option<String> {
@@ -91,6 +95,260 @@ fn wrap_in_transaction(statements: &[String]) -> Option<String> {
         "BEGIN TRANSACTION;\n{};\nCOMMIT TRANSACTION;",
         statements.join(";\n")
     ))
+}
+
+/// Where one key's value came from last, while folding a run of `Modified` ops.
+///
+/// `to_modify_surql` renders `added` and `modified` identically (the new value)
+/// and `deleted` as `NULL`, so the bucket a key ends in decides its final value.
+enum LastWrite<V> {
+    Added(V),
+    Modified((V, V)),
+    Deleted(V),
+}
+
+/// Per-key last-writer-wins fold of one attribute namespace over a run of ops.
+///
+/// Unioning the three delta maps would be wrong: a key deleted in one session and
+/// re-added in a later one would land in both `added` and `deleted`, and
+/// `to_modify_surql` applies `deleted` last — silently turning the value back into
+/// `NULL`. Replaying by session and keeping only the last bucket per key is what
+/// makes a folded statement equivalent to the sequence it replaces.
+fn fold_attr_namespace<'a, K, V, I>(
+    per_op: I,
+) -> (
+    std::collections::HashMap<K, V>,
+    std::collections::HashMap<K, (V, V)>,
+    std::collections::HashMap<K, V>,
+)
+where
+    K: Eq + std::hash::Hash + Clone + 'a,
+    V: Clone + 'a,
+    I: Iterator<
+        Item = (
+            &'a std::collections::HashMap<K, V>,
+            &'a std::collections::HashMap<K, (V, V)>,
+            &'a std::collections::HashMap<K, V>,
+        ),
+    >,
+{
+    use std::collections::HashMap;
+
+    let mut last: HashMap<K, LastWrite<V>> = HashMap::new();
+    for (added, modified, deleted) in per_op {
+        for (k, v) in added {
+            last.insert(k.clone(), LastWrite::Added(v.clone()));
+        }
+        for (k, v) in modified {
+            last.insert(k.clone(), LastWrite::Modified(v.clone()));
+        }
+        for (k, v) in deleted {
+            last.insert(k.clone(), LastWrite::Deleted(v.clone()));
+        }
+    }
+
+    let mut added = HashMap::new();
+    let mut modified = HashMap::new();
+    let mut deleted = HashMap::new();
+    for (k, write) in last {
+        match write {
+            LastWrite::Added(v) => {
+                added.insert(k, v);
+            }
+            LastWrite::Modified(v) => {
+                modified.insert(k, v);
+            }
+            LastWrite::Deleted(v) => {
+                deleted.insert(k, v);
+            }
+        }
+    }
+    (added, modified, deleted)
+}
+
+/// Merge a run of consecutive `Modified` ops on one refno into a single op.
+///
+/// `current_data` and `noun` come from the newest op (it already carries the full
+/// post-state); the delta maps are folded per key; `children_changed` keeps the
+/// oldest `old` and the newest `new` so the pair still spans the whole run — only
+/// the `new` side is rendered, and the `DELETE … <-pe_owner` + re-`INSERT` it
+/// drives is a full replace, so the newest child list is the correct one.
+fn fold_modified_run(run: &[&ModifiedElement]) -> Option<ModifiedElement> {
+    let last = run.last()?;
+    if run.len() == 1 {
+        return Some((*last).clone());
+    }
+
+    let mut folded = (*last).clone();
+
+    let (added, modified, deleted) = fold_attr_namespace(
+        run.iter()
+            .map(|e| (&e.added_attrs, &e.modified_attrs, &e.deleted_attrs)),
+    );
+    folded.added_attrs = added;
+    folded.modified_attrs = modified;
+    folded.deleted_attrs = deleted;
+
+    let (added, modified, deleted) = fold_attr_namespace(run.iter().map(|e| {
+        (
+            &e.added_explicit_attrs,
+            &e.modified_explicit_attrs,
+            &e.deleted_explicit_attrs,
+        )
+    }));
+    folded.added_explicit_attrs = added;
+    folded.modified_explicit_attrs = modified;
+    folded.deleted_explicit_attrs = deleted;
+
+    let (added, modified, deleted) = fold_attr_namespace(run.iter().map(|e| {
+        (
+            &e.added_uda_attrs,
+            &e.modified_uda_attrs,
+            &e.deleted_uda_attrs,
+        )
+    }));
+    folded.added_uda_attrs = added;
+    folded.modified_uda_attrs = modified;
+    folded.deleted_uda_attrs = deleted;
+
+    let oldest = run
+        .iter()
+        .find_map(|e| e.children_changed.as_ref().map(|(old, _)| old.clone()));
+    let newest = run
+        .iter()
+        .rev()
+        .find_map(|e| e.children_changed.as_ref().map(|(_, new)| new.clone()));
+    folded.children_changed = match (oldest, newest) {
+        (Some(old), Some(new)) => Some((old, new)),
+        _ => None,
+    };
+
+    Some(folded)
+}
+
+/// One operation to render, after the window has been folded.
+struct PlannedWrite<'a> {
+    sesno: u32,
+    op: &'a EleOperationData,
+    /// `Some` when this position stands in for a whole run of `Modified` ops.
+    folded: Option<ModifiedElement>,
+}
+
+/// Collapse a window so each refno is written once per run of consecutive
+/// `Modified` operations.
+///
+/// This module keeps only the latest state (no `sessions` / `element_changes`
+/// history), so replaying every intermediate session write is pure overhead: a
+/// refno modified N times in one window emitted N `UPSERT … MERGE` + N `UPDATE pe`
+/// pairs that the last one overwrote anyway. Measured on the amssys cold-start
+/// window (169 sessions, 4635 operations over 2148 refnos) this removes ~31% of
+/// the statements and a matching share of the ~17 MB of SurrealQL.
+///
+/// Deliberately conservative:
+/// * only a *consecutive* run of `Modified` on one refno collapses, so the
+///   create-then-tombstone ordering of `Add` / `Deleted` is untouched;
+/// * the merged statement is emitted at the position of the run's LAST operation,
+///   so the global statement order is preserved. No generated statement ever reads
+///   another record (every value is a literal), so dropping intermediate writes
+///   cannot change what a later statement sees.
+fn fold_window(range_eles: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<PlannedWrite<'_>> {
+    use std::collections::HashMap;
+
+    let mut flat: Vec<PlannedWrite<'_>> = Vec::new();
+    for (&sesno, elements) in range_eles {
+        for op in elements {
+            flat.push(PlannedWrite {
+                sesno,
+                op,
+                folded: None,
+            });
+        }
+    }
+
+    let mut positions: HashMap<RefU64, Vec<usize>> = HashMap::new();
+    for (i, planned) in flat.iter().enumerate() {
+        positions.entry(planned.op.refno).or_default().push(i);
+    }
+
+    // Collect the runs before folding: folding writes back into `flat`, so it can
+    // no longer hold the immutable borrow that run detection needs.
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for idxs in positions.values() {
+        let mut run: Vec<usize> = Vec::new();
+        for &i in idxs {
+            if matches!(flat[i].op.detail, EleOperationDetail::Modified(_)) {
+                run.push(i);
+            } else if run.len() > 1 {
+                runs.push(std::mem::take(&mut run));
+            } else {
+                run.clear();
+            }
+        }
+        if run.len() > 1 {
+            runs.push(run);
+        }
+    }
+
+    let mut dropped = vec![false; flat.len()];
+    for run in runs {
+        let folded = {
+            let members: Vec<&ModifiedElement> = run
+                .iter()
+                .filter_map(|&i| match &flat[i].op.detail {
+                    EleOperationDetail::Modified(m) => Some(m),
+                    _ => None,
+                })
+                .collect();
+            fold_modified_run(&members)
+        };
+        let (&last_idx, earlier) = run.split_last().expect("a run holds at least two entries");
+        for &i in earlier {
+            dropped[i] = true;
+        }
+        flat[last_idx].folded = folded;
+    }
+
+    flat.into_iter()
+        .zip(dropped)
+        .filter_map(|(planned, drop)| (!drop).then_some(planned))
+        .collect()
+}
+
+/// Wall time of each stage of one file's window, reported as a single line so a
+/// slow stage can be attributed without attaching a profiler to a live run.
+#[derive(Debug, Default, Clone, Copy)]
+struct StageTimings {
+    collect: Duration,
+    plan: Duration,
+    persist: Duration,
+    cache: Duration,
+    reverse_index: Duration,
+    datacenter: Duration,
+    finalize: Duration,
+}
+
+impl StageTimings {
+    async fn measure<T>(slot: &mut Duration, work: impl Future<Output = T>) -> T {
+        let start = Instant::now();
+        let value = work.await;
+        *slot += start.elapsed();
+        value
+    }
+
+    fn report(&self, dbnum: u32, db_type: &str, elements: usize) {
+        println!(
+            "IncrementPipeline 阶段耗时 dbnum={dbnum} db_type={db_type} 元素={elements}: \
+             collect={}ms plan={}ms persist={}ms cache={}ms rev_index={}ms \
+             datacenter={}ms finalize={}ms",
+            self.collect.as_millis(),
+            self.plan.as_millis(),
+            self.persist.as_millis(),
+            self.cache.as_millis(),
+            self.reverse_index.as_millis(),
+            self.datacenter.as_millis(),
+            self.finalize.as_millis(),
+        );
+    }
 }
 
 /// Independent deep module: collect delta → Surreal persist → datacenter meta → watermark by dbnum.
@@ -159,6 +417,28 @@ impl IncrementPipeline {
         &self,
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
     ) -> IncrResult {
+        self.apply_with_precollected(increment_ranges_map, IndexMap::new())
+            .await
+    }
+
+    /// 同 [`Self::apply`]，但允许调用方交出**已经收集好**的增量窗口，避免同一个文件
+    /// 被完整解析两次。
+    ///
+    /// 背景：`manual_update::execute_one_dbnum` 为了算 `changed_elements` 和 DESI 的
+    /// 单元归并，会先 `collect_changes` 一次；随后 `apply_one` 在 fresh 分支里又收集
+    /// 了一遍同一文件、同一窗口。非 DESI 库（SYST/CATA/DICT）尤其亏——第一趟的整份
+    /// 结果只被用来算两个标量。实测 dbnum=250206 单趟就要 5 分多钟。
+    ///
+    /// 交入的结果**仅在恰好覆盖本次要应用的区间时**才被采信：崩溃重放走的是持久化
+    /// 的固定区间，可能与 `requested_range` 不同，那种情况永远重新收集。
+    pub async fn apply_with_precollected(
+        &self,
+        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
+        mut precollected: IndexMap<
+            PathBuf,
+            (RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>),
+        >,
+    ) -> IncrResult {
         let mut result = IncrResult::default();
 
         for (path, (basic_info, sesno_range, db_type)) in increment_ranges_map {
@@ -174,8 +454,10 @@ impl IncrementPipeline {
                 continue;
             }
 
+            let handed_in = precollected.shift_remove(&path);
+
             match self
-                .apply_one(&path, &basic_info, sesno_range, &db_type)
+                .apply_one(&path, &basic_info, sesno_range, &db_type, handed_in)
                 .await
             {
                 Ok((success, warnings)) => {
@@ -200,8 +482,10 @@ impl IncrementPipeline {
         basic_info: &DbPageBasicInfo,
         requested_range: RangeInclusive<i32>,
         db_type: &str,
+        precollected: Option<(RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>)>,
     ) -> anyhow::Result<(IncrFileSuccess, Vec<String>)> {
         let mut warnings = Vec::new();
+        let mut timings = StageTimings::default();
         let dbnum = basic_info.pdms_header.db_num as u32;
         let path_text = path.to_string_lossy().into_owned();
 
@@ -218,24 +502,41 @@ impl IncrementPipeline {
             ));
             (attempt.start_sesno..=attempt.end_sesno, attempt.plan, None)
         } else {
-            let range_eles = Self::collect_changes(path, requested_range.clone())?;
+            // 调用方交出的窗口必须与本次要应用的区间完全一致才复用；复用时
+            // `timings.collect` 自然为 0，收集成本记在调用方那一侧。
+            let range_eles = match precollected {
+                Some((range, eles)) if range == requested_range => eles,
+                _ => {
+                    let start = Instant::now();
+                    let eles = Self::collect_changes(path, requested_range.clone())?;
+                    timings.collect += start.elapsed();
+                    eles
+                }
+            };
+
             let end_sesno = *requested_range.end();
-            let model_plan = crate::data_interface::model_update_plan::build_model_update_plan(
-                dbnum,
-                end_sesno,
-                db_type,
-                &range_eles,
+            let model_plan = StageTimings::measure(
+                &mut timings.plan,
+                crate::data_interface::model_update_plan::build_model_update_plan(
+                    dbnum,
+                    end_sesno,
+                    db_type,
+                    &range_eles,
+                ),
             )
             .await;
-            crate::data_interface::model_update_pending::prepare_attempt(
-                &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
-                    dbnum,
-                    db_type: db_type.to_string(),
-                    file_path: path_text,
-                    start_sesno: *requested_range.start(),
-                    end_sesno,
-                    plan: model_plan.clone(),
-                },
+            StageTimings::measure(
+                &mut timings.plan,
+                crate::data_interface::model_update_pending::prepare_attempt(
+                    &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
+                        dbnum,
+                        db_type: db_type.to_string(),
+                        file_path: path_text,
+                        start_sesno: *requested_range.start(),
+                        end_sesno,
+                        plan: model_plan.clone(),
+                    },
+                ),
             )
             .await?;
             (requested_range, model_plan, Some(range_eles))
@@ -251,7 +552,12 @@ impl IncrementPipeline {
         // the collection that produced its pre-update model plan.
         let range_eles = match collected {
             Some(range_eles) => range_eles,
-            None => Self::collect_changes(path, sesno_range)?,
+            None => {
+                let start = Instant::now();
+                let range_eles = Self::collect_changes(path, sesno_range)?;
+                timings.collect += start.elapsed();
+                range_eles
+            }
         };
         let cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
         warnings.extend(model_plan.warnings.iter().cloned());
@@ -261,8 +567,13 @@ impl IncrementPipeline {
         // Cache invalidation must run after every attempted persist, including a
         // partially failed batch: earlier Surreal statements may already have
         // changed data even though the watermark must remain unchanged.
-        let persist_result = Self::persist_latest_main_data(&range_eles, dbnum as i32).await;
-        let invalidated = Self::invalidate_caches(cache_refnos).await;
+        let persist_result = StageTimings::measure(
+            &mut timings.persist,
+            Self::persist_latest_main_data(&range_eles, dbnum as i32),
+        )
+        .await;
+        let invalidated =
+            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await;
         if invalidated > 0 {
             println!(
                 "IncrementPipeline: invalidated {invalidated} PE/attribute cache entries \
@@ -273,7 +584,12 @@ impl IncrementPipeline {
 
         // ADR-003 B1-emit: 维护反向引用索引（非致命，绝不阻塞数据批次 / 水位推进）。
         // 写失败只记 warning：缺一条引用边最多漏一次级联，靠后续触及 / 全量重建自愈。
-        if let Err(e) = Self::maintain_reverse_index(&range_eles).await {
+        if let Err(e) = StageTimings::measure(
+            &mut timings.reverse_index,
+            Self::maintain_reverse_index(&range_eles),
+        )
+        .await
+        {
             warnings.push(format!(
                 "reverse-index maintain (non-fatal) {}: {}",
                 path.display(),
@@ -281,23 +597,33 @@ impl IncrementPipeline {
             ));
         }
 
-        if let Err(e) = Self::update_datacenter_version(&range_eles).await {
-            warnings.push(format!(
-                "datacenter_version update failed for {}: {}",
-                path.display(),
-                e
-            ));
-        }
+        // Rendering only — the timing slot no longer covers any datacenter I/O,
+        // which now happens inside the finalize transaction below.
+        let datacenter_statements = StageTimings::measure(&mut timings.datacenter, async {
+            Self::datacenter_statements(&range_eles, db_type)
+        })
+        .await;
 
-        // One final transaction establishes durable model work, advances the
-        // watermark and removes the short-lived recovery record. If it fails,
-        // the attempt remains and the whole fixed range is safe to replay.
-        crate::data_interface::model_update_pending::finalize_attempt(
-            dbnum,
-            end_sesno,
-            &model_plan,
+        // One final transaction publishes this window's delivery-status updates,
+        // establishes durable model work, advances the watermark and removes the
+        // short-lived recovery record. If it fails, the attempt remains and the
+        // whole fixed range is safe to replay.
+        StageTimings::measure(
+            &mut timings.finalize,
+            crate::data_interface::model_update_pending::finalize_attempt(
+                dbnum,
+                end_sesno,
+                &model_plan,
+                &datacenter_statements,
+            ),
         )
         .await?;
+
+        timings.report(
+            dbnum,
+            db_type,
+            range_eles.values().map(|ops| ops.len()).sum::<usize>(),
+        );
 
         let changed_refnos = range_eles
             .values()
@@ -358,12 +684,17 @@ impl IncrementPipeline {
 
     /// Clear database-backed aios-core caches before any post-persist consumer
     /// (model refresh, transform update, preview, etc.) can read stale values.
+    ///
+    /// Invalidating per refno would re-clear the global world-transform caches
+    /// and re-take every cache lock once per element, so a wide window paid for
+    /// the same wholesale clear thousands of times.
     async fn invalidate_caches(refnos: HashSet<RefnoEnum>) -> usize {
-        let count = refnos.len();
-        for refno in refnos {
-            clear_all_caches(refno).await;
+        if refnos.is_empty() {
+            return 0;
         }
-        count
+        let refnos: Vec<RefnoEnum> = refnos.into_iter().collect();
+        clear_all_caches_batch(&refnos).await;
+        refnos.len()
     }
 
     /// Persist ONLY the latest main data (pe + attributes) for this delta.
@@ -380,22 +711,36 @@ impl IncrementPipeline {
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
         dbnum: i32,
     ) -> anyhow::Result<()> {
-        // 收集本文件本窗口的全部落库语句，作为「一个事务」原子提交：要么整体成功、
-        // 要么整体回滚，绝不留下半写状态。这样 ADR-001「失败批次不推进水位、按同一
-        // 窗口重试」才安全——重试永远从干净状态开始；配合 Add 改用幂等 UPSERT，
-        // 彻底消除「上次半写 + 本次重试撞已存在记录反复失败 → dbnum 水位卡死」。
+        // 收集本文件本窗口的全部落库语句，随后分块提交（提交策略见下方 TX_CHUNK 处）。
+        // ADR-001「失败批次不推进水位、按同一窗口重试」的安全性并不依赖「整窗口一个
+        // 事务」，而是靠 Add 改用幂等 UPSERT：重试撞上上一轮已写入的记录也能覆盖收敛，
+        // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
+        // 窗口内同一 refno 被连续改 N 次就写 N 次，而本模块只保留最新状态，中间态
+        // 全部会被最后一次覆盖。折叠掉它们（见 fold_window）既减语句数也减 SQL 体积。
+        let raw_ops: usize = range_eles.values().map(|v| v.len()).sum();
+        let planned = fold_window(range_eles);
+
         let mut statements: Vec<String> = Vec::new();
-        for (&sesno, elements) in range_eles {
-            for element in elements {
-                let id = element.refno.to_string();
-                let surql = element.to_surql(&id, dbnum, sesno);
-                if !surql.is_empty() {
-                    statements.push(surql);
-                }
+        for write in &planned {
+            let id = write.op.refno.to_string();
+            let surql = match &write.folded {
+                Some(folded) => folded.to_modify_surql(&id, write.sesno),
+                None => write.op.to_surql(&id, dbnum, write.sesno),
+            };
+            if !surql.is_empty() {
+                statements.push(surql);
             }
         }
 
         let total = statements.len();
+        // 被折掉的位置一定是 Modified（必然渲染出语句），所以这个差值就是净省下的语句数；
+        // 不用 planned.len() 直接比，因为两侧都含渲染为空的 None 操作，会低报降幅。
+        let folded_away = raw_ops.saturating_sub(planned.len());
+        if folded_away > 0 {
+            println!(
+                "增量窗口折叠：合并同 refno 的连续 Modified，省下 {folded_away} 条语句（实际落库 {total} 条）"
+            );
+        }
         // 分块事务提交：原实现把整窗口拼成「单个事务」，大型系统库（如 amssys 冷启动
         // 168 会话 ~4000+ 元素）会撑爆 SurrealDB ws 通道上限，报「receiving from an
         // empty and closed channel」而整体失败。改为按 TX_CHUNK 条语句一块、每块自身
@@ -421,30 +766,36 @@ impl IncrementPipeline {
         Ok(())
     }
 
-    async fn update_datacenter_version(
+    /// Render this window's `datacenter_version` status updates (pure).
+    ///
+    /// `UPDATE` only touches delivery records that already exist, so an element
+    /// that was never published to the data centre is a silent no-op — the
+    /// statements are safe to emit for every changed element. Each one carries
+    /// its own `;` so a batch can be concatenated verbatim.
+    fn render_datacenter_statements(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
-    ) -> anyhow::Result<()> {
-        let unit = ["SUPPO", "BRAN", "EQUI", "ZONE"];
-        for (_, data) in data {
+        delivery_unit_types: &[String],
+    ) -> Vec<String> {
+        let mut unit = delivery_unit_types.to_vec();
+        unit.push("ZONE".into());
+        let mut statements = Vec::new();
+        for data in data.values() {
             for d in data {
                 match &d.detail {
                     EleOperationDetail::Deleted => {
-                        let sql = format!(
+                        statements.push(format!(
                             "let $pe = {};\
                              let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};\
                              update type::thing('{}',$pe) set status = '{:?}',belong_zone = $belong_zone;",
                             d.refno.to_pe_key(),
                             DATACENTER_VERSION,
                             DataCenterRecordOperate::Delete
-                        );
-                        if let Err(e) = SUL_DB.query(&sql).await {
-                            eprintln!("datacenter delete warn: {e}; sql={sql}");
-                        }
+                        ));
                     }
                     EleOperationDetail::Modified(modify_data) => {
-                        let sql = if unit.contains(&modify_data.noun.as_str()) {
+                        statements.push(if unit.iter().any(|noun| noun == &modify_data.noun) {
                             format!(
-                                "update {} set status = '{:?}'",
+                                "update {} set status = '{:?}';",
                                 d.refno.to_table_key(DATACENTER_VERSION),
                                 DataCenterRecordOperate::Modify
                             )
@@ -462,16 +813,42 @@ impl IncrementPipeline {
                                 DATACENTER_VERSION,
                                 DataCenterRecordOperate::Modify
                             )
-                        };
-                        if let Err(e) = SUL_DB.query(&sql).await {
-                            eprintln!("datacenter modify warn: {e}; sql={sql}");
-                        }
+                        });
                     }
                     _ => {}
                 }
             }
         }
-        Ok(())
+        statements
+    }
+
+    /// The statements marking this window's delivery records Modify / Delete in
+    /// `datacenter_version`, empty for a window that cannot have any.
+    ///
+    /// Delivery records are published design elements, and the
+    /// `unit`/`belong_zone` rollup semantics only exist in the DESI hierarchy —
+    /// SYS meta DBs hold project structure (MDB/DB/CURD/TEAM) and CATA holds
+    /// catalogue definitions, so none of their elements can ever match a
+    /// delivery record. Skipping every non-DESI window keeps cold starts and
+    /// catalogue imports from paying for thousands of guaranteed no-op UPDATEs.
+    ///
+    /// These statements used to be executed right here, in chunks, outside any
+    /// transaction, with the error downgraded to a caller warning. A failed
+    /// status write was then lost for good: the watermark still advanced past
+    /// the one window that carried it, and no later window revisits an element
+    /// that did not change again. They are now handed to `finalize_attempt`, so
+    /// they commit with the watermark or roll back and replay with it.
+    fn datacenter_statements(
+        data: &BTreeMap<u32, Vec<EleOperationData>>,
+        db_type: &str,
+    ) -> Vec<String> {
+        if db_type != "DESI" {
+            return Vec::new();
+        }
+
+        let delivery_unit_types =
+            crate::data_interface::generation_root::configured_delivery_unit_types();
+        Self::render_datacenter_statements(data, &delivery_unit_types)
     }
 
     /// ADR-003 B1-emit: maintain the reverse-reference index (`ref_rev`) for this
@@ -567,6 +944,640 @@ mod cache_tests {
 }
 
 #[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use aios_core::NamedAttrValue;
+    use std::collections::HashMap;
+
+    fn refno(id: u64) -> RefU64 {
+        RefU64((7997u64 << 32) | id)
+    }
+
+    fn text(v: &str) -> NamedAttrValue {
+        NamedAttrValue::StringType(v.to_string())
+    }
+
+    fn blank() -> ModifiedElement {
+        ModifiedElement {
+            current_data: Default::default(),
+            added_attrs: Default::default(),
+            deleted_attrs: Default::default(),
+            modified_attrs: Default::default(),
+            added_explicit_attrs: Default::default(),
+            deleted_explicit_attrs: Default::default(),
+            modified_explicit_attrs: Default::default(),
+            added_uda_attrs: Default::default(),
+            deleted_uda_attrs: Default::default(),
+            modified_uda_attrs: Default::default(),
+            noun: "DAMP".to_string(),
+            children_changed: None,
+        }
+    }
+
+    fn op(id: u64, sesno: u32, element: ModifiedElement) -> EleOperationData {
+        EleOperationData::new(refno(id), sesno, EleOperationDetail::Modified(element))
+    }
+
+    fn window(ops: Vec<EleOperationData>) -> BTreeMap<u32, Vec<EleOperationData>> {
+        let mut map: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
+        for op in ops {
+            map.entry(op.sesno).or_default().push(op);
+        }
+        map
+    }
+
+    fn folded_at<'a>(planned: &'a [PlannedWrite<'a>], id: u64) -> &'a ModifiedElement {
+        planned
+            .iter()
+            .find(|w| w.op.refno == refno(id))
+            .and_then(|w| w.folded.as_ref())
+            .expect("expected a folded run for this refno")
+    }
+
+    #[test]
+    fn a_run_of_modified_collapses_onto_its_last_session() {
+        let mut second = blank();
+        second.added_attrs.insert("XLEN".into(), text("2"));
+
+        let w = window(vec![op(1, 1, blank()), op(1, 2, second), op(1, 3, blank())]);
+        let planned = fold_window(&w);
+
+        assert_eq!(planned.len(), 1);
+        // The merged write lands where the newest operation was, so `pe.sesno`
+        // still ends at the latest session that touched the element.
+        assert_eq!(planned[0].sesno, 3);
+    }
+
+    /// The case a naive union of the three delta maps gets wrong: the key would
+    /// stay in `deleted_attrs`, which `to_modify_surql` applies last, silently
+    /// turning a live value back into `NULL`.
+    #[test]
+    fn a_key_deleted_then_re_added_keeps_the_newer_value() {
+        let mut first = blank();
+        first.deleted_attrs.insert("XLEN".into(), text("old"));
+        let mut second = blank();
+        second.added_attrs.insert("XLEN".into(), text("new"));
+
+        let w = window(vec![op(1, 1, first), op(1, 2, second)]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+
+        assert_eq!(folded.added_attrs.get("XLEN"), Some(&text("new")));
+        assert!(folded.deleted_attrs.is_empty());
+    }
+
+    #[test]
+    fn a_key_added_then_deleted_ends_up_cleared() {
+        let mut first = blank();
+        first.added_attrs.insert("XLEN".into(), text("v"));
+        let mut second = blank();
+        second.deleted_attrs.insert("XLEN".into(), text("v"));
+
+        let w = window(vec![op(1, 1, first), op(1, 2, second)]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+
+        assert!(folded.added_attrs.is_empty());
+        assert!(folded.deleted_attrs.contains_key("XLEN"));
+    }
+
+    #[test]
+    fn later_sessions_win_per_key_across_every_namespace() {
+        let mut first = blank();
+        first
+            .modified_attrs
+            .insert("POS".into(), (text("a"), text("b")));
+        first
+            .added_explicit_attrs
+            .insert("NAME".into(), text("/OLD"));
+        first.added_uda_attrs.insert(7, text("u1"));
+
+        let mut second = blank();
+        second
+            .modified_attrs
+            .insert("POS".into(), (text("b"), text("c")));
+        second
+            .modified_explicit_attrs
+            .insert("NAME".into(), (text("/OLD"), text("/NEW")));
+        second
+            .modified_uda_attrs
+            .insert(7, (text("u1"), text("u2")));
+
+        let w = window(vec![op(1, 1, first), op(1, 2, second)]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+
+        assert_eq!(
+            folded.modified_attrs.get("POS"),
+            Some(&(text("b"), text("c")))
+        );
+        // NAME moved from `added` to `modified`, so it must no longer sit in both.
+        assert!(folded.added_explicit_attrs.is_empty());
+        assert_eq!(
+            folded.modified_explicit_attrs.get("NAME"),
+            Some(&(text("/OLD"), text("/NEW")))
+        );
+        assert!(folded.added_uda_attrs.is_empty());
+        assert_eq!(
+            folded.modified_uda_attrs.get(&7),
+            Some(&(text("u1"), text("u2")))
+        );
+    }
+
+    /// `Add` creates the record and `Deleted` lays the tombstone; folding across
+    /// them would drop one of the two, so a run may only span `Modified`.
+    #[test]
+    fn add_and_deleted_break_a_run_and_are_never_merged() {
+        let w = window(vec![
+            EleOperationData::new(refno(1), 1, EleOperationDetail::Add(Default::default())),
+            op(1, 2, blank()),
+            op(1, 3, blank()),
+            EleOperationData::new(refno(1), 4, EleOperationDetail::Deleted),
+            op(1, 5, blank()),
+        ]);
+        let planned = fold_window(&w);
+
+        // Add, one merged Modified, Deleted, and the trailing lone Modified.
+        assert_eq!(planned.len(), 4);
+        let kinds: Vec<&str> = planned.iter().map(|w| w.op.get_op_type()).collect();
+        assert_eq!(kinds, vec!["新增", "修改", "删除", "修改"]);
+        assert!(planned[1].folded.is_some(), "the run should be merged");
+        assert!(planned[3].folded.is_none(), "a lone op needs no merge");
+    }
+
+    #[test]
+    fn unrelated_refnos_keep_their_relative_order() {
+        let w = window(vec![
+            op(1, 1, blank()),
+            op(2, 1, blank()),
+            op(1, 2, blank()),
+            op(2, 2, blank()),
+        ]);
+        let planned = fold_window(&w);
+
+        assert_eq!(planned.len(), 2);
+        // Both runs collapse onto session 2, preserving the order they appeared in.
+        assert_eq!(planned[0].op.refno, refno(1));
+        assert_eq!(planned[1].op.refno, refno(2));
+    }
+
+    /// The rebuilt `pe_owner` edges are a full replace, so the newest child list
+    /// is the only correct one to render.
+    #[test]
+    fn the_newest_child_list_wins() {
+        let mut first = blank();
+        first.children_changed = Some((vec![refno(10)].into(), vec![refno(11)].into()));
+        let mut second = blank();
+        second.children_changed = Some((vec![refno(11)].into(), vec![refno(12)].into()));
+
+        let w = window(vec![op(1, 1, first), op(1, 2, second)]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+
+        let (old, new) = folded.children_changed.as_ref().expect("children changed");
+        assert_eq!(old.to_vec(), vec![refno(10)]);
+        assert_eq!(new.to_vec(), vec![refno(12)]);
+    }
+
+    #[test]
+    fn a_window_without_repeats_is_left_alone() {
+        let w = window(vec![
+            op(1, 1, blank()),
+            op(2, 1, blank()),
+            op(3, 2, blank()),
+        ]);
+        let planned = fold_window(&w);
+
+        assert_eq!(planned.len(), 3);
+        assert!(planned.iter().all(|w| w.folded.is_none()));
+    }
+
+    /// Folding must not change how many statement groups one write renders to.
+    #[test]
+    fn a_merged_write_still_renders_one_statement_group() {
+        let mut first = blank();
+        first.added_attrs.insert("XLEN".into(), text("1"));
+        let mut second = blank();
+        second.added_attrs.insert("YLEN".into(), text("2"));
+
+        let w = window(vec![op(1, 1, first), op(1, 2, second)]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+        let sql = folded.to_modify_surql("7997_1", 2);
+
+        assert_eq!(sql.matches("UPSERT DAMP:7997_1 MERGE").count(), 1, "{sql}");
+        assert_eq!(sql.matches("UPDATE pe:7997_1 SET").count(), 1, "{sql}");
+        assert!(sql.contains("XLEN"), "{sql}");
+        assert!(sql.contains("YLEN"), "{sql}");
+    }
+
+    /// A merged statement must reproduce the state the replayed sequence left
+    /// behind, key for key.
+    #[test]
+    fn merging_is_equivalent_to_replaying_the_sequence() {
+        let mut first = blank();
+        first.added_attrs.insert("A".into(), text("1"));
+        first.added_attrs.insert("B".into(), text("1"));
+        let mut second = blank();
+        second.deleted_attrs.insert("A".into(), text("1"));
+        let mut third = blank();
+        third.added_attrs.insert("A".into(), text("3"));
+        third
+            .modified_attrs
+            .insert("B".into(), (text("1"), text("3")));
+
+        let w = window(vec![
+            op(1, 1, first.clone()),
+            op(1, 2, second.clone()),
+            op(1, 3, third.clone()),
+        ]);
+        let planned = fold_window(&w);
+        let folded = folded_at(&planned, 1);
+
+        // Replay the same sequence the way `to_modify_surql` resolves each op.
+        let mut replayed: HashMap<String, Option<NamedAttrValue>> = HashMap::new();
+        for element in [&first, &second, &third] {
+            for (k, v) in &element.added_attrs {
+                replayed.insert(k.clone(), Some(v.clone()));
+            }
+            for (k, (_, v)) in &element.modified_attrs {
+                replayed.insert(k.clone(), Some(v.clone()));
+            }
+            for k in element.deleted_attrs.keys() {
+                replayed.insert(k.clone(), None);
+            }
+        }
+
+        let mut merged: HashMap<String, Option<NamedAttrValue>> = HashMap::new();
+        for (k, v) in &folded.added_attrs {
+            merged.insert(k.clone(), Some(v.clone()));
+        }
+        for (k, (_, v)) in &folded.modified_attrs {
+            merged.insert(k.clone(), Some(v.clone()));
+        }
+        for k in folded.deleted_attrs.keys() {
+            merged.insert(k.clone(), None);
+        }
+
+        assert_eq!(merged, replayed);
+    }
+
+    /// The state one refno ends in after a window, modelled independently of how
+    /// [`fold_window`] detects runs: an `Add` replaces the record wholesale, a
+    /// `Deleted` lays a tombstone without clearing attributes, and a `Modified`
+    /// applies its three delta maps in the order `to_modify_surql` resolves them.
+    #[derive(Default, Clone, PartialEq, Debug)]
+    struct FinalState {
+        attrs: std::collections::BTreeMap<String, Option<NamedAttrValue>>,
+        explicit: std::collections::BTreeMap<String, Option<NamedAttrValue>>,
+        uda: std::collections::BTreeMap<i32, Option<NamedAttrValue>>,
+        children: Option<Vec<RefU64>>,
+        tombstoned: bool,
+        recreated: usize,
+    }
+
+    impl FinalState {
+        fn apply(&mut self, detail: &EleOperationDetail) {
+            match detail {
+                EleOperationDetail::Add(_) => {
+                    let recreated = self.recreated + 1;
+                    *self = FinalState::default();
+                    self.recreated = recreated;
+                }
+                EleOperationDetail::Deleted => self.tombstoned = true,
+                EleOperationDetail::None => {}
+                EleOperationDetail::Modified(m) => {
+                    for (k, v) in &m.added_attrs {
+                        self.attrs.insert(k.clone(), Some(v.clone()));
+                    }
+                    for (k, (_, v)) in &m.modified_attrs {
+                        self.attrs.insert(k.clone(), Some(v.clone()));
+                    }
+                    for k in m.deleted_attrs.keys() {
+                        self.attrs.insert(k.clone(), None);
+                    }
+                    for (k, v) in &m.added_explicit_attrs {
+                        self.explicit.insert(k.clone(), Some(v.clone()));
+                    }
+                    for (k, (_, v)) in &m.modified_explicit_attrs {
+                        self.explicit.insert(k.clone(), Some(v.clone()));
+                    }
+                    for k in m.deleted_explicit_attrs.keys() {
+                        self.explicit.insert(k.clone(), None);
+                    }
+                    for (k, v) in &m.added_uda_attrs {
+                        self.uda.insert(*k, Some(v.clone()));
+                    }
+                    for (k, (_, v)) in &m.modified_uda_attrs {
+                        self.uda.insert(*k, Some(v.clone()));
+                    }
+                    for k in m.deleted_uda_attrs.keys() {
+                        self.uda.insert(*k, None);
+                    }
+                    if let Some((_, new)) = &m.children_changed {
+                        self.children = Some(new.to_vec());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Folding is only safe if a real window ends in exactly the state its
+    /// unfolded replay would. Ten hand-built cases cannot cover the attribute
+    /// sequences a 169-session cold start actually produces, so this replays both
+    /// forms over a real E3D file and compares them refno by refno.
+    ///
+    /// Needs only the file — no SurrealDB. Run it in release; a debug build parses
+    /// the same window roughly 90x slower.
+    ///
+    /// ```text
+    /// $env:AIOS_FOLD_TEST_FILE = "D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys"
+    /// cargo test --release --lib -- folding_a_real_window_preserves_final_state --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual: folds a real E3D window and checks it against an unfolded replay"]
+    fn folding_a_real_window_preserves_final_state() {
+        use std::collections::BTreeMap as Map;
+
+        let file = std::env::var("AIOS_FOLD_TEST_FILE").expect("set AIOS_FOLD_TEST_FILE");
+        let to: i32 = std::env::var("AIOS_FOLD_TEST_TO")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(169);
+
+        let range_eles = IncrementPipeline::collect_changes(std::path::Path::new(&file), 1..=to)
+            .expect("collect changes");
+
+        let mut before: Map<RefU64, FinalState> = Map::new();
+        let mut raw_ops = 0usize;
+        for elements in range_eles.values() {
+            for op in elements {
+                raw_ops += 1;
+                before.entry(op.refno).or_default().apply(&op.detail);
+            }
+        }
+
+        let planned = fold_window(&range_eles);
+        let mut after: Map<RefU64, FinalState> = Map::new();
+        for write in &planned {
+            let entry = after.entry(write.op.refno).or_default();
+            match &write.folded {
+                Some(folded) => entry.apply(&EleOperationDetail::Modified(folded.clone())),
+                None => entry.apply(&write.op.detail),
+            }
+        }
+
+        println!(
+            "折叠 {} 个操作 → {} 个（省 {:.1}%），覆盖 {} 个 refno",
+            raw_ops,
+            planned.len(),
+            (raw_ops - planned.len()) as f64 / raw_ops.max(1) as f64 * 100.0,
+            before.len()
+        );
+
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "a refno went missing while folding"
+        );
+        for (refno, expected) in &before {
+            assert_eq!(
+                after.get(refno),
+                Some(expected),
+                "refno {refno:?} ends in a different state after folding"
+            );
+        }
+        assert!(planned.len() < raw_ops, "this window folded nothing");
+    }
+}
+
+#[cfg(test)]
+mod bench_tests {
+    use super::*;
+    use surrealdb::Surreal;
+    use surrealdb::engine::any::Any;
+    use surrealdb::opt::auth::Root;
+
+    /// Exactly what `persist_latest_main_data` used to emit, before folding.
+    fn render_unfolded(
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+        dbnum: i32,
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+        for (&sesno, elements) in range_eles {
+            for element in elements {
+                let surql = element.to_surql(&element.refno.to_string(), dbnum, sesno);
+                if !surql.is_empty() {
+                    statements.push(surql);
+                }
+            }
+        }
+        statements
+    }
+
+    /// What it emits now.
+    fn render_folded(range_eles: &BTreeMap<u32, Vec<EleOperationData>>, dbnum: i32) -> Vec<String> {
+        let mut statements = Vec::new();
+        for write in fold_window(range_eles) {
+            let id = write.op.refno.to_string();
+            let surql = match &write.folded {
+                Some(folded) => folded.to_modify_surql(&id, write.sesno),
+                None => write.op.to_surql(&id, dbnum, write.sesno),
+            };
+            if !surql.is_empty() {
+                statements.push(surql);
+            }
+        }
+        statements
+    }
+
+    async fn throwaway(endpoint: &str, db_name: &str) -> Surreal<Any> {
+        let db: Surreal<Any> = Surreal::init();
+        db.connect(endpoint)
+            .with_capacity(1000)
+            .await
+            .expect("connect throwaway instance");
+        db.signin(Root {
+            username: "root",
+            password: "root",
+        })
+        .await
+        .expect("sign in");
+        db.use_ns("bench").use_db(db_name).await.expect("use ns/db");
+        db
+    }
+
+    /// Replay the statements the way the pipeline does: 500 per atomic
+    /// transaction, awaited in order.
+    async fn replay(db: &Surreal<Any>, statements: &[String]) -> Duration {
+        const TX_CHUNK: usize = 500;
+        let start = Instant::now();
+        for chunk in statements.chunks(TX_CHUNK) {
+            if let Some(tx_sql) = wrap_in_transaction(chunk) {
+                db.query(&tx_sql)
+                    .await
+                    .expect("bench transport")
+                    .check()
+                    .expect("bench statements");
+            }
+        }
+        start.elapsed()
+    }
+
+    /// What folding is actually worth at the database, measured by replaying one
+    /// real window in both forms.
+    ///
+    /// Deliberately NOT `SUL_DB`: that global points at the configured working
+    /// project and a benchmark must never write there. This opens its own client
+    /// against a throwaway instance and refuses to run against the configured port.
+    ///
+    /// ```text
+    /// bin\surreal.exe start --user root --pass root --bind 127.0.0.1:8099 memory
+    /// $env:AIOS_FOLD_TEST_FILE = "…\ams000\amssys"
+    /// cargo test --release --lib -- persist_ab_on_a_throwaway_instance --ignored --nocapture
+    /// ```
+    ///
+    /// An empty in-memory instance has no existing rows and no indexes, so read
+    /// the ratio between the two runs, not the absolute milliseconds.
+    #[tokio::test]
+    #[ignore = "manual bench: needs a throwaway SurrealDB on 127.0.0.1:8099"]
+    async fn persist_ab_on_a_throwaway_instance() {
+        let file = std::env::var("AIOS_FOLD_TEST_FILE").expect("set AIOS_FOLD_TEST_FILE");
+        let endpoint = std::env::var("AIOS_BENCH_ENDPOINT")
+            .unwrap_or_else(|_| "ws://127.0.0.1:8099".to_string());
+        assert!(
+            !endpoint.contains(":8009"),
+            "refusing to benchmark against the configured working database"
+        );
+        let to: i32 = std::env::var("AIOS_FOLD_TEST_TO")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(169);
+        let dbnum: i32 = std::env::var("AIOS_FOLD_TEST_DBNUM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8191);
+
+        let range_eles = IncrementPipeline::collect_changes(std::path::Path::new(&file), 1..=to)
+            .expect("collect changes");
+
+        let unfolded = render_unfolded(&range_eles, dbnum);
+        let folded = render_folded(&range_eles, dbnum);
+        let bytes =
+            |s: &[String]| s.iter().map(String::len).sum::<usize>() as f64 / 1024.0 / 1024.0;
+
+        println!(
+            "未折叠 {} 条 / {:.2} MB   折叠后 {} 条 / {:.2} MB",
+            unfolded.len(),
+            bytes(&unfolded),
+            folded.len(),
+            bytes(&folded)
+        );
+
+        // Alternate the two forms so a warm-up or ordering effect shows up as a
+        // gap between the two rounds rather than hiding inside one of them.
+        for round in 1..=2 {
+            let db = throwaway(&endpoint, &format!("unfolded_{round}")).await;
+            let a = replay(&db, &unfolded).await;
+            let db = throwaway(&endpoint, &format!("folded_{round}")).await;
+            let b = replay(&db, &folded).await;
+            println!(
+                "第 {round} 轮: 未折叠 {}ms  折叠后 {}ms  省 {:.1}%",
+                a.as_millis(),
+                b.as_millis(),
+                (a.as_secs_f64() - b.as_secs_f64()) / a.as_secs_f64() * 100.0
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod datacenter_tests {
+    use super::*;
+    use pdms_io::io::ModifiedElement;
+
+    fn modified(noun: &str) -> EleOperationData {
+        EleOperationData::new(
+            RefU64((7997u64 << 32) | 1),
+            1,
+            EleOperationDetail::Modified(ModifiedElement {
+                current_data: Default::default(),
+                added_attrs: Default::default(),
+                deleted_attrs: Default::default(),
+                modified_attrs: Default::default(),
+                added_explicit_attrs: Default::default(),
+                deleted_explicit_attrs: Default::default(),
+                modified_explicit_attrs: Default::default(),
+                added_uda_attrs: Default::default(),
+                deleted_uda_attrs: Default::default(),
+                modified_uda_attrs: Default::default(),
+                noun: noun.to_string(),
+                children_changed: None,
+            }),
+        )
+    }
+
+    fn render(ops: Vec<EleOperationData>) -> Vec<String> {
+        let unit_types = crate::data_interface::generation_root::resolve_delivery_unit_types(&[]);
+        IncrementPipeline::render_datacenter_statements(&BTreeMap::from([(1u32, ops)]), &unit_types)
+    }
+
+    /// Chunks are concatenated verbatim, so an unterminated statement would
+    /// silently merge into its neighbour.
+    #[test]
+    fn every_statement_is_self_terminated_so_a_chunk_can_be_concatenated() {
+        let statements = render(vec![
+            modified("BRAN"),
+            modified("DAMP"),
+            EleOperationData::new(RefU64((7997u64 << 32) | 2), 1, EleOperationDetail::Deleted),
+        ]);
+
+        assert_eq!(statements.len(), 3);
+        for statement in &statements {
+            assert!(statement.ends_with(';'), "{statement}");
+        }
+    }
+
+    #[test]
+    fn delivery_unit_nouns_update_directly_and_others_roll_up_to_an_ancestor() {
+        for noun in ["BRAN", "HANG", "SUPPO", "EQUI"] {
+            let unit = render(vec![modified(noun)]).remove(0);
+            assert_eq!(
+                unit, "update datacenter_version:7997_1 set status = 'Modify';",
+                "{noun}"
+            );
+        }
+
+        let nested = render(vec![modified("FTUB")]).remove(0);
+        assert!(
+            nested.contains("fn::find_ancestor_types(pe:7997_1,"),
+            "{nested}"
+        );
+        assert!(!nested.contains("'FTUB'"), "{nested}");
+        assert!(nested.contains("'Modify'"), "{nested}");
+    }
+
+    #[test]
+    fn deletions_record_the_owning_zone_and_no_ops_render_nothing() {
+        let deleted = render(vec![EleOperationData::new(
+            RefU64((7997u64 << 32) | 2),
+            1,
+            EleOperationDetail::Deleted,
+        )])
+        .remove(0);
+        assert!(deleted.contains("belong_zone"), "{deleted}");
+        assert!(deleted.contains("'Delete'"), "{deleted}");
+
+        let noop = render(vec![EleOperationData::new(
+            RefU64((7997u64 << 32) | 3),
+            1,
+            EleOperationDetail::None,
+        )]);
+        assert!(noop.is_empty(), "{noop:?}");
+    }
+}
+
+#[cfg(test)]
 mod live_tests {
     use super::*;
     use crate::data_interface::tidb_manager::AiosDBManager;
@@ -582,5 +1593,935 @@ mod live_tests {
             .expect("connect surreal");
         let mgr = AiosDBManager::init_form_config().await.expect("init mgr");
         mgr.init_watcher().await.expect("init_watcher");
+    }
+
+    /// F4 · T403（live）：同一窗口重放 `Add` 的 `pe_owner` 写必须收敛。
+    ///
+    /// 落库按 `TX_CHUNK` 分块提交、整窗口非单事务，早块提交后块失败时 ADR-001 要求按
+    /// 同一 sesno 窗口重放。裸 `INSERT RELATION` 会撞上已存在的复合 id `[pe:{id}, i]`
+    /// 反复报错、把该 dbnum 的水位卡死；语句先删本元素入向边才收敛。
+    ///
+    /// 这里只回放渲染结果中的 `pe_owner` 语句：F4 的主张就落在这两句上，剥掉 pe / noun
+    /// 主记录的 UPSERT 可以让断言不依赖属性载荷的完整度。语句取自真实的
+    /// `to_surql` 输出而非手写，避免测试和实现各写一份 SQL 而漂移。
+    #[tokio::test]
+    #[ignore = "manual live: requires the configured Surreal database"]
+    async fn live_add_pe_owner_replay_is_idempotent() {
+        use aios_core::NamedAttrValue;
+        use parse_pdms_db::parse::EleData;
+        use pdms_io::io::EleOperationDetail;
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let mut ele = EleData::default();
+        ele.whole_attmap.attmap.map.insert(
+            "TYPE".to_string(),
+            NamedAttrValue::StringType("BOX".to_string()),
+        );
+        // DBNUM 只影响 pe / noun 主记录的 JSON（本例过滤掉不回放），取常规值即可；
+        // 4000000003 这类保留段号超出 i32，不能直接放进 IntegerType。
+        ele.whole_attmap
+            .attmap
+            .map
+            .insert("DBNUM".to_string(), NamedAttrValue::IntegerType(7997));
+        ele.children = RefU64Vec(vec![
+            RefU64((4000000003u64 << 32) | 11),
+            RefU64((4000000003u64 << 32) | 12),
+        ]);
+
+        let rendered = EleOperationDetail::Add(ele).to_surql("4000000003_10", 7997, 7);
+        let relate_sql = rendered
+            .lines()
+            .filter(|line| line.contains("pe_owner"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            relate_sql.contains("DELETE") && relate_sql.contains("INSERT RELATION"),
+            "渲染结果里应同时有 DELETE 与 INSERT RELATION:\n{rendered}"
+        );
+
+        let cleanup = "delete pe:4000000003_10, pe:4000000003_11, pe:4000000003_12;";
+        let setup = format!(
+            "{cleanup}
+            create pe:4000000003_10;
+            create pe:4000000003_11;
+            create pe:4000000003_12;"
+        );
+        SUL_DB
+            .query(setup)
+            .await
+            .expect("create replay fixture")
+            .check()
+            .expect("valid setup");
+
+        // 第一次：正常写入。第二次：模拟同窗口重放——必须同样成功。
+        for attempt in 1..=2 {
+            SUL_DB
+                .query(&relate_sql)
+                .await
+                .unwrap_or_else(|e| panic!("第 {attempt} 次执行关系语句失败: {e}"))
+                .check()
+                .unwrap_or_else(|e| panic!("第 {attempt} 次关系语句返回错误: {e}"));
+        }
+
+        let mut response = SUL_DB
+            .query("SELECT VALUE id FROM pe_owner WHERE out = pe:4000000003_10;")
+            .await
+            .expect("count relations")
+            .check()
+            .expect("valid count query");
+        let count = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
+            .expect("decode relation ids")
+            .len();
+
+        SUL_DB
+            .query(cleanup)
+            .await
+            .expect("cleanup replay fixture")
+            .check()
+            .expect("valid cleanup");
+
+        assert_eq!(count, 2, "重放后 children 关系应恰好各一条，不得重复累积");
+    }
+
+    /// Real-file E2E: load the backup baseline, apply the current file's real
+    /// FTUB + transient Add→Deleted window, skip the net-zero model work, then
+    /// generate every affected root. The E3D source files are read-only.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: requires isolated Surreal on :8009 and local AMS files"]
+    async fn live_real_ftub_delete_move_and_reorder() {
+        use crate::data_interface::dbnum_state::{DbnumState, FileObservation};
+        use crate::data_interface::generation_root::{
+            configured_delivery_unit_types, resolve_live_element_generation_root,
+        };
+        use crate::data_interface::manual_update::load_pending_model_units;
+        use crate::data_interface::model_refresh::ModelRefreshPolicy;
+        use crate::data_interface::model_update_pending::{drain, drain_non_regen};
+        use crate::data_interface::model_update_plan::ModelWorkAction;
+        use crate::versioned_db::database::sync_total_async_threaded;
+        use aios_core::NamedAttrValue;
+        use dashmap::DashSet;
+        use std::sync::Arc;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let current = PathBuf::from(std::env::var("AIOS_FTUB_CURRENT_FILE").unwrap_or_else(|_| {
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+        }));
+        let backup = PathBuf::from(std::env::var("AIOS_FTUB_BASELINE_FILE").unwrap_or_else(|_| {
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001.codex-before-move-20260724"
+                .into()
+        }));
+        assert!(
+            current.is_file(),
+            "missing current fixture: {}",
+            current.display()
+        );
+        assert!(
+            backup.is_file(),
+            "missing baseline fixture: {}",
+            backup.display()
+        );
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect isolated surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init current-project manager");
+
+        let fixture_project = "AiosFtubIncrementFixture";
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let fixture_root = std::env::temp_dir().join(format!(
+            "aios-ftub-increment-{}-{unique}",
+            std::process::id()
+        ));
+        let fixture_db_dir = fixture_root
+            .join(fixture_project)
+            .join(format!("{fixture_project}000"));
+        std::fs::create_dir_all(&fixture_db_dir).expect("create baseline fixture directory");
+        std::fs::copy(&backup, fixture_db_dir.join("ams8000_0001"))
+            .expect("copy read-only baseline fixture");
+
+        let mut baseline_options = manager.db_option.clone();
+        baseline_options.project_path = fixture_root.to_string_lossy().into_owned();
+        baseline_options.included_projects = vec![fixture_project.into()];
+        baseline_options.project_dirs = None;
+        baseline_options.total_sync = true;
+        baseline_options.replace_dbs = false;
+        baseline_options.included_db_files = Some(vec!["ams8000_0001".into()]);
+        baseline_options.manual_db_nums = Some(vec![8000]);
+        baseline_options.gen_model = false;
+        baseline_options.gen_mesh = false;
+
+        let parsed = sync_total_async_threaded(
+            &baseline_options,
+            fixture_project,
+            Arc::new(DashSet::new()),
+            &["DESI"],
+            100,
+        )
+        .await
+        .expect("load sesno-15 baseline");
+        assert!(
+            parsed.get(&8000).copied().unwrap_or_default() > 0,
+            "baseline dbnum=8000 must contain elements"
+        );
+
+        let branch = "24384/22402";
+        let deleted = RefnoEnum::from("24384/30939");
+        let baseline_root =
+            resolve_live_element_generation_root(deleted, &configured_delivery_unit_types())
+                .await
+                .expect("inspect element before applying its tombstone")
+                .expect("baseline FTUB must resolve to its owning BRAN");
+        assert_eq!(
+            (
+                baseline_root.root.to_pdms_str(),
+                baseline_root.noun.as_str()
+            ),
+            (branch.to_string(), "BRAN"),
+            "an Add→Deleted window only cancels when the element did not exist at baseline"
+        );
+        let mut baseline_io = PdmsIO::new("", backup.clone(), true);
+        baseline_io.open().expect("open baseline file");
+        let baseline_sesno = i32::try_from(baseline_io.get_latest_sesno().expect("baseline sesno"))
+            .expect("baseline sesno fits i32");
+        let mut current_io = PdmsIO::new("", current.clone(), true);
+        current_io.open().expect("open current file");
+        let current_sesno = i32::try_from(current_io.get_latest_sesno().expect("current sesno"))
+            .expect("current sesno fits i32");
+        let basic_info = current_io.get_page_basic_info().expect("current header");
+        assert_eq!(basic_info.pdms_header.db_num, 8000);
+        assert!(
+            current_sesno > baseline_sesno,
+            "fixture must contain a real incremental window"
+        );
+
+        let current_meta = std::fs::metadata(&current).expect("current file metadata");
+        DbnumState::record_scan(&FileObservation {
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            file_name: current
+                .file_name()
+                .expect("current file name")
+                .to_string_lossy()
+                .into_owned(),
+            file_path: current.to_string_lossy().into_owned(),
+            file_size: current_meta.len(),
+            file_latest_sesno: current_sesno,
+            file_modified_at: None,
+        })
+        .await
+        .expect("record current-file identity");
+        // This ignored live test deliberately replays an older baseline in the
+        // isolated :8009 database. Production watermarks remain monotonic; only
+        // the fixture is rewound so a previous interrupted test is rerunnable.
+        SUL_DB
+            .query(format!(
+                "UPDATE dbnum_watermark:8000 SET applied_sesno = {baseline_sesno}, \
+                 sesno = {baseline_sesno}; \
+                 DELETE increment_update_attempt:8000; \
+                 DELETE model_update_pending WHERE dbnum = 8000;"
+            ))
+            .await
+            .expect("rewind isolated fixture watermark")
+            .check()
+            .expect("valid fixture rewind");
+        let recovery_range = (baseline_sesno + 1)..=current_sesno;
+        let recovery_changes = IncrementPipeline::collect_changes(&current, recovery_range.clone())
+            .expect("collect fixed recovery range");
+        let recovery_plan = crate::data_interface::model_update_plan::build_model_update_plan(
+            8000,
+            current_sesno,
+            "DESI",
+            &recovery_changes,
+        )
+        .await;
+        crate::data_interface::model_update_pending::prepare_attempt(
+            &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                file_path: current.to_string_lossy().into_owned(),
+                start_sesno: baseline_sesno + 1,
+                end_sesno: current_sesno,
+                plan: recovery_plan,
+            },
+        )
+        .await
+        .expect("simulate crash after durable prepare and before PE writes");
+        let ranges = IndexMap::from([(
+            current.clone(),
+            (basic_info.clone(), recovery_range.clone(), "DESI".into()),
+        )]);
+        let result = IncrementPipeline::new().apply(ranges).await;
+        assert!(
+            result.errors.is_empty(),
+            "increment failed: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("replay unfinished range")),
+            "apply must recover the durable pre-write attempt: {:?}",
+            result.warnings
+        );
+        assert_eq!(result.successes.len(), 1);
+        let mut response = SUL_DB
+            .query("RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);")
+            .await
+            .expect("count pending before replay")
+            .check()
+            .expect("valid pending-count query");
+        let pending_before_replay = response
+            .take::<Option<usize>>(0)
+            .expect("decode pending count")
+            .unwrap_or_default();
+        let replay = IncrementPipeline::new()
+            .apply(IndexMap::from([(
+                current.clone(),
+                (basic_info, recovery_range, "DESI".into()),
+            )]))
+            .await;
+        assert!(
+            replay.errors.is_empty(),
+            "same-range replay failed: {:?}",
+            replay.errors
+        );
+        assert_eq!(replay.successes.len(), 1);
+        let mut response = SUL_DB
+            .query("RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);")
+            .await
+            .expect("count pending after replay")
+            .check()
+            .expect("valid replay pending-count query");
+        assert_eq!(
+            response
+                .take::<Option<usize>>(0)
+                .expect("decode replay pending count")
+                .unwrap_or_default(),
+            pending_before_replay,
+            "replaying one fixed session range must not duplicate durable model work"
+        );
+        let transient = result.successes[0]
+            .range_eles
+            .values()
+            .flatten()
+            .filter(|op| op.refno == deleted.refno())
+            .collect::<Vec<_>>();
+        assert!(
+            transient
+                .iter()
+                .any(|op| matches!(&op.detail, EleOperationDetail::Add(_)))
+                && transient
+                    .iter()
+                    .any(|op| matches!(&op.detail, EleOperationDetail::Deleted)),
+            "real fixture must retain the Add→Deleted sequence: {transient:?}"
+        );
+        assert_eq!(
+            DbnumState::applied_sesno(8000)
+                .await
+                .expect("read final watermark"),
+            current_sesno
+        );
+
+        let fitting = "24384/22403";
+        let pending = load_pending_model_units()
+            .await
+            .expect("load generation roots");
+        assert!(
+            pending
+                .iter()
+                .any(|job| job.dbnum == 8000 && job.root_refno == branch),
+            "FTUB/member changes must schedule owning BRAN {branch}: {pending:?}"
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|job| job.dbnum == 8000 && job.root_refno == fitting),
+            "FTUB is a component, never a delivery-unit generation root"
+        );
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN count(SELECT * FROM model_update_pending \
+                 WHERE action = 'delete_cleanup' AND target_refno = '{}');",
+                deleted.to_pdms_str()
+            ))
+            .await
+            .expect("query transient-delete work")
+            .check()
+            .expect("valid transient-delete work query");
+        assert_eq!(
+            response
+                .take::<Option<usize>>(0)
+                .expect("decode transient-delete work")
+                .unwrap_or_default(),
+            1,
+            "an element that existed at baseline must retain delete cleanup despite Add→Deleted"
+        );
+        assert!(
+            drain_non_regen(&manager)
+                .await
+                .expect("execute non-regeneration work")
+                >= 1,
+            "real window must execute the FTUB transform work"
+        );
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN {}.id != none;",
+                deleted.to_inst_relate_key()
+            ))
+            .await
+            .expect("query transient deleted model state")
+            .check()
+            .expect("valid transient deleted-model query");
+        assert!(
+            !response
+                .take::<Option<bool>>(0)
+                .expect("decode transient deleted-model query")
+                .unwrap_or(false),
+            "same-window Add→Deleted must not materialize a model"
+        );
+
+        let mut roots = pending
+            .iter()
+            .filter(|job| job.dbnum == 8000)
+            .map(|job| job.root_refno.clone())
+            .collect::<Vec<_>>();
+        roots.sort_unstable();
+        roots.dedup();
+        ModelRefreshPolicy::generate_roots(&manager, &roots)
+            .await
+            .expect("generate every affected root");
+        // BRAN is the delivery/generation root; its FTUB remains the concrete
+        // component that owns the generated instance relation.
+        let key = RefnoEnum::from(fitting).to_inst_relate_key();
+        let mut response = SUL_DB
+            .query(format!("RETURN {key}.id != none;"))
+            .await
+            .expect("query generated fitting")
+            .check()
+            .expect("valid generated-fitting query");
+        assert!(
+            response
+                .take::<Option<bool>>(0)
+                .expect("decode generated-fitting query")
+                .unwrap_or(false),
+            "owning BRAN generation must materialize its FTUB component geometry"
+        );
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN {}.id != none;",
+                deleted.to_inst_relate_key()
+            ))
+            .await
+            .expect("query deleted model after root regeneration")
+            .check()
+            .expect("valid post-regeneration deleted-model query");
+        assert!(
+            !response
+                .take::<Option<bool>>(0)
+                .expect("decode post-regeneration deleted-model query")
+                .unwrap_or(false),
+            "regenerating the surviving BRAN must not create the transient deleted element"
+        );
+
+        // Synthetic OWNER edit over real PE/CATA data: plan before persist, then
+        // move the real FTUB from BRAN A to BRAN B and regenerate both sides.
+        let old_branch = RefnoEnum::from(branch);
+        let new_branch = RefnoEnum::from("24384/22404");
+        let fitting_refno = RefnoEnum::from(fitting);
+        SUL_DB
+            .query(format!(
+                "DELETE pe_owner WHERE in = {} AND out != {};",
+                fitting_refno.to_pe_key(),
+                old_branch.to_pe_key()
+            ))
+            .await
+            .expect("remove stale owner edge from an interrupted prior run")
+            .check()
+            .expect("valid stale-owner cleanup");
+        IncrementPipeline::invalidate_caches(HashSet::from([
+            fitting_refno,
+            old_branch,
+            new_branch,
+        ]))
+        .await;
+        let mut move_op = result.successes[0]
+            .range_eles
+            .values()
+            .flatten()
+            .find(|op| {
+                op.refno == fitting_refno.refno()
+                    && matches!(&op.detail, EleOperationDetail::Modified(_))
+            })
+            .expect("real FTUB modification")
+            .clone();
+        let mut source_fitting_op = move_op.clone();
+        let EleOperationDetail::Modified(source_modified) = &mut source_fitting_op.detail else {
+            unreachable!("filtered above")
+        };
+        source_modified.modified_explicit_attrs.insert(
+            "OWNER".into(),
+            (
+                NamedAttrValue::RefU64Type(new_branch.refno()),
+                NamedAttrValue::RefU64Type(old_branch.refno()),
+            ),
+        );
+        let EleOperationDetail::Modified(modified) = &mut move_op.detail else {
+            unreachable!("filtered above")
+        };
+        modified.current_data.owner = new_branch.refno();
+        modified.modified_explicit_attrs.insert(
+            "OWNER".into(),
+            (
+                NamedAttrValue::RefU64Type(old_branch.refno()),
+                NamedAttrValue::RefU64Type(new_branch.refno()),
+            ),
+        );
+        let old_children = RefU64Vec(
+            aios_core::get_children_pes(old_branch)
+                .await
+                .expect("load old BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect(),
+        );
+        let new_children = RefU64Vec(
+            aios_core::get_children_pes(new_branch)
+                .await
+                .expect("load new BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect(),
+        );
+        let original_old_children = old_children.clone();
+        let original_new_children = new_children.clone();
+        let mut old_children_after = old_children.clone();
+        old_children_after
+            .0
+            .retain(|child| *child != fitting_refno.refno());
+        let mut new_children_after = new_children.clone();
+        if !new_children_after.0.contains(&fitting_refno.refno()) {
+            new_children_after.0.push(fitting_refno.refno());
+        }
+        let parent_op = |root: RefnoEnum, sesno: u32, before: RefU64Vec, after: RefU64Vec| {
+            EleOperationData::new(
+                root.refno(),
+                sesno,
+                EleOperationDetail::Modified(ModifiedElement {
+                    current_data: Default::default(),
+                    added_attrs: Default::default(),
+                    deleted_attrs: Default::default(),
+                    modified_attrs: Default::default(),
+                    added_explicit_attrs: Default::default(),
+                    deleted_explicit_attrs: Default::default(),
+                    modified_explicit_attrs: Default::default(),
+                    added_uda_attrs: Default::default(),
+                    deleted_uda_attrs: Default::default(),
+                    modified_uda_attrs: Default::default(),
+                    noun: "BRAN".into(),
+                    children_changed: Some((before, after)),
+                }),
+            )
+        };
+        let move_sesno = u32::try_from(current_sesno + 1).expect("synthetic sesno fits u32");
+        let move_range = BTreeMap::from([(
+            move_sesno,
+            vec![
+                move_op,
+                parent_op(old_branch, move_sesno, old_children, old_children_after),
+                parent_op(new_branch, move_sesno, new_children, new_children_after),
+            ],
+        )]);
+        let move_plan = crate::data_interface::model_update_plan::build_model_update_plan(
+            8000,
+            current_sesno + 1,
+            "DESI",
+            &move_range,
+        )
+        .await;
+        let mut move_roots = move_plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .map(|item| item.target_refno.clone())
+            .collect::<Vec<_>>();
+        move_roots.sort_unstable();
+        move_roots.dedup();
+        let mut expected_move_roots = vec![old_branch.to_pdms_str(), new_branch.to_pdms_str()];
+        expected_move_roots.sort_unstable();
+        assert_eq!(
+            move_roots, expected_move_roots,
+            "cross-BRAN OWNER move must regenerate both membership sides"
+        );
+
+        IncrementPipeline::persist_latest_main_data(&move_range, 8000)
+            .await
+            .expect("persist synthetic OWNER move");
+        IncrementPipeline::invalidate_caches(HashSet::from([
+            fitting_refno,
+            old_branch,
+            new_branch,
+        ]))
+        .await;
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE out FROM pe_owner WHERE in = {};",
+                fitting_refno.to_pe_key()
+            ))
+            .await
+            .expect("query moved FTUB owner")
+            .check()
+            .expect("valid moved-owner query");
+        assert_eq!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("decode moved owner"),
+            vec![new_branch.to_pe_key().parse().expect("new owner thing")]
+        );
+
+        ModelRefreshPolicy::generate_roots(&manager, &move_roots)
+            .await
+            .expect("regenerate both sides of OWNER move");
+        for root in [old_branch, new_branch] {
+            let subtree = crate::data_interface::helper::collect_pe_subtree_refnos(&[root])
+                .await
+                .expect("collect regenerated branch subtree");
+            let pe_keys = subtree
+                .iter()
+                .map(RefnoEnum::to_pe_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response = SUL_DB
+                .query(format!(
+                    "SELECT VALUE id FROM inst_relate WHERE in IN [{pe_keys}];"
+                ))
+                .await
+                .expect("query regenerated branch models")
+                .check()
+                .expect("valid regenerated-branch query");
+            assert!(
+                !response
+                    .take::<Vec<surrealdb::sql::Thing>>(0)
+                    .expect("decode regenerated branch models")
+                    .is_empty(),
+                "both old and new BRAN must contain generated model instances after move"
+            );
+        }
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN {}.id != none;",
+                fitting_refno.to_inst_relate_key()
+            ))
+            .await
+            .expect("query moved FTUB model")
+            .check()
+            .expect("valid moved-FTUB query");
+        assert!(
+            response
+                .take::<Option<bool>>(0)
+                .expect("decode moved-FTUB model")
+                .unwrap_or(false),
+            "receiving BRAN generation must materialize the moved FTUB"
+        );
+
+        // Same members, different order: persist indexed pe_owner edges and
+        // regenerate only the affected receiving BRAN.
+        let reorder_before = RefU64Vec(
+            aios_core::get_children_pes(new_branch)
+                .await
+                .expect("load moved BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect(),
+        );
+        assert!(
+            reorder_before.0.len() >= 2,
+            "real receiving BRAN needs at least two children for reorder coverage"
+        );
+        let mut reorder_after = reorder_before.clone();
+        reorder_after.0.swap(0, 1);
+        let reorder_sesno = u32::try_from(current_sesno + 2).expect("reorder sesno fits u32");
+        let reorder_range = BTreeMap::from([(
+            reorder_sesno,
+            vec![parent_op(
+                new_branch,
+                reorder_sesno,
+                reorder_before.clone(),
+                reorder_after.clone(),
+            )],
+        )]);
+        // A malformed ref_rev endpoint exercises the production read/decode
+        // failure path without a test-only injection switch.
+        const BAD_REFERRER: &str = "pe:codex_bad_ref_rev";
+        SUL_DB
+            .query(format!(
+                "DELETE ref_rev WHERE in = {BAD_REFERRER}; \
+                 RELATE {BAD_REFERRER}->ref_rev->{};",
+                new_branch.to_pe_key()
+            ))
+            .await
+            .expect("inject malformed reverse edge")
+            .check()
+            .expect("valid malformed-edge fixture");
+        let reorder_plan = crate::data_interface::model_update_plan::build_model_update_plan(
+            8000,
+            current_sesno + 2,
+            "DESI",
+            &reorder_range,
+        )
+        .await;
+        let reorder_roots = reorder_plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .map(|item| item.target_refno.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reorder_roots,
+            vec![new_branch.to_pdms_str()],
+            "same-set reorder must regenerate only its owning BRAN"
+        );
+        assert!(
+            reorder_plan
+                .work_items
+                .iter()
+                .any(|item| item.action == ModelWorkAction::CascadeExpand
+                    && item.target_refno == new_branch.to_pdms_str()),
+            "reverse-index failure must persist a deferred cascade seed: {reorder_plan:?}"
+        );
+        assert!(
+            reorder_plan
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("reverse-reference lookup failed")),
+            "reverse-index failure must remain visible: {:?}",
+            reorder_plan.warnings
+        );
+
+        IncrementPipeline::persist_latest_main_data(&reorder_range, 8000)
+            .await
+            .expect("persist BRAN child reorder");
+        crate::data_interface::model_update_pending::finalize_attempt(
+            8000,
+            current_sesno + 2,
+            &reorder_plan,
+            &[],
+        )
+        .await
+        .expect("persist reorder work and advance watermark");
+        SUL_DB
+            .query(format!("DELETE ref_rev WHERE in = {BAD_REFERRER};"))
+            .await
+            .expect("repair reverse index")
+            .check()
+            .expect("valid reverse-index repair");
+        IncrementPipeline::invalidate_caches(HashSet::from([new_branch])).await;
+        #[derive(serde::Deserialize)]
+        struct OrderedChild {
+            child: surrealdb::sql::Thing,
+        }
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, in AS child FROM pe_owner WHERE out = {} ORDER BY id;",
+                new_branch.to_pe_key()
+            ))
+            .await
+            .expect("query persisted child order")
+            .check()
+            .expect("valid child-order query");
+        let persisted_order = response
+            .take::<Vec<OrderedChild>>(0)
+            .expect("decode persisted child order");
+        let persisted_order = persisted_order
+            .into_iter()
+            .map(|row| row.child)
+            .collect::<Vec<_>>();
+        let expected_order = reorder_after
+            .0
+            .iter()
+            .map(|child| {
+                RefnoEnum::from(*child)
+                    .to_pe_key()
+                    .parse()
+                    .expect("child thing")
+            })
+            .collect::<Vec<surrealdb::sql::Thing>>();
+        assert_eq!(
+            persisted_order, expected_order,
+            "pe_owner compound ids must retain the new child order"
+        );
+        drain(&manager)
+            .await
+            .expect("recover deferred cascade and regenerate reordered BRAN");
+        assert!(
+            load_pending_model_units()
+                .await
+                .expect("load recovered pending work")
+                .is_empty(),
+            "repaired reverse index must let deferred cascade and root work converge"
+        );
+        let reordered_subtree =
+            crate::data_interface::helper::collect_pe_subtree_refnos(&[new_branch])
+                .await
+                .expect("collect reordered branch subtree");
+        let reordered_pe_keys = reordered_subtree
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM inst_relate WHERE in IN [{reordered_pe_keys}];"
+            ))
+            .await
+            .expect("query reordered branch models")
+            .check()
+            .expect("valid reordered-model query");
+        assert!(
+            !response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("decode reordered branch models")
+                .is_empty(),
+            "reordered BRAN must still have generated model instances"
+        );
+
+        // Restore the shared :8009 ProjAMS state to the actual file. The MOVE
+        // and ORDER cases above are synthetic and must not leak sesno+1/+2 or
+        // altered ownership into later manual-preview tests.
+        std::fs::copy(&current, fixture_db_dir.join("ams8000_0001"))
+            .expect("replace fixture with current source file");
+        let restored = sync_total_async_threaded(
+            &baseline_options,
+            fixture_project,
+            Arc::new(DashSet::new()),
+            &["DESI"],
+            100,
+        )
+        .await
+        .expect("restore current ProjAMS dbnum=8000");
+        assert!(
+            restored.get(&8000).copied().unwrap_or_default() > 0,
+            "restored dbnum=8000 must contain elements"
+        );
+        SUL_DB
+            .query(format!(
+                "UPDATE dbnum_watermark:8000 SET applied_sesno = {current_sesno}, \
+                 sesno = {current_sesno}, file_latest_sesno = {current_sesno}; \
+                 DELETE increment_update_attempt:8000; \
+                 DELETE model_update_pending WHERE dbnum = 8000;"
+            ))
+            .await
+            .expect("restore isolated fixture watermark")
+            .check()
+            .expect("valid fixture restore");
+        let restored_old_children = RefU64Vec(
+            aios_core::get_children_pes(old_branch)
+                .await
+                .expect("read synthetic old BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect(),
+        );
+        let restored_new_children = RefU64Vec(
+            aios_core::get_children_pes(new_branch)
+                .await
+                .expect("read synthetic new BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect(),
+        );
+        let restore_sesno = u32::try_from(current_sesno).expect("current sesno fits u32");
+        IncrementPipeline::persist_latest_main_data(
+            &BTreeMap::from([(
+                restore_sesno,
+                vec![
+                    source_fitting_op,
+                    parent_op(
+                        old_branch,
+                        restore_sesno,
+                        restored_old_children,
+                        original_old_children.clone(),
+                    ),
+                    parent_op(
+                        new_branch,
+                        restore_sesno,
+                        restored_new_children,
+                        original_new_children.clone(),
+                    ),
+                ],
+            )]),
+            8000,
+        )
+        .await
+        .expect("restore synthetic OWNER and child-order edits");
+        SUL_DB
+            .query(format!(
+                "DELETE pe_owner WHERE in = {} AND out != {};",
+                fitting_refno.to_pe_key(),
+                old_branch.to_pe_key()
+            ))
+            .await
+            .expect("remove synthetic owner edge")
+            .check()
+            .expect("valid synthetic-owner cleanup");
+        IncrementPipeline::invalidate_caches(HashSet::from([
+            fitting_refno,
+            old_branch,
+            new_branch,
+        ]))
+        .await;
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE out FROM pe_owner WHERE in = {};",
+                fitting_refno.to_pe_key()
+            ))
+            .await
+            .expect("query restored fitting owner")
+            .check()
+            .expect("valid restored-owner query");
+        assert_eq!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("decode restored fitting owner"),
+            vec![old_branch.to_pe_key().parse().expect("old owner thing")],
+            "restore exactly one FTUB owner from source"
+        );
+        assert_eq!(
+            aios_core::get_children_pes(old_branch)
+                .await
+                .expect("read restored old BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect::<Vec<_>>(),
+            original_old_children.0,
+            "restore old BRAN membership and order"
+        );
+        assert_eq!(
+            aios_core::get_children_pes(new_branch)
+                .await
+                .expect("read restored new BRAN children")
+                .into_iter()
+                .map(|child| child.refno.refno())
+                .collect::<Vec<_>>(),
+            original_new_children.0,
+            "restore new BRAN membership and order"
+        );
+        ModelRefreshPolicy::generate_roots(
+            &manager,
+            &[old_branch.to_pdms_str(), new_branch.to_pdms_str()],
+        )
+        .await
+        .expect("restore affected BRAN models");
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove temporary baseline fixture");
     }
 }

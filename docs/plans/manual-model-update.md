@@ -104,7 +104,8 @@ pub async fn execute_manual_update(
    - 修改→删除
    - 新增→删除
 5. 复用 `EleOperationData::is_geometry_update` 和 `is_transform_change` 判定模型影响，不维护第二份属性名单。
-6. 在 `DbOptionExt` 中增加“追加最小交付类型”配置，运行时与内置五类取并集并规范化大小写。
+6. 在 `DbOptionExt` 中提供完整替换/追加配置；默认交付类型为
+   `BRAN/HANG/SUPPO/EQUI`，并固定拒绝层级容器和普通管件 `FTUB`。
 
 最小检查：
 
@@ -134,12 +135,13 @@ pub async fn execute_manual_update(
    - 更新前 ZONE 与最近交付单元
    - 更新后 ZONE 与最近交付单元
 4. 按 `sesno` 保留原始记录，按 ZONE 和交付单元输出去重汇总。
-5. 无最小交付单元时回退到 ZONE；两者都未知时输出警告且不生成模型。
+5. 无最小交付单元时按 normal-granularity significant owner 解析生成根；
+   `ZONE` 只做统计，不能作为生成兜底。
 6. 删除使用更新前快照；移动同时加入原、新交付单元。
 
 最小检查：
 
-- BRAN/HANG/SUPPO/EQUI 最近祖先选择。
+- BRAN/HANG/SUPPO/EQUI 最近祖先选择；FTUB 作为管件归并到 BRAN。
 - 自定义追加类型与自定义完整类型集合（`append_delivery_unit_types` / `delivery_unit_types`）。
 - 嵌套交付类型只选择最近祖先。
 - 跨 ZONE、跨交付单元移动同时影响两端。
@@ -251,7 +253,7 @@ pub async fn execute_manual_update(
    - 多 `sesno`
    - 元素新增、修改、删除
    - OWNER 和 ZONE 移动
-   - 最小交付单元与 ZONE 兜底
+   - 最小交付单元与正常颗粒生成根（ZONE 仅统计）
    - 一个故意失败的模型单元
 5. 按功能规格的 12 条验收标准逐项记录结果。
 

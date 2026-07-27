@@ -7,11 +7,11 @@
 //! Compensation for `model_refresh` always uses the Owner regen path (idempotent
 //! on owner sets). Classified payloads are not replayed from disk.
 
-use aios_core::options::ModelRefreshMode;
-use aios_core::pdms_types::*;
 use aios_core::SUL_DB;
+use aios_core::pdms_types::*;
 use serde::{Deserialize, Serialize};
 
+use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::increment_pipeline::{IncrResult, SYS_META_DB_TYPES};
 use crate::data_interface::model_refresh::ModelRefreshPolicy;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -59,32 +59,11 @@ impl SideEffectCompensator {
         format!("{}:{}_{}_{}", TABLE, kind.as_str(), dbnum, end_sesno)
     }
 
-    /// After PE+watermark success: enqueue jobs that still need side effects.
-    pub async fn enqueue_from_incr(
-        mgr: &AiosDBManager,
-        incr: &IncrResult,
-    ) -> anyhow::Result<()> {
+    /// After PE+watermark success: enqueue only legacy non-model side effects.
+    /// Model work is now persisted by `IncrementPipeline` before its watermark.
+    pub async fn enqueue_from_incr(_mgr: &AiosDBManager, incr: &IncrResult) -> anyhow::Result<()> {
         if !incr.had_work() {
             return Ok(());
-        }
-
-        if !matches!(mgr.db_option.model_refresh, ModelRefreshMode::Noop) {
-            for success in &incr.successes {
-                if SYS_META_DB_TYPES.contains(&success.db_type.as_str()) {
-                    continue;
-                }
-                if success.changed_refnos.is_empty() {
-                    continue;
-                }
-                Self::upsert_pending(
-                    SideEffectKind::ModelRefresh,
-                    success.dbnum,
-                    success.end_sesno,
-                    &success.db_type,
-                    &success.changed_refnos,
-                )
-                .await?;
-            }
         }
 
         if incr.has_db_type("SYST") {
@@ -101,14 +80,8 @@ impl SideEffectCompensator {
                 .find(|s| s.db_type == "SYST")
                 .map(|s| s.dbnum)
                 .unwrap_or(0);
-            Self::upsert_pending(
-                SideEffectKind::SystDerived,
-                dbnum,
-                end_sesno,
-                "SYST",
-                &[],
-            )
-            .await?;
+            Self::upsert_pending(SideEffectKind::SystDerived, dbnum, end_sesno, "SYST", &[])
+                .await?;
         }
 
         Ok(())
@@ -129,6 +102,7 @@ impl SideEffectCompensator {
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_else(|_| "[]".into());
+        let db_type = escape_surql_str(db_type);
         let sql = format!(
             "UPSERT {id} SET \
              kind = '{}', dbnum = {dbnum}, end_sesno = {end_sesno}, \
@@ -140,16 +114,14 @@ impl SideEffectCompensator {
         SUL_DB
             .query(sql)
             .await
-            .map_err(|e| anyhow::anyhow!("enqueue {id} failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("enqueue {id} failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("enqueue {id} statement failed: {e}"))?;
         println!("SideEffectCompensator: enqueued {id}");
         Ok(())
     }
 
-    pub async fn mark_done(
-        kind: SideEffectKind,
-        dbnum: u32,
-        end_sesno: i32,
-    ) -> anyhow::Result<()> {
+    pub async fn mark_done(kind: SideEffectKind, dbnum: u32, end_sesno: i32) -> anyhow::Result<()> {
         let id = Self::record_id(kind, dbnum, end_sesno);
         let sql = format!(
             "UPDATE {id} SET status = 'done', last_error = NONE, updated_at = time::now();"
@@ -157,7 +129,9 @@ impl SideEffectCompensator {
         SUL_DB
             .query(sql)
             .await
-            .map_err(|e| anyhow::anyhow!("mark_done {id} failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("mark_done {id} failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("mark_done {id} statement failed: {e}"))?;
         Ok(())
     }
 
@@ -168,7 +142,10 @@ impl SideEffectCompensator {
         err: &str,
     ) -> anyhow::Result<()> {
         let id = Self::record_id(kind, dbnum, end_sesno);
-        let escaped = err.replace('\'', "\\'");
+        // 错误信息常含 Windows 路径的反斜杠，需与单引号一起转义，否则会破坏
+        // SurrealQL 字符串字面量导致本次 mark_failed 失败（attempts 不自增、
+        // last_error 不落库）。复用 dbnum_state 的统一转义。
+        let escaped = escape_surql_str(err);
         let sql = format!(
             "UPDATE {id} SET status = 'failed', attempts = (attempts?:0) + 1, \
              last_error = '{escaped}', updated_at = time::now();"
@@ -176,7 +153,9 @@ impl SideEffectCompensator {
         SUL_DB
             .query(sql)
             .await
-            .map_err(|e| anyhow::anyhow!("mark_failed {id} failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("mark_failed {id} failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("mark_failed {id} statement failed: {e}"))?;
         Ok(())
     }
 
@@ -184,10 +163,10 @@ impl SideEffectCompensator {
     pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
         let sql = format!(
             "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-             AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC LIMIT 50;"
+             AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC;"
         );
-        let mut response = SUL_DB.query(sql).await?;
-        let jobs: Vec<PendingJob> = response.take(0).unwrap_or_default();
+        let mut response = SUL_DB.query(sql).await?.check()?;
+        let jobs: Vec<PendingJob> = response.take(0)?;
         if jobs.is_empty() {
             return Ok(0);
         }
@@ -215,12 +194,23 @@ impl SideEffectCompensator {
                         .iter()
                         .filter_map(|s| s.parse().ok())
                         .collect();
-                    ModelRefreshPolicy::compensate_owners(mgr, &refnos).await
+                    // F1（T304）：补偿也要清理已删除元素几何（按 pe.deleted 状态反推），
+                    // 再把 legacy refnos 转为新根任务；旧记录只在新任务成功落库后完成。
+                    async {
+                        ModelRefreshPolicy::cleanup_deleted_by_pe_state(&refnos).await?;
+                        crate::data_interface::model_update_pending::enqueue_legacy_changed_refnos(
+                            job.dbnum,
+                            job.end_sesno,
+                            &job.db_type,
+                            &refnos,
+                        )
+                        .await
+                    }
+                    .await
                 }
                 SideEffectKind::SystDerived => {
                     let aios_mgr =
-                        aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option()
-                            .await?;
+                        aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option().await?;
                     crate::team_data::sync_team_data(&aios_mgr).await
                 }
             };

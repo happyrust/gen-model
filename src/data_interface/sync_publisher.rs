@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aios_core::{get_db_option, SUL_DB};
+use aios_core::{SUL_DB, get_db_option};
 use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use rumqttc::{AsyncClient, QoS};
 
@@ -135,9 +135,7 @@ impl SyncPublisher {
                 ))
                 .await
             {
-                outcome
-                    .errors
-                    .push(format!("写入 e3d_sync 失败: {}", e));
+                outcome.errors.push(format!("写入 e3d_sync 失败: {}", e));
             }
 
             match self
@@ -154,9 +152,7 @@ impl SyncPublisher {
         #[cfg(not(feature = "mqtt"))]
         {
             let _ = (&notify_file_names, &notify_file_hashes, &self.mqtt_client);
-            outcome
-                .skipped
-                .extend(notify_file_names.iter().cloned());
+            outcome.skipped.extend(notify_file_names.iter().cloned());
         }
 
         outcome

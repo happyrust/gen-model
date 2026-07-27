@@ -15,7 +15,7 @@ _Avoid_: 局部更新、局部刷新
 _Avoid_: 重生成根、regen root、目标根
 
 **最小交付单元 (Minimum Delivery Unit, MDU)**：
-一类**具备独立成败与独立交付语义**的模型单元类型。类型集合由项目配置决定：默认 `BRAN / HANG / SUPPO / EQUI`，`delivery_unit_types` 可完全取代默认集合、`append_delivery_unit_types` 可在默认集合上追加；层级容器 `WORL/WORLD/SITE/ZONE` 恒被拒绝。当变化元素自身或其最近祖先命中该类型时，以该单元为生成根。
+一类**具备独立成败与独立交付语义**的模型单元类型。类型集合由项目配置决定：默认 `BRAN / HANG / SUPPO / EQUI`，`delivery_unit_types` 可完全取代默认集合、`append_delivery_unit_types` 可在默认集合上追加；层级容器 `WORL/WORLD/SITE/ZONE` 与管件 `FTUB` 恒被拒绝。当变化元素自身或其最近祖先命中该类型时，以该单元为生成根；`FTUB` 及其子件在正常颗粒路径中也必须继续上溯，不能成为生成根。
 _Avoid_: 交付单元类型、delivery type、内置交付单元
 
 **交付单元根 (Delivery-Unit Root)**：
@@ -34,6 +34,10 @@ _Avoid_: 显著属主、主属主
 `LOOP / PLOO / VERT / PAVE` 等**自身不是几何生成根**的层级容器；解析生成根时需跨过它继续上溯到 PANE/EXTR 等真正的生成体。
 _Avoid_: 环容器
 
+**父模型输入 (Parent-Model Input)**：
+自身不作为独立交付模型、但其数据参与父元素几何或坐标计算的子元素，例如 GENSEC 的 `SPINE / POINSP / JLDATU / PLDATU / ENDATU`；其变化归并到父级生成根。
+_Avoid_: 辅助几何、漏生成类型
+
 **模型影响 (Model Impact)**：
 一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。
 _Avoid_: 几何影响、is_geometry_update
@@ -47,11 +51,11 @@ _Avoid_: 合并变化、final op
 _Avoid_: 移动、迁移
 
 **应用水位 (applied_sesno)**：
-某 `dbnum` 已成功落库并生成的会话号上界，只能在对应数据批次成功后推进；与扫描观察值 `file_latest_sesno` 严格区分、互不替代。
+某 `dbnum` 已成功落库、且对应模型工作已持久化为 durable pending 的会话号上界；模型执行可在水位后失败并独立重试。它只在对应数据批次与模型计划原子收口后推进，与扫描观察值 `file_latest_sesno` 严格区分、互不替代。
 _Avoid_: 水位、sesno 水位（泛指时）
 
 **待重试单元 (Pending Model Unit)**：
-数据已成功但模型生成失败时登记的独立重试任务，键为 `(dbnum, 生成根)`，同一根只保留一条最新任务。
+数据已成功后仍需执行或重试的独立模型任务，包含位姿更新、删除清理、反向级联展开和生成根重算；生成根任务键为 `(dbnum, 生成根)`，同一根只保留一条最新任务。消费时先完成非重生成动作，再重新读取并批量生成其展开出的全部根。
 _Avoid_: 重试任务、pending task
 
 **关联展开链 (Association Expansion Chain)**：

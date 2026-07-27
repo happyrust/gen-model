@@ -6,7 +6,6 @@ use aios_core::{RefnoEnum, SUL_DB};
 use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::{Deserialize, Serialize};
 
-use crate::data_interface::increment_pipeline::SYS_META_DB_TYPES;
 use crate::data_interface::manual_update::{
     DeliveryUnitSummary, NetChangeDetail, NetOp, merge_net_change_details, resolve_unit_rollup,
     resolve_unit_rollup_without_reverse_index,
@@ -161,6 +160,45 @@ async fn baseline_existing_cancelled(
     Ok(existing)
 }
 
+/// CATA windows seed only deferred reverse-cascade expansion (ADR-008 / F8):
+/// an edited shared catalogue/spec element must regenerate the design
+/// instances that reference it, yet the element itself is never a generation
+/// root — so no unit rollup, no transform and no delete-cleanup work here.
+/// The `CascadeExpand` executor re-queries `ref_rev` live and enqueues the
+/// derived `RegenRoot` items idempotently.
+///
+/// Net `Added` elements are skipped: a brand-new catalogue element can only
+/// become referenced through design-side edits, and those plan their own
+/// regeneration in the DESI window that records them.
+fn build_cata_cascade_plan(
+    dbnum: u32,
+    end_sesno: i32,
+    db_type: &str,
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+) -> ModelUpdatePlan {
+    let mut items = BTreeMap::new();
+    for detail in merge_net_change_details(range_eles) {
+        if !detail.model_affecting || !matches!(detail.net, NetOp::Modified | NetOp::Deleted) {
+            continue;
+        }
+        insert_item(
+            &mut items,
+            ModelWorkItem {
+                dbnum,
+                db_type: db_type.to_string(),
+                source_end_sesno: end_sesno,
+                action: ModelWorkAction::CascadeExpand,
+                target_refno: detail.refno.to_pdms_str(),
+                noun: String::new(),
+            },
+        );
+    }
+    ModelUpdatePlan {
+        work_items: items.into_values().collect(),
+        warnings: Vec::new(),
+    }
+}
+
 /// Prepare model work before PE persistence, while the pre-update owner graph
 /// and reverse-reference index are still available.
 pub(crate) async fn build_model_update_plan(
@@ -169,7 +207,10 @@ pub(crate) async fn build_model_update_plan(
     db_type: &str,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
 ) -> ModelUpdatePlan {
-    if SYS_META_DB_TYPES.contains(&db_type) {
+    if db_type == "CATA" {
+        return build_cata_cascade_plan(dbnum, end_sesno, db_type, range_eles);
+    }
+    if db_type != "DESI" {
         return ModelUpdatePlan::default();
     }
 
@@ -455,5 +496,376 @@ mod tests {
             data_only.work_items.is_empty(),
             "NAME must not schedule model work: {data_only:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: verifies real ProjAMS direct, transform and data-only sessions"]
+    async fn live_projams_real_attribute_sessions_plan_and_execute_distinctly() {
+        use crate::data_interface::increment_pipeline::IncrementPipeline;
+        use crate::data_interface::model_refresh::ModelRefreshPolicy;
+        use crate::data_interface::tidb_manager::AiosDBManager;
+        use std::path::PathBuf;
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+
+        let design_file = PathBuf::from(
+            std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+            }),
+        );
+        let direct = IncrementPipeline::collect_changes(&design_file, 25..=26)
+            .expect("collect real BOX.XLEN sessions");
+        let direct_plan = build_model_update_plan(8000, 26, "DESI", &direct).await;
+        assert_eq!(
+            direct_plan
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::RegenRoot, "24384/24776")]
+        );
+        ModelRefreshPolicy::generate_roots(&manager, &["24384/24776".into()])
+            .await
+            .expect("regenerate EQUI for real BOX.XLEN sessions");
+
+        let transform = IncrementPipeline::collect_changes(&design_file, 27..=28)
+            .expect("collect real FTUB.POS sessions");
+        let transform_impacts = transform
+            .iter()
+            .flat_map(|(sesno, operations)| {
+                operations.iter().map(|operation| {
+                    (
+                        *sesno,
+                        classify_operation_impact(operation),
+                        crate::data_interface::model_impact::classify_operation_effects(operation),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            transform_impacts
+                .iter()
+                .all(|(_, impact, _)| *impact != OperationImpact::Regen),
+            "{transform_impacts:#?}"
+        );
+        assert_eq!(
+            transform_impacts
+                .iter()
+                .filter(|(_, impact, _)| *impact == OperationImpact::TransformOnly)
+                .count(),
+            2,
+            "{transform_impacts:#?}"
+        );
+        let transform_plan = build_model_update_plan(8000, 28, "DESI", &transform).await;
+        assert_eq!(
+            transform_plan
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::Transform, "24384/22403")]
+        );
+        manager
+            .update_world_transforms(&HashSet::from([RefnoEnum::from("24384/22403")]))
+            .await
+            .expect("refresh FTUB transform for real POS sessions");
+
+        let data_file = PathBuf::from(std::env::var("AIOS_PROJAMS_DATA_ONLY_FILE").unwrap_or_else(
+            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
+        ));
+        let equi_transform = IncrementPipeline::collect_changes(&data_file, 77..=80)
+            .expect("collect real EQUI.POS sessions");
+        let equi_transform_plan = build_model_update_plan(7997, 80, "DESI", &equi_transform).await;
+        assert_eq!(
+            equi_transform_plan
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::Transform, "24381/100677")]
+        );
+        manager
+            .update_world_transforms(&HashSet::from([RefnoEnum::from("24381/100677")]))
+            .await
+            .expect("refresh EQUI transform for real POS sessions");
+
+        let data_only = IncrementPipeline::collect_changes(&data_file, 82..=82)
+            .expect("collect real ProjAMS NAME session");
+        let operations = data_only.get(&82).expect("sesno 82 exists");
+        assert_eq!(operations.len(), 1, "{operations:?}");
+        let operation = &operations[0];
+        assert_eq!(
+            RefnoEnum::from(operation.refno),
+            RefnoEnum::from("24381/100823")
+        );
+        let EleOperationDetail::Modified(modified) = &operation.detail else {
+            panic!("sesno 82 must contain one Modified operation: {operation:?}");
+        };
+        assert_eq!(modified.noun, "DAMP");
+        let effects = crate::data_interface::model_impact::classify_operation_effects(operation);
+        assert_eq!(effects.changed_attributes, vec!["NAME"]);
+
+        let plan = build_model_update_plan(7997, 82, "DESI", &data_only).await;
+        assert!(
+            plan.work_items.is_empty(),
+            "real NAME-only session must not schedule model work: {plan:?}"
+        );
+
+        let mut response = SUL_DB
+            .query(
+                "RETURN [
+                    (SELECT VALUE name FROM pe:24381_100823)[0],
+                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
+                ];",
+            )
+            .await
+            .expect("query applied NAME session")
+            .check()
+            .expect("valid applied-session query");
+        let state: Vec<serde_json::Value> = response.take(0).expect("decode applied session");
+        assert_eq!(state[0], serde_json::json!("/1CUP002VAI_INC"));
+        assert!(
+            state[1].as_i64().is_some_and(|sesno| sesno >= 82),
+            "{state:?}"
+        );
+
+        let structural = IncrementPipeline::collect_changes(&data_file, 75..=75)
+            .expect("collect real WALL.JUSL session");
+        let structural_plan = build_model_update_plan(7997, 75, "DESI", &structural).await;
+        assert_eq!(
+            structural_plan
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::RegenRoot, "24381/44413")]
+        );
+        ModelRefreshPolicy::generate_roots(&manager, &["24381/44413".into()])
+            .await
+            .expect("regenerate CWALL for real WALL.JUSL session");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: verifies real nested Created operations regenerate their SUPPO roots"]
+    async fn live_projams_nested_created_routes_and_generates_delivery_roots() {
+        use crate::data_interface::generation_root::{
+            configured_delivery_unit_types, resolve_live_element_generation_root,
+        };
+        use crate::data_interface::increment_pipeline::IncrementPipeline;
+        use crate::data_interface::model_refresh::ModelRefreshPolicy;
+        use crate::data_interface::tidb_manager::AiosDBManager;
+        use std::path::PathBuf;
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let design_file = PathBuf::from(
+            std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+            }),
+        );
+        let session = IncrementPipeline::collect_changes(&design_file, 21..=21)
+            .expect("collect real nested GENSEC Add session");
+        let operations = session.get(&21).expect("sesno 21 exists");
+        let expected = [
+            ("24384/25743", "24384/25742", "24384/25725"),
+            ("24384/25923", "24384/25887", "24384/25872"),
+        ];
+        let mut selected = Vec::new();
+        for (element, direct_owner, delivery_root) in expected {
+            let refno = RefnoEnum::from(element);
+            let operation = operations
+                .iter()
+                .find(|operation| RefnoEnum::from(operation.refno) == refno)
+                .unwrap_or_else(|| panic!("sesno 21 missing real Add {element}"));
+            let EleOperationDetail::Add(added) = &operation.detail else {
+                panic!("{element} must be a real Add: {operation:?}");
+            };
+            assert_eq!(operation.get_noun_type(), "GENSEC");
+            assert_eq!(
+                RefnoEnum::from(added.owner),
+                RefnoEnum::from(direct_owner),
+                "GENSEC direct owner must be the non-delivery FRMW"
+            );
+            let root =
+                resolve_live_element_generation_root(refno, &configured_delivery_unit_types())
+                    .await
+                    .expect("resolve nested Created generation root")
+                    .expect("nested GENSEC must have a delivery root");
+            assert_eq!(
+                (root.root.to_pdms_str(), root.noun.as_str()),
+                (delivery_root.to_string(), "SUPPO")
+            );
+            selected.push(operation.clone());
+        }
+
+        let plan =
+            build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)])).await;
+        let roots = plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .map(|item| item.target_refno.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(roots, vec!["24384/25725", "24384/25872"], "{plan:?}");
+
+        ModelRefreshPolicy::generate_roots(&manager, &roots)
+            .await
+            .expect("generate SUPPO roots for real nested Created operations");
+        let mut response = SUL_DB
+            .query(
+                "RETURN [
+                    inst_relate:24384_25743.id != none,
+                    inst_relate:24384_25923.id != none
+                ];",
+            )
+            .await
+            .expect("query generated nested elements")
+            .check()
+            .expect("valid nested-element query");
+        let generated: Vec<bool> = response.take(0).expect("decode nested-element state");
+        assert_eq!(generated, vec![true, true]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: regenerates a real ProjAMS EQUI containing NCYL negative geometry"]
+    async fn live_projams_negative_geometry_change_regenerates_owning_equi() {
+        use crate::data_interface::model_refresh::ModelRefreshPolicy;
+        use crate::data_interface::tidb_manager::AiosDBManager;
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let negative = RefnoEnum::from("24381/100680");
+        let parent_box = RefnoEnum::from("24381/100679");
+        let equi = "24381/100677";
+        let plan = build_model_update_plan(
+            7997,
+            84,
+            "DESI",
+            &BTreeMap::from([(
+                84,
+                vec![live_modified_op(negative, parent_box, "NCYL", "DIAM")],
+            )]),
+        )
+        .await;
+        assert_eq!(
+            plan.work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::RegenRoot, equi)]
+        );
+
+        ModelRefreshPolicy::generate_roots(&manager, &[equi.into()])
+            .await
+            .expect("regenerate EQUI containing NCYL");
+        let mut response = SUL_DB
+            .query(
+                "RETURN [
+                    count(SELECT * FROM neg_relate
+                          WHERE in = pe:24381_100680 AND out = pe:24381_100679),
+                    inst_relate:24381_100680.id != none
+                ];",
+            )
+            .await
+            .expect("query regenerated negative geometry")
+            .check()
+            .expect("valid negative-geometry query");
+        let state: Vec<serde_json::Value> = response.take(0).expect("decode negative geometry");
+        assert_eq!(state, vec![serde_json::json!(1), serde_json::json!(true)]);
+    }
+
+    /// ADR-008 / F8：CATA 窗口只落 `CascadeExpand` 种子——几何性 Modified 与
+    /// Deleted 元素各一枚，由执行器 live 反查 `ref_rev` 展开为设计根重生成。
+    #[tokio::test]
+    async fn cata_geometry_changes_seed_deferred_cascade_expansion() {
+        let deleted = aios_core::RefU64((1u64 << 32) | 7);
+        let modified = aios_core::RefU64((1u64 << 32) | 8);
+        let range_eles = BTreeMap::from([(
+            42,
+            vec![
+                EleOperationData::new(deleted, 42, EleOperationDetail::Deleted),
+                modified_op(modified, 42, "PARA"),
+            ],
+        )]);
+
+        let plan = build_model_update_plan(1, 42, "CATA", &range_eles).await;
+        assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
+        assert!(
+            plan.work_items
+                .iter()
+                .all(|item| item.action == ModelWorkAction::CascadeExpand),
+            "CATA windows must never plan rollup/transform/cleanup work: {:?}",
+            plan.work_items
+        );
+        let targets: Vec<&str> = plan
+            .work_items
+            .iter()
+            .map(|item| item.target_refno.as_str())
+            .collect();
+        assert!(
+            targets.contains(&"1/7") && targets.contains(&"1/8"),
+            "{targets:?}"
+        );
+    }
+
+    /// CATA 净新增（含窗口内加删抵消）与纯业务元数据修改不产生任何模型工作：
+    /// 新目录元件只能经设计侧编辑被引用，而那次 DESI 编辑自会规划重生成。
+    #[tokio::test]
+    async fn cata_added_neutral_and_cancelled_changes_seed_nothing() {
+        let added = aios_core::RefU64((1u64 << 32) | 3);
+        let renamed = aios_core::RefU64((1u64 << 32) | 4);
+        let cancelled = aios_core::RefU64((1u64 << 32) | 5);
+        let range_eles = BTreeMap::from([
+            (
+                41,
+                vec![
+                    EleOperationData::new(added, 41, EleOperationDetail::Add(Default::default())),
+                    EleOperationData::new(
+                        cancelled,
+                        41,
+                        EleOperationDetail::Add(Default::default()),
+                    ),
+                ],
+            ),
+            (
+                42,
+                vec![
+                    modified_op(renamed, 42, "NAME"),
+                    EleOperationData::new(cancelled, 42, EleOperationDetail::Deleted),
+                ],
+            ),
+        ]);
+
+        let plan = build_model_update_plan(1, 42, "CATA", &range_eles).await;
+        assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
+    }
+
+    #[tokio::test]
+    async fn sys_meta_changes_never_create_model_work() {
+        let changed = aios_core::RefU64((1u64 << 32) | 7);
+        let range_eles = BTreeMap::from([(
+            42,
+            vec![EleOperationData::new(
+                changed,
+                42,
+                EleOperationDetail::Deleted,
+            )],
+        )]);
+
+        let plan = build_model_update_plan(1, 42, "SYST", &range_eles).await;
+        assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
     }
 }

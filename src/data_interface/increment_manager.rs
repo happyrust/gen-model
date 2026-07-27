@@ -1,17 +1,19 @@
 // 标准库导入
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 // AIOS核心模块导入
+use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
-use aios_core::{RefU64Vec, RefnoEnum, get_db_option};
+use aios_core::{RefU64Vec, RefnoEnum};
 use aios_core::{get_default_name, get_pe};
 
 // 异步和工具库导入
@@ -21,7 +23,7 @@ use itertools::Itertools;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 
 // PDMS相关模块导入
-use parse_pdms_db::parse::parse_db_basic_info;
+use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info};
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 use pdms_io::watch::PdmsWatcher;
@@ -36,7 +38,6 @@ use crate::api::element::gen_pdms_element_insert_sql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
-use parse_pdms_db::parse::DbBasicInfo;
 use tracing_subscriber::fmt::format;
 
 use crate::consts::PDMS_ELEMENTS_TABLE;
@@ -45,6 +46,108 @@ use crate::consts::PDMS_ELEMENTS_TABLE;
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn duplicate_dbnums_are_detected_across_separate_paths() {
+        let duplicates = duplicate_dbnums([
+            (7997, PathBuf::from("first")),
+            (8000, PathBuf::from("only")),
+            (7997, PathBuf::from("second")),
+        ]);
+        assert_eq!(duplicates, HashSet::from([7997]));
+    }
+
+    /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
+    /// （file_name / file_path / file_size / file_latest_sesno）。同一 dbnum 的第二个文件
+    /// 若先走 `scan_and_check_file`，就会把首见文件的身份覆盖掉——此后即便阻断了该
+    /// dbnum，回退 / 迁移检测的基准也已经被污染。故 `init_watcher` 与 `async_watch`
+    /// 两条自动路径都必须先做重复 dbnum 阻断、再落库观察。
+    ///
+    /// 这两步嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接在源码上钉顺序。
+    /// marker 用 `concat!` 拼接，避免本测试自己的字符串字面量先于真函数被命中。
+    #[test]
+    fn duplicate_dbnum_guard_precedes_scan_record_on_both_auto_paths() {
+        let src = include_str!("increment_manager.rs");
+        for (name, marker) in [
+            ("init_watcher", concat!("pub async fn ", "init_watcher(")),
+            ("async_watch", concat!("pub async fn ", "async_watch(")),
+        ] {
+            let body = src
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{name} 未找到"))
+                .1;
+            let guard_at = body
+                .find("seen_dbnums.insert(")
+                .unwrap_or_else(|| panic!("{name}: 缺少重复 dbnum 阻断"));
+            let scan_at = body
+                .find(".scan_and_check_file(")
+                .unwrap_or_else(|| panic!("{name}: 缺少 scan_and_check_file 调用"));
+            assert!(
+                guard_at < scan_at,
+                "{name}: 重复 dbnum 阻断必须先于 scan_and_check_file，\
+                 否则重复文件会覆盖 dbnum_watermark 里的文件身份字段"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_files_are_not_treated_as_e3d_databases() {
+        assert!(try_parse_db_basic_info(Path::new("missing-e3d-db")).is_none());
+    }
+
+    #[test]
+    fn database_filter_uses_the_manager_option() {
+        let mut option = DbOption::default();
+        option.manual_db_nums = Some(vec![1001]);
+
+        assert!(should_process_database_with(&option, "DESI", 1001));
+        assert!(!should_process_database_with(&option, "DESI", 7997));
+        assert!(should_process_database_with(&option, "SYST", 8191));
+    }
+
+    #[tokio::test]
+    #[ignore = "manual live: copies one configured E3D header into a throwaway duplicate directory"]
+    async fn live_watch_directory_blocks_duplicate_dbnum_files() {
+        let mut manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let source = manager
+            .watcher
+            .watch_dirs
+            .iter()
+            .flat_map(|dir| {
+                WalkDir::new(dir)
+                    .max_depth(1)
+                    .into_iter()
+                    .filter_map(Result::ok)
+            })
+            .find_map(|entry| {
+                let path = entry.file_type().is_file().then(|| entry.into_path())?;
+                let info = try_parse_db_basic_info(&path)?;
+                manager
+                    .should_process_database(&info.db_type, info.db_no)
+                    .then_some((path, info))
+            })
+            .expect("configured watch dirs contain an E3D database");
+        let mut source_file = fs::File::open(&source.0).expect("open source E3D header");
+        let mut header = [0u8; 60];
+        source_file
+            .read_exact(&mut header)
+            .expect("read source E3D header");
+        let fixture =
+            std::env::temp_dir().join(format!("aios-duplicate-dbnum-{}", std::process::id()));
+        fs::create_dir_all(&fixture).expect("create duplicate directory");
+        fs::write(fixture.join("first"), header).expect("write first header");
+        fs::write(fixture.join("second"), header).expect("write second header");
+        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+
+        assert_eq!(
+            manager.duplicate_dbnums_across_watch_dirs(),
+            HashSet::from([source.1.db_no])
+        );
+
+        fs::remove_dir_all(&fixture).expect("remove duplicate directory");
+    }
 
     #[test]
     fn test_should_exclude_file() {
@@ -148,6 +251,32 @@ pub struct IncrementInfo {
     pub operation: EleOperation,
 }
 
+fn should_process_database_with(db_option: &DbOption, db_type: &str, db_num: u32) -> bool {
+    if !CHECK_DB_TYPES.contains(&db_type) {
+        return false;
+    }
+
+    let is_sys_meta = crate::data_interface::sesno_range::COLD_START_DB_TYPES.contains(&db_type);
+    if db_option.only_sync_sys && !is_sys_meta {
+        return false;
+    }
+    if db_option
+        .exclude_db_nums
+        .as_ref()
+        .is_some_and(|dbnums| dbnums.contains(&db_num))
+    {
+        return false;
+    }
+    if is_sys_meta {
+        return true;
+    }
+
+    db_option
+        .manual_db_nums
+        .as_ref()
+        .is_none_or(|dbnums| dbnums.is_empty() || dbnums.contains(&db_num))
+}
+
 impl IncrementInfo {
     /// 检查元素是否被修改
     ///
@@ -192,6 +321,21 @@ const QUERY_BATCH_SIZE: usize = 20;
 /// 需要检查的数据库类型列表
 /// 包含目录(CATA)、设计(DESI)、字典(DICT)、系统(SYST)、全局(GLB/GLOB)等类型
 pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
+
+fn duplicate_dbnums(entries: impl IntoIterator<Item = (u32, PathBuf)>) -> HashSet<u32> {
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter_map(|(dbnum, _)| (!seen.insert(dbnum)).then_some(dbnum))
+        .collect()
+}
+
+fn try_parse_db_basic_info(path: &std::path::Path) -> Option<DbBasicInfo> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0u8; 60];
+    file.read_exact(&mut header).ok()?;
+    Some(parse_file_basic_info(&header))
+}
 
 impl AiosDBManager {
     /// 简化的MySQL pdms_element表更新方法
@@ -306,6 +450,22 @@ impl AiosDBManager {
         false
     }
 
+    fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<u32> {
+        duplicate_dbnums(self.watcher.watch_dirs.iter().flat_map(|watch_dir| {
+            WalkDir::new(watch_dir)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .filter(|entry| !self.should_exclude_file(entry.path()))
+                .filter_map(|entry| {
+                    let info = try_parse_db_basic_info(entry.path())?;
+                    self.should_process_database(&info.db_type, info.db_no)
+                        .then(|| (info.db_no, entry.path().to_path_buf()))
+                })
+        }))
+    }
+
     /// 检查数据库文件是否应该被处理
     ///
     /// 根据配置的过滤规则检查数据库文件是否应该被包含在增量更新处理中。
@@ -331,42 +491,7 @@ impl AiosDBManager {
     /// init_watcher / async_watch 共用此门控；SesnoRangeResolver 的 `skip_cata`
     /// 两侧均传 `false`，避免双路径对 CATA 分叉。
     pub(crate) fn should_process_database(&self, db_type: &str, db_num: u32) -> bool {
-        // 检查数据库类型是否支持
-        if !CHECK_DB_TYPES.contains(&db_type) {
-            return false;
-        }
-
-        let db_option = get_db_option();
-
-        // 系统/元数据库（SYST/DICT/GLB/GLOB）默认始终解析：项目结构数据
-        // （MDB/DB/CURD/PROJ/TEAM 等）存放于此，客户端模型树依赖它解析 world→site，
-        // 因此不受 manual_db_nums 窄范围过滤影响；只有显式 exclude_db_nums 才排除。
-        let is_sys_meta =
-            crate::data_interface::sesno_range::COLD_START_DB_TYPES.contains(&db_type);
-
-        // 与 versioned_db 全量 only_sync_sys 对齐：仅同步系统元数据，跳过 DESI/CATA
-        if db_option.only_sync_sys && !is_sys_meta {
-            return false;
-        }
-
-        let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
-        // 显式排除对所有类型（含系统库）都生效，作为逃生开关
-        if !exclude_dbnums.is_empty() && exclude_dbnums.contains(&db_num) {
-            return false;
-        }
-
-        // 系统/元数据库到此即放行，不再受 manual_db_nums 影响（保证 MDB/CURD 默认生成）
-        if is_sys_meta {
-            return true;
-        }
-
-        let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
-        // 检查是否在手动指定的数据库编号列表中（仅对非系统库生效）
-        if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_num) {
-            return false;
-        }
-
-        true
+        should_process_database_with(&self.db_option, db_type, db_num)
     }
 
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」，与手动路径（manual_update）同口径。
@@ -451,9 +576,10 @@ impl AiosDBManager {
     /// 编排：IncrementPipeline → enqueue side-effects → 可选 MySQL → SYST 派生 → ModelRefresh。
     /// 返回 [`IncrResult`] 供调用方（如 SyncPublisher）继续处理。
     ///
-    /// 模型刷新 / SYST 派生同步失败不会使整体返回 Err：持久化与水位已完成，
-    /// 错误只记入 `IncrResult::warnings`，并以 [`SideEffectCompensator`] 落库待补偿，
-    /// 以保证调用方仍能对成功文件执行异地同步发布。
+    /// 模型刷新 / SYST 派生同步失败不会使整体返回 Err：持久化与水位已完成。
+    /// 模型工作已在水位事务中写入 `model_update_pending`；SYST 派生错误由
+    /// [`SideEffectCompensator`] 补偿。两者都记入 `IncrResult::warnings`，调用方仍可
+    /// 对成功文件执行异地同步发布。
     ///
     /// Map value: `(basic_info, sesno_range, db_type)`.
     pub async fn execute_incr_update(
@@ -547,6 +673,11 @@ impl AiosDBManager {
             }
         }
 
+        // Web 服务增量摘要事件：覆盖 init_watcher 与 async_watch 两条自动路径
+        // （评审决议：仅摘要，不含逐 refno 明细）。
+        #[cfg(feature = "http_api")]
+        crate::web_service::events::notify_incr_applied(&incr);
+
         Ok(incr)
     }
 
@@ -577,9 +708,9 @@ impl AiosDBManager {
         fs::create_dir_all("assets/archives")?;
         fs::create_dir_all("assets/temp")?;
         let mut time = Instant::now();
-        dbg!(&self.watcher.watch_dirs);
+        log::debug!("init_watcher 监控目录: {:?}", self.watcher.watch_dirs);
 
-        // 先补偿上次未完成的副作用（水位已推过的 mesh / SYST 派生）
+        // 先补偿上次未完成的旧副作用 / SYST 派生；模型任务由下一步独立 drain。
         match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self).await {
             Ok(n) if n > 0 => println!("启动补偿完成 {n} 个副作用任务"),
             Ok(_) => {}
@@ -588,11 +719,6 @@ impl AiosDBManager {
         if let Err(e) = crate::data_interface::model_update_pending::drain(self).await {
             println!("启动模型任务补偿失败（继续增量扫描）: {e:?}");
         }
-
-        // 获取数据库配置选项
-        let db_option = get_db_option();
-        let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
-        let exclude_dbnums = db_option.exclude_db_nums.clone().unwrap_or_default();
 
         // 遍历所有监控目录
         for watch_dir in &self.watcher.watch_dirs {
@@ -623,11 +749,15 @@ impl AiosDBManager {
                 }
 
                 // 解析数据库基本信息
-                let DbBasicInfo {
+                let Some(DbBasicInfo {
                     db_type,
                     ses_pgno,
                     db_no,
-                } = parse_db_basic_info(path.to_path_buf());
+                }) = try_parse_db_basic_info(path)
+                else {
+                    println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                    continue;
+                };
 
                 // 使用统一的过滤方法检查是否应该处理此数据库
                 if !self.should_process_database(&db_type, db_no) {
@@ -635,31 +765,36 @@ impl AiosDBManager {
                 }
 
                 // 获取项目名称和文件最新会话号
-                let project = get_db_option().project_name.clone();
+                let project = self.db_option.project_name.clone();
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_latest_sesno()
                     .unwrap_or_default();
-                dbg!(&file_latest_sesno);
+                log::debug!("扫描 {path:?}: file_latest_sesno={file_latest_sesno}");
 
                 // 建立文件名到完整路径的映射
                 self.watcher
                     .file_name_full_path_map
                     .insert(file_name.to_owned(), path.to_path_buf());
 
-                // F6：文件观察落库 + 回退/迁移检测；回退（file_latest < applied）阻断该文件（水位不回退）。
-                if !self
-                    .scan_and_check_file(path, file_name, &db_type, db_no, file_latest_sesno as i32)
-                    .await
-                {
-                    continue;
-                }
                 // F6：同一 dbnum 出现多个文件 → 阻断该 dbnum（不自动挑选）。
+                //
+                // 必须先于 scan_and_check_file（2026-07-26 审计 B3）：record_scan 按 dbnum
+                // UPSERT 身份字段（file_name/file_path/file_size/file_latest_sesno），重复
+                // 文件一旦先落库，就会把首见文件的身份覆盖掉，此后即使阻断该 dbnum，
+                // dbnum_watermark 里记的也已经是「后来那个」文件，回退/迁移检测的基准被污染。
                 if let Some(prev) = seen_dbnums.insert(db_no, path.to_path_buf()) {
                     blocked_dupes.insert(db_no);
                     println!(
                         "F6 发现同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
                         db_no, prev, path
                     );
+                    continue;
+                }
+                // F6：文件观察落库 + 回退/迁移检测；回退（file_latest < applied）阻断该文件（水位不回退）。
+                if !self
+                    .scan_and_check_file(path, file_name, &db_type, db_no, file_latest_sesno as i32)
+                    .await
+                {
                     continue;
                 }
 
@@ -720,7 +855,7 @@ impl AiosDBManager {
 
         // 等所有文件检查完毕后，执行批量增量更新
         if !params.is_empty() {
-            dbg!(params.len());
+            log::info!("增量批次待处理文件数: {}", params.len());
         }
 
         // 执行增量更新；成功后与 async_watch 一致，走 SyncPublisher 异地同步
@@ -800,14 +935,28 @@ impl AiosDBManager {
         println!(
             "async_watch 使用 PollWatcher 定时轮询（间隔 {poll_secs}s），适配远程共享目录的增量发现"
         );
-        dbg!(&self.watcher.watch_dirs);
+        log::debug!("async_watch 监控目录: {:?}", self.watcher.watch_dirs);
 
         // 为每个监控目录设置文件监控（NonRecursive：轮询目录直属的 E3D 库文件）
-        self.watcher.watch_dirs.iter().for_each(|x| {
-            watcher
-                .watch(x.as_path(), RecursiveMode::NonRecursive)
-                .expect("文件监控设置失败");
-        });
+        //
+        // 单个目录不可达（共享盘掉线、路径写错）不再 panic 掉整个看门狗（T903）：
+        // 逐目录告警并继续挂载其余目录。但一个都没挂上时必须报错——那等同于
+        // 「看门狗在跑却什么都不监控」，是比 panic 更难发现的静默失效。
+        let mut watched = 0usize;
+        for dir in self.watcher.watch_dirs.iter() {
+            match watcher.watch(dir.as_path(), RecursiveMode::NonRecursive) {
+                Ok(()) => watched += 1,
+                Err(e) => {
+                    log::error!("文件监控设置失败，跳过该目录 {dir:?}: {e:?}");
+                    eprintln!("文件监控设置失败，跳过该目录 {dir:?}: {e:?}");
+                }
+            }
+        }
+        if watched == 0 {
+            return Err(notify::Error::generic(
+                "没有任何监控目录挂载成功，增量看门狗无法工作",
+            ));
+        }
 
         // 创建必要的目录结构
         create_dir_all("assets/archives")
@@ -905,7 +1054,10 @@ impl AiosDBManager {
                             };
 
                             // 解析数据库基本信息以获取数据库类型
-                            let db_basic_info = parse_db_basic_info(path.to_path_buf());
+                            let Some(db_basic_info) = try_parse_db_basic_info(path) else {
+                                println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                                continue;
+                            };
                             let db_type = &db_basic_info.db_type;
                             let db_num = db_basic_info.db_no;
 
@@ -918,6 +1070,16 @@ impl AiosDBManager {
                                 continue;
                             }
 
+                            // F6：同一 dbnum 出现多个文件 → 阻断该 dbnum（不自动挑选）。
+                            // 与 init_watcher 同口径，必须先于 scan_and_check_file（审计 B3）。
+                            if let Some(prev) = seen_dbnums.insert(db_num, path.to_path_buf()) {
+                                blocked_dupes.insert(db_num);
+                                println!(
+                                    "F6 发现同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
+                                    db_num, prev, path
+                                );
+                                continue;
+                            }
                             // F6：文件观察落库 + 回退/迁移检测；回退阻断该文件（水位不回退）。
                             if !self
                                 .scan_and_check_file(
@@ -931,15 +1093,6 @@ impl AiosDBManager {
                             {
                                 continue;
                             }
-                            // F6：同一 dbnum 出现多个文件 → 阻断该 dbnum（不自动挑选）。
-                            if let Some(prev) = seen_dbnums.insert(db_num, path.to_path_buf()) {
-                                blocked_dupes.insert(db_num);
-                                println!(
-                                    "F6 发现同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
-                                    db_num, prev, path
-                                );
-                                continue;
-                            }
 
                             println!(
                                 "检查文件: {}, 数据库编号: {}, 文件会话号: {}",
@@ -947,7 +1100,7 @@ impl AiosDBManager {
                             );
 
                             use crate::data_interface::sesno_range::SesnoRangeResolver;
-                            let project = get_db_option().project_name.clone();
+                            let project = self.db_option.project_name.clone();
                             let resolver = SesnoRangeResolver::new();
                             match resolver
                                 .resolve_with_header(
@@ -987,8 +1140,14 @@ impl AiosDBManager {
                                 }
                             }
                         }
+                        // Event batches are not a global file snapshot. Recheck all
+                        // non-recursively watched files so duplicates arriving in
+                        // separate poll events cannot bypass the dbnum guard.
+                        blocked_dupes.extend(self.duplicate_dbnums_across_watch_dirs());
+
                         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选）。
                         if !blocked_dupes.is_empty() {
+                            println!("F6 阻断重复 dbnum: {blocked_dupes:?}");
                             params.retain(|_p, (bi, _r, _t)| {
                                 !blocked_dupes.contains(&(bi.pdms_header.db_num as u32))
                             });
@@ -1032,7 +1191,13 @@ impl AiosDBManager {
             }
         }
 
-        Ok(())
+        // 走到这里说明事件流已经关闭（PollWatcher 被丢弃 / 发送端全部消失）。
+        // 对一个本该长驻的看门狗而言这不是正常终止：过去这里返回 Ok(())，调用方
+        // 一路 .unwrap() 也是 Ok，看门狗就此静默死亡、增量再也不会被发现（T903）。
+        log::error!("async_watch 事件流意外关闭，增量看门狗已停止监听");
+        Err(notify::Error::generic(
+            "async_watch 事件流意外关闭，增量看门狗已停止监听",
+        ))
     }
 
     /// 更新MySQL pdms_element表数据
@@ -1067,11 +1232,12 @@ impl AiosDBManager {
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     ) -> anyhow::Result<()> {
         // 获取数据库连接配置
-        let db_option = get_db_option();
-        let project_name = &db_option.project_name;
+        let project_name = &self.db_option.project_name;
         // 获取MySQL连接池
         let connection_str =
-            crate::data_interface::tidb_manager::AiosDBManager::get_default_conn_str(&db_option);
+            crate::data_interface::tidb_manager::AiosDBManager::get_default_conn_str(
+                &self.db_option,
+            );
         let pool = crate::data_interface::tidb_manager::AiosDBManager::get_db_pool(
             &connection_str,
             project_name,
@@ -1324,7 +1490,7 @@ impl AiosDBManager {
     ///
     /// - **高效查询**: 使用递归SQL查询一次性获取所有相关节点
     /// - **内存友好**: 分批处理避免大量数据同时加载到内存
-    /// - **错误容忍**: 单个节点计算失败不影响其他节点的更新
+    /// - **错误可见**: 任一模型节点无法计算时返回错误，由 pending 任务重试
     pub(crate) async fn update_world_transforms(
         &self,
         refnos: &HashSet<RefnoEnum>,
@@ -1370,8 +1536,7 @@ impl AiosDBManager {
                     );
                     update_sqls.push(update_sql);
                 } else {
-                    // 记录警告但不中断处理流程
-                    println!("警告: 无法计算元素 {} 的world transform", refno);
+                    anyhow::bail!("无法计算已有模型节点 {refno} 的 world transform");
                 }
             }
 
@@ -1382,7 +1547,9 @@ impl AiosDBManager {
                 SUL_DB
                     .query(batch_sql)
                     .await
-                    .map_err(|e| anyhow::anyhow!("更新world transform失败: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("更新world transform失败: {}", e))?
+                    .check()
+                    .map_err(|e| anyhow::anyhow!("更新world transform语句失败: {}", e))?;
             }
         }
 
@@ -1393,14 +1560,13 @@ impl AiosDBManager {
     /// 获取指定参考号及其子树中所有有inst_relate数据的几何节点
     ///
     /// 这是一个高性能的树遍历查询方法，用于在复杂的层次结构中快速定位需要更新的几何节点。
-    /// 该方法采用单次递归SQL查询替代传统的多次查询方式，显著提升了查询效率。
+    /// 该方法复用无深度上限、循环安全的 `pe_owner` 子树遍历，再批量筛选模型节点。
     ///
     /// # 算法优势
     ///
-    /// - **一次查询**: 使用递归SQL一次性获取整个子树的相关节点
     /// - **智能过滤**: 只返回有inst_relate数据的节点，避免无效处理
-    /// - **深度遍历**: 支持最多10层的递归查询，覆盖复杂的层次结构
-    /// - **容错机制**: 提供回退策略，确保在复杂查询失败时仍能正常工作
+    /// - **深度遍历**: 不设固定层数上限
+    /// - **错误可见**: 查询或 record id 解码失败会保留待重试任务
     ///
     /// # 参数
     ///
@@ -1412,145 +1578,69 @@ impl AiosDBManager {
     ///
     /// # SQL查询说明
     ///
-    /// 查询使用SurrealDB的递归语法，通过pe_owner关系向下遍历：
+    /// 查询通过 pe_owner 关系向下遍历：
     /// - 检查根节点本身是否有inst_relate
-    /// - 递归检查所有子节点（最多10层）
-    /// - 过滤掉已删除的节点
+    /// - 循环安全地检查所有后代
     /// - 返回去重后的结果集
     async fn get_inst_relate_nodes_in_subtree(
         &self,
         refnos: &HashSet<RefnoEnum>,
     ) -> anyhow::Result<HashSet<RefnoEnum>> {
         use crate::SUL_DB;
+        use crate::data_interface::helper::{collect_pe_subtree_refnos, pe_thing_to_refno};
+        use surrealdb::sql::Thing;
 
-        // 如果输入为空，直接返回空结果
         if refnos.is_empty() {
             return Ok(HashSet::new());
         }
 
         let mut result = HashSet::new();
+        let roots = refnos.iter().copied().collect::<Vec<_>>();
+        let subtree = collect_pe_subtree_refnos(&roots).await?;
+        let subtree = subtree.into_iter().collect::<Vec<_>>();
 
-        // 分批处理，避免SQL语句过长导致性能问题
-        let refnos_vec: Vec<&RefnoEnum> = refnos.iter().collect();
-
-        for chunk in refnos_vec.chunks(QUERY_BATCH_SIZE) {
-            // 构建PE键列表，用于SQL查询
+        for chunk in subtree.chunks(QUERY_BATCH_SIZE) {
             let pe_keys: String = chunk
                 .iter()
                 .map(|refno| refno.to_pe_key())
                 .collect::<Vec<_>>()
                 .join(",");
-
-            // 构建递归SQL查询
-            // 该查询实现了以下逻辑：
-            // 1. 从指定的根节点开始遍历
-            // 2. 递归获取所有子节点（支持最多10层深度）
-            // 3. 只返回那些有inst_relate记录的节点
-            // 4. 过滤掉已删除的节点
             let sql = format!(
-                r#"
-                array::distinct(array::flatten(
-                    select value [
-                        if record::exists(type::thing('inst_relate', record::id(id))) {{ [id] }} else {{ [] }},
-                        array::flatten(
-                            select value if record::exists(type::thing('inst_relate', record::id(in))) {{ [in] }} else {{ [] }}
-                            from [{}]<-pe_owner<-(? as p1)<-pe_owner<-(? as p2)<-pe_owner<-(? as p3)
-                            <-pe_owner<-(? as p4)<-pe_owner<-(? as p5)<-pe_owner<-(? as p6)<-pe_owner<-(? as p7)
-                            <-pe_owner<-(? as p8)<-pe_owner<-(? as p9)<-pe_owner<-(? as p10)
-                            where record::exists(in.id) and !in.deleted
-                        )
-                    ] from [{}]
-                ))
-                "#,
-                pe_keys, pe_keys
+                "array::flatten(SELECT VALUE IF record::exists(type::thing('inst_relate', record::id(id))) {{ [id] }} ELSE {{ [] }} FROM [{pe_keys}]);"
             );
-
-            println!("执行inst_relate节点查询，批次大小: {}", chunk.len());
-
-            // 执行查询并处理结果
-            match SUL_DB.query(sql).await {
-                Ok(mut response) => {
-                    if let Ok(refnos_result) = response.take::<Vec<RefnoEnum>>(0) {
-                        println!("找到 {} 个有inst_relate的节点", refnos_result.len());
-                        result.extend(refnos_result);
-                    }
-                }
-                Err(e) => {
-                    println!("批量查询inst_relate节点失败: {}", e);
-                    // 容错机制：如果复杂查询失败，回退到逐个检查的方式
-                    // 这确保了系统的健壮性，即使在极端情况下也能正常工作
-                    for &refno in chunk {
-                        if self
-                            .check_single_inst_relate_exists(refno)
-                            .await
-                            .unwrap_or(false)
-                        {
-                            result.insert(*refno);
-                        }
-                    }
-                }
+            let mut response = SUL_DB.query(&sql).await?.check()?;
+            for value in response.take::<Vec<Thing>>(0)? {
+                result.insert(pe_thing_to_refno(value)?);
             }
         }
 
         Ok(result)
     }
+}
 
-    /// 检查单个参考号是否存在inst_relate记录
-    ///
-    /// 这是一个轻量级的检查方法，用作复杂查询失败时的回退机制。
-    /// 通过简单的计数查询来确定指定的参考号是否有对应的inst_relate数据。
-    ///
-    /// # 参数
-    ///
-    /// * `refno` - 需要检查的参考号
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<bool>` - 如果存在inst_relate记录返回true，否则返回false
-    ///
-    /// # 使用场景
-    ///
-    /// 该方法主要用于以下情况：
-    /// - 作为复杂递归查询的回退方案
-    /// - 单个节点的快速检查
-    /// - 调试和验证用途
-    ///
-    /// # 性能考虑
-    ///
-    /// - 使用COUNT查询而非SELECT *，减少数据传输
-    /// - 包含record::exists检查，确保记录真实存在
-    /// - 错误容忍设计，查询失败时返回false而非抛出异常
-    async fn check_single_inst_relate_exists(&self, refno: &RefnoEnum) -> anyhow::Result<bool> {
-        use crate::SUL_DB;
+#[cfg(test)]
+mod transform_subtree_tests {
+    use super::*;
 
-        // 构建inst_relate表的键名
-        let inst_relate_key = refno.to_inst_relate_key();
-
-        // 使用COUNT查询检查记录是否存在
-        // record::exists确保记录真实存在而非仅仅是表结构
-        let sql = format!(
-            "SELECT count() FROM {} WHERE record::exists(id)",
-            inst_relate_key
-        );
-
-        match SUL_DB.query(sql).await {
-            Ok(mut response) => {
-                // 尝试获取计数结果
-                if let Ok(count) = response.take::<Option<i64>>(0) {
-                    Ok(count.unwrap_or(0) > 0)
-                } else {
-                    // 如果无法解析结果，认为记录不存在
-                    Ok(false)
-                }
-            }
-            Err(_) => {
-                // 如果查询失败，可能的原因：
-                // 1. 表不存在
-                // 2. 网络问题
-                // 3. 权限问题
-                // 为了保持系统稳定性，返回false而不是抛出异常
-                Ok(false)
-            }
-        }
+    #[tokio::test]
+    #[ignore = "manual live: requires the configured AvevaMarineSample Surreal database"]
+    async fn live_transform_branch_includes_known_model_child() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let branch = RefnoEnum::from("24381/100817");
+        let damp = RefnoEnum::from("24381/100819");
+        let nodes = manager
+            .get_inst_relate_nodes_in_subtree(&HashSet::from([branch]))
+            .await
+            .expect("collect model nodes in BRAN subtree");
+        assert!(nodes.contains(&damp));
+        manager
+            .update_world_transforms(&HashSet::from([branch]))
+            .await
+            .expect("refresh BRAN subtree transforms");
     }
 }
