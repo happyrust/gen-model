@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::anyhow;
 use surrealdb::sql::Thing;
@@ -143,7 +144,52 @@ pub async fn delete_inst_relate_subtree(
         .map_err(|e| anyhow!("collect deleted PE subtree failed: {e}"))?;
 
     let all_vec: Vec<RefnoEnum> = all.into_iter().collect();
-    delete_inst_relate_cascade(&all_vec, chunk_size).await
+    delete_inst_relate_cascade(&all_vec, chunk_size).await?;
+    delete_room_membership(&all_vec, chunk_size).await
+}
+
+/// 渲染一批被删元素的房间归属清理。
+///
+/// **两个方向都要删。** 作为成员，元素有 `room_relate` 入边；如果它本身是一块 PANE，
+/// 它还是某间房的面板，另有 `room_relate` 出边与 `room_panel_relate` 入边。这里不按
+/// noun 分情况：`pe.noun` 此刻可能已随软删一起不可靠，而对非面板元素那两条子句本来
+/// 就是空操作。
+fn render_room_membership_delete(pe_keys: &str) -> String {
+    format!(
+        "DELETE room_relate WHERE in IN [{pe_keys}] OR out IN [{pe_keys}];\n\
+         DELETE room_panel_relate WHERE in IN [{pe_keys}] OR out IN [{pe_keys}];"
+    )
+}
+
+/// 清掉被删元素在房间归属里留下的一切，并把它们从空间树上摘掉（ADR-010 §4）。
+///
+/// 删除是房间增量里唯一不走队列的分支：被删元素没有新的包围盒，「AABB 变了」这个触发源
+/// 对它根本不成立，所以由删除路径当场清边。此前生产路径上**从来没有人删过**
+/// `room_relate`——全仓只有夹具清理里有一条删除语句，于是房间归属只增不减。
+///
+/// 刻意不与 [`delete_inst_relate_cascade`] 合成一个事务：那个函数同时服务于重生成时的
+/// 「先删旧几何再写新几何」，而那条路径上元素还活着，房间边不该被动。两段各自幂等，
+/// 中间崩了 `DeleteCleanup` 任务会重试，从头再走一遍即可收敛。
+async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyhow::Result<()> {
+    for chunk in refnos.chunks(chunk_size) {
+        let pe_keys = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(", ");
+        SUL_DB
+            .query(render_room_membership_delete(&pe_keys))
+            .await
+            .map_err(|e| anyhow!("delete room membership failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow!("delete room membership statement failed: {e}"))?;
+    }
+
+    // 树上留着已删元素的包围盒，`locate_intersecting_bounds` 会继续把它当候选返回，
+    // 于是重算时一个已经不存在的构件仍会被算进某间房（缺陷 D4）。
+    let stale: HashSet<aios_core::RefU64> = refnos.iter().map(RefnoEnum::refno).collect();
+    GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -194,6 +240,24 @@ mod tests {
             !sql.contains("[out, id, in]"),
             "inst_info must not ride the geo_relate triple delete: {sql}"
         );
+    }
+
+    /// 删除是房间增量里唯一不走队列的分支（ADR-010 §4），两个方向都得清：作为成员是
+    /// `room_relate` 入边，作为面板还有出边和 `room_panel_relate`。少清一个方向，
+    /// 房间归属就会留下指向已删元素的悬空边，而 `fn::room_relate_of` 照样会把它取出来。
+    #[test]
+    fn deleting_an_element_clears_room_membership_in_both_directions() {
+        let sql = render_room_membership_delete("pe:7997_1, pe:7997_2");
+
+        for table in ["room_relate", "room_panel_relate"] {
+            assert!(
+                sql.contains(&format!(
+                    "DELETE {table} WHERE in IN [pe:7997_1, pe:7997_2] \
+                     OR out IN [pe:7997_1, pe:7997_2]"
+                )),
+                "{sql}"
+            );
+        }
     }
 
     #[tokio::test]
