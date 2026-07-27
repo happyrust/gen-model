@@ -1,0 +1,878 @@
+//! 房间计算的最小合成夹具（ADR-010 §9）。
+//!
+//! 本地没有任何项目能跑通房间：唯一入库的 AvevaMarineSample 里，2889 个 FRMW 只有 2 个
+//! 挂着 PANE，名字也不符合 `project_hd` 的 `<X>-R-<K###>` 约定；真正开着房间的
+//! ABA/GDP 与 KMX/MSP 不在本机（见 `docs/2026-07-27_room-incremental-audit-report.md` §4.3）。
+//! 所以「增量结果 == 全量重建结果」的对拍验收只能靠合成数据。
+//!
+//! 夹具铺的是 `cal_room_refnos` 真正会走的整条链路，而不是简化替身：
+//!
+//! - 层级按本库实际形状 `FRMW → CWALL → PANE`，FRMW 同时写 `pe` 与类型表两处
+//!   （`build_room_panels_relate_common` 查的是 `from FRMW`）；
+//! - 每个 PANE 有真实的 `.mesh` 文件，因为判定要把它反序列化成 `TriMesh` 做点包含；
+//! - 每个构件有 `inst_relate.aabb`（进 R 树）与 `inst_geo.pts`（第二轮点检查要用）。
+//!
+//! 布局：两个 1000 见方的房间在 x 上重叠 100，5 个构件覆盖三种归属情形。
+//!
+//! ```text
+//!   x=0        900 1000            1900
+//!   ├── A ──────┼───┤
+//!               ├───┼──── B ─────────┤
+//!    C1   C2      C5      C3    C4
+//! ```
+//!
+//! `C5` 骑在重叠区上：它的 AABB 八个顶点对 A、B 都只有部分在内，因此两边都会落到
+//! 第二轮的逐点兜底，是多归属与排序的用例。
+
+use std::path::{Path, PathBuf};
+
+use aios_core::SUL_DB;
+use aios_core::shape::pdms_shape::PlantMesh;
+use glam::Vec3;
+use parry3d::bounding_volume::Aabb;
+
+/// 夹具占用的库号。沿用仓库既有的保留段约定（见 `model_refresh.rs` 的 live 用例）。
+pub const FIXTURE_DBNUM: u64 = 4000000001;
+
+const ROOM_NAME: &str = "/ZZ-R-K100";
+const ROOM_NUM: &str = "K100";
+
+fn refno(seq: u64) -> String {
+    format!("{FIXTURE_DBNUM}_{seq}")
+}
+
+/// 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝向，
+/// 绕序错了会把内外判反。
+/// 供 `room_predicate` 的单测复用同一个盒子构造，避免两处各造一份形状。
+pub fn box_mesh_for_test(min: Vec3, max: Vec3) -> PlantMesh {
+    box_mesh(min, max)
+}
+
+fn box_mesh(min: Vec3, max: Vec3) -> PlantMesh {
+    let vertices = vec![
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    #[rustfmt::skip]
+    let indices = vec![
+        0, 2, 1,  0, 3, 2, // -z
+        4, 5, 6,  4, 6, 7, // +z
+        0, 1, 5,  0, 5, 4, // -y
+        3, 7, 6,  3, 6, 2, // +y
+        0, 4, 7,  0, 7, 3, // -x
+        1, 2, 6,  1, 6, 5, // +x
+    ];
+    let mut mesh = PlantMesh {
+        indices,
+        vertices,
+        normals: Vec::new(),
+        wire_vertices: Vec::new(),
+        aabb: None,
+    };
+    mesh.aabb = mesh.cal_aabb();
+    mesh
+}
+
+fn aabb_json(aabb: &Aabb) -> String {
+    format!(
+        "{{mins: [{}, {}, {}], maxs: [{}, {}, {}]}}",
+        aabb.mins.x, aabb.mins.y, aabb.mins.z, aabb.maxs.x, aabb.maxs.y, aabb.maxs.z
+    )
+}
+
+const IDENTITY_TRANS: &str =
+    "{translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0]}";
+
+/// 夹具里的一个几何体：一个 pe + 一条 inst_relate + 一个 inst_geo，盒形。
+struct Body {
+    seq: u64,
+    noun: &'static str,
+    owner_seq: u64,
+    min: Vec3,
+    max: Vec3,
+    /// 只有 PANE 需要落 `.mesh` 文件——判定时只有面板会被反序列化成 TriMesh。
+    write_mesh: bool,
+}
+
+impl Body {
+    fn geo_hash(&self) -> String {
+        format!("zzfx_{}", self.seq)
+    }
+}
+
+fn bodies() -> Vec<Body> {
+    let pane = |seq, min, max| Body {
+        seq,
+        noun: "PANE",
+        owner_seq: 2,
+        min,
+        max,
+        write_mesh: true,
+    };
+    let part = |seq, cx: f32, half: f32| Body {
+        seq,
+        noun: "BOX",
+        owner_seq: 2,
+        min: Vec3::new(cx - half, 500.0 - half, 500.0 - half),
+        max: Vec3::new(cx + half, 500.0 + half, 500.0 + half),
+        write_mesh: false,
+    };
+    vec![
+        pane(10, Vec3::new(0.0, 0.0, 0.0), Vec3::new(1000.0, 1000.0, 1000.0)),
+        pane(
+            11,
+            Vec3::new(900.0, 0.0, 0.0),
+            Vec3::new(1900.0, 1000.0, 1000.0),
+        ),
+        part(20, 200.0, 50.0),  // 完全在 A 内
+        part(21, 500.0, 50.0),  // 完全在 A 内
+        part(22, 1500.0, 50.0), // 完全在 B 内
+        part(23, 1700.0, 50.0), // 完全在 B 内
+        part(24, 950.0, 100.0), // 骑在 A/B 重叠区，走第二轮逐点判定
+    ]
+}
+
+/// 面板 A / B 的 refno，供断言使用。
+pub fn panel_refnos() -> (String, String) {
+    (refno(10), refno(11))
+}
+
+/// 完全在 A 内、完全在 B 内、以及跨界的构件 refno。
+pub fn part_refnos() -> (Vec<String>, Vec<String>, String) {
+    (
+        vec![refno(20), refno(21)],
+        vec![refno(22), refno(23)],
+        refno(24),
+    )
+}
+
+/// 建夹具：写 `.mesh` 文件 + 灌库。幂等——先调 [`drop_room_fixture`] 清干净再建。
+pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
+    drop_room_fixture(mesh_dir).await?;
+    std::fs::create_dir_all(mesh_dir)?;
+
+    let bodies = bodies();
+    let mut sql = String::new();
+
+    // 房间节点：pe 供图遍历，类型表供 `build_room_panels_relate_common` 的 `from FRMW`。
+    // `pe.owner` 与 `inst_relate.generic` 都是 `GeomInstQuery` 的**非 Option** 字段
+    // （`owner: RefnoEnum` / `generic: String`）。缺任何一个，`query_insts` 就会以
+    // 「expected a string, found None」失败，而 `cal_room_refnos` 又把这个错误
+    // `unwrap_or_default()` 吞成空 Vec，整间房静悄悄算成 0 个成员。
+    sql.push_str(&format!(
+        "CREATE pe:{r} SET noun = 'FRMW', deleted = false, owner = pe:{r};\
+         CREATE FRMW:{r} SET NAME = '{ROOM_NAME}', REFNO = pe:{r};\
+         CREATE pe:{w} SET noun = 'CWALL', deleted = false, owner = pe:{r};\
+         RELATE pe:{w}->pe_owner->pe:{r};",
+        r = refno(1),
+        w = refno(2),
+    ));
+    sql.push_str(&format!("INSERT IGNORE INTO trans {{id: trans:zzfx_id, d: {IDENTITY_TRANS}}};"));
+
+    for body in &bodies {
+        let aabb = Aabb::new(body.min.into(), body.max.into());
+        let geo_hash = body.geo_hash();
+        let seq_refno = refno(body.seq);
+
+        if body.write_mesh {
+            let mesh = box_mesh(body.min, body.max);
+            mesh.ser_to_file(&mesh_dir.join(format!("{geo_hash}.mesh")))?;
+        }
+
+        // 第二轮点检查读的是 inst_geo.pts → vec3.d，用盒子的 8 个角点。
+        let mut pt_ids = Vec::new();
+        for (i, v) in box_mesh(body.min, body.max).vertices.iter().enumerate() {
+            let id = format!("zzfx_{}_{i}", body.seq);
+            sql.push_str(&format!(
+                "INSERT IGNORE INTO vec3 {{id: vec3:{id}, d: [{}, {}, {}]}};",
+                v.x, v.y, v.z
+            ));
+            pt_ids.push(format!("vec3:{id}"));
+        }
+
+        sql.push_str(&format!(
+            "INSERT IGNORE INTO aabb {{id: aabb:{geo_hash}, d: {}}};\
+             CREATE pe:{seq_refno} SET noun = '{noun}', deleted = false, owner = pe:{owner};\
+             RELATE pe:{seq_refno}->pe_owner->pe:{owner};\
+             CREATE inst_info:{geo_hash};\
+             CREATE inst_geo:{geo_hash} SET meshed = true, visible = true, \
+                 aabb = aabb:{geo_hash}, pts = [{pts}];\
+             RELATE inst_info:{geo_hash}->geo_relate->inst_geo:{geo_hash} \
+                 SET trans = trans:zzfx_id, geo_type = 'Pos', visible = true, \
+                     geom_refno = pe:{seq_refno};\
+             RELATE pe:{seq_refno}->inst_relate:{seq_refno}->inst_info:{geo_hash} \
+                 SET world_trans = trans:zzfx_id, aabb = aabb:{geo_hash}, solid = true, \
+                     generic = 'UNKOWN';",
+            aabb_json(&aabb),
+            noun = body.noun,
+            owner = refno(body.owner_seq),
+            pts = pt_ids.join(", "),
+        ));
+    }
+
+    SUL_DB.query(sql).await?.check()?;
+    Ok(())
+}
+
+/// 把一个构件搬到新位置。
+///
+/// 只动几何侧（`aabb` 记录、`inst_geo.pts`，面板还要重写 `.mesh`），不碰
+/// `inst_relate.aabb`——后者由 `update_inst_relate_aabbs_by_refnos` 从 `geo_relate`
+/// 重算，走的正是生成流程那条路。测试若直接改 `inst_relate.aabb`，就绕过了「包围盒
+/// 真的变了」的触发源，等于没测。
+pub async fn move_fixture_body(
+    mesh_dir: &Path,
+    seq: u64,
+    min: Vec3,
+    max: Vec3,
+) -> anyhow::Result<()> {
+    let geo_hash = format!("zzfx_{seq}");
+    // 面板的归属判定读的是 `.mesh` 里的三角网而不是包围盒，不重写它，面板就还停在原处。
+    if bodies().iter().any(|body| body.seq == seq && body.write_mesh) {
+        box_mesh(min, max).ser_to_file(&mesh_dir.join(format!("{geo_hash}.mesh")))?;
+    }
+    let mut sql = format!(
+        "UPDATE aabb:{geo_hash} SET d = {};",
+        aabb_json(&Aabb::new(min.into(), max.into()))
+    );
+    for (i, v) in box_mesh(min, max).vertices.iter().enumerate() {
+        sql.push_str(&format!(
+            "UPDATE vec3:zzfx_{seq}_{i} SET d = [{}, {}, {}];",
+            v.x, v.y, v.z
+        ));
+    }
+    SUL_DB.query(sql).await?.check()?;
+    Ok(())
+}
+
+/// 拆夹具：删库里的记录与 `.mesh` 文件。对不存在的记录是安全的。
+pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
+    let mut ids = vec![
+        format!("pe:{}", refno(1)),
+        format!("FRMW:{}", refno(1)),
+        format!("pe:{}", refno(2)),
+        format!("trans:zzfx_id"),
+    ];
+    for body in bodies() {
+        let geo_hash = body.geo_hash();
+        let seq_refno = refno(body.seq);
+        ids.push(format!("pe:{seq_refno}"));
+        ids.push(format!("inst_relate:{seq_refno}"));
+        ids.push(format!("inst_info:{geo_hash}"));
+        ids.push(format!("inst_geo:{geo_hash}"));
+        ids.push(format!("geo_relate:{geo_hash}"));
+        ids.push(format!("aabb:{geo_hash}"));
+        for i in 0..8 {
+            ids.push(format!("vec3:zzfx_{}_{i}", body.seq));
+        }
+        let path: PathBuf = mesh_dir.join(format!("{geo_hash}.mesh"));
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+
+    // pe_owner / geo_relate / inst_relate / room_relate 的边按端点删，id 不完全可预测。
+    let pes = (0..25)
+        .map(|seq| format!("pe:{}", refno(seq)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    SUL_DB
+        .query(format!(
+            "DELETE pe_owner WHERE in IN [{pes}] OR out IN [{pes}];\
+             DELETE room_relate WHERE in IN [{pes}] OR out IN [{pes}];\
+             DELETE room_panel_relate WHERE in IN [{pes}] OR out IN [{pes}];\
+             DELETE inst_relate WHERE in IN [{pes}];\
+             DELETE {};",
+            ids.join(", ")
+        ))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
+    use crate::fast_model::room_model::build_room_relations;
+    use aios_core::room::room::load_aabb_tree;
+    use aios_core::{RefnoEnum, get_db_option};
+    use std::collections::HashSet;
+    use surrealdb::opt::auth::Root;
+
+    /// 盒子的绕序 / 闭合性必须撑得住 `contains_point`——`cal_room_refnos` 的两轮判定
+    /// 全押在它上面。这条不连库，先把几何本身钉死，免得端到端失败时分不清是数据问题
+    /// 还是网格问题。
+    #[test]
+    fn box_mesh_supports_point_containment() {
+        use parry3d::math::{Isometry, Point};
+        use parry3d::query::PointQuery;
+        use parry3d::shape::TriMeshFlags;
+
+        let mesh = box_mesh(Vec3::ZERO, Vec3::splat(1000.0));
+        let tri = mesh
+            .get_tri_mesh_with_flag(
+                glam::Mat4::IDENTITY,
+                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
+            )
+            .expect("box mesh -> trimesh");
+        assert!(
+            tri.contains_point(&Isometry::identity(), &Point::new(500.0, 500.0, 500.0)),
+            "盒心应判为在内"
+        );
+        assert!(
+            !tri.contains_point(&Isometry::identity(), &Point::new(1500.0, 500.0, 500.0)),
+            "盒外的点应判为在外"
+        );
+    }
+
+    /// 排障用：把 `cal_room_refnos` 的三个输入逐个打出来（实例、树、判定结果）。
+    /// 需要先跑过带 `AIOS_KEEP_FIXTURE=1` 的用例把夹具留在库里。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: diagnostic for an existing fixture"]
+    async fn live_room_fixture_probe() {
+        use crate::fast_model::room_model::cal_room_refnos;
+        use aios_core::room::room::GLOBAL_AABB_TREE;
+
+        connect_live().await;
+        let db_option = get_db_option().clone();
+        let mesh_dir = db_option.get_meshes_path();
+
+        let panel: RefnoEnum = "4000000001_10".into();
+        println!("panel refno parsed = {panel} / {:?}", panel.refno());
+
+        let insts = aios_core::query_insts(&[panel], true).await;
+        println!("query_insts -> {:?}", insts.as_ref().map(|v| v.len()));
+        if let Ok(v) = &insts {
+            for g in v {
+                println!("  world_aabb={:?} insts={}", g.world_aabb, g.insts.len());
+                for i in &g.insts {
+                    let p = mesh_dir.join(format!("{}.mesh", i.geo_hash));
+                    println!(
+                        "    geo_hash={} mesh_exists={} des_ok={}",
+                        i.geo_hash,
+                        p.exists(),
+                        PlantMesh::des_mesh_file(&p).is_ok()
+                    );
+                }
+            }
+        }
+
+        load_aabb_tree().await.expect("load tree");
+        println!("tree size = {}", GLOBAL_AABB_TREE.read().await.tree.size());
+        let hit = GLOBAL_AABB_TREE
+            .read()
+            .await
+            .locate_intersecting_bounds(&Aabb::new(
+                Vec3::ZERO.into(),
+                Vec3::splat(1000.0).into(),
+            ))
+            .map(|b| b.refno.to_string())
+            .collect::<Vec<_>>();
+        println!("tree hits in panel A bounds = {hit:?}");
+
+        let within = cal_room_refnos(&mesh_dir, panel, &HashSet::new(), 0.1).await;
+        println!("cal_room_refnos -> {within:?}");
+    }
+
+    async fn connect_live() {
+        let endpoint = std::env::var("AIOS_LIVE_WS").expect("set AIOS_LIVE_WS");
+        let ns = std::env::var("AIOS_LIVE_NS").unwrap_or_else(|_| "1516".into());
+        let db = std::env::var("AIOS_LIVE_DB").unwrap_or_else(|_| "AvevaMarineSample".into());
+        // 这些 live 用例只能**逐个**运行，不能一把 `--ignored` 全跑：`SUL_DB` 是进程级
+        // 全局，而每个用例各建一个 tokio 运行时；第一个用例结束时它的运行时被丢弃，
+        // 连接的后台任务随之死掉，后面的用例拿到的是一条已关闭的连接
+        // （表现为 AlreadyConnected 或 "sending into a closed channel"）。
+        if let Err(error) = SUL_DB.connect(endpoint).with_capacity(1000).await {
+            panic!(
+                "connect: {error:?}\nlive 用例需逐个运行：\
+                 cargo test --lib <用例名> -- --ignored --exact --nocapture"
+            );
+        }
+        SUL_DB.use_ns(&ns).use_db(&db).await.expect("use ns/db");
+        SUL_DB
+            .signin(Root { username: "root", password: "root" })
+            .await
+            .expect("signin");
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct Edge {
+        panel: String,
+        part: String,
+        room_num: String,
+    }
+
+    /// 夹具那间房当前的全部归属边，已排序，可直接相等比较。
+    async fn room_edges() -> Vec<Edge> {
+        let mut response = SUL_DB
+            .query(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
+                 FROM room_relate WHERE room_num = 'K100' ORDER BY panel, part;",
+            )
+            .await
+            .expect("query room_relate")
+            .check()
+            .expect("valid query");
+        let mut edges: Vec<Edge> = response.take(0).expect("decode room_relate");
+        edges.sort();
+        edges
+    }
+
+    /// ADR-010 §9 的验收骨架：夹具 → `build_room_relations` → 逐边比对。
+    ///
+    /// 断言的是三种归属都算对：完全在内（走 AABB 八顶点快路径）、完全在外（不该出现）、
+    /// 以及骑在两室重叠区上的那个（八顶点判不出来，必须落到第二轮逐点兜底，且两室都算）。
+    ///
+    /// **不要指向共享的工作库**——用一次性内存实例，夹具会写 pe / inst_* / room_* 多张表：
+    ///
+    /// ```text
+    /// surreal start --user root --pass root --bind 127.0.0.1:8071 memory
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test live_room_fixture_parity -- --ignored --nocapture
+    /// ```
+    ///
+    /// `assets/meshes` 下会多出两个 `zzfx_*.mesh`，用例结束时删除。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records and .mesh files"]
+    async fn live_room_fixture_parity() {
+        connect_live().await;
+
+        let mut db_option = get_db_option().clone();
+        // 只匹配夹具那一间，避免把库里 124 个真实房间一起卷进来。
+        db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);
+        let mesh_dir = db_option.get_meshes_path();
+
+        create_room_fixture(&mesh_dir).await.expect("create fixture");
+
+        // 夹具构件要先进 R 树，cal_room_refnos 的候选集就是从树里捞的。
+        // 刻意**不**调 `load_aabb_tree`：一次性实例上树应当只装夹具，
+        // 免得把 `accel_tree.bin` 里几万条真实包围盒带进来干扰断言。
+        let fixture_refnos: Vec<RefnoEnum> = bodies()
+            .iter()
+            .map(|b| RefnoEnum::from(refno(b.seq).as_str()))
+            .collect();
+        update_inst_relate_aabbs_by_refnos(&fixture_refnos, true)
+            .await
+            .expect("push fixture aabbs into tree");
+
+        build_room_relations(&db_option).await.expect("build room relations");
+
+        let (pane_a, pane_b) = panel_refnos();
+        let mut response = SUL_DB
+            .query(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
+                 FROM room_relate WHERE room_num = 'K100' ORDER BY panel, part;",
+            )
+            .await
+            .expect("query room_relate")
+            .check()
+            .expect("valid query");
+        let mut got: Vec<Edge> = response.take(0).expect("decode room_relate");
+        got.sort();
+
+        // 排障时置 AIOS_KEEP_FIXTURE=1 把数据留在库里，便于用 SQL 逐段回溯。
+        if std::env::var("AIOS_KEEP_FIXTURE").is_err() {
+            drop_room_fixture(&mesh_dir).await.expect("drop fixture");
+        }
+
+        let (in_a, in_b, straddler) = part_refnos();
+        let mut want: Vec<Edge> = Vec::new();
+        for part in in_a.iter().chain(std::iter::once(&straddler)) {
+            want.push(Edge { panel: pane_a.clone(), part: part.clone(), room_num: "K100".into() });
+        }
+        for part in in_b.iter().chain(std::iter::once(&straddler)) {
+            want.push(Edge { panel: pane_b.clone(), part: part.clone(), room_num: "K100".into() });
+        }
+        want.sort();
+
+        let got_set: HashSet<_> = got.iter().map(|e| (&e.panel, &e.part)).collect();
+        let want_set: HashSet<_> = want.iter().map(|e| (&e.panel, &e.part)).collect();
+        assert_eq!(
+            got_set, want_set,
+            "\n实得: {got:#?}\n期望: {want:#?}\n（跨界构件 {straddler} 应同时属于两室）"
+        );
+    }
+
+    /// 建夹具 + 灌树 + 全量基线，返回夹具用的 `DbOption`（房间关键字已指向夹具那一间）。
+    async fn fixture_baseline() -> aios_core::options::DbOption {
+        let mut db_option = get_db_option().clone();
+        // 只匹配夹具那一间，避免把库里的真实房间一起卷进来。
+        db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);
+        // 入队口以它为总开关：关着时房间增量一条都不排。
+        db_option.gen_spatial_tree = true;
+
+        let mesh_dir = db_option.get_meshes_path();
+        create_room_fixture(&mesh_dir).await.expect("create fixture");
+        let fixture_refnos: Vec<RefnoEnum> = bodies()
+            .iter()
+            .map(|body| RefnoEnum::from(refno(body.seq).as_str()))
+            .collect();
+        update_inst_relate_aabbs_by_refnos(&fixture_refnos, true)
+            .await
+            .expect("push fixture aabbs into tree");
+        build_room_relations(&db_option)
+            .await
+            .expect("baseline full rebuild");
+        assert_eq!(room_edges().await.len(), 6, "基线应有 6 条归属边");
+        db_option
+    }
+
+    async fn drop_fixture_and_queue(mesh_dir: &Path) {
+        if std::env::var("AIOS_KEEP_FIXTURE").is_ok() {
+            return;
+        }
+        SUL_DB
+            .query(
+                "DELETE model_update_pending \
+                 WHERE action IN ['room_recalc_element', 'room_recalc_panel'];",
+            )
+            .await
+            .expect("cleanup queue")
+            .check()
+            .expect("cleanup queue statements");
+        drop_room_fixture(mesh_dir).await.expect("drop fixture");
+    }
+
+    /// 整间分支的对拍：**搬动的是一块面板**，不是构件。
+    ///
+    /// 面板一动，它名下的成员整批换人，元素级根本表达不了——这正是 ADR-010 §2 要分出
+    /// 两种任务的理由。这里把 B 房的面板往外挪，让原本骑在 A/B 重叠区上的跨界构件掉出
+    /// B 房，然后只跑整间分支，再与全量重建逐边比较。
+    ///
+    /// 只能单独运行，见 [`connect_live`]。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_panel_move_parity() {
+        use crate::data_interface::model_update_pending::enqueue_room_recalc;
+        use crate::fast_model::room_model::{load_room_panel_map, recalc_panel_membership};
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        // B 房的面板从 900..1900 挪到 1400..2400：跨界构件（850..1050）就此掉出 B 房，
+        // 而 B 房原有的两个成员（1450..1550 / 1650..1750）仍在里面。
+        let panel = RefnoEnum::from(refno(11).as_str());
+        move_fixture_body(
+            &mesh_dir,
+            11,
+            Vec3::new(1400.0, 0.0, 0.0),
+            Vec3::new(2400.0, 1000.0, 1000.0),
+        )
+        .await
+        .expect("move panel B");
+
+        let changes = update_inst_relate_aabbs_by_refnos(&[panel], true)
+            .await
+            .expect("refresh moved panel aabb");
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.refno, change.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(panel, "PANE")],
+            "只有被搬走的那块面板的包围盒变了"
+        );
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue room work");
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE record::id(id) FROM model_update_pending \
+                 WHERE action = 'room_recalc_panel';",
+            )
+            .await
+            .expect("query queued room work")
+            .check()
+            .expect("valid queue query");
+        let queued: Vec<String> = response.take(0).expect("decode queued room work");
+        assert_eq!(
+            queued,
+            vec!["room_recalc_panel_4000000001_11"],
+            "PANE 必须走整间分支"
+        );
+
+        let rooms = load_room_panel_map(&db_option)
+            .await
+            .expect("load room panel map");
+        recalc_panel_membership(&db_option, &rooms, panel)
+            .await
+            .expect("incremental whole-room recalc");
+        let incremental = room_edges().await;
+
+        build_room_relations(&db_option)
+            .await
+            .expect("full rebuild after move");
+        let full = room_edges().await;
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(incremental, full, "\n增量: {incremental:#?}\n全量: {full:#?}");
+        // 搬家要看得见：跨界构件掉出 B 房，但仍留在 A 房。
+        let (pane_a, pane_b) = panel_refnos();
+        let (_, _, straddler) = part_refnos();
+        assert!(
+            !full
+                .iter()
+                .any(|edge| edge.panel == pane_b && edge.part == straddler),
+            "跨界构件应已掉出 B 房: {full:#?}"
+        );
+        assert!(
+            full.iter()
+                .any(|edge| edge.panel == pane_a && edge.part == straddler),
+            "它在 A 房的归属不该被牵连: {full:#?}"
+        );
+    }
+
+    /// 同轮冲突规则（ADR-010 §8）：整间分支已经写过的构件，其元素任务被吸收跳过。
+    ///
+    /// 两条分支的删除范围不同——一个按面板删出边，一个按构件删入边。真正的风险是它们
+    /// 互相踩：元素分支若在整间分支之后拿着过期的候选集跑一遍，会把刚写好的边删掉。
+    /// 这里把一块面板的任务和它名下一个成员的任务塞进同一轮，跑完整的第三阶段，断言
+    /// 边集**一条不变**、两行队列都被消费掉。
+    ///
+    /// 「一条不变」同时也是幂等性：在没有任何变更的数据上重算，结果必须与基线相同。
+    ///
+    /// 只能单独运行，见 [`connect_live`]。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_panel_task_absorbs_element_task_in_the_same_round() {
+        use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
+        use crate::fast_model::occ_generate::AabbChange;
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+        let baseline = room_edges().await;
+
+        // 面板 A 与它名下的一个成员，同一轮一起入队。
+        let panel = RefnoEnum::from(refno(10).as_str());
+        let member = RefnoEnum::from(refno(21).as_str());
+        enqueue_room_recalc(
+            &db_option,
+            &[
+                AabbChange {
+                    refno: panel,
+                    noun: "PANE".into(),
+                },
+                AabbChange {
+                    refno: member,
+                    noun: "BOX".into(),
+                },
+            ],
+        )
+        .await
+        .expect("enqueue both room tasks");
+
+        let done = drain_rooms(&db_option).await.expect("drain room phase");
+        let after = room_edges().await;
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE record::id(id) FROM model_update_pending \
+                 WHERE action IN ['room_recalc_element', 'room_recalc_panel'];",
+            )
+            .await
+            .expect("query leftover room work")
+            .check()
+            .expect("valid leftover query");
+        let leftover: Vec<String> = response.take(0).expect("decode leftover room work");
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(done, 2, "两行任务都要被这一轮消费掉");
+        assert!(
+            leftover.is_empty(),
+            "被吸收的元素任务也必须删行，否则它会一直卡在队列里: {leftover:?}"
+        );
+        assert_eq!(
+            after, baseline,
+            "\n重算后: {after:#?}\n基线: {baseline:#?}\n（数据没变，两条分支同轮跑完结果必须一致）"
+        );
+    }
+
+    /// 删除路径：被删元素的房间归属必须当场清干净，而不是留成悬空边（ADR-010 §4）。
+    ///
+    /// 此前生产路径上**从来没有人删过** `room_relate`——全仓只有夹具清理里有一条删除
+    /// 语句，于是房间归属只增不减。这条用例分两步：先删一个普通构件（只有入边），
+    /// 再删一整块面板（还有出边和 `room_panel_relate`），顺带确认它们也从空间树上
+    /// 摘掉了——留在树里的话，之后的重算会把一个已经不存在的构件算进某间房。
+    ///
+    /// 同样只能单独运行，见 [`connect_live`]：
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_delete_clears_membership -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records and .mesh files"]
+    async fn live_room_delete_clears_membership() {
+        use crate::data_interface::helper::delete_inst_relate_subtree;
+        use aios_core::room::room::GLOBAL_AABB_TREE;
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        // 第一步：删一个普通构件。它只有入边。
+        let part = RefnoEnum::from(refno(20).as_str());
+        delete_inst_relate_subtree(&[part], 300)
+            .await
+            .expect("delete a member part");
+        let after_part = room_edges().await;
+        assert!(
+            after_part.iter().all(|edge| edge.part != refno(20)),
+            "被删构件不该再有归属边: {after_part:#?}"
+        );
+        assert_eq!(after_part.len(), 5, "只该少掉它自己那一条: {after_part:#?}");
+        assert!(
+            !GLOBAL_AABB_TREE
+                .read()
+                .await
+                .tree
+                .iter()
+                .any(|bbox| bbox.refno == part.refno()),
+            "被删构件必须从空间树上摘掉"
+        );
+
+        // 第二步：删一整块面板。它还有出边和 room_panel_relate。
+        let panel = RefnoEnum::from(refno(10).as_str());
+        delete_inst_relate_subtree(&[panel], 300)
+            .await
+            .expect("delete a panel");
+        let after_panel = room_edges().await;
+        let (pane_a, pane_b) = panel_refnos();
+        assert!(
+            after_panel.iter().all(|edge| edge.panel != pane_a),
+            "被删面板不该再收着任何成员: {after_panel:#?}"
+        );
+        assert!(
+            after_panel.iter().any(|edge| edge.panel == pane_b),
+            "另一块面板的归属不该被牵连: {after_panel:#?}"
+        );
+
+        let mut response = SUL_DB
+            .query("SELECT VALUE record::id(out) FROM room_panel_relate;")
+            .await
+            .expect("query room_panel_relate")
+            .check()
+            .expect("valid room_panel_relate query");
+        // 在 Rust 侧排序：`SELECT VALUE` 的 ORDER BY 字段必须出现在投影里，而这里投影的
+        // 是 `record::id(out)` 而不是 `out` 本身。
+        let mut panels: Vec<String> = response.take(0).expect("decode room_panel_relate");
+        panels.sort();
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(
+            panels,
+            vec![pane_b],
+            "房间-面板映射里也不该再留着被删的那块面板"
+        );
+    }
+
+    /// ADR-010 §9 的验收硬标准：**增量收敛结果 == 全量重建结果**。
+    ///
+    /// 全量建基线 → 把一个构件从 A 房搬到 B 房 → 只跑增量 → 在同一份数据上再跑一遍
+    /// 全量 → 逐边比较。两条路径共用 `room_predicate` 的判定与 `{panel}_{element}`
+    /// 边 id，这条用例就是在守它们不许分叉：共享谓词一旦被某一侧偷偷改了口径、
+    /// 或者两边的边 id 走形，这里立刻红。
+    ///
+    /// 搬家本身也要断言看得见——只比「增量 == 全量」的话，两边同时算错（比如都算成
+    /// 空集）也会相等。
+    ///
+    /// 同样**不要指向共享的工作库**，用一次性内存实例：
+    ///
+    /// ```text
+    /// surreal start --user root --pass root --bind 127.0.0.1:8071 memory
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test live_room_incremental_parity -- --ignored --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_incremental_parity() {
+        use crate::data_interface::model_update_pending::enqueue_room_recalc;
+        use crate::fast_model::room_model::{load_room_panel_map, recalc_element_membership};
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        // 把完全在 A 房内的 _20 搬进 B 房。
+        let moved = RefnoEnum::from(refno(20).as_str());
+        move_fixture_body(
+            &mesh_dir,
+            20,
+            Vec3::new(1450.0, 450.0, 450.0),
+            Vec3::new(1550.0, 550.0, 550.0),
+        )
+        .await
+        .expect("move part across rooms");
+
+        // 触发源（ADR §4）：刷新包围盒拿到变更集，再按它入队。
+        let changes = update_inst_relate_aabbs_by_refnos(&[moved], true)
+            .await
+            .expect("refresh moved aabb");
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.refno, change.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(moved, "BOX")],
+            "只有被搬走的那个构件的包围盒变了"
+        );
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue room work");
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE record::id(id) FROM model_update_pending \
+                 WHERE action = 'room_recalc_element';",
+            )
+            .await
+            .expect("query queued room work")
+            .check()
+            .expect("valid queue query");
+        let queued: Vec<String> = response.take(0).expect("decode queued room work");
+        assert_eq!(queued, vec!["room_recalc_element_4000000001_20"]);
+
+        // 增量收敛：只重算这一个构件的归属，其余五条边不该被碰。
+        let rooms = load_room_panel_map(&db_option)
+            .await
+            .expect("load room panel map");
+        recalc_element_membership(&db_option, &rooms, moved)
+            .await
+            .expect("incremental recalc");
+        let incremental = room_edges().await;
+
+        // 同一份数据上再跑一遍全量。
+        build_room_relations(&db_option)
+            .await
+            .expect("full rebuild after move");
+        let full = room_edges().await;
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(
+            incremental, full,
+            "\n增量: {incremental:#?}\n全量: {full:#?}"
+        );
+        let (pane_a, pane_b) = panel_refnos();
+        let part = refno(20);
+        assert!(
+            full.iter()
+                .any(|edge| edge.part == part && edge.panel == pane_b),
+            "搬过去的构件应属于 B 房: {full:#?}"
+        );
+        assert!(
+            !full.iter()
+                .any(|edge| edge.part == part && edge.panel == pane_a),
+            "搬走之后 A 房不该再收着它: {full:#?}"
+        );
+    }
+}

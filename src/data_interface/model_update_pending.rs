@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::occ_generate::AabbChange;
+use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
@@ -18,7 +20,10 @@ pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 /// of burning a generator run every watcher cycle forever; it revives
 /// automatically because [`render_upsert`] resets `attempts` whenever a newer
 /// session touches the same target.
-const MAX_ATTEMPTS: u32 = 5;
+///
+/// Public because the manual run enforces the same ceiling: reading the table
+/// without it is how you INSPECT a dead letter, not how you re-run one.
+pub const MAX_ATTEMPTS: u32 = 5;
 
 /// Short-lived recovery record written before any PE mutation. A retry reuses
 /// this exact range and pre-update model plan instead of recomputing ownership
@@ -59,13 +64,19 @@ pub struct PendingModelWork {
     pub last_error: Option<String>,
 }
 
+/// 队列行的 id。同一个 (dbnum, action, target) 只占一行，重复入队即幂等更新。
+///
+/// 房间任务是唯一的例外，它的 id **不带 dbnum**（ADR-010 §7）：一块面板天然跨库，
+/// 带上 dbnum 会让同一间房在一轮里排出多行、于是被重算多遍；更糟的是失败之后它只能
+/// 等同一个 dbnum 的新会话来复活，而真正触发它的其它库永远够不着——那正是审计里 B6
+/// 的放大版。dbnum 与 `source_end_sesno` 因此降为字段，只记最后一次触发来源。
 fn record_id(item: &ModelWorkItem) -> String {
-    format!(
-        "{TABLE}:{}_{}_{}",
-        item.dbnum,
-        item.action.as_str(),
-        item.target_refno.replace('/', "_")
-    )
+    let action = item.action.as_str();
+    let target = item.target_refno.replace('/', "_");
+    if item.action.is_room_recalc() {
+        return format!("{TABLE}:{action}_{target}");
+    }
+    format!("{TABLE}:{}_{action}_{target}", item.dbnum)
 }
 
 /// Persist the exact model work before advancing `applied_sesno`.
@@ -113,22 +124,51 @@ pub async fn enqueue_legacy_changed_refnos(
     enqueue_plan(&plan).await
 }
 
-pub async fn enqueue_legacy_root(
-    dbnum: u32,
-    end_sesno: i32,
-    root_refno: &str,
-    noun: &str,
+/// 一个包围盒变更对应的房间重算任务（ADR-010 §2/§4）。
+///
+/// `dbnum` / `source_end_sesno` 对房间任务只是来源记录，不参与寻址也不参与复活判定：
+/// 行 id 不带 dbnum，复活是无条件的。dbnum 跟着 refno 走（与反向级联派生根同一口径），
+/// 会话号取 0——两个触发点都在几何刷新那一层，本来就不知道自己属于哪次会话。
+fn room_recalc_item(change: &AabbChange) -> ModelWorkItem {
+    ModelWorkItem {
+        dbnum: change.refno.refno().get_0(),
+        db_type: "DESI".to_string(),
+        source_end_sesno: 0,
+        action: if change.noun == "PANE" {
+            ModelWorkAction::RoomRecalcPanel
+        } else {
+            ModelWorkAction::RoomRecalcElement
+        },
+        target_refno: change.refno.to_pdms_str(),
+        noun: change.noun.clone(),
+    }
+}
+
+/// 包围盒真的变了 → 排一次房间归属重算。
+///
+/// 只接受**变更集**：同一轮里同一个目标只需要一行，因此先按目标折叠再落库——队列行
+/// 的 id 本来就幂等，重复入队只是白跑一趟往返。
+///
+/// `gen_spatial_tree` 关着时一条都不排。那个开关同时管着全量重建与空间树对账：关着
+/// 意味着 `build_room_relations` 从不运行、树也从不与库对账，此时跑增量不只是徒劳
+/// ——元素分支是「先删该构件的所有入边再写回」，而候选面板取自那棵没人维护的树，
+/// 捞不到候选就只剩下那条 DELETE，等于把上一次全量建出来的边悄悄抹掉。
+pub async fn enqueue_room_recalc(
+    db_option: &aios_core::options::DbOption,
+    changes: &[AabbChange],
 ) -> anyhow::Result<()> {
+    if !db_option.gen_spatial_tree || changes.is_empty() {
+        return Ok(());
+    }
+    let mut items: std::collections::BTreeMap<String, ModelWorkItem> =
+        std::collections::BTreeMap::new();
+    for change in changes {
+        let item = room_recalc_item(change);
+        items.insert(item.target_refno.clone(), item);
+    }
     enqueue_plan(&ModelUpdatePlan {
-        work_items: vec![ModelWorkItem {
-            dbnum,
-            db_type: "DESI".into(),
-            source_end_sesno: end_sesno,
-            action: ModelWorkAction::RegenRoot,
-            target_refno: root_refno.to_string(),
-            noun: noun.to_string(),
-        }],
-        warnings: Vec::new(),
+        work_items: items.into_values().collect(),
+        ..Default::default()
     })
     .await
 }
@@ -139,17 +179,49 @@ fn render_upsert(item: &ModelWorkItem) -> String {
     let target = escape_surql_str(&item.target_refno);
     let noun = escape_surql_str(&item.noun);
     let end_sesno = item.source_end_sesno;
-    format!(
-        "UPSERT {id} SET \
-         dbnum = {dbnum}, db_type = '{db_type}', action = '{action}', \
-         target_refno = '{target}', noun = '{noun}', \
-         attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END, \
-         last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END, \
-         source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}]), \
-         status = 'pending', updated_at = time::now();",
-        dbnum = item.dbnum,
-        action = item.action.as_str(),
-    )
+    let dbnum = item.dbnum;
+
+    // 死信复活的判据：本次触发是否比这一行已知的来源更新。
+    //
+    // 常规任务按会话号比——同库内 sesno 单调，「来了更新的会话」就是重试的正当理由。
+    // 房间任务不行：它的行不带 dbnum，同一块面板会被不同库的会话轮流触发，跨库比 sesno
+    // 毫无意义（一个库的 500 会永久压住另一个库的 80）。而房间任务的入队条件本身就是
+    // 「AABB 真的变了」——每一次入队都是一个全新的重算理由，所以无条件复活。
+    let (dbnum_clause, revival_clauses) = if item.action.is_room_recalc() {
+        (
+            format!("dbnum = math::max([dbnum?:0, {dbnum}])"),
+            vec!["attempts = 0".to_string(), "last_error = NONE".to_string()],
+        )
+    } else {
+        (
+            format!("dbnum = {dbnum}"),
+            vec![
+                format!(
+                    "attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END"
+                ),
+                format!(
+                    "last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END"
+                ),
+            ],
+        )
+    };
+
+    let mut clauses = vec![
+        dbnum_clause,
+        format!("db_type = '{db_type}'"),
+        format!("action = '{}'", item.action.as_str()),
+        format!("target_refno = '{target}'"),
+        format!("noun = '{noun}'"),
+    ];
+    clauses.extend(revival_clauses);
+    // 复活子句读的是 `source_end_sesno` 的**旧值**，所以必须排在它被覆盖之前。
+    clauses.push(format!(
+        "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
+    ));
+    clauses.push("status = 'pending'".to_string());
+    clauses.push("updated_at = time::now()".to_string());
+
+    format!("UPSERT {id} SET {};", clauses.join(", "))
 }
 
 async fn upsert(item: &ModelWorkItem) -> anyhow::Result<()> {
@@ -229,6 +301,17 @@ pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result
     Ok(())
 }
 
+/// The monotonic watermark advance for one `dbnum`. Rendered in one place so
+/// the window and baseline transactions cannot drift apart.
+fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
+    format!(
+        "UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum}, \
+         applied_sesno = math::max([applied_sesno?:0, {end_sesno}]), \
+         sesno = math::max([sesno?:0, {end_sesno}]), \
+         applied_at = time::now(), updated_at = time::now();"
+    )
+}
+
 /// Render the single transaction that closes a window: first the caller's
 /// `window_statements` (side effects that must share this watermark's fate),
 /// then the durable model work, the watermark advance and the recovery-record
@@ -241,13 +324,23 @@ fn render_finalize_transaction(
 ) -> String {
     let mut statements = window_statements.to_vec();
     statements.extend(plan.work_items.iter().map(render_upsert));
-    statements.push(format!(
-        "UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum}, \
-         applied_sesno = math::max([applied_sesno?:0, {end_sesno}]), \
-         sesno = math::max([sesno?:0, {end_sesno}]), \
-         applied_at = time::now(), updated_at = time::now();"
-    ));
+    statements.push(render_watermark_advance(dbnum, end_sesno));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
+    format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        statements.join("\n")
+    )
+}
+
+/// Render the transaction that closes a freshly parsed baseline.
+///
+/// Same collar as [`render_finalize_transaction`] minus the recovery-record
+/// removal: a baseline is not a replayable window, so it never has an
+/// `increment_update_attempt` row, and deleting one here could only discard
+/// another path's crash-recovery state.
+fn render_baseline_transaction(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan) -> String {
+    let mut statements: Vec<String> = plan.work_items.iter().map(render_upsert).collect();
+    statements.push(render_watermark_advance(dbnum, end_sesno));
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
         statements.join("\n")
@@ -282,6 +375,30 @@ pub async fn finalize_attempt(
         .check()
         .map_err(|error| {
             anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
+        })?;
+    Ok(())
+}
+
+/// Atomically establish a freshly parsed `dbnum`'s model work and its watermark.
+///
+/// A baseline full-parse writes element data but no geometry, and every later
+/// incremental window only regenerates the roots that window itself touched. So
+/// a watermark that advances without its generation work leaves the database
+/// permanently modelless — nothing revisits a root that never changes again.
+/// Binding the two into one transaction makes that state unreachable: either
+/// the baseline is both applied and scheduled for generation, or it replays.
+pub async fn finalize_baseline(
+    dbnum: u32,
+    end_sesno: i32,
+    plan: &ModelUpdatePlan,
+) -> anyhow::Result<()> {
+    SUL_DB
+        .query(render_baseline_transaction(dbnum, end_sesno, plan))
+        .await
+        .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("finalize baseline dbnum={dbnum} statement failed: {error}")
         })?;
     Ok(())
 }
@@ -388,6 +505,32 @@ pub async fn mark_regen_failed(dbnum: u32, root_refno: &str, error: &str) -> any
     mark_failed(&item, error).await
 }
 
+/// Regeneration work for one root a reverse cascade discovered (pure).
+///
+/// The derived root is booked against ITS OWN database, not the seed's. Filing
+/// a design root under the catalogue `dbnum` that triggered it meant a dead
+/// letter could only ever be revived by a new CATALOGUE session, while the
+/// design sessions that actually need it regenerated could never reach it.
+/// `expand_live_reverse_cascade` already drops every non-design referrer, so
+/// what arrives here is a design root.
+///
+/// `source_end_sesno` is 0 rather than the seed's: session numbers are
+/// per-database, so a catalogue sesno of 500 sitting next to design sessions in
+/// the 80s would block revival outright. 0 claims no session, which lets the
+/// next real session on the design db reset the attempt count as intended.
+fn derived_regen_item(
+    root: crate::data_interface::generation_root::GenerationRoot,
+) -> ModelWorkItem {
+    ModelWorkItem {
+        dbnum: root.root.refno().get_0(),
+        db_type: "DESI".to_string(),
+        source_end_sesno: 0,
+        action: ModelWorkAction::RegenRoot,
+        target_refno: root.root.to_pdms_str(),
+        noun: root.noun,
+    }
+}
+
 async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::Result<()> {
     let refno = RefnoEnum::from(
         RefU64::from_str(&item.target_refno)
@@ -408,23 +551,40 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         ModelWorkAction::CascadeExpand => {
             let roots =
                 crate::data_interface::manual_update::expand_live_reverse_cascade(refno).await?;
-            let work_items = roots
-                .into_iter()
-                .map(|root| ModelWorkItem {
-                    dbnum: item.dbnum,
-                    db_type: item.db_type.clone(),
-                    source_end_sesno: item.source_end_sesno,
-                    action: ModelWorkAction::RegenRoot,
-                    target_refno: root.root.to_pdms_str(),
-                    noun: root.noun,
-                })
-                .collect();
             enqueue_plan(&ModelUpdatePlan {
-                work_items,
-                warnings: Vec::new(),
+                work_items: roots.into_iter().map(derived_regen_item).collect(),
+                ..Default::default()
             })
             .await
         }
+        // 单件执行路径：自己加载一次房间映射。批量消费走 [`drain_rooms`]，它按轮加载
+        // 一次并在整轮复用——房间映射是一次房间类型表全表扫描加逐行图遍历，几十个任务
+        // 各扫一遍是承受不起的。
+        ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
+            let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
+            run_room_task(&mgr.db_option, &rooms, item.action, refno)
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+/// 执行一个房间重算任务，返回本次写入了归属边的构件集合。
+async fn run_room_task(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    action: ModelWorkAction,
+    target: RefnoEnum,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    match action {
+        ModelWorkAction::RoomRecalcPanel => {
+            room_model::recalc_panel_membership(db_option, rooms, target).await
+        }
+        ModelWorkAction::RoomRecalcElement => {
+            room_model::recalc_element_membership(db_option, rooms, target).await?;
+            Ok(HashSet::new())
+        }
+        other => anyhow::bail!("{} 不是房间任务", other.as_str()),
     }
 }
 
@@ -563,26 +723,129 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
     Ok(done)
 }
 
+// 三个阶段的 action 白名单。合起来必须正好覆盖 `ModelWorkAction` 的全部取值：漏掉
+// 一种，那种任务入了队就永远不会被消费，而且没有任何报错——它只是静静躺在表里。
+// `every_action_is_consumed_by_exactly_one_drain_phase` 守着这条。
+const NON_REGEN_ACTION_FILTER: &str =
+    "AND action IN ['transform', 'delete_cleanup', 'cascade_expand']";
+const REGEN_ACTION_FILTER: &str = "AND action = 'regen_root'";
+const ROOM_ACTION_FILTER: &str = "AND action IN ['room_recalc_panel', 'room_recalc_element']";
+
 pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
-    // Cascade expansion enqueues regen work, so consume non-regen work first
-    // and load regen work only after those roots are durable.
-    let non_regen = drain_non_regen(mgr).await;
-    let regen = drain_where(mgr, "AND action = 'regen_root'").await;
-    match (non_regen, regen) {
-        (Ok(non_regen), Ok(regen)) => Ok(non_regen + regen),
-        (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-        (Err(non_regen), Err(regen)) => anyhow::bail!(
-            "non-regen pending tasks failed: {non_regen:#}; regen pending tasks failed: {regen:#}"
-        ),
+    // 三个阶段的先后是硬约束，不是习惯：
+    // 1. 非 regen 先跑——`cascade_expand` 会反过来入队 regen 工作；
+    // 2. regen 次之——房间归属要读几何与包围盒，在重生成之前算出来的结果本身就是错的；
+    // 3. 房间最后（ADR-010 §7）。
+    let phases = [
+        ("non-regen", drain_non_regen(mgr).await),
+        ("regen", drain_where(mgr, REGEN_ACTION_FILTER).await),
+        ("room recalc", drain_rooms(&mgr.db_option).await),
+    ];
+
+    let mut done = 0;
+    let mut failures = Vec::new();
+    for (phase, outcome) in phases {
+        match outcome {
+            Ok(count) => done += count,
+            Err(error) => failures.push(format!("{phase} pending tasks failed: {error:#}")),
+        }
     }
+    if !failures.is_empty() {
+        anyhow::bail!("{}", failures.join("; "));
+    }
+    Ok(done)
 }
 
 pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
-    drain_where(
-        mgr,
-        "AND action IN ['transform', 'delete_cleanup', 'cascade_expand']",
-    )
-    .await
+    drain_where(mgr, NON_REGEN_ACTION_FILTER).await
+}
+
+/// 第三阶段：房间归属重算。
+///
+/// 不复用 [`drain_where`] 的原因有两个。其一，房间映射要按轮加载一次而不是按任务；
+/// 其二，整间分支必须先于元素分支跑完，才能把它已经写过的构件从元素任务里摘掉
+/// （ADR-010 §8 的冲突规则）——这两条 `drain_where` 的通用循环都表达不了。
+///
+/// 队列行级别的去重不需要在内存里再做一遍：房间任务的 record id 已经是
+/// `{action}_{target}`（不带 dbnum），同一个目标天然只占一行。
+///
+/// 取 `DbOption` 而不是 `AiosDBManager`：这一阶段只用得到配置，收窄参数也让合成夹具
+/// 能用它自己的房间关键字驱动整个阶段——`init_form_config()` 读的是项目配置，夹具那间
+/// `/ZZ-R-K100` 在默认关键字下根本匹配不到。
+pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<usize> {
+    let mut response = SUL_DB
+        .query(render_drain_select(ROOM_ACTION_FILTER))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("load pending room work statement failed: {error}"))?;
+    let jobs: Vec<PendingModelWork> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode pending room work failed: {error}"))?;
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+
+    let (panels, elements): (Vec<PendingModelWork>, Vec<PendingModelWork>) = jobs
+        .into_iter()
+        .partition(|job| job.action == ModelWorkAction::RoomRecalcPanel);
+
+    let rooms = room_model::load_room_panel_map(db_option).await?;
+    let mut done = 0;
+    let mut failures = Vec::new();
+    let mut claimed: HashSet<RefnoEnum> = HashSet::new();
+
+    for job in &panels {
+        match run_room_job(db_option, &rooms, job).await {
+            Ok(members) => {
+                claimed.extend(members);
+                match delete_work(job).await {
+                    Ok(()) => done += 1,
+                    Err(error) => record_failure(job, &error, &mut failures).await,
+                }
+            }
+            Err(error) => record_failure(job, &error, &mut failures).await,
+        }
+    }
+
+    for job in &elements {
+        // 整间分支刚刚把这个构件写进某块面板的成员里，它的元素任务就是重复劳动：
+        // 两条分支共用判定与边 id，再跑一遍只会得到同一批边。
+        let absorbed = RefU64::from_str(&job.target_refno)
+            .is_ok_and(|refno| claimed.contains(&RefnoEnum::from(refno)));
+        let outcome = if absorbed {
+            delete_work(job).await
+        } else {
+            match run_room_job(db_option, &rooms, job).await {
+                Ok(_) => delete_work(job).await,
+                Err(error) => Err(error),
+            }
+        };
+        match outcome {
+            Ok(()) => done += 1,
+            Err(error) => record_failure(job, &error, &mut failures).await,
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} pending room task(s) failed after {done} completed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+    Ok(done)
+}
+
+async fn run_room_job(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    job: &PendingModelWork,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    let refno = RefnoEnum::from(
+        RefU64::from_str(&job.target_refno)
+            .map_err(|_| anyhow::anyhow!("invalid pending refno {}", job.target_refno))?,
+    );
+    run_room_task(db_option, rooms, job.action, refno).await
 }
 
 #[cfg(test)]
@@ -643,6 +906,158 @@ mod tests {
         );
     }
 
+    /// B6：反向级联派生出来的根记在**它自己的**设计库账上。继承种子的 dbnum 时，
+    /// 一个目录库触发的设计根会被记在目录库下，于是它的死信只能等下一次目录库会话
+    /// 来复活——而真正需要它重生成的设计库会话永远够不着它。会话号同理：跨库比大小
+    /// 没有意义，所以派生任务不认领任何会话号。
+    #[test]
+    fn a_cascade_derived_root_is_booked_against_its_own_design_db() {
+        use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
+
+        let item = derived_regen_item(GenerationRoot {
+            root: RefnoEnum::from(RefU64((24381u64 << 32) | 100677)),
+            noun: "EQUI".into(),
+            name: "/PUMP-01".into(),
+            kind: GenerationRootKind::DeliveryUnit,
+        });
+
+        assert_eq!(item.dbnum, 24381, "派生根应记在设计库，而不是种子所在的目录库");
+        assert_eq!(item.db_type, "DESI");
+        assert_eq!(item.action, ModelWorkAction::RegenRoot);
+        assert_eq!(item.target_refno, "24381/100677");
+        assert_eq!(item.source_end_sesno, 0, "跨库会话号不可比，派生任务不认领会话");
+    }
+
+    fn room_item(action: ModelWorkAction, dbnum: u32, end_sesno: i32) -> ModelWorkItem {
+        ModelWorkItem {
+            dbnum,
+            db_type: "DESI".into(),
+            source_end_sesno: end_sesno,
+            action,
+            target_refno: "24381/34303".into(),
+            noun: "PANE".into(),
+        }
+    }
+
+    /// ADR-010 §7：房间任务的行不带 dbnum。一块面板天然跨库，带上 dbnum 会让同一间房
+    /// 在一轮里排出多行、被重算多遍，失败后又只能等同一个库的新会话来复活，而真正
+    /// 触发它的那些库永远够不着它（B6 的放大版）。
+    #[test]
+    fn a_room_task_is_addressed_by_target_alone_across_databases() {
+        let from_one_db = record_id(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
+        let from_another = record_id(&room_item(ModelWorkAction::RoomRecalcPanel, 24384, 7));
+        assert_eq!(from_one_db, from_another);
+        assert_eq!(
+            from_one_db,
+            "model_update_pending:room_recalc_panel_24381_34303"
+        );
+
+        // 元素分支与整间分支是两种任务，同一个目标上不能挤成一行。
+        assert_ne!(
+            from_one_db,
+            record_id(&room_item(ModelWorkAction::RoomRecalcElement, 24381, 42))
+        );
+
+        // 其余任务照旧按库分行。
+        let regen = ModelWorkItem {
+            action: ModelWorkAction::RegenRoot,
+            ..room_item(ModelWorkAction::RegenRoot, 24381, 42)
+        };
+        assert_eq!(
+            record_id(&regen),
+            "model_update_pending:24381_regen_root_24381_34303"
+        );
+    }
+
+    /// 触发源的分流（ADR-010 §2）：PANE 自己一动，整间房的成员全变，元素级表达不了，
+    /// 必须整块面板重算；其余元素只重算自己的归属。
+    #[test]
+    fn a_moved_panel_routes_to_the_whole_room_branch() {
+        let change = |refno: u64, noun: &str| AabbChange {
+            refno: RefnoEnum::from(RefU64((24381u64 << 32) | refno)),
+            noun: noun.into(),
+        };
+
+        let panel = room_recalc_item(&change(34303, "PANE"));
+        assert_eq!(panel.action, ModelWorkAction::RoomRecalcPanel);
+        assert_eq!(panel.target_refno, "24381/34303");
+        // dbnum 跟着 refno 走，而不是跟着触发它的那个库；会话号不认领。
+        assert_eq!(panel.dbnum, 24381);
+        assert_eq!(panel.source_end_sesno, 0);
+
+        assert_eq!(
+            room_recalc_item(&change(100677, "EQUI")).action,
+            ModelWorkAction::RoomRecalcElement
+        );
+    }
+
+    /// 房间任务的死信无条件复活，而不是按会话号比。
+    ///
+    /// 常规任务的判据「来了更新的会话」在这里不成立：行不带 dbnum，同一块面板被不同库
+    /// 轮流触发，跨库比 sesno 只会让一个库的 500 永久压住另一个库的 80。而房间任务的
+    /// 入队条件本身就是「AABB 真的变了」，每一次入队都是全新的重算理由。
+    #[test]
+    fn a_room_task_revives_on_any_new_trigger_not_on_a_newer_session() {
+        let sql = render_upsert(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
+        assert!(sql.contains("attempts = 0"), "{sql}");
+        assert!(sql.contains("last_error = NONE"), "{sql}");
+        assert!(
+            !sql.contains("IF 42 > (source_end_sesno?:0)"),
+            "房间任务不应按会话号决定是否复活: {sql}"
+        );
+        // dbnum / source_end_sesno 降为字段，只记最后一次触发来源。
+        assert!(sql.contains("dbnum = math::max([dbnum?:0, 24381])"), "{sql}");
+        assert!(
+            sql.contains("source_end_sesno = math::max([source_end_sesno?:0, 42])"),
+            "{sql}"
+        );
+    }
+
+    /// 每一种 action 都必须被某个 drain 阶段消费，且只被一个消费。
+    ///
+    /// 漏掉一种，那种任务入队之后就永远躺在表里，不报错也不执行；被两个阶段同时选中，
+    /// 则会在同一轮里跑两遍。新增 action 时下面的 `match` 会编译失败，逼调用方明确
+    /// 它归哪个阶段。
+    #[test]
+    fn every_action_is_consumed_by_exactly_one_drain_phase() {
+        const ALL_ACTIONS: [ModelWorkAction; 6] = [
+            ModelWorkAction::RegenRoot,
+            ModelWorkAction::Transform,
+            ModelWorkAction::DeleteCleanup,
+            ModelWorkAction::CascadeExpand,
+            ModelWorkAction::RoomRecalcElement,
+            ModelWorkAction::RoomRecalcPanel,
+        ];
+        let declared_phase = |action: ModelWorkAction| match action {
+            ModelWorkAction::RegenRoot => REGEN_ACTION_FILTER,
+            ModelWorkAction::Transform
+            | ModelWorkAction::DeleteCleanup
+            | ModelWorkAction::CascadeExpand => NON_REGEN_ACTION_FILTER,
+            ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
+                ROOM_ACTION_FILTER
+            }
+        };
+
+        for action in ALL_ACTIONS {
+            let quoted = format!("'{}'", action.as_str());
+            let declared = declared_phase(action);
+            assert!(
+                declared.contains(&quoted),
+                "{quoted} 不在它声明的阶段白名单里: {declared}"
+            );
+            for other in [
+                NON_REGEN_ACTION_FILTER,
+                REGEN_ACTION_FILTER,
+                ROOM_ACTION_FILTER,
+            ] {
+                assert!(
+                    other == declared || !other.contains(&quoted),
+                    "{quoted} 同时落在两个阶段里: {other}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn drain_select_leaves_dead_letters_in_the_table() {
         let sql = render_drain_select("AND action = 'regen_root'");
@@ -695,7 +1110,7 @@ mod tests {
                 target_refno: "16777216/5".into(),
                 noun: "BRAN".into(),
             }],
-            warnings: Vec::new(),
+            ..Default::default()
         };
 
         let delivery_status = "update datacenter_version:16777216_5 set status = 'Modify';";
@@ -717,6 +1132,38 @@ mod tests {
         assert!(status_at < watermark_at, "{sql}");
     }
 
+    /// A baseline that advanced its watermark without queueing generation work
+    /// would leave the dbnum modelless forever, so the two must share one
+    /// transaction. It must NOT drop an `increment_update_attempt` row: a
+    /// baseline never owns one, and another path's recovery record is not its
+    /// to discard.
+    #[test]
+    fn baseline_transaction_pairs_generation_work_with_the_watermark() {
+        let plan = ModelUpdatePlan {
+            work_items: vec![ModelWorkItem {
+                dbnum: 7997,
+                db_type: "DESI".into(),
+                source_end_sesno: 76,
+                action: ModelWorkAction::RegenRoot,
+                target_refno: "24381/2".into(),
+                noun: "SITE".into(),
+            }],
+            ..Default::default()
+        };
+
+        let sql = render_baseline_transaction(7997, 76, &plan);
+        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
+        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+        let work_at = sql
+            .find("UPSERT model_update_pending:7997_regen_root_24381_2")
+            .unwrap_or_else(|| panic!("baseline generation work missing: {sql}"));
+        let watermark_at = sql
+            .find("applied_sesno = math::max([applied_sesno?:0, 76])")
+            .unwrap_or_else(|| panic!("baseline watermark advance missing: {sql}"));
+        assert!(work_at < watermark_at, "{sql}");
+        assert!(!sql.contains(ATTEMPT_TABLE), "{sql}");
+    }
+
     #[test]
     fn prepared_attempt_round_trips_the_fixed_range_and_model_plan() {
         let attempt = IncrementUpdateAttempt {
@@ -735,6 +1182,7 @@ mod tests {
                     noun: String::new(),
                 }],
                 warnings: vec!["kept across restart".into()],
+                ..Default::default()
             },
         };
 
@@ -758,6 +1206,7 @@ mod tests {
                 noun: String::new(),
             }],
             warnings: vec!["crash recovery fixture".into()],
+            ..Default::default()
         };
         let attempt = IncrementUpdateAttempt {
             dbnum: DBNUM,
@@ -846,6 +1295,7 @@ mod tests {
                 noun: String::new(),
             }],
             warnings: vec!["os-kill recovery fixture".into()],
+            ..Default::default()
         };
         let attempt = IncrementUpdateAttempt {
             dbnum: DBNUM,
@@ -968,7 +1418,7 @@ mod tests {
             .collect();
         enqueue_plan(&ModelUpdatePlan {
             work_items,
-            warnings: Vec::new(),
+            ..Default::default()
         })
         .await
         .expect("enqueue queue fixture");
@@ -1033,7 +1483,7 @@ mod tests {
             .collect();
         enqueue_plan(&ModelUpdatePlan {
             work_items,
-            warnings: Vec::new(),
+            ..Default::default()
         })
         .await
         .expect("enqueue isolation fixture");
@@ -1091,7 +1541,7 @@ mod tests {
                 target_refno: format!("{DBNUM}/1"),
                 noun: "BRAN".into(),
             }],
-            warnings: Vec::new(),
+            ..Default::default()
         };
         let work_id = record_id(&plan.work_items[0]);
         let cleanup =
@@ -1360,7 +1810,7 @@ mod tests {
                 target_refno: SPCO.into(),
                 noun: "SPCO".into(),
             }],
-            warnings: Vec::new(),
+            ..Default::default()
         })
         .await
         .expect("enqueue shared SPCO cascade");

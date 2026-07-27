@@ -53,7 +53,8 @@ use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
     classify_operation_impact, owner_change,
 };
-use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
+use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
+use crate::data_interface::sesno_range::SesnoRangeResolver;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// Max owner-chain depth to walk when resolving delivery units. PDMS
@@ -77,8 +78,18 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
     crate::data_interface::generation_root::configured_delivery_unit_types()
 }
 
-fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32, db_type: &str) -> bool {
-    applied_sesno == 0 && file_latest_sesno > 0 && !COLD_START_DB_TYPES.contains(&db_type)
+/// 从未解析过的库（没有水位、文件里却有会话）都要先补一次全量基线，**SYS meta 也算**。
+///
+/// 早先这里把 `SYST / DICT / GLB / GLOB` 排除在外，让它们改走
+/// [`SesnoRangeResolver`] 的 cold start——水位缺失时从 0 起、用增量窗口把历史会话重放一遍。
+/// 问题在于两条路用的不是同一个解析器：基线走 `parse_pdms_db`，而重放走 `pdms_io`，
+/// 而 ADR-006 那个跨块引用列表（`CURD` / `DBLS`）的解析修复只落在前者。设计 MDB 的 `CURD`
+/// 恰恰是这类属性，它决定模型树能不能解析到设计库——靠重放建起来的 SYS 元数据可能缺它。
+///
+/// cold start 没有失效，只是让位：本函数在 `SesnoRangeResolver` 之前判，全新的 SYS 库走基线，
+/// 而水位记录被删、数据还在的情形仍由 cold start 兜住。
+fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
+    applied_sesno == 0 && file_latest_sesno > 0
 }
 
 /// One incoming element operation kind within a session (drops `None`).
@@ -224,7 +235,7 @@ pub fn merge_net_changes(
 ///
 /// Counts are deduped by `refno` over the whole pending window; the same element
 /// contributes at most once per unit (a cross-unit move touches both units).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryUnitSummary {
     /// Delivery-unit root as `a/b` pdms string.
     pub root_refno: String,
@@ -1735,14 +1746,41 @@ fn pending_record_id(dbnum: u32, root_refno: &str) -> String {
     )
 }
 
-/// Load all pending model-retry tasks (read-only; used by preview + execute).
-pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
-    let sql = format!(
+/// Load pending model-retry tasks from both the legacy manual table and the
+/// current work queue.
+///
+/// `attempt_cap` bounds `attempts` when the caller intends to RUN the tasks;
+/// `None` returns dead letters too, which is what inspection wants.
+/// `(legacy manual table, current work queue)` SELECTs for one attempt policy (pure).
+fn render_pending_units_sql(attempt_cap: Option<u32>) -> (String, String) {
+    let legacy = format!(
         "SELECT dbnum, root_refno, noun, source_end_sesno, attempts, \
-         last_error FROM {MANUAL_MODEL_PENDING_TABLE};"
+         last_error FROM {MANUAL_MODEL_PENDING_TABLE}{};",
+        attempt_cap
+            .map(|cap| format!(" WHERE (attempts?:0) < {cap}"))
+            .unwrap_or_default()
     );
+    // New work is written before the data watermark. Read it alongside the
+    // legacy manual table so retry-only manual runs consume the same roots as
+    // automatic updates without a stop-the-world migration.
+    let current = format!(
+        "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
+         last_error FROM model_update_pending \
+         WHERE action = 'regen_root' AND status IN ['pending', 'failed']{};",
+        attempt_cap
+            .map(|cap| format!(" AND (attempts?:0) < {cap}"))
+            .unwrap_or_default()
+    );
+    (legacy, current)
+}
+
+async fn load_pending_units_where(
+    attempt_cap: Option<u32>,
+) -> anyhow::Result<Vec<PendingModelUnit>> {
+    let (legacy_sql, current_sql) = render_pending_units_sql(attempt_cap);
+
     let mut response = SUL_DB
-        .query(sql)
+        .query(legacy_sql)
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("读取旧模型待重试语句失败: {error}"))?;
@@ -1750,14 +1788,8 @@ pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>>
         .take(0)
         .map_err(|error| anyhow::anyhow!("解码旧模型待重试失败: {error}"))?;
 
-    // New work is written before the data watermark. Read it alongside the
-    // legacy manual table so retry-only manual runs consume the same roots as
-    // automatic updates without a stop-the-world migration.
-    let sql = "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
-               last_error FROM model_update_pending \
-               WHERE action = 'regen_root' AND status IN ['pending', 'failed'];";
     let mut response = SUL_DB
-        .query(sql)
+        .query(current_sql)
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("读取模型待重试语句失败: {error}"))?;
@@ -1768,26 +1800,27 @@ pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>>
     Ok(pending)
 }
 
-/// Record (or refresh) a pending-retry task after a unit generation failure.
-async fn upsert_pending_model_unit(task: &UnitTask, error: &str) -> anyhow::Result<()> {
-    let id = pending_record_id(task.dbnum, &task.root_refno);
-    let sql = format!(
-        "UPSERT {id} SET dbnum = {dbnum}, root_refno = '{root}', noun = '{noun}', \
-         source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}]), \
-         attempts = (attempts?:0) + 1, last_error = '{error}', updated_at = time::now();",
-        dbnum = task.dbnum,
-        root = escape_surql_str(&task.root_refno),
-        noun = escape_surql_str(&task.noun),
-        end_sesno = task.source_end_sesno,
-        error = escape_surql_str(error),
-    );
-    SUL_DB
-        .query(sql)
-        .await
-        .map_err(|e| anyhow::anyhow!("记录模型待重试失败 {id}: {e}"))?
-        .check()
-        .map_err(|e| anyhow::anyhow!("记录模型待重试语句失败 {id}: {e}"))?;
-    Ok(())
+/// Every pending model-retry task, dead letters included (read-only).
+///
+/// This is the INSPECTION view — the preview and `GET /update/pending-units`.
+/// Anything that is going to actually run the tasks wants
+/// [`load_pending_model_units_for_retry`] instead.
+pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
+    load_pending_units_where(None).await
+}
+
+/// The pending model-retry tasks a run may execute.
+///
+/// Honours the same [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS)
+/// ceiling the automatic drain does. Without it a permanently broken root
+/// burned a full generator pass on every manual run, forever, while its
+/// `attempts` counter climbed with nothing watching it — the dead-letter
+/// mechanism existed but only the automatic path was subject to it.
+pub async fn load_pending_model_units_for_retry() -> anyhow::Result<Vec<PendingModelUnit>> {
+    load_pending_units_where(Some(
+        crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+    ))
+    .await
 }
 
 /// Drop the pending-retry task after the unit generates successfully.
@@ -2084,6 +2117,67 @@ fn baseline_parse_confirmed_empty(parsed_count: Option<usize>) -> bool {
     parsed_count == Some(0)
 }
 
+/// Turn a freshly baselined dbnum's roots into durable generation work (pure).
+///
+/// Only DESI carries generation roots: CATA holds catalogue definitions and SYS
+/// meta holds project structure, so neither gets model work here — matching
+/// [`crate::data_interface::model_update_plan::build_model_update_plan`], which
+/// plans nothing but deferred cascades for those types.
+fn baseline_work_items(
+    dbnum: u32,
+    db_type: &str,
+    end_sesno: i32,
+    roots: &[RefnoEnum],
+) -> ModelUpdatePlan {
+    if db_type != "DESI" {
+        return ModelUpdatePlan::default();
+    }
+    ModelUpdatePlan {
+        work_items: roots
+            .iter()
+            .map(|root| ModelWorkItem {
+                dbnum,
+                db_type: db_type.to_string(),
+                source_end_sesno: end_sesno,
+                action: ModelWorkAction::RegenRoot,
+                target_refno: root.to_pdms_str(),
+                noun: "SITE".to_string(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// Model work for a `dbnum` that has just established its baseline.
+///
+/// The baseline full-parse produces data only, and incremental windows after it
+/// regenerate nothing but the roots they themselves touched — so without this
+/// the elements that are never edited again would have no geometry, ever.
+///
+/// The roots are the dbnum's non-empty SITEs, which is the same root set the
+/// generator picks for its own whole-database branch (`gen_geos_data`'s `dbno`
+/// path), so coverage of the freshly parsed database is guaranteed. They are
+/// deliberately coarser than an incremental window's delivery-unit roots: a
+/// baseline generates everything once, and one queue row per SITE keeps that
+/// from fanning out into thousands of rows before any of them has ever run.
+async fn baseline_model_plan(
+    dbnum: u32,
+    db_type: &str,
+    end_sesno: i32,
+    include_history: bool,
+) -> anyhow::Result<ModelUpdatePlan> {
+    if db_type != "DESI" {
+        return Ok(ModelUpdatePlan::default());
+    }
+    let roots =
+        aios_core::query_type_refnos_by_dbnum(&["SITE"], dbnum, Some(true), include_history)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
+            })?;
+    Ok(baseline_work_items(dbnum, db_type, end_sesno, &roots))
+}
+
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
     meta.modified().ok().map(|t| {
         let dt: chrono::DateTime<chrono::Utc> = t.into();
@@ -2116,14 +2210,29 @@ impl AiosDBManager {
                 candidates.len()
             );
         }
-        self.initialize_dbnum_baseline(project, &candidates[0])
-            .await
+        let cand = &candidates[0];
+        self.initialize_dbnum_baseline(
+            project,
+            cand.db_num,
+            &cand.file_name,
+            &cand.db_type,
+            cand.file_latest_sesno,
+        )
+        .await
     }
 
-    async fn initialize_dbnum_baseline(
+    /// 给一个从未解析过的 dbnum 补一次全量基线，并把水位与生成工作原子收口。
+    ///
+    /// 只吃四个标量而不是 `FileCandidate`：自动 watcher 那侧手里没有候选结构，而两条路径
+    /// 对「从未解析过」必须给出同一种处置（见 [`needs_initial_load`]），共用这一个入口
+    /// 才不会各自长出一套。
+    pub(crate) async fn initialize_dbnum_baseline(
         &self,
         project: &str,
-        cand: &FileCandidate,
+        dbnum: u32,
+        file_name: &str,
+        db_type: &str,
+        file_latest_sesno: i32,
     ) -> anyhow::Result<usize> {
         #[derive(Deserialize)]
         struct CountRow {
@@ -2148,49 +2257,55 @@ impl AiosDBManager {
             Ok((pe_count, info_count))
         }
 
-        let applied_sesno = DbnumState::applied_sesno(cand.db_num).await?;
-        let (mut count, mut info_count) = baseline_counts(cand.db_num).await?;
+        let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
+        let (mut count, mut info_count) = baseline_counts(dbnum).await?;
         let mut parsed_count = None;
         if baseline_needs_full_parse(count, applied_sesno) {
-            let options = baseline_sync_options(&self.db_option, &cand.file_name, cand.db_num);
+            let options = baseline_sync_options(&self.db_option, file_name, dbnum);
             let parsed_counts = crate::versioned_db::database::sync_total_async_threaded(
                 &options,
                 project,
                 Arc::new(dashmap::DashSet::new()),
-                &[cand.db_type.as_str()],
+                &[db_type],
                 100,
             )
             .await?;
-            parsed_count = Some(*parsed_counts.get(&cand.db_num).ok_or_else(|| {
+            parsed_count = Some(*parsed_counts.get(&dbnum).ok_or_else(|| {
                 anyhow::anyhow!(
                     "dbnum={} 基线解析未返回目标文件结果；不推进 applied_sesno",
-                    cand.db_num
+                    dbnum
                 )
             })?);
-            (count, info_count) = baseline_counts(cand.db_num).await?;
+            (count, info_count) = baseline_counts(dbnum).await?;
         } else if baseline_stats_need_rebuild(count, info_count) {
             crate::versioned_db::database::rebuild_dbnum_info_from_pe(
-                cand.db_num,
-                &cand.file_name,
-                &cand.db_type,
+                dbnum,
+                file_name,
+                db_type,
             )
             .await?;
-            (count, info_count) = baseline_counts(cand.db_num).await?;
+            (count, info_count) = baseline_counts(dbnum).await?;
         }
         if count == 0 {
             if baseline_parse_confirmed_empty(parsed_count) {
                 // 空库（仅根元素，如 TEST dbnum=1/TES500）：全量解析成功但确实
                 // 没有业务元素。这是合法基线——必须推进水位，否则该 dbnum 会在
                 // 之后每次手动执行中反复以失败批次出现并阻塞增量窗口。
-                DbnumState::advance_applied(cand.db_num, cand.file_latest_sesno).await?;
+                // 没有元素也就没有生成根，计划为空。
+                crate::data_interface::model_update_pending::finalize_baseline(
+                    dbnum,
+                    file_latest_sesno,
+                    &ModelUpdatePlan::default(),
+                )
+                .await?;
                 return Ok(0);
             }
-            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", cand.db_num);
+            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", dbnum);
         }
         if count != info_count {
             anyhow::bail!(
                 "dbnum={} 基线不完整: PE={} dbnum_info={}; 不推进 applied_sesno",
-                cand.db_num,
+                dbnum,
                 count,
                 info_count
             );
@@ -2200,13 +2315,35 @@ impl AiosDBManager {
         {
             anyhow::bail!(
                 "dbnum={} 基线不完整: PE={} 本次成功解析={}; 不推进 applied_sesno",
-                cand.db_num,
+                dbnum,
                 count,
                 parsed_count
             );
         }
 
-        DbnumState::advance_applied(cand.db_num, cand.file_latest_sesno).await?;
+        // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
+        // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
+        // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
+        let plan = baseline_model_plan(
+            dbnum,
+            db_type,
+            file_latest_sesno,
+            self.db_option.is_gen_history_model(),
+        )
+        .await?;
+        let roots = plan.work_items.len();
+        crate::data_interface::model_update_pending::finalize_baseline(
+            dbnum,
+            file_latest_sesno,
+            &plan,
+        )
+        .await?;
+        if roots > 0 {
+            println!(
+                "dbnum={} 基线已建立，排入 {roots} 个全量生成根（等待模型任务消费）",
+                dbnum
+            );
+        }
         Ok(count)
     }
 
@@ -2464,11 +2601,7 @@ impl AiosDBManager {
             file_latest_sesno: cand.file_latest_sesno,
             anomaly,
             blocked,
-            initialization_required: needs_initial_load(
-                applied,
-                cand.file_latest_sesno,
-                &cand.db_type,
-            ),
+            initialization_required: needs_initial_load(applied, cand.file_latest_sesno),
             ..Default::default()
         };
 
@@ -2620,7 +2753,7 @@ impl AiosDBManager {
         // Expand deferred cascades before loading regen work so recovered roots
         // are generated in this same manual run. Transform/delete work is also
         // safe to consume before root generation.
-        let model_side_effect_failed = if let Err(e) =
+        let mut model_side_effect_failed = if let Err(e) =
             crate::data_interface::model_update_pending::drain_non_regen(self).await
         {
             result.warnings.push(format!(
@@ -2633,7 +2766,10 @@ impl AiosDBManager {
 
         // Merge with persisted pending retries: retry-only runs work with zero
         // new sessions, and a re-affected unit keeps exactly one latest task.
-        let pending = match load_pending_model_units().await {
+        // Dead letters are deliberately excluded — they stay visible through the
+        // preview, but re-running one on every manual invocation is not a retry
+        // policy, it is an unbounded loop.
+        let pending = match load_pending_model_units_for_retry().await {
             Ok(pending) => pending,
             Err(e) => {
                 result
@@ -2672,9 +2808,11 @@ impl AiosDBManager {
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    if let Err(e) = upsert_pending_model_unit(&task, &msg).await {
-                        result.warnings.push(e.to_string());
-                    }
+                    // Only `model_update_pending` records the failure. The legacy
+                    // `manual_model_pending` table used to be written in the same
+                    // breath, so one unit's retry state lived in two rows that
+                    // nothing kept in agreement; existing rows still drain (the
+                    // success branch above deletes them) but no new ones appear.
                     if let Err(e) = crate::data_interface::model_update_pending::mark_regen_failed(
                         task.dbnum,
                         &task.root_refno,
@@ -2707,6 +2845,19 @@ impl AiosDBManager {
                 old_owner: task.old_owner,
                 new_owner: task.new_owner,
             });
+        }
+
+        // 房间归属是第三阶段，必须排在上面的单元重生成之后：它要读几何与包围盒，
+        // 在重生成之前算出来的结果本身就是错的（ADR-010 §7）。自动路径由
+        // `model_update_pending::drain` 一次带过三段，手动路径分两处调用，
+        // 所以这一段要在这里补齐——漏掉它，手动跑就永远不算房间。
+        if let Err(e) =
+            crate::data_interface::model_update_pending::drain_rooms(&self.db_option).await
+        {
+            result
+                .warnings
+                .push(format!("执行房间归属重算失败（已保留待重试）: {e}"));
+            model_side_effect_failed = true;
         }
 
         result.status = include_model_side_effect_failure(
@@ -2769,8 +2920,17 @@ impl AiosDBManager {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
 
-        if needs_initial_load(applied, cand.file_latest_sesno, &cand.db_type) {
-            return match self.initialize_dbnum_baseline(project, cand).await {
+        if needs_initial_load(applied, cand.file_latest_sesno) {
+            return match self
+                .initialize_dbnum_baseline(
+                    project,
+                    dbnum,
+                    &cand.file_name,
+                    &cand.db_type,
+                    cand.file_latest_sesno,
+                )
+                .await
+            {
                 Ok(count) => (
                     Some(DataBatchResult {
                         dbnum,
@@ -2780,7 +2940,7 @@ impl AiosDBManager {
                         end_sesno: cand.file_latest_sesno,
                         status: BatchStatus::Applied,
                         message: Some(format!(
-                            "首次按需初始化完成：解析 {count} 个元素并建立增量水位"
+                            "首次按需初始化完成：解析 {count} 个元素、建立增量水位并排入全量生成"
                         )),
                         merged_sesnos: Vec::new(),
                         changed_elements: count,
@@ -2884,32 +3044,17 @@ impl AiosDBManager {
         );
         batch.changed_elements = collected.values().map(|v| v.len()).sum();
 
-        let pre_state = if cand.db_type == "DESI" {
-            let details = merge_net_change_details(&collected);
-            let (unit_summaries, _no_generation, unit_warnings) = match resolve_unit_rollup(
-                dbnum, &collected, &details,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    let (units, no_generation, mut unit_warnings) =
-                        resolve_unit_rollup_without_reverse_index(dbnum, &collected, &details)
-                            .await;
-                    unit_warnings.push(format!(
-                            "dbnum={dbnum}: reverse-reference lookup deferred to durable cascade work: {error:#}"
-                        ));
-                    (units, no_generation, unit_warnings)
-                }
-            };
-            warnings.extend(unit_warnings);
-            Some(unit_summaries)
-        } else {
-            None
-        };
-
         // Apply through the shared pipeline: persist + datacenter side meta +
         // watermark advance on ITS success path only (per-file isolation).
+        //
+        // The pipeline resolves the delivery-unit rollup itself, before it
+        // persists anything, and hands it back on `model_plan`. Resolving a
+        // second one here would not just cost another reverse-index closure and
+        // owner-graph load — it took the RAW net changes, where `model_affecting`
+        // is true for a transform-only edit too, so a pure POS/ORI move would
+        // regenerate the whole unit that the pipeline's plan updates with a
+        // single `Transform`. Two answers to "which roots regenerate" is one too
+        // many; the plan is the one that also survives a crash.
         let mut apply_map = IndexMap::new();
         apply_map.insert(
             cand.path.clone(),
@@ -2932,9 +3077,10 @@ impl AiosDBManager {
             batch.message = Some(err.error.clone());
         } else {
             batch.status = BatchStatus::Applied;
-            // Only DESI batches feed model generation (CATA/SYS meta: data only).
-            if let Some(unit_summaries) = &pre_state {
-                units = collect_unit_tasks(unit_summaries, dbnum, end_sesno);
+            // Only DESI batches carry a unit rollup (CATA / SYS meta: data only),
+            // so this is empty for the others without a type check.
+            if let Some(success) = incr.successes.first() {
+                units = collect_unit_tasks(&success.model_plan.units, dbnum, end_sesno);
             }
         }
 
@@ -3023,6 +3169,54 @@ mod tests {
             body.contains("apply_with_precollected("),
             "收集结果必须交给 apply_with_precollected，否则 pipeline 会把同一文件重新解析一遍"
         );
+    }
+
+    /// 同一个窗口的交付单元归并也只能算一次。`execute_one_dbnum` 曾在落库前自己
+    /// 归并一次，`IncrementPipeline` 内部的 `build_model_update_plan` 又归并一次——
+    /// 两次各要一趟反向索引闭包和一趟属主图加载。更要命的是**口径不同**：手动这次
+    /// 用的是原始净变化，`model_affecting` 对纯 POS/ORI 也为真，于是一次位移会被
+    /// 判成整单重生成，而 plan 只排一条 `Transform`。现在单元表从 plan 上取。
+    #[test]
+    fn execute_one_dbnum_resolves_the_unit_rollup_exactly_once() {
+        let src = include_str!("manual_update.rs");
+        let body = src
+            .split_once(concat!("async fn ", "execute_one_dbnum"))
+            .expect("execute_one_dbnum 未找到")
+            .1;
+        let body = body
+            .split_once(concat!("\n#[cfg", "(test)]"))
+            .map(|(head, _)| head)
+            .unwrap_or(body);
+
+        for forbidden in [
+            concat!("resolve_unit", "_rollup("),
+            concat!("resolve_unit", "_rollup_without_reverse_index("),
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "execute_one_dbnum 不应自己归并交付单元（{forbidden}）；应取 model_plan.units"
+            );
+        }
+        assert!(
+            body.contains("model_plan.units"),
+            "交付单元必须来自 pipeline 交回的 model_plan，两处各算一次口径会分叉"
+        );
+    }
+
+    /// 死信的判定标准只有一个。检查表可以看到全部（含死信），要**执行**它们就必须
+    /// 和自动 drain 用同一个 `MAX_ATTEMPTS` 上限，否则手动路径会永远重跑一个已经
+    /// 判死的根，每跑一次烧掉一整趟生成。
+    #[test]
+    fn only_the_retry_query_caps_attempts() {
+        let (legacy, current) = render_pending_units_sql(None);
+        assert!(!legacy.contains("attempts?:0) <"), "{legacy}");
+        assert!(!current.contains("attempts?:0) <"), "{current}");
+        assert!(current.contains("status IN ['pending', 'failed']"), "{current}");
+
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let (legacy, current) = render_pending_units_sql(Some(cap));
+        assert!(legacy.contains(&format!("WHERE (attempts?:0) < {cap}")), "{legacy}");
+        assert!(current.contains(&format!("AND (attempts?:0) < {cap}")), "{current}");
     }
 
     fn seq(kinds: &[IncomingKind]) -> NetOp {
@@ -3115,12 +3309,44 @@ mod tests {
         );
     }
 
+    /// 判据只看水位与文件会话号，**不再按 db_type 分叉**：SYS meta 曾被排除在外、改走
+    /// cold start 重放，而重放用的 `pdms_io` 没有 ADR-006 的跨块 `CURD` 解析修复。
     #[test]
-    fn uninitialized_design_files_are_detected_for_on_demand_baseline() {
-        assert!(needs_initial_load(0, 76, "DESI"));
-        assert!(needs_initial_load(0, 12, "CATA"));
-        assert!(!needs_initial_load(76, 76, "DESI"));
-        assert!(!needs_initial_load(0, 76, "SYST"));
+    fn uninitialized_files_are_detected_for_on_demand_baseline() {
+        assert!(needs_initial_load(0, 76));
+        assert!(needs_initial_load(0, 12));
+        assert!(!needs_initial_load(76, 76));
+        // 空文件不是「没解析过」，没有会话可解析，别派一次白跑的基线。
+        assert!(!needs_initial_load(0, 0));
+    }
+
+
+    /// A baseline used to advance its watermark and queue nothing, so every root
+    /// the user never edited again stayed modelless forever (incremental windows
+    /// only revisit what changed). Design baselines must therefore hand back
+    /// generation work; catalogue and SYS meta baselines legitimately hand back
+    /// none, since neither holds generation roots.
+    #[test]
+    fn a_design_baseline_queues_generation_work_for_every_root() {
+        let sites = [
+            RefnoEnum::from(RefU64((7997u64 << 32) | 2)),
+            RefnoEnum::from(RefU64((7997u64 << 32) | 9)),
+        ];
+
+        let plan = baseline_work_items(7997, "DESI", 76, &sites);
+
+        assert_eq!(plan.work_items.len(), 2);
+        assert!(
+            plan.work_items
+                .iter()
+                .all(|item| item.action == ModelWorkAction::RegenRoot
+                    && item.dbnum == 7997
+                    && item.source_end_sesno == 76)
+        );
+        assert_eq!(plan.work_items[0].target_refno, sites[0].to_pdms_str());
+
+        assert!(baseline_work_items(7997, "CATA", 76, &sites).work_items.is_empty());
+        assert!(baseline_work_items(7997, "SYST", 76, &sites).work_items.is_empty());
     }
 
     #[test]

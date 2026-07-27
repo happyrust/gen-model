@@ -19,6 +19,11 @@ pub enum ModelWorkAction {
     Transform,
     DeleteCleanup,
     CascadeExpand,
+    /// 一个构件的几何动了 → 反向定位它落在哪些面板里（ADR-010 §2）。
+    RoomRecalcElement,
+    /// 一块 PANE 或房间节点本身动了 → 整块面板重算（面板一动，成员全变，
+    /// 元素级表达不了）。
+    RoomRecalcPanel,
 }
 
 impl ModelWorkAction {
@@ -28,7 +33,15 @@ impl ModelWorkAction {
             Self::Transform => "transform",
             Self::DeleteCleanup => "delete_cleanup",
             Self::CascadeExpand => "cascade_expand",
+            Self::RoomRecalcElement => "room_recalc_element",
+            Self::RoomRecalcPanel => "room_recalc_panel",
         }
+    }
+
+    /// 房间任务与其余任务在队列层有两处不同：队列行的 id 不带 dbnum，且它们排在
+    /// `drain` 的第三阶段（ADR-010 §7）。两处判断都走这里，免得只改一处。
+    pub const fn is_room_recalc(self) -> bool {
+        matches!(self, Self::RoomRecalcElement | Self::RoomRecalcPanel)
     }
 }
 
@@ -48,6 +61,18 @@ pub struct ModelWorkItem {
 pub struct ModelUpdatePlan {
     pub work_items: Vec<ModelWorkItem>,
     pub warnings: Vec<String>,
+    /// The delivery-unit rollup `work_items`' `RegenRoot` entries came from.
+    ///
+    /// Resolving it costs a reverse-index closure plus an owner-graph load, and
+    /// it can only be resolved BEFORE the window persists — so it is carried
+    /// here rather than recomputed by whoever needs the per-unit detail (root
+    /// counts, pre/post OWNER for the client's tree refresh). Riding along in
+    /// the durable attempt also means a crash replay keeps that detail instead
+    /// of silently degrading to bare root ids.
+    ///
+    /// Empty for windows that have no unit rollup at all (CATA / SYS meta).
+    #[serde(default)]
+    pub units: Vec<DeliveryUnitSummary>,
 }
 
 fn insert_item(
@@ -196,6 +221,7 @@ fn build_cata_cascade_plan(
     ModelUpdatePlan {
         work_items: items.into_values().collect(),
         warnings: Vec::new(),
+        units: Vec::new(),
     }
 }
 
@@ -311,6 +337,7 @@ pub(crate) async fn build_model_update_plan(
     ModelUpdatePlan {
         work_items,
         warnings,
+        units,
     }
 }
 

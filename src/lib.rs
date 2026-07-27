@@ -238,7 +238,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             GLOBAL_AABB_TREE.read().await.tree.size()
         );
         let mut time = Instant::now();
-        build_room_relations(&db_option).await.unwrap();
+        // 单块面板算不出来不该拦住启动：这里在 `async_watch` 之前，panic 等于整个服务
+        // 起不来，而房间归属是可以事后重建的派生数据。函数内已按面板逐条聚合失败原因，
+        // 打出来即可定位——此前那些失败是被 `unwrap_or_default()` 吞成「这间房 0 个成员」的。
+        if let Err(error) = build_room_relations(&db_option).await {
+            eprintln!("计算房间未完全成功: {error:#}");
+        }
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         // update_cal_equip().await?;
         update_cal_bran_component().await?;
@@ -325,7 +330,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
-    use crate::fast_model::aabb_tree::manual_update_aabbs;
+    use crate::fast_model::aabb_tree::sync_aabb_tree_with_db;
     use aios_core::init_surreal;
     // 如果传入的是DbOptionExt，则取其内部的DbOption
     let db_option: DbOption = option
@@ -359,13 +364,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     if db_option.gen_spatial_tree {
         // Try to load existing AABB tree first
         load_aabb_tree().await?;
-
-        // Check if tree is empty after loading
-        if GLOBAL_AABB_TREE.read().await.is_empty() {
-            println!("AABB tree is empty after loading, performing manual update...");
-            manual_update_aabbs(true).await?;
-            println!("Manual update aabb tree completed");
-        }
+        sync_aabb_tree_with_db().await?;
     }
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await

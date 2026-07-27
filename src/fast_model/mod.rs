@@ -12,6 +12,10 @@ pub mod occ_generate;
 
 pub mod manifold_bool;
 
+pub mod room_fixture;
+
+pub mod room_predicate;
+
 pub mod room_model;
 
 pub mod cal_model;

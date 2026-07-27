@@ -32,10 +32,18 @@ pub struct IncrFileSuccess {
     pub end_sesno: i32,
     /// PDMS db type (`SYST` / `DESI` / …) for downstream side-effects.
     pub db_type: String,
-    /// Changed element refnos for downstream model refresh.
+    /// Changed element refnos for downstream model refresh. Deduped, and free
+    /// of the `None` operations that carry no change at all — every consumer
+    /// resolves a generation root per entry, so a refno repeated once per
+    /// session in the window was paying for that lookup once per session.
     pub changed_refnos: Vec<RefU64>,
     /// Full delta payload (MySQL / classified refresh). Kept for callers that need detail.
     pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
+    /// The model work this window established, with the delivery-unit rollup
+    /// behind it. Callers that need to act on the affected units (the manual
+    /// run's per-unit reporting) read it here instead of resolving the rollup a
+    /// second time — it can only be resolved before the window persists anyway.
+    pub model_plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
 }
 
 /// One file that failed before watermark advance.
@@ -87,7 +95,7 @@ impl IncrResult {
 /// applied watermark and the same window replays idempotently. Returns `None`
 /// when there is nothing to run. Statements keep the original `;\n` separator
 /// (SurrealDB tolerates the resulting empty statements).
-fn wrap_in_transaction(statements: &[String]) -> Option<String> {
+pub(crate) fn wrap_in_transaction(statements: &[String]) -> Option<String> {
     if statements.is_empty() {
         return None;
     }
@@ -625,10 +633,13 @@ impl IncrementPipeline {
             range_eles.values().map(|ops| ops.len()).sum::<usize>(),
         );
 
+        let mut seen = HashSet::new();
         let changed_refnos = range_eles
             .values()
             .flat_map(|vec| vec.iter())
-            .map(|p| p.refno)
+            .filter(|op| !matches!(op.detail, EleOperationDetail::None))
+            .map(|op| op.refno)
+            .filter(|refno| seen.insert(*refno))
             .collect::<Vec<RefU64>>();
 
         Ok((
@@ -639,6 +650,7 @@ impl IncrementPipeline {
                 db_type: db_type.to_string(),
                 changed_refnos,
                 range_eles,
+                model_plan,
             },
             warnings,
         ))
@@ -2523,5 +2535,270 @@ mod live_tests {
         .expect("restore affected BRAN models");
 
         std::fs::remove_dir_all(&fixture_root).expect("remove temporary baseline fixture");
+    }
+
+    /// D-03（live）：ProjAMS 上一次**真实** E3D 删除会话。
+    ///
+    /// 六个变化桶里 Deleted 是唯一还没有真实文件会话的一个。上面那个 FTUB 用例走的是
+    /// 备份基线对当前文件的瞬态 Add→Deleted，而 FTUB 是伪类型、BRAN 内的组件，覆盖不到
+    /// 「元素自身带模型被删」的清理路径。这里的 VTWA 24381/107146 自带 `inst_relate`
+    /// 与 `SPRE`，且属于 `INLINE` 变化等价类——此前没有任何用例覆盖过该类。
+    ///
+    /// 会话由 `scripts/e3d/projams_incr_delete_apply.mac` 产生。删除不可逆、refno 不会
+    /// 被重新发放，回滚只能靠删除前的文件备份
+    /// `ams7997_0001.codex-before-d03-delete-20260727`。
+    /// 执行前基线见 `docs/evidence/2026-07-27-d03-delete-session-baseline.md`。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: needs the real delete session from scripts/e3d/projams_incr_delete_apply.mac"]
+    async fn live_real_delete_session_cleans_up_model_and_regenerates_branch() {
+        use crate::data_interface::generation_root::{
+            configured_delivery_unit_types, resolve_live_element_generation_root,
+        };
+        use crate::data_interface::manual_update::load_pending_model_units;
+        use crate::data_interface::model_update_pending::drain;
+        use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
+
+        let design_file = PathBuf::from(std::env::var("AIOS_PROJAMS_DELETE_FILE").unwrap_or_else(
+            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
+        ));
+        assert!(
+            design_file.is_file(),
+            "missing design file: {}",
+            design_file.display()
+        );
+        let sesno: i32 = std::env::var("AIOS_PROJAMS_DELETE_SESNO")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(84);
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect isolated surreal");
+        let manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+
+        let deleted = RefnoEnum::from("24381/107146");
+        let branch = RefnoEnum::from("24381/107104");
+
+        let mut response = SUL_DB
+            .query("SELECT VALUE applied_sesno FROM dbnum_watermark:7997;")
+            .await
+            .expect("read watermark before the delete window")
+            .check()
+            .expect("valid watermark query");
+        let applied_before = response
+            .take::<Vec<i32>>(0)
+            .expect("decode watermark")
+            .first()
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            applied_before < sesno,
+            "window {sesno} is already applied (applied_sesno={applied_before}); \
+             restore the pre-delete file backup and reload before rerunning"
+        );
+
+        // 墓碑落库后元素链路就查不到了，生成根必须先解析。
+        let root = resolve_live_element_generation_root(deleted, &configured_delivery_unit_types())
+            .await
+            .expect("inspect VTWA before applying its tombstone")
+            .expect("VTWA must resolve to its owning BRAN");
+        assert_eq!(
+            (root.root.to_pdms_str(), root.noun.as_str()),
+            (branch.to_pdms_str(), "BRAN")
+        );
+        let children_before = aios_core::get_children_pes(branch)
+            .await
+            .expect("read BRAN children before the delete")
+            .len();
+
+        let changes = IncrementPipeline::collect_changes(&design_file, sesno..=sesno)
+            .expect("collect the real delete session");
+        let operations = changes
+            .get(&u32::try_from(sesno).expect("sesno fits u32"))
+            .expect("the delete session must exist in the file");
+        assert!(
+            operations.iter().any(|operation| {
+                RefnoEnum::from(operation.refno) == deleted
+                    && matches!(operation.detail, EleOperationDetail::Deleted)
+            }),
+            "sesno {sesno} must carry the VTWA tombstone: {operations:?}"
+        );
+
+        let plan = build_model_update_plan(7997, sesno, "DESI", &changes).await;
+        let actions = plan
+            .work_items
+            .iter()
+            .map(|item| (item.action, item.target_refno.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            actions
+                .iter()
+                .any(|(action, _)| *action == ModelWorkAction::DeleteCleanup),
+            "a real tombstone must plan model cleanup: {actions:?}"
+        );
+        assert!(
+            actions.contains(&(ModelWorkAction::RegenRoot, branch.to_pdms_str().as_str())),
+            "the owning BRAN must be replanned after losing a component: {actions:?}"
+        );
+
+        let mut io = PdmsIO::new("", design_file.clone(), true);
+        io.open().expect("open design file");
+        let basic_info = io.get_page_basic_info().expect("design file header");
+        assert_eq!(basic_info.pdms_header.db_num, 7997);
+
+        let result = IncrementPipeline::new()
+            .apply(IndexMap::from([(
+                design_file.clone(),
+                (basic_info.clone(), sesno..=sesno, "DESI".into()),
+            )]))
+            .await;
+        assert!(
+            result.errors.is_empty(),
+            "delete window failed: {:?}",
+            result.errors
+        );
+        drain(&manager)
+            .await
+            .expect("consume the model work of the delete window");
+
+        let mut response = SUL_DB
+            .query(
+                "RETURN [
+                    (SELECT VALUE deleted FROM pe:24381_107146)[0],
+                    inst_relate:24381_107146.id != none,
+                    count(SELECT * FROM ref_rev
+                          WHERE in = pe:24381_107146 OR out = pe:24381_107146),
+                    count(SELECT * FROM pe_owner WHERE in = pe:24381_107146),
+                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
+                ];",
+            )
+            .await
+            .expect("query the state left by the delete window")
+            .check()
+            .expect("valid cleanup query");
+        let state: Vec<serde_json::Value> = response.take(0).expect("decode cleanup state");
+        assert!(
+            state[0].is_null() || state[0] == serde_json::json!(true),
+            "the tombstoned VTWA must be gone or soft-deleted: {state:?}"
+        );
+        assert_eq!(
+            state[1],
+            serde_json::json!(false),
+            "inst_relate must not outlive its element: {state:?}"
+        );
+        assert_eq!(
+            state[2],
+            serde_json::json!(0),
+            "no ref_rev edge may keep the deleted refno as an endpoint: {state:?}"
+        );
+        assert_eq!(
+            state[3],
+            serde_json::json!(0),
+            "the pe_owner edge to the BRAN must be removed: {state:?}"
+        );
+        assert!(
+            state[4].as_i64().is_some_and(|applied| applied >= sesno as i64),
+            "the watermark must advance past the delete window: {state:?}"
+        );
+        assert_eq!(
+            aios_core::get_children_pes(branch)
+                .await
+                .expect("read BRAN children after the delete")
+                .len(),
+            children_before - 1,
+            "the BRAN must lose exactly the deleted component"
+        );
+
+        // 同区间重放。`apply` 是不带水位闸门的底层原语：崩溃恢复本就要求它能把一个
+        // 已部分落库的固定区间原样重跑，而两个生产调用方的区间都是从水位算出来的，
+        // 谁都不会拿已应用的窗口来调它。所以可断言的是收敛，不是「重放不排活」——
+        // 重放会按同样的键重新建立同一批工作，这与 `live_real_ftub_delete_move_and_
+        // reorder` 里「重放固定区间不得重复建立模型工作」是同一条约定。
+        let replay = IncrementPipeline::new()
+            .apply(IndexMap::from([(
+                design_file,
+                (basic_info, sesno..=sesno, "DESI".into()),
+            )]))
+            .await;
+        assert!(
+            replay.errors.is_empty(),
+            "same-range replay failed: {:?}",
+            replay.errors
+        );
+        let mut response = SUL_DB
+            .query(
+                "SELECT action, target_refno FROM model_update_pending
+                 WHERE dbnum = 7997 ORDER BY action;",
+            )
+            .await
+            .expect("read the work replanned by the replay")
+            .check()
+            .expect("valid replanned-work query");
+        let replanned: Vec<serde_json::Value> = response.take(0).expect("decode replanned work");
+        assert_eq!(
+            replanned,
+            vec![
+                serde_json::json!({
+                    "action": "delete_cleanup",
+                    "target_refno": "24381/107146",
+                }),
+                serde_json::json!({
+                    "action": "regen_root",
+                    "target_refno": "24381/107104",
+                }),
+            ],
+            "the replay must re-establish exactly the same keyed work, never duplicates: \
+             {replanned:?}"
+        );
+
+        drain(&manager)
+            .await
+            .expect("consume the work replanned by the replay");
+        assert!(
+            load_pending_model_units()
+                .await
+                .expect("read pending model units after the replay drain")
+                .is_empty(),
+            "the replayed window must drain back to an empty queue"
+        );
+
+        // 收敛：墓碑没被复活，水位没再动，BRAN 也没多出或少掉子件。
+        let mut response = SUL_DB
+            .query(
+                "RETURN [
+                    (SELECT VALUE deleted FROM pe:24381_107146)[0],
+                    inst_relate:24381_107146.id != none,
+                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
+                ];",
+            )
+            .await
+            .expect("query the state left by the replay")
+            .check()
+            .expect("valid convergence query");
+        let converged: Vec<serde_json::Value> = response.take(0).expect("decode converged state");
+        assert!(
+            converged[0].is_null() || converged[0] == serde_json::json!(true),
+            "the replay must not resurrect the tombstoned VTWA: {converged:?}"
+        );
+        assert_eq!(
+            converged[1],
+            serde_json::json!(false),
+            "the replay must not recreate inst_relate for a deleted element: {converged:?}"
+        );
+        assert_eq!(
+            converged[2],
+            serde_json::json!(sesno),
+            "the replay must leave the watermark where the first pass put it: {converged:?}"
+        );
+        assert_eq!(
+            aios_core::get_children_pes(branch)
+                .await
+                .expect("read BRAN children after the replay")
+                .len(),
+            children_before - 1,
+            "the BRAN child count must not drift across a replay"
+        );
     }
 }

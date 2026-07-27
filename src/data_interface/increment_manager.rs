@@ -571,6 +571,53 @@ impl AiosDBManager {
         }
     }
 
+    /// 与手动路径同口径的「从未解析过就先补全量基线」。
+    ///
+    /// [`SesnoRangeResolver`] 在水位为 0 时只有两种出路：DESI/CATA 直接跳过（不敢猜历史），
+    /// SYS meta 走 cold start 把历史会话重放一遍。两者都不等于一次全量解析——重放走的是
+    /// `pdms_io`，而 ADR-006 那个跨块引用列表（`CURD`/`DBLS`）的解析修复只落在全量那侧的
+    /// `parse_pdms_db` 里。手动路径已经改走基线（见 `manual_update::needs_initial_load`），
+    /// 自动路径跟上，免得同一个库「点预览」与「让 watcher 自己发现」得出两种结果。
+    ///
+    /// 返回 `true` 表示本轮已由基线接管，调用方跳过增量窗口。
+    ///
+    /// [`SesnoRangeResolver`]: crate::data_interface::sesno_range::SesnoRangeResolver
+    async fn baseline_if_never_parsed(
+        &self,
+        project: &str,
+        file_name: &str,
+        db_type: &str,
+        db_num: u32,
+        file_latest_sesno: i32,
+    ) -> bool {
+        use crate::data_interface::dbnum_state::DbnumState;
+
+        // 空文件不是「没解析过」：没有会话可解析，派一次基线纯属白跑。
+        if file_latest_sesno <= 0 {
+            return false;
+        }
+        match DbnumState::applied_sesno(db_num).await {
+            Ok(0) => {}
+            Ok(_) => return false,
+            Err(error) => {
+                eprintln!("dbnum={db_num} 读取水位失败，本轮不补基线: {error:#}");
+                return false;
+            }
+        }
+
+        println!("dbnum={db_num}({db_type}) 从未解析过，先补一次全量基线: {file_name}");
+        match self
+            .initialize_dbnum_baseline(project, db_num, file_name, db_type, file_latest_sesno)
+            .await
+        {
+            Ok(count) => println!("dbnum={db_num} 基线完成，落库 {count} 个元素"),
+            // 基线失败不推进水位，下一轮自然重来；但此时也不该退回增量窗口去猜历史，
+            // 那正是这次改动要消除的分叉。
+            Err(error) => eprintln!("dbnum={db_num} 基线失败，跳过本轮: {error:#}"),
+        }
+        true
+    }
+
     /// 执行增量更新操作
     ///
     /// 编排：IncrementPipeline → enqueue side-effects → 可选 MySQL → SYST 派生 → ModelRefresh。
@@ -587,7 +634,7 @@ impl AiosDBManager {
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
     ) -> anyhow::Result<crate::data_interface::increment_pipeline::IncrResult> {
         use crate::data_interface::increment_pipeline::IncrementPipeline;
-        use crate::data_interface::side_effect_pending::{SideEffectCompensator, SideEffectKind};
+        use crate::data_interface::side_effect_pending::SideEffectCompensator;
 
         if increment_ranges_map.is_empty() {
             return Ok(Default::default());
@@ -638,27 +685,10 @@ impl AiosDBManager {
                 Err(e) => {
                     let warn = format!("SYST 派生同步失败（持久化与水位不受影响）: {e:?}");
                     println!("{warn}");
+                    // 每个 SYST 文件各记各的失败：入队时就是按文件建的行，
+                    // 这里再拼一个「首个 dbnum + 最大 sesno」只会打在不存在的行上。
+                    SideEffectCompensator::fail_syst_jobs(&incr, &format!("{e:?}")).await;
                     incr.warnings.push(warn);
-                    let end_sesno = incr
-                        .successes
-                        .iter()
-                        .filter(|s| s.db_type == "SYST")
-                        .map(|s| s.end_sesno)
-                        .max()
-                        .unwrap_or(0);
-                    let dbnum = incr
-                        .successes
-                        .iter()
-                        .find(|s| s.db_type == "SYST")
-                        .map(|s| s.dbnum)
-                        .unwrap_or(0);
-                    let _ = SideEffectCompensator::mark_failed(
-                        SideEffectKind::SystDerived,
-                        dbnum,
-                        end_sesno,
-                        &format!("{e:?}"),
-                    )
-                    .await;
                 }
             }
         }
@@ -704,9 +734,12 @@ impl AiosDBManager {
         // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。
         let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
         let mut blocked_dupes: HashSet<u32> = HashSet::new();
-        // 创建存档与压缩临时目录（SyncPublisher 依赖 assets/temp）
+        // 创建存档与压缩临时目录（SyncPublisher 依赖 assets/temp）；
+        // 还要 assets/meshes——本函数随后 drain 模型任务就可能开始写网格，
+        // 而调用方 `lib.rs` 建这个目录的那行排在 `init_watcher()` 之后。
         fs::create_dir_all("assets/archives")?;
         fs::create_dir_all("assets/temp")?;
+        fs::create_dir_all("assets/meshes")?;
         let mut time = Instant::now();
         log::debug!("init_watcher 监控目录: {:?}", self.watcher.watch_dirs);
 
@@ -721,9 +754,15 @@ impl AiosDBManager {
         }
 
         // 遍历所有监控目录
+        //
+        // `max_depth(1)`：只有监控目录的**直属**文件参与增量。这不是省事，是
+        // 为了让「能被摄入的文件集」与「能被监听到的文件集」相等——`async_watch`
+        // 注册的是 `RecursiveMode::NonRecursive`，子目录里的库文件收不到任何变更
+        // 事件。启动时递归摄入它们，只会让它们在库里留下一份此后永不更新的数据，
+        // 而且看起来是新鲜的（B4）。需要覆盖子目录时，把该子目录配成监控目录。
         for watch_dir in &self.watcher.watch_dirs {
             // 按文件大小降序排列，优先处理大文件
-            for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
+            for entry in WalkDir::new(watch_dir).max_depth(1).sort_by(|a, b| {
                 let a_len = a.path().metadata().map(|m| m.len()).unwrap_or_default();
                 let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
                 b_len.cmp(&a_len)
@@ -805,6 +844,20 @@ impl AiosDBManager {
                     if let Err(e) = SyncPublisher::ensure_archive(&path.to_path_buf()).await {
                         eprintln!("初始化存档失败 {:?}: {}", file_name, e);
                     }
+                }
+
+                // 从未解析过的库先补全量基线，不进增量窗口（与手动路径同口径）。
+                if self
+                    .baseline_if_never_parsed(
+                        &project,
+                        file_name,
+                        &db_type,
+                        db_no,
+                        file_latest_sesno as i32,
+                    )
+                    .await
+                {
+                    continue;
                 }
 
                 // 统一 sesno 范围解析（水位=dbnum，nearest 跳跃）
@@ -965,6 +1018,9 @@ impl AiosDBManager {
         create_dir_all("assets/temp")
             .await
             .map_err(|e| notify::Error::io(e))?;
+        create_dir_all("assets/meshes")
+            .await
+            .map_err(|e| notify::Error::io(e))?;
 
         // 启动时先补偿一次（与 init_watcher 对齐；仅 watch 场景也会覆盖）
         match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self).await {
@@ -1101,6 +1157,21 @@ impl AiosDBManager {
 
                             use crate::data_interface::sesno_range::SesnoRangeResolver;
                             let project = self.db_option.project_name.clone();
+
+                            // 从未解析过的库先补全量基线，不进增量窗口（与手动路径同口径）。
+                            if self
+                                .baseline_if_never_parsed(
+                                    &project,
+                                    file_name,
+                                    db_type,
+                                    db_num,
+                                    new_header.latest_ses_data.sesno as i32,
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+
                             let resolver = SesnoRangeResolver::new();
                             match resolver
                                 .resolve_with_header(
@@ -1523,22 +1594,33 @@ impl AiosDBManager {
 
         for chunk in refnos_vec.chunks(TRANSFORM_BATCH_SIZE) {
             let mut update_sqls = Vec::new();
+            let mut transform_map: HashMap<u64, String> = HashMap::new();
 
             // 第三步：批量计算和更新
             for &refno in chunk {
                 // 重新计算该节点的世界变换矩阵
                 if let Some(world_transform) = get_world_transform(refno).await? {
-                    let update_sql = format!(
-                        "UPDATE {} SET world_trans = {};",
+                    // 必须写成 `trans:⟨hash⟩` 记录链接，不能直接塞裸对象：全部读者取的都是
+                    // `world_trans.d`（`query_insts`、`update_inst_relate_aabbs_by_refnos`…），
+                    // 而 inst_relate 是 schemaless 表，裸对象会被静默接受、`.d` 变成 none，
+                    // 于是该元素在几何查询里 world_trans 为空，在包围盒刷新的
+                    // `where world_trans.d != none` 处被整条过滤掉（ADR-010 D9）。
+                    let json = serde_json::to_string(&world_transform)
+                        .map_err(|e| anyhow::anyhow!("序列化Transform失败: {}", e))?;
+                    let transform_hash = aios_core::gen_bytes_hash::<_, 64>(&world_transform);
+                    transform_map.entry(transform_hash).or_insert(json);
+                    update_sqls.push(format!(
+                        "UPDATE {} SET world_trans = trans:⟨{}⟩;",
                         refno.to_inst_relate_key(),
-                        serde_json::to_string(&world_transform)
-                            .map_err(|e| anyhow::anyhow!("序列化Transform失败: {}", e))?
-                    );
-                    update_sqls.push(update_sql);
+                        transform_hash
+                    ));
                 } else {
                     anyhow::bail!("无法计算已有模型节点 {refno} 的 world transform");
                 }
             }
+
+            // trans 记录要先落库，否则 world_trans 会指向不存在的记录，`.d` 一样取不到。
+            crate::fast_model::utils::save_transforms_to_surreal(&transform_map).await?;
 
             // 批量执行数据库更新
             if !update_sqls.is_empty() {
@@ -1552,6 +1634,23 @@ impl AiosDBManager {
                     .map_err(|e| anyhow::anyhow!("更新world transform语句失败: {}", e))?;
             }
         }
+
+        // world_trans 一变，inst_relate.aabb（由 world_trans * geo.trans 变换 geo.aabb 合并
+        // 而来）立即失效。这条便宜路径不重生成几何，永远进不了 process_meshes_update_db_deep，
+        // 不在这里显式刷新的话，包围盒与空间树会永久停在旧位置，房间归属随之算错（ADR-010 D1）。
+        //
+        // replace_exist 必须传 true：默认的 replace_mesh=false 会给 SQL 追加 `and aabb=none`，
+        // 而这条路径上的元素全都已经有包围盒，会被整批跳过。
+        let aabb_changes = update_inst_relate_aabbs_by_refnos(&refnos_vec, true).await?;
+
+        // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」，房间归属必须跟着重算
+        // （ADR-010 §4）。只有包围盒**确实变了**的才入队：这条路径上的元素常常是被
+        // 子树遍历顺带捞进来的，它们的世界变换重算后与原值一致，不该白算一遍房间。
+        crate::data_interface::model_update_pending::enqueue_room_recalc(
+            &self.db_option,
+            &aabb_changes,
+        )
+        .await?;
 
         println!("world transform更新完成");
         Ok(())
