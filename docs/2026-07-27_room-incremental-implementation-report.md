@@ -248,9 +248,32 @@ AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
 | 项 | 状态 |
 |---|---|
 | `update_aabbs` 写反的去重条件 | 未修。gen-model 侧已在唯一调用点绕过；新加的 `remove_by_refnos` 正好可以直接复用来修它 |
-| **D10** | `options.rs` 是 `room_key_word`，所有 toml 写的是 `room_keyword`，键名与类型都不匹配，配置恒为 `None`，一直用默认 `-RM`。本项目上恰好是对的，改配置会静默无效 |
+| **D10** | 见下方 6.3——**不要照字面修** |
 | **D11** | `rs-core-pin/src/rs_surreal/function.rs` 无条件按目录顺序加载 `resource/surreal` 下所有文件，`_hh` 永远覆盖 `_hd`，与 Rust 侧编译的 `project_hd` 错位；且加载语句没有 `.check()` |
 | 空间树落盘时机 | TransformOnly 一轮更新了库与内存树但不重写 `accel_tree.bin`；房间任务的落盘时机 ADR 也标着「待定」 |
+
+### 6.3 D10 有个陷阱：照字面修会把房间匹配改坏
+
+事实先摆清楚：
+
+- `rs-core-pin/src/options.rs:247` 的字段是 `room_key_word: Option<Vec<String>>`，
+  取值走 `get_room_key_word()`，缺省是 `vec!["-RM"]`；
+- 所有 toml 写的都是 `room_keyword`，而且是**裸字符串**（本项目当前是 `room_keyword = "-R-"`）；
+- 键名与类型都对不上，于是该字段恒为 `None`，**实际一直在用默认的 `-RM`**。
+
+看起来该做的是「把键名对上、顺便支持字符串或数组」。**别这么修。**
+
+关键字是拿去做 `'{kw}' in NAME` 的子串匹配，而按审计报告 §4.3，本项目那 124 间合规房间的
+名字形如 `/1RX-RM03-R301`——它含 `-RM`，**不含 `-R-`**（`-RM` 后面不是横杠，`-R3` 也不是）。
+所以一旦让 toml 里那句 `room_keyword = "-R-"` 真正生效，匹配到的房间会从 124 间变成 **0 间**，
+而且同样不会有任何报错。
+
+也就是说这里有两个缺陷叠在一起：管道断了（键名/类型不匹配），以及配置文件里那个值本身
+是错的（大概正因为它从未生效，写错了也没人发现）。修的时候必须同时定这两件事，顺序是：
+先确认这个项目到底该用哪个关键字，再接管道；只接管道就是把一个静默失效换成一次静默清空。
+
+`.codex-incremental-verify` 下的 DbOption 副本与 `DbOption.toml.bak-*` 几份备份里也带着
+同样的 `room_keyword` 写法，一并改。
 
 ---
 
