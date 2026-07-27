@@ -58,7 +58,7 @@ pub struct FrozenBatch {
     pub end_sesno: i32,
 }
 
-/// 入队回执的一行（HTTP 202 与日志共用；rollout 第八节第 7 条）。
+/// 入队回执的一行（HTTP 202 与日志共用；rollout 第九节第 7 条）。
 #[derive(Debug, Clone, Serialize)]
 pub struct EnqueuedBatchInfo {
     pub task_id: String,
@@ -274,6 +274,46 @@ impl BatchScheduler {
 
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
+    }
+
+    /// 设置暂停并**持久化**（ADR-011 §9：暂停是操作意图不是派生态，必须活过重启，
+    /// 否则重启后队列立刻开吃，把暂停的用意整个抹掉且毫无提示）。
+    ///
+    /// 与水位同库（`queue_control:main`），不进队列表。先落库再改内存旗标：
+    /// 持久化失败时宁可保持现状并报错，也不要「界面显示已暂停、重启后又开吃」。
+    pub async fn set_paused_persistent(&self, paused: bool) -> anyhow::Result<()> {
+        aios_core::SUL_DB
+            .query(format!(
+                "UPSERT queue_control:main SET paused = {paused}, updated_at = time::now();"
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("持久化队列暂停标志失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("持久化队列暂停标志语句失败: {e}"))?;
+        if paused {
+            self.pause();
+        } else {
+            self.resume();
+        }
+        Ok(())
+    }
+
+    /// 启动时恢复持久化的暂停状态（worker 起跑前调用）。
+    ///
+    /// 返回恢复后的暂停值；读不到记录视为未暂停。
+    pub async fn restore_persisted_pause(&self) -> anyhow::Result<bool> {
+        let mut response = aios_core::SUL_DB
+            .query("SELECT VALUE paused FROM queue_control:main;")
+            .await
+            .map_err(|e| anyhow::anyhow!("读取队列暂停标志失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("读取队列暂停标志语句失败: {e}"))?;
+        let stored: Vec<bool> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码队列暂停标志失败: {e}"))?;
+        let paused = stored.first().copied().unwrap_or(false);
+        self.paused.store(paused, Ordering::SeqCst);
+        Ok(paused)
     }
 
     /// 等新工作（入队 / 恢复）或超时。超时兜底轮询：唤醒丢失也只是晚一拍。

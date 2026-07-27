@@ -24,7 +24,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 各 handler 共享的服务状态。
 ///
 /// 任务注册表是进程级单例（`TaskRegistry::global()`）：队列真身住在 feature
-/// 无关层，`web_service` 只是它的 HTTP 视图（rollout 第八节第 4 条）。
+/// 无关层，`web_service` 只是它的 HTTP 视图（rollout 第九节第 4 条）。
 #[derive(Clone)]
 pub struct AppState {
     pub mgr: Arc<AiosDBManager>,

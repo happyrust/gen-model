@@ -272,25 +272,7 @@ impl SideEffectCompensator {
         Ok(done)
     }
 
-    /// Retire every SYST job this incr enqueued, after the live derived sync
-    /// succeeded. Keyed per file, exactly as [`Self::enqueue_from_incr`] wrote them.
-    pub async fn complete_syst_jobs(incr: &IncrResult) -> anyhow::Result<()> {
-        for success in Self::syst_successes(incr) {
-            Self::mark_done(SideEffectKind::SystDerived, success.dbnum, success.end_sesno).await?;
-        }
-        Ok(())
-    }
-
-    /// Record a failed live derived sync against every SYST job of this incr.
-    pub async fn fail_syst_jobs(incr: &IncrResult, error: &str) {
-        for success in Self::syst_successes(incr) {
-            let _ = Self::mark_failed(
-                SideEffectKind::SystDerived,
-                success.dbnum,
-                success.end_sesno,
-                error,
-            )
-            .await;
-        }
-    }
+    // `complete_syst_jobs` / `fail_syst_jobs` 随 `execute_incr_update` 退役：
+    // 合流后 SYST 派生只走本补偿队列（enqueue_syst → drain 逐作业 mark_done /
+    // mark_failed），不再有「先同步跑一遍、成了再回头销行」的旁路。
 }

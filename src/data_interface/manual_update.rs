@@ -2048,7 +2048,7 @@ pub struct ManualUpdatePreview {
 
 /// A candidate DB file discovered during the project scan.
 ///
-/// `pub(crate)`：数据批次 worker 在冻结点重扫时也要构造它（rollout 第八节第 6 条，
+/// `pub(crate)`：数据批次 worker 在冻结点重扫时也要构造它（rollout 第九节第 6 条，
 /// worker 执行体复用 [`AiosDBManager::execute_one_dbnum`]）。
 pub(crate) struct FileCandidate {
     pub(crate) path: PathBuf,
@@ -2640,7 +2640,7 @@ impl AiosDBManager {
         Ok(Some(preview))
     }
 
-    /// 手动触发 = 扫描 + 入队（ADR-011 §2/§6/§12；rollout 第八节第 6/7 条）。
+    /// 手动触发 = 扫描 + 入队（ADR-011 §2/§6/§12；rollout 第九节第 6/7 条）。
     ///
     /// 旧的 `execute_manual_update`（扫描 → 逐库应用 → 单元生成 → 房间）随合流
     /// 拆成两半：这里只做「发现」，执行由数据批次 worker 从队列里取走
@@ -2751,7 +2751,7 @@ impl AiosDBManager {
     /// data persists (spec: 执行数据更新前必须保存旧归属 — deletes and moves
     /// must still see the old owners).
     ///
-    /// `pub(crate)`：这是数据批次 worker 的执行体（rollout 第八节第 6 条）——
+    /// `pub(crate)`：这是数据批次 worker 的执行体（rollout 第九节第 6 条）——
     /// 手动与自动两条触发路径合流后，执行只发生在 `batch_worker` 的消费循环里。
     pub(crate) async fn execute_one_dbnum(
         &self,
@@ -2957,6 +2957,18 @@ impl AiosDBManager {
             batch.message = Some(err.error.clone());
         } else {
             batch.status = BatchStatus::Applied;
+            // MySQL 可选同步（feature = "sql"）：从退役的 `execute_incr_update` 搬来。
+            // 合流后不再分手动/自动，每个应用成功的批次都同步；失败只记警告，
+            // 与旧口径一致（不回滚水位）。
+            #[cfg(feature = "sql")]
+            if let Some(success) = incr.successes.first() {
+                match self.update_mysql_pdms_elements(&success.range_eles).await {
+                    Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
+                    Err(e) => {
+                        warnings.push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}"))
+                    }
+                }
+            }
             // Only DESI batches carry a unit rollup (CATA / SYS meta: data only),
             // so this is empty for the others without a type check.
             if let Some(success) = incr.successes.first() {

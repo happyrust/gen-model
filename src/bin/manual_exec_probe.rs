@@ -5,7 +5,7 @@ use aios_database::data_interface::task_registry::TaskRegistry;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 
 /// CLI twin of the frontend "更新模型 → 执行" button（合流后为「扫描 + 入队 →
-/// 等队空」，rollout 第八节第 6 条）: enqueues the pending batches for
+/// 等队空」，rollout 第九节第 6 条）: enqueues the pending batches for
 /// `<project>` against the SurrealDB configured in the current working
 /// directory's `DbOption.toml`, drains the queue with the same consumer loop
 /// the batch worker uses, then prints the receipt and每个批次的终态 JSON

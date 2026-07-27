@@ -2,7 +2,7 @@
 //!
 //! 从 `web_service::tasks` 搬到 feature 无关层：`web_service` 整个在
 //! `http_api` 门后，而合流后的队列消费者（单 worker）不分编译形态都要写
-//! 任务状态——队列真身只能有一份，不能随 feature 分叉（rollout 第八节第 4 条）。
+//! 任务状态——队列真身只能有一份，不能随 feature 分叉（rollout 第九节第 4 条）。
 //!
 //! durable 语义仍由 `applied_sesno` 水位与 `model_update_pending` 表承担；
 //! 本表仅内存、重启即清空，重启后由 `init_watcher` 重扫水位把队列重建出来
@@ -19,7 +19,7 @@ pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
 /// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
 pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 
-/// 分层保留的兜底上限（ADR-011 §11 + rollout 第八节第 8 条）：
+/// 分层保留的兜底上限（ADR-011 §11 + rollout 第九节第 8 条）：
 /// 首轮放宽 `manual_db_nums` 后 287 条排队 + 287 条终态就要 ≥574，
 /// 200 差了一个量级；1000 = 574 打底 + 全局最近终态的余量。
 const MAX_TASKS: usize = 1000;
@@ -86,9 +86,22 @@ pub struct TaskEntry {
     pub total_units: Option<u32>,
     /// 该任务累计广播过的进度事件数（重连后前端用于对齐，见 spec §5.4）。
     pub events_seen: u64,
+    /// kind 专属的详情（如房间轮的 `{panels, elements, dead_letters}`，
+    /// ADR-011 §10）；建行时写入，与终态 `result` 互不替代。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
     /// 终态结果 JSON；queued / running 时为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+}
+
+/// 进程启动时刻（RFC3339）。`ensure_batch_worker` 启动时触发初始化，因此它
+/// 锚定的是服务真正起来的时间，而不是第一次被问到的时间——「队列已重建，
+/// 排队时长从重启起算」那句话靠它才说得出来（ADR-011 §4）。
+static PROCESS_STARTED_AT: OnceLock<String> = OnceLock::new();
+
+pub fn process_started_at() -> &'static str {
+    PROCESS_STARTED_AT.get_or_init(|| Local::now().to_rfc3339())
 }
 
 /// 插入序即时间序的注册表。
@@ -145,12 +158,21 @@ impl TaskRegistry {
             units_done: None,
             total_units: None,
             events_seen: 0,
+            detail: None,
             result: None,
         });
     }
 
     /// 新排一条房间收敛轮（房间轮不排队，创建即 running；ADR-011 §10）。
-    pub fn insert_running_room_round(&self, task_id: &str, project: &str, total: u32) {
+    ///
+    /// `detail` 携带本轮的分项计数（面板 / 构件 / 死信），随任务详情带出。
+    pub fn insert_running_room_round(
+        &self,
+        task_id: &str,
+        project: &str,
+        total: u32,
+        detail: serde_json::Value,
+    ) {
         let now = Local::now().to_rfc3339();
         self.insert_entry(TaskEntry {
             task_id: task_id.to_string(),
@@ -167,6 +189,7 @@ impl TaskRegistry {
             units_done: Some(0),
             total_units: Some(total),
             events_seen: 0,
+            detail: Some(detail),
             result: None,
         });
     }
@@ -298,6 +321,7 @@ mod tests {
             units_done: None,
             total_units: None,
             events_seen: 0,
+            detail: None,
             result: None,
         });
     }

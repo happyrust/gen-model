@@ -6,7 +6,7 @@
 //! （副作用补偿 + 模型待重试），再收一轮房间（ADR-010 §7 / ADR-011 §8——房间
 //! 依赖「几何与 AABB 都已落定」，不跟在每个批次后面）。
 //!
-//! 执行体复用 [`AiosDBManager::execute_one_dbnum`]（rollout 第八节第 6 条）：
+//! 执行体复用 [`AiosDBManager::execute_one_dbnum`]（rollout 第九节第 6 条）：
 //! 它自带回退阻断、基线补全、窗口冻结与崩溃重放，两条触发路径共用同一份语义。
 
 use std::sync::Arc;
@@ -77,7 +77,7 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
 /// 把当前排队中的批次全部消费掉（FIFO，逐个冻结执行），返回执行条数。
 ///
 /// worker 主循环的内圈；探针与 live 测试也用它做「入队后等队空」的有界消费
-/// （rollout 第八节第 6 条），不必拉起无限循环的 worker。暂停时立即返回。
+/// （rollout 第九节第 6 条），不必拉起无限循环的 worker。暂停时立即返回。
 pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let scheduler = BatchScheduler::global();
     let registry = TaskRegistry::global();

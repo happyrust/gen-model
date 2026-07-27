@@ -5,6 +5,16 @@
 - 决策：方案选型已定为 **axum 0.8.9 REST + WebSocket**（用户决策，见会话 gen-model-49）
 - 相关规格：`docs/specs/manual-model-update.md`（手动更新语义）、`CONTEXT.md`（术语表）
 
+> **修订注记（2026-07-27，ADR-011 合流落地）**：手动与自动已合流到一条数据批次队列，
+> 本文以下与实现不符的点以 ADR-011 与 `plant-ui/docs/plans/task-queue-rollout.md`
+> 第九节为准，全文修订随服务端 5–9 项（暂停端点 / health / dbnums 扩展）一并做：
+> ① `/update/execute` 不再 409/422，一律 202 返回入队回执
+> `{scanned, enqueued:[{task_id,dbnum,position,…}], merged, already_covered, blocked, up_to_date, warnings}`；
+> ② `TaskState` 新增 `queued`，kind 由 `manual_update` 改为 `data_batch` / `room_recalc`，
+> `TaskEntry` 增加 `dbnum / db_type / start_sesno / end_sesno / started_at / units_done / total_units`；
+> ③ `increments` 主题与 `incr_applied` 事件已删除（从未有过消费者），
+> 任务注册表搬至 feature 无关层（`data_interface/task_registry.rs`），容量 1000、分层保留。
+
 ## 1. 背景与目标
 
 `aios-database` 目前是长驻进程（`run_app -> run_cli -> async_watch`），增量数据落 SurrealDB，MQTT 仅做跨节点文件同步，**没有任何面向前端的服务层**。本设计为前端（浏览器 3D viewer / 桌面端）提供：
@@ -156,7 +166,7 @@
 
 | 消息 | 说明 |
 | --- | --- |
-| `{ "type": "subscribe", "topics": ["tasks", "increments"] }` | 订阅主题；默认订阅 `tasks` |
+| `{ "type": "subscribe", "topics": ["tasks"] }` | 订阅主题；默认订阅 `tasks`（`increments` 已删，见顶部修订注记）|
 | `{ "type": "unsubscribe", "topics": [...] }` | 退订 |
 | `{ "type": "ping" }` | 心跳，服务端回 `pong` |
 
@@ -167,7 +177,7 @@
 | `task_started` | tasks | `{ task_id, kind, project }` |
 | `task_progress` | tasks | `ManualUpdateEvent` 原样（`kind: data_batch_started / data_batch_finished / model_unit_started / model_unit_finished`，两阶段、无百分比，与规格一致）|
 | `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }` |
-| `incr_applied` | increments | 自动模式增量摘要：`{ dbnums: [{ dbnum, db_type, end_sesno, changed_count }], error_files: [...], warnings: [...] }`（由 `IncrResult` 缩减，不含 `range_eles` 大负载）|
+| ~~`incr_applied`~~ | ~~increments~~ | **已删（ADR-011 合流）**：自动路径的批次与手动同走 tasks 主题的 `task_started / task_progress / task_finished` |
 | `pong` | 无 | `{}` |
 
 ### 5.4 心跳与重连语义

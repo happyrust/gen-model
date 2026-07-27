@@ -280,7 +280,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
 
     // 数据批次队列的唯一消费者：无条件启动、不分 sync_live（ADR-011；rollout
-    // 第八节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，
+    // 第九节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，
     // 手动模式的队列就没有消费者。刻意放在全量生成 / 房间重建**之后**：批次执行
     // 与 `gen_all_geos_data` 并发会在同一批生成根上互踩；sync_live 启动重扫入队
     // 的批次会等到这里才开始被消费。

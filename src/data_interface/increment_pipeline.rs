@@ -82,10 +82,6 @@ impl IncrResult {
     pub fn had_work(&self) -> bool {
         !self.successes.is_empty()
     }
-
-    pub fn has_db_type(&self, db_type: &str) -> bool {
-        self.successes.iter().any(|s| s.db_type == db_type)
-    }
 }
 
 /// Wrap the given SurrealQL statements into one atomic transaction: that batch

@@ -1,29 +1,26 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use aios_core::*;
-use aios_core::{AttrMap, RefU64Vec};
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{GmParam, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::spine::Spine3D;
+use aios_core::*;
+use aios_core::{AttrMap, RefU64Vec};
 use bevy_transform::prelude::*;
 use dashmap::mapref::one::Ref;
 use glam::Vec3;
 
 // #[async_trait]
+/// 只读数据访问面。
+///
+/// 这里**不含**同步/增量入口：曾经挂着的 `sync_total_project` /
+/// `sync_incremental_project` 是一对返回 `Ok(true)` 的空壳，没有实现方也没有调用方，
+/// 却因为名字最像「增量同步的接口」而反复被当成入口去找。真正的入口是
+/// `AiosDBManager::{init_watcher, async_watch, enqueue_manual_update}`（发现即入队）
+/// 与消费队列的 `batch_worker`（执行体 `execute_one_dbnum` → `IncrementPipeline`）。
 pub trait PdmsDataInterface: Send + Sync {
-    ///同步整个项目
-    async fn sync_total_project(&self) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-
-    ///增量同步项目
-    async fn sync_incremental_project(&self) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-
     ///获得属性
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
 
@@ -33,7 +30,6 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
     async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
-
 
     ///获得参考号的Owner
     fn get_owner(&self, refno: RefU64) -> RefU64;
@@ -96,7 +92,7 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
-     ///获得子节点的refno集合
+    ///获得子节点的refno集合
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<String>;
@@ -118,7 +114,7 @@ pub trait PdmsDataInterface: Send + Sync {
     ///获得refno的祖先参考号
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
 
-      ///查询指定参考号下哪些有负实体的参考号
+    ///查询指定参考号下哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
 
     ///查询指定参考号下负实体和正实体的集合
@@ -187,5 +183,4 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn get_cat_refno(&self, refno: RefU64) -> Option<RefU64>;
 
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap>;
-
 }
