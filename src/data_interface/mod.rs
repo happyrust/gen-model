@@ -39,3 +39,5 @@ pub mod generation_root;
 pub mod model_update_plan;
 
 pub mod model_update_pending;
+
+pub mod batch_queue;
