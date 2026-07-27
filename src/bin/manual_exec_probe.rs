@@ -1,10 +1,15 @@
+use std::sync::Arc;
+
+use aios_database::data_interface::batch_worker::drain_queue_until_empty;
+use aios_database::data_interface::task_registry::TaskRegistry;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 
-/// CLI twin of the frontend "更新模型 → 执行" button: runs one manual
-/// incremental execution for `<project>` against the SurrealDB configured in
-/// the current working directory's `DbOption.toml`, then prints the full
-/// `ManualUpdateResult` as JSON (for E2E evidence and idempotency/recovery
-/// checks).
+/// CLI twin of the frontend "更新模型 → 执行" button（合流后为「扫描 + 入队 →
+/// 等队空」，rollout 第八节第 6 条）: enqueues the pending batches for
+/// `<project>` against the SurrealDB configured in the current working
+/// directory's `DbOption.toml`, drains the queue with the same consumer loop
+/// the batch worker uses, then prints the receipt and每个批次的终态 JSON
+/// (for E2E evidence and idempotency/recovery checks).
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let project = std::env::args()
@@ -12,8 +17,22 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("usage: manual_exec_probe <project>"))?;
 
     aios_core::init_test_surreal().await?;
-    let manager = AiosDBManager::init_form_config().await?;
-    let result = manager.execute_manual_update(&project, None).await;
-    println!("EXEC-RESULT-JSON|{}", serde_json::to_string(&result)?);
+    let manager = Arc::new(AiosDBManager::init_form_config().await?);
+
+    let receipt = manager.enqueue_manual_update(&project).await;
+    println!("ENQUEUE-RECEIPT-JSON|{}", serde_json::to_string(&receipt)?);
+
+    let ran = drain_queue_until_empty(&manager).await;
+    println!("RAN-BATCHES|{ran}");
+
+    let registry = TaskRegistry::global();
+    for info in receipt.enqueued.iter().chain(receipt.merged.iter()) {
+        match registry.get(&info.task_id) {
+            Some(entry) => {
+                println!("BATCH-TASK-JSON|{}", serde_json::to_string(&entry)?);
+            }
+            None => println!("BATCH-TASK-MISSING|{}", info.task_id),
+        }
+    }
     Ok(())
 }

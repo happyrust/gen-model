@@ -41,3 +41,9 @@ pub mod model_update_plan;
 pub mod model_update_pending;
 
 pub mod batch_queue;
+
+pub mod batch_scheduler;
+
+pub mod batch_worker;
+
+pub mod task_registry;

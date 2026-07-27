@@ -12,7 +12,7 @@ use aios_core::pdms_types::*;
 use serde::{Deserialize, Serialize};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
-use crate::data_interface::increment_pipeline::{IncrResult, SYS_META_DB_TYPES};
+use crate::data_interface::increment_pipeline::IncrResult;
 use crate::data_interface::model_refresh::ModelRefreshPolicy;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -61,30 +61,37 @@ impl SideEffectCompensator {
 
     /// After PE+watermark success: enqueue only legacy non-model side effects.
     /// Model work is now persisted by `IncrementPipeline` before its watermark.
+    ///
+    /// One row per SYST file. A single row keyed by the FIRST success's `dbnum`
+    /// paired with the LARGEST `end_sesno` across all of them used to stand in
+    /// for the batch — with two SYST databases in one batch that pair described
+    /// neither file, so the row could not be traced back to what produced it.
     pub async fn enqueue_from_incr(_mgr: &AiosDBManager, incr: &IncrResult) -> anyhow::Result<()> {
-        if !incr.had_work() {
-            return Ok(());
+        for success in Self::syst_successes(incr) {
+            Self::upsert_pending(
+                SideEffectKind::SystDerived,
+                success.dbnum,
+                success.end_sesno,
+                &success.db_type,
+                &[],
+            )
+            .await?;
         }
-
-        if incr.has_db_type("SYST") {
-            let end_sesno = incr
-                .successes
-                .iter()
-                .filter(|s| s.db_type == "SYST")
-                .map(|s| s.end_sesno)
-                .max()
-                .unwrap_or(0);
-            let dbnum = incr
-                .successes
-                .iter()
-                .find(|s| s.db_type == "SYST")
-                .map(|s| s.dbnum)
-                .unwrap_or(0);
-            Self::upsert_pending(SideEffectKind::SystDerived, dbnum, end_sesno, "SYST", &[])
-                .await?;
-        }
-
         Ok(())
+    }
+
+    fn syst_successes(
+        incr: &IncrResult,
+    ) -> impl Iterator<Item = &crate::data_interface::increment_pipeline::IncrFileSuccess> {
+        incr.successes.iter().filter(|s| s.db_type == "SYST")
+    }
+
+    /// 单个 SYST 批次落库后登记一条派生同步任务（数据批次 worker 用）。
+    ///
+    /// 与 [`Self::enqueue_from_incr`] 是同一张表、同一种行 id——worker 一次只
+    /// 执行一个文件，没有 `IncrResult` 可给，就按批次直接记。
+    pub async fn enqueue_syst(dbnum: u32, end_sesno: i32, db_type: &str) -> anyhow::Result<()> {
+        Self::upsert_pending(SideEffectKind::SystDerived, dbnum, end_sesno, db_type, &[]).await
     }
 
     async fn upsert_pending(
@@ -160,6 +167,14 @@ impl SideEffectCompensator {
     }
 
     /// Replay pending/failed jobs (attempts < MAX_ATTEMPTS). Safe to call at init.
+    ///
+    /// Every job runs on its own: a failure — including a failure to write the
+    /// job's own bookkeeping — is collected and reported at the end rather than
+    /// aborting the round. Propagating it from inside the loop meant one flaky
+    /// `UPDATE` skipped every job queued behind it, which is the same defect
+    /// `model_update_pending::run_one` was rewritten to avoid. Returning `Err`
+    /// once the round is over also matches that queue's contract, so a job that
+    /// keeps failing surfaces in the caller's warnings instead of only in stdout.
     pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
         let sql = format!(
             "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
@@ -176,6 +191,7 @@ impl SideEffectCompensator {
             jobs.len()
         );
         let mut done = 0usize;
+        let mut failures: Vec<String> = Vec::new();
 
         for job in jobs {
             let kind = match job.kind.as_str() {
@@ -208,16 +224,26 @@ impl SideEffectCompensator {
                     }
                     .await
                 }
+                // 连不上 AiosDBMgr 是这个作业自己的失败，不是整轮的失败：
+                // 这里必须留在 async 块里，`?` 一旦逃出去就会掐掉后面所有作业。
                 SideEffectKind::SystDerived => {
-                    let aios_mgr =
-                        aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option().await?;
-                    crate::team_data::sync_team_data(&aios_mgr).await
+                    async {
+                        let aios_mgr =
+                            aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option()
+                                .await?;
+                        crate::team_data::sync_team_data(&aios_mgr).await
+                    }
+                    .await
                 }
             };
 
-            match result {
+            let outcome = match result {
+                Ok(()) => Self::mark_done(kind, job.dbnum, job.end_sesno).await,
+                Err(error) => Err(error),
+            };
+
+            match outcome {
                 Ok(()) => {
-                    Self::mark_done(kind, job.dbnum, job.end_sesno).await?;
                     done += 1;
                     println!(
                         "SideEffectCompensator: done {:?} dbnum={} sesno={}",
@@ -231,48 +257,40 @@ impl SideEffectCompensator {
                         kind, job.dbnum
                     );
                     let _ = Self::mark_failed(kind, job.dbnum, job.end_sesno, &msg).await;
+                    failures.push(format!("{:?} dbnum={}: {msg}", kind, job.dbnum));
                 }
             }
         }
 
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "{} side-effect job(s) failed after {done} completed: {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
         Ok(done)
     }
 
-    /// Mark all model_refresh jobs covered by this incr as done (after live refresh ok).
-    pub async fn complete_model_jobs(incr: &IncrResult) -> anyhow::Result<()> {
-        for success in &incr.successes {
-            if SYS_META_DB_TYPES.contains(&success.db_type.as_str()) {
-                continue;
-            }
-            if success.changed_refnos.is_empty() {
-                continue;
-            }
-            Self::mark_done(
-                SideEffectKind::ModelRefresh,
-                success.dbnum,
-                success.end_sesno,
-            )
-            .await?;
+    /// Retire every SYST job this incr enqueued, after the live derived sync
+    /// succeeded. Keyed per file, exactly as [`Self::enqueue_from_incr`] wrote them.
+    pub async fn complete_syst_jobs(incr: &IncrResult) -> anyhow::Result<()> {
+        for success in Self::syst_successes(incr) {
+            Self::mark_done(SideEffectKind::SystDerived, success.dbnum, success.end_sesno).await?;
         }
         Ok(())
     }
 
-    pub async fn complete_syst_jobs(incr: &IncrResult) -> anyhow::Result<()> {
-        let end_sesno = incr
-            .successes
-            .iter()
-            .filter(|s| s.db_type == "SYST")
-            .map(|s| s.end_sesno)
-            .max();
-        let Some(end_sesno) = end_sesno else {
-            return Ok(());
-        };
-        let dbnum = incr
-            .successes
-            .iter()
-            .find(|s| s.db_type == "SYST")
-            .map(|s| s.dbnum)
-            .unwrap_or(0);
-        Self::mark_done(SideEffectKind::SystDerived, dbnum, end_sesno).await
+    /// Record a failed live derived sync against every SYST job of this incr.
+    pub async fn fail_syst_jobs(incr: &IncrResult, error: &str) {
+        for success in Self::syst_successes(incr) {
+            let _ = Self::mark_failed(
+                SideEffectKind::SystDerived,
+                success.dbnum,
+                success.end_sesno,
+                error,
+            )
+            .await;
+        }
     }
 }

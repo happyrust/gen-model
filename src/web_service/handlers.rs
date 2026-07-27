@@ -1,7 +1,6 @@
 //! REST handlers：领域结构体 JSON 原样透传，服务层不做二次映射（spec §3）。
 
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use aios_core::pdms_types::{RefU64, RefnoEnum};
@@ -13,12 +12,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::data_interface::dbnum_state::DbnumState;
+use crate::data_interface::manual_update::load_pending_model_units;
 use crate::data_interface::on_demand_model::UnresolvableRoot;
-use crate::data_interface::manual_update::{
-    ManualUpdateEvent, ManualUpdateProgress, ManualUpdateStatus, load_pending_model_units,
-};
-use crate::web_service::events::{self, Topic};
-use crate::web_service::tasks::{TASK_KIND_MANUAL_UPDATE, TaskRegistry, TaskState};
 use crate::web_service::{ApiError, AppState};
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,71 +54,20 @@ pub async fn update_preview(
         .map_err(|e| ApiError::from_domain(e.into()))
 }
 
-/// POST /api/v1/update/execute — 异步任务，进度经 WS 推送（spec §4.3）。
+/// POST /api/v1/update/execute — 扫描 + 入队，202 返回入队回执（ADR-011 §12）。
+///
+/// 单飞预检与 `sync_live` 拒绝都随合流退役：数据批次由单 worker 天然串行，
+/// 互斥是调度器的性质，在 HTTP 层再写一遍只会产生假冲突；`sync_live = true`
+/// 时手动触发的意义是「别等下一个 30s 轮询，现在就扫一遍」。
 pub async fn update_execute(
     State(state): State<AppState>,
     body: Option<Json<ProjectReq>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if state.sync_live {
-        return Err(ApiError::from_domain(anyhow::anyhow!(
-            "sync_live=true 时不允许手动更新（自动更新模式独占）"
-        )));
-    }
     let project = resolve_project(&state, body.and_then(|b| b.0.project));
-    if let Some(existing) = state.tasks.running_for_project(&project) {
-        return Err(ApiError::conflict(format!(
-            "项目 {project} 已有手动更新任务正在执行: {existing}"
-        )));
-    }
-
-    let task_id = TaskRegistry::new_task_id("mu");
-    state
-        .tasks
-        .insert_running(&task_id, TASK_KIND_MANUAL_UPDATE, &project);
-    events::publish(
-        Topic::Tasks,
-        "task_started",
-        Some(task_id.clone()),
-        json!({ "task_id": task_id, "kind": TASK_KIND_MANUAL_UPDATE, "project": project }),
-    );
-
-    // ManualUpdateProgress 回调：领域侧为此预留的前端转发槽（manual_update.rs）。
-    let progress: ManualUpdateProgress = {
-        let tasks = state.tasks.clone();
-        let tid = task_id.clone();
-        Arc::new(move |event: ManualUpdateEvent| {
-            tasks.bump_events(&tid);
-            let payload = serde_json::to_value(&event).unwrap_or_default();
-            events::publish(Topic::Tasks, "task_progress", Some(tid.clone()), payload);
-        })
-    };
-
-    let mgr = state.mgr.clone();
-    let tasks = state.tasks.clone();
-    let tid = task_id.clone();
-    let proj = project.clone();
-    tokio::spawn(async move {
-        // 领域函数从不返回 Err：失败也落在 ManualUpdateResult 内（spec §4.3）。
-        let result = mgr.execute_manual_update(&proj, Some(progress)).await;
-        let task_state = match result.status {
-            ManualUpdateStatus::Success | ManualUpdateStatus::UpToDate => TaskState::Succeeded,
-            ManualUpdateStatus::Partial => TaskState::Partial,
-            ManualUpdateStatus::Failed => TaskState::Failed,
-        };
-        let result_json = serde_json::to_value(&result).unwrap_or_default();
-        tasks.finish(&tid, task_state, result_json.clone());
-        events::publish(
-            Topic::Tasks,
-            "task_finished",
-            Some(tid.clone()),
-            json!({ "task_id": tid, "state": task_state.as_str(), "result": result_json }),
-        );
-    });
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({ "task_id": task_id, "kind": TASK_KIND_MANUAL_UPDATE, "state": "running" })),
-    ))
+    let receipt = state.mgr.enqueue_manual_update(&project).await;
+    serde_json::to_value(&receipt)
+        .map(|value| (StatusCode::ACCEPTED, Json(value)))
+        .map_err(|e| ApiError::from_domain(e.into()))
 }
 
 #[derive(Debug, Default, Deserialize)]

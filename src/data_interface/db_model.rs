@@ -4,12 +4,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aios_core::SUL_DB;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
 use dashmap::DashMap;
 use futures::StreamExt;
 use glam::Vec3;
@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{execute_clone, CloneOptions};
+use pdms_io::sync::clone::{CloneOptions, execute_clone};
 // use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
@@ -36,7 +36,7 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
-use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
+use crate::mqtt_service::{SyncE3dFileMsg, new_mqtt_inst};
 
 pub const TUBI_TOL: f32 = 0.1f32;
 
@@ -74,9 +74,15 @@ impl AiosDBManager {
     }
 
     //初始化watcher
+    /// 看门狗的失败必须向上传播（T903）：过去这里 `.unwrap()`，init 失败直接 panic，
+    /// 而 `async_watch` 静默返回 Ok 时又看不出任何异常。
+    ///
+    /// 合流后两条自动路径都只「发现即入队」，这里必须确保队列消费者在跑，
+    /// 否则批次入了队没人执行（`ensure_batch_worker` 幂等，重复调用无害）。
     pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-        mgr.init_watcher().await.unwrap();
-        mgr.async_watch().await.unwrap();
+        crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+        mgr.init_watcher().await?;
+        mgr.async_watch().await?;
         Ok(())
     }
 
@@ -152,8 +158,17 @@ impl AiosDBManager {
 
     pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
         let f = tokio::spawn(async move {
-            mgr.init_watcher().await.unwrap();
-            mgr.async_watch().await.unwrap();
+            // 后台任务里 panic 只会毒死这一个 task 且往往无人查看，改为显式告警（T903）。
+            crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+            if let Err(e) = mgr.init_watcher().await {
+                log::error!("init_watcher 失败，增量看门狗未启动: {e:?}");
+                eprintln!("init_watcher 失败，增量看门狗未启动: {e:?}");
+                return;
+            }
+            if let Err(e) = mgr.async_watch().await {
+                log::error!("async_watch 退出，增量看门狗已停止: {e:?}");
+                eprintln!("async_watch 退出，增量看门狗已停止: {e:?}");
+            }
         });
         Ok(f.await?)
     }

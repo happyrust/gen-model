@@ -7,7 +7,6 @@
 
 pub mod events;
 mod handlers;
-pub mod tasks;
 mod ws;
 
 use std::sync::Arc;
@@ -19,14 +18,17 @@ use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::web_service::tasks::TaskRegistry;
 
 /// 各 handler 共享的服务状态。
+///
+/// 任务注册表是进程级单例（`TaskRegistry::global()`）：队列真身住在 feature
+/// 无关层，`web_service` 只是它的 HTTP 视图（rollout 第八节第 4 条）。
 #[derive(Clone)]
 pub struct AppState {
     pub mgr: Arc<AiosDBManager>,
-    pub tasks: Arc<TaskRegistry>,
+    pub tasks: &'static TaskRegistry,
     /// 请求未显式指定项目时的缺省项目名（取 `DbOption.project_name`）。
     pub default_project: String,
     pub sync_live: bool,
@@ -141,7 +143,7 @@ pub async fn serve(
     let db_option = aios_core::get_db_option();
     let state = AppState {
         mgr,
-        tasks: Arc::new(TaskRegistry::default()),
+        tasks: TaskRegistry::global(),
         default_project: db_option.project_name.clone(),
         sync_live: db_option.sync_live.unwrap_or(false),
     };

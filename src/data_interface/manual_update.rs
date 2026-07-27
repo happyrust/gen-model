@@ -21,10 +21,10 @@
 //! ([`build_unit_rollup`]). There is no whole-ZONE fallback; only changes that
 //! cannot resolve any legal generation root are counted in `no_generation`.
 //!
-//! Manual execution ([`AiosDBManager::execute_manual_update`]) re-scans, fixes
-//! each `dbnum` batch's `end_sesno` at scan time, reuses [`IncrementPipeline`]
-//! per `dbnum` (watermark advances only on its success path), then generates
-//! each affected delivery unit independently. Data success + model failure
+//! 手动触发（[`AiosDBManager::enqueue_manual_update`]）只做「扫描 + 入队」，
+//! 执行由数据批次 worker（`batch_worker`）从队列取走（ADR-011 合流）：worker
+//! 在冻结点重扫、按 `dbnum` 复用 [`IncrementPipeline`]（水位只在其成功路径上
+//! 推进），随后逐个生成受影响的交付单元。Data success + model failure
 //! never rolls back data: the unit lands in the `manual_model_pending` table
 //! ([`PendingModelUnit`]) and is retried — merged and deduped with newer data —
 //! on the next run, even when no new sesno exists.
@@ -44,6 +44,7 @@ use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info, parse_file_db_bas
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 use surrealdb::sql::Thing;
 
+use crate::data_interface::batch_scheduler::ManualEnqueueReceipt;
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
@@ -1670,17 +1671,6 @@ pub struct ManualUpdateResult {
     pub warnings: Vec<String>,
 }
 
-impl ManualUpdateResult {
-    fn failed(project: &str, reason: String) -> Self {
-        Self {
-            project: project.to_string(),
-            status: ManualUpdateStatus::Failed,
-            warnings: vec![reason],
-            ..Default::default()
-        }
-    }
-}
-
 /// Two-stage progress events (spec §任务与进度: 数据批次 + 模型交付单元，无百分比).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1708,11 +1698,12 @@ pub enum ManualUpdateEvent {
     },
 }
 
-/// Progress sink for [`AiosDBManager::execute_manual_update`]. The frontend
-/// forwards events into its own task state; `None` runs silently.
+/// Progress sink for the batch worker's per-dbnum execution
+/// ([`AiosDBManager::execute_one_dbnum`]). The worker forwards events into the
+/// task registry and the WS broadcast; `None` runs silently.
 pub type ManualUpdateProgress = Arc<dyn Fn(ManualUpdateEvent) + Send + Sync>;
 
-fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateEvent) {
+pub(crate) fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateEvent) {
     if let Some(sink) = progress {
         sink(event);
     }
@@ -1824,7 +1815,7 @@ pub async fn load_pending_model_units_for_retry() -> anyhow::Result<Vec<PendingM
 }
 
 /// Drop the pending-retry task after the unit generates successfully.
-async fn clear_pending_model_unit(dbnum: u32, root_refno: &str) -> anyhow::Result<()> {
+pub(crate) async fn clear_pending_model_unit(dbnum: u32, root_refno: &str) -> anyhow::Result<()> {
     let id = pending_record_id(dbnum, root_refno);
     SUL_DB
         .query(format!("DELETE {id};"))
@@ -1957,7 +1948,7 @@ pub fn aggregate_manual_status(
     }
 }
 
-fn include_model_side_effect_failure(
+pub(crate) fn include_model_side_effect_failure(
     status: ManualUpdateStatus,
     failed: bool,
 ) -> ManualUpdateStatus {
@@ -1971,29 +1962,8 @@ fn include_model_side_effect_failure(
     }
 }
 
-/// Per-process guard: one manual update per project at a time (spec §可用条件).
-static EXECUTING_PROJECTS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
-
-struct ProjectExecGuard(String);
-
-impl ProjectExecGuard {
-    fn try_acquire(project: &str) -> Option<Self> {
-        let lock = EXECUTING_PROJECTS.get_or_init(|| StdMutex::new(HashSet::new()));
-        let mut set = lock.lock().expect("EXECUTING_PROJECTS poisoned");
-        set.insert(project.to_string())
-            .then(|| Self(project.to_string()))
-    }
-}
-
-impl Drop for ProjectExecGuard {
-    fn drop(&mut self) {
-        if let Some(lock) = EXECUTING_PROJECTS.get() {
-            if let Ok(mut set) = lock.lock() {
-                set.remove(&self.0);
-            }
-        }
-    }
-}
+// `ProjectExecGuard`（同项目手动执行互斥）随 ADR-011 §12 退役：合流之后执行
+// 一律入队、由单 worker 串行消费，互斥是调度器的性质，守卫再无可拦之物。
 
 /// Generate ONE delivery unit through the existing generation path (same call
 /// shape as `ModelRefreshPolicy::run_owner_regen`, but per unit root so每个
@@ -2077,14 +2047,17 @@ pub struct ManualUpdatePreview {
 }
 
 /// A candidate DB file discovered during the project scan.
-struct FileCandidate {
-    path: PathBuf,
-    file_name: String,
-    db_type: String,
-    db_num: u32,
-    file_latest_sesno: i32,
-    file_size: u64,
-    file_modified_at: Option<String>,
+///
+/// `pub(crate)`：数据批次 worker 在冻结点重扫时也要构造它（rollout 第八节第 6 条，
+/// worker 执行体复用 [`AiosDBManager::execute_one_dbnum`]）。
+pub(crate) struct FileCandidate {
+    pub(crate) path: PathBuf,
+    pub(crate) file_name: String,
+    pub(crate) db_type: String,
+    pub(crate) db_num: u32,
+    pub(crate) file_latest_sesno: i32,
+    pub(crate) file_size: u64,
+    pub(crate) file_modified_at: Option<String>,
 }
 
 fn baseline_sync_options(
@@ -2667,204 +2640,108 @@ impl AiosDBManager {
         Ok(Some(preview))
     }
 
-    /// Execute the pending manual update for the current project.
+    /// 手动触发 = 扫描 + 入队（ADR-011 §2/§6/§12；rollout 第八节第 6/7 条）。
     ///
-    /// Flow (spec §用户流程 / plan 阶段 4): re-scan → fix each `dbnum` batch's
-    /// `end_sesno` at scan time (sessions arriving DURING execution wait for the
-    /// next run) → apply data batches per `dbnum` through the shared
-    /// [`IncrementPipeline`] (watermark advances inside its success path only) →
-    /// dedupe affected delivery units (DESI only) + merge persisted pending
-    /// retries → generate each unit independently, recording failures as
-    /// per-unit pending tasks.
+    /// 旧的 `execute_manual_update`（扫描 → 逐库应用 → 单元生成 → 房间）随合流
+    /// 拆成两半：这里只做「发现」，执行由数据批次 worker 从队列里取走
+    /// （[`crate::data_interface::batch_worker`]，与自动路径同一个消费者、同一份
+    /// 冻结语义）。手动触发不插队：对已在队里的库只是并入会话（ADR-011 §6），
+    /// 它剩下的唯一新意义是「别等下一个 30s 轮询，现在就扫一遍」。
     ///
-    /// Never returns `Err`: precondition and per-batch failures land in the
-    /// returned [`ManualUpdateResult`] so the frontend has one shape to render.
-    pub async fn execute_manual_update(
-        &self,
-        project: &str,
-        progress: Option<ManualUpdateProgress>,
-    ) -> ManualUpdateResult {
-        if self.db_option.sync_live.unwrap_or(false) {
-            return ManualUpdateResult::failed(
-                project,
-                "sync_live=true 时不允许手动更新（自动更新模式独占）".to_string(),
-            );
-        }
-        let Some(project_dir) = self.db_option.get_project_path(project) else {
-            return ManualUpdateResult::failed(project, format!("无法解析项目目录: {project}"));
+    /// Never returns `Err`: precondition and per-dbnum problems land in the
+    /// receipt so the frontend has one shape to render.
+    pub async fn enqueue_manual_update(&self, project: &str) -> ManualEnqueueReceipt {
+        use crate::data_interface::batch_queue::Enqueued;
+        use crate::data_interface::batch_scheduler::{
+            BatchScheduler, BlockedDbnum, DiscoveredBatch,
         };
-        if !project_dir.exists() {
-            return ManualUpdateResult::failed(
-                project,
-                format!("项目目录不存在: {}", project_dir.display()),
-            );
-        }
-        let Some(_guard) = ProjectExecGuard::try_acquire(project) else {
-            return ManualUpdateResult::failed(
-                project,
-                format!("项目 {project} 已有手动更新任务正在执行"),
-            );
-        };
+        use crate::data_interface::task_registry::TaskRegistry;
 
-        let mut result = ManualUpdateResult {
+        let mut receipt = ManualEnqueueReceipt {
             project: project.to_string(),
             ..Default::default()
         };
+        let Some(project_dir) = self.db_option.get_project_path(project) else {
+            receipt.warnings.push(format!("无法解析项目目录: {project}"));
+            return receipt;
+        };
+        if !project_dir.exists() {
+            receipt
+                .warnings
+                .push(format!("项目目录不存在: {}", project_dir.display()));
+            return receipt;
+        }
 
-        // Re-scan the project (execution owns its own scan; preview may be stale).
-        let by_dbnum = self.scan_project_candidates(&project_dir, &mut result.warnings);
-        let mut new_units: Vec<UnitTask> = Vec::new();
+        let by_dbnum = self.scan_project_candidates(&project_dir, &mut receipt.warnings);
+        receipt.scanned = by_dbnum.len();
+        let scheduler = BatchScheduler::global();
+        let registry = TaskRegistry::global();
 
         let mut dbnums: Vec<u32> = by_dbnum.keys().copied().collect();
         dbnums.sort_unstable();
-
         for dbnum in dbnums {
             let candidates = &by_dbnum[&dbnum];
+            // 阻断与排除的库压根不入队（ADR-011 结果段）：同号多文件先挡。
             if candidates.len() > 1 {
                 let paths = candidates
                     .iter()
                     .map(|c| c.path.display().to_string())
                     .collect::<Vec<_>>()
                     .join("; ");
-                result.batches.push(DataBatchResult {
+                receipt.blocked.push(BlockedDbnum {
                     dbnum,
-                    db_type: candidates[0].db_type.clone(),
-                    file_path: candidates[0].path.display().to_string(),
-                    start_sesno: 0,
-                    end_sesno: 0,
-                    status: BatchStatus::Skipped,
-                    message: Some(format!("同 dbnum 存在多个文件，已阻断: {paths}")),
-                    merged_sesnos: Vec::new(),
-                    changed_elements: 0,
+                    reason: format!("同 dbnum 存在多个文件，已阻断: {paths}"),
                 });
                 continue;
             }
-
             let cand = &candidates[0];
-            let (batch, units) = self
-                .execute_one_dbnum(project, cand, &progress, &mut result.warnings)
-                .await;
-            if let Some(batch) = batch {
-                result.batches.push(batch);
-            }
-            new_units.extend(units);
-        }
 
-        // Expand deferred cascades before loading regen work so recovered roots
-        // are generated in this same manual run. Transform/delete work is also
-        // safe to consume before root generation.
-        let mut model_side_effect_failed = if let Err(e) =
-            crate::data_interface::model_update_pending::drain_non_regen(self).await
-        {
-            result.warnings.push(format!(
-                "执行位姿/删除/级联模型任务失败（已保留待重试）: {e}"
-            ));
-            true
-        } else {
-            false
-        };
-
-        // Merge with persisted pending retries: retry-only runs work with zero
-        // new sessions, and a re-affected unit keeps exactly one latest task.
-        // Dead letters are deliberately excluded — they stay visible through the
-        // preview, but re-running one on every manual invocation is not a retry
-        // policy, it is an unbounded loop.
-        let pending = match load_pending_model_units_for_retry().await {
-            Ok(pending) => pending,
-            Err(e) => {
-                result
-                    .warnings
-                    .push(format!("读取模型待重试列表失败（本次仅处理新单元）: {e}"));
-                Vec::new()
-            }
-        };
-        let worklist = merge_unit_worklist(new_units, pending);
-
-        for task in worklist {
-            emit(
-                &progress,
-                ManualUpdateEvent::ModelUnitStarted {
-                    dbnum: task.dbnum,
-                    root_refno: task.root_refno.clone(),
-                    noun: task.noun.clone(),
-                },
-            );
-
-            let outcome = generate_unit_model(self, &task.root_refno).await;
-            let (status, attempts, message) = match &outcome {
-                Ok(()) => {
-                    if let Err(e) = clear_pending_model_unit(task.dbnum, &task.root_refno).await {
-                        result.warnings.push(e.to_string());
-                    }
-                    if let Err(e) = crate::data_interface::model_update_pending::clear_regen_work(
-                        task.dbnum,
-                        &task.root_refno,
-                    )
-                    .await
-                    {
-                        result.warnings.push(e.to_string());
-                    }
-                    (UnitGenStatus::Generated, task.attempts, None)
-                }
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    // Only `model_update_pending` records the failure. The legacy
-                    // `manual_model_pending` table used to be written in the same
-                    // breath, so one unit's retry state lived in two rows that
-                    // nothing kept in agreement; existing rows still drain (the
-                    // success branch above deletes them) but no new ones appear.
-                    if let Err(e) = crate::data_interface::model_update_pending::mark_regen_failed(
-                        task.dbnum,
-                        &task.root_refno,
-                        &msg,
-                    )
-                    .await
-                    {
-                        result.warnings.push(e.to_string());
-                    }
-                    (UnitGenStatus::Failed, task.attempts + 1, Some(msg))
+            let applied = match DbnumState::applied_sesno(dbnum).await {
+                Ok(applied) => applied,
+                Err(error) => {
+                    receipt
+                        .warnings
+                        .push(format!("dbnum={dbnum}: 读取水位失败，本次跳过: {error:#}"));
+                    continue;
                 }
             };
+            // 回退 / 被替换：水位不回退，该库阻断（执行侧还会再核一遍）。
+            if cand.file_latest_sesno < applied {
+                receipt.blocked.push(BlockedDbnum {
+                    dbnum,
+                    reason: format!(
+                        "文件回退或被替换（file_latest_sesno={} < applied_sesno={applied}），已阻断",
+                        cand.file_latest_sesno
+                    ),
+                });
+                continue;
+            }
+            if cand.file_latest_sesno == applied {
+                receipt.up_to_date += 1;
+                continue;
+            }
 
-            emit(
-                &progress,
-                ManualUpdateEvent::ModelUnitFinished {
-                    dbnum: task.dbnum,
-                    root_refno: task.root_refno.clone(),
-                    success: status == UnitGenStatus::Generated,
-                    message: message.clone(),
+            // 从未解析（applied=0）与增量窗口在这里不分家：worker 执行体里的
+            // `needs_initial_load` 会把基线接管过去，两条路径同口径。
+            let outcome = scheduler.enqueue(
+                registry,
+                &DiscoveredBatch {
+                    project: project.to_string(),
+                    dbnum,
+                    db_type: cand.db_type.clone(),
+                    path: cand.path.clone(),
+                    file_name: cand.file_name.clone(),
+                    applied_sesno: applied,
+                    file_latest_sesno: cand.file_latest_sesno,
                 },
             );
-            result.units.push(ModelUnitResult {
-                dbnum: task.dbnum,
-                root_refno: task.root_refno,
-                noun: task.noun,
-                status,
-                attempts,
-                message,
-                old_owner: task.old_owner,
-                new_owner: task.new_owner,
-            });
+            match outcome.outcome {
+                Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
+                Enqueued::Merged => receipt.merged.push(outcome.info),
+                Enqueued::AlreadyCovered => receipt.already_covered.push(dbnum),
+            }
         }
-
-        // 房间归属是第三阶段，必须排在上面的单元重生成之后：它要读几何与包围盒，
-        // 在重生成之前算出来的结果本身就是错的（ADR-010 §7）。自动路径由
-        // `model_update_pending::drain` 一次带过三段，手动路径分两处调用，
-        // 所以这一段要在这里补齐——漏掉它，手动跑就永远不算房间。
-        if let Err(e) =
-            crate::data_interface::model_update_pending::drain_rooms(&self.db_option).await
-        {
-            result
-                .warnings
-                .push(format!("执行房间归属重算失败（已保留待重试）: {e}"));
-            model_side_effect_failed = true;
-        }
-
-        result.status = include_model_side_effect_failure(
-            aggregate_manual_status(&result.batches, &result.units),
-            model_side_effect_failed,
-        );
-        result
+        receipt
     }
 
     /// Execute the data batch of ONE `dbnum` and derive its delivery units.
@@ -2873,7 +2750,10 @@ impl AiosDBManager {
     /// fully up to date. The pre-update ownership snapshot loads BEFORE the
     /// data persists (spec: 执行数据更新前必须保存旧归属 — deletes and moves
     /// must still see the old owners).
-    async fn execute_one_dbnum(
+    ///
+    /// `pub(crate)`：这是数据批次 worker 的执行体（rollout 第八节第 6 条）——
+    /// 手动与自动两条触发路径合流后，执行只发生在 `batch_worker` 的消费循环里。
+    pub(crate) async fn execute_one_dbnum(
         &self,
         project: &str,
         cand: &FileCandidate,
@@ -4882,21 +4762,9 @@ mod tests {
         assert_eq!(id, "manual_model_pending:8191_16777216_5");
     }
 
-    #[test]
-    fn project_exec_guard_is_exclusive_per_project() {
-        let first = ProjectExecGuard::try_acquire("proj-a");
-        assert!(first.is_some());
-        assert!(
-            ProjectExecGuard::try_acquire("proj-a").is_none(),
-            "second acquire on the same project must fail"
-        );
-        assert!(ProjectExecGuard::try_acquire("proj-b").is_some());
-        drop(first);
-        assert!(
-            ProjectExecGuard::try_acquire("proj-a").is_some(),
-            "guard must release on drop"
-        );
-    }
+    // `project_exec_guard_is_exclusive_per_project` 随 `ProjectExecGuard` 一并
+    // 退役（ADR-011 §12）：互斥由数据批次队列的单 worker 承担，见
+    // `batch_scheduler` / `batch_worker` 的单测。
 }
 
 #[cfg(test)]
@@ -4933,20 +4801,27 @@ mod live_tests {
 
     /// Manual end-to-end update against the configured local E3D project.
     ///
+    /// 合流之后手动触发只入队（ADR-011），执行走与 worker 相同的消费循环：
+    /// 入队 → `drain_queue_until_empty` → 从任务注册表核对每个批次的终态。
+    ///
     /// Example:
     /// `AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample cargo test
     /// live_manual_update_project -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "manual live: execute incremental data/model update"]
     async fn live_manual_update_project() {
+        use crate::data_interface::task_registry::{TASK_KIND_DATA_BATCH, TaskRegistry, TaskState};
+
         aios_core::init_test_surreal()
             .await
             .expect("connect surreal");
         let project =
             std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
-        let mgr = AiosDBManager::init_form_config()
-            .await
-            .expect("init manager");
+        let mgr = Arc::new(
+            AiosDBManager::init_form_config()
+                .await
+                .expect("init manager"),
+        );
 
         let preview = mgr
             .preview_manual_update(&project)
@@ -4957,18 +4832,34 @@ mod live_tests {
             serde_json::to_string_pretty(&preview).expect("serialize preview")
         );
 
-        let result = mgr.execute_manual_update(&project, None).await;
+        let receipt = mgr.enqueue_manual_update(&project).await;
         println!(
-            "result = {}",
-            serde_json::to_string_pretty(&result).expect("serialize result")
+            "receipt = {}",
+            serde_json::to_string_pretty(&receipt).expect("serialize receipt")
         );
         assert!(
-            matches!(
-                result.status,
-                ManualUpdateStatus::Success | ManualUpdateStatus::UpToDate
-            ),
-            "manual update was not complete: {result:?}"
+            receipt.warnings.is_empty(),
+            "enqueue warnings: {:?}",
+            receipt.warnings
         );
+
+        let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+        println!("ran {ran} batch task(s)");
+        assert_eq!(ran, receipt.enqueued.len(), "每条入队回执都要被消费");
+
+        for info in &receipt.enqueued {
+            let entry = TaskRegistry::global()
+                .get(&info.task_id)
+                .expect("task entry exists");
+            assert_eq!(entry.kind, TASK_KIND_DATA_BATCH);
+            assert_eq!(
+                entry.state,
+                TaskState::Succeeded,
+                "batch dbnum={:?} did not succeed: {:?}",
+                entry.dbnum,
+                entry.result
+            );
+        }
     }
 
     /// Read-only live self-check for the ADR-003 reverse index (needs local Surreal).

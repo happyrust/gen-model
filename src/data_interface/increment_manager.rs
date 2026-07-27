@@ -571,187 +571,40 @@ impl AiosDBManager {
         }
     }
 
-    /// 与手动路径同口径的「从未解析过就先补全量基线」。
-    ///
-    /// [`SesnoRangeResolver`] 在水位为 0 时只有两种出路：DESI/CATA 直接跳过（不敢猜历史），
-    /// SYS meta 走 cold start 把历史会话重放一遍。两者都不等于一次全量解析——重放走的是
-    /// `pdms_io`，而 ADR-006 那个跨块引用列表（`CURD`/`DBLS`）的解析修复只落在全量那侧的
-    /// `parse_pdms_db` 里。手动路径已经改走基线（见 `manual_update::needs_initial_load`），
-    /// 自动路径跟上，免得同一个库「点预览」与「让 watcher 自己发现」得出两种结果。
-    ///
-    /// 返回 `true` 表示本轮已由基线接管，调用方跳过增量窗口。
-    ///
-    /// [`SesnoRangeResolver`]: crate::data_interface::sesno_range::SesnoRangeResolver
-    async fn baseline_if_never_parsed(
-        &self,
-        project: &str,
-        file_name: &str,
-        db_type: &str,
-        db_num: u32,
-        file_latest_sesno: i32,
-    ) -> bool {
-        use crate::data_interface::dbnum_state::DbnumState;
-
-        // 空文件不是「没解析过」：没有会话可解析，派一次基线纯属白跑。
-        if file_latest_sesno <= 0 {
-            return false;
-        }
-        match DbnumState::applied_sesno(db_num).await {
-            Ok(0) => {}
-            Ok(_) => return false,
-            Err(error) => {
-                eprintln!("dbnum={db_num} 读取水位失败，本轮不补基线: {error:#}");
-                return false;
-            }
-        }
-
-        println!("dbnum={db_num}({db_type}) 从未解析过，先补一次全量基线: {file_name}");
-        match self
-            .initialize_dbnum_baseline(project, db_num, file_name, db_type, file_latest_sesno)
-            .await
-        {
-            Ok(count) => println!("dbnum={db_num} 基线完成，落库 {count} 个元素"),
-            // 基线失败不推进水位，下一轮自然重来；但此时也不该退回增量窗口去猜历史，
-            // 那正是这次改动要消除的分叉。
-            Err(error) => eprintln!("dbnum={db_num} 基线失败，跳过本轮: {error:#}"),
-        }
-        true
-    }
-
-    /// 执行增量更新操作
-    ///
-    /// 编排：IncrementPipeline → enqueue side-effects → 可选 MySQL → SYST 派生 → ModelRefresh。
-    /// 返回 [`IncrResult`] 供调用方（如 SyncPublisher）继续处理。
-    ///
-    /// 模型刷新 / SYST 派生同步失败不会使整体返回 Err：持久化与水位已完成。
-    /// 模型工作已在水位事务中写入 `model_update_pending`；SYST 派生错误由
-    /// [`SideEffectCompensator`] 补偿。两者都记入 `IncrResult::warnings`，调用方仍可
-    /// 对成功文件执行异地同步发布。
-    ///
-    /// Map value: `(basic_info, sesno_range, db_type)`.
-    pub async fn execute_incr_update(
-        &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
-    ) -> anyhow::Result<crate::data_interface::increment_pipeline::IncrResult> {
-        use crate::data_interface::increment_pipeline::IncrementPipeline;
-        use crate::data_interface::side_effect_pending::SideEffectCompensator;
-
-        if increment_ranges_map.is_empty() {
-            return Ok(Default::default());
-        }
-
-        let mut incr = IncrementPipeline::new().apply(increment_ranges_map).await;
-
-        for err in &incr.errors {
-            println!("增量文件失败: {:?} — {}", err.path, err.error);
-        }
-        for w in &incr.warnings {
-            println!("增量警告: {}", w);
-        }
-
-        if let Err(e) = SideEffectCompensator::enqueue_from_incr(self, &incr).await {
-            let warn = format!("副作用任务入队失败（不影响水位）: {e:?}");
-            println!("{warn}");
-            incr.warnings.push(warn);
-        }
-
-        #[cfg(feature = "sql")]
-        {
-            for success in &incr.successes {
-                match self.update_mysql_pdms_elements(&success.range_eles).await {
-                    Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={}", success.dbnum),
-                    Err(e) => {
-                        println!("MySQL pdms_element 更新失败 dbnum={}: {}", success.dbnum, e)
-                    }
-                }
-            }
-        }
-
-        // SYST 增量落 PE 后，刷新 TEAM 等派生表（与全量 only_sync_sys 路径一致；失败不回滚水位）
-        if incr.has_db_type("SYST") {
-            match (async {
-                let aios_mgr =
-                    aios_core::aios_db_mgr::aios_mgr::AiosDBMgr::init_from_db_option().await?;
-                crate::team_data::sync_team_data(&aios_mgr).await
-            })
-            .await
-            {
-                Ok(_) => {
-                    println!("SYST 增量后派生同步 sync_team_data 完成");
-                    if let Err(e) = SideEffectCompensator::complete_syst_jobs(&incr).await {
-                        println!("标记 syst_derived done 失败: {e:?}");
-                    }
-                }
-                Err(e) => {
-                    let warn = format!("SYST 派生同步失败（持久化与水位不受影响）: {e:?}");
-                    println!("{warn}");
-                    // 每个 SYST 文件各记各的失败：入队时就是按文件建的行，
-                    // 这里再拼一个「首个 dbnum + 最大 sesno」只会打在不存在的行上。
-                    SideEffectCompensator::fail_syst_jobs(&incr, &format!("{e:?}")).await;
-                    incr.warnings.push(warn);
-                }
-            }
-        }
-
-        match crate::data_interface::model_update_pending::drain(self).await {
-            Ok(done) if done > 0 => println!("已完成 {done} 个持久化模型更新任务"),
-            Ok(_) => {}
-            Err(e) => {
-                let warn = format!("模型任务消费失败（持久化与水位不受影响）: {e:?}");
-                println!("{warn}");
-                incr.warnings.push(warn);
-            }
-        }
-
-        // Web 服务增量摘要事件：覆盖 init_watcher 与 async_watch 两条自动路径
-        // （评审决议：仅摘要，不含逐 refno 明细）。
-        #[cfg(feature = "http_api")]
-        crate::web_service::events::notify_incr_applied(&incr);
-
-        Ok(incr)
-    }
+    // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：
+    // 执行只发生在 `batch_worker` 的消费循环里（一条队列、一个消费者）。它独有的
+    // 三步都有了新家——MySQL 可选同步进了 `execute_one_dbnum` 的成功分支，SYST
+    // 派生由 worker 经 `SideEffectCompensator::enqueue_syst` 走持久补偿队列，
+    // `notify_incr_applied` 摘要随之删除（plant-ui 只订 tasks 主题，它从未有过消费者）。
 
     /// 初始化文件监控器
     ///
-    /// 在系统启动时扫描监控目录中的所有数据库文件，检查是否需要进行增量更新。
-    /// 该方法会比较文件中的最新会话号与数据库中记录的会话号，如果文件更新则执行增量更新。
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
+    /// 在系统启动时扫描监控目录中的所有数据库文件，检查是否有待应用的会话；
+    /// 有则**入队**（发现即入队，ADR-011 §2）。执行归数据批次 worker——重启后
+    /// 的队列正是靠这次重扫从水位重建出来的（ADR-011 §4）。
     ///
     /// # 处理流程
     ///
     /// 1. 创建必要的目录结构
-    /// 2. 遍历所有监控目录中的文件
-    /// 3. 解析数据库基本信息
-    /// 4. 检查是否需要增量更新
+    /// 2. 遍历所有监控目录中的文件，解析数据库基本信息
+    /// 3. F6 检查（同号多文件阻断、回退阻断）
+    /// 4. 比较文件最新会话号与水位，需要更新的进入待入队集合
     /// 5. 生成压缩包(如果启用MQTT功能)
-    /// 6. 执行增量更新操作
-    /// 7. 成功后由 SyncPublisher 发布异地同步（与 async_watch 对齐）
+    /// 6. 逐条入队（合并/冻结语义见 `batch_queue`）
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
-        let mut params = IndexMap::new();
+        let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
+            IndexMap::new();
         // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。
         let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
         let mut blocked_dupes: HashSet<u32> = HashSet::new();
         // 创建存档与压缩临时目录（SyncPublisher 依赖 assets/temp）；
-        // 还要 assets/meshes——本函数随后 drain 模型任务就可能开始写网格，
+        // 还要 assets/meshes——worker 消费本次入队的批次时就可能开始写网格，
         // 而调用方 `lib.rs` 建这个目录的那行排在 `init_watcher()` 之后。
         fs::create_dir_all("assets/archives")?;
         fs::create_dir_all("assets/temp")?;
         fs::create_dir_all("assets/meshes")?;
         let mut time = Instant::now();
         log::debug!("init_watcher 监控目录: {:?}", self.watcher.watch_dirs);
-
-        // 先补偿上次未完成的旧副作用 / SYST 派生；模型任务由下一步独立 drain。
-        match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self).await {
-            Ok(n) if n > 0 => println!("启动补偿完成 {n} 个副作用任务"),
-            Ok(_) => {}
-            Err(e) => println!("启动副作用补偿失败（继续增量扫描）: {e:?}"),
-        }
-        if let Err(e) = crate::data_interface::model_update_pending::drain(self).await {
-            println!("启动模型任务补偿失败（继续增量扫描）: {e:?}");
-        }
 
         // 遍历所有监控目录
         //
@@ -846,103 +699,119 @@ impl AiosDBManager {
                     }
                 }
 
-                // 从未解析过的库先补全量基线，不进增量窗口（与手动路径同口径）。
-                if self
-                    .baseline_if_never_parsed(
-                        &project,
-                        file_name,
-                        &db_type,
-                        db_no,
-                        file_latest_sesno as i32,
-                    )
+                // 需不需要更新只看「文件会话号 vs 水位」；从未解析（水位 0）的库
+                // 同样入队，worker 执行体的 `needs_initial_load` 会把基线接管过去
+                // （与手动路径同口径——两条路径合流后只剩这一份判定）。
+                match self
+                    .discover_batch(&project, path, &db_type, db_no, file_latest_sesno as i32)
                     .await
                 {
-                    continue;
-                }
-
-                // 统一 sesno 范围解析（水位=dbnum，nearest 跳跃）
-                {
-                    use crate::data_interface::sesno_range::SesnoRangeResolver;
-                    let resolver = SesnoRangeResolver::new();
-                    match resolver
-                        .resolve(
-                            path,
-                            &project,
-                            db_no,
-                            file_latest_sesno as i32,
-                            false, // CATA 仅由 should_process_database 门控（与 watch 对齐）
-                            &db_type,
-                        )
-                        .await
-                    {
-                        Ok(Some(plan)) => {
-                            if plan.cold_start {
-                                println!(
-                                    "发现需要冷启动的 SYS meta 文件: {:?}, db_type={}, 水位=0, 文件最新sesno: {}, range={:?}",
-                                    &file_name, plan.db_type, plan.file_latest_sesno, plan.range
-                                );
-                            } else {
-                                println!(
-                                    "发现需要增量更新的文件: {:?}, 当前数据库最大sesno: {}, \
-                                    文件最新sesno: {}",
-                                    &file_name, plan.db_latest_sesno, plan.file_latest_sesno
-                                );
-                            }
-                            params.insert(plan.path, (plan.basic_info, plan.range, plan.db_type));
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            println!("sesno 范围解析失败 {:?}: {:?}", file_name, e);
-                        }
+                    Some(found) => {
+                        params.insert(path.to_path_buf(), found);
                     }
+                    None => {}
                 }
             }
         }
 
-        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选）。
+        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
-            params.retain(|_p, (bi, _r, _t)| {
-                !blocked_dupes.contains(&(bi.pdms_header.db_num as u32))
-            });
+            params.retain(|_p, found| !blocked_dupes.contains(&found.dbnum));
         }
 
-        // 等所有文件检查完毕后，执行批量增量更新
+        // 等所有文件检查完毕后，逐条入队；执行与发布归数据批次 worker。
         if !params.is_empty() {
-            log::info!("增量批次待处理文件数: {}", params.len());
+            log::info!("启动重扫待入队批次数: {}", params.len());
         }
+        self.enqueue_discovered("init", params);
 
-        // 执行增量更新；成功后与 async_watch 一致，走 SyncPublisher 异地同步
-        match self.execute_incr_update(params).await {
-            Ok(incr) if incr.had_work() => {
-                println!(
-                    "启动时自动增量更新执行完成。成功 {} 个文件，失败 {} 个",
-                    incr.successes.len(),
-                    incr.errors.len()
-                );
-                let publisher = crate::data_interface::sync_publisher::SyncPublisher::new(
-                    self.mqtt_client.clone(),
-                );
-                let outcome = publisher.publish(&incr).await;
-                for e in &outcome.errors {
-                    println!("SyncPublisher 错误: {}", e);
-                }
-                println!(
-                    "SyncPublisher(init): published={}, skipped={}",
-                    outcome.published.len(),
-                    outcome.skipped.len()
-                );
-            }
-            Ok(_) => {
-                println!("没有发现需要增量更新的内容。")
-            }
-            Err(e) => {
-                println!("执行增量更新时发生错误: {:?}", e);
-            }
-        }
-
-        println!("初始化增量更新总耗时: {} 秒", time.elapsed().as_secs_f32());
+        println!("启动重扫（重建队列）总耗时: {} 秒", time.elapsed().as_secs_f32());
 
         anyhow::Ok(())
+    }
+
+    /// 一次发现的公共判定：读水位、比会话号，需要更新则给出待入队批次。
+    ///
+    /// 基线（水位 0、文件有会话）与增量窗口在这里不分家——都只是「有活要干」，
+    /// 具体怎么干由 worker 冻结点重扫时的 `execute_one_dbnum` 决定。
+    /// 返回 `None` 表示水位已覆盖或读取失败（失败已打印）。
+    ///
+    /// `file_name` 从 `path` 现取（完整文件名）：init 重扫与 watch 事件两个调用方
+    /// 手里各是一种口径（一个全名一个去了扩展名的 stem），在这里统一。
+    async fn discover_batch(
+        &self,
+        project: &str,
+        path: &std::path::Path,
+        db_type: &str,
+        db_num: u32,
+        file_latest_sesno: i32,
+    ) -> Option<crate::data_interface::batch_scheduler::DiscoveredBatch> {
+        use crate::data_interface::dbnum_state::DbnumState;
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let applied = match DbnumState::applied_sesno(db_num).await {
+            Ok(applied) => applied,
+            Err(error) => {
+                eprintln!("dbnum={db_num} 读取水位失败，本轮跳过: {error:#}");
+                return None;
+            }
+        };
+        if file_latest_sesno <= applied {
+            return None;
+        }
+        if applied == 0 {
+            println!(
+                "发现从未解析过的文件: {file_name}, db_type={db_type}, 文件最新sesno: {file_latest_sesno}（入队后由基线接管）"
+            );
+        } else {
+            println!(
+                "发现需要增量更新的文件: {file_name}, 当前数据库最大sesno: {applied}, 文件最新sesno: {file_latest_sesno}"
+            );
+        }
+        Some(crate::data_interface::batch_scheduler::DiscoveredBatch {
+            project: project.to_string(),
+            dbnum: db_num,
+            db_type: db_type.to_string(),
+            path: path.to_path_buf(),
+            file_name: file_name.to_string(),
+            applied_sesno: applied,
+            file_latest_sesno,
+        })
+    }
+
+    /// 把一批发现逐条入队并打日志（init 重扫与 watch 事件两条路径共用）。
+    fn enqueue_discovered(
+        &self,
+        origin: &str,
+        params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch>,
+    ) {
+        use crate::data_interface::batch_queue::Enqueued;
+        use crate::data_interface::batch_scheduler::BatchScheduler;
+        use crate::data_interface::task_registry::TaskRegistry;
+
+        let scheduler = BatchScheduler::global();
+        let registry = TaskRegistry::global();
+        for (_path, found) in params {
+            let outcome = scheduler.enqueue(registry, &found);
+            let verb = match outcome.outcome {
+                Enqueued::New => "新排",
+                Enqueued::Merged => "并入会话",
+                Enqueued::AlreadyCovered => "已覆盖",
+                Enqueued::BehindRunning => "接在运行批次之后",
+            };
+            println!(
+                "[{origin}] dbnum={} {verb}：sesno {}..={}（task {}，排在第 {} 位）",
+                found.dbnum,
+                outcome.info.start_sesno,
+                outcome.info.end_sesno,
+                outcome.info.task_id,
+                outcome.info.position
+            );
+        }
     }
 
     /// 开始异步监控数据文件夹
@@ -1022,15 +891,9 @@ impl AiosDBManager {
             .await
             .map_err(|e| notify::Error::io(e))?;
 
-        // 启动时先补偿一次（与 init_watcher 对齐；仅 watch 场景也会覆盖）
-        match crate::data_interface::side_effect_pending::SideEffectCompensator::drain(self).await {
-            Ok(n) if n > 0 => println!("watch 启动补偿完成 {n} 个副作用任务"),
-            Ok(_) => {}
-            Err(e) => println!("watch 启动副作用补偿失败（继续监听）: {e:?}"),
-        }
-        if let Err(e) = crate::data_interface::model_update_pending::drain(self).await {
-            println!("watch 启动模型任务补偿失败（继续监听）: {e:?}");
-        }
+        // 积压补偿（副作用 / 模型待重试）不再由 watcher 顺带做：合流之后
+        // 那是数据批次 worker 空闲轮的职责——watcher 只负责「发现即入队」，
+        // 事件回调再也不会被一轮增量执行堵住（ADR-011 §2 治的正是这个）。
 
         // 持续监听文件变化事件
         while let Some(res) = rx.next().await {
@@ -1049,19 +912,6 @@ impl AiosDBManager {
                     );
                     if !data_changed {
                         continue;
-                    }
-
-                    // 每次有数据变更时顺带 drain：覆盖「水位已推、刷新失败」的积压
-                    if let Err(e) =
-                        crate::data_interface::side_effect_pending::SideEffectCompensator::drain(
-                            self,
-                        )
-                        .await
-                    {
-                        println!("watch 周期副作用补偿失败: {e:?}");
-                    }
-                    if let Err(e) = crate::data_interface::model_update_pending::drain(self).await {
-                        println!("watch 周期模型任务补偿失败: {e:?}");
                     }
 
                     // 记录文件变化事件
@@ -1155,60 +1005,23 @@ impl AiosDBManager {
                                 file_name, db_num, new_header.latest_ses_data.sesno
                             );
 
-                            use crate::data_interface::sesno_range::SesnoRangeResolver;
                             let project = self.db_option.project_name.clone();
 
-                            // 从未解析过的库先补全量基线，不进增量窗口（与手动路径同口径）。
-                            if self
-                                .baseline_if_never_parsed(
+                            // 水位对比即发现；基线与增量窗口都只是「有活要干」，
+                            // 由 worker 冻结点重扫时决定怎么干（与 init 同口径）。
+                            if let Some(found) = self
+                                .discover_batch(
                                     &project,
-                                    file_name,
+                                    path,
                                     db_type,
                                     db_num,
                                     new_header.latest_ses_data.sesno as i32,
                                 )
                                 .await
                             {
-                                continue;
-                            }
-
-                            let resolver = SesnoRangeResolver::new();
-                            match resolver
-                                .resolve_with_header(
-                                    path,
-                                    &project,
-                                    new_header.clone(),
-                                    false, // CATA 仅由 should_process_database 门控（与 init 对齐）
-                                    db_type,
-                                )
-                                .await
-                            {
-                                Ok(Some(plan)) => {
-                                    if plan.cold_start {
-                                        println!(
-                                            "发现需要冷启动的 SYS meta 文件: {}, db_type={}, 水位=0, 文件会话号: {}, range={:?}",
-                                            file_name,
-                                            plan.db_type,
-                                            plan.file_latest_sesno,
-                                            plan.range
-                                        );
-                                    } else {
-                                        println!(
-                                            "发现需要增量更新的文件: {}, 数据库会话号: {}, 文件会话号: {}",
-                                            file_name, plan.db_latest_sesno, plan.file_latest_sesno
-                                        );
-                                    }
-                                    params.insert(
-                                        plan.path,
-                                        (plan.basic_info, plan.range, plan.db_type),
-                                    );
-                                }
-                                Ok(None) => {
-                                    println!("文件 {} 无需更新（水位已覆盖或不可解析）", file_name);
-                                }
-                                Err(e) => {
-                                    println!("sesno 范围解析失败 {}: {:?}", file_name, e);
-                                }
+                                params.insert(path.to_path_buf(), found);
+                            } else {
+                                println!("文件 {} 无需更新（水位已覆盖）", file_name);
                             }
                         }
                         // Event batches are not a global file snapshot. Recheck all
@@ -1216,44 +1029,20 @@ impl AiosDBManager {
                         // separate poll events cannot bypass the dbnum guard.
                         blocked_dupes.extend(self.duplicate_dbnums_across_watch_dirs());
 
-                        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选）。
+                        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，不入队）。
                         if !blocked_dupes.is_empty() {
                             println!("F6 阻断重复 dbnum: {blocked_dupes:?}");
-                            params.retain(|_p, (bi, _r, _t)| {
-                                !blocked_dupes.contains(&(bi.pdms_header.db_num as u32))
-                            });
+                            params.retain(|_p, found| !blocked_dupes.contains(&found.dbnum));
                         }
 
-                        // 如果没有需要更新的参数，跳过后续处理
+                        // 如果没有需要入队的批次，跳过后续处理
                         if params.is_empty() {
                             continue;
                         }
 
-                        // 执行增量更新，成功后由 SyncPublisher 负责异地同步
-                        match self.execute_incr_update(params).await {
-                            Ok(incr) if incr.had_work() => {
-                                let publisher =
-                                    crate::data_interface::sync_publisher::SyncPublisher::new(
-                                        self.mqtt_client.clone(),
-                                    );
-                                let outcome = publisher.publish(&incr).await;
-                                for e in &outcome.errors {
-                                    println!("SyncPublisher 错误: {}", e);
-                                }
-                                println!(
-                                    "SyncPublisher: published={}, skipped={}",
-                                    outcome.published.len(),
-                                    outcome.skipped.len()
-                                );
-                            }
-                            Ok(_) => {
-                                println!("文件 {:?} 发生修改，但未触发增量更新。", &event.paths);
-                                continue;
-                            }
-                            Err(e) => {
-                                println!("执行增量更新时发生错误: {:?}", e);
-                            }
-                        }
+                        // 发现即入队（ADR-011 §2）：执行、发布与补偿都归数据批次
+                        // worker，事件回调从此不再被一轮增量执行堵住。
+                        self.enqueue_discovered("watch", params);
                     } else {
                         println!("扫描数据库头部信息失败，路径: {:?}", &event.paths);
                     }

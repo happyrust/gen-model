@@ -1597,14 +1597,19 @@ mod live_tests {
     /// Manual: requires local Surreal `ws://127.0.0.1:8009` + E3D project files.
     /// Example: lower `dbnum_watermark:8191` then
     /// `cargo test -p aios-database force_init_watcher_incr_once -- --ignored --nocapture`
+    ///
+    /// 合流后 `init_watcher` 只重扫入队（ADR-011 §4），要真把增量应用掉还得
+    /// 跑一遍与 worker 相同的消费循环。
     #[tokio::test]
     #[ignore = "manual live incr against local Surreal/E3D"]
     async fn force_init_watcher_incr_once() {
         aios_core::init_test_surreal()
             .await
             .expect("connect surreal");
-        let mgr = AiosDBManager::init_form_config().await.expect("init mgr");
+        let mgr = std::sync::Arc::new(AiosDBManager::init_form_config().await.expect("init mgr"));
         mgr.init_watcher().await.expect("init_watcher");
+        let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+        println!("consumed {ran} queued batch task(s)");
     }
 
     /// F4 · T403（live）：同一窗口重放 `Add` 的 `pe_owner` 写必须收敛。

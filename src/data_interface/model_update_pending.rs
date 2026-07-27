@@ -760,6 +760,51 @@ pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
     drain_where(mgr, NON_REGEN_ACTION_FILTER).await
 }
 
+/// 前两个阶段（非 regen → regen），不含房间。
+///
+/// 数据批次 worker 的空闲轮用它消化积压：房间收敛按 ADR-011 §8 在队列跑空时
+/// 单独收一轮（包成 `room_recalc` 任务），不跟在积压消化后面顺手带走——那样
+/// 房间轮就没有自己的任务行了。
+pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+    let phases = [
+        ("non-regen", drain_non_regen(mgr).await),
+        ("regen", drain_where(mgr, REGEN_ACTION_FILTER).await),
+    ];
+    let mut done = 0;
+    let mut failures = Vec::new();
+    for (phase, outcome) in phases {
+        match outcome {
+            Ok(count) => done += count,
+            Err(error) => failures.push(format!("{phase} pending tasks failed: {error:#}")),
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!("{}", failures.join("; "));
+    }
+    Ok(done)
+}
+
+/// 还活着（未到重试上限）的待重算房间目标数，供空闲轮决定要不要收房间
+/// 并给 `room_recalc` 任务当 total。
+pub async fn count_live_room_targets() -> anyhow::Result<usize> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+             AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER} GROUP ALL;"
+        ))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("count pending room work statement failed: {error}"))?;
+    #[derive(serde::Deserialize)]
+    struct CountRow {
+        c: usize,
+    }
+    let rows: Vec<CountRow> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode pending room count failed: {error}"))?;
+    Ok(rows.first().map(|r| r.c).unwrap_or(0))
+}
+
 /// 第三阶段：房间归属重算。
 ///
 /// 不复用 [`drain_where`] 的原因有两个。其一，房间映射要按轮加载一次而不是按任务；
