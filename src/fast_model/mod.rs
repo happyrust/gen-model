@@ -26,12 +26,14 @@ pub mod utils;
 
 pub mod aabb_tree;
 
+pub mod coverage_audit;
+
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
-use once_cell::sync::Lazy;
-use parry3d::bounding_volume::Aabb;
 pub use gen_model::*;
 pub use occ_generate::*;
+use once_cell::sync::Lazy;
+use parry3d::bounding_volume::Aabb;
 pub use query::*;
 pub use resolve::*;
 

@@ -1,3 +1,4 @@
+use aios_core::SUL_DB;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::normalize_sql_string;
@@ -6,17 +7,17 @@ use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
-use aios_core::SUL_DB;
 use chrono::Local;
 use dashmap::{DashMap, DashSet};
+use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
 use pdms_io::io::PdmsIO;
 use pe::SPdmsElement;
 use petgraph::prelude::DiGraph;
+use serde::Deserialize;
 #[cfg(feature = "sql")]
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 #[cfg(feature = "sql")]
@@ -31,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::fs::{create_dir_all, File};
+use tokio::fs::{File, create_dir_all};
 use tokio::io::AsyncReadExt;
 // use tokio::sync::mpsc::Sender;
 use std::sync::mpsc::Sender;
@@ -44,14 +45,237 @@ use crate::tables::*;
 use crate::versioned_db::pe::*;
 use crate::versioned_db::task::get_global_db_sender;
 
+const BASELINE_QUEUE_CAPACITY: usize = 100;
+const BASELINE_WRITE_WINDOW: usize = 20;
+const BASELINE_WRITE_WORKERS: usize = 4;
+
 pub enum SenderJsonsData {
     PEJson(Vec<String>),
     PERelateJson(Vec<String>),
     AttJson((String, Vec<String>)),
     // 项目名 , sql
     MysqlSql((String, String)),
-    // 新增：用于更新dbnum_info_table
-    DbnumInfoUpdate(Vec<String>),
+}
+
+fn is_retryable_surreal_write_error(error: &str) -> bool {
+    error.contains("read or write conflict") || error.contains("transaction can be retried")
+}
+
+/// 冲突重试的等待时长。
+///
+/// BASELINE_WRITE_WORKERS 个写入器争同一张表时冲突是持续的：固定或线性退避会让几个
+/// 批次同步重试、一起再撞上，很快耗尽重试预算。指数增长拉开重试窗口，抖动把并发的
+/// 写入器错开。
+fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
+    const BASE_MS: u64 = 25;
+    const MAX_SHIFT: usize = 6;
+    let backoff_ms = BASE_MS << attempt.min(MAX_SHIFT);
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() as u64)
+        .unwrap_or_default()
+        % backoff_ms;
+    std::time::Duration::from_millis(backoff_ms + jitter_ms)
+}
+
+/// 列出项目 `*000` 目录下需要解析的库文件。
+///
+/// 只保留普通文件：目录名不含 `.` 时会混进来，而 Windows 上 `File::open` 打开目录
+/// 返回 PermissionDenied，会让整个解析任务 panic。同名时 `_0001` 抽取库优先于基础库。
+fn collect_project_db_files(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let target_dir = std::fs::read_dir(project_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("000"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("项目目录下没有 *000 数据库目录: {}", project_dir.display())
+        })?;
+
+    let mut file_map: HashMap<String, PathBuf> = HashMap::new();
+    for path in std::fs::read_dir(target_dir)?.filter_map(|entry| entry.ok().map(|e| e.path())) {
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.contains('.') {
+            continue;
+        }
+        match file_name.strip_suffix("_0001") {
+            Some(base_name) => {
+                file_map.insert(base_name.to_string(), path);
+            }
+            None => {
+                file_map.entry(file_name.to_string()).or_insert(path);
+            }
+        }
+    }
+    Ok(file_map.into_values().collect())
+}
+
+/// 收尾写入管线：先关闭 sender、排空 writer 任务，再决定这次同步的成败。
+///
+/// 顺序是关键。解析任务失败时如果提前返回，已经解析好的数据会连同没人消费的通道
+/// 一起被丢弃，日志却停在「开始保存pe数量」，看起来像成功。
+async fn finish_write_pipeline(
+    sender: flume::Sender<SenderJsonsData>,
+    mut insert_handles: FuturesUnordered<tokio::task::JoinHandle<(usize, Vec<String>)>>,
+    parser_outcome: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    drop(sender);
+    let mut write_error_count = 0usize;
+    let mut write_error_samples: Vec<String> = Vec::new();
+    while let Some(result) = insert_handles.next().await {
+        match result {
+            Ok((count, samples)) => {
+                write_error_count += count;
+                for sample in samples {
+                    if write_error_samples.len() < 3 {
+                        write_error_samples.push(sample);
+                    }
+                }
+            }
+            Err(error) => {
+                write_error_count += 1;
+                if write_error_samples.len() < 3 {
+                    write_error_samples.push(format!("writer task join failed: {error}"));
+                }
+            }
+        }
+    }
+    parser_outcome?;
+    if write_error_count > 0 {
+        anyhow::bail!(
+            "baseline SurrealDB write failed {write_error_count} time(s); samples: {}",
+            write_error_samples.join("; ")
+        );
+    }
+    Ok(())
+}
+
+async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: usize = 16;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let result = async {
+            SUL_DB
+                .query(sql)
+                .await
+                .map_err(|error| anyhow::anyhow!("{context} transport failed: {error}"))?
+                .check()
+                .map_err(|error| anyhow::anyhow!("{context} statement failed: {error}"))?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < MAX_ATTEMPTS
+                    && is_retryable_surreal_write_error(&error.to_string()) =>
+            {
+                tokio::time::sleep(conflict_retry_backoff(attempt)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded retry loop always returns")
+}
+
+fn record_write_error(
+    total: &mut usize,
+    samples: &mut Vec<String>,
+    context: &str,
+    error: anyhow::Error,
+) {
+    *total += 1;
+    if samples.len() < 3 {
+        samples.push(format!("{context}: {error}"));
+    }
+}
+
+#[derive(Deserialize)]
+struct PeStatRow {
+    key: String,
+    // Legacy/baseline PE rows can predate per-element session tracking.
+    sesno: Option<i32>,
+}
+
+#[cfg(test)]
+mod pe_stat_row_tests {
+    use super::PeStatRow;
+
+    #[test]
+    fn legacy_null_session_is_accepted() {
+        let row: PeStatRow =
+            serde_json::from_value(serde_json::json!({"key": "24384_22403", "sesno": null}))
+                .unwrap();
+
+        assert_eq!(row.sesno.unwrap_or_default(), 0);
+    }
+}
+
+pub(crate) async fn rebuild_dbnum_info_from_pe(
+    dbnum: u32,
+    file_name: &str,
+    db_type: &str,
+) -> anyhow::Result<usize> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT record::id(id) AS key, sesno FROM pe WHERE dbnum = {dbnum};"
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("read PE stats dbnum={dbnum} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("read PE stats dbnum={dbnum} statement failed: {error}")
+        })?;
+    let rows: Vec<PeStatRow> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode PE stats dbnum={dbnum} failed: {error}"))?;
+
+    let mut by_ref0: BTreeMap<u64, (usize, i32, u64)> = BTreeMap::new();
+    for row in &rows {
+        let sesno = row.sesno.unwrap_or_default();
+        let (ref0, ref1) = row
+            .key
+            .split_once('_')
+            .ok_or_else(|| anyhow::anyhow!("invalid PE record id: {}", row.key))?;
+        let ref0 = ref0.parse::<u64>()?;
+        let ref1 = ref1.parse::<u64>()?;
+        by_ref0
+            .entry(ref0)
+            .and_modify(|(count, max_sesno, max_ref1)| {
+                *count += 1;
+                *max_sesno = (*max_sesno).max(sesno);
+                *max_ref1 = (*max_ref1).max(ref1);
+            })
+            .or_insert((1, sesno, ref1));
+    }
+
+    execute_surreal_checked(
+        &format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
+        &format!("reset dbnum_info_table dbnum={dbnum}"),
+    )
+    .await?;
+    let file_name = file_name.replace('\'', "\\'");
+    let db_type = db_type.replace('\'', "\\'");
+    for (ref0, (count, max_sesno, max_ref1)) in by_ref0 {
+        execute_surreal_checked(
+            &format!(
+                "UPSERT dbnum_info_table:{ref0} SET dbnum = {dbnum}, count = {count}, \
+                 sesno = {max_sesno}, max_ref1 = {max_ref1}, \
+                 file_name = '{file_name}', db_type = '{db_type}';"
+            ),
+            &format!("rebuild dbnum_info_table dbnum={dbnum} ref0={ref0}"),
+        )
+        .await?;
+    }
+    Ok(rows.len())
 }
 
 #[cfg(feature = "sql")]
@@ -70,8 +294,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&pool)
-        .await?;
+    .execute(&pool)
+    .await?;
     Ok(())
 }
 
@@ -85,9 +309,9 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-            .as_str(),
+        .as_str(),
     )
-        .await?;
+    .await?;
 
     //todo 改成一对多的实现
     let mut sql = String::new();
@@ -149,7 +373,6 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// 初始化同步pdms数据到数据
 /// , progress_sender: Sender<i32>
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
@@ -196,7 +419,12 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     dbg!("执行多线程解析");
     let proj_progress_chunk = 80 / db_option.included_projects.len();
     // 遍历所有包含的项目
-    for project in &db_option.included_projects {
+    for (proj_idx, project) in db_option.included_projects.iter().enumerate() {
+        // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/GLB/GLOB)只解析「主项目」——
+        // included_projects 的第一个即主项目。依赖项目(如 AvevaCatalogue)的 SYS 与主项目
+        // 共用 dbnum 8191，若也解析会经 check_and_clear_db(8191) 把主项目刚写的设计 MDB 清掉、
+        // 导致 get_world_refno 取不到设计库。故 SYS 仅在 proj_idx==0 解析；DESI/CATA 仍按各项目解析。
+        let is_main_project = proj_idx == 0;
         let debug_refnos: Vec<RefU64> = db_option
             .debug_root_refnos
             .as_ref()
@@ -209,7 +437,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         //debug 不保存数据，只复杂查看属性值
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
-        if is_debug || db_option.only_sync_sys || db_option.total_sync {
+        if is_main_project && (is_debug || db_option.only_sync_sys || db_option.total_sync) {
             // let progress_sender = progress_sender.clone();
             match sync_total_async_threaded(
                 &db_option,
@@ -219,15 +447,16 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 // progress_sender,
                 proj_progress_chunk,
             )
-                .await
+            .await
             {
                 Ok(_) => {
                     // 同步数据成功
                     println!("同步UDA和SYS数据成功。");
                 }
                 Err(e) => {
-                    // 同步数据失败，打印错误信息
-                    println!("{}", e.to_string());
+                    // 只打印会让「一条数据都没入库」的运行看起来是成功的，后续的 DESI 解析
+                    // 又依赖这批 SYS 数据，必须直接失败。
+                    return Err(e.context(format!("同步 {project} 的 UDA/SYS 数据失败")));
                 }
             }
         }
@@ -245,15 +474,14 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // progress_sender,
             proj_progress_chunk,
         )
-            .await
+        .await
         {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
             }
             Err(e) => {
-                // 同步数据失败，打印错误信息
-                println!("{}", e.to_string());
+                return Err(e.context(format!("同步 {project} 的 DESI/CATA 数据失败")));
             }
         }
     }
@@ -275,7 +503,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 pub async fn define_dbnum_event() -> anyhow::Result<()> {
     let event_sql = r#"
@@ -360,7 +587,8 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -374,12 +602,18 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
 }
 
 pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
-    let sql = format!("SELECT value id FROM only pe WHERE dbnum = {} limit 1", db_no);
+    let sql = format!(
+        "SELECT value id FROM only pe WHERE dbnum = {} limit 1",
+        db_no
+    );
     let mut response = SUL_DB.query(&sql).await.expect("check db exists failed");
     use surrealdb::sql::Thing;
     let db_exists: Option<Thing> = response.take(0).unwrap();
     if db_exists.is_some() {
-        println!("Database with dbnum {} already exists in pe table. Will override with new data.", db_no);
+        println!(
+            "Database with dbnum {} already exists in pe table. Will override with new data.",
+            db_no
+        );
         println!("开始删除已有的dbnum {db_no} 的数据");
         let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
                                     delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
@@ -399,7 +633,7 @@ pub async fn sync_total_async_threaded(
     db_types: &[&str],
     // progress_sender: Sender<i32>,
     proj_progress_chunk: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HashMap<u32, usize>> {
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
@@ -410,45 +644,12 @@ pub async fn sync_total_async_threaded(
         // 如果项目目录不存在，则抛出错误
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
-    let mut children_files = {
-        // 获取子文件列表
-        let target_dir = std::fs::read_dir(&project_dir)
-            .unwrap()
-            .into_iter()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                entry.path()
-            })
-            .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
-            .unwrap();
-        std::fs::read_dir(target_dir)?
-            .into_iter()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                entry.path()
-            })
-            .collect::<Vec<PathBuf>>()
-    };
-    // 处理文件名_0001和文件名同时存在的情况
-    let mut file_map = HashMap::new();
-    for path in children_files.iter() {
-        let file_name = path.file_stem().unwrap().to_str().unwrap();
-        if let Some(base_name) = file_name.strip_suffix("_0001") {
-            file_map.insert(base_name.to_string(), path.clone());
-        } else {
-            // 只有当没有_0001版本时才插入普通版本
-            if !file_map.contains_key(file_name) {
-                file_map.insert(file_name.to_string(), path.clone());
-            }
-        }
-    }
-
-    // 更新children_files只包含需要处理的文件
-    children_files = file_map.into_values().collect();
+    let children_files = collect_project_db_files(Path::new(&project_dir))?;
     // println!("需要处理的文件: {:?}", &children_files);
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
+    #[cfg(feature = "sql")]
     let mgr = AiosDBMgr::init_from_db_option().await?;
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
@@ -462,20 +663,29 @@ pub async fn sync_total_async_threaded(
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
     #[cfg(feature = "sql")]
-        let pool = mgr.get_project_pools().await.unwrap_or_default();
+    let pool = mgr.get_project_pools().await.unwrap_or_default();
 
-    const CHUNK_SIZE: usize = 100;
-    // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-    let (sender, receiver) = flume::unbounded();
+    // Apply backpressure while parsing large single-file baselines. An
+    // unbounded queue can retain every pending Surreal INSERT payload and
+    // exhaust the interactive viewer process before the workers catch up.
+    let (sender, receiver) = flume::bounded(BASELINE_QUEUE_CAPACITY);
 
     let mut insert_handles = FuturesUnordered::new();
-    for i in 0..16 {
+    // SurrealDB 2.1 uses optimistic transactions. Unbounded same-table
+    // concurrency caused silent write loss; one global writer was correct but
+    // too slow for 7997. Use bounded concurrency plus checked conflict retries.
+    for _ in 0..BASELINE_WRITE_WORKERS {
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]
-            let pools_clone = pool.clone();
+        let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
-            let mut record_stream = receiver.into_stream().chunks(200);
+            // Must remain below the bounded channel capacity (100). With one
+            // correctness-first writer, chunks(200) waits for 200 messages
+            // while the producer blocks after 100: a deterministic deadlock.
+            let mut record_stream = receiver.into_stream().chunks(BASELINE_WRITE_WINDOW);
+            let mut error_count = 0usize;
+            let mut error_samples = Vec::new();
             // let mut cnt = 0;
             while let Some(stream) = record_stream.next().await {
                 // while let Ok(data) = receiver.recv_async().await {
@@ -484,10 +694,15 @@ pub async fn sync_total_async_threaded(
                         SenderJsonsData::PEJson(pes) => {
                             if !pes.is_empty() {
                                 let sql = format!("INSERT IGNORE INTO pe [{}]", pes.join(","));
-                                // println!("pe sql: {}", sql);
-                                if let Err(e) = SUL_DB.query(&sql).await {
-                                    dbg!(sql);
-                                    dbg!(&e);
+                                if let Err(error) =
+                                    execute_surreal_checked(&sql, "insert PE batch").await
+                                {
+                                    record_write_error(
+                                        &mut error_count,
+                                        &mut error_samples,
+                                        "PE",
+                                        error,
+                                    );
                                 }
                             }
                         }
@@ -497,9 +712,15 @@ pub async fn sync_total_async_threaded(
                                     "INSERT RELATION INTO pe_owner [{}]",
                                     relates.join(",")
                                 );
-                                if let Err(e) = SUL_DB.query(&sql).await {
-                                    dbg!(sql);
-                                    dbg!(&e);
+                                if let Err(error) =
+                                    execute_surreal_checked(&sql, "insert pe_owner batch").await
+                                {
+                                    record_write_error(
+                                        &mut error_count,
+                                        &mut error_samples,
+                                        "pe_owner",
+                                        error,
+                                    );
                                 }
                             }
                         }
@@ -507,18 +728,15 @@ pub async fn sync_total_async_threaded(
                             if !atts.is_empty() {
                                 let sql =
                                     format!("INSERT IGNORE INTO {} [{}]", table, atts.join(","));
-                                // println!("att sql is {}", &sql);
-                                if let Err(e) = SUL_DB.query(&sql).await {
-                                    dbg!(sql);
-                                    dbg!(&e);
-                                }
-                            }
-                        }
-                        SenderJsonsData::DbnumInfoUpdate(updates) => {
-                            if !updates.is_empty() {
-                                // 使用UPSERT语法来更新或插入dbnum_info_table记录
-                                for update in updates {
-                                    SUL_DB.query(update).await.expect("upsert dbnum_info failed");
+                                if let Err(error) =
+                                    execute_surreal_checked(&sql, "insert attribute batch").await
+                                {
+                                    record_write_error(
+                                        &mut error_count,
+                                        &mut error_samples,
+                                        &format!("attribute table {table}"),
+                                        error,
+                                    );
                                 }
                             }
                         }
@@ -540,9 +758,7 @@ pub async fn sync_total_async_threaded(
                     }
                 }
             }
-            // if cnt > 0 {
-            //     println!("thread {i} Imported records: {}", cnt);
-            // }
+            (error_count, error_samples)
         });
         insert_handles.push(insert_handle);
     }
@@ -553,15 +769,16 @@ pub async fn sync_total_async_threaded(
         .collect::<Vec<_>>();
     let is_parse_sys = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
-    let is_sync_history = db_option.is_sync_history();
     let is_total_sync = db_option.total_sync;
     let sync_versioned = db_option.sync_versioned.unwrap_or(false);
 
     let sender_clone = sender.clone();
+    let parsed_db_infos = Arc::new(DashMap::<u32, (String, String, usize)>::new());
+    let parsed_db_infos_for_parser = parsed_db_infos.clone();
     let children_files_len = children_files.len();
     let db_file_progress_chunk = (proj_progress_chunk as f32 / children_files_len as f32) as usize;
     // let progress_sender_clone = progress_sender.clone();
-    tokio::spawn(async move {
+    let parser_outcome = tokio::spawn(async move {
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         // let mut db_info_sql = vec![];
         for path in children_files {
@@ -572,13 +789,19 @@ pub async fn sync_total_async_threaded(
             let dbno_set = cur_dbno_set.clone();
             let mut time = Instant::now();
             // dbg!(&file_name);
-            if (is_parse_sys && is_total_sync) ||
-                db_option_arc.included_db_files.is_none()
+            // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/GLB/GLOB)必须从其专属文件(amssys 等)解析，
+            // 不应受 included_db_files 过滤——它列的是 DESI/CATA 数据库文件，从不含 SYS 文件。
+            // 旧条件 `is_parse_sys && is_total_sync` 使得 only_sync_sys(非 total_sync) 下 SYS 文件被
+            // included_db_files 过滤掉、静默跳过 → 设计 MDB/CURD/DB 建不起来。改为 is_parse_sys 即可：
+            // SYS 同步始终遍历全部文件，再由下方 db_type 过滤只留 SYS 文件。DESI/CATA 同步(is_parse_sys=false)
+            // 行为不变、仍受 included_db_files 约束。
+            if is_parse_sys
+                || db_option_arc.included_db_files.is_none()
                 || db_option_arc
-                .included_db_files
-                .as_ref()
-                .unwrap()
-                .contains(&file_name)
+                    .included_db_files
+                    .as_ref()
+                    .unwrap()
+                    .contains(&file_name)
             {
                 if !is_total_sync {
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
@@ -630,28 +853,35 @@ pub async fn sync_total_async_threaded(
                         } else {
                             continue;
                         }
-                        if is_sync_history {
-                            //同步历史纪录
-                            io.sync_history().await.unwrap();
-                            //同步完历史纪录就返回
-                            continue;
-                        } else {
-                            //存储所有refno sesno map
-                            io.store_all_refno_sesno_map().await.unwrap();
-                        }
+                        // 只保留最新数据：不再写历史/版本表（sessions/element_changes/pe_ses_h/ses/pe VERSION）。
+                        // ses_range_map 已由 io.open() 构建，无需 store_all_refno_sesno_map。
                         //获取sesno range
                         ses_range_map = io.ses_range_map;
                     }
                 }
 
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
-                let mut db_basic = parse_file_db_basic_data(
+                // 解析失败绝不能退化成“空库”：`unwrap_or_default()` 会让本文件以 0 元素
+                // 计入 parsed_db_infos，基线层据此认定合法空库并推进 applied_sesno，
+                // 于是整个 dbnum 被静默跳过。跳过本文件、不登记结果，让基线层以
+                // “解析未返回目标文件结果”显式失败。
+                let mut db_basic = match parse_file_db_basic_data(
                     &path,
                     &file_name,
                     project_name.clone().as_str(),
-                )
-                    .unwrap_or_default();
-                let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
+                ) {
+                    Ok(db_basic) => db_basic,
+                    Err(error) => {
+                        println!("解析 {file_name} 失败，跳过该文件: {error:#}");
+                        continue;
+                    }
+                };
+                let all_refnos = db_basic
+                    .children_map
+                    .keys()
+                    .filter(|refno| **refno != db_basic.world_refno)
+                    .cloned()
+                    .collect::<Vec<_>>();
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
@@ -693,13 +923,15 @@ pub async fn sync_total_async_threaded(
                         &chunk_refnos,
                         &ses_range_map_clone,
                         ignore_world_refno,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(PdmsDbData {
-                               total_attr_map,
-                               type_ele_map,
-                               db_no,
-                               ..
-                           }) => {
+                            total_attr_map,
+                            type_ele_map,
+                            db_no,
+                            ..
+                        }) => {
                             //类型暂时不多线程
                             let total_attr_map_arc = Arc::new(total_attr_map);
                             total_cnt += total_attr_map_arc.len();
@@ -715,30 +947,40 @@ pub async fn sync_total_async_threaded(
                                     &db_option_clone,
                                     sender_clone.clone(),
                                 )
-                                    .await
-                                    .expect("save pe to surreal failed");
+                                .await
+                                .expect("save pe to surreal failed");
                             }
                             if b_save_mysql {
                                 #[cfg(feature = "sql")]
-                                save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
-                                               &db_option_clone, db_no as i32).await;
+                                save_pes_mysql(
+                                    &db_basic_clone,
+                                    &project_name,
+                                    &total_attr_map_arc,
+                                    &pool,
+                                    &db_option_clone,
+                                    db_no as i32,
+                                )
+                                .await;
                             }
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
                                 let type_name = db1_dehash(noun as _);
+                                let refnos = kv.value().iter().copied().collect::<Vec<_>>();
+                                drop(kv);
                                 if type_name.is_empty() {
                                     continue;
                                 }
                                 //UDA 还是要单独存，不然数据很容易混乱
-                                for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
-                                {
+                                for refnos in refnos.chunks(db_option_clone.att_chunk as _) {
                                     let mut json_vec = vec![];
                                     let mut uda_json_vec = vec![];
                                     for refno in refnos {
                                         let att = total_attr_map_arc.get(refno).unwrap();
                                         //调试时，只解析这个单独的refno
                                         if is_debug {
-                                            if debug_refnos.contains(&att.get_refno_or_default().refno()) {
+                                            if debug_refnos
+                                                .contains(&att.get_refno_or_default().refno())
+                                            {
                                                 dbg!(att.value());
                                             } else {
                                                 continue;
@@ -758,13 +1000,23 @@ pub async fn sync_total_async_threaded(
                                     }
                                     if is_save_db {
                                         if !json_vec.is_empty() {
-                                            sender_clone.send(SenderJsonsData::AttJson((type_name.clone(), json_vec)))
+                                            sender_clone
+                                                .send_async(SenderJsonsData::AttJson((
+                                                    type_name.clone(),
+                                                    json_vec,
+                                                )))
+                                                .await
                                                 .expect("send attmap sql failed");
                                         }
 
                                         if !uda_json_vec.is_empty() {
                                             // dbg!(&uda_json_vec);
-                                            sender_clone.send(SenderJsonsData::AttJson(("ATT_UDA".to_string(), uda_json_vec)))
+                                            sender_clone
+                                                .send_async(SenderJsonsData::AttJson((
+                                                    "ATT_UDA".to_string(),
+                                                    uda_json_vec,
+                                                )))
+                                                .await
                                                 .expect("send attmap sql failed");
                                         }
                                     }
@@ -777,7 +1029,13 @@ pub async fn sync_total_async_threaded(
                     }
                 }
 
-                println!("解析任务完成, 耗时: {} s, 总数量: {}", time.elapsed().as_secs_f32(), total_cnt);
+                println!(
+                    "解析任务完成, 耗时: {} s, 总数量: {}",
+                    time.elapsed().as_secs_f32(),
+                    total_cnt
+                );
+                parsed_db_infos_for_parser
+                    .insert(db_no, (file_name.clone(), db_type.clone(), total_cnt));
             }
             //单个文件多线程
             // if !handles.is_empty() {
@@ -796,17 +1054,26 @@ pub async fn sync_total_async_threaded(
         // if !db_info_sql.is_empty() {
         //     SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         // }
-    }).await.unwrap();
-    drop(sender);
-    // insert_handles.push(parse_handle);
-    while let Some(result) = insert_handles.next().await {
-        // 处理每个完成的 future 的结果
-        // dbg!(&result);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("baseline parser task failed: {error}"))
+    .and_then(|inner| inner);
+    finish_write_pipeline(sender, insert_handles, parser_outcome).await?;
+    if is_total_sync && is_save_db {
+        for entry in parsed_db_infos.iter() {
+            let dbnum = *entry.key();
+            let (file_name, db_type, _) = entry.value();
+            rebuild_dbnum_info_from_pe(dbnum, file_name, db_type).await?;
+        }
     }
     // all_handles.push(parse_handle);
     // futures::future::join_all(take(&mut all_handles)).await;
     // futures::future::join_all(&mut [parse_handle]).await;
-    Ok(())
+    Ok(parsed_db_infos
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().2))
+        .collect())
 }
 
 /// 给对应类型的参考号赋上 uda 默认值
@@ -884,4 +1151,139 @@ async fn test_threads() {
     for v in Arc::try_unwrap(map).unwrap() {
         dbg!(v);
     }
+}
+
+#[test]
+fn surreal_write_conflicts_are_retryable_but_syntax_errors_are_not() {
+    assert!(is_retryable_surreal_write_error(
+        "Failed to commit transaction due to a read or write conflict. This transaction can be retried"
+    ));
+    assert!(!is_retryable_surreal_write_error(
+        "Parse error: unexpected token"
+    ));
+}
+
+#[test]
+fn baseline_writer_window_is_smaller_than_bounded_queue() {
+    assert!(BASELINE_WRITE_WINDOW < BASELINE_QUEUE_CAPACITY);
+    assert!(BASELINE_WRITE_WORKERS <= BASELINE_WRITE_WINDOW);
+}
+
+#[cfg(test)]
+fn make_temp_dir(tag: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("gen-model-{tag}-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn collect_project_db_files_skips_directories_and_prefers_extract_copy() {
+    let root = make_temp_dir("dbfiles");
+    let db_dir = root.join("TES000");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    // 目录名不含 `.` 时会被当成待解析文件，Windows 上 File::open 打开目录返回
+    // PermissionDenied，整个解析任务会 panic。
+    std::fs::create_dir_all(db_dir.join("新建文件夹")).unwrap();
+    for name in ["tes1002", "tes1002_0001", "tes1008", "tes1008.bak"] {
+        std::fs::write(db_dir.join(name), b"stub").unwrap();
+    }
+
+    let mut files = collect_project_db_files(&root).unwrap();
+    files.sort();
+    let names = files
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec!["tes1002_0001", "tes1008"]);
+    assert!(files.iter().all(|path| path.is_file()));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn conflict_retry_backoff_grows_exponentially_and_caps() {
+    for attempt in [1usize, 2, 3, 6, 12] {
+        let base_ms = 25u64 << attempt.min(6);
+        let waited = conflict_retry_backoff(attempt).as_millis() as u64;
+        assert!(
+            (base_ms..base_ms * 2).contains(&waited),
+            "第 {attempt} 次重试等待 {waited}ms，期望落在 [{base_ms}, {})",
+            base_ms * 2
+        );
+    }
+    // 线性退避会让并发写入器同步重试、一起再撞上，必须是指数增长。
+    assert!(conflict_retry_backoff(4).as_millis() >= conflict_retry_backoff(1).as_millis() * 2);
+}
+
+#[tokio::test]
+async fn finish_write_pipeline_drains_writers_before_surfacing_parser_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const MESSAGES: usize = 8;
+    let (sender, receiver) = flume::bounded::<SenderJsonsData>(MESSAGES);
+    for i in 0..MESSAGES {
+        sender
+            .send(SenderJsonsData::PEJson(vec![format!("pe-{i}")]))
+            .unwrap();
+    }
+
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let writer_consumed = consumed.clone();
+    let mut handles = FuturesUnordered::new();
+    handles.push(tokio::task::spawn(async move {
+        // 先歇一会儿：不等待 writer 就返回的实现，此刻计数一定还是 0。
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let mut seen = 0usize;
+        while receiver.recv_async().await.is_ok() {
+            seen += 1;
+        }
+        writer_consumed.store(seen, Ordering::SeqCst);
+        (0usize, Vec::<String>::new())
+    }));
+
+    let error = finish_write_pipeline(sender, handles, Err(anyhow::anyhow!("parse boom")))
+        .await
+        .expect_err("解析失败必须向上报错，不能被当成同步成功");
+
+    assert!(error.to_string().contains("parse boom"));
+    assert_eq!(
+        consumed.load(Ordering::SeqCst),
+        MESSAGES,
+        "解析失败时也要先排空 writer，否则已解析的数据会被静默丢弃"
+    );
+}
+
+#[tokio::test]
+async fn finish_write_pipeline_reports_writer_errors_when_parsing_succeeded() {
+    let (sender, receiver) = flume::bounded::<SenderJsonsData>(1);
+    let mut handles = FuturesUnordered::new();
+    handles.push(tokio::task::spawn(async move {
+        while receiver.recv_async().await.is_ok() {}
+        (2usize, vec!["conflict on pe".to_string()])
+    }));
+
+    let error = finish_write_pipeline(sender, handles, Ok(()))
+        .await
+        .expect_err("写入失败不能被当成同步成功");
+    assert!(error.to_string().contains("conflict on pe"));
+    assert!(error.to_string().contains("2 time(s)"));
+}
+
+#[tokio::test]
+async fn finish_write_pipeline_succeeds_when_parser_and_writers_are_clean() {
+    let (sender, receiver) = flume::bounded::<SenderJsonsData>(1);
+    let mut handles = FuturesUnordered::new();
+    handles.push(tokio::task::spawn(async move {
+        while receiver.recv_async().await.is_ok() {}
+        (0usize, Vec::<String>::new())
+    }));
+
+    finish_write_pipeline(sender, handles, Ok(()))
+        .await
+        .unwrap();
 }
