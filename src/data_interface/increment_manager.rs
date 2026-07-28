@@ -1633,7 +1633,12 @@ impl AiosDBManager {
         //
         // replace_exist 必须传 true：默认的 replace_mesh=false 会给 SQL 追加 `and aabb=none`，
         // 而这条路径上的元素全都已经有包围盒，会被整批跳过。
-        let aabb_changes = update_inst_relate_aabbs_by_refnos(&refnos_vec, true).await?;
+        let aabb_changes = update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+            &refnos_vec,
+            true,
+            self.db_option.gen_spatial_tree,
+        )
+        .await?;
 
         // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」，房间归属必须跟着重算
         // （ADR-010 §4）。只有包围盒**确实变了**的才入队：这条路径上的元素常常是被

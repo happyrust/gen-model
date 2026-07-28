@@ -136,6 +136,10 @@ pub async fn gen_meshes_in_db(
         .as_ref()
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
+    let maintain_spatial_tree = option
+        .as_ref()
+        .map(|x| x.gen_spatial_tree)
+        .unwrap_or_else(|| get_db_option().gen_spatial_tree);
     // let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -154,7 +158,12 @@ pub async fn gen_meshes_in_db(
         //     time.elapsed().as_millis()
         // );
         // let time = std::time::Instant::now();
-        update_inst_relate_aabbs_by_refnos(chunk, replace_exist).await?;
+        update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+            chunk,
+            replace_exist,
+            maintain_spatial_tree,
+        )
+        .await?;
         // println!(
         //     "update_inst_relate_aabbs finished: {} ms",
         //     time.elapsed().as_millis()
@@ -213,6 +222,10 @@ pub async fn process_meshes_update_db(
         .as_ref()
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
+    let maintain_spatial_tree = option
+        .as_ref()
+        .map(|x| x.gen_spatial_tree)
+        .unwrap_or_else(|| get_db_option().gen_spatial_tree);
     let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -226,7 +239,12 @@ pub async fn process_meshes_update_db(
         time.elapsed().as_millis()
     );
     let time = std::time::Instant::now();
-    update_inst_relate_aabbs_by_refnos(&refnos, replace_exist).await?;
+    update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+        &refnos,
+        replace_exist,
+        maintain_spatial_tree,
+    )
+    .await?;
     println!(
         "update_inst_relate_aabbs finished: {} ms",
         time.elapsed().as_millis()
@@ -325,8 +343,12 @@ pub async fn process_meshes_update_db_deep(
                 // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
                 // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
                 // 是同一个理由（ADR-010 D2）。
-                let aabb_changes =
-                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
+                let aabb_changes = update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+                    &update_refnos,
+                    true,
+                    dboption.gen_spatial_tree,
+                )
+                .await?;
                 // 几何重生成后包围盒变了 → 房间归属可能变（ADR-010 §4）。房间任务是
                 // `drain` 的第三阶段，排在本轮 regen 之后，因此在这里入队正好被它捡起。
                 //
@@ -748,6 +770,14 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     refnos: &[RefnoEnum],
     replace_exist: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
+    update_inst_relate_aabbs_by_refnos_with_spatial_tree(refnos, replace_exist, true).await
+}
+
+pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+    refnos: &[RefnoEnum],
+    replace_exist: bool,
+    maintain_spatial_tree: bool,
+) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
     let mut changes = Vec::new();
     for chunk in refnos.chunks(CHUNK) {
@@ -825,6 +855,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         utils::save_aabb_to_surreal(&chunk_aabbs).await?;
         if !update_sql.is_empty() {
             execute_surreal_checked(&update_sql, "update inst_relate aabb pointers").await?;
+        }
+        // 关闭房间空间树时仍要保留数据库 AABB 真值，但不维护一棵不会加载、对账或查询
+        // 的内存树。重新开启该功能需要重启，启动路径会用数据库记录重建并对账空间树。
+        if !maintain_spatial_tree {
+            continue;
         }
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
         // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入
@@ -1332,6 +1367,9 @@ mod aabb_write_order_tests {
         let pointers_at = body
             .find("update inst_relate aabb pointers")
             .expect("pointer update missing");
+        let spatial_gate_at = body
+            .find("if !maintain_spatial_tree")
+            .expect("spatial-tree disabled fast path missing");
         let tree_at = body
             .find("GLOBAL_AABB_TREE.write()")
             .expect("tree update missing");
@@ -1341,7 +1379,7 @@ mod aabb_write_order_tests {
             "aabb 记录必须先于指针落库，否则指针会指向缺位记录"
         );
         assert!(
-            pointers_at < tree_at,
+            pointers_at < spatial_gate_at && spatial_gate_at < tree_at,
             "内存树必须在本块 DB 写入全部成功之后才动，失败块不得留下树新库旧的半掺状态"
         );
     }
