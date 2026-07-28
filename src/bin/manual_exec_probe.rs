@@ -14,12 +14,16 @@ use aios_database::data_interface::tidb_manager::AiosDBManager;
 async fn main() -> anyhow::Result<()> {
     let project = std::env::args()
         .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: manual_exec_probe <project>"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: manual_exec_probe <project> [mdb]"))?;
+    // 第二个参数是本期执行范围照哪个 MDB 解，省略则用 DbOption.toml 的 mdb_name。
+    let mdb = std::env::args().nth(2);
 
     aios_core::init_test_surreal().await?;
     let manager = Arc::new(AiosDBManager::init_form_config().await?);
 
-    let receipt = manager.enqueue_manual_update(&project).await;
+    let receipt = manager
+        .enqueue_manual_update(&project, mdb.as_deref())
+        .await;
     println!("ENQUEUE-RECEIPT-JSON|{}", serde_json::to_string(&receipt)?);
 
     let ran = drain_queue_until_empty(&manager).await;

@@ -16,10 +16,61 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
+
+/// The immutable project identity served by this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceIdentity {
+    pub project: String,
+    pub mdb: String,
+    pub namespace: String,
+}
+
+impl ServiceIdentity {
+    pub fn new(project: impl Into<String>, mdb: &str, namespace: impl Into<String>) -> Self {
+        Self {
+            project: project.into().trim().to_owned(),
+            mdb: aios_core::helper::to_e3d_name(mdb.trim()).into_owned(),
+            namespace: namespace.into().trim().to_owned(),
+        }
+    }
+
+    /// Missing values preserve the legacy “use server defaults” contract.
+    /// Explicit values must identify this process before any scan or write starts.
+    pub fn validate(
+        &self,
+        project: Option<&str>,
+        mdb: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let requested_mdb = mdb.map(|value| {
+            aios_core::helper::to_e3d_name(value.trim())
+                .into_owned()
+        });
+        for (label, requested, expected) in [
+            ("project", project.map(str::trim), self.project.as_str()),
+            ("mdb", requested_mdb.as_deref(), self.mdb.as_str()),
+            (
+                "namespace",
+                namespace.map(str::trim),
+                self.namespace.as_str(),
+            ),
+        ] {
+            if let Some(requested) = requested
+                && requested != expected
+            {
+                return Err(ApiError::identity_mismatch(format!(
+                    "请求的 {label}={requested} 与模型服务 {label}={expected} 不一致"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
 
 /// 各 handler 共享的服务状态。
 ///
@@ -29,8 +80,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 pub struct AppState {
     pub mgr: Arc<AiosDBManager>,
     pub tasks: &'static TaskRegistry,
-    /// 请求未显式指定项目时的缺省项目名（取 `DbOption.project_name`）。
-    pub default_project: String,
+    pub identity: ServiceIdentity,
     pub sync_live: bool,
 }
 
@@ -95,6 +145,14 @@ impl ApiError {
         }
     }
 
+    pub fn identity_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "identity_mismatch",
+            message: message.into(),
+        }
+    }
+
     /// 领域层 `anyhow::Error` 的统一映射：`sync_live` 前置条件拒绝归为 422，其余 500。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
@@ -144,9 +202,15 @@ pub async fn serve(
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
-        default_project: db_option.project_name.clone(),
+        identity: ServiceIdentity::new(
+            db_option.project_name.clone(),
+            &db_option.mdb_name,
+            db_option.surreal_ns.clone(),
+        ),
         sync_live: db_option.sync_live.unwrap_or(false),
     };
+    let ui_root =
+        std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into());
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -161,6 +225,8 @@ pub async fn serve(
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))
         .route("/api/v1/ws", get(ws::ws_handler))
+        .nest_service("/assets/meshes", ServeDir::new("assets/meshes"))
+        .fallback_service(ServeDir::new(ui_root).append_index_html_on_directories(true))
         .layer(build_cors(cors_origins))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -185,6 +251,47 @@ fn build_cors(origins: Option<Vec<String>>) -> CorsLayer {
                 .allow_origin(parsed)
                 .allow_methods(Any)
                 .allow_headers(Any)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity() -> ServiceIdentity {
+        ServiceIdentity::new("AvevaMarineSample", "ALL", "1516")
+    }
+
+    #[test]
+    fn service_identity_accepts_legacy_defaults_and_canonical_mdb() {
+        let identity = identity();
+
+        assert_eq!(identity.mdb, "/ALL");
+        assert!(identity.validate(None, None, None).is_ok());
+        assert!(
+            identity
+                .validate(
+                    Some("AvevaMarineSample"),
+                    Some("ALL"),
+                    Some("1516")
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn service_identity_rejects_each_explicit_mismatch() {
+        let identity = identity();
+
+        for error in [
+            identity.validate(Some("OtherProject"), None, None),
+            identity.validate(None, Some("/OTHER"), None),
+            identity.validate(None, None, Some("9999")),
+        ] {
+            let error = error.expect_err("explicit mismatch must be rejected");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "identity_mismatch");
         }
     }
 }

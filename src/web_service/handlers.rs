@@ -12,19 +12,34 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::data_interface::manual_update::load_pending_model_units;
-use crate::data_interface::on_demand_model::UnresolvableRoot;
-use crate::web_service::{ApiError, AppState};
+use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
+use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ProjectReq {
     #[serde(default)]
     pub project: Option<String>,
+    /// 本期执行范围照哪个 MDB 解。缺省回落到服务端配置里的 `mdb_name`。
+    ///
+    /// 范围既然由 MDB 定，发起方就该说清自己开的是哪个 MDB：服务端与客户端
+    /// 各有一份 `DbOption.toml`，都写 `mdb_name = "ALL"` 纯属巧合，改一边不改
+    /// 另一边，界面显示的范围与真跑的范围会静默错开。
+    #[serde(default)]
+    pub mdb: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
-fn resolve_project(state: &AppState, requested: Option<String>) -> String {
-    requested
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| state.default_project.clone())
+fn resolve_identity<'a>(
+    state: &'a AppState,
+    requested: &ProjectReq,
+) -> Result<&'a ServiceIdentity, ApiError> {
+    state.identity.validate(
+        requested.project.as_deref(),
+        requested.mdb.as_deref(),
+        requested.namespace.as_deref(),
+    )?;
+    Ok(&state.identity)
 }
 
 /// GET /api/v1/health
@@ -33,15 +48,26 @@ fn resolve_project(state: &AppState, requested: Option<String>) -> String {
 /// 界面靠它说出「服务 xx:xx 重启过，这条队列是按水位重建的」；`gen_spatial_tree`
 /// 关着时房间增量一条不排，界面要说的是「房间增量没开」而不是画一条空泳道
 /// （ADR-011 §8 / rollout 服务端第 7 项）。
+///
+/// `worker_alive` / `worker_idle_secs` 回答的是「队列还有没有人在消费」。worker
+/// 由 `OnceLock` 只启动一次，死了就是永久死了、批次全停在 queued——而在此之前
+/// 这个端点会一路报 `status: ok`，外面分不出「大库在慢慢跑」和「消费者没了」。
+/// 两个字段要一起看：旗子立着而空转秒数很大 = 卡在长批次上；旗子倒了 = 真死了。
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (worker_alive, worker_idle_secs) =
+        crate::data_interface::batch_worker::worker_liveness();
     Json(json!({
         "status": "ok",
-        "project": state.default_project,
+        "project": state.identity.project,
+        "mdb": state.identity.mdb,
+        "namespace": state.identity.namespace,
         "sync_live": state.sync_live,
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "gen_spatial_tree": aios_core::get_db_option().gen_spatial_tree,
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
+        "worker_alive": worker_alive,
+        "worker_idle_secs": worker_idle_secs,
     }))
 }
 
@@ -50,10 +76,11 @@ pub async fn update_preview(
     State(state): State<AppState>,
     body: Option<Json<ProjectReq>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let project = resolve_project(&state, body.and_then(|b| b.0.project));
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let identity = resolve_identity(&state, &req)?;
     let preview = state
         .mgr
-        .preview_manual_update(&project)
+        .preview_manual_update(&identity.project, Some(&identity.mdb))
         .await
         .map_err(ApiError::from_domain)?;
     serde_json::to_value(&preview)
@@ -70,8 +97,15 @@ pub async fn update_execute(
     State(state): State<AppState>,
     body: Option<Json<ProjectReq>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = resolve_project(&state, body.and_then(|b| b.0.project));
-    let receipt = state.mgr.enqueue_manual_update(&project).await;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let identity = resolve_identity(&state, &req)?;
+    let mut receipt = state
+        .mgr
+        .enqueue_manual_update(&identity.project, Some(&identity.mdb))
+        .await;
+    receipt.project.clone_from(&identity.project);
+    receipt.mdb.clone_from(&identity.mdb);
+    receipt.namespace.clone_from(&identity.namespace);
     serde_json::to_value(&receipt)
         .map(|value| (StatusCode::ACCEPTED, Json(value)))
         .map_err(|e| ApiError::from_domain(e.into()))
@@ -121,6 +155,30 @@ pub struct EnsureModelReq {
     /// 只是画不出来的生成根直接回状态，不必每次显示都把生成再跑一遍。
     #[serde(default)]
     pub force: bool,
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+}
+
+async fn await_background_without_cancelling<F, T>(
+    timeout: Duration,
+    future: F,
+) -> Result<Result<T, tokio::task::JoinError>, tokio::time::error::Elapsed>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut task = tokio::spawn(future);
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(result) => Ok(result),
+        Err(elapsed) => {
+            tokio::spawn(async move {
+                if let Err(error) = task.await {
+                    log::error!("按需生成后台任务异常结束: {error}");
+                }
+            });
+            Err(elapsed)
+        }
+    }
 }
 
 /// POST /api/v1/model/ensure — 映射 `ensure_model_generated`（幂等同步，spec §4.5）。
@@ -128,6 +186,7 @@ pub async fn model_ensure(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
         return Err(ApiError::bad_request(format!(
             "refno 格式非法（应为 a/b，如 24381/100677）: {}",
@@ -135,16 +194,29 @@ pub async fn model_ensure(
         )));
     };
     let refno = RefnoEnum::from(refu);
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        state.mgr.ensure_model_generated(refno, req.force),
-    )
+    let mgr = state.mgr.clone();
+    let force = req.force;
+    let worker_refno = req.refno.clone();
+    let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
+        let result = mgr.ensure_model_generated(refno, force).await;
+        if let Err(error) = &result {
+            log::error!("按需生成后台失败 refno={worker_refno}: {error:#}");
+        }
+        result
+    })
     .await
     .map_err(|_| {
-        // 超时不取消后台生成；per-根锁保证重发幂等（spec §4.5）。
-        ApiError::timeout(format!("按需生成超时(120s)，可稍后重发: {}", req.refno))
-    })?
-    .map_err(ensure_error)?;
+        // 超时不取消后台生成；生成根忙时后续请求会收到 conflict，不会排队。
+        ApiError::timeout(format!(
+            "按需生成超时(120s)，后台继续执行，请稍后查询状态: {}",
+            req.refno
+        ))
+    })?;
+    let result = task_result
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("按需生成后台任务异常结束: {error}"))
+        })?
+        .map_err(ensure_error)?;
     serde_json::to_value(&result)
         .map(Json)
         .map_err(|e| ApiError::from_domain(e.into()))
@@ -154,6 +226,9 @@ pub async fn model_ensure(
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
+    if error.downcast_ref::<ModelGenerationInProgress>().is_some() {
+        return ApiError::conflict(message);
+    }
     match error.downcast_ref::<UnresolvableRoot>() {
         Some(UnresolvableRoot::Container) => ApiError::container(message),
         Some(UnresolvableRoot::NotFound) => ApiError::not_found(message),
@@ -181,10 +256,10 @@ pub async fn dbnums(
     State(state): State<AppState>,
     Query(query): Query<ProjectReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let project = resolve_project(&state, query.project);
+    let identity = resolve_identity(&state, &query)?;
     let report = state
         .mgr
-        .dbnum_statuses(&project)
+        .dbnum_statuses(&identity.project, Some(&identity.mdb))
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(json!({ "dbnums": report.dbnums, "warnings": report.warnings })))
@@ -223,4 +298,31 @@ pub async fn queue_resume(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(json!({ "paused": false })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timeout_does_not_cancel_background_work() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+
+        let result = await_background_without_cancelling(Duration::from_millis(1), async move {
+            let _ = release_rx.await;
+            let _ = completed_tx.send(());
+        })
+        .await;
+
+        assert!(result.is_err(), "the caller should observe the timeout");
+        release_tx
+            .send(())
+            .expect("background task should remain alive");
+        tokio::time::timeout(Duration::from_secs(1), completed_rx)
+            .await
+            .expect("background task should complete after caller timeout")
+            .expect("background task should signal completion");
+    }
+
 }

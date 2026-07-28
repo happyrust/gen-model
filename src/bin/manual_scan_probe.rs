@@ -1,4 +1,4 @@
-use aios_database::data_interface::dbnum_state::DbnumState;
+use aios_database::data_interface::dbnum_state::{DbnumState, FileAnomaly};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use pdms_io::io::PdmsIO;
 use std::path::PathBuf;
@@ -46,10 +46,10 @@ async fn main() -> anyhow::Result<()> {
     option.included_db_files = None;
     let manager = AiosDBManager::init(&option).await?;
 
-    let preview = manager.preview_manual_update(&project).await?;
+    let preview = manager.preview_manual_update(&project, None).await?;
     for db in preview.dbnums {
         println!(
-            "PROBE|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "PROBE|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             db.dbnum,
             db.db_type,
             db.applied_sesno,
@@ -59,6 +59,16 @@ async fn main() -> anyhow::Result<()> {
             db.net_modified,
             db.net_deleted,
             db.initialization_required,
+            db.blocked,
+            db.not_in_project,
+            match &db.anomaly {
+                None => "-",
+                Some(FileAnomaly::Rollback { .. }) => "rollback",
+                Some(FileAnomaly::PathMigrated { .. }) => "path_migrated",
+                Some(FileAnomaly::TypeChanged { .. }) => "type_changed",
+                Some(FileAnomaly::Duplicate { .. }) => "duplicate",
+                Some(FileAnomaly::Missing { .. }) => "missing",
+            },
         );
     }
     for warning in preview.warnings {

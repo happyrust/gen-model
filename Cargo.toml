@@ -125,7 +125,7 @@ toml = "0.8.19"
 pollster = "0.4.0"
 async-std = "1.13.1"
 axum = { version = "0.8.9", features = ["ws"], optional = true }
-tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
 
 [patch."https://gitee.com/happydpc/occt-rs.git"]
 opencascade = { path = "vendor/occt-rs/crates/opencascade" }
