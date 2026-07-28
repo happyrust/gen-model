@@ -60,8 +60,9 @@ mod tests {
     /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
     /// （file_name / file_path / file_size / file_latest_sesno）。同一 dbnum 的第二个文件
     /// 若先走 `scan_and_check_file`，就会把首见文件的身份覆盖掉——此后即便阻断了该
-    /// dbnum，回退 / 迁移检测的基准也已经被污染。故 `init_watcher` 与 `async_watch`
-    /// 两条自动路径都必须先做重复 dbnum 阻断、再落库观察。
+    /// dbnum，回退 / 迁移检测的基准也已经被污染。故 `sweep_watch_dirs`（启动重扫与
+    /// 范围刷新重扫共用）与 `async_watch` 两条自动路径都必须先做重复 dbnum 阻断、
+    /// 再落库观察。
     ///
     /// 这两步嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接在源码上钉顺序。
     /// marker 用 `concat!` 拼接，避免本测试自己的字符串字面量先于真函数被命中。
@@ -69,7 +70,7 @@ mod tests {
     fn duplicate_dbnum_guard_precedes_scan_record_on_both_auto_paths() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            ("init_watcher", concat!("pub async fn ", "init_watcher(")),
+            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
             ("async_watch", concat!("pub async fn ", "async_watch(")),
         ] {
             let body = src
@@ -90,6 +91,55 @@ mod tests {
         }
     }
 
+    /// 手动与自动喂的是同一个队列，入队口径只能有一份。自动路径过去只过
+    /// `should_process_database`（类型白名单 + `manual_db_nums`），于是 MDB 外的设计库
+    /// 照样入队——预览说它不在本期执行范围里，队列里却有它的任务行。
+    ///
+    /// 手法同上：这道门嵌在依赖实库的大函数里，没法用纯函数钉住，只能钉源码。
+    #[test]
+    fn both_auto_paths_gate_on_the_shared_scope_predicate() {
+        let src = include_str!("increment_manager.rs");
+        for (name, marker) in [
+            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            ("async_watch", concat!("pub async fn ", "async_watch(")),
+        ] {
+            let body = src
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{name} 未找到"))
+                .1;
+            let gate_at = body
+                .find(".in_scope(")
+                .unwrap_or_else(|| panic!("{name}: 缺少本期执行范围门控"));
+            let discover_at = body
+                .find(".discover_batch(")
+                .unwrap_or_else(|| panic!("{name}: 缺少 discover_batch 调用"));
+            assert!(
+                gate_at < discover_at,
+                "{name}: 入队前必须先过 in_scope，否则 MDB 外的库会被自动路径带进队列，\
+                 而手动预览还一口咬定它不在范围里"
+            );
+        }
+    }
+
+    /// 手动路径的候选目录必须与自动 watcher 的监控目录是同一份，否则手动执行能把
+    /// 监听不到的库排进队列（B4：数据落了库、此后永不更新，看起来却很新鲜）。
+    /// 监控目录按项目收集（每个项目取它的 `*000` 库目录），按前缀过滤就还原出本项目那几个。
+    #[test]
+    fn ingestible_dirs_are_the_watch_dirs_under_this_project() {
+        let watch = vec![
+            PathBuf::from("/proj/AvevaMarineSample/dabacon000"),
+            PathBuf::from("/proj/Another/dabacon000"),
+        ];
+        assert_eq!(
+            dirs_under(&watch, Path::new("/proj/AvevaMarineSample")),
+            vec![PathBuf::from("/proj/AvevaMarineSample/dabacon000")]
+        );
+        // 前缀比的是路径分量不是字符串，`Aveva` 匹配不上 `AvevaMarineSample`。
+        assert!(dirs_under(&watch, Path::new("/proj/Aveva")).is_empty());
+        // 一个都没有时调用方要说话（手动侧回执里那句告警），不能静悄悄地报「没有候选」。
+        assert!(dirs_under(&[], Path::new("/proj/AvevaMarineSample")).is_empty());
+    }
+
     #[test]
     fn unreadable_files_are_not_treated_as_e3d_databases() {
         assert!(try_parse_db_basic_info(Path::new("missing-e3d-db")).is_none());
@@ -103,6 +153,47 @@ mod tests {
         assert!(should_process_database_with(&option, "DESI", 1001));
         assert!(!should_process_database_with(&option, "DESI", 7997));
         assert!(should_process_database_with(&option, "SYST", 8191));
+    }
+
+    /// 库文件白名单。正反例全部取自 `D:/AVEVA/Projects/E3D3.1` 下真实躺着的文件
+    /// ——副本的头部与正本一字不差，只能靠名字分辨；认错的代价是 dbnum 1112 拿到
+    /// 五个候选、整个库被判「同号重复」而阻断。
+    #[test]
+    fn only_aveva_named_files_count_as_databases() {
+        for name in [
+            "ams1112_0001",
+            "acp250705_0001", // 六位库号
+            "TES1000_0001",   // TEST 项目整套是大写
+            "ams3001",        // 无序号的老形态，登记表里是个正经 DESI
+            "zdj7209",
+            "TES001",
+            "amssys", // SYST 库 8191：MDB / CURD 就存在它里面
+            "amscom",
+            "amsmis",
+            "TESsys",
+        ] {
+            assert!(is_pdms_db_file_name(name), "{name} 应当算库文件");
+        }
+
+        for name in [
+            "ams1112_0001 copy",                          // 人手复制，带空格
+            "ams1112_0001 copy 3",                        //
+            "ams1112_0001_old",                           // 后缀不是四位数字
+            "ams1112_0001-new",                           // 旧规则唯一挡得住的那种
+            "ams1112_0001.zip",                           // 带扩展名
+            "ams7997_0001.codex-before-d03-delete-20260727", // 日期后缀备份
+            "amscom.codex-before-d03-relaunch-20260727",
+            "TES1001_0001 - 副本",
+            "ams000.7z",
+            "DBOutput.txt",
+            "_0001",       // 没有前缀
+            "ab12_0001",   // 前缀不足三位字母
+            "ams1112_001", // 序号不足四位
+            "ams",         // 只有前缀
+            "amssys2",     // sys/com/mis 后面不许再挂东西
+        ] {
+            assert!(!is_pdms_db_file_name(name), "{name} 不该算库文件");
+        }
     }
 
     #[tokio::test]
@@ -251,6 +342,48 @@ pub struct IncrementInfo {
     pub operation: EleOperation,
 }
 
+/// 这个文件名是不是一个 AVEVA 库文件。三位项目前缀打头，后面只认两种形态：
+///
+/// - `<前缀><库号>` 带或不带 `_<四位序号>`——`ams1112_0001`、`acp250705_0001`、
+///   `TES1000_0001`，以及没有序号的老形态 `ams3001`、`zdj7209`、`TES001`；
+/// - `<前缀>sys` / `com` / `mis`——项目的系统、通信与杂项库，每个项目各一个。
+///   **`amssys` 就是 SYST 库 8191**，MDB 与 CURD 都存在它里面，认不出它等于
+///   让本期执行范围再也刷新不了。
+///
+/// 大小写不敏感：TEST 项目整套用的是大写 `TES…`，按小写认会把它 85 个库全吞掉。
+///
+/// 这是**白名单**，与 [`AiosDBManager::should_exclude_file`] 那份扩展名黑名单
+/// 相反。黑名单只挡得住它列举过的东西，挡不住 `ams1112_0001 copy`、
+/// `ams1112_0001 copy 3`、`ams1112_0001_old` 这类人手复制的副本——它们没有扩展名、
+/// 头部与正本一字不差，于是 dbnum 1112 一口气拿到五个候选文件，整个库被判成
+/// 「同号重复」而阻断。原先那条「名字含 `-` 就跳过」接不住带空格的副本，也接不住
+/// `ams7997_0001.codex-before-d03-delete-20260727` 这种带日期后缀的备份。
+///
+/// 规则拿真实项目校过：`D:/AVEVA/Projects/E3D3.1` 下 8 个项目的库目录，999 个
+/// 编号库 + 每项目 3 个 sys/com/mis + 一批无序号老库全部命中，杂项一个不漏地弃掉。
+pub fn is_pdms_db_file_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.len() <= 3 || !bytes[..3].iter().all(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    let rest = &name[3..];
+    if matches!(
+        rest.to_ascii_lowercase().as_str(),
+        "sys" | "com" | "mis"
+    ) {
+        return true;
+    }
+    // `<库号>` 或 `<库号>_<四位序号>`，别的一律不是。
+    let (dbnum, seq) = match rest.split_once('_') {
+        Some((dbnum, seq)) => (dbnum, Some(seq)),
+        None => (rest, None),
+    };
+    if dbnum.is_empty() || !dbnum.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    seq.is_none_or(|seq| seq.len() == 4 && seq.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn should_process_database_with(db_option: &DbOption, db_type: &str, db_num: u32) -> bool {
     if !CHECK_DB_TYPES.contains(&db_type) {
         return false;
@@ -322,11 +455,28 @@ const QUERY_BATCH_SIZE: usize = 20;
 /// 包含目录(CATA)、设计(DESI)、字典(DICT)、系统(SYST)、全局(GLB/GLOB)等类型
 pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
 
+/// 只认监控目录的**直属**文件。
+///
+/// 「能被摄入的文件集」必须等于「能被监听到的文件集」：`async_watch` 注册的是
+/// `RecursiveMode::NonRecursive`，子目录里的库文件收不到任何变更事件。摄入它们
+/// 只会在库里留下一份此后永不更新、看起来却很新鲜的数据（B4）。需要覆盖某个
+/// 子目录时，把它配成监控目录，而不是把遍历放深。
+pub(crate) const INGEST_MAX_DEPTH: usize = 1;
+
 fn duplicate_dbnums(entries: impl IntoIterator<Item = (u32, PathBuf)>) -> HashSet<u32> {
     let mut seen = HashSet::new();
     entries
         .into_iter()
         .filter_map(|(dbnum, _)| (!seen.insert(dbnum)).then_some(dbnum))
+        .collect()
+}
+
+/// 监控目录里落在 `project_dir` 下的那些。
+fn dirs_under(watch_dirs: &[PathBuf], project_dir: &std::path::Path) -> Vec<PathBuf> {
+    watch_dirs
+        .iter()
+        .filter(|dir| dir.starts_with(project_dir))
+        .cloned()
         .collect()
 }
 
@@ -450,10 +600,22 @@ impl AiosDBManager {
         false
     }
 
+    /// 这个项目里「能被摄入」的库目录，即监控目录中落在 `project_dir` 下的那些。
+    ///
+    /// 手动与自动两条触发路径喂的是同一个队列，因此必须共用同一份目录集合与同一个
+    /// [`INGEST_MAX_DEPTH`]。手动侧过去递归整个项目目录，于是它能把监听不到的子目录
+    /// 里的库排进队列——正好制造出自动侧专门在防的 B4。
+    ///
+    /// 监控目录是按项目收集的（每个项目取其 `*000` 库目录），所以按前缀过滤就能还原
+    /// 「本项目的那几个」。
+    pub(crate) fn ingestible_dirs(&self, project_dir: &std::path::Path) -> Vec<PathBuf> {
+        dirs_under(&self.watcher.watch_dirs, project_dir)
+    }
+
     fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<u32> {
         duplicate_dbnums(self.watcher.watch_dirs.iter().flat_map(|watch_dir| {
             WalkDir::new(watch_dir)
-                .max_depth(1)
+                .max_depth(INGEST_MAX_DEPTH)
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_file())
@@ -583,39 +745,64 @@ impl AiosDBManager {
     /// 有则**入队**（发现即入队，ADR-011 §2）。执行归数据批次 worker——重启后
     /// 的队列正是靠这次重扫从水位重建出来的（ADR-011 §4）。
     ///
-    /// # 处理流程
-    ///
-    /// 1. 创建必要的目录结构
-    /// 2. 遍历所有监控目录中的文件，解析数据库基本信息
-    /// 3. F6 检查（同号多文件阻断、回退阻断）
-    /// 4. 比较文件最新会话号与水位，需要更新的进入待入队集合
-    /// 5. 生成压缩包(如果启用MQTT功能)
-    /// 6. 逐条入队（合并/冻结语义见 `batch_queue`）
+    /// 只负责启动那一次性的目录准备，重扫本身见 [`Self::sweep_watch_dirs`]。
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
-        let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
-            IndexMap::new();
-        // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。
-        let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
-        let mut blocked_dupes: HashSet<u32> = HashSet::new();
         // 创建存档与压缩临时目录（SyncPublisher 依赖 assets/temp）；
         // 还要 assets/meshes——worker 消费本次入队的批次时就可能开始写网格，
         // 而调用方 `lib.rs` 建这个目录的那行排在 `init_watcher()` 之后。
         fs::create_dir_all("assets/archives")?;
         fs::create_dir_all("assets/temp")?;
         fs::create_dir_all("assets/meshes")?;
-        let mut time = Instant::now();
-        log::debug!("init_watcher 监控目录: {:?}", self.watcher.watch_dirs);
+        self.sweep_watch_dirs("init", true).await
+    }
 
-        // 遍历所有监控目录
+    /// SYS meta 落库之后再重扫一次监控目录。
+    ///
+    /// 本期执行范围由 MDB 定，而 MDB 与 CURD 就存在 SYS meta 库里。全新项目的第一轮
+    /// 只解析得出 SYS meta（那时范围还是空的），有人往 MDB 里加一个库也是同样的形状
+    /// ——那些**刚刚进入范围**的设计库自己并没有文件变更事件，不重扫就得等下次重启
+    /// 才会被发现。
+    pub async fn resweep_for_scope_change(&self) -> anyhow::Result<()> {
+        self.sweep_watch_dirs("scope-refresh", false).await
+    }
+
+    /// 重扫监控目录并入队：解范围 → 遍历 → F6 → 发现 → 入队。
+    ///
+    /// `ensure_archives` 只有启动那一次为真：`SyncPublisher::ensure_archive` 会把整个
+    /// 库文件重压一遍，重扫时再压一遍纯属白烧 CPU。
+    async fn sweep_watch_dirs(&self, origin: &str, ensure_archives: bool) -> anyhow::Result<()> {
+        // 本期执行范围与手动路径走同一个谓词（`in_scope`）。自动路径过去只过类型
+        // 白名单，于是 MDB 外的设计库照样入队——预览说它不在范围里、队列里却有它的
+        // 任务行，而两条路径喂的是同一个 worker。
         //
-        // `max_depth(1)`：只有监控目录的**直属**文件参与增量。这不是省事，是
-        // 为了让「能被摄入的文件集」与「能被监听到的文件集」相等——`async_watch`
-        // 注册的是 `RecursiveMode::NonRecursive`，子目录里的库文件收不到任何变更
-        // 事件。启动时递归摄入它们，只会让它们在库里留下一份此后永不更新的数据，
-        // 而且看起来是新鲜的（B4）。需要覆盖子目录时，把该子目录配成监控目录。
+        // 解不出范围就一个库都不入队，与 `enqueue_manual_update` 同一条纪律：宁可这轮
+        // 不跑，也不能退回「扫全项目」。全新项目不会撞上这条——库里一条 MDB 都没有时
+        // `resolve` 给的是 bootstrap 范围（只放行 SYS meta），不是错误。
+        let scope = match self.update_scope(None).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                let msg = format!("[{origin}] 无法确定本期执行范围，未入队任何批次: {error:#}");
+                log::error!("{msg}");
+                eprintln!("{msg}");
+                return Ok(());
+            }
+        };
+        if let Some(warning) = scope.warning() {
+            println!("[{origin}] {warning}");
+        }
+
+        let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
+            IndexMap::new();
+        // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。
+        let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
+        let mut blocked_dupes: HashSet<u32> = HashSet::new();
+        let time = Instant::now();
+        log::debug!("[{origin}] 监控目录: {:?}", self.watcher.watch_dirs);
+
+        // 遍历所有监控目录（深度见 [`INGEST_MAX_DEPTH`]）。
         for watch_dir in &self.watcher.watch_dirs {
             // 按文件大小降序排列，优先处理大文件
-            for entry in WalkDir::new(watch_dir).max_depth(1).sort_by(|a, b| {
+            for entry in WalkDir::new(watch_dir).max_depth(INGEST_MAX_DEPTH).sort_by(|a, b| {
                 let a_len = a.path().metadata().map(|m| m.len()).unwrap_or_default();
                 let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
                 b_len.cmp(&a_len)
@@ -651,8 +838,9 @@ impl AiosDBManager {
                     continue;
                 };
 
-                // 使用统一的过滤方法检查是否应该处理此数据库
-                if !self.should_process_database(&db_type, db_no) {
+                // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，三道门合成
+                // 一个谓词，与手动路径共用（`in_scope`）。
+                if !self.in_scope(&scope, &db_type, db_no) {
                     continue;
                 }
 
@@ -692,7 +880,7 @@ impl AiosDBManager {
 
                 // 只有开启MQTT功能时，才需要初始化压缩数据包用于异地同步
                 #[cfg(feature = "mqtt")]
-                {
+                if ensure_archives {
                     use crate::data_interface::sync_publisher::SyncPublisher;
                     if let Err(e) = SyncPublisher::ensure_archive(&path.to_path_buf()).await {
                         eprintln!("初始化存档失败 {:?}: {}", file_name, e);
@@ -721,11 +909,14 @@ impl AiosDBManager {
 
         // 等所有文件检查完毕后，逐条入队；执行与发布归数据批次 worker。
         if !params.is_empty() {
-            log::info!("启动重扫待入队批次数: {}", params.len());
+            log::info!("[{origin}] 重扫待入队批次数: {}", params.len());
         }
-        self.enqueue_discovered("init", params);
+        self.enqueue_discovered(origin, params);
 
-        println!("启动重扫（重建队列）总耗时: {} 秒", time.elapsed().as_secs_f32());
+        println!(
+            "[{origin}] 重扫（重建队列）总耗时: {} 秒",
+            time.elapsed().as_secs_f32()
+        );
 
         anyhow::Ok(())
     }
@@ -932,6 +1123,17 @@ impl AiosDBManager {
 
                     println!("开始扫描数据库头部信息，过滤后路径: {:?}", &filtered_paths);
 
+                    // 本期执行范围每批重解一次：MDB 可能刚被改过（它自己就存在 SYS meta
+                    // 库里，而那个库的落库也会走这条路径）。解不出来就整批不入队，与
+                    // 启动重扫和手动触发同一条纪律——绝不退回「扫全项目」。
+                    let scope = match self.update_scope(None).await {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            eprintln!("无法确定本期执行范围，本批文件事件不入队: {error:#}");
+                            continue;
+                        }
+                    };
+
                     // 扫描变化文件的数据库头部信息（使用过滤后的路径）
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&filtered_paths) {
                         println!("成功扫描到 {} 个数据库头部", new_headers.len());
@@ -967,10 +1169,11 @@ impl AiosDBManager {
                             let db_type = &db_basic_info.db_type;
                             let db_num = db_basic_info.db_no;
 
-                            // 使用统一的过滤方法检查是否应该处理此数据库
-                            if !self.should_process_database(db_type, db_num) {
+                            // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，
+                            // 与启动重扫、手动触发共用同一个谓词。
+                            if !self.in_scope(&scope, db_type, db_num) {
                                 println!(
-                                    "根据过滤规则跳过数据库: 类型={}, 编号={}",
+                                    "不在本期执行范围，跳过数据库: 类型={}, 编号={}",
                                     db_type, db_num
                                 );
                                 continue;
@@ -1493,8 +1696,16 @@ impl AiosDBManager {
                 .map(|refno| refno.to_pe_key())
                 .collect::<Vec<_>>()
                 .join(",");
+            // 隐含直管段的行（out 指向共享单位几何 inst_info:⟨1⟩/⟨2⟩，挂在 BRAN/HANG
+            // 名下）必须排除：它的 world_trans 是「单位圆柱 → 世界管段」的缩放矩阵，
+            // 由生成层按分支成员的 arrive/leave 点现场推导；拿元素本身的世界变换去覆盖
+            // 它，管段会被画成分支原点处的一个单位圆柱。纯位姿移动后管段停在旧位置
+            // （滞后到下次该分支重生成才追上）是这里的已知代价，比覆坏变换要轻。
             let sql = format!(
-                "array::flatten(SELECT VALUE IF record::exists(type::thing('inst_relate', record::id(id))) {{ [id] }} ELSE {{ [] }} FROM [{pe_keys}]);"
+                "array::flatten(SELECT VALUE IF record::exists(type::thing('inst_relate', record::id(id))) \
+                 AND type::thing('inst_relate', record::id(id)).out != inst_info:⟨1⟩ \
+                 AND type::thing('inst_relate', record::id(id)).out != inst_info:⟨2⟩ \
+                 {{ [id] }} ELSE {{ [] }} FROM [{pe_keys}]);"
             );
             let mut response = SUL_DB.query(&sql).await?.check()?;
             for value in response.take::<Vec<Thing>>(0)? {

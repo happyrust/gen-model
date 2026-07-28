@@ -2,6 +2,7 @@ use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
+use crate::surreal_retry::execute_surreal_checked;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
@@ -12,7 +13,7 @@ use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
-    RefnoEnum, SUL_DB, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
+    RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
     query_deep_visible_inst_refnos,
 };
 use aios_core::{get_db_option, init_test_surreal};
@@ -147,17 +148,13 @@ pub async fn gen_meshes_in_db(
     }
     for chunk in refnos.chunks(100) {
         // 生成模型文件
-        gen_inst_meshes(chunk, replace_exist, dir.clone())
-            .await
-            .unwrap();
+        gen_inst_meshes(chunk, replace_exist, dir.clone()).await?;
         // println!(
         //     "gen_inst_meshes finished: {} ms",
         //     time.elapsed().as_millis()
         // );
         // let time = std::time::Instant::now();
-        update_inst_relate_aabbs_by_refnos(chunk, replace_exist)
-            .await
-            .unwrap();
+        update_inst_relate_aabbs_by_refnos(chunk, replace_exist).await?;
         // println!(
         //     "update_inst_relate_aabbs finished: {} ms",
         //     time.elapsed().as_millis()
@@ -223,17 +220,13 @@ pub async fn process_meshes_update_db(
         .unwrap_or("assets/meshes".into());
     // dbg!(&target_refnos);
     // 生成模型文件
-    gen_inst_meshes(&refnos, replace_exist, dir.clone())
-        .await
-        .unwrap();
+    gen_inst_meshes(&refnos, replace_exist, dir.clone()).await?;
     println!(
         "gen_inst_meshes finished: {} ms",
         time.elapsed().as_millis()
     );
     let time = std::time::Instant::now();
-    update_inst_relate_aabbs_by_refnos(&refnos, replace_exist)
-        .await
-        .unwrap();
+    update_inst_relate_aabbs_by_refnos(&refnos, replace_exist).await?;
     println!(
         "update_inst_relate_aabbs finished: {} ms",
         time.elapsed().as_millis()
@@ -287,9 +280,17 @@ pub async fn process_meshes_update_db_deep(
         // dbg!(refnos.len());
         println!("更新模型结点数量: {}", refnos.len());
         let time = std::time::Instant::now();
+        // 分段累计。此前这里只有一个跨越整个循环的计时器，却挂着「布尔运算花费时间」
+        // 的名字——它把两次深度查询、网格生成、AABB 落库、房间入队全算进了布尔运算，
+        // 于是这项统计能超过整个进程的 CPU 总时间。四段分开记才知道该优化哪一步。
+        let mut query_ms = 0u128;
+        let mut mesh_ms = 0u128;
+        let mut aabb_ms = 0u128;
+        let mut boolean_ms = 0u128;
         for &refno in refnos {
             #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
             println!("更新模型结点: {}", refno);
+            let t_query = std::time::Instant::now();
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
                 .await
@@ -299,6 +300,7 @@ pub async fn process_meshes_update_db_deep(
 
             let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
             update_refnos.extend(neg_refnos);
+            query_ms += t_query.elapsed().as_millis();
 
             // #[cfg(any(feture = "debug_model", feature = "debug_model_no_obj"))]
             if update_refnos.is_empty() {
@@ -310,19 +312,21 @@ pub async fn process_meshes_update_db_deep(
             if dboption.gen_mesh {
                 // dbg!(&target_refnos);
                 // 生成模型文件
-                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                let time = std::time::Instant::now();
+                let t_mesh = std::time::Instant::now();
                 gen_inst_meshes(&update_refnos, replace_exist, dir.clone()).await?;
-                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                println!(
-                    "gen_inst_meshes finished: {} ms",
-                    time.elapsed().as_millis()
-                );
-                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                let time = std::time::Instant::now();
-                // 更新aabb 到inst relate，geo relate
+                mesh_ms += t_mesh.elapsed().as_millis();
+
+                let t_aabb = std::time::Instant::now();
+                // 更新aabb 到inst relate，geo relate。
+                //
+                // 这里必须强制 replace=true，不跟 `replace_mesh` 配置走（mesh 文件按内容
+                // 寻址，replace 与否只影响要不要重写同名文件；包围盒不是）：默认配置
+                // replace_mesh=false 会给刷新 SQL 追加 `and aabb=none`，凡是插入时就带
+                // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
+                // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
+                // 是同一个理由（ADR-010 D2）。
                 let aabb_changes =
-                    update_inst_relate_aabbs_by_refnos(&update_refnos, replace_exist).await?;
+                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
                 // 几何重生成后包围盒变了 → 房间归属可能变（ADR-010 §4）。房间任务是
                 // `drain` 的第三阶段，排在本轮 regen 之后，因此在这里入队正好被它捡起。
                 //
@@ -338,11 +342,7 @@ pub async fn process_meshes_update_db_deep(
                     )
                     .await?;
                 }
-                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                println!(
-                    "update_inst_relate_aabbs finished: {} ms",
-                    time.elapsed().as_millis()
-                );
+                aabb_ms += t_aabb.elapsed().as_millis();
             }
 
             if target_visible_refnos.is_empty() {
@@ -352,7 +352,7 @@ pub async fn process_meshes_update_db_deep(
             if dboption.apply_boolean_operation {
                 // apply_cata_neg_boolean_occ(None).await.unwrap();
                 // dbg!(target_visible_refnos.len());
-                let time = std::time::Instant::now();
+                let t_bool = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
                 apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
                     .await?;
@@ -361,9 +361,17 @@ pub async fn process_meshes_update_db_deep(
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
                 // apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;
+                boolean_ms += t_bool.elapsed().as_millis();
             }
         }
-        println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+        println!(
+            "模型结点更新耗时: {} ms（深度查询 {} / 网格生成 {} / AABB落库 {} / 布尔运算 {}）",
+            time.elapsed().as_millis(),
+            query_ms,
+            mesh_ms,
+            aabb_ms,
+            boolean_ms
+        );
     }
     Ok(())
 }
@@ -673,7 +681,10 @@ pub async fn gen_inst_meshes(
         }
 
         utils::save_pts_to_surreal(&pts_json_map).await;
-        utils::save_aabb_to_surreal(&aabb_map).await;
+        // TODO(与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
+        // 先落，这里才补 aabb 记录。彻底修复需要把记录写入挪进每个任务、先于其 update；
+        // 本轮先保证失败不再被静默吞掉。
+        utils::save_aabb_to_surreal(&aabb_map).await?;
 
         Ok(())
     } // cfg(feature = "occ")
@@ -718,8 +729,18 @@ pub struct AabbChange {
 ///
 /// # 返回值
 ///
-/// 包围盒**确实变了**的那些元素。房间归属的触发源就是它（ADR-010 §4）：新旧两个值
-/// 在函数体里本来就同时握着，比一下成本几乎为零，而此前只算不比、外面拿不到任何信号。
+/// 包围盒**确实变了**的那些元素。房间归属的触发源就是它（ADR-010 §4）。
+///
+/// 变更基线取**空间树上的旧值**而不是行内的 `old_aabb`：定向重生成走的是「先删行再
+/// 重插」（`save_instance_data(replace_exist)`），行内旧值在刷新时刻恒为 none 或者
+/// 恒等于刚插入的新值，拿它作基线会退化成「根下每个元素每次重生成都算变」；树上的
+/// 条目跨过删行重插存活，才是房间系统上一次真正看到的状态。树上没有条目（首次见到）
+/// 同样算变——房间系统从没算过它，正需要一次回填。
+///
+/// 新值优先从 geo 侧重算；重算不出（`geo_aabbs` 为空或不可用）而行内有既有指针的，
+/// 以指针值为准——隐含直管段（TUBI/BOXI）的 aabb 由生成层在插入时算好，geo 侧的
+/// 共享单位几何没有 `aabb`/`pts`，此前这类行被整体跳过，从未进过空间树，也就从未
+/// 参与过房间归属。
 ///
 /// 注意返回的是「变更集」而不是「处理过的集合」——`manual_update_aabbs` 这类全量重刷
 /// 会把整个库喂进来，按处理集入队等于给每个元素都排一次房间重算。
@@ -728,15 +749,12 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     replace_exist: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
-    // dbg!(refnos);
-    let aabb_map = DashMap::new();
     let mut changes = Vec::new();
     for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
             continue;
         }
         let mut rstar_objs = Vec::new();
-        let mut stale_objs: Vec<RStarBoundingBox> = Vec::new();
         let inst_keys = get_inst_relate_keys(chunk);
         let mut sql = format!(
             r#"select id, in as refno, world_trans.d as world_trans, in.noun as noun, aabb.d as old_aabb,
@@ -747,14 +765,25 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         if !replace_exist {
             sql.push_str(" and aabb=none");
         }
-        let mut response = SUL_DB.query(sql).await.unwrap();
-        let Ok(result) = response.take::<Vec<QueryAabbParam>>(0) else {
-            continue;
-        };
+        // 失败即中止，整批上抛（与 persist_latest_main_data 同一纪律）：本函数所有写入
+        // 幂等，调用方把整批当一个任务结算、重放收敛。此前这里是 `.unwrap()` + 反序列化
+        // 失败静默 continue——传输抖动直接 panic（同款 panic 在生产日志有实证，os error
+        // 10054），坏一块就无声丢掉 100 个元素的包围盒与房间触发。
+        let mut response = SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("查询 inst_relate 包围盒输入失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("查询 inst_relate 包围盒输入语句失败: {e}"))?;
+        let result: Vec<QueryAabbParam> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解析 inst_relate 包围盒输入失败: {e}"))?;
+        let chunk_aabbs: DashMap<String, Aabb> = DashMap::new();
         let mut update_sql = String::new();
+        // 本块每行的「当前真值」，树同步与变更判定共用。
+        let mut new_boxes: Vec<(RefnoEnum, String, Aabb)> = Vec::new();
         for r in result {
-            // dbg!(&r);
-            let mut aabb = Aabb::new_invalid();
+            let mut computed = Aabb::new_invalid();
             for g in r.geo_aabbs {
                 let t = r.world_trans * g.trans;
                 let tmp_aabb = g.aabb.scaled(&t.scale.into());
@@ -762,54 +791,76 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                     rotation: t.rotation.into(),
                     translation: t.translation.into(),
                 });
-                aabb.merge(&tmp_aabb);
+                computed.merge(&tmp_aabb);
             }
-            // dbg!(aabb.extents().magnitude());
-            if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
-                #[cfg(feature = "debug_model")]
-                dbg!("Found nan aabb");
-                continue;
-            }
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
-            aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
-            // 没有旧值就是「几何是刚生成的」，同样算变。
-            if r.old_aabb.as_ref().map_or(true, |old| *old != aabb) {
-                changes.push(AabbChange {
-                    refno: r.refno,
-                    noun: r.noun.clone(),
-                });
-            }
-            if let Some(old_aabb) = r.old_aabb {
-                stale_objs.push(RStarBoundingBox::new(old_aabb, r.refno, r.noun.clone()));
-            }
-            rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
-            let sql = format!(
-                "update {} set aabb = aabb:⟨{}⟩;",
-                r.refno.to_inst_relate_key(),
-                aabb_hash,
-            );
-            //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
-            // dbg!(&sql);
-            update_sql.push_str(&sql);
+            let magnitude = computed.extents().magnitude();
+            let new_box = if magnitude.is_nan() || magnitude.is_infinite() {
+                // geo 侧重算不出。有既有指针的（隐含直管段这类插入时写死 aabb 的行）
+                // 以指针值为当前真值；两头都没有的才是真的无几何可用，跳过。
+                match r.old_aabb {
+                    Some(existing) => existing,
+                    None => {
+                        #[cfg(feature = "debug_model")]
+                        dbg!("Found nan aabb");
+                        continue;
+                    }
+                }
+            } else {
+                // 只有重算出来的值需要写库；指针回退的那条本来就是库里现值。
+                let aabb_hash = gen_bytes_hash::<_, 64>(&computed).to_string();
+                chunk_aabbs.entry(aabb_hash.clone()).or_insert(computed);
+                update_sql.push_str(&format!(
+                    "update {} set aabb = aabb:⟨{}⟩;",
+                    r.refno.to_inst_relate_key(),
+                    aabb_hash,
+                ));
+                computed
+            };
+            rstar_objs.push(RStarBoundingBox::new(new_box, r.refno, r.noun.clone()));
+            new_boxes.push((r.refno, r.noun, new_box));
         }
+        // aabb 记录先落库、指针后落库（与 trans 记录同一条 D9 教训，方向不能反）：
+        // 反过来的话，两条语句之间的并发读者与中途崩溃都会看到指向缺位记录的指针，
+        // `aabb.d` 为 none，元素从 `where aabb.d != none` 的所有读者里整条消失。
+        utils::save_aabb_to_surreal(&chunk_aabbs).await?;
         if !update_sql.is_empty() {
-            // dbg!(&update_sql);
-            SUL_DB.query(&update_sql).await.unwrap();
+            execute_surreal_checked(&update_sql, "update inst_relate aabb pointers").await?;
         }
-        //更新Rstar
-        {
+        // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
+        // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入
+        // 新值，返回的旧条目正是变更判定的基线。
+        let stale = {
             let mut tree = GLOBAL_AABB_TREE.write().await;
-            // `update_aabbs` 自带的去重分支恒不触发（条件写反，且按新值删匹配不到旧记录），
-            // 重复插入会让同一 refno 在树里堆叠历史包围盒。旧条目只能在这里按旧值清掉。
-            for stale in &stale_objs {
-                tree.tree.remove(stale);
+            tree.sync_refnos(rstar_objs.clone())
+        };
+        if !rstar_objs.is_empty() || !stale.is_empty() {
+            crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+        }
+        let mut stale_by_refno: HashMap<RefU64, Vec<Aabb>> = HashMap::new();
+        for old in stale {
+            stale_by_refno.entry(old.refno).or_default().push(old.aabb);
+        }
+        for (refno, noun, new_box) in new_boxes {
+            let olds = stale_by_refno
+                .get(&refno.refno())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if tree_box_changed(olds, &new_box) {
+                changes.push(AabbChange { refno, noun });
             }
-            tree.update_aabbs(rstar_objs);
         }
     }
-    utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(changes)
+}
+
+/// 「这个元素的包围盒相对房间系统上一次看到的状态变了吗」的唯一判据（纯函数）。
+///
+/// 不变的唯一形态是：树上恰有一条旧条目且与新值逐位相等。没有旧条目是「首次见到」
+/// ——房间从没算过它，必须回填；多于一条是历史堆叠的残留——状态本身已经坏了，
+/// 重算一次才能收敛。
+fn tree_box_changed(old_entries: &[Aabb], new_box: &Aabb) -> bool {
+    !(old_entries.len() == 1 && old_entries[0] == *new_box)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1257,4 +1308,77 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod aabb_write_order_tests {
+    /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条
+    /// D9 教训）。顺序一旦被整理代码时悄悄换回去，不会有任何编译或运行报错——只会在
+    /// 崩溃/并发窗口里让 `aabb.d` 读者取到 none。这里把书写顺序钉成断言。
+    #[test]
+    fn aabb_records_persist_before_the_pointers_that_reference_them() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("update_inst_relate_aabbs_by_refnos must exist")
+            .1
+            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        let records_at = body
+            .find("save_aabb_to_surreal(&chunk_aabbs)")
+            .expect("per-chunk aabb record insert missing");
+        let pointers_at = body
+            .find("update inst_relate aabb pointers")
+            .expect("pointer update missing");
+        let tree_at = body
+            .find("GLOBAL_AABB_TREE.write()")
+            .expect("tree update missing");
+
+        assert!(
+            records_at < pointers_at,
+            "aabb 记录必须先于指针落库，否则指针会指向缺位记录"
+        );
+        assert!(
+            pointers_at < tree_at,
+            "内存树必须在本块 DB 写入全部成功之后才动，失败块不得留下树新库旧的半掺状态"
+        );
+    }
+}
+
+#[cfg(test)]
+mod aabb_change_tests {
+    use super::tree_box_changed;
+    use parry3d::bounding_volume::Aabb;
+    use parry3d::math::Point;
+
+    fn cube(min: f32, max: f32) -> Aabb {
+        Aabb::new(Point::new(min, min, min), Point::new(max, max, max))
+    }
+
+    /// 变更基线是树上的旧值：恰有一条且逐位相等才算「没变」。定向重生成走「先删行再
+    /// 重插」，行内 old_aabb 恒为 none/新值，若拿它作基线，根下每个元素每次重生成都
+    /// 会白排一次房间任务（ADR-010 §4 的差异信号被结构性摧毁）。
+    #[test]
+    fn unchanged_only_when_exactly_one_equal_entry() {
+        let unchanged = [cube(0.0, 10.0)];
+        assert!(!tree_box_changed(&unchanged, &cube(0.0, 10.0)));
+        assert!(tree_box_changed(&unchanged, &cube(0.0, 11.0)), "盒子动了必须算变");
+    }
+
+    /// 树上没有条目 = 房间系统从没见过它，必须回填一次——隐含直管段此前从未进树，
+    /// 靠的正是这条语义完成一次性补账。
+    #[test]
+    fn first_sighting_counts_as_changed() {
+        assert!(tree_box_changed(&[], &cube(0.0, 10.0)));
+    }
+
+    /// 历史堆叠的重复条目（update_aabbs 写反的去重条件留下的）说明状态已经坏了，
+    /// 即使其中一条与新值相等也要重算一次才能收敛。
+    #[test]
+    fn historic_duplicates_force_a_recalc() {
+        let stacked = [cube(0.0, 10.0), cube(5.0, 15.0)];
+        assert!(tree_box_changed(&stacked, &cube(0.0, 10.0)));
+    }
 }

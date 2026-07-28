@@ -73,6 +73,8 @@ pub mod gui;
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 
+pub mod surreal_retry;
+
 pub mod versioned_db;
 
 pub mod mqtt_service;
@@ -278,6 +280,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         set_pbs_node(&mut handles).await?;
         futures::future::join_all(handles).await;
     }
+
+    // 收口事务依赖的 SurrealDB 自定义函数自检：缺了要在第一秒指名道姓说清楚，
+    // 而不是让每个 DESI 窗口在 finalize 处失败、报一个不指向 datacenter 的错误。
+    crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await;
 
     // 数据批次队列的唯一消费者：无条件启动、不分 sync_live（ADR-011；rollout
     // 第九节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，

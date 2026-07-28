@@ -31,17 +31,41 @@ use std::path::PathBuf;
 #[ignore = "manual integration: requires the configured Surreal project and room mesh files"]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await?;
-    let refno = "24381/35844".into();
-    // process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
-    //     .await
-    //     .unwrap();
-    load_aabb_tree().await.unwrap();
-    build_room_relations(&option).await.unwrap();
-    let mesh_path = option.get_meshes_path();
-    let within_refnos = cal_room_refnos(&mesh_path, refno, &HashSet::new(), 0.1)
-        .await
-        .unwrap();
-    dbg!(&within_refnos);
+    load_aabb_tree().await?;
+
+    let rooms = load_room_panel_map(&option).await?;
+    assert_eq!(rooms.rooms.len(), 124, "AMS 应识别出 124 间房");
+    assert_eq!(rooms.all_panels.len(), 147, "AMS 应识别出 147 块房间面板");
+    build_room_relations(&option).await?;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Edge {
+        panel: String,
+        member: String,
+        room_num: String,
+        inside_count: i64,
+        center_dist: f64,
+    }
+
+    let sql = "SELECT record::id(in) AS panel, record::id(out) AS member, \
+               room_num, inside_count, center_dist FROM room_relate \
+               WHERE string::starts_with(record::id(out), '24381_') \
+               ORDER BY panel, member";
+    let mut response = SUL_DB.query(sql).await?.check()?;
+    let baseline: Vec<Edge> = response.take(0)?;
+    let first = baseline
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("7997 全量房间计算没有产生任何成员边"))?;
+
+    let element = RefnoEnum::from(first.member.replace('_', "/").as_str());
+    recalc_element_membership(&option, &rooms, element).await?;
+
+    let mut response = SUL_DB.query(sql).await?.check()?;
+    let incremental: Vec<Edge> = response.take(0)?;
+    assert_eq!(
+        incremental, baseline,
+        "7997 单构件增量重算必须与全量基线逐边一致"
+    );
     Ok(())
 }
 
@@ -119,7 +143,7 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     for room in &room_panel_map.rooms {
         for &panel_refno in &room.panels {
             let members =
-                match cal_room_refnos(&mesh_dir, panel_refno, exclude_panel_refnos, 0.1).await {
+                match cal_room_refnos(&mesh_dir, panel_refno, exclude_panel_refnos).await {
                     Ok(members) => members,
                     Err(error) => {
                         failures.push(format!("{panel_refno} 计算房间成员失败: {error:#}"));
@@ -442,7 +466,8 @@ async fn query_geom_pts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomPtsQuery
             r#"select
                  in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
                  (select value [trans.d, (->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
-               from array::flatten([{pes}]->inst_relate)  where !booled
+               from array::flatten([{pes}]->inst_relate)
+               where !booled and aabb.d != none and world_trans.d != none
             "#
         ))
         .await
@@ -458,7 +483,6 @@ pub async fn cal_room_refnos(
     mesh_dir: &PathBuf,
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
-    inside_tol: f32,
 ) -> anyhow::Result<HashMap<RefnoEnum, RoomMember>> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
     // 这里曾经是 `unwrap_or_default()`：面板实例只要有一个字段形状不对
@@ -474,20 +498,31 @@ pub async fn cal_room_refnos(
     }
 
     let mut within_refnos: HashMap<RefnoEnum, RoomMember> = HashMap::new();
+    // 网格读不出来不能静默当成「没有成员」：这套写入是先清后写，判不了却照常
+    // 返回结果会把整间房的存量边部分抹掉且不留痕迹。逐个实例的失败先收集，
+    // 只要有一个失败就中止写入并保留任务重试。
+    let mut usable_meshes = 0usize;
+    let mut mesh_failures: Vec<String> = Vec::new();
     //将panel的 plant mesh 转换成TriMesh
     for geom_inst in geom_insts {
         for inst in geom_inst.insts {
             let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
-            let Ok(mesh) = PlantMesh::des_mesh_file(&file_path) else {
-                continue;
+            let mesh = match PlantMesh::des_mesh_file(&file_path) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    mesh_failures.push(format!("{}: {error}", file_path.display()));
+                    continue;
+                }
             };
             // dbg!(&file_path);
             let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
                 (geom_inst.world_trans * inst.transform).compute_matrix(),
                 TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
             ) else {
+                mesh_failures.push(format!("{}: 三角网转换失败", file_path.display()));
                 continue;
             };
+            usable_meshes += 1;
             let mut read = GLOBAL_AABB_TREE.read().await;
             let mut contains_query = read
                 .locate_intersecting_bounds(&geom_inst.world_aabb)
@@ -606,6 +641,17 @@ pub async fn cal_room_refnos(
         }
     }
 
+    if !mesh_failures.is_empty() {
+        anyhow::bail!(
+            "面板 {panel_refno} 有 {} 个网格不可用，本次不改写归属: {}",
+            mesh_failures.len(),
+            mesh_failures.join("; ")
+        );
+    }
+    if usable_meshes == 0 {
+        anyhow::bail!("面板 {panel_refno} 没有可用网格，本次不改写归属");
+    }
+
     Ok(within_refnos)
 }
 
@@ -625,13 +671,7 @@ pub async fn recalc_panel_membership(
         save_room_relate(panel, &HashMap::new(), "").await?;
         return Ok(HashSet::new());
     };
-    let members = cal_room_refnos(
-        &db_option.get_meshes_path(),
-        panel,
-        &rooms.all_panels,
-        0.1,
-    )
-    .await?;
+    let members = cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels).await?;
     save_room_relate(panel, &members, &room_num).await?;
     Ok(members.keys().copied().collect())
 }
@@ -688,23 +728,34 @@ pub async fn recalc_element_membership(
 
     let mesh_dir = db_option.get_meshes_path();
     let mut edges: HashMap<RefnoEnum, ElementRoomEdge> = HashMap::new();
+    // 候选面板的网格读不出来时不能把「判不了」当「不在里面」：本函数是先删该构件
+    // 全部入边再写回，静默跳过一块面板等于悄悄退掉该构件在这块面板的归属。
+    // 任一网格失败或面板没有可用网格都中止写入并保留任务重试。
+    let mut undecidable_panels: Vec<String> = Vec::new();
     for panel_inst in &panel_insts {
         let panel = panel_inst.refno;
         let Some(room_num) = rooms.room_num_of(panel) else {
             continue;
         };
+        let mut usable_meshes = 0usize;
+        let mut mesh_failures: Vec<String> = Vec::new();
         for inst in &panel_inst.insts {
-            let Ok(mesh) =
-                PlantMesh::des_mesh_file(&mesh_dir.join(format!("{}.mesh", inst.geo_hash)))
-            else {
-                continue;
+            let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
+            let mesh = match PlantMesh::des_mesh_file(&file_path) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    mesh_failures.push(format!("{}: {error}", file_path.display()));
+                    continue;
+                }
             };
             let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
                 (panel_inst.world_trans * inst.transform).compute_matrix(),
                 TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
             ) else {
+                mesh_failures.push(format!("{}: 三角网转换失败", file_path.display()));
                 continue;
             };
+            usable_meshes += 1;
             if !element_in_panel(&tri_mesh, &element_aabb, || world_pts.iter().copied()) {
                 continue;
             }
@@ -724,6 +775,18 @@ pub async fn recalc_element_membership(
                     member,
                 });
         }
+        if !mesh_failures.is_empty() {
+            undecidable_panels.push(format!("{panel}({})", mesh_failures.join("; ")));
+        } else if usable_meshes == 0 {
+            undecidable_panels.push(format!("{panel}(没有可用网格)"));
+        }
+    }
+    if !undecidable_panels.is_empty() {
+        anyhow::bail!(
+            "构件 {element} 的 {} 块候选面板网格不可完整判定，本次不改写归属: {}",
+            undecidable_panels.len(),
+            undecidable_panels.join(", ")
+        );
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();

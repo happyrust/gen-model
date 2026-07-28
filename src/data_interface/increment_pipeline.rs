@@ -387,6 +387,38 @@ fn validate_prepared_attempt(
     Ok(())
 }
 
+/// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
+///
+/// `render_datacenter_statements` 会渲出 `fn::find_ancestor_types(...)`，而 A3 把
+/// datacenter 语句并进了收口事务——它从「可失败的副作用」变成了「水位推进的必要
+/// 条件」。这个函数定义在 `resource/surreal/common.surql`，而**全仓没有任何代码
+/// 负责把那份脚本灌进库**，它是部署时的手工步骤。漏灌的后果是每一个 DESI 窗口的
+/// 收口都失败、水位永不推进、同一区间无限重放，而错误信息长成
+/// `finalize increment attempt dbnum=… statement failed: …`，一个字都不提
+/// datacenter，排查的人会先去翻水位和模型队列。
+///
+/// 只探测，不加载：`common.surql` 是 `REMOVE FUNCTION` + `DEFINE FUNCTION` 的形态，
+/// 启动时无条件重建会把库里手工调过的函数静默盖掉，而那份脚本本身的权威版本
+/// 还没定。缺失也不阻止启动——SYST / CATA / DICT 窗口不依赖它。
+pub async fn selfcheck_surreal_functions() {
+    const PROBE: &str =
+        "RETURN fn::find_ancestor_types(type::thing('pe','__startup_selfcheck__'),['ZONE']);";
+    let probed = match aios_core::SUL_DB.query(PROBE).await {
+        Ok(response) => response.check().map(|_| ()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = probed {
+        let msg = format!(
+            "启动自检未通过：调用 fn::find_ancestor_types 失败（{error}）。\
+             它是 DESI 窗口收口事务的硬前置，定义在 resource/surreal/common.surql，\
+             需要手工灌进当前库。不灌的话每个 DESI 窗口的收口都会失败、\
+             applied_sesno 永不推进，而那时的错误信息不会指向这里。"
+        );
+        log::error!("{msg}");
+        eprintln!("{msg}");
+    }
+}
+
 impl IncrementPipeline {
     pub fn new() -> Self {
         Self
@@ -451,7 +483,7 @@ impl IncrementPipeline {
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
 
-            if file_name.contains('-') {
+            if !crate::data_interface::increment_manager::is_pdms_db_file_name(file_name) {
                 result
                     .warnings
                     .push(format!("skip copy file: {}", path.display()));
@@ -586,8 +618,12 @@ impl IncrementPipeline {
         }
         persist_result?;
 
-        // ADR-003 B1-emit: 维护反向引用索引（非致命，绝不阻塞数据批次 / 水位推进）。
-        // 写失败只记 warning：缺一条引用边最多漏一次级联，靠后续触及 / 全量重建自愈。
+        // ADR-003 B1-emit: 维护失败可进持久补偿队列；补偿也落不下时不推进水位。
+        //
+        // 失败不能只留一句 warning。`ref_rev` 是「关联模型也要更新」的权威来源，缺一条边
+        // 就是某个设计实例静默不重生成；而「靠后续触及 / 全量重建自愈」里没有任何一步是
+        // 自动发生的——那条边可能到下一次有人手工跑全量重建为止都不存在。所以把这批引用者
+        // 记进持久补偿队列，走与其它副作用同一条重试通道。
         if let Err(e) = StageTimings::measure(
             &mut timings.reverse_index,
             Self::maintain_reverse_index(&range_eles),
@@ -599,6 +635,11 @@ impl IncrementPipeline {
                 path.display(),
                 e
             ));
+            let referrers = Self::changed_refnos(&range_eles);
+            crate::data_interface::side_effect_pending::SideEffectCompensator::enqueue_ref_rev(
+                dbnum, end_sesno, db_type, &referrers,
+            )
+            .await?;
         }
 
         // Rendering only — the timing slot no longer covers any datacenter I/O,
@@ -629,14 +670,7 @@ impl IncrementPipeline {
             range_eles.values().map(|ops| ops.len()).sum::<usize>(),
         );
 
-        let mut seen = HashSet::new();
-        let changed_refnos = range_eles
-            .values()
-            .flat_map(|vec| vec.iter())
-            .filter(|op| !matches!(op.detail, EleOperationDetail::None))
-            .map(|op| op.refno)
-            .filter(|refno| seen.insert(*refno))
-            .collect::<Vec<RefU64>>();
+        let changed_refnos = Self::changed_refnos(&range_eles);
 
         Ok((
             IncrFileSuccess {
@@ -650,6 +684,22 @@ impl IncrementPipeline {
             },
             warnings,
         ))
+    }
+
+    /// 本窗口里真正动过的 refno，按首次出现去重。
+    ///
+    /// 与 [`crate::data_interface::manual_update::build_reverse_index_statements`] 同一口径
+    /// （跳过 `None` 操作），所以它既是 `IncrFileSuccess.changed_refnos`，也正好是反向索引
+    /// 维护碰过的那批引用者——修复任务要重建的就是这些。
+    fn changed_refnos(range_eles: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<RefU64> {
+        let mut seen = HashSet::new();
+        range_eles
+            .values()
+            .flatten()
+            .filter(|op| !matches!(op.detail, EleOperationDetail::None))
+            .map(|op| op.refno)
+            .filter(|refno| seen.insert(*refno))
+            .collect()
     }
 
     /// Collect the cache keys whose database-backed values may change.
@@ -860,11 +910,10 @@ impl IncrementPipeline {
     }
 
     /// ADR-003 B1-emit: maintain the reverse-reference index (`ref_rev`) for this
-    /// window. BEST-EFFORT / non-fatal by contract: the caller swallows the Err
-    /// into a warning so a failure here can NEVER block the data batch or the
-    /// applied watermark. Not wrapped in the main-data transaction; transport
-    /// and statement errors are still surfaced as warnings so a stale index is
-    /// never reported as successfully maintained.
+    /// window. A direct failure is recoverable through the durable side-effect
+    /// queue; if that recovery record cannot be persisted, the caller returns
+    /// before finalization so the watermark does not publish an unrecoverable
+    /// stale index. This write is not part of the main-data transaction.
     /// Statements are rendered by the pure
     /// [`crate::data_interface::manual_update::build_reverse_index_statements`].
     async fn maintain_reverse_index(
@@ -892,6 +941,28 @@ impl IncrementPipeline {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    #[test]
+    fn reverse_index_failure_requires_durable_recovery_before_finalize() {
+        let source = include_str!("increment_pipeline.rs");
+        let recovery = source
+            .split_once("Self::maintain_reverse_index(&range_eles)")
+            .expect("reverse-index maintenance must exist")
+            .1
+            .split_once("let datacenter_statements")
+            .expect("recovery must finish before finalization")
+            .0;
+
+        assert!(recovery.contains("enqueue_ref_rev"), "{recovery}");
+        assert!(
+            !recovery.contains("if let Err(enqueue_error)"),
+            "recovery enqueue failure must escape apply_one instead of becoming a warning"
+        );
+        assert!(
+            recovery.contains("await?"),
+            "durable recovery must succeed before finalization"
+        );
+    }
 
     #[test]
     fn cache_targets_are_deduped_and_none_operations_are_skipped() {

@@ -62,6 +62,8 @@ pub struct PendingModelWork {
     pub attempts: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// 队列行的 id。同一个 (dbnum, action, target) 只占一行，重复入队即幂等更新。
@@ -70,13 +72,23 @@ pub struct PendingModelWork {
 /// 带上 dbnum 会让同一间房在一轮里排出多行、于是被重算多遍；更糟的是失败之后它只能
 /// 等同一个 dbnum 的新会话来复活，而真正触发它的其它库永远够不着——那正是审计里 B6
 /// 的放大版。dbnum 与 `source_end_sesno` 因此降为字段，只记最后一次触发来源。
-fn record_id(item: &ModelWorkItem) -> String {
-    let action = item.action.as_str();
-    let target = item.target_refno.replace('/', "_");
-    if item.action.is_room_recalc() {
-        return format!("{TABLE}:{action}_{target}");
+/// 只用寻址三要素算行 id。
+///
+/// 单独开一个是因为有几个调用方手里只有 `(dbnum, action, target)`——它们过去为了
+/// 拿一个 id 就凭空拼一个字段全空的 `ModelWorkItem`。那种写法眼下能对，全靠 id 恰好
+/// 不读 `db_type` 与 `source_end_sesno`；哪天往 id 里加一个字段，它们会**静默**删错行、
+/// 改错行，而不是编译不过。
+pub(crate) fn record_id_of(dbnum: u32, action: ModelWorkAction, target_refno: &str) -> String {
+    let action_name = action.as_str();
+    let target = target_refno.replace('/', "_");
+    if action.is_room_recalc() {
+        return format!("{TABLE}:{action_name}_{target}");
     }
-    format!("{TABLE}:{}_{action}_{target}", item.dbnum)
+    format!("{TABLE}:{dbnum}_{action_name}_{target}")
+}
+
+fn record_id(item: &ModelWorkItem) -> String {
+    record_id_of(item.dbnum, item.action, &item.target_refno)
 }
 
 /// Persist the exact model work before advancing `applied_sesno`.
@@ -218,6 +230,7 @@ fn render_upsert(item: &ModelWorkItem) -> String {
     clauses.push(format!(
         "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
     ));
+    clauses.push("revision = (revision?:0) + 1".to_string());
     clauses.push("status = 'pending'".to_string());
     clauses.push("updated_at = time::now()".to_string());
 
@@ -413,6 +426,17 @@ fn fail_deletes_for_test(count: usize) {
     FAIL_DELETES.store(count, std::sync::atomic::Ordering::SeqCst);
 }
 
+fn render_delete_revision(id: &str, revision: u64) -> String {
+    format!("DELETE {id} WHERE (revision?:0) = {revision};")
+}
+
+fn render_delete_work(item: &PendingModelWork) -> String {
+    render_delete_revision(
+        &record_id_of(item.dbnum, item.action, &item.target_refno),
+        item.revision,
+    )
+}
+
 async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
     #[cfg(test)]
     if FAIL_DELETES
@@ -426,17 +450,9 @@ async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
         anyhow::bail!("injected queue cleanup failure");
     }
 
-    let work = ModelWorkItem {
-        dbnum: item.dbnum,
-        db_type: item.db_type.clone(),
-        source_end_sesno: item.source_end_sesno,
-        action: item.action,
-        target_refno: item.target_refno.clone(),
-        noun: item.noun.clone(),
-    };
-    let id = record_id(&work);
+    let id = record_id_of(item.dbnum, item.action, &item.target_refno);
     SUL_DB
-        .query(format!("DELETE {id};"))
+        .query(render_delete_work(item))
         .await
         .map_err(|error| anyhow::anyhow!("delete completed model work {id} failed: {error}"))?
         .check()
@@ -446,22 +462,27 @@ async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn mark_failed(item: &PendingModelWork, error: &str) -> anyhow::Result<()> {
-    let work = ModelWorkItem {
-        dbnum: item.dbnum,
-        db_type: item.db_type.clone(),
-        source_end_sesno: item.source_end_sesno,
-        action: item.action,
-        target_refno: item.target_refno.clone(),
-        noun: item.noun.clone(),
-    };
-    let id = record_id(&work);
+fn render_mark_failed_revision(id: &str, revision: u64, error: &str) -> String {
     let error = escape_surql_str(error);
+    format!(
+        "UPDATE {id} SET status = 'failed', attempts = (attempts?:0) + 1, \
+         last_error = '{error}', updated_at = time::now() \
+         WHERE (revision?:0) = {revision};"
+    )
+}
+
+fn render_mark_failed(item: &PendingModelWork, error: &str) -> String {
+    render_mark_failed_revision(
+        &record_id_of(item.dbnum, item.action, &item.target_refno),
+        item.revision,
+        error,
+    )
+}
+
+async fn mark_failed(item: &PendingModelWork, error: &str) -> anyhow::Result<()> {
+    let id = record_id_of(item.dbnum, item.action, &item.target_refno);
     SUL_DB
-        .query(format!(
-            "UPDATE {id} SET status = 'failed', attempts = (attempts?:0) + 1, \
-             last_error = '{error}', updated_at = time::now();"
-        ))
+        .query(render_mark_failed(item, error))
         .await
         .map_err(|query_error| anyhow::anyhow!("mark model work {id} failed: {query_error}"))?
         .check()
@@ -469,18 +490,33 @@ async fn mark_failed(item: &PendingModelWork, error: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-pub async fn clear_regen_work(dbnum: u32, root_refno: &str) -> anyhow::Result<()> {
-    let work = ModelWorkItem {
-        dbnum,
-        db_type: String::new(),
-        source_end_sesno: 0,
-        action: ModelWorkAction::RegenRoot,
-        target_refno: root_refno.to_string(),
-        noun: String::new(),
-    };
-    let id = record_id(&work);
+pub async fn current_regen_revision(
+    dbnum: u32,
+    root_refno: &str,
+) -> anyhow::Result<Option<u64>> {
+    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
+    let mut response = SUL_DB
+        .query(format!("SELECT VALUE revision?:0 FROM {id};"))
+        .await
+        .map_err(|error| anyhow::anyhow!("load model work revision {id} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("load model work revision {id} statement failed: {error}")
+        })?;
+    let revisions: Vec<u64> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode model work revision {id} failed: {error}"))?;
+    Ok(revisions.into_iter().next())
+}
+
+async fn clear_regen_work_revision(
+    dbnum: u32,
+    root_refno: &str,
+    revision: u64,
+) -> anyhow::Result<()> {
+    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
     SUL_DB
-        .query(format!("DELETE {id};"))
+        .query(render_delete_revision(&id, revision))
         .await
         .map_err(|error| anyhow::anyhow!("delete completed model work {id} failed: {error}"))?
         .check()
@@ -490,19 +526,96 @@ pub async fn clear_regen_work(dbnum: u32, root_refno: &str) -> anyhow::Result<()
     Ok(())
 }
 
-pub async fn mark_regen_failed(dbnum: u32, root_refno: &str, error: &str) -> anyhow::Result<()> {
-    let item = PendingModelWork {
-        dbnum,
-        db_type: String::new(),
-        source_end_sesno: 0,
-        action: ModelWorkAction::RegenRoot,
-        target_refno: root_refno.to_string(),
-        noun: String::new(),
-        status: String::new(),
-        attempts: 0,
-        last_error: None,
+async fn mark_regen_revision_failed(
+    dbnum: u32,
+    root_refno: &str,
+    revision: u64,
+    error: &str,
+) -> anyhow::Result<()> {
+    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
+    SUL_DB
+        .query(render_mark_failed_revision(&id, revision, error))
+        .await
+        .map_err(|query_error| anyhow::anyhow!("mark model work {id} failed: {query_error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("mark model work {id} statement failed: {error}"))?;
+    Ok(())
+}
+
+pub async fn settle_regen_work(
+    dbnum: u32,
+    root_refno: &str,
+    expected_revision: Option<u64>,
+    generation_error: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(revision) = expected_revision else {
+        return Ok(());
     };
-    mark_failed(&item, error).await
+    match generation_error {
+        Some(error) => mark_regen_revision_failed(dbnum, root_refno, revision, error).await,
+        None => clear_regen_work_revision(dbnum, root_refno, revision).await,
+    }
+}
+
+/// 收编一条旧队列行的语句（纯函数）。
+///
+/// 一律**只增不改**：本表可能已经有同一个根（上一个进程留下的），那一行比旧表那条新，
+/// 不该被它盖回去。`status` / `last_error` 用 `??` 让既有值胜出，空的 `noun` 干脆不写。
+fn render_legacy_adoption(
+    unit: &crate::data_interface::manual_update::PendingModelUnit,
+) -> String {
+    let id = record_id_of(unit.dbnum, ModelWorkAction::RegenRoot, &unit.root_refno);
+    let legacy_error = unit
+        .last_error
+        .as_deref()
+        .map(|error| format!("'{}'", escape_surql_str(error)))
+        .unwrap_or_else(|| "NONE".to_string());
+
+    let mut clauses = vec![
+        format!("dbnum = {}", unit.dbnum),
+        "db_type = 'DESI'".to_string(),
+        format!("action = '{}'", ModelWorkAction::RegenRoot.as_str()),
+        format!("target_refno = '{}'", escape_surql_str(&unit.root_refno)),
+    ];
+    if !unit.noun.is_empty() {
+        clauses.push(format!("noun = '{}'", escape_surql_str(&unit.noun)));
+    }
+    clauses.extend([
+        format!(
+            "source_end_sesno = math::max([source_end_sesno?:0, {}])",
+            unit.source_end_sesno
+        ),
+        format!("attempts = math::max([attempts?:0, {}])", unit.attempts),
+        format!("last_error = last_error ?? {legacy_error}"),
+        "status = status ?? 'failed'".to_string(),
+        "updated_at = time::now()".to_string(),
+    ]);
+    format!("UPSERT {id} SET {};", clauses.join(", "))
+}
+
+/// 收编旧 `manual_model_pending` 里的重生成根，并在**同一个事务**里清空来源表。
+///
+/// 中途崩掉宁可整体不算数、下次启动重来，也不能把待重试的根搬丢。
+///
+/// `attempts` 取两边较大值：旧表那个数是这个根真实失败过的次数，直接归零等于把一个
+/// 已经判死的根放回队列，再烧五趟完整生成。
+pub(crate) async fn adopt_legacy_regen_units(
+    units: &[crate::data_interface::manual_update::PendingModelUnit],
+    legacy_table: &str,
+) -> anyhow::Result<()> {
+    let mut statements: Vec<String> = units.iter().map(render_legacy_adoption).collect();
+    statements.push(format!("DELETE {legacy_table};"));
+
+    SUL_DB
+        .query(format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            statements.join("\n")
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("adopt legacy pending units failed: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("adopt legacy pending units statement failed: {error}"))?;
+    Ok(())
 }
 
 /// Regeneration work for one root a reverse cascade discovered (pure).
@@ -623,6 +736,13 @@ async fn run_one(
     done: &mut usize,
     failures: &mut Vec<String>,
 ) {
+    let root_lock = (job.action == ModelWorkAction::RegenRoot).then(|| {
+        crate::data_interface::manual_update::generation_root_lock(&job.target_refno)
+    });
+    let _root_guard = match &root_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     let outcome = match execute_item(mgr, job).await {
         Ok(()) => delete_work(job).await,
         Err(error) => Err(error),
@@ -686,9 +806,20 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
                 roots.push(job.target_refno.clone());
             }
         }
-        match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(mgr, &roots)
-            .await
-        {
+        let mut lock_roots = roots.clone();
+        lock_roots.sort_unstable();
+        let locks = lock_roots
+            .iter()
+            .map(|root| crate::data_interface::manual_update::generation_root_lock(root))
+            .collect::<Vec<_>>();
+        let mut _root_guards = Vec::with_capacity(locks.len());
+        for lock in &locks {
+            _root_guards.push(lock.lock().await);
+        }
+        let batch_result =
+            crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(mgr, &roots)
+                .await;
+        match batch_result {
             Ok(()) => {
                 for job in &batchable {
                     match delete_work(job).await {
@@ -698,6 +829,9 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
                 }
             }
             Err(error) => {
+                // The per-root fallback acquires the same locks one by one.
+                drop(_root_guards);
+                drop(locks);
                 println!(
                     "批量重生成 {} 个根失败，回退逐根重试以定位问题根: {error:#}",
                     roots.len()
@@ -877,12 +1011,16 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     let rooms = room_model::load_room_panel_map(db_option).await?;
     let mut done = 0;
     let mut failures = Vec::new();
-    let mut claimed: HashSet<RefnoEnum> = HashSet::new();
+    let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
+    let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
     for job in &panels {
         match run_room_job(db_option, &rooms, job).await {
             Ok(members) => {
-                claimed.extend(members);
+                claimed_members.extend(members);
+                if let Ok(refno) = RefU64::from_str(&job.target_refno) {
+                    claimed_panels.insert(RefnoEnum::from(refno));
+                }
                 match delete_work(job).await {
                     Ok(()) => done += 1,
                     Err(error) => record_failure(job, &error, &mut failures).await,
@@ -892,11 +1030,42 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         }
     }
 
+    // 吸收的封闭性输入（ADR-010 §8，2026-07-28 修订）只为真正的候选加载一次；
+    // 加载失败不放大成整轮失败，但**一个都不吸收**——封闭性未知时把元素任务照跑
+    // 一遍只是多花一次网格判定，错吸收却会把陈旧边永久留在库里。
+    let absorb_candidates: Vec<RefnoEnum> = elements
+        .iter()
+        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
+        .map(RefnoEnum::from)
+        .filter(|refno| claimed_members.contains(refno))
+        .collect();
+    let closure_inputs = if absorb_candidates.is_empty() {
+        None
+    } else {
+        match load_absorption_closure_inputs(&rooms, &absorb_candidates).await {
+            Ok(inputs) => Some(inputs),
+            Err(error) => {
+                println!("吸收封闭性输入加载失败，本轮不吸收任何元素任务: {error:#}");
+                None
+            }
+        }
+    };
+
     for job in &elements {
-        // 整间分支刚刚把这个构件写进某块面板的成员里，它的元素任务就是重复劳动：
-        // 两条分支共用判定与边 id，再跑一遍只会得到同一批边。
+        // 整间分支刚把它写进某块面板的成员里，且它的旧归属面板与当前候选面板**全部**
+        // 落在本轮已重算面板集合之内时，元素任务才是重复劳动。封闭性不成立就照跑：
+        // 只有元素分支那条「删全部入边」能清掉本轮没重算的面板指向它的陈旧边、
+        // 写上它新进入的本轮外面板的边——构件与新面板同轮搬迁而旧面板不在本轮时，
+        // 无条件吸收会把旧面板的边永久留在库里。
         let absorbed = RefU64::from_str(&job.target_refno)
-            .is_ok_and(|refno| claimed.contains(&RefnoEnum::from(refno)));
+            .ok()
+            .map(RefnoEnum::from)
+            .is_some_and(|refno| {
+                claimed_members.contains(&refno)
+                    && closure_inputs
+                        .as_ref()
+                        .is_some_and(|inputs| absorption_verdict(inputs, refno, &claimed_panels))
+            });
         let outcome = if absorbed {
             delete_work(job).await
         } else {
@@ -921,6 +1090,111 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     Ok(done)
 }
 
+/// 同轮吸收的封闭性输入：候选元素的现存归属边与当前空间树候选面板。
+#[derive(Debug, Default)]
+struct AbsorptionClosureInputs {
+    /// 元素 → 现存 `room_relate` 入边的面板集合。没有旧边的元素不在映射里（等价空集）。
+    old_edge_panels: std::collections::HashMap<RefnoEnum, HashSet<RefnoEnum>>,
+    /// 元素 → 当前包围盒在空间树上命中的**在册** PANE 集合。树里没有该元素条目时
+    /// 不在映射里——候选未知，吸收判定必须让路。
+    candidate_panels: std::collections::HashMap<RefnoEnum, HashSet<RefnoEnum>>,
+}
+
+/// 吸收的封闭性判据（纯函数）。
+///
+/// 整间分支只重写了本轮 claimed 面板的出边；元素分支才会「删该构件全部入边再写回」。
+/// 只有当该构件的旧归属面板与当前候选面板都落在 claimed 集合里，跳过元素任务才
+/// 不会丢删陈旧边（旧面板不在本轮）或漏写新边（新面板不在本轮）。
+fn absorption_is_closed(
+    old_edge_panels: &HashSet<RefnoEnum>,
+    candidate_panels: &HashSet<RefnoEnum>,
+    claimed_panels: &HashSet<RefnoEnum>,
+) -> bool {
+    old_edge_panels.is_subset(claimed_panels) && candidate_panels.is_subset(claimed_panels)
+}
+
+/// 一个候选元素的吸收裁决：旧边缺省为空集（没有旧边不阻碍吸收），候选集缺失
+/// 视为未知、一律不吸收。
+fn absorption_verdict(
+    inputs: &AbsorptionClosureInputs,
+    element: RefnoEnum,
+    claimed_panels: &HashSet<RefnoEnum>,
+) -> bool {
+    let no_old_edges = HashSet::new();
+    let old = inputs
+        .old_edge_panels
+        .get(&element)
+        .unwrap_or(&no_old_edges);
+    inputs
+        .candidate_panels
+        .get(&element)
+        .is_some_and(|candidates| absorption_is_closed(old, candidates, claimed_panels))
+}
+
+/// 为本轮吸收候选批量加载封闭性输入：一条 SELECT 查旧边，一次树遍历取候选面板。
+async fn load_absorption_closure_inputs(
+    rooms: &room_model::RoomPanelMap,
+    elements: &[RefnoEnum],
+) -> anyhow::Result<AbsorptionClosureInputs> {
+    use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
+
+    let mut inputs = AbsorptionClosureInputs::default();
+
+    let keys = elements
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    #[derive(serde::Deserialize)]
+    struct EdgeRow {
+        panel: RefnoEnum,
+        element: RefnoEnum,
+    }
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT in.id AS panel, out.id AS element FROM room_relate WHERE out IN [{keys}];"
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("查询吸收候选的现存归属边失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("查询吸收候选的现存归属边语句失败: {error}"))?;
+    for row in response
+        .take::<Vec<EdgeRow>>(0)
+        .map_err(|error| anyhow::anyhow!("解析吸收候选的现存归属边失败: {error}"))?
+    {
+        inputs
+            .old_edge_panels
+            .entry(row.element)
+            .or_default()
+            .insert(row.panel);
+    }
+
+    // 候选面板用元素在树上的包围盒条目求交——树与库由同一次刷新维护（记录先落、
+    // 指针后落、写入全部成功才动树），此处与元素分支读到的是同一份现状。
+    load_aabb_tree().await?;
+    let tree = GLOBAL_AABB_TREE.read().await;
+    let wanted: std::collections::HashMap<RefU64, RefnoEnum> = elements
+        .iter()
+        .map(|refno| (refno.refno(), *refno))
+        .collect();
+    let mut element_aabbs: Vec<(RefnoEnum, parry3d::bounding_volume::Aabb)> = Vec::new();
+    for bbox in tree.tree.iter() {
+        if let Some(&element) = wanted.get(&bbox.refno) {
+            element_aabbs.push((element, bbox.aabb));
+        }
+    }
+    for (element, aabb) in element_aabbs {
+        let candidates: HashSet<RefnoEnum> = tree
+            .locate_intersecting_bounds(&aabb)
+            .filter(|bbox| bbox.noun == "PANE")
+            .map(|bbox| RefnoEnum::from(bbox.refno))
+            .filter(|panel| rooms.room_num_of(*panel).is_some())
+            .collect();
+        inputs.candidate_panels.insert(element, candidates);
+    }
+    Ok(inputs)
+}
+
 async fn run_room_job(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
@@ -942,6 +1216,73 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn pending_regeneration_holds_the_shared_root_lock_through_settlement() {
+        let source = include_str!("model_update_pending.rs");
+        let run_one = source
+            .split_once("async fn run_one(")
+            .expect("run_one must exist")
+            .1
+            .split_once("fn render_drain_select")
+            .expect("run_one must end before render_drain_select")
+            .0;
+        let batch = source
+            .split_once("if !batchable.is_empty()")
+            .expect("batch regeneration branch must exist")
+            .1
+            .split_once("for job in singles")
+            .expect("batch regeneration branch must end before singles")
+            .0;
+
+        assert!(run_one.contains("generation_root_lock"), "{run_one}");
+        assert!(batch.contains("generation_root_lock"), "{batch}");
+        assert!(
+            run_one.find("lock().await") < run_one.find("delete_work(job).await"),
+            "single-root lock must cover queue settlement"
+        );
+        assert!(
+            batch.find("lock().await") < batch.find("delete_work(job).await"),
+            "batch locks must cover queue settlement"
+        );
+    }
+
+    #[test]
+    fn settlement_only_mutates_the_queue_revision_that_was_executed() {
+        let work = PendingModelWork {
+            dbnum: 8191,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "16777216/5".into(),
+            noun: "BRAN".into(),
+            status: "pending".into(),
+            attempts: 0,
+            last_error: None,
+            revision: 7,
+        };
+        let item = ModelWorkItem {
+            dbnum: work.dbnum,
+            db_type: work.db_type.clone(),
+            source_end_sesno: work.source_end_sesno,
+            action: work.action,
+            target_refno: work.target_refno.clone(),
+            noun: work.noun.clone(),
+        };
+
+        assert!(
+            render_upsert(&item).contains("revision = (revision?:0) + 1"),
+            "every trigger must create a new settlement revision"
+        );
+        assert!(
+            render_delete_work(&work).contains("WHERE (revision?:0) = 7"),
+            "old success must not delete a newer trigger"
+        );
+        assert!(
+            render_mark_failed(&work, "boom").contains("WHERE (revision?:0) = 7"),
+            "old failure must not overwrite a newer trigger"
+        );
+    }
+
+    #[test]
     fn record_id_is_stable_per_dbnum_action_and_target() {
         let item = ModelWorkItem {
             dbnum: 8191,
@@ -955,6 +1296,38 @@ mod tests {
             record_id(&item),
             "model_update_pending:8191_regen_root_16777216_5"
         );
+    }
+
+    /// 收编旧队列行只增不改：本表可能已经有同一个根（上一个进程留下的、比旧表那条新），
+    /// 盖回去等于用一条陈旧记录顶掉当前状态。失败次数必须带过来——归零就是把一个已经
+    /// 判死的根放回队列再烧五趟生成。
+    #[test]
+    fn adopting_a_legacy_row_carries_attempts_without_overwriting_a_newer_row() {
+        let sql = render_legacy_adoption(
+            &crate::data_interface::manual_update::PendingModelUnit {
+                dbnum: 8000,
+                root_refno: "16777216/5".into(),
+                noun: "BRAN".into(),
+                source_end_sesno: 42,
+                attempts: 3,
+                last_error: Some("生成失败".into()),
+            },
+        );
+        assert!(sql.starts_with("UPSERT model_update_pending:8000_regen_root_16777216_5 SET"));
+        assert!(sql.contains("attempts = math::max([attempts?:0, 3])"), "{sql}");
+        assert!(sql.contains("last_error = last_error ?? '生成失败'"), "{sql}");
+        assert!(sql.contains("status = status ?? 'failed'"), "{sql}");
+
+        // 空 noun 干脆不写，否则会把本表里那条已知的 noun 抹成空串。
+        let blank = render_legacy_adoption(
+            &crate::data_interface::manual_update::PendingModelUnit {
+                dbnum: 8000,
+                root_refno: "16777216/5".into(),
+                ..Default::default()
+            },
+        );
+        assert!(!blank.contains("noun ="), "{blank}");
+        assert!(blank.contains("last_error = last_error ?? NONE"), "{blank}");
     }
 
     /// B5（2026-07-26 审计 round2）：SurrealDB 对 `UPSERT … SET a = …, b = …` 顺序求值，
@@ -1076,6 +1449,52 @@ mod tests {
         );
     }
 
+    /// 同轮吸收的封闭性（ADR-010 §8，2026-07-28 修订）：旧边或候选任何一个越出本轮
+    /// claimed 面板集合，元素任务都必须照跑——错吸收会把本轮没重算的面板指向该构件的
+    /// 陈旧边永久留在库里，或漏写它新进入的本轮外面板的边。
+    #[test]
+    fn absorption_requires_old_edges_and_candidates_inside_the_claimed_set() {
+        let panel = |seq: u64| RefnoEnum::from(RefU64((4000000001u64 << 32) | seq));
+        let element = panel(20);
+        let claimed: HashSet<RefnoEnum> = [panel(10)].into();
+
+        // 旧边与候选都在 claimed 里：吸收成立。
+        let mut inputs = AbsorptionClosureInputs::default();
+        inputs.old_edge_panels.insert(element, [panel(10)].into());
+        inputs.candidate_panels.insert(element, [panel(10)].into());
+        assert!(absorption_verdict(&inputs, element, &claimed));
+
+        // 旧边指向本轮没重算的面板：只有元素分支能清它，不得吸收。
+        let mut stale_old = AbsorptionClosureInputs::default();
+        stale_old
+            .old_edge_panels
+            .insert(element, [panel(11)].into());
+        stale_old.candidate_panels.insert(element, [panel(10)].into());
+        assert!(!absorption_verdict(&stale_old, element, &claimed));
+
+        // 候选里有本轮没重算的面板：它的新边只有元素分支会写，不得吸收。
+        let mut outside_candidate = AbsorptionClosureInputs::default();
+        outside_candidate
+            .old_edge_panels
+            .insert(element, [panel(10)].into());
+        outside_candidate
+            .candidate_panels
+            .insert(element, [panel(10), panel(11)].into());
+        assert!(!absorption_verdict(&outside_candidate, element, &claimed));
+
+        // 没有旧边（映射缺位 = 空集）不阻碍吸收；候选缺位 = 封闭性未知，一律不吸收。
+        let mut no_old_edges = AbsorptionClosureInputs::default();
+        no_old_edges
+            .candidate_panels
+            .insert(element, [panel(10)].into());
+        assert!(absorption_verdict(&no_old_edges, element, &claimed));
+        assert!(!absorption_verdict(
+            &AbsorptionClosureInputs::default(),
+            element,
+            &claimed
+        ));
+    }
+
     /// 房间任务的死信无条件复活，而不是按会话号比。
     ///
     /// 常规任务的判据「来了更新的会话」在这里不成立：行不带 dbnum，同一块面板被不同库
@@ -1166,6 +1585,7 @@ mod tests {
             status: "pending".into(),
             attempts: 0,
             last_error: None,
+            revision: 1,
         };
         assert!(joins_regen_batch(&fresh));
 

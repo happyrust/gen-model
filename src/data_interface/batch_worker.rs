@@ -9,9 +9,13 @@
 //! 执行体复用 [`AiosDBManager::execute_one_dbnum`]（rollout 第九节第 6 条）：
 //! 它自带回退阻断、基线补全、窗口冻结与崩溃重放，两条触发路径共用同一份语义。
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
+use chrono::Local;
+use futures::FutureExt;
 use serde::Serialize;
 
 use crate::data_interface::batch_scheduler::{BatchScheduler, FrozenBatch};
@@ -27,6 +31,50 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
+
+/// worker 还在不在。
+///
+/// `ensure_batch_worker` 用 `OnceLock` 保证只启动一次——反过来说 worker 一旦因
+/// panic 终结，本进程就再也不会有第二个消费者，所有批次永远停在 queued。而 tokio
+/// 只把 panic 交给那个被丢弃的 JoinHandle，没有人 join 它；`/health` 又只读进程
+/// 状态与 `AtomicBool` 暂停旗，于是子系统整个死掉、外面一路报 ok。
+///
+/// 旗子由 [`WorkerLiveGuard`] 在任务结束时放倒——`Drop` 在 panic 展开时同样会跑，
+/// 所以正常返回与 panic 两条路都盖得住。
+static WORKER_LIVE: AtomicBool = AtomicBool::new(false);
+/// 最近一次推进的时刻（epoch 毫秒，0 = 从未推进过）。
+///
+/// 旗子还立着但心跳很旧，说明它卡在某个长批次上（大库一轮以分钟计，正常）；
+/// 旗子倒了才是真死了。两个信号分开报，才分得清「慢」和「死」。
+static WORKER_BEAT: AtomicI64 = AtomicI64::new(0);
+
+/// 刚落库过 SYS meta → 本期执行范围可能已经变宽，空闲轮要重扫一次监控目录。
+///
+/// 范围由 MDB 定，而 MDB 与 CURD 就存在 SYS meta 库里。全新项目的第一轮只解析得出
+/// SYS meta，有人往 MDB 里加一个库也是同样的形状——那些刚进范围的设计库自己没有
+/// 文件变更事件，不重扫就得等下次重启才会被发现。
+static SCOPE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+fn beat() {
+    WORKER_BEAT.store(Local::now().timestamp_millis(), Ordering::Relaxed);
+}
+
+struct WorkerLiveGuard;
+
+impl Drop for WorkerLiveGuard {
+    fn drop(&mut self) {
+        WORKER_LIVE.store(false, Ordering::SeqCst);
+        log::error!("数据批次 worker 已退出，队列不再有消费者（本进程不会自动重启它）");
+        eprintln!("数据批次 worker 已退出，队列不再有消费者（本进程不会自动重启它）");
+    }
+}
+
+/// `/health` 用：worker 是否还活着、距最近一次推进过了多少秒（从未推进则 `None`）。
+pub fn worker_liveness() -> (bool, Option<i64>) {
+    let millis = WORKER_BEAT.load(Ordering::Relaxed);
+    let idle_secs = (millis > 0).then(|| (Local::now().timestamp_millis() - millis) / 1000);
+    (WORKER_LIVE.load(Ordering::SeqCst), idle_secs)
+}
 
 /// 一个数据批次任务的终态结果（写进任务注册表的 `result`）。
 ///
@@ -52,7 +100,11 @@ pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>) {
     static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let mut newly_started = false;
     STARTED.get_or_init(|| {
+        WORKER_LIVE.store(true, Ordering::SeqCst);
+        beat();
         tokio::spawn(async move {
+            // 守卫在任务结束时放倒存活旗——正常返回与 panic 展开都会跑到。
+            let _live = WorkerLiveGuard;
             run_batch_worker(mgr).await;
         });
         newly_started = true;
@@ -72,15 +124,55 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
+    // 旧 `manual_model_pending` 一次性收编（幂等：搬空之后每次启动都是一趟空 SELECT）。
+    // 放在消费之前：那张表里的根在被收编前既进不了工作单、也累计不了失败次数。
+    match crate::data_interface::manual_update::migrate_legacy_pending_units().await {
+        Ok(0) => {}
+        Ok(moved) => println!("已收编 {moved} 条旧模型待重试任务并清空 manual_model_pending"),
+        Err(error) => println!("收编旧模型待重试任务失败（留在旧表，下次启动重试）: {error:#}"),
+    }
     println!("数据批次 worker 已启动（单消费者，队列空时消化积压并收房间轮）");
     loop {
+        beat();
         let ran = drain_queue_until_empty(&mgr).await;
         // 队列跑空（或暂停）：暂停挡的是出队与积压消化——人按暂停就是「别再动数据」。
         if !scheduler.is_paused() {
-            idle_round(&mgr, registry, ran > 0).await;
+            // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
+            // 一样会把唯一的消费者带走。
+            if let Err(reason) = isolate_panic(idle_round(&mgr, registry, ran > 0)).await {
+                let msg = format!("空闲轮 panic，已隔离，worker 继续: {reason}");
+                log::error!("{msg}");
+                eprintln!("{msg}");
+            }
         }
         scheduler.wait_for_work(IDLE_WAKE).await;
     }
+}
+
+/// 跑一个可能 panic 的阶段，panic 只丢这个阶段，不展开到 worker 主循环。
+///
+/// 返回 `Err(那句话)` 表示接住了一个 panic，调用方据此收拾自己那部分状态。
+///
+/// **前提是 unwind**：profile 里一旦打开 `panic = "abort"`，这层壳什么都接不住，
+/// 队列就退回「一次 panic 永久停摆」。
+async fn isolate_panic<T>(work: impl std::future::Future<Output = T>) -> Result<T, String> {
+    AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        // `&*payload` 而不是 `&payload`：后者会把 `Box<dyn Any>` 自己当成那个
+        // 具体类型去 unsize，于是每一次 downcast 都落空、每一条 panic 都退化成
+        // 「载荷不是字符串」。
+        .map_err(|payload| panic_message(&*payload))
+}
+
+/// panic 载荷里那句话。`Box<dyn Any>` 里通常躺着 `&'static str` 或 `String`；
+/// 取不出来时也得给一句能写进任务终态的话——只写「panicked」等于让人回头翻 stderr。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&'static str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic 载荷不是字符串，详见 stderr".to_string())
 }
 
 /// 把当前排队中的批次全部消费掉（FIFO，逐个冻结执行），返回执行条数。
@@ -92,16 +184,53 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let registry = TaskRegistry::global();
     let mut ran = 0usize;
     while let Some(job) = scheduler.freeze_next(registry) {
-        run_one_batch(mgr, registry, scheduler, job).await;
+        run_one_batch_isolated(mgr, registry, scheduler, job).await;
         ran += 1;
     }
     ran
 }
 
+/// [`run_one_batch`] 的隔离壳：一个批次 panic 只丢这一个批次。
+///
+/// 没有这层壳，panic 会一路展开出 worker 任务：[`WorkerLiveGuard`] 放倒存活旗，
+/// 而 [`ensure_batch_worker`] 的 `OnceLock` 保证本进程不会再有第二个消费者——
+/// 一次 panic 就把整条队列永久停在 queued，只能靠人重启进程。
+///
+/// 展开路径上也必须把队列行与任务行收干净。漏掉的话那个 dbnum 会永远挂着一行
+/// running：`batch_queue::enqueue` 此后一直按 `running_end + 1` 给它排队，
+/// 而 `freeze_next` 只取 queued，那行 running 再也没人摘。
+async fn run_one_batch_isolated(
+    mgr: &Arc<AiosDBManager>,
+    registry: &'static TaskRegistry,
+    scheduler: &'static BatchScheduler,
+    job: FrozenBatch,
+) {
+    let dbnum = job.dbnum;
+    let task_id = job.task_id.clone();
+    let Err(reason) = isolate_panic(run_one_batch(mgr, registry, scheduler, job)).await else {
+        // 正常返回的那条路 `run_one_batch` 自己已经收过口了，别再 finish 一次
+        // ——那会把它写好的终态结果覆盖掉。
+        return;
+    };
+
+    let message =
+        format!("数据批次 dbnum={dbnum} 执行时 panic，已隔离，队列继续（task {task_id}）: {reason}");
+    log::error!("{message}");
+    eprintln!("{message}");
+    scheduler.finish(dbnum);
+    registry.finish(
+        &task_id,
+        TaskState::Failed,
+        serde_json::json!({ "error": message }),
+    );
+    beat();
+}
+
 /// 执行一个冻结批次：数据应用 → SYST 派生入账 → 副作用补偿 → 本批交付单元生成。
 ///
-/// 永不 panic 上抛：所有失败都折进任务终态；单个批次的失败不影响队列里的下一条
-/// （与 `model_update_pending::run_one` 同一条纪律）。
+/// 所有**预期内**的失败都折进任务终态，单个批次的失败不影响队列里的下一条（与
+/// `model_update_pending::run_one` 同一条纪律）。预期外的 panic 由
+/// [`run_one_batch_isolated`] 接住——这里够不着的第三方代码（几何、解析）不归它保证。
 async fn run_one_batch(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -129,10 +258,16 @@ async fn run_one_batch(
     let progress = progress_sink(registry, &task_id);
     let mut warnings = Vec::new();
 
-    // 冻结点重扫：合并只推高排队行的显示区间，真正要应用的窗口由执行时的
-    // 水位与文件现状决定（merged_sesnos 兑现的正是这次重扫，ADR-011 §5）。
+    // 冻结点重扫：排队行上那个右端只是入队时观察到的预期上界，真正要应用的窗口
+    // 由执行时的水位与文件现状决定（merged_sesnos 兑现的正是这次重扫，ADR-011 §5）。
+    // 算出来立刻回写，否则面板显示的区间比实际应用的窄，紧接着排在后面那条的
+    // 左端（running_end + 1）也建在一个过时的数上。
     let result = match refresh_candidate(&job) {
-        Ok(cand) => execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await,
+        Ok(cand) => {
+            scheduler.record_frozen_end(registry, job.dbnum, cand.file_latest_sesno);
+            beat();
+            execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await
+        }
         Err(error) => {
             warnings.push(format!("冻结批次重扫失败: {error:#}"));
             DataBatchTaskResult {
@@ -153,6 +288,7 @@ async fn run_one_batch(
     let result_json = serde_json::to_value(&result).unwrap_or_default();
     scheduler.finish(job.dbnum);
     registry.finish(&task_id, state, result_json.clone());
+    beat();
     #[cfg(feature = "http_api")]
     crate::web_service::events::publish(
         crate::web_service::events::Topic::Tasks,
@@ -192,6 +328,8 @@ async fn execute_frozen_batch(
                 warnings.push(format!("SYST 派生任务入队失败: {error:#}"));
             }
         }
+        // MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽。
+        SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
     let mut side_effect_failed = false;
@@ -213,8 +351,9 @@ async fn execute_frozen_batch(
         side_effect_failed = true;
     }
 
-    // 本批新单元 + 持久待重试合并成一张工作单（同根只留最新一条）。
-    let pending = match load_pending_model_units_for_retry().await {
+    // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
+    // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
+    let pending = match load_pending_model_units_for_retry(job.dbnum).await {
         Ok(pending) => pending,
         Err(error) => {
             warnings.push(format!("读取模型待重试列表失败（本次仅处理新单元）: {error:#}"));
@@ -228,7 +367,10 @@ async fn execute_frozen_batch(
     // 异地同步发布（与旧自动路径对齐：数据批次成功才发布该文件）。
     #[cfg(feature = "mqtt")]
     if applied {
-        publish_sync(mgr, job).await;
+        // 报真正应用到的会话号，与紧邻的 SYST 派生入账同口径；`job.end_sesno`
+        // 是入队时的预期上界，冻结重扫之后可能已经不是它了。
+        let end_sesno = batch.as_ref().map_or(job.end_sesno, |b| b.end_sesno);
+        publish_sync(mgr, job, end_sesno).await;
     }
 
     let batch_slice: Vec<DataBatchResult> = batch.clone().into_iter().collect();
@@ -255,7 +397,7 @@ async fn run_unit_worklist(
     warnings: &mut Vec<String>,
 ) -> Vec<ModelUnitResult> {
     use crate::data_interface::manual_update::{
-        clear_pending_model_unit, emit, generate_unit_model,
+        emit, generate_unit_model, generation_root_lock,
     };
 
     registry.set_unit_totals(task_id, worklist.len() as u32);
@@ -270,29 +412,40 @@ async fn run_unit_worklist(
             },
         );
 
+        let lock = generation_root_lock(&task.root_refno);
+        let _guard = lock.lock().await;
+        let pending_revision = match model_update_pending::current_regen_revision(
+            task.dbnum,
+            &task.root_refno,
+        )
+        .await
+        {
+            Ok(revision) => revision,
+            Err(error) => {
+                warnings.push(error.to_string());
+                None
+            }
+        };
         let outcome = generate_unit_model(mgr, &task.root_refno).await;
-        let (status, attempts, message) = match &outcome {
-            Ok(()) => {
-                if let Err(e) = clear_pending_model_unit(task.dbnum, &task.root_refno).await {
-                    warnings.push(e.to_string());
-                }
-                if let Err(e) =
-                    model_update_pending::clear_regen_work(task.dbnum, &task.root_refno).await
-                {
-                    warnings.push(e.to_string());
-                }
-                (UnitGenStatus::Generated, task.attempts, None)
-            }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                if let Err(e) =
-                    model_update_pending::mark_regen_failed(task.dbnum, &task.root_refno, &msg)
-                        .await
-                {
-                    warnings.push(e.to_string());
-                }
-                (UnitGenStatus::Failed, task.attempts + 1, Some(msg))
-            }
+        let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
+        if let Err(error) = model_update_pending::settle_regen_work(
+            task.dbnum,
+            &task.root_refno,
+            pending_revision,
+            generation_error.as_deref(),
+        )
+        .await
+        {
+            warnings.push(error.to_string());
+        }
+        drop(_guard);
+        let (status, attempts, message) = match outcome {
+            Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
+            Err(_) => (
+                UnitGenStatus::Failed,
+                task.attempts + 1,
+                generation_error,
+            ),
         };
 
         emit(
@@ -324,6 +477,14 @@ async fn run_unit_worklist(
 /// `after_batches` 只影响日志口径；两类动作本身都以「表里有没有活」为准，
 /// 空表时各是一次廉价 SELECT。
 async fn idle_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, after_batches: bool) {
+    // 范围可能刚变宽（见 [`SCOPE_DIRTY`]）：先把新进范围的库找出来入队，它们没有
+    // 自己的文件事件，错过这一轮就要等下次重启。入队会唤醒本 worker，下一圈就消费。
+    if SCOPE_DIRTY.swap(false, Ordering::SeqCst) {
+        if let Err(error) = mgr.resweep_for_scope_change().await {
+            println!("范围刷新后重扫监控目录失败: {error:#}");
+        }
+    }
+
     // 副作用与模型积压：覆盖「水位已推、工作未完成」的重启/失败残留。
     if let Err(error) = SideEffectCompensator::drain(mgr).await {
         println!("空闲副作用补偿失败（保留待重试）: {error:#}");
@@ -335,6 +496,16 @@ async fn idle_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, a
     }
 
     room_round(mgr, registry, after_batches).await;
+
+    // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
+    // AABB 刷新与删除清理只动内存树，这里每轮最多写一次 accel_tree.bin。不落盘的话，
+    // 重启读回旧文件 + 数量对账放行 + 启动全量房间重建，会把增量已收敛的房间边
+    // 改写回搬家前的状态。失败保留脏标记，下一空闲轮重试。
+    match crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty().await {
+        Ok(true) => println!("空间树增量变更已写回 accel_tree.bin"),
+        Ok(false) => {}
+        Err(error) => println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}"),
+    }
 }
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
@@ -453,7 +624,7 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
 
 /// 数据批次成功后的异地同步发布（与旧 `execute_incr_update` 成功路径对齐）。
 #[cfg(feature = "mqtt")]
-async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch) {
+async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, end_sesno: i32) {
     use crate::data_interface::increment_pipeline::{IncrFileSuccess, IncrResult};
     use crate::data_interface::sync_publisher::SyncPublisher;
 
@@ -461,7 +632,7 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch) {
     incr.successes.push(IncrFileSuccess {
         path: job.path.clone(),
         dbnum: job.dbnum,
-        end_sesno: job.end_sesno,
+        end_sesno,
         db_type: job.db_type.clone(),
         changed_refnos: Vec::new(),
         range_eles: Default::default(),
@@ -479,5 +650,36 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch) {
             outcome.published.len(),
             outcome.skipped.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 接住 panic 之后要能说出「哪儿炸了」。取不出载荷时也得给一句话——任务终态里
+    /// 只写「panicked」，等于让排查的人回头去 stderr 里大海捞针。
+    #[test]
+    fn panic_payloads_become_a_readable_sentence() {
+        assert_eq!(panic_message(&"边界越界"), "边界越界");
+        assert_eq!(panic_message(&String::from("dbnum=7997 解析失败")), "dbnum=7997 解析失败");
+        // `panic_any` 能扔任意类型，这条路必须有话说而不是空串。
+        assert!(!panic_message(&42u8).is_empty());
+    }
+
+    /// 隔离壳的本分：panic 到此为止，换成一句话交给调用方。
+    ///
+    /// 它兜住的是「一次 panic 让队列永久没有消费者」——`ensure_batch_worker` 的
+    /// `OnceLock` 保证本进程不会再起第二个 worker，所以这层壳漏一次就是永久停摆。
+    #[tokio::test]
+    async fn a_panicking_stage_is_caught_instead_of_unwinding_out() {
+        assert_eq!(isolate_panic(async { 7 }).await, Ok(7));
+
+        // 默认 hook 会把这次 panic 打到 stderr，测试输出里出现回溯是预期的。
+        let caught = isolate_panic(async { panic!("模型生成炸了") }).await;
+        assert_eq!(caught, Err("模型生成炸了".to_string()));
+
+        // 接住之后本任务还活着：worker 主循环正是靠这一点继续取下一条。
+        assert_eq!(isolate_panic(async { 8 }).await, Ok(8));
     }
 }

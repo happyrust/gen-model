@@ -3,7 +3,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::category::CateBrepShape;
 use dashmap::DashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -47,4 +47,3 @@ pub struct CateBrepShapeData {
     pub gmse_refno: RefU64,
     pub shapes: Vec<CateBrepShape>,
 }
-

@@ -1,9 +1,7 @@
 //! 房间计算的最小合成夹具（ADR-010 §9）。
 //!
-//! 本地没有任何项目能跑通房间：唯一入库的 AvevaMarineSample 里，2889 个 FRMW 只有 2 个
-//! 挂着 PANE，名字也不符合 `project_hd` 的 `<X>-R-<K###>` 约定；真正开着房间的
-//! ABA/GDP 与 KMX/MSP 不在本机（见 `docs/2026-07-27_room-incremental-audit-report.md` §4.3）。
-//! 所以「增量结果 == 全量重建结果」的对拍验收只能靠合成数据。
+//! AvevaMarineSample 的 7997 模型可用于真实全量基线和无损单构件增量对拍；需要移动几何
+//! 的破坏性场景仍放在一次性数据库的合成夹具中，避免改动共享项目数据。
 //!
 //! 夹具铺的是 `cal_room_refnos` 真正会走的整条链路，而不是简化替身：
 //!
@@ -304,7 +302,7 @@ mod tests {
     use aios_core::room::room::load_aabb_tree;
     use aios_core::{RefnoEnum, get_db_option};
     use std::collections::HashSet;
-    use surrealdb::opt::auth::Root;
+    use surrealdb::opt::{Config, auth::Root};
 
     /// 盒子的绕序 / 闭合性必须撑得住 `contains_point`——`cal_room_refnos` 的两轮判定
     /// 全押在它上面。这条不连库，先把几何本身钉死，免得端到端失败时分不清是数据问题
@@ -377,7 +375,7 @@ mod tests {
             .collect::<Vec<_>>();
         println!("tree hits in panel A bounds = {hit:?}");
 
-        let within = cal_room_refnos(&mesh_dir, panel, &HashSet::new(), 0.1).await;
+        let within = cal_room_refnos(&mesh_dir, panel, &HashSet::new()).await;
         println!("cal_room_refnos -> {within:?}");
     }
 
@@ -389,7 +387,11 @@ mod tests {
         // 全局，而每个用例各建一个 tokio 运行时；第一个用例结束时它的运行时被丢弃，
         // 连接的后台任务随之死掉，后面的用例拿到的是一条已关闭的连接
         // （表现为 AlreadyConnected 或 "sending into a closed channel"）。
-        if let Err(error) = SUL_DB.connect(endpoint).with_capacity(1000).await {
+        if let Err(error) = SUL_DB
+            .connect((endpoint, Config::default().ast_payload()))
+            .with_capacity(1000)
+            .await
+        {
             panic!(
                 "connect: {error:?}\nlive 用例需逐个运行：\
                  cargo test --lib <用例名> -- --ignored --exact --nocapture"
@@ -697,6 +699,91 @@ mod tests {
         );
     }
 
+    /// 吸收的封闭性（ADR-010 §8，2026-07-28 修订）：构件从「本轮未重算」的面板搬进
+    /// 「本轮已重算」的面板时，吸收必须让路——只有元素分支那条「删全部入边」能清掉
+    /// 旧面板指向它的陈旧边。修订前这里的 B→22 会永久留在库里，材料表随之读到
+    /// 两个房间号，`fn::room_code` 取哪个全看旧排序键。
+    ///
+    /// 场景：构件 _22（原本完全在 B 内）搬进 A 的内部，同轮 A 面板自身外扩了一点
+    /// （成员不变但包围盒变了，走整间分支），B 完全不在本轮。同轮 drain 后：
+    /// A 收下 _22，B 对 _22 的旧边被元素分支清掉，且整体与全量重建逐边一致。
+    ///
+    /// 同样只能单独运行，见 [`connect_live`]：
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_cross_panel_move_defeats_absorption -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_cross_panel_move_defeats_absorption() {
+        use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
+        use crate::fast_model::room_model::build_room_relations;
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        let panel_a = RefnoEnum::from(refno(10).as_str());
+        let mover = RefnoEnum::from(refno(22).as_str());
+        let (pane_a, pane_b) = panel_refnos();
+
+        // _22 从 B 的内部（1450..1550）搬进 A 的内部；A 面板往 -x 外扩 50，
+        // 原有成员照旧、包围盒确实变了。B 一动不动，不会出现在本轮任务里。
+        move_fixture_body(
+            &mesh_dir,
+            22,
+            Vec3::new(300.0, 450.0, 450.0),
+            Vec3::new(400.0, 550.0, 550.0),
+        )
+        .await
+        .expect("move part 22 into room A");
+        move_fixture_body(
+            &mesh_dir,
+            10,
+            Vec3::new(-50.0, 0.0, 0.0),
+            Vec3::new(1000.0, 1000.0, 1000.0),
+        )
+        .await
+        .expect("expand panel A");
+
+        let changes = update_inst_relate_aabbs_by_refnos(&[panel_a, mover], true)
+            .await
+            .expect("refresh moved aabbs");
+        assert_eq!(changes.len(), 2, "面板与构件的包围盒都该判为变了: {changes:?}");
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue both room tasks");
+
+        let done = drain_rooms(&db_option).await.expect("drain room phase");
+        let incremental = room_edges().await;
+
+        build_room_relations(&db_option)
+            .await
+            .expect("full rebuild after cross-panel move");
+        let full = room_edges().await;
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(done, 2, "两行任务都要被这一轮消费掉");
+        assert!(
+            !incremental
+                .iter()
+                .any(|edge| edge.panel == pane_b && edge.part == refno(22)),
+            "B 对搬走构件的陈旧边必须被元素分支清掉（吸收让路）: {incremental:#?}"
+        );
+        assert!(
+            incremental
+                .iter()
+                .any(|edge| edge.panel == pane_a && edge.part == refno(22)),
+            "构件搬进 A 后必须收进 A 的成员: {incremental:#?}"
+        );
+        assert_eq!(
+            incremental, full,
+            "\n增量: {incremental:#?}\n全量: {full:#?}\n（增量收敛结果必须等于全量重建结果）"
+        );
+    }
+
     /// 删除路径：被删元素的房间归属必须当场清干净，而不是留成悬空边（ADR-010 §4）。
     ///
     /// 此前生产路径上**从来没有人删过** `room_relate`——全仓只有夹具清理里有一条删除
@@ -873,6 +960,155 @@ mod tests {
             !full.iter()
                 .any(|edge| edge.part == part && edge.panel == pane_a),
             "搬走之后 A 房不该再收着它: {full:#?}"
+        );
+    }
+
+    /// 造 / 重建一条「插入时自带 aabb 指针、geo 侧无从重算」的行——形状对齐生产上的
+    /// 隐含直管段（TUBI/BOXI）：`inst_relate` 挂在 BRAN 名下、out 指向共享单位几何、
+    /// `aabb` 在写入时就指向现成记录，`->geo_relate` 里没有可用的 `aabb`/`pts`。
+    /// `recreate` 语义 = 生产上的「重生成」：先删行（`save_instance_data(replace)` 的
+    /// 删除集现在包含隐含直管段），再按新盒子重插。
+    async fn upsert_tubi_like_row(seq: u64, min: Vec3, max: Vec3) {
+        let seq_refno = refno(seq);
+        let sql = format!(
+            "DELETE inst_relate:{seq_refno};\
+             UPSERT pe:{seq_refno} SET noun = 'BRAN', deleted = false, owner = pe:{owner};\
+             UPSERT inst_info:zzfx_tubi_unit;\
+             UPSERT aabb:zzfx_tubi_{seq} SET d = {aabb};\
+             RELATE pe:{seq_refno}->inst_relate:{seq_refno}->inst_info:zzfx_tubi_unit \
+                 SET world_trans = trans:zzfx_id, aabb = aabb:zzfx_tubi_{seq}, \
+                     solid = true, generic = 'PIPE';",
+            owner = refno(2),
+            aabb = aabb_json(&Aabb::new(min.into(), max.into())),
+        );
+        SUL_DB
+            .query(sql)
+            .await
+            .expect("upsert tubi-like row")
+            .check()
+            .expect("valid tubi-like row statements");
+    }
+
+    async fn drop_tubi_like_row(seq: u64) {
+        let seq_refno = refno(seq);
+        SUL_DB
+            .query(format!(
+                "DELETE room_relate WHERE out = pe:{seq_refno};\
+                 DELETE inst_relate:{seq_refno};\
+                 DELETE pe:{seq_refno}, inst_info:zzfx_tubi_unit, aabb:zzfx_tubi_{seq};"
+            ))
+            .await
+            .expect("drop tubi-like row")
+            .check()
+            .expect("valid tubi-like cleanup");
+    }
+
+    /// 隐含直管段类行（aabb 在插入时写死、geo 侧无从重算）的房间链路。
+    ///
+    /// 此前这类行被刷新层整体跳过：`replace=false` 时被 `and aabb=none` 过滤，
+    /// `replace=true` 时因 `geo_aabbs` 为空被 `continue`——从未进过空间树，也就从未
+    /// 参与过房间归属；重生成后树上（若有）也只剩旧位置。本用例钉住修复后的三段语义：
+    ///
+    /// 1. **回填**：树上首次见到 → 算变 → 元素分支把它算进 A 房；
+    /// 2. **幂等**：删行重插同一个盒子（未动的重生成）→ 树上旧值相等 → 不算变——
+    ///    这同时守着「重生成不再把根下全员白排一遍房间任务」的差异语义；
+    /// 3. **搬家**：删行重插指向 B 房的新盒 → 算变 → 收敛到 B 房，且与全量重建逐边一致
+    ///    （树上有它了，全量路径同样看得见它）。
+    ///
+    /// 只能单独运行，见 [`connect_live`]：
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_tubi_row_enters_tree_and_tracks_regen -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_tubi_row_enters_tree_and_tracks_regen() {
+        use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
+        use crate::fast_model::room_model::build_room_relations;
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        let tube = RefnoEnum::from(refno(30).as_str());
+        let (pane_a, pane_b) = panel_refnos();
+        let box_in_a = (Vec3::new(100.0, 100.0, 100.0), Vec3::new(300.0, 200.0, 200.0));
+        let box_in_b = (
+            Vec3::new(1500.0, 100.0, 100.0),
+            Vec3::new(1700.0, 200.0, 200.0),
+        );
+
+        // 1. 回填：首次刷新（regen 路径口径 replace=true），树上没有它 → 算变。
+        upsert_tubi_like_row(30, box_in_a.0, box_in_a.1).await;
+        let changes = update_inst_relate_aabbs_by_refnos(&[tube], true)
+            .await
+            .expect("first refresh of the tubi-like row");
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.refno, change.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(tube, "BRAN")],
+            "树上首次见到必须算变，且以 BRAN 身份走元素分支"
+        );
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue backfill");
+        drain_rooms(&db_option).await.expect("drain backfill");
+        let after_backfill = room_edges().await;
+        assert!(
+            after_backfill
+                .iter()
+                .any(|edge| edge.panel == pane_a && edge.part == refno(30)),
+            "回填后 A 房应收下管段: {after_backfill:#?}"
+        );
+
+        // 2. 幂等：未动的重生成（删行重插同一个盒子）不该再算变。
+        upsert_tubi_like_row(30, box_in_a.0, box_in_a.1).await;
+        let changes = update_inst_relate_aabbs_by_refnos(&[tube], true)
+            .await
+            .expect("noop-regen refresh");
+        assert!(
+            changes.is_empty(),
+            "盒子没动的重生成不该再排房间任务: {changes:?}"
+        );
+
+        // 3. 搬家：重生成后管段挪进 B 房。
+        upsert_tubi_like_row(30, box_in_b.0, box_in_b.1).await;
+        let changes = update_inst_relate_aabbs_by_refnos(&[tube], true)
+            .await
+            .expect("move-regen refresh");
+        assert_eq!(changes.len(), 1, "搬家必须算变: {changes:?}");
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue move");
+        drain_rooms(&db_option).await.expect("drain move");
+        let incremental = room_edges().await;
+
+        build_room_relations(&db_option)
+            .await
+            .expect("full rebuild after tubi move");
+        let full = room_edges().await;
+
+        drop_tubi_like_row(30).await;
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(
+            incremental, full,
+            "\n增量: {incremental:#?}\n全量: {full:#?}\n（管段进树之后全量路径必须同样看得见它）"
+        );
+        assert!(
+            !incremental
+                .iter()
+                .any(|edge| edge.panel == pane_a && edge.part == refno(30)),
+            "搬走之后 A 房不该再收着管段: {incremental:#?}"
+        );
+        assert!(
+            incremental
+                .iter()
+                .any(|edge| edge.panel == pane_b && edge.part == refno(30)),
+            "管段应已归入 B 房: {incremental:#?}"
         );
     }
 }

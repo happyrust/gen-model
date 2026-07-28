@@ -71,7 +71,9 @@
   「AABB 真的变了」，每一次入队都是全新的重算理由。`dbnum` 与 `source_end_sesno`
   降为字段，取 max 记录最后一次触发来源。
   `drain` 由两阶段变三阶段，新增的 `drain_rooms` 排在 regen 之后；手动路径
-  （`manual_update`）在单元重生成之后补上同一阶段，否则手动跑永远不算房间。
+  （`manual_update`）当时在单元重生成之后补了同一阶段——该安排已被 ADR-011
+  合流取代：手动与自动共用一条数据批次队列，房间收敛统一在 worker 空闲轮的
+  `room_round`（ADR-011 §8），不再挂在手动路径里。
   两条重算分支落在 `room_model.rs`：整间分支 `recalc_panel_membership` 复用
   `cal_room_refnos` + 先清后写并返回本次写入的成员集合；元素分支
   `recalc_element_membership` 从全局树按 `noun == 'PANE'` 取候选、调共享谓词
@@ -110,8 +112,110 @@
      写入层带出一个「实体确实变了」的信号，而不是在这里放宽成全量入队。
 - 排序落地时查出 **D11**：hd / hh 两份 surql 无条件按文件名顺序加载，`_hh` 永远覆盖
   `_hd`，与 Rust 侧编译的 `project_hd` 错位。本轮两份都改了排序，但门控未修。
+- 2026-07-28 增补（复审后修复：AABB 刷新加固、落盘时机、吸收封闭性、D10）——
+  - **AABB 刷新加固**：`update_inst_relate_aabbs_by_refnos` 是增量→房间链路的唯一
+    交汇点，此前健壮性远低于两侧：两处 `.unwrap()` 在传输错误上 panic（生产日志
+    `_7997_service4.err.log` 有 rs-core-pin `geom.rs` 同类实证，且 panic 后队列行
+    既不删除也不 mark_failed，空闲轮无限重试）；UPDATE 缺 `.check()`，语句级失败
+    静默吞掉，库里 aabb 停旧值而内存树已更新；反序列化失败 `let Ok(..) else
+    { continue }` 静默丢整块；每块先写 `inst_relate.aabb` 指针、**全部结束后**才
+    `INSERT IGNORE INTO aabb`——与 D9 教训相反的顺序，崩溃落在窗口内指针悬空。
+    已改为：错误全部上抛（分块失败即中止，整批靠幂等重放收敛，与增量主链路同一
+    纪律）；两类写入接 `execute_surreal_checked` 获得写冲突重试；每块**先存
+    `aabb:⟨hash⟩` 记录、再更新指针**；内存树只在该块 DB 写入成功后才更新。
+    `save_aabb_to_surreal` / `save_transforms_to_surreal` 改为返回 `Result`；
+    `gen_meshes_in_db` / `process_meshes_update_db` 的同类 `.unwrap()` 一并清除。
+    写入顺序有源码钉住测试（`aabb_write_order_records_before_pointers`）。
+    注：`gen_inst_meshes` 里 `inst_geo.aabb` 指针有同构的顺序问题，本轮未动，记为
+    后续项。
+  - **落盘时机（第 7 条挂起项，已决）**：空间树新增脏标记 `AABB_TREE_DIRTY`，
+    两处树变更（AABB 刷新、`remove_by_refnos` 删除清理）后置位；`batch_worker`
+    空闲轮收尾（room_round 之后）若脏则 `serialize_to_bin_file`，成功清位、失败
+    保留脏位下轮重试，每轮至多一次序列化。全量路径 `gen_all_geos_data` 收尾落盘
+    不变（改走无条件 `persist_aabb_tree`）。残余窗口收窄为「树变更后到下个空闲轮
+    之间崩溃」的分钟级。
+  - **同轮吸收改为封闭性检查（修正第 8 条冲突规则）**：吸收不再只看「整间分支已
+    写过该构件」，另要求封闭条件成立：`(构件现存 room_relate 入边的面板集) ∪
+    (构件当前包围盒在空间树命中的在册 PANE 候选集) ⊆ 本轮已重算面板集`。不封闭
+    （旧边或候选伸出本轮范围）则元素分支照跑。旧边集对本轮全部候选构件一条批量
+    SELECT 查完；候选集纯内存树查询；查询失败按「封闭性未知、不吸收」保守处理。
+    修复的缺陷：构件同轮从面板 B 搬进面板 A 且 A 在本轮重算而 B 不在时，旧规则
+    直接吸收、跳过元素分支「删该构件所有入边」的清理，B→构件的陈旧边无人清除，
+    构件同时挂两间房，违背第 9 条「增量==全量」唯一硬标准。纯谓词
+    `absorption_is_closed` 有单测；live 夹具新增
+    `live_room_cross_panel_move_defeats_absorption` 钉住「跨面板搬家 + 同轮入队」。
+  - **D10 已修**：`room_key_word` 补 `#[serde(alias = "room_keyword")]`
+    （rs-core-pin `options.rs`），旧键名 toml 不再静默退回默认值。
+- 2026-07-28 增补 2（第二轮审核后修复：隐含直管段、差异基线、落盘容错）——
+  - **D13（新发现，已修）：隐含直管段（TUBI/BOXI）整体绕过房间增量链路。**
+    管段的 `inst_relate` 行挂在 BRAN/HANG 名下（`cata_model::insert_tubi`），`aabb`
+    由生成层算好后**插入时直接写死**，out 指向共享单位几何（`inst_info:⟨1⟩/⟨2⟩`，
+    其 `->geo_relate` 没有可用的 `aabb`/`pts`）。链路上三处各自把它漏掉：
+    ① 刷新层 `replace=false` 的 `and aabb=none` 过滤它、`replace=true` 又因
+    `geo_aabbs` 为空 `continue`——**从未进过空间树**，两条房间分支的候选与成员盒
+    都取自树，管段因此从未参与过房间归属；② `query_deep_visible_inst_refnos`
+    对 BRAN 根只返回子元素、不含分支自身，重生成的刷新集里压根没有管段行；
+    ③ 本仓 SurrealDB fork 的 `INSERT RELATION` 撞已有 id 时**静默保留旧行**
+    （8009 实测：重复插入返回旧行、无报错），而 regen 的删除集只有
+    `inst_info_map` 的键，管段行不在其中——重生成后连库里的 aabb/world_trans
+    都停在第一次生成的值。三处齐修：`save_instance_data(replace)` 的删除集并入
+    `inst_tubi_map` 键（共享单位几何有引用计数守卫，删单条不伤别的分支）；
+    `query_deep_visible_inst_refnos` 补分支自身；刷新层对「geo 侧重算不出而行内
+    有既有指针」的行以指针值为当前真值，照常进树、照常参与变更判定。
+    live 夹具新增 `live_room_tubi_row_enters_tree_and_tracks_regen` 钉住
+    回填 / 幂等重生成 / 跨房搬迁三段语义。
+  - **变更判定基线改为空间树上的旧值**（修正 §4 的实现语义）：定向重生成走
+    `save_instance_data(replace)` 的「先删行再重插」，行内 `old_aabb` 在刷新时刻
+    恒为 none，按旧口径「无旧值算变」等于**根下每个元素每次重生成都排一次房间
+    任务**——差异信号被结构性摧毁，只有 TransformOnly 路径的 diff 是真实的。
+    树上的条目跨过删行重插存活，才是房间系统上一次真正看到的状态：恰有一条且
+    逐位相等 → 没变；没有条目 → 首次见到，回填（管段的一次性补账正靠它）；
+    多条 → 历史堆叠残留，重算一次收敛。判据是纯函数 `tree_box_changed`，有单测。
+    树同步收成 rs-core-pin 的新原语 `sync_refnos`（一次遍历按 refno 摘旧插新并
+    返回旧条目），`update_aabbs` 写反的去重条件与 `replace` 不重置 `ids` 一并修掉
+    ——「已知未修、调用点绕过」的旧账就此关闭。
+  - **regen 路径的包围盒刷新强制 `replace=true`**（D2 在该路径的真正修复）：
+    `process_meshes_update_db_deep` 此前把 `replace_mesh` 配置透传给刷新，默认
+    false 时存量行（含管段）整批被 `and aabb=none` 滤掉。mesh 文件按内容寻址，
+    replace 与否只该影响文件重写，不该影响包围盒——与 `update_world_transforms`
+    强制 true 同一个理由。
+  - **落盘容错补齐**（§6 配套修当时只落了两树合一与 query 的 `?`，此处两条
+    实为**未落地**，本轮补上）：`serialize_to_bin_file` 改为临时文件 + 原子
+    rename——空闲轮反复重写 17MB 文件，原地重写的「写半截崩溃」窗口每轮都开；
+    `deserialize_from_bin_file` 内部的 `bincode .unwrap()` 改为 `?`——损坏文件
+    此前会在启动路径 panic 成 crash loop（`load_aabb_tree` 的 `unwrap_or_default`
+    兜不住 panic）；`load_aabb_tree` 对缺失/损坏打告警而非静默空树。
+    **路径带项目名仍未做**（cwd 相对硬编码：换目录静默空树、多项目共用 cwd
+    互相覆盖），记为后续项。
+  - **纯位姿移动不再覆坏管段变换**：`update_world_transforms` 的子树收集此前
+    把管段行一并捞进来，用**元素**的世界变换覆盖管段行的「单位圆柱 → 世界管段」
+    缩放矩阵，管段会被画成分支原点处的单位圆柱。现按 out 排除
+    `inst_info:⟨1⟩/⟨2⟩` 的行。代价：纯 POS/ORI 移动后管段（视觉与房间归属）
+    停在旧位置，滞后到该分支下次重生成才追上——管段无独立几何源，位姿层无从
+    重推其变换，这是已知代价而非缺陷（TUBI 语料注释同口径）。
+  - **网格失败不再静默清边**：两条重算分支对 `.mesh` 读失败/三角化失败此前一律
+    `continue`，「判不了」被当成「不在里面」，先清后写随即把存量边抹掉且无日志。
+    现在：面板（或元素分支的某块候选面板）**一个网格都不可用**升级为错误——任务
+    保留重试；部分不可用打告警继续。顺带删掉 `cal_room_refnos` 从未使用的
+    `inside_tol` 参数（`lib.rs` 顶上的 `#![allow(warnings)]` 一直压着它）。
+  - **刷新集查询去缓存**：`query_deep_visible_inst_refnos` / `query_deep_neg_inst_refnos`
+    摘掉 `#[cached]`。两者按**生成根**为键缓存重生成的刷新集，而增量管线的
+    `clear_all_caches_batch` 只按「变更元素 + 其属主」失效，够不着这两份快照；
+    分支加了新构件之后，同根的下一次重生成会拿着**旧成员表**跑——新构件的 mesh
+    不生成、aabb 不落库、房间不触发，无任何报错。真正贵的子树遍历在
+    `query_deep_children_refnos` 里另有缓存（在失效列表内），每根多付的几条查询
+    相对整根重生成是噪音。顺带把 `GET_SELF_AND_OWNER_TYPE_NAME` 补进
+    `clear_all_caches_batch` 的失效列表——它的值含属主类型，OWNER 搬迁后不失效
+    会让根解析拿旧属主类型走错 BRAN 成员分支。
+    **残余**：`QUERY_DEEP_CHILDREN_REFNOS` 按子树根为键，失效集只到变更元素的
+    直接属主——深层后代变更时高层根（ZONE 级正常颗粒根）的子树快照仍会陈旧；
+    正确的修法是在 `build_model_update_plan` 算出生成根后按根失效，属计划层
+    接线，记为后续项。
+  - 验证：gen-model `cargo test --lib` 266 通过；rs-core-pin `accel_tree` 4 条新
+    单测通过；七条 live 夹具用例（含新增的管段用例）在一次性内存实例上逐个实跑
+    全部通过。
 
-日期：2026-07-27
+日期：2026-07-27（2026-07-28 两轮增补）
 关联：`docs/2026-07-27_room-incremental-audit-report.md`（缺陷取证 D1–D7）；
 `docs/2026-07-27_room-incremental-implementation-report.md`（变更清单、验证证据、残留风险）；
 `src/fast_model/room_model.rs`；`src/data_interface/model_update_pending.rs`；
@@ -241,6 +345,9 @@ D1 与 D2 相互独立，修好任何一个另一个依然成立。
 **冲突规则**：同一轮 drain 内，若某 panel 已进入整间分支，落在该 panel 内的元素任务
 被吸收跳过——两条路径的删除范围不同（一个按 panel 出边，一个按元素入边），
 同时跑会互相踩。
+（2026-07-28 修正：吸收另需**封闭性检查**成立——构件现存入边面板与其当前树候选
+面板都落在本轮已重算面板集合内，否则元素分支照跑。只看「已写过该构件」在同轮
+跨面板搬家时会留下未重算面板的陈旧边，见落地进度。）
 
 ### 9. 验收口径：与全量重建逐边对拍
 
@@ -279,10 +386,13 @@ AABB 八顶点，跨界的落第二轮逐点兜底且被两室同时收录。增
   当前的处理是在 `update_inst_relate_aabbs_by_refnos` 内先按**旧值**把 R 树旧条目删掉
   再调 `update_aabbs`（`AccelerationTree.tree` 是 `pub`，无需改 `rs-core-pin`）。
   `update_aabbs` 本身的缺陷仍在，只是在这个调用点被绕过了；它当前没有别的调用方。
-- 落盘尚未处理：`TransformOnly` 一轮更新了库与内存树，但不会重写 `accel_tree.bin`
-  （regen 路径靠 `gen_all_geos_data` 收尾落盘）。不在 `update_world_transforms` 里落盘，
-  是因为 `execute_item` 对每个 refno 调它一次，在那里落盘等于每个任务全量序列化整棵树。
-  正确的落盘时机属于第 7 条的队列层，待定。
+- ~~落盘尚未处理~~ **已决（2026-07-28，见落地进度）**：落盘时机放在队列层——空间树
+  带脏标记，`batch_worker` 空闲轮收尾统一落盘。复审时确认此前缺口的实际后果比
+  「收敛保证会漂」更重：重启加载旧 bin 后 `sync_aabb_tree_with_db` 只对账**数量**
+  （搬动不改条数，快路径直接放行），随后 `run_cli` 无条件的 `build_room_relations`
+  全量重建会用**树上的旧位置**把重启前已收敛的 `room_relate` 边改写回搬家前的状态
+  ——是主动回退而非缓慢漂移。仍不在 `update_world_transforms` 里落盘，理由不变
+  （`execute_item` 逐 refno 调用会变成序列化风暴）。
 - 本 ADR 的前置是 D1–D5 的修复。其中 D1（`TransformOnly` 补 AABB 刷新）与
   D3/D4（树的删除语义）跨 `gen-model` 与 `rs-core-pin` 两个仓，
   而两边都有大量未提交改动（复核时 gen-model 217 / rs-core-pin 5），
@@ -301,8 +411,22 @@ AABB 八顶点，跨界的落第二轮逐点兜底且被两室同时收录。增
      结构库从未参与生成，于是 `cal_room_refnos` 在 `query_insts` 那一步就空手而归（§4.3）。
      补生成结构库之后，**真实数据上的对拍验收是可行的**；第 9 条的合成夹具因此是
      「不依赖生成流程、跑得快、可进 CI」的常备手段，而非唯一出路。
-  3. 另有 **D10**：`DbOption` 的字段名是 `room_key_word`，而所有 toml 写的是
-     `room_keyword`，键名对不上导致该配置从未生效，实际一直用默认值 `-RM`
-     （本项目上恰好是对的，但这是巧合）。
+  3. 另有 **D10**（已修 2026-07-28）：`DbOption` 的字段名是 `room_key_word`，而旧 toml
+     写的是 `room_keyword`，键名对不上导致该配置从未生效，实际一直用默认值 `-RM`
+     （本项目上恰好是对的，但这是巧合）。现已补 `#[serde(alias = "room_keyword")]`，
+     两种键名均生效。
 - 第 5 条给 `room_relate` 加了两个字段，旧数据没有。全量重建一次即可补齐；
   在补齐之前 `ORDER BY` 会退化为按 `room_num` 排序，仍然是确定的。
+- **D12（已知缺口，2026-07-28 记载，本轮不实现）**：非几何的房间结构变更没有任何
+  触发器。房间节点改名（FRMW/SBFR 的 NAME 变更）与 PANE 挂靠层级变化（OWNER 变更）
+  都不改变任何 AABB → 第 4 条的触发源不点火 → `room_relate.room_num` 与
+  `room_panel_relate` 保持陈旧，直到下次启动的全量重建。第 4 条原有的两个例外
+  （删除、形状变而包围盒不变）都没覆盖这一类。20+ 材料表 surql 经 `fn::room_code`
+  直接读 room_num，陈旧期间房间号列错误；当前以「启动时全量重建会自愈」为兜底，
+  属最终一致的已知代价。
+  触发设计草图（后续轮次实现）：在 `build_model_update_plan` 追加两条规则——
+  ① 房间类 noun（命中 `room_key_word` 关键字 + 名称正则的 FRMW/SBFR）的 NAME 属性
+  变更 → 为其名下全部 PANE 入队 `RoomRecalcPanel`。需要在计划层引入「房间→面板」
+  查询（目前那一层不碰房间概念），这是本项未随手实现的原因；
+  ② PANE 的 OWNER 变更（搬迁语义，ADR-009 口径）→ 为该 PANE 自身入队
+  `RoomRecalcPanel`（新旧两个属主对应的房间都会经该面板的整间分支收敛）。

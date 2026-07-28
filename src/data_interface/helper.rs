@@ -5,6 +5,8 @@ use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::anyhow;
 use surrealdb::sql::Thing;
 
+use crate::surreal_retry::execute_surreal_checked;
+
 /// 查询子树时的分批大小（与 increment_manager 的 QUERY_BATCH_SIZE 一致，避免 SQL 过长）。
 const SUBTREE_QUERY_BATCH: usize = 20;
 
@@ -89,6 +91,11 @@ COMMIT TRANSACTION;"#
 ///
 /// inst_info 可能由相同 catalogue hash 的多个元素共享，不能在仍有引用时删除。
 /// 每个 refno 的这两步在一个事务里（见 [`render_cascade_delete`]），失败整体回滚。
+///
+/// 共享正是并发下的冲突来源：两个各自重生成的根同时删到同一个 `inst_info`，
+/// SurrealDB 的乐观事务会让后提交的那个报「read or write conflict」。整段 SQL 幂等
+/// ——边已删时 `$old_inst` 读到 NONE，清理块整个跳过——所以交给
+/// [`execute_surreal_checked`] 退避重试即可，不必在调用方另设补偿。
 pub async fn delete_inst_relate_cascade(
     refnos: &[RefnoEnum],
     chunk_size: usize,
@@ -106,12 +113,7 @@ pub async fn delete_inst_relate_cascade(
         }
         if !delete_sql_vec.is_empty() {
             let sql = delete_sql_vec.join("\n");
-            SUL_DB
-                .query(&sql)
-                .await
-                .map_err(|e| anyhow!("delete model relations failed: {e}"))?
-                .check()
-                .map_err(|e| anyhow!("delete model relations statement failed: {e}"))?;
+            execute_surreal_checked(&sql, "delete model relations").await?;
         }
     }
 
@@ -177,18 +179,22 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(", ");
-        SUL_DB
-            .query(render_room_membership_delete(&pe_keys))
-            .await
-            .map_err(|e| anyhow!("delete room membership failed: {e}"))?
-            .check()
-            .map_err(|e| anyhow!("delete room membership statement failed: {e}"))?;
+        execute_surreal_checked(
+            &render_room_membership_delete(&pe_keys),
+            "delete room membership",
+        )
+        .await?;
     }
 
     // 树上留着已删元素的包围盒，`locate_intersecting_bounds` 会继续把它当候选返回，
     // 于是重算时一个已经不存在的构件仍会被算进某间房（缺陷 D4）。
     let stale: HashSet<aios_core::RefU64> = refnos.iter().map(RefnoEnum::refno).collect();
-    GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
+    let removed = GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
+    if removed > 0 {
+        // 摘除同样是「内存树相对 accel_tree.bin 的未持久化变更」：不标脏的话，
+        // 重启读回旧文件，被删构件会重新以候选身份出现在房间重算里。
+        crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+    }
     Ok(())
 }
 

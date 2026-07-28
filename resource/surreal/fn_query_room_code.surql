@@ -14,7 +14,8 @@ DEFINE FUNCTION fn::room_code($pe:record) {
     };
 
     // Then check room relation
-    let $res = select * from only $pe<-room_relate limit 1;
+    // 多归属时按归属强度取最强的一条，结果确定（ADR-010 §5）。
+    let $res = fn::room_relate_of($pe);
     if ($res == none) {
         return none;
     };

@@ -22,6 +22,8 @@ pub mod dbnum_state;
 
 pub mod manual_update;
 
+pub mod update_scope;
+
 pub mod on_demand_model;
 
 pub mod sync_publisher;

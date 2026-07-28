@@ -24,6 +24,8 @@ const MAX_ATTEMPTS: u32 = 5;
 pub enum SideEffectKind {
     ModelRefresh,
     SystDerived,
+    /// 某个窗口的反向引用索引没维护上，需要按引用者定点重建（ADR-003）。
+    RefRevMaintain,
 }
 
 impl SideEffectKind {
@@ -31,6 +33,7 @@ impl SideEffectKind {
         match self {
             Self::ModelRefresh => "model_refresh",
             Self::SystDerived => "syst_derived",
+            Self::RefRevMaintain => "ref_rev_maintain",
         }
     }
 }
@@ -92,6 +95,34 @@ impl SideEffectCompensator {
     /// 执行一个文件，没有 `IncrResult` 可给，就按批次直接记。
     pub async fn enqueue_syst(dbnum: u32, end_sesno: i32, db_type: &str) -> anyhow::Result<()> {
         Self::upsert_pending(SideEffectKind::SystDerived, dbnum, end_sesno, db_type, &[]).await
+    }
+
+    /// 反向引用索引没维护上 → 记一条定点重建任务。
+    ///
+    /// 按 ADR-003，`ref_rev` 是「关联模型也要更新」的权威来源：缺一条边就是某个设计
+    /// 实例静默不重生成。这件事过去只留一句 warning，而那句话既没人读、也没有任何东西
+    /// 会自动触发重建，只能等有人手工跑全量。既然补偿队列就在旁边，让它走同一条重试
+    /// 通道、同一个 `MAX_ATTEMPTS`。
+    ///
+    /// 带上引用者名单而不是会话区间：重建从库里的当前状态算（PE 主数据早于本步落库），
+    /// 不必回头再解析一遍文件。
+    pub async fn enqueue_ref_rev(
+        dbnum: u32,
+        end_sesno: i32,
+        db_type: &str,
+        referrers: &[RefU64],
+    ) -> anyhow::Result<()> {
+        if referrers.is_empty() {
+            return Ok(());
+        }
+        Self::upsert_pending(
+            SideEffectKind::RefRevMaintain,
+            dbnum,
+            end_sesno,
+            db_type,
+            referrers,
+        )
+        .await
     }
 
     async fn upsert_pending(
@@ -197,6 +228,7 @@ impl SideEffectCompensator {
             let kind = match job.kind.as_str() {
                 "model_refresh" => SideEffectKind::ModelRefresh,
                 "syst_derived" => SideEffectKind::SystDerived,
+                "ref_rev_maintain" => SideEffectKind::RefRevMaintain,
                 other => {
                     println!("SideEffectCompensator: unknown kind {other}, skip");
                     continue;
@@ -223,6 +255,15 @@ impl SideEffectCompensator {
                         .await
                     }
                     .await
+                }
+                SideEffectKind::RefRevMaintain => {
+                    let referrers: Vec<RefnoEnum> = job
+                        .changed_refnos
+                        .iter()
+                        .filter_map(|refno| refno.parse::<RefU64>().ok())
+                        .map(RefnoEnum::from)
+                        .collect();
+                    crate::data_interface::manual_update::repair_reverse_index_for(&referrers).await
                 }
                 // 连不上 AiosDBMgr 是这个作业自己的失败，不是整轮的失败：
                 // 这里必须留在 async 块里，`?` 一旦逃出去就会掐掉后面所有作业。

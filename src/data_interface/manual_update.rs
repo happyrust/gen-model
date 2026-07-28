@@ -32,10 +32,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
+use dashmap::{DashMap, mapref::entry::Entry};
 use indexmap::IndexMap;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 use walkdir::WalkDir;
 
 use aios_core::pdms_types::RefU64;
@@ -49,6 +52,7 @@ use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
 use crate::data_interface::helper::pe_thing_to_refno;
+use crate::data_interface::increment_manager::{INGEST_MAX_DEPTH, is_pdms_db_file_name};
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
@@ -57,6 +61,7 @@ use crate::data_interface::model_impact::{
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::sesno_range::SesnoRangeResolver;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::update_scope::UpdateScope;
 
 /// Max owner-chain depth to walk when resolving delivery units. PDMS
 /// hierarchies (WORLD/SITE/ZONE/…/leaf) are shallow; this only guards cycles.
@@ -826,6 +831,61 @@ async fn insert_reverse_index_stage_rows(
             .map_err(|e| anyhow::anyhow!("write reverse-index staging chunk failed: {e}"))?
             .check()
             .map_err(|e| anyhow::anyhow!("write reverse-index staging statement failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 只重建这批引用者的出向 `ref_rev` 边——增量维护失败后的定点修复。
+///
+/// 从**库里的当前状态**算，不重放文件窗口：PE 主数据在反向索引维护之前就已经落库
+/// （失败会直接中断整个窗口），所以库里那份就是那次维护本该看到的 post-state。
+/// 因此这个修复与窗口重放等价，而且天然幂等——重跑一次得到同一批边。
+///
+/// 形状与 [`build_reverse_index_statements`] 一致：先按元素自身的邻接清掉旧的出向边，
+/// 再为**还活着的**元素重新落边。删掉的元素只清不写，否则修复会把它的边又请回来。
+pub async fn repair_reverse_index_for(referrers: &[RefnoEnum]) -> anyhow::Result<()> {
+    const CHUNK: usize = 500;
+    for chunk in referrers.chunks(CHUNK) {
+        let deletes = chunk
+            .iter()
+            .map(|referrer| format!("DELETE {}->ref_rev;", referrer.to_pe_key()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        SUL_DB
+            .query(deletes)
+            .await
+            .map_err(|e| anyhow::anyhow!("清理待修复引用者的旧边失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("清理待修复引用者的旧边语句失败: {e}"))?;
+
+        let ids = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut response = SUL_DB
+            .query(format!("SELECT VALUE refno.* FROM [{ids}] WHERE !deleted;"))
+            .await
+            .map_err(|e| anyhow::anyhow!("读取待修复引用者的当前属性失败: {e}"))?;
+        let value: surrealdb::Value = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码待修复引用者的当前属性失败: {e}"))?;
+        let rows = collect_reverse_index_rows(&decode_reverse_index_attmaps(value)?);
+        if rows.is_empty() {
+            continue;
+        }
+
+        let values = rows
+            .iter()
+            .map(|(referrer, referenced)| render_ref_rev_edge(&referrer.to_pe_key(), *referenced))
+            .collect::<Vec<_>>()
+            .join(", ");
+        SUL_DB
+            .query(format!("INSERT RELATION INTO ref_rev [{values}];"))
+            .await
+            .map_err(|e| anyhow::anyhow!("重建引用者的出向边失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("重建引用者的出向边语句失败: {e}"))?;
     }
     Ok(())
 }
@@ -1728,67 +1788,40 @@ pub struct PendingModelUnit {
     pub last_error: Option<String>,
 }
 
-/// Record id: one row per (dbnum, unit root) so a unit re-affected by newer
-/// data keeps exactly ONE latest task (spec: 同一待重试单元只保留一个最新任务).
-fn pending_record_id(dbnum: u32, root_refno: &str) -> String {
-    format!(
-        "{MANUAL_MODEL_PENDING_TABLE}:{dbnum}_{}",
-        root_refno.replace('/', "_")
-    )
-}
-
-/// Load pending model-retry tasks from both the legacy manual table and the
-/// current work queue.
+/// 待重试重生成根的 SELECT（纯函数）。
 ///
-/// `attempt_cap` bounds `attempts` when the caller intends to RUN the tasks;
-/// `None` returns dead letters too, which is what inspection wants.
-/// `(legacy manual table, current work queue)` SELECTs for one attempt policy (pure).
-fn render_pending_units_sql(attempt_cap: Option<u32>) -> (String, String) {
-    let legacy = format!(
-        "SELECT dbnum, root_refno, noun, source_end_sesno, attempts, \
-         last_error FROM {MANUAL_MODEL_PENDING_TABLE}{};",
-        attempt_cap
-            .map(|cap| format!(" WHERE (attempts?:0) < {cap}"))
-            .unwrap_or_default()
-    );
-    // New work is written before the data watermark. Read it alongside the
-    // legacy manual table so retry-only manual runs consume the same roots as
-    // automatic updates without a stop-the-world migration.
-    let current = format!(
+/// `attempt_cap` 只在调用方打算**执行**这些任务时给；`None` 连死信一起返回，那是
+/// 检查视图要的。`dbnum` 限定到一个库，`None` 是全库。
+fn render_pending_units_sql(attempt_cap: Option<u32>, dbnum: Option<u32>) -> String {
+    let mut filters = vec![
+        "action = 'regen_root'".to_string(),
+        "status IN ['pending', 'failed']".to_string(),
+    ];
+    if let Some(cap) = attempt_cap {
+        filters.push(format!("(attempts?:0) < {cap}"));
+    }
+    if let Some(dbnum) = dbnum {
+        filters.push(format!("dbnum = {dbnum}"));
+    }
+    format!(
         "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
-         last_error FROM model_update_pending \
-         WHERE action = 'regen_root' AND status IN ['pending', 'failed']{};",
-        attempt_cap
-            .map(|cap| format!(" AND (attempts?:0) < {cap}"))
-            .unwrap_or_default()
-    );
-    (legacy, current)
+         last_error FROM model_update_pending WHERE {};",
+        filters.join(" AND ")
+    )
 }
 
 async fn load_pending_units_where(
     attempt_cap: Option<u32>,
+    dbnum: Option<u32>,
 ) -> anyhow::Result<Vec<PendingModelUnit>> {
-    let (legacy_sql, current_sql) = render_pending_units_sql(attempt_cap);
-
     let mut response = SUL_DB
-        .query(legacy_sql)
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取旧模型待重试语句失败: {error}"))?;
-    let mut pending: Vec<PendingModelUnit> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解码旧模型待重试失败: {error}"))?;
-
-    let mut response = SUL_DB
-        .query(current_sql)
+        .query(render_pending_units_sql(attempt_cap, dbnum))
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("读取模型待重试语句失败: {error}"))?;
-    let mut current: Vec<PendingModelUnit> = response
+    response
         .take(0)
-        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))?;
-    pending.append(&mut current);
-    Ok(pending)
+        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))
 }
 
 /// Every pending model-retry task, dead letters included (read-only).
@@ -1797,33 +1830,61 @@ async fn load_pending_units_where(
 /// Anything that is going to actually run the tasks wants
 /// [`load_pending_model_units_for_retry`] instead.
 pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
-    load_pending_units_where(None).await
+    load_pending_units_where(None, None).await
 }
 
-/// The pending model-retry tasks a run may execute.
+/// 本批次可以顺带重试的模型任务——**只限本库**。
 ///
-/// Honours the same [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS)
-/// ceiling the automatic drain does. Without it a permanently broken root
-/// burned a full generator pass on every manual run, forever, while its
-/// `attempts` counter climbed with nothing watching it — the dead-letter
-/// mechanism existed but only the automatic path was subject to it.
-pub async fn load_pending_model_units_for_retry() -> anyhow::Result<Vec<PendingModelUnit>> {
-    load_pending_units_where(Some(
-        crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-    ))
+/// 遵守与自动 drain 同一个
+/// [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS) 上限：
+/// 没有它的话，一个永久坏掉的根会在每次运行里烧掉一整趟生成，而 `attempts` 一路上涨
+/// 却没人看——死信机制存在，但只有自动路径受它约束。
+///
+/// 限本库同样是必须的。过去这里读的是全库积压，于是 dbnum=A 的批次会去跑 B/C/D 的根，
+/// 结果还记在 A 那条任务名下（面板上冒出与本批无关的库）；29 个库轮流跑批时，同一个
+/// 坏根在触到上限之前会被每个批次各试一遍。跨库积压归 worker 空闲轮的
+/// `drain_data_phases` 管，那本来就是它的职责。
+pub async fn load_pending_model_units_for_retry(
+    dbnum: u32,
+) -> anyhow::Result<Vec<PendingModelUnit>> {
+    load_pending_units_where(
+        Some(crate::data_interface::model_update_pending::MAX_ATTEMPTS),
+        Some(dbnum),
+    )
     .await
 }
 
-/// Drop the pending-retry task after the unit generates successfully.
-pub(crate) async fn clear_pending_model_unit(dbnum: u32, root_refno: &str) -> anyhow::Result<()> {
-    let id = pending_record_id(dbnum, root_refno);
-    SUL_DB
-        .query(format!("DELETE {id};"))
-        .await
-        .map_err(|e| anyhow::anyhow!("清除模型待重试失败 {id}: {e}"))?
+/// 把旧 `manual_model_pending` 一次性并进 `model_update_pending`，随后清空它。
+///
+/// 那张表已经只剩读与删——全仓没有任何地方再往里写。留着它有两处害处：每个批次与
+/// 每次预览都多一趟 SELECT；更要命的是失败计数记不上——`mark_regen_failed` 写的是
+/// `model_update_pending` 的行 id，旧表里的根在新表没有对应记录，`UPDATE` 命不中就是
+/// 空操作。于是那种根既 dead-letter 不了、也不会被 attempts 上限挡住，会被无限重试。
+///
+/// 搬迁与清空同属一个事务（见 `adopt_legacy_regen_units`）。失败不致命：留在旧表里，
+/// 下次启动再来一遍。
+pub async fn migrate_legacy_pending_units() -> anyhow::Result<usize> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT dbnum, root_refno, noun, source_end_sesno, attempts, last_error \
+             FROM {MANUAL_MODEL_PENDING_TABLE};"
+        ))
+        .await?
         .check()
-        .map_err(|e| anyhow::anyhow!("清除模型待重试语句失败 {id}: {e}"))?;
-    Ok(())
+        .map_err(|error| anyhow::anyhow!("读取旧模型待重试语句失败: {error}"))?;
+    let legacy: Vec<PendingModelUnit> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解码旧模型待重试失败: {error}"))?;
+    if legacy.is_empty() {
+        return Ok(0);
+    }
+
+    crate::data_interface::model_update_pending::adopt_legacy_regen_units(
+        &legacy,
+        MANUAL_MODEL_PENDING_TABLE,
+    )
+    .await?;
+    Ok(legacy.len())
 }
 
 /// One model delivery-unit generation task inside an execution run.
@@ -1980,6 +2041,36 @@ pub(crate) async fn generate_unit_model(
     .await
 }
 
+static GENERATION_ROOT_LOCKS: Lazy<DashMap<String, Weak<AsyncMutex<()>>>> = Lazy::new(DashMap::new);
+static GENERATION_ROOT_LOCK_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn prune_generation_root_locks() {
+    GENERATION_ROOT_LOCKS.retain(|_, lock| lock.strong_count() > 0);
+}
+
+pub(crate) fn generation_root_lock(root_refno: &str) -> Arc<AsyncMutex<()>> {
+    if GENERATION_ROOT_LOCK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1024 == 0 {
+        prune_generation_root_locks();
+    }
+    match GENERATION_ROOT_LOCKS.entry(root_refno.to_string()) {
+        Entry::Occupied(mut entry) => {
+            if let Some(lock) = entry.get().upgrade() {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                entry.insert(Arc::downgrade(&lock));
+                lock
+            }
+        }
+        Entry::Vacant(entry) => {
+            let lock = Arc::new(AsyncMutex::new(()));
+            entry.insert(Arc::downgrade(&lock));
+            lock
+        }
+    }
+}
+
 /// Raw per-session change counts (spec §预览结构: 会话层保留原始变化记录).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionPreview {
@@ -2027,12 +2118,27 @@ pub struct DbnumPreview {
     /// initializes only this file, then establishes its authoritative watermark.
     #[serde(default)]
     pub initialization_required: bool,
+    /// 当前 MDB 声明了这个库，但当前项目目录里没有它的文件。
+    ///
+    /// 与「文件缺失」不是一回事，两者都不许合成一行：文件缺失是**登记过、
+    /// 文件后来找不到了**（阻断，水位停在那儿等人处理）；这一条是**从没登记过**，
+    /// 文件多半在别的项目目录里——AvevaMarineSample 的 MDB `/ALL` 声明的 29 个
+    /// DESI 里有 9 个是 AvevaCatalogue 的模板与标准库（`acp7009_0001` 那一批），
+    /// 而扫描按契约只走当前项目目录。它不阻断、不执行，只是让人看见范围里
+    /// 有几个成员这次够不着。
+    #[serde(default)]
+    pub not_in_project: bool,
 }
 
 /// Full read-only preview of a project's pending manual update.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManualUpdatePreview {
     pub project: String,
+    /// 本期执行范围是照哪个 MDB 解的（带前导 `/`）。范围既然由 MDB 定，界面就得
+    /// 说得出自己看的是哪个 MDB 的范围——服务端与客户端各有一份 `mdb_name` 配置，
+    /// 不回显的话两边对不上是静默的。
+    #[serde(default)]
+    pub mdb: String,
     pub dbnums: Vec<DbnumPreview>,
     /// Model units still awaiting a retry from earlier runs. Shown even when
     /// no new sesno is pending (spec §失败与重试: 下次预览即使没有新 sesno 也
@@ -2118,7 +2224,8 @@ fn baseline_parse_confirmed_empty(parsed_count: Option<usize>) -> bool {
     parsed_count == Some(0)
 }
 
-/// Turn a freshly baselined dbnum's roots into durable generation work (pure).
+/// Turn a freshly baselined dbnum's active ownership graph into durable,
+/// fine-grained generation work (pure).
 ///
 /// Only DESI carries generation roots: CATA holds catalogue definitions and SYS
 /// meta holds project structure, so neither gets model work here — matching
@@ -2128,24 +2235,96 @@ fn baseline_work_items(
     dbnum: u32,
     db_type: &str,
     end_sesno: i32,
-    roots: &[RefnoEnum],
+    nodes: &HashMap<RefnoEnum, OwnerNode>,
+    unit_types: &[String],
 ) -> ModelUpdatePlan {
     if db_type != "DESI" {
         return ModelUpdatePlan::default();
     }
+    let mut roots = BTreeMap::new();
+    for refno in nodes.keys() {
+        let Some(root) =
+            crate::data_interface::generation_root::resolve_element_generation_root(
+                *refno,
+                unit_types,
+                |candidate| {
+                    nodes.get(&candidate).map(|node| {
+                        crate::data_interface::generation_root::GenerationNode {
+                            owner: node.owner,
+                            noun: node.noun.clone(),
+                            name: node.name.clone(),
+                        }
+                    })
+                },
+            )
+        else {
+            continue;
+        };
+        roots.entry(root.root.to_pdms_str()).or_insert(root);
+    }
     ModelUpdatePlan {
         work_items: roots
-            .iter()
-            .map(|root| ModelWorkItem {
+            .into_iter()
+            .map(|(target_refno, root)| ModelWorkItem {
                 dbnum,
                 db_type: db_type.to_string(),
                 source_end_sesno: end_sesno,
                 action: ModelWorkAction::RegenRoot,
-                target_refno: root.to_pdms_str(),
-                noun: "SITE".to_string(),
+                target_refno,
+                noun: root.noun,
             })
             .collect(),
         ..Default::default()
+    }
+}
+
+#[derive(Deserialize)]
+struct BaselineNodeRow {
+    id: Thing,
+    #[serde(default)]
+    owner: Option<Thing>,
+    noun: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn load_baseline_nodes(dbnum: u32) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
+    const PAGE_SIZE: usize = 5_000;
+    let mut nodes = HashMap::new();
+    loop {
+        let offset = nodes.len();
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, owner, noun, name FROM pe \
+                 WHERE dbnum = {dbnum} AND deleted != true \
+                 ORDER BY id LIMIT {PAGE_SIZE} START {offset};"
+            ))
+            .await
+            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图失败: {error}"))?
+            .check()
+            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图语句失败: {error}"))?;
+        let rows = response
+            .take::<Vec<BaselineNodeRow>>(0)
+            .map_err(|error| anyhow::anyhow!("解码 dbnum={dbnum} 基线 PE 图失败: {error}"))?;
+        let page_len = rows.len();
+        for row in rows {
+            let refno = pe_thing_to_refno(row.id)?;
+            let owner = row
+                .owner
+                .map(RefnoEnum::from)
+                .filter(|owner| owner.is_valid() && *owner != refno);
+            nodes.insert(
+                refno,
+                OwnerNode {
+                    owner,
+                    noun: row.noun,
+                    name: row.name,
+                },
+            );
+        }
+        if page_len < PAGE_SIZE {
+            return Ok(nodes);
+        }
     }
 }
 
@@ -2155,28 +2334,29 @@ fn baseline_work_items(
 /// regenerate nothing but the roots they themselves touched — so without this
 /// the elements that are never edited again would have no geometry, ever.
 ///
-/// The roots are the dbnum's non-empty SITEs, which is the same root set the
-/// generator picks for its own whole-database branch (`gen_geos_data`'s `dbno`
-/// path), so coverage of the freshly parsed database is guaranteed. They are
-/// deliberately coarser than an incremental window's delivery-unit roots: a
-/// baseline generates everything once, and one queue row per SITE keeps that
-/// from fanning out into thousands of rows before any of them has ever run.
+/// Every active PE is resolved through the same delivery-unit / normal-granularity
+/// authority used by incremental and on-demand generation. The roots are then
+/// deduplicated; hierarchy containers never become generation work.
 async fn baseline_model_plan(
     dbnum: u32,
     db_type: &str,
     end_sesno: i32,
-    include_history: bool,
 ) -> anyhow::Result<ModelUpdatePlan> {
     if db_type != "DESI" {
         return Ok(ModelUpdatePlan::default());
     }
-    let roots =
-        aios_core::query_type_refnos_by_dbnum(&["SITE"], dbnum, Some(true), include_history)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
-            })?;
-    Ok(baseline_work_items(dbnum, db_type, end_sesno, &roots))
+    let nodes = load_baseline_nodes(dbnum)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
+        })?;
+    Ok(baseline_work_items(
+        dbnum,
+        db_type,
+        end_sesno,
+        &nodes,
+        &configured_delivery_unit_types(),
+    ))
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -2201,8 +2381,10 @@ impl AiosDBManager {
             .get_project_path(project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
+        // 按 dbnum 点名的入口不设范围门：调用方已经自己决定了要哪个库，
+        // 再套一层 MDB 门只会把点名挡掉。
         let candidates = self
-            .scan_project_candidates(&project_dir, &mut warnings)
+            .scan_project_candidates(&project_dir, &UpdateScope::unrestricted(), &mut warnings)
             .shift_remove(&dbnum)
             .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
         if candidates.len() != 1 {
@@ -2329,7 +2511,6 @@ impl AiosDBManager {
             dbnum,
             db_type,
             file_latest_sesno,
-            self.db_option.is_gen_history_model(),
         )
         .await?;
         let roots = plan.work_items.len();
@@ -2358,6 +2539,7 @@ impl AiosDBManager {
     pub async fn preview_manual_update(
         &self,
         project: &str,
+        mdb: Option<&str>,
     ) -> anyhow::Result<ManualUpdatePreview> {
         let project_dir = self
             .db_option
@@ -2366,9 +2548,10 @@ impl AiosDBManager {
         if !project_dir.exists() {
             anyhow::bail!("项目目录不存在: {}", project_dir.display());
         }
+        let scope = self.update_scope(mdb).await?;
 
-        let mut warnings = Vec::new();
-        let by_dbnum = self.scan_project_candidates(&project_dir, &mut warnings);
+        let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
+        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut warnings);
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
         let mut dbnums = Vec::new();
@@ -2384,6 +2567,10 @@ impl AiosDBManager {
                 );
                 for state in states {
                     let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
+                    // 范围外的库没进扫描，「登记了却没扫到」对它不构成文件缺失。
+                    if !self.in_scope(&scope, &state.db_type, state.dbnum) {
+                        continue;
+                    }
                     if !state.file_path.is_empty()
                         && stored_path.starts_with(&project_prefix)
                         && !observed_dbnums.contains(&state.dbnum)
@@ -2406,6 +2593,27 @@ impl AiosDBManager {
             }
             Err(error) => warnings.push(format!("读取已登记 DBNUM 文件失败: {error}")),
         }
+
+        // MDB 声明了、当前项目目录里却没有文件的库。不列出来的话，范围表说 20 个、
+        // MDB 说 29 个，这个差额界面回答不了；列一行「够不着」比让它们悄悄消失好。
+        for dbnum in scope.declared_desi() {
+            if observed_dbnums.contains(&dbnum) || dbnums.iter().any(|d| d.dbnum == dbnum) {
+                continue;
+            }
+            // `manual_db_nums` 手工收窄掉的库不是「没有文件」，是本次故意不看它。
+            // 不隔开的话，调试时把范围收到一个库，另外 28 个会顶着「项目内无此文件」
+            // 冒出来——那是假话，文件就在磁盘上。
+            if !self.should_process_database("DESI", dbnum) {
+                continue;
+            }
+            dbnums.push(DbnumPreview {
+                dbnum,
+                db_type: "DESI".to_owned(),
+                not_in_project: true,
+                ..Default::default()
+            });
+        }
+
         for (db_num, candidates) in by_dbnum {
             // 同一 dbnum 多个文件：展示全部路径，阻断该 dbnum，不自动挑选。
             if candidates.len() > 1 {
@@ -2443,9 +2651,13 @@ impl AiosDBManager {
         };
 
         dbnums.sort_by_key(|d| d.dbnum);
+        // 「够不着」的行不算待办：它们每次预览都在，算进去的话「已是最新」这个
+        // 终态永远到不了，界面会一直催人去更新九个它压根碰不到的库。
+        let pending_rows = dbnums.iter().filter(|d| !d.not_in_project).count();
         Ok(ManualUpdatePreview {
             project: project.to_string(),
-            up_to_date: dbnums.is_empty() && pending_model_retries.is_empty(),
+            mdb: scope.mdb().to_owned(),
+            up_to_date: pending_rows == 0 && pending_model_retries.is_empty(),
             dbnums,
             pending_model_retries,
             warnings,
@@ -2459,7 +2671,11 @@ impl AiosDBManager {
     /// 的水位为什么一直不动」的唯一解释，自动同步常开时人可能从不点预览，一个库
     /// 能默默阻断好几周。判定与预览同源（`check_file_against_state` +
     /// [`FileAnomaly::blocks`]），只扫头部与最新会话号、不收集增量窗口，纯读。
-    pub async fn dbnum_statuses(&self, project: &str) -> anyhow::Result<DbnumStatusReport> {
+    pub async fn dbnum_statuses(
+        &self,
+        project: &str,
+        mdb: Option<&str>,
+    ) -> anyhow::Result<DbnumStatusReport> {
         let mut report = DbnumStatusReport::default();
         let Some(project_dir) = self.db_option.get_project_path(project) else {
             anyhow::bail!("无法解析项目目录: {project}");
@@ -2467,8 +2683,10 @@ impl AiosDBManager {
         if !project_dir.exists() {
             anyhow::bail!("项目目录不存在: {}", project_dir.display());
         }
+        let scope = self.update_scope(mdb).await?;
+        report.warnings.extend(scope.warning().map(str::to_owned));
 
-        let by_dbnum = self.scan_project_candidates(&project_dir, &mut report.warnings);
+        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut report.warnings);
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
         let project_prefix = format!(
@@ -2481,7 +2699,7 @@ impl AiosDBManager {
         );
 
         for state in registered {
-            let excluded = !self.should_process_database(&state.db_type, state.dbnum);
+            let excluded = !self.in_scope(&scope, &state.db_type, state.dbnum);
             let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
             let in_this_project =
                 !state.file_path.is_empty() && stored_path.starts_with(&project_prefix);
@@ -2561,15 +2779,81 @@ impl AiosDBManager {
         Ok(report)
     }
 
-    /// Pass 1: walk the project directory and group candidate DB files by `dbnum`.
+    /// 这个库进不进本期执行范围：类型白名单 + `manual_db_nums` 手工收窄，
+    /// 再加 MDB 声明的 DESI 名单。
+    ///
+    /// **三处判定必须走同一个谓词**——扫描进不进候选、「登记了却没扫到」算不算
+    /// 文件缺失、`GET /dbnums` 那行的 `excluded`。过去缺失判定漏了这一道，
+    /// 于是范围一收窄，范围外每个登记过的库都变成一行假的「文件缺失·已阻断」：
+    /// `manual_db_nums = [7997]` 时 AvevaMarineSample 报了 287 行，登记表里
+    /// 288 个 DESI 减去唯一扫到的那个，一个不差。
+    ///
+    /// `pub(crate)`：自动 watcher 的启动重扫与文件事件也走它（`increment_manager`）。
+    /// 两条触发路径喂的是同一个队列、同一个 worker，入队口径只能有一份——自动路径
+    /// 过去只过前两道，于是 MDB 外的设计库照样入队，而预览说它不在范围里。
+    pub(crate) fn in_scope(&self, scope: &UpdateScope, db_type: &str, dbnum: u32) -> bool {
+        self.should_process_database(db_type, dbnum) && scope.admits(db_type, dbnum)
+    }
+
+    /// 本期执行范围。
+    ///
+    /// **`None`（请求压根没带 mdb）才回落到配置**，那是旧客户端的兼容路径。
+    /// `Some("")` 一律报错：带了这个字段却是空的，说明发起方自己也不知道当前是
+    /// 哪个 MDB（界面还没连上库就发了请求），此时回落到服务端配置正好制造出这次
+    /// 改动要消灭的东西——界面显示一个 MDB 的范围、服务端跑另一个，还不出声。
+    pub(crate) async fn update_scope(&self, mdb: Option<&str>) -> anyhow::Result<UpdateScope> {
+        let mdb = match mdb.map(str::trim) {
+            Some("") => anyhow::bail!(
+                "请求带了空的 mdb：发起方尚未确定当前 MDB。\
+                 本期执行范围由 MDB 定，宁可这次不跑，也不能悄悄回落到服务端配置里的另一个 MDB"
+            ),
+            Some(mdb) => mdb,
+            // 配置里那个也可能是空的。让它落到 `resolve` 只会得到「库里没有名为 / 的
+            // MDB」这种查不出所以然的报错，而自动 watcher 现在也走这条路——范围解不出来
+            // 它一个库都不入队，届时没人猜得到问题出在一行没填的配置上。
+            None => match self.db_option.mdb_name.trim() {
+                "" => anyhow::bail!(
+                    "DbOption 里的 mdb_name 是空的，本期执行范围无从谈起。\
+                     它决定哪些设计库参与更新（手动与自动两条路径都读它），请先填上"
+                ),
+                mdb => mdb,
+            },
+        };
+        UpdateScope::resolve(mdb).await
+    }
+
+    /// Pass 1: walk this project's ingestible DB directories and group candidate
+    /// DB files by `dbnum`.
+    ///
+    /// 目录集合与深度取自 [`AiosDBManager::ingestible_dirs`]，与自动 watcher 同一份。
+    /// 这里过去是 `WalkDir::new(project_dir)` 递归整个项目目录，于是手动执行能把
+    /// 监听不到的子目录里的库排进同一个队列——正好制造出自动路径专门在防的 B4：
+    /// 那份数据落了库、此后再也不会更新，看起来却一直很新鲜。
+    ///
+    /// `scope` 是第二道门，跟在类型白名单与 `manual_db_nums` 之后：前者管「这类
+    /// 文件认不认」，它管「这个库在不在本期执行范围里」。
     fn scan_project_candidates(
         &self,
         project_dir: &std::path::Path,
+        scope: &UpdateScope,
         warnings: &mut Vec<String>,
     ) -> IndexMap<u32, Vec<FileCandidate>> {
         let mut by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
 
-        for entry in WalkDir::new(project_dir) {
+        let dirs = self.ingestible_dirs(project_dir);
+        if dirs.is_empty() {
+            warnings.push(format!(
+                "{} 下没有可摄入的库目录：监控目录里没有一个落在该项目下，本次没有候选文件。\
+                 增量看门狗监控的就是这份目录，它空着的话自动更新同样不会发生",
+                project_dir.display()
+            ));
+            return by_dbnum;
+        }
+
+        for entry in dirs
+            .iter()
+            .flat_map(|dir| WalkDir::new(dir).max_depth(INGEST_MAX_DEPTH))
+        {
             let dir_entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
@@ -2586,8 +2870,8 @@ impl AiosDBManager {
                 Some(name) => name.to_string(),
                 None => continue,
             };
-            // 副本文件（名字含 '-'）与增量应用保持一致地跳过。
-            if file_name.contains('-') {
+            // 只有名字合 AVEVA 库文件命名的才算库文件，与增量应用同一条规则。
+            if !is_pdms_db_file_name(&file_name) {
                 continue;
             }
 
@@ -2610,7 +2894,7 @@ impl AiosDBManager {
                 continue;
             }
             let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
-            if !self.should_process_database(&db_type, db_no) {
+            if !self.in_scope(scope, &db_type, db_no) {
                 continue;
             }
 
@@ -2781,7 +3065,11 @@ impl AiosDBManager {
     ///
     /// Never returns `Err`: precondition and per-dbnum problems land in the
     /// receipt so the frontend has one shape to render.
-    pub async fn enqueue_manual_update(&self, project: &str) -> ManualEnqueueReceipt {
+    pub async fn enqueue_manual_update(
+        &self,
+        project: &str,
+        mdb: Option<&str>,
+    ) -> ManualEnqueueReceipt {
         use crate::data_interface::batch_queue::Enqueued;
         use crate::data_interface::batch_scheduler::{
             BatchScheduler, BlockedDbnum, DiscoveredBatch,
@@ -2790,6 +3078,7 @@ impl AiosDBManager {
 
         let mut receipt = ManualEnqueueReceipt {
             project: project.to_string(),
+            namespace: self.db_option.surreal_ns.clone(),
             ..Default::default()
         };
         let Some(project_dir) = self.db_option.get_project_path(project) else {
@@ -2803,7 +3092,23 @@ impl AiosDBManager {
             return receipt;
         }
 
-        let by_dbnum = self.scan_project_candidates(&project_dir, &mut receipt.warnings);
+        // 范围解不出来就一个库都不入队。这里宁可空手回执带一条告警，也不能退回
+        // 「扫全项目」——那等于人点一次更新就把 287 个库全排进队。
+        let scope = match self.update_scope(mdb).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                receipt
+                    .warnings
+                    .push(format!("无法确定本期执行范围，未入队任何批次: {error:#}"));
+                return receipt;
+            }
+        };
+        receipt.warnings.extend(scope.warning().map(str::to_owned));
+        // 回执报出真正用了哪个 MDB：预览与执行是两次独立解析，中间 MDB 可能被改过，
+        // 不报的话人只能假定它跟预览那次一样。
+        receipt.mdb = scope.mdb().to_owned();
+
+        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut receipt.warnings);
         receipt.scanned = by_dbnum.len();
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
@@ -3162,6 +3467,39 @@ fn fill_change_summary(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn generation_lock_is_shared_by_root() {
+        let first = generation_root_lock("123/456");
+        let second = generation_root_lock("123/456");
+        let weak = Arc::downgrade(&first);
+        let guard = first.lock().await;
+
+        assert!(
+            second.try_lock().is_err(),
+            "同一模型根的 worker 与按需生成必须串行"
+        );
+
+        drop(guard);
+        assert!(second.try_lock().is_ok());
+        drop(first);
+        drop(second);
+        assert!(
+            weak.upgrade().is_none(),
+            "the keyed-lock registry must not retain every historical root"
+        );
+    }
+
+    #[test]
+    fn generation_lock_registry_prunes_dead_keys() {
+        let key = "test/dead-generation-root".to_string();
+        let lock = Arc::new(AsyncMutex::new(()));
+        GENERATION_ROOT_LOCKS.insert(key.clone(), Arc::downgrade(&lock));
+        drop(lock);
+
+        prune_generation_root_locks();
+        assert!(!GENERATION_ROOT_LOCKS.contains_key(&key));
+    }
+
     /// `execute_one_dbnum` 曾经收集一次增量窗口只为算 `changed_elements` 和 DESI 单元
     /// 归并，把结果丢掉后 `IncrementPipeline::apply` 内部又把**同一文件、同一窗口**
     /// 完整解析第二遍。非 DESI 库（SYST/CATA/DICT）尤其亏——第一趟整份结果只换来两个
@@ -3226,20 +3564,32 @@ mod tests {
         );
     }
 
-    /// 死信的判定标准只有一个。检查表可以看到全部（含死信），要**执行**它们就必须
+    /// 死信的判定标准只有一个。检查视图看得到全部（含死信），要**执行**它们就必须
     /// 和自动 drain 用同一个 `MAX_ATTEMPTS` 上限，否则手动路径会永远重跑一个已经
     /// 判死的根，每跑一次烧掉一整趟生成。
     #[test]
     fn only_the_retry_query_caps_attempts() {
-        let (legacy, current) = render_pending_units_sql(None);
-        assert!(!legacy.contains("attempts?:0) <"), "{legacy}");
-        assert!(!current.contains("attempts?:0) <"), "{current}");
-        assert!(current.contains("status IN ['pending', 'failed']"), "{current}");
+        let inspect = render_pending_units_sql(None, None);
+        assert!(!inspect.contains("attempts?:0) <"), "{inspect}");
+        assert!(inspect.contains("status IN ['pending', 'failed']"), "{inspect}");
 
         let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
-        let (legacy, current) = render_pending_units_sql(Some(cap));
-        assert!(legacy.contains(&format!("WHERE (attempts?:0) < {cap}")), "{legacy}");
-        assert!(current.contains(&format!("AND (attempts?:0) < {cap}")), "{current}");
+        let retry = render_pending_units_sql(Some(cap), None);
+        assert!(retry.contains(&format!("(attempts?:0) < {cap}")), "{retry}");
+    }
+
+    /// 批次工作单只捞本库的积压。全库口径下 dbnum=A 的批次会去跑 B/C/D 的根，结果
+    /// 还记在 A 那条任务名下；而检查视图必须保持全库，否则界面看不到别的库的死信。
+    #[test]
+    fn only_the_per_batch_query_narrows_to_one_dbnum() {
+        assert!(
+            render_pending_units_sql(Some(5), Some(7997)).contains("dbnum = 7997"),
+            "批次工作单要限本库"
+        );
+        assert!(
+            !render_pending_units_sql(None, None).contains("dbnum ="),
+            "检查视图要保持全库"
+        );
     }
 
     fn seq(kinds: &[IncomingKind]) -> NetOp {
@@ -3350,15 +3700,29 @@ mod tests {
     /// generation work; catalogue and SYS meta baselines legitimately hand back
     /// none, since neither holds generation roots.
     #[test]
-    fn a_design_baseline_queues_generation_work_for_every_root() {
-        let sites = [
-            RefnoEnum::from(RefU64((7997u64 << 32) | 2)),
-            RefnoEnum::from(RefU64((7997u64 << 32) | 9)),
-        ];
+    fn a_design_baseline_uses_deduplicated_fine_grained_roots() {
+        let r = |n| RefnoEnum::from(RefU64((7997u64 << 32) | n));
+        let nodes = HashMap::from([
+            (r(1), owner_node(None, "WORL")),
+            (r(2), owner_node(Some(r(1)), "SITE")),
+            (r(3), owner_node(Some(r(2)), "ZONE")),
+            (r(4), owner_node(Some(r(3)), "BRAN")),
+            (r(5), owner_node(Some(r(4)), "TUBI")),
+            (r(6), owner_node(Some(r(4)), "ELBO")),
+            (r(7), owner_node(Some(r(3)), "STRU")),
+            (r(8), owner_node(Some(r(7)), "GENSEC")),
+            (r(9), owner_node(Some(r(3)), "EQUI")),
+        ]);
 
-        let plan = baseline_work_items(7997, "DESI", 76, &sites);
+        let plan = baseline_work_items(
+            7997,
+            "DESI",
+            76,
+            &nodes,
+            &resolve_delivery_unit_types(&[]),
+        );
 
-        assert_eq!(plan.work_items.len(), 2);
+        assert_eq!(plan.work_items.len(), 3);
         assert!(
             plan.work_items
                 .iter()
@@ -3366,10 +3730,36 @@ mod tests {
                     && item.dbnum == 7997
                     && item.source_end_sesno == 76)
         );
-        assert_eq!(plan.work_items[0].target_refno, sites[0].to_pdms_str());
+        let roots = plan
+            .work_items
+            .iter()
+            .map(|item| (item.target_refno.clone(), item.noun.clone()))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            roots,
+            HashSet::from([
+                (r(4).to_pdms_str(), "BRAN".to_string()),
+                (r(7).to_pdms_str(), "STRU".to_string()),
+                (r(9).to_pdms_str(), "EQUI".to_string()),
+            ])
+        );
+        assert!(
+            plan.work_items
+                .iter()
+                .all(|item| !matches!(item.noun.as_str(), "WORL" | "SITE" | "ZONE"))
+        );
 
-        assert!(baseline_work_items(7997, "CATA", 76, &sites).work_items.is_empty());
-        assert!(baseline_work_items(7997, "SYST", 76, &sites).work_items.is_empty());
+        assert!(
+            baseline_work_items(
+                7997,
+                "CATA",
+                76,
+                &nodes,
+                &resolve_delivery_unit_types(&[])
+            )
+            .work_items
+            .is_empty()
+        );
     }
 
     #[test]
@@ -4899,11 +5289,10 @@ mod tests {
         assert!(sessions_merged_after(&[4, 5], 7).is_empty());
     }
 
-    #[test]
-    fn pending_record_id_is_stable_per_dbnum_and_root() {
-        let id = pending_record_id(8191, "16777216/5");
-        assert_eq!(id, "manual_model_pending:8191_16777216_5");
-    }
+    // `pending_record_id_is_stable_per_dbnum_and_root` 随 `manual_model_pending`
+    // 的读写路径一并退役：那张表的行由 `migrate_legacy_pending_units` 一次性收编进
+    // `model_update_pending`，行 id 的性质由后者的
+    // `record_id_is_stable_per_dbnum_action_and_target` 守着。
 
     // `project_exec_guard_is_exclusive_per_project` 随 `ProjectExecGuard` 一并
     // 退役（ADR-011 §12）：互斥由数据批次队列的单 worker 承担，见
@@ -4926,7 +5315,10 @@ mod live_tests {
             .await
             .expect("init manager");
 
-        for dbnum in [7997, 7999, 8000] {
+        let dbnums = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
+            .map(|value| vec![value.parse::<u32>().expect("AIOS_MANUAL_UPDATE_DBNUM must be u32")])
+            .unwrap_or_else(|_| vec![7997, 7999, 8000]);
+        for dbnum in dbnums {
             let count = mgr
                 .initialize_project_dbnum_baseline(&project, dbnum)
                 .await
@@ -4967,7 +5359,7 @@ mod live_tests {
         );
 
         let preview = mgr
-            .preview_manual_update(&project)
+            .preview_manual_update(&project, None)
             .await
             .expect("preview manual update");
         println!(
@@ -4975,7 +5367,7 @@ mod live_tests {
             serde_json::to_string_pretty(&preview).expect("serialize preview")
         );
 
-        let receipt = mgr.enqueue_manual_update(&project).await;
+        let receipt = mgr.enqueue_manual_update(&project, None).await;
         println!(
             "receipt = {}",
             serde_json::to_string_pretty(&receipt).expect("serialize receipt")
