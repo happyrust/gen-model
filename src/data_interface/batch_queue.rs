@@ -21,7 +21,10 @@ pub struct DataBatch {
     pub db_type: String,
     /// 闭区间左端，等于入队时的水位 + 1。
     pub start_sesno: i32,
-    /// 闭区间右端。排队期间会被后来的触发推高，冻结之后不再变。
+    /// 闭区间右端。**排队期间它是「入队时观察到的预期上界」，不是冻结值**——
+    /// ADR-011 §5 把冻结点定义为「执行真正开始之前」的那次重扫，两次触发之间
+    /// 文件还在长。真冻结值由执行侧的重扫算出，再经
+    /// `BatchScheduler::record_frozen_end` 回写到这里。
     pub end_sesno: i32,
     pub state: BatchState,
 }
@@ -37,6 +40,16 @@ pub enum Enqueued {
     AlreadyCovered,
     /// 正在跑的那条已经冻结，另起一条排在它后面。
     BehindRunning,
+}
+
+/// 一条队列行的会话区间恒为非空：`start_sesno <= end_sesno`。
+///
+/// 运行中那条的右端在冻结重扫后才定死，期间水位又还没推进，因此一次落在
+/// `(applied, running_end]` 里的重扫能通过上游 `discover_batch` 的水位守卫、
+/// 却排出 `start = running_end + 1 > end` 的倒挂行。它不会丢数据（执行侧一律
+/// 按水位重算窗口），但面板上会挂一条 `1039..=1038` 这种读不通的幽灵行。
+fn covers(start_sesno: i32, end_sesno: i32) -> bool {
+    start_sesno <= end_sesno
 }
 
 /// 把一次「dbnum 的文件会话号到了 `file_latest_sesno`」的发现放进队列。
@@ -77,6 +90,9 @@ pub fn enqueue(
         Some(end) => (end + 1, Enqueued::BehindRunning),
         None => (applied_sesno + 1, Enqueued::New),
     };
+    if !covers(start_sesno, file_latest_sesno) {
+        return Enqueued::AlreadyCovered;
+    }
     queue.push(DataBatch {
         dbnum,
         db_type: db_type.to_owned(),
@@ -155,12 +171,38 @@ mod tests {
             Enqueued::BehindRunning
         );
         assert_eq!(queue.len(), 2);
-        assert_eq!(queue[0].end_sesno, 1038, "跑起来之后区间就定死了");
+        assert_eq!(
+            queue[0].end_sesno, 1038,
+            "入队合并不再动运行中那条；真正的冻结值由执行侧重扫经 record_frozen_end 回写"
+        );
         assert_eq!(
             queue[1],
             queued(7997, 1039, 1041),
             "新的一条从运行中那条的右端之后接上，不重叠"
         );
+    }
+
+    #[test]
+    fn a_rescan_that_does_not_pass_the_running_end_never_queues_an_inverted_row() {
+        // 水位还停在 1023（运行中那条尚未收口），所以 file_latest=1030 能通过
+        // discover_batch 的水位守卫走到这里。若不拦，排出的就是 1039..=1030。
+        let mut queue = vec![queued(7997, 1024, 1038)];
+        freeze_next(&mut queue, false).expect("有一条排队项");
+        assert_eq!(
+            enqueue(&mut queue, 7997, "DESI", 1023, 1030),
+            Enqueued::AlreadyCovered
+        );
+        assert_eq!(queue.len(), 1, "不该多排一条读不通的幽灵行");
+    }
+
+    #[test]
+    fn a_watermark_already_covering_the_file_never_queues_an_empty_row() {
+        let mut queue = Vec::new();
+        assert_eq!(
+            enqueue(&mut queue, 7997, "DESI", 1034, 1034),
+            Enqueued::AlreadyCovered
+        );
+        assert!(queue.is_empty(), "start=1035 > end=1034，空区间不入队");
     }
 
     #[test]

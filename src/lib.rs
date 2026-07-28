@@ -196,6 +196,14 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     /// 创建db manager
+    match crate::data_interface::batch_scheduler::BatchScheduler::global()
+        .restore_persisted_pause()
+        .await
+    {
+        Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
+        Ok(false) => {}
+        Err(error) => println!("启动时恢复队列暂停标志失败（worker 启动前会重试）: {error:#}"),
+    }
     if sync_live {
         mgr.init_watcher().await?;
     }

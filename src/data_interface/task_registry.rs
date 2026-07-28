@@ -8,7 +8,8 @@
 //! 本表仅内存、重启即清空，重启后由 `init_watcher` 重扫水位把队列重建出来
 //! （ADR-011 §4——界面必须说得出「这是重建的队列」）。
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use chrono::Local;
 use indexmap::IndexMap;
@@ -117,6 +118,15 @@ pub struct TaskRegistry {
 
 static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
 
+/// 任务序号，进程内单调递增。
+///
+/// 曾经的后缀是 `rand::random::<u16>()`，而时间戳只到秒——`init_watcher` 的重扫
+/// 在一个紧循环里逐个 dbnum 建行，整批都落在同一秒。放宽 `manual_db_nums` 后有
+/// 287 个库要排队（rollout 六之二实测），16 位随机在 287 条下的生日碰撞概率约
+/// 47%；而 `insert_entry` 是按 task_id 覆盖的，撞上就是一整行任务凭空消失、
+/// 两个库的进度打在同一行上。序号把这个概率问题变成不可能。
+static NEXT_TASK_SEQ: AtomicU64 = AtomicU64::new(0);
+
 impl TaskRegistry {
     /// 进程级单例：worker（feature 无关）与 web_service（`http_api` 门内）
     /// 共用同一份，队列真身不随编译形态分叉。
@@ -124,12 +134,25 @@ impl TaskRegistry {
         REGISTRY.get_or_init(TaskRegistry::default)
     }
 
+    /// 取表锁，并从中毒中恢复。
+    ///
+    /// 注册表只是一份 UI 视图，durable 语义在水位与 `model_update_pending` 表上。
+    /// 持锁者 panic 之后让每一次后续访问都跟着 panic，会把「一个批次挂了」放大成
+    /// 「队列面板、看门狗入队、HTTP 全线瘫痪」，而 `/health` 还在报 ok。中毒的
+    /// 数据最坏是某一行状态没更新完，远好过连坐。
+    fn entries(&self) -> MutexGuard<'_, IndexMap<String, TaskEntry>> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            log::error!("任务注册表锁曾因 panic 中毒，已恢复继续使用");
+            poisoned.into_inner()
+        })
+    }
+
     pub fn new_task_id(prefix: &str) -> String {
         format!(
-            "{}-{}-{:04x}",
+            "{}-{}-{:06}",
             prefix,
             Local::now().format("%Y%m%d-%H%M%S"),
-            rand::random::<u16>()
+            NEXT_TASK_SEQ.fetch_add(1, Ordering::Relaxed)
         )
     }
 
@@ -195,9 +218,23 @@ impl TaskRegistry {
     }
 
     fn insert_entry(&self, entry: TaskEntry) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if inner.len() >= MAX_TASKS {
             Self::evict_one(&mut inner);
+        }
+        // `new_task_id` 之后撞键已不可能，真撞上就是编程错误。而 `IndexMap::insert`
+        // 会把旧行连同它的进度与终态一并吞掉，界面上表现为一条任务凭空消失——
+        // 这种事必须吵出来，不能靠人事后从「怎么少了一行」倒推。
+        if let Some(existing) = inner.get(&entry.task_id) {
+            log::error!(
+                "task_id 撞键 {}：既有行(kind={} state={} dbnum={:?})将被新行(kind={} dbnum={:?})覆盖",
+                entry.task_id,
+                existing.kind,
+                existing.state.as_str(),
+                existing.dbnum,
+                entry.kind,
+                entry.dbnum
+            );
         }
         inner.insert(entry.task_id.clone(), entry);
     }
@@ -234,7 +271,7 @@ impl TaskRegistry {
 
     /// 排队中的行被后来的触发并入会话：只推高右端（ADR-011 §5）。
     pub fn update_queued_range(&self, task_id: &str, end_sesno: i32) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             if entry.state == TaskState::Queued {
                 entry.end_sesno = Some(entry.end_sesno.unwrap_or(0).max(end_sesno));
@@ -242,9 +279,23 @@ impl TaskRegistry {
         }
     }
 
+    /// 冻结点重扫定下真实上界后回写（ADR-011 §5）。
+    ///
+    /// 与 `update_queued_range` 相反：那个只推高排队行、开跑后一概不动；这个只作用
+    /// 于已经开跑的行，且直接赋值不取 max——冻结点看到什么就是什么，界面显示的
+    /// 区间必须是真正要应用的那个。
+    pub fn set_frozen_range(&self, task_id: &str, end_sesno: i32) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            if entry.state == TaskState::Running {
+                entry.end_sesno = Some(end_sesno);
+            }
+        }
+    }
+
     /// 出队冻结：queued → running，记录开跑时刻。
     pub fn mark_started(&self, task_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.state = TaskState::Running;
             entry.started_at = Some(Local::now().to_rfc3339());
@@ -253,7 +304,7 @@ impl TaskRegistry {
 
     /// 本批次的交付单元总数（阶段二进度分母）。
     pub fn set_unit_totals(&self, task_id: &str, total: u32) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.total_units = Some(total);
             entry.units_done = Some(entry.units_done.unwrap_or(0));
@@ -261,21 +312,21 @@ impl TaskRegistry {
     }
 
     pub fn bump_units_done(&self, task_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.units_done = Some(entry.units_done.unwrap_or(0) + 1);
         }
     }
 
     pub fn bump_events(&self, task_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.events_seen += 1;
         }
     }
 
     pub fn finish(&self, task_id: &str, state: TaskState, result: serde_json::Value) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.state = state;
             entry.finished_at = Some(Local::now().to_rfc3339());
@@ -284,12 +335,12 @@ impl TaskRegistry {
     }
 
     pub fn get(&self, task_id: &str) -> Option<TaskEntry> {
-        self.inner.lock().unwrap().get(task_id).cloned()
+        self.entries().get(task_id).cloned()
     }
 
     /// 按创建时间倒序（最近优先）过滤列出。
     pub fn list(&self, state: Option<&str>, kind: Option<&str>, limit: usize) -> Vec<TaskEntry> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.entries();
         inner
             .values()
             .rev()
@@ -407,6 +458,27 @@ mod tests {
             registry.get("row").unwrap().end_sesno,
             Some(1041),
             "冻结之后区间不再变"
+        );
+    }
+
+    #[test]
+    fn task_ids_minted_within_one_second_are_all_distinct() {
+        // `init_watcher` 的重扫在一个紧循环里逐个 dbnum 建行，整批落在同一秒。
+        // 放宽 `manual_db_nums` 后那一批是 287 条（rollout 六之二实测），这里取
+        // 300 覆盖它。旧的 u16 随机后缀在这个量级下约 47% 会撞。
+        let ids: std::collections::HashSet<String> =
+            (0..300).map(|_| TaskRegistry::new_task_id("db")).collect();
+        assert_eq!(ids.len(), 300, "同一秒内生成的 task_id 必须互不相同");
+    }
+
+    #[test]
+    fn task_ids_keep_the_kind_prefix_and_sort_by_mint_order() {
+        let first = TaskRegistry::new_task_id("db");
+        let second = TaskRegistry::new_task_id("db");
+        assert!(first.starts_with("db-"), "客户端按前缀区分 kind：{first}");
+        assert!(
+            first < second,
+            "序号单调，字典序即入队序：{first} 应排在 {second} 之前"
         );
     }
 

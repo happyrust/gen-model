@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -81,6 +81,15 @@ pub struct EnqueueOutcome {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManualEnqueueReceipt {
     pub project: String,
+    /// 本次执行范围照哪个 MDB 解的（带前导 `/`）。
+    ///
+    /// 预览与执行是两次独立解析，中间 MDB 可能被改过；不报出来的话，人只能假定
+    /// 这次跑的范围跟预览时看到的那份一样。
+    #[serde(default)]
+    pub mdb: String,
+    /// SurrealDB namespace actually used by the service.
+    #[serde(default)]
+    pub namespace: String,
     /// 本次扫描到的候选 dbnum 数（含最新与被阻断的）。
     pub scanned: usize,
     /// 新排的行（含接在运行中批次之后的）。
@@ -141,13 +150,26 @@ impl BatchScheduler {
         })
     }
 
+    /// 取队列锁，并从中毒中恢复。
+    ///
+    /// 队列不持久（ADR-011 §4），durable 语义在水位与 `model_update_pending` 表上，
+    /// 所以中毒状态最坏是某一行元数据没更新完。而让每一次后续加锁都跟着 panic，
+    /// 会把「一个批次挂了」放大成看门狗入队、队列面板、worker 全线连坐——偏偏
+    /// `/health` 读的是 `AtomicBool`、不碰这把锁，外面还一直报 ok。
+    fn queue(&self) -> MutexGuard<'_, QueueState> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            log::error!("数据批次队列锁曾因 panic 中毒，已恢复继续使用");
+            poisoned.into_inner()
+        })
+    }
+
     /// 把一次发现放进队列，并让注册表跟上（新行 / 并入 / 无动作）。
     ///
     /// 三种落点都会唤醒 worker：即便 `AlreadyCovered`，manual 触发的语义也是
     /// 「别等下一个 30s 轮询」——worker 醒来发现队列没变化也只亏一次空转。
     pub fn enqueue(&self, registry: &TaskRegistry, found: &DiscoveredBatch) -> EnqueueOutcome {
         let outcome = {
-            let mut state = self.inner.lock().unwrap();
+            let mut state = self.queue();
             let outcome = batch_queue::enqueue(
                 &mut state.queue,
                 found.dbnum,
@@ -169,49 +191,72 @@ impl BatchScheduler {
                 .map(|i| i + 1)
                 .unwrap_or(0);
 
-            let info = match outcome {
-                Enqueued::New | Enqueued::BehindRunning => {
-                    let row = queued_row.expect("enqueue 刚排入的行必然存在");
-                    let task_id = TaskRegistry::new_task_id("db");
-                    registry.insert_queued_batch(
-                        &task_id,
-                        &found.project,
+            // 三条规则保证此刻必有排队行；真没有就是队列失步了。这里持着锁，
+            // panic 会把锁毒掉、连累看门狗与面板，所以退回一条空回执并告警。
+            let info = match queued_row {
+                None => {
+                    log::error!(
+                        "dbnum={} 入队判定为 {:?} 却找不到排队行，队列已失步",
                         found.dbnum,
-                        &found.db_type,
-                        row.start_sesno,
-                        row.end_sesno,
-                    );
-                    state.meta.insert(
-                        (found.dbnum, false),
-                        RowMeta {
-                            task_id: task_id.clone(),
-                            project: found.project.clone(),
-                            path: found.path.clone(),
-                            file_name: found.file_name.clone(),
-                        },
+                        outcome
                     );
                     EnqueuedBatchInfo {
-                        task_id,
+                        task_id: String::new(),
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
                         position,
-                        start_sesno: row.start_sesno,
-                        end_sesno: row.end_sesno,
+                        start_sesno: found.applied_sesno + 1,
+                        end_sesno: found.file_latest_sesno,
                     }
                 }
-                Enqueued::Merged | Enqueued::AlreadyCovered => {
-                    let row = queued_row.expect("合并目标行必然存在");
-                    let meta = state
-                        .meta
-                        .get_mut(&(found.dbnum, false))
-                        .expect("排队行必有元数据");
-                    // 文件可能在两次触发之间被挪动，执行按最后一次观察到的路径走。
-                    meta.path = found.path.clone();
-                    meta.file_name = found.file_name.clone();
-                    let task_id = meta.task_id.clone();
-                    if outcome == Enqueued::Merged {
-                        registry.update_queued_range(&task_id, row.end_sesno);
-                    }
+                Some(row) => {
+                    let merging = matches!(
+                        outcome,
+                        Enqueued::Merged | Enqueued::AlreadyCovered
+                    );
+                    let existing = merging
+                        .then(|| state.meta.get(&(found.dbnum, false)).map(|m| m.task_id.clone()))
+                        .flatten();
+                    let task_id = match existing {
+                        Some(task_id) => {
+                            // 文件可能在两次触发之间被挪动，执行按最后一次观察到的路径走。
+                            if let Some(meta) = state.meta.get_mut(&(found.dbnum, false)) {
+                                meta.path = found.path.clone();
+                                meta.file_name = found.file_name.clone();
+                            }
+                            if outcome == Enqueued::Merged {
+                                registry.update_queued_range(&task_id, row.end_sesno);
+                            }
+                            task_id
+                        }
+                        None => {
+                            if merging {
+                                log::error!(
+                                    "dbnum={} 有排队行却没有元数据，补建任务行",
+                                    found.dbnum
+                                );
+                            }
+                            let task_id = TaskRegistry::new_task_id("db");
+                            registry.insert_queued_batch(
+                                &task_id,
+                                &found.project,
+                                found.dbnum,
+                                &found.db_type,
+                                row.start_sesno,
+                                row.end_sesno,
+                            );
+                            state.meta.insert(
+                                (found.dbnum, false),
+                                RowMeta {
+                                    task_id: task_id.clone(),
+                                    project: found.project.clone(),
+                                    path: found.path.clone(),
+                                    file_name: found.file_name.clone(),
+                                },
+                            );
+                            task_id
+                        }
+                    };
                     EnqueuedBatchInfo {
                         task_id,
                         dbnum: found.dbnum,
@@ -230,14 +275,17 @@ impl BatchScheduler {
 
     /// FIFO 出队并冻结（暂停时恒 None）。注册表行随之转 running。
     pub fn freeze_next(&self, registry: &TaskRegistry) -> Option<FrozenBatch> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.queue();
         let paused = self.paused.load(Ordering::SeqCst);
         let index = batch_queue::freeze_next(&mut state.queue, paused)?;
         let row = state.queue[index].clone();
-        let meta = state
-            .meta
-            .remove(&(row.dbnum, false))
-            .expect("被冻结的行必有排队元数据");
+        // 元数据缺失说明队列失步。此处持着锁，panic 会毒掉锁把整条链连坐，
+        // 而这一行既然没有文件路径也就无从执行——把它摘掉、报错、让下一条上。
+        let Some(meta) = state.meta.remove(&(row.dbnum, false)) else {
+            log::error!("dbnum={} 被冻结却没有排队元数据，丢弃该行", row.dbnum);
+            state.queue.remove(index);
+            return None;
+        };
         state.meta.insert((row.dbnum, true), meta.clone());
         registry.mark_started(&meta.task_id);
         Some(FrozenBatch {
@@ -254,11 +302,41 @@ impl BatchScheduler {
 
     /// 批次执行完毕：把运行中的那行从队列里摘掉（终态只留在注册表历史里）。
     pub fn finish(&self, dbnum: u32) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.queue();
         state
             .queue
             .retain(|b| !(b.dbnum == dbnum && b.state == BatchState::Running));
         state.meta.remove(&(dbnum, true));
+    }
+
+    /// 冻结点重扫定下真实上界之后，把它回写到运行中的队列行与任务行。
+    ///
+    /// ADR-011 §5 把冻结点定义为「执行真正开始之前」的那次重扫，而排队期间显示的
+    /// 右端只是**入队时观察到的预期上界**——两次触发之间文件还在长。不回写会有两个
+    /// 后果：面板上显示的区间比实际应用的窄；以及紧接着排在后面那条的左端
+    /// （`running_end + 1`）建在一个过时的数上。
+    pub fn record_frozen_end(&self, registry: &TaskRegistry, dbnum: u32, end_sesno: i32) {
+        let task_id = {
+            let mut state = self.queue();
+            let changed = match state
+                .queue
+                .iter_mut()
+                .find(|b| b.dbnum == dbnum && b.state == BatchState::Running)
+            {
+                Some(row) if row.end_sesno != end_sesno => {
+                    row.end_sesno = end_sesno;
+                    true
+                }
+                _ => false,
+            };
+            if !changed {
+                return;
+            }
+            state.meta.get(&(dbnum, true)).map(|m| m.task_id.clone())
+        };
+        if let Some(task_id) = task_id {
+            registry.set_frozen_range(&task_id, end_sesno);
+        }
     }
 
     /// 暂停出队（正在跑的那条会跑完为止——服务端没有中止接口）。
@@ -323,7 +401,7 @@ impl BatchScheduler {
 
     /// 队列快照（含运行中行），按队列序。
     pub fn snapshot(&self) -> Vec<QueueRow> {
-        let state = self.inner.lock().unwrap();
+        let state = self.queue();
         state
             .queue
             .iter()
