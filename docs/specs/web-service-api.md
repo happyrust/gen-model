@@ -149,7 +149,7 @@
 - 响应 200：`OnDemandModelResult` 原样，含 `generation_root`、`model_instance_count`（画得出来的实例数）与 `generated_instance_count`（生成写出的实例数，含画不出来的）。`status` 三种：
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
   - `Generated` — 这次跑了生成，拿到了画得出来的实例；
-  - `NoRenderableGeometry` — 生成写出了实例，但一条都画不出来（`model_available` 为 false）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
+  - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
 - `force` 只给「人明确要求重生成」用（S4-C 的重试）：它跳过上面两种短路，无条件重跑一次生成。显示补齐**不要**传，否则每显示一次就重生成一次。
 - 解析不出生成根时按缘由分型，客户端对三种的出路各不相同，不要压成一个 `internal`：
   - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
