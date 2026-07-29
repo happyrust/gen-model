@@ -9,6 +9,7 @@ pub mod events;
 mod handlers;
 mod ws;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -211,6 +212,17 @@ pub async fn serve(
     };
     let ui_root =
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into());
+    let asset_root = resolve_asset_root();
+    if !asset_root.is_dir() {
+        anyhow::bail!(
+            "PLANT_ASSET_ROOT 不存在或不是目录：{}",
+            asset_root.display()
+        );
+    }
+    println!(
+        "Web 资产目录：{}（其内容通过 /assets 公开）",
+        asset_root.display()
+    );
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -225,7 +237,7 @@ pub async fn serve(
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))
         .route("/api/v1/ws", get(ws::ws_handler))
-        .nest_service("/assets/meshes", ServeDir::new("assets/meshes"))
+        .nest_service("/assets", ServeDir::new(asset_root))
         .fallback_service(ServeDir::new(ui_root).append_index_html_on_directories(true))
         .layer(build_cors(cors_origins))
         .layer(TraceLayer::new_for_http())
@@ -235,6 +247,30 @@ pub async fn serve(
     println!("Web 服务已启动: http://{addr}/api/v1 （地址由 DbOption.toml 的 http_api_addr 配置）");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn resolve_asset_root() -> PathBuf {
+    if let Some(configured) = std::env::var_os("PLANT_ASSET_ROOT")
+        .filter(|path| !path.to_string_lossy().trim().is_empty())
+    {
+        return configured.into();
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(executable_dir) = executable.parent()
+    {
+        let packaged = executable_dir
+            .parent()
+            .map(|root| root.join("backend/assets"));
+        for candidate in [Some(executable_dir.join("assets")), packaged]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    "assets".into()
 }
 
 /// CORS 策略：未配置或包含 `*` 时放开（开发期）；否则按 origin 白名单。
