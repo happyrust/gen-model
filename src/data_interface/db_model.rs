@@ -68,7 +68,7 @@ pub static MQTT_CONNECT_STATUS: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
-        let db_option = get_db_option();
+        let db_option = crate::get_db_option_ext().inner;
         let mut mgr = Self::init(&db_option).await?;
         Ok(mgr)
     }

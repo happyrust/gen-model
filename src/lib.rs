@@ -355,8 +355,8 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use aios_core::init_surreal;
     // 如果传入的是DbOptionExt，则取其内部的DbOption
     let db_option: DbOption = option
-        .map(|o| o.inner)
-        .unwrap_or_else(|| get_db_option().clone());
+        .map(|o| options::apply_asset_root(o.inner))
+        .unwrap_or_else(|| get_db_option_ext().inner);
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容

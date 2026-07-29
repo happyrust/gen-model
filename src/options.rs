@@ -1,6 +1,8 @@
 use aios_core::options::DbOption;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// 扩展DbOption，添加异地部署相关的配置
@@ -117,11 +119,25 @@ fn load_ext_fields() -> &'static DbOptionExtFields {
     })
 }
 
+fn meshes_dir_from_asset_root(asset_root: Option<OsString>) -> Option<PathBuf> {
+    asset_root
+        .filter(|root| !root.to_string_lossy().trim().is_empty())
+        .map(PathBuf::from)
+        .map(|root| root.join("meshes"))
+}
+
+pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
+    if let Some(meshes_dir) = meshes_dir_from_asset_root(std::env::var_os("PLANT_ASSET_ROOT")) {
+        option.meshes_path = Some(meshes_dir.to_string_lossy().into_owned());
+    }
+    option
+}
+
 /// 获取扩展的数据库选项
 pub fn get_db_option_ext() -> DbOptionExt {
     let ext = load_ext_fields();
     DbOptionExt {
-        inner: aios_core::get_db_option().clone(),
+        inner: apply_asset_root(aios_core::get_db_option().clone()),
         mqtt_server: ext.mqtt_server.clone(),
         mqtt_port: ext.mqtt_port,
         http_server: ext.http_server.clone(),
@@ -130,5 +146,19 @@ pub fn get_db_option_ext() -> DbOptionExt {
         append_delivery_unit_types: ext.append_delivery_unit_types.clone(),
         http_api_addr: ext.http_api_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_windows_asset_root_and_ignores_empty_value() {
+        assert_eq!(
+            meshes_dir_from_asset_root(Some(OsString::from(r"C:\Legacy Assets"))),
+            Some(PathBuf::from(r"C:\Legacy Assets").join("meshes"))
+        );
+        assert_eq!(meshes_dir_from_asset_root(Some(OsString::from("  "))), None);
     }
 }
