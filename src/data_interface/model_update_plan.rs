@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_interface::manual_update::{
     DeliveryUnitSummary, NetChangeDetail, NetOp, merge_net_change_details, resolve_unit_rollup,
-    resolve_unit_rollup_without_reverse_index,
 };
 use crate::data_interface::model_impact::{OperationImpact, classify_operation_impact};
 
@@ -232,12 +231,14 @@ pub(crate) async fn build_model_update_plan(
     end_sesno: i32,
     db_type: &str,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-) -> ModelUpdatePlan {
+) -> anyhow::Result<ModelUpdatePlan> {
     if db_type == "CATA" {
-        return build_cata_cascade_plan(dbnum, end_sesno, db_type, range_eles);
+        return Ok(build_cata_cascade_plan(
+            dbnum, end_sesno, db_type, range_eles,
+        ));
     }
     if db_type != "DESI" {
-        return ModelUpdatePlan::default();
+        return Ok(ModelUpdatePlan::default());
     }
 
     let mut details = merge_net_change_details(range_eles);
@@ -290,23 +291,9 @@ pub(crate) async fn build_model_update_plan(
         })
         .collect();
 
-    let (units, _no_generation, mut warnings, reverse_index_failed) = match resolve_unit_rollup(
-        dbnum,
-        range_eles,
-        &regen_details,
-    )
-    .await
-    {
-        Ok((units, no_generation, warnings)) => (units, no_generation, warnings, false),
-        Err(error) => {
-            let (units, no_generation, mut warnings) =
-                resolve_unit_rollup_without_reverse_index(dbnum, range_eles, &regen_details).await;
-            warnings.push(format!(
-                    "dbnum={dbnum}: reverse-reference lookup failed; deferred cascade expansion: {error:#}"
-                ));
-            (units, no_generation, warnings, true)
-        }
-    };
+    let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details).await?;
+    let units = rollup.units;
+    let mut warnings = rollup.warnings;
     warnings.extend(baseline_warnings);
     let mut work_items = work_items_from_units(
         dbnum,
@@ -316,7 +303,7 @@ pub(crate) async fn build_model_update_plan(
         &transform_refnos,
         &deleted_refnos,
     );
-    if reverse_index_failed {
+    if rollup.cascade_deferred {
         let mut deferred: BTreeMap<String, ModelWorkItem> = BTreeMap::new();
         for detail in regen_details.iter().filter(|detail| detail.model_affecting) {
             deferred.insert(
@@ -334,11 +321,11 @@ pub(crate) async fn build_model_update_plan(
         work_items.extend(deferred.into_values());
         work_items.sort_by_key(|item| (item.action, item.target_refno.clone()));
     }
-    ModelUpdatePlan {
+    Ok(ModelUpdatePlan {
         work_items,
         warnings,
         units,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -479,7 +466,8 @@ mod tests {
             "DESI",
             &BTreeMap::from([(42, vec![live_modified_op(box_, equi, "BOX", "XLEN")])]),
         )
-        .await;
+        .await
+        .expect("build direct model plan");
         assert_eq!(
             direct
                 .work_items
@@ -498,7 +486,8 @@ mod tests {
             "DESI",
             &BTreeMap::from([(42, vec![live_modified_op(box_, equi, "BOX", "POS")])]),
         )
-        .await;
+        .await
+        .expect("build transform model plan");
         assert_eq!(
             transform
                 .work_items
@@ -518,7 +507,8 @@ mod tests {
             "DESI",
             &BTreeMap::from([(42, vec![live_modified_op(equi, equi, "EQUI", "NAME")])]),
         )
-        .await;
+        .await
+        .expect("build data-only model plan");
         assert!(
             data_only.work_items.is_empty(),
             "NAME must not schedule model work: {data_only:?}"
@@ -547,7 +537,9 @@ mod tests {
         );
         let direct = IncrementPipeline::collect_changes(&design_file, 25..=26)
             .expect("collect real BOX.XLEN sessions");
-        let direct_plan = build_model_update_plan(8000, 26, "DESI", &direct).await;
+        let direct_plan = build_model_update_plan(8000, 26, "DESI", &direct)
+            .await
+            .expect("build direct model plan");
         assert_eq!(
             direct_plan
                 .work_items
@@ -588,7 +580,9 @@ mod tests {
             2,
             "{transform_impacts:#?}"
         );
-        let transform_plan = build_model_update_plan(8000, 28, "DESI", &transform).await;
+        let transform_plan = build_model_update_plan(8000, 28, "DESI", &transform)
+            .await
+            .expect("build transform model plan");
         assert_eq!(
             transform_plan
                 .work_items
@@ -607,7 +601,9 @@ mod tests {
         ));
         let equi_transform = IncrementPipeline::collect_changes(&data_file, 77..=80)
             .expect("collect real EQUI.POS sessions");
-        let equi_transform_plan = build_model_update_plan(7997, 80, "DESI", &equi_transform).await;
+        let equi_transform_plan = build_model_update_plan(7997, 80, "DESI", &equi_transform)
+            .await
+            .expect("build EQUI transform model plan");
         assert_eq!(
             equi_transform_plan
                 .work_items
@@ -637,7 +633,9 @@ mod tests {
         let effects = crate::data_interface::model_impact::classify_operation_effects(operation);
         assert_eq!(effects.changed_attributes, vec!["NAME"]);
 
-        let plan = build_model_update_plan(7997, 82, "DESI", &data_only).await;
+        let plan = build_model_update_plan(7997, 82, "DESI", &data_only)
+            .await
+            .expect("build data-only model plan");
         assert!(
             plan.work_items.is_empty(),
             "real NAME-only session must not schedule model work: {plan:?}"
@@ -663,7 +661,9 @@ mod tests {
 
         let structural = IncrementPipeline::collect_changes(&data_file, 75..=75)
             .expect("collect real WALL.JUSL session");
-        let structural_plan = build_model_update_plan(7997, 75, "DESI", &structural).await;
+        let structural_plan = build_model_update_plan(7997, 75, "DESI", &structural)
+            .await
+            .expect("build structural model plan");
         assert_eq!(
             structural_plan
                 .work_items
@@ -735,7 +735,9 @@ mod tests {
         }
 
         let plan =
-            build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)])).await;
+            build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)]))
+                .await
+                .expect("build nested-created model plan");
         let roots = plan
             .work_items
             .iter()
@@ -786,7 +788,8 @@ mod tests {
                 vec![live_modified_op(negative, parent_box, "NCYL", "DIAM")],
             )]),
         )
-        .await;
+        .await
+        .expect("build negative-geometry model plan");
         assert_eq!(
             plan.work_items
                 .iter()
@@ -828,7 +831,9 @@ mod tests {
             ],
         )]);
 
-        let plan = build_model_update_plan(1, 42, "CATA", &range_eles).await;
+        let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
+            .await
+            .expect("build CATA cascade plan");
         assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
         assert!(
             plan.work_items
@@ -876,7 +881,9 @@ mod tests {
             ),
         ]);
 
-        let plan = build_model_update_plan(1, 42, "CATA", &range_eles).await;
+        let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
+            .await
+            .expect("build neutral CATA plan");
         assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
     }
 
@@ -892,7 +899,9 @@ mod tests {
             )],
         )]);
 
-        let plan = build_model_update_plan(1, 42, "SYST", &range_eles).await;
+        let plan = build_model_update_plan(1, 42, "SYST", &range_eles)
+            .await
+            .expect("build SYST plan");
         assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
     }
 }

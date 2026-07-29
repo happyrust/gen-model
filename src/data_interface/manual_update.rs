@@ -12,7 +12,7 @@
 //!
 //! Minimal-delivery-unit resolution (spec §最小交付单元) is a pure walk over an
 //! [`OwnershipSnapshot`]: the pre-update state is the ACTIVE Surreal PE/OWNER
-//! graph (loaded via [`aios_core::get_pe`]; the unexported `ssc.rs` / Arango
+//! graph (loaded from Surreal in bounded batches; the unexported `ssc.rs` / Arango
 //! paths stay off), and the post-update state overlays the OWNER coverage graph
 //! built from the pending window ops ([`build_owner_overlay`]) so adds, moves
 //! and ancestors changing in the same window all resolve correctly. Deletions
@@ -1102,11 +1102,6 @@ async fn fetch_ref_rev_edges(
     Ok(edges)
 }
 
-/// Load the reverse-reference edges whose `referenced` is one of `seeds` (one hop).
-///
-/// Callers decide whether a read failure is fatal. The increment planner turns
-/// it into a durable `CascadeExpand` item, while the normal path consumes the
-/// returned index directly.
 pub(crate) async fn load_ref_reversal(
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
@@ -1129,8 +1124,24 @@ const MAX_REVERSE_CASCADE_REFERRERS: usize = 50_000;
 /// terminate and keeps every `referenced` key queried at most once.
 async fn collect_ref_reversal_closure<F, Fut>(
     seeds: &HashSet<RefnoEnum>,
-    mut fetch: F,
+    fetch: F,
 ) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>>
+where
+    F: FnMut(HashSet<RefnoEnum>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>>>,
+{
+    Ok(
+        collect_ref_reversal_closure_with_limit(seeds, MAX_REVERSE_CASCADE_REFERRERS, fetch)
+            .await?
+            .0,
+    )
+}
+
+async fn collect_ref_reversal_closure_with_limit<F, Fut>(
+    seeds: &HashSet<RefnoEnum>,
+    max_referrers: usize,
+    mut fetch: F,
+) -> anyhow::Result<(HashMap<RefnoEnum, Vec<RefnoEnum>>, bool)>
 where
     F: FnMut(HashSet<RefnoEnum>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>>>,
@@ -1139,6 +1150,7 @@ where
     let mut visited: HashSet<RefnoEnum> = seeds.iter().copied().collect();
     let mut frontier: HashSet<RefnoEnum> = seeds.clone();
     let mut referrers = 0usize;
+    let mut truncated = false;
 
     for hop in 0..MAX_REVERSE_CASCADE_HOPS {
         if frontier.is_empty() {
@@ -1153,16 +1165,17 @@ where
         }
         edges.extend(hop_edges);
 
-        if referrers >= MAX_REVERSE_CASCADE_REFERRERS {
+        if referrers >= max_referrers {
+            truncated = true;
             log::warn!(
-                "reverse cascade closure hit the {MAX_REVERSE_CASCADE_REFERRERS} referrer cap \
+                "reverse cascade closure hit the {max_referrers} referrer cap \
                  at hop {hop}; deeper referrers are not expanded"
             );
             break;
         }
     }
 
-    Ok(assemble_ref_reversal(&edges))
+    Ok((assemble_ref_reversal(&edges), truncated))
 }
 
 /// Load the TRANSITIVE `referenced → [referrers]` closure for `seeds`.
@@ -1172,10 +1185,12 @@ where
 /// changed element and so would have no entry in the map (ADR-003 B3).
 pub(crate) async fn load_ref_reversal_closure(
     seeds: &HashSet<RefnoEnum>,
-) -> anyhow::Result<HashMap<RefnoEnum, Vec<RefnoEnum>>> {
-    collect_ref_reversal_closure(seeds, |frontier| async move {
-        fetch_ref_rev_edges(&frontier).await
-    })
+) -> anyhow::Result<(HashMap<RefnoEnum, Vec<RefnoEnum>>, bool)> {
+    collect_ref_reversal_closure_with_limit(
+        seeds,
+        MAX_REVERSE_CASCADE_REFERRERS,
+        |frontier| async move { fetch_ref_rev_edges(&frontier).await },
+    )
     .await
 }
 
@@ -1186,37 +1201,85 @@ pub(crate) async fn load_ref_reversal_closure(
 /// (that element then has no resolvable delivery unit). Note preview runs
 /// BEFORE any data is applied, so this graph IS the pre-update snapshot —
 /// including elements the window will delete.
-async fn load_base_graph(seeds: HashSet<RefnoEnum>) -> HashMap<RefnoEnum, OwnerNode> {
+async fn collect_base_graph<F, Fut>(
+    seeds: HashSet<RefnoEnum>,
+    mut fetch: F,
+) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>>
+where
+    F: FnMut(HashSet<RefnoEnum>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<(RefnoEnum, OwnerNode)>>>,
+{
     let mut base: HashMap<RefnoEnum, OwnerNode> = HashMap::new();
-    let mut missing: HashSet<RefnoEnum> = HashSet::new();
-    let mut stack: Vec<RefnoEnum> = seeds.into_iter().filter(|r| r.is_valid()).collect();
+    let mut queried: HashSet<RefnoEnum> = HashSet::new();
+    let mut frontier: HashSet<RefnoEnum> =
+        seeds.into_iter().filter(|refno| refno.is_valid()).collect();
 
-    while let Some(refno) = stack.pop() {
-        if base.contains_key(&refno) || missing.contains(&refno) {
-            continue;
+    while !frontier.is_empty() {
+        let current = std::mem::take(&mut frontier)
+            .into_iter()
+            .filter(|refno| queried.insert(*refno))
+            .collect::<HashSet<_>>();
+        if current.is_empty() {
+            break;
         }
-        let pe = match aios_core::get_pe(refno).await {
-            Ok(Some(pe)) => pe,
-            _ => {
-                missing.insert(refno);
-                continue;
+        for (refno, node) in fetch(current).await? {
+            if let Some(owner) = node.owner.filter(|owner| !queried.contains(owner)) {
+                frontier.insert(owner);
             }
-        };
-        let owner = (pe.owner.is_valid() && pe.owner != refno).then_some(pe.owner);
-        if let Some(owner) = owner {
-            stack.push(owner);
+            base.insert(refno, node);
         }
-        base.insert(
-            refno,
-            OwnerNode {
-                owner,
-                noun: pe.noun,
-                name: pe.name,
-            },
-        );
     }
 
-    base
+    Ok(base)
+}
+
+async fn fetch_base_graph_nodes(
+    frontier: HashSet<RefnoEnum>,
+) -> anyhow::Result<Vec<(RefnoEnum, OwnerNode)>> {
+    const QUERY_CHUNK: usize = 500;
+    let keys = frontier
+        .into_iter()
+        .filter(|refno| refno.is_valid())
+        .map(|refno| refno.to_pe_key())
+        .collect::<Vec<_>>();
+    let mut nodes = Vec::new();
+
+    for chunk in keys.chunks(QUERY_CHUNK) {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, owner, noun, name FROM [{}] WHERE record::exists(id);",
+                chunk.join(",")
+            ))
+            .await
+            .map_err(|error| anyhow::anyhow!("读取 PE/OWNER 图失败: {error}"))?
+            .check()
+            .map_err(|error| anyhow::anyhow!("读取 PE/OWNER 图语句失败: {error}"))?;
+        let rows = response
+            .take::<Vec<BaselineNodeRow>>(0)
+            .map_err(|error| anyhow::anyhow!("解码 PE/OWNER 图失败: {error}"))?;
+        for row in rows {
+            let refno = pe_thing_to_refno(row.id)?;
+            let owner = row
+                .owner
+                .map(RefnoEnum::from)
+                .filter(|owner| owner.is_valid() && *owner != refno);
+            nodes.push((
+                refno,
+                OwnerNode {
+                    owner,
+                    noun: row.noun,
+                    name: row.name,
+                },
+            ));
+        }
+    }
+    Ok(nodes)
+}
+
+async fn load_base_graph(
+    seeds: HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
+    collect_base_graph(seeds, fetch_base_graph_nodes).await
 }
 
 /// Delivery-unit accumulator (internal to [`build_unit_rollup`]).
@@ -1485,31 +1548,57 @@ pub fn build_unit_rollup(
 /// window's OWNER coverage graph, then runs the pure [`build_unit_rollup`]. The
 /// reverse index is loaded as a TRANSITIVE closure
 /// ([`load_ref_reversal_closure`]) because the rollup walks it hop by hop.
-/// Returns `(units, no_generation, warnings)`.
+#[derive(Debug, Default)]
+pub(crate) struct ResolvedUnitRollup {
+    pub units: Vec<DeliveryUnitSummary>,
+    pub no_generation: u32,
+    pub warnings: Vec<String>,
+    pub cascade_deferred: bool,
+}
+
 pub(crate) async fn resolve_unit_rollup(
     dbnum: u32,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
-) -> anyhow::Result<(Vec<DeliveryUnitSummary>, u32, Vec<String>)> {
+) -> anyhow::Result<ResolvedUnitRollup> {
     if details.iter().all(|d| d.net == NetOp::Cancelled) {
-        return Ok((Vec::new(), 0, Vec::new()));
+        return Ok(ResolvedUnitRollup::default());
     }
 
     let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
-    let ref_reversal = load_ref_reversal_closure(&change_refnos).await?;
+    let (ref_reversal, cascade_deferred, mut lookup_warnings) =
+        match load_ref_reversal_closure(&change_refnos).await {
+            Ok((ref_reversal, truncated)) => {
+                let warnings = truncated
+                    .then(|| {
+                        format!(
+                            "dbnum={dbnum}: reverse-reference closure reached its safety cap; \
+                             deferred cascade expansion"
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                (ref_reversal, truncated, warnings)
+            }
+            Err(error) => (
+                HashMap::new(),
+                true,
+                vec![format!(
+                    "dbnum={dbnum}: reverse-reference lookup failed; deferred cascade expansion: \
+                     {error:#}"
+                )],
+            ),
+        };
 
-    Ok(resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, ref_reversal).await)
-}
-
-/// Fallback used only after a reverse-index read failure. It retains direct
-/// root work; callers additionally persist a `CascadeExpand` seed for every
-/// model-affecting changed element.
-pub(crate) async fn resolve_unit_rollup_without_reverse_index(
-    dbnum: u32,
-    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-    details: &[NetChangeDetail],
-) -> (Vec<DeliveryUnitSummary>, u32, Vec<String>) {
-    resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, HashMap::new()).await
+    let (units, no_generation, mut warnings) =
+        resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, ref_reversal).await?;
+    warnings.append(&mut lookup_warnings);
+    Ok(ResolvedUnitRollup {
+        units,
+        no_generation,
+        warnings,
+        cascade_deferred,
+    })
 }
 
 async fn resolve_unit_rollup_with_ref_reversal(
@@ -1517,9 +1606,9 @@ async fn resolve_unit_rollup_with_ref_reversal(
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
     ref_reversal: HashMap<RefnoEnum, Vec<RefnoEnum>>,
-) -> (Vec<DeliveryUnitSummary>, u32, Vec<String>) {
+) -> anyhow::Result<(Vec<DeliveryUnitSummary>, u32, Vec<String>)> {
     if details.iter().all(|d| d.net == NetOp::Cancelled) {
-        return (Vec::new(), 0, Vec::new());
+        return Ok((Vec::new(), 0, Vec::new()));
     }
 
     let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
@@ -1531,7 +1620,9 @@ async fn resolve_unit_rollup_with_ref_reversal(
     seeds.extend(ref_reversal.values().flatten().copied());
 
     let snap = OwnershipSnapshot {
-        base: load_base_graph(seeds).await,
+        base: load_base_graph(seeds).await.map_err(|error| {
+            anyhow::anyhow!("dbnum={dbnum}: owner graph load failed: {error:#}")
+        })?,
         overlay,
         deleted_post,
         ref_reversal,
@@ -1539,34 +1630,34 @@ async fn resolve_unit_rollup_with_ref_reversal(
 
     let (units, no_generation, warnings) =
         build_unit_rollup(&snap, details, &configured_delivery_unit_types());
-    (
+    Ok((
         units,
         no_generation,
         warnings
             .into_iter()
             .map(|w| format!("dbnum={dbnum}: {w}"))
             .collect(),
-    )
+    ))
 }
 
 async fn resolve_zone_rollup(
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
     units: &[DeliveryUnitSummary],
-) -> Vec<ZoneSummary> {
+) -> anyhow::Result<Vec<ZoneSummary>> {
     if details.iter().all(|detail| detail.net == NetOp::Cancelled) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let (overlay, deleted_post) = build_owner_overlay(range_eles);
     let mut seeds: HashSet<RefnoEnum> = details.iter().map(|detail| detail.refno).collect();
     seeds.extend(overlay.values().filter_map(|node| node.owner));
     let snap = OwnershipSnapshot {
-        base: load_base_graph(seeds).await,
+        base: load_base_graph(seeds).await?,
         overlay,
         deleted_post,
         ref_reversal: HashMap::new(),
     };
-    build_zone_rollup(&snap, details, units)
+    Ok(build_zone_rollup(&snap, details, units))
 }
 
 /// Registered dbnums whose db_type is known and is NOT `DESI` (CATA / SYST /
@@ -1605,37 +1696,33 @@ pub(crate) async fn expand_live_reverse_cascade(
     seed: RefnoEnum,
 ) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
     use crate::data_interface::generation_root::{
-        configured_delivery_unit_types, resolve_live_element_generation_root,
+        GenerationNode, configured_delivery_unit_types, resolve_element_generation_root,
     };
 
     let unit_types = configured_delivery_unit_types();
     let non_design_dbnums = load_non_design_dbnums().await?;
-    let mut pending = vec![seed];
-    let mut visited = HashSet::from([seed]);
+    let (reversal, _) = collect_ref_reversal_closure_with_limit(
+        &HashSet::from([seed]),
+        usize::MAX,
+        |frontier| async move { fetch_ref_rev_edges(&frontier).await },
+    )
+    .await?;
+    let referrers = reversal.values().flatten().copied().collect::<HashSet<_>>();
+    let graph = load_base_graph(referrers.clone()).await?;
     let mut roots = BTreeMap::new();
 
-    while let Some(referenced) = pending.pop() {
-        let referrers = load_ref_reversal(&HashSet::from([referenced]))
-            .await?
-            .remove(&referenced)
-            .unwrap_or_default();
-        let mut referrers = referrers;
-        referrers.sort_by_key(|refno| refno.to_pdms_str());
-        for referrer in referrers {
-            if !visited.insert(referrer) {
-                continue;
-            }
-            pending.push(referrer);
-            // No pe row → no owner chain → no root; skip the resolve round-trip.
-            let Some(pe) = aios_core::get_pe(referrer).await? else {
-                continue;
-            };
-            if non_design_dbnums.contains(&(pe.dbnum as u32)) {
-                continue;
-            }
-            if let Some(root) = resolve_live_element_generation_root(referrer, &unit_types).await? {
-                roots.insert(root.root.to_pdms_str(), root);
-            }
+    for referrer in referrers {
+        if non_design_dbnums.contains(&referrer.refno().get_0()) {
+            continue;
+        }
+        if let Some(root) = resolve_element_generation_root(referrer, &unit_types, |candidate| {
+            graph.get(&candidate).map(|node| GenerationNode {
+                owner: node.owner,
+                noun: node.noun.clone(),
+                name: node.name.clone(),
+            })
+        }) {
+            roots.insert(root.root.to_pdms_str(), root);
         }
     }
     Ok(roots.into_values().collect())
@@ -1786,6 +1873,10 @@ pub struct PendingModelUnit {
     pub attempts: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Revision-safe settlement token. Loaded for execution but intentionally
+    /// omitted from the inspection/API JSON contract.
+    #[serde(default, skip_serializing)]
+    pub revision: u64,
 }
 
 /// 待重试重生成根的 SELECT（纯函数）。
@@ -1805,7 +1896,7 @@ fn render_pending_units_sql(attempt_cap: Option<u32>, dbnum: Option<u32>) -> Str
     }
     format!(
         "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
-         last_error FROM model_update_pending WHERE {};",
+         last_error, revision FROM model_update_pending WHERE {};",
         filters.join(" AND ")
     )
 }
@@ -1897,6 +1988,9 @@ pub struct UnitTask {
     pub source_end_sesno: i32,
     /// Attempts BEFORE this run (carried from a pending record; 0 for new).
     pub attempts: u32,
+    /// Queue revision observed before generation. New-only tasks have no
+    /// revision until matched with the authoritative pending row.
+    pub revision: Option<u64>,
     /// Pre/post-update OWNER (parent) of the unit root (`a/b`); carried to the
     /// result for client tree refresh. `None` for pending-only (retry) tasks.
     pub old_owner: Option<String>,
@@ -1922,6 +2016,7 @@ pub fn collect_unit_tasks(
             noun: unit.noun.clone(),
             source_end_sesno: end_sesno,
             attempts: 0,
+            revision: None,
             old_owner: unit.old_owner.clone(),
             new_owner: unit.new_owner.clone(),
         });
@@ -1950,6 +2045,7 @@ pub fn merge_unit_worklist(
                 noun: p.noun,
                 source_end_sesno: p.source_end_sesno,
                 attempts: p.attempts,
+                revision: Some(p.revision),
                 // Pending records don't persist owners; a fresh run (below)
                 // fills them in when the same unit is re-affected this window.
                 old_owner: None,
@@ -3012,34 +3108,21 @@ impl AiosDBManager {
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
                     if cand.db_type == "DESI" && !details.is_empty() {
-                        let (units, no_generation, unit_warnings) = match resolve_unit_rollup(
+                        let rollup = resolve_unit_rollup(
                             cand.db_num,
                             &range_eles,
                             &details,
                         )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => {
-                                let (units, no_generation, mut unit_warnings) =
-                                    resolve_unit_rollup_without_reverse_index(
-                                        cand.db_num,
-                                        &range_eles,
-                                        &details,
-                                    )
-                                    .await;
-                                unit_warnings.push(format!(
-                                    "dbnum={}: reverse-reference lookup deferred to durable cascade work: {error:#}",
-                                    cand.db_num
-                                ));
-                                (units, no_generation, unit_warnings)
-                            }
-                        };
-                        preview.units = units;
-                        preview.zones =
-                            resolve_zone_rollup(&range_eles, &details, &preview.units).await;
-                        preview.no_generation = no_generation;
-                        warnings.extend(unit_warnings);
+                        .await?;
+                        preview.units = rollup.units;
+                        preview.zones = resolve_zone_rollup(
+                            &range_eles,
+                            &details,
+                            &preview.units,
+                        )
+                        .await?;
+                        preview.no_generation = rollup.no_generation;
+                        warnings.extend(rollup.warnings);
                     }
                 }
                 None => {}
@@ -3571,7 +3654,11 @@ mod tests {
     fn only_the_retry_query_caps_attempts() {
         let inspect = render_pending_units_sql(None, None);
         assert!(!inspect.contains("attempts?:0) <"), "{inspect}");
-        assert!(inspect.contains("status IN ['pending', 'failed']"), "{inspect}");
+        assert!(
+            inspect.contains("status IN ['pending', 'failed']"),
+            "{inspect}"
+        );
+        assert!(inspect.contains("last_error, revision FROM"), "{inspect}");
 
         let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
         let retry = render_pending_units_sql(Some(cap), None);
@@ -4709,6 +4796,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn owner_graph_read_error_is_not_treated_as_a_missing_record() {
+        let error = collect_base_graph(HashSet::from([r(5)]), |_| async {
+            anyhow::bail!("surreal unavailable")
+        })
+        .await
+        .expect_err("owner graph read failures must abort planning");
+
+        assert!(
+            error.to_string().contains("surreal unavailable"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_cascade_closure_reports_truncation() {
+        let stored = [(r(82), r(90)), (r(83), r(82)), (r(5), r(83))];
+        let (closure, truncated) =
+            collect_ref_reversal_closure_with_limit(&HashSet::from([r(90)]), 2, |frontier| {
+                let mut queried = Vec::new();
+                let edges = fake_ref_rev(&stored, &mut queried, frontier);
+                async move { anyhow::Ok(edges) }
+            })
+            .await
+            .expect("load bounded reverse-reference closure");
+
+        assert!(truncated);
+        assert_eq!(closure.get(&r(90)), Some(&vec![r(82)]));
+        assert_eq!(closure.get(&r(82)), Some(&vec![r(83)]));
+    }
+
     // -----------------------------------------------------------------------
     // ADR-003 B1: reverse-reference extraction (pure core, feeds `ref_reversal`)
     // -----------------------------------------------------------------------
@@ -5081,6 +5199,7 @@ mod tests {
             noun: "BRAN".into(),
             source_end_sesno: end_sesno,
             attempts,
+            revision: None,
             old_owner: None,
             new_owner: None,
         }
@@ -5094,6 +5213,7 @@ mod tests {
             source_end_sesno: end_sesno,
             attempts,
             last_error: Some("boom".into()),
+            revision: 7,
         }
     }
 
@@ -5177,13 +5297,23 @@ mod tests {
             .unwrap();
         assert_eq!(five.source_end_sesno, 12);
         assert_eq!(five.attempts, 2);
+        assert_eq!(five.revision, Some(7));
         let seven = merged
             .iter()
             .find(|t| t.root_refno == r(7).to_pdms_str())
             .unwrap();
         assert_eq!(seven.source_end_sesno, 8);
         assert_eq!(seven.attempts, 1);
+        assert_eq!(seven.revision, Some(7));
         assert!(merged.iter().any(|t| t.root_refno == r(9).to_pdms_str()));
+        assert!(
+            !serde_json::to_value(pending_unit(1, 5, 10, 2))
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("revision"),
+            "revision is an internal settlement token, not a public API field"
+        );
     }
 
     #[test]

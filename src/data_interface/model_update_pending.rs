@@ -14,6 +14,7 @@ use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
+const QUERY_CHUNK: usize = 500;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
 /// that keeps failing stays in the table as an inspectable dead letter instead
@@ -93,8 +94,21 @@ fn record_id(item: &ModelWorkItem) -> String {
 
 /// Persist the exact model work before advancing `applied_sesno`.
 pub async fn enqueue_plan(plan: &ModelUpdatePlan) -> anyhow::Result<()> {
-    for item in &plan.work_items {
-        upsert(item).await?;
+    for chunk in plan.work_items.chunks(QUERY_CHUNK) {
+        SUL_DB
+            .query(
+                chunk
+                    .iter()
+                    .map(render_upsert)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("persist model work batch failed: {error}"))?
+            .check()
+            .map_err(|error| {
+                anyhow::anyhow!("persist model work batch statement failed: {error}")
+            })?;
     }
     Ok(())
 }
@@ -235,17 +249,6 @@ fn render_upsert(item: &ModelWorkItem) -> String {
     clauses.push("updated_at = time::now()".to_string());
 
     format!("UPSERT {id} SET {};", clauses.join(", "))
-}
-
-async fn upsert(item: &ModelWorkItem) -> anyhow::Result<()> {
-    let id = record_id(item);
-    SUL_DB
-        .query(render_upsert(item))
-        .await
-        .map_err(|error| anyhow::anyhow!("persist model work {id} failed: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("persist model work {id} statement failed: {error}"))?;
-    Ok(())
 }
 
 pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAttempt>> {
@@ -526,6 +529,39 @@ async fn clear_regen_work_revision(
     Ok(())
 }
 
+fn render_clear_regen_transactions(items: &[(u32, String, u64)]) -> Vec<String> {
+    items
+        .chunks(QUERY_CHUNK)
+        .map(|chunk| {
+            let deletes = chunk
+                .iter()
+                .map(|(dbnum, root_refno, revision)| {
+                    render_delete_revision(
+                        &record_id_of(*dbnum, ModelWorkAction::RegenRoot, root_refno),
+                        *revision,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("BEGIN TRANSACTION;\n{deletes}\nCOMMIT TRANSACTION;")
+        })
+        .collect()
+}
+
+pub(crate) async fn clear_regen_work_batch(items: &[(u32, String, u64)]) -> anyhow::Result<()> {
+    for transaction in render_clear_regen_transactions(items) {
+        SUL_DB
+            .query(transaction)
+            .await
+            .map_err(|error| anyhow::anyhow!("delete completed model work batch failed: {error}"))?
+            .check()
+            .map_err(|error| {
+                anyhow::anyhow!("delete completed model work batch statement failed: {error}")
+            })?;
+    }
+    Ok(())
+}
+
 async fn mark_regen_revision_failed(
     dbnum: u32,
     root_refno: &str,
@@ -768,8 +804,12 @@ fn render_drain_select(action_filter: &str) -> String {
 /// or nothing, so re-admitting a root that already failed would fail the
 /// whole batch again on every later drain and re-pay the per-root fallback
 /// for every healthy neighbour queued alongside it.
+pub(crate) fn root_joins_regen_batch(attempts: u32, target_refno: &str) -> bool {
+    attempts == 0 && RefU64::from_str(target_refno).is_ok()
+}
+
 fn joins_regen_batch(job: &PendingModelWork) -> bool {
-    job.attempts == 0 && RefU64::from_str(&job.target_refno).is_ok()
+    root_joins_regen_batch(job.attempts, &job.target_refno)
 }
 
 /// Drain pending work independently. Failures remain durable and are retried on
@@ -821,10 +861,16 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
                 .await;
         match batch_result {
             Ok(()) => {
-                for job in &batchable {
-                    match delete_work(job).await {
-                        Ok(()) => done += 1,
-                        Err(error) => record_failure(job, &error, &mut failures).await,
+                let settlements = batchable
+                    .iter()
+                    .map(|job| (job.dbnum, job.target_refno.clone(), job.revision))
+                    .collect::<Vec<_>>();
+                match clear_regen_work_batch(&settlements).await {
+                    Ok(()) => done += batchable.len(),
+                    Err(error) => {
+                        for job in &batchable {
+                            record_failure(job, &error, &mut failures).await;
+                        }
                     }
                 }
             }
@@ -1240,7 +1286,7 @@ mod tests {
             "single-root lock must cover queue settlement"
         );
         assert!(
-            batch.find("lock().await") < batch.find("delete_work(job).await"),
+            batch.find("lock().await") < batch.find("clear_regen_work_batch(&settlements).await"),
             "batch locks must cover queue settlement"
         );
     }
@@ -1283,6 +1329,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_settlement_is_revision_safe_and_bounded() {
+        let items = (0..501)
+            .map(|index| (8191, format!("16777216/{}", index + 1), index as u64 + 1))
+            .collect::<Vec<_>>();
+        let transactions = render_clear_regen_transactions(&items);
+
+        assert_eq!(transactions.len(), 2);
+        assert!(transactions.iter().all(|sql| {
+            sql.starts_with("BEGIN TRANSACTION;") && sql.ends_with("COMMIT TRANSACTION;")
+        }));
+        assert!(
+            transactions[0].contains(
+                "DELETE model_update_pending:8191_regen_root_16777216_1 \
+                 WHERE (revision?:0) = 1;"
+            ),
+            "{}",
+            transactions[0]
+        );
+        assert!(
+            transactions[1].contains(
+                "DELETE model_update_pending:8191_regen_root_16777216_501 \
+                 WHERE (revision?:0) = 501;"
+            ),
+            "{}",
+            transactions[1]
+        );
+    }
+
+    #[test]
     fn record_id_is_stable_per_dbnum_action_and_target() {
         let item = ModelWorkItem {
             dbnum: 8191,
@@ -1311,6 +1386,7 @@ mod tests {
                 source_end_sesno: 42,
                 attempts: 3,
                 last_error: Some("生成失败".into()),
+                revision: 0,
             },
         );
         assert!(sql.starts_with("UPSERT model_update_pending:8000_regen_root_16777216_5 SET"));
@@ -2369,5 +2445,103 @@ mod tests {
             .expect("cleanup SPCO fixture")
             .check()
             .expect("cleanup statements");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: validates a 5k delivery + 5k work finalize over configured websocket"]
+    async fn live_finalize_capacity_is_atomic_and_idempotent() {
+        const DBNUM: u32 = 4_000_000_024;
+        const COUNT: usize = 5_000;
+        const FIXTURE: &str = "codex_finalize_capacity";
+        let cleanup = format!(
+            "DELETE {TABLE} WHERE dbnum = {DBNUM}; \
+             DELETE dbnum_watermark:{DBNUM}; \
+             DELETE {ATTEMPT_TABLE}:{DBNUM}; \
+             DELETE datacenter_version WHERE capacity_fixture = '{FIXTURE}';"
+        );
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("pre-clean finalize capacity fixture")
+            .check()
+            .expect("valid pre-clean statements");
+
+        let plan = ModelUpdatePlan {
+            work_items: (0..COUNT)
+                .map(|index| ModelWorkItem {
+                    dbnum: DBNUM,
+                    db_type: "DESI".into(),
+                    source_end_sesno: 42,
+                    action: ModelWorkAction::RegenRoot,
+                    target_refno: format!("{DBNUM}/{}", index + 1),
+                    noun: "BRAN".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let delivery = (0..COUNT)
+            .map(|index| {
+                format!(
+                    "UPSERT datacenter_version:capacity_{index} SET \
+                     status = 'Modify', capacity_fixture = '{FIXTURE}';"
+                )
+            })
+            .collect::<Vec<_>>();
+        let attempt = IncrementUpdateAttempt {
+            dbnum: DBNUM,
+            db_type: "DESI".into(),
+            file_path: "capacity-fixture".into(),
+            start_sesno: 42,
+            end_sesno: 42,
+            plan: plan.clone(),
+        };
+
+        for _ in 0..2 {
+            prepare_attempt(&attempt)
+                .await
+                .expect("prepare capacity attempt");
+            finalize_attempt(DBNUM, 42, &plan, &delivery)
+                .await
+                .expect("finalize 5k delivery + 5k model work");
+        }
+
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN [
+                    count(SELECT * FROM {TABLE} WHERE dbnum = {DBNUM}),
+                    math::min(SELECT VALUE revision FROM {TABLE} WHERE dbnum = {DBNUM}),
+                    (SELECT VALUE applied_sesno FROM dbnum_watermark:{DBNUM})[0],
+                    count(SELECT * FROM {ATTEMPT_TABLE}:{DBNUM}) = 0,
+                    count(SELECT * FROM datacenter_version
+                          WHERE capacity_fixture = '{FIXTURE}')
+                ];"
+            ))
+            .await
+            .expect("query finalize capacity state")
+            .check()
+            .expect("valid capacity state query");
+        let state: Vec<serde_json::Value> =
+            response.take(0).expect("decode finalize capacity state");
+        assert_eq!(
+            state,
+            vec![
+                serde_json::json!(COUNT),
+                serde_json::json!(2),
+                serde_json::json!(42),
+                serde_json::json!(true),
+                serde_json::json!(COUNT),
+            ]
+        );
+
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("cleanup finalize capacity fixture")
+            .check()
+            .expect("valid cleanup statements");
     }
 }

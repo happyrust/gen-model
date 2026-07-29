@@ -24,8 +24,8 @@ use aios_core::{
 };
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
-use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use glam::DVec3;
 use glam::{DMat4, Vec3};
 use nom::complete::bool;
@@ -169,8 +169,7 @@ pub async fn gen_all_geos_data(
     let time = Instant::now();
     dbg!(&has_debug);
     if is_incr_update || has_manual_refnos || has_debug {
-        // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-        let (sender, receiver) = flume::unbounded();
+        let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
@@ -183,17 +182,16 @@ pub async fn gen_all_geos_data(
             }
             anyhow::Ok(())
         });
-        let target_root_refnos = gen_geos_data(
+        let generation_result = capture_generation(gen_geos_data(
             None,
             manual_refnos.clone(),
             db_option,
             incr_updates.clone(),
             sender.clone(),
-        )
-        .await?;
-        drop(sender);
-        // 先解 JoinError，再解 save_instance_data 的 anyhow::Error。
-        insert_task.await??;
+        ))
+        .await;
+        let target_root_refnos =
+            finish_shape_writer(generation_result, sender, insert_task).await?;
         if db_option.gen_mesh {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
             // ModelRefreshPolicy::generate_roots 返回 Err，从而保留 model_update_pending
@@ -222,7 +220,7 @@ pub async fn gen_all_geos_data(
         for dbno in dbnos.clone() {
             println!("开始{}的模型生成", dbno);
             let time = Instant::now();
-            let (sender, receiver) = flume::unbounded();
+            let (sender, receiver) = flume::bounded(CHUNK_SIZE);
             let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
             let insert_task = tokio::task::spawn(async move {
                 while let Ok(shape_insts) = receiver.recv_async().await {
@@ -235,11 +233,13 @@ pub async fn gen_all_geos_data(
                 }
                 anyhow::Ok(())
             });
-            let db_refnos =
-                gen_geos_data_by_dbnum(dbno, db_option_arc.clone(), sender.clone()).await?;
-            drop(sender);
-            // 先解 JoinError，再解 save_instance_data 的 anyhow::Error。
-            insert_task.await??;
+            let generation_result = capture_generation(gen_geos_data_by_dbnum(
+                dbno,
+                db_option_arc.clone(),
+                sender.clone(),
+            ))
+            .await;
+            let db_refnos = finish_shape_writer(generation_result, sender, insert_task).await?;
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
             if db_option_arc.gen_mesh {
                 let time = Instant::now();
@@ -265,6 +265,45 @@ pub async fn gen_all_geos_data(
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
 
     Ok(true)
+}
+
+async fn finish_shape_writer<T>(
+    generation_result: anyhow::Result<T>,
+    sender: flume::Sender<ShapeInstancesData>,
+    insert_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<T> {
+    drop(sender);
+    let writer_result = match insert_task.await {
+        Ok(result) => result,
+        Err(error) => Err(anyhow::anyhow!("shape writer task failed: {error}")),
+    };
+    match (generation_result, writer_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(writer_error)) => {
+            Err(error.context(format!("shape writer also failed: {writer_error:#}")))
+        }
+    }
+}
+
+async fn capture_generation<T>(
+    generation: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match std::panic::AssertUnwindSafe(generation)
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic payload");
+            Err(anyhow::anyhow!("geometry generation panicked: {message}"))
+        }
+    }
 }
 
 ///更新模型数据
@@ -428,8 +467,7 @@ pub async fn gen_geos_data_by_dbnum(
                 sjus_map_clone,
                 sender,
             )
-            .await
-            .unwrap();
+            .await?;
             println!(
                 "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
                 start_time.elapsed().as_millis()
@@ -470,8 +508,7 @@ pub async fn gen_geos_data_by_dbnum(
                 sjus_map_clone,
                 sender,
             )
-            .await
-            .unwrap();
+            .await?;
             println!(
                 "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
                 start_time.elapsed().as_millis()
@@ -499,8 +536,7 @@ pub async fn gen_geos_data_by_dbnum(
             sjus_map_clone,
             sender,
         )
-        .await
-        .unwrap();
+        .await?;
         // });
         // all_handles.push(handle);
     }
@@ -519,9 +555,7 @@ pub async fn gen_geos_data_by_dbnum(
         let sender = sender.clone();
         let target_prim_refnos_arc = target_prim_refnos.clone();
         // let hand le = tokio::spawn(async move {
-        prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender)
-            .await
-            .unwrap();
+        prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender).await?;
         // });
         // all_handles.push(handle);
     }
@@ -860,6 +894,7 @@ pub async fn gen_geos_data(
         // 不参与生成、不改变结果；默认关闭，由 AIOS_GEOM_COVERAGE_AUDIT 打开。
         coverage_audit::audit_segment(target_refnos, skip_exist).await;
 
+        wait_for_generation_workers(&mut all_handles).await?;
         if is_incr_update {
             break;
         }
@@ -877,10 +912,18 @@ pub async fn gen_geos_data(
 async fn wait_for_generation_workers(
     handles: &mut FuturesUnordered<tokio::task::JoinHandle<anyhow::Result<()>>>,
 ) -> anyhow::Result<()> {
+    let mut first_error = None;
     while let Some(result) = handles.next().await {
-        result??;
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(anyhow::anyhow!("generation worker task failed: {error}")),
+        };
+        if first_error.is_none() {
+            first_error = error;
+        }
     }
-    Ok(())
+    first_error.map_or_else(|| Ok(()), Err)
 }
 
 ///查询tubi的大小
@@ -915,6 +958,7 @@ pub async fn query_tubi_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test]
     async fn generation_worker_error_is_returned() {
@@ -938,5 +982,55 @@ mod tests {
             .expect_err("a worker panic must fail the generation request");
 
         assert!(error.to_string().contains("task"));
+    }
+
+    #[tokio::test]
+    async fn generation_worker_failure_waits_for_siblings() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_by_worker = completed.clone();
+        let mut handles = FuturesUnordered::new();
+        handles.push(tokio::spawn(async { anyhow::bail!("first worker failed") }));
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            completed_by_worker.store(true, Ordering::SeqCst);
+            anyhow::Ok(())
+        }));
+
+        wait_for_generation_workers(&mut handles)
+            .await
+            .expect_err("the first worker failure must be returned");
+
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "worker siblings must be drained before generation returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_panic_waits_for_shape_writer() {
+        let writer_completed = Arc::new(AtomicBool::new(false));
+        let writer_completed_by_task = writer_completed.clone();
+        let (sender, receiver) = flume::bounded(1);
+        let writer = tokio::spawn(async move {
+            while receiver.recv_async().await.is_ok() {}
+            writer_completed_by_task.store(true, Ordering::SeqCst);
+            anyhow::Ok(())
+        });
+
+        let generation_result = capture_generation(async {
+            panic!("generator panic");
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        })
+        .await;
+        let error = finish_shape_writer(generation_result, sender, writer)
+            .await
+            .expect_err("a generator panic must fail the request");
+
+        assert!(error.to_string().contains("generator panic"), "{error:#}");
+        assert!(
+            writer_completed.load(Ordering::SeqCst),
+            "shape writer must exit before generation returns"
+        );
     }
 }

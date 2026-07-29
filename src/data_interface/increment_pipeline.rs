@@ -560,7 +560,7 @@ impl IncrementPipeline {
                     &range_eles,
                 ),
             )
-            .await;
+            .await?;
             StageTimings::measure(
                 &mut timings.plan,
                 crate::data_interface::model_update_pending::prepare_attempt(
@@ -1926,7 +1926,8 @@ mod live_tests {
             "DESI",
             &recovery_changes,
         )
-        .await;
+        .await
+        .expect("build recovery model plan");
         crate::data_interface::model_update_pending::prepare_attempt(
             &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
                 dbnum: 8000,
@@ -2231,7 +2232,8 @@ mod live_tests {
             "DESI",
             &move_range,
         )
-        .await;
+        .await
+        .expect("build move model plan");
         let mut move_roots = move_plan
             .work_items
             .iter()
@@ -2362,7 +2364,8 @@ mod live_tests {
             "DESI",
             &reorder_range,
         )
-        .await;
+        .await
+        .expect("build reorder model plan");
         let reorder_roots = reorder_plan
             .work_items
             .iter()
@@ -2698,7 +2701,9 @@ mod live_tests {
             "sesno {sesno} must carry the VTWA tombstone: {operations:?}"
         );
 
-        let plan = build_model_update_plan(7997, sesno, "DESI", &changes).await;
+        let plan = build_model_update_plan(7997, sesno, "DESI", &changes)
+            .await
+            .expect("build delete model plan");
         let actions = plan
             .work_items
             .iter()

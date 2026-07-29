@@ -744,8 +744,11 @@ pub async fn gen_cata_geos(
                     );
 
                     sender
-                        .send(std::mem::take(&mut shape_insts_data))
-                        .expect("send cate shape_insts_data error");
+                        .send_async(std::mem::take(&mut shape_insts_data))
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("send cata shape instances failed: {error}")
+                        })?;
                 }
             }
 
@@ -771,9 +774,9 @@ pub async fn gen_cata_geos(
             }
 
             if shape_insts_data.inst_cnt() > 0 {
-                sender
-                    .send(shape_insts_data)
-                    .expect("send prim shape_insts_data error");
+                sender.send_async(shape_insts_data).await.map_err(|error| {
+                    anyhow::anyhow!("send cata shape instances failed: {error}")
+                })?;
             }
 
             #[cfg(feature = "profile")]
@@ -1169,8 +1172,9 @@ pub async fn gen_cata_geos(
     let t_send_data = Instant::now();
     if tubi_shape_insts_data.inst_cnt() > 0 {
         sender
-            .send(tubi_shape_insts_data)
-            .expect("send tubi shape_insts_data failed.");
+            .send_async(tubi_shape_insts_data)
+            .await
+            .map_err(|error| anyhow::anyhow!("send tubi shape instances failed: {error}"))?;
     }
     let send_data_time = t_send_data.elapsed().as_millis();
 

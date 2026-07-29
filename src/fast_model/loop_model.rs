@@ -209,16 +209,19 @@ pub async fn gen_loop_geos(
 
                 if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                     sender
-                        .send(std::mem::take(&mut shape_insts_data))
-                        .expect("send loop shape_insts_data error");
+                        .send_async(std::mem::take(&mut shape_insts_data))
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("send loop shape instances failed: {error}")
+                        })?;
                     // dbg!("Send loop insts data");
                 }
             }
 
             if shape_insts_data.inst_cnt() > 0 {
-                sender
-                    .send(shape_insts_data)
-                    .expect("send loop shape_insts_data error");
+                sender.send_async(shape_insts_data).await.map_err(|error| {
+                    anyhow::anyhow!("send loop shape instances failed: {error}")
+                })?;
                 // dbg!("Send last loop insts data");
             }
             Ok::<_, anyhow::Error>(())
@@ -226,7 +229,9 @@ pub async fn gen_loop_geos(
 
         handles.push(handle);
     }
-    futures::future::join_all(take(&mut handles)).await;
+    for result in futures::future::join_all(take(&mut handles)).await {
+        result??;
+    }
     println!(
         "处理loops几何体: {} 花费时间: {} ms",
         loop_owner_cnt,

@@ -85,7 +85,7 @@ impl AiosDBManager {
         )
         .await
         {
-            log::warn!("收口模型 pending 失败 root={root_refno}: {error:#}");
+            log::error!("收口模型 pending 失败 root={root_refno}: {error:#}");
         }
         outcome?;
 

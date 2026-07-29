@@ -353,16 +353,20 @@ async fn execute_frozen_batch(
 
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
-    let pending = match load_pending_model_units_for_retry(job.dbnum).await {
-        Ok(pending) => pending,
+    let (units, settlement_failed) = match load_pending_model_units_for_retry(job.dbnum).await {
+        Ok(pending) => {
+            let worklist = merge_unit_worklist(new_units, pending);
+            run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+        }
         Err(error) => {
-            warnings.push(format!("读取模型待重试列表失败（本次仅处理新单元）: {error:#}"));
-            Vec::new()
+            warnings.push(format!(
+                "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
+            ));
+            registry.set_unit_totals(&job.task_id, 0);
+            (Vec::new(), true)
         }
     };
-    let worklist = merge_unit_worklist(new_units, pending);
-    let units =
-        run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await;
+    side_effect_failed |= settlement_failed;
 
     // 异地同步发布（与旧自动路径对齐：数据批次成功才发布该文件）。
     #[cfg(feature = "mqtt")]
@@ -387,22 +391,23 @@ async fn execute_frozen_batch(
     }
 }
 
-/// 逐个生成交付单元（旧手动路径的单元循环搬到 worker，全仓只此一份）。
-async fn run_unit_worklist(
+fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
+    task.revision.is_some()
+        && model_update_pending::root_joins_regen_batch(task.attempts, &task.root_refno)
+}
+
+async fn run_single_unit(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     task_id: &str,
-    worklist: Vec<crate::data_interface::manual_update::UnitTask>,
+    task: crate::data_interface::manual_update::UnitTask,
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
-) -> Vec<ModelUnitResult> {
-    use crate::data_interface::manual_update::{
-        emit, generate_unit_model, generation_root_lock,
-    };
+    emit_started: bool,
+) -> (ModelUnitResult, bool) {
+    use crate::data_interface::manual_update::{emit, generate_unit_model, generation_root_lock};
 
-    registry.set_unit_totals(task_id, worklist.len() as u32);
-    let mut results = Vec::with_capacity(worklist.len());
-    for task in worklist {
+    if emit_started {
         emit(
             progress,
             ManualUpdateEvent::ModelUnitStarted {
@@ -411,54 +416,79 @@ async fn run_unit_worklist(
                 noun: task.noun.clone(),
             },
         );
+    }
 
-        let lock = generation_root_lock(&task.root_refno);
-        let _guard = lock.lock().await;
-        let pending_revision = match model_update_pending::current_regen_revision(
-            task.dbnum,
-            &task.root_refno,
-        )
-        .await
-        {
-            Ok(revision) => revision,
-            Err(error) => {
-                warnings.push(error.to_string());
-                None
-            }
-        };
-        let outcome = generate_unit_model(mgr, &task.root_refno).await;
-        let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-        if let Err(error) = model_update_pending::settle_regen_work(
-            task.dbnum,
-            &task.root_refno,
-            pending_revision,
-            generation_error.as_deref(),
-        )
-        .await
-        {
-            warnings.push(error.to_string());
-        }
-        drop(_guard);
-        let (status, attempts, message) = match outcome {
-            Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
-            Err(_) => (
-                UnitGenStatus::Failed,
-                task.attempts + 1,
-                generation_error,
-            ),
-        };
-
+    let Some(revision) = task.revision else {
+        let message = format!(
+            "模型任务缺少 pending revision，已跳过生成 root={}",
+            task.root_refno
+        );
+        warnings.push(message.clone());
         emit(
             progress,
             ManualUpdateEvent::ModelUnitFinished {
                 dbnum: task.dbnum,
                 root_refno: task.root_refno.clone(),
-                success: status == UnitGenStatus::Generated,
-                message: message.clone(),
+                success: false,
+                message: Some(message.clone()),
             },
         );
         registry.bump_units_done(task_id);
-        results.push(ModelUnitResult {
+        return (
+            ModelUnitResult {
+                dbnum: task.dbnum,
+                root_refno: task.root_refno,
+                noun: task.noun,
+                status: UnitGenStatus::Failed,
+                attempts: task.attempts,
+                message: Some(message),
+                old_owner: task.old_owner,
+                new_owner: task.new_owner,
+            },
+            true,
+        );
+    };
+
+    let lock = generation_root_lock(&task.root_refno);
+    let guard = lock.lock().await;
+    let outcome = generate_unit_model(mgr, &task.root_refno).await;
+    let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
+    let settlement_failed = if let Err(error) = model_update_pending::settle_regen_work(
+        task.dbnum,
+        &task.root_refno,
+        Some(revision),
+        generation_error.as_deref(),
+    )
+    .await
+    {
+        log::error!(
+            "收口模型 pending 失败 dbnum={} root={}: {error:#}",
+            task.dbnum,
+            task.root_refno
+        );
+        warnings.push(error.to_string());
+        true
+    } else {
+        false
+    };
+    drop(guard);
+
+    let (status, attempts, message) = match outcome {
+        Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
+        Err(_) => (UnitGenStatus::Failed, task.attempts + 1, generation_error),
+    };
+    emit(
+        progress,
+        ManualUpdateEvent::ModelUnitFinished {
+            dbnum: task.dbnum,
+            root_refno: task.root_refno.clone(),
+            success: status == UnitGenStatus::Generated,
+            message: message.clone(),
+        },
+    );
+    registry.bump_units_done(task_id);
+    (
+        ModelUnitResult {
             dbnum: task.dbnum,
             root_refno: task.root_refno,
             noun: task.noun,
@@ -467,9 +497,127 @@ async fn run_unit_worklist(
             message,
             old_owner: task.old_owner,
             new_owner: task.new_owner,
-        });
+        },
+        settlement_failed,
+    )
+}
+
+/// Fresh roots share one generator pass; retries remain isolated.
+async fn run_unit_worklist(
+    mgr: &Arc<AiosDBManager>,
+    registry: &'static TaskRegistry,
+    task_id: &str,
+    worklist: Vec<crate::data_interface::manual_update::UnitTask>,
+    progress: &Option<ManualUpdateProgress>,
+    warnings: &mut Vec<String>,
+) -> (Vec<ModelUnitResult>, bool) {
+    use crate::data_interface::manual_update::{emit, generation_root_lock};
+
+    registry.set_unit_totals(task_id, worklist.len() as u32);
+    let mut results = Vec::with_capacity(worklist.len());
+    let mut settlement_failed = false;
+    let (batchable, singles): (Vec<_>, Vec<_>) =
+        worklist.into_iter().partition(unit_joins_regen_batch);
+
+    if !batchable.is_empty() {
+        for task in &batchable {
+            emit(
+                progress,
+                ManualUpdateEvent::ModelUnitStarted {
+                    dbnum: task.dbnum,
+                    root_refno: task.root_refno.clone(),
+                    noun: task.noun.clone(),
+                },
+            );
+        }
+        let roots = batchable
+            .iter()
+            .map(|task| task.root_refno.clone())
+            .collect::<Vec<_>>();
+        let mut lock_roots = roots.clone();
+        lock_roots.sort_unstable();
+        lock_roots.dedup();
+        let locks = lock_roots
+            .iter()
+            .map(|root| generation_root_lock(root))
+            .collect::<Vec<_>>();
+        let mut guards = Vec::with_capacity(locks.len());
+        for lock in &locks {
+            guards.push(lock.lock().await);
+        }
+        match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(mgr, &roots)
+            .await
+        {
+            Ok(()) => {
+                let settlements = batchable
+                    .iter()
+                    .map(|task| {
+                        (
+                            task.dbnum,
+                            task.root_refno.clone(),
+                            task.revision.expect("batchable tasks have revisions"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await
+                {
+                    log::error!("批量收口模型 pending 失败 roots={}: {error:#}", roots.len());
+                    warnings.push(error.to_string());
+                    settlement_failed = true;
+                }
+                drop(guards);
+                drop(locks);
+                for task in batchable {
+                    emit(
+                        progress,
+                        ManualUpdateEvent::ModelUnitFinished {
+                            dbnum: task.dbnum,
+                            root_refno: task.root_refno.clone(),
+                            success: true,
+                            message: None,
+                        },
+                    );
+                    registry.bump_units_done(task_id);
+                    results.push(ModelUnitResult {
+                        dbnum: task.dbnum,
+                        root_refno: task.root_refno,
+                        noun: task.noun,
+                        status: UnitGenStatus::Generated,
+                        attempts: task.attempts,
+                        message: None,
+                        old_owner: task.old_owner,
+                        new_owner: task.new_owner,
+                    });
+                }
+            }
+            Err(error) => {
+                drop(guards);
+                drop(locks);
+                println!(
+                    "批量重生成 {} 个根失败，回退逐根重试以定位问题根: {error:#}",
+                    roots.len()
+                );
+                for task in batchable {
+                    let (result, failed) =
+                        run_single_unit(mgr, registry, task_id, task, progress, warnings, false)
+                            .await;
+                    settlement_failed |= failed;
+                    results.push(result);
+                }
+            }
+        }
     }
-    results
+
+    for task in singles {
+        let (result, failed) =
+            run_single_unit(mgr, registry, task_id, task, progress, warnings, true).await;
+        settlement_failed |= failed;
+        results.push(result);
+    }
+    results.sort_by(|left, right| {
+        (left.dbnum, left.root_refno.as_str()).cmp(&(right.dbnum, right.root_refno.as_str()))
+    });
+    (results, settlement_failed)
 }
 
 /// 队列跑空后的收尾轮：积压补偿 + 房间收敛（ADR-011 §8）。
@@ -656,6 +804,39 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, end_sesno: i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unit_task(
+        attempts: u32,
+        revision: Option<u64>,
+        root_refno: &str,
+    ) -> crate::data_interface::manual_update::UnitTask {
+        crate::data_interface::manual_update::UnitTask {
+            dbnum: 8191,
+            root_refno: root_refno.into(),
+            noun: "BRAN".into(),
+            source_end_sesno: 42,
+            attempts,
+            revision,
+            old_owner: None,
+            new_owner: None,
+        }
+    }
+
+    #[test]
+    fn only_fresh_parseable_revisioned_units_join_the_batch() {
+        assert!(unit_joins_regen_batch(&unit_task(0, Some(7), "16777216/5")));
+        assert!(!unit_joins_regen_batch(&unit_task(
+            1,
+            Some(7),
+            "16777216/5"
+        )));
+        assert!(!unit_joins_regen_batch(&unit_task(0, None, "16777216/5")));
+        assert!(!unit_joins_regen_batch(&unit_task(
+            0,
+            Some(7),
+            "not-a-refno"
+        )));
+    }
 
     /// 接住 panic 之后要能说出「哪儿炸了」。取不出载荷时也得给一句话——任务终态里
     /// 只写「panicked」，等于让排查的人回头去 stderr 里大海捞针。
