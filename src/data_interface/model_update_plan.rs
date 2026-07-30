@@ -194,6 +194,23 @@ async fn baseline_existing_cancelled(
 /// Net `Added` elements are skipped: a brand-new catalogue element can only
 /// become referenced through design-side edits, and those plan their own
 /// regeneration in the DESI window that records them.
+///
+/// # 当前不可达（2026-07-31 决策，spec 001 · US5）
+///
+/// **生产路径上没有任何 CATA 窗口会走到这里。** 入队要过
+/// `AiosDBManager::in_scope` = `should_process_database && UpdateScope::admits`，
+/// 而 [`crate::data_interface::update_scope::UpdateScope::admits`] 对 CATA 恒返回
+/// `false`（唯一的例外 `UpdateScope::unrestricted()` 只被按 dbnum 点名的按需初始化
+/// 用）。所以目录改动目前**不会**经这条链触发设计实例重生成。
+///
+/// 保留这段代码与它的单测是有意的：判定逻辑已经写好并钉住，缺的只是范围那道门。
+///
+/// **启用条件**：`UpdateScope::admits` 放行 CATA。届时要一并补：
+/// 新 ADR（纳入的动机与影响面）、以及一条端到端 live 测试
+/// （CATA 会话 → 入队 → `CascadeExpand` → 设计根重生成）。
+///
+/// 下面那两条 `cata_*` 单测验的是**这个规划函数**，不是端到端行为——
+/// 它们绿着不代表目录级联在跑。
 fn build_cata_cascade_plan(
     dbnum: u32,
     end_sesno: i32,
@@ -232,6 +249,8 @@ pub(crate) async fn build_model_update_plan(
     db_type: &str,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
 ) -> anyhow::Result<ModelUpdatePlan> {
+    // CATA 分支当前不可达：范围门（`UpdateScope::admits`）不放行 CATA，
+    // 所以没有 CATA 窗口能走到这个函数。详见 `build_cata_cascade_plan` 的文档。
     if db_type == "CATA" {
         return Ok(build_cata_cascade_plan(
             dbnum, end_sesno, db_type, range_eles,
@@ -819,8 +838,12 @@ mod tests {
 
     /// ADR-008 / F8：CATA 窗口只落 `CascadeExpand` 种子——几何性 Modified 与
     /// Deleted 元素各一枚，由执行器 live 反查 `ref_rev` 展开为设计根重生成。
+    ///
+    /// **验的是规划器本身，不是端到端行为**：范围门当前不放行 CATA，生产路径上
+    /// 没有 CATA 窗口能走到 `build_cata_cascade_plan`（见它的文档与
+    /// `UpdateScope::admits`）。这条绿着**不代表**目录级联在跑。
     #[tokio::test]
-    async fn cata_geometry_changes_seed_deferred_cascade_expansion() {
+    async fn the_cata_planner_seeds_deferred_cascade_expansion() {
         let deleted = aios_core::RefU64((1u64 << 32) | 7);
         let modified = aios_core::RefU64((1u64 << 32) | 8);
         let range_eles = BTreeMap::from([(
@@ -855,8 +878,10 @@ mod tests {
 
     /// CATA 净新增（含窗口内加删抵消）与纯业务元数据修改不产生任何模型工作：
     /// 新目录元件只能经设计侧编辑被引用，而那次 DESI 编辑自会规划重生成。
+    ///
+    /// 同上：这是规划器单测，CATA 窗口当前进不了执行范围。
     #[tokio::test]
-    async fn cata_added_neutral_and_cancelled_changes_seed_nothing() {
+    async fn the_cata_planner_seeds_nothing_for_added_neutral_and_cancelled_changes() {
         let added = aios_core::RefU64((1u64 << 32) | 3);
         let renamed = aios_core::RefU64((1u64 << 32) | 4);
         let cancelled = aios_core::RefU64((1u64 << 32) | 5);

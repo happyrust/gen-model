@@ -120,6 +120,13 @@ impl UpdateScope {
     ///
     /// 除此之外只认 DESI，且必须是本 MDB 声明过的。CATA 参与不了模型交付，
     /// 目录变化要靠重新生成而不是数据批次，这次一律不进范围。
+    ///
+    /// **这一句是全仓「目录改动会不会触发设计实例重生成」的唯一决定点**
+    /// （2026-07-31 决策 A，spec 001 · US5）。ADR-008 / F8 那套 CATA 反向级联规划
+    /// （`model_update_plan::build_cata_cascade_plan`）已经实现并有单测，但只要这里
+    /// 不放行 CATA，它在生产路径上就一次都跑不到——读那段代码的人很容易以为
+    /// 「改目录会触发重生成」，实际不会。要启用就改这里，并按那边文档列的三件事
+    /// 一并补齐（新 ADR + 端到端 live 测试）。
     pub fn admits(&self, db_type: &str, dbnum: u32) -> bool {
         if COLD_START_DB_TYPES.contains(&db_type) {
             return true;
@@ -165,7 +172,10 @@ mod tests {
         let scope = scope(&[7997, 8000]);
         assert!(scope.admits("DESI", 8000));
         assert!(!scope.admits("DESI", 3001), "MDB 外的设计库不进范围");
-        assert!(!scope.admits("CATA", 8000), "CATA 不进范围，即便同号在名单里");
+        assert!(
+            !scope.admits("CATA", 8000),
+            "CATA 不进范围，即便同号在名单里"
+        );
     }
 
     /// SYS meta 绕过 MDB 门：范围名单本身就是从这些库里读出来的，挡住它们
@@ -226,7 +236,10 @@ mod tests {
         aios_core::init_test_surreal().await;
         let scope = UpdateScope::resolve("ALL").await.expect("不该 bail");
         assert_eq!(scope.declared_desi().count(), 0);
-        assert!(scope.admits("SYST", 8191), "SYS meta 照常解析，把名单建起来");
+        assert!(
+            scope.admits("SYST", 8191),
+            "SYS meta 照常解析，把名单建起来"
+        );
         assert!(!scope.admits("DESI", 8000), "设计库一个都不跑");
         assert!(scope.warning().is_some(), "不许悄悄发生");
     }
