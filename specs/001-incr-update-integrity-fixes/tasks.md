@@ -269,8 +269,16 @@ description: "Task list for 001-incr-update-integrity-fixes"
       词汇表是对的，代码没跟上。两条都不用改。
       只补了一个缺失的术语「候选库文件 (Candidate Database File)」——
       US1 之后它成了一个有名字的共享判定，词汇表里却没有它。
-- [ ] T035 若跑了 live 验证，在 `docs/evidence/2026-07-31-incr-integrity-fixes.md`
-      留痕（命令、环境、结论）。**尚未跑 live**。
+- [x] T035 live 验证已跑，留痕在
+      `docs/evidence/2026-07-31-incr-integrity-fixes.md`。
+      新增 `#[ignore]` live 测试
+      `live_blocked_observation_keeps_the_verdict_evidence_intact`：
+      验 `record_blocked_observation` 的 SQL 能落库、判据字段一个不动、观察字段照写、
+      水位不动，且**第二轮仍能检出同一个 TypeChanged**。
+      环境坑记在证据文档里：`PATH` 上的 `surreal.exe` 是 3.3.0-nightly，
+      既开不了存储版本 2 的 `.surreal/ams-8009`，也和 2.1.4 的客户端 SDK 握不上手；
+      要用 `test-worklspace\surreal.exe`（2.1.4，与 SDK 同一个 git rev）。
+      本次用的是**空的内存实例**，没碰项目真实数据；其余四条修复仍未端到端跑过。
 - [x] T036 终检：`cargo check --lib` 干净、`cargo test --lib`
       283 passed / 0 failed / 57 ignored，与 T001 基线对比只多了 6 条新测试。
 

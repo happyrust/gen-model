@@ -631,4 +631,114 @@ mod tests {
             Some(FileAnomaly::Rollback { .. })
         ));
     }
+
+    /// spec 001 · US2（live）：阻断落库只写观察值，**判据字段纹丝不动**。
+    ///
+    /// 这是那个 bug 的核心：`record_scan` 按 dbnum UPSERT `db_type` / `file_path`，
+    /// 而它们正是 `check_file_against_state` 的判据。阻断时若照常写，第二轮扫描读到的
+    /// `stored_db_type` 已经等于观察值，`TypeChanged` 再也检不出来——异常把自己抹掉了。
+    /// 所以这条测试的重点不在第一次的返回值，而在**第二轮还能不能检出同一个异常**。
+    ///
+    /// 用 `999_999_002` 这个不会出现在真实工程里的 dbnum，跑完即清理。
+    /// 空库即可验证，不需要解析过的 E3D 工程。
+    #[tokio::test]
+    #[ignore = "manual live: requires a reachable SurrealDB at the configured endpoint"]
+    async fn live_blocked_observation_keeps_the_verdict_evidence_intact() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let dbnum = 999_999_002u32;
+        let cleanup = format!("delete {WATERMARK_TABLE}:{dbnum};");
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("clear stale fixture")
+            .check()
+            .expect("valid pre-cleanup");
+
+        // 建立登记身份：DESI，某个路径，水位 50。
+        DbnumState::advance_applied(dbnum, 50)
+            .await
+            .expect("establish watermark");
+        DbnumState::record_scan(&FileObservation {
+            dbnum,
+            db_type: "DESI".to_string(),
+            file_name: "zz_us2_0001".to_string(),
+            file_path: r"D:\zz_us2\ams000\zz_us2_0001".to_string(),
+            file_size: 4096,
+            file_latest_sesno: 60,
+            file_modified_at: None,
+        })
+        .await
+        .expect("record the registered identity");
+
+        // 现场文件换成了另一种类型的库 —— 这一观察应判 TypeChanged 且阻断。
+        let observed_path = r"D:\zz_us2\cata000\zz_us2_0001".to_string();
+        let anomaly = check_file_against_state(
+            Some("DESI"),
+            Some(r"D:\zz_us2\ams000\zz_us2_0001"),
+            50,
+            "CATA",
+            &observed_path,
+            70,
+        );
+        assert!(
+            anomaly.as_ref().is_some_and(FileAnomaly::blocks),
+            "前提：类型变更必须是阻断类异常，实际 {anomaly:?}"
+        );
+
+        // 阻断路径的落库。
+        DbnumState::record_blocked_observation(&FileObservation {
+            dbnum,
+            db_type: "CATA".to_string(),
+            file_name: "zz_us2_0001".to_string(),
+            file_path: observed_path.clone(),
+            file_size: 8192,
+            file_latest_sesno: 70,
+            file_modified_at: None,
+        })
+        .await
+        .expect("record blocked observation");
+
+        let after = DbnumState::read(dbnum)
+            .await
+            .expect("read state after blocked scan")
+            .expect("state exists");
+
+        // 第二轮：拿库里现存的登记身份再判一次，必须仍然是 TypeChanged。
+        let second_round = check_file_against_state(
+            Some(&after.db_type),
+            Some(&after.file_path),
+            after.applied_sesno,
+            "CATA",
+            &observed_path,
+            70,
+        );
+
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("cleanup fixture")
+            .check()
+            .expect("valid cleanup");
+
+        // 判据字段：一个都不许动。
+        assert_eq!(after.db_type, "DESI", "阻断不得改写登记的库类型");
+        assert_eq!(
+            after.file_path, r"D:\zz_us2\ams000\zz_us2_0001",
+            "阻断不得改写登记的文件路径"
+        );
+        assert_eq!(after.file_name, "zz_us2_0001", "阻断不得改写登记的文件名");
+        // 观察值：照实更新，人要从面板上看得见现场是什么样。
+        assert_eq!(after.file_size, 8192);
+        assert_eq!(after.file_latest_sesno, 70);
+        // 水位：永不因为一次扫描而移动（ADR-001）。
+        assert_eq!(after.applied_sesno, 50);
+        // 而这才是重点：异常没有把自己抹掉。
+        assert!(
+            matches!(second_round, Some(FileAnomaly::TypeChanged { .. })),
+            "第二轮必须仍能检出同一个异常，实际 {second_round:?}"
+        );
+    }
 }
