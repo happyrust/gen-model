@@ -67,29 +67,26 @@ pub struct PendingModelWork {
     pub revision: u64,
 }
 
-/// 队列行的 id。同一个 (dbnum, action, target) 只占一行，重复入队即幂等更新。
+/// 队列行的 id。同一个 `(action, target)` 只占一行，重复入队即幂等更新（ADR-015）。
 ///
-/// 房间任务是唯一的例外，它的 id **不带 dbnum**（ADR-010 §7）：一块面板天然跨库，
-/// 带上 dbnum 会让同一间房在一轮里排出多行、于是被重算多遍；更糟的是失败之后它只能
-/// 等同一个 dbnum 的新会话来复活，而真正触发它的其它库永远够不着——那正是审计里 B6
-/// 的放大版。dbnum 与 `source_end_sesno` 因此降为字段，只记最后一次触发来源。
-/// 只用寻址三要素算行 id。
+/// `dbnum` **不参与寻址**。项目内 `target_refno` 的 Ref0 唯一归属一个 dbnum，所以把它
+/// 拼进 id 不增加任何区分度，却要求每个入队方都算出同一个 dbnum——而它们并没有：
+/// 反向级联派生根（`derived_regen_item`）与按需生成（`on_demand_model`）拿的是
+/// `RefU64::get_0()`，那是 Ref0 不是 dbnum（`cata_closure` 专门有 `dbnum_of_ref0` 做这层
+/// 反查）。于是 `24381/100677` 会同时存在 `7997_regen_root_…`（DESI 窗口排的）与
+/// `24381_regen_root_…`（级联排的）两行：同一个根整整重生成两遍，而按需生成那条路径
+/// 读写的始终是另一行，真正的 pending 永远收不掉。
 ///
-/// 单独开一个是因为有几个调用方手里只有 `(dbnum, action, target)`——它们过去为了
-/// 拿一个 id 就凭空拼一个字段全空的 `ModelWorkItem`。那种写法眼下能对，全靠 id 恰好
-/// 不读 `db_type` 与 `source_end_sesno`；哪天往 id 里加一个字段，它们会**静默**删错行、
-/// 改错行，而不是编译不过。
-pub(crate) fn record_id_of(dbnum: u32, action: ModelWorkAction, target_refno: &str) -> String {
+/// dbnum 与 `source_end_sesno` 因此都只是字段，记最后一次触发来源。房间任务本来就
+/// 已经这样寻址（ADR-010 §7），现在所有动作统一。
+pub(crate) fn record_id_of(action: ModelWorkAction, target_refno: &str) -> String {
     let action_name = action.as_str();
     let target = target_refno.replace('/', "_");
-    if action.is_room_recalc() {
-        return format!("{TABLE}:{action_name}_{target}");
-    }
-    format!("{TABLE}:{dbnum}_{action_name}_{target}")
+    format!("{TABLE}:{action_name}_{target}")
 }
 
 fn record_id(item: &ModelWorkItem) -> String {
-    record_id_of(item.dbnum, item.action, &item.target_refno)
+    record_id_of(item.action, &item.target_refno)
 }
 
 /// Persist the exact model work before advancing `applied_sesno`.
@@ -153,11 +150,13 @@ pub async fn enqueue_legacy_changed_refnos(
 /// 一个包围盒变更对应的房间重算任务（ADR-010 §2/§4）。
 ///
 /// `dbnum` / `source_end_sesno` 对房间任务只是来源记录，不参与寻址也不参与复活判定：
-/// 行 id 不带 dbnum，复活是无条件的。dbnum 跟着 refno 走（与反向级联派生根同一口径），
-/// 会话号取 0——两个触发点都在几何刷新那一层，本来就不知道自己属于哪次会话。
+/// 行 id 不带 dbnum，复活是无条件的。两者都取 0——这一层在几何刷新里，既不知道自己
+/// 属于哪次会话，也没有 refno 所属库的反查结果。曾经填 `refno().get_0()`，那是 Ref0
+/// 不是 dbnum（见 `record_id_of`），而 Ref0 有可能撞上另一个库真实的 dbnum，把这行
+/// 误挂到别的库名下；宁可留空也不填一个看着像真的假值。
 fn room_recalc_item(change: &AabbChange) -> ModelWorkItem {
     ModelWorkItem {
-        dbnum: change.refno.refno().get_0(),
+        dbnum: 0,
         db_type: "DESI".to_string(),
         source_end_sesno: 0,
         action: if change.noun == "PANE" {
@@ -199,6 +198,23 @@ pub async fn enqueue_room_recalc(
     .await
 }
 
+/// 这次入队要不要**无条件**把死信复活（清零 `attempts` / `last_error`）。
+///
+/// 两类任务的会话号不能拿来比大小，因此不能用「来了更新的会话」当复活理由：
+///
+/// * **房间重算**——行 id 不带 dbnum，同一块面板会被不同库的会话轮流触发，
+///   跨库比 sesno 毫无意义（一个库的 500 会永久压住另一个库的 80）。而它的入队
+///   条件本身就是「AABB 真的变了」，每一次入队都是一个全新的重算理由。
+/// * **不认领会话号的任务**（`source_end_sesno == 0`）——反向级联派生根
+///   （[`derived_regen_item`]）就是这一类：跨库会话号不可比，所以它如实留空。
+///   而 `0 > 0` 恒假，按会话号比的话它失败到 [`MAX_ATTEMPTS`] 之后就再也不会被
+///   [`render_drain_select`] 取到，**即便后续每一次目录改动都在重新把它推进队列**
+///   ——每次 upsert 只是把 `revision` 加一，任务永久躺平。房间任务过去为这个道理
+///   单独开了口子，派生根有同样的性质却没赶上。
+fn revives_unconditionally(item: &ModelWorkItem) -> bool {
+    item.action.is_room_recalc() || item.source_end_sesno == 0
+}
+
 fn render_upsert(item: &ModelWorkItem) -> String {
     let id = record_id(item);
     let db_type = escape_surql_str(&item.db_type);
@@ -210,26 +226,23 @@ fn render_upsert(item: &ModelWorkItem) -> String {
     // 死信复活的判据：本次触发是否比这一行已知的来源更新。
     //
     // 常规任务按会话号比——同库内 sesno 单调，「来了更新的会话」就是重试的正当理由。
-    // 房间任务不行：它的行不带 dbnum，同一块面板会被不同库的会话轮流触发，跨库比 sesno
-    // 毫无意义（一个库的 500 会永久压住另一个库的 80）。而房间任务的入队条件本身就是
-    // 「AABB 真的变了」——每一次入队都是一个全新的重算理由，所以无条件复活。
-    let (dbnum_clause, revival_clauses) = if item.action.is_room_recalc() {
-        (
-            format!("dbnum = math::max([dbnum?:0, {dbnum}])"),
-            vec!["attempts = 0".to_string(), "last_error = NONE".to_string()],
-        )
+    // 不能这么比的那两类见 [`revives_unconditionally`]。
+    let revival_clauses = if revives_unconditionally(item) {
+        vec!["attempts = 0".to_string(), "last_error = NONE".to_string()]
     } else {
-        (
-            format!("dbnum = {dbnum}"),
-            vec![
-                format!(
-                    "attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END"
-                ),
-                format!(
-                    "last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END"
-                ),
-            ],
-        )
+        vec![
+            format!("attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END"),
+            format!(
+                "last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END"
+            ),
+        ]
+    };
+    // dbnum 字段的合并策略与复活无关，别把两件事绑在一个判断上：房间任务的行不带
+    // dbnum、会被不同库轮流触发，所以只升不降；其余照写本次来源。
+    let dbnum_clause = if item.action.is_room_recalc() {
+        format!("dbnum = math::max([dbnum?:0, {dbnum}])")
+    } else {
+        format!("dbnum = {dbnum}")
     };
 
     let mut clauses = vec![
@@ -429,15 +442,29 @@ fn fail_deletes_for_test(count: usize) {
     FAIL_DELETES.store(count, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn render_delete_revision(id: &str, revision: u64) -> String {
-    format!("DELETE {id} WHERE (revision?:0) = {revision};")
+/// 收口语句一律按 `(action, target_refno)` 谓词寻址，而不是按重新算出来的 record id。
+///
+/// 算 id 的写法要求「入队时算的 id」与「收口时算的 id」永远一致。它们曾经不一致过
+/// （见 `record_id_of`：dbnum 位置上有人传 Ref0），后果是 `DELETE` 静默命中零行——
+/// 任务清不掉、每一轮都重跑一次完整生成，而日志里一切正常。谓词寻址让收口只依赖
+/// 行里实际存着的字段，顺带把历史遗留的 `{dbnum}_` 前缀旧行一并收敛掉。
+fn settle_predicate(action: ModelWorkAction, target_refno: &str, revision: u64) -> String {
+    format!(
+        "action = '{}' AND target_refno = '{}' AND (revision?:0) = {revision}",
+        action.as_str(),
+        escape_surql_str(target_refno)
+    )
+}
+
+fn render_delete_revision(action: ModelWorkAction, target_refno: &str, revision: u64) -> String {
+    format!(
+        "DELETE {TABLE} WHERE {};",
+        settle_predicate(action, target_refno, revision)
+    )
 }
 
 fn render_delete_work(item: &PendingModelWork) -> String {
-    render_delete_revision(
-        &record_id_of(item.dbnum, item.action, &item.target_refno),
-        item.revision,
-    )
+    render_delete_revision(item.action, &item.target_refno, item.revision)
 }
 
 async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
@@ -453,93 +480,96 @@ async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
         anyhow::bail!("injected queue cleanup failure");
     }
 
-    let id = record_id_of(item.dbnum, item.action, &item.target_refno);
+    let target = &item.target_refno;
     SUL_DB
         .query(render_delete_work(item))
         .await
-        .map_err(|error| anyhow::anyhow!("delete completed model work {id} failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("delete completed model work {target} failed: {error}"))?
         .check()
         .map_err(|error| {
-            anyhow::anyhow!("delete completed model work {id} statement failed: {error}")
+            anyhow::anyhow!("delete completed model work {target} statement failed: {error}")
         })?;
     Ok(())
 }
 
-fn render_mark_failed_revision(id: &str, revision: u64, error: &str) -> String {
+fn render_mark_failed_revision(
+    action: ModelWorkAction,
+    target_refno: &str,
+    revision: u64,
+    error: &str,
+) -> String {
     let error = escape_surql_str(error);
     format!(
-        "UPDATE {id} SET status = 'failed', attempts = (attempts?:0) + 1, \
+        "UPDATE {TABLE} SET status = 'failed', attempts = (attempts?:0) + 1, \
          last_error = '{error}', updated_at = time::now() \
-         WHERE (revision?:0) = {revision};"
+         WHERE {};",
+        settle_predicate(action, target_refno, revision)
     )
 }
 
 fn render_mark_failed(item: &PendingModelWork, error: &str) -> String {
-    render_mark_failed_revision(
-        &record_id_of(item.dbnum, item.action, &item.target_refno),
-        item.revision,
-        error,
-    )
+    render_mark_failed_revision(item.action, &item.target_refno, item.revision, error)
 }
 
 async fn mark_failed(item: &PendingModelWork, error: &str) -> anyhow::Result<()> {
-    let id = record_id_of(item.dbnum, item.action, &item.target_refno);
+    let target = &item.target_refno;
     SUL_DB
         .query(render_mark_failed(item, error))
         .await
-        .map_err(|query_error| anyhow::anyhow!("mark model work {id} failed: {query_error}"))?
+        .map_err(|query_error| anyhow::anyhow!("mark model work {target} failed: {query_error}"))?
         .check()
-        .map_err(|error| anyhow::anyhow!("mark model work {id} statement failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("mark model work {target} statement failed: {error}"))?;
     Ok(())
 }
 
-pub async fn current_regen_revision(
-    dbnum: u32,
-    root_refno: &str,
-) -> anyhow::Result<Option<u64>> {
-    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
+/// 取该生成根当前的收口令牌。存量表里同一个根可能还留着一条旧 id 的行，取较大的
+/// revision：收口只清掉这一版，另一版留给 drain 正常消化，绝不会误删更新的工作。
+pub async fn current_regen_revision(root_refno: &str) -> anyhow::Result<Option<u64>> {
+    let action = ModelWorkAction::RegenRoot.as_str();
+    let target = escape_surql_str(root_refno);
     let mut response = SUL_DB
-        .query(format!("SELECT VALUE revision?:0 FROM {id};"))
+        .query(format!(
+            "SELECT VALUE revision?:0 FROM {TABLE} \
+             WHERE action = '{action}' AND target_refno = '{target}';"
+        ))
         .await
-        .map_err(|error| anyhow::anyhow!("load model work revision {id} failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("load model work revision {root_refno} failed: {error}"))?
         .check()
         .map_err(|error| {
-            anyhow::anyhow!("load model work revision {id} statement failed: {error}")
+            anyhow::anyhow!("load model work revision {root_refno} statement failed: {error}")
         })?;
-    let revisions: Vec<u64> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("decode model work revision {id} failed: {error}"))?;
-    Ok(revisions.into_iter().next())
+    let revisions: Vec<u64> = response.take(0).map_err(|error| {
+        anyhow::anyhow!("decode model work revision {root_refno} failed: {error}")
+    })?;
+    Ok(revisions.into_iter().max())
 }
 
-async fn clear_regen_work_revision(
-    dbnum: u32,
-    root_refno: &str,
-    revision: u64,
-) -> anyhow::Result<()> {
-    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
+async fn clear_regen_work_revision(root_refno: &str, revision: u64) -> anyhow::Result<()> {
     SUL_DB
-        .query(render_delete_revision(&id, revision))
+        .query(render_delete_revision(
+            ModelWorkAction::RegenRoot,
+            root_refno,
+            revision,
+        ))
         .await
-        .map_err(|error| anyhow::anyhow!("delete completed model work {id} failed: {error}"))?
+        .map_err(|error| {
+            anyhow::anyhow!("delete completed model work {root_refno} failed: {error}")
+        })?
         .check()
         .map_err(|error| {
-            anyhow::anyhow!("delete completed model work {id} statement failed: {error}")
+            anyhow::anyhow!("delete completed model work {root_refno} statement failed: {error}")
         })?;
     Ok(())
 }
 
-fn render_clear_regen_transactions(items: &[(u32, String, u64)]) -> Vec<String> {
+fn render_clear_regen_transactions(items: &[(String, u64)]) -> Vec<String> {
     items
         .chunks(QUERY_CHUNK)
         .map(|chunk| {
             let deletes = chunk
                 .iter()
-                .map(|(dbnum, root_refno, revision)| {
-                    render_delete_revision(
-                        &record_id_of(*dbnum, ModelWorkAction::RegenRoot, root_refno),
-                        *revision,
-                    )
+                .map(|(root_refno, revision)| {
+                    render_delete_revision(ModelWorkAction::RegenRoot, root_refno, *revision)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -548,7 +578,7 @@ fn render_clear_regen_transactions(items: &[(u32, String, u64)]) -> Vec<String> 
         .collect()
 }
 
-pub(crate) async fn clear_regen_work_batch(items: &[(u32, String, u64)]) -> anyhow::Result<()> {
+pub(crate) async fn clear_regen_work_batch(items: &[(String, u64)]) -> anyhow::Result<()> {
     for transaction in render_clear_regen_transactions(items) {
         SUL_DB
             .query(transaction)
@@ -563,23 +593,27 @@ pub(crate) async fn clear_regen_work_batch(items: &[(u32, String, u64)]) -> anyh
 }
 
 async fn mark_regen_revision_failed(
-    dbnum: u32,
     root_refno: &str,
     revision: u64,
     error: &str,
 ) -> anyhow::Result<()> {
-    let id = record_id_of(dbnum, ModelWorkAction::RegenRoot, root_refno);
     SUL_DB
-        .query(render_mark_failed_revision(&id, revision, error))
+        .query(render_mark_failed_revision(
+            ModelWorkAction::RegenRoot,
+            root_refno,
+            revision,
+            error,
+        ))
         .await
-        .map_err(|query_error| anyhow::anyhow!("mark model work {id} failed: {query_error}"))?
+        .map_err(|query_error| {
+            anyhow::anyhow!("mark model work {root_refno} failed: {query_error}")
+        })?
         .check()
-        .map_err(|error| anyhow::anyhow!("mark model work {id} statement failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("mark model work {root_refno} statement failed: {error}"))?;
     Ok(())
 }
 
 pub async fn settle_regen_work(
-    dbnum: u32,
     root_refno: &str,
     expected_revision: Option<u64>,
     generation_error: Option<&str>,
@@ -588,8 +622,8 @@ pub async fn settle_regen_work(
         return Ok(());
     };
     match generation_error {
-        Some(error) => mark_regen_revision_failed(dbnum, root_refno, revision, error).await,
-        None => clear_regen_work_revision(dbnum, root_refno, revision).await,
+        Some(error) => mark_regen_revision_failed(root_refno, revision, error).await,
+        None => clear_regen_work_revision(root_refno, revision).await,
     }
 }
 
@@ -600,7 +634,7 @@ pub async fn settle_regen_work(
 fn render_legacy_adoption(
     unit: &crate::data_interface::manual_update::PendingModelUnit,
 ) -> String {
-    let id = record_id_of(unit.dbnum, ModelWorkAction::RegenRoot, &unit.root_refno);
+    let id = record_id_of(ModelWorkAction::RegenRoot, &unit.root_refno);
     let legacy_error = unit
         .last_error
         .as_deref()
@@ -656,12 +690,21 @@ pub(crate) async fn adopt_legacy_regen_units(
 
 /// Regeneration work for one root a reverse cascade discovered (pure).
 ///
-/// The derived root is booked against ITS OWN database, not the seed's. Filing
-/// a design root under the catalogue `dbnum` that triggered it meant a dead
-/// letter could only ever be revived by a new CATALOGUE session, while the
-/// design sessions that actually need it regenerated could never reach it.
-/// `expand_live_reverse_cascade` already drops every non-design referrer, so
-/// what arrives here is a design root.
+/// The derived root is NOT booked against the seed's catalogue `dbnum`: filing a
+/// design root there meant a dead letter could only ever be revived by a new
+/// CATALOGUE session, while the design sessions that actually need it
+/// regenerated could never reach it. `expand_live_reverse_cascade` drops every
+/// referrer whose **real** `pe.dbnum` belongs to a non-design database — it used
+/// to compare `RefU64::get_0()` (a Ref0, not a dbnum) against that set, which
+/// both let catalogue intermediates through and silently dropped design
+/// referrers whose Ref0 happened to collide. So what arrives here is a design
+/// root, and a referrer whose dbnum cannot be resolved is kept rather than lost.
+///
+/// 但这里也**不能**填 `root.refno().get_0()`——那是 Ref0，不是 dbnum（见
+/// `record_id_of`）。自从行 id 不再带 dbnum，这个字段只剩下路由与追踪用途，填 0
+/// 表示「来源库未解析」：这一层没有 Ref0→dbnum 的反查结果，而一个看着像真 dbnum
+/// 的 Ref0 会把这行误挂到别的库名下、被那个库的批次工作单捞走。留 0 之后它由空闲轮
+/// 的 `drain_data_phases` 统一消化，下一次真正的 DESI 窗口再 upsert 时会补上真值。
 ///
 /// `source_end_sesno` is 0 rather than the seed's: session numbers are
 /// per-database, so a catalogue sesno of 500 sitting next to design sessions in
@@ -671,7 +714,7 @@ fn derived_regen_item(
     root: crate::data_interface::generation_root::GenerationRoot,
 ) -> ModelWorkItem {
     ModelWorkItem {
-        dbnum: root.root.refno().get_0(),
+        dbnum: 0,
         db_type: "DESI".to_string(),
         source_end_sesno: 0,
         action: ModelWorkAction::RegenRoot,
@@ -863,7 +906,7 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
             Ok(()) => {
                 let settlements = batchable
                     .iter()
-                    .map(|job| (job.dbnum, job.target_refno.clone(), job.revision))
+                    .map(|job| (job.target_refno.clone(), job.revision))
                     .collect::<Vec<_>>();
                 match clear_regen_work_batch(&settlements).await {
                     Ok(()) => done += batchable.len(),
@@ -1318,20 +1361,41 @@ mod tests {
             render_upsert(&item).contains("revision = (revision?:0) + 1"),
             "every trigger must create a new settlement revision"
         );
+        let expected = "WHERE action = 'regen_root' AND target_refno = '16777216/5' \
+                        AND (revision?:0) = 7";
         assert!(
-            render_delete_work(&work).contains("WHERE (revision?:0) = 7"),
-            "old success must not delete a newer trigger"
+            render_delete_work(&work).contains(expected),
+            "old success must not delete a newer trigger: {}",
+            render_delete_work(&work)
         );
         assert!(
-            render_mark_failed(&work, "boom").contains("WHERE (revision?:0) = 7"),
-            "old failure must not overwrite a newer trigger"
+            render_mark_failed(&work, "boom").contains(expected),
+            "old failure must not overwrite a newer trigger: {}",
+            render_mark_failed(&work, "boom")
+        );
+    }
+
+    /// 收口不能靠「再算一遍 record id」。存量表里同一个根还留着旧格式的行
+    /// （`{dbnum}_regen_root_…`），按 id 寻址会命中零行——任务清不掉、每一轮重跑一次
+    /// 完整生成，而日志里一切正常。谓词寻址只依赖行里实际存着的字段。
+    #[test]
+    fn settlement_addresses_the_row_by_its_fields_not_by_a_recomputed_id() {
+        let sql = render_delete_revision(ModelWorkAction::RegenRoot, "24381/100677", 3);
+        assert_eq!(
+            sql,
+            "DELETE model_update_pending WHERE action = 'regen_root' \
+             AND target_refno = '24381/100677' AND (revision?:0) = 3;"
+        );
+        assert!(
+            !sql.contains("model_update_pending:"),
+            "settlement must not address a record id: {sql}"
         );
     }
 
     #[test]
     fn batch_settlement_is_revision_safe_and_bounded() {
         let items = (0..501)
-            .map(|index| (8191, format!("16777216/{}", index + 1), index as u64 + 1))
+            .map(|index| (format!("16777216/{}", index + 1), index as u64 + 1))
             .collect::<Vec<_>>();
         let transactions = render_clear_regen_transactions(&items);
 
@@ -1341,36 +1405,43 @@ mod tests {
         }));
         assert!(
             transactions[0].contains(
-                "DELETE model_update_pending:8191_regen_root_16777216_1 \
-                 WHERE (revision?:0) = 1;"
+                "DELETE model_update_pending WHERE action = 'regen_root' \
+                 AND target_refno = '16777216/1' AND (revision?:0) = 1;"
             ),
             "{}",
             transactions[0]
         );
         assert!(
             transactions[1].contains(
-                "DELETE model_update_pending:8191_regen_root_16777216_501 \
-                 WHERE (revision?:0) = 501;"
+                "DELETE model_update_pending WHERE action = 'regen_root' \
+                 AND target_refno = '16777216/501' AND (revision?:0) = 501;"
             ),
             "{}",
             transactions[1]
         );
     }
 
+    /// ADR-015：任务身份是 `(action, target_refno)`，`dbnum` 不参与寻址。
+    ///
+    /// 这条断言的反面正是它要防的事故：`24381/100677` 在 DESI 窗口下 dbnum 是 7997，
+    /// 而反向级联与按需生成传的是 Ref0（24381）。id 里只要带 dbnum，同一个根就会分裂
+    /// 成两行——重生成两遍，且按需生成那侧永远收不掉真正的 pending。
     #[test]
-    fn record_id_is_stable_per_dbnum_action_and_target() {
-        let item = ModelWorkItem {
-            dbnum: 8191,
+    fn record_id_ignores_dbnum_so_one_root_can_never_split_into_two_rows() {
+        let item = |dbnum| ModelWorkItem {
+            dbnum,
             db_type: "DESI".into(),
             source_end_sesno: 42,
             action: ModelWorkAction::RegenRoot,
-            target_refno: "16777216/5".into(),
-            noun: "BRAN".into(),
+            target_refno: "24381/100677".into(),
+            noun: "EQUI".into(),
         };
         assert_eq!(
-            record_id(&item),
-            "model_update_pending:8191_regen_root_16777216_5"
+            record_id(&item(7997)),
+            "model_update_pending:regen_root_24381_100677"
         );
+        assert_eq!(record_id(&item(7997)), record_id(&item(24381)));
+        assert_eq!(record_id(&item(7997)), record_id(&item(0)));
     }
 
     /// 收编旧队列行只增不改：本表可能已经有同一个根（上一个进程留下的、比旧表那条新），
@@ -1389,7 +1460,7 @@ mod tests {
                 revision: 0,
             },
         );
-        assert!(sql.starts_with("UPSERT model_update_pending:8000_regen_root_16777216_5 SET"));
+        assert!(sql.starts_with("UPSERT model_update_pending:regen_root_16777216_5 SET"));
         assert!(sql.contains("attempts = math::max([attempts?:0, 3])"), "{sql}");
         assert!(sql.contains("last_error = last_error ?? '生成失败'"), "{sql}");
         assert!(sql.contains("status = status ?? 'failed'"), "{sql}");
@@ -1440,12 +1511,15 @@ mod tests {
         );
     }
 
-    /// B6：反向级联派生出来的根记在**它自己的**设计库账上。继承种子的 dbnum 时，
-    /// 一个目录库触发的设计根会被记在目录库下，于是它的死信只能等下一次目录库会话
-    /// 来复活——而真正需要它重生成的设计库会话永远够不着它。会话号同理：跨库比大小
-    /// 没有意义，所以派生任务不认领任何会话号。
+    /// B6：反向级联派生出来的根**不记在种子所在的目录库**账上——那样它的死信只能等
+    /// 下一次目录库会话来复活，而真正需要它重生成的设计库会话永远够不着它。会话号同理：
+    /// 跨库比大小没有意义，所以派生任务不认领任何会话号。
+    ///
+    /// 也不能拿 `refno().get_0()` 冒充设计库号：`24381/100677` 的 dbnum 是 7997，24381
+    /// 只是 Ref0。填一个看着像真 dbnum 的 Ref0，最坏情况是撞上另一个库、被那个库的批次
+    /// 工作单捞走。这一层没有 Ref0→dbnum 的反查结果，就如实留空。
     #[test]
-    fn a_cascade_derived_root_is_booked_against_its_own_design_db() {
+    fn a_cascade_derived_root_claims_neither_a_database_nor_a_session() {
         use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
 
         let item = derived_regen_item(GenerationRoot {
@@ -1455,7 +1529,7 @@ mod tests {
             kind: GenerationRootKind::DeliveryUnit,
         });
 
-        assert_eq!(item.dbnum, 24381, "派生根应记在设计库，而不是种子所在的目录库");
+        assert_eq!(item.dbnum, 0, "Ref0 不是 dbnum，来源库未解析就留空");
         assert_eq!(item.db_type, "DESI");
         assert_eq!(item.action, ModelWorkAction::RegenRoot);
         assert_eq!(item.target_refno, "24381/100677");
@@ -1492,14 +1566,14 @@ mod tests {
             record_id(&room_item(ModelWorkAction::RoomRecalcElement, 24381, 42))
         );
 
-        // 其余任务照旧按库分行。
+        // ADR-015 之后其余任务同样不按库分行。
         let regen = ModelWorkItem {
             action: ModelWorkAction::RegenRoot,
             ..room_item(ModelWorkAction::RegenRoot, 24381, 42)
         };
         assert_eq!(
             record_id(&regen),
-            "model_update_pending:24381_regen_root_24381_34303"
+            "model_update_pending:regen_root_24381_34303"
         );
     }
 
@@ -1515,8 +1589,9 @@ mod tests {
         let panel = room_recalc_item(&change(34303, "PANE"));
         assert_eq!(panel.action, ModelWorkAction::RoomRecalcPanel);
         assert_eq!(panel.target_refno, "24381/34303");
-        // dbnum 跟着 refno 走，而不是跟着触发它的那个库；会话号不认领。
-        assert_eq!(panel.dbnum, 24381);
+        // 来源库与会话号都不认领：这一层拿不到 Ref0→dbnum 的反查结果，填 Ref0 会把这行
+        // 误挂到某个恰好同号的库名下。
+        assert_eq!(panel.dbnum, 0);
         assert_eq!(panel.source_end_sesno, 0);
 
         assert_eq!(
@@ -1590,6 +1665,59 @@ mod tests {
         assert!(
             sql.contains("source_end_sesno = math::max([source_end_sesno?:0, 42])"),
             "{sql}"
+        );
+    }
+
+    /// 不认领会话号的任务必须无条件复活，否则它一旦判死就永远醒不过来。
+    ///
+    /// 派生根的 `source_end_sesno` 是 0（跨库会话号不可比，如实留空），而按会话号
+    /// 比的复活判据是 `0 > 0` —— 恒假。于是它失败到 MAX_ATTEMPTS 之后，后续每一次
+    /// 目录改动重新把它推进队列时都只是 `revision + 1`，`attempts` 纹丝不动，
+    /// `drain` 的 `attempts < MAX_ATTEMPTS` 永远把它挡在外面：构件停在旧几何，
+    /// 队列里躺着一行谁也不会去执行的任务。
+    #[test]
+    fn a_task_that_claims_no_session_revives_on_every_enqueue() {
+        use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
+
+        let derived = derived_regen_item(GenerationRoot {
+            root: RefnoEnum::from(RefU64((24381u64 << 32) | 100677)),
+            noun: "EQUI".into(),
+            name: "/PUMP-01".into(),
+            kind: GenerationRootKind::DeliveryUnit,
+        });
+        assert_eq!(derived.source_end_sesno, 0, "前提：派生根不认领会话号");
+
+        let sql = render_upsert(&derived);
+        assert!(sql.contains("attempts = 0"), "{sql}");
+        assert!(sql.contains("last_error = NONE"), "{sql}");
+        assert!(
+            !sql.contains("attempts = IF"),
+            "不认领会话号的任务不能按会话号决定是否复活（0 > 0 恒假）: {sql}"
+        );
+    }
+
+    /// 反过来：认领了会话号的常规任务仍按会话号比，旧会话不构成复活理由。
+    #[test]
+    fn a_task_that_claims_a_session_still_revives_only_on_a_newer_one() {
+        let sql = render_upsert(&ModelWorkItem {
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "24381/100677".into(),
+            noun: "EQUI".into(),
+        });
+        assert!(
+            sql.contains("attempts = IF 42 > (source_end_sesno?:0)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("last_error = IF 42 > (source_end_sesno?:0)"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("attempts = 0,"),
+            "常规任务不该无条件复活: {sql}"
         );
     }
 
@@ -1697,7 +1825,7 @@ mod tests {
         let delivery_status = "update datacenter_version:16777216_5 set status = 'Modify';";
         let sql = render_finalize_transaction(8191, 42, &plan, &[delivery_status.to_string()]);
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
-        assert!(sql.contains("UPSERT model_update_pending:8191_regen_root_16777216_5"));
+        assert!(sql.contains("UPSERT model_update_pending:regen_root_16777216_5"));
         assert!(sql.contains("applied_sesno = math::max([applied_sesno?:0, 42])"));
         assert!(sql.contains("DELETE increment_update_attempt:8191"));
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
@@ -1736,7 +1864,7 @@ mod tests {
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
         let work_at = sql
-            .find("UPSERT model_update_pending:7997_regen_root_24381_2")
+            .find("UPSERT model_update_pending:regen_root_24381_2")
             .unwrap_or_else(|| panic!("baseline generation work missing: {sql}"));
         let watermark_at = sql
             .find("applied_sesno = math::max([applied_sesno?:0, 76])")
