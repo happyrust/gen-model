@@ -8,8 +8,8 @@
 | 项 | 值 |
 |---|---|
 | 客户端 SDK | `surrealdb 2.1.4`（fork：`git+https://gitee.com/happydpc/surrealdb.git#45013fc9`） |
-| 服务端 | `D:\work\plant-code\old\test-worklspace\surreal.exe` — `2.1.4+20250317.45013fc9`，与 SDK 同一个 rev |
-| 启动方式 | `surreal start --user root --pass root --bind 127.0.0.1:8009 memory`（**空的内存实例，用完即停**） |
+| 服务端 | `bin/surreal.exe` — `2.1.4+20250317.45013fc9`，与 SDK 同一个 rev（**仓库里本来就有**） |
+| 启动方式 | `./scripts/Start-Surreal8009.ps1 -Memory`（**空的内存实例，用完即停**） |
 | 连接 | `DbOption.toml`：`v_ip=localhost`、`v_port=8009`、`surreal_ns=1516`、`project_name=AvevaMarineSample` |
 
 ### 为什么用空的内存实例，而不是项目真实数据
@@ -26,7 +26,12 @@ throwaway dbnum 上跑就够了。
    **不要用 3.x 去开它**——那需要不可逆的存储迁移。
 2. 即便绕开数据目录，3.x 服务端与 2.1.4 客户端也**握不上手**：
    `WebSocket protocol error: SubProtocol error: Server sent no subprotocol`。
-   跑 live 测试必须用 `test-worklspace\surreal.exe`（2.1.4），不是 `PATH` 上那个。
+
+对的二进制一直就在仓库里（`bin/surreal.exe`，2.1.4，与 `Cargo.lock` 锁的 rev
+同一个），只是 `PATH` 会先命中 3.x。这次之后加了
+`scripts/Start-Surreal8009.ps1`：它按 `bin/surreal.exe` 找、启动前核对大版本与
+git rev、遇到 3.x 直接拒绝并说清楚为什么。**以后一律走脚本，不要手敲
+`surreal start`。**
 
 ## 静态门
 
