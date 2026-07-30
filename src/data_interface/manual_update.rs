@@ -52,7 +52,7 @@ use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
 use crate::data_interface::helper::pe_thing_to_refno;
-use crate::data_interface::increment_manager::{INGEST_MAX_DEPTH, is_pdms_db_file_name};
+use crate::data_interface::increment_manager::{INGEST_MAX_DEPTH, is_candidate_db_file};
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
@@ -1682,6 +1682,67 @@ async fn load_non_design_dbnums() -> anyhow::Result<HashSet<u32>> {
     Ok(rows.into_iter().filter_map(|row| row.dbnum).collect())
 }
 
+/// 这个引用者算不算「设计侧」的引用者（纯函数）。
+///
+/// `dbnum` 为 `None` 表示反查不可得 —— **保守保留**。多规划一次重生成是可控成本；
+/// 漏掉一个引用者是静默陈旧：共享元件改了、引用它的实例不重生成，而没有任何信号
+/// （ADR-003 存在的全部理由）。
+///
+/// 这个判断过去写成 `non_design_dbnums.contains(&referrer.refno().get_0())`，
+/// 拿 Ref0 直接当 dbnum 比。两者不是一回事（见
+/// `model_update_pending::record_id_of`，以及 `cata_closure::dbnum_of_ref0`
+/// 这层专门的反查），于是两个方向都会错：Ref0 撞不上任何非设计 dbnum 时目录
+/// 中间体混进来成为永远失败的垃圾根；Ref0 恰好等于某个非 DESI 库的 dbnum 时，
+/// 一个真实的设计引用者被静默丢掉。
+pub(crate) fn referrer_is_design(dbnum: Option<u32>, non_design_dbnums: &HashSet<u32>) -> bool {
+    dbnum.is_none_or(|dbnum| !non_design_dbnums.contains(&dbnum))
+}
+
+/// 批量取引用者所属的真实库号（`pe.dbnum`）。
+///
+/// 查不到记录、或记录上没有这个字段的引用者不出现在返回值里，由
+/// [`referrer_is_design`] 按「未知 → 保守保留」处理。
+async fn load_referrer_dbnums(
+    referrers: &HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, u32>> {
+    const QUERY_CHUNK: usize = 500;
+
+    #[derive(Deserialize)]
+    struct DbnumRow {
+        id: Thing,
+        #[serde(default)]
+        dbnum: Option<u32>,
+    }
+
+    let keys = referrers
+        .iter()
+        .filter(|refno| refno.is_valid())
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>();
+    let mut by_refno = HashMap::new();
+
+    for chunk in keys.chunks(QUERY_CHUNK) {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, dbnum FROM [{}] WHERE record::exists(id);",
+                chunk.join(",")
+            ))
+            .await
+            .map_err(|error| anyhow::anyhow!("读取引用者所属库号失败: {error}"))?
+            .check()
+            .map_err(|error| anyhow::anyhow!("读取引用者所属库号语句失败: {error}"))?;
+        for row in response
+            .take::<Vec<DbnumRow>>(0)
+            .map_err(|error| anyhow::anyhow!("解码引用者所属库号失败: {error}"))?
+        {
+            if let Some(dbnum) = row.dbnum {
+                by_refno.insert(pe_thing_to_refno(row.id)?, dbnum);
+            }
+        }
+    }
+    Ok(by_refno)
+}
+
 /// Re-expand a deferred reverse-cascade seed against the current graph. The
 /// walk is deterministic, deduplicated, and cycle-safe; each discovered
 /// referrer is resolved through the same generation-root authority as normal
@@ -1709,10 +1770,16 @@ pub(crate) async fn expand_live_reverse_cascade(
     .await?;
     let referrers = reversal.values().flatten().copied().collect::<HashSet<_>>();
     let graph = load_base_graph(referrers.clone()).await?;
+    let referrer_dbnums = load_referrer_dbnums(&referrers).await?;
+    let mut unresolved: Vec<String> = Vec::new();
     let mut roots = BTreeMap::new();
 
     for referrer in referrers {
-        if non_design_dbnums.contains(&referrer.refno().get_0()) {
+        let dbnum = referrer_dbnums.get(&referrer).copied();
+        if dbnum.is_none() {
+            unresolved.push(referrer.to_pdms_str());
+        }
+        if !referrer_is_design(dbnum, &non_design_dbnums) {
             continue;
         }
         if let Some(root) = resolve_element_generation_root(referrer, &unit_types, |candidate| {
@@ -1724,6 +1791,18 @@ pub(crate) async fn expand_live_reverse_cascade(
         }) {
             roots.insert(root.root.to_pdms_str(), root);
         }
+    }
+    if !unresolved.is_empty() {
+        // 保守分支已经生效（这些引用者被保留了），所以这不是失败，是「多算了几次」
+        // 的降级通知。但它必须说出来：`pe.dbnum` 大面积缺失意味着有一批库是用旧路径
+        // 落的，那会让目录级联长期多跑。
+        let message = format!(
+            "反向级联：{} 个引用者查不到所属库号（pe.dbnum 缺失），已按设计侧保守保留；样例: {}",
+            unresolved.len(),
+            skip_samples(&unresolved)
+        );
+        log::warn!("{message}");
+        println!("{message}");
     }
     Ok(roots.into_values().collect())
 }
@@ -2958,7 +3037,8 @@ impl AiosDBManager {
                 }
             };
             let path = dir_entry.path();
-            if path.is_dir() || self.should_exclude_file(path) {
+            // 黑名单 + AVEVA 库命名白名单合成的同一个谓词，三条自动路径共用它。
+            if path.is_dir() || !is_candidate_db_file(path) {
                 continue;
             }
 
@@ -2966,10 +3046,6 @@ impl AiosDBManager {
                 Some(name) => name.to_string(),
                 None => continue,
             };
-            // 只有名字合 AVEVA 库文件命名的才算库文件，与增量应用同一条规则。
-            if !is_pdms_db_file_name(&file_name) {
-                continue;
-            }
 
             let metadata = path.metadata().ok();
             if metadata.as_ref().is_some_and(|meta| meta.len() < 60) {
@@ -3748,6 +3824,46 @@ mod tests {
         assert_eq!(
             seq(&[IncomingKind::Add, IncomingKind::Delete, IncomingKind::Add]),
             NetOp::Added
+        );
+    }
+
+    /// 「引用者算不算设计侧」的三种输入各有一个确定答案，未知那一档必须保守保留。
+    #[test]
+    fn an_unknown_referrer_database_is_kept_not_dropped() {
+        let non_design: HashSet<u32> = HashSet::from([5052, 24381]);
+
+        assert!(
+            !referrer_is_design(Some(5052), &non_design),
+            "确属目录库的引用者不该成为生成根"
+        );
+        assert!(
+            referrer_is_design(Some(7997), &non_design),
+            "设计库的引用者必须保留"
+        );
+        assert!(
+            referrer_is_design(None, &non_design),
+            "库号未知时保守保留：多算一次是可控成本，漏掉一个引用者是静默陈旧"
+        );
+    }
+
+    /// 这条钉的正是拿 `RefU64::get_0()` 冒充 dbnum 时会挂的那一格。
+    ///
+    /// `24381/100677` 的 Ref0 是 24381，而它真正属于设计库 7997。项目里只要存在
+    /// 一个 dbnum 恰好等于 24381 的目录库，旧写法就会把这个设计引用者丢掉——
+    /// 共享元件改了它不重生成，日志里一个字都没有。
+    #[test]
+    fn a_design_referrer_is_kept_even_when_its_ref0_collides_with_a_catalogue_dbnum() {
+        let referrer = RefnoEnum::from("24381/100677");
+        let ref0 = referrer.refno().get_0();
+        let non_design: HashSet<u32> = HashSet::from([ref0]);
+
+        assert!(
+            non_design.contains(&ref0),
+            "前提：Ref0 与某个非设计库的 dbnum 撞上了"
+        );
+        assert!(
+            referrer_is_design(Some(7997), &non_design),
+            "判断必须用真实 dbnum(7997)，不是 Ref0({ref0})"
         );
     }
 

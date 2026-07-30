@@ -240,88 +240,181 @@ mod tests {
         fs::remove_dir_all(&fixture).expect("remove duplicate directory");
     }
 
+    /// 黑名单那一道门。直接调被生产路径用的那个函数——这里过去是一份手抄的副本，
+    /// 抄件永远绿着，改坏真函数也发现不了。
     #[test]
     fn test_should_exclude_file() {
-        // 创建一个简单的测试实例，只需要测试 should_exclude_file 方法
-        struct TestManager;
-
-        impl TestManager {
-            fn should_exclude_file(&self, file_path: &std::path::Path) -> bool {
-                // 复制 should_exclude_file 的逻辑用于测试
-                if let Some(extension) = file_path.extension() {
-                    if let Some(ext_str) = extension.to_str() {
-                        let ext_lower = ext_str.to_lowercase();
-
-                        let excluded_extensions = [
-                            "com", "exe", "dll", "sys", "tmp", "temp", "log", "bak", "backup",
-                            "old", "cache", "lock", "pid", "swp", "swo", "~",
-                        ];
-
-                        if excluded_extensions.contains(&ext_lower.as_str()) {
-                            return true;
-                        }
-                    }
-                }
-
-                if let Some(file_name) = file_path.file_name() {
-                    if let Some(name_str) = file_name.to_str() {
-                        let name_lower = name_str.to_lowercase();
-
-                        let excluded_patterns = ["thumbs.db", "desktop.ini", ".ds_store"];
-
-                        for pattern in &excluded_patterns {
-                            if name_lower == *pattern {
-                                return true;
-                            }
-                        }
-
-                        if name_str.starts_with("~$") {
-                            return true;
-                        }
-
-                        if name_str.starts_with('.') && name_str.len() > 1 {
-                            return true;
-                        }
-                    }
-                }
-
-                false
-            }
-        }
-
-        let manager = TestManager;
-
         // 测试应该被排除的文件扩展名
-        assert!(manager.should_exclude_file(Path::new("test.com")));
-        assert!(manager.should_exclude_file(Path::new("program.exe")));
-        assert!(manager.should_exclude_file(Path::new("library.dll")));
-        assert!(manager.should_exclude_file(Path::new("system.sys")));
-        assert!(manager.should_exclude_file(Path::new("temp.tmp")));
-        assert!(manager.should_exclude_file(Path::new("backup.bak")));
-        assert!(manager.should_exclude_file(Path::new("debug.log")));
-        assert!(manager.should_exclude_file(Path::new("cache.cache")));
+        assert!(should_exclude_file(Path::new("test.com")));
+        assert!(should_exclude_file(Path::new("program.exe")));
+        assert!(should_exclude_file(Path::new("library.dll")));
+        assert!(should_exclude_file(Path::new("system.sys")));
+        assert!(should_exclude_file(Path::new("temp.tmp")));
+        assert!(should_exclude_file(Path::new("backup.bak")));
+        assert!(should_exclude_file(Path::new("debug.log")));
+        assert!(should_exclude_file(Path::new("cache.cache")));
 
         // 测试应该被排除的系统文件
-        assert!(manager.should_exclude_file(Path::new("thumbs.db")));
-        assert!(manager.should_exclude_file(Path::new("desktop.ini")));
-        assert!(manager.should_exclude_file(Path::new(".ds_store")));
-        assert!(manager.should_exclude_file(Path::new("~$document.docx")));
+        assert!(should_exclude_file(Path::new("thumbs.db")));
+        assert!(should_exclude_file(Path::new("desktop.ini")));
+        assert!(should_exclude_file(Path::new(".ds_store")));
+        assert!(should_exclude_file(Path::new("~$document.docx")));
 
         // 测试隐藏文件
-        assert!(manager.should_exclude_file(Path::new(".hidden")));
-        assert!(manager.should_exclude_file(Path::new(".gitignore")));
+        assert!(should_exclude_file(Path::new(".hidden")));
+        assert!(should_exclude_file(Path::new(".gitignore")));
 
         // 测试不应该被排除的文件
-        assert!(!manager.should_exclude_file(Path::new("data.db")));
-        assert!(!manager.should_exclude_file(Path::new("config.txt")));
-        assert!(!manager.should_exclude_file(Path::new("ams7334_0001")));
-        assert!(!manager.should_exclude_file(Path::new("zdj7015_0001")));
-        assert!(!manager.should_exclude_file(Path::new("document.pdf")));
+        assert!(!should_exclude_file(Path::new("data.db")));
+        assert!(!should_exclude_file(Path::new("config.txt")));
+        assert!(!should_exclude_file(Path::new("ams7334_0001")));
+        assert!(!should_exclude_file(Path::new("zdj7015_0001")));
+        assert!(!should_exclude_file(Path::new("document.pdf")));
 
         // 测试大小写不敏感
-        assert!(manager.should_exclude_file(Path::new("TEST.COM")));
-        assert!(manager.should_exclude_file(Path::new("Program.EXE")));
-        assert!(manager.should_exclude_file(Path::new("THUMBS.DB")));
+        assert!(should_exclude_file(Path::new("TEST.COM")));
+        assert!(should_exclude_file(Path::new("Program.EXE")));
+        assert!(should_exclude_file(Path::new("THUMBS.DB")));
+
+        // 黑名单**挡不住**人手副本与带日期后缀的备份——它们没有扩展名、或者
+        // 扩展名压根不在清单里。这就是白名单必须存在、且三条自动路径都得过它的
+        // 全部理由（见 `is_candidate_db_file`）。
+        assert!(!should_exclude_file(Path::new("ams1112_0001 copy")));
+        assert!(!should_exclude_file(Path::new(
+            "ams7997_0001.codex-before-d03-delete-20260727"
+        )));
+    }
+
+    /// 候选库文件 = 黑名单 ∩ 白名单。这是三条自动路径与手动扫描共用的那道门，
+    /// 也是「一个人手副本冻住整个库」这条事故链的唯一出口。
+    ///
+    /// 反例里那几个副本形态全部来自 `D:/AVEVA/Projects/E3D3.1` 下真实躺着的文件：
+    /// 它们没有扩展名、头部与正本一字不差，黑名单一个都挡不住，所以这条测试
+    /// 必须由白名单来兜。
+    #[test]
+    fn only_real_database_files_are_candidates() {
+        for name in [
+            "ams1112_0001",
+            "acp250705_0001",
+            "TES1000_0001",
+            "ams3001",
+            "zdj7209",
+            // sys / com / mis 三个项目库。注意 `amscom` 与黑名单里的 `com`
+            // 扩展名同名却毫不相干——它没有扩展名，误伤它等于丢掉 SYST 8191
+            // 之外的整套项目库。
+            "amssys",
+            "amscom",
+            "amsmis",
+            "TESsys",
+        ] {
+            assert!(
+                is_candidate_db_file(Path::new(name)),
+                "{name} 应当算候选库文件"
+            );
+        }
+
+        for name in [
+            // 人手复制的副本——黑名单挡不住，只有白名单能拦。
+            "ams1112_0001 copy",
+            "ams1112_0001 copy 3",
+            "ams1112_0001_old",
+            "TES1001_0001 - 副本",
+            "ams7997_0001.codex-before-d03-delete-20260727",
+            "amscom.codex-before-d03-relaunch-20260727",
+            // 黑名单本来就该挡住的。
+            "debug.log",
+            "thumbs.db",
+            ".gitignore",
+            "ams000.7z",
+            // 压根不是库文件。
+            "DBOutput.txt",
+            "_0001",
+            "ab12_0001",
+        ] {
+            assert!(
+                !is_candidate_db_file(Path::new(name)),
+                "{name} 不该算候选库文件"
+            );
+        }
+    }
+
+    /// 三条自动路径必须都过同一道候选门，且都在读文件头之前过。
+    ///
+    /// 漏掉任何一处的代价不是「多解析几个杂项文件」：`duplicate_dbnums_across_watch_dirs`
+    /// 漏掉，一个 `ams1112_0001 copy` 就让 dbnum 1112 拿到两个候选、被判同号重复而
+    /// **整库停更**；而手动预览（它过了白名单）看到的是唯一候选、报告一切正常。
+    ///
+    /// 这三道门嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接钉源码。
+    /// marker 用 `concat!` 拼接，避免本测试自己的字符串字面量先于真函数被命中。
+    #[test]
+    fn every_auto_path_gates_on_the_shared_candidate_predicate() {
+        let src = include_str!("increment_manager.rs");
+        for (name, marker) in [
+            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            ("async_watch", concat!("pub async fn ", "async_watch(")),
+            (
+                "duplicate_dbnums_across_watch_dirs",
+                concat!("fn ", "duplicate_dbnums_across_watch_dirs("),
+            ),
+        ] {
+            let body = src
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{name} 未找到"))
+                .1;
+            let gate_at = body
+                .find("is_candidate_db_file(")
+                .unwrap_or_else(|| panic!("{name}: 缺少候选库文件门控"));
+            let header_at = body
+                .find("try_parse_db_basic_info(")
+                .unwrap_or_else(|| panic!("{name}: 缺少 try_parse_db_basic_info 调用"));
+            assert!(
+                gate_at < header_at,
+                "{name}: 候选门控必须先于读文件头，否则人手复制的副本会被当成同一个 \
+                 dbnum 的第二个候选，把整个库判成「同号重复」而阻断"
+            );
+        }
+    }
+
+    /// 阻断裁决只能有一个权威：[`FileAnomaly::blocks`]。
+    ///
+    /// 这里过去是 `match` 只列 `Rollback` / `PathMigrated`，其余走 `_ => true` 放行，
+    /// 于是 `TypeChanged` 在自动路径上被静默放过，而手动预览把它标成阻断。
+    /// 顺带钉住「先裁决、后落库」：`record_scan` 会按 dbnum 覆盖 `db_type`/`file_path`，
+    /// 那正是判据本身，覆盖掉之后同一个异常下一轮就检不出来了（同 B3）。
+    #[test]
+    fn the_auto_path_blocks_by_the_shared_anomaly_verdict() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file("))
+            .expect("scan_and_check_file 未找到")
+            .1;
+        // 用「下一个函数定义」而不是缩进花括号来收边：这个文件是 CRLF 的，
+        // 按 "\n    }\n" 找永远找不到。
+        let body = body
+            .split_once(concat!("pub async fn ", "init_watcher("))
+            .expect("scan_and_check_file 之后应当是 init_watcher")
+            .0;
+
+        assert!(
+            body.contains("FileAnomaly::blocks"),
+            "阻断裁决必须走 FileAnomaly::blocks，不能自己再列一份异常清单"
+        );
+        assert!(
+            !body.contains("_ => true"),
+            "不许有放行式兜底：新增一种异常时必须显式决定它阻不阻断"
+        );
+
+        let verdict_at = body
+            .find("FileAnomaly::blocks")
+            .expect("已在上面断言过存在");
+        let record_at = body
+            .find("record_scan(")
+            .expect("scan_and_check_file 仍应落一次扫描观察");
+        assert!(
+            verdict_at < record_at,
+            "必须先裁决再落库：record_scan 按 dbnum 覆盖 db_type/file_path，\
+             而它们正是 check_file_against_state 的判据"
+        );
     }
 }
 
@@ -352,7 +445,7 @@ pub struct IncrementInfo {
 ///
 /// 大小写不敏感：TEST 项目整套用的是大写 `TES…`，按小写认会把它 85 个库全吞掉。
 ///
-/// 这是**白名单**，与 [`AiosDBManager::should_exclude_file`] 那份扩展名黑名单
+/// 这是**白名单**，与 [`should_exclude_file`] 那份扩展名黑名单
 /// 相反。黑名单只挡得住它列举过的东西，挡不住 `ams1112_0001 copy`、
 /// `ams1112_0001 copy 3`、`ams1112_0001_old` 这类人手复制的副本——它们没有扩展名、
 /// 头部与正本一字不差，于是 dbnum 1112 一口气拿到五个候选文件，整个库被判成
@@ -382,6 +475,111 @@ pub fn is_pdms_db_file_name(name: &str) -> bool {
         return false;
     }
     seq.is_none_or(|seq| seq.len() == 4 && seq.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// 这个文件该不该被排除在监控之外（扩展名 / 系统文件 / 隐藏文件黑名单）。
+///
+/// 只挡它列举过的东西——挡不住 `ams1112_0001 copy` 这类没有扩展名的人手副本，
+/// 那是 [`is_pdms_db_file_name`] 白名单的职责。两道门合起来才是
+/// [`is_candidate_db_file`]，调用方一律用后者，不要单独用这一道。
+fn should_exclude_file(file_path: &std::path::Path) -> bool {
+    // 获取文件扩展名
+    if let Some(extension) = file_path.extension() {
+        if let Some(ext_str) = extension.to_str() {
+            let ext_lower = ext_str.to_lowercase();
+
+            // 排除的文件扩展名列表
+            let excluded_extensions = [
+                "com",    // COM可执行文件
+                "exe",    // Windows可执行文件
+                "dll",    // 动态链接库
+                "sys",    // 系统文件
+                "tmp",    // 临时文件
+                "temp",   // 临时文件
+                "log",    // 日志文件
+                "bak",    // 备份文件
+                "backup", // 备份文件
+                "old",    // 旧文件
+                "cache",  // 缓存文件
+                "lock",   // 锁文件
+                "pid",    // 进程ID文件
+                "swp",    // Vim交换文件
+                "swo",    // Vim交换文件
+                "~",      // 临时备份文件
+            ];
+
+            if excluded_extensions.contains(&ext_lower.as_str()) {
+                log::debug!("排除文件（扩展名）: {:?}", file_path);
+                return true;
+            }
+        }
+    }
+
+    // 获取文件名
+    if let Some(file_name) = file_path.file_name() {
+        if let Some(name_str) = file_name.to_str() {
+            let name_lower = name_str.to_lowercase();
+
+            // 排除的文件名模式
+            let excluded_patterns = [
+                "thumbs.db",   // Windows缩略图缓存
+                "desktop.ini", // Windows桌面配置
+                ".ds_store",   // macOS文件夹配置
+                "~$",          // Office临时文件前缀
+            ];
+
+            // 检查是否匹配排除模式
+            for pattern in &excluded_patterns {
+                if pattern.starts_with("~$") && name_lower.starts_with("~$") {
+                    log::debug!("排除文件（临时文件）: {:?}", file_path);
+                    return true;
+                } else if name_lower == *pattern {
+                    log::debug!("排除文件（系统文件）: {:?}", file_path);
+                    return true;
+                }
+            }
+
+            // 排除以点开头的隐藏文件（Unix风格）
+            if name_str.starts_with('.') && name_str.len() > 1 {
+                log::debug!("排除文件（隐藏文件）: {:?}", file_path);
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// 这个路径是不是一个**候选库文件**：两道门都过才算。
+///
+/// 1. [`should_exclude_file`]——扩展名 / 系统文件黑名单；
+/// 2. [`is_pdms_db_file_name`]——AVEVA 库命名白名单。
+///
+/// 三条自动路径（启动重扫 `sweep_watch_dirs`、文件事件 `async_watch`、重复 dbnum
+/// 复查 `duplicate_dbnums_across_watch_dirs`）与手动候选扫描
+/// (`manual_update::scan_project_candidates`) 必须共用这一个谓词。
+///
+/// 自动侧曾经只过黑名单。少的那道白名单不是「多解析几个杂项文件」的效率问题，
+/// 而是**整个库停更**：`ams1112_0001 copy` 这类人手复制的副本没有扩展名、
+/// 头部与正本一字不差，黑名单挡不住，于是 dbnum 1112 拿到两个候选、被 F6 判成
+/// 「同号重复」而阻断，此后一条批次都不入队。现场只有一行 println，而手动预览
+/// （它过了白名单）看到的是唯一候选、报告「无异常」——面板上永远查不出
+/// 水位为什么不动。
+///
+/// 不在这里做 `is_file()`：那要多一次 stat，而三个调用点各自都已排除目录。
+pub(crate) fn is_candidate_db_file(path: &std::path::Path) -> bool {
+    if should_exclude_file(path) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        log::debug!("跳过文件名无法解析为 UTF-8 的条目: {}", path.display());
+        return false;
+    };
+    if !is_pdms_db_file_name(name) {
+        log::debug!("跳过不合 AVEVA 库命名的文件（副本 / 备份 / 杂项）: {name}");
+        return false;
+    }
+    true
 }
 
 fn should_process_database_with(db_option: &DbOption, db_type: &str, db_num: u32) -> bool {
@@ -515,91 +713,6 @@ impl AiosDBManager {
     ) -> anyhow::Result<()> {
         self.update_mysql_pdms_elements(range_eles).await
     }
-    /// 检查文件是否应该被排除在监控之外
-    ///
-    /// 根据文件扩展名和文件名模式检查文件是否应该被排除在监控范围之外。
-    ///
-    /// # 参数
-    ///
-    /// * `file_path` - 文件路径
-    ///
-    /// # 返回值
-    ///
-    /// * `bool` - 如果文件应该被排除返回true，否则返回false
-    ///
-    /// # 排除规则
-    ///
-    /// 1. 检查文件扩展名是否在排除列表中
-    /// 2. 检查文件名是否匹配排除模式
-    /// 3. 检查是否为系统文件或临时文件
-    pub(crate) fn should_exclude_file(&self, file_path: &std::path::Path) -> bool {
-        // 获取文件扩展名
-        if let Some(extension) = file_path.extension() {
-            if let Some(ext_str) = extension.to_str() {
-                let ext_lower = ext_str.to_lowercase();
-
-                // 排除的文件扩展名列表
-                let excluded_extensions = [
-                    "com",    // COM可执行文件
-                    "exe",    // Windows可执行文件
-                    "dll",    // 动态链接库
-                    "sys",    // 系统文件
-                    "tmp",    // 临时文件
-                    "temp",   // 临时文件
-                    "log",    // 日志文件
-                    "bak",    // 备份文件
-                    "backup", // 备份文件
-                    "old",    // 旧文件
-                    "cache",  // 缓存文件
-                    "lock",   // 锁文件
-                    "pid",    // 进程ID文件
-                    "swp",    // Vim交换文件
-                    "swo",    // Vim交换文件
-                    "~",      // 临时备份文件
-                ];
-
-                if excluded_extensions.contains(&ext_lower.as_str()) {
-                    println!("排除文件（扩展名）: {:?}", file_path);
-                    return true;
-                }
-            }
-        }
-
-        // 获取文件名
-        if let Some(file_name) = file_path.file_name() {
-            if let Some(name_str) = file_name.to_str() {
-                let name_lower = name_str.to_lowercase();
-
-                // 排除的文件名模式
-                let excluded_patterns = [
-                    "thumbs.db",   // Windows缩略图缓存
-                    "desktop.ini", // Windows桌面配置
-                    ".ds_store",   // macOS文件夹配置
-                    "~$",          // Office临时文件前缀
-                ];
-
-                // 检查是否匹配排除模式
-                for pattern in &excluded_patterns {
-                    if pattern.starts_with("~$") && name_lower.starts_with("~$") {
-                        println!("排除文件（临时文件）: {:?}", file_path);
-                        return true;
-                    } else if name_lower == *pattern {
-                        println!("排除文件（系统文件）: {:?}", file_path);
-                        return true;
-                    }
-                }
-
-                // 排除以点开头的隐藏文件（Unix风格）
-                if name_str.starts_with('.') && name_str.len() > 1 {
-                    println!("排除文件（隐藏文件）: {:?}", file_path);
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
     /// 这个项目里「能被摄入」的库目录，即监控目录中落在 `project_dir` 下的那些。
     ///
     /// 手动与自动两条触发路径喂的是同一个队列，因此必须共用同一份目录集合与同一个
@@ -619,7 +732,7 @@ impl AiosDBManager {
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_file())
-                .filter(|entry| !self.should_exclude_file(entry.path()))
+                .filter(|entry| is_candidate_db_file(entry.path()))
                 .filter_map(|entry| {
                     let info = try_parse_db_basic_info(entry.path())?;
                     self.should_process_database(&info.db_type, info.db_no)
@@ -652,6 +765,10 @@ impl AiosDBManager {
     ///
     /// init_watcher / async_watch 共用此门控；SesnoRangeResolver 的 `skip_cata`
     /// 两侧均传 `false`，避免双路径对 CATA 分叉。
+    ///
+    /// 注意这只是**第一道**门。`CHECK_DB_TYPES` 里有 CATA，但入队还要过
+    /// `in_scope` 的第二道（`UpdateScope::admits`），而它对 CATA 恒返回 false
+    /// ——所以 CATA 库实际上进不了数据批次队列（2026-07-31 决策 A，spec 001 · US5）。
     pub(crate) fn should_process_database(&self, db_type: &str, db_num: u32) -> bool {
         should_process_database_with(&self.db_option, db_type, db_num)
     }
@@ -664,8 +781,16 @@ impl AiosDBManager {
     ///    绝不推进 applied_sesno**（ADR-001）。自动模式过去从不 record_scan，导致
     ///    dbnum_watermark 文件身份字段常空、无法检测回退/迁移/重复。
     ///
-    /// 返回 `false` 表示该文件因回退（Rollback）被阻断、调用方应跳过（水位不回退）。
-    /// 路径迁移由 record_scan 写入新路径自动完成，仅记录日志。
+    /// 返回 `false` 表示该文件被阻断、调用方应跳过（水位不回退）。阻不阻断只由
+    /// [`FileAnomaly::blocks`] 说了算，与手动预览 / `dbnum_statuses` 同一个权威
+    /// ——这里过去只列举了 `Rollback` 与 `PathMigrated`，其余走 `_ => true` 放行，
+    /// 于是 `TypeChanged`（同号文件被换成另一类型的库）在自动路径上照常应用，
+    /// 而手动预览把它标成阻断。
+    ///
+    /// 阻断时**不写文件身份字段**：`db_type` / `file_path` 正是判据本身，
+    /// `record_scan` 按 dbnum UPSERT 会把它们覆盖成观察值，下一轮
+    /// `check_file_against_state` 就再也检不出同一个异常——异常会把自己抹掉。
+    /// 这与 B3（重复 dbnum 阻断必须先于 record_scan）是同一条道理。
     pub(crate) async fn scan_and_check_file(
         &self,
         path: &std::path::Path,
@@ -699,6 +824,8 @@ impl AiosDBManager {
             file_latest_sesno,
         );
 
+        let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let obs = FileObservation {
             dbnum: db_num,
@@ -709,28 +836,44 @@ impl AiosDBManager {
             file_latest_sesno,
             file_modified_at: None,
         };
-        if let Err(e) = DbnumState::record_scan(&obs).await {
+        let recorded = if blocked {
+            DbnumState::record_blocked_observation(&obs).await
+        } else {
+            DbnumState::record_scan(&obs).await
+        };
+        if let Err(e) = recorded {
             println!("F6 记录扫描观察失败 dbnum={db_num}: {e}");
         }
 
-        match anomaly {
+        // 逐个变体点名，不留 `_ =>` 兜底：将来新增一种异常时这里编译不过，
+        // 作者必须显式决定它阻不阻断、怎么说。
+        match &anomaly {
+            None => {}
             Some(FileAnomaly::Rollback {
                 file_latest_sesno: f,
                 applied_sesno: a,
-            }) => {
-                println!(
-                    "F6 文件回退/替换，阻断 dbnum={db_num}（file_latest={f} < applied={a}），水位不回退"
-                );
-                false
+            }) => println!(
+                "F6 文件回退/替换，阻断 dbnum={db_num}（file_latest={f} < applied={a}），水位不回退"
+            ),
+            Some(FileAnomaly::TypeChanged {
+                stored_db_type,
+                observed_db_type,
+            }) => println!(
+                "F6 库类型变更，阻断 dbnum={db_num}（登记 {stored_db_type} → 现场 {observed_db_type}）；\
+                 登记身份保持不变，否则下一轮就检不出同一个异常"
+            ),
+            Some(FileAnomaly::Duplicate { paths }) => {
+                println!("F6 同 dbnum 多文件，阻断 dbnum={db_num}: {paths:?}")
             }
-            Some(FileAnomaly::PathMigrated { old_path, new_path }) => {
-                println!(
-                    "F6 文件路径迁移 dbnum={db_num}: {old_path} -> {new_path}（已更新登记路径）"
-                );
-                true
+            Some(FileAnomaly::Missing { path }) => {
+                println!("F6 登记文件缺失，阻断 dbnum={db_num}: {path}")
             }
-            _ => true,
+            Some(FileAnomaly::PathMigrated { old_path, new_path }) => println!(
+                "F6 文件路径迁移 dbnum={db_num}: {old_path} -> {new_path}（已更新登记路径）"
+            ),
         }
+
+        !blocked
     }
 
     // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：
@@ -810,22 +953,24 @@ impl AiosDBManager {
                 let dir_entry = entry.map_err(|e| anyhow::anyhow!("获取目录条目失败: {}", e))?;
                 let path = dir_entry.path();
 
-                // 获取文件名(不含扩展名)
-                let file_name = path
-                    .file_stem()
-                    .ok_or_else(|| anyhow::anyhow!("无法从路径获取文件名: {}", path.display()))?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("文件名转换为字符串失败: {}", path.display()))?;
-
                 // 跳过目录
                 if path.is_dir() {
                     continue;
                 }
 
-                // 检查文件是否应该被排除
-                if self.should_exclude_file(path) {
+                // 黑名单 + AVEVA 库命名白名单，与 async_watch、重复 dbnum 复查、
+                // 手动候选扫描共用同一个谓词（见 `is_candidate_db_file`）。
+                if !is_candidate_db_file(path) {
                     continue;
                 }
+
+                // 取文件名（不含扩展名）。取不到就跳过这一个条目——过去这里是 `?`，
+                // 一个非 UTF-8 的文件名能把整轮重扫连同 `init_watcher` 一起打掉，
+                // 而 `async_watch` 遇到同样的情况只是 continue。两条自动路径同口径。
+                let Some(file_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    println!("[{origin}] 跳过无法解析文件名的条目: {}", path.display());
+                    continue;
+                };
 
                 // 解析数据库基本信息
                 let Some(DbBasicInfo {
@@ -1108,11 +1253,12 @@ impl AiosDBManager {
                     // 记录文件变化事件
                     println!("检测到文件变化: {:?}", &event);
 
-                    // 预过滤：检查事件中的文件路径，排除不需要监控的文件
+                    // 预过滤：只留候选库文件（黑名单 + AVEVA 库命名白名单，
+                    // 与启动重扫、重复 dbnum 复查、手动扫描共用 `is_candidate_db_file`）。
                     let filtered_paths: Vec<_> = event
                         .paths
                         .iter()
-                        .filter(|path| !self.should_exclude_file(path))
+                        .filter(|path| is_candidate_db_file(path))
                         .cloned()
                         .collect();
 
@@ -1146,8 +1292,10 @@ impl AiosDBManager {
                         for (path, new_header) in &new_headers {
                             println!("正在处理路径: {:?}", path);
 
-                            // 检查文件是否应该被排除
-                            if self.should_exclude_file(path) {
+                            // 复核一遍候选判定：`scan_db_headers` 的返回集合来自上面的
+                            // filtered_paths，但这道门便宜、且它是本函数体内出现在
+                            // try_parse_db_basic_info 之前的那一道，别让它退化掉。
+                            if !is_candidate_db_file(path) {
                                 println!("文件被排除规则过滤: {:?}", path);
                                 continue;
                             }

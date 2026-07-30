@@ -11,8 +11,20 @@
 _Avoid_: 局部更新、局部刷新
 
 **生成根 (Generation Root)**：
-一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。一个变化元素归一到恰好一个生成根；同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
+一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 Ref0 库归属映射得到，`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
 _Avoid_: 重生成根、regen root、目标根
+
+**Ref0 库归属 (Ref0 Database Affiliation)**：
+项目内每个 Ref0 唯一归属一个 `dbnum`，而一个 `dbnum` 可以拥有多个 Ref0；因此 `dbnum → Ref0` 是一对多关系，`Ref0 → dbnum` 可唯一反查，但 Ref0 本身不是 `dbnum`。同一 Ref0 出现在不同 `dbnum` 中属于库归属冲突，不存在可自动选择的有效归属。
+_Avoid_: Ref0 数据库号、把 Ref0 当作 dbnum
+
+**Ref0 库归属缺失 (Unresolved Ref0 Affiliation)**：
+一个合法 Ref0 当前没有可用的 `dbnum` 归属。它表示模型依赖暂时无法定位，不等同于元素不存在，也不表示该依赖可以跳过。
+_Avoid_: Refno 不存在、忽略的外部引用
+
+**Ref0 库归属冲突 (Conflicting Ref0 Affiliation)**：
+同一 Ref0 在项目文件索引中同时归属多个 `dbnum`，违反 Ref0 可唯一反查的不变量。系统不得猜选其中一个归属；只阻断命中该 Ref0 的工作，其他无冲突 Ref0 继续可用。
+_Avoid_: 重复 Ref0、任选一个 dbnum
 
 **最小交付单元 (Minimum Delivery Unit, MDU)**：
 一类**具备独立成败与独立交付语义**的模型单元类型。类型集合由项目配置决定：默认 `BRAN / HANG / SUPPO / EQUI`，`delivery_unit_types` 可完全取代默认集合、`append_delivery_unit_types` 可在默认集合上追加；层级容器 `WORL/WORLD/SITE/ZONE` 与管件 `FTUB` 恒被拒绝。当变化元素自身或其最近祖先命中该类型时，以该单元为生成根；`FTUB` 及其子件在正常颗粒路径中也必须继续上溯，不能成为生成根。
@@ -54,9 +66,21 @@ _Avoid_: 移动、迁移
 某 `dbnum` 已成功落库、且对应模型工作已持久化为 durable pending 的会话号上界；模型执行可在水位后失败并独立重试。它只在对应数据批次与模型计划原子收口后推进，与扫描观察值 `file_latest_sesno` 严格区分、互不替代。
 _Avoid_: 水位、sesno 水位（泛指时）
 
+**候选库文件 (Candidate Database File)**：
+监控目录里被认可为「一个 AVEVA 库文件」的物理文件：既不在扩展名/系统文件黑名单里，文件名又合 AVEVA 库命名（三位项目前缀 + 库号[ + 四位序号]，或 `<前缀>sys/com/mis`）。判定只看名字，不读文件头。人手复制的副本（`… copy`、`…_old`、带日期后缀的备份）与正本头部一字不差，只有命名规则分得开它们；把副本当候选会让同一个 `dbnum` 拿到多个候选而整库被判「同号重复」阻断。自动发现与手动扫描必须共用同一个判定。
+_Avoid_: 库文件、数据库文件（泛指时）、排除规则
+
+**登记文件身份 (Registered File Identity)**：
+系统为一个 `dbnum` 认可的数据库类型与物理文件身份。它只在首次登记或确认唯一、同类型且水位不回退的路径迁移时改变；阻断异常中的候选文件不是新的登记身份。
+_Avoid_: 最近扫描文件、观察到的文件身份
+
 **待重试单元 (Pending Model Unit)**：
-数据已成功后仍需执行或重试的独立模型任务，包含位姿更新、删除清理、反向级联展开和生成根重算；生成根任务键为 `(dbnum, 生成根)`，同一根只保留一条最新任务。消费时先完成非重生成动作，再重新读取并批量生成其展开出的全部根。
+数据已成功后仍需执行或重试的独立模型任务，包含位姿更新、删除清理、反向级联展开和生成根重算；任务以 `(action, target_refno)` 为唯一身份，`dbnum` 是由 Ref0 库归属得到的路由与校验字段，不参与任务身份。同一动作与目标只保留一条最新任务；每次确认有新工作时递增队列内部 `revision`，消费时先完成非重生成动作，再重新读取并批量生成其展开出的全部根。
 _Avoid_: 重试任务、pending task
+
+**冻结吸收 (Freeze-time Absorption)**：
+数据批次在执行起点重扫得到更高上界时，将该上界已经覆盖的后继排队区间并入当前运行批次。完全覆盖的后继任务以“已被当前批次吸收”成功终止，部分覆盖的后继区间从冻结上界之后继续。
+_Avoid_: 幽灵任务、重叠批次、空跑补批
 
 **关联展开链 (Association Expansion Chain)**：
 设计元素 →(`SPRE`/`CATR`/SPREF)→ 目录构件(`SCOM`/`SPCO`) →(几何集 `GMSET`)→ 用设计参数(`DESP`/`PARA[]`)展开出图元 的正向链；决定"一个元素画成什么形状"。core.dll 在段重建时按此链现场展开。
@@ -69,6 +93,32 @@ _Avoid_: 逆引用、backref、被引用列表
 **变更集 (Change Set)**：
 按会话区间算出的元素变更集合（对应 core.dll 的 `DB_UserChanges`，由 `DB_DB::elementsChangedBetween` 产出）。core.dll 分五类：`elementCreated`/`elementDeleted`/`attributeModified`/`elementReordered`/`elementIncluded`；gen-model 现映射为 `Add`/`Modified`/`Deleted`（reorder 并入 `children_changed`，无 include）。
 _Avoid_: 增量集、delta、diff
+
+**模型变更通告 (Model Change Notice)**：
+某个 refno 的模型产物已经落库、与观看端手上那份不再相同的对外告知；三种口径与「模型影响」同源：重生成 / 仅位姿 / 已删除。它只陈述「变了」，不指示「谁该重画」——重画与否由观看端按自己的可见性判断，服务端不认识任何一个场景。
+_Avoid_: 局部刷新、增量推送、刷新事件
+
+## 模型生成执行（Model Generation Execution）
+
+**模型生成结果 (Model Generation Outcome)**：
+某个生成根最近一次成功完成的生成结论，包括存在可绘制模型或确定没有可绘制几何。它是已经发生的成功事实，不是待重试单元；生成失败不会用失败结果覆盖它。
+_Avoid_: 生成任务状态、pending 终态、实例计数
+
+**分支原子替换 (Branch-Atomic Replacement)**：
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。同一生成根内的不同 BRAN 可以在重试期间处于不同版本，并由 durable pending 最终收敛。
+_Avoid_: 生成根快照事务、先删后补
+
+**合批重生成 (Batched Root Regeneration)**：
+一次生成调用同时承载多个生成根的重算方式，与「逐根重生成」相对。整批同成同败；批失败后回退逐根，以定位真正坏掉的那个根。
+_Avoid_: 批量生成、批处理生成、多根生成
+
+**Fresh 根 / 重试根 (Fresh Root / Retry Root)**：
+合批准入的二分：`attempts == 0` 且 refno 可解析的生成根是 fresh 根，可以进批；其余是重试根，只能单独跑。判据实现为纯谓词 `joins_regen_batch`。
+_Avoid_: 新根、干净根、失败根
+
+**revision 收口 (Revision-safe Settlement)**：
+以待重试单元行的队列内部单调 `revision` 为条件完成删除或标记失败。revision 对不上意味着该任务已因新工作重新入队，本次执行结果不足以清除它；来源 `dbnum/sesno` 只用于追踪，不参与 revision、跨库排序、去重或复活判断。
+_Avoid_: 收尾、结算、settle
 
 ## 按需解析元件库（On-demand CATA）
 
@@ -111,3 +161,33 @@ _Avoid_: refno 索引树、btree、索引区
 **索引优先建表 (Index-first Table Build)**：
 构建 `refno→文件偏移`表时优先走会话索引、解码失败才回退全缓冲扫描（`gen_ref_type_pos_table_scan`）；干净库两者相等，编辑库索引得最新会话存活集、更小且更权威（scan 会多收已删、漏活元素、指旧副本），是「部分解析 / 按需解析」定位的底座。
 _Avoid_: 索引建表、index-first
+
+## 房间归属（Room Membership）
+
+**房间归属 (Room Membership)**：
+构件与房间的从属关系，经面板物化为两类边：`room_relate`（面板→构件，带 `inside_count`/`center_dist` 排序字段）与 `room_panel_relate`（房间→面板）。材料表 surql 经 `fn::room_code` / `fn::room_num_of` 消费；是可事后重建的派生数据。
+_Avoid_: 房间关系、房间隶属
+
+**面板 (Panel / PANE)**：
+房间的几何载体：`FRMW/SBFR 房间节点 → CWALL/CFLOOR → PANE` 层级中带盒状 mesh 的 PANE 元素。归属判定以面板 mesh 为容器做点包含检查；房间节点自身不参与几何判定。
+_Avoid_: 板、墙板（泛指时）
+
+**整间分支 (Panel Branch)**：
+房间重算的粗粒度分支：面板自身变化时重算**该面板的全部成员**（先删面板全部 `room_relate` 出边、再整批写回）。对应 `RoomRecalcPanel` / `recalc_panel_membership`；成员元素的包围盒取自空间树。
+_Avoid_: 面板分支、全房重算
+
+**元素分支 (Element Branch)**：
+房间重算的细粒度分支：单个构件变化时只重算**该构件自己的归属**（先删构件全部 `room_relate` 入边、再写回本次算出的边）。对应 `RoomRecalcElement` / `recalc_element_membership`；候选面板从空间树按 `noun == 'PANE'` 取，构件包围盒取自库。
+_Avoid_: 构件分支、反向分支
+
+**同轮吸收 (Same-round Absorption)**：
+同一轮 drain 内整间分支已把某构件写为成员时，跳过该构件元素任务的省算优化。仅当**封闭性检查**成立才允许：构件现存入边面板集 ∪ 当前树候选面板集 ⊆ 本轮已重算面板集；不封闭则元素分支照跑（否则跨面板搬家会残留未重算面板的陈旧边）。判据实现为纯谓词 `absorption_is_closed`。
+_Avoid_: 任务吸收、任务去重（此场景）
+
+**空间树 (Spatial Tree)**：
+全库元素世界包围盒的进程级 R\* 树（`GLOBAL_AABB_TREE`），房间候选查询与整间分支的成员盒都取自它。带脏标记（`AABB_TREE_DIRTY`）：AABB 刷新与删除清理置位，worker 空闲轮收尾若脏则序列化到 `accel_tree.bin`；启动时 `sync_aabb_tree_with_db` 按条目数与库对账。
+_Avoid_: R 树（泛指时）、AABB 树、加速树
+
+**AABB 变更集 (AABB Change Set)**：
+包围盒刷新时与**空间树上旧值**比对产出的差异集合（`Vec<AabbChange>`），是房间任务的**唯一触发源**——真变了才入队，按 noun 分流：PANE 进整间分支、其余进元素分支。基线取树而非行内旧值：重生成走「先删行再重插」，行内旧值不可靠，树上条目才是房间系统上一次看到的状态。树上没有条目（首次见到）同样算变——正是回填语义；纯数据变更天然不触发（其残余缺口见 ADR-010 D12）。
+_Avoid_: 包围盒差异、aabb diff

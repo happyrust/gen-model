@@ -311,6 +311,34 @@ impl DbnumState {
         Ok(())
     }
 
+    /// 阻断类异常下的扫描落库：**只写观察值，不写文件身份**。
+    ///
+    /// `db_type` / `file_name` / `file_path` 是 [`check_file_against_state`] 的判据。
+    /// 判为阻断（回退 / 类型变更 / …）时若照常 UPSERT 它们，登记基准就被现场的
+    /// 那个文件顶掉了——下一轮再扫，`stored_db_type` 已经等于 `observed_db_type`，
+    /// 同一个异常再也检不出来，异常把自己抹掉了。
+    ///
+    /// 观察值（大小、文件最新会话号、扫描时刻）照写：人从面板上仍要看得见
+    /// 「现场那个文件长什么样」，这也是判断阻断是否已被人工处理掉的依据。
+    /// 与 [`Self::record_scan`] 一样，永不触碰 `applied_sesno`（ADR-001）。
+    pub async fn record_blocked_observation(obs: &FileObservation) -> anyhow::Result<()> {
+        let sql = format!(
+            "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
+             file_size = {file_size}, file_latest_sesno = {file_latest_sesno}, \
+             scanned_at = time::now(), updated_at = time::now();",
+            dbnum = obs.dbnum,
+            file_size = obs.file_size,
+            file_latest_sesno = obs.file_latest_sesno,
+        );
+        SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("记录阻断观察失败 dbnum={}: {}", obs.dbnum, e))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("记录阻断观察语句失败 dbnum={}: {}", obs.dbnum, e))?;
+        Ok(())
+    }
+
     /// Advance the applied watermark for one `dbnum` after a data batch succeeds.
     ///
     /// Monotonic (`math::max`, never regresses) and only ever called on the success
@@ -373,6 +401,45 @@ mod tests {
             resolve_migrated_applied_sesno(Some(0), Some(99), Some(120)),
             Some(0)
         );
+    }
+
+    /// `blocks()` 是阻断与否的唯一权威，自动路径与手动预览都读它，所以每一个变体
+    /// 的取值都要在这里说死。用 `match` 而不是逐个 `assert!`：新增一种异常时这里
+    /// 编译不过，作者必须显式选边，而不是让它默默落进「不阻断」。
+    #[test]
+    fn every_anomaly_declares_whether_it_blocks() {
+        let cases = [
+            FileAnomaly::Rollback {
+                file_latest_sesno: 80,
+                applied_sesno: 120,
+            },
+            FileAnomaly::PathMigrated {
+                old_path: "/old".into(),
+                new_path: "/new".into(),
+            },
+            FileAnomaly::TypeChanged {
+                stored_db_type: "DESI".into(),
+                observed_db_type: "CATA".into(),
+            },
+            FileAnomaly::Duplicate {
+                paths: vec!["/a".into(), "/b".into()],
+            },
+            FileAnomaly::Missing {
+                path: "/gone".into(),
+            },
+        ];
+        for anomaly in &cases {
+            let expected = match anomaly {
+                // 良性搬家：登记路径跟着更新即可。
+                FileAnomaly::PathMigrated { .. } => false,
+                // 其余四种都动了「这个 dbnum 对应哪个文件」这件事的根基。
+                FileAnomaly::Rollback { .. }
+                | FileAnomaly::TypeChanged { .. }
+                | FileAnomaly::Duplicate { .. }
+                | FileAnomaly::Missing { .. } => true,
+            };
+            assert_eq!(anomaly.blocks(), expected, "{anomaly:?} 的阻断口径不符");
+        }
     }
 
     #[test]
