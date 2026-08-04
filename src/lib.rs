@@ -156,6 +156,22 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     aios_core::function::define_common_functions()
         .await
         .unwrap();
+    // D11（ADR-010）：define_common_functions 按文件名顺序无条件加载 resource/surreal
+    // 全目录，`fn_query_room_code_hh.surql` 排在 `_hd` 版之后，同名 fn::room_code 永远
+    // 被 hh 版覆盖——与 Rust 侧编译的 project_hd feature 错位。加载顺序在 rs-core 里
+    // 改不到，这里在加载完成后按 feature 重放正确版本，把覆盖再覆盖回来。
+    // project_hh 构建无需处理：hh 版本来就是最后加载的那份。
+    #[cfg(feature = "project_hd")]
+    {
+        const HD_ROOM_CODE: &str = "resource/surreal/fn_query_room_code.surql";
+        match std::fs::read_to_string(HD_ROOM_CODE) {
+            Ok(text) => match SUL_DB.query(text).await {
+                Ok(_) => println!("已按 project_hd 重放 fn::room_code（矫正 _hh 文件的覆盖）"),
+                Err(e) => eprintln!("重放 hd 版 fn::room_code 失败（生效的仍是 hh 版）: {e}"),
+            },
+            Err(e) => eprintln!("读取 {HD_ROOM_CODE} 失败（生效的仍是 hh 版 fn::room_code）: {e}"),
+        }
+    }
     let migrated = crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage()
         .await?;
     println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
@@ -211,6 +227,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         mgr.init_watcher().await?;
     }
 
+    // rs-core 只认 cwd 下的裸 accel_tree.bin；先把本项目的专属文件放上去，
+    // 否则换目录静默空树、多项目共用目录互读对方的树（ADR-010 §6）。
+    crate::fast_model::aabb_tree::stage_project_aabb_tree_file();
     load_aabb_tree().await.unwrap();
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
@@ -386,7 +405,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
-        // Try to load existing AABB tree first
+        // Try to load existing AABB tree first.
+        // rs-core 只认 cwd 下的裸 accel_tree.bin，先放置本项目的专属文件（ADR-010 §6）。
+        crate::fast_model::aabb_tree::stage_project_aabb_tree_file();
         load_aabb_tree().await?;
         sync_aabb_tree_with_db().await?;
     }

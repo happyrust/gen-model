@@ -21,14 +21,75 @@ pub fn mark_aabb_tree_dirty() {
     AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
 }
 
-/// 脏则写回 `accel_tree.bin`（worker 空闲轮收尾调用），返回是否真的写了。
+/// rs-core 硬编码的裸文件名：`serialize_to_bin_file` / `deserialize_from_bin_file`
+/// 都写死它（cwd 相对），且重建 refno 反向索引的方法是私有的，本仓无法绕开
+/// rs-core 自己读写别的路径。
+const BARE_TREE_FILE: &str = "accel_tree.bin";
+
+/// 带项目名的落盘文件：`accel_tree_{project}.bin`（ADR-010 §6「路径带项目名」）。
+fn project_tree_file() -> String {
+    format!(
+        "accel_tree_{}.bin",
+        aios_core::get_db_option().project_name
+    )
+}
+
+/// 启动加载空间树**之前**调用：把本项目的树文件放到 rs-core 硬编码的裸路径上。
+///
+/// 裸文件名的两个后果都有实证：换工作目录启动静默空树（2026-08-04 演练日志），
+/// 多项目先后共用一个部署目录时读到**别的项目**的树——重启后
+/// `sync_aabb_tree_with_db` 只对账数量，随后启动期的全量房间重建会拿错树的
+/// 旧位置改写 `room_relate`。搬运语义：
+/// - 项目专属文件存在 → 复制到裸名（覆盖别的项目残留）；
+/// - 只有裸文件 → 首次迁移，沿用它，下次落盘起写回项目名；
+/// - 都没有 → 空树告警由 rs-core 加载路径给出。
+///
+/// 已知限制：多项目**并发**共用同一个 cwd 时，裸文件仍是竞态窗口——rs-core
+/// 硬编码之下无解，先后切换项目的场景（实际部署形态）已由本函数闭环。
+pub fn stage_project_aabb_tree_file() {
+    let project_file = project_tree_file();
+    if std::path::Path::new(&project_file).is_file() {
+        match std::fs::copy(&project_file, BARE_TREE_FILE) {
+            Ok(_) => println!("空间树使用项目专属文件 {project_file}"),
+            Err(error) => eprintln!(
+                "放置项目空间树文件失败（{project_file} -> {BARE_TREE_FILE}），\
+                 将按现有裸文件或空树启动: {error}"
+            ),
+        }
+        return;
+    }
+    if std::path::Path::new(BARE_TREE_FILE).is_file() {
+        println!(
+            "未找到 {project_file}，沿用既有 {BARE_TREE_FILE}\
+            （首次迁移：下次落盘起写入项目专属文件）"
+        );
+    }
+}
+
+/// 落盘成功后把裸文件归档为项目专属名。
+///
+/// 失败必须上抛：吞掉的话项目文件停在旧值，下次启动 `stage` 会拿旧树覆盖
+/// 刚写好的裸文件——比不归档更糟。调用方靠保留脏位让下一轮连同序列化一起重试。
+fn archive_project_aabb_tree_file() -> anyhow::Result<()> {
+    let project_file = project_tree_file();
+    std::fs::copy(BARE_TREE_FILE, &project_file)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("归档空间树到 {project_file} 失败: {error}"))
+}
+
+/// 脏则写回 `accel_tree.bin` 并归档项目专属文件（worker 空闲轮收尾调用），
+/// 返回是否真的写了。
 ///
 /// 落盘失败时**保留**脏标记，下一轮重试——清掉的话一次磁盘抖动就把变更永远留在内存里。
 pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
     if !AABB_TREE_DIRTY.swap(false, Ordering::SeqCst) {
         return Ok(false);
     }
-    if let Err(error) = GLOBAL_AABB_TREE.read().await.serialize_to_bin_file() {
+    let written = match GLOBAL_AABB_TREE.read().await.serialize_to_bin_file() {
+        Ok(_) => archive_project_aabb_tree_file(),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = written {
         AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
         return Err(error);
     }
@@ -40,6 +101,7 @@ pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
 /// 全量序列化覆盖了此前一切增量变更，所以顺手清标记，免得空闲轮紧接着再白写一遍。
 pub async fn persist_aabb_tree() -> anyhow::Result<()> {
     GLOBAL_AABB_TREE.read().await.serialize_to_bin_file()?;
+    archive_project_aabb_tree_file()?;
     AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
     Ok(())
 }

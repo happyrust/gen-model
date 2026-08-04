@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::data_interface::manual_update::{
     DeliveryUnitSummary, NetChangeDetail, NetOp, merge_net_change_details, resolve_unit_rollup,
 };
-use crate::data_interface::model_impact::{OperationImpact, classify_operation_impact};
+use crate::data_interface::model_impact::{
+    OperationImpact, classify_operation_impact, normalize_attribute_name, owner_change,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -264,6 +266,136 @@ async fn baseline_existing_cancelled(
     Ok(existing)
 }
 
+/// D12（ADR-010 已知缺口）触发器：非几何的房间结构变更。
+///
+/// 房间节点改名与 PANE 挂靠变更都不改任何 AABB，第 4 条的差异触发源不点火，
+/// `room_relate.room_num` / `room_panel_relate` 会一直陈旧到下次启动的全量重建
+/// ——而 20+ 材料表 surql 经 `fn::room_code` 直接读 room_num。
+#[derive(Debug, Default)]
+pub(crate) struct RoomStructuralTriggers {
+    /// NAME 变更且新旧任一名字命中房间关键字的 FRMW/SBFR。
+    pub renamed_rooms: Vec<RefnoEnum>,
+    /// OWNER 变更（搬迁，ADR-009 口径）的 PANE。
+    pub moved_panels: Vec<RefnoEnum>,
+}
+
+impl RoomStructuralTriggers {
+    pub fn is_empty(&self) -> bool {
+        self.renamed_rooms.is_empty() && self.moved_panels.is_empty()
+    }
+}
+
+/// NAME 变更是否触及房间语义：**旧名或新名任一**命中房间关键字即算。
+///
+/// 只看新名会漏「改出房间」（房间名改成普通框架名，旧边该清）；只看旧名会漏
+/// 「改成房间」（普通框架改成房间名，成员该建）。关键字未配置时判不了房间性，
+/// 不触发——房间功能本身（`build_room_relations`）也依赖同一份关键字。
+fn name_change_hits_room_keyword(
+    modified: &pdms_io::io::ModifiedElement,
+    keywords: &[String],
+) -> bool {
+    let hits = |value: &aios_core::NamedAttrValue| -> bool {
+        use aios_core::NamedAttrValue;
+        let name = match value {
+            NamedAttrValue::StringType(s)
+            | NamedAttrValue::ElementType(s)
+            | NamedAttrValue::WordType(s) => s,
+            _ => return false,
+        };
+        keywords
+            .iter()
+            .any(|keyword| !keyword.is_empty() && name.contains(keyword.as_str()))
+    };
+    for (attr, (old, new)) in modified
+        .modified_attrs
+        .iter()
+        .chain(&modified.modified_explicit_attrs)
+    {
+        if normalize_attribute_name(attr) == "NAME" && (hits(old) || hits(new)) {
+            return true;
+        }
+    }
+    for (attr, value) in modified.added_attrs.iter().chain(&modified.added_explicit_attrs) {
+        if normalize_attribute_name(attr) == "NAME" && hits(value) {
+            return true;
+        }
+    }
+    for (attr, value) in modified
+        .deleted_attrs
+        .iter()
+        .chain(&modified.deleted_explicit_attrs)
+    {
+        if normalize_attribute_name(attr) == "NAME" && hits(value) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 从窗口操作里收集房间结构触发器（纯函数）。
+///
+/// 只看 `Modified`：新建的房间/面板会经几何生成 → AABB 差异触发链路；删除走
+/// `DeleteCleanup` 的房间边清理（ADR-010 第 4 条的删除例外）。
+pub(crate) fn collect_room_structural_triggers(
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    room_keywords: &[String],
+) -> RoomStructuralTriggers {
+    let mut triggers = RoomStructuralTriggers::default();
+    let mut seen_rooms = HashSet::new();
+    let mut seen_panels = HashSet::new();
+    for op in range_eles.values().flatten() {
+        let EleOperationDetail::Modified(modified) = &op.detail else {
+            continue;
+        };
+        let refno = RefnoEnum::from(op.refno);
+        match modified.noun.trim().to_ascii_uppercase().as_str() {
+            "PANE" => {
+                let (old_owner, new_owner) = owner_change(op);
+                let moved = (old_owner.is_some() || new_owner.is_some()) && old_owner != new_owner;
+                if moved && seen_panels.insert(refno) {
+                    triggers.moved_panels.push(refno);
+                }
+            }
+            "FRMW" | "SBFR" => {
+                if name_change_hits_room_keyword(modified, room_keywords)
+                    && seen_rooms.insert(refno)
+                {
+                    triggers.renamed_rooms.push(refno);
+                }
+            }
+            _ => {}
+        }
+    }
+    triggers
+}
+
+/// 改名房间名下的全部 PANE（子 + 孙两层，与房间归属计算的层级覆盖同口径：
+/// `FRMW → CWALL/CFLOOR → PANE`）。
+async fn panels_under_rooms(rooms: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+    use crate::data_interface::helper::pe_thing_to_refno;
+    use surrealdb::sql::Thing;
+
+    let mut panels = Vec::new();
+    for chunk in rooms.chunks(200) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM pe WHERE noun = 'PANE' AND deleted != true \
+                 AND (owner IN [{keys}] OR owner.owner IN [{keys}]);"
+            ))
+            .await?
+            .check()?;
+        for thing in response.take::<Vec<Thing>>(0)? {
+            panels.push(pe_thing_to_refno(thing)?);
+        }
+    }
+    Ok(panels)
+}
+
 /// CATA windows seed only deferred reverse-cascade expansion (ADR-008 / F8):
 /// an edited shared catalogue/spec element must regenerate the design
 /// instances that reference it, yet the element itself is never a generation
@@ -396,6 +528,45 @@ pub(crate) async fn build_model_update_plan(
         }
         work_items.extend(deferred.into_values());
         work_items.sort_by_key(|item| (item.action, item.target_refno.clone()));
+    }
+
+    // D12（ADR-010 已知缺口的触发规则落地）：房间改名 → 名下全部 PANE 入队整间
+    // 重算；PANE 搬迁 → 自身入队（新旧属主对应的房间都经它的整间分支收敛）。
+    // 面板枚举失败降级为告警——房间归属是可事后重建的派生数据，下一次启动的
+    // 全量重建仍是兜底，不能让它掐断整个数据窗口。
+    let room_triggers = collect_room_structural_triggers(
+        range_eles,
+        &aios_core::get_db_option().get_room_key_word(),
+    );
+    if !room_triggers.is_empty() {
+        let mut panel_targets: std::collections::BTreeSet<String> = room_triggers
+            .moved_panels
+            .iter()
+            .map(|refno| refno.to_pdms_str())
+            .collect();
+        if !room_triggers.renamed_rooms.is_empty() {
+            match panels_under_rooms(&room_triggers.renamed_rooms).await {
+                Ok(panels) => {
+                    panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
+                }
+                Err(error) => warnings.push(format!(
+                    "dbnum={dbnum}: 房间改名的面板枚举失败，房间号刷新延迟到下次全量重建: {error:#}"
+                )),
+            }
+        }
+        if !panel_targets.is_empty() {
+            work_items.extend(panel_targets.into_iter().map(|target| ModelWorkItem {
+                dbnum,
+                db_type: db_type.to_string(),
+                source_end_sesno: end_sesno,
+                action: ModelWorkAction::RoomRecalcPanel,
+                target_refno: target,
+                noun: "PANE".to_string(),
+            }));
+            work_items.sort_by_key(|item| (item.action, item.target_refno.clone()));
+            work_items
+                .dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
+        }
     }
     Ok(ModelUpdatePlan {
         work_items,
@@ -615,6 +786,115 @@ mod tests {
                 children_changed: None,
             }),
         )
+    }
+
+    /// 指定 noun 与某个属性 (旧值, 新值) 的修改操作，D12 触发器测试用。
+    fn room_modified_op(
+        refno: aios_core::RefU64,
+        noun: &str,
+        attr: &str,
+        old_value: aios_core::NamedAttrValue,
+        new_value: aios_core::NamedAttrValue,
+    ) -> EleOperationData {
+        let mut op = modified_op(refno, 42, attr);
+        let EleOperationDetail::Modified(modified) = &mut op.detail else {
+            unreachable!()
+        };
+        modified.noun = noun.to_string();
+        modified
+            .modified_attrs
+            .insert(attr.to_string(), (old_value, new_value));
+        op
+    }
+
+    /// D12：房间改名（新旧任一名字命中关键字）触发 renamed_rooms；PANE 搬迁
+    /// （OWNER 变更）触发 moved_panels；普通 FRMW 改名与 PANE 的普通属性变更
+    /// 都不触发——触发面失控的话，一次结构库批量改名会给每个 FRMW 名下的
+    /// 面板都排整间重算。
+    #[test]
+    fn room_renames_and_panel_moves_trigger_panel_recalc() {
+        use aios_core::NamedAttrValue;
+
+        let room = aios_core::RefU64((1u64 << 32) | 11);
+        let plain_frame = aios_core::RefU64((1u64 << 32) | 12);
+        let renamed_out = aios_core::RefU64((1u64 << 32) | 13);
+        let panel = aios_core::RefU64((1u64 << 32) | 14);
+        let idle_panel = aios_core::RefU64((1u64 << 32) | 15);
+
+        let ops = BTreeMap::from([(
+            42u32,
+            vec![
+                // 普通框架名 → 房间名：改成房间，要触发。
+                room_modified_op(
+                    room,
+                    "FRMW",
+                    "NAME",
+                    NamedAttrValue::StringType("/1RX-FRAME-01".into()),
+                    NamedAttrValue::StringType("/1RX-RM03-R301".into()),
+                ),
+                // 与房间无关的框架改名：不触发。
+                room_modified_op(
+                    plain_frame,
+                    "FRMW",
+                    "NAME",
+                    NamedAttrValue::StringType("/1RX-FRAME-02".into()),
+                    NamedAttrValue::StringType("/1RX-FRAME-03".into()),
+                ),
+                // 房间名 → 普通名：改出房间，旧边要清，同样触发。
+                room_modified_op(
+                    renamed_out,
+                    "SBFR",
+                    "NAME",
+                    NamedAttrValue::StringType("/1RX-RM07-R701".into()),
+                    NamedAttrValue::StringType("/1RX-FRAME-07".into()),
+                ),
+                // PANE 搬迁（OWNER 变更）：触发整间重算。
+                room_modified_op(
+                    panel,
+                    "PANE",
+                    "OWNER",
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 21)),
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 22)),
+                ),
+                // PANE 的普通属性变更：不触发（几何类变更走 AABB 差异链路）。
+                room_modified_op(
+                    idle_panel,
+                    "PANE",
+                    "DESC",
+                    NamedAttrValue::StringType("old".into()),
+                    NamedAttrValue::StringType("new".into()),
+                ),
+            ],
+        )]);
+
+        let triggers = collect_room_structural_triggers(&ops, &["-RM".to_string()]);
+        assert_eq!(
+            triggers.renamed_rooms,
+            vec![RefnoEnum::from(room), RefnoEnum::from(renamed_out)],
+            "改成房间与改出房间都要触发"
+        );
+        assert_eq!(triggers.moved_panels, vec![RefnoEnum::from(panel)]);
+    }
+
+    /// 关键字未配置时判不了房间性：一个都不触发（与房间功能本身的依赖一致），
+    /// 而不是退化成「所有 FRMW 改名都排任务」。
+    #[test]
+    fn room_triggers_stay_silent_without_keywords() {
+        use aios_core::NamedAttrValue;
+
+        let ops = BTreeMap::from([(
+            42u32,
+            vec![room_modified_op(
+                aios_core::RefU64((1u64 << 32) | 11),
+                "FRMW",
+                "NAME",
+                NamedAttrValue::StringType("/1RX-RM03-R301".into()),
+                NamedAttrValue::StringType("/1RX-RM03-R302".into()),
+            )],
+        )]);
+
+        let triggers = collect_room_structural_triggers(&ops, &[]);
+        assert!(triggers.is_empty(), "{triggers:?}");
     }
 
     fn live_modified_op(
