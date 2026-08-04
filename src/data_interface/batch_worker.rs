@@ -454,7 +454,6 @@ async fn run_single_unit(
     let outcome = generate_unit_model(mgr, &task.root_refno).await;
     let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
     let settlement_failed = if let Err(error) = model_update_pending::settle_regen_work(
-        task.dbnum,
         &task.root_refno,
         Some(revision),
         generation_error.as_deref(),
@@ -553,7 +552,6 @@ async fn run_unit_worklist(
                     .iter()
                     .map(|task| {
                         (
-                            task.dbnum,
                             task.root_refno.clone(),
                             task.revision.expect("batchable tasks have revisions"),
                         )

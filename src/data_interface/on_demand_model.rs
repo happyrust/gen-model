@@ -70,15 +70,12 @@ impl AiosDBManager {
             }
         }
 
-        let pending_revision = crate::data_interface::model_update_pending::current_regen_revision(
-            root.refno().get_0(),
-            &root_refno,
-        )
-        .await?;
+        let pending_revision =
+            crate::data_interface::model_update_pending::current_regen_revision(&root_refno)
+                .await?;
         let outcome = generate_unit_model(self, &root_refno).await;
         let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
         if let Err(error) = settle_regen_work(
-            root.refno().get_0(),
             &root_refno,
             pending_revision,
             generation_error.as_deref(),
