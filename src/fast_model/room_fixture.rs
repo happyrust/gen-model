@@ -167,10 +167,14 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
     // （`owner: RefnoEnum` / `generic: String`）。缺任何一个，`query_insts` 就会以
     // 「expected a string, found None」失败，而 `cal_room_refnos` 又把这个错误
     // `unwrap_or_default()` 吞成空 Vec，整间房静悄悄算成 0 个成员。
+    // `pe.name` 同样是下游非 Option 字段：计划层（`resolve_unit_rollup`）加载
+    // OWNER 图时 SELECT id, owner, noun, name——缺 name 会以「expected a string,
+    // found None」整批失败。房间路径自身不读它，但 D12 的触发用例要把夹具窗口
+    // 喂给 `build_model_update_plan`。
     sql.push_str(&format!(
-        "CREATE pe:{r} SET noun = 'FRMW', deleted = false, owner = pe:{r};\
+        "CREATE pe:{r} SET noun = 'FRMW', deleted = false, owner = pe:{r}, name = '{ROOM_NAME}';\
          CREATE FRMW:{r} SET NAME = '{ROOM_NAME}', REFNO = pe:{r};\
-         CREATE pe:{w} SET noun = 'CWALL', deleted = false, owner = pe:{r};\
+         CREATE pe:{w} SET noun = 'CWALL', deleted = false, owner = pe:{r}, name = '';\
          RELATE pe:{w}->pe_owner->pe:{r};",
         r = refno(1),
         w = refno(2),
@@ -202,7 +206,8 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
 
         sql.push_str(&format!(
             "INSERT IGNORE INTO aabb {{id: aabb:{geo_hash}, d: {}}};\
-             CREATE pe:{seq_refno} SET noun = '{noun}', deleted = false, owner = pe:{owner};\
+             CREATE pe:{seq_refno} SET noun = '{noun}', deleted = false, owner = pe:{owner}, \
+                 name = '';\
              RELATE pe:{seq_refno}->pe_owner->pe:{owner};\
              CREATE inst_info:{geo_hash};\
              CREATE inst_geo:{geo_hash} SET meshed = true, visible = true, \
@@ -411,6 +416,142 @@ mod tests {
             })
             .await
             .expect("signin");
+    }
+
+    /// D12（ADR-010）：房间改名与 PANE 搬迁都不改任何 AABB，唯一触发在计划层。
+    /// 本用例在真库上验证那两条规则的端到端前半程——窗口操作 →
+    /// `build_model_update_plan` → `RoomRecalcPanel` 工作项，其中房间改名要经
+    /// `panels_under_rooms` 的真库子 + 孙查询（FRMW → CWALL → PANE）拿到面板。
+    /// 工作项入队之后的消费路径（整间分支、先清后写、对拍）已由本文件其余
+    /// live 用例覆盖，这里不重复。
+    ///
+    /// 触发判定只看窗口 delta 里的名字（旧名 `/1RX-RM03-R301` 命中全局关键字
+    /// `-RM`），与夹具房间的实际 NAME 解耦——D12 的语义本来就是「改出房间也要
+    /// 重算」。
+    ///
+    /// ```text
+    /// ./scripts/Start-Surreal8009.ps1 -Memory -Bind 127.0.0.1:8071
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_structural_triggers_enqueue_panel_recalc -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records and .mesh files"]
+    async fn live_room_structural_triggers_enqueue_panel_recalc() {
+        use crate::data_interface::model_update_plan::{
+            ModelWorkAction, build_model_update_plan,
+        };
+        use aios_core::NamedAttrValue;
+        use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
+        use std::collections::BTreeMap;
+
+        fn fixture_modified_op(
+            seq: u64,
+            noun: &str,
+            attr: &str,
+            old_value: NamedAttrValue,
+            new_value: NamedAttrValue,
+        ) -> EleOperationData {
+            let mut modified_attrs = std::collections::HashMap::new();
+            modified_attrs.insert(attr.to_string(), (old_value, new_value));
+            EleOperationData::new(
+                RefnoEnum::from(refno(seq).as_str()).refno(),
+                7,
+                EleOperationDetail::Modified(ModifiedElement {
+                    current_data: Default::default(),
+                    added_attrs: Default::default(),
+                    deleted_attrs: Default::default(),
+                    modified_attrs,
+                    added_explicit_attrs: Default::default(),
+                    deleted_explicit_attrs: Default::default(),
+                    modified_explicit_attrs: Default::default(),
+                    added_uda_attrs: Default::default(),
+                    deleted_uda_attrs: Default::default(),
+                    modified_uda_attrs: Default::default(),
+                    noun: noun.to_string(),
+                    children_changed: None,
+                }),
+            )
+        }
+
+        connect_live().await;
+        let db_option = get_db_option().clone();
+        let mesh_dir = db_option.get_meshes_path();
+        create_room_fixture(&mesh_dir)
+            .await
+            .expect("create fixture");
+
+        let dbnum = u32::try_from(FIXTURE_DBNUM).expect("fixture dbnum fits u32");
+        let (pane_a, pane_b) = panel_refnos();
+        let pane_a_target = RefnoEnum::from(pane_a.as_str()).to_pdms_str();
+        let pane_b_target = RefnoEnum::from(pane_b.as_str()).to_pdms_str();
+
+        // 场景 A：房间（FRMW，refno 1）改名，旧名命中关键字 → 名下两块 PANE 入队。
+        let rename_ops = BTreeMap::from([(
+            7u32,
+            vec![fixture_modified_op(
+                1,
+                "FRMW",
+                "NAME",
+                NamedAttrValue::StringType("/1RX-RM03-R301".into()),
+                NamedAttrValue::StringType("/1RX-FRAME-01".into()),
+            )],
+        )]);
+        let rename_plan = build_model_update_plan(dbnum, 7, "DESI", &rename_ops)
+            .await
+            .expect("plan for room rename");
+        let mut rename_targets: Vec<String> = rename_plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RoomRecalcPanel)
+            .map(|item| item.target_refno.clone())
+            .collect();
+        rename_targets.sort();
+
+        // 场景 B：PANE（refno 10）搬迁（OWNER 变更）→ 自身入队。
+        let move_ops = BTreeMap::from([(
+            8u32,
+            vec![fixture_modified_op(
+                10,
+                "PANE",
+                "OWNER",
+                NamedAttrValue::RefU64Type(RefnoEnum::from(refno(2).as_str()).refno()),
+                NamedAttrValue::RefU64Type(RefnoEnum::from(refno(1).as_str()).refno()),
+            )],
+        )]);
+        let move_plan = build_model_update_plan(dbnum, 8, "DESI", &move_ops)
+            .await
+            .expect("plan for pane move");
+        let move_targets: Vec<String> = move_plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RoomRecalcPanel)
+            .map(|item| item.target_refno.clone())
+            .collect();
+
+        if std::env::var("AIOS_KEEP_FIXTURE").is_err() {
+            drop_room_fixture(&mesh_dir).await.expect("drop fixture");
+        }
+
+        let mut want = vec![pane_a_target.clone(), pane_b_target];
+        want.sort();
+        assert_eq!(
+            rename_targets, want,
+            "房间改名必须为名下（子 + 孙）全部 PANE 排整间重算"
+        );
+        assert_eq!(
+            move_targets,
+            vec![pane_a_target],
+            "PANE 搬迁必须为自身排整间重算"
+        );
+        // 改名与搬迁都是纯数据 / 结构变更：不得混进几何重生成工作项。
+        assert!(
+            rename_plan
+                .work_items
+                .iter()
+                .all(|item| item.action == ModelWorkAction::RoomRecalcPanel),
+            "{:?}",
+            rename_plan.work_items
+        );
     }
 
     #[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
