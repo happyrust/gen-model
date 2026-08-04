@@ -1,6 +1,10 @@
 [net]
 git-fetch-with-cli = true
 
+# manifold-sys 的 bindgen 需要 libclang，缺失时 build script 直接 panic
+[env]
+LIBCLANG_PATH = { value = "D:\\LLVM\\bin", force = false }
+
 # [target.x86_64-pc-windows-msvc]
 # linker = "rust-lld.exe"
 # rustdocflags = ["-Clinker=rust-lld.exe"]
@@ -15,7 +19,11 @@ git-fetch-with-cli = true
 #codegen-backend = "cranelift"
 
 [build]
+target-dir = "../target"
 rustflags = ["-Z", "threads=8"]
+# 本仓库 19 个 bin 目标 × 前端 8 线程，默认 -j（=逻辑核数）会耗尽系统句柄/提交内存，
+# 触发 "could not create 8 threads (os error 1450)" 并留下半成品 rlib（表现为 std/Vec 找不到）。
+jobs = 8
 
 #[target.x86_64-unknown-linux-musl]
 #linker = "x86_64-linux-musl-gcc"

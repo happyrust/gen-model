@@ -100,6 +100,24 @@ pub async fn resolve_axis_params(
     Ok(map)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BEND 24384/22456 uses this SCOM.  The on-demand CATA path persists the
+    /// authoritative GMRE attribute but intentionally has no legacy `->GMRE`
+    /// graph edge, so catalogue resolution must not depend on that edge.
+    #[tokio::test]
+    #[ignore = "requires the configured AvevaMarineSample SurrealDB"]
+    async fn scom_geometry_resolves_from_stored_reference_attributes() {
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        aios_core::init_surreal().await.unwrap();
+
+        let info = get_or_create_scom_info("13244_56726".into()).await.unwrap();
+        assert!(!info.gm_params.is_empty(), "SCOM.GMRE did not resolve geometry");
+    }
+}
+
 ///求解design component
 pub async fn resolve_desi_comp(
     desi_refno: RefnoEnum,
