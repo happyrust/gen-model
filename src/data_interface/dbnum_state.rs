@@ -8,8 +8,10 @@
 //! Read semantics (ADR-001 §兼容迁移):
 //! 1. Prefer an already-established `applied_sesno`.
 //! 2. Otherwise inherit the legacy `dbnum_watermark.sesno`.
-//! 3. Otherwise (only when no dedicated watermark exists) fall back once to the
-//!    max `sesno` in `dbnum_info_table` for this `dbnum`.
+//! 3. If the whole watermark table is absent during an in-place compatibility
+//!    upgrade, establish each dbnum from the max persisted `pe.sesno`.
+//! 4. Otherwise (only when a dedicated row is absent) fall back once to the max
+//!    `sesno` in `dbnum_info_table` for this `dbnum`.
 //!
 //! After the state is established (a scan / advance writes `applied_sesno`), reads
 //! use `applied_sesno` directly and never re-mix other sources.
@@ -30,6 +32,11 @@ DEFINE TABLE IF NOT EXISTS model_update_pending SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS incr_side_effect_pending SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS queue_control SCHEMALESS;
 "#;
+
+const CURRENT_DATABASE_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FROM pe \
+     WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;";
+const LEGACY_INFO_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FROM dbnum_info_table \
+     WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;";
 
 /// File observation captured during a (read-only) scan.
 ///
@@ -89,7 +96,7 @@ struct StateRow {
 }
 
 #[derive(Debug, Deserialize)]
-struct LegacyInfoWatermark {
+struct DatabaseWatermark {
     dbnum: u32,
     sesno: i32,
 }
@@ -261,13 +268,41 @@ pub(crate) fn escape_surql_str(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
+fn database_has_table(info: &serde_json::Value, table: &str) -> bool {
+    info.get("tables")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|tables| tables.contains_key(table))
+}
+
+fn migration_watermark_source(watermark_table_missing: bool) -> (&'static str, &'static str) {
+    if watermark_table_missing {
+        (CURRENT_DATABASE_WATERMARKS, "现有 PE 数据")
+    } else {
+        (LEGACY_INFO_WATERMARKS, "旧 DBNUM 统计")
+    }
+}
+
 impl DbnumState {
     /// Ensure an old Surreal database can run the current incremental pipeline in place.
     ///
-    /// Table definitions are idempotent. Watermark migration is fill-only: an established
-    /// `applied_sesno` always wins; otherwise the legacy `dbnum_watermark.sesno`, then the
-    /// maximum `dbnum_info_table.sesno`, becomes the durable starting watermark.
+    /// Table definitions are idempotent. When the watermark table itself is absent, this is
+    /// an in-place compatibility upgrade: the durable baseline comes from the maximum `sesno`
+    /// already persisted in `pe` for each `dbnum`. Existing watermark tables keep their own
+    /// established/legacy watermarks and use `dbnum_info_table` only as the old fallback.
     pub async fn ensure_increment_state_storage() -> anyhow::Result<usize> {
+        let mut response = SUL_DB
+            .query("INFO FOR DB;")
+            .await
+            .map_err(|e| anyhow::anyhow!("检查增量状态表失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("检查增量状态表语句失败: {e}"))?;
+        let database_info: Option<serde_json::Value> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码数据库表信息失败: {e}"))?;
+        let database_info = database_info
+            .ok_or_else(|| anyhow::anyhow!("数据库表信息为空，无法安全初始化增量状态"))?;
+        let watermark_table_missing = !database_has_table(&database_info, WATERMARK_TABLE);
+
         SUL_DB
             .query(INCREMENT_STATE_SCHEMA)
             .await
@@ -285,20 +320,18 @@ impl DbnumState {
             .check()
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
 
+        let (source_sql, source_name) = migration_watermark_source(watermark_table_missing);
         let mut response = SUL_DB
-            .query(
-                "SELECT dbnum, math::max(sesno) AS sesno FROM dbnum_info_table \
-                 WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;",
-            )
+            .query(source_sql)
             .await
-            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 统计水位失败: {e}"))?
+            .map_err(|e| anyhow::anyhow!("读取{source_name}水位失败: {e}"))?
             .check()
-            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 统计水位语句失败: {e}"))?;
-        let legacy: Vec<LegacyInfoWatermark> = response
+            .map_err(|e| anyhow::anyhow!("读取{source_name}水位语句失败: {e}"))?;
+        let watermarks: Vec<DatabaseWatermark> = response
             .take(0)
-            .map_err(|e| anyhow::anyhow!("解码旧 DBNUM 统计水位失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("解码{source_name}水位失败: {e}"))?;
 
-        for chunk in legacy.chunks(500) {
+        for chunk in watermarks.chunks(500) {
             let sql = chunk
                 .iter()
                 .map(|row| {
@@ -315,11 +348,11 @@ impl DbnumState {
             SUL_DB
                 .query(sql)
                 .await
-                .map_err(|e| anyhow::anyhow!("固化旧 DBNUM 统计水位失败: {e}"))?
+                .map_err(|e| anyhow::anyhow!("固化{source_name}水位失败: {e}"))?
                 .check()
-                .map_err(|e| anyhow::anyhow!("固化旧 DBNUM 统计水位语句失败: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("固化{source_name}水位语句失败: {e}"))?;
         }
-        Ok(legacy.len())
+        Ok(watermarks.len())
     }
 
     /// List registered DB files. Used by project scans to surface files that
@@ -585,6 +618,27 @@ mod tests {
                 "missing startup definition for {table}"
             );
         }
+    }
+
+    #[test]
+    fn missing_watermark_table_uses_current_pe_sessions_for_compatibility() {
+        let before = serde_json::json!({"tables": {"pe": "DEFINE TABLE pe SCHEMALESS"}});
+        let after = serde_json::json!({
+            "tables": {
+                "pe": "DEFINE TABLE pe SCHEMALESS",
+                "dbnum_watermark": "DEFINE TABLE dbnum_watermark SCHEMALESS"
+            }
+        });
+
+        let missing = !database_has_table(&before, WATERMARK_TABLE);
+        let existing = !database_has_table(&after, WATERMARK_TABLE);
+        assert!(migration_watermark_source(missing).0.contains("FROM pe"));
+        assert!(migration_watermark_source(missing)
+            .0
+            .contains("GROUP BY dbnum"));
+        assert!(migration_watermark_source(existing)
+            .0
+            .contains("FROM dbnum_info_table"));
     }
 
     #[test]
