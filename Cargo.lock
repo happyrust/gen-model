@@ -163,6 +163,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
+source = "git+https://github.com/happyrust/rs-core.git?rev=f9a66adb0099ef185e65f21825e0ecfb9204d5b9#f9a66adb0099ef185e65f21825e0ecfb9204d5b9"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -5899,6 +5900,7 @@ dependencies = [
 [[package]]
 name = "kicad-parser"
 version = "0.1.0"
+source = "git+https://github.com/happyrust/occt-rs.git?rev=1c44c6e122b42a9efaf5c241af05bc3098c01b79#1c44c6e122b42a9efaf5c241af05bc3098c01b79"
 dependencies = [
  "sexp",
  "thiserror 1.0.69",
@@ -7599,6 +7601,7 @@ dependencies = [
 [[package]]
 name = "opencascade"
 version = "0.2.0"
+source = "git+https://github.com/happyrust/occt-rs.git?rev=1c44c6e122b42a9efaf5c241af05bc3098c01b79#1c44c6e122b42a9efaf5c241af05bc3098c01b79"
 dependencies = [
  "anyhow",
  "cxx",
@@ -7611,6 +7614,7 @@ dependencies = [
 [[package]]
 name = "opencascade-sys"
 version = "0.2.0"
+source = "git+https://github.com/happyrust/occt-rs.git?rev=1c44c6e122b42a9efaf5c241af05bc3098c01b79#1c44c6e122b42a9efaf5c241af05bc3098c01b79"
 dependencies = [
  "cmake",
  "cxx",
@@ -7821,6 +7825,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
+source = "git+https://github.com/happyrust/aios-parse-pdms.git?rev=028ea1de93418bc3bac0fcb5aca6ec40776a7274#028ea1de93418bc3bac0fcb5aca6ec40776a7274"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -7855,7 +7860,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "smol_str 0.3.2",
- "thiserror 2.0.19",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -7922,6 +7927,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
+source = "git+https://github.com/happyrust/pdms-io.git?rev=b1fbe24d9f49c1699bc118591cf18bd4edc21d39#b1fbe24d9f49c1699bc118591cf18bd4edc21d39"
 dependencies = [
  "aios_core",
  "anyhow",

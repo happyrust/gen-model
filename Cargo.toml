@@ -68,11 +68,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { path = "vendor/aios-parse-pdms" }
-aios_core = { git = "https://gitee.com/happydpc/rs-core.git", rev = "5667b70bd0c8f1668e7c4a3cae50060bfc97b64a", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms.git", rev = "028ea1de93418bc3bac0fcb5aca6ec40776a7274" }
+aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "f9a66adb0099ef185e65f21825e0ecfb9204d5b9", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { path = "../pdms-io" }
+pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "b1fbe24d9f49c1699bc118591cf18bd4edc21d39" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -87,7 +87,7 @@ rfd = { version = "0.15.1", features = ["async-std"] }
 
 
 #造型功能，先在database测试
-opencascade = { path = "vendor/occt-rs/crates/opencascade", optional = true }
+opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
 indexmap = "2.2.6"
@@ -128,12 +128,9 @@ axum = { version = "0.8.9", features = ["ws"], optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
 
 [patch."https://gitee.com/happydpc/occt-rs.git"]
-opencascade = { path = "vendor/occt-rs/crates/opencascade" }
-opencascade-sys = { path = "vendor/occt-rs/crates/opencascade-sys" }
-kicad-parser = { path = "vendor/occt-rs/crates/kicad-parser" }
-
-[patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
-parse_pdms_db = { path = "vendor/aios-parse-pdms" }
+opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
+opencascade-sys = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
+kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
@@ -164,11 +161,6 @@ features = [
 #opt-level = 3
 #panic = 'abort'
 #codegen-units = 1
-
-# 临时：把 aios_core 指向带 get_world/get_world_refno「顺延到已解析设计库」修复的钉版拷贝
-# （= git rev 5667b70 源码 + 该 2 函数改动），用于验证 app 层 1112→8000 顺延。
-[patch."https://gitee.com/happydpc/rs-core.git"]
-aios_core = { path = "../../rs-core-pin" }
 
 # [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
 # parse_pdms_db = { path = "../aios-parse-pdms" }
