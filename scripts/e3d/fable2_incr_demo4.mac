@@ -1,0 +1,11 @@
+-- fable-gen-2 revalidation session 38: restore the zone (down 500mm).
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/fable2_incr_demo4.log" OVER
+=24384/22400
+Q POS
+BY D 500
+Q POS
+SAVEWORK 'fable-gen-2 revalidation: zone restored to origin'
+$P __FABLE2_DONE4__
+ALPHA LOG END
+FINISH

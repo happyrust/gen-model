@@ -18,8 +18,14 @@
 //! and ancestors changing in the same window all resolve correctly. Deletions
 //! resolve against the pre-update snapshot; moves join both the old and the new
 //! delivery unit or normal-granularity significant owner
-//! ([`build_unit_rollup`]). There is no whole-ZONE fallback; only changes that
-//! cannot resolve any legal generation root are counted in `no_generation`.
+//! ([`build_unit_rollup`]). There is no whole-ZONE **regeneration** fallback;
+//! only REGEN-class changes that cannot resolve any legal generation root are
+//! counted in `no_generation`. Pure-pose changes (`POS`/`ORI`) — including on
+//! ZONE/SITE containers — never enter the rollup at all: they ride the
+//! `ModelWorkAction::Transform` cheap path (subtree world transforms + AABB +
+//! spatial tree + room recalc), and the preview reports them as
+//! `transform_targets` with the same partition the execute plan uses
+//! (`model_update_plan::partition_operation_impacts`).
 //!
 //! 手动触发（[`AiosDBManager::enqueue_manual_update`]）只做「扫描 + 入队」，
 //! 执行由数据批次 worker（`batch_worker`）从队列取走（ADR-011 合流）：worker
@@ -2232,6 +2238,20 @@ pub struct SessionPreview {
     pub deleted: u32,
 }
 
+/// 一个纯位姿（`POS`/`ORI`）变更目标：执行阶段走 `transform` 便宜工作项
+/// （`update_world_transforms`：世界变换 + 包围盒 + 空间树 + 房间归属，
+/// 不重建网格、不整单重生成），因此**不出现**在交付单元 rollup 里。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransformTargetSummary {
+    /// PDMS `a/b` 引用串。
+    pub refno: String,
+    pub noun: String,
+    pub name: String,
+    /// 粗层级容器（WORL/SITE/ZONE）：`true` 时执行阶段会刷新其**整棵子树**
+    /// 的模型实例变换（容器自己没有生成根，但子树全部跟着动）。
+    pub container: bool,
+}
+
 /// Preview for one `dbnum` batch.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbnumPreview {
@@ -2258,8 +2278,17 @@ pub struct DbnumPreview {
     /// changes the `dbnum + sesno` execution boundary.
     #[serde(default)]
     pub zones: Vec<ZoneSummary>,
-    /// Model-affecting changes that could not resolve to any minimal delivery
-    /// unit (no BRAN/HANG/… ancestor): counted, warned, and NOT generated.
+    /// 纯位姿变更目标（执行口径，见 [`TransformTargetSummary`]）。与
+    /// `units`/`no_generation` 同源于执行计划的分区
+    /// （`model_update_plan::partition_operation_impacts`），保证预览说的就是
+    /// 执行要做的：位姿目标走 `Transform` 便宜路径，容器目标刷新整棵子树。
+    #[serde(default)]
+    pub transform_targets: Vec<TransformTargetSummary>,
+    /// **Regen-class** model-affecting changes that could not resolve to any
+    /// minimal delivery unit (no BRAN/HANG/… ancestor) and have no reverse
+    /// referrer: counted, warned, and NOT generated. Pure-pose changes are
+    /// never counted here — they ride the `Transform` path
+    /// (`transform_targets`) even on ZONE/SITE containers.
     pub no_generation: u32,
     /// File-identity anomaly, if any (rollback/duplicate/etc.).
     pub anomaly: Option<FileAnomaly>,
@@ -3144,10 +3173,25 @@ impl AiosDBManager {
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
                     if cand.db_type == "DESI" && !details.is_empty() {
+                        // 与执行计划同一分区（单一事实源）：纯位姿目标走 `Transform`
+                        // 便宜路径、不进 rollup——否则预览会把「执行阶段会刷新整棵
+                        // 子树的 ZONE/SITE 位移」错报成 no_generation「跳过模型生成」，
+                        // 又把「成员纯位姿变化」错报成整单 will_generate（执行阶段
+                        // 实际不整单重生成）。
+                        let partition =
+                            crate::data_interface::model_update_plan::partition_operation_impacts(
+                                &range_eles,
+                                &details,
+                            );
+                        let regen_details =
+                            crate::data_interface::model_update_plan::mask_details_to_regen(
+                                &details,
+                                &partition.regen_refnos,
+                            );
                         let rollup = resolve_unit_rollup(
                             cand.db_num,
                             &range_eles,
-                            &details,
+                            &regen_details,
                         )
                         .await?;
                         preview.units = rollup.units;
@@ -3157,6 +3201,8 @@ impl AiosDBManager {
                             &preview.units,
                         )
                         .await?;
+                        preview.transform_targets =
+                            build_transform_target_summaries(&partition.transform_refnos).await;
                         preview.no_generation = rollup.no_generation;
                         warnings.extend(rollup.warnings);
                     }
@@ -3568,6 +3614,35 @@ impl AiosDBManager {
 ///
 /// Returns the merged net-change details for reuse by the delivery-unit rollup
 /// so the preview never merges the window twice.
+/// 把执行分区里的纯位姿目标补上 noun/name（预览展示用）。
+///
+/// 位姿目标一定是**已存在元素的 Modified**（Add/Delete 在分类里恒为 Regen 类），
+/// 所以直接查当前库；查不到时保留空 noun/name，不让展示细节阻断预览。
+/// 结果按 refno 串排序，保证响应稳定可对拍。
+async fn build_transform_target_summaries(
+    transform_refnos: &std::collections::HashSet<RefnoEnum>,
+) -> Vec<TransformTargetSummary> {
+    let mut sorted: Vec<RefnoEnum> = transform_refnos.iter().copied().collect();
+    sorted.sort_by_key(|refno| refno.to_pdms_str());
+
+    let mut out = Vec::with_capacity(sorted.len());
+    for refno in sorted {
+        let (noun, name) = match aios_core::get_pe(refno).await {
+            Ok(Some(pe)) => (pe.noun.trim().to_ascii_uppercase(), pe.name),
+            _ => (String::new(), String::new()),
+        };
+        let container =
+            crate::data_interface::generation_root::is_coarse_hierarchy_noun(&noun);
+        out.push(TransformTargetSummary {
+            refno: refno.to_pdms_str(),
+            noun,
+            name,
+            container,
+        });
+    }
+    out
+}
+
 fn fill_change_summary(
     preview: &mut DbnumPreview,
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,

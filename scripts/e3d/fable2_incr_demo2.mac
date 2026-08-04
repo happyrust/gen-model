@@ -1,0 +1,20 @@
+-- fable-gen-2 incremental demo, session 2 of 2.
+-- Undo the zone-level move (container cascade turned out not to schedule any
+-- unit generation - kept session 35 as evidence), and make the visible change
+-- at component level instead: BEND 9 (24384/22456) up 300mm.
+--
+-- Launch: scripts\e3d\run_ams_c_entrymacro.bat "D:/work/plant-code/old/gen-model/scripts/e3d/fable2_incr_demo2.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/fable2_incr_demo2.log" OVER
+=24384/22400
+Q POS
+BY D 1000
+Q POS
+=24384/22456
+Q POS
+BY U 300
+Q POS
+SAVEWORK 'fable-gen-2 incremental demo 2: zone restored, BEND 9 +300mm up'
+$P __FABLE2_DONE2__
+ALPHA LOG END
+FINISH

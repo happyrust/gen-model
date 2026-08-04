@@ -155,6 +155,72 @@ fn discard_cancelled(refnos: &mut HashSet<RefnoEnum>, details: &[NetChangeDetail
     refnos.retain(|refno| !cancelled.contains(refno));
 }
 
+/// 一个窗口内操作的「重生成 / 纯位姿」分区。
+///
+/// **执行计划（[`build_model_update_plan`]）与手动更新预览
+/// （`manual_update::preview_one_dbnum`）共用的唯一分类事实源。** 两边曾经口径
+/// 分歧：预览把容器（ZONE/SITE）位姿变更计进 `no_generation` 并告警「跳过模型
+/// 生成」，而执行计划实际会为它建 [`ModelWorkAction::Transform`] 工作项——
+/// `update_world_transforms` 对整棵子树刷新世界变换 + 包围盒 + 空间树 + 房间
+/// 归属（2026-08-04 AMS 会话 35 实测）。预览必须与计划取同一分区，才不会把
+/// 「会被便宜路径处理的变更」报告成「被丢弃的变更」。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OperationImpactPartition {
+    /// 几何重建类变更：驱动交付单元 rollup（`RegenRoot` 工作项）。
+    pub regen_refnos: HashSet<RefnoEnum>,
+    /// 纯位姿（`POS`/`ORI`）变更：走 `Transform` 便宜路径，不进 rollup。
+    /// 同一元素同窗若还有重建类变更，重建吞并位姿（transform 集不含它）。
+    pub transform_refnos: HashSet<RefnoEnum>,
+}
+
+/// 按 [`classify_operation_impact`] 把窗口内操作分区，并剔除已取消的净变更。
+pub(crate) fn partition_operation_impacts(
+    range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+    details: &[NetChangeDetail],
+) -> OperationImpactPartition {
+    let mut regen_refnos = HashSet::new();
+    let mut transform_refnos = HashSet::new();
+    for op in range_eles.values().flatten() {
+        match classify_operation_impact(op) {
+            OperationImpact::Regen => {
+                regen_refnos.insert(RefnoEnum::from(op.refno));
+            }
+            OperationImpact::TransformOnly => {
+                transform_refnos.insert(RefnoEnum::from(op.refno));
+            }
+            OperationImpact::Skip => {}
+        }
+    }
+
+    discard_cancelled(&mut regen_refnos, details);
+    discard_cancelled(&mut transform_refnos, details);
+
+    // A geometry/root rebuild subsumes a transform-only update for the same
+    // element. Cancelled changes are excluded above by the net-change fold.
+    transform_refnos.retain(|refno| !regen_refnos.contains(refno));
+    OperationImpactPartition {
+        regen_refnos,
+        transform_refnos,
+    }
+}
+
+/// 交付单元 rollup 眼中的净变更：只有重建类变更保留 `model_affecting`。
+/// 纯位姿目标属于 `Transform` 工作项，不参与单元重生成，也不该被 rollup
+/// 计进 `no_generation`。
+pub(crate) fn mask_details_to_regen(
+    details: &[NetChangeDetail],
+    regen_refnos: &HashSet<RefnoEnum>,
+) -> Vec<NetChangeDetail> {
+    details
+        .iter()
+        .copied()
+        .map(|mut detail| {
+            detail.model_affecting &= regen_refnos.contains(&detail.refno);
+            detail
+        })
+        .collect()
+}
+
 fn restore_baseline_deletes(
     details: &mut [NetChangeDetail],
     baseline_existing: &HashSet<RefnoEnum>,
@@ -290,39 +356,16 @@ pub(crate) async fn build_model_update_plan(
             ));
         }
     }
-    let mut regen_refnos = HashSet::new();
-    let mut transform_refnos = HashSet::new();
-    for op in range_eles.values().flatten() {
-        match classify_operation_impact(op) {
-            OperationImpact::Regen => {
-                regen_refnos.insert(RefnoEnum::from(op.refno));
-            }
-            OperationImpact::TransformOnly => {
-                transform_refnos.insert(RefnoEnum::from(op.refno));
-            }
-            OperationImpact::Skip => {}
-        }
-    }
-
-    discard_cancelled(&mut regen_refnos, &details);
-    discard_cancelled(&mut transform_refnos, &details);
-
-    // A geometry/root rebuild subsumes a transform-only update for the same
-    // element. Cancelled changes are excluded below by the net-change fold.
-    transform_refnos.retain(|refno| !regen_refnos.contains(refno));
+    let OperationImpactPartition {
+        regen_refnos,
+        transform_refnos,
+    } = partition_operation_impacts(range_eles, &details);
     let deleted_refnos: HashSet<RefnoEnum> = details
         .iter()
         .filter(|detail| detail.net == NetOp::Deleted)
         .map(|detail| detail.refno)
         .collect();
-    let regen_details: Vec<NetChangeDetail> = details
-        .iter()
-        .copied()
-        .map(|mut detail| {
-            detail.model_affecting &= regen_refnos.contains(&detail.refno);
-            detail
-        })
-        .collect();
+    let regen_details = mask_details_to_regen(&details, &regen_refnos);
 
     let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details).await?;
     let units = rollup.units;
@@ -438,6 +481,94 @@ mod tests {
         );
 
         assert_eq!(refnos, HashSet::from([kept]));
+    }
+
+    /// 分区是预览与执行计划共用的唯一事实源（预览曾把容器位姿变更错报成
+    /// `no_generation`「跳过模型生成」，执行计划却会为它建 `Transform` 工作项）。
+    /// 位姿/重建归属、取消剔除、同元素重建吞并位姿，都钉在这里。
+    #[test]
+    fn partition_splits_pose_from_regen_and_respects_cancellation() {
+        let pose = aios_core::RefU64((1u64 << 32) | 11);
+        let geom = aios_core::RefU64((1u64 << 32) | 12);
+        let both = aios_core::RefU64((1u64 << 32) | 13);
+        let gone = aios_core::RefU64((1u64 << 32) | 14);
+
+        let range_eles = BTreeMap::from([
+            (
+                41,
+                vec![modified_op(pose, 41, "POS"), modified_op(geom, 41, "DIAM")],
+            ),
+            (
+                42,
+                vec![
+                    modified_op(both, 42, "POS"),
+                    modified_op(both, 42, "DIAM"),
+                    modified_op(gone, 42, "POS"),
+                ],
+            ),
+        ]);
+        let details = [
+            NetChangeDetail {
+                refno: RefnoEnum::from(pose),
+                net: NetOp::Modified,
+                model_affecting: true,
+            },
+            NetChangeDetail {
+                refno: RefnoEnum::from(geom),
+                net: NetOp::Modified,
+                model_affecting: true,
+            },
+            NetChangeDetail {
+                refno: RefnoEnum::from(both),
+                net: NetOp::Modified,
+                model_affecting: true,
+            },
+            NetChangeDetail {
+                refno: RefnoEnum::from(gone),
+                net: NetOp::Cancelled,
+                model_affecting: true,
+            },
+        ];
+
+        let partition = partition_operation_impacts(&range_eles, &details);
+        assert_eq!(
+            partition.transform_refnos,
+            HashSet::from([RefnoEnum::from(pose)]),
+            "纯位姿目标独立成集；被取消的（gone）与被重建吞并的（both）都不在"
+        );
+        assert_eq!(
+            partition.regen_refnos,
+            HashSet::from([RefnoEnum::from(geom), RefnoEnum::from(both)]),
+            "几何变更与「位姿+几何」都归重建"
+        );
+    }
+
+    /// rollup 的输入必须只保留重建类 model_affecting：纯位姿目标不参与单元重
+    /// 生成，也绝不能被 rollup 计进 `no_generation`（那是预览误报的根源）。
+    #[test]
+    fn mask_details_keeps_only_regen_class_model_affecting() {
+        let pose = RefnoEnum::from(aios_core::RefU64((1u64 << 32) | 21));
+        let geom = RefnoEnum::from(aios_core::RefU64((1u64 << 32) | 22));
+        let details = [
+            NetChangeDetail {
+                refno: pose,
+                net: NetOp::Modified,
+                model_affecting: true,
+            },
+            NetChangeDetail {
+                refno: geom,
+                net: NetOp::Modified,
+                model_affecting: true,
+            },
+        ];
+
+        let masked = mask_details_to_regen(&details, &HashSet::from([geom]));
+        assert_eq!(masked.len(), 2, "净变更一条不丢，只掩掉调度语义");
+        assert!(
+            !masked.iter().find(|d| d.refno == pose).unwrap().model_affecting,
+            "纯位姿目标在 rollup 眼中不再 model_affecting"
+        );
+        assert!(masked.iter().find(|d| d.refno == geom).unwrap().model_affecting);
     }
 
     #[test]

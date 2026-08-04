@@ -1,0 +1,13 @@
+-- fable-gen-2 revalidation session 37: ZONE up 500mm.
+-- Exercises the corrected preview (transform_targets + no_generation=0) and the
+-- execute-side Transform subtree refresh.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/fable2_incr_demo3.log" OVER
+=24384/22400
+Q POS
+BY U 500
+Q POS
+SAVEWORK 'fable-gen-2 revalidation: zone +500mm (preview alignment check)'
+$P __FABLE2_DONE3__
+ALPHA LOG END
+FINISH

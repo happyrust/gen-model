@@ -1,0 +1,21 @@
+-- fable-gen-2: simulate one incremental session on AMS design db 8000.
+-- Change 1: move ZONE /1RX03-LCT (24384/22400) up 1000mm  -> obvious 3D shift.
+-- Change 2: rename BRAN /M-IY-1R330-B (24384/22441)       -> visible tree change.
+-- One SAVEWORK = one new session on top of sesno 34.
+--
+-- Launch: scripts\e3d\run_ams_c_entrymacro.bat "D:/work/plant-code/old/gen-model/scripts/e3d/fable2_incr_demo.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/fable2_incr_demo.log" OVER
+=24384/22400
+Q NAME
+Q POS
+BY U 1000
+Q POS
+=24384/22441
+Q NAME
+NAME /M-IY-1R330-B-INCR
+Q NAME
+SAVEWORK 'fable-gen-2 incremental demo: ZONE +1000mm up, BRAN renamed'
+$P __FABLE2_DONE__
+ALPHA LOG END
+FINISH
