@@ -8,14 +8,18 @@
 //! Read semantics (ADR-001 §兼容迁移):
 //! 1. Prefer an already-established `applied_sesno`.
 //! 2. Otherwise inherit the legacy `dbnum_watermark.sesno`.
-//! 3. If the watermark table is absent — or exists but holds no rows yet (the
-//!    crash window between table creation and seeding) — during an in-place
-//!    compatibility upgrade, establish each dbnum from the max persisted `pe.sesno`.
+//! 3. Until the pe-based compatibility seeding has completed once on this
+//!    database (durable `queue_control:watermark_seed` marker; also covers a
+//!    missing or empty watermark table), establish each dbnum from the max
+//!    persisted `pe.sesno`. Fill-only, so reruns never overwrite established
+//!    watermarks.
 //! 4. Otherwise (only when a dedicated row is absent) fall back once to the max
 //!    `sesno` in `dbnum_info_table` for this `dbnum`.
 //!
 //! After the state is established (a scan / advance writes `applied_sesno`), reads
 //! use `applied_sesno` directly and never re-mix other sources.
+
+use std::collections::BTreeMap;
 
 use aios_core::SUL_DB;
 use serde::{Deserialize, Serialize};
@@ -275,17 +279,67 @@ fn database_has_table(info: &serde_json::Value, table: &str) -> bool {
         .is_some_and(|tables| tables.contains_key(table))
 }
 
-/// 空表与缺表同判。
+/// 播种完成标记：pe 兼容播种在此库上**完整**跑完过一次。
 ///
-/// 播种不是原子的：建表、pe 全表聚合（大库上很慢）、分块 UPSERT 之间任何一处
-/// 失败或被杀，都会留下一张**已存在但没有任何行**的水位表。下次启动若只凭
-/// 「表存在」就切到 `dbnum_info_table` 源，pe 源本要救的那类老库（info 缺失或
-/// 陈旧）就会以 0 水位被 `needs_initial_load` 判成首次导入，整库全量重解析。
+/// 分块 UPSERT 每 500 条一批；部分批次成功后死掉，表里已经有行，「空表判定」
+/// 就分不出「跑完了」与「跑了一半」。只有一个在全部批次成功之后才落库的标记
+/// 能把两者区分开。与暂停旗标（`queue_control:main`）同表不同行。
+const SEED_MARKER: &str = "queue_control:watermark_seed";
+
+/// 是否需要按当前数据库（pe）播种兼容水位。
 ///
-/// 空表里没有任何已建立水位需要保护，改走 pe 源没有代价：新库 pe 为空时播种
-/// 0 行；刚全量解析完的库，pe 与 info 给出的最大会话号一致。
-fn should_seed_from_current_database(watermark_table_missing: bool, watermark_rows: usize) -> bool {
-    watermark_table_missing || watermark_rows == 0
+/// 三个条件任意一个成立就（重）跑 pe 源：表缺失、表为空、播种完成标记缺失。
+/// 前两个是显而易见的初始/崩溃状态；第三个覆盖「分块 UPSERT 部分完成后死掉」
+/// 与「从没跑过带标记版本的老库」——两者从表内容上无法区分，只能统一补跑。
+/// 重跑无损：回填是 `??` 填空，绝不覆盖已建立水位，代价只是该库升级后的
+/// 第一次启动多一次 pe 全表聚合（有日志提示）。
+///
+/// 若不这样判，后果是：pe 源本要救的那类老库（`dbnum_info_table` 缺失或陈旧）
+/// 半途死一次后，下次启动切到 info 源，没播上的 dbnum 以 0 水位被
+/// `needs_initial_load` 判成首次导入，整库全量重解析。
+fn should_seed_from_current_database(
+    watermark_table_missing: bool,
+    watermark_rows: usize,
+    seed_marker_present: bool,
+) -> bool {
+    watermark_table_missing || watermark_rows == 0 || !seed_marker_present
+}
+
+/// 播种完整性告警（纯函数）：pe 与统计表的按 dbnum 元素计数对不上。
+///
+/// 正常基线路径有 `count(pe) == sum(info.count)` 的完整性校验，播种路径没有——
+/// 一个被历史全量解析中断留下洞的老库，pe 的最大会话号会接近文件尾，播种后
+/// 增量永远补不回中间的洞。这里不阻断（播种照旧），只把嫌疑喊出来让人处置。
+///
+/// `dbnum_info_table` 整体为空（更老的库没有这张表）时无从比对，返回一条
+/// 整体提示而不是逐库刷屏。
+fn seed_integrity_warnings(
+    pe_counts: &BTreeMap<u32, i64>,
+    info_counts: &BTreeMap<u32, i64>,
+) -> Vec<String> {
+    if pe_counts.is_empty() {
+        return Vec::new();
+    }
+    if info_counts.is_empty() {
+        return vec![
+            "播种完整性比对跳过：dbnum_info_table 无统计数据（更老的库没有这张表，属预期）"
+                .to_string(),
+        ];
+    }
+    pe_counts
+        .iter()
+        .filter(|(dbnum, pe_count)| {
+            info_counts.get(dbnum).copied().unwrap_or(0) != **pe_count
+        })
+        .map(|(dbnum, pe_count)| {
+            let info_count = info_counts.get(dbnum).copied().unwrap_or(0);
+            format!(
+                "播种完整性告警 dbnum={dbnum}：pe {pe_count} 条 != 统计 {info_count} 条；\
+                 该库可能带着历史解析中断留下的洞，播种仍按 pe 最大会话号建立基线；\
+                 如需彻底校验，请对该库重建基线（清空后走首次导入）"
+            )
+        })
+        .collect()
 }
 
 fn migration_watermark_source(seed_from_current_database: bool) -> (&'static str, &'static str) {
@@ -316,6 +370,73 @@ async fn count_watermark_rows() -> anyhow::Result<usize> {
     Ok(rows.first().map(|row| row.count).unwrap_or_default())
 }
 
+/// 播种完成标记是否存在（表/行缺失时 SELECT 返回空集，得 `false`）。
+async fn seed_marker_present() -> anyhow::Result<bool> {
+    #[derive(Deserialize)]
+    struct MarkerRow {
+        #[serde(default)]
+        dbnum_count: Option<i64>,
+    }
+    let mut response = SUL_DB
+        .query(format!("SELECT dbnum_count FROM {SEED_MARKER};"))
+        .await
+        .map_err(|e| anyhow::anyhow!("读取播种完成标记失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("读取播种完成标记语句失败: {e}"))?;
+    let rows: Vec<MarkerRow> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解码播种完成标记失败: {e}"))?;
+    Ok(!rows.is_empty())
+}
+
+/// 全部播种批次成功后落下完成标记。
+async fn write_seed_marker(source_name: &str, seeded_dbnums: usize) -> anyhow::Result<()> {
+    let sql = format!(
+        "UPSERT {SEED_MARKER} SET source = '{source_name}', \
+         dbnum_count = {seeded_dbnums}, completed_at = time::now();"
+    );
+    SUL_DB
+        .query(sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("写播种完成标记失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("写播种完成标记语句失败: {e}"))?;
+    Ok(())
+}
+
+/// 拉取播种完整性比对的两组按 dbnum 计数：pe 实际元素数、`dbnum_info_table` 统计和。
+///
+/// pe 侧是第二次全表扫描（与水位聚合分开发，互不影响已验证的水位语句）；
+/// 只在走 pe 源播种的启动里执行一次。
+async fn fetch_seed_integrity_counts()
+-> anyhow::Result<(BTreeMap<u32, i64>, BTreeMap<u32, i64>)> {
+    #[derive(Deserialize)]
+    struct DbnumCount {
+        dbnum: u32,
+        count: i64,
+    }
+    let mut response = SUL_DB
+        .query("SELECT dbnum, count() AS count FROM pe WHERE dbnum != NONE GROUP BY dbnum;")
+        .query(
+            "SELECT dbnum, math::sum(count) AS count FROM dbnum_info_table \
+             WHERE dbnum != NONE GROUP BY dbnum;",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("读取播种完整性计数失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("读取播种完整性计数语句失败: {e}"))?;
+    let pe_rows: Vec<DbnumCount> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解码 pe 元素计数失败: {e}"))?;
+    let info_rows: Vec<DbnumCount> = response
+        .take(1)
+        .map_err(|e| anyhow::anyhow!("解码 DBNUM 统计计数失败: {e}"))?;
+    Ok((
+        pe_rows.into_iter().map(|r| (r.dbnum, r.count)).collect(),
+        info_rows.into_iter().map(|r| (r.dbnum, r.count)).collect(),
+    ))
+}
+
 impl DbnumState {
     /// Ensure an old Surreal database can run the current incremental pipeline in place.
     ///
@@ -338,14 +459,15 @@ impl DbnumState {
         let database_info = database_info
             .ok_or_else(|| anyhow::anyhow!("数据库表信息为空，无法安全初始化增量状态"))?;
         let watermark_table_missing = !database_has_table(&database_info, WATERMARK_TABLE);
-        // 行数必须在建表与任何写入之前取：它与「表原本是否存在」共同决定播种源。
+        // 行数与完成标记必须在建表与任何写入之前取：它们共同决定播种源。
         let watermark_rows = if watermark_table_missing {
             0
         } else {
             count_watermark_rows().await?
         };
+        let marker_present = seed_marker_present().await?;
         let seed_from_current_database =
-            should_seed_from_current_database(watermark_table_missing, watermark_rows);
+            should_seed_from_current_database(watermark_table_missing, watermark_rows, marker_present);
 
         SUL_DB
             .query(INCREMENT_STATE_SCHEMA)
@@ -368,10 +490,27 @@ impl DbnumState {
         if seed_from_current_database {
             // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
             // 现场很容易把首次兼容启动当成卡死。
+            let reason = if watermark_table_missing {
+                "水位表缺失"
+            } else if watermark_rows == 0 {
+                "水位表为空"
+            } else {
+                "播种完成标记缺失（上次播种中断，或首次升级到带标记的版本）"
+            };
             println!(
-                "增量水位播种开始：水位表{}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…",
-                if watermark_table_missing { "缺失" } else { "为空" }
+                "增量水位播种开始：{reason}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…"
             );
+            // 完整性嫌疑要在播种前喊出来：告警不阻断，播种照旧。
+            match fetch_seed_integrity_counts().await {
+                Ok((pe_counts, info_counts)) => {
+                    for warning in seed_integrity_warnings(&pe_counts, &info_counts) {
+                        eprintln!("{warning}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("播种完整性比对失败（不阻断播种）: {error:#}");
+                }
+            }
         }
         let seed_started = std::time::Instant::now();
         let mut response = SUL_DB
@@ -404,6 +543,13 @@ impl DbnumState {
                 .map_err(|e| anyhow::anyhow!("固化{source_name}水位失败: {e}"))?
                 .check()
                 .map_err(|e| anyhow::anyhow!("固化{source_name}水位语句失败: {e}"))?;
+        }
+        if seed_from_current_database {
+            // 全部批次成功才落标记；写失败只提示不阻断——后果不过是下次启动
+            // 重跑一遍 fill-only 播种，幂等无损。
+            if let Err(error) = write_seed_marker(source_name, watermarks.len()).await {
+                eprintln!("写播种完成标记失败（下次启动会重新播种一遍，幂等无损）: {error:#}");
+            }
         }
         println!(
             "增量水位回填检查完成：源={source_name}，来源 {} 个 dbnum，耗时 {:.1} 秒",
@@ -690,8 +836,8 @@ mod tests {
 
         let missing = !database_has_table(&before, WATERMARK_TABLE);
         let existing = !database_has_table(&after, WATERMARK_TABLE);
-        let seed = should_seed_from_current_database(missing, 0);
-        let keep_legacy = should_seed_from_current_database(existing, 7);
+        let seed = should_seed_from_current_database(missing, 0, false);
+        let keep_legacy = should_seed_from_current_database(existing, 7, true);
         assert!(migration_watermark_source(seed).0.contains("FROM pe"));
         assert!(migration_watermark_source(seed).0.contains("GROUP BY dbnum"));
         assert!(migration_watermark_source(keep_legacy)
@@ -699,18 +845,51 @@ mod tests {
             .contains("FROM dbnum_info_table"));
     }
 
-    /// 崩溃窗口：上一轮在建表之后、播种完成之前死掉，留下**已存在但没有行**的
-    /// 水位表。只凭「表存在」切到 info 源，会把 pe 源本要救的老库判成首次导入。
-    /// 空表没有任何已建立水位需要保护，必须与缺表同判、继续走 pe 源。
+    /// 崩溃窗口：上一轮在建表之后、播种完成之前死掉。空表（一批都没写上）与
+    /// 半途表（部分批次写上了，行数 > 0 但完成标记没落）都必须继续走 pe 源；
+    /// 只有「有行且标记在」的库才算播种完成、回到 info 源快路径。
     #[test]
-    fn an_empty_watermark_table_still_seeds_from_current_pe_data() {
+    fn an_interrupted_seed_resumes_from_current_pe_data() {
         // 表缺失：无条件走 pe 源。
-        assert!(should_seed_from_current_database(true, 0));
-        // 表存在但一行都没有：崩溃窗口留下的空表，同样走 pe 源。
-        assert!(should_seed_from_current_database(false, 0));
-        // 已有任何水位行：保持旧口径，info 源只回填缺行。
-        assert!(!should_seed_from_current_database(false, 1));
-        assert!(!should_seed_from_current_database(false, 300));
+        assert!(should_seed_from_current_database(true, 0, false));
+        // 表存在但一行都没有：建表后第一批就没写上。
+        assert!(should_seed_from_current_database(false, 0, false));
+        // 部分批次写上了（行数 > 0）但完成标记缺失：继续补跑 pe 源。
+        assert!(should_seed_from_current_database(false, 500, false));
+        // 有行且标记在：播种完成，走 info 源快路径。
+        assert!(!should_seed_from_current_database(false, 1, true));
+        assert!(!should_seed_from_current_database(false, 300, true));
+        // 标记在但表被清空/重建：行数为 0 优先，重新播种（随后标记会被重写）。
+        assert!(should_seed_from_current_database(false, 0, true));
+        // 标记在但整张表被删了：缺表优先，重新播种。
+        assert!(should_seed_from_current_database(true, 0, true));
+    }
+
+    /// 完整性告警只喊「对不上」的库：pe 与统计一致的不出声；统计缺行按 0 比；
+    /// 统计表整体为空（更老的库没有它）时只给一条整体提示，不逐库刷屏。
+    #[test]
+    fn seed_integrity_flags_only_mismatched_dbnums() {
+        let pe = BTreeMap::from([(7997u32, 1000i64), (8000, 34), (8191, 169)]);
+        let info = BTreeMap::from([(7997u32, 1000i64), (8000, 30), (251047, 6)]);
+
+        let warnings = seed_integrity_warnings(&pe, &info);
+        // 7997 一致不告警；8000 计数不等、8191 统计缺行（按 0 比）要告警。
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("dbnum=8000")
+            && w.contains("pe 34 条")
+            && w.contains("统计 30 条")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("dbnum=8191") && w.contains("统计 0 条")));
+
+        // 统计表整体为空：一条整体提示。
+        let empty_info = BTreeMap::new();
+        let skipped = seed_integrity_warnings(&pe, &empty_info);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("跳过"));
+
+        // pe 为空（全新库）：什么都不喊。
+        assert!(seed_integrity_warnings(&BTreeMap::new(), &info).is_empty());
     }
 
     #[test]
