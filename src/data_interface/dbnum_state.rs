@@ -8,8 +8,9 @@
 //! Read semantics (ADR-001 §兼容迁移):
 //! 1. Prefer an already-established `applied_sesno`.
 //! 2. Otherwise inherit the legacy `dbnum_watermark.sesno`.
-//! 3. If the whole watermark table is absent during an in-place compatibility
-//!    upgrade, establish each dbnum from the max persisted `pe.sesno`.
+//! 3. If the watermark table is absent — or exists but holds no rows yet (the
+//!    crash window between table creation and seeding) — during an in-place
+//!    compatibility upgrade, establish each dbnum from the max persisted `pe.sesno`.
 //! 4. Otherwise (only when a dedicated row is absent) fall back once to the max
 //!    `sesno` in `dbnum_info_table` for this `dbnum`.
 //!
@@ -274,21 +275,56 @@ fn database_has_table(info: &serde_json::Value, table: &str) -> bool {
         .is_some_and(|tables| tables.contains_key(table))
 }
 
-fn migration_watermark_source(watermark_table_missing: bool) -> (&'static str, &'static str) {
-    if watermark_table_missing {
+/// 空表与缺表同判。
+///
+/// 播种不是原子的：建表、pe 全表聚合（大库上很慢）、分块 UPSERT 之间任何一处
+/// 失败或被杀，都会留下一张**已存在但没有任何行**的水位表。下次启动若只凭
+/// 「表存在」就切到 `dbnum_info_table` 源，pe 源本要救的那类老库（info 缺失或
+/// 陈旧）就会以 0 水位被 `needs_initial_load` 判成首次导入，整库全量重解析。
+///
+/// 空表里没有任何已建立水位需要保护，改走 pe 源没有代价：新库 pe 为空时播种
+/// 0 行；刚全量解析完的库，pe 与 info 给出的最大会话号一致。
+fn should_seed_from_current_database(watermark_table_missing: bool, watermark_rows: usize) -> bool {
+    watermark_table_missing || watermark_rows == 0
+}
+
+fn migration_watermark_source(seed_from_current_database: bool) -> (&'static str, &'static str) {
+    if seed_from_current_database {
         (CURRENT_DATABASE_WATERMARKS, "现有 PE 数据")
     } else {
         (LEGACY_INFO_WATERMARKS, "旧 DBNUM 统计")
     }
 }
 
+/// 现有水位行数（表不存在时 SurrealDB 对 SELECT 返回空集，得 0）。
+async fn count_watermark_rows() -> anyhow::Result<usize> {
+    #[derive(Deserialize)]
+    struct CountRow {
+        count: usize,
+    }
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT count() AS count FROM {WATERMARK_TABLE} GROUP ALL;"
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("统计增量水位行数失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("统计增量水位行数语句失败: {e}"))?;
+    let rows: Vec<CountRow> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解码增量水位行数失败: {e}"))?;
+    Ok(rows.first().map(|row| row.count).unwrap_or_default())
+}
+
 impl DbnumState {
     /// Ensure an old Surreal database can run the current incremental pipeline in place.
     ///
-    /// Table definitions are idempotent. When the watermark table itself is absent, this is
+    /// Table definitions are idempotent. When the watermark table is absent — or exists but
+    /// holds no rows yet (a previous run died between table creation and seeding) — this is
     /// an in-place compatibility upgrade: the durable baseline comes from the maximum `sesno`
-    /// already persisted in `pe` for each `dbnum`. Existing watermark tables keep their own
-    /// established/legacy watermarks and use `dbnum_info_table` only as the old fallback.
+    /// already persisted in `pe` for each `dbnum`. Watermark tables with established rows
+    /// keep their own established/legacy watermarks and use `dbnum_info_table` only as the
+    /// old fallback.
     pub async fn ensure_increment_state_storage() -> anyhow::Result<usize> {
         let mut response = SUL_DB
             .query("INFO FOR DB;")
@@ -302,6 +338,14 @@ impl DbnumState {
         let database_info = database_info
             .ok_or_else(|| anyhow::anyhow!("数据库表信息为空，无法安全初始化增量状态"))?;
         let watermark_table_missing = !database_has_table(&database_info, WATERMARK_TABLE);
+        // 行数必须在建表与任何写入之前取：它与「表原本是否存在」共同决定播种源。
+        let watermark_rows = if watermark_table_missing {
+            0
+        } else {
+            count_watermark_rows().await?
+        };
+        let seed_from_current_database =
+            should_seed_from_current_database(watermark_table_missing, watermark_rows);
 
         SUL_DB
             .query(INCREMENT_STATE_SCHEMA)
@@ -320,7 +364,16 @@ impl DbnumState {
             .check()
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
 
-        let (source_sql, source_name) = migration_watermark_source(watermark_table_missing);
+        let (source_sql, source_name) = migration_watermark_source(seed_from_current_database);
+        if seed_from_current_database {
+            // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
+            // 现场很容易把首次兼容启动当成卡死。
+            println!(
+                "增量水位播种开始：水位表{}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…",
+                if watermark_table_missing { "缺失" } else { "为空" }
+            );
+        }
+        let seed_started = std::time::Instant::now();
         let mut response = SUL_DB
             .query(source_sql)
             .await
@@ -352,6 +405,11 @@ impl DbnumState {
                 .check()
                 .map_err(|e| anyhow::anyhow!("固化{source_name}水位语句失败: {e}"))?;
         }
+        println!(
+            "增量水位回填检查完成：源={source_name}，来源 {} 个 dbnum，耗时 {:.1} 秒",
+            watermarks.len(),
+            seed_started.elapsed().as_secs_f32()
+        );
         Ok(watermarks.len())
     }
 
@@ -632,13 +690,27 @@ mod tests {
 
         let missing = !database_has_table(&before, WATERMARK_TABLE);
         let existing = !database_has_table(&after, WATERMARK_TABLE);
-        assert!(migration_watermark_source(missing).0.contains("FROM pe"));
-        assert!(migration_watermark_source(missing)
-            .0
-            .contains("GROUP BY dbnum"));
-        assert!(migration_watermark_source(existing)
+        let seed = should_seed_from_current_database(missing, 0);
+        let keep_legacy = should_seed_from_current_database(existing, 7);
+        assert!(migration_watermark_source(seed).0.contains("FROM pe"));
+        assert!(migration_watermark_source(seed).0.contains("GROUP BY dbnum"));
+        assert!(migration_watermark_source(keep_legacy)
             .0
             .contains("FROM dbnum_info_table"));
+    }
+
+    /// 崩溃窗口：上一轮在建表之后、播种完成之前死掉，留下**已存在但没有行**的
+    /// 水位表。只凭「表存在」切到 info 源，会把 pe 源本要救的老库判成首次导入。
+    /// 空表没有任何已建立水位需要保护，必须与缺表同判、继续走 pe 源。
+    #[test]
+    fn an_empty_watermark_table_still_seeds_from_current_pe_data() {
+        // 表缺失：无条件走 pe 源。
+        assert!(should_seed_from_current_database(true, 0));
+        // 表存在但一行都没有：崩溃窗口留下的空表，同样走 pe 源。
+        assert!(should_seed_from_current_database(false, 0));
+        // 已有任何水位行：保持旧口径，info 源只回填缺行。
+        assert!(!should_seed_from_current_database(false, 1));
+        assert!(!should_seed_from_current_database(false, 300));
     }
 
     #[test]
