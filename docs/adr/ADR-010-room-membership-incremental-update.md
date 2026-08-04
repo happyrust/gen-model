@@ -112,6 +112,9 @@
      写入层带出一个「实体确实变了」的信号，而不是在这里放宽成全量入队。
 - 排序落地时查出 **D11**：hd / hh 两份 surql 无条件按文件名顺序加载，`_hh` 永远覆盖
   `_hd`，与 Rust 侧编译的 `project_hd` 错位。本轮两份都改了排序，但门控未修。
+  **（2026-08-04 已修：`run_cli` 在 `define_common_functions` 之后按 `project_hd`
+  feature 重放 hd 版 `fn::room_code`，把覆盖矫正回来；`project_hh` 构建无需处理。
+  见 `2026-08-04_room-incremental-audit-and-gap-closure.md`。）**
 - 2026-07-28 增补（复审后修复：AABB 刷新加固、落盘时机、吸收封闭性、D10）——
   - **AABB 刷新加固**：`update_inst_relate_aabbs_by_refnos` 是增量→房间链路的唯一
     交汇点，此前健壮性远低于两侧：两处 `.unwrap()` 在传输错误上 panic（生产日志
@@ -185,8 +188,11 @@
     `deserialize_from_bin_file` 内部的 `bincode .unwrap()` 改为 `?`——损坏文件
     此前会在启动路径 panic 成 crash loop（`load_aabb_tree` 的 `unwrap_or_default`
     兜不住 panic）；`load_aabb_tree` 对缺失/损坏打告警而非静默空树。
-    **路径带项目名仍未做**（cwd 相对硬编码：换目录静默空树、多项目共用 cwd
-    互相覆盖），记为后续项。
+    ~~**路径带项目名仍未做**（cwd 相对硬编码：换目录静默空树、多项目共用 cwd
+    互相覆盖），记为后续项。~~ **已做（2026-08-04）**：rs-core 的读写硬编码裸文件名
+    且反向索引重建私有，采用搬运语义——加载前把 `accel_tree_{project}.bin` 放到
+    裸名上（只有裸文件则首次迁移），落盘成功后归档回项目名，归档失败上抛由脏位
+    驱动重试。已知限制：多项目**并发**共用同一 cwd 时裸文件仍是竞态窗口。
   - **纯位姿移动不再覆坏管段变换**：`update_world_transforms` 的子树收集此前
     把管段行一并捞进来，用**元素**的世界变换覆盖管段行的「单位圆柱 → 世界管段」
     缩放矩阵，管段会被画成分支原点处的单位圆柱。现按 out 排除
@@ -417,16 +423,20 @@ AABB 八顶点，跨界的落第二轮逐点兜底且被两室同时收录。增
      两种键名均生效。
 - 第 5 条给 `room_relate` 加了两个字段，旧数据没有。全量重建一次即可补齐；
   在补齐之前 `ORDER BY` 会退化为按 `room_num` 排序，仍然是确定的。
-- **D12（已知缺口，2026-07-28 记载，本轮不实现）**：非几何的房间结构变更没有任何
-  触发器。房间节点改名（FRMW/SBFR 的 NAME 变更）与 PANE 挂靠层级变化（OWNER 变更）
-  都不改变任何 AABB → 第 4 条的触发源不点火 → `room_relate.room_num` 与
-  `room_panel_relate` 保持陈旧，直到下次启动的全量重建。第 4 条原有的两个例外
-  （删除、形状变而包围盒不变）都没覆盖这一类。20+ 材料表 surql 经 `fn::room_code`
-  直接读 room_num，陈旧期间房间号列错误；当前以「启动时全量重建会自愈」为兜底，
-  属最终一致的已知代价。
-  触发设计草图（后续轮次实现）：在 `build_model_update_plan` 追加两条规则——
-  ① 房间类 noun（命中 `room_key_word` 关键字 + 名称正则的 FRMW/SBFR）的 NAME 属性
-  变更 → 为其名下全部 PANE 入队 `RoomRecalcPanel`。需要在计划层引入「房间→面板」
-  查询（目前那一层不碰房间概念），这是本项未随手实现的原因；
-  ② PANE 的 OWNER 变更（搬迁语义，ADR-009 口径）→ 为该 PANE 自身入队
-  `RoomRecalcPanel`（新旧两个属主对应的房间都会经该面板的整间分支收敛）。
+- **D12（已知缺口，2026-07-28 记载）→ 已实现（2026-08-04）**：非几何的房间结构
+  变更此前没有任何触发器。房间节点改名（FRMW/SBFR 的 NAME 变更）与 PANE 挂靠层级
+  变化（OWNER 变更）都不改变任何 AABB → 第 4 条的触发源不点火 → `room_relate.room_num`
+  与 `room_panel_relate` 保持陈旧，直到下次启动的全量重建；20+ 材料表 surql 经
+  `fn::room_code` 直接读 room_num，陈旧期间房间号列错误。
+  草图中的两条规则已按原样落进 `build_model_update_plan`
+  （`collect_room_structural_triggers` + `panels_under_rooms`，见
+  `2026-08-04_room-incremental-audit-and-gap-closure.md`）：
+  ① FRMW/SBFR 的 NAME 变更且**新旧任一**名字命中 `room_key_word`（改进房间与改出
+  房间都要重算；名称正则的合规校验仍归重算路径，计划层不重复）→ 名下全部 PANE
+  （子 + 孙两层）入队 `RoomRecalcPanel`；关键字未配置时不触发。
+  ② PANE 的 OWNER 变更（搬迁语义，ADR-009 口径，复用 `owner_change`）→ 为该 PANE
+  自身入队 `RoomRecalcPanel`（新旧两个属主对应的房间都会经该面板的整间分支收敛）。
+  面板枚举失败降级为告警不掐数据窗口——启动全量重建仍是兜底。
+  live 验证：`live_room_structural_triggers_enqueue_panel_recalc`（一次性内存实例
+  实跑，含真库子 + 孙面板查询），夹具 pe 行随之补齐 `name` 字段（计划层 OWNER 图
+  加载的非 Option 坑，与 `pe.owner` / `generic` 同构）。
