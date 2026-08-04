@@ -219,7 +219,12 @@ mod pe_stat_row_tests {
     }
 }
 
-pub(crate) async fn rebuild_dbnum_info_from_pe(
+/// 从 pe 全量重算一个 dbnum 的 `dbnum_info_table` 统计（DELETE + 按 ref0 重建）。
+///
+/// 事件只做增量维护：漏记（如事件曾被坏版本覆盖）造成的 count 缺口不会自愈，
+/// 这里是唯一的纠偏入口。基线路径（`initialize_dbnum_baseline`）在统计不齐时
+/// 自动调用；已有基线的库用 `rebuild_dbnum_stats` bin 手动触发。
+pub async fn rebuild_dbnum_info_from_pe(
     dbnum: u32,
     file_name: &str,
     db_type: &str,
@@ -542,41 +547,45 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
     "#;
 
     SUL_DB.query(event_sql).await?;
+
+    // 定义后立即读回自证。这个事件有过不兼容的同名实现（rs-core 里对 string 形态
+    // pe id 用 array::at 解析的版本，$ref_0 恒为 NONE，统计维护整体静默断供），
+    // 谁最后启动谁 OVERWRITE。多服务混跑同一个库时，这里的告警是唯一能在启动
+    // 日志里看见「事件被换成坏版」的地方。
+    match verify_dbnum_event_definition().await {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!(
+                "update_dbnum_event 事件体校验失败：库里生效的定义不含 string::split 指纹，\
+                 dbnum_info_table 统计维护可能已静默失效（多半是别的进程用旧实现覆盖了它）"
+            );
+        }
+        Err(error) => {
+            eprintln!("update_dbnum_event 事件体读回失败（不阻断启动）: {error:#}");
+        }
+    }
     Ok(())
 }
 
-/// 定义dbnum_info_table的更新事件, pe 的id 为array的情况
-pub async fn define_dbnum_event_array_id() -> anyhow::Result<()> {
-    let event_sql = r#"
-DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
-            -- 获取当前记录的 dbnum
-            LET $dbnum = $value.dbnum;
-            LET $id = record::id($value.id);
-            let $ref_0 = array::at($id, 0);
-            let $ref_1 = array::at($id, 1);
-            let $is_delete = $value.deleted and $event = "UPDATE";
-            let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
-            -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
-            IF $event = "CREATE"   {
-                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
-                    dbnum: $dbnum,
-                    count: count?:0 + 1,
-                    sesno: $max_sesno,
-                    max_ref1: $ref_1
-                };
-            } ELSE IF $event = "DELETE" OR $is_delete  {
-                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
-                    count: count - 1,
-                    sesno: $max_sesno,
-                    max_ref1: $ref_1
-                }
-                WHERE count > 0;
-            };
-        };
-    "#;
-
-    SUL_DB.query(event_sql).await?;
-    Ok(())
+/// 读回 pe 表上 `update_dbnum_event` 的实际定义，校验是好版（string::split 解析
+/// string 形态 id）。返回 `false` 表示事件缺失或被不兼容实现覆盖。
+pub async fn verify_dbnum_event_definition() -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query("INFO FOR TABLE pe;")
+        .await
+        .map_err(|e| anyhow::anyhow!("读取 pe 表定义失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("读取 pe 表定义语句失败: {e}"))?;
+    let info: Option<serde_json::Value> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解码 pe 表定义失败: {e}"))?;
+    let body = info
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|events| events.get("update_dbnum_event"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Ok(body.contains("string::split"))
 }
 
 #[cfg(feature = "sql")]
@@ -636,7 +645,11 @@ pub async fn sync_total_async_threaded(
 ) -> anyhow::Result<HashMap<u32, usize>> {
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
-    let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
+    // 与监控目录同一套解析（认 project_dirs 里的绝对 / UNC 路径），否则共享盘上的
+    // 项目在解析这一步就会被拼成一个不存在的目录。
+    let project_dir =
+        crate::data_interface::project_paths::resolve_project_root(db_option, project)
+            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?; // 创建一个Path对象，表示项目目录的路径
     dbg!(&project_dir);
 
     if !Path::new(&project_dir).exists() {
