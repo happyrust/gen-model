@@ -1,0 +1,12 @@
+-- Controlled DataOnly increment for hierarchy/plant-ui verification.
+-- Target: DAMP 24381/100838, original name /1CUP201VAF.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/plant-ui-increment/hierarchy_name_apply.log" OVER
+=24381/100838
+Q CE
+NAME /1CUP201VAF_CDX
+Q CE
+SAVEWORK 'CODEX hierarchy NAME apply'
+UNCLAIM ALL
+ALPHA LOG END
+QUIT

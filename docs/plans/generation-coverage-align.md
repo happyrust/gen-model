@@ -26,7 +26,13 @@ NounClassifier + 守护（名单 ⊆ flag）+ 缺口清单 §1-5 + noun_flags.js
 - 派生名单接口：`primitive_nouns()/extrusion_nouns()/geomset_nouns()/negative_nouns()`（已有前三个）。
 - 与现有硬编码名单交叉核对（守护已覆盖），产出差异供审。
 
-### 阶段 2 · catch-all 告警（零行为变化，先看不改）
+### 阶段 2 · catch-all 告警（零行为变化，先看不改）  ✅ 已完成（2026-07-25 · gen-model-4）
+
+> **已落地**：`src/fast_model/coverage_audit.rs`——`audit_segment(target_refnos, skip_exist)` 挂在 `gen_geos_data` 每个分段的四桶之后，用**差集 noun 名单**做一次子树查询，命中元素再按 noun 聚合（`select noun, count() ... group by noun`，分块 2000），`log::warn!` 逐段上报；`report_and_reset()` 在生成收尾打印本次累计「noun → 命中元素数」。查询/统计任一失败只降级为日志，绝不影响生成。
+> **单一事实源**：差集口径下沉到 `parse_pdms_db::dict::{routing_coverage_nouns, uncovered_geometry_nouns}`，`export_stage3_gap_report` 与运行期观测共用，新增守护测试 `uncovered_geometry_nouns_match_the_gap_report_snapshot`（覆盖并集 122 / 未覆盖 291，任一漂移即失败）。
+> **开关**：默认 Off，`AIOS_GEOM_COVERAGE_AUDIT=on`（或 `1`/`true`）打开；关掉时零查询、零开销、行为与改动前一致。
+> **待跑**：真实项目（AvevaMarineSample dbnum 7997 / 8000）开观测跑一遍全量生成，把实际命中的名单外 noun 记入阶段 5 的动态坐实。
+
 - `gen_geos_data` 子树查询后，对"dict 认几何(primitive∪geomset∪extrusion) 但不落任何桶（非 prim/loop/有SPRE/BRAN·HANG子）"的 noun → `warn!` 日志 + 计数上报。
 - 目的：把"静默漏"变可见，收集真实运行的"名单外几何 noun"实证（轻量动态，不改生成结果）。
 

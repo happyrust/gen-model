@@ -132,7 +132,10 @@ mod tests {
             Vec3::new(900.0, 400.0, 400.0),
             Vec3::new(1100.0, 600.0, 600.0),
         );
-        assert_eq!(classify_by_aabb(&room, &straddle), AabbVerdict::NeedsPointCheck);
+        assert_eq!(
+            classify_by_aabb(&room, &straddle),
+            AabbVerdict::NeedsPointCheck
+        );
 
         assert!(element_in_panel(&room, &straddle, || {
             vec![Point::new(950.0, 500.0, 500.0)]

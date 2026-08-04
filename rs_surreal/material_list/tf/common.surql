@@ -114,7 +114,7 @@ DEFINE FUNCTION fn::get_ipara($pe:record) {
 // 获取room
 remove function fn::get_room_number;
 DEFINE FUNCTION fn::get_room_number($pe:record) {
-    return ($pe<-room_relate.room_num)[0];
+    return fn::room_num_of($pe);
 };
 
 remove function fn::vec3_distance;

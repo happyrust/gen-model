@@ -1,0 +1,51 @@
+-- Export the full element-type -> ordered attribute layout from the live E3D
+-- dictionary. Consumed offline by gen-model to parse element binaries.
+--
+-- Runs as AVEVA_DESIGN_ENTRYMACRO, i.e. with no command window to read, so every
+-- step is journalled to noun_layout_export.log and the failing step is the last
+-- line written.
+
+!out = 'D:/work/plant-code/old/gen-model/output'
+!log = object FILE(!out + '/noun_layout_export.log')
+!lines = ARRAY()
+!lines.append('step1 entry macro running')
+!log.writeFile('OVERWRITE', !lines)
+
+!ok = TRUE
+
+import 'GenModelNounLayout'
+handle any
+    !ok = FALSE
+    !lines.append('FAIL import GenModelNounLayout')
+endhandle
+if (!ok) then
+    !lines.append('step2 assembly imported')
+endif
+!log.writeFile('OVERWRITE', !lines)
+
+if (!ok) then
+    !e = object NOUNLAYOUTEXPORT()
+    handle any
+        !ok = FALSE
+        !lines.append('FAIL object NOUNLAYOUTEXPORT')
+    endhandle
+endif
+if (!ok) then
+    !lines.append('step3 pml.net object created')
+endif
+!log.writeFile('OVERWRITE', !lines)
+
+if (!ok) then
+    !res = !e.Export(!out + '/noun_layout.json')
+    handle any
+        !ok = FALSE
+        !lines.append('FAIL Export() threw')
+    endhandle
+endif
+if (!ok) then
+    !lines.append('step4 ' + !res)
+endif
+!lines.append('done')
+!log.writeFile('OVERWRITE', !lines)
+
+$P NOUNLAYOUT-RESULT $!res

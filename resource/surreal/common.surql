@@ -608,3 +608,24 @@ define function fn::get_flan_bolt_list($pe:record) {
         'mat':$mat
     }
 };
+REMOVE FUNCTION fn::room_relate_of;
+-- 取一个构件"最强"的那条房间归属边。
+--
+-- 数据模型允许一个件同时属于多间房（横跨两室的桶形件就是），而消费方只取一条。
+-- 没有排序键时取到哪条由存储顺序决定：全量重建时碰巧稳定，一旦改成增量、边删了
+-- 再写回去就会变，表现为材料表房间号无规律跳动且无任何日志（ADR-010 §5 / 缺陷 D7）。
+--
+-- 排序键由 save_room_relate 写入：inside_count 是元素 AABB 八顶点落在面板内的个数，
+-- center_dist 是元素中心到面板中心的距离。第三级 room_num 保证全序，
+-- 使旧数据（缺前两个字段）也有确定结果。
+DEFINE FUNCTION fn::room_relate_of($pe: record) {
+    return (select * from $pe<-room_relate
+            order by inside_count desc, center_dist asc, room_num asc
+            limit 1)[0];
+};
+
+REMOVE FUNCTION fn::room_num_of;
+-- fn::room_relate_of 的房间号快捷方式。
+DEFINE FUNCTION fn::room_num_of($pe: record) {
+    return fn::room_relate_of($pe).room_num;
+};

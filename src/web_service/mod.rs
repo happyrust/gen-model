@@ -48,10 +48,8 @@ impl ServiceIdentity {
         mdb: Option<&str>,
         namespace: Option<&str>,
     ) -> Result<(), ApiError> {
-        let requested_mdb = mdb.map(|value| {
-            aios_core::helper::to_e3d_name(value.trim())
-                .into_owned()
-        });
+        let requested_mdb =
+            mdb.map(|value| aios_core::helper::to_e3d_name(value.trim()).into_owned());
         for (label, requested, expected) in [
             ("project", project.map(str::trim), self.project.as_str()),
             ("mdb", requested_mdb.as_deref(), self.mdb.as_str()),
@@ -83,6 +81,9 @@ pub struct AppState {
     pub tasks: &'static TaskRegistry,
     pub identity: ServiceIdentity,
     pub sync_live: bool,
+    /// 启动时资源目录是否存在（spec §4.1 的 `static_assets`）。缺失不是故障：
+    /// `/assets` 返回 404，REST/WS 照常，这个旗子让 `/health` 能把降级说出来。
+    pub static_assets: bool,
 }
 
 /// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
@@ -200,6 +201,27 @@ pub async fn serve(
     cors_origins: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let db_option = aios_core::get_db_option();
+    let ui_root = std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into());
+    let asset_root = resolve_asset_root();
+    // 静态前端资源是可选能力（spec §7）：目录缺失只告警一次，静态路径返回 404，
+    // REST/WS 照常启动，不得因此终止服务。这里曾经是 `anyhow::bail!`，而
+    // `serve_if_configured` 被 spawn 包着、错误只有一句 stderr——真实症状是队列在跑、
+    // 数据在进，HTTP 端口从头到尾没起来，界面只会说「读不到任务队列」。
+    let static_assets = asset_root.is_dir();
+    if static_assets {
+        println!(
+            "Web 资产目录：{}（其内容通过 /assets 公开）",
+            asset_root.display()
+        );
+    } else {
+        let message = format!(
+            "Web 资产目录不存在或不是目录：{}（/assets 将返回 404，REST/WS 照常启动；\
+             可用 PLANT_ASSET_ROOT 指定）",
+            asset_root.display()
+        );
+        log::warn!("{message}");
+        println!("[warn] {message}");
+    }
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
@@ -209,26 +231,18 @@ pub async fn serve(
             db_option.surreal_ns.clone(),
         ),
         sync_live: db_option.sync_live.unwrap_or(false),
+        static_assets,
     };
-    let ui_root =
-        std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into());
-    let asset_root = resolve_asset_root();
-    if !asset_root.is_dir() {
-        anyhow::bail!(
-            "PLANT_ASSET_ROOT 不存在或不是目录：{}",
-            asset_root.display()
-        );
-    }
-    println!(
-        "Web 资产目录：{}（其内容通过 /assets 公开）",
-        asset_root.display()
-    );
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
         .route("/api/v1/update/preview", post(handlers::update_preview))
         .route("/api/v1/update/execute", post(handlers::update_execute))
         .route("/api/v1/update/pending-units", get(handlers::pending_units))
+        .route(
+            "/api/v1/update/pending-units/retry",
+            post(handlers::pending_units_retry),
+        )
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
@@ -307,12 +321,33 @@ mod tests {
         assert!(identity.validate(None, None, None).is_ok());
         assert!(
             identity
-                .validate(
-                    Some("AvevaMarineSample"),
-                    Some("ALL"),
-                    Some("1516")
-                )
+                .validate(Some("AvevaMarineSample"), Some("ALL"), Some("1516"))
                 .is_ok()
+        );
+    }
+
+    /// 静态资源缺失只降级不终止（spec §7 / 2026-07-30 审计 A1）。
+    ///
+    /// `serve_if_configured` 被 spawn 包着、错误只有一句 stderr——这里一 bail，
+    /// 真实症状就是队列在跑、HTTP 端口从头到尾没起来，而界面只说「读不到任务队列」。
+    #[test]
+    fn a_missing_asset_dir_degrades_instead_of_killing_the_service() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split_once("pub async fn serve(")
+            .expect("serve 必须存在")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("serve 之后是 resolve_asset_root")
+            .0;
+        // 按调用点形态（带左括号）断言，避免撞上讲历史的注释文本。
+        assert!(
+            !body.contains("bail!("),
+            "serve 不得因资源目录缺失终止服务，REST/WS 必须照常启动"
+        );
+        assert!(
+            body.contains("static_assets"),
+            "降级必须通过 static_assets 旗子暴露给 /health"
         );
     }
 

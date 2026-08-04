@@ -1,4 +1,3 @@
-use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::pdms_inst::save_instance_data;
@@ -148,27 +147,22 @@ impl DbModelInstRefnos {
     }
 }
 
-/// 生成几何体数据
+/// 生成几何体数据。
+///
+/// 两种模式，由 `db_option.debug_root_refnos` 二选一：设了就只生成那批生成根
+/// （`ModelRefreshPolicy::generate_roots` 唯一的入口，增量重算走这条），没设就整库全量。
 ///
 /// # 参数
-/// * `manual_refnos` - 手动指定的引用号列表
 /// * `db_option` - 数据库选项配置
-/// * `incr_updates` - 增量更新日志，用于增量生成几何体数据
 ///
 /// # 返回值
 /// * `anyhow::Result<bool>` - 返回生成结果，成功返回true，失败返回错误
-pub async fn gen_all_geos_data(
-    manual_refnos: Vec<RefnoEnum>,
-    db_option: &DbOption,
-    incr_updates: Option<IncrGeoUpdateLog>,
-) -> anyhow::Result<bool> {
+pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
     const CHUNK_SIZE: usize = 100;
-    let is_incr_update = incr_updates.is_some();
-    let has_manual_refnos = !manual_refnos.is_empty();
-    let has_debug = db_option.debug_root_refnos.is_some();
+    // 定向生成（`debug_root_refnos` 选定的一批生成根）与整库全量生成的分界。
+    let targeted = db_option.debug_root_refnos.is_some();
     let time = Instant::now();
-    dbg!(&has_debug);
-    if is_incr_update || has_manual_refnos || has_debug {
+    if targeted {
         let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         let insert_task = tokio::task::spawn(async move {
@@ -177,19 +171,15 @@ pub async fn gen_all_geos_data(
                 // 不再 unwrap：写入失败必须向上传播，让 ModelRefreshPolicy::generate_roots
                 // 返回 Err；model_update_pending 会把根任务标记为 failed 并在后续 drain
                 // 时重试（增量删旧/加新的错误传播链关键一环）。
-                save_instance_data(&shape_insts, has_debug).await?;
+                // replace_exist = true：定向重生成必须先删旧实例再写新的，否则改小的
+                // 几何会留着上一版的行。
+                save_instance_data(&shape_insts, true).await?;
                 println!("Insert manual shape insts: {}", inst_cnt);
             }
             anyhow::Ok(())
         });
-        let generation_result = capture_generation(gen_geos_data(
-            None,
-            manual_refnos.clone(),
-            db_option,
-            incr_updates.clone(),
-            sender.clone(),
-        ))
-        .await;
+        let generation_result =
+            capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
         let target_root_refnos =
             finish_shape_writer(generation_result, sender, insert_task).await?;
         if db_option.gen_mesh {
@@ -257,10 +247,22 @@ pub async fn gen_all_geos_data(
             }
         }
     }
-    {
-        let read = GLOBAL_AABB_TREE.read().await;
-        println!("GLOBAL_AABB_TREE: {:?}", read.tree.size());
-        GLOBAL_AABB_TREE.read().await.serialize_to_bin_file()?;
+    println!(
+        "GLOBAL_AABB_TREE: {:?}",
+        GLOBAL_AABB_TREE.read().await.tree.size()
+    );
+    // 只有全量生成无条件写回 `accel_tree.bin`——它本来就覆盖了此前的一切增量变更。
+    //
+    // 定向生成一概不写。这个文件现在约 21 MB，而定向路径一次可能只改了一个 BOX 的
+    // XLEN；合批失败回退逐根时更是每个根写一遍。增量路径动内存树的两处（AABB 刷新、
+    // 删除清理）都会 `mark_aabb_tree_dirty`，由 worker 空闲轮的
+    // `persist_aabb_tree_if_dirty` 每轮最多落一次盘（ADR-010 落盘时机、ADR-012 背景）。
+    //
+    // 顺带修掉一处可靠性问题：这里原先是 `?`，磁盘写失败会让一次**已经成功**的生成
+    // 返回 Err，于是 `model_update_pending` 把那个根标成 failed 并计进重试次数——重试
+    // 重跑的还是同一份已经生成好的几何，而磁盘问题一点没被解决。
+    if !targeted {
+        crate::fast_model::aabb_tree::persist_aabb_tree().await?;
     }
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
 
@@ -582,51 +584,24 @@ pub async fn gen_geos_data(
     dbno: Option<u32>,
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
-    incr_updates: Option<IncrGeoUpdateLog>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
-    // let skip_exist = !db_option.is_replace_mesh();
     let mut all_handles = FuturesUnordered::new();
-    // dbg!(&incr_updates);
     const CHUNK_SIZE: usize = 100;
-    //根据需要拉入数据到本地数据库也可以
-    let is_incr_update = incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
-    //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
     let debug_root_refnos = db_option.get_all_debug_refnos().await;
     let has_debug = !debug_root_refnos.is_empty();
     let skip_exist = !(db_option.is_replace_mesh() || has_manual_refnos || has_debug);
-    // dbg!(&debug_root_refnos);
-    if !is_incr_update
-        //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
-        && (db_option.debug_root_refnos.is_some() && debug_root_refnos.is_empty())
-        && (!has_manual_refnos)
-    {
-        return Ok(vec![]);
-    }
-    if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
+    //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
+    if db_option.debug_root_refnos.is_some() && debug_root_refnos.is_empty() && !has_manual_refnos {
         return Ok(vec![]);
     }
     let db_option_arc = Arc::new(db_option.clone());
     let is_debug = debug_root_refnos.len() > 0;
 
     let include_history = db_option_arc.is_gen_history_model();
-    let is_replace_mesh = db_option_arc.is_replace_mesh();
-    let incr_count = if is_incr_update {
-        incr_updates.as_ref().unwrap().count()
-    } else {
-        0
-    };
     let mut target_root_refnos = vec![];
-    if is_incr_update {
-        // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
-        target_root_refnos = incr_updates
-            .as_ref()
-            .unwrap()
-            .get_all_visible_refnos()
-            .into_iter()
-            .collect();
-    } else if is_debug || has_manual_refnos {
+    if is_debug || has_manual_refnos {
         target_root_refnos = if has_manual_refnos {
             manual_refnos.clone()
         } else {
@@ -645,11 +620,7 @@ pub async fn gen_geos_data(
         println!("总共 {} 个结点", target_root_refnos.len());
     }
     let origin_root_refnos = target_root_refnos.clone();
-    // let process_handle = tokio::spawn(async move {
-    // let mut handles = vec![]
-    if is_incr_update {
-        println!("处理更新模型数量: {}", incr_count);
-    } else if has_manual_refnos {
+    if has_manual_refnos {
         println!("处理生成模型数量: {}", manual_refnos.len());
     } else if is_debug {
         println!("调试模型数量: {:?}", debug_root_refnos.len());
@@ -657,18 +628,13 @@ pub async fn gen_geos_data(
         println!("处理db: {}", dbno.unwrap());
     }
     let d_types = db_option_arc.debug_refno_types.clone();
-    let mut gen_cata_flag =
-        d_types.iter().any(|x| x == "CATA") || is_incr_update || has_manual_refnos;
-    let mut gen_loop_flag =
-        d_types.iter().any(|x| x == "LOOP") || is_incr_update || has_manual_refnos;
-    let mut gen_prim_flag =
-        d_types.iter().any(|x| x == "PRIM") || is_incr_update || has_manual_refnos;
+    let gen_cata_flag = d_types.iter().any(|x| x == "CATA") || has_manual_refnos;
+    let gen_loop_flag = d_types.iter().any(|x| x == "LOOP") || has_manual_refnos;
+    let gen_prim_flag = d_types.iter().any(|x| x == "PRIM") || has_manual_refnos;
 
-    // dbg!(origin_root_refnos.len());
-    let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
     //需要在这里把origin_root_refnos 打断成小块
     let mut chunked_root_refnos = origin_root_refnos.chunks(CHUNK_SIZE);
-    let gen_model = db_option_arc.gen_model || is_incr_update || has_manual_refnos;
+    let gen_model = db_option_arc.gen_model || has_manual_refnos;
     //遍历小块
     while gen_model && let Some(target_refnos) = chunked_root_refnos.next() {
         //Step 1、提前缓存ploo, 得到对齐方式的偏移
@@ -703,13 +669,7 @@ pub async fn gen_geos_data(
 
         //Step 2、按类目先逐个分好类的参考号集合
         //2.1 管道或者支吊架的分类
-        let target_bran_hanger_refnos: Vec<RefnoEnum> = if is_incr_update {
-            incr_updates_log_arc
-                .bran_hanger_refnos
-                .iter()
-                .cloned()
-                .collect()
-        } else {
+        let target_bran_hanger_refnos: Vec<RefnoEnum> =
             aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &["BRAN", "HANG"],
@@ -717,31 +677,12 @@ pub async fn gen_geos_data(
             )
             .await?
             .into_iter()
-            .collect()
-        };
+            .collect();
         let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> =
             { aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos).await? };
         let mut use_cata_refnos = HashSet::new();
         //查询单个使用元件库的数量
-        let target_single_cata_map = if is_incr_update {
-            let cata_map = DashMap::new();
-            let cata_refnos = &incr_updates_log_arc.basic_cata_refnos;
-            //直接使用group的办法，按cata_hash 进行分组
-            for &r in cata_refnos {
-                let Some(att) = aios_core::get_pe(r).await? else {
-                    continue;
-                };
-                cata_map.insert(
-                    att.cata_hash.clone(),
-                    CataHashRefnoKV {
-                        cata_hash: att.cata_hash,
-                        group_refnos: vec![r],
-                        ..Default::default()
-                    },
-                );
-            }
-            cata_map
-        } else {
+        let target_single_cata_map = {
             //查询是否是单个使用元件库，父节点是BRAN HANG
             let sql = format!(
                 "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
@@ -830,13 +771,7 @@ pub async fn gen_geos_data(
             all_handles.push(handle);
         }
 
-        let target_loop_owner_refnos: Vec<RefnoEnum> = if is_incr_update {
-            incr_updates_log_arc
-                .loop_owner_refnos
-                .iter()
-                .cloned()
-                .collect()
-        } else {
+        let target_loop_owner_refnos: Vec<RefnoEnum> =
             aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &GNERAL_LOOP_OWNER_NOUN_NAMES,
@@ -844,8 +779,7 @@ pub async fn gen_geos_data(
             )
             .await?
             .into_iter()
-            .collect()
-        };
+            .collect();
         if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
             println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
             let sjus_map_clone = loop_sjus_map_arc.clone();
@@ -864,9 +798,7 @@ pub async fn gen_geos_data(
             all_handles.push(handle);
         }
 
-        let target_prim_refnos: Vec<RefnoEnum> = if is_incr_update {
-            incr_updates_log_arc.prim_refnos.iter().cloned().collect()
-        } else {
+        let target_prim_refnos: Vec<RefnoEnum> =
             aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &GNERAL_PRIM_NOUN_NAMES,
@@ -874,8 +806,7 @@ pub async fn gen_geos_data(
             )
             .await?
             .into_iter()
-            .collect()
-        };
+            .collect();
 
         //基本元件的生成
         if gen_prim_flag && !target_prim_refnos.is_empty() {
@@ -895,9 +826,6 @@ pub async fn gen_geos_data(
         coverage_audit::audit_segment(target_refnos, skip_exist).await;
 
         wait_for_generation_workers(&mut all_handles).await?;
-        if is_incr_update {
-            break;
-        }
     }
     wait_for_generation_workers(&mut all_handles).await?;
     coverage_audit::report_and_reset();
@@ -959,6 +887,35 @@ pub async fn query_tubi_size(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 定向重生成不得整体写回 `accel_tree.bin`：文件约 21 MB，而定向路径一次可能只改了
+    /// 一个属性，合批失败回退逐根时更是每根写一遍。增量变更由 `mark_aabb_tree_dirty` 加
+    /// worker 空闲轮的 `persist_aabb_tree_if_dirty` 负责（ADR-010 落盘时机）。
+    ///
+    /// 实跑要写 cwd 下那个 21 MB 文件，单测只能钉源码。
+    #[test]
+    fn only_a_full_generation_persists_the_spatial_tree() {
+        let source = include_str!("gen_model.rs");
+        let body = source
+            .split_once(concat!("pub async fn ", "gen_all_geos_data("))
+            .expect("gen_all_geos_data must exist")
+            .1
+            .split_once(concat!("async fn ", "finish_shape_writer"))
+            .expect("finish_shape_writer must follow it")
+            .0;
+
+        assert!(
+            !body.contains("serialize_to_bin_file"),
+            "定向重生成不得直接整体序列化空间树"
+        );
+        let gate_at = body
+            .find("if !targeted {")
+            .expect("落盘必须由 !targeted 把关");
+        let persist_at = body
+            .find("persist_aabb_tree()")
+            .expect("全量生成仍要写回 accel_tree.bin");
+        assert!(gate_at < persist_at, "落盘必须待在 !targeted 分支里");
+    }
 
     #[tokio::test]
     async fn generation_worker_error_is_returned() {

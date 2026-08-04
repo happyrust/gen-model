@@ -113,7 +113,8 @@ pub async fn enqueue_plan(plan: &ModelUpdatePlan) -> anyhow::Result<()> {
 /// Translate legacy changed-refno jobs into stable root work. Legacy rows do
 /// not retain operations, so this is deliberately a conservative regen-only
 /// bridge; new rows always use the exact pre-persist plan.
-pub async fn enqueue_legacy_changed_refnos(
+#[cfg(test)]
+async fn enqueue_legacy_changed_refnos(
     dbnum: u32,
     end_sesno: i32,
     db_type: &str,
@@ -150,7 +151,7 @@ pub async fn enqueue_legacy_changed_refnos(
 /// 一个包围盒变更对应的房间重算任务（ADR-010 §2/§4）。
 ///
 /// `dbnum` / `source_end_sesno` 对房间任务只是来源记录，不参与寻址也不参与复活判定：
-/// 行 id 不带 dbnum，复活是无条件的。两者都取 0——这一层在几何刷新里，既不知道自己
+/// 行 id 不带 dbnum，复活由每次入队递增的 revision 驱动。两者都取 0——这一层在几何刷新里，既不知道自己
 /// 属于哪次会话，也没有 refno 所属库的反查结果。曾经填 `refno().get_0()`，那是 Ref0
 /// 不是 dbnum（见 `record_id_of`），而 Ref0 有可能撞上另一个库真实的 dbnum，把这行
 /// 误挂到别的库名下；宁可留空也不填一个看着像真的假值。
@@ -238,9 +239,14 @@ fn render_upsert(item: &ModelWorkItem) -> String {
         ]
     };
     // dbnum 字段的合并策略与复活无关，别把两件事绑在一个判断上：房间任务的行不带
-    // dbnum、会被不同库轮流触发，所以只升不降；其余照写本次来源。
+    // dbnum、会被不同库轮流触发，所以只升不降；其余照写本次来源——但本次入队
+    // **不认领**来源库时（dbnum == 0：反向级联派生根、按需生成）不得把行上已存的
+    // 真实库号抹掉。抹掉的后果不是丢失而是延迟：那个根从「本库批次工作单」掉进
+    // 空闲轮 `drain_data_phases`，而 0 覆盖真值没有任何信息增益。
     let dbnum_clause = if item.action.is_room_recalc() {
         format!("dbnum = math::max([dbnum?:0, {dbnum}])")
+    } else if dbnum == 0 {
+        "dbnum = dbnum?:0".to_string()
     } else {
         format!("dbnum = {dbnum}")
     };
@@ -522,6 +528,39 @@ async fn mark_failed(item: &PendingModelWork, error: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+/// 确保 `(regen_root, root)` 存在一行 durable pending，返回它的收口令牌（spec §4.5）。
+///
+/// 按需生成（ensure）在真正跑生成**之前**调它：曾经那条路只读现有行，表里本来没有
+/// 这个根时 `expected_revision` 是 `None`、收口是 no-op——一次纯按需生成在进程中途
+/// 崩溃后不留任何持久痕迹，没有 drain 会把它捡回来，只能靠人再点一次。先落行之后：
+/// 崩溃 → 行还在（status = pending），空闲轮 `drain_data_phases` 接手；成功 → 按本次
+/// revision 收口，期间若有新触发把 revision 又推高，行留给 drain，不误删新工作。
+///
+/// 走与所有入队方相同的 [`render_upsert`]：不认领会话号（`source_end_sesno = 0`，
+/// 人在主动要求生成，无条件复活死信正是想要的语义）、不认领来源库（`dbnum = 0`，
+/// 这一层没有 Ref0→dbnum 的反查结果，见 [`derived_regen_item`]）。
+pub async fn ensure_regen_pending(root_refno: &str, noun: &str) -> anyhow::Result<u64> {
+    let item = ModelWorkItem {
+        dbnum: 0,
+        db_type: "DESI".to_string(),
+        source_end_sesno: 0,
+        action: ModelWorkAction::RegenRoot,
+        target_refno: root_refno.to_string(),
+        noun: noun.to_string(),
+    };
+    SUL_DB
+        .query(render_upsert(&item))
+        .await
+        .map_err(|error| anyhow::anyhow!("persist ensure pending {root_refno} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("persist ensure pending {root_refno} statement failed: {error}")
+        })?;
+    current_regen_revision(root_refno)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("ensure 落 pending 之后读不到行: {root_refno}"))
+}
+
 /// 取该生成根当前的收口令牌。存量表里同一个根可能还留着一条旧 id 的行，取较大的
 /// revision：收口只清掉这一版，另一版留给 drain 正常消化，绝不会误删更新的工作。
 pub async fn current_regen_revision(root_refno: &str) -> anyhow::Result<Option<u64>> {
@@ -627,65 +666,46 @@ pub async fn settle_regen_work(
     }
 }
 
-/// 收编一条旧队列行的语句（纯函数）。
+/// 人工复活一行待重试任务的 UPDATE（spec §4.6.1，纯渲染）。
 ///
-/// 一律**只增不改**：本表可能已经有同一个根（上一个进程留下的），那一行比旧表那条新，
-/// 不该被它盖回去。`status` / `last_error` 用 `??` 让既有值胜出，空的 `noun` 干脆不写。
-fn render_legacy_adoption(
-    unit: &crate::data_interface::manual_update::PendingModelUnit,
-) -> String {
-    let id = record_id_of(ModelWorkAction::RegenRoot, &unit.root_refno);
-    let legacy_error = unit
-        .last_error
-        .as_deref()
-        .map(|error| format!("'{}'", escape_surql_str(error)))
-        .unwrap_or_else(|| "NONE".to_string());
-
-    let mut clauses = vec![
-        format!("dbnum = {}", unit.dbnum),
-        "db_type = 'DESI'".to_string(),
-        format!("action = '{}'", ModelWorkAction::RegenRoot.as_str()),
-        format!("target_refno = '{}'", escape_surql_str(&unit.root_refno)),
-    ];
-    if !unit.noun.is_empty() {
-        clauses.push(format!("noun = '{}'", escape_surql_str(&unit.noun)));
-    }
-    clauses.extend([
-        format!(
-            "source_end_sesno = math::max([source_end_sesno?:0, {}])",
-            unit.source_end_sesno
-        ),
-        format!("attempts = math::max([attempts?:0, {}])", unit.attempts),
-        format!("last_error = last_error ?? {legacy_error}"),
-        "status = status ?? 'failed'".to_string(),
-        "updated_at = time::now()".to_string(),
-    ]);
-    format!("UPSERT {id} SET {};", clauses.join(", "))
+/// 只允许操作**已存在**的 `(action, target_refno)`——这个端点是「复活」不是「入队」，
+/// 入队有自己的窗口与级联语义，不能从这里绕。原子地 `revision += 1`（旧收口令牌全部
+/// 作废，正在跑的那次成功后删不掉这行，留给 drain——与并发触发的既有语义一致）、
+/// `attempts = 0`、清 `last_error`，下一轮 drain 重新取到它。
+fn render_retry_pending_unit(action: ModelWorkAction, target_refno: &str) -> String {
+    format!(
+        "UPDATE {TABLE} SET revision = (revision?:0) + 1, attempts = 0, \
+         last_error = NONE, status = 'pending', updated_at = time::now() \
+         WHERE action = '{}' AND target_refno = '{}' RETURN AFTER;",
+        action.as_str(),
+        escape_surql_str(target_refno)
+    )
 }
 
-/// 收编旧 `manual_model_pending` 里的重生成根，并在**同一个事务**里清空来源表。
+/// 人工复活一行待重试任务（死信的唯一 HTTP 出口，spec §4.6.1）。
 ///
-/// 中途崩掉宁可整体不算数、下次启动重来，也不能把待重试的根搬丢。
+/// 自动路径的复活（[`render_upsert`] 按会话号 / 无条件两种判据）覆盖不到「认领了
+/// 会话号、又没有更新会话到来」的死信——[`render_drain_select`] 的 attempts 上限
+/// 把它们永远挡在外面，此前除了直接改库没有第二条路。
 ///
-/// `attempts` 取两边较大值：旧表那个数是这个根真实失败过的次数，直接归零等于把一个
-/// 已经判死的根放回队列，再烧五趟完整生成。
-pub(crate) async fn adopt_legacy_regen_units(
-    units: &[crate::data_interface::manual_update::PendingModelUnit],
-    legacy_table: &str,
-) -> anyhow::Result<()> {
-    let mut statements: Vec<String> = units.iter().map(render_legacy_adoption).collect();
-    statements.push(format!("DELETE {legacy_table};"));
-
-    SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-            statements.join("\n")
-        ))
+/// 返回 `None` 表示表里没有这行（HTTP 层回 404）。同一谓词命中多行时（历史遗留的
+/// `{dbnum}_` 前缀旧行），全部复活并返回 revision 最大的那行作回执。
+pub async fn retry_pending_unit(
+    action: ModelWorkAction,
+    target_refno: &str,
+) -> anyhow::Result<Option<PendingModelWork>> {
+    let mut response = SUL_DB
+        .query(render_retry_pending_unit(action, target_refno))
         .await
-        .map_err(|error| anyhow::anyhow!("adopt legacy pending units failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("revive pending unit {target_refno} failed: {error}"))?
         .check()
-        .map_err(|error| anyhow::anyhow!("adopt legacy pending units statement failed: {error}"))?;
-    Ok(())
+        .map_err(|error| {
+            anyhow::anyhow!("revive pending unit {target_refno} statement failed: {error}")
+        })?;
+    let rows: Vec<PendingModelWork> = response.take(0).map_err(|error| {
+        anyhow::anyhow!("decode revived pending unit {target_refno} failed: {error}")
+    })?;
+    Ok(rows.into_iter().max_by_key(|row| row.revision))
 }
 
 /// Regeneration work for one root a reverse cascade discovered (pure).
@@ -911,9 +931,18 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
                 match clear_regen_work_batch(&settlements).await {
                     Ok(()) => done += batchable.len(),
                     Err(error) => {
-                        for job in &batchable {
-                            record_failure(job, &error, &mut failures).await;
-                        }
+                        // 收口失败不是生成失败（2026-07-30 审计 C2）：这批根刚刚全部
+                        // 生成成功，唯一没做完的是把队列行删掉。给它们逐根 mark_failed
+                        // 会各涨一次 attempts——一条 flaky 的 DELETE 连撞 MAX_ATTEMPTS
+                        // 次，一整批健康的根就全进死信，而生成明明一次都没失败过。
+                        // 行留在表里不动（attempts 仍是 0），下一轮 drain 会重新取到
+                        // 它们、重跑一遍幂等生成、再试一次收口；batch_worker 那条同构
+                        // 路径（`settlement_failed`）也是这个口径。
+                        failures.push(format!(
+                            "batch settlement failed for {} generated root(s), \
+                             rows stay pending for the next drain: {error:#}",
+                            settlements.len()
+                        ));
                     }
                 }
             }
@@ -1334,6 +1363,66 @@ mod tests {
         );
     }
 
+    /// 人工复活的三件事必须原子地发生在同一条语句里（spec §4.6.1）：
+    /// `revision + 1`（作废旧收口令牌）、`attempts = 0`（重新进 drain 候选集）、
+    /// 清 `last_error`。且它只 UPDATE 不 UPSERT——复活不是入队，表里没有的行
+    /// 不能从这里凭空造出来。
+    #[test]
+    fn a_manual_retry_revives_in_one_atomic_statement() {
+        let sql = render_retry_pending_unit(ModelWorkAction::RegenRoot, "24381/100677");
+        assert!(sql.starts_with("UPDATE"), "复活不是入队，不得 UPSERT: {sql}");
+        assert!(sql.contains("revision = (revision?:0) + 1"), "{sql}");
+        assert!(sql.contains("attempts = 0"), "{sql}");
+        assert!(sql.contains("last_error = NONE"), "{sql}");
+        assert!(sql.contains("status = 'pending'"), "{sql}");
+        assert!(
+            sql.contains("WHERE action = 'regen_root' AND target_refno = '24381/100677'"),
+            "必须按 (action, target) 寻址既有行: {sql}"
+        );
+        assert!(sql.contains("RETURN AFTER"), "回执要带复活后的行: {sql}");
+    }
+
+    /// 收口失败不是生成失败（2026-07-30 审计 C2）。
+    ///
+    /// 批量生成成功之后 `clear_regen_work_batch` 挂掉，曾经的处置是给批里每个根
+    /// `record_failure`（→ mark_failed → attempts + 1）：一条 flaky 的 DELETE 连撞
+    /// [`MAX_ATTEMPTS`] 次，一整批**生成从没失败过**的健康根就全进死信——而死信只有
+    /// 人工才能复活。正确口径与 `batch_worker` 的同构路径一致：行留在表里不动，
+    /// 下一轮 drain 重跑幂等生成、再试一次收口。
+    #[test]
+    fn batch_settlement_failure_never_marks_generated_roots_failed() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_where(")
+            .expect("drain_where 必须存在")
+            .1
+            .split_once("const NON_REGEN_ACTION_FILTER")
+            .expect("drain_where 必须在阶段白名单之前结束")
+            .0;
+        // 收边用批量失败回退分支的注释当锚点（本文件是 CRLF，不能按 "\n...}" 找）。
+        // 这段截出来的正是「生成成功、收口失败」那条 arm。
+        let settlement_arm = body
+            .split_once("match clear_regen_work_batch(&settlements).await")
+            .expect("批量收口分支必须存在")
+            .1
+            .split_once("Err(error) => {")
+            .expect("收口失败分支必须存在")
+            .1
+            .split_once("The per-root fallback")
+            .expect("收口失败分支之后是批量失败回退分支")
+            .0;
+        // 按调用点形态（带左括号）断言，注释里提到这两个名字不算数。
+        assert!(
+            !settlement_arm.contains("record_failure(")
+                && !settlement_arm.contains("mark_failed("),
+            "收口失败分支不得动行状态（不涨 attempts、不写 failed）: {settlement_arm}"
+        );
+        assert!(
+            settlement_arm.contains("failures.push"),
+            "收口失败仍要进 drain 汇总，让这一轮如实报错: {settlement_arm}"
+        );
+    }
+
     #[test]
     fn settlement_only_mutates_the_queue_revision_that_was_executed() {
         let work = PendingModelWork {
@@ -1442,39 +1531,6 @@ mod tests {
         );
         assert_eq!(record_id(&item(7997)), record_id(&item(24381)));
         assert_eq!(record_id(&item(7997)), record_id(&item(0)));
-    }
-
-    /// 收编旧队列行只增不改：本表可能已经有同一个根（上一个进程留下的、比旧表那条新），
-    /// 盖回去等于用一条陈旧记录顶掉当前状态。失败次数必须带过来——归零就是把一个已经
-    /// 判死的根放回队列再烧五趟生成。
-    #[test]
-    fn adopting_a_legacy_row_carries_attempts_without_overwriting_a_newer_row() {
-        let sql = render_legacy_adoption(
-            &crate::data_interface::manual_update::PendingModelUnit {
-                dbnum: 8000,
-                root_refno: "16777216/5".into(),
-                noun: "BRAN".into(),
-                source_end_sesno: 42,
-                attempts: 3,
-                last_error: Some("生成失败".into()),
-                revision: 0,
-            },
-        );
-        assert!(sql.starts_with("UPSERT model_update_pending:regen_root_16777216_5 SET"));
-        assert!(sql.contains("attempts = math::max([attempts?:0, 3])"), "{sql}");
-        assert!(sql.contains("last_error = last_error ?? '生成失败'"), "{sql}");
-        assert!(sql.contains("status = status ?? 'failed'"), "{sql}");
-
-        // 空 noun 干脆不写，否则会把本表里那条已知的 noun 抹成空串。
-        let blank = render_legacy_adoption(
-            &crate::data_interface::manual_update::PendingModelUnit {
-                dbnum: 8000,
-                root_refno: "16777216/5".into(),
-                ..Default::default()
-            },
-        );
-        assert!(!blank.contains("noun ="), "{blank}");
-        assert!(blank.contains("last_error = last_error ?? NONE"), "{blank}");
     }
 
     /// B5（2026-07-26 审计 round2）：SurrealDB 对 `UPSERT … SET a = …, b = …` 顺序求值，
@@ -1694,6 +1750,38 @@ mod tests {
             !sql.contains("attempts = IF"),
             "不认领会话号的任务不能按会话号决定是否复活（0 > 0 恒假）: {sql}"
         );
+    }
+
+    /// 不认领来源库的入队（dbnum == 0：派生根、按需生成）不得抹掉行上已存的真实
+    /// 库号。抹掉的后果是延迟：DESI 窗口曾把真 dbnum 写上去，这个根本属于「本库
+    /// 批次工作单」；被 0 覆盖之后它只能等空闲轮的 `drain_data_phases`。
+    #[test]
+    fn an_enqueue_that_claims_no_dbnum_keeps_the_stored_one() {
+        use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
+
+        let derived = derived_regen_item(GenerationRoot {
+            root: RefnoEnum::from(RefU64((24381u64 << 32) | 100677)),
+            noun: "EQUI".into(),
+            name: "/PUMP-01".into(),
+            kind: GenerationRootKind::DeliveryUnit,
+        });
+        assert_eq!(derived.dbnum, 0, "前提：派生根不认领来源库");
+        let sql = render_upsert(&derived);
+        assert!(
+            sql.contains("dbnum = dbnum?:0"),
+            "不认领的入队必须保留行上已存的库号: {sql}"
+        );
+
+        // 认领了库号的常规入队照写本次来源，行为不变。
+        let claiming = render_upsert(&ModelWorkItem {
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "24381/100677".into(),
+            noun: "EQUI".into(),
+        });
+        assert!(claiming.contains("dbnum = 7997"), "{claiming}");
     }
 
     /// 反过来：认领了会话号的常规任务仍按会话号比，旧会话不构成复活理由。

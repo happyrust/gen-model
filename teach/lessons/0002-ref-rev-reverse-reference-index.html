@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课 02 · ref_rev：反向引用索引，用流程图讲透</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 课程 / <strong>02 · ref_rev 反向引用索引</strong> · <a href="../reference/glossary.html">参考速查表 →</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Lesson 0002 · gen-model · ADR-003</p>
+  <h1>ref_rev：回答「谁在用我」的那张索引</h1>
+  <p class="lead">正向问题（这个弯头实例用的是哪个目录元件）读一次属性就有答案；反向问题（这个目录元件被哪些实例用着）在 PDMS 数据里<strong>根本没有出口</strong>。<code>ref_rev</code> 就是为反向问题建的索引。本课用 <span class="pill">10 张流程图</span> 走完它的<strong>写、查、用、坏了怎么办</strong>四条路径，配两个端到端例子，最后拿 <code>core.dll</code> / <code>Core3D.dll</code> 的实测反编译对照原生 back-ref 是怎么做的、又是谁在做。</p>
+  <p class="kicker">预计 18–22 分钟 · 代码：<code>src/data_interface/{manual_update, increment_pipeline, model_impact}.rs</code> · 逆向：IDA 会话 <code>core31-retrace</code></p>
+</header>
+
+<div class="toc">
+  <strong>本课路线</strong>
+  <ol>
+    <li><a href="#why">为什么需要它：正向易、反向难</a></li>
+    <li><a href="#shape">一条边长什么样（方向陷阱在这）</a></li>
+    <li><a href="#write">流程 A · 写：增量落库时怎么维护</a></li>
+    <li><a href="#read">流程 B · 查：传递闭包 BFS</a></li>
+    <li><a href="#use">流程 C · 用：怎么变成重生成根</a></li>
+    <li><a href="#case1">例子一：改一个共享弯头</a></li>
+    <li><a href="#case2">例子二：为什么必须多跳</a></li>
+    <li><a href="#fail">流程 D · 坏了怎么办</a></li>
+    <li><a href="#core">对照 core.dll：back-ref 到底是什么（实测）</a></li>
+    <li><a href="#quiz">自测</a></li>
+  </ol>
+</div>
+
+<h2 id="why">1. 为什么需要它：正向易、反向难</h2>
+<p>先把问题摆清楚。设计实例通过 <code>CATR</code>/<code>SPRE</code>/<code>PRTREF</code> 这类属性指向目录元件——这条<strong>正向</strong>关系就写在元素自己的属性里，读一次就有。但增量更新真正需要的是<strong>反向</strong>：有人改了目录元件，谁的几何会跟着变？</p>
+
+<figure>
+<div class="diagram">正向：属性里直接存着，一次读取就够
+  ┌──────────────────┐   CATR / SPRE / PRTREF …   ┌──────────────────────┐
+  │ 设计实例 ELBO_A  │ ─────────────────────────▶ │ 目录元件             │
+  └──────────────────┘                            │ /ELBOW-90-DN100      │
+  ┌──────────────────┐ ─────────────────────────▶ │ （同一个，被共享）   │
+  │ 设计实例 ELBO_B  │                            └──────────────────────┘
+  └──────────────────┘
+
+反向：数据里没有这条链，必须自己建索引
+  ┌──────────────────────┐   「谁在用我？」   ┌──────────────────────┐
+  │ /ELBOW-90-DN100      │ ── ？？？ ──────▶ │ 用到它的全部设计实例 │
+  └──────────────────────┘                    └──────────────────────┘</div>
+<figcaption>没有反向索引，改共享目录件时只会重建目录侧容器，设计侧几何全部陈旧。</figcaption>
+</figure>
+
+<div class="callout tip"><span class="tag">这就是那段 TODO</span>
+<code>src/data_interface/model_refresh.rs</code> 里有一大段注释描述这个缺口：「当被多个设计实例引用的<strong>共享 CATA 目录/规格元件本身</strong>被改动时，这里只会把该 CATA 元素归一到它自己的 CATA owner 重生成，不会反查并重生成所有引用它的设计实例」。<code>ref_rev</code>（ADR-003）就是来补这个洞的。</div>
+
+<h2 id="shape">2. 一条边长什么样（方向陷阱在这）</h2>
+<p><code>ref_rev</code> 是 SurrealDB 的<strong>图边表</strong>：<code>in</code> = 引用方，<code>out</code> = 被引用方，边 id 是两端拼成的复合主键。</p>
+
+<figure>
+<div class="diagram">              in（引用方 referrer）            out（被引用方 referenced）
+        ┌──────────────────────┐          ┌────────────────────────────┐
+        │ pe:ELBO_A            │ ───────▶ │ pe:CAT_ELBOW90             │
+        └──────────────────────┘          └────────────────────────────┘
+                    id = ref_rev:[pe:ELBO_A, pe:CAT_ELBOW90]
+                                  └─ 复合主键 ⇒ 同一条边重复写是幂等的
+
+        维护时顺着走：  pe:ELBO_A     -&gt;ref_rev   ⇒ 这个元素的全部出边
+        查询时倒着走：  pe:CAT_ELBOW90 &lt;-ref_rev   ⇒ 所有引用它的 in</div>
+<figcaption><code>pe:ELBO_A</code> 是简写，实际是 <code>RefnoEnum::to_pe_key()</code> 生成的 pe 记录 id。</figcaption>
+</figure>
+
+<div class="callout infer"><span class="tag">最容易看反的地方</span>
+名字叫「反向索引」，但表里<strong>存的是正向边</strong>（实例 → 目录）。「反向」体现在<strong>查询方向</strong>上。<br>
+为什么不干脆把行反过来存？因为这样维护成本最低：清理一个元素的旧引用只需要 <code>DELETE pe:X-&gt;ref_rev</code>，沿元素自己的邻接表走，<strong>不用扫表、也不用建二级索引</strong>。</div>
+
+<h3>2.1 哪些属性会进这张索引</h3>
+<p>门槛只有一个：该属性被 <code>model_impact::classify_attribute_effect_with_meta</code> 判为 <code>DependencyCascade</code>。判定逻辑和「哪些变更要级联」是<strong>同一份定义</strong>，不会各说各话。</p>
+<table>
+<thead><tr><th>类别</th><th>例子</th><th>进索引？</th></tr></thead>
+<tbody>
+<tr><td>目录 / 规格 / 设计表引用</td><td><code>CATR</code> <code>SPRE</code> <code>SPREF</code> <code>PRTREF</code> <code>SPCO</code> <code>SCOM</code> <code>DESP</code> <code>GMREF</code> <code>TMPL</code> …</td><td>✅ 进</td></tr>
+<tr><td>A2 兜底：schema <code>att_type == ELEMENT</code> 的引用属性，名字不在上面清单里</td><td>项目自定义引用属性</td><td>✅ 进（自动升级为 <code>DependencyCascade</code>）</td></tr>
+<tr><td>结构属性</td><td><code>OWNER</code> <code>CHILDREN</code></td><td>❌ 不进 —— 层级关系由 owner 图负责</td></tr>
+<tr><td>纯几何参数</td><td><code>DIAM</code> <code>XLEN</code> <code>HEIG</code></td><td>❌ 不进 —— 不是引用</td></tr>
+<tr><td>业务元数据 / 位姿</td><td><code>NAME</code> <code>DESC</code> / <code>POS</code> <code>ORI</code></td><td>❌ 不进</td></tr>
+</tbody>
+</table>
+<p class="muted">排除 <code>OWNER</code> 是有意为之：把层级也塞进来，这张表就退化成「什么都有」的大杂烩，级联范围会失控。它要保持是一张<strong>纯粹的交叉引用表</strong>。</p>
+
+<h2 id="write">3. 流程 A · 写：增量落库时怎么维护</h2>
+<p>入口在 <code>IncrementPipeline::apply_one</code> 里的 <code>maintain_reverse_index</code>，位置在<strong>主数据落库之后、推进水位之前</strong>。</p>
+
+<figure>
+<div class="diagram">                     每个变更元素 op（detail == None 直接跳过）
+                                    │
+              ┌─────────────────────┴─────────────────────┐
+              │ Deleted                                   │ Add / Modified
+              ▼                                           ▼
+   DELETE pe:X-&gt;ref_rev;                    读「后态」完整属性图 att_map()
+   （只清出边，不再插入）                                  │
+              │                                           ▼
+              │                   逐属性 classify_attribute_effect_with_meta
+              │                                           │
+              │                             ┌─────────────┴─────────────┐
+              │                             │ == DependencyCascade ?    │
+              │                             └──────┬────────────┬───────┘
+              │                                  是 │          否 │
+              │                                    ▼            ▼
+              │                        取值里的 refno        丢弃，不进索引
+              │                     （单引用 / 引用数组都收）
+              │                                    │
+              │                                    ▼
+              │                    去重 · 排除自引用 · 排除非法 refno
+              │                                    │
+              │                                    ▼
+              │                     DELETE pe:X-&gt;ref_rev;          ← 先整体清旧
+              │                     INSERT RELATION INTO ref_rev [ … ];  ← 再整体重写
+              └───────────────────────────┬───────────────────────┘
+                                          ▼
+                        500 条语句一块提交（.check() 上浮语句级错误）
+                                          │
+                            ┌─────────────┴─────────────┐
+                            │ 成功                       │ 失败
+                            ▼                           ▼
+                        继续后续步骤            只记 warning，绝不阻塞
+                                                数据批次与 applied_sesno</div>
+<figcaption>「先整体清、再整体重写」是关键：改过的引用不会留下幽灵边。</figcaption>
+</figure>
+
+<p>渲染出来的语句就是这个样子（<code>build_reverse_index_statements</code> 是纯函数，可单测）：</p>
+<pre><code><span class="tok-k">DELETE</span> pe:ELBO_A-&gt;ref_rev;
+<span class="tok-k">INSERT RELATION INTO</span> ref_rev [
+  { id: ref_rev:[pe:ELBO_A, pe:CAT_ELBOW90], in: pe:ELBO_A, out: pe:CAT_ELBOW90 }
+];</code></pre>
+
+<div class="callout confirm"><span class="tag">按约定非致命</span>
+<code>apply_one</code> 把这一步的 <code>Err</code> 吞成 warning。理由写在代码注释里：缺一条边最多漏一次级联，下次触及该元素时会整体重写而自愈；而如果让它阻塞水位，一次目录写失败就会卡死整个 dbnum。</div>
+
+<h2 id="read">4. 流程 B · 查：传递闭包 BFS</h2>
+<p>查询发生在 <code>build_model_update_plan</code> 里（<strong>落库前</strong>，此时索引还是变更前的状态）。它不是查一次就完事，而是<strong>逐跳扩张</strong>。</p>
+
+<figure>
+<div class="diagram">  seeds = 本窗口所有「影响模型」的变更元素
+  frontier = seeds     visited = seeds     edges = []
+
+  ┌───────────────────── 每一跳，最多 8 跳 ─────────────────────┐
+  │                                                             │
+  │    frontier 为空？ ──── 是 ────▶ 跳出                        │
+  │         │ 否                                                │
+  │         ▼                                                   │
+  │    SELECT in, out                                           │
+  │    FROM array::flatten([frontier…]&lt;-ref_rev);   ← 500 个一批 │
+  │         │                                                   │
+  │         ▼                                                   │
+  │    新出现的 in（引用方）→ 记 visited → 成为下一跳 frontier   │
+  │         │                                                   │
+  │         ▼                                                   │
+  │    累计引用方 ≥ 50000 ？ ── 是 ──▶ 记 warning 并跳出         │
+  │         │ 否                                                │
+  └─────────┴───────────────────────────────────────────────────┘
+                              │
+                              ▼
+              assemble_ref_reversal(edges)
+              ⇒ HashMap&lt;被引用方, [引用方 …]&gt;</div>
+<figcaption>走的是 seeds 自己的入边邻接（<code>&lt;-ref_rev</code>），代价随命中边数走，而不是随表大小走。</figcaption>
+</figure>
+
+<table>
+<thead><tr><th>常量</th><th>值</th><th>为什么存在</th></tr></thead>
+<tbody>
+<tr><td><code>MAX_REVERSE_CASCADE_HOPS</code></td><td>8</td><td>规格链只有几跳深；这个界纯粹是为了在脏数据上能终止</td></tr>
+<tr><td><code>MAX_REVERSE_CASCADE_REFERRERS</code></td><td>50000</td><td>防止一个被全项目共享的元素把整张索引拉进一个窗口</td></tr>
+<tr><td>查询分批</td><td>500</td><td>避免拼出超长语句</td></tr>
+</tbody>
+</table>
+
+<h2 id="use">5. 流程 C · 用：怎么变成重生成根</h2>
+<p>闭包只是「谁引用了我」的原料。<code>build_unit_rollup</code> 才把它变成真正要重建的<strong>交付单元</strong>（BRAN / HANG / SUPPO / EQUI）。注意这里的<strong>止步规则</strong>——它决定了级联不会无限扩散。</p>
+
+<figure>
+<div class="diagram">  对每个净变化 change：
+       change.model_affecting ? ──── 否 ────▶ 不做级联
+            │ 是
+            ▼
+       stack = ref_reversal[change.refno]      visited = { change.refno }
+            │
+  ┌─────────▼─────────────────────────────────────────────────────────┐
+  │  pop 一个 referrer（visited 里已有 → 跳过，天然防环）              │
+  │       │                                                           │
+  │       ▼                                                           │
+  │  resolve_change_unit(referrer, post 态)                           │
+  │       └ 解析不出？回退 pre 态（referrer 本身被删的情况）           │
+  │       │                                                           │
+  │  ┌────┴───────────────┬────────────────────┬────────────────────┐ │
+  │  │ 命中交付单元        │ 命中普通根          │ 没有根              │ │
+  │  │ kind=DeliveryUnit  │ kind=Normal        │ None（目录中间体）  │ │
+  │  ▼                    ▼                    ▼                     │ │
+  │ cascaded += 1      它还有上层引用者？     它还有上层引用者？        │ │
+  │ 【止步】            ├ 有 → 继续压栈        ├ 有 → 继续压栈         │ │
+  │ 不再向上穿透        └ 无 → cascaded += 1   └ 无 → 什么也不做       │ │
+  └───────────────────────────────┬───────────────────────────────────┘
+                                  ▼
+              命中的交付单元 will_generate = true
+                                  ▼
+                    产出 RegenRoot 工作项（去重后入库）</div>
+<figcaption>命中交付单元就止步：一条支管被级联到了，就不必再问「谁引用这条支管」。</figcaption>
+</figure>
+
+<div class="callout tip"><span class="tag">两种命中的区别</span>
+同一个交付单元上会分别记 <code>direct</code>（元素自己被改了）和 <code>cascaded</code>（是被引用关系带出来的）。两者都会让 <code>will_generate = true</code>，但计数分开，预览时能看出「这条支管是我自己改的，还是被目录改动波及的」。</div>
+
+<h2 id="case1">6. 例子一：改一个共享弯头</h2>
+
+<figure>
+<div class="diagram">【平时】两条支管各有一个 ELBO，引用同一个目录弯头
+   pe:ELBO_A ──CATR──▶ pe:CAT_ELBOW90     ⇒ ref_rev:[ELBO_A, CAT_ELBOW90]
+   pe:ELBO_B ──CATR──▶ pe:CAT_ELBOW90     ⇒ ref_rev:[ELBO_B, CAT_ELBOW90]
+   ELBO_A 的交付单元 = BRAN /100-B-1
+   ELBO_B 的交付单元 = BRAN /200-C-3
+
+【变更】有人在 CATA 库里改了 /ELBOW-90-DN100 的弯曲半径（PARA）
+   变更集 = { CAT_ELBOW90 }
+        │
+        ▼  classify_operation_impact → Regen（PARA 属 DirectGeometry）
+        │
+        ▼  SELECT in,out FROM array::flatten([pe:CAT_ELBOW90]&lt;-ref_rev)
+   引用方 = [ ELBO_A, ELBO_B ]
+        │
+        ▼  各自向上找最近的最小交付单元
+   ELBO_A → /100-B-1              ELBO_B → /200-C-3
+        │
+        ▼  产出工作项
+   RegenRoot(/100-B-1)      cascaded = 1
+   RegenRoot(/200-C-3)      cascaded = 1
+   RegenRoot(CAT_ELBOW90 所在的目录容器)    direct = 1</div>
+<figcaption>如果没有 <code>ref_rev</code>，上面只会剩最后一条 <code>direct</code>——两条支管的弯头继续用旧半径显示。</figcaption>
+</figure>
+
+<h2 id="case2">7. 例子二：为什么必须多跳</h2>
+<p>规格表链是典型的<strong>间接引用</strong>：设计侧并不直接引用表项，中间隔着一层没有交付单元的目录中间体。</p>
+
+<figure>
+<div class="diagram">正向：  BRAN 组件 ──SPREF──▶ SPCO ──PRTREF──▶ TABITE
+边：    ref_rev:[BRAN组件, SPCO]        ref_rev:[SPCO, TABITE]
+
+改 TABITE 时：
+  hop 1   [TABITE]&lt;-ref_rev  ⇒  SPCO
+             └ SPCO 不在 BRAN/HANG/SUPPO/EQUI 里 ⇒ 没有交付单元
+               ⇒ 走「None / Normal」分支，继续压栈，不能止步
+  hop 2   [SPCO]&lt;-ref_rev    ⇒  BRAN 组件
+             └ 向上找到 BRAN ⇒ 命中交付单元 ⇒ cascaded += 1，止步
+
+只做一跳会怎样：拿到 SPCO 就断了，SPCO 自己又不产生几何 ⇒ 整条支管漏刷。</div>
+<figcaption>这就是 ADR-003 的 B3：闭包必须是传递的，否则会静默停在第一个目录中间体上。</figcaption>
+</figure>
+
+<div class="callout example"><span class="tag">TABITE 是什么</span>
+<p><strong>Table Item，表项</strong>——目录侧「表」机制里的一行数据（<code>TABGRO</code> 表组 → <code>CTABLE</code>/<code>TABLE</code> 一张表 → <code>TABITE</code> 一行）。规格元件不把尺寸写死，而是用 <code>PRTREF</code> 指向表里某一行，展开几何时去读那行的值。</p>
+<p>它自己<strong>完全不产生几何</strong>，这一点从 schema 标志位可以直接看到（<code>noun_flags.json</code>，noun hash <code>0x4F3C0B8</code>，在 <code>parse.rs</code> 里的全名是 <code>TABITEM</code>）：<code>primitive:false, geomset:false, extrusion:false, is_pointset_point:false, graphics_behaviour:0</code>。所以改一个表项时，「改动位置」上没有任何东西可重建——真正变形的是隔着两层引用的设计管件。</p>
+</div>
+
+<div class="callout example"><span class="tag">第三个小例子 · 改引用与删元素</span>
+<p>把 <code>ELBO_A</code> 的 <code>CATR</code> 从 <code>/ELBOW-90-DN100</code> 改成 <code>/ELBOW-45-DN100</code>：维护流程是「<code>DELETE pe:ELBO_A-&gt;ref_rev</code> 清掉<strong>全部</strong>旧出边，再按后态整体重写」，所以旧边不会残留，以后再改 DN100 弯头不会把 <code>ELBO_A</code> 误拉进来。</p>
+<p><code>ELBO_A</code> 被删除时只执行 DELETE、不再插入，它从此不出现在任何级联结果里。</p>
+</div>
+
+<h2 id="fail">8. 流程 D · 坏了怎么办</h2>
+<p>写和读的失败策略是<strong>不对称</strong>的，理由不同：写失败可以自愈，读失败会导致「静默漏刷」，必须留下痕迹。</p>
+
+<figure>
+<div class="diagram">┌ 写 ref_rev 失败 ────────────────────────────────────────────────────┐
+│   只记 warning ──▶ 数据批次照常提交，applied_sesno 照常推进          │
+│                └─▶ 下次触及该元素时整体重写 ⇒ 自愈                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌ 读 ref_rev 失败 ────────────────────────────────────────────────────┐
+│   resolve_unit_rollup_without_reverse_index                         │
+│        └ 保留所有「直接命中」的生成根（不牺牲已知的那部分）           │
+│   +  为每个受影响元素登记一条 CascadeExpand 持久待办                 │
+│        └ 下次 drain：expand_live_reverse_cascade → 补出 RegenRoot    │
+│   ⇒ 级联不丢，只是推迟                                               │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌ 冷导入 / 大面积回填 ────────────────────────────────────────────────┐
+│   cargo run --bin rebuild_ref_rev                                   │
+│     ├ 扫描全部未删除 pe 的属性记录 → 写入 ref_rev_rebuild 暂存表     │
+│     └ 全部扫完且写入成功后，单事务「删除 + 复制」换表                │
+│   ⇒ 重建失败不会把线上索引搞成半空                                   │
+└─────────────────────────────────────────────────────────────────────┘</div>
+<figcaption>这三条路径分别对应：可自愈的小损伤、必须留痕的漏刷风险、一次性重建。</figcaption>
+</figure>
+
+<div class="callout confirm"><span class="tag">索引为空时是 no-op</span>
+<code>build_unit_rollup</code> 里级联那段在 <code>ref_reversal</code> 为空时行为与 B1 落地前完全一致。所以「先建索引、后接消费」这种分期上线是安全的。</div>
+
+<h2 id="core">9. 对照 core.dll：back-ref 到底是什么</h2>
+<p>gen-model 自建 <code>ref_rev</code>，是因为 E3D 原生<strong>本来就有</strong>这套东西——只是离线拿不到。本节结论全部来自对 <code>core.dll</code> 的实测（IDA 会话 <code>core31-retrace</code>，imagebase <code>0x5170000</code>）。</p>
+
+<h3>9.1 那些 <code>*BREF</code> 确实是真属性，不是文档传说</h3>
+<p>每个名字在属性名字符串区都有一条字符串，且各自被<strong>一个 0xDB 字节的静态初始化器</strong>引用——这些初始化器是同一个模板生成的，干的事就是 <code>new DB_Attribute("名字")</code> 再存进一个 <code>ATT_*</code> 全局。</p>
+<table>
+<thead><tr><th>属性</th><th>名字字符串</th><th>静态初始化器</th><th>对应全局</th></tr></thead>
+<tbody>
+<tr><td><code>SPBREF</code></td><td><code>0x5D7FA54</code></td><td><code>sub_57675F0</code>（0xDB）</td><td><code>ATT_SPBREF</code> @ <code>0x64203E4</code></td></tr>
+<tr><td><code>SCBREF</code></td><td><code>0x5D7D604</code></td><td><code>sub_575D4F0</code>（0xDB）</td><td>同款模板</td></tr>
+<tr><td><code>TABREF</code></td><td><code>0x5D84578</code></td><td><code>sub_577BC50</code>（0xDB）</td><td>同款模板</td></tr>
+<tr><td><code>GOBREF</code></td><td><code>0x5D82980</code></td><td><code>sub_56CB910</code>（0xDB）</td><td>同款模板</td></tr>
+<tr><td><code>HDBREF</code></td><td><code>0x5D83A50</code></td><td><code>sub_56D07D0</code>（0xDB）</td><td>同款模板</td></tr>
+<tr><td><code>DBREF</code></td><td><code>0x5D7EBA4</code></td><td>同一字符串区</td><td>同款模板</td></tr>
+</tbody>
+</table>
+
+<p class="kicker">sub_57675F0 —— ATT_SPBREF 的静态初始化器</p>
+<pre><code>v1 = <span class="tok-f">operator new</span>(0x114u);              <span class="tok-c">// DB_Attribute 对象 276 字节</span>
+<span class="tok-f">memset</span>(v1, 0, 0x114u);
+sub_581BFE0(v4, <span class="tok-s">"SPBREF"</span>);              <span class="tok-c">// 构造 std::string("SPBREF")</span>
+v2 = <span class="tok-f">DB_Attribute::DB_Attribute</span>(v4, 1);
+ATT_SPBREF = v2;                        <span class="tok-c">// ?ATT_SPBREF@@3QBVDB_Attribute@@B</span></code></pre>
+
+<div class="callout confirm"><span class="tag">已确认 · 顺带的一条反证</span>
+正向属性 <code>ATT_SPRE</code> 的初始化器 <code>sub_576D8D0</code> <strong>同样是 0xDB 字节的同一模板</strong>。所以 back-ref 属性和普通引用属性在「怎么被造出来」这一层<strong>毫无区别</strong>——它们就是普通属性，差别只在语义和「谁来写」。</div>
+
+<h3>9.2 维护挂点：那是个广播器，不是维护者</h3>
+<p>这一步常被简写成「<code>PostSetRefListAttribute</code> 维护 back-ref」。但反编译出来，它<strong>什么都不维护</strong>——它是条事件总线：</p>
+
+<p class="kicker">DB_ElementChangesPlugger::PostSetRefListAttribute @ 0x591E780</p>
+<pre><code><span class="tok-k">char</span> DB_ElementChangesPlugger::PostSetRefListAttribute(
+        this, a2 <span class="tok-c">/* DB_Element const&amp; 改动的元素 */</span>,
+        DB_Attribute *a3 <span class="tok-c">/* 被写的引用列表属性 */</span>,
+        a4 <span class="tok-c">/* vector&lt;DB_Element&gt; const&amp; 新的引用目标 */</span>)
+{
+  <span class="tok-k">if</span> ( !DB_Attribute::wnoevt(a3) )         <span class="tok-c">// 闸门：属性若配置为「不发事件」，整段跳过</span>
+  {
+    v6 = *(this + 76);  v5 = *(this + 77); <span class="tok-c">// 订阅者指针数组 [begin, end)</span>
+    v8 = (v5 - v6 + 3) &gt;&gt; 2;
+    <span class="tok-k">do</span> {
+      (**v6)(*v6, a2, a3, a4);             <span class="tok-c">// 虚调用：三件套原样转发给每个 handler</span>
+      ++v6;
+    } <span class="tok-k">while</span> (--v8);
+  }
+}</code></pre>
+
+<figure>
+<div class="diagram">      有人写了一个引用列表属性（例如把某构件的 SPREF 改指到新目录件）
+                                │
+                                ▼
+      DB_ElementChangesPlugger::PostSetRefListAttribute      @ 0x591E780
+                                │
+                ┌───────────────┴────────────────┐
+                │  DB_Attribute::wnoevt(attr) ?  │           @ 0x58D5290
+                └───────┬────────────────┬───────┘
+                   true │           false │
+                        ▼                 ▼
+                  什么都不做      遍历订阅者数组，逐个虚调用
+                （静默属性）                │
+                                            ▼
+              转发三件套：改动的元素 · 被写的引用属性 · 新引用目标列表
+                                            │
+              ┌─────────────────────────────┴──────────────────────────┐
+              ▼                                                        ▼
+   Core3D.dll  DESDRA_SCPlugs                        AfiModeling.dll  ElementEvents
+   （维护连接型 back-ref，见 9.3）                    （转发成应用层事件，不写 back-ref）
+
+   订阅入口   DB_ElementChangesPlugger::SubscribePostSetRefListAttribute  @ 0x581F7E0
+   handler 基类  DB_PostSetRefListAttributeHandler   ctor @ 0x581B400 / 0x581B410</div>
+<figcaption>plugger 只负责把「谁改了哪个引用、改成了什么」这条消息分发出去；真正干活的是订阅它的 handler——下一节把这两个订阅者揪出来了。</figcaption>
+</figure>
+
+<div class="callout tip"><span class="tag">这个签名值得单独看一眼</span>
+参数正好是<strong>三件套</strong>：改动的元素、被写的引用属性、新的引用目标列表——恰好就是维护一张反向索引所需的全部信息。gen-model 的 <code>extract_reverse_ref_edges(op)</code> 拿到的是同样三样东西（referrer、哪些属性算引用、后态目标集），挂点位置也一致：都在「写引用属性」那一刻。这不是巧合，ADR-003 就是照着这个挂点选的。</div>
+
+<h3>9.3 订阅者到底是谁（实测：只有两个，而且都不写 <code>SPBREF</code>）</h3>
+<p>这一节是本课最容易讲错的地方，所以直接把它查穿。先看一个反直觉的事实：<code>SubscribePostSetRefListAttribute</code> 在 <strong>core.dll 内部一个调用方都没有</strong>——它唯一的 xref 是 <code>0x5E14028</code>，也就是导出表数据项（IDA 标为 Exported entry 12076）。**订阅动作全部来自外部模块。**</p>
+<p>对 E3D 安装目录下 621 个顶层 <code>*.dll</code> / <code>*.exe</code> 扫描导入名，命中除 core.dll 自身外只有三个模块：</p>
+<table>
+<thead><tr><th>模块</th><th>订阅者</th><th>它拿这条消息干什么</th></tr></thead>
+<tbody>
+<tr><td><code>Core3D.dll</code></td><td><code>DESDRA_SCPlugs</code>（单例，<code>Instance</code> @ <code>0x10409440</code>）</td><td><strong>维护连接型 back-ref</strong>——下面这条链</td></tr>
+<tr><td><code>AfiModeling.dll</code></td><td><code>ElementEvents</code>（<code>sub_100C4AB0</code> @ <code>0x100C4AB0</code> 一次性 new 出 14 个 handler 子对象并逐个订阅）</td><td>转发成应用层事件 + 合法性校验，<strong>不写 back-ref</strong></td></tr>
+<tr><td><code>Aveva.Core.Database.Implementation.dll</code></td><td>未分析（混合模式 C++/CLI）</td><td>推测是 .NET 事件桥</td></tr>
+</tbody>
+</table>
+
+<figure>
+<div class="diagram">DB_ElementChangesPlugger::PostSetRefListAttribute   core.dll @0x591E780   广播
+   │
+   ▼
+DESDRA_SCPlugs::PostSetRefListAttribute             Core3D   @0x10409C50   打包
+   把（元素 refno, noun hash, 属性 hash, 新目标 refno 数组, 个数）交给 ↓
+   │
+   ▼
+VDESFA        trace 串 "descases/VDESFA"            Core3D   @0x101F2D4B   差分
+   DGETFA 读出该属性的「旧值」，与新列表逐项比对
+   │
+   ├─ 新列表里有、旧列表里没有 ── 新增 ──▶ BAKREF  "structures/BAKREF"  @0x102D4724
+   │                                        建立反向引用
+   │                                        （内部先调 BREAKF 清旧，再写新）
+   │
+   └─ 旧列表里有、新列表里没有 ── 移除 ──▶ BREAKF  "structures/BREAKF"  @0x102D448F
+                                            断开反向引用</div>
+<figcaption>图 9 · 订阅者链路。<code>BAKREF</code> / <code>BREAKF</code> 这两个 trace 串（back reference / break ref）是判定这条链用途的直接证据。</figcaption>
+</figure>
+
+<div class="callout confirm"><span class="tag">和 gen-model 撞了同一条纪律</span>
+<code>BAKREF</code> 在写新边之前会**先调一次 <code>BREAKF</code>** 把旧的清掉，然后才建立新的反向引用。这正是 <code>maintain_reverse_index</code> 的「先整体 <code>DELETE</code> 出边、再按后态整体重写」——两边独立走到同一个结论，因为要解决的都是「改过引用后旧边不能残留」这个问题。</div>
+
+<h4>配对关系是查表来的：<code>desdblib/LOOKUP</code>，646 行</h4>
+<p><code>BAKREF</code> 靠 <code>sub_10382A60</code>（trace 串 <code>desdblib/LOOKUP</code>）回答「A 型元素用属性 X 指向 B 型元素时，B 那边应该写哪个属性」。它线性扫描一张静态表 <code>dword_10DA5EA0</code>，<strong>646 行 × 4 列</strong>（列间距 646 个 dword，共 10 336 字节）：<code>col0 == noun_a &amp;&amp; (col1 == noun_b || noun_b == 0) &amp;&amp; col2 == attr</code> ⇒ 产出 <code>col3</code>。</p>
+<p>整张表已经解码落盘在 <code>.ida_scratch/out_conn_pairing_table.md</code>。它的形状是：</p>
+<div class="diagram">col0 / col1  = noun 对        92 / 95 个不同值
+               BRAN NOZZ ELBO TEE FLAN REDU OLET GENSEC HANG AHU DAMP FILT …
+
+col2 / col3  = 属性对         只有 11 个不同值
+               CREF  HREF  TREF  CRFA  JOIS  JOIE  PFRE  CFRA  LNFA  HPREF  TPREF
+
+表是对称的：既有 TREF → CRFA，也有 CRFA → TREF
+
+例：  BRAN | TEE  | HREF | CREF     BRAN 的 HREF 指向 TEE ⇒ 配对属性是 TEE 的 CREF
+      BRAN | BRAN | TREF | HREF     两条支管首尾相接
+      LOAP | FITT | CREF | CREF     两侧同名</div>
+
+<div class="callout infer"><span class="tag">这里要更正一个说法</span>
+所以这条链维护的是**连接型 back-ref**（管道 / 暖通的首尾与连接关系），<strong>不是</strong> 9.1 那六个 <code>SPBREF</code>/<code>SCBREF</code>/<code>TABREF</code>/<code>GOBREF</code>/<code>HDBREF</code>/<code>DBREF</code>。目录 / 规格那一族 back-ref 究竟由谁写，<strong>本次没有找到</strong>——不在这两个订阅者里，很可能压根不走 plugger，而是由 dabacon 内核在写引用属性时自己维护。这与 ADR-003 早就写下的判断（「PDMS 里 back-ref 是独立引用表 / 系统维护结构」）是一致的。</div>
+
+<div class="callout tip"><span class="tag">对 gen-model 的直接意义</span>
+E3D 认定为双向连接的这 11 个属性里，<code>DEPENDENCY_CASCADE_ATTR_NAMES</code> 只显式列了 <code>CREF</code>/<code>HREF</code>/<code>TREF</code>。另外 8 个（<code>CRFA</code> <code>JOIS</code> <code>JOIE</code> <code>PFRE</code> <code>CFRA</code> <code>LNFA</code> <code>HPREF</code> <code>TPREF</code>）不在任何静态清单里、也不被 <code>attribute_affects_model</code> 命中，于是落到 <code>Unknown</code>，再被 <strong>A2 兜底</strong>（schema <code>att_type == ELEMENT</code>）升级成 <code>DependencyCascade</code>。<br>
+结论：<code>ref_rev</code> 的成员资格<strong>没有缺口</strong>，但这 8 个是靠兜底进来的而不是靠 curated 清单——这也算 A2 那条规则第一次被逆向正面验证。另外它们<strong>全都在离线 <code>all_attr_info.json</code> 里</strong>，和 <code>SPBREF</code> 家族的「离线零命中」正好形成对照：<strong>连接型 back-ref 离线读得到，目录型读不到</strong>。</div>
+
+<h3>9.4 <code>wnoevt</code>：要不要广播，字典说了算</h3>
+<p class="kicker">DB_Attribute::wnoevt @ 0x58D5290</p>
+<pre><code><span class="tok-k">bool</span> DB_Attribute::wnoevt(DB_Attribute *this){
+  <span class="tok-k">if</span> ( !*((BYTE*)this + 8) )              <span class="tok-c">// 还没从字典加载过？</span>
+    (*(*(DWORD*)this + 20))(this);        <span class="tok-c">// 走 vtable 槽 +20 懒加载 schema</span>
+  <span class="tok-k">return</span> *((BYTE*)this + 184);            <span class="tok-c">// 返回 this+0xB8 的布尔字段</span>
+}</code></pre>
+<p>「want no event」＝这个属性被写时要不要广播变更事件。注意它和课 01 的 <code>DB_Noun::graphicsBehaviour</code> 是<strong>同一个套路</strong>：先看 <code>this+8</code> 加载过没有，没有就走 vtable 懒加载，然后返回一个固定偏移的 schema 字段。也就是说「哪些属性是静默的」同样<strong>由字典数据驱动</strong>，不是二进制里写死的。</p>
+
+<div class="callout infer"><span class="tag">推断 · 未验证</span>
+很自然会猜：back-ref 属性自己的 <code>wnoevt</code> 应当为 true，否则 handler 写 <code>SPBREF</code> 又会触发一轮 <code>PostSetRefListAttribute</code>，无限递归。但这个值存在<strong>字典里</strong>而不在二进制里，静态分析读不到——要在活的 E3D 会话里查该属性的 schema 才能证实。所以目前只是推断。</div>
+
+<h3>9.5 名字怎么拆（提示，不是结论）</h3>
+<p>按前缀看：<code>SP</code>+<code>BREF</code> ＝ spec 反向引用、<code>SC</code>+<code>BREF</code> ＝ spec component / SCOM 反向引用、<code>GO</code>/<code>HD</code>+<code>BREF</code> 同理；<code>TABREF</code> 则少了那个 B。字面拆分并不唯一，语义要以字典定义为准。</p>
+
+<div class="callout confirm"><span class="tag">顺手解决了一个长期麻烦：名字 ↔ hash</span>
+<p>逆向里遇到的全是裸 hash（<code>DB_Attribute::hashValue</code> / <code>DB_Noun::hashValue</code> 的返回值），过去只能靠在字典 JSON 里搜数字。这次从本仓 <code>all_attr_info.json</code> 的 701 个 <code>(name, hash)</code> 对把函数拟合出来了——先用「只差一个字符的名字对」求每个位置的权重（恒为 <code>27^i</code>，<strong>首字符权重最低</strong>），再按名字长度解常数项：</p>
+<pre><code>hash(name) = 27^4 + Σ<span class="tok-c">(i = 0 .. n-1)</span> val(c_i) · 27^i        val('A')=1 … val('Z')=26</code></pre>
+<p>在 701 个属性名上 <strong>100% 命中</strong>（长度 2/3/4/5/6 全对），对 noun 同样成立：<code>TABITE</code> ⇒ <code>83 083 448</code>，与 <code>noun_flags.json</code> 一致。意味着 gen-model <strong>不需要字典就能算任意 noun / 属性的 hash</strong>，也能把逆向里的裸 hash 立刻反解成名字——上面 646 行配对表里有 8 个字典查不到的 noun，就是这么解出来的。脚本：<code>.ida_scratch/attr_hash_solve.py</code>。</p></div>
+
+<h3>9.6 那 gen-model 为什么还要自己建一张</h3>
+<table>
+<thead><tr><th>能力</th><th>core.dll（在线 viewer）</th><th>gen-model（离线生成）</th></tr></thead>
+<tbody>
+<tr><td>反向关联</td><td>库里就有存储型 back-ref：<code>SPBREF</code>/<code>SCBREF</code>/<code>TABREF</code>/<code>GOBREF</code>/<code>HDBREF</code>/<code>DBREF</code></td><td>自建 <code>ref_rev</code> 边表</td></tr>
+<tr><td>维护挂点</td><td><code>PostSetRefListAttribute</code> 广播 → handler 写 back-ref</td><td><code>maintain_reverse_index</code>，同样在「落库写引用属性」处</td></tr>
+<tr><td>关联展开</td><td><code>DB_Clone::getRelatedElements</code></td><td><code>load_ref_reversal_closure</code> + <code>build_unit_rollup</code></td></tr>
+<tr><td>刷新粒度</td><td>全量视图 flush（<code>FZXUPD→FUPALL→GLUPDA</code>）</td><td>必须自算最小重生成集，粒度不照抄</td></tr>
+</tbody>
+</table>
+
+<div class="callout confirm"><span class="tag">已确认 · 离线确实拿不到</span>
+gen-model 的解析器按 <strong>schema 固定偏移</strong>解码属性，而这些 back-ref 名字<strong>不在</strong> <code>vendor/aios-parse-pdms/all_attr_info.json</code> 里（可自行 grep，零命中）。PDMS 里 back-ref 是独立引用表 / 系统维护结构，不是元素隐含块里的固定偏移属性 → 离线解析取不到。这就是 ADR-003 选择自建索引的直接理由；「将来直读 E3D back-ref」列为后续优化 ADR。</div>
+
+<h2 id="quiz">10. 自测</h2>
+
+<div class="quiz">
+  <p class="q">Q1. <code>ref_rev</code> 表里一条边的 <code>in</code> 是谁？</p>
+  <button data-correct="1" data-fb="对。in = 引用方（设计实例），out = 被引用方（目录元件）；存正向边，查的时候用 &lt;-ref_rev 反着走。">引用方，比如设计实例 ELBO</button>
+  <button data-correct="0" data-fb="不对。被引用方是 out。名字叫反向索引，但存的是正向边。">被引用方，比如目录元件</button>
+  <button data-correct="0" data-fb="不对。OWNER 层级关系由 owner 图负责，故意不进这张表。">元素的 OWNER</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q2. 为什么维护时要先 <code>DELETE pe:X-&gt;ref_rev</code> 再整体重写，而不是只插新边？</p>
+  <button data-correct="1" data-fb="对。只插不删会留下幽灵边，改过引用的元素以后会被旧目标误级联。">否则改过的引用会留下旧边，造成误级联</button>
+  <button data-correct="0" data-fb="不对。边 id 是复合主键，本来就幂等，重复插入不会报错。">否则重复插入会主键冲突</button>
+  <button data-correct="0" data-fb="不对。删除只影响该元素自己的出边，和性能排序无关。">为了让插入顺序更快</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q3. 改一个 <code>TABITE</code> 时，为什么一跳查询不够？</p>
+  <button data-correct="1" data-fb="对。SPCO 不是交付单元，一跳只能拿到它，必须继续沿它的引用者上溯到 BRAN。">中间的 SPCO 自己没有交付单元，级联会断在它身上</button>
+  <button data-correct="0" data-fb="不对。一跳查询本身没有条数限制问题，问题在语义上断链。">一跳查询会超出 500 条批次上限</button>
+  <button data-correct="0" data-fb="不对。TABITE 的边是正常写入的，问题在于链路中间那一层。">TABITE 的边没有被写进索引</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q4. 写 <code>ref_rev</code> 失败和读 <code>ref_rev</code> 失败，处理为什么不一样？</p>
+  <button data-correct="1" data-fb="对。写失败下次触及会整体重写而自愈；读失败会静默漏刷，所以必须落一条 CascadeExpand 待办把级联推迟执行。">写失败能自愈所以只记 warning；读失败会静默漏刷所以要落持久待办</button>
+  <button data-correct="0" data-fb="不对。两者都不会回滚水位，这正是 ADR-001 的设计。">读失败会回滚水位，写失败不会</button>
+  <button data-correct="0" data-fb="不对。反过来了：写失败才是可自愈的那个。">读失败可以自愈，写失败不行</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q5. <code>DB_ElementChangesPlugger::PostSetRefListAttribute</code> 自己干了什么？</p>
+  <button data-correct="1" data-fb="对。反编译出来它只有一个 wnoevt 闸门加一个订阅者遍历虚调用，写 back-ref 的是订阅它的 handler。">只做广播：过一道 wnoevt 闸门，然后把三件套转发给所有订阅者</button>
+  <button data-correct="0" data-fb="不对。它函数体只有几十字节，没有任何写属性的动作。">它直接把 SPBREF/SCBREF 等 back-ref 写回数据库</button>
+  <button data-correct="0" data-fb="不对。图形刷新是 FZXUPD→FUPALL→GLUPDA 那条链，和它无关。">它触发图形刷新</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q6. 订阅 <code>PostSetRefListAttribute</code> 的 <code>Core3D.dll / DESDRA_SCPlugs</code> 这条链，维护的是哪一族 back-ref？</p>
+  <button data-correct="1" data-fb="对。VDESFA 差分新旧引用列表后走 BAKREF / BREAKF，配对关系来自 desdblib/LOOKUP 那张 646 行表，属性只有 CREF/HREF/TREF/CRFA/JOIS/JOIE 等 11 个。">连接型：CREF / HREF / TREF / CRFA / JOIS / JOIE 那一族</button>
+  <button data-correct="0" data-fb="不对。目录/规格那族（SPBREF/SCBREF/TABREF…）不在这条链上，谁写它至今没找到——很可能由 dabacon 内核自己维护。">目录 / 规格型：SPBREF / SCBREF / TABREF 那一族</button>
+  <button data-correct="0" data-fb="不对。OWNER 层级关系不经过这条链，它处理的是引用列表属性。">OWNER 层级关系</button>
+  <div class="fb"></div>
+</div>
+
+<hr>
+<p><strong>配套流程图</strong>：<code>docs/diagrams/incremental-update.drawio</code> 第 2 页「交付单元归并」泳道，画的就是本课流程 B + C 在整条增量链路里的位置。</p>
+
+<div class="callout tip"><span class="tag">我是你的老师</span> 想往下挖哪一段——比如 <code>build_unit_rollup</code> 的搬迁两侧处理、<code>rebuild_ref_rev</code> 的换表事务、或者把订阅 <code>PostSetRefListAttribute</code> 的那几个 handler 逐个揪出来看——直接说，我接着讲。</div>
+
+<footer class="foot">
+  课 02 · gen-model 侧基于本仓 <code>src/data_interface/{manual_update,increment_pipeline,model_impact,model_update_plan}.rs</code> 实读；逆向侧基于 <code>ida-pro-mcp</code> 会话 <code>core31-retrace</code>（core.dll）、<code>core3d-retrace</code>（Core3D.dll）、<code>afimodel-retrace</code>（AfiModeling.dll）的实测反编译。<br>
+  笔记：<code>teach/learning-records/0007</code>（back-ref 属性与广播器）、<code>0008</code>（订阅者链路 · 646 行配对表 · 名字 hash 函数）。相关：<a href="0001-core-dll-geometry-graphics.html">课 01 · 几何体识别与关联模型生成</a> · <a href="../reference/glossary.html">参考速查表</a> · <a href="../MISSION.md">MISSION</a>
+</footer>
+</div>
+
+<script>
+document.querySelectorAll('.quiz').forEach(function(q){
+  var fb = q.querySelector('.fb');
+  q.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click', function(){
+      q.querySelectorAll('button').forEach(function(x){ x.classList.remove('correct','wrong'); });
+      if(b.dataset.correct === '1'){ b.classList.add('correct'); }
+      else { b.classList.add('wrong'); }
+      fb.textContent = b.dataset.fb || '';
+    });
+  });
+});
+</script>
+</body>
+</html>

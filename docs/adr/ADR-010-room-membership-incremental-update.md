@@ -66,10 +66,10 @@
 - 本 ADR 第 1/2/7 条与第 8 条的元素分支（**队列骨架**）：已落地。
   `ModelWorkAction` 新增 `RoomRecalcElement` / `RoomRecalcPanel`；`record_id` 按
   action 分支，房间任务的行 id 是 `{action}_{target}`、**不带 dbnum**；复活语义随之
-  改为无条件——行既然不带 dbnum，同一块面板会被不同库的会话轮流触发，跨库比 sesno
-  只会让一个库的 500 永久压住另一个库的 80，而房间任务的入队条件本身就是
-  「AABB 真的变了」，每一次入队都是全新的重算理由。`dbnum` 与 `source_end_sesno`
-  降为字段，取 max 记录最后一次触发来源。
+  改为由队列 revision 驱动——行既然不带 dbnum，同一块面板会被不同库的会话轮流触发，
+  跨库比较 sesno 没有意义，而房间任务的入队条件本身就是「AABB 真的变了」，每一次入队
+  都是全新的重算理由。`dbnum` 与 `source_end_sesno` 仅保留为追踪字段；当前几何刷新层
+  拿不到可靠来源，统一写 0，不参与排序、去重或复活。
   `drain` 由两阶段变三阶段，新增的 `drain_rooms` 排在 regen 之后；手动路径
   （`manual_update`）当时在单元重生成之后补了同一阶段——该安排已被 ADR-011
   合流取代：手动与自动共用一条数据批次队列，房间收敛统一在 worker 空闲轮的
@@ -325,8 +325,8 @@ D1 与 D2 相互独立，修好任何一个另一个依然成立。
 - **去重**：必须像 `joins_regen_batch` 那样**按 target 在内存去重**，但不套用它的
   批量执行逻辑。
 - **`record_id` 去掉 dbnum**：房间任务用 `room_recalc_panel_{target}` /
-  `room_recalc_element_{target}`，`dbnum` 与 `source_end_sesno` 降为字段，
-  UPSERT 时取 max 记录最后一次触发来源。
+  `room_recalc_element_{target}`，`dbnum` 与 `source_end_sesno` 仅作追踪；来源未知时写 0；
+  UPSERT 递增队列 revision，不比较跨库 sesno。
   理由：一个 panel 天然跨库，带 dbnum 会让同一 panel 在一轮里出多行（同一间房重算多遍），
   失败后又只能被同 dbnum 的新会话复活——那是审计里 **B6** 的放大版。
   代价：`record_id()` 需要按 action 分支，B5 的复活子句顺序守护

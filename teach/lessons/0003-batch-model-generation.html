@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课 03 · 批量模型生成：一条 ADD 命令如何生成上万个元素的图形</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 课程 / <strong>03 · 批量模型生成流水线</strong> · <a href="../reference/glossary.html">参考速查表 →</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Lesson 0003 · Reverse engineering · AVEVA Everything3D 3.1</p>
+  <h1>批量模型生成：一条 <code>ADD</code> 如何变成上万个段</h1>
+  <p class="lead">本课回答一个你问了很久的问题：<strong>AVEVA 到底怎么"批量"生成模型？</strong> 结论会让你意外——<span class="pill">批量循环不在 core.dll</span>。<code>core.dll</code> 是"图形/几何供应商"，真正的批量遍历在 <code>Core3D.dll</code>。全部结论配<span class="pill">地址</span><span class="pill">反编译</span><span class="pill">导入导出表</span>证据。</p>
+  <p class="kicker">预计 20–25 分钟 · 会话：core31-retrace(core.dll) + core3d-retrace(Core3D.dll) · 工具：ida-pro-mcp</p>
+</header>
+
+<div class="toc">
+  <strong>本课路线</strong>
+  <ol>
+    <li><a href="#neg">先证伪：为什么批量循环<em>不在</em> core.dll</a></li>
+    <li><a href="#supply">core.dll 提供的四件"批量原料"</a></li>
+    <li><a href="#pipe">主线：Core3D.dll 的九步流水线</a></li>
+    <li><a href="#gate">批量的关键：几何之前的两级闸门</a></li>
+    <li><a href="#cache">批量的加速：缓存 + 登记表</a></li>
+    <li><a href="#libgm">真正的实体建模在 libgm</a></li>
+    <li><a href="#fix">修正三条旧结论</a></li>
+    <li><a href="#gen">落到 gen-model</a></li>
+    <li><a href="#todo">还没验证的部分</a></li>
+    <li><a href="#quiz">自测</a></li>
+  </ol>
+</div>
+
+<h2 id="neg">1. 先证伪：批量循环不在 core.dll</h2>
+<p>直觉上"core.dll 是内核，模型生成当然在它里面"。但四条硬证据一起否定了这点。</p>
+
+<h3>1.1 core.dll 里只有一个函数会建 SGL 段</h3>
+<p class="kicker">FZ3SGL @ 0x5297141（fm3dcanv）</p>
+<p>把 core.dll 对 <code>sgl5NET</code> 全部 32 个导入做反向 xref，只有 <strong>35 个</strong>函数调用图形引擎，而其中<strong>唯一</strong>调用建段 API（<code>GLSVCR / GLVSEG / GLSVBO / GLSVSA / GLSVSE / GLVCRE</code>）的就是 <code>FZ3SGL</code>：</p>
+<pre><code>GLVCRE(&amp;v8, &amp;v10);                        <span class="tok-c">// 建 1 个视图</span>
+HPUTI1(a2, &amp;unk_5D32024, &amp;v8);
+if (*a4 &amp;&amp; *a5) GLVSIZ(&amp;v8, a4, a5);
+v11 = 140; v12 = 140; v13 = 1; v14 = 1;
+GLSVCR(&amp;v8, &amp;v11, &amp;v12, &amp;v13, &amp;v14);      <span class="tok-c">// 建 1 组固定的段（常量 140/140/1/1）</span>
+...
+GLSVSE(&amp;v8, varC); GLSVSA(...); GLSVBO(&amp;v8);</code></pre>
+<p>参数是<strong>写死的常量</strong>——它建的是"画布容器"，不是"每个元素一个段"。core.dll 里根本没有"遍历元素建段"的代码。</p>
+
+<h3>1.2 绘图 opcode 全部只被导出表引用</h3>
+<p>core.dll 有一套 GINO 风格的图形抽象层（下一节详述）。但对 <code>GSTDRG</code>(Start drawing)、<code>GFIDRG</code>(Finish drawing)、<code>GOPSGI</code>、<code>GMASTE</code>、<code>CPTSGL</code>、以及整个 <code>MBX*</code> 包围盒族做 xref，结果<strong>唯一</strong>引用都是 <code>0x5e14028</code>——导出目录。</p>
+<div class="callout confirm"><span class="tag">confirmed</span> 没有任何 core.dll 内部代码调用它们 ⇒ 它们是<strong>给别的 DLL 用的 API</strong>。</div>
+
+<h3>1.3 谁在用？Core3D.dll</h3>
+<table>
+<thead><tr><th>DLL</th><th>从 core 导入</th><th>从 sgl5NET 导入</th><th>从 libgm 导入</th></tr></thead>
+<tbody>
+<tr><td><code>core.dll</code>（自身）</td><td>—</td><td><strong>32</strong>（只有视图/段管理 + GLUPDA）</td><td>0</td></tr>
+<tr><td><code>Core3D.dll</code></td><td><strong>4859</strong></td><td><strong>113</strong>（含 <code>SGL_define_primitive_d</code>）</td><td><strong>124</strong>（<code>gm_Create*</code>）</td></tr>
+</tbody>
+</table>
+<p>数量差本身就是答案：Core3D 才是那个"每个元素都要画一遍"的模块。</p>
+
+<h2 id="supply">2. core.dll 提供的四件"批量原料"</h2>
+<p>core.dll 的角色是<strong>供应商</strong>：它把批量生成需要的四类零件都导出，自己不跑循环。</p>
+
+<h3>2.1 GINO 风格图形抽象层：141 个 opcode</h3>
+<p class="kicker">名字表 0x60f9f00 · 描述表 0x60fd650 起步长 0x190 · 下标→名字 helper sub_54D4308</p>
+<pre><code><span class="tok-c">// sub_54D4308：把 opcode 下标翻成 6 字符名字</span>
+for_cpystr(a1, a2, a2&gt;&gt;31, &amp;aGopenGdfpicgst[6 * *a3 - 6], 6, 0, 0);</code></pre>
+<p>表里 141 项，从 <code>GOPEN</code> 到 <code>GQUNWV</code>。并排还有一张 40 字符定长的人读描述表。挑几个关键的：</p>
+<table>
+<thead><tr><th>opcode</th><th>描述（来自二进制里的描述表）</th><th>意义</th></tr></thead>
+<tbody>
+<tr><td><code>GSTDRG</code> <code>0x561e1a6</code></td><td>Start drawing</td><td><strong>一次批量绘制的开括号</strong></td></tr>
+<tr><td><code>GFIDRG</code> <code>0x561ecbd</code></td><td>Finish drawing</td><td><strong>闭括号</strong></td></tr>
+<tr><td><code>GDFSEG</code> <code>0x54bd158</code></td><td>Define segment</td><td>定义段</td></tr>
+<tr><td><code>GDFPGP</code> <code>0x54be5cb</code></td><td>Define primitive-group</td><td>定义图元组</td></tr>
+<tr><td><code>GSTSGD</code>/<code>GQUSGD</code></td><td>Set/Query segment user-data as Splash element</td><td>段↔元素身份绑定</td></tr>
+<tr><td><code>GQUITV</code> / <code>GTHITV</code></td><td>Query / Highlight Item in View</td><td>拾取与高亮</td></tr>
+<tr><td><code>GRGPIC</code></td><td>Regenerate picture</td><td>重生成</td></tr>
+</tbody>
+</table>
+<div class="callout tip"><span class="tag">记住这一对</span> <code>GSTDRG … GFIDRG</code>＝"开始画/结束画"。**批量**在 AVEVA 的语义里就是：这对括号之间塞进去 N 个元素，最后一次性 <code>GLUPDA</code> 刷屏。</div>
+
+<h3>2.2 boxlib：逐图元包围盒（第一张真正的"按图元类型分派表"）</h3>
+<p class="kicker">0x55f9c24 – 0x55fe2af，全部导出</p>
+<pre><code>MBXBOX 0x55face8  盒     MBXCIR 0x55fb004  圆     MBXDSH 0x55fb1f8  碟(dish)
+MBXPOI 0x55fb7b4  点     MBXPYR 0x55fbab4  棱锥   MBXSAN 0x55fc01c  ?
+MBXSLC 0x55fc5d4  斜切柱 MBXSNO 0x55fca18  锥筒   MBXSPH 0x55fcc40  球
+MBXSRE 0x55fcd3c  回转体 MBXTOR 0x55fd2d8  环     MBXARC/MBXELL/MBXSEC …
+MBXADD 0x55fab78  合并盒  UNVBOX/EXPBOX/LINBOX/LINVOL/LTHVOL  体积与限界</code></pre>
+<p>注意这一族<strong>只算盒不算几何</strong>——比建实体便宜好几个量级。批量流程会先用它做体积/限界过滤。</p>
+
+<h3>2.3 cpslib：CPS 图片存储</h3>
+<p class="kicker">CMPTUD @ 0x5595aec</p>
+<pre><code>GQUSGD(&amp;v7, v6);                       <span class="tok-c">// 读段上的 user-data</span>
+HPUTI1(v6, &amp;unk_5DAB0E8, a3);          <span class="tok-c">// 改一个字段</span>
+HPUTIA(v6, &amp;unk_5DAB0EC, a2, ...);
+GSTSGD(&amp;v7, v6);                       <span class="tok-c">// 写回</span></code></pre>
+<p>整套 <code>CM*</code>（<code>CMINIT/CMHEAD/CMGTPF/CMPTGP/CMDLGP/CMGTUD/CMQSGU</code>…）是图片(picture)持久化层，"Delete picture (cps)" 就在 opcode 描述表里。</p>
+
+<h3>2.4 nounlib：分类谓词族</h3>
+<p><code>IFCOMP / IPCOMP / IHCOMP / IECOMP / INCOMP / INGCOM / IGMCOM / IG2COM / IASLCO / ICABCO / IPFCOM / LPRMTV / MEMTES</code>。这些是<strong>课 01 讲的"数据驱动类型判定"的调用面</strong>：Core3D 的每一层分派都在调它们。</p>
+
+<h2 id="pipe">3. 主线：Core3D.dll 的九步流水线</h2>
+<p>Core3D.dll 里大部分函数没有符号，但每个 FORTRAN 例程入口都有 <code>MTRENT("模块/例程", …)</code> 的 traceback 字符串。把这些串反向 xref 就能还原全部名字。下面是还原出来的批量主链：</p>
+
+<figure>
+<div class="diagram">【一条 ADD 命令 → 上万个段】
+
+ add/ADDELE     0x1021b4ec   命令层 ADD  &lt;CE | SITE | ZONE | …&gt;
+   │                          兄弟：ADDSIT ADDDES ADDCAT LADALL VISALL REPALL REMALL
+   ▼
+ add/ADDDES     0x1021d005   走设计库子树，逐元素登记（2505 B）
+   │                          调 LISTOP/LPRMTV/IHCOMP/IPCOMP 判类
+   ▼
+ css/SEGCRE     0x10232c9d   为该元素建一个 SGL 段  → GLDFSG
+   │                          兄弟：SEGREP(替换) SEGDEL SEGOPN SEGTRA SEGCOL SEGHIL
+   ▼
+ build/MODCMP   0x10251012   按 noun 类挑"建模方式"（1638 B）
+   │                          IFCOMP IPCOMP IHCOMP IJOCOM IPLCOM IPRCOM ICOCOM …
+   ▼
+ build/ELMODL   0x1025277e   ★元素模型构建主循环（7675 B）
+   ├── build/DRAWOP  0x10254579   表示法 + 层级闸门（几何之前）
+   ├── build/SGDRAW  0x102556de   逐类分派（4120 B）
+   │      └ build/SGHDRW 0x10255013   层级递归
+   │           └ build/NXTITM 0x102547f5   成员游标迭代
+   │                └ build/GMDRAW 0x10254b01  ★逐元素几何
+   ├── cachegml/GTGEOM 0x10341d2e  几何缓存命中/装配（2106 B）
+   └── css/SEGNEW    0x10233094
+   ▼
+ libgm  gm_CreateBox / gm_CreateCylinder / gm_CreateSnout / …   实体建模
+   ▼
+ sgl5NET  SGL_define_primitive_d / SGL_define_segment           进显示列表
+   ▼
+ core.dll  FUPALL 0x52f1f82 → GLUPDA 0x5aa90d0                  一次性刷屏</div>
+<figcaption>批量的边界是"子树"，不是"元素"：一条 ADD ZONE 就是一个批。</figcaption>
+</figure>
+
+<div class="callout confirm"><span class="tag">confirmed</span> 每一格的地址都由 traceback 串反查得到，调用边由 xref 与反编译核对。<code>SGHDRW</code> 的调用者只有 <code>SGDRAW</code>；<code>SGDRAW</code> 的调用者只有 <code>ELMODL</code>；<code>ELMODL</code> 的调用者只有 <code>MODCMP</code>；<code>MODCMP</code> 的调用者含 <code>SEGCRE</code> 与 <code>SEGREP</code>。</div>
+
+<h3>3.1 遍历方式：游标，不是列表</h3>
+<p class="kicker">build/NXTITM @ 0x102547f5</p>
+<pre><code>if (*a2) { if (*a2 == -1) { v3 = 0; goto END; } }   <span class="tok-c">// -1 = 遍历结束</span>
+else {
+  *a2 = sub_10402210(a1);                            <span class="tok-c">// 首次：取第一个成员</span>
+  if (!*a2) { v3 = 0; goto END; }
+}
+if (sub_10402220(a2, v4)) v3 = sub_10402250(a2);     <span class="tok-c">// 推进游标</span>
+else v3 = 0;</code></pre>
+<p>典型的 <em>first / next / sentinel</em> 游标。配合 <code>ELMODL</code> 里的 <code>DSAVE</code>/<code>DRESTO</code>（保存/恢复 DB 当前指针）做子树深度遍历——<strong>全程不物化元素数组</strong>，所以 ADD 一个几万元素的 ZONE 不会先吃掉一大块内存。</p>
+
+<h2 id="gate">4. 批量的关键：几何之前的两级闸门</h2>
+<p>批量要快，靠的不是几何算得快，而是<strong>大多数元素根本没走到几何</strong>。流水线里有两道闸门，都在建实体之前。</p>
+
+<h3>4.1 第一道：DRAWOP —— 表示法 + 层级</h3>
+<p class="kicker">build/DRAWOP @ 0x10254579</p>
+<pre><code>v7 = IFCOMP(a2);  v8 = IPFCOM(a2);
+if (IASLCO(a2) | v7 | v8)   v9 = dword_10EB4000;   <span class="tok-c">// 按 noun 类选一个"表示法标志字"</span>
+else if (*a2 == 3426330)    v9 = dword_10EB4008;
+else if (ICABCO(a2))        v9 = dword_10EB400C;
+else if (*a2 == 710633)     v9 = dword_10EB4010;
+else                        v9 = dword_10EB4004;
+
+sub_1025BC2E(&amp;v10, _6C);                     <span class="tok-c">// = build/LEVGET 取绘图 level</span>
+if (v9 &amp; 2) v13 = -1; else v13 = 0;  ...     <span class="tok-c">// bit 1/2/4/8 = 各表示法开关</span></code></pre>
+<p>先用 <strong>noun 分类谓词</strong>选表示法标志字，再用 <code>LEVGET</code> 取绘图层级，最后按 bit 展开成一组布尔开关（对应 PDMS 里 obstruction / insulation / centreline 之类）。这一步只读属性，不碰几何。</p>
+
+<h3>4.2 第二道：GMDRAW —— 两级早退</h3>
+<p class="kicker">build/GMDRAW @ 0x10254b01</p>
+<pre><code>if (*a4 != 621502 &amp;&amp; *a4 != 621505 &amp;&amp; *a4 != 312510241
+                  &amp;&amp; *a4 != 312510247 &amp;&amp; *a4 != 312510290) {   <span class="tok-c">// ① 5 个 noun 码直接跳过</span>
+  if (*a5 &amp; 1 | ((sub_10510680(...) &amp; 1) == 0)) {
+    if (sub_10402560(a2, ...) == 1) {                            <span class="tok-c">// ② 是不是 3D 可画</span>
+      v8 = GMCFST(a2);                                           <span class="tok-c">//    取缓存首项</span>
+      sub_10527500(&amp;v9, ..., a5, &amp;v7);                           <span class="tok-c">//    才真的画</span>
+      ...
+    } else if (dword_10E98634[0] &gt; 1) {
+      MTRINT("GMDRAW: Skipping non-3d:", 24, a2, ...);            <span class="tok-c">//    否则打点跳过</span>
+    }
+  }
+}</code></pre>
+<div class="callout confirm"><span class="tag">confirmed</span> 那条 <code>"GMDRAW: Skipping non-3d:"</code> 字符串是硬证据：<strong>AVEVA 自己就是把"非 3D 元素"在几何之前扔掉的</strong>，而且留了 trace 级别开关（<code>dword_10E98634[0] &gt; 1</code>）。</div>
+
+<h2 id="cache">5. 批量的加速：缓存 + 登记表</h2>
+
+<h3>5.1 cachegml：几何缓存</h3>
+<p><code>GTGEOM</code>(0x10341d2e, 2106 B) 是核心，周边 <code>GTCLEL / GTCLRF / GTCLSH / GTTUBG / GTCSPA / MBXGML</code>，还有两个"意向位" <code>BXWANT</code>(要盒吗) / <code>SLWANT</code>(要实体吗)。<code>GTGEOM</code> 的调用面全是分类谓词 + <code>CGTCT2/CSTCT2</code>(目录读取) + <code>GATINS</code>：</p>
+<div class="callout infer"><span class="tag">inferred</span> 缓存键在<strong>目录几何层</strong>（catalogue / GMSET），不是设计元素层。理由：<code>GTGEOM</code> 的入参路径走 <code>CGTCT2/CSTCT2</code> 目录读取而非设计元素属性，且 <code>MODCMP</code> 也调 <code>CGTCT2</code>。这解释了批量的主要加速来源——<strong>同型号构件复用同一份几何</strong>。尚未逐块反编译确认键的构成。</div>
+
+<h3>5.2 maplib：元素 ↔ 段 登记表</h3>
+<p>41 个例程：<code>MAPINS</code>(0x1038f5e4 插入) <code>MAPGET</code> <code>MAPELE</code> <code>MAPREM</code> <code>MAPBOX</code> <code>MAPKEY/MAPKY2/MAPKY3</code> <code>QVOLDS/SVOLPR</code>(体积过滤) 以及一族 <code>MU*</code> 更新例程。</p>
+<p>这张表是<strong>增量更新的前提</strong>：有了它，<code>css/SEGREP</code>(0x102334d0) 才能"只替换一个元素的段"——它同样调 <code>MODCMP</code>，等于对单个元素重跑一遍流水线尾段。</p>
+
+<h3>5.3 change：变化 → 图形</h3>
+<pre><code>change/EVALST 0x1022e0a7   变化求值（兄弟 EVALAT EVALCD EVALNW EVALRF）
+change/UPCACE / UPCACP     缓存失效
+change/UPGRPH 0x1022eaee   图形更新（3959 B）
+change/UPDATD 0x1022e5ac   / UPDATN / UPDATP</code></pre>
+<p>这与课 02 的 core.dll 侧（<code>DB_ElementChangesPlugger</code> → <code>invalidate(attr)</code>）是<strong>两层</strong>：core.dll 失效数据缓存，Core3D 失效图形缓存并重建段。</p>
+
+<h2 id="libgm">6. 真正的实体建模在 libgm</h2>
+<p>Core3D 从 <code>libgm</code> 导入 124 个符号，和 PDMS 目录图元<strong>几乎一一对应</strong>：</p>
+<pre><code>gm_CreateBox              gm_CreateCylinder          gm_CreateSnout
+gm_CreatePyramid          gm_CreateCircularTorus     gm_CreateRectangularTorus
+gm_CreateEllipticalDish   gm_CreateSlopeEndedCylinder
+gm_CreateExtrusion        gm_CreateRevolution        gm_CreateRuledSolid
+gm_CreatePolyhedron  + gm_AddVertexToPolyhedron / gm_AddFacetToPolyhedron
+gm_CreateFacetStructure   gm_CreateProfile           gm_CreateArc / gm_CreateBezier
+<span class="tok-c">// CSG 与遍历</span>
+gm_CreateCombination      gm_CreateClippedTree       gm_CreateExpandedTree
+gm_CompressTree           gm_CreateIterator          gm_CreatePicture  gm_AddMember</code></pre>
+<p>再往下 <code>sgl5NET</code> 侧 Core3D 拿到的是真正的几何 API：<code>SGL_define_primitive_d</code>、<code>SGL_import_external_geometry</code>、<code>SGL_set_external_geometry_map</code>、<code>SGL_define_segment</code>、<code>SGL_calculate_segment_extents</code>、<code>SGL_pick*</code> 一整套。</p>
+
+<h2 id="fix">7. 修正三条旧结论</h2>
+<div class="callout infer"><span class="tag">correction 1</span> <strong>课 01 第 5 条</strong>说"sgl5NET 只暴露视图/段管理 + GLUPDA，无逐三角 API"——这<strong>只对 core.dll 的 IAT 成立</strong>（32 个）。Core3D.dll 导入 113 个，含 <code>SGL_define_primitive_d</code> / <code>SGL_import_external_geometry</code>。而实体建模其实在第三个库 <code>libgm</code>。</div>
+<div class="callout infer"><span class="tag">correction 2</span> <strong>课 02 第 4 条</strong>说"真正的 3D 逐-noun 几何派发…待定位"——<strong>已定位</strong>：Core3D.dll <code>build/MODCMP</code> + <code>build/SGDRAW</code> + <code>build/GMDRAW</code>。判据是 core.dll <code>nounlib</code> 的 <code>I*COMP</code> 谓词族，<strong>不是</strong> <code>graphicsBehaviour</code> 上的一个大 switch。</div>
+<div class="callout infer"><span class="tag">correction 3</span> <strong>速查表</strong>把 <code>sub_5621F20</code> 记为"图形 metafile 令牌解析器（引用 FACET 字典）"——不准确。它是 metafile/plotfile 的<strong>设备选项命令解析器</strong>（<code>CHKEYW</code> 关键字表 <code>FRAME/TOKEN/ZCOORD/EUC/SHIFTJIS/APPEND/SCALE/SPLASH/FACET/UTF8</code>…），<code>FACET</code> 在这里是"输出要不要含 facet"的开关，不是几何令牌流。<br>顺带：<code>fm3dcanv/F3BDAD</code>(sub_5297CCF) 不是 drawlist add，是 3D 画布边框的<strong>方位/仰角标尺</strong>（<code>UIALBL</code> 造 label、<code>UIASLD</code> 造 slider）。</div>
+
+<h2 id="gen">8. 落到 gen-model：五条可直接抄的做法</h2>
+<ol class="steps">
+<li><strong>把批量边界定在"子树"</strong>。AVEVA 一条 <code>ADD SITE/ZONE</code> 就是一个批；遍历用 DB 指针栈(<code>DSAVE/DRESTO</code>) + 游标(<code>NXTITM</code>)，不物化元素列表。我们的 pipeline 若先收集 Vec&lt;Element&gt; 再处理，在大 ZONE 上内存会吃亏。</li>
+<li><strong>闸门必须前移到几何之前</strong>。对齐 <code>DRAWOP</code>(类 + level) → <code>GMDRAW</code>(noun 早退 + 非 3D 早退)。现在我们容易"先建网格再按 LEVEL/CLFLA/TUFLA 丢弃"，那是纯浪费。</li>
+<li><strong>缓存键放在目录几何层</strong>，不是设计元素层。同型号构件复用一份几何是批量的主加速点（对应 <code>cachegml/GTGEOM</code>）。</li>
+<li><strong>建一张 元素 ↔ 产出 的登记表</strong>（对应 <code>maplib</code>）。ADR-003 的反向索引是"输入侧"，这里需要的是"<strong>产出侧</strong>"索引——没有它就做不到 <code>SEGREP</code> 式的"只换一个单元"。</li>
+<li><strong>包围盒走独立的便宜通道</strong>。<code>boxlib MBX*</code> / <code>dbboxlib</code> 先算盒做体积过滤，再用 <code>BXWANT/SLWANT</code> 决定要不要实体。适合我们的"交付单元"级裁剪。</li>
+</ol>
+
+<h2 id="todo">9. 还没验证的部分（不要当成已完成）</h2>
+<ul>
+<li><code>ELMODL</code>(7675 B) 只读了调用面，<strong>未逐块反编译</strong>其子树遍历与 level 分支。</li>
+<li><code>GMDRAW</code> 里跳过的 5 个 noun 码（<code>621502 / 621505 / 312510241 / 312510247 / 312510290</code>）<strong>未解码成类型名</strong>。</li>
+<li><code>MODCMP</code> 在多种"建模方式"间如何选（<code>sub_102586DB / sub_1025B8B3 / sub_1038158C / sub_10651840</code>）未展开。</li>
+<li><code>libgm</code> 的 <code>gm_Create*</code> 与 PDMS 目录图元(SCYL/SBOX/SSNO…)的精确对应表<strong>未逐一核对</strong>，目前是按名字对应的强推断。</li>
+<li>CPS(<code>cpslib</code>) 明显服务 DRAFT/2D 出图，<strong>是否也缓存 3D 段未查</strong>。</li>
+<li>另一条批量入口 <code>dra_model/GENMOD</code>(0x100df724) → <code>updview/DESUPV</code>(0x101b7b7a) → <code>UVIEW</code>(0x101b2254, 12.7 KB) 是 DRAFT 出图路径，本课只确认它同样汇入 <code>MODCMP/ELMODL</code>，<strong>细节未展开</strong>。</li>
+</ul>
+
+<h2 id="quiz">10. 自测</h2>
+
+<div class="quiz">
+  <p class="q">Q1. 批量生成模型的循环在哪个模块？</p>
+  <button data-correct="0" data-fb="不对。core.dll 里唯一建段的 FZ3SGL 用的是写死常量，只建画布。">core.dll 的 FZ3SGL</button>
+  <button data-correct="1" data-fb="对。ELMODL→SGDRAW→SGHDRW→NXTITM→GMDRAW，全在 Core3D.dll 的 build 模块。">Core3D.dll 的 build 模块</button>
+  <button data-correct="0" data-fb="不对。sgl5NET 是渲染引擎，不遍历设计库。">sgl5NET 内部</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q2. <code>GSTDRG</code> / <code>GFIDRG</code> 这对 opcode 的作用是？</p>
+  <button data-correct="1" data-fb="对。描述表里就写着 Start drawing / Finish drawing——一次批量绘制的括号。">括起一次批量绘制</button>
+  <button data-correct="0" data-fb="不对。那是 GDFSEG / GCLSEG。">创建和清除段</button>
+  <button data-correct="0" data-fb="不对。取/存 user-data 是 GQUSGD / GSTSGD。">读写段的 user-data</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q3. 批量为什么快？最主要的原因是</p>
+  <button data-correct="0" data-fb="不完全。三角化快只是末端，前面已经筛掉大部分。">三角化算法快</button>
+  <button data-correct="1" data-fb="对。DRAWOP 按类+level 过滤、GMDRAW 两级早退，加上目录层几何缓存复用。">大多数元素在几何之前就被闸门筛掉，且同型号复用缓存</button>
+  <button data-correct="0" data-fb="不对。全程是单线程 FORTRAN 例程链，没看到并行证据。">多线程并行</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q4. 真正把 PDMS 图元变成实体的是哪个库？</p>
+  <button data-correct="0" data-fb="不对。core.dll 里连 SCYL/SBOX 这些字符串都没有——类型名在字典库里。">core.dll</button>
+  <button data-correct="1" data-fb="对。gm_CreateBox / gm_CreateSnout / gm_CreateCircularTorus … 124 个符号，和目录图元一一对应。">libgm</button>
+  <button data-correct="0" data-fb="不对。libgeom 只提供 D2_/D3_/mth* 数学。">libgeom</button>
+  <div class="fb"></div>
+</div>
+
+<hr>
+<p><strong>复现命令</strong>（在 <code>.ida_scratch/</code> 下）：</p>
+<pre><code>python _dump_routines2.py core3d-retrace _routines_core3d.json   <span class="tok-c"># 还原 175 个模块的例程名</span>
+python _resolve3d.py                                             <span class="tok-c"># 模块/例程 → 函数地址</span>
+python _who3d.py 0x1025277e 0x102556de 0x10255013                <span class="tok-c"># traceback + 调用面</span>
+python _dec3d.py 0x10254b01 0x10254579 0x102547f5                <span class="tok-c"># 反编译 GMDRAW/DRAWOP/NXTITM</span>
+python _opcodes.py                                               <span class="tok-c"># core.dll 141 个 GINO opcode 表</span></code></pre>
+
+<div class="callout tip"><span class="tag">我是你的老师</span> 下一步最有价值的三个方向：① 逐块拆 <code>ELMODL</code> 把子树遍历写成伪代码；② 解码 <code>GMDRAW</code> 跳过的 5 个 noun 码；③ 把 <code>libgm gm_Create*</code> 与目录图元做成精确对照表。想深挖哪个直接说。</div>
+
+<footer class="foot">
+  课 03 · 基于 <code>ida-pro-mcp</code> 对 <code>core.dll</code>(core31-retrace) 与 <code>Core3D.dll</code>(core3d-retrace) 的实测。相关：<a href="0001-core-dll-geometry-graphics.html">课 01</a> · <a href="0002-ref-rev-reverse-reference-index.html">课 02</a> · <a href="../reference/glossary.html">速查表</a> · <a href="../learning-records/0009-batch-model-generation-pipeline.md">学习记录 0009</a> · <a href="../MISSION.md">MISSION</a>
+</footer>
+</div>
+
+<script>
+document.querySelectorAll('.quiz').forEach(function(q){
+  var fb = q.querySelector('.fb');
+  q.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click', function(){
+      q.querySelectorAll('button').forEach(function(x){ x.classList.remove('correct','wrong'); });
+      if(b.dataset.correct === '1'){ b.classList.add('correct'); }
+      else { b.classList.add('wrong'); }
+      fb.textContent = b.dataset.fb || '';
+    });
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+$P GMSTDIN-ALIVE
+$M "D:/work/plant-code/old/gen-model/scripts/e3d/slots2.mac"
+$P GMSTDIN-DONE
+QUIT

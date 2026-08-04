@@ -122,7 +122,11 @@ fn bodies() -> Vec<Body> {
         write_mesh: false,
     };
     vec![
-        pane(10, Vec3::new(0.0, 0.0, 0.0), Vec3::new(1000.0, 1000.0, 1000.0)),
+        pane(
+            10,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1000.0, 1000.0, 1000.0),
+        ),
         pane(
             11,
             Vec3::new(900.0, 0.0, 0.0),
@@ -171,7 +175,9 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
         r = refno(1),
         w = refno(2),
     ));
-    sql.push_str(&format!("INSERT IGNORE INTO trans {{id: trans:zzfx_id, d: {IDENTITY_TRANS}}};"));
+    sql.push_str(&format!(
+        "INSERT IGNORE INTO trans {{id: trans:zzfx_id, d: {IDENTITY_TRANS}}};"
+    ));
 
     for body in &bodies {
         let aabb = Aabb::new(body.min.into(), body.max.into());
@@ -232,7 +238,10 @@ pub async fn move_fixture_body(
 ) -> anyhow::Result<()> {
     let geo_hash = format!("zzfx_{seq}");
     // 面板的归属判定读的是 `.mesh` 里的三角网而不是包围盒，不重写它，面板就还停在原处。
-    if bodies().iter().any(|body| body.seq == seq && body.write_mesh) {
+    if bodies()
+        .iter()
+        .any(|body| body.seq == seq && body.write_mesh)
+    {
         box_mesh(min, max).ser_to_file(&mesh_dir.join(format!("{geo_hash}.mesh")))?;
     }
     let mut sql = format!(
@@ -367,10 +376,7 @@ mod tests {
         let hit = GLOBAL_AABB_TREE
             .read()
             .await
-            .locate_intersecting_bounds(&Aabb::new(
-                Vec3::ZERO.into(),
-                Vec3::splat(1000.0).into(),
-            ))
+            .locate_intersecting_bounds(&Aabb::new(Vec3::ZERO.into(), Vec3::splat(1000.0).into()))
             .map(|b| b.refno.to_string())
             .collect::<Vec<_>>();
         println!("tree hits in panel A bounds = {hit:?}");
@@ -399,7 +405,10 @@ mod tests {
         }
         SUL_DB.use_ns(&ns).use_db(&db).await.expect("use ns/db");
         SUL_DB
-            .signin(Root { username: "root", password: "root" })
+            .signin(Root {
+                username: "root",
+                password: "root",
+            })
             .await
             .expect("signin");
     }
@@ -450,7 +459,9 @@ mod tests {
         db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);
         let mesh_dir = db_option.get_meshes_path();
 
-        create_room_fixture(&mesh_dir).await.expect("create fixture");
+        create_room_fixture(&mesh_dir)
+            .await
+            .expect("create fixture");
 
         // 夹具构件要先进 R 树，cal_room_refnos 的候选集就是从树里捞的。
         // 刻意**不**调 `load_aabb_tree`：一次性实例上树应当只装夹具，
@@ -463,7 +474,9 @@ mod tests {
             .await
             .expect("push fixture aabbs into tree");
 
-        build_room_relations(&db_option).await.expect("build room relations");
+        build_room_relations(&db_option)
+            .await
+            .expect("build room relations");
 
         let (pane_a, pane_b) = panel_refnos();
         let mut response = SUL_DB
@@ -486,10 +499,18 @@ mod tests {
         let (in_a, in_b, straddler) = part_refnos();
         let mut want: Vec<Edge> = Vec::new();
         for part in in_a.iter().chain(std::iter::once(&straddler)) {
-            want.push(Edge { panel: pane_a.clone(), part: part.clone(), room_num: "K100".into() });
+            want.push(Edge {
+                panel: pane_a.clone(),
+                part: part.clone(),
+                room_num: "K100".into(),
+            });
         }
         for part in in_b.iter().chain(std::iter::once(&straddler)) {
-            want.push(Edge { panel: pane_b.clone(), part: part.clone(), room_num: "K100".into() });
+            want.push(Edge {
+                panel: pane_b.clone(),
+                part: part.clone(),
+                room_num: "K100".into(),
+            });
         }
         want.sort();
 
@@ -510,7 +531,9 @@ mod tests {
         db_option.gen_spatial_tree = true;
 
         let mesh_dir = db_option.get_meshes_path();
-        create_room_fixture(&mesh_dir).await.expect("create fixture");
+        create_room_fixture(&mesh_dir)
+            .await
+            .expect("create fixture");
         let fixture_refnos: Vec<RefnoEnum> = bodies()
             .iter()
             .map(|body| RefnoEnum::from(refno(body.seq).as_str()))
@@ -615,7 +638,10 @@ mod tests {
 
         drop_fixture_and_queue(&mesh_dir).await;
 
-        assert_eq!(incremental, full, "\n增量: {incremental:#?}\n全量: {full:#?}");
+        assert_eq!(
+            incremental, full,
+            "\n增量: {incremental:#?}\n全量: {full:#?}"
+        );
         // 搬家要看得见：跨界构件掉出 B 房，但仍留在 A 房。
         let (pane_a, pane_b) = panel_refnos();
         let (_, _, straddler) = part_refnos();
@@ -750,7 +776,11 @@ mod tests {
         let changes = update_inst_relate_aabbs_by_refnos(&[panel_a, mover], true)
             .await
             .expect("refresh moved aabbs");
-        assert_eq!(changes.len(), 2, "面板与构件的包围盒都该判为变了: {changes:?}");
+        assert_eq!(
+            changes.len(),
+            2,
+            "面板与构件的包围盒都该判为变了: {changes:?}"
+        );
         enqueue_room_recalc(&db_option, &changes)
             .await
             .expect("enqueue both room tasks");
@@ -957,7 +987,8 @@ mod tests {
             "搬过去的构件应属于 B 房: {full:#?}"
         );
         assert!(
-            !full.iter()
+            !full
+                .iter()
                 .any(|edge| edge.part == part && edge.panel == pane_a),
             "搬走之后 A 房不该再收着它: {full:#?}"
         );
@@ -1033,7 +1064,10 @@ mod tests {
 
         let tube = RefnoEnum::from(refno(30).as_str());
         let (pane_a, pane_b) = panel_refnos();
-        let box_in_a = (Vec3::new(100.0, 100.0, 100.0), Vec3::new(300.0, 200.0, 200.0));
+        let box_in_a = (
+            Vec3::new(100.0, 100.0, 100.0),
+            Vec3::new(300.0, 200.0, 200.0),
+        );
         let box_in_b = (
             Vec3::new(1500.0, 100.0, 100.0),
             Vec3::new(1700.0, 200.0, 200.0),

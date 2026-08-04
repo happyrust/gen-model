@@ -121,8 +121,6 @@ impl SyncPublisher {
             }
         }
 
-        dbg!(&notify_file_names);
-
         #[cfg(feature = "mqtt")]
         if !notify_file_names.is_empty() {
             let published = notify_file_names.clone();

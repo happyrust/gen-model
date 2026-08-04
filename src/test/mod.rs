@@ -15,19 +15,10 @@ pub mod test_performance;
 
 // 重新导出性能测试函数，方便外部调用
 pub use test_performance::{
-    test_model_generation_performance,
-    analyze_performance_bottlenecks,
-    init_performance_tracing,
-    generate_detailed_stage_analysis,
-    generate_optimization_recommendations,
-    test_gen_geos_data_performance,
-    batch_test_gen_geos_data_performance,
-    test_gen_geos_data_from_database,
-    save_gen_geos_data_report,
-    test_parallel_cata_geos_performance,
-    PerformanceStats,
-    StageAnalysis,
-    GenGeosDataPerformanceStats,
-    GenGeosDataMetrics,
-    ParallelCataPerformanceStats,
+    GenGeosDataMetrics, GenGeosDataPerformanceStats, ParallelCataPerformanceStats,
+    PerformanceStats, StageAnalysis, analyze_performance_bottlenecks,
+    batch_test_gen_geos_data_performance, generate_detailed_stage_analysis,
+    generate_optimization_recommendations, init_performance_tracing, save_gen_geos_data_report,
+    test_gen_geos_data_from_database, test_gen_geos_data_performance,
+    test_model_generation_performance, test_parallel_cata_geos_performance,
 };

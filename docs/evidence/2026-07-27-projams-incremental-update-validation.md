@@ -13,6 +13,7 @@ D-02/D-09 `SAVEWORK` 会话外，测试只读 E3D 源文件；所有现场变更
 | HANG 最小交付单元生成 | 通过 | `output/live-hang-direct-20260727.log` |
 | SUPPO 最小交付单元生成 | 通过 | `output/live-suppo-direct-20260727.log` |
 | FTUB 删除、跨 BRAN 移动、重排 | 通过 | `output/live-ftub-delete-move-reorder-fixed-20260727.log` |
+| 真实 E3D 删除会话（D-03） | 通过 | 7997 sesno 84 删 `VTWA 24381/107146`；`docs/evidence/2026-07-27-d03-delete-session-baseline.md` |
 | DirectGeometry | 通过 | 8000/25–26 `BOX.XLEN`、7997/75 `WALL.JUSL`，真实根生成 |
 | TransformOnly | 通过 | 8000/27–28 `FTUB.POS`、7997/77–80 `EQUI.POS`，真实 transform 更新 |
 | DataOnly | 通过 | 7997/82 `DAMP.NAME`，无模型任务且数据、水位正确 |
@@ -74,7 +75,7 @@ D-15 的两条 live 幂等断言也已复跑：同一 `Add` 的 `pe_owner` 关�
 |---|---|---|
 | D-01 | 真实共享 SPCO：72 个 DAMP → 67 个 BRAN，全部生成 | 多管道同机位前后截图 |
 | D-02 | E3D sesno 31 实际跨 BRAN MOVE、sesno 32 恢复；新旧 owner 两根均生成 | 两处同机位前后截图 |
-| D-03 | 四类删除/替换与 FTUB 删除清理通过 | E3D 实际 Deleted session、消失截图 |
+| D-03 | 四类删除/替换与 FTUB 删除清理通过；7997 sesno 84 为 E3D 实际 Deleted session（`VTWA 24381/107146`），清理与 BRAN 重生成对拍见 `2026-07-27-d03-delete-session-baseline.md` | 消失截图 |
 | D-04 | 8000/21 两个真实 GENSEC Add：FRMW 直接 owner → SUPPO 根，两个根实际生成 | 实体出现截图 |
 | D-05 | FLOOR/PAVE 路由、CFLOOR 真实生成通过 | E3D 实际结构属性 session、外形截图 |
 | D-06 | WALL.JUSL 真实 session 与 CWALL 生成；GENSEC 多变体生成通过 | 型材扫掠前后截图 |

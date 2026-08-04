@@ -18,7 +18,7 @@ use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::data_interface::batch_queue::{self, BatchState, DataBatch, Enqueued};
-use crate::data_interface::task_registry::TaskRegistry;
+use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
 /// 一次发现（文件会话号超过水位）携带的全部入队信息。
 #[derive(Debug, Clone)]
@@ -210,12 +210,14 @@ impl BatchScheduler {
                     }
                 }
                 Some(row) => {
-                    let merging = matches!(
-                        outcome,
-                        Enqueued::Merged | Enqueued::AlreadyCovered
-                    );
+                    let merging = matches!(outcome, Enqueued::Merged | Enqueued::AlreadyCovered);
                     let existing = merging
-                        .then(|| state.meta.get(&(found.dbnum, false)).map(|m| m.task_id.clone()))
+                        .then(|| {
+                            state
+                                .meta
+                                .get(&(found.dbnum, false))
+                                .map(|m| m.task_id.clone())
+                        })
                         .flatten();
                     let task_id = match existing {
                         Some(task_id) => {
@@ -316,7 +318,7 @@ impl BatchScheduler {
     /// 后果：面板上显示的区间比实际应用的窄；以及紧接着排在后面那条的左端
     /// （`running_end + 1`）建在一个过时的数上。
     pub fn record_frozen_end(&self, registry: &TaskRegistry, dbnum: u32, end_sesno: i32) {
-        let task_id = {
+        let (task_id, absorbed_task_id, shifted_task_id) = {
             let mut state = self.queue();
             let changed = match state
                 .queue
@@ -332,11 +334,53 @@ impl BatchScheduler {
             if !changed {
                 return;
             }
-            state.meta.get(&(dbnum, true)).map(|m| m.task_id.clone())
+            let task_id = state.meta.get(&(dbnum, true)).map(|m| m.task_id.clone());
+            let mut absorbed_task_id = None;
+            let mut shifted_task_id = None;
+            if let Some(index) = state
+                .queue
+                .iter()
+                .position(|b| b.dbnum == dbnum && b.state == BatchState::Queued)
+            {
+                if state.queue[index].end_sesno <= end_sesno {
+                    state.queue.remove(index);
+                    absorbed_task_id = state.meta.remove(&(dbnum, false)).map(|m| m.task_id);
+                } else if state.queue[index].start_sesno <= end_sesno {
+                    state.queue[index].start_sesno = end_sesno + 1;
+                    shifted_task_id = state.meta.get(&(dbnum, false)).map(|m| m.task_id.clone());
+                }
+            }
+            (task_id, absorbed_task_id, shifted_task_id)
         };
         if let Some(task_id) = task_id {
             registry.set_frozen_range(&task_id, end_sesno);
         }
+        if let Some(task_id) = shifted_task_id {
+            registry.set_queued_start(&task_id, end_sesno + 1);
+        }
+        if let Some(task_id) = absorbed_task_id {
+            let result = serde_json::json!({ "status": "absorbed_by_running" });
+            registry.finish(&task_id, TaskState::Succeeded, result.clone());
+            #[cfg(feature = "http_api")]
+            crate::web_service::events::publish(
+                crate::web_service::events::Topic::Tasks,
+                "task_finished",
+                Some(task_id.clone()),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "state": TaskState::Succeeded.as_str(),
+                    "result": result,
+                }),
+            );
+        }
+    }
+
+    /// 唤醒 worker 消化一轮（不入队任何东西）。
+    ///
+    /// 给绕过队列、直接改 `model_update_pending` 表的入口用（如死信人工复活）：
+    /// 不叫醒的话，复活的行要等 `IDLE_WAKE` 兜底轮询才被捡走，最多晚 30 秒。
+    pub fn wake(&self) {
+        self.notify.notify_one();
     }
 
     /// 暂停出队（正在跑的那条会跑完为止——服务端没有中止接口）。
@@ -472,7 +516,10 @@ mod tests {
         let first = scheduler.enqueue(&registry, &found(7997, 1023, 1034));
         let second = scheduler.enqueue(&registry, &found(7997, 1023, 1041));
         assert_eq!(second.outcome, Enqueued::Merged);
-        assert_eq!(second.info.task_id, first.info.task_id, "合并不该另开任务行");
+        assert_eq!(
+            second.info.task_id, first.info.task_id,
+            "合并不该另开任务行"
+        );
         assert_eq!(
             registry.get(&first.info.task_id).unwrap().end_sesno,
             Some(1041)
@@ -525,5 +572,30 @@ mod tests {
         let third = scheduler.enqueue(&registry, &found(3, 0, 5));
         assert_eq!(second.info.position, 1, "运行中的行不占排队位置");
         assert_eq!(third.info.position, 2);
+    }
+
+    #[test]
+    fn frozen_rescan_recomputes_the_successor_under_the_scheduler_lock() {
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue(&registry, &found(7997, 0, 10));
+        scheduler.freeze_next(&registry).unwrap();
+        let absorbed = scheduler.enqueue(&registry, &found(7997, 0, 12));
+        scheduler.record_frozen_end(&registry, 7997, 12);
+        assert_eq!(scheduler.snapshot().len(), 1);
+        let entry = registry.get(&absorbed.info.task_id).unwrap();
+        assert_eq!(entry.state, TaskState::Succeeded);
+        assert_eq!(entry.result.unwrap()["status"], "absorbed_by_running");
+
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue(&registry, &found(7997, 0, 10));
+        scheduler.freeze_next(&registry).unwrap();
+        let shifted = scheduler.enqueue(&registry, &found(7997, 0, 15));
+        scheduler.record_frozen_end(&registry, 7997, 12);
+        let rows = scheduler.snapshot();
+        assert_eq!((rows[1].start_sesno, rows[1].end_sesno), (13, 15));
+        assert_eq!(
+            registry.get(&shifted.info.task_id).unwrap().start_sesno,
+            Some(13)
+        );
     }
 }

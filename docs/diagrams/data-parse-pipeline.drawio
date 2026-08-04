@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="1-总览 数据解析到模型生成">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="2336" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p1_title" value="aios-database 数据解析总流程：从触发到模型生成" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="260" y="-40" width="840" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_t1" value="HTTP&#xa;POST /api/v1/update/execute" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="260" y="40" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_t2" value="文件监听&#xa;init_watcher / async_watch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="550" y="40" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_t3" value="CLI / bin&#xa;initialize_project_dbnum_baseline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="840" y="40" width="260" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n1" value="扫描候选 FileCandidate&#xa;（file_latest_sesno = 扫描观察值）&#xa;→ 入队 batch_queue（合并 / 冻结区间 / FIFO）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="180" width="420" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_n2" value="batch_worker（全局唯一消费者）&#xa;execute_one_dbnum(project, cand)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="330" width="420" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_d1" value="needs_initial_load ?&#xa;applied_sesno == 0&#xa;且 file_latest_sesno &gt; 0" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="480" width="420" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_inc1" value="增量窗口分支&#xa;开区间 (applied_sesno, file_latest_sesno]&#xa;IncrementPipeline::apply(ranges)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="470" width="340" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_inc2" value="finalize_attempt_with_hierarchy&#xa;（与基线同一收口语义）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="620" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n3" value="基线分支 initialize_dbnum_baseline&#xa;读 applied_sesno、pe_count、dbnum_info 计数&#xa;查 DuckLake current_release(dbnum)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="660" width="420" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_d2" value="baseline_needs_full_parse ?&#xa;pe_count == 0  或  applied_sesno == 0&#xa;或  DuckLake release.end_sesno ≠ file_latest_sesno" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="820" width="420" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n4" value="【解析核心】sync_total_async_threaded&#xa;受限选项 baseline_sync_options：&#xa;total_sync=true / replace_dbs=false&#xa;included_db_files=[本文件] / gen_model=false&#xa;详细展开见第 2 页" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Microsoft YaHei;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="470" y="990" width="420" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n5" value="baseline_model_plan（仅 DESI）&#xa;全库活跃 PE → 归一到生成根 → 去重 → RegenRoot&#xa;CATA / SYS meta 返回空计划" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1180" width="420" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n6" value="baseline_hierarchy_release&#xa;从 DuckLake 读回 release_id / locator_hash&#xa;再校一次 end_sesno == file_latest_sesno&#xa;对不上就不推进水位" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1320" width="420" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n7" value="finalize_baseline_with_hierarchy（单事务）&#xa;写 pending 工作项 + 推进 applied_sesno&#xa;+ 写 hierarchy_release_id / locator_hash" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="470" y="1470" width="420" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_d3" value="kv-mem readiness 门&#xa;applied_sesno 与 hierarchy_release_id&#xa;是否同时对上当前 release ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1620" width="420" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n8" value="分片冷加载&#xa;per-dbnum 进程内嵌 SurrealDB 实例" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="1635" width="340" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_fail" value="fail-closed&#xa;hierarchy dbnum is not ready&#xa;当前态查询直接失败，不回退旧持久路径&#xa;（回退会让生成观察到混合 release）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1635" width="300" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n9" value="drain_non_regen（位姿 / 删除 / 级联）&#xa;→ load_pending_model_units_for_retry(dbnum)&#xa;→ run_unit_worklist" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1790" width="420" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_n10" value="几何生成&#xa;prim_model / loop_model / cata_model / bran_hanger&#xa;→ OCCT 造型 → 网格" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1950" width="420" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_s1" value="SurrealDB&#xa;pe / pe_owner / ATT_* / ATT_UDA" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="990" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_s2" value="DuckLake&#xa;hierarchy_node / hierarchy_release&#xa;每次发布 = 一个 snapshot" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="1140" width="340" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_s3" value="SurrealDB&#xa;dbnum_watermark&#xa;model_update_pending" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="1450" width="340" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_note1" value="applied_sesno = 应用水位（权威值）&#xa;「我真的处理完并收口到这里了」&#xa;&#xa;file_latest_sesno = 扫描观察值&#xa;「我刚看了一眼，文件长到这」&#xa;两者混用 = 把没处理的当处理过了" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="470" width="300" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_note2" value="解析本身幂等（replace_dbs=false）&#xa;所以「白跑一遍」只损失时间，&#xa;不损失正确性。&#xa;&#xa;但不要手动开 total_sync：&#xa;sync_pdms 不写水位，独立跑完&#xa;基线路径还会再解析一遍。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="960" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_note3" value="必须先收口再生成：&#xa;生成依赖 current_hierarchy 的当前态&#xa;查询，而它要等 release 写进水位后&#xa;readiness 门才放行。&#xa;&#xa;数据成功、模型失败不回滚数据。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1440" width="300" height="140" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1_e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_t1" target="p1_n1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_t2" target="p1_n1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_t3" target="p1_n1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n1" target="p1_n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n2" target="p1_d1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e6" value="否（已有基线）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d1" target="p1_inc1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_inc1" target="p1_inc2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e8" value="是（首次建基线）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d1" target="p1_n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n3" target="p1_d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e10" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d2" target="p1_n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e11" value="否（跳过解析）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d2" target="p1_n5">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="405" y="880" />
+              <mxPoint x="405" y="1225" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p1_e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n4" target="p1_n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e13" value="流式并发写" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n4" target="p1_s1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e14" value="攒齐后一次性发布" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.8;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n4" target="p1_s2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n5" target="p1_n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n6" target="p1_n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e17" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n7" target="p1_s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e18" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n7" target="p1_d3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e19" value="放行" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d3" target="p1_n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e20" value="未就绪" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d3" target="p1_fail">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e21" value="就绪" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_d3" target="p1_n9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_e22" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_n9" target="p1_n10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="2-解析核心 sync_total_async_threaded">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="2900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p2_title" value="解析核心：一次解析，两条互不相干的写路径" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="700" y="-50" width="880" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_hdr0" value="SurrealDB 写入管线" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontStyle=1;fontColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1160" width="320" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_hdr1" value="SurrealDB 生产者" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontStyle=1;fontColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="440" y="600" width="400" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_hdr2" value="共用解析主链" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="920" y="0" width="440" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_hdr3" value="DuckLake 层级投影" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontStyle=1;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="880" width="440" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a1" value="入口 sync_total_async_threaded&#xa;(db_option, project, dbno_set, db_types, progress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="40" width="440" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a2" value="遍历 children_files（逐个 db 文件）&#xa;读 60 字节文件头 parse_file_basic_info → db_type / db_no&#xa;过滤：db_types 命中 + included_db_files&#xa;（SYS 元数据不受 included_db_files 约束，ADR-007）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="180" width="440" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a3" value="PdmsIO::open → get_latest_sesno&#xa;sesno == 0 直接 bail（没有可发布的 session）&#xa;io.open() 顺带构建 ses_range_map" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="330" width="440" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a4" value="parse_file_db_basic_data → db_basic&#xa;refno_table_map / children_map / world_refno&#xa;解析失败绝不退化成空库，整批 baseline 失败" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="470" width="440" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_g1" value="门 A · 层级预计算（写盘前）&#xa;1) is_projected_hierarchy_noun 过滤，挡掉 MNUM 等数据库控制记录&#xa;2) children_map → sibling_orders；子节点重复出现 / 父不是元素 → 失败&#xa;3) required_hierarchy_refnos = 全部层级子节点 + world_refno&#xa;4) hierarchy_ref0s 从 refno_table_map 取（排除 0 与哨兵）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;align=left;spacingLeft=14;" vertex="1" parent="1">
+          <mxGeometry x="920" y="610" width="440" height="140" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_b1" value="save_pe_relates(db_basic)&#xa;→ SenderJsonsData::PERelateJson" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="650" width="400" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a5" value="chunk 循环 all_refnos.chunks(sync_chunk_size)&#xa;parse_file_with_chunk(db_basic, chunk, ses_range_map, ignore_world_refno)&#xa;→ total_attr_map / type_ele_map&#xa;（WORL 只在持有它的那一块解析一次）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="920" y="800" width="440" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_b2" value="save_pes(db_basic, total_attr_map, db_no, ...)&#xa;→ SenderJsonsData::PEJson" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="940" width="400" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_b3" value="按 noun 分表逐条生成 JSON&#xa;att.gen_sur_json() → 属性表&#xa;att.gen_sur_json_uda() → normalize_sql_string → ATT_UDA&#xa;→ SenderJsonsData::AttJson((表名, jsons))" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="1070" width="400" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_c1" value="HierarchyRowV1::from_named_attr_map&#xa;refno 一致性校验（map vs attr）&#xa;validate_member_owner：成员表里的父&#xa;与标量 OWNER 不一致 → 直接失败" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="940" width="440" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_c2" value="hierarchy_rows 内存累加（不立即写盘）&#xa;只有 6 个字段：dbnum / refno / owner / noun / name / sibling_order" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1090" width="440" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g2" value="门 B · 完整性（单文件解析结束后）&#xa;parsed_refnos 必须覆盖 required_hierarchy_refnos&#xa;缺一个就整库失败，错误里带 parsed / required / missing_sample" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;align=left;spacingLeft=14;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1230" width="440" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g3" value="门 C · BaselineProjection::new_with_ref0s&#xa;ref0 为 0 或哨兵 → 失败；ref0 不在文件索引内 → 失败&#xa;row.dbnum 不符 / refno 重复 → 失败&#xa;validate_hierarchy_rows → 按 refno 排序 → 推入 hierarchy_baselines" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;align=left;spacingLeft=14;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1400" width="440" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_d1" value="flume::bounded(BASELINE_QUEUE_CAPACITY)&#xa;背压：无界队列会把未落盘的 INSERT&#xa;payload 全留住，撑爆进程" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1220" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_d2" value="写入 worker × BASELINE_WRITE_WORKERS&#xa;chunks(BASELINE_WRITE_WINDOW)&#xa;execute_surreal_checked + 冲突重试&#xa;（乐观事务下无界并发曾导致静默丢写）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1370" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_d3" value="SurrealDB&#xa;INSERT IGNORE INTO pe&#xa;INSERT RELATION INTO pe_owner&#xa;INSERT IGNORE INTO {noun} / ATT_UDA" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1530" width="320" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a6" value="finish_write_pipeline(sender, insert_handles, parser_outcome)&#xa;关闭 sender → drain 全部 writer → 汇总解析错误与写入错误&#xa;（解析失败也要先把 writer 排干，再上抛）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="920" y="1720" width="440" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a7" value="spawn_blocking：HierarchyProjectionStore::publish_baseline&#xa;幂等短路：end_sesno + source_digest + change_hash 全等 → already_committed&#xa;release_id = hash(project, dbnum, base_release_id, 0, end_sesno, digest, change_hash)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="1880" width="440" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_e1" value="prepare_locator + stage_locator&#xa;内容寻址 ref0 → dbnum 反查表&#xa;先暂存，不激活" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="1890" width="440" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a8" value="DuckLake 事务（DuckDB ducklake 扩展，SHA256 钉版）&#xa;BEGIN TRANSACTION&#xa;→ DELETE FROM hierarchy_node WHERE dbnum = ?&#xa;→ appender_to_catalog_and_db 逐行追加&#xa;→ INSERT INTO hierarchy_release(...)&#xa;→ CALL set_commit_message('aios', release_id, extra_info =&gt; locator_hash)&#xa;→ COMMIT（失败则 ROLLBACK）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;align=left;spacingLeft=14;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2060" width="440" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_e2" value="DuckLake&#xa;hierarchy_node（按 dbnum 分区）&#xa;hierarchy_release + snapshot" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="2085" width="440" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_a9" value="last_committed_snapshot() → snapshot_id&#xa;返回 ProjectionCommit{release_id, locator_hash, snapshot_id, row_count}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2290" width="440" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a10" value="evict_global_if_resident(project, dbnum)&#xa;基线换了 → 立刻丢弃可能常驻的 kv-mem 分片" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2430" width="440" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a11" value="define_owner_index / define_pe_index&#xa;rebuild_dbnum_info_from_pe（仅 total_sync）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2570" width="440" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_a12" value="返回 parsed_db_infos（dbnum → 元素数）&#xa;交回 initialize_dbnum_baseline 做收口（第 1 页）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2710" width="440" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_note1" value="本页是第 1 页【解析核心】的展开。&#xa;&#xa;基线路径用受限选项调用：&#xa;total_sync=true / replace_dbs=false&#xa;included_db_files=[本文件]&#xa;manual_db_nums=[本 dbnum]&#xa;gen_model=false / gen_mesh=false&#xa;&#xa;所以只解析这一个库，且不顺带生成。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="320" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_note2" value="两条写路径彼此独立，不在同一个事务里：&#xa;· SurrealDB 边解析边流式并发写&#xa;· DuckLake 全部攒在内存，等 SurrealDB&#xa;  写管线收尾后才一次性发布&#xa;&#xa;崩溃窗口（PE 已落、DuckLake 未提交）&#xa;靠水位与 readiness 门兜底，不靠事务。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;dashed=1;fontFamily=Microsoft YaHei;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1720" width="320" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_x1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a1" target="p2_a2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a2" target="p2_a3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a3" target="p2_a4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a4" target="p2_g1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_g1" target="p2_a5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_g1" target="p2_b1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a5" target="p2_b2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="640" y="855" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a5" target="p2_c1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1660" y="855" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_b2" target="p2_b3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_c1" target="p2_c2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_c2" target="p2_g2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_g2" target="p2_g3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x13" value="PERelateJson" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.2;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_b1" target="p2_d1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="104" y="690" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x14" value="PEJson" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_b2" target="p2_d1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="200" y="980" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x15" value="AttJson" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.8;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_b3" target="p2_d1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="296" y="1120" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d1" target="p2_d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x17" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d2" target="p2_d3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x18" value="写入侧排干" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d3" target="p2_a6">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1052" y="1590" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x19" value="解析侧结果" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.7;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_g3" target="p2_a6">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1660" y="1640" />
+              <mxPoint x="1228" y="1640" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2_x20" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a6" target="p2_a7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x21" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a7" target="p2_e1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x22" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a7" target="p2_a8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x23" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a8" target="p2_e2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x24" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a8" target="p2_a9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x25" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a9" target="p2_a10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x26" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a10" target="p2_a11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_x27" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_a11" target="p2_a12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="3-存储职责与收口就绪门">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p3_title" value="存储职责边界、locator 三段发布协议与就绪门" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="500" y="-50" width="880" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_s1" value="&lt;b&gt;SurrealDB · 完整元素数据（权威）&lt;/b&gt;&lt;br&gt;&lt;br&gt;pe — 元素主记录&lt;br&gt;pe_owner — owner 关系边&lt;br&gt;ATT_{noun} — 按 noun 分表的属性&lt;br&gt;ATT_UDA — 用户自定义属性&lt;br&gt;dbnum_info_table — 每库元素计数&lt;br&gt;dbnum_watermark — applied_sesno&lt;br&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;+ hierarchy_release_id + locator_hash&lt;br&gt;model_update_pending — 待重试模型任务&lt;br&gt;&lt;br&gt;写入方式：解析期间流式并发写，&lt;br&gt;分批事务，一批失败不回滚已写数据&lt;br&gt;（正确性由水位兜底）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="420" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_s2" value="&lt;b&gt;DuckLake · 当前态层级（唯一权威）&lt;/b&gt;&lt;br&gt;&lt;br&gt;hierarchy_node（按 dbnum 分区）&lt;br&gt;&amp;nbsp;&amp;nbsp;dbnum / refno / owner / noun&lt;br&gt;&amp;nbsp;&amp;nbsp;/ name / sibling_order&lt;br&gt;&lt;br&gt;hierarchy_release&lt;br&gt;&amp;nbsp;&amp;nbsp;release_id / base_release_id&lt;br&gt;&amp;nbsp;&amp;nbsp;start_sesno / end_sesno&lt;br&gt;&amp;nbsp;&amp;nbsp;source_digest / change_hash&lt;br&gt;&amp;nbsp;&amp;nbsp;locator_hash / row_count&lt;br&gt;&lt;br&gt;每次发布 = 一个 DuckLake snapshot，&lt;br&gt;commit_message 就是 release_id。&lt;br&gt;DuckDB ducklake 扩展 SHA256 硬编码钉版。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="500" y="60" width="420" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_s3" value="&lt;b&gt;kv-mem · 可丢弃缓存&lt;/b&gt;&lt;br&gt;&lt;br&gt;每个 dbnum 一个独立的进程内嵌&lt;br&gt;SurrealDB 内存实例，装载该库全部&lt;br&gt;层级行，建 owner / noun 两个索引。&lt;br&gt;&lt;br&gt;首次查询冷加载（2000 行一批），&lt;br&gt;per-dbnum load gate 串行化。&lt;br&gt;&lt;br&gt;sync 失败或 release 对不上 →&lt;br&gt;直接驱逐分片，下次查询重新冷加载。&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#b85450&quot;&gt;目前无淘汰策略，只增不减；&lt;br&gt;规格要求的 RSS 观测也未落地。&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="960" y="60" width="420" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_s4" value="&lt;b&gt;locator · 内容寻址文件&lt;/b&gt;&lt;br&gt;&lt;br&gt;用途：ref0 → dbnum 反查，&lt;br&gt;以及跨库 owner 路由&lt;br&gt;（external_owner_routes）。&lt;br&gt;&lt;br&gt;staged：内容哈希命名，已落盘未激活&lt;br&gt;active_locator.json：激活指针&lt;br&gt;&lt;br&gt;发布与激活分离，是为了让&lt;br&gt;「DuckLake 已提交、水位还没写」&lt;br&gt;这个中间态不对读侧可见。&lt;br&gt;&lt;br&gt;每次查找目前都走 spawn_blocking，&lt;br&gt;整改方案建议换进程内快照。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="60" width="420" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_ph" value="locator 三段发布协议（仅在需要全量解析时启用）" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=15;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="530" width="700" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_p1" value="begin_baseline_locator_publication(dbnum)&#xa;取 hierarchy_publication_guard" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="580" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_p2" value="全量解析 + publish_baseline&#xa;stage_locator：落盘但不激活" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="410" y="580" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_p3" value="bind_baseline_locator_publication&#xa;(dbnum, release_id, locator_hash)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="580" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_p4" value="finalize_baseline_with_hierarchy&#xa;单事务收口（见下）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1150" y="580" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_p5" value="finish_locator_publication&#xa;激活 active_locator，读侧才看得见" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1520" y="580" width="330" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_y1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_p1" target="p3_p2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_y2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_p2" target="p3_p3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_y3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_p3" target="p3_p4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_y4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_p4" target="p3_p5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_tx" value="&lt;b&gt;收口事务（唯一推进水位的地方）&lt;/b&gt;&lt;br&gt;render_watermark_advance 只出现在这两个函数里：&lt;br&gt;finalize_baseline_with_hierarchy / finalize_attempt_with_hierarchy&lt;br&gt;&lt;br&gt;同一事务内三件事同时成立：&lt;br&gt;1) 写 model_update_pending 工作项&lt;br&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;（按 (action, target_refno) 去重，靠 revision 收口）&lt;br&gt;2) UPSERT dbnum_watermark.applied_sesno&lt;br&gt;3) 写 hierarchy_release_id + locator_hash&lt;br&gt;&lt;br&gt;任一失败 → 整体不推进，下一轮从头重来。&lt;br&gt;推进条件是「数据已落库 且 模型工作已持久化」，&lt;br&gt;不要求模型真的生成完。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="760" width="600" height="330" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_gate" value="readiness 门&#xa;applied_sesno 与 hierarchy_release_id&#xa;是否都与 DuckLake 当前 release 对上 ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="710" y="800" width="440" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_ok" value="放行&#xa;分片冷加载 → 当前态层级查询&#xa;get_many / ordered_children&#xa;/ refnos_by_nouns / descendants_inclusive" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="760" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_no" value="fail-closed&#xa;hierarchy dbnum is not ready&#xa;不回退旧持久查询&#xa;（回退会让生成观察到混合 release）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="930" width="400" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_y5" value="就绪" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_gate" target="p3_ok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_y6" value="未就绪" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=11;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_gate" target="p3_no">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3_y7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p3_tx" target="p3_gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_note" value="&lt;b&gt;几条容易踩的结论&lt;/b&gt;&lt;br&gt;· sync_pdms 发布 DuckLake baseline，但&lt;b&gt;不写水位&lt;/b&gt;：跑完全量同步系统仍然不「就绪」。&lt;br&gt;· 更进一步，&lt;b&gt;独立跑 sync_pdms 基本白费&lt;/b&gt;——applied_sesno 仍为 0，会让 baseline_needs_full_parse 再解析一遍（幂等，只是白花时间）。正确做法是不手动开 total_sync，让基线路径自己驱动那次受限解析。&lt;br&gt;· SYS meta（SYST / DICT / GLB / GLOB）&lt;b&gt;也走基线&lt;/b&gt;，不走 cold-start 重放：两条路用的不是同一个解析器，ADR-006 的跨块引用（CURD / DBLS）修复只落在 parse_pdms_db 上。&lt;br&gt;· 连带后果：UpdateScope 本身是从 SYS meta 库读出来的，所以 SYS 必须先建基线，DESI 才进得了执行范围——batch_worker 的 SCOPE_DIRTY 标志就是处理这件事的。&lt;br&gt;· readiness 不只是性能负担，它同时是「PE 已落、DuckLake 未提交」这个崩溃窗口的&lt;b&gt;唯一防线&lt;/b&gt;，优化时只能换粒度、不能拿掉。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=14;spacingTop=10;dashed=1;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1120" width="1800" height="150" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -71,8 +71,8 @@ pub async fn sync_aabb_tree_with_db() -> anyhow::Result<()> {
     let tree_count = GLOBAL_AABB_TREE.read().await.tree.size();
 
     // 快路径：存量包围盒数是上界，一条简单计数就能放行健康的树。
-    let stored_count = count_rows("SELECT count() FROM inst_relate WHERE aabb != none GROUP ALL")
-        .await?;
+    let stored_count =
+        count_rows("SELECT count() FROM inst_relate WHERE aabb != none GROUP ALL").await?;
     if stored_count == 0 || tree_count >= stored_count {
         return Ok(());
     }
@@ -188,7 +188,9 @@ mod tests {
         let restore_at = body
             .find("AABB_TREE_DIRTY.store(true")
             .expect("failure branch must restore the dirty flag");
-        let err_at = body.find("return Err").expect("failure branch must propagate");
+        let err_at = body
+            .find("return Err")
+            .expect("failure branch must propagate");
         assert!(
             restore_at < err_at,
             "脏标记必须在错误返回之前恢复，否则一次磁盘抖动就丢掉待落盘变更"

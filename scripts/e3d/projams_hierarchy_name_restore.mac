@@ -1,0 +1,11 @@
+-- Restore the controlled hierarchy/plant-ui verification target.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/plant-ui-increment/hierarchy_name_restore.log" OVER
+=24381/100838
+Q CE
+NAME /1CUP201VAF
+Q CE
+SAVEWORK 'CODEX hierarchy NAME restore'
+UNCLAIM ALL
+ALPHA LOG END
+QUIT

@@ -68,6 +68,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
+        // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
+        // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
+        "static_assets": state.static_assets,
     }))
 }
 
@@ -245,6 +248,59 @@ pub async fn pending_units(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(json!({ "units": units })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingUnitRetryReq {
+    /// 队列行动作名（`regen_root` / `transform` / …）。缺省 `regen_root`——
+    /// 死信几乎全是它，检查视图（GET /pending-units）列的也正是这一种。
+    #[serde(default)]
+    pub action: Option<String>,
+    /// PDMS `a/b` 目标（与检查视图回执里的 `root_refno` 同值）。
+    pub target_refno: String,
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+}
+
+/// POST /api/v1/update/pending-units/retry — 人工复活一行死信（spec §4.6.1）。
+///
+/// 自动路径的 attempts 上限把到顶的行永远挡在 drain 之外，此前除了直接改库没有
+/// 第二条复活路。只允许操作已存在的 `(action, target_refno)`：这个端点是「复活」
+/// 不是「入队」。成功回 202 + 复活后的行，行不存在回 404。
+pub async fn pending_units_retry(
+    State(state): State<AppState>,
+    Json(req): Json<PendingUnitRetryReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let action = match req.action.as_deref() {
+        None => crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
+        Some(name) => crate::data_interface::model_update_plan::ModelWorkAction::parse(name)
+            .ok_or_else(|| ApiError::bad_request(format!("未知的队列动作: {name}")))?,
+    };
+    let revived =
+        crate::data_interface::model_update_pending::retry_pending_unit(action, &req.target_refno)
+            .await
+            .map_err(ApiError::from_domain)?
+            .ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "待重试任务不存在: ({}, {})，复活只作用于已存在的行",
+                    action.as_str(),
+                    req.target_refno
+                ))
+            })?;
+    // 复活绕过了入队通道，worker 的 Notify 没人碰过；不叫醒它，这行要等 30s
+    // 兜底轮询才被捡走。
+    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "action": revived.action.as_str(),
+            "target_refno": revived.target_refno,
+            "revision": revived.revision,
+            "attempts": revived.attempts,
+            "status": revived.status,
+        })),
+    ))
 }
 
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。

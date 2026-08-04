@@ -1130,16 +1130,20 @@ where
     F: FnMut(HashSet<RefnoEnum>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>>>,
 {
-    Ok(
-        collect_ref_reversal_closure_with_limit(seeds, MAX_REVERSE_CASCADE_REFERRERS, fetch)
-            .await?
-            .0,
+    Ok(collect_ref_reversal_closure_with_limit(
+        seeds,
+        MAX_REVERSE_CASCADE_REFERRERS,
+        Some(MAX_REVERSE_CASCADE_HOPS),
+        fetch,
     )
+    .await?
+    .0)
 }
 
 async fn collect_ref_reversal_closure_with_limit<F, Fut>(
     seeds: &HashSet<RefnoEnum>,
     max_referrers: usize,
+    max_hops: Option<usize>,
     mut fetch: F,
 ) -> anyhow::Result<(HashMap<RefnoEnum, Vec<RefnoEnum>>, bool)>
 where
@@ -1152,8 +1156,13 @@ where
     let mut referrers = 0usize;
     let mut truncated = false;
 
-    for hop in 0..MAX_REVERSE_CASCADE_HOPS {
-        if frontier.is_empty() {
+    let mut hop = 0usize;
+    while !frontier.is_empty() {
+        if max_hops.is_some_and(|limit| hop >= limit) {
+            truncated = true;
+            log::warn!(
+                "reverse cascade closure hit the hop cap; deeper referrers are not expanded"
+            );
             break;
         }
         let hop_edges = fetch(std::mem::take(&mut frontier)).await?;
@@ -1173,6 +1182,7 @@ where
             );
             break;
         }
+        hop += 1;
     }
 
     Ok((assemble_ref_reversal(&edges), truncated))
@@ -1189,6 +1199,7 @@ pub(crate) async fn load_ref_reversal_closure(
     collect_ref_reversal_closure_with_limit(
         seeds,
         MAX_REVERSE_CASCADE_REFERRERS,
+        Some(MAX_REVERSE_CASCADE_HOPS),
         |frontier| async move { fetch_ref_rev_edges(&frontier).await },
     )
     .await
@@ -1765,6 +1776,7 @@ pub(crate) async fn expand_live_reverse_cascade(
     let (reversal, _) = collect_ref_reversal_closure_with_limit(
         &HashSet::from([seed]),
         usize::MAX,
+        None,
         |frontier| async move { fetch_ref_rev_edges(&frontier).await },
     )
     .await?;
@@ -1936,8 +1948,6 @@ pub(crate) fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateE
 }
 
 /// Surreal table holding per-unit model pending-retry tasks (spec §失败与重试).
-pub const MANUAL_MODEL_PENDING_TABLE: &str = "manual_model_pending";
-
 /// One persisted model pending-retry task: `dbnum` + delivery-unit root +
 /// source `end_sesno` + attempts + last error (spec §失败与重试 最小字段).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2022,39 +2032,6 @@ pub async fn load_pending_model_units_for_retry(
         Some(dbnum),
     )
     .await
-}
-
-/// 把旧 `manual_model_pending` 一次性并进 `model_update_pending`，随后清空它。
-///
-/// 那张表已经只剩读与删——全仓没有任何地方再往里写。留着它有两处害处：每个批次与
-/// 每次预览都多一趟 SELECT；更要命的是失败计数记不上——`mark_regen_failed` 写的是
-/// `model_update_pending` 的行 id，旧表里的根在新表没有对应记录，`UPDATE` 命不中就是
-/// 空操作。于是那种根既 dead-letter 不了、也不会被 attempts 上限挡住，会被无限重试。
-///
-/// 搬迁与清空同属一个事务（见 `adopt_legacy_regen_units`）。失败不致命：留在旧表里，
-/// 下次启动再来一遍。
-pub async fn migrate_legacy_pending_units() -> anyhow::Result<usize> {
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT dbnum, root_refno, noun, source_end_sesno, attempts, last_error \
-             FROM {MANUAL_MODEL_PENDING_TABLE};"
-        ))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取旧模型待重试语句失败: {error}"))?;
-    let legacy: Vec<PendingModelUnit> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解码旧模型待重试失败: {error}"))?;
-    if legacy.is_empty() {
-        return Ok(0);
-    }
-
-    crate::data_interface::model_update_pending::adopt_legacy_regen_units(
-        &legacy,
-        MANUAL_MODEL_PENDING_TABLE,
-    )
-    .await?;
-    Ok(legacy.len())
 }
 
 /// One model delivery-unit generation task inside an execution run.
@@ -3113,30 +3090,10 @@ impl AiosDBManager {
         cand: &FileCandidate,
         warnings: &mut Vec<String>,
     ) -> anyhow::Result<Option<DbnumPreview>> {
-        // Read PRIOR stored state before recording the new observation, so file
-        // anomalies compare against the previously registered identity.
-        let prior = DbnumState::read(cand.db_num).await.ok().flatten();
-        let applied = prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0);
-        let prior_db_type = prior
-            .as_ref()
-            .map(|s| s.db_type.as_str())
-            .filter(|s| !s.is_empty());
-        let prior_path = prior
-            .as_ref()
-            .map(|s| s.file_path.as_str())
-            .filter(|s| !s.is_empty());
-
-        let anomaly = check_file_against_state(
-            prior_db_type,
-            prior_path,
-            applied,
-            &cand.db_type,
-            &cand.path.display().to_string(),
-            cand.file_latest_sesno,
-        );
-
-        // Refresh scan observation (identity + file_latest_sesno + scanned_at).
-        // This is the only write preview performs and never advances applied_sesno.
+        // 裁决在落库之前，且落库口径由裁决决定（`DbnumState::record_observation`）。
+        // 这里过去无条件 `record_scan`，而它按 dbnum 覆盖 `db_type` / `file_path`
+        // ——正是判据本身。于是点一次预览就把 `TypeChanged` 的证据抹掉了，连自动
+        // 路径下一轮也再检不出同一个异常。
         let obs = FileObservation {
             dbnum: cand.db_num,
             db_type: cand.db_type.clone(),
@@ -3146,11 +3103,14 @@ impl AiosDBManager {
             file_latest_sesno: cand.file_latest_sesno,
             file_modified_at: cand.file_modified_at.clone(),
         };
-        if let Err(e) = DbnumState::record_scan(&obs).await {
+        let verdict = DbnumState::classify_scan(&obs).await?;
+        let applied = verdict.applied_sesno();
+        // 预览唯一的写操作，且永不推进 applied_sesno。
+        if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             return Err(anyhow::anyhow!("记录扫描观察失败: {e}"));
         }
 
-        let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+        let blocked = verdict.blocked();
 
         let mut preview = DbnumPreview {
             dbnum: cand.db_num,
@@ -3159,7 +3119,7 @@ impl AiosDBManager {
             file_path: cand.path.display().to_string(),
             applied_sesno: applied,
             file_latest_sesno: cand.file_latest_sesno,
-            anomaly,
+            anomaly: verdict.anomaly,
             blocked,
             initialization_required: needs_initial_load(applied, cand.file_latest_sesno),
             ..Default::default()
@@ -3277,22 +3237,39 @@ impl AiosDBManager {
         for dbnum in dbnums {
             let candidates = &by_dbnum[&dbnum];
             // 阻断与排除的库压根不入队（ADR-011 结果段）：同号多文件先挡。
+            //
+            // 必须先于下面的观察落库（2026-07-26 审计 B3）：`Duplicate` 是扫描器
+            // 聚合出来的，单条观察判不出它，而落库会按 dbnum 覆盖文件身份——先落库
+            // 就等于在两个候选之间随便挑一个当登记基准。
             if candidates.len() > 1 {
-                let paths = candidates
-                    .iter()
-                    .map(|c| c.path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                receipt.blocked.push(BlockedDbnum {
-                    dbnum,
-                    reason: format!("同 dbnum 存在多个文件，已阻断: {paths}"),
-                });
+                let reason = FileAnomaly::Duplicate {
+                    paths: candidates
+                        .iter()
+                        .map(|c| c.path.display().to_string())
+                        .collect(),
+                }
+                .block_reason()
+                .expect("同号多文件是阻断类异常");
+                receipt.blocked.push(BlockedDbnum { dbnum, reason });
                 continue;
             }
             let cand = &candidates[0];
 
-            let applied = match DbnumState::applied_sesno(dbnum).await {
-                Ok(applied) => applied,
+            // 阻断裁决与自动路径、预览同源。这里过去只挡回退，于是「同号文件被换成
+            // 另一类型的库」照常入队：8000 登记为 DESI、现场换成 SYST，而
+            // `UpdateScope::admits` 对 SYS meta 无条件放行，worker 就会拿 DESI 的水位
+            // 去跑另一个库的会话，把 8000 的 applied_sesno 推到别人的会话号上。
+            let obs = FileObservation {
+                dbnum,
+                db_type: cand.db_type.clone(),
+                file_name: cand.file_name.clone(),
+                file_path: cand.path.display().to_string(),
+                file_size: cand.file_size,
+                file_latest_sesno: cand.file_latest_sesno,
+                file_modified_at: cand.file_modified_at.clone(),
+            };
+            let verdict = match DbnumState::classify_scan(&obs).await {
+                Ok(verdict) => verdict,
                 Err(error) => {
                     receipt
                         .warnings
@@ -3300,17 +3277,16 @@ impl AiosDBManager {
                     continue;
                 }
             };
-            // 回退 / 被替换：水位不回退，该库阻断（执行侧还会再核一遍）。
-            if cand.file_latest_sesno < applied {
-                receipt.blocked.push(BlockedDbnum {
-                    dbnum,
-                    reason: format!(
-                        "文件回退或被替换（file_latest_sesno={} < applied_sesno={applied}），已阻断",
-                        cand.file_latest_sesno
-                    ),
-                });
+            if let Err(error) = DbnumState::record_observation(&obs, &verdict).await {
+                receipt
+                    .warnings
+                    .push(format!("dbnum={dbnum}: 记录扫描观察失败: {error:#}"));
+            }
+            if let Some(reason) = verdict.block_reason() {
+                receipt.blocked.push(BlockedDbnum { dbnum, reason });
                 continue;
             }
+            let applied = verdict.applied_sesno();
             if cand.file_latest_sesno == applied {
                 receipt.up_to_date += 1;
                 continue;
@@ -3356,32 +3332,6 @@ impl AiosDBManager {
         warnings: &mut Vec<String>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
         let dbnum = cand.db_num;
-        let prior = DbnumState::read(dbnum).await.ok().flatten();
-        let applied = prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0);
-        let previous_observed = prior.as_ref().map(|s| s.file_latest_sesno).unwrap_or(0);
-
-        // Rollback / replacement blocks this dbnum; the watermark never regresses.
-        if cand.file_latest_sesno < applied {
-            return (
-                Some(DataBatchResult {
-                    dbnum,
-                    db_type: cand.db_type.clone(),
-                    file_path: cand.path.display().to_string(),
-                    start_sesno: 0,
-                    end_sesno: 0,
-                    status: BatchStatus::Skipped,
-                    message: Some(format!(
-                        "文件回退或被替换（file_latest_sesno={} < applied_sesno={}），已阻断",
-                        cand.file_latest_sesno, applied
-                    )),
-                    merged_sesnos: Vec::new(),
-                    changed_elements: 0,
-                }),
-                Vec::new(),
-            );
-        }
-
-        // Refresh the scan observation (identity/path/file_latest_sesno).
         let obs = FileObservation {
             dbnum,
             db_type: cand.db_type.clone(),
@@ -3391,9 +3341,40 @@ impl AiosDBManager {
             file_latest_sesno: cand.file_latest_sesno,
             file_modified_at: cand.file_modified_at.clone(),
         };
-        if let Err(e) = DbnumState::record_scan(&obs).await {
+        let skipped = |message: String| -> (Option<DataBatchResult>, Vec<UnitTask>) {
+            (
+                Some(DataBatchResult {
+                    dbnum,
+                    db_type: cand.db_type.clone(),
+                    file_path: cand.path.display().to_string(),
+                    start_sesno: 0,
+                    end_sesno: 0,
+                    status: BatchStatus::Skipped,
+                    message: Some(message),
+                    merged_sesnos: Vec::new(),
+                    changed_elements: 0,
+                }),
+                Vec::new(),
+            )
+        };
+
+        // 执行侧的复核：入队与执行之间隔着一整个队列，期间文件可能被换掉。判据与
+        // 入队、预览、自动路径同源，且阻断时不覆盖登记身份——否则这一次执行就把
+        // 异常证据抹了，下一轮谁都拦不住它。
+        let verdict = match DbnumState::classify_scan(&obs).await {
+            Ok(verdict) => verdict,
+            Err(error) => {
+                return skipped(format!("读取 DBNUM 状态失败，本批次跳过: {error:#}"));
+            }
+        };
+        if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
+        if let Some(reason) = verdict.block_reason() {
+            return skipped(reason);
+        }
+        let applied = verdict.applied_sesno();
+        let previous_observed = verdict.previous_file_latest_sesno();
 
         if needs_initial_load(applied, cand.file_latest_sesno) {
             return match self
@@ -4929,18 +4910,42 @@ mod tests {
     #[tokio::test]
     async fn reverse_cascade_closure_reports_truncation() {
         let stored = [(r(82), r(90)), (r(83), r(82)), (r(5), r(83))];
-        let (closure, truncated) =
-            collect_ref_reversal_closure_with_limit(&HashSet::from([r(90)]), 2, |frontier| {
+        let (closure, truncated) = collect_ref_reversal_closure_with_limit(
+            &HashSet::from([r(90)]),
+            2,
+            Some(MAX_REVERSE_CASCADE_HOPS),
+            |frontier| {
                 let mut queried = Vec::new();
                 let edges = fake_ref_rev(&stored, &mut queried, frontier);
                 async move { anyhow::Ok(edges) }
-            })
-            .await
-            .expect("load bounded reverse-reference closure");
+            },
+        )
+        .await
+        .expect("load bounded reverse-reference closure");
 
         assert!(truncated);
         assert_eq!(closure.get(&r(90)), Some(&vec![r(82)]));
         assert_eq!(closure.get(&r(82)), Some(&vec![r(83)]));
+    }
+
+    #[tokio::test]
+    async fn deferred_reverse_cascade_has_no_hop_limit() {
+        let stored = (0..10).map(|i| (r(i + 2), r(i + 1))).collect::<Vec<_>>();
+        let (closure, truncated) = collect_ref_reversal_closure_with_limit(
+            &HashSet::from([r(1)]),
+            usize::MAX,
+            None,
+            |frontier| {
+                let mut queried = Vec::new();
+                let edges = fake_ref_rev(&stored, &mut queried, frontier);
+                async move { anyhow::Ok(edges) }
+            },
+        )
+        .await
+        .expect("load unbounded deferred cascade");
+
+        assert!(!truncated);
+        assert_eq!(closure.get(&r(10)), Some(&vec![r(11)]));
     }
 
     // -----------------------------------------------------------------------
@@ -5536,13 +5541,87 @@ mod tests {
     }
 
     // `pending_record_id_is_stable_per_dbnum_and_root` 随 `manual_model_pending`
-    // 的读写路径一并退役：那张表的行由 `migrate_legacy_pending_units` 一次性收编进
-    // `model_update_pending`，行 id 的性质由后者的
+    // 的读写路径一并退役；行 id 的性质由 `model_update_pending` 的
     // `record_id_is_stable_per_dbnum_action_and_target` 守着。
 
     // `project_exec_guard_is_exclusive_per_project` 随 `ProjectExecGuard` 一并
     // 退役（ADR-011 §12）：互斥由数据批次队列的单 worker 承担，见
     // `batch_scheduler` / `batch_worker` 的单测。
+
+    /// 手动那条链的三段都必须过同一道阻断门。
+    ///
+    /// 「落库口径」那一半已由类型系统兜住：`record_scan` /
+    /// `record_blocked_observation` 都是 `DbnumState` 的私有函数，模块外只能走
+    /// `record_observation`，选错语句已经编译不过。这里守的是剩下那一半——
+    /// **拿到裁决之后真的去拦**：
+    ///
+    /// * `preview_one_dbnum` 曾经算完 anomaly 却照常刷新文件身份，把 `TypeChanged`
+    ///   的判据顶掉，连自动路径下一轮都检不出来；
+    /// * `enqueue_manual_update` 与 `execute_one_dbnum` 只挡回退，于是「同号文件
+    ///   被换成另一类型的库」一路畅通到水位推进。
+    #[test]
+    fn every_manual_entry_point_consults_the_shared_block_verdict() {
+        let src = include_str!("manual_update.rs");
+        // 用「下一个函数定义」收边，不按缩进花括号找：这个文件是 CRLF 的。
+        let body_between = |from: &str, to: &str| -> &str {
+            let after = src
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} 未找到"))
+                .1;
+            after
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{from} 之后应当是 {to}"))
+                .0
+        };
+
+        let cases = [
+            (
+                "preview_one_dbnum",
+                body_between(
+                    concat!("async fn ", "preview_one_dbnum("),
+                    concat!("pub async fn ", "enqueue_manual_update("),
+                ),
+                // 预览不拦执行，它把裁决原样报进 DTO 让界面显示。
+                "blocked",
+            ),
+            (
+                "enqueue_manual_update",
+                body_between(
+                    concat!("pub async fn ", "enqueue_manual_update("),
+                    concat!("pub(crate) async fn ", "execute_one_dbnum("),
+                ),
+                "block_reason()",
+            ),
+            (
+                "execute_one_dbnum",
+                body_between(
+                    concat!("pub(crate) async fn ", "execute_one_dbnum("),
+                    concat!("fn ", "fill_change_summary("),
+                ),
+                "block_reason()",
+            ),
+        ];
+
+        for (name, body, gate) in cases {
+            assert!(
+                body.contains("classify_scan("),
+                "{name}: 必须用共用裁决，不得自己拼 check_file_against_state"
+            );
+            assert!(
+                body.contains(gate),
+                "{name}: 拿到裁决还得真的去拦，否则阻断类异常照常放行"
+            );
+            let classify_at = body.find("classify_scan(").expect("已在上面断言过存在");
+            let record_at = body
+                .find("record_observation(")
+                .unwrap_or_else(|| panic!("{name}: 仍应落一次扫描观察"));
+            assert!(
+                classify_at < record_at,
+                "{name}: 必须先裁决再落库——落库会按 dbnum 覆盖 db_type/file_path，\
+                 而它们正是判据本身"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

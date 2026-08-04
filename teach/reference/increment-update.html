@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>增量更新参考 · 从文件落盘到三维刷新</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .fig{margin:1.8rem 0}
+  .fig svg{display:block; width:100%; height:auto; background:#fff;
+           border:1px solid var(--line); border-radius:10px}
+  svg text{font-family:"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  svg .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  .sev-crit{color:#b03a3a;font-weight:600}
+  .sev-high{color:#8a5a00;font-weight:600}
+  .sev-med{color:#5b5b5b}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:.9rem; margin:1.1rem 0}
+  .grid2>div{background:#fff; border:1px solid var(--line); border-radius:10px; padding:.75rem .9rem}
+  .grid2 h4{margin:.1rem 0 .35rem; color:var(--ink)}
+  .grid2 p{font-size:.9rem; margin:.25rem 0}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 参考 / <strong>增量更新</strong> · <a href="glossary.html">速查表</a> · <a href="../cases/README.md">案例集</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Reference · incremental update</p>
+  <h1>增量更新参考：从文件落盘到三维刷新</h1>
+  <p class="lead">把 <code>gen-model</code> 增量链路的九个阶段、六条不变量、以及 20 个真实踩过的坑放在一页里。
+  每个阶段都配一句「这里错了会看到什么」，因为绝大多数增量缺陷的表现不是报错，而是<strong>安静的错误结果</strong>。</p>
+  <p class="kicker">配套：20 张案例卡在 <a href="../cases/README.md">teach/cases/</a> · 术语与符号在 <a href="glossary.html">速查表</a> · 内核侧证据在 <a href="../learning-records/0002-core-dll-model-update-logic.md">learning-records/0002</a></p>
+</header>
+
+<div class="toc">
+  <strong>本文覆盖</strong>
+  <ol>
+    <li><a href="#why">为什么增量比全量难</a> · <a href="#pipeline">九阶段全景图</a></li>
+    <li><a href="#s1">① 发现</a> · <a href="#s2">② 窗口</a> · <a href="#s3">③ 解析</a> · <a href="#s4">④ 落库</a> · <a href="#s5">⑤ 影响判定</a></li>
+    <li><a href="#s6">⑥ 生成根</a> · <a href="#s7">⑦ 反向级联</a> · <a href="#s8">⑧ 模型生成</a> · <a href="#s9">⑨ 收口</a></li>
+    <li><a href="#invariants">六条不变量</a> · <a href="#consts">关键常量</a> · <a href="#atlas">20 案例总表</a> · <a href="#symptom">按症状检索</a></li>
+    <li><a href="#repro">复现命令</a> · <a href="#open">遗留与未验证（诚实清单）</a></li>
+  </ol>
+</div>
+
+<h2 id="why">0 · 为什么增量比全量难</h2>
+
+<p>全量生成只需要回答一个问题：<em>这个元素长什么样</em>。增量生成要回答四个，而且每一个都能独立地错：</p>
+
+<div class="grid2">
+  <div><h4>1. 什么变了</h4><p>PDMS 文件给的是<strong>会话流水</strong>，不是「当前状态」。同一个元素在一个窗口里可能被改 55 次，
+  其中大多数是中间态。而「OWNER 改了」在数据上表现为<strong>两个 owner 各自的成员列表变化</strong>，不是一条属性修改。</p></div>
+  <div><h4>2. 谁受影响</h4><p>改一个共享目录元件，可能有 72 个管件在用它。这个「谁在用我」的问题，
+  PDMS 离线数据<strong>根本没有出口</strong>——必须自建反向索引（<a href="../cases/case-05-shared-spco-reverse-cascade.md">案例 05</a>）。</p></div>
+  <div><h4>3. 从哪重生成</h4><p>改一根 SPINE 不能只重生成 SPINE——几何是在 <code>SUPPO</code> 这个层级成形的。
+  必须沿 owner 链上溯到<strong>最小交付单元</strong>，而且主路径、兜底、补偿三条路必须算出同一个答案
+  （<a href="../cases/case-04-generation-root-must-be-one-rule.md">案例 04</a>）。</p></div>
+  <div><h4>4. 失败了怎么办</h4><p>数据落了库、模型没生成，进程挂了——重来一次会不会重复、会不会丢、会不会永远卡住？
+  这决定了水位、事务边界与幂等性的全部设计（<a href="../cases/case-11-watermark-three-phase.md">案例 11</a>）。</p></div>
+</div>
+
+<div class="callout confirm"><span class="tag">贯穿全文的一条判据</span>
+增量缺陷的典型表现是<strong>「流程走完了、没报错、结果是空的或旧的」</strong>。所以本文每个阶段都标注了
+「错了会看到什么」——排查时倒着用这张表，比顺着读代码快。</div>
+
+<h2 id="pipeline">1 · 九阶段全景</h2>
+
+<figure class="fig">
+<svg viewBox="0 0 880 806" role="img" aria-label="增量更新九阶段流水线">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/>
+    </marker>
+  </defs>
+  <g>
+    <!-- 1 -->
+    <rect x="16" y="16" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="43" r="13" fill="#1a1a1a"/><text x="42" y="47" text-anchor="middle" fill="#fff" font-size="12" class="mono">1</text>
+    <text x="64" y="39" font-size="13.5" fill="#1a1a1a">发现 · watcher 扫描文件</text>
+    <text x="64" y="57" font-size="11" fill="#5b5b5b" class="mono">record_scan / check_file_against_state</text>
+    <text x="336" y="36" font-size="11.5" fill="#5b5b5b">重复 dbnum、回退到旧备份被静默接受</text>
+    <text x="336" y="55" font-size="10.5" fill="#8a5a00" class="mono">案例 15</text>
+    <line x1="166" y1="70" x2="166" y2="94" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 2 -->
+    <rect x="16" y="100" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="127" r="13" fill="#1a1a1a"/><text x="42" y="131" text-anchor="middle" fill="#fff" font-size="12" class="mono">2</text>
+    <text x="64" y="123" font-size="13.5" fill="#1a1a1a">窗口 · applied_sesno+1 … 文件最新</text>
+    <text x="64" y="141" font-size="11" fill="#5b5b5b" class="mono">SesnoRangeResolver</text>
+    <text x="336" y="120" font-size="11.5" fill="#5b5b5b">水位被间接推进 ⇒ 整段会话永久跳过</text>
+    <text x="336" y="139" font-size="10.5" fill="#8a5a00" class="mono">案例 11、15</text>
+    <line x1="166" y1="154" x2="166" y2="178" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 3 -->
+    <rect x="16" y="184" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="211" r="13" fill="#1a1a1a"/><text x="42" y="215" text-anchor="middle" fill="#fff" font-size="12" class="mono">3</text>
+    <text x="64" y="207" font-size="13.5" fill="#1a1a1a">解析 · 净变化 + 六个变化桶</text>
+    <text x="64" y="225" font-size="11" fill="#5b5b5b" class="mono">collect_changes</text>
+    <text x="336" y="204" font-size="11.5" fill="#5b5b5b">跨块长列表截断 ⇒ 模型树整棵为空</text>
+    <text x="336" y="223" font-size="10.5" fill="#8a5a00" class="mono">案例 18、01</text>
+    <line x1="166" y1="238" x2="166" y2="262" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 4 -->
+    <rect x="16" y="268" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="295" r="13" fill="#1a1a1a"/><text x="42" y="299" text-anchor="middle" fill="#fff" font-size="12" class="mono">4</text>
+    <text x="64" y="291" font-size="13.5" fill="#1a1a1a">落库 · 窗口折叠 → 500 条分块提交</text>
+    <text x="64" y="309" font-size="11" fill="#5b5b5b" class="mono">persist_latest_main_data · TX_CHUNK</text>
+    <text x="336" y="288" font-size="11.5" fill="#5b5b5b">任一条写不幂等 ⇒ 该 dbnum 反复失败、水位不动</text>
+    <text x="336" y="307" font-size="10.5" fill="#8a5a00" class="mono">案例 14、19</text>
+    <line x1="166" y1="322" x2="166" y2="346" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 5 -->
+    <rect x="16" y="352" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="379" r="13" fill="#1a1a1a"/><text x="42" y="383" text-anchor="middle" fill="#fff" font-size="12" class="mono">5</text>
+    <text x="64" y="375" font-size="13.5" fill="#1a1a1a">影响判定 · attr → effect 唯一映射</text>
+    <text x="64" y="393" font-size="11" fill="#5b5b5b" class="mono">classify_attribute_effect_with_meta</text>
+    <text x="336" y="372" font-size="11.5" fill="#5b5b5b">名单过宽走便宜路径 ⇒ 改了尺寸但 mesh 不变</text>
+    <text x="336" y="391" font-size="10.5" fill="#8a5a00" class="mono">案例 02、03</text>
+    <line x1="166" y1="406" x2="166" y2="430" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 6 -->
+    <rect x="16" y="436" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="463" r="13" fill="#1a1a1a"/><text x="42" y="467" text-anchor="middle" fill="#fff" font-size="12" class="mono">6</text>
+    <text x="64" y="459" font-size="13.5" fill="#1a1a1a">生成根 · 上溯到最小交付单元</text>
+    <text x="64" y="477" font-size="11" fill="#5b5b5b" class="mono">resolve_element_generation_root</text>
+    <text x="336" y="456" font-size="11.5" fill="#5b5b5b">主路径与补偿口径不一致 ⇒ 重试后永远补不上</text>
+    <text x="336" y="475" font-size="10.5" fill="#8a5a00" class="mono">案例 04、17</text>
+    <line x1="166" y1="490" x2="166" y2="514" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 7 -->
+    <rect x="16" y="520" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#0b6b5f" stroke-width="1.6"/>
+    <circle cx="42" cy="547" r="13" fill="#0b6b5f"/><text x="42" y="551" text-anchor="middle" fill="#fff" font-size="12" class="mono">7</text>
+    <text x="64" y="543" font-size="13.5" fill="#1a1a1a">反向级联 · ref_rev 逐跳反查</text>
+    <text x="64" y="561" font-size="11" fill="#5b5b5b" class="mono">load_ref_reversal_closure ≤ 8 跳</text>
+    <text x="336" y="540" font-size="11.5" fill="#5b5b5b">建边资格挂错地方 ⇒ 一条边都不建、共享件改了没反应</text>
+    <text x="336" y="559" font-size="10.5" fill="#8a5a00" class="mono">案例 05、06、07</text>
+    <line x1="166" y1="574" x2="166" y2="598" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 8 -->
+    <rect x="16" y="604" width="300" height="54" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+    <circle cx="42" cy="631" r="13" fill="#1a1a1a"/><text x="42" y="635" text-anchor="middle" fill="#fff" font-size="12" class="mono">8</text>
+    <text x="64" y="627" font-size="13.5" fill="#1a1a1a">模型工作 · 生成 / 变换 / 删除清理</text>
+    <text x="64" y="645" font-size="11" fill="#5b5b5b" class="mono">drain_where · inst_relate</text>
+    <text x="336" y="614" font-size="11.5" fill="#5b5b5b">一次删除抖动拖垮整轮；一句 panic 炸掉看门狗；</text>
+    <text x="336" y="631" font-size="11.5" fill="#5b5b5b">清理中途失败留下永久孤儿几何</text>
+    <text x="336" y="650" font-size="10.5" fill="#8a5a00" class="mono">案例 08–10、12、13、16、17</text>
+    <line x1="166" y1="658" x2="166" y2="682" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar)"/>
+
+    <!-- 9 -->
+    <rect x="16" y="688" width="300" height="54" rx="8" fill="#eaf5f2" stroke="#0b6b5f" stroke-width="1.6"/>
+    <circle cx="42" cy="715" r="13" fill="#0b6b5f"/><text x="42" y="719" text-anchor="middle" fill="#fff" font-size="12" class="mono">9</text>
+    <text x="64" y="711" font-size="13.5" fill="#1a1a1a">收口 · 水位 + 模型工作 + 交付态</text>
+    <text x="64" y="729" font-size="11" fill="#5b5b5b" class="mono">render_finalize_transaction（单事务）</text>
+    <text x="336" y="708" font-size="11.5" fill="#5b5b5b">收口不原子 ⇒「数据已应用、模型任务未登记」永久丢批</text>
+    <text x="336" y="727" font-size="10.5" fill="#8a5a00" class="mono">案例 11、20</text>
+
+    <text x="16" y="774" font-size="11" fill="#5b5b5b">① ~ ⑨ 每个文件窗口跑一遍；⑨ 成功后 <tspan class="mono">applied_sesno</tspan> 才前移，失败则整窗重放（③ 起重来）。</text>
+    <text x="16" y="794" font-size="11" fill="#5b5b5b">粗框 = 失败时<tspan font-weight="600">不阻塞</tspan>数据推进的阶段（⑦ 降级为待办、⑨ 是唯一的原子收口点）。</text>
+  </g>
+</svg>
+<figcaption>图 1 · 一次增量更新的九个阶段，以及每个阶段错了会看到的现象</figcaption>
+</figure>
+
+<h2 id="s1">2 · 阶段详解</h2>
+
+<h3>① 发现：文件身份守卫</h3>
+
+<p>watcher 每 30 s 轮询监控目录。它要回答的不只是「文件变了吗」，还有<strong>「这还是同一个文件吗」</strong>：
+同一个 dbnum 出现两份文件（<code>Duplicate</code>）、被换成更旧的备份（<code>Rollback</code>）、
+被搬到新路径（<code>PathMigrated</code>）、消失（<code>Missing</code>）。</p>
+
+<p>这四类判定原本只挂在手动路径上，自动 watcher 一概不做——直到 F6 把
+<code>check_file_against_state</code> 接进自动路径（<a href="../cases/case-15-file-identity-guard.md">案例 15</a>）。
+关键约束来自 <a href="../../docs/adr/ADR-001-dbnum-update-state.md">ADR-001</a>：</p>
+
+<div class="callout confirm"><span class="tag">ADR-001 不变量</span>
+文件观察字段（<code>file_name</code>/<code>file_path</code>/<code>file_size</code>/<code>file_modified_at</code>/<code>file_latest_sesno</code>）
+必须通过<strong>独立写入</strong>更新，该写入失败<strong>不能修改或间接影响</strong> <code>applied_sesno</code>。<br>
+换句话说：<em>「我看到了一个新文件」永远不等于「我已经处理完它了」</em>。</div>
+
+<h3>② 窗口：水位决定做多少活</h3>
+
+<p>窗口是 <code>(applied_sesno, file_latest_sesno]</code>。这里有一条容易被忽略的设计后果：
+<strong>事件只是「去看一眼」的触发器，真正的工作量由水位决定</strong>。所以事件通道容量为 1、
+串行处理不会丢工作，最多是延迟（<a href="../cases/case-15-file-identity-guard.md">案例 15 · T903</a>）。</p>
+
+<p>冷启动时 <code>COLD_START_DB_TYPES</code> 只放行 <code>SYST</code>/<code>DICT</code>/<code>GLB</code>/<code>GLOB</code>；
+设计库不会自然出现「从 sesno 1 重放」的窗口——这一点在读性能数据时很重要
+（<a href="../cases/case-19-window-folding.md">案例 19</a>）。</p>
+
+<h3>③ 解析：净变化与六个变化桶</h3>
+
+<p><code>collect_changes</code> 把会话流水折成<strong>净变化</strong>。变化桶沿用 <code>DB_UserChanges</code> 的布局：</p>
+
+<table>
+<thead><tr><th>变化桶</th><th>含义</th><th>模型侧后果</th></tr></thead>
+<tbody>
+<tr><td><code>Created</code></td><td>元素新建</td><td>生成该元素所属交付单元</td></tr>
+<tr><td><code>Deleted</code></td><td>元素删除（<strong>软删墓碑</strong>，带 <code>deleted = true</code>）</td><td>删除清理 + 重生成旧 owner 侧</td></tr>
+<tr><td><code>Moved</code></td><td><code>OWNER</code> 变更 = <strong>搬迁</strong></td><td><strong>旧根与新根两端都要重生成</strong></td></tr>
+<tr><td><code>MemberChanged</code></td><td>成员列表变化</td><td>搬迁在数据上的真实形态：<strong>旧 owner 与新 owner 各一条</strong></td></tr>
+<tr><td><code>Reordered</code></td><td>成员次序变化</td><td>影响装配次序的类型需要重生成</td></tr>
+<tr><td><code>Modified</code></td><td>属性修改</td><td>看属性效果分类（阶段 ⑤）</td></tr>
+</tbody>
+</table>
+
+<div class="callout infer"><span class="tag">最容易写错的一条</span>
+<code>OWNER</code> <strong>不是</strong>普通属性。把它当属性处理，只会刷新新 owner 一侧，
+旧位置的几何原样留在三维里。<a href="../../docs/adr/ADR-009-owner-change-is-moved-not-attribute-modified.md">ADR-009</a>
+把这条钉死：搬迁 ⇒ <strong>两条 <code>MemberChanged</code></strong>（旧 owner + 新 owner）。
+详见 <a href="../cases/case-01-owner-change-is-a-move.md">案例 01</a>。</div>
+
+<p>解析层的缺陷会伪装成业务缺陷。<code>CURD</code>/<code>DBLS</code> 这类跨记录块存储的长引用列表，
+一旦收集逻辑遇到不认识的块就 <code>break</code>，整条属性丢失 ⇒ 用户看到的是「模型树是空的」
+（<a href="../cases/case-18-cross-block-explicit-attrs.md">案例 18</a>）。<strong>凡是「整类东西都没有」的故障，先往上游查一层。</strong></p>
+
+<h3>④ 落库：折叠 + 分块 + 幂等</h3>
+
+<p>本模块的契约是<strong>只保留最新状态，不写历史表</strong>。既然中间态没人读，逐会话回放就是浪费——
+<code>fold_window</code> 按 key 做 last-writer-wins 折叠。amssys 冷启动窗口 SQL 体积降 <strong>88%</strong>、
+persist 从 ~20 s 降到 ~2.6 s；但设计库几乎全是新建，收益 <strong>−0.0%</strong>
+（<a href="../cases/case-19-window-folding.md">案例 19</a>）。</p>
+
+<div class="diagram">【折叠 · last-writer-wins，不是 union】
+
+  会话 5：删属性 X          会话 9：又加回 X
+  ─────────────────────────────────────────────
+  简单 union   ⇒  X 同时出现在 added 和 deleted 里
+                  to_modify_surql 把 deleted 放最后 ⇒ 值被静默抹成 NULL   ✗
+  单张 HashMap ⇒  一个 key 只落进 added / modified / deleted 三桶之一      ✓
+                  （比未折叠更安全：消除了原本就存在的抹 NULL 隐患）
+
+  安全前提（实测坐实，不是推断）：
+    · 生成的语句里每个值都是字面量，没有任何一条语句会读另一条记录
+    · Add / Deleted 不参与合并 ⇒ 建记录 → 立墓碑的顺序原封不动
+    · 合并后的语句放在 run 最后一个操作的位置 ⇒ 全局语句顺序不变</div>
+
+<p>落库按 <code>TX_CHUNK = 500</code> 分块提交。<strong>分块 ≠ 单事务</strong>——这意味着中途失败会留下已提交的前几块，
+重放必须收敛。所以每一条写都必须幂等：<code>pe_owner</code> 的插入曾经不是，导致该 dbnum 反复失败、水位永远不动
+（<a href="../cases/case-14-replay-must-converge.md">案例 14</a>）。</p>
+
+<h3 id="s5">⑤ 影响判定：唯一的 attr → effect 映射</h3>
+
+<figure class="fig">
+<svg viewBox="0 0 880 470" role="img" aria-label="从变更操作到模型工作的判定漏斗">
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b5b5b"/>
+    </marker>
+  </defs>
+
+  <rect x="290" y="16" width="300" height="44" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+  <text x="440" y="35" text-anchor="middle" font-size="12.5" fill="#1a1a1a">一条变更 op</text>
+  <text x="440" y="52" text-anchor="middle" font-size="10.5" fill="#5b5b5b" class="mono">(dbnum, refno, 变化桶, 变动属性集)</text>
+  <line x1="440" y1="60" x2="440" y2="82" stroke="#5b5b5b" stroke-width="1.1" marker-end="url(#ar2)"/>
+
+  <rect x="250" y="84" width="380" height="44" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+  <text x="440" y="103" text-anchor="middle" font-size="12.5" fill="#1a1a1a" class="mono">classify_operation_impact</text>
+  <text x="440" y="120" text-anchor="middle" font-size="10.5" fill="#5b5b5b">三态：NoImpact / Impact / Unknown（未知一律按影响处理）</text>
+  <line x1="440" y1="128" x2="440" y2="150" stroke="#5b5b5b" stroke-width="1.1" marker-end="url(#ar2)"/>
+
+  <rect x="200" y="152" width="480" height="44" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+  <text x="440" y="171" text-anchor="middle" font-size="12.5" fill="#1a1a1a" class="mono">classify_attribute_effect_with_meta</text>
+  <text x="440" y="188" text-anchor="middle" font-size="10.5" fill="#5b5b5b">逐属性查<tspan font-weight="600">唯一一张</tspan> ATTRIBUTE_EFFECT_TABLES（不再是 if-else 链）</text>
+  <line x1="440" y1="196" x2="440" y2="216" stroke="#5b5b5b" stroke-width="1.1" marker-end="url(#ar2)"/>
+
+  <!-- effect chips -->
+  <g font-size="11">
+    <rect x="16"  y="220" width="120" height="34" rx="17" fill="#f2efe8" stroke="#e4e0d8"/><text x="76"  y="242" text-anchor="middle" fill="#1a1a1a">DataOnly</text>
+    <rect x="148" y="220" width="120" height="34" rx="17" fill="#f2efe8" stroke="#e4e0d8"/><text x="208" y="242" text-anchor="middle" fill="#1a1a1a">TransformOnly</text>
+    <rect x="280" y="220" width="120" height="34" rx="17" fill="#fbf1df" stroke="#8a5a00"/><text x="340" y="242" text-anchor="middle" fill="#1a1a1a">DirectGeometry</text>
+    <rect x="412" y="220" width="120" height="34" rx="17" fill="#fbf1df" stroke="#8a5a00"/><text x="472" y="242" text-anchor="middle" fill="#1a1a1a">Structural</text>
+    <rect x="544" y="220" width="120" height="34" rx="17" fill="#eaf5f2" stroke="#0b6b5f"/><text x="604" y="242" text-anchor="middle" fill="#1a1a1a">DependencyCascade</text>
+    <rect x="676" y="220" width="120" height="34" rx="17" fill="#f2efe8" stroke="#e4e0d8" stroke-dasharray="3 2"/><text x="736" y="242" text-anchor="middle" fill="#1a1a1a">Unknown</text>
+  </g>
+
+  <!-- edges to actions -->
+  <g stroke="#5b5b5b" stroke-width="1.1" fill="none">
+    <path d="M76,254 L76,290 L125,290 L125,318" marker-end="url(#ar2)"/>
+    <path d="M208,254 L208,290 L335,290 L335,318" marker-end="url(#ar2)"/>
+    <path d="M340,254 L340,300 L545,300"/>
+    <path d="M472,254 L472,300 L545,300"/>
+    <path d="M604,254 L604,300 L545,300"/>
+    <path d="M736,254 L736,300 L545,300"/>
+    <path d="M545,300 L545,318" marker-end="url(#ar2)"/>
+  </g>
+
+  <!-- Deleted bypass -->
+  <path d="M630,106 L845,106 L845,306 L755,306 L755,318" stroke="#b03a3a" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+  <text x="840" y="98" text-anchor="end" font-size="10.5" fill="#b03a3a">变化桶 = Deleted（旁路）</text>
+
+  <!-- actions -->
+  <g font-size="11.5">
+    <rect x="30"  y="320" width="190" height="44" rx="8" fill="#fff" stroke="#e4e0d8"/>
+    <text x="125" y="338" text-anchor="middle" fill="#5b5b5b">不建模型工作</text>
+    <text x="125" y="354" text-anchor="middle" font-size="10" fill="#5b5b5b">只更新数据与模型树</text>
+
+    <rect x="240" y="320" width="190" height="44" rx="8" fill="#fff" stroke="#1a1a1a"/>
+    <text x="335" y="338" text-anchor="middle" fill="#1a1a1a" class="mono">Transform</text>
+    <text x="335" y="354" text-anchor="middle" font-size="10" fill="#5b5b5b">只刷 world transform</text>
+
+    <rect x="450" y="320" width="190" height="44" rx="8" fill="#fbf1df" stroke="#8a5a00" stroke-width="1.4"/>
+    <text x="545" y="338" text-anchor="middle" fill="#1a1a1a" class="mono">RegenRoot</text>
+    <text x="545" y="354" text-anchor="middle" font-size="10" fill="#5b5b5b">重建交付单元几何</text>
+
+    <rect x="660" y="320" width="190" height="44" rx="8" fill="#fff" stroke="#b03a3a"/>
+    <text x="755" y="338" text-anchor="middle" fill="#1a1a1a" class="mono">DeleteCleanup</text>
+    <text x="755" y="354" text-anchor="middle" font-size="10" fill="#5b5b5b">级联删几何 + 重生成旧 owner</text>
+  </g>
+
+  <rect x="380" y="396" width="330" height="40" rx="8" fill="#fff" stroke="#0b6b5f" stroke-dasharray="4 3"/>
+  <text x="545" y="412" text-anchor="middle" font-size="11" fill="#0b6b5f" class="mono">CascadeExpand</text>
+  <text x="545" y="428" text-anchor="middle" font-size="10" fill="#5b5b5b">ref_rev 反查失败时落的待办，下轮 drain 补出 RegenRoot</text>
+  <line x1="545" y1="364" x2="545" y2="394" stroke="#0b6b5f" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+
+  <text x="16" y="458" font-size="10.5" fill="#5b5b5b">虚线 = 降级 / 旁路路径。<tspan class="mono">Unknown</tspan> 保守归入 RegenRoot：<tspan font-weight="600">宁可多算，不可漏算</tspan>。</text>
+</svg>
+<figcaption>图 2 · 从一条变更操作到四类模型工作的判定漏斗</figcaption>
+</figure>
+
+<p>这一层踩过两个坑，方向相反但根因相同——<strong>分类规则散落在多处</strong>：</p>
+
+<ul>
+<li><strong>名单过宽</strong>：<code>POSS</code>/<code>POSE</code>/<code>CPOS</code> 这些名字带 POS 的属性<strong>定义的是几何本身</strong>，
+却被归进「只更新 transform、不重建 mesh」的便宜路径——改型材端点，长度不跟着变
+（<a href="../cases/case-02-transform-only-was-too-wide.md">案例 02</a>）。</li>
+<li><strong>顺序决定归属</strong>：五张分类名单靠 if-else 链先后判定，<strong>73 条重名被短路后永远走不到</strong>，
+错写漏写都不报错。合并成唯一映射后，重名成为可检测的冲突（<a href="../cases/case-03-attribute-effect-single-source.md">案例 03</a>）。</li>
+</ul>
+
+<div class="callout tip"><span class="tag">正交性</span>
+「它是不是一条引用」（建不建 <code>ref_rev</code> 边）和「改了它有什么效果」是<strong>两个正交问题</strong>。
+把建边资格挂在效果分类上，归在 <code>DirectGeometry</code> 表里的引用属性（<code>NGMR</code>/<code>ORRF</code>/<code>VXREF</code>）
+就会一条边都不建（<a href="../cases/case-06-ref-edge-eligibility-decoupled.md">案例 06</a>）。</div>
+
+<h3 id="s6">⑥ 生成根：一个变化元素归一到恰好一个根</h3>
+
+<figure class="fig">
+<svg viewBox="0 0 880 356" role="img" aria-label="生成根上溯示意">
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a5a00"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="26" font-size="12" fill="#5b5b5b">管道专业</text>
+  <text x="470" y="26" font-size="12" fill="#5b5b5b">结构专业</text>
+
+  <!-- left chain -->
+  <g font-size="11.5">
+    <rect x="30" y="38" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="42" y="58" fill="#5b5b5b" class="mono">SITE</text>
+    <rect x="30" y="82" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="42" y="102" fill="#5b5b5b" class="mono">ZONE</text>
+    <rect x="30" y="126" width="200" height="30" rx="6" fill="#fbf1df" stroke="#8a5a00" stroke-width="1.6"/>
+    <text x="42" y="146" fill="#1a1a1a" class="mono">BRAN</text><text x="120" y="146" fill="#8a5a00" font-size="10.5">最小交付单元 MDU</text>
+    <rect x="30" y="170" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="42" y="190" fill="#5b5b5b" class="mono">ELBO</text>
+    <rect x="30" y="214" width="200" height="30" rx="6" fill="#fff" stroke="#b03a3a" stroke-width="1.4"/>
+    <text x="42" y="234" fill="#1a1a1a" class="mono">ELBO.SPRE</text><text x="140" y="234" fill="#b03a3a" font-size="10.5">← 变更</text>
+  </g>
+  <path d="M240,229 C282,229 282,141 240,141" stroke="#8a5a00" stroke-width="1.4" fill="none" marker-end="url(#ar3)"/>
+  <text x="290" y="188" font-size="11" fill="#8a5a00">上溯 → 生成根</text>
+
+  <!-- right chain -->
+  <g font-size="11.5">
+    <rect x="470" y="38" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="482" y="58" fill="#5b5b5b" class="mono">STRU</text>
+    <rect x="470" y="82" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="482" y="102" fill="#5b5b5b" class="mono">FRMW</text>
+    <rect x="470" y="126" width="200" height="30" rx="6" fill="#fbf1df" stroke="#8a5a00" stroke-width="1.6"/>
+    <text x="482" y="146" fill="#1a1a1a" class="mono">SUPPO</text><text x="565" y="146" fill="#8a5a00" font-size="10.5">最小交付单元 MDU</text>
+    <rect x="470" y="170" width="200" height="30" rx="6" fill="#f2efe8" stroke="#e4e0d8"/><text x="482" y="190" fill="#5b5b5b" class="mono">GENSEC</text>
+    <rect x="470" y="214" width="200" height="30" rx="6" fill="#fff" stroke="#b03a3a" stroke-width="1.4"/>
+    <text x="482" y="234" fill="#1a1a1a" class="mono">SPINE</text><text x="560" y="234" fill="#b03a3a" font-size="10.5">← 变更（隐含子元素）</text>
+  </g>
+  <path d="M680,229 C722,229 722,141 680,141" stroke="#8a5a00" stroke-width="1.4" fill="none" marker-end="url(#ar3)"/>
+  <text x="730" y="188" font-size="11" fill="#8a5a00">上溯 → 生成根</text>
+
+  <line x1="30" y1="264" x2="850" y2="264" stroke="#e4e0d8"/>
+  <text x="30" y="288" font-size="11.5" fill="#1a1a1a" font-weight="600">三条规则，按序尝试</text>
+  <text x="30" y="308" font-size="11" fill="#5b5b5b">1 · 最近的 MDU（自身或祖先）—— 默认 <tspan class="mono">BRAN / HANG / SUPPO / EQUI</tspan>，可配置增删</text>
+  <text x="30" y="326" font-size="11" fill="#5b5b5b">2 · 没有 MDU 祖先 → significant owner（正常颗粒根）</text>
+  <text x="30" y="344" font-size="11" fill="#5b5b5b">3 · <tspan class="mono">WORL / WORLD / SITE / ZONE</tspan> 恒被拒；防环上限 <tspan class="mono">MAX_ANCESTOR_DEPTH = 32</tspan></text>
+</svg>
+<figcaption>图 3 · 变更元素沿 owner 链上溯到最小交付单元；几何在 MDU 层级成形，不在叶子上</figcaption>
+</figure>
+
+<p>这里的纪律不是「算法要对」，而是<strong>「三条路必须算出同一个答案」</strong>：主路径、无索引兜底、失败补偿
+如果各用一套口径，就会出现「主路径说重生成、补偿说跳过」——失败重试之后模型<strong>永远补不上</strong>
+（<a href="../cases/case-04-generation-root-must-be-one-rule.md">案例 04</a>）。
+<a href="../../docs/adr/ADR-008-catalog-reverse-propagation.md">ADR-008</a> 把统一收口点定在 <code>generation_root</code>。</p>
+
+<h3 id="s7">⑦ 反向级联：ref_rev 回答「谁在用我」</h3>
+
+<figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-label="共享目录元件的反向级联扇出">
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0b6b5f"/>
+    </marker>
+  </defs>
+
+  <rect x="16" y="104" width="164" height="60" rx="8" fill="#fff" stroke="#b03a3a" stroke-width="1.5"/>
+  <text x="98" y="128" text-anchor="middle" font-size="12" fill="#1a1a1a" class="mono">SPCO</text>
+  <text x="98" y="146" text-anchor="middle" font-size="10.5" fill="#b03a3a">共享规格元件被改</text>
+  <line x1="180" y1="134" x2="212" y2="134" stroke="#0b6b5f" stroke-width="1.3" marker-end="url(#ar4)"/>
+
+  <rect x="216" y="96" width="184" height="76" rx="8" fill="#eaf5f2" stroke="#0b6b5f" stroke-width="1.5"/>
+  <text x="308" y="120" text-anchor="middle" font-size="11.5" fill="#1a1a1a" class="mono">[frontier]&lt;-ref_rev</text>
+  <text x="308" y="138" text-anchor="middle" font-size="10.5" fill="#5b5b5b">逐跳 BFS，500 个一批</text>
+  <text x="308" y="156" text-anchor="middle" font-size="10.5" fill="#5b5b5b">≤ 8 跳 · ≤ 50 000 引用方</text>
+  <line x1="400" y1="134" x2="432" y2="134" stroke="#0b6b5f" stroke-width="1.3" marker-end="url(#ar4)"/>
+
+  <g font-size="11">
+    <rect x="436" y="70" width="150" height="30" rx="6" fill="#fff" stroke="#e4e0d8"/><text x="448" y="90" fill="#5b5b5b" class="mono">ELBO …</text>
+    <rect x="436" y="108" width="150" height="30" rx="6" fill="#fff" stroke="#e4e0d8"/><text x="448" y="128" fill="#5b5b5b" class="mono">TEE  …</text>
+    <rect x="436" y="146" width="150" height="30" rx="6" fill="#fff" stroke="#e4e0d8"/><text x="448" y="166" fill="#5b5b5b" class="mono">FLAN …</text>
+    <text x="448" y="196" font-size="10.5" fill="#5b5b5b">引用方（不是生成根）</text>
+  </g>
+  <line x1="586" y1="123" x2="618" y2="123" stroke="#0b6b5f" stroke-width="1.3" marker-end="url(#ar4)"/>
+
+  <rect x="622" y="88" width="230" height="76" rx="8" fill="#fbf1df" stroke="#8a5a00" stroke-width="1.5"/>
+  <text x="737" y="112" text-anchor="middle" font-size="11.5" fill="#1a1a1a" class="mono">resolve_change_unit</text>
+  <text x="737" y="130" text-anchor="middle" font-size="10.5" fill="#5b5b5b">每个引用方归一到交付单元</text>
+  <text x="737" y="150" text-anchor="middle" font-size="11.5" fill="#8a5a00" font-weight="600">⇒ 72 个 BRAN 生成根</text>
+
+  <line x1="16" y1="212" x2="864" y2="212" stroke="#e4e0d8"/>
+  <text x="16" y="236" font-size="11.5" fill="#1a1a1a" font-weight="600">止步规则（build_unit_rollup）</text>
+  <text x="16" y="256" font-size="11" fill="#5b5b5b">命中交付单元 → 计数并<tspan font-weight="600">止步</tspan>，不再向上穿透 ｜ 命中普通根 → 还有上层引用者就继续压栈</text>
+  <text x="16" y="274" font-size="11" fill="#5b5b5b">没有根 → 有上层就继续，没有则什么都不做 ｜ 闭包必须<tspan font-weight="600">传递</tspan>，否则会断在没有交付单元的目录中间体上</text>
+  <text x="16" y="292" font-size="11" fill="#5b5b5b">写失败 → 只记 warning，下次触及整体重写而自愈 ｜ 读失败 → 落 <tspan class="mono">CascadeExpand</tspan> 待办，级联不丢只是推迟</text>
+</svg>
+<figcaption>图 4 · 改一个共享 SPCO 时，反向索引把它扇出成 72 个生成根</figcaption>
+</figure>
+
+<p>PDMS 原生有存储型逆指针（<code>SPBREF</code>/<code>SCBREF</code>/<code>TABREF</code> 等），但<strong>离线解析取不到</strong>——
+这是 <a href="../../docs/adr/ADR-003-reverse-cascade-index.md">ADR-003</a> 决定自建 <code>ref_rev</code> 的直接依据。
+索引本身存的是<strong>正向边，反着查</strong>；边 id 是两端复合主键，所以重复写天然幂等。</p>
+
+<p>这条链路上最脆的一处不在算法里，而在一行 SQL 的<strong>子句顺序</strong>：死信复活依赖
+<code>attempts = IF {end_sesno} &gt; (source_end_sesno ?: 0) THEN 0 ELSE attempts ?: 0 END</code>
+在 <code>source_end_sesno = …</code> <strong>之前</strong>求值。挪一行，所有死信任务永远失去复活能力——
+没有报错、没有告警、没有测试会红。现在靠一条断言钉住（<a href="../cases/case-07-cascade-expand-and-dead-letter.md">案例 07</a>）。</p>
+
+<h3 id="s8">⑧ 模型生成与删除清理</h3>
+
+<p>四类模型工作按 <code>(dbnum, action, target_refno)</code> 去重入库，语义是 <strong>at-least-once</strong>：
+模型失败<strong>不回滚</strong>数据与水位。这个选择的代价是每个环节都必须能安全重跑。</p>
+
+<div class="diagram">【删除清理的两个坑，方向相反】
+
+  坑一 · 清理集为空（案例 08）
+    被删元素带 deleted = true 软删墓碑
+    生成期却用 !deleted 过滤  ⇒  它永远进不了删除集  ⇒  几何原样留在库里
+
+  坑二 · 清理中途失败（案例 09）
+    render_cascade_delete 的清理条件，读的是它自己刚删掉的那条边
+      DELETE inst_relate:X ;                    ← 已提交
+      IF (该边不存在) THEN 删几何 END ;          ← 这里失败
+    重试时条件恒为假 ⇒ 清理被静默跳过，函数还返回 Ok
+    修法：整段包进 BEGIN TRANSACTION … COMMIT TRANSACTION
+
+  坑三 · 记录压根没建（案例 10）
+    普通元件：inst_info_map  → 建 inst_relate 记录 → aabb / world_trans 有处可存
+    TUBI    ：inst_tubi_map  → 只收集 aabb 和 transform，从不建记录 ✗</div>
+
+<p>按需生成（on-demand）这一侧的失败形态是<strong>「不报错、0 个几何」</strong>：精确 CATA 闭包的类型白名单
+少一个 <code>GMSS</code>，WALL 的 <code>SPRF → GSTR → GMSS</code> 就断在最后一跳
+（<a href="../cases/case-16-wall-cata-closure-missed-gmss.md">案例 16</a>）。
+修完还有第二层——<strong>闭包结果有缓存</strong>，规则改了旧缓存仍然宣称「依赖已解析完」，
+所以必须带 <code>CATA_CLOSURE_SCHEMA_VERSION</code>。</p>
+
+<p>结构专业还暴露了一类数据形态问题：<strong>隐含子元素（PAVE / VERT / SPINE / POINSP / CURVE）只有 noun 表记录、
+没有通用 <code>pe</code> 行</strong>。按 <code>pe</code> 表查子元素的代码必须准备好回退到 noun 表
+（<a href="../cases/case-17-structural-on-demand-trio.md">案例 17</a>）。</p>
+
+<h3 id="s9">⑨ 收口：三段式水位</h3>
+
+<figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-label="水位三段式与崩溃窗口">
+  <defs>
+    <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="46" width="220" height="58" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+  <text x="130" y="70" text-anchor="middle" font-size="12" fill="#1a1a1a" class="mono">① prepare_attempt</text>
+  <text x="130" y="88" text-anchor="middle" font-size="10.5" fill="#5b5b5b">尝试计数 +1，登记本窗口</text>
+
+  <rect x="260" y="46" width="300" height="58" rx="8" fill="#fbfaf7" stroke="#1a1a1a" stroke-width="1.2"/>
+  <text x="410" y="70" text-anchor="middle" font-size="12" fill="#1a1a1a" class="mono">② PE 落库（500 条一块，多次提交）</text>
+  <text x="410" y="88" text-anchor="middle" font-size="10.5" fill="#5b5b5b">非原子 ⇒ 每一条写都必须幂等</text>
+
+  <rect x="580" y="46" width="280" height="58" rx="8" fill="#eaf5f2" stroke="#0b6b5f" stroke-width="1.8"/>
+  <text x="720" y="70" text-anchor="middle" font-size="12" fill="#1a1a1a" class="mono">③ finalize（单事务）</text>
+  <text x="720" y="88" text-anchor="middle" font-size="10.5" fill="#5b5b5b">水位 + 模型工作 + datacenter + 交付态</text>
+
+  <line x1="240" y1="75" x2="258" y2="75" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar5)"/>
+  <line x1="560" y1="75" x2="578" y2="75" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#ar5)"/>
+
+  <text x="20" y="140" font-size="11.5" fill="#1a1a1a" font-weight="600">在任意一点断电，会发生什么</text>
+
+  <g font-size="11">
+    <circle cx="130" cy="164" r="5" fill="#0b6b5f"/>
+    <text x="146" y="168" fill="#5b5b5b">① 之后：水位未动，整窗重放 —— 只多一次尝试计数</text>
+
+    <circle cx="410" cy="192" r="5" fill="#0b6b5f"/>
+    <text x="426" y="196" fill="#5b5b5b">② 中间：部分块已提交，水位未动 ⇒ 整窗重放，幂等保证收敛</text>
+
+    <circle cx="720" cy="220" r="5" fill="#0b6b5f"/>
+    <text x="706" y="224" text-anchor="end" fill="#5b5b5b">③ 事务内：整体回滚，等价于「从没做过」</text>
+  </g>
+
+  <rect x="20" y="240" width="840" height="44" rx="8" fill="#fff" stroke="#b03a3a" stroke-dasharray="4 3"/>
+  <text x="34" y="260" font-size="11.5" fill="#b03a3a" font-weight="600">曾经存在的致命窗口</text>
+  <text x="34" y="277" font-size="11" fill="#5b5b5b">水位已推进、模型工作却在另一个事务里登记 ⇒ 进程在缝隙中退出，那批模型更新<tspan font-weight="600">永久丢失</tspan>（A3，已并入单事务）</text>
+</svg>
+<figcaption>图 5 · 三段式收口：只有第 ③ 段是原子的，也只有它能推进水位</figcaption>
+</figure>
+
+<p>收口之外，这一层还有两条「别让局部失败变成全局停摆」的教训：</p>
+
+<ul>
+<li><strong>失败隔离要真的隔离</strong>。<code>drain</code> 的注释承诺「单个坏任务不阻塞队列」，
+但删除队列行用的是裸 <code>?</code>——一次数据库抖动就让本轮后面所有任务全不跑，
+而且已经生成成功的那个下轮还要重跑一遍完整几何（<a href="../cases/case-12-drain-failure-isolation.md">案例 12</a>）。</li>
+<li><strong>不要用 panic 表达业务失败</strong>。一句 <code>.expect("更新模型数据失败")</code>
+把「一个元件网格生成失败」升级成「整个增量看门狗停止工作」
+（<a href="../cases/case-13-mesh-panic-kills-the-watchdog.md">案例 13</a>）。</li>
+</ul>
+
+<h2 id="invariants">3 · 六条不变量</h2>
+
+<p>这六条是从 20 个案例里反提炼出来的。<strong>每一条都至少被一个真实缺陷违反过</strong>，
+所以它们不是「最佳实践」，是止血线。</p>
+
+<table>
+<thead><tr><th>#</th><th>不变量</th><th>被谁违反过</th></tr></thead>
+<tbody>
+<tr><td>I1</td><td><strong>「观察」与「应用」是两条独立的写。</strong> 文件观察字段的写入失败，
+  不得修改或间接影响 <code>applied_sesno</code>。</td><td><a href="../cases/case-15-file-identity-guard.md">15</a></td></tr>
+<tr><td>I2</td><td><strong>同一个判定只能有一个定义处。</strong> 属性效果、生成根、建边资格——
+  主路径 / 兜底 / 补偿必须调用同一个函数，而不是各写一份。</td><td><a href="../cases/case-03-attribute-effect-single-source.md">03</a>、<a href="../cases/case-04-generation-root-must-be-one-rule.md">04</a>、<a href="../cases/case-06-ref-edge-eligibility-decoupled.md">06</a></td></tr>
+<tr><td>I3</td><td><strong>水位只在一个原子事务里前移</strong>，且必须与模型工作登记、交付态同批。</td><td><a href="../cases/case-11-watermark-three-phase.md">11</a></td></tr>
+<tr><td>I4</td><td><strong>分块提交下每一条写都必须幂等</strong>，同窗口重放必须收敛到同一末态。</td><td><a href="../cases/case-14-replay-must-converge.md">14</a>、<a href="../cases/case-19-window-folding.md">19</a></td></tr>
+<tr><td>I5</td><td><strong>局部失败只隔离到自己。</strong> 一个任务失败不得阻塞整轮；
+  业务失败用 <code>Err</code> 表达，不用 <code>panic</code>。</td><td><a href="../cases/case-12-drain-failure-isolation.md">12</a>、<a href="../cases/case-13-mesh-panic-kills-the-watchdog.md">13</a></td></tr>
+<tr><td>I6</td><td><strong>读后写的清理必须在同一事务内。</strong> 条件读的是自己刚删掉的东西时，
+  中途失败会让重试恒为假、静默跳过。</td><td><a href="../cases/case-09-cascade-delete-transaction.md">09</a></td></tr>
+</tbody>
+</table>
+
+<div class="callout confirm"><span class="tag">还有两条「元」纪律</span>
+<strong>规则变了，缓存必须跟着失效</strong>——闭包 / 分类 / 名单类缓存都要带规则版本号，
+否则一次修复会被旧缓存完整吃掉，看起来像「修复无效」（<a href="../cases/case-16-wall-cata-closure-missed-gmss.md">案例 16</a>）。<br>
+<strong>等价性测试不能复用被测逻辑</strong>——折叠等价性用独立写的状态机回放两遍对拍，
+如果回放器复用 <code>fold_window</code> 的 run 检测，测试只是在证明它自己内部一致（<a href="../cases/case-19-window-folding.md">案例 19</a>）。</div>
+
+<h2 id="consts">4 · 关键常量</h2>
+
+<table>
+<thead><tr><th>常量</th><th>值</th><th>作用 / 为什么是这个值</th></tr></thead>
+<tbody>
+<tr><td><code>MAX_REVERSE_CASCADE_HOPS</code></td><td>8</td><td>规格链只有几跳深；这个界<strong>纯粹是为了在脏数据上能终止</strong></td></tr>
+<tr><td><code>MAX_REVERSE_CASCADE_REFERRERS</code></td><td>50 000</td><td>防一个全项目共享的元素把整张索引拉进一个窗口</td></tr>
+<tr><td><code>TX_CHUNK</code> / <code>QUERY_CHUNK</code> / <code>READ_CHUNK</code> / <code>WRITE_CHUNK</code></td><td>500</td><td>落库、闭包反查、索引重建的分块粒度</td></tr>
+<tr><td><code>MAX_ANCESTOR_DEPTH</code></td><td>32</td><td>只用于防 owner 环，<strong>不是业务上限</strong></td></tr>
+<tr><td><code>MAX_ATTEMPTS</code></td><td>5</td><td>死信门槛；<code>attempts &gt; 0</code> 的根不进批量，单独逐根跑（毒根防放大）</td></tr>
+<tr><td><code>CATA_CLOSURE_SCHEMA_VERSION</code></td><td>2</td><td>闭包规则版本；改白名单后旧缓存自动失效</td></tr>
+<tr><td><code>MAX_RESYNC</code></td><td>64</td><td>跨块属性收集遇到坏块时的重同步上限，防跑飞</td></tr>
+</tbody>
+</table>
+
+<h2 id="atlas">5 · 20 案例总表</h2>
+
+<p class="kicker">完整卡片在 <a href="../cases/README.md">teach/cases/</a>，每张七段固定：一句话 / 现象 / 证据 / 根因 / 修法 / 验证 / 规律</p>
+
+<table>
+<thead><tr><th>#</th><th>案例</th><th>族</th><th>严重度</th><th>证据层</th></tr></thead>
+<tbody>
+<tr><td>01</td><td><a href="../cases/case-01-owner-change-is-a-move.md">OWNER 变更是「搬迁」，不是属性修改</a></td><td>A 变化语义</td><td class="sev-high">High</td><td>A+B</td></tr>
+<tr><td>02</td><td><a href="../cases/case-02-transform-only-was-too-wide.md">TRANSFORM_ONLY 名单过宽：7 条属性走了便宜路径</a></td><td>A 变化语义</td><td class="sev-high">High</td><td>A+B</td></tr>
+<tr><td>03</td><td><a href="../cases/case-03-attribute-effect-single-source.md">五张分类名单合并为唯一 attr→effect 映射</a></td><td>A 变化语义</td><td class="sev-med">Medium</td><td>B</td></tr>
+<tr><td>04</td><td><a href="../cases/case-04-generation-root-must-be-one-rule.md">生成根归一：主路径 / 兜底 / 补偿必须同一套口径</a></td><td>A 变化语义</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>05</td><td><a href="../cases/case-05-shared-spco-reverse-cascade.md">改一个共享 SPCO，72 个消费者全部重生成</a></td><td>B 反向级联</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>06</td><td><a href="../cases/case-06-ref-edge-eligibility-decoupled.md">建边资格与效果分类解耦：NGMR / ORRF / VXREF</a></td><td>B 反向级联</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>07</td><td><a href="../cases/case-07-cascade-expand-and-dead-letter.md">CascadeExpand 与死信复活：SET 子句顺序即功能</a></td><td>B 反向级联</td><td class="sev-med">Low（极脆）</td><td>B</td></tr>
+<tr><td>08</td><td><a href="../cases/case-08-deleted-element-orphan-geometry.md">删除元素后旧几何残留：软删墓碑被生成期过滤掉了</a></td><td>C 删除清理</td><td class="sev-crit">Critical</td><td>B+C</td></tr>
+<tr><td>09</td><td><a href="../cases/case-09-cascade-delete-transaction.md">级联清理的事务边界：中途失败后永久孤儿，还上报成功</a></td><td>C 删除清理</td><td class="sev-med">Medium</td><td>B</td></tr>
+<tr><td>10</td><td><a href="../cases/case-10-tubi-inst-relate-missing.md">TUBI 的 aabb / world_trans 从未落 inst_relate</a></td><td>C 删除清理</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>11</td><td><a href="../cases/case-11-watermark-three-phase.md">水位三段式：prepare → PE 落库 → finalize</a></td><td>D 水位与重放</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>12</td><td><a href="../cases/case-12-drain-failure-isolation.md">drain 的失败隔离：一次删除抖动拖垮整轮队列</a></td><td>D 水位与重放</td><td class="sev-high">High</td><td>B</td></tr>
+<tr><td>13</td><td><a href="../cases/case-13-mesh-panic-kills-the-watchdog.md">mesh 生成失败 panic 炸掉看门狗</a></td><td>D 水位与重放</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>14</td><td><a href="../cases/case-14-replay-must-converge.md">同窗口重放必须收敛：pe_owner 幂等 + SurrealQL 转义</a></td><td>D 水位与重放</td><td class="sev-med">Medium</td><td>B+C</td></tr>
+<tr><td>15</td><td><a href="../cases/case-15-file-identity-guard.md">自动 watcher 的文件身份守卫：重复 dbnum / 回退 / 路径迁移</a></td><td>D 水位与重放</td><td class="sev-med">Medium</td><td>B+C</td></tr>
+<tr><td>16</td><td><a href="../cases/case-16-wall-cata-closure-missed-gmss.md">WALL 的精确 CATA 闭包漏了 GMSS，几何数为 0</a></td><td>E 解析与按需</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>17</td><td><a href="../cases/case-17-structural-on-demand-trio.md">结构专业三连：FLOOR 隐含子元素、GENSEC 圆角与端面</a></td><td>E 解析与按需</td><td class="sev-high">High</td><td>B+C</td></tr>
+<tr><td>18</td><td><a href="../cases/case-18-cross-block-explicit-attrs.md">跨块显式属性 CURD/DBLS 丢失，模型树整棵为空</a></td><td>E 解析与按需</td><td class="sev-crit">Critical</td><td>B+C</td></tr>
+<tr><td>19</td><td><a href="../cases/case-19-window-folding.md">窗口折叠：last-writer-wins，以及它只在哪种窗口有效</a></td><td>F 性能</td><td class="sev-med">—</td><td>B+C</td></tr>
+<tr><td>20</td><td><a href="../cases/case-20-batching-and-the-measurement-trap.md">批量化三连，与 debug/release 的 93 倍测量陷阱</a></td><td>F 性能</td><td class="sev-med">—</td><td>B+C</td></tr>
+</tbody>
+<tfoot><tr><td colspan="5" class="muted">证据层沿用测试报告 §2 的口径：<strong>A</strong> 内核行为（<code>core.dll</code> 反编译）→
+<strong>B</strong> 离线实现（Rust 单测）→ <strong>C</strong> 端到端（实库 + 三维截图）。
+三层不能互相顶替：单测绿不等于实库通过，实库数据对不等于三维截图对。</td></tr></tfoot>
+</table>
+
+<h2 id="symptom">6 · 按「你正在排查什么」检索</h2>
+
+<table>
+<thead><tr><th>症状</th><th>先看</th></tr></thead>
+<tbody>
+<tr><td>改了东西，三维没变</td><td>02（便宜路径少算）、05 / 06（反向级联没建边）、16（目录闭包缺子树）</td></tr>
+<tr><td>删了东西，三维还在</td><td>08（清理集不含软删）、09（清理中途失败）</td></tr>
+<tr><td>搬走了，旧位置还留着</td><td>01（旧 owner 侧没进变更集）</td></tr>
+<tr><td>按需生成不报错，但 0 个几何</td><td>16（白名单缺类型 + 旧缓存）、17（隐含子元素没有 <code>pe</code> 行）</td></tr>
+<tr><td>某个 dbnum 反复失败、水位不动</td><td>14（重放不收敛）、12（整轮被拖垮）、07（死信复活失效）</td></tr>
+<tr><td>看门狗悄无声息地停了</td><td>13（<code>panic</code> 向上 unwind）</td></tr>
+<tr><td>模型树是空的</td><td>18（跨块属性丢失 ⇒ <code>pe</code> 关系断链）</td></tr>
+<tr><td>明明没改，却整批重算</td><td>03（<code>Unknown</code> 兜底过度）、06（建边过宽的反向）</td></tr>
+<tr><td>冷启动很慢</td><td>19（窗口折叠）、20（批量化 + 先确认测量口径）</td></tr>
+</tbody>
+</table>
+
+<h2 id="repro">7 · 复现命令</h2>
+
+<div class="callout tip"><span class="tag">先决条件</span>
+性能相关的一切都<strong>必须 <code>--release</code></strong>：同一份 <code>collect_changes</code>，
+debug 150 s、release 1.6 s，<strong>差 93 倍</strong>。用默认 debug 跑埋点会得出「解析才是瓶颈」的错误结论。<br>
+release 可执行文件还需要 <code>D:\Rust\target\debug</code> 里那 104 个 DLL（OpenCASCADE 等），
+release 目录下一个都没有，不加进 PATH 会直接 <code>STATUS_DLL_NOT_FOUND</code> 退出。</div>
+
+<pre><code><span class="tok-c"># 环境</span>
+$env:PATH = <span class="tok-s">"D:\Rust\target\debug;$env:PATH"</span>
+$env:AIOS_FOLD_TEST_FILE = <span class="tok-s">"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys"</span>
+
+<span class="tok-c"># 窗口成分 / 重复度分布 / 折叠收益估算（只读，不连库）</span>
+cargo run --release --bin incr_fold_probe -- --file $env:AIOS_FOLD_TEST_FILE --to 169 --dbnum 8191
+
+<span class="tok-c"># persist A/B（先起一次性实例；台架硬性拒绝连向 :8009 生产库）</span>
+bin\surreal.exe start --user root --pass root --bind 127.0.0.1:8099 memory
+cargo test --release --lib -- persist_ab_on_a_throwaway_instance --ignored --nocapture
+
+<span class="tok-c"># 按需生成单个元素（AIOS_CATA_CLOSURE_MODE=on 允许首次自动解析目录依赖）</span>
+$env:AIOS_CATA_CLOSURE_MODE = <span class="tok-s">"on"</span>
+$env:AIOS_ON_DEMAND_TEST_REFNO = <span class="tok-s">"24381/180032"</span>
+cargo test live_generates_a_missing_model --lib -- --ignored --nocapture
+
+<span class="tok-c"># 反向索引：全量重建（写暂存表 ref_rev_rebuild，全部成功后单事务换表）</span>
+cargo run --bin rebuild_ref_rev
+
+<span class="tok-c"># 相关单测（crate 名 aios-database，单包仓库不用 -p）</span>
+cargo test reverse_index
+cargo test ref_reversal
+cargo test data_interface::cata_closure
+cargo test --lib -- live_record_scan_never_moves_the_applied_watermark --ignored</code></pre>
+
+<h2 id="open">8 · 遗留与未验证（诚实清单）</h2>
+
+<p>这一节和上面同等重要。<strong>没做的事写清楚，比把它藏进「已完成」里安全得多。</strong></p>
+
+<table>
+<thead><tr><th>项</th><th>状态</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>三维前后截图</td><td class="sev-high">阻塞</td><td>E3D 与 <code>rs-plant-3d</code> 的窗口自动化在当前桌面会话持续报
+  <code>IGraphicsCaptureItemInterop.CreateForMonitor failed (0x80070057)</code>。
+  多轮结构专业测试<strong>只有数据库证据，没有 C 层截图</strong>——不拿 AABB 冒充截图。</td></tr>
+<tr><td>案例 02 实库对拍</td><td class="sev-med">缺</td><td>名单已收窄到安全侧，但「收窄后与 <code>core.dll</code> 行为一致」尚无实库对拍。</td></tr>
+<tr><td><code>plan</code> / <code>rev_index</code> 阶段耗时</td><td class="sev-med">未测</td><td><code>StageTimings</code> 七段埋点里这两段尚无实测数据。</td></tr>
+<tr><td>激进折叠</td><td class="sev-med">未做</td><td>末态 <code>Deleted</code> 只留墓碑可再降约 19 个百分点语句数，
+  但需先确认没有消费方依赖 <code>deleted = true</code> 记录。</td></tr>
+<tr><td><code>load_base_graph</code> 逐跳串行</td><td class="sev-med">未做</td><td>同文件的 <code>fetch_ref_rev_edges</code> 已是正确的分块批量写法，可照抄改成逐层 BFS。</td></tr>
+<tr><td><code>maintain_reverse_index</code> 无条件 DELETE</td><td class="sev-med">未做</td><td>对每个非 <code>None</code> 变更都发一条 <code>DELETE {referrer}-&gt;ref_rev;</code>，
+  哪怕该元素没有任何引用属性。</td></tr>
+<tr><td>同文件一轮打开 3~4 次</td><td class="sev-med">未做</td><td><code>init_watcher</code> → <code>SesnoRangeResolver::resolve</code> →
+  <code>resolve_with_header</code> → <code>collect_changes</code>。远程共享目录上成本不低。</td></tr>
+<tr><td>裸字符串拼 SQL</td><td class="sev-med">未做</td><td>全链路无参数绑定。转义靠调用点自觉——已经因此出过一次故障（案例 14）。</td></tr>
+<tr><td>B3 · <code>record_scan</code> 早于重复判定</td><td class="sev-med">已知</td><td>重复文件两份都会写观察字段，最终留下的身份取决于文件大小。
+  <code>applied_sesno</code> 不受影响，只是状态记录被污染。</td></tr>
+<tr><td>B4 · init 递归 / watch 限深不一致</td><td class="sev-med">已知</td><td>监控注册本身是 <code>NonRecursive</code>，<strong>不构成漏判</strong>；
+  但子目录里的库文件启动时会被处理、之后永远收不到事件。</td></tr>
+<tr><td>折叠的命名空间断言</td><td class="sev-med">建议</td><td>三个命名空间在折叠侧独立归并，落库观测面却是一个 MERGE 对象
+  ⇒ 「后一个会话胜出」被换成「显式命名空间恒胜」。当前构造不出发散（<code>refine</code> 保证两侧值恒等），
+  但建议加断言，防 <code>refine</code> 变更导致等价性在两层测试都通过的情况下悄悄失效。</td></tr>
+</tbody>
+</table>
+
+<footer class="foot">
+  增量更新参考 · 汇总自 <a href="../cases/README.md">teach/cases/</a> 的 20 张案例卡。<br>
+  一手材料：决策 <code>docs/adr/</code>（001 水位 / 003 反向索引 / 006 跨块收集 / 008 目录反向传播 / 009 搬迁语义）·
+  规格 <code>docs/specs/incr-gen-fixes/</code>（F1–F9）·
+  审核 <code>2026-07-26_increment-update-chain-audit-report.md</code>（A1–A3）与
+  <code>…-round2.md</code>（B1–B6）· 测试矩阵 <code>2026-07-25_test-plan-core-dll-model-update-complete-matrix-v2.md</code>。<br>
+  术语见 <a href="../../CONTEXT.md">CONTEXT.md</a>；内核侧证据见
+  <a href="../learning-records/0002-core-dll-model-update-logic.md">learning-records/0002</a> 与
+  <a href="../lessons/0002-ref-rev-reverse-reference-index.html">课 02</a>。<br>
+  代码落点行号会漂，函数名才是可靠索引；文件都在 <code>src/data_interface/</code> 下。
+</footer>
+</div>
+</body>
+</html>

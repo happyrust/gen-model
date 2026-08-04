@@ -4,16 +4,13 @@
 //! watermarks and must not roll back. Model refresh / SYST derived sync can fail
 //! afterward; this module records those jobs in Surreal and retries on drain.
 //!
-//! Compensation for `model_refresh` always uses the Owner regen path (idempotent
-//! on owner sets). Classified payloads are not replayed from disk.
-
 use aios_core::SUL_DB;
 use aios_core::pdms_types::*;
 use serde::{Deserialize, Serialize};
+use surrealdb::sql::Thing;
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::increment_pipeline::IncrResult;
-use crate::data_interface::model_refresh::ModelRefreshPolicy;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 const TABLE: &str = "incr_side_effect_pending";
@@ -22,7 +19,6 @@ const MAX_ATTEMPTS: u32 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideEffectKind {
-    ModelRefresh,
     SystDerived,
     /// 某个窗口的反向引用索引没维护上，需要按引用者定点重建（ADR-003）。
     RefRevMaintain,
@@ -31,7 +27,6 @@ pub enum SideEffectKind {
 impl SideEffectKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::ModelRefresh => "model_refresh",
             Self::SystDerived => "syst_derived",
             Self::RefRevMaintain => "ref_rev_maintain",
         }
@@ -40,6 +35,7 @@ impl SideEffectKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingJob {
+    pub id: Thing,
     pub kind: String,
     pub dbnum: u32,
     pub end_sesno: i32,
@@ -197,6 +193,15 @@ impl SideEffectCompensator {
         Ok(())
     }
 
+    async fn mark_abandoned(id: &Thing, reason: &str) -> anyhow::Result<()> {
+        let sql = format!(
+            "UPDATE {id} SET status = 'abandoned', last_error = '{}', updated_at = time::now();",
+            escape_surql_str(reason)
+        );
+        SUL_DB.query(sql).await?.check()?;
+        Ok(())
+    }
+
     /// Replay pending/failed jobs (attempts < MAX_ATTEMPTS). Safe to call at init.
     ///
     /// Every job runs on its own: a failure — including a failure to write the
@@ -226,36 +231,20 @@ impl SideEffectCompensator {
 
         for job in jobs {
             let kind = match job.kind.as_str() {
-                "model_refresh" => SideEffectKind::ModelRefresh,
                 "syst_derived" => SideEffectKind::SystDerived,
                 "ref_rev_maintain" => SideEffectKind::RefRevMaintain,
                 other => {
-                    println!("SideEffectCompensator: unknown kind {other}, skip");
+                    let reason = format!("unsupported legacy side-effect kind: {other}");
+                    if let Err(error) = Self::mark_abandoned(&job.id, &reason).await {
+                        failures.push(format!("abandon {} failed: {error:#}", job.id));
+                    } else {
+                        println!("SideEffectCompensator: abandoned {} ({other})", job.id);
+                    }
                     continue;
                 }
             };
 
             let result = match kind {
-                SideEffectKind::ModelRefresh => {
-                    let refnos: Vec<RefU64> = job
-                        .changed_refnos
-                        .iter()
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
-                    // F1（T304）：补偿也要清理已删除元素几何（按 pe.deleted 状态反推），
-                    // 再把 legacy refnos 转为新根任务；旧记录只在新任务成功落库后完成。
-                    async {
-                        ModelRefreshPolicy::cleanup_deleted_by_pe_state(&refnos).await?;
-                        crate::data_interface::model_update_pending::enqueue_legacy_changed_refnos(
-                            job.dbnum,
-                            job.end_sesno,
-                            &job.db_type,
-                            &refnos,
-                        )
-                        .await
-                    }
-                    .await
-                }
                 SideEffectKind::RefRevMaintain => {
                     let referrers: Vec<RefnoEnum> = job
                         .changed_refnos

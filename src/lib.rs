@@ -156,6 +156,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     aios_core::function::define_common_functions()
         .await
         .unwrap();
+    let migrated = crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage()
+        .await?;
+    println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
     // 解析完成后重新定义EVENT
     println!("正在重新定义dbnum_event...");
     match define_dbnum_event().await {
@@ -234,7 +237,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         //         EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
         //     }
         // }
-        gen_all_geos_data(vec![], &db_option, None).await?;
+        gen_all_geos_data(&db_option).await?;
         //保存
         // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
     }

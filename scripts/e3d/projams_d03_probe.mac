@@ -1,0 +1,19 @@
+-- Read-only dry run for the D-03 delete session.
+--
+-- Nothing here mutates the project: no DELETE, no SAVEWORK. Its only job is to
+-- prove that Startup.dll really does run AVEVA_DESIGN_ENTRYMACRO in a detached
+-- session, before that same channel is used to drive an irreversible DELETE.
+--
+-- Success is the appearance of this log with the VTWA still reported as live:
+--   D:/work/plant-code/old/gen-model/scripts/e3d/projams_d03_probe.log
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_d03_probe.log" OVER
+$P CODEX-D03-PROBE-ALIVE
+=24381/107146
+Q CE
+Q TYPE
+Q OWNE
+Q SPRE
+$P CODEX-D03-PROBE-DONE
+ALPHA LOG END
+QUIT

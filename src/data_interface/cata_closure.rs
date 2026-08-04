@@ -611,11 +611,17 @@ impl Default for CataClosureConfig {
 impl CataClosureConfig {
     /// 精确模式（refno 级按需 / 惰性小闭包）：children 仅对几何与点集容器展开
     /// （GMSE/GMSS/NGMS/PTSE/PSTR/SPRO/DTSE），不展开 SPEC/SELE 等规格容器。
+    ///
+    /// 挤出 / 回转体的轮廓是三层：`SEXT|NSEX|SREV|NSRE → SLOO → 顶点`。名单停在
+    /// 几何集这一层时闭包仍报 `missing=0`，落库的却是没有顶点的空壳几何。
     pub fn precise() -> Self {
-        let container: HashSet<String> = ["GMSE", "GMSS", "NGMS", "PTSE", "PSTR", "SPRO", "DTSE"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let container: HashSet<String> = [
+            "GMSE", "GMSS", "NGMS", "PTSE", "PSTR", "SPRO", "DTSE", "SEXT", "NSEX", "SREV", "NSRE",
+            "SLOO",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let mut cata_db_types = HashSet::new();
         cata_db_types.insert("CATA".to_string());
         cata_db_types.insert("DESI".to_string());
@@ -1250,7 +1256,7 @@ struct CataDepCache {
     by_source_root: HashMap<(u32, u64), CataDepEntry>,
 }
 
-const CATA_CLOSURE_SCHEMA_VERSION: u32 = 2;
+const CATA_CLOSURE_SCHEMA_VERSION: u32 = 3;
 
 impl CataDepCache {
     /// 缓存文件路径：env `AIOS_CATA_DEP_CACHE_PATH` 覆盖，缺省 `output/<project>/cata_dep_cache.bin`。

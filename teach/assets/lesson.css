@@ -1,0 +1,78 @@
+/* AVEVA core.dll teach — shared lesson stylesheet (print-friendly, Tufte-inspired) */
+:root{
+  --ink:#1a1a1a; --muted:#5b5b5b; --paper:#fbfaf7; --line:#e4e0d8;
+  --accent:#8a5a00; --accent2:#0b6b5f; --code-bg:#1f2430; --code-ink:#e6e6e6;
+  --confirm:#0b6b5f; --confirm-bg:#eaf5f2; --infer:#8a5a00; --infer-bg:#fbf1df;
+  --example-bg:#eef2fb; --example-line:#3556a6; --maxw:52rem;
+}
+*{box-sizing:border-box}
+html{font-size:17px}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:Georgia,"Iowan Old Style","Songti SC","Noto Serif CJK SC",serif;
+  line-height:1.62; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:3rem 1.4rem 6rem}
+header.hero{border-bottom:2px solid var(--ink); padding-bottom:1rem; margin-bottom:2rem}
+.eyebrow{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.72rem;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin:0 0 .5rem}
+h1{font-size:2.05rem; line-height:1.15; margin:.2rem 0 .6rem; letter-spacing:-.01em}
+h2{font-size:1.4rem; margin:2.6rem 0 .7rem; padding-bottom:.3rem; border-bottom:1px solid var(--line)}
+h3{font-size:1.12rem; margin:1.7rem 0 .5rem; color:#333}
+h4{font-size:.98rem; margin:1.1rem 0 .3rem; color:var(--muted); font-family:ui-monospace,Menlo,Consolas,monospace}
+p,li{font-size:1.02rem}
+a{color:var(--accent2); text-underline-offset:2px}
+.lead{font-size:1.12rem; color:#333}
+.muted{color:var(--muted)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.86em;
+  background:#efece4; padding:.06em .35em; border-radius:4px}
+pre{background:var(--code-bg); color:var(--code-ink); border-radius:10px; padding:1rem 1.1rem;
+  overflow:auto; font-size:.82rem; line-height:1.5; box-shadow:0 1px 0 rgba(0,0,0,.04)}
+pre code{background:none; padding:0; color:inherit; font-size:inherit}
+.tok-c{color:#8b98a9} .tok-k{color:#c792ea} .tok-f{color:#82aaff} .tok-s{color:#c3e88d} .tok-n{color:#f78c6c}
+figure{margin:1.4rem 0}
+figcaption{font-size:.82rem; color:var(--muted); text-align:center; margin-top:.4rem}
+.diagram{background:#fff; border:1px solid var(--line); border-radius:10px; padding:1.1rem;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.8rem; line-height:1.5; white-space:pre; overflow:auto}
+.callout{border-left:4px solid var(--line); background:#fff; padding:.8rem 1rem; border-radius:0 8px 8px 0; margin:1.1rem 0}
+.callout .tag{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.7rem; letter-spacing:.1em;
+  text-transform:uppercase; display:inline-block; margin-bottom:.3rem}
+.callout.confirm{border-color:var(--confirm); background:var(--confirm-bg)} .callout.confirm .tag{color:var(--confirm)}
+.callout.infer{border-color:var(--infer); background:var(--infer-bg)} .callout.infer .tag{color:var(--infer)}
+.callout.example{border-color:var(--example-line); background:var(--example-bg)} .callout.example .tag{color:var(--example-line)}
+.callout.tip{border-color:#7a3fb0; background:#f3ecfa} .callout.tip .tag{color:#7a3fb0}
+table{border-collapse:collapse; width:100%; margin:1.1rem 0; font-size:.9rem}
+th,td{border:1px solid var(--line); padding:.45rem .6rem; text-align:left; vertical-align:top}
+th{background:#f2efe8; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.78rem; letter-spacing:.03em}
+td code{font-size:.82em}
+.steps{counter-reset:step; list-style:none; padding-left:0}
+.steps>li{counter-increment:step; position:relative; padding-left:2.4rem; margin:.7rem 0}
+.steps>li::before{content:counter(step); position:absolute; left:0; top:.05rem; width:1.7rem; height:1.7rem;
+  background:var(--ink); color:#fff; border-radius:50%; display:grid; place-items:center; font-size:.85rem;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+.quiz{border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem; margin:1rem 0; background:#fff}
+.quiz .q{font-weight:600; margin:0 0 .6rem}
+.quiz button{display:block; width:100%; text-align:left; margin:.35rem 0; padding:.55rem .8rem;
+  border:1px solid var(--line); background:#faf9f6; border-radius:8px; cursor:pointer; font:inherit; font-size:.92rem}
+.quiz button:hover{border-color:var(--accent2)}
+.quiz button.correct{background:#e7f6ef; border-color:var(--confirm)}
+.quiz button.wrong{background:#fbeaea; border-color:#b03a3a}
+.quiz .fb{font-size:.86rem; color:var(--muted); margin-top:.5rem; min-height:1.2em}
+.kicker{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.72rem; color:var(--muted)}
+.toc{background:#fff; border:1px solid var(--line); border-radius:10px; padding:.9rem 1.1rem; margin:1.4rem 0}
+.toc ol{margin:.3rem 0 0; padding-left:1.2rem}
+.toc a{color:var(--ink)}
+hr{border:none; border-top:1px solid var(--line); margin:2.4rem 0}
+footer.foot{margin-top:3rem; padding-top:1rem; border-top:2px solid var(--ink); font-size:.9rem; color:var(--muted)}
+.pill{display:inline-block; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.72rem;
+  background:#efece4; border:1px solid var(--line); border-radius:999px; padding:.1rem .55rem; margin:.1rem .2rem .1rem 0}
+@media print{
+  :root{--paper:#fff}
+  body{font-size:11pt} .wrap{max-width:none; padding:0}
+  pre{white-space:pre-wrap; word-wrap:break-word; box-shadow:none}
+  .quiz button{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+  a{color:var(--ink); text-decoration:none} nav.crumbs{display:none}
+  h2{break-after:avoid} pre,table,.callout,.diagram,figure{break-inside:avoid}
+}
+nav.crumbs{font-size:.85rem; margin-bottom:1.2rem}
+nav.crumbs a{color:var(--muted)}

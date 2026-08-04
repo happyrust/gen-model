@@ -1888,7 +1888,9 @@ mod live_tests {
         );
 
         let current_meta = std::fs::metadata(&current).expect("current file metadata");
-        DbnumState::record_scan(&FileObservation {
+        // 夹具专用的强写：这个 live 用例故意重放更旧的基线，走正门会被判成回退
+        // 而只写观察值，前置身份就摆不进去。
+        DbnumState::force_scan_identity_for_test(&FileObservation {
             dbnum: 8000,
             db_type: "DESI".into(),
             file_name: current

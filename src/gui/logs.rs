@@ -1,13 +1,13 @@
 use gpui::*;
 use gpui_component::{
-    list::{List, ListDelegate, ListEvent, ListItem},
     h_flex,
     label::Label,
+    list::{List, ListDelegate, ListEvent, ListItem},
     theme::ActiveTheme,
 };
+use lazy_static::lazy_static;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use lazy_static::lazy_static;
 
 // 日志更新事件（全局可用）
 #[derive(Debug, Clone)]
@@ -51,7 +51,7 @@ impl LogListItem {
 impl RenderOnce for LogListItem {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        
+
         // 根据日志级别设置颜色
         let level_color = match self.log_item.level {
             LogLevel::Info => theme.foreground,
@@ -59,46 +59,41 @@ impl RenderOnce for LogListItem {
                 let mut color = Hsla::red();
                 color.h = 30.0;
                 color
-            }, // 黄色
-            LogLevel::Error => Hsla::red(),    // 红色
+            } // 黄色
+            LogLevel::Error => Hsla::red(), // 红色
         };
-        
+
         // 如果被选中，使用不同背景色
         let bg_color = if self.selected {
             theme.list_active
         } else {
             theme.list
         };
-        
+
         // 格式化时间戳为时分秒
         let now = SystemTime::now();
-        let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let since_epoch = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let timestamp = format!(
             "{:02}:{:02}:{:02}",
             since_epoch.as_secs() % 86400 / 3600,
             since_epoch.as_secs() % 3600 / 60,
             since_epoch.as_secs() % 60
         );
-        
-        self.base
-            .py_1()
-            .px_2()
-            .bg(bg_color)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(65.))
-                            .text_color(theme.foreground.alpha(0.7))
-                            .text_size(px(12.))
-                            .child(timestamp)
-                    )
-                    .child(
-                        Label::new(self.log_item.message)
-                            .text_color(level_color)
-                    )
-            )
+
+        self.base.py_1().px_2().bg(bg_color).child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(65.))
+                        .text_color(theme.foreground.alpha(0.7))
+                        .text_size(px(12.))
+                        .child(timestamp),
+                )
+                .child(Label::new(self.log_item.message).text_color(level_color)),
+        )
     }
 }
 
@@ -166,7 +161,7 @@ lazy_static! {
 pub fn add_global_log<S: Into<String>>(message: S, level: LogLevel) {
     let message = message.into();
     let level_copy = level; // 创建一个拷贝以避免moved value错误
-    
+
     // 添加到全局日志缓存
     let mut log_item = LogItem {
         id: 0, // 临时ID
@@ -174,19 +169,19 @@ pub fn add_global_log<S: Into<String>>(message: S, level: LogLevel) {
         message: message.clone().into(),
         level,
     };
-    
+
     if let Ok(mut logs) = GLOBAL_LOGS.lock() {
         log_item.id = logs.len();
         logs.push(log_item);
     }
-    
+
     // 打印到控制台（保持原有行为）
     match level_copy {
         LogLevel::Info => println!("{}", message),
         LogLevel::Warning => println!("警告: {}", message),
         LogLevel::Error => eprintln!("错误: {}", message),
     }
-    
+
     // 触发全局事件通知，使用 emit 方法
     // if let Some(app) = App::instance() {
     //     app.emit(LogUpdateEvent);
@@ -199,7 +194,7 @@ pub fn log_from_thread<S: Into<String> + Send + 'static>(message: S, level: LogL
     // 处理消费问题
     // let message_string = message.into();
     // let level_copy = level;
-    
+
     // // 在后台线程中记录日志
     // std::thread::spawn(move || {
     //     // 直接添加到全局日志缓存
@@ -209,12 +204,12 @@ pub fn log_from_thread<S: Into<String> + Send + 'static>(message: S, level: LogL
     //         message: message_string.clone().into(),
     //         level: level_copy,
     //     };
-        
+
     //     if let Ok(mut logs) = GLOBAL_LOGS.lock() {
     //         log_item.id = logs.len();
     //         logs.push(log_item);
     //     }
-        
+
     //     // 打印到控制台
     //     match level_copy {
     //         LogLevel::Info => println!("{}", message_string),
@@ -222,4 +217,4 @@ pub fn log_from_thread<S: Into<String> + Send + 'static>(message: S, level: LogL
     //         LogLevel::Error => eprintln!("错误: {}", message_string),
     //     }
     // });
-} 
+}

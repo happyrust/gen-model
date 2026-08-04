@@ -124,13 +124,6 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
-    // 旧 `manual_model_pending` 一次性收编（幂等：搬空之后每次启动都是一趟空 SELECT）。
-    // 放在消费之前：那张表里的根在被收编前既进不了工作单、也累计不了失败次数。
-    match crate::data_interface::manual_update::migrate_legacy_pending_units().await {
-        Ok(0) => {}
-        Ok(moved) => println!("已收编 {moved} 条旧模型待重试任务并清空 manual_model_pending"),
-        Err(error) => println!("收编旧模型待重试任务失败（留在旧表，下次启动重试）: {error:#}"),
-    }
     println!("数据批次 worker 已启动（单消费者，队列空时消化积压并收房间轮）");
     loop {
         beat();
@@ -213,8 +206,9 @@ async fn run_one_batch_isolated(
         return;
     };
 
-    let message =
-        format!("数据批次 dbnum={dbnum} 执行时 panic，已隔离，队列继续（task {task_id}）: {reason}");
+    let message = format!(
+        "数据批次 dbnum={dbnum} 执行时 panic，已隔离，队列继续（task {task_id}）: {reason}"
+    );
     log::error!("{message}");
     eprintln!("{message}");
     scheduler.finish(dbnum);
@@ -622,7 +616,11 @@ async fn run_unit_worklist(
 ///
 /// `after_batches` 只影响日志口径；两类动作本身都以「表里有没有活」为准，
 /// 空表时各是一次廉价 SELECT。
-async fn idle_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, after_batches: bool) {
+async fn idle_round(
+    mgr: &Arc<AiosDBManager>,
+    registry: &'static TaskRegistry,
+    after_batches: bool,
+) {
     // 范围可能刚变宽（见 [`SCOPE_DIRTY`]）：先把新进范围的库找出来入队，它们没有
     // 自己的文件事件，错过这一轮就要等下次重启。入队会唤醒本 worker，下一圈就消费。
     if SCOPE_DIRTY.swap(false, Ordering::SeqCst) {
@@ -658,7 +656,11 @@ async fn idle_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, a
 ///
 /// `gen_spatial_tree` 关着时一条房间任务都不会入队（门控在入队口），这里再拦
 /// 一道只是把「没开就别建空任务行」说清楚。
-async fn room_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, after_batches: bool) {
+async fn room_round(
+    mgr: &Arc<AiosDBManager>,
+    registry: &'static TaskRegistry,
+    after_batches: bool,
+) {
     if !mgr.db_option.gen_spatial_tree {
         return;
     }
@@ -712,6 +714,15 @@ async fn room_round(mgr: &Arc<AiosDBManager>, registry: &'static TaskRegistry, a
             serde_json::json!({ "total": live, "error": format!("{error:#}") }),
         ),
     };
+    // 收尾必须用收敛后的计数覆盖建行时那份 detail。客户端泳道读的是最近一条
+    // room_recalc 的 detail（live = panels + elements），而收敛到 0 的下一空闲轮
+    // 因本函数开头的早退不再建新行——不覆盖的话，房间全部收敛干净的那一刻起，
+    // 泳道永远显示本轮开跑前的待重算数，30 分钟后误报「饥饿」且永不自愈。
+    // 统计失败时保留旧 detail：宁可显示旧数字，也别把分项计数抹成空。
+    match model_update_pending::count_room_targets().await {
+        Ok(after) => registry.set_detail(&task_id, serde_json::to_value(after).unwrap_or_default()),
+        Err(error) => println!("收敛后统计房间目标失败（泳道将沿用开跑前的计数）: {error:#}"),
+    }
     registry.finish(&task_id, state, result_json.clone());
     #[cfg(feature = "http_api")]
     crate::web_service::events::publish(
@@ -745,22 +756,32 @@ fn progress_sink(registry: &'static TaskRegistry, task_id: &str) -> Option<Manua
 /// 冻结点重扫候选文件：路径 / 类型不变（F6 已在入队前把关），会话号与大小取现值。
 fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
     use pdms_io::io::PdmsIO;
+    use std::io::Read;
 
     let metadata = std::fs::metadata(&job.path)
         .map_err(|e| anyhow::anyhow!("读取文件元数据失败 {}: {e}", job.path.display()))?;
     let file_latest_sesno = PdmsIO::new(&job.project, job.path.clone(), true)
         .get_latest_sesno()
-        .map_err(|e| anyhow::anyhow!("读取最新会话号失败 {}: {e}", job.path.display()))? as i32;
+        .map_err(|e| anyhow::anyhow!("读取最新会话号失败 {}: {e}", job.path.display()))?
+        as i32;
     let file_name = job
         .path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&job.file_name)
         .to_string();
+    // 类型从**现场文件头**重读，不沿用冻结任务里那份。入队到执行之间隔着整条队列，
+    // 同号文件被换成另一类型的库时，沿用旧值就等于把执行侧的阻断复核蒙上眼睛：
+    // `execute_one_dbnum` 拿到的 `db_type` 永远等于登记值，`TypeChanged` 判不出来。
+    let mut header = [0u8; 60];
+    std::fs::File::open(&job.path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|e| anyhow::anyhow!("读取数据库头失败 {}: {e}", job.path.display()))?;
+    let db_type = parse_pdms_db::parse::parse_file_basic_info(&header).db_type;
     Ok(FileCandidate {
         path: job.path.clone(),
         file_name,
-        db_type: job.db_type.clone(),
+        db_type,
         db_num: job.dbnum,
         file_latest_sesno,
         file_size: metadata.len(),
@@ -841,9 +862,46 @@ mod tests {
     #[test]
     fn panic_payloads_become_a_readable_sentence() {
         assert_eq!(panic_message(&"边界越界"), "边界越界");
-        assert_eq!(panic_message(&String::from("dbnum=7997 解析失败")), "dbnum=7997 解析失败");
+        assert_eq!(
+            panic_message(&String::from("dbnum=7997 解析失败")),
+            "dbnum=7997 解析失败"
+        );
         // `panic_any` 能扔任意类型，这条路必须有话说而不是空串。
         assert!(!panic_message(&42u8).is_empty());
+    }
+
+    /// 房间轮收尾必须用收敛后的计数覆盖 detail（2026-07-30 审计 B2）。
+    ///
+    /// 泳道读的是最近一条 `room_recalc` 的 `detail`，而收敛到 0 的下一空闲轮因
+    /// `live == 0` 早退不再建新行：drain 之后不重新统计并 `set_detail`，
+    /// 「已全部收敛」这个事实就没有任何出口，界面永远显示开跑前的待重算数。
+    #[test]
+    fn the_room_round_overwrites_its_detail_after_draining() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn room_round(")
+            .expect("room_round 必须存在")
+            .1
+            .split_once("\nasync fn ")
+            .expect("room_round 之后还有别的函数")
+            .0;
+        let drain_at = body
+            .find("drain_rooms")
+            .expect("room_round 必须消化房间任务");
+        let recount_at = body
+            .rfind("count_room_targets")
+            .expect("room_round 必须在收尾时重新统计");
+        assert!(
+            recount_at > drain_at,
+            "收敛后的重新统计必须发生在 drain 之后，否则写回的还是旧计数"
+        );
+        let set_detail_at = body
+            .find("set_detail")
+            .expect("重新统计的结果必须经 set_detail 写回任务行");
+        assert!(
+            set_detail_at > recount_at,
+            "set_detail 写回的必须是收敛后那份计数"
+        );
     }
 
     /// 隔离壳的本分：panic 到此为止，换成一句话交给调用方。

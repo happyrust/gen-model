@@ -1,19 +1,21 @@
-use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use std::sync::Arc;
-use aios_core::options::DbOption;
-use aios_core::DBType;
-use crate::fast_model::gen_model::{gen_all_geos_data, gen_geos_data_by_dbnum};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use tracing::{info, warn, error, debug, span, Level, instrument};
-use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
-use tracing_chrome::ChromeLayerBuilder;
-use std::fs::File;
-use aios_core::{query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, RefnoEnum};
-use aios_core::pdms_types::{GNERAL_PRIM_NOUN_NAMES, GNERAL_LOOP_OWNER_NOUN_NAMES, USE_CATE_NOUN_NAMES};
+use crate::fast_model::gen_model::{gen_all_geos_data, gen_geos_data_by_dbnum};
+use aios_core::DBType;
 use aios_core::geometry::ShapeInstancesData;
-use dashmap::DashMap;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::CataHashRefnoKV;
+use aios_core::pdms_types::{
+    GNERAL_LOOP_OWNER_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, USE_CATE_NOUN_NAMES,
+};
+use aios_core::{RefnoEnum, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum};
+use dashmap::DashMap;
+use std::collections::HashMap;
+use std::fs::File;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{Level, debug, error, info, instrument, span, warn};
+use tracing_chrome::ChromeLayerBuilder;
+use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// 性能测试结果统计
 #[derive(Debug, Clone)]
@@ -155,7 +157,10 @@ pub async fn test_model_generation_performance(
     }
 
     let overall_time = overall_start.elapsed();
-    info!("总体性能测试完成，耗时: {:.2}秒", overall_time.as_secs_f64());
+    info!(
+        "总体性能测试完成，耗时: {:.2}秒",
+        overall_time.as_secs_f64()
+    );
 
     // 输出性能统计报告
     print_performance_report(&all_stats, overall_time);
@@ -165,7 +170,12 @@ pub async fn test_model_generation_performance(
 
 /// 获取指定范围内的数据库号
 async fn get_dbnos_in_range(start_dbno: u32, end_dbno: u32) -> anyhow::Result<Vec<u32>> {
-    let span = span!(Level::DEBUG, "get_dbnos_in_range", start = start_dbno, end = end_dbno);
+    let span = span!(
+        Level::DEBUG,
+        "get_dbnos_in_range",
+        start = start_dbno,
+        end = end_dbno
+    );
     let _enter = span.enter();
 
     // 查询所有可用的数据库号
@@ -201,7 +211,14 @@ async fn test_single_db_performance(
     // 一体化测试：实例生成、网格生成和布尔运算（带详细分析）
     let integrated_result = test_integrated_model_generation(dbno, &test_db_option).await;
     match integrated_result {
-        Ok((instance_time, mesh_time, boolean_time, instance_count, mesh_count, stage_analysis)) => {
+        Ok((
+            instance_time,
+            mesh_time,
+            boolean_time,
+            instance_count,
+            mesh_count,
+            stage_analysis,
+        )) => {
             stats.instance_gen_time_ms = instance_time;
             stats.mesh_gen_time_ms = mesh_time;
             stats.boolean_time_ms = boolean_time;
@@ -209,14 +226,20 @@ async fn test_single_db_performance(
             stats.mesh_count = mesh_count;
             stats.stage_analysis = stage_analysis;
 
-            info!("数据库 {} 完整测试完成: {} 个实例, {} 个网格",
-                  dbno, instance_count, mesh_count);
-            info!("  实例生成: {}ms, 网格生成: {}ms, 布尔运算: {}ms",
-                  instance_time, mesh_time, boolean_time);
-            info!("  详细分析 - 数据库查询: {}ms, 几何计算: {}ms, 网格细分: {}ms",
-                  stats.stage_analysis.db_query_time_ms,
-                  stats.stage_analysis.geometry_calc_time_ms,
-                  stats.stage_analysis.mesh_subdivision_time_ms);
+            info!(
+                "数据库 {} 完整测试完成: {} 个实例, {} 个网格",
+                dbno, instance_count, mesh_count
+            );
+            info!(
+                "  实例生成: {}ms, 网格生成: {}ms, 布尔运算: {}ms",
+                instance_time, mesh_time, boolean_time
+            );
+            info!(
+                "  详细分析 - 数据库查询: {}ms, 几何计算: {}ms, 网格细分: {}ms",
+                stats.stage_analysis.db_query_time_ms,
+                stats.stage_analysis.geometry_calc_time_ms,
+                stats.stage_analysis.mesh_subdivision_time_ms
+            );
         }
         Err(e) => {
             error!("数据库 {} 模型生成失败: {}", dbno, e);
@@ -226,8 +249,13 @@ async fn test_single_db_performance(
 
     stats.total_time_ms = db_start.elapsed().as_millis();
 
-    info!("数据库 {} 测试完成，总耗时: {}ms，实例/秒: {:.2}，网格/秒: {:.2}",
-          dbno, stats.total_time_ms, stats.instances_per_second(), stats.meshes_per_second());
+    info!(
+        "数据库 {} 测试完成，总耗时: {}ms，实例/秒: {:.2}，网格/秒: {:.2}",
+        dbno,
+        stats.total_time_ms,
+        stats.instances_per_second(),
+        stats.meshes_per_second()
+    );
 
     Ok(stats)
 }
@@ -259,7 +287,8 @@ async fn test_integrated_model_generation(
     });
 
     // 详细分析实例生成阶段
-    let (db_refnos, instance_analysis) = analyze_instance_generation(dbno, db_option, sender).await?;
+    let (db_refnos, instance_analysis) =
+        analyze_instance_generation(dbno, db_option, sender).await?;
     instance_count = count_task.await.unwrap_or(0);
     let instance_time = instance_start.elapsed().as_millis();
 
@@ -291,10 +320,19 @@ async fn test_integrated_model_generation(
     // 估算网格数量（实际项目中应该从数据库查询）
     let mesh_count = instance_count / 2; // 估算值
 
-    debug!("数据库 {} 各阶段耗时 - 实例: {}ms, 网格: {}ms, 布尔: {}ms",
-           dbno, instance_time, mesh_time, boolean_time);
+    debug!(
+        "数据库 {} 各阶段耗时 - 实例: {}ms, 网格: {}ms, 布尔: {}ms",
+        dbno, instance_time, mesh_time, boolean_time
+    );
 
-    Ok((instance_time, mesh_time, boolean_time, instance_count, mesh_count, stage_analysis))
+    Ok((
+        instance_time,
+        mesh_time,
+        boolean_time,
+        instance_count,
+        mesh_count,
+        stage_analysis,
+    ))
 }
 
 /// 详细分析实例生成阶段
@@ -303,17 +341,29 @@ async fn analyze_instance_generation(
     dbno: u32,
     db_option: &DbOption,
     sender: flume::Sender<ShapeInstancesData>,
-) -> anyhow::Result<(crate::fast_model::gen_model::DbModelInstRefnos, StageAnalysis)> {
+) -> anyhow::Result<(
+    crate::fast_model::gen_model::DbModelInstRefnos,
+    StageAnalysis,
+)> {
     let mut analysis = StageAnalysis::default();
 
     // 1. 数据库查询阶段
     let db_query_start = Instant::now();
 
     // 查询各类型引用号
-    let prim_refnos = query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None, false).await.unwrap_or_default();
-    let loop_refnos = query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true), false).await.unwrap_or_default();
-    let bran_hanger_refnos = query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None, false).await.unwrap_or_default();
-    let use_cate_refnos = query_use_cate_refnos_by_dbnum(&USE_CATE_NOUN_NAMES, dbno, false).await.unwrap_or_default();
+    let prim_refnos = query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None, false)
+        .await
+        .unwrap_or_default();
+    let loop_refnos =
+        query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true), false)
+            .await
+            .unwrap_or_default();
+    let bran_hanger_refnos = query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None, false)
+        .await
+        .unwrap_or_default();
+    let use_cate_refnos = query_use_cate_refnos_by_dbnum(&USE_CATE_NOUN_NAMES, dbno, false)
+        .await
+        .unwrap_or_default();
 
     analysis.db_query_time_ms = db_query_start.elapsed().as_millis();
     debug!("数据库 {} 查询耗时: {}ms", dbno, analysis.db_query_time_ms);
@@ -326,10 +376,14 @@ async fn analyze_instance_generation(
     let db_refnos = gen_geos_data_by_dbnum(dbno, db_option_arc, sender).await?;
 
     analysis.geometry_calc_time_ms = geometry_calc_start.elapsed().as_millis();
-    debug!("数据库 {} 几何计算耗时: {}ms", dbno, analysis.geometry_calc_time_ms);
+    debug!(
+        "数据库 {} 几何计算耗时: {}ms",
+        dbno, analysis.geometry_calc_time_ms
+    );
 
     // 3. 内存分配分析（估算）
-    let total_refnos = prim_refnos.len() + loop_refnos.len() + bran_hanger_refnos.len() + use_cate_refnos.len();
+    let total_refnos =
+        prim_refnos.len() + loop_refnos.len() + bran_hanger_refnos.len() + use_cate_refnos.len();
     analysis.memory_alloc_time_ms = (total_refnos as u128) / 100; // 估算值：每100个引用号约1ms内存分配时间
 
     Ok((db_refnos, analysis))
@@ -348,7 +402,9 @@ async fn analyze_mesh_generation(
 
     // 执行网格生成
     let db_option_arc = std::sync::Arc::new(db_option.clone());
-    db_refnos.execute_gen_inst_meshes(Some(db_option_arc)).await;
+    db_refnos
+        .execute_gen_inst_meshes(Some(db_option_arc))
+        .await?;
 
     analysis.mesh_subdivision_time_ms = subdivision_start.elapsed().as_millis();
     debug!("网格细分耗时: {}ms", analysis.mesh_subdivision_time_ms);
@@ -374,10 +430,10 @@ async fn analyze_boolean_operations(
     let prep_start = Instant::now();
 
     // 准备布尔运算数据（这里主要是数据结构准备）
-    let total_elements = db_refnos.prim_refnos.len() +
-                        db_refnos.loop_owner_refnos.len() +
-                        db_refnos.bran_hanger_refnos.len() +
-                        db_refnos.use_cate_refnos.len();
+    let total_elements = db_refnos.prim_refnos.len()
+        + db_refnos.loop_owner_refnos.len()
+        + db_refnos.bran_hanger_refnos.len()
+        + db_refnos.use_cate_refnos.len();
 
     analysis.boolean_prep_time_ms = prep_start.elapsed().as_millis();
     debug!("布尔运算准备耗时: {}ms", analysis.boolean_prep_time_ms);
@@ -387,7 +443,9 @@ async fn analyze_boolean_operations(
 
     // 执行布尔运算
     let db_option_arc = std::sync::Arc::new(db_option.clone());
-    db_refnos.execute_boolean_meshes(Some(db_option_arc)).await;
+    db_refnos
+        .execute_boolean_meshes(Some(db_option_arc))
+        .await?;
 
     analysis.boolean_exec_time_ms = exec_start.elapsed().as_millis();
     debug!("布尔运算执行耗时: {}ms", analysis.boolean_exec_time_ms);
@@ -397,8 +455,6 @@ async fn analyze_boolean_operations(
 
     Ok(analysis)
 }
-
-
 
 /// 打印性能测试报告
 fn print_performance_report(stats: &[PerformanceStats], total_time: std::time::Duration) {
@@ -416,17 +472,17 @@ fn print_performance_report(stats: &[PerformanceStats], total_time: std::time::D
     let total_meshes: usize = stats.iter().map(|s| s.mesh_count).sum();
     let total_errors: usize = stats.iter().map(|s| s.errors.len()).sum();
 
-    let avg_instance_time: f64 = stats.iter()
+    let avg_instance_time: f64 = stats
+        .iter()
         .map(|s| s.instance_gen_time_ms as f64)
-        .sum::<f64>() / stats.len() as f64;
+        .sum::<f64>()
+        / stats.len() as f64;
 
-    let avg_mesh_time: f64 = stats.iter()
-        .map(|s| s.mesh_gen_time_ms as f64)
-        .sum::<f64>() / stats.len() as f64;
+    let avg_mesh_time: f64 =
+        stats.iter().map(|s| s.mesh_gen_time_ms as f64).sum::<f64>() / stats.len() as f64;
 
-    let avg_boolean_time: f64 = stats.iter()
-        .map(|s| s.boolean_time_ms as f64)
-        .sum::<f64>() / stats.len() as f64;
+    let avg_boolean_time: f64 =
+        stats.iter().map(|s| s.boolean_time_ms as f64).sum::<f64>() / stats.len() as f64;
 
     println!("\n--- 总体统计 ---");
     println!("总实例数: {}", total_instances);
@@ -472,20 +528,24 @@ fn print_performance_report(stats: &[PerformanceStats], total_time: std::time::D
 
     // 详细的每个数据库统计
     println!("\n--- 详细统计 ---");
-    println!("{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
-             "数据库", "总时间(ms)", "实例时间", "网格时间", "布尔时间", "实例数", "网格数", "错误数");
+    println!(
+        "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
+        "数据库", "总时间(ms)", "实例时间", "网格时间", "布尔时间", "实例数", "网格数", "错误数"
+    );
     println!("{}", "-".repeat(100));
 
     for stat in stats {
-        println!("{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
-                 stat.dbno,
-                 stat.total_time_ms,
-                 stat.instance_gen_time_ms,
-                 stat.mesh_gen_time_ms,
-                 stat.boolean_time_ms,
-                 stat.instance_count,
-                 stat.mesh_count,
-                 stat.errors.len());
+        println!(
+            "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
+            stat.dbno,
+            stat.total_time_ms,
+            stat.instance_gen_time_ms,
+            stat.mesh_gen_time_ms,
+            stat.boolean_time_ms,
+            stat.instance_count,
+            stat.mesh_count,
+            stat.errors.len()
+        );
     }
 }
 
@@ -498,10 +558,17 @@ pub fn analyze_performance_bottlenecks(stats: &[PerformanceStats]) -> Vec<String
     }
 
     // 计算各阶段平均时间占比
-    let avg_total_time: f64 = stats.iter().map(|s| s.total_time_ms as f64).sum::<f64>() / stats.len() as f64;
-    let avg_instance_time: f64 = stats.iter().map(|s| s.instance_gen_time_ms as f64).sum::<f64>() / stats.len() as f64;
-    let avg_mesh_time: f64 = stats.iter().map(|s| s.mesh_gen_time_ms as f64).sum::<f64>() / stats.len() as f64;
-    let avg_boolean_time: f64 = stats.iter().map(|s| s.boolean_time_ms as f64).sum::<f64>() / stats.len() as f64;
+    let avg_total_time: f64 =
+        stats.iter().map(|s| s.total_time_ms as f64).sum::<f64>() / stats.len() as f64;
+    let avg_instance_time: f64 = stats
+        .iter()
+        .map(|s| s.instance_gen_time_ms as f64)
+        .sum::<f64>()
+        / stats.len() as f64;
+    let avg_mesh_time: f64 =
+        stats.iter().map(|s| s.mesh_gen_time_ms as f64).sum::<f64>() / stats.len() as f64;
+    let avg_boolean_time: f64 =
+        stats.iter().map(|s| s.boolean_time_ms as f64).sum::<f64>() / stats.len() as f64;
 
     if avg_total_time > 0.0 {
         let instance_ratio = avg_instance_time / avg_total_time;
@@ -537,9 +604,13 @@ pub fn analyze_performance_bottlenecks(stats: &[PerformanceStats]) -> Vec<String
     }
 
     // 错误率分析
-    let error_rate = stats.iter().map(|s| s.errors.len()).sum::<usize>() as f64 / stats.len() as f64;
+    let error_rate =
+        stats.iter().map(|s| s.errors.len()).sum::<usize>() as f64 / stats.len() as f64;
     if error_rate > 0.1 {
-        suggestions.push(format!("平均错误率较高({:.1}%)，建议：", error_rate * 100.0));
+        suggestions.push(format!(
+            "平均错误率较高({:.1}%)，建议：",
+            error_rate * 100.0
+        ));
         suggestions.push("  1. 增加错误处理和重试机制".to_string());
         suggestions.push("  2. 优化数据验证，提前发现问题数据".to_string());
         suggestions.push("  3. 增加详细的日志记录，便于问题定位".to_string());
@@ -553,7 +624,10 @@ pub fn analyze_performance_bottlenecks(stats: &[PerformanceStats]) -> Vec<String
         if max_time > 0 && min_time > 0 {
             let variance_ratio = max_time as f64 / min_time as f64;
             if variance_ratio > 3.0 {
-                suggestions.push(format!("不同数据库的处理时间差异较大(最大/最小 = {:.1})，建议：", variance_ratio));
+                suggestions.push(format!(
+                    "不同数据库的处理时间差异较大(最大/最小 = {:.1})，建议：",
+                    variance_ratio
+                ));
                 suggestions.push("  1. 分析数据复杂度差异，针对性优化".to_string());
                 suggestions.push("  2. 实现自适应的处理策略".to_string());
                 suggestions.push("  3. 考虑数据预处理，平衡负载".to_string());
@@ -574,6 +648,7 @@ pub fn analyze_performance_bottlenecks(stats: &[PerformanceStats]) -> Vec<String
 
 /// 专门测试24383/66456范围内的所有模型生成
 #[tokio::test]
+#[ignore = "manual benchmark: requires the configured Surreal project and model data"]
 async fn test_model_generation_24383_66456() -> anyhow::Result<()> {
     // 初始化追踪
     init_performance_tracing()?;
@@ -623,14 +698,19 @@ fn save_performance_report(stats: &[PerformanceStats], filename: &str) -> anyhow
     let mut file = File::create(filename)?;
 
     writeln!(file, "模型生成性能测试报告")?;
-    writeln!(file, "生成时间: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+    writeln!(
+        file,
+        "生成时间: {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    )?;
     writeln!(file, "测试数据库数量: {}", stats.len())?;
     writeln!(file, "")?;
 
     if !stats.is_empty() {
         let total_instances: usize = stats.iter().map(|s| s.instance_count).sum();
         let total_meshes: usize = stats.iter().map(|s| s.mesh_count).sum();
-        let avg_time: f64 = stats.iter().map(|s| s.total_time_ms as f64).sum::<f64>() / stats.len() as f64;
+        let avg_time: f64 =
+            stats.iter().map(|s| s.total_time_ms as f64).sum::<f64>() / stats.len() as f64;
 
         writeln!(file, "总体统计:")?;
         writeln!(file, "  总实例数: {}", total_instances)?;
@@ -639,20 +719,33 @@ fn save_performance_report(stats: &[PerformanceStats], filename: &str) -> anyhow
         writeln!(file, "")?;
 
         writeln!(file, "详细数据:")?;
-        writeln!(file, "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
-                 "数据库", "总时间(ms)", "实例时间", "网格时间", "布尔时间", "实例数", "网格数", "错误数")?;
+        writeln!(
+            file,
+            "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
+            "数据库",
+            "总时间(ms)",
+            "实例时间",
+            "网格时间",
+            "布尔时间",
+            "实例数",
+            "网格数",
+            "错误数"
+        )?;
         writeln!(file, "{}", "-".repeat(100))?;
 
         for stat in stats {
-            writeln!(file, "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
-                     stat.dbno,
-                     stat.total_time_ms,
-                     stat.instance_gen_time_ms,
-                     stat.mesh_gen_time_ms,
-                     stat.boolean_time_ms,
-                     stat.instance_count,
-                     stat.mesh_count,
-                     stat.errors.len())?;
+            writeln!(
+                file,
+                "{:<8} {:<12} {:<12} {:<12} {:<12} {:<12} {:<12} {:<8}",
+                stat.dbno,
+                stat.total_time_ms,
+                stat.instance_gen_time_ms,
+                stat.mesh_gen_time_ms,
+                stat.boolean_time_ms,
+                stat.instance_count,
+                stat.mesh_count,
+                stat.errors.len()
+            )?;
         }
 
         // 保存错误信息
@@ -700,29 +793,108 @@ pub fn generate_detailed_stage_analysis(stats: &[PerformanceStats]) -> String {
     report.push_str("=== 详细阶段耗时分析报告 ===\n\n");
 
     // 计算各阶段平均耗时
-    let avg_db_query = stats.iter().map(|s| s.stage_analysis.db_query_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_geometry_calc = stats.iter().map(|s| s.stage_analysis.geometry_calc_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_memory_alloc = stats.iter().map(|s| s.stage_analysis.memory_alloc_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_mesh_subdivision = stats.iter().map(|s| s.stage_analysis.mesh_subdivision_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_mesh_optimization = stats.iter().map(|s| s.stage_analysis.mesh_optimization_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_boolean_prep = stats.iter().map(|s| s.stage_analysis.boolean_prep_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_boolean_exec = stats.iter().map(|s| s.stage_analysis.boolean_exec_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_serialization = stats.iter().map(|s| s.stage_analysis.serialization_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_io_wait = stats.iter().map(|s| s.stage_analysis.io_wait_time_ms).sum::<u128>() as f64 / stats.len() as f64;
+    let avg_db_query = stats
+        .iter()
+        .map(|s| s.stage_analysis.db_query_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_geometry_calc = stats
+        .iter()
+        .map(|s| s.stage_analysis.geometry_calc_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_memory_alloc = stats
+        .iter()
+        .map(|s| s.stage_analysis.memory_alloc_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_mesh_subdivision = stats
+        .iter()
+        .map(|s| s.stage_analysis.mesh_subdivision_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_mesh_optimization = stats
+        .iter()
+        .map(|s| s.stage_analysis.mesh_optimization_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_boolean_prep = stats
+        .iter()
+        .map(|s| s.stage_analysis.boolean_prep_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_boolean_exec = stats
+        .iter()
+        .map(|s| s.stage_analysis.boolean_exec_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_serialization = stats
+        .iter()
+        .map(|s| s.stage_analysis.serialization_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_io_wait = stats
+        .iter()
+        .map(|s| s.stage_analysis.io_wait_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
 
-    let total_avg_time = avg_db_query + avg_geometry_calc + avg_memory_alloc + avg_mesh_subdivision +
-                        avg_mesh_optimization + avg_boolean_prep + avg_boolean_exec + avg_serialization + avg_io_wait;
+    let total_avg_time = avg_db_query
+        + avg_geometry_calc
+        + avg_memory_alloc
+        + avg_mesh_subdivision
+        + avg_mesh_optimization
+        + avg_boolean_prep
+        + avg_boolean_exec
+        + avg_serialization
+        + avg_io_wait;
 
     report.push_str("1. 各阶段平均耗时统计:\n");
-    report.push_str(&format!("   数据库查询:     {:.2}ms ({:.1}%)\n", avg_db_query, (avg_db_query / total_avg_time) * 100.0));
-    report.push_str(&format!("   几何计算:       {:.2}ms ({:.1}%)\n", avg_geometry_calc, (avg_geometry_calc / total_avg_time) * 100.0));
-    report.push_str(&format!("   内存分配:       {:.2}ms ({:.1}%)\n", avg_memory_alloc, (avg_memory_alloc / total_avg_time) * 100.0));
-    report.push_str(&format!("   网格细分:       {:.2}ms ({:.1}%)\n", avg_mesh_subdivision, (avg_mesh_subdivision / total_avg_time) * 100.0));
-    report.push_str(&format!("   网格优化:       {:.2}ms ({:.1}%)\n", avg_mesh_optimization, (avg_mesh_optimization / total_avg_time) * 100.0));
-    report.push_str(&format!("   布尔运算准备:   {:.2}ms ({:.1}%)\n", avg_boolean_prep, (avg_boolean_prep / total_avg_time) * 100.0));
-    report.push_str(&format!("   布尔运算执行:   {:.2}ms ({:.1}%)\n", avg_boolean_exec, (avg_boolean_exec / total_avg_time) * 100.0));
-    report.push_str(&format!("   结果序列化:     {:.2}ms ({:.1}%)\n", avg_serialization, (avg_serialization / total_avg_time) * 100.0));
-    report.push_str(&format!("   I/O等待:        {:.2}ms ({:.1}%)\n", avg_io_wait, (avg_io_wait / total_avg_time) * 100.0));
+    report.push_str(&format!(
+        "   数据库查询:     {:.2}ms ({:.1}%)\n",
+        avg_db_query,
+        (avg_db_query / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   几何计算:       {:.2}ms ({:.1}%)\n",
+        avg_geometry_calc,
+        (avg_geometry_calc / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   内存分配:       {:.2}ms ({:.1}%)\n",
+        avg_memory_alloc,
+        (avg_memory_alloc / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   网格细分:       {:.2}ms ({:.1}%)\n",
+        avg_mesh_subdivision,
+        (avg_mesh_subdivision / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   网格优化:       {:.2}ms ({:.1}%)\n",
+        avg_mesh_optimization,
+        (avg_mesh_optimization / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   布尔运算准备:   {:.2}ms ({:.1}%)\n",
+        avg_boolean_prep,
+        (avg_boolean_prep / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   布尔运算执行:   {:.2}ms ({:.1}%)\n",
+        avg_boolean_exec,
+        (avg_boolean_exec / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   结果序列化:     {:.2}ms ({:.1}%)\n",
+        avg_serialization,
+        (avg_serialization / total_avg_time) * 100.0
+    ));
+    report.push_str(&format!(
+        "   I/O等待:        {:.2}ms ({:.1}%)\n",
+        avg_io_wait,
+        (avg_io_wait / total_avg_time) * 100.0
+    ));
     report.push_str(&format!("   总计:           {:.2}ms\n\n", total_avg_time));
 
     // 识别主要瓶颈
@@ -743,7 +915,13 @@ pub fn generate_detailed_stage_analysis(stats: &[PerformanceStats]) -> String {
 
     for (i, (stage, time)) in bottlenecks.iter().take(3).enumerate() {
         let percentage = (time / total_avg_time) * 100.0;
-        report.push_str(&format!("   {}. {} - {:.2}ms ({:.1}%)\n", i + 1, stage, time, percentage));
+        report.push_str(&format!(
+            "   {}. {} - {:.2}ms ({:.1}%)\n",
+            i + 1,
+            stage,
+            time,
+            percentage
+        ));
     }
 
     report.push_str("\n");
@@ -759,18 +937,61 @@ pub fn generate_optimization_recommendations(stats: &[PerformanceStats]) -> Vec<
     }
 
     // 计算各阶段平均耗时和占比
-    let avg_db_query = stats.iter().map(|s| s.stage_analysis.db_query_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_geometry_calc = stats.iter().map(|s| s.stage_analysis.geometry_calc_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_memory_alloc = stats.iter().map(|s| s.stage_analysis.memory_alloc_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_mesh_subdivision = stats.iter().map(|s| s.stage_analysis.mesh_subdivision_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_mesh_optimization = stats.iter().map(|s| s.stage_analysis.mesh_optimization_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_boolean_prep = stats.iter().map(|s| s.stage_analysis.boolean_prep_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_boolean_exec = stats.iter().map(|s| s.stage_analysis.boolean_exec_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_serialization = stats.iter().map(|s| s.stage_analysis.serialization_time_ms).sum::<u128>() as f64 / stats.len() as f64;
-    let avg_io_wait = stats.iter().map(|s| s.stage_analysis.io_wait_time_ms).sum::<u128>() as f64 / stats.len() as f64;
+    let avg_db_query = stats
+        .iter()
+        .map(|s| s.stage_analysis.db_query_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_geometry_calc = stats
+        .iter()
+        .map(|s| s.stage_analysis.geometry_calc_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_memory_alloc = stats
+        .iter()
+        .map(|s| s.stage_analysis.memory_alloc_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_mesh_subdivision = stats
+        .iter()
+        .map(|s| s.stage_analysis.mesh_subdivision_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_mesh_optimization = stats
+        .iter()
+        .map(|s| s.stage_analysis.mesh_optimization_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_boolean_prep = stats
+        .iter()
+        .map(|s| s.stage_analysis.boolean_prep_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_boolean_exec = stats
+        .iter()
+        .map(|s| s.stage_analysis.boolean_exec_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_serialization = stats
+        .iter()
+        .map(|s| s.stage_analysis.serialization_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
+    let avg_io_wait = stats
+        .iter()
+        .map(|s| s.stage_analysis.io_wait_time_ms)
+        .sum::<u128>() as f64
+        / stats.len() as f64;
 
-    let total_avg_time = avg_db_query + avg_geometry_calc + avg_memory_alloc + avg_mesh_subdivision +
-                        avg_mesh_optimization + avg_boolean_prep + avg_boolean_exec + avg_serialization + avg_io_wait;
+    let total_avg_time = avg_db_query
+        + avg_geometry_calc
+        + avg_memory_alloc
+        + avg_mesh_subdivision
+        + avg_mesh_optimization
+        + avg_boolean_prep
+        + avg_boolean_exec
+        + avg_serialization
+        + avg_io_wait;
 
     recommendations.push("=== 针对性优化建议 ===".to_string());
 
@@ -905,7 +1126,11 @@ pub async fn test_gen_geos_data_performance(
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
 ) -> anyhow::Result<GenGeosDataPerformanceStats> {
-    let span = span!(Level::DEBUG, "test_gen_geos_data_performance", refno_count = manual_refnos.len());
+    let span = span!(
+        Level::DEBUG,
+        "test_gen_geos_data_performance",
+        refno_count = manual_refnos.len()
+    );
     let _enter = span.enter();
 
     info!("开始测试 gen_geos_data 函数性能");
@@ -917,7 +1142,7 @@ pub async fn test_gen_geos_data_performance(
     let init_start = Instant::now();
 
     // 使用 aios_core 的数据库初始化函数
-    use aios_core::{init_surreal, SUL_DB};
+    use aios_core::{SUL_DB, init_surreal};
 
     // 连接到数据库
     #[cfg(feature = "ws")]
@@ -977,9 +1202,9 @@ pub async fn test_gen_geos_data_performance(
         None, // dbno - 手动指定 refnos 时不需要传入
         manual_refnos.clone(),
         db_option,
-        None, // incr_updates
         sender,
-    ).await;
+    )
+    .await;
 
     let total_time = stage_start.elapsed();
     stats.total_time_ms = total_time.as_millis();
@@ -1024,7 +1249,11 @@ pub async fn test_gen_geos_data_performance_without_db_init(
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
 ) -> anyhow::Result<GenGeosDataPerformanceStats> {
-    let span = span!(Level::DEBUG, "test_gen_geos_data_performance_without_db_init", refno_count = manual_refnos.len());
+    let span = span!(
+        Level::DEBUG,
+        "test_gen_geos_data_performance_without_db_init",
+        refno_count = manual_refnos.len()
+    );
     let _enter = span.enter();
 
     info!("开始测试 gen_geos_data 函数性能（跳过数据库初始化）");
@@ -1061,9 +1290,9 @@ pub async fn test_gen_geos_data_performance_without_db_init(
         None, // dbno - 手动指定 refnos 时不需要传入
         manual_refnos.clone(),
         db_option,
-        None, // incr_updates
         sender,
-    ).await;
+    )
+    .await;
 
     let total_time = stage_start.elapsed();
     stats.total_time_ms = total_time.as_millis();
@@ -1108,7 +1337,11 @@ pub async fn test_parallel_cata_geos_performance(
     manual_refnos: Vec<RefnoEnum>,
     db_option: &DbOption,
 ) -> anyhow::Result<ParallelCataPerformanceStats> {
-    let span = span!(Level::DEBUG, "test_parallel_cata_geos_performance", refno_count = manual_refnos.len());
+    let span = span!(
+        Level::DEBUG,
+        "test_parallel_cata_geos_performance",
+        refno_count = manual_refnos.len()
+    );
     let _enter = span.enter();
 
     info!("🚀 开始测试并行优化的元件库处理性能");
@@ -1119,7 +1352,7 @@ pub async fn test_parallel_cata_geos_performance(
 
     // 第一步：初始化数据库连接
     info!("初始化数据库连接...");
-    use aios_core::{init_surreal, SUL_DB};
+    use aios_core::{SUL_DB, init_surreal};
 
     let db_init_start = Instant::now();
     #[cfg(feature = "ws")]
@@ -1155,14 +1388,18 @@ pub async fn test_parallel_cata_geos_performance(
         &manual_refnos,
         &["BRAN", "HANG"],
         false, // skip_exist
-    ).await.unwrap_or_default();
+    )
+    .await
+    .unwrap_or_default();
 
     // 查询单个元件库
     let single_cata_refnos = aios_core::query_multi_deep_versioned_children_filter_inst(
         &manual_refnos,
         &["CATA", "EQUI", "NOZZ"],
         false, // skip_exist
-    ).await.unwrap_or_default();
+    )
+    .await
+    .unwrap_or_default();
 
     stats.query_time_ms = query_start.elapsed().as_millis();
     stats.bran_hang_count = bran_hang_refnos.len();
@@ -1182,12 +1419,15 @@ pub async fn test_parallel_cata_geos_performance(
     // 为BRAN/HANG类型构建数据
     for refno in &bran_hang_refnos {
         let cata_hash = format!("bran_hang_{}", refno);
-        target_cata_map.insert(cata_hash.clone(), CataHashRefnoKV {
-            cata_hash: cata_hash.clone(),
-            group_refnos: vec![*refno],
-            exist_inst: false,
-            ptset: None,
-        });
+        target_cata_map.insert(
+            cata_hash.clone(),
+            CataHashRefnoKV {
+                cata_hash: cata_hash.clone(),
+                group_refnos: vec![*refno],
+                exist_inst: false,
+                ptset: None,
+            },
+        );
 
         // 模拟分支数据
         branch_map.insert(*refno, vec![]);
@@ -1196,12 +1436,15 @@ pub async fn test_parallel_cata_geos_performance(
     // 为单个元件库构建数据
     for refno in &single_cata_refnos {
         let cata_hash = format!("single_cata_{}", refno);
-        target_cata_map.insert(cata_hash.clone(), CataHashRefnoKV {
-            cata_hash: cata_hash.clone(),
-            group_refnos: vec![*refno],
-            exist_inst: false,
-            ptset: None,
-        });
+        target_cata_map.insert(
+            cata_hash.clone(),
+            CataHashRefnoKV {
+                cata_hash: cata_hash.clone(),
+                group_refnos: vec![*refno],
+                exist_inst: false,
+                ptset: None,
+            },
+        );
     }
 
     stats.build_data_time_ms = build_data_start.elapsed().as_millis();
@@ -1237,7 +1480,8 @@ pub async fn test_parallel_cata_geos_performance(
         Arc::new(branch_map),
         Arc::new(DashMap::new()), // sjus_map
         sender,
-    ).await;
+    )
+    .await;
 
     stats.parallel_processing_time_ms = parallel_start.elapsed().as_millis();
 
@@ -1296,11 +1540,11 @@ pub struct ParallelCataPerformanceStats {
     pub error_message: Option<String>,
 
     // 性能指标
-    pub cata_processing_speed: f64,      // 元件库/秒
-    pub instance_generation_speed: f64,   // 实例/秒
-    pub avg_cata_processing_time: f64,    // ms/元件库
+    pub cata_processing_speed: f64,        // 元件库/秒
+    pub instance_generation_speed: f64,    // 实例/秒
+    pub avg_cata_processing_time: f64,     // ms/元件库
     pub avg_instance_generation_time: f64, // ms/实例
-    pub efficiency_score: f64,            // 综合效率分数
+    pub efficiency_score: f64,             // 综合效率分数
 }
 
 impl ParallelCataPerformanceStats {
@@ -1338,11 +1582,13 @@ impl ParallelCataPerformanceStats {
         }
 
         if self.total_cata_count > 0 {
-            self.avg_cata_processing_time = self.parallel_processing_time_ms as f64 / self.total_cata_count as f64;
+            self.avg_cata_processing_time =
+                self.parallel_processing_time_ms as f64 / self.total_cata_count as f64;
         }
 
         if self.generated_instance_count > 0 {
-            self.avg_instance_generation_time = self.parallel_processing_time_ms as f64 / self.generated_instance_count as f64;
+            self.avg_instance_generation_time =
+                self.parallel_processing_time_ms as f64 / self.generated_instance_count as f64;
         }
 
         // 计算效率分数 (综合考虑处理速度和成功率)
@@ -1500,23 +1746,42 @@ impl GenGeosDataPerformanceStats {
         if self.total_time_ms > 0 {
             let time_seconds = self.total_time_ms as f64 / 1000.0;
 
-            self.performance_metrics.refnos_per_second =
-                if time_seconds > 0.0 { self.processed_refno_count as f64 / time_seconds } else { 0.0 };
+            self.performance_metrics.refnos_per_second = if time_seconds > 0.0 {
+                self.processed_refno_count as f64 / time_seconds
+            } else {
+                0.0
+            };
 
-            self.performance_metrics.instances_per_second =
-                if time_seconds > 0.0 { self.generated_instance_count as f64 / time_seconds } else { 0.0 };
+            self.performance_metrics.instances_per_second = if time_seconds > 0.0 {
+                self.generated_instance_count as f64 / time_seconds
+            } else {
+                0.0
+            };
 
-            self.performance_metrics.shapes_per_second =
-                if time_seconds > 0.0 { self.total_generated_shapes as f64 / time_seconds } else { 0.0 };
+            self.performance_metrics.shapes_per_second = if time_seconds > 0.0 {
+                self.total_generated_shapes as f64 / time_seconds
+            } else {
+                0.0
+            };
 
-            self.performance_metrics.avg_time_per_refno_ms =
-                if self.processed_refno_count > 0 { self.total_time_ms as f64 / self.processed_refno_count as f64 } else { 0.0 };
+            self.performance_metrics.avg_time_per_refno_ms = if self.processed_refno_count > 0 {
+                self.total_time_ms as f64 / self.processed_refno_count as f64
+            } else {
+                0.0
+            };
 
-            self.performance_metrics.avg_time_per_instance_ms =
-                if self.generated_instance_count > 0 { self.total_time_ms as f64 / self.generated_instance_count as f64 } else { 0.0 };
+            self.performance_metrics.avg_time_per_instance_ms = if self.generated_instance_count > 0
+            {
+                self.total_time_ms as f64 / self.generated_instance_count as f64
+            } else {
+                0.0
+            };
 
-            self.performance_metrics.avg_time_per_shape_ms =
-                if self.total_generated_shapes > 0 { self.total_time_ms as f64 / self.total_generated_shapes as f64 } else { 0.0 };
+            self.performance_metrics.avg_time_per_shape_ms = if self.total_generated_shapes > 0 {
+                self.total_time_ms as f64 / self.total_generated_shapes as f64
+            } else {
+                0.0
+            };
         }
     }
 
@@ -1529,11 +1794,26 @@ impl GenGeosDataPerformanceStats {
         // 基本信息
         report.push_str("基本信息:\n");
         report.push_str(&format!("  输入根节点数量: {}\n", self.input_refno_count));
-        report.push_str(&format!("  处理子节点数量: {}\n", self.processed_refno_count));
-        report.push_str(&format!("  生成实例数量: {}\n", self.generated_instance_count));
-        report.push_str(&format!("  生成形状数据组数: {}\n", self.generated_shape_data_count));
-        report.push_str(&format!("  生成总形状数量: {}\n", self.total_generated_shapes));
-        report.push_str(&format!("  执行状态: {}\n", if self.success { "成功" } else { "失败" }));
+        report.push_str(&format!(
+            "  处理子节点数量: {}\n",
+            self.processed_refno_count
+        ));
+        report.push_str(&format!(
+            "  生成实例数量: {}\n",
+            self.generated_instance_count
+        ));
+        report.push_str(&format!(
+            "  生成形状数据组数: {}\n",
+            self.generated_shape_data_count
+        ));
+        report.push_str(&format!(
+            "  生成总形状数量: {}\n",
+            self.total_generated_shapes
+        ));
+        report.push_str(&format!(
+            "  执行状态: {}\n",
+            if self.success { "成功" } else { "失败" }
+        ));
 
         if let Some(ref error) = self.error_message {
             report.push_str(&format!("  错误信息: {}\n", error));
@@ -1549,12 +1829,30 @@ impl GenGeosDataPerformanceStats {
 
         // 性能指标
         report.push_str("性能指标:\n");
-        report.push_str(&format!("  子节点处理速度: {:.2} 节点/秒\n", self.performance_metrics.refnos_per_second));
-        report.push_str(&format!("  实例生成速度: {:.2} 实例/秒\n", self.performance_metrics.instances_per_second));
-        report.push_str(&format!("  形状生成速度: {:.2} 形状/秒\n", self.performance_metrics.shapes_per_second));
-        report.push_str(&format!("  平均子节点处理时间: {:.2}ms/节点\n", self.performance_metrics.avg_time_per_refno_ms));
-        report.push_str(&format!("  平均实例生成时间: {:.2}ms/实例\n", self.performance_metrics.avg_time_per_instance_ms));
-        report.push_str(&format!("  平均形状生成时间: {:.2}ms/形状\n", self.performance_metrics.avg_time_per_shape_ms));
+        report.push_str(&format!(
+            "  子节点处理速度: {:.2} 节点/秒\n",
+            self.performance_metrics.refnos_per_second
+        ));
+        report.push_str(&format!(
+            "  实例生成速度: {:.2} 实例/秒\n",
+            self.performance_metrics.instances_per_second
+        ));
+        report.push_str(&format!(
+            "  形状生成速度: {:.2} 形状/秒\n",
+            self.performance_metrics.shapes_per_second
+        ));
+        report.push_str(&format!(
+            "  平均子节点处理时间: {:.2}ms/节点\n",
+            self.performance_metrics.avg_time_per_refno_ms
+        ));
+        report.push_str(&format!(
+            "  平均实例生成时间: {:.2}ms/实例\n",
+            self.performance_metrics.avg_time_per_instance_ms
+        ));
+        report.push_str(&format!(
+            "  平均形状生成时间: {:.2}ms/形状\n",
+            self.performance_metrics.avg_time_per_shape_ms
+        ));
         report.push_str("\n");
 
         // 效率评估
@@ -1573,13 +1871,19 @@ impl GenGeosDataPerformanceStats {
         // 扩展比例分析
         if self.input_refno_count > 0 {
             let expansion_ratio = self.processed_refno_count as f64 / self.input_refno_count as f64;
-            report.push_str(&format!("  子节点扩展比例: {:.1}:1 (每个根节点平均包含 {:.1} 个子节点)\n",
-                                   expansion_ratio, expansion_ratio));
+            report.push_str(&format!(
+                "  子节点扩展比例: {:.1}:1 (每个根节点平均包含 {:.1} 个子节点)\n",
+                expansion_ratio, expansion_ratio
+            ));
         }
 
         if self.processed_refno_count > 0 {
-            let shapes_per_node = self.total_generated_shapes as f64 / self.processed_refno_count as f64;
-            report.push_str(&format!("  形状生成比例: {:.1} 形状/子节点\n", shapes_per_node));
+            let shapes_per_node =
+                self.total_generated_shapes as f64 / self.processed_refno_count as f64;
+            report.push_str(&format!(
+                "  形状生成比例: {:.1} 形状/子节点\n",
+                shapes_per_node
+            ));
         }
 
         report
@@ -1594,10 +1898,17 @@ pub async fn batch_test_gen_geos_data_performance(
     refno_groups: Vec<Vec<RefnoEnum>>,
     db_option: &DbOption,
 ) -> anyhow::Result<Vec<GenGeosDataPerformanceStats>> {
-    let span = span!(Level::DEBUG, "batch_test_gen_geos_data_performance", group_count = refno_groups.len());
+    let span = span!(
+        Level::DEBUG,
+        "batch_test_gen_geos_data_performance",
+        group_count = refno_groups.len()
+    );
     let _enter = span.enter();
 
-    info!("开始批量测试 gen_geos_data 函数性能，测试组数: {}", refno_groups.len());
+    info!(
+        "开始批量测试 gen_geos_data 函数性能，测试组数: {}",
+        refno_groups.len()
+    );
 
     let mut all_stats = Vec::new();
 
@@ -1607,7 +1918,11 @@ pub async fn batch_test_gen_geos_data_performance(
         let mut stats = test_gen_geos_data_performance(refno_group, db_option).await?;
         stats.calculate_metrics();
 
-        info!("第 {} 组测试完成，耗时: {}ms", index + 1, stats.total_time_ms);
+        info!(
+            "第 {} 组测试完成，耗时: {}ms",
+            index + 1,
+            stats.total_time_ms
+        );
         all_stats.push(stats);
     }
 
@@ -1625,7 +1940,11 @@ pub async fn test_gen_geos_data_from_database(
     max_refnos: Option<usize>,
     db_option: &DbOption,
 ) -> anyhow::Result<GenGeosDataPerformanceStats> {
-    let span = span!(Level::DEBUG, "test_gen_geos_data_from_database", dbno = dbno);
+    let span = span!(
+        Level::DEBUG,
+        "test_gen_geos_data_from_database",
+        dbno = dbno
+    );
     let _enter = span.enter();
 
     info!("从数据库 {} 查询参考号进行性能测试", dbno);
@@ -1633,7 +1952,7 @@ pub async fn test_gen_geos_data_from_database(
 
     // 第一步：初始化数据库连接
     info!("初始化数据库连接...");
-    use aios_core::{init_surreal, SUL_DB};
+    use aios_core::{SUL_DB, init_surreal};
 
     #[cfg(feature = "ws")]
     {
@@ -1699,7 +2018,11 @@ pub fn save_gen_geos_data_report(
     let mut file = File::create(filename)?;
 
     writeln!(file, "gen_geos_data 函数性能测试报告")?;
-    writeln!(file, "生成时间: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+    writeln!(
+        file,
+        "生成时间: {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    )?;
     writeln!(file, "=")?;
     writeln!(file, "")?;
 
@@ -1722,16 +2045,26 @@ pub fn save_gen_geos_data_report(
     writeln!(file, "- 总处理参考号: {}", total_processed_refnos)?;
     writeln!(file, "- 总生成实例: {}", total_instances)?;
     writeln!(file, "- 总耗时: {}ms", total_time)?;
-    writeln!(file, "- 成功率: {:.1}%", (success_count as f64 / stats.len() as f64) * 100.0)?;
+    writeln!(
+        file,
+        "- 成功率: {:.1}%",
+        (success_count as f64 / stats.len() as f64) * 100.0
+    )?;
     writeln!(file, "")?;
 
     // 平均性能指标
     if success_count > 0 {
         let successful_stats: Vec<_> = stats.iter().filter(|s| s.success).collect();
-        let avg_refnos_per_sec: f64 = successful_stats.iter()
-            .map(|s| s.performance_metrics.refnos_per_second).sum::<f64>() / successful_stats.len() as f64;
-        let avg_instances_per_sec: f64 = successful_stats.iter()
-            .map(|s| s.performance_metrics.instances_per_second).sum::<f64>() / successful_stats.len() as f64;
+        let avg_refnos_per_sec: f64 = successful_stats
+            .iter()
+            .map(|s| s.performance_metrics.refnos_per_second)
+            .sum::<f64>()
+            / successful_stats.len() as f64;
+        let avg_instances_per_sec: f64 = successful_stats
+            .iter()
+            .map(|s| s.performance_metrics.instances_per_second)
+            .sum::<f64>()
+            / successful_stats.len() as f64;
 
         writeln!(file, "平均性能指标:")?;
         writeln!(file, "- 平均处理速度: {:.2} 参考号/秒", avg_refnos_per_sec)?;
@@ -1741,20 +2074,26 @@ pub fn save_gen_geos_data_report(
 
     // 详细测试结果
     writeln!(file, "详细测试结果:")?;
-    writeln!(file, "{:<6} {:<12} {:<12} {:<12} {:<10} {:<12} {:<12} {:<8}",
-             "序号", "输入参考号", "处理参考号", "生成实例", "耗时(ms)", "处理速度", "生成速度", "状态")?;
+    writeln!(
+        file,
+        "{:<6} {:<12} {:<12} {:<12} {:<10} {:<12} {:<12} {:<8}",
+        "序号", "输入参考号", "处理参考号", "生成实例", "耗时(ms)", "处理速度", "生成速度", "状态"
+    )?;
     writeln!(file, "{}", "-".repeat(90))?;
 
     for (index, stat) in stats.iter().enumerate() {
-        writeln!(file, "{:<6} {:<12} {:<12} {:<12} {:<10} {:<12.2} {:<12.2} {:<8}",
-                 index + 1,
-                 stat.input_refno_count,
-                 stat.processed_refno_count,
-                 stat.generated_instance_count,
-                 stat.total_time_ms,
-                 stat.performance_metrics.refnos_per_second,
-                 stat.performance_metrics.instances_per_second,
-                 if stat.success { "成功" } else { "失败" })?;
+        writeln!(
+            file,
+            "{:<6} {:<12} {:<12} {:<12} {:<10} {:<12.2} {:<12.2} {:<8}",
+            index + 1,
+            stat.input_refno_count,
+            stat.processed_refno_count,
+            stat.generated_instance_count,
+            stat.total_time_ms,
+            stat.performance_metrics.refnos_per_second,
+            stat.performance_metrics.instances_per_second,
+            if stat.success { "成功" } else { "失败" }
+        )?;
     }
     writeln!(file, "")?;
 

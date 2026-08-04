@@ -375,12 +375,10 @@ mod tests {
         }
     }
 
-    /// 阻断裁决只能有一个权威：[`FileAnomaly::blocks`]。
+    /// 阻断裁决只能有一个权威，自动路径不许自己再列一份异常清单。
     ///
     /// 这里过去是 `match` 只列 `Rollback` / `PathMigrated`，其余走 `_ => true` 放行，
     /// 于是 `TypeChanged` 在自动路径上被静默放过，而手动预览把它标成阻断。
-    /// 顺带钉住「先裁决、后落库」：`record_scan` 会按 dbnum 覆盖 `db_type`/`file_path`，
-    /// 那正是判据本身，覆盖掉之后同一个异常下一轮就检不出来了（同 B3）。
     #[test]
     fn the_auto_path_blocks_by_the_shared_anomaly_verdict() {
         let src = include_str!("increment_manager.rs");
@@ -396,23 +394,19 @@ mod tests {
             .0;
 
         assert!(
-            body.contains("FileAnomaly::blocks"),
-            "阻断裁决必须走 FileAnomaly::blocks，不能自己再列一份异常清单"
+            body.contains("classify_scan(") && body.contains("record_observation("),
+            "分类与落库都必须走共用裁决，自动路径不得自己拼 check_file_against_state"
         );
         assert!(
             !body.contains("_ => true"),
             "不许有放行式兜底：新增一种异常时必须显式决定它阻不阻断"
         );
 
-        let verdict_at = body
-            .find("FileAnomaly::blocks")
-            .expect("已在上面断言过存在");
-        let record_at = body
-            .find("record_scan(")
-            .expect("scan_and_check_file 仍应落一次扫描观察");
+        let classify_at = body.find("classify_scan(").expect("已在上面断言过存在");
+        let record_at = body.find("record_observation(").expect("已在上面断言过存在");
         assert!(
-            verdict_at < record_at,
-            "必须先裁决再落库：record_scan 按 dbnum 覆盖 db_type/file_path，\
+            classify_at < record_at,
+            "必须先裁决再落库：落库会按 dbnum 覆盖 db_type/file_path，\
              而它们正是 check_file_against_state 的判据"
         );
     }
@@ -773,24 +767,16 @@ impl AiosDBManager {
         should_process_database_with(&self.db_option, db_type, db_num)
     }
 
-    /// F6：自动 watcher 的「文件观察落库 + 异常检测」，与手动路径（manual_update）同口径。
+    /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
     ///
-    /// 1. 读取该 dbnum 之前登记的状态（对比文件身份）。
-    /// 2. `check_file_against_state` 判定回退 / 路径迁移。
-    /// 3. `record_scan` 刷新文件身份、file_latest_sesno、scanned_at —— **只写观察字段，
-    ///    绝不推进 applied_sesno**（ADR-001）。自动模式过去从不 record_scan，导致
-    ///    dbnum_watermark 文件身份字段常空、无法检测回退/迁移/重复。
+    /// 分类与落库都交给 [`DbnumState::classify_scan`] / [`DbnumState::record_observation`]
+    /// ——手动预览、手动入队、worker 执行体走的是同两个函数，四条路径不可能再分叉。
+    /// 这里只剩下自动路径独有的那部分：把裁决翻成日志，把阻断翻成返回值。
     ///
     /// 返回 `false` 表示该文件被阻断、调用方应跳过（水位不回退）。阻不阻断只由
-    /// [`FileAnomaly::blocks`] 说了算，与手动预览 / `dbnum_statuses` 同一个权威
-    /// ——这里过去只列举了 `Rollback` 与 `PathMigrated`，其余走 `_ => true` 放行，
-    /// 于是 `TypeChanged`（同号文件被换成另一类型的库）在自动路径上照常应用，
-    /// 而手动预览把它标成阻断。
-    ///
-    /// 阻断时**不写文件身份字段**：`db_type` / `file_path` 正是判据本身，
-    /// `record_scan` 按 dbnum UPSERT 会把它们覆盖成观察值，下一轮
-    /// `check_file_against_state` 就再也检不出同一个异常——异常会把自己抹掉。
-    /// 这与 B3（重复 dbnum 阻断必须先于 record_scan）是同一条道理。
+    /// [`FileAnomaly::blocks`] 说了算——这里过去只列举了 `Rollback` 与 `PathMigrated`，
+    /// 其余走 `_ => true` 放行，于是 `TypeChanged`（同号文件被换成另一类型的库）
+    /// 在自动路径上照常应用，而手动预览把它标成阻断。
     pub(crate) async fn scan_and_check_file(
         &self,
         path: &std::path::Path,
@@ -799,55 +785,34 @@ impl AiosDBManager {
         db_num: u32,
         file_latest_sesno: i32,
     ) -> bool {
-        use crate::data_interface::dbnum_state::{
-            DbnumState, FileAnomaly, FileObservation, check_file_against_state,
-        };
-
-        let prior = DbnumState::read(db_num).await.ok().flatten();
-        let applied = prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0);
-        let prior_db_type = prior
-            .as_ref()
-            .map(|s| s.db_type.as_str())
-            .filter(|s| !s.is_empty());
-        let prior_path = prior
-            .as_ref()
-            .map(|s| s.file_path.as_str())
-            .filter(|s| !s.is_empty());
-        let observed_path = path.display().to_string();
-
-        let anomaly = check_file_against_state(
-            prior_db_type,
-            prior_path,
-            applied,
-            db_type,
-            &observed_path,
-            file_latest_sesno,
-        );
-
-        let blocked = anomaly.as_ref().is_some_and(FileAnomaly::blocks);
+        use crate::data_interface::dbnum_state::{DbnumState, FileAnomaly, FileObservation};
 
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let obs = FileObservation {
             dbnum: db_num,
             db_type: db_type.to_string(),
             file_name: file_name.to_string(),
-            file_path: observed_path.clone(),
+            file_path: path.display().to_string(),
             file_size,
             file_latest_sesno,
             file_modified_at: None,
         };
-        let recorded = if blocked {
-            DbnumState::record_blocked_observation(&obs).await
-        } else {
-            DbnumState::record_scan(&obs).await
+        // 读状态失败按阻断处理：水位读不出来就不知道有没有回退，宁可这一轮不入队，
+        // 也不能拿一个默认的 0 当水位去跑（那会把老库判成首次导入）。
+        let verdict = match DbnumState::classify_scan(&obs).await {
+            Ok(verdict) => verdict,
+            Err(e) => {
+                println!("F6 读取 DBNUM 状态失败，本轮跳过 dbnum={db_num}: {e:#}");
+                return false;
+            }
         };
-        if let Err(e) = recorded {
+        if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             println!("F6 记录扫描观察失败 dbnum={db_num}: {e}");
         }
 
         // 逐个变体点名，不留 `_ =>` 兜底：将来新增一种异常时这里编译不过，
         // 作者必须显式决定它阻不阻断、怎么说。
-        match &anomaly {
+        match &verdict.anomaly {
             None => {}
             Some(FileAnomaly::Rollback {
                 file_latest_sesno: f,
@@ -873,7 +838,7 @@ impl AiosDBManager {
             ),
         }
 
-        !blocked
+        !verdict.blocked()
     }
 
     // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：

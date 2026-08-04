@@ -1,7 +1,7 @@
 // pub mod pdms_arango;
 pub mod structs;
 // pub mod ssc_arango;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForeignEdges {

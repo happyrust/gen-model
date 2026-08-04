@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考速查表 · core.dll 几何/图形 + ref_rev 反向级联</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 参考 / <strong>速查表</strong> · <a href="../lessons/0001-core-dll-geometry-graphics.html">课 01</a> · <a href="../lessons/0002-ref-rev-reverse-reference-index.html">课 02</a> · <a href="../lessons/0003-batch-model-generation.html">课 03</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Reference · quick lookup</p>
+  <h1>速查表：core.dll 几何/图形 · ref_rev 反向级联</h1>
+  <p class="lead">课 01 与课 02 的压缩版：术语、符号+地址、代码落点、关键常量、调用链、复现命令。打印友好，随时回查。</p>
+  <p class="kicker">A 段 = 课 01（core.dll 几何 / 图形） · B 段 = 课 02（ref_rev 反向引用级联） · C 段 = 复现命令</p>
+</header>
+
+<div class="toc">
+  <strong>本表覆盖</strong>
+  <ol>
+    <li><a href="#a-term">A1 术语表</a> · <a href="#a-sym">A2 符号+地址</a> · <a href="#a-gl">A3 sgl5NET API</a> · <a href="#a-mod">A4 模块前缀</a> · <a href="#a-chain">A5 两条主链</a></li>
+    <li><a href="#b-term">B1 术语表</a> · <a href="#b-backref">B2 back-ref 符号+地址</a> · <a href="#b-code">B3 代码落点</a> · <a href="#b-const">B4 关键常量</a> · <a href="#b-sql">B5 SurrealQL</a> · <a href="#b-chain">B6 四条路径</a></li>
+    <li><a href="#partD">D1 批量流水线</a> · <a href="#d-core">D2 core.dll 供应的原料</a> · <a href="#d-mod">D3 Core3D 模块速记</a> · <a href="#d-chain">D4 批量主链</a></li>
+    <li><a href="#repro">C 复现命令（core.dll 侧 / Core3D 侧 / gen-model 侧）</a></li>
+  </ol>
+</div>
+
+<h2 id="partA">A · 课 01：core.dll 几何 / 图形</h2>
+
+<h3 id="a-term">A1 · 术语表</h3>
+<table>
+<thead><tr><th>术语</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>DB_Noun</code></td><td>元素"类型描述符"(schema 对象)，来自字典库。承载类型分类标志。</td></tr>
+<tr><td>noun 码</td><td>元素类型的整数标识（如 <code>NOUN_WORL</code>）。用 <code>findNoun(int)</code> 定位。</td></tr>
+<tr><td>dabacon</td><td>PDMS/E3D 的数据库/字典引擎；类型与字段定义的来源。</td></tr>
+<tr><td><code>DB_Attribute</code></td><td>属性描述符。<code>ATT_PSPREF</code>/<code>ATT_FSPREF</code> 即 SPREF 属性。</td></tr>
+<tr><td>SPREF</td><td>规格引用：设计元素 → 目录构件的关联。属性 <code>PSPREF</code>/<code>FSPREF</code>。</td></tr>
+<tr><td><code>SPCO</code>/<code>SCOM</code></td><td>目录构件(catalogue component)，有 generic type(如 ELBO)，引用 PTSET+GMSET+PARAM。</td></tr>
+<tr><td><code>GMSET</code></td><td>几何集：一组 3D 图元，定义构件的绘制符号与碰撞体。</td></tr>
+<tr><td>DESPARAM / PARA[n]</td><td>设计参数：驱动 GMSET 图元尺寸的数值。</td></tr>
+<tr><td>SCYL/SBOX/SSPH/LCYL</td><td>目录 3D 图元：圆柱/方盒/球/…（参数化）。</td></tr>
+<tr><td>OBST / LEVEL / CLFLA / TUFLA</td><td>图元标志：碰撞级别 / 显示级别 / 单线(中心线) / 双线(实管) 表示开关。</td></tr>
+<tr><td>graphicsBehaviour</td><td>DB_Noun 上的枚举，决定该类型的画法分派。</td></tr>
+<tr><td>SGL 段(segment)</td><td>sgl5NET 的显示列表单元；每个可绘制对象一段。</td></tr>
+<tr><td>metafile / FACET 令牌</td><td>几何以令牌流(FRAME/ZCOORD/FACET…)序列化交给图形引擎渲染。</td></tr>
+<tr><td><code>sgl5NET</code></td><td>AVEVA SGL v5 图形引擎(外部 DLL)：视图/段管理 + GLUPDA + 内部三角化/渲染。</td></tr>
+<tr><td><code>libgeom</code></td><td>几何数学库(外部)：<code>D2_/D3_Vector</code>、<code>mthAngle</code>、<code>mth2Arc</code>、<code>mthOrientedPlane</code>…</td></tr>
+<tr><td><code>RIO_OutputListener</code></td><td>输出监听器(观察者)：SendUpdate 遍历通知各视图重绘。</td></tr>
+</tbody>
+</table>
+
+<h3 id="a-sym">A2 · 关键符号 + 地址</h3>
+<table>
+<thead><tr><th>符号 / 函数</th><th>地址</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td>DLL_PMLCommand::GraphicsUpdate</td><td><code>0x582b000</code></td><td>PML "GRAPHICS UPDATE" 入口 → FZXUPD(-1)</td></tr>
+<tr><td>FZXUPD</td><td><code>0x5294555</code></td><td>图形更新总调度 (fmcallback)</td></tr>
+<tr><td>FMXIST (sub_529140A)</td><td><code>0x529140a</code></td><td>闸门：图形模式是否开启 (fminit, 调 UQGRAF)</td></tr>
+<tr><td>FUPALL</td><td><code>0x52f1f82</code></td><td>update all → GLUPDA + FUP2VW (fmform)</td></tr>
+<tr><td>FUP2VW</td><td><code>0x5326ed3</code></td><td>2D 画布更新 (fm2dcanv)</td></tr>
+<tr><td>FZ3SGL (sub_5297141)</td><td><code>0x5297141</code></td><td>建 SGL 视图+段 (fm3dcanv)</td></tr>
+<tr><td>RIO_OutputListener::SendUpdate</td><td><code>0x588b110</code></td><td>观察者：通知各视图重绘</td></tr>
+<tr><td>V3CVEV</td><td><code>0x52a0b01</code></td><td>3D 视图命令事件驱动 (~8KB, 多次 GLUPDA)</td></tr>
+<tr><td>DBPRIM</td><td><code>0x522b6c0</code></td><td>DB 图元测试/处理 (dbtestact)</td></tr>
+<tr><td>SMODUL</td><td><code>0x523a130</code></td><td>FORTRAN 模型/几何相关例程</td></tr>
+<tr><td>sub_5621F20</td><td><code>0x5621f20</code></td><td><strong>⚠️ 2026-07-27 更正</strong>：不是几何令牌流解析器，而是 metafile/plotfile 的<strong>设备选项命令解析器</strong>（<code>CHKEYW</code> 关键字表）。此处 <code>FACET</code> 是"输出要不要含 facet"的开关。详见课 03。</td></tr>
+<tr><td>metafile 选项关键字表</td><td><code>0x5db7160</code></td><td>"1FRAME 1I,2HTOKEN I,1ZCOORD R,…,3FACET,…UTF8" —— 命令选项表（非绘图令牌表）</td></tr>
+<tr><td>DB_Noun::primitive</td><td><code>0x58da280</code></td><td>是否几何图元（读字段 #659518）</td></tr>
+<tr><td>DB_Noun::graphicsBehaviour</td><td><code>0x58d9760</code></td><td>图形行为枚举 (this+0xB4)</td></tr>
+<tr><td>DB_Noun::geomset</td><td><code>0x58d8a20</code></td><td>是否 GMSET 几何集类型</td></tr>
+<tr><td>DB_Noun::extrusion</td><td><code>0x58d8180</code></td><td>是否挤出类型</td></tr>
+<tr><td>DB_Noun::ReadData</td><td><code>0x58d6d20</code></td><td>从字典懒加载 noun 数据</td></tr>
+</tbody>
+</table>
+
+<h3 id="a-gl">A3 · sgl5NET 图形 API（thunk 地址）</h3>
+<table>
+<thead><tr><th>例程</th><th>thunk</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td>GLUPDA</td><td><code>0x5aa90d0</code></td><td>刷新/重绘所有视图段</td></tr>
+<tr><td>GLVCRE</td><td><code>0x5aa903f</code></td><td>创建视图</td></tr>
+<tr><td>GLVDEL</td><td><code>0x5aa90c0</code></td><td>删除视图</td></tr>
+<tr><td>GLVSIZ</td><td><code>0x5aa9060</code></td><td>视图尺寸</td></tr>
+<tr><td>GLSVCR</td><td><code>0x5aa9070</code></td><td>创建段(display list)</td></tr>
+<tr><td>GLVSEG</td><td><code>0x5aa9080</code></td><td>绑定段到视图</td></tr>
+<tr><td>GLSVSE / GLSVSA / GLSVBO</td><td><code>0x5aa9090/a0/b0</code></td><td>段范围 / 段属性 / 段包围盒</td></tr>
+</tbody>
+<tfoot><tr><td colspan="3" class="muted">其余：GLVPRJ/GLVSCA/GLVANG/GLVDIR/GLVCEN/GLVTWT/GLVCLP/GLVSTY/GLGPOS… 为视图投影/缩放/角度/方向/中心/扭转/裁剪/风格/取位。</td></tr></tfoot>
+</table>
+
+<h3 id="a-mod">A4 · 模块前缀速记</h3>
+<table>
+<thead><tr><th>前缀 / 模块</th><th>职责</th></tr></thead>
+<tbody>
+<tr><td><code>DB_*</code></td><td>C++ 数据库/schema 层：DB_Noun(类型)、DB_Element、DB_Attribute、DB_DB</td></tr>
+<tr><td>fminit</td><td>初始化 / 存在性检查（FMXIST）</td></tr>
+<tr><td>fmcallback</td><td>图形更新回调（FZXUPD）</td></tr>
+<tr><td>fmform</td><td>表单/视图整体更新（FUPALL/FUP3VW）</td></tr>
+<tr><td>fm2dcanv / fm3dcanv</td><td>2D 画布 / 3D 画布(SGL 视图段)（FUP2VW / FZ3SGL）</td></tr>
+<tr><td>dbtestact</td><td>DB 活动元素 / 图元测试（DBPRIM）</td></tr>
+<tr><td><code>V3*</code></td><td>3D 视图控制：V3PAN/V3RADI/V3ELEV/V3BEAR/V3WALK/V3PERS/V3CVEV…</td></tr>
+<tr><td><code>FZX*/FUP*</code></td><td>FORTRAN 图形更新族</td></tr>
+<tr><td><code>GL*</code></td><td>sgl5NET 图形引擎 API</td></tr>
+<tr><td><code>libgeom</code></td><td>几何数学：mth*、D2_/D3_ 向量/圆弧/平面</td></tr>
+</tbody>
+</table>
+
+<h3 id="a-chain">A5 · 两条主链（一屏记住）</h3>
+<div class="diagram">【刷新链】
+GraphicsUpdate(0x582b000) → FZXUPD(0x5294555)
+   → FMXIST 闸门 → 回调派发 → FUPALL(0x52f1f82) → GLUPDA[sgl5NET]
+   → RIO_OutputListener::SendUpdate(0x588b110)
+
+【生成链】
+元素 → DB_Noun：primitive()/graphicsBehaviour()/geomset() 判类型
+   ├─ primitive=true  → 用自身几何
+   └─ 否则 → SPREF(PSPREF/FSPREF) → 目录 SPCO → GMSET
+             → 套 DESPARAM/PARA[] 展开图元(SCYL/SBOX…)
+             → libgeom 数学 + 几何引擎三角化 → metafile(FACET)
+             → FZ3SGL 建视图/段(GLVCRE/GLSVCR/GLVSEG) 装入
+             → GLUPDA 刷新</div>
+<div class="callout infer"><span class="tag">课 03 更正</span> 上面这条"生成链"末段过于粗略：<code>FZ3SGL</code> 只建<strong>画布</strong>（常量参数），并不逐元素建段；实体建模其实在 <code>libgm</code>(<code>gm_Create*</code>)，逐元素建段在 <code>Core3D!css/SEGCRE</code>。完整链见 <a href="#d-chain">D4</a>。</div>
+
+<h2 id="partB">B · 课 02：ref_rev 反向引用级联</h2>
+
+<h3 id="b-term">B1 · 术语表</h3>
+<table>
+<thead><tr><th>术语</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>ref_rev</code></td><td>SurrealDB 图边表。<code>in</code>=引用方、<code>out</code>=被引用方，边 id 是两端复合主键（重复写幂等）。记住：<strong>存的是正向边，反着查</strong>。</td></tr>
+<tr><td>反向引用 back-ref</td><td>E3D 原生的存储型逆指针（<code>SPBREF</code>/<code>SCBREF</code>/<code>TABREF</code>/<code>GOBREF</code>/<code>HDBREF</code>/<code>DBREF</code>）。离线解析取不到 → 才要自建 <code>ref_rev</code>（ADR-003）。</td></tr>
+<tr><td><code>DependencyCascade</code></td><td><code>classify_attribute_effect_with_meta</code> 的属性效果分类之一，也是<strong>进不进 ref_rev 的唯一门槛</strong>——和「哪些变更要级联」共用同一份定义。</td></tr>
+<tr><td>进索引的属性</td><td>curated 清单：<code>CATR</code> <code>SPRE</code> <code>SPREF</code> <code>PRTREF</code> <code>SPCO</code> <code>SCOM</code> <code>DESP</code> <code>GMREF</code> <code>TMPL</code>…；A2 兜底：schema <code>att_type == ELEMENT</code> 的引用属性。<strong><code>OWNER</code> 故意排除</strong>（层级归 owner 图管）。</td></tr>
+<tr><td>引用闭包（传递）</td><td><code>load_ref_reversal_closure</code> 的逐跳 BFS 结果，产出 <code>HashMap&lt;被引用方, [引用方…]&gt;</code>。必须是传递的，否则会断在没有交付单元的目录中间体上。</td></tr>
+<tr><td>最小交付单元 MDU</td><td>默认 <code>BRAN</code>/<code>HANG</code>/<code>SUPPO</code>/<code>EQUI</code>；<code>delivery_unit_types</code> 可整体取代、<code>append_delivery_unit_types</code> 可追加；<code>WORL</code>/<code>WORLD</code>/<code>SITE</code>/<code>ZONE</code> 恒被拒。</td></tr>
+<tr><td>生成根</td><td>交付单元根（最近的 MDU 自身或祖先）或正常颗粒根（significant owner）。一个变化元素归一到<strong>恰好一个</strong>根，同一根一批次只生成一次。</td></tr>
+<tr><td><code>direct</code> / <code>cascaded</code></td><td>同一交付单元上的两种命中计数：元素自己被改 vs 被引用关系带出来。两者都会置 <code>will_generate</code>，但分开计数便于预览时区分。</td></tr>
+<tr><td>搬迁 moved_out / moved_in</td><td><code>OWNER</code> 变化跨了交付单元：旧根与新根<strong>两端都要重生成</strong>。</td></tr>
+<tr><td><code>CascadeExpand</code></td><td>读 <code>ref_rev</code> 失败时登记的持久待办；下次 drain 由 <code>expand_live_reverse_cascade</code> 补出 <code>RegenRoot</code>。<strong>级联不丢，只是推迟</strong>。</td></tr>
+<tr><td>四类模型工作</td><td><code>regen_root</code> / <code>transform</code> / <code>delete_cleanup</code> / <code>cascade_expand</code>，按 <code>(dbnum, action, target_refno)</code> 去重，at-least-once：模型失败不回滚数据与水位。</td></tr>
+<tr><td><code>ref_rev_rebuild</code></td><td>全量重建用的暂存表；全部扫完写完后单事务换表，重建失败不会把线上索引搞成半空。</td></tr>
+<tr><td><code>TABITE</code></td><td>Table Item，表项（<code>TABGRO</code> 表组 → <code>CTABLE</code>/<code>TABLE</code> → <code>TABITE</code> 一行）。noun hash <code>0x4F3C0B8</code>，在 <code>parse.rs</code> 里全名 <code>TABITEM</code>。<strong>五个几何标志全 false、<code>graphics_behaviour=0</code></strong>，自己完全不产生几何。</td></tr>
+<tr><td><code>SPCO</code> / <code>SCOM</code></td><td>规格元件 / 目录构件。<code>SPCO</code> 不在 MDU 集合里 ⇒ 级联走到它必须继续上溯，不能止步。</td></tr>
+<tr><td><code>wnoevt</code></td><td>want-no-event：属性被写时要不要广播变更事件。值在 dabacon 字典里，<strong>不在二进制里</strong>。</td></tr>
+<tr><td><code>applied_sesno</code></td><td>某 dbnum 已成功落库并生成的会话号上界。<strong>写 <code>ref_rev</code> 失败不阻塞它推进</strong>。</td></tr>
+</tbody>
+</table>
+
+<h3 id="b-backref">B2 · core.dll back-ref 符号 + 地址</h3>
+<p class="kicker">IDA 会话 core31-retrace · imagebase 0x5170000 · 实测 2026-07-26 · 详见 learning-records/0007</p>
+<table>
+<thead><tr><th>属性</th><th>名字字符串</th><th>静态初始化器（都是 0xDB 字节的同一模板）</th></tr></thead>
+<tbody>
+<tr><td><code>SPBREF</code></td><td><code>0x5D7FA54</code></td><td><code>sub_57675F0</code> → <code>ATT_SPBREF</code> @ <code>0x64203E4</code></td></tr>
+<tr><td><code>SCBREF</code></td><td><code>0x5D7D604</code></td><td><code>sub_575D4F0</code></td></tr>
+<tr><td><code>TABREF</code></td><td><code>0x5D84578</code></td><td><code>sub_577BC50</code></td></tr>
+<tr><td><code>GOBREF</code></td><td><code>0x5D82980</code></td><td><code>sub_56CB910</code></td></tr>
+<tr><td><code>HDBREF</code></td><td><code>0x5D83A50</code></td><td><code>sub_56D07D0</code></td></tr>
+<tr><td><code>DBREF</code></td><td><code>0x5D7EBA4</code></td><td>同一字符串区、同款模板</td></tr>
+<tr><td class="muted">对照：正向 <code>SPRE</code></td><td class="muted">—</td><td class="muted"><code>sub_576D8D0</code>，<strong>同一个 0xDB 模板</strong> ⇒ back-ref 与正向属性在构造层毫无区别</td></tr>
+</tbody>
+</table>
+<table>
+<thead><tr><th>符号 / 函数</th><th>地址</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td>DB_ElementChangesPlugger::PostSetRefListAttribute</td><td><code>0x591E780</code></td><td><strong>广播器（不是维护者）</strong>：过 <code>wnoevt</code> 闸门 → 遍历订阅者数组虚调用，转发（改动的元素, 被写的引用属性, 新目标列表）</td></tr>
+<tr><td>…::SubscribePostSetRefListAttribute</td><td><code>0x581F7E0</code></td><td>订阅入口——反查「谁真的写 back-ref」的抓手</td></tr>
+<tr><td>DB_PostSetRefListAttributeHandler</td><td><code>0x581B400</code> / <code>0x581B410</code></td><td>handler 基类 ctor；dtor <code>0x581BE50</code></td></tr>
+<tr><td>DB_Attribute::wnoevt</td><td><code>0x58D5290</code></td><td><code>this+8</code> 未加载 → vtable 槽 <code>+20</code> 懒加载 schema；返回 <code>this+0xB8</code>。与 <code>DB_Noun::graphicsBehaviour</code>（<code>this+0xB4</code>）同一套路</td></tr>
+<tr><td>DB_Attribute 对象大小</td><td><code>0x114</code></td><td>初始化器里的 <code>operator new(0x114)</code>（276 字节）</td></tr>
+</tbody>
+</table>
+<div class="callout infer"><span class="tag">未决</span>
+写 <code>SPBREF</code> 家族的那一位<strong>仍未找到</strong>（不在已定位的两个订阅者里，很可能由 dabacon 内核自己维护）；back-ref 属性自身的 <code>wnoevt</code> 是否为 true <strong>仍是推断</strong>——值在字典里，静态分析读不到。</div>
+
+<h3 id="b-subs">B2.1 · 订阅者链路（Core3D，实测）</h3>
+<p class="kicker">SubscribePostSetRefListAttribute 在 core.dll 内零调用方；订阅全部来自外部模块</p>
+<table>
+<thead><tr><th>环节</th><th>符号 / trace 串</th><th>地址</th></tr></thead>
+<tbody>
+<tr><td>广播</td><td><code>DB_ElementChangesPlugger::PostSetRefListAttribute</code></td><td>core.dll <code>0x591E780</code></td></tr>
+<tr><td>订阅者（Core3D）</td><td><code>DESDRA_SCPlugs::PostSetRefListAttribute</code>；单例 <code>Instance</code> <code>0x10409440</code>、<code>Init</code> <code>0x10409160</code></td><td><code>0x10409C50</code></td></tr>
+<tr><td>差分新旧引用列表</td><td><code>descases/VDESFA</code></td><td><code>0x101F2D4B</code></td></tr>
+<tr><td>新增目标 → 建反向引用</td><td><code>structures/BAKREF</code>（内部先调 BREAKF 清旧）</td><td><code>0x102D4724</code></td></tr>
+<tr><td>移除目标 → 断反向引用</td><td><code>structures/BREAKF</code></td><td><code>0x102D448F</code></td></tr>
+<tr><td>配对关系查表</td><td><code>desdblib/LOOKUP</code>，表 <code>dword_10DA5EA0</code> 646 行 × 4 列</td><td><code>0x10382A60</code></td></tr>
+<tr><td>订阅者（AfiModeling）</td><td><code>ElementEvents</code>（<code>sub_100C4AB0</code> 建 14 个 handler 并订阅）—— 只转发事件</td><td><code>0x100C4AB0</code></td></tr>
+</tbody>
+</table>
+<div class="callout confirm"><span class="tag">这条链维护的是「连接型」back-ref</span>
+646 行表的属性列只有 11 个值：<code>CREF</code> <code>HREF</code> <code>TREF</code> <code>CRFA</code> <code>JOIS</code> <code>JOIE</code> <code>PFRE</code> <code>CFRA</code> <code>LNFA</code> <code>HPREF</code> <code>TPREF</code>；noun 列 92/95 个值（BRAN/NOZZ/ELBO/TEE/FLAN/GENSEC/HANG/AHU…）。表是对称的。整表已解码：<code>.ida_scratch/out_conn_pairing_table.md</code>。<strong>它不是 <code>SPBREF</code> 那一族。</strong><br>
+对 gen-model：这 11 个里 curated 清单只有 <code>CREF</code>/<code>HREF</code>/<code>TREF</code>，其余 8 个靠 <strong>A2 兜底</strong>（<code>att_type == ELEMENT</code>）进 <code>ref_rev</code>，成员资格无缺口；而且它们<strong>全在离线字典里</strong>，与 <code>SPBREF</code> 家族的离线零命中正好相反。</div>
+
+<h3 id="b-hash">B2.2 · PDMS 名字 hash 函数（反解，可离线复用）</h3>
+<pre><code>hash(name) = 27^4 + Σ<span class="tok-c">(i = 0 .. n-1)</span> val(c_i) · 27^i     val('A')=1 … val('Z')=26
+                                                  <span class="tok-c">// 首字符权重最低</span></code></pre>
+<p>在本仓 <code>all_attr_info.json</code> 的 701 个属性名上 100% 命中（长度 2/3/4/5/6 全对）；noun 同一套：<code>TABITE</code> ⇒ <code>83083448</code>，与 <code>noun_flags.json</code> 一致。用途：不查字典即可算 hash，也能把逆向里的裸 hash 反解成名字。脚本 <code>.ida_scratch/attr_hash_solve.py</code>。</p>
+
+<h3 id="b-code">B3 · gen-model 代码落点</h3>
+<table>
+<thead><tr><th>干什么</th><th>函数</th><th>文件:行</th></tr></thead>
+<tbody>
+<tr><td>写 · 落库后的维护挂点</td><td><code>maintain_reverse_index</code></td><td><code>increment_pipeline.rs:604</code></td></tr>
+<tr><td>写 · 从 op 抽出边</td><td><code>extract_reverse_ref_edges</code></td><td><code>manual_update.rs:667</code></td></tr>
+<tr><td>写 · 渲染 DELETE+INSERT（纯函数、可单测）</td><td><code>build_reverse_index_statements</code></td><td><code>manual_update.rs:702</code></td></tr>
+<tr><td>查 · 逐跳 BFS 闭包</td><td><code>load_ref_reversal_closure</code></td><td><code>manual_update.rs:1089</code></td></tr>
+<tr><td>查 · 边 → HashMap</td><td><code>assemble_ref_reversal</code></td><td><code>manual_update.rs:966</code></td></tr>
+<tr><td>用 · 三源合一入口</td><td><code>resolve_unit_rollup</code></td><td><code>manual_update.rs:1405</code></td></tr>
+<tr><td>用 · 归并与止步规则</td><td><code>build_unit_rollup</code></td><td><code>manual_update.rs:1236</code></td></tr>
+<tr><td>用 · 前态 owner 图 / 后态 OWNER 覆盖</td><td><code>load_base_graph</code> / <code>build_owner_overlay</code></td><td><code>manual_update.rs:1105</code> / <code>:545</code></td></tr>
+<tr><td>用 · 单个元素归一到变化单元</td><td><code>resolve_change_unit</code></td><td><code>manual_update.rs:494</code></td></tr>
+<tr><td>坏 · 读失败降级</td><td><code>resolve_unit_rollup_without_reverse_index</code></td><td><code>manual_update.rs:1423</code></td></tr>
+<tr><td>坏 · 延迟展开待办</td><td><code>expand_live_reverse_cascade</code></td><td><code>manual_update.rs:1492</code></td></tr>
+<tr><td>坏 · 全量重建换表</td><td><code>rebuild_reverse_index</code></td><td><code>manual_update.rs:820</code></td></tr>
+<tr><td>门槛 · 属性效果分类</td><td><code>classify_attribute_effect_with_meta</code></td><td><code>model_impact.rs:168</code></td></tr>
+<tr><td>门槛 · 操作影响三态</td><td><code>classify_operation_impact</code></td><td><code>model_impact.rs:389</code></td></tr>
+<tr><td>根 · 交付单元 / 正常颗粒</td><td><code>resolve_element_generation_root</code> / <code>resolve_significant_owner</code></td><td><code>generation_root.rs:201</code> / <code>model_refresh.rs:294</code></td></tr>
+</tbody>
+</table>
+<p class="muted">行号是 2026-07-26 的快照，会漂；函数名才是可靠索引。文件都在 <code>src/data_interface/</code> 下。</p>
+
+<h3 id="b-const">B4 · 关键常量</h3>
+<table>
+<thead><tr><th>常量</th><th>值</th><th>出处 / 为什么存在</th></tr></thead>
+<tbody>
+<tr><td><code>MAX_REVERSE_CASCADE_HOPS</code></td><td><code>8</code></td><td><code>manual_update.rs</code>；规格链只有几跳深，这个界<strong>纯粹是为了在脏数据上能终止</strong></td></tr>
+<tr><td><code>MAX_REVERSE_CASCADE_REFERRERS</code></td><td><code>50_000</code></td><td>同上；防止一个被全项目共享的元素把整张索引拉进一个窗口</td></tr>
+<tr><td><code>QUERY_CHUNK</code></td><td><code>500</code></td><td>闭包反查分批，避免拼出超长语句</td></tr>
+<tr><td><code>READ_CHUNK</code> / <code>WRITE_CHUNK</code></td><td><code>500</code> / <code>500</code></td><td><code>rebuild_reverse_index</code>；暂存表 <code>ref_rev_rebuild</code></td></tr>
+<tr><td><code>TX_CHUNK</code></td><td><code>500</code></td><td><code>increment_pipeline.rs</code> 落库事务分块</td></tr>
+<tr><td><code>MAX_ANCESTOR_DEPTH</code></td><td><code>32</code></td><td><code>manual_update.rs</code> / <code>generation_root.rs</code>；只用于防 owner 环，不是业务上限</td></tr>
+</tbody>
+</table>
+
+<h3 id="b-sql">B5 · SurrealQL 速查</h3>
+<pre><code><span class="tok-c">-- 维护：先整体清掉该元素的旧出边，再按后态整体重写（边 id 复合主键 ⇒ 幂等）</span>
+<span class="tok-k">DELETE</span> pe:ELBO_A-&gt;ref_rev;
+<span class="tok-k">INSERT RELATION INTO</span> ref_rev [
+  { id: ref_rev:[pe:ELBO_A, pe:CAT_ELBOW90], in: pe:ELBO_A, out: pe:CAT_ELBOW90 }
+];
+
+<span class="tok-c">-- 反查一跳：谁在用这个目录件（in = 引用方）</span>
+<span class="tok-k">SELECT</span> in, out <span class="tok-k">FROM</span> array::flatten([pe:CAT_ELBOW90]&lt;-ref_rev);
+
+<span class="tok-c">-- BFS 的一跳：frontier 每 500 个一批</span>
+<span class="tok-k">SELECT</span> in, out <span class="tok-k">FROM</span> array::flatten([pe:A, pe:B, pe:C …]&lt;-ref_rev);</code></pre>
+
+<h3 id="b-chain">B6 · 四条路径（一屏记住）</h3>
+<div class="diagram">【写】落库之后 · 推水位之前
+  op ─┬ Deleted        → DELETE pe:X-&gt;ref_rev（只清，不再插）
+      └ Add/Modified   → 读后态 att_map → 逐属性判 DependencyCascade
+                       → 去重 / 排自引用 → DELETE 全部旧出边 → INSERT RELATION
+      失败 ⇒ 只记 warning，不阻塞数据批次与 applied_sesno（下次触及整体重写而自愈）
+
+【查】落库之前（此时索引仍是前态）
+  seeds = 本窗口所有「影响模型」的变更元素
+  逐跳  [frontier]&lt;-ref_rev     ≤ 8 跳 / ≤ 50000 引用方 / 500 个一批
+  ⇒ HashMap&lt;被引用方, [引用方 …]&gt;
+
+【用】build_unit_rollup 的止步规则
+  referrer → resolve_change_unit（post 态；解析不出则回退 pre 态）
+    ├ 命中交付单元 → cascaded += 1，【止步】不再向上穿透
+    ├ 命中普通根   → 还有上层引用者？有 → 继续压栈；无 → cascaded += 1
+    └ 没有根       → 还有上层引用者？有 → 继续压栈；无 → 什么都不做
+  ⇒ will_generate 的单元产出 RegenRoot（按 (dbnum, action, target) 去重入库）
+
+【坏】写与读的策略是不对称的
+  写失败 → warning，可自愈
+  读失败 → 保留所有 direct 根 + 每个受影响元素落一条 CascadeExpand 待办
+           下次 drain：expand_live_reverse_cascade 补出 RegenRoot
+  冷导入 → rebuild_reverse_index：全量写 ref_rev_rebuild 暂存 → 单事务换表</div>
+
+<h2 id="partD">D · 课 03：批量模型生成</h2>
+
+<div class="callout confirm"><span class="tag">一句话</span> 批量循环<strong>不在 core.dll</strong>。core.dll 是供应商（GINO opcode / 包围盒 / 图片存储 / 分类谓词，全部导出）；批量遍历在 <code>Core3D.dll</code>；实体建模在 <code>libgm</code>；渲染在 <code>sgl5NET</code>。</div>
+
+<h3 id="d-core">D2 · core.dll 供应的原料（会话 core31-retrace）</h3>
+<table>
+<thead><tr><th>符号 / 表</th><th>地址</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td>GINO opcode 名字表</td><td><code>0x60f9f00</code></td><td>141 项 × 6 字符：<code>GOPEN … GSTDRG GFIDRG GCRVEW GSTDRU GQUNWV</code></td></tr>
+<tr><td>GINO opcode 描述表</td><td><code>0x60fd650</code> 起，步长 <code>0x190</code></td><td>40 字符定长人读描述（"Start drawing"…）</td></tr>
+<tr><td>opcode 下标→名字</td><td><code>0x54d4308</code></td><td><code>for_cpystr(..., &amp;aGopenGdfpicgst[6*i-6], 6, ...)</code></td></tr>
+<tr><td><strong>GSTDRG</strong> / <strong>GFIDRG</strong></td><td><code>0x561e1a6</code> / <code>0x561ecbd</code></td><td><strong>Start / Finish drawing —— 一次批量绘制的括号</strong></td></tr>
+<tr><td>GDFSEG / GDFPGP</td><td><code>0x54bd158</code> / <code>0x54be5cb</code></td><td>Define segment / primitive-group</td></tr>
+<tr><td>GSTSGD / GQUSGD</td><td><code>0x54be879</code> / —</td><td>段 user-data（Splash 元素身份）读写</td></tr>
+<tr><td>GTHITV / GOPSGI / GMASTE</td><td><code>0x54ba8e3</code> / <code>0x54bef45</code> / <code>0x54be98b</code></td><td>视口高亮 / 输出段实例 / 匹配结构实体</td></tr>
+<tr><td>boxlib <code>MBX*</code></td><td><code>0x55fab78</code>–<code>0x55fe2af</code></td><td>逐图元包围盒：BOX/CIR/DSH/POI/PYR/SAN/SLC/SNO/SPH/SRE/TOR/ARC/ELL/SEC + ADD 合并</td></tr>
+<tr><td>cpslib <code>CMPTUD</code></td><td><code>0x5595aec</code></td><td>CPS 图片存储：GQUSGD → 改 → GSTSGD</td></tr>
+<tr><td>FZ3SGL</td><td><code>0x5297141</code></td><td>core.dll 里<strong>唯一</strong>建 SGL 段的函数（常量参数，只建画布）</td></tr>
+<tr><td>导出目录</td><td><code>0x5e14028</code></td><td>上述 opcode/MBX/CPTSGL 的唯一 xref ⇒ 供外部 DLL 调用</td></tr>
+</tbody>
+</table>
+
+<h3 id="d-mod">D3 · Core3D.dll 模块速记（会话 core3d-retrace）</h3>
+<table>
+<thead><tr><th>模块</th><th>例程数</th><th>职责</th></tr></thead>
+<tbody>
+<tr><td><code>add</code></td><td>43</td><td>drawlist 命令层：ADDELE ADDDES ADDSIT ADDCAT LADALL VISALL REPALL REMALL SETCOL/SETVIS…</td></tr>
+<tr><td><code>build</code></td><td>41</td><td><strong>批量构建核心</strong>：MODCMP ELMODL SGDRAW SGHDRW NXTITM GMDRAW DRAWOP LEVGET/LEVSET</td></tr>
+<tr><td><code>css</code></td><td>16</td><td>段管理：SEGCRE SEGREP SEGDEL SEGOPN SEGTRA SEGCOL SEGHIL STRCRE</td></tr>
+<tr><td><code>cachegml</code></td><td>12</td><td>几何缓存：GTGEOM GTCLEL GTCLRF GTCLSH GTTUBG + BXWANT/SLWANT 意向位</td></tr>
+<tr><td><code>maplib</code></td><td>41</td><td>元素↔段登记：MAPINS MAPGET MAPELE MAPREM MAPBOX QVOLDS/SVOLPR</td></tr>
+<tr><td><code>change</code></td><td>23</td><td>增量：EVALST/EVALAT/EVALCD → UPCACE/UPCACP → UPGRPH → UPDATD/N/P</td></tr>
+<tr><td><code>updview</code> / <code>dra_model</code></td><td>19 / 1</td><td>DRAFT 出图入口：GENMOD → DESUPV → UVIEW（同样汇入 MODCMP/ELMODL）</td></tr>
+<tr><td><code>replib</code></td><td>26</td><td>WDBOX WDCYLI WDSNOU WDSSPH WDDUCT WDARC …（2D 表示写出）</td></tr>
+<tr><td><code>dbboxlib</code></td><td>35</td><td>设计元素级包围盒：BOXALL BOXDRW BOXELE MBXCAT MBXCMP…</td></tr>
+</tbody>
+</table>
+
+<h3 id="d-chain">D4 · 批量主链（一屏记住）</h3>
+<div class="diagram">add/ADDELE 0x1021b4ec → add/ADDDES 0x1021d005
+  → css/SEGCRE 0x10232c9d (GLDFSG 建段)
+    → build/MODCMP 0x10251012        按 noun 类选建模方式
+      → build/ELMODL 0x1025277e      ★主循环 (DSAVE/DRESTO 子树遍历)
+         ├ build/DRAWOP 0x10254579   闸门① 表示法标志字 + LEVGET
+         ├ build/SGDRAW 0x102556de   逐类分派
+         │   └ build/SGHDRW 0x10255013 → build/NXTITM 0x102547f5 (游标)
+         │        └ build/GMDRAW 0x10254b01  闸门② 5 个 noun 码 + "非 3D" 早退
+         └ cachegml/GTGEOM 0x10341d2e  几何缓存（键在目录层）
+  → libgm  gm_CreateBox / gm_CreateSnout / gm_CreateCircularTorus …
+  → sgl5NET SGL_define_primitive_d / SGL_define_segment
+  → core.dll FUPALL 0x52f1f82 → GLUPDA 0x5aa90d0   一次性刷屏
+
+登记与增量： maplib/MAPINS 0x1038f5e4  ←→  css/SEGREP 0x102334d0（只换一个段）
+另一入口：   dra_model/GENMOD 0x100df724 → updview/DESUPV 0x101b7b7a → UVIEW 0x101b2254</div>
+
+<h2 id="repro">C · 复现命令</h2>
+
+<h3>C1 · core.dll 侧（ida-pro-mcp）</h3>
+<pre><code><span class="tok-c"># 客户端：teach/../.ida_scratch/ida_mcp_client.py ；参数走 stdin，--db 指定会话</span>
+echo '{}'                       | python ida_mcp_client.py --db=core31-retrace call server_health
+echo '{"addr":"0x582b000"}'     | python ida_mcp_client.py --db=core31-retrace call decompile
+echo '{"queries":[{"filter":"Graphic","count":40}]}' | python ida_mcp_client.py --db=core31-retrace call func_query
+echo '{"queries":[{"module":"sgl5NET","count":400}]}' | python ida_mcp_client.py --db=core31-retrace call imports_query
+echo '{"addrs":["0x5aa90d0"],"limit":40}' | python ida_mcp_client.py --db=core31-retrace call xrefs_to
+
+<span class="tok-c"># 课 02 的 back-ref 证据链</span>
+echo '{"pattern":"^[a-z]*bref[0-9]?$","limit":40}' | python ida_mcp_client.py --db=core31-retrace call find_regex
+echo '{"pattern":"PostSetRefListAttribute","limit":30}' | python ida_mcp_client.py --db=core31-retrace call search_text
+echo '{"addr":"0x591E780"}'     | python ida_mcp_client.py --db=core31-retrace call decompile
+echo '{"addr":"0x58D5290"}'     | python ida_mcp_client.py --db=core31-retrace call decompile
+echo '{"addrs":["0x5d7fa54","0x5d7d604","0x5d84578"],"limit":8}' | python ida_mcp_client.py --db=core31-retrace call xrefs_to</code></pre>
+
+<h3>C1.1 · Core3D 侧：还原无符号 FORTRAN 例程（课 03 方法）</h3>
+<pre><code><span class="tok-c"># 两个 DLL 里大多数函数无符号，但每个例程入口有 MTRENT("模块/例程",…) traceback 串</span>
+python _dump_routines2.py core3d-retrace _routines_core3d.json   <span class="tok-c"># 抓串 → 175 个模块</span>
+python _resolve3d.py                                             <span class="tok-c"># 模块/例程 → 函数地址</span>
+python _who3d.py 0x1025277e 0x102556de 0x10255013                <span class="tok-c"># traceback + 调用面</span>
+python _dec3d.py 0x10254b01 0x10254579 0x102547f5                <span class="tok-c"># 反编译 GMDRAW/DRAWOP/NXTITM</span>
+python _opcodes.py                                               <span class="tok-c"># core.dll 141 个 GINO opcode 表</span>
+python _sgl_callers.py                                           <span class="tok-c"># 谁在调 sgl5NET（证明 FZ3SGL 是唯一建段者）</span>
+python _dump_imports.py                                          <span class="tok-c"># core.dll 全部 1104 条导入按模块归类</span></code></pre>
+
+<h3>C2 · gen-model 侧</h3>
+<pre><code><span class="tok-c"># 全量重建 ref_rev：写 ref_rev_rebuild 暂存表，全部成功后单事务换表</span>
+cargo run --bin rebuild_ref_rev
+
+<span class="tok-c"># 确认 back-ref 名字确实不在离线 schema 里（应零命中，这是 ADR-003 的直接依据）</span>
+rg -n '"(SPBREF|SCBREF|TABREF|GOBREF|HDBREF|DBREF)"' all_attr_info.json vendor/aios-parse-pdms/all_attr_info.json
+
+<span class="tok-c"># 反向索引相关单测（crate 名是 aios-database，单包仓库不用 -p）</span>
+cargo test reverse_index
+cargo test ref_reversal</code></pre>
+
+<footer class="foot">
+  参考速查表 · 配套 <a href="../lessons/0001-core-dll-geometry-graphics.html">课 01 · 几何体识别与关联模型生成</a>、<a href="../lessons/0002-ref-rev-reverse-reference-index.html">课 02 · ref_rev 反向引用索引</a> 与 <a href="../lessons/0003-batch-model-generation.html">课 03 · 批量模型生成流水线</a>。<br>
+  core.dll 地址基于 IDA 会话 <code>core31-retrace</code>（imagebase <code>0x5170000</code>）；Core3D.dll 地址基于会话 <code>core3d-retrace</code>；gen-model 侧函数与常量实读自本仓 <code>src/data_interface/</code>。<br>
+  相关决策：<code>docs/adr/ADR-003</code>（自建反转索引）· <code>ADR-008</code>（模型工作计划与目录反向传播）；逆向笔记：<code>teach/learning-records/0002</code>、<code>0007</code>、<code>0009</code>。
+</footer>
+</div>
+</body>
+</html>

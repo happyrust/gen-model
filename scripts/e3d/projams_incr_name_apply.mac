@@ -1,0 +1,14 @@
+-- ProjAMS incremental NAME test.
+-- Target is the DAMP already used by the POS regression:
+--   refno 24381/100819, current name /1CUP001VAR, dbnum 7997.
+--
+-- Run in E3D Design Command Window:
+--   $M "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_apply.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_apply.log" OVER
+=24381/100819
+Q CE
+NAME /1CUP001VAR_CODEX
+Q CE
+SAVEWORK 'CODEX incremental NAME apply'
+ALPHA LOG END

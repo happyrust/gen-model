@@ -42,6 +42,20 @@ impl ModelWorkAction {
     pub const fn is_room_recalc(self) -> bool {
         matches!(self, Self::RoomRecalcElement | Self::RoomRecalcPanel)
     }
+
+    /// [`Self::as_str`] 的逆（HTTP 层解析 `pending-units/retry` 的请求体用）。
+    /// 新增变体时这里的 `match` 缺一条也能编译，靠 `action_names_roundtrip` 钉住。
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "regen_root" => Self::RegenRoot,
+            "transform" => Self::Transform,
+            "delete_cleanup" => Self::DeleteCleanup,
+            "cascade_expand" => Self::CascadeExpand,
+            "room_recalc_element" => Self::RoomRecalcElement,
+            "room_recalc_panel" => Self::RoomRecalcPanel,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +364,29 @@ pub(crate) async fn build_model_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `parse` 是 `as_str` 的逆。漏一条的话，那种 action 的死信从 HTTP 复活端点
+    /// 送进来会被当成非法参数拒绝——表里躺着行，接口却说没有这种东西。
+    #[test]
+    fn action_names_roundtrip_through_parse() {
+        const ALL_ACTIONS: [ModelWorkAction; 6] = [
+            ModelWorkAction::RegenRoot,
+            ModelWorkAction::Transform,
+            ModelWorkAction::DeleteCleanup,
+            ModelWorkAction::CascadeExpand,
+            ModelWorkAction::RoomRecalcElement,
+            ModelWorkAction::RoomRecalcPanel,
+        ];
+        for action in ALL_ACTIONS {
+            assert_eq!(
+                ModelWorkAction::parse(action.as_str()),
+                Some(action),
+                "{} 必须能被 parse 解析回来",
+                action.as_str()
+            );
+        }
+        assert_eq!(ModelWorkAction::parse("no_such_action"), None);
+    }
 
     #[test]
     fn work_items_are_deduped_and_sorted_by_action_and_target() {

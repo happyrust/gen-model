@@ -221,7 +221,11 @@ mod tests {
     fn freezing_takes_the_oldest_queued_row_first() {
         let mut queue = vec![queued(7997, 1, 5), queued(8000, 1, 3), queued(7999, 1, 9)];
         assert_eq!(freeze_next(&mut queue, false), Some(0));
-        assert_eq!(freeze_next(&mut queue, false), Some(1), "跳过已经在跑的那条");
+        assert_eq!(
+            freeze_next(&mut queue, false),
+            Some(1),
+            "跳过已经在跑的那条"
+        );
         assert_eq!(queue[0].state, BatchState::Running);
         assert_eq!(queue[2].state, BatchState::Queued, "第三条还没轮到");
     }

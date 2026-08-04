@@ -1,7 +1,7 @@
 use crate::gui::logs::{
-    add_global_log, log_from_thread, LogLevel, LogListDelegate, LogUpdateEvent, GLOBAL_LOGS,
+    GLOBAL_LOGS, LogLevel, LogListDelegate, LogUpdateEvent, add_global_log, log_from_thread,
 };
-use crate::options::{get_db_option_ext, DbOptionExt};
+use crate::options::{DbOptionExt, get_db_option_ext};
 use crate::run_cli;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
@@ -9,6 +9,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::{
+    Disableable, Sizable,
     form::FieldBuilder,
     h_flex,
     input::TextInput,
@@ -19,7 +20,7 @@ use gpui_component::{
     scroll::ScrollbarShow,
     switch::Switch,
     theme::ActiveTheme,
-    v_flex, Disableable, Sizable,
+    v_flex,
 };
 use story::Story;
 

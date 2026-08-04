@@ -1,0 +1,5 @@
+$P GENMODEL-CONSOLE-ALIVE
+import 'GenModelNounLayout'
+!e = object NOUNLAYOUTEXPORT()
+!res = !e.Export('D:/work/plant-code/old/gen-model/output/noun_layout.json')
+$P NOUNLAYOUT-RESULT $!res

@@ -25,7 +25,8 @@ pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 /// 200 差了一个量级；1000 = 574 打底 + 全局最近终态的余量。
 const MAX_TASKS: usize = 1000;
 
-/// 任务状态机：`queued -> running -> succeeded | partial | failed`。
+/// 任务状态机：`queued -> running -> succeeded | partial | failed`；冻结重扫完全覆盖
+/// 后继行时，该后继按 ADR-011 §5 直接 `queued -> succeeded`（`absorbed_by_running`）。
 ///
 /// `queued` 随 ADR-011 §3 引入——数据批次在队列里排队时就要有一行可看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -279,6 +280,15 @@ impl TaskRegistry {
         }
     }
 
+    pub fn set_queued_start(&self, task_id: &str, start_sesno: i32) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            if entry.state == TaskState::Queued {
+                entry.start_sesno = Some(start_sesno);
+            }
+        }
+    }
+
     /// 冻结点重扫定下真实上界后回写（ADR-011 §5）。
     ///
     /// 与 `update_queued_range` 相反：那个只推高排队行、开跑后一概不动；这个只作用
@@ -322,6 +332,17 @@ impl TaskRegistry {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             entry.events_seen += 1;
+        }
+    }
+
+    /// 覆盖 kind 专属详情。房间轮收尾时必须用收敛后的计数覆盖建行时那份
+    /// （`{panels, elements, dead_letters}`）：`finish` 从不动 `detail`，而收敛到 0
+    /// 的下一空闲轮不再建新行——不覆盖的话，客户端泳道读到的 live 永远停在本轮
+    /// 开跑前的数字，30 分钟后被判成「饥饿」刷红且永不自愈（2026-07-30 审计 B2）。
+    pub fn set_detail(&self, task_id: &str, detail: serde_json::Value) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            entry.detail = Some(detail);
         }
     }
 
@@ -480,6 +501,37 @@ mod tests {
             first < second,
             "序号单调，字典序即入队序：{first} 应排在 {second} 之前"
         );
+    }
+
+    /// 房间轮收尾用收敛后的计数覆盖 detail（2026-07-30 审计 B2）。
+    ///
+    /// `finish` 从不动 `detail`，而收敛到 0 的下一空闲轮不建新行——没有 `set_detail`
+    /// 的话，客户端泳道读到的 live 永远停在本轮开跑前的数字，收敛得越干净，
+    /// 「N 块面板待重算」的误报挂得越久，30 分钟后还会被判成「饥饿」。
+    #[test]
+    fn a_room_round_detail_can_be_overwritten_after_convergence() {
+        let registry = TaskRegistry::default();
+        registry.insert_running_room_round(
+            "room-1",
+            "P",
+            5,
+            serde_json::json!({ "panels": 3, "elements": 2, "dead_letters": 1 }),
+        );
+        registry.set_detail(
+            "room-1",
+            serde_json::json!({ "panels": 0, "elements": 0, "dead_letters": 1 }),
+        );
+        registry.finish(
+            "room-1",
+            TaskState::Succeeded,
+            serde_json::json!({ "done": 5, "total": 5 }),
+        );
+
+        let entry = registry.get("room-1").unwrap();
+        let detail = entry.detail.expect("detail 必须保留分项计数");
+        assert_eq!(detail["panels"], 0, "收敛后的面板数必须归零");
+        assert_eq!(detail["elements"], 0);
+        assert_eq!(detail["dead_letters"], 1, "死信数是唯一的暴露出口，不能丢");
     }
 
     #[test]

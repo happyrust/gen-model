@@ -8,7 +8,11 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 impl AiosDBManager {
     ///拉取geo_hashs对应的meshes
-    pub async fn cache_plant_meshes(&self, geo_hashes: impl IntoIterator<Item=&u64>, overwrite: bool) -> anyhow::Result<bool> {
+    pub async fn cache_plant_meshes(
+        &self,
+        geo_hashes: impl IntoIterator<Item = &u64>,
+        overwrite: bool,
+    ) -> anyhow::Result<bool> {
         // let new_hashes = {
         //     let m = self.cached_mesh_mgr.read().await;
         //     if !overwrite {
@@ -45,17 +49,35 @@ impl AiosDBManager {
     }
 
     ///获得变换后的mesh
-    pub async fn get_transformed_plant_mesh(&self, geo_hash: u64, t: &Transform) -> anyhow::Result<Option<PlantMesh>> {
-        self.get_plant_mesh(geo_hash).await.map(|x| x.map(|x| x.transform_by(&t.compute_matrix().as_dmat4())))
+    pub async fn get_transformed_plant_mesh(
+        &self,
+        geo_hash: u64,
+        t: &Transform,
+    ) -> anyhow::Result<Option<PlantMesh>> {
+        self.get_plant_mesh(geo_hash)
+            .await
+            .map(|x| x.map(|x| x.transform_by(&t.compute_matrix().as_dmat4())))
     }
 
     ///获得变换后的mesh的标高
-    pub async fn get_transformed_mesh_elev(&self, geo_hash: u64, t: &Transform) -> anyhow::Result<Option<(f32, f32)>> {
+    pub async fn get_transformed_mesh_elev(
+        &self,
+        geo_hash: u64,
+        t: &Transform,
+    ) -> anyhow::Result<Option<(f32, f32)>> {
         if let Some(mesh) = self.get_transformed_plant_mesh(geo_hash, t).await? {
-            let elev_max = mesh.vertices.iter().map(|x| x.z)
-                .max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or_default();
-            let elev_min = mesh.vertices.iter().map(|x| x.z)
-                .min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or_default();
+            let elev_max = mesh
+                .vertices
+                .iter()
+                .map(|x| x.z)
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or_default();
+            let elev_min = mesh
+                .vertices
+                .iter()
+                .map(|x| x.z)
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or_default();
             Ok(Some((elev_min, elev_max)))
         } else {
             Ok(None)

@@ -1,0 +1,31 @@
+-- D-03 real Deleted session for ProjAMS.
+-- Target is VTWA 24381/107146 under BRAN 24381/107104, dbnum 7997.
+-- VTWA belongs to the INLINE change class, which no test case has covered yet.
+--
+-- The element is NOT recreated afterwards: refnos are never reissued, so the
+-- rollback path is the file backup taken before this macro runs, restored while
+-- E3D holds no claim on the database:
+--   D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7997_0001.codex-before-d03-delete-20260727
+--
+-- Baseline to diff against: docs/evidence/2026-07-27-d03-delete-session-baseline.md
+--
+-- Run as the entry macro of a fresh single-purpose session, so that SAVEWORK
+-- commits this deletion and nothing else:
+--   scripts\e3d\run_ams_c_entrymacro.bat "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_delete_apply.mac"
+-- It also works typed into an E3D Design Command Window, but then SAVEWORK
+-- would fold any other pending edits of that session into the same session
+-- number and the window would no longer isolate the deletion.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_delete_apply.log" OVER
+$P CODEX-D03-DELETE-ALIVE
+=24381/107146
+Q CE
+Q TYPE
+Q OWNE
+Q SPRE
+DELETE VTWA
+Q CE
+SAVEWORK 'CODEX D-03 delete VTWA 24381/107146'
+$P CODEX-D03-DELETE-DONE
+ALPHA LOG END
+QUIT

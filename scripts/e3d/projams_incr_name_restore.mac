@@ -1,0 +1,12 @@
+-- Restore the ProjAMS incremental NAME test target.
+--
+-- Run in E3D Design Command Window:
+--   $M "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_restore.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_restore.log" OVER
+=/1CUP001VAR_CODEX
+Q CE
+NAME /1CUP001VAR
+Q CE
+SAVEWORK 'CODEX incremental NAME restore'
+ALPHA LOG END

@@ -1,13 +1,11 @@
-use aios_database::test::{
-    test_model_generation_performance, 
-    analyze_performance_bottlenecks,
-    init_performance_tracing,
-    PerformanceStats,
-};
 use aios_core::options::DbOption;
+use aios_database::test::{
+    PerformanceStats, analyze_performance_bottlenecks, init_performance_tracing,
+    test_model_generation_performance,
+};
 
 /// 性能测试示例
-/// 
+///
 /// 这个示例展示了如何使用性能测试工具来分析模型生成的性能瓶颈
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,9 +22,9 @@ async fn main() -> anyhow::Result<()> {
     db_option.gen_model = true;
     db_option.gen_mesh = true;
     db_option.debug_refno_types = vec![
-        "CATA".to_string(),   // 元件库
-        "LOOP".to_string(),   // 管道
-        "PRIM".to_string(),   // 基本体
+        "CATA".to_string(), // 元件库
+        "LOOP".to_string(), // 管道
+        "PRIM".to_string(), // 基本体
     ];
     println!("   ✓ 测试配置完成\n");
 
@@ -34,9 +32,9 @@ async fn main() -> anyhow::Result<()> {
     println!("3. 执行小范围性能测试...");
     let start_dbno = 24383;
     let end_dbno = 24385; // 只测试3个数据库作为示例
-    
+
     println!("   测试范围: {} - {}", start_dbno, end_dbno);
-    
+
     let stats = test_model_generation_performance(start_dbno, end_dbno, &db_option).await?;
     println!("   ✓ 性能测试完成，测试了 {} 个数据库\n", stats.len());
 
@@ -93,10 +91,16 @@ fn print_simple_stats(stats: &[PerformanceStats]) {
 
     // 显示最快和最慢的数据库
     if let Some(fastest) = stats.iter().min_by_key(|s| s.total_time_ms) {
-        println!("   - 最快数据库: {} ({}ms)", fastest.dbno, fastest.total_time_ms);
+        println!(
+            "   - 最快数据库: {} ({}ms)",
+            fastest.dbno, fastest.total_time_ms
+        );
     }
     if let Some(slowest) = stats.iter().max_by_key(|s| s.total_time_ms) {
-        println!("   - 最慢数据库: {} ({}ms)", slowest.dbno, slowest.total_time_ms);
+        println!(
+            "   - 最慢数据库: {} ({}ms)",
+            slowest.dbno, slowest.total_time_ms
+        );
     }
 
     // 显示错误统计
@@ -112,9 +116,13 @@ fn save_simple_report(stats: &[PerformanceStats], filename: &str) -> anyhow::Res
     use std::io::Write;
 
     let mut file = File::create(filename)?;
-    
+
     writeln!(file, "AIOS 模型生成性能测试报告（示例）")?;
-    writeln!(file, "生成时间: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+    writeln!(
+        file,
+        "生成时间: {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    )?;
     writeln!(file, "=")?;
     writeln!(file, "")?;
 
@@ -137,17 +145,23 @@ fn save_simple_report(stats: &[PerformanceStats], filename: &str) -> anyhow::Res
 
     // 详细数据
     writeln!(file, "详细数据:")?;
-    writeln!(file, "{:<8} {:<12} {:<12} {:<12} {:<8}", 
-             "数据库", "总时间(ms)", "实例数", "网格数", "错误数")?;
+    writeln!(
+        file,
+        "{:<8} {:<12} {:<12} {:<12} {:<8}",
+        "数据库", "总时间(ms)", "实例数", "网格数", "错误数"
+    )?;
     writeln!(file, "{}", "-".repeat(50))?;
-    
+
     for stat in stats {
-        writeln!(file, "{:<8} {:<12} {:<12} {:<12} {:<8}",
-                 stat.dbno,
-                 stat.total_time_ms,
-                 stat.instance_count,
-                 stat.mesh_count,
-                 stat.errors.len())?;
+        writeln!(
+            file,
+            "{:<8} {:<12} {:<12} {:<12} {:<8}",
+            stat.dbno,
+            stat.total_time_ms,
+            stat.instance_count,
+            stat.mesh_count,
+            stat.errors.len()
+        )?;
     }
 
     // 错误详情

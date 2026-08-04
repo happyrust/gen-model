@@ -27,19 +27,23 @@
 ## 2. 总体架构
 
 ```
-前端 --HTTP(JSON)--> axum Router --+--> TaskRegistry（任务注册表, DashMap）
-     <--WebSocket--  /api/v1/ws    |         | 状态查询
-                          ^        |         v
-                          |   tokio::spawn(execute_manual_update(progress))
-                     broadcast <---+-- ManualUpdateProgress 回调 / IncrResult 桥接
+前端 --HTTP(JSON)--> axum Router ---> 数据批次调度器 ---> 单 worker
+     <--WebSocket--  /api/v1/ws          |                 |
+                          ^              v                 v
+                          +-------- TaskRegistry   model_update_pending
+                                                           |
+                                                           v
+                                                共享模型生成执行器
+                                              （按需 ensure 也走这里）
 ```
 
 - 新增模块 `src/web_service/`，feature flag **`http_api`**（默认不启用，`console` feature 可包含它）。
 - 服务与 `async_watch` 在 `run_cli` 内并行：`tokio::join!(mgr.async_watch(), web_service::serve(state))`，互不阻塞；`http_api` 未启用时行为与现在完全一致。
 - **共享状态 `AppState`**：`Arc<AiosDBManager>` + `TaskRegistry` + `tokio::sync::broadcast::Sender<WsEvent>`（容量 1024，慢消费者掉线自补）。
-- 事件源两处接入，均为已有扩展点、不改领域逻辑：
-  - 手动路径：`execute_manual_update(project, Some(progress))` 的 `ManualUpdateProgress` 回调（代码注释即写明"前端把事件转发进自己的任务状态"），回调内转发到 broadcast；
-  - 自动路径（`sync_live=true`）：在 `sync_publisher` 发布 `IncrResult` 的同一位置挂钩，广播 `incr_applied` 摘要事件。
+- 手动提交与自动 watcher 只负责把数据范围交给同一调度器；进度与终态统一由单 worker
+  更新 `TaskRegistry` 并广播 tasks 事件，不再保留 HTTP 直跑或 `incr_applied` 旁路。
+- 自动、手动、级联补偿与按需 ensure 产生的模型工作统一进入 durable pending，并由共享
+  执行器完成加锁、生成、结果写入和 revision 收口。
 
 ## 3. 通用约定
 
@@ -49,18 +53,24 @@
 - 错误响应统一结构：
 
 ```json
-{ "code": "conflict", "message": "项目 HD 已有手动更新任务正在执行", "detail": null }
+{ "code": "ref0_affiliation_conflict",
+  "message": "Ref0 24381 同时归属 dbnum 7997 与 8001", "detail": null }
 ```
 
 | HTTP | code | 场景 |
 | --- | --- | --- |
 | 400 | `bad_request` | 参数缺失 / refno 格式非法 |
-| 404 | `not_found` | task_id 不存在 |
-| 500 | `internal` | 领域层 `anyhow::Error` |
+| 404 | `not_found` | task_id 不存在，或模型依赖查询成功且 refno 确实不存在 |
+| 409 | `ref0_affiliation_conflict` | 同一 Ref0 同时归属多个 dbnum；需修正项目文件 |
+| 503 | `ref0_affiliation_unavailable` | 合法 Ref0 当前无法解析到所属 dbnum；模型任务保留待重试 |
+| 503 | `model_dependency_unavailable` | 数据库查询、项目文件读取或 locator 临时不可用；可重试 |
+| 500 | `generation_failed` | 确定性的解析、数据损坏或模型生成失败；pending 保留 |
+| 500 | `internal` | 未分类的服务端缺陷 |
 
-> 409 `conflict` 与「`sync_live=true` 拒手动」的 422 随 ADR-011 §12 退役：数据批次
+> 旧的通用 409 `conflict` 与「`sync_live=true` 拒手动」的 422 随 ADR-011 §12 退役：数据批次
 > 由单 worker 天然串行，执行请求一律 202 入队（见 §4.3）。`model/ensure` 的
-> 422 `container` / `precondition` 不受影响。
+> 422 `container` / `precondition` 以及归属不变量被破坏时的
+> `409 ref0_affiliation_conflict` 不受影响。
 
 ## 4. REST 接口定义
 
@@ -69,7 +79,8 @@
 
 ```json
 { "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
-  "started_at": "2026-07-27T21:02:11+08:00", "gen_spatial_tree": false, "queue_paused": false }
+  "started_at": "2026-07-27T21:02:11+08:00", "gen_spatial_tree": false,
+  "queue_paused": false, "static_assets": false, "ref0_affiliation_conflicts": 0 }
 ```
 
 - `started_at`：进程启动时刻。队列不持久、重启由重扫重建（ADR-011 §4），界面靠它
@@ -77,6 +88,10 @@
 - `gen_spatial_tree`：关着时房间增量一条不排，界面要说「房间增量没开」，
   不许显示一条永远为 0 的泳道（ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
+- `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
+  不降低 REST/WS 与增量 worker 的健康状态。
+- `ref0_affiliation_conflicts`：locator 构建时发现的冲突 Ref0 数量；非零时只阻断命中这些
+  Ref0 的工作，不代表整个项目停止服务。
 
 ### 4.2 `POST /api/v1/update/preview` — 手动更新预览
 - 映射：`AiosDBManager::preview_manual_update(project)`（只读，可能刷新扫描观察字段，故用 POST）。
@@ -93,7 +108,11 @@
     "model_affecting": 6, "units": [], "zones": [],
     "anomaly": null, "blocked": false
   }],
-  "pending_model_retries": [{ "dbnum": 7997, "root_refno": "24381/100817", "noun": "BRAN", "source_end_sesno": 81, "attempts": 2, "last_error": "..." }],
+  "pending_model_retries": [{
+    "action": "regen_root", "target_refno": "24381/100817", "dbnum": 7997,
+    "revision": 4, "noun": "BRAN", "source_dbnum": 7997, "source_end_sesno": 81,
+    "attempts": 2, "last_error": "..."
+  }],
   "warnings": [],
   "up_to_date": false
 }
@@ -130,36 +149,67 @@
   units: [ModelUnitResult], warnings }`（一行任务一个批次，「一次运行」的复数形态随 ADR-011 退役）。
 
 ### 4.4 `GET /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`
-- 列表支持 `?state=running&kind=manual_update&limit=50`（内存中保留最近 200 条，进程重启即清空——durable 状态以 `manual_model_pending` 表与水位为准，本表只是 UI 视图）。
+- 列表支持 `?state=running&kind=data_batch&limit=50`（进程重启即清空——durable 状态以
+  `model_update_pending` 表与应用水位为准，本表只是 UI 视图）。
 - 详情响应：
 
 ```json
 {
-  "task_id": "mu-20260726-100301-7f3a", "kind": "manual_update",
+  "task_id": "db-20260729-100301-7f3a", "kind": "data_batch",
   "state": "succeeded", "project": "HD",
-  "created_at": "2026-07-26T10:03:01+08:00", "finished_at": "2026-07-26T10:04:12+08:00",
+  "dbnum": 7997, "start_sesno": 85, "end_sesno": 92,
+  "created_at": "2026-07-29T10:03:01+08:00", "finished_at": "2026-07-29T10:04:12+08:00",
   "events_seen": 42,
-  "result": { "project": "HD", "status": "success", "batches": [], "units": [], "warnings": [] }
+  "result": { "status": "success", "batch": {}, "units": [], "warnings": [] }
 }
 ```
 
 ### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
-- 映射：`AiosDBManager::ensure_model_generated(refno, force)`；内部已有 per-生成根锁与二次检查，天然幂等，可并发。
+- 映射：`AiosDBManager::ensure_model_generated(refno, force)`；短路未命中时先写入
+  `(regen_root, generation_root)` durable pending，再同步等待共享生成执行器的结果。
+  命中已有 pending 或正在执行的同根任务时等待同一份工作，不另开生成路径。
 - 请求：`{ "refno": "24381/100677" }`，可选 `"force": true`。
 - 响应 200：`OnDemandModelResult` 原样，含 `generation_root`、`model_instance_count`（画得出来的实例数）与 `generated_instance_count`（生成写出的实例数，含画不出来的）。`status` 三种：
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
   - `Generated` — 这次跑了生成，拿到了画得出来的实例；
   - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
-- `force` 只给「人明确要求重生成」用（S4-C 的重试）：它跳过上面两种短路，无条件重跑一次生成。显示补齐**不要**传，否则每显示一次就重生成一次。
-- 解析不出生成根时按缘由分型，客户端对三种的出路各不相同，不要压成一个 `internal`：
+- 等待超过 120s 且 durable pending 仍在排队或执行时响应
+  `202 { "code": "generation_pending", "generation_root": "24381/100677" }`，并带
+  `Retry-After` 响应头。后台工作不取消；客户端随后以 `force=false` 重查，复用或等待同一
+  pending。202 不是生成失败，只有获得成功结果或失败终态后才返回 200 或对应 5xx。
+- `force` 只给「人明确要求重生成」用（S4-C 的重试）：它跳过实例与成功结果复用并新增
+  pending revision，但仍服从共享执行器、根锁和 revision 收口。显示补齐**不要**传，
+  否则每显示一次都会提交新的重生成工作；收到 `generation_pending` 后的轮询也不得继续
+  携带 `force=true`。
+- 按需边界使用一个最小领域错误枚举完成以下分型，不把所有 `anyhow::Error` 压成
+  `not_found` 或 `internal`，也不扩建全局错误框架：
   - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
-  - `404 not_found` — 库里没有这个 refno。
+  - `404 not_found` — 依赖查询成功，并确认库里没有这个 refno；只有该情形允许负缓存。
   - `422 precondition` — 构件在、也不是容器，但向上找不到任何合法生成根。
+  - `503 ref0_affiliation_unavailable` — refno 合法，但当前缺少 `Ref0 → dbnum` 库归属；客户端不得按 404 负缓存，可稍后重试。
+  - `409 ref0_affiliation_conflict` — 同一 Ref0 同时出现在多个 `dbnum`；pending 保留，
+    自动重试不会自行修复，需先纠正项目文件。无冲突根不受影响。
+  - `503 model_dependency_unavailable` — SurrealDB 查询、项目文件读取或 locator 暂时失败；
+    客户端可重试，不得负缓存。
+  - `500 generation_failed` — 确定性的解析、数据损坏或生成失败；已经建立的 pending 保留，
+    不写成功结果。
   - `400 bad_request` — refno 连格式都不对。
-- 单根生成通常秒级，同步等待即可；HTTP 层设 120s 超时，超时不取消后台生成，前端可重发（幂等）。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，客户端超时不能设得比它更短。
+- 单根生成通常秒级，同步等待即可；HTTP 层等待预算为 120s，耗尽后按上述 202 契约返回，
+  不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
+  客户端自身超时不能设得比它更短。
 
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。
+
+### 4.6.1 `POST /api/v1/update/pending-units/retry` — 显式复活一个待重试单元
+
+- 请求：`{ "action": "regen_root", "target_refno": "24381/100677" }`。
+- 只允许操作已经存在的 `(action, target_refno)` pending；不存在返回 `404 not_found`，
+  不根据请求凭空创建任务。
+- 在一个原子更新中执行 `revision += 1`、`attempts = 0`、清除 `last_error` 并恢复 pending，
+  返回 `202 { "action": "...", "target_refno": "...", "status": "pending" }`。
+  正在执行旧 revision 的 worker 随后不能删除或标记这条已复活记录。
+- 不提供批量重试；新数据触发仍走正常 enqueue，不调用本端点。
 
 ### 4.7 `GET /api/v1/dbnums` — 水位状态 + 阻断/排除（rollout 服务端第 8 项）
 - 映射：`AiosDBManager::dbnum_statuses(project)`（登记表 ∪ 项目扫描；只读头部与
@@ -199,7 +249,7 @@
 服务端到客户端统一信封（`type` 判别）：
 
 ```json
-{ "type": "task_progress", "seq": 17, "ts": "2026-07-26T10:03:05+08:00", "task_id": "mu-...", "payload": {} }
+{ "type": "task_progress", "seq": 17, "ts": "2026-07-29T10:03:05+08:00", "task_id": "db-...", "payload": {} }
 ```
 
 `seq` 为连接内单调递增序号，仅用于客户端探测丢包（broadcast 慢消费者被跳过时 seq 出现空洞，客户端应走 5.4 节补偿）。
@@ -243,7 +293,8 @@
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。
 - 并发约束汇总：数据批次由**单 worker** 串行消费（互斥是调度器的性质，HTTP 层不再有
-  409 预检）；按需生成 per-生成根互斥（既有 `GENERATION_LOCKS`），与批次执行可并发。
+  409 预检）；所有生成入口共享 durable pending、生成执行器和 per-生成根锁，同一根不会
+  由按需与批次路径并发生成。
 
 ## 7. 配置与依赖
 
@@ -254,6 +305,10 @@
 http_api_addr = "0.0.0.0:8020"     # 评审决议：局域网可访问；8009/8010/1883/8000 已被占用，避开
 http_api_cors = ["*"]              # 开发期放开，上线前收敛为前端 origin
 ```
+
+- 静态前端资源是可选能力。资源目录存在时挂载 `/assets` 与 SPA fallback；目录缺失时只记录
+  一次告警，静态路径返回 404，REST/WS 仍正常启动。无需为此增加配置开关，也不得因
+  `PLANT_ASSET_ROOT` 缺失或无效终止服务。
 
 - 依赖（仅 `http_api` feature 引入）：
 
@@ -271,12 +326,12 @@ tokio/serde/serde_json 均已存在，无其他新增。
 | --- | --- | --- |
 | M1 | 脚手架：`web_service` 模块、AppState、`/health`、`/update/preview`、`/dbnums` | curl 全通，`http_api` 关闭时零影响 |
 | M2 | `/update/execute` + TaskRegistry + WS（subscribe/进度/finished） | 前端可见两阶段进度直至 `ManualUpdateResult` |
-| M3 | `/model/ensure`、`/update/pending-units`、自动模式 `incr_applied` 桥接 | 按需生成幂等；watch 模式下增量事件可见 |
+| M3 | `/model/ensure`、`/update/pending-units` 查询/单项重试、统一 worker 事件桥接 | 按需生成幂等；watch 与手动提交产生相同 tasks 事件 |
 | M4 | CORS/超时/日志（tower-http trace 接入现有 tracing）、联调收尾 | 前端跨域可用，异常路径错误码符合第 3 节 |
 
 ## 9. 评审决议（2026-07-26）
 
 1. **监听地址与端口**：`0.0.0.0:8020`，供局域网前端访问（已写入 `DbOption.toml`）。
 2. **鉴权**：本期不做；前端部署到共享环境前可追加最简 token 头校验。
-3. **`incr_applied` 粒度**：仅摘要（dbnum/条数/会话号）；前端需要逐 refno 明细（局部刷新）时再扩展 payload。
-4. **任务历史持久化**：仅内存保留最近 200 条（durable 语义由水位 + pending 表承担），不做持久化。
+3. **`incr_applied` 已退役**：自动与手动批次统一发布 tasks 主题事件。
+4. **任务历史持久化**：仅内存分层保留最多 1000 条（durable 语义由水位 + pending 表承担），不做持久化。

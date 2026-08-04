@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课 01 · AVEVA E3D core.dll：几何体如何被识别并生成图形</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 课程 / <strong>01 · 几何体识别与关联模型生成</strong> · <a href="../reference/glossary.html">参考速查表 →</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Lesson 0001 · Reverse engineering · AVEVA Everything3D 3.1</p>
+  <h1>几何体如何被识别，关联模型如何被生成</h1>
+  <p class="lead">读懂 <code>core.dll</code> 两件事：① 它怎么判断"哪些元素是几何体类型"；② 它怎么把"设计元素 → 目录几何 → 图形"这条关联模型链跑出来。全部结论都配 <span class="pill">地址</span> <span class="pill">反编译</span> 证据，并用一个<strong>弯头(ELBO)</strong>端到端举例。</p>
+  <p class="kicker">预计 15–20 分钟 · 目标：<code>D:\AVEVA\Everything3D3.1\core.dll</code>（32 位）· 工具：ida-pro-mcp（会话 core31-retrace）</p>
+</header>
+
+<div class="toc">
+  <strong>本课路线</strong>
+  <ol>
+    <li><a href="#big">一张图看全貌：三层架构</a></li>
+    <li><a href="#q1">第一问：怎么判断"几何体类型"（DB_Noun 分类）</a></li>
+    <li><a href="#refresh">回顾：图形刷新链（上节课）</a></li>
+    <li><a href="#q2">第二问：关联模型怎么生成（SPREF → GMSET → 图元 → 段）</a></li>
+    <li><a href="#example">端到端例子：一个弯头 ELBO 上屏</a></li>
+    <li><a href="#truth">确认 vs 推断</a></li>
+    <li><a href="#gen">落到 gen-model：你该怎么做</a></li>
+    <li><a href="#quiz">自测（回忆练习）</a></li>
+  </ol>
+</div>
+
+<h2 id="big">1. 一张图看全貌：三层架构</h2>
+<p><code>core.dll</code> 本身<strong>不做像素/网格渲染</strong>，它是"编排层"。真正干活的分给两个外部库：几何数学给 <code>libgeom</code>，绘制给 <code>sgl5NET</code>。</p>
+<figure>
+<div class="diagram">┌─────────────────────────── core.dll（编排层）───────────────────────────┐
+│  设计数据库  DB_Element / DB_Noun / DB_Attribute                          │
+│  类型分类    DB_Noun::primitive() / graphicsBehaviour() / geomset()       │
+│  图形更新    GraphicsUpdate → FZXUPD → FUPALL → (GLUPDA) + SendUpdate      │
+│  容器构建    FZ3SGL：GLVCRE 建视图 → GLSVCR 建段 → GLVSEG 绑定             │
+└───────────────┬───────────────────────────────────┬─────────────────────┘
+                │ import (几何数学)                   │ import (图形/绘制)
+                ▼                                     ▼
+        ┌──────────────┐                    ┌────────────────────┐
+        │   libgeom    │                    │      sgl5NET        │
+        │ D3_Vector    │                    │ 视图/段模型 + GLUPDA │
+        │ mth2Arc …    │                    │ 三角化/渲染在此内部  │
+        └──────────────┘                    └────────────────────┘</div>
+<figcaption>core.dll 判类型、组织更新、建"视图+段"；几何数学在 libgeom，三角化与绘制在 sgl5NET。</figcaption>
+</figure>
+
+<div class="callout tip"><span class="tag">先记三个词</span>
+<strong>DB_Noun</strong>＝元素"类型描述符"（schema 对象）；<strong>SPREF</strong>＝设计元素指向目录构件的"规格引用"；<strong>GMSET</strong>＝目录里装 3D 图元(SCYL/SBOX…)的"几何集"。全课围绕这三个词展开。</div>
+
+<h2 id="q1">2. 第一问：怎么判断"几何体类型"</h2>
+<p>关键结论：<strong>类型判定是数据驱动的，不是给每种类型写死 if</strong>。E3D 里每种元素类型都是一个整数 <em>noun 码</em>（如世界 <code>NOUN_WORL</code>），由字典库(dabacon schema)描述成一个 <code>DB_Noun</code> 对象。要不要当几何体、按哪种画法，全看这个对象上的标志位。</p>
+
+<h3>2.1 是不是"图元"？—— <code>DB_Noun::primitive()</code></h3>
+<p class="kicker">0x58da280</p>
+<pre><code>bool DB_Noun::primitive(DB_Noun *this){
+  bool v2 = 0;
+  DB_Noun::internalGetField(this, 659518, &amp;v2);   <span class="tok-c">// 读 schema 布尔字段 #659518</span>
+  return v2;                                     <span class="tok-c">// 字段号本身来自字典库</span>
+}</code></pre>
+<p>它不判断"BOX 还是 CYL"，而是去问 schema 里的一个布尔字段 <code>#659518</code>：这个类型是不是几何图元。字段值由字典库决定 —— 这就是"数据驱动"。</p>
+
+<h3>2.2 按哪种画法？—— <code>DB_Noun::graphicsBehaviour()</code></h3>
+<p class="kicker">0x58d9760</p>
+<pre><code>int DB_Noun::graphicsBehaviour(DB_Noun *this){
+  if(!*((BYTE*)this + 96)) DB_Noun::ReadData(this);  <span class="tok-c">// 首次访问才从字典懒加载</span>
+  return *((DWORD*)this + 45);                        <span class="tok-c">// 返回 this+0xB4 的"图形行为"枚举</span>
+}</code></pre>
+<p>返回一个<strong>枚举</strong>（缓存在对象偏移 <code>0xB4</code>），告诉后续图形代码"这种类型应当怎样表示"。上层就是按这个枚举分派不同画法。</p>
+
+<h3>2.3 其它分类器（都挂在 DB_Noun 上）</h3>
+<table>
+<thead><tr><th>方法</th><th>返回</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>primitive()</code></td><td>bool</td><td>是否几何图元（字段 #659518）</td></tr>
+<tr><td><code>graphicsBehaviour()</code></td><td>int</td><td>图形行为枚举（决定画法，this+0xB4）</td></tr>
+<tr><td><code>geomset()</code></td><td>bool</td><td>是否 GMSET 目录几何集类型</td></tr>
+<tr><td><code>extrusion()</code></td><td>bool</td><td>是否挤出(extrusion)类型</td></tr>
+<tr><td><code>isPointsetPoint()</code></td><td>bool</td><td>是否点集中的点(P-point)</td></tr>
+<tr><td><code>hashValue()</code> / <code>findNoun(int)</code></td><td>int / noun*</td><td>按 noun 码定位类型描述符</td></tr>
+</tbody>
+</table>
+
+<div class="callout example"><span class="tag">小例子 · 两种元素的判定</span>
+<p>一个 <strong>BOX</strong>（设计图元）：其 noun 的 <code>primitive()</code> 返回 <code>true</code>，<code>graphicsBehaviour()</code> 给出"实体图元"画法 → 直接用自身几何。<br>
+一个 <strong>EQUIPMENT</strong>（容器）：<code>primitive()</code> 返回 <code>false</code> → 它自己不是几何体，几何来自其成员（NOZZLE 等）或目录引用。</p>
+</div>
+
+<div class="callout confirm"><span class="tag">已确认（反编译实测）</span> <code>primitive()</code> 读字段 #659518、<code>graphicsBehaviour()</code> 返回 this+0xB4 枚举、以及 <code>geomset()/extrusion()</code> 等分类器均在 <code>core.dll</code> 内实测存在。</div>
+
+<h2 id="refresh">3. 回顾：图形刷新链（上节课）</h2>
+<p>类型判完、几何进了段之后，靠这条链把画面刷新出来：</p>
+<pre><code>void DLL_PMLCommand::GraphicsUpdate(){ int sel = -1; FZXUPD(&amp;sel); }   <span class="tok-c">// PML 命令 "GRAPHICS UPDATE"</span></code></pre>
+<figure><div class="diagram">GraphicsUpdate ─▶ FZXUPD ─▶ FMXIST()闸门(图形模式?) 
+                     │        回调派发 (*fp)(sel)
+                     ├─▶ FUPALL ─▶ GLUPDA[sgl5NET]  (刷新所有视图段)
+                     │           └▶ FUP2VW           (2D 画布)
+                     └─▶ RIO_OutputListener::SendUpdate  (观察者：通知各视图重绘)</div>
+<figcaption>0x582b000 → 0x5294555 → 0x52f1f82 → GLUPDA / 0x588b110</figcaption></figure>
+
+<h2 id="q2">4. 第二问：关联模型怎么生成</h2>
+<p>"关联模型" = 把一个设计元素、它引用的<strong>目录几何</strong>、以及<strong>设计参数</strong>组合起来，生成实际图形。分四步理解。</p>
+
+<h3>4.1 关联的载体：SPREF 规格引用</h3>
+<p>设计元素通过 <code>PSPREF</code>/<code>FSPREF</code> 属性（在 core.dll 里是 <code>ATT_PSPREF</code>/<code>ATT_FSPREF</code>，类型 <code>DB_Attribute</code>）指向<strong>目录构件</strong>（catalogue component）。这就是设计侧与目录侧的"关联"。</p>
+<div class="callout confirm"><span class="tag">已确认</span> 字符串/符号 <code>PSPREF</code>、<code>FSPREF</code>、<code>?ATT_PSPREF@@3QBVDB_Attribute@@B</code>、<code>?ATT_FSPREF@@…</code> 在 core.dll 内实测存在。</div>
+
+<h3>4.2 目录侧：SPCO → GMSET → 图元</h3>
+<p>目录构件（<code>SCOM</code>/<code>SPCO</code>）带一个<strong>几何集 GMSET</strong>（<code>DB_Noun::geomset()</code>）。GMSET 里是一组 3D 图元，定义"这个构件画成什么样"以及碰撞包围体：<span class="pill">SCYL 圆柱</span><span class="pill">SBOX 方盒</span><span class="pill">SSPH 球</span><span class="pill">LCYL</span>…</p>
+<div class="callout"><span class="tag">AVEVA 官方文档</span> "A GMSET is a grouping of 3D primitive elements … It specifies the dimensions, orientation and obstruction geometry of each primitive."（<a href="https://docs.aveva.com/bundle/e3d-design-ue/page/912898.html">GMSET 文档</a>）每个图元有 <code>OBST</code>（碰撞级别）、<code>LEVEL</code>、<code>CLFLA</code>、<code>TUFLA</code> 等标志，其中 <code>CLFLA</code>/<code>TUFLA</code> 控制"单线(中心线) / 双线(实管)"两种表示是否绘制。</div>
+
+<h3>4.3 参数化：DESPARAM / PARA[n] 驱动尺寸</h3>
+<p>GMSET 图元的尺寸不是常数，而是引用<strong>设计参数</strong>。设计元素的 <code>Desparam</code>（PARA[]）把值灌进去，图元才有真实尺寸。官方例子：</p>
+<pre><code>NEW GMSET /GSE1
+NEW SCYL  PAXI -Y  PDIS (PARA[5])  PDIA (PARA[2])  PHEI (-2*PARA[5])  OBST 2
+NEW SCYL            PHEI (PARA[6])  PDIA (PARA[4])                     OBST 2
+NEW SCOM  GTYP ELBO  ...  /GSE1     <span class="tok-c">// 构件(generic type=ELBO) 引用几何集 /GSE1</span>
+PARAM 20 19 5 ...                    <span class="tok-c">// 组件参数：填进 PARA[1..n]</span></code></pre>
+<p class="muted">来源：AVEVA <a href="https://docs.aveva.com/bundle/e3d-design/page/912871.html">Constructing 3D Geomsets</a> / <a href="https://docs.aveva.com/bundle/e3d-design-ue/page/912847.html">Creating Catalog Components</a>。</p>
+
+<h3>4.4 图形容器：FZ3SGL 建"视图 + 段"</h3>
+<p class="kicker">sub_5297141 · trace 标签 fm3dcanv/FZ3SGL</p>
+<pre><code>GLVCRE(&amp;view, ...);                 <span class="tok-c">// sgl5NET：创建视图</span>
+HPUTI1(elem, ATT_view, &amp;view);      <span class="tok-c">// 视图句柄存回元素属性</span>
+GLVSIZ(&amp;view, w, h);                <span class="tok-c">// 视图尺寸</span>
+GLSVCR(&amp;view, 140,140,1,1);         <span class="tok-c">// 创建段(display list)</span>
+FQGVCO(elem, ctx);  GLVSEG(&amp;view, ctx);   <span class="tok-c">// 绑定段到视图</span>
+GLSVSE(&amp;view,{0,2000}); GLSVSA(...); GLSVBO(&amp;view);  <span class="tok-c">// 段范围/包围盒</span></code></pre>
+<p>几何最终装进这些 <strong>SGL 段</strong>（每个可绘制对象一段），随后 <code>GLUPDA</code> 一次性刷新。</p>
+
+<div class="callout infer"><span class="tag">合理推断（实测+文档）</span> core.dll 引入的 <code>sgl5NET</code> 只有"视图/段管理 + GLUPDA"，<strong>没有逐三角推送 API</strong>，core 里也无逐图元 facet 调用 → 图元→facet 的<strong>三角化在 FORTRAN 几何引擎(DBPRIM/SMODUL)与 sgl5NET 内部</strong>，两侧以<strong>图形元文件(metafile)</strong>交换（含 <code>FACET/FRAME/ZCOORD</code> 的令牌字典由 <code>sub_5621F20</code> 解析）。精确三角化算法不在 core.dll。</div>
+
+<h2 id="example">5. 端到端例子：一个弯头 ELBO 上屏</h2>
+<p>把上面两问串起来。假设模型里有一个弯头组件（generic type = <code>ELBO</code>）：</p>
+<ol class="steps">
+<li><strong>取类型</strong>：由元素拿到它的 <code>DB_Noun</code>。问 <code>primitive()</code> → <code>false</code>（弯头不是原生图元），问 <code>graphicsBehaviour()</code> → "目录构件"画法。</li>
+<li><strong>找关联</strong>：读元素的 <code>SPREF</code>(PSPREF/FSPREF) → 定位到目录构件 <code>SPCO</code>（GTYP=ELBO）。</li>
+<li><strong>取几何集</strong>：从 SPCO 跟到它的 <code>GMSET /GSE1</code>（<code>geomset()==true</code>），里面是两段 <code>SCYL</code>（弯头两臂）。</li>
+<li><strong>灌参数</strong>：把元素 <code>Desparam</code> 的 <code>PARA[2],PARA[4],PARA[5],PARA[6]</code> 代入 SCYL 的 <code>PDIA/PHEI/PDIS</code> → 得到真实尺寸的两段圆柱。</li>
+<li><strong>看画不画</strong>：按 <code>LEVEL/CLFLA/TUFLA</code> 决定用"实管(双线)"还是"中心线(单线)"表示。</li>
+<li><strong>三角化</strong>：libgeom 算方向/位置/圆弧，几何引擎把参数化 SCYL 展开为 facet（metafile FACET 令牌）。</li>
+<li><strong>装段</strong>：<code>FZ3SGL</code> 已建好视图与段（GLVCRE/GLSVCR/GLVSEG），facet 进入该元素的 SGL 段。</li>
+<li><strong>刷新</strong>：<code>GLUPDA</code> flush → 屏幕出现弯头；<code>RIO_OutputListener::SendUpdate</code> 通知其它视图重绘。</li>
+</ol>
+
+<div class="callout example"><span class="tag">关键直觉</span> 弯头的"形状"不存在设计元素里，而是"<strong>目录形状模板(GMSET) + 设计参数(PARA[])</strong>"在绘制时<strong>现场展开</strong>出来的。改一个 <code>PARA</code> 或换一个 <code>SPREF</code>，形状随之变。</div>
+
+<h2 id="truth">6. 确认 vs 推断（保持诚实）</h2>
+<table>
+<thead><tr><th>结论</th><th>依据</th></tr></thead>
+<tbody>
+<tr><td>类型分类靠 DB_Noun 标志位（primitive/graphicsBehaviour/geomset…）</td><td>✅ 反编译实测</td></tr>
+<tr><td>关联靠 SPREF：PSPREF/FSPREF（DB_Attribute）</td><td>✅ 符号实测</td></tr>
+<tr><td>FZ3SGL 用 sgl5NET 建"视图+段"</td><td>✅ 反编译实测</td></tr>
+<tr><td>依赖 sgl5NET(图形) 与 libgeom(几何数学)</td><td>✅ 导入表实测</td></tr>
+<tr><td>GMSET 装 SCYL/SBOX、PARA[] 驱动尺寸、CLFLA/TUFLA 控制表示</td><td>📘 AVEVA 官方文档</td></tr>
+<tr><td>SPREF→GMSET→PARA→图元→facet 的精确展开与三角化</td><td>🟠 实测符号 + 文档 + PDMS 架构的合理推断（算法在 sgl5NET/字典侧）</td></tr>
+</tbody>
+</table>
+
+<h2 id="gen">7. 落到 gen-model：你该怎么做</h2>
+<ul>
+<li><strong>类型判定</strong>：不要为每种 noun 硬编码；像 core 一样用<strong>元数据表</strong>（你已有 <code>all_attr_info.json</code>/字典）标注"是否几何 / 画法类别"，代码只按标志分派。</li>
+<li><strong>关联模型</strong>：复刻 <code>SPREF → SPCO → GMSET → PARA[] 展开图元</code> 这条链（对应 <code>src/fast_model/cata_model.rs</code> / <code>prim_model.rs</code>）；draw 与否看 <code>LEVEL/CLFLA/TUFLA</code>。</li>
+<li><strong>增量更新</strong>：对齐 core 的"标记脏 → 只重建受影响元素的段 → flush"模型（对应你的增量管线）。</li>
+</ul>
+
+<h2 id="quiz">8. 自测（回忆练习）</h2>
+<p class="muted">先别翻上文，凭记忆选。点选项即得反馈。</p>
+
+<div class="quiz">
+  <p class="q">Q1. core.dll 判断"某元素是不是几何图元"，本质上是？</p>
+  <button data-correct="1" data-fb="对。primitive() 去读 schema 字段 #659518，纯数据驱动。">读取 DB_Noun 的 schema 标志字段</button>
+  <button data-correct="0" data-fb="不对。core 不给每种类型写死判断。">对每种类型用硬编码判断</button>
+  <button data-correct="0" data-fb="不对。文件扩展名与此无关。">按元素的文件扩展名区分</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q2. 设计元素与目录几何之间的"关联"靠哪个属性？</p>
+  <button data-correct="1" data-fb="对。PSPREF/FSPREF(ATT_*) 指向目录构件 SPCO。">规格引用 SPREF（PSPREF/FSPREF）</button>
+  <button data-correct="0" data-fb="不对。GLUPDA 只是刷新显示。">图形刷新调用 GLUPDA</button>
+  <button data-correct="0" data-fb="不对。观察者只负责通知重绘。">输出监听 SendUpdate 回调</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q3. 弯头的"形状"主要来自哪里？</p>
+  <button data-correct="1" data-fb="对。目录 GMSET 模板 + 设计参数 PARA[]，绘制时展开。">目录 GMSET 模板加设计参数</button>
+  <button data-correct="0" data-fb="不对。设计元素只存参数与引用，不存网格。">设计元素里存好的网格</button>
+  <button data-correct="0" data-fb="不对。libgeom 只提供数学，不存形状。">libgeom 库内置的形状表</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q4. 真正把图元三角化成 facet 的地方，最可能是？</p>
+  <button data-correct="1" data-fb="对。core 无逐三角 API，三角化在几何引擎/sgl5NET，经 metafile 交换。">sgl5NET / 几何引擎（经 metafile）</button>
+  <button data-correct="0" data-fb="不对。DB_Noun 只做类型描述与分类。">DB_Noun 的类型描述里</button>
+  <button data-correct="0" data-fb="不对。SendUpdate 只通知视图刷新。">RIO_OutputListener 通知里</button>
+  <div class="fb"></div>
+</div>
+
+<hr>
+<p><strong>推荐一手资料</strong>：AVEVA E3D 官方帮助 —— <a href="https://docs.aveva.com/bundle/e3d-design/page/912871.html">Constructing 3D Geomsets</a>（含 SCYL + PARA[] 参数化实例，最能印证本课"关联模型"部分）。</p>
+<p><strong>获取"智慧"</strong>：把你的 GMSET/SPREF 展开细节拿到 AVEVA 官方社区论坛核对，边缘情况(如 NEGA 负体、TUBI 连接管)常有老工程师的经验。</p>
+
+<div class="callout tip"><span class="tag">我是你的老师</span> 有任何不清楚的点——某个函数想深挖、想要更多例子、想把某段再反编译验证——直接在对话里问我，我随时接着讲。</div>
+
+<footer class="foot">
+  课 01 · 基于 <code>ida-pro-mcp</code> 对 <code>core.dll</code>(core31-retrace) 的实测。相关：<a href="../reference/glossary.html">参考速查表（符号+地址+术语）</a> · <a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">RESOURCES</a>
+</footer>
+</div>
+
+<script>
+document.querySelectorAll('.quiz').forEach(function(q){
+  var fb = q.querySelector('.fb');
+  q.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click', function(){
+      q.querySelectorAll('button').forEach(function(x){ x.classList.remove('correct','wrong'); });
+      if(b.dataset.correct === '1'){ b.classList.add('correct'); }
+      else { b.classList.add('wrong'); }
+      fb.textContent = b.dataset.fb || '';
+    });
+  });
+});
+</script>
+</body>
+</html>

@@ -1,14 +1,11 @@
-use clap::Parser;
+use aios_core::RefnoEnum;
+use aios_core::options::DbOption;
 use aios_database::test::{
-    test_gen_geos_data_performance,
-    test_gen_geos_data_from_database,
-    batch_test_gen_geos_data_performance,
-    save_gen_geos_data_report,
-    init_performance_tracing,
+    batch_test_gen_geos_data_performance, init_performance_tracing, save_gen_geos_data_report,
+    test_gen_geos_data_from_database, test_gen_geos_data_performance,
     test_parallel_cata_geos_performance,
 };
-use aios_core::options::DbOption;
-use aios_core::RefnoEnum;
+use clap::Parser;
 
 /// gen_geos_data 函数性能测试工具
 ///
@@ -129,13 +126,12 @@ async fn test_manual_mode(
     args: &Args,
     db_option: &DbOption,
 ) -> anyhow::Result<Vec<aios_database::test::GenGeosDataPerformanceStats>> {
-    let refnos_str = args.refnos.as_ref()
+    let refnos_str = args
+        .refnos
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("手动模式需要指定 --refnos 参数"))?;
 
-    let refnos: Vec<RefnoEnum> = refnos_str
-        .split(',')
-        .map(|s| s.trim().into())
-        .collect();
+    let refnos: Vec<RefnoEnum> = refnos_str.split(',').map(|s| s.trim().into()).collect();
 
     println!("   指定参考号数量: {}", refnos.len());
     println!("   参考号列表: {:?}", refnos);
@@ -145,10 +141,7 @@ async fn test_manual_mode(
         println!("🚀 启用P0级并行优化测试");
 
         // 测试并行优化的元件库处理
-        let parallel_stats = test_parallel_cata_geos_performance(
-            refnos.clone(),
-            db_option
-        ).await?;
+        let parallel_stats = test_parallel_cata_geos_performance(refnos.clone(), db_option).await?;
 
         println!("\n📊 并行优化测试结果:");
         println!("{}", parallel_stats.generate_report());
@@ -169,15 +162,11 @@ async fn test_database_mode(
     db_option: &DbOption,
 ) -> anyhow::Result<Vec<aios_database::test::GenGeosDataPerformanceStats>> {
     let type_refs: Vec<&str> = args.types.iter().map(|s| s.as_str()).collect();
-    
+
     println!("   从数据库 {} 查询参考号...", args.dbno);
-    
-    let stats = test_gen_geos_data_from_database(
-        args.dbno,
-        &type_refs,
-        args.max_refnos,
-        db_option,
-    ).await?;
+
+    let stats =
+        test_gen_geos_data_from_database(args.dbno, &type_refs, args.max_refnos, db_option).await?;
 
     Ok(vec![stats])
 }
@@ -196,7 +185,7 @@ async fn test_batch_mode(
     // 查询所有参考号
     let type_refs: Vec<&str> = args.types.iter().map(|s| s.as_str()).collect();
     let mut all_refnos = Vec::new();
-    
+
     for refno_type in &type_refs {
         let refnos = query_type_refnos_by_dbnum(&[refno_type], args.dbno, None, false).await?;
         all_refnos.extend(refnos);
@@ -230,7 +219,7 @@ async fn test_batch_mode(
 /// 打印测试总结
 fn print_summary(stats: &[aios_database::test::GenGeosDataPerformanceStats]) {
     println!("\n📊 测试总结:");
-    
+
     if stats.is_empty() {
         println!("   没有测试数据");
         return;
@@ -247,7 +236,10 @@ fn print_summary(stats: &[aios_database::test::GenGeosDataPerformanceStats]) {
     println!("   总处理参考号: {}", total_processed_refnos);
     println!("   总生成实例: {}", total_instances);
     println!("   总耗时: {}ms", total_time);
-    println!("   成功率: {:.1}%", (success_count as f64 / stats.len() as f64) * 100.0);
+    println!(
+        "   成功率: {:.1}%",
+        (success_count as f64 / stats.len() as f64) * 100.0
+    );
 
     if success_count > 0 {
         let avg_time = total_time as f64 / success_count as f64;
@@ -280,15 +272,22 @@ fn print_summary(stats: &[aios_database::test::GenGeosDataPerformanceStats]) {
     }
 
     // 显示失败的测试
-    let failed_tests: Vec<_> = stats.iter().enumerate()
+    let failed_tests: Vec<_> = stats
+        .iter()
+        .enumerate()
         .filter(|(_, s)| !s.success)
         .collect();
-    
+
     if !failed_tests.is_empty() {
         println!("\n❌ 失败的测试:");
         for (index, stat) in failed_tests {
-            println!("   测试 {}: {}", index + 1, 
-                     stat.error_message.as_ref().unwrap_or(&"未知错误".to_string()));
+            println!(
+                "   测试 {}: {}",
+                index + 1,
+                stat.error_message
+                    .as_ref()
+                    .unwrap_or(&"未知错误".to_string())
+            );
         }
     }
 }

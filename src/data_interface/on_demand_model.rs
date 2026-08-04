@@ -12,7 +12,7 @@ use crate::data_interface::generation_root::{
     configured_delivery_unit_types, is_coarse_hierarchy_noun, resolve_live_element_generation_root,
 };
 use crate::data_interface::manual_update::{generate_unit_model, generation_root_lock};
-use crate::data_interface::model_update_pending::settle_regen_work;
+use crate::data_interface::model_update_pending::{ensure_regen_pending, settle_regen_work};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// Scope chunk for the written-instance probe, matching the viewer's own probe
@@ -70,9 +70,11 @@ impl AiosDBManager {
             }
         }
 
-        let pending_revision =
-            crate::data_interface::model_update_pending::current_regen_revision(&root_refno)
-                .await?;
+        // 先落 durable pending 再生成（spec §4.5 / 2026-07-30 审计 C1）。曾经这里只
+        // 读现有行的 revision：表里本来没有这个根时收口是 no-op，进程在生成中途崩溃，
+        // 这次工作就没有任何持久痕迹，没有 drain 会捡它，只能靠人再点一次。落行失败
+        // 直接返回错误、不跑生成——durable 语义必须先于工作本身成立。
+        let pending_revision = Some(ensure_regen_pending(&root_refno, &root_noun).await?);
         let outcome = generate_unit_model(self, &root_refno).await;
         let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
         if let Err(error) = settle_regen_work(
@@ -310,6 +312,36 @@ mod tests {
         assert!(
             lock_at < availability_at,
             "a concurrent partial write must return busy instead of looking complete"
+        );
+    }
+
+    /// durable pending 必须先于生成成立（spec §4.5 / 2026-07-30 审计 C1）。
+    ///
+    /// 只读现有行（`current_regen_revision`）的话，表里本来没有这个根时收口是
+    /// no-op：进程在生成中途崩溃，这次工作没有任何持久痕迹，没有 drain 会捡它。
+    #[test]
+    fn a_durable_pending_row_is_written_before_generation_runs() {
+        let source = include_str!("on_demand_model.rs");
+        let body = source
+            .split_once("pub async fn ensure_model_generated(")
+            .expect("ensure entrypoint must exist")
+            .1
+            .split_once("#[derive(Debug, Clone, PartialEq, Eq)]")
+            .expect("ensure implementation must end before its error type")
+            .0;
+        let pending_at = body
+            .find("ensure_regen_pending")
+            .expect("ensure 必须先写 durable pending 行");
+        let generate_at = body
+            .find("generate_unit_model")
+            .expect("ensure 必须执行生成");
+        assert!(
+            pending_at < generate_at,
+            "pending 行必须写在生成之前，崩溃才有 drain 能捡的痕迹"
+        );
+        assert!(
+            !body.contains("current_regen_revision"),
+            "ensure 不得再走只读旧行的路——那条路对『表里没有行』的情形收口是 no-op"
         );
     }
 

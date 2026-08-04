@@ -37,7 +37,10 @@ applied_at
 
 状态变化规则：
 
-- 预览扫描可以更新文件身份、属性、`file_latest_sesno` 和 `scanned_at`。
+- 首次发现一个未登记 `dbnum` 时，扫描可以建立登记文件身份，并写入文件观察字段。
+- 已登记文件身份一致时，扫描可以更新文件属性、`file_latest_sesno` 和 `scanned_at`。
+- 只有唯一文件在项目与 `db_type` 一致、且水位不回退时，`PathMigrated` 才能更新登记路径。
+- `TypeChanged`、回退、重复、缺失等阻断异常不得覆盖登记文件身份，也不新增第二套持久 observed identity；异常由当次扫描结果、任务回执和日志报告。
 - 文件观察字段必须通过独立写入更新；该写入失败不能修改或间接影响 `applied_sesno`。
 - 只有对应数据批次成功持久化后才能推进 `applied_sesno` 和 `applied_at`。
 - 数据批次失败、文件异常或模型生成失败都不能回退或虚增 `applied_sesno`。
@@ -45,16 +48,12 @@ applied_at
 
 `dbnum_info_table` 继续承担按 `ref_0` 的元素统计职责，不再参与日常水位计算。
 
-## 兼容迁移
+## 初始状态
 
-旧项目首次读取新状态时：
-
-1. 若已有 `dbnum_watermark.sesno`，将其迁移为 `applied_sesno`。
-2. 仅当专用水位不存在时，从 `dbnum_info_table` 中该 `dbnum` 的最大 `sesno` 兜底。
-3. 同时写入当前扫描到的文件信息。
-4. 新状态建立后，所有读取只使用 `applied_sesno`，不再执行跨表取最大值。
-
-迁移是一次性的兼容路径，不是长期双写或双读机制。
+启动时幂等创建增量状态表。旧库已有 `dbnum_watermark.sesno` 时，将其固化为缺失的
+`applied_sesno`；没有专用水位行但 `dbnum_info_table` 有历史统计时，以该 dbnum 的最大
+`sesno` 建立水位行。迁移只填空值，绝不覆盖已建立的 `applied_sesno`。三处都没有历史
+水位的 DESI 不得猜测范围，必须先由全量项目生成建立明确基线，再允许增量应用。
 
 ## 结果
 

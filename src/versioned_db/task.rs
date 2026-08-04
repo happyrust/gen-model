@@ -1,5 +1,5 @@
 use crate::{fast_model::pdms_inst::save_instance_data, versioned_db::database::SenderJsonsData};
-use aios_core::{geometry::ShapeInstancesData, SUL_DB};
+use aios_core::{SUL_DB, geometry::ShapeInstancesData};
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
@@ -38,7 +38,12 @@ async fn background_save_inst_task(receiver: flume::Receiver<ShapeInstancesData>
         let insert_handle = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
                 dbg!(shape_insts.inst_info_map.len());
-                save_instance_data(&shape_insts, false).await.unwrap();
+                // 后台 fire-and-forget worker：save_instance_data 现在会在写入失败时
+                // 返回 Err（不再静默吞错）。这里没有可上报的调用方，故记录并继续，
+                // 避免让整个后台任务 panic 退出。
+                if let Err(e) = save_instance_data(&shape_insts, false).await {
+                    eprintln!("background_save_inst_task: save_instance_data 失败: {e:?}");
+                }
             }
             // Ok::<_, anyhow::Error>(())
         });

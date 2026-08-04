@@ -22,6 +22,15 @@ pub const WATERMARK_TABLE: &str = "dbnum_watermark";
 /// Legacy per-`ref_0` element-statistics table, used only for one-time migration.
 pub const INFO_TABLE: &str = "dbnum_info_table";
 
+const INCREMENT_STATE_SCHEMA: &str = r#"
+DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS increment_update_attempt SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS model_update_pending SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS incr_side_effect_pending SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS queue_control SCHEMALESS;
+"#;
+
 /// File observation captured during a (read-only) scan.
 ///
 /// Writing this must NOT touch `applied_sesno` beyond a one-time establishment
@@ -79,6 +88,12 @@ struct StateRow {
     sesno: Option<i32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LegacyInfoWatermark {
+    dbnum: u32,
+    sesno: i32,
+}
+
 /// A file-identity anomaly for one `dbnum` (see spec §文件异常).
 ///
 /// [`check_file_against_state`] decides `Rollback` / `PathMigrated` from a single
@@ -115,6 +130,76 @@ impl FileAnomaly {
     /// （QUEUE-FIELD-MAP §3「本期不执行」一格的判定，从预览里提出来复用）。
     pub fn blocks(&self) -> bool {
         !matches!(self, FileAnomaly::PathMigrated { .. })
+    }
+
+    /// 说给人听的阻断理由；不阻断的异常返回 `None`。
+    ///
+    /// 回退那句的措辞被 `docs/specs/web-service-api.md` 的回执样例钉着，别改。
+    pub fn block_reason(&self) -> Option<String> {
+        match self {
+            FileAnomaly::PathMigrated { .. } => None,
+            FileAnomaly::Rollback {
+                file_latest_sesno,
+                applied_sesno,
+            } => Some(format!(
+                "文件回退或被替换（file_latest_sesno={file_latest_sesno} < \
+                 applied_sesno={applied_sesno}），已阻断"
+            )),
+            FileAnomaly::TypeChanged {
+                stored_db_type,
+                observed_db_type,
+            } => Some(format!(
+                "库类型变更（登记 {stored_db_type} → 现场 {observed_db_type}），已阻断"
+            )),
+            FileAnomaly::Duplicate { paths } => Some(format!(
+                "同 dbnum 存在多个文件，已阻断: {}",
+                paths.join("; ")
+            )),
+            FileAnomaly::Missing { path } => {
+                Some(format!("登记文件缺失，已阻断: {path}"))
+            }
+        }
+    }
+}
+
+/// 一次扫描观察的裁决：登记状态 + 异常分类。
+///
+/// 存在的理由是**落库口径只能有一处**。判据（`db_type` / `file_name` /
+/// `file_path`）与写这几个字段的语句是同一批，谁先谁后、阻断时写不写，过去由
+/// 每个调用点各自决定，于是自动路径用只写观察值的那条语句保住了证据，而手动
+/// 预览与执行体照常刷新文件身份——同一个 `TypeChanged`，点一次预览就被自己
+/// 抹掉，连自动路径下一轮也检不出来了。
+///
+/// 现在拿到裁决才能落库（[`DbnumState::record_observation`] 由裁决自己选语句），
+/// 调用方剩下的自由只有「阻断了要说什么」。
+#[derive(Debug, Clone)]
+pub struct ScanVerdict {
+    /// 本次观察之前登记的状态；`None` 表示这个 dbnum 从未登记过。
+    pub prior: Option<DbnumState>,
+    pub anomaly: Option<FileAnomaly>,
+}
+
+impl ScanVerdict {
+    /// 权威水位（未登记时为 0）。
+    pub fn applied_sesno(&self) -> i32 {
+        self.prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0)
+    }
+
+    /// 上一次观察到的文件最新会话号（未登记时为 0）。
+    pub fn previous_file_latest_sesno(&self) -> i32 {
+        self.prior
+            .as_ref()
+            .map(|s| s.file_latest_sesno)
+            .unwrap_or(0)
+    }
+
+    pub fn blocked(&self) -> bool {
+        self.anomaly.as_ref().is_some_and(FileAnomaly::blocks)
+    }
+
+    /// 阻断理由；没阻断时 `None`。
+    pub fn block_reason(&self) -> Option<String> {
+        self.anomaly.as_ref().and_then(FileAnomaly::block_reason)
     }
 }
 
@@ -177,6 +262,66 @@ pub(crate) fn escape_surql_str(raw: &str) -> String {
 }
 
 impl DbnumState {
+    /// Ensure an old Surreal database can run the current incremental pipeline in place.
+    ///
+    /// Table definitions are idempotent. Watermark migration is fill-only: an established
+    /// `applied_sesno` always wins; otherwise the legacy `dbnum_watermark.sesno`, then the
+    /// maximum `dbnum_info_table.sesno`, becomes the durable starting watermark.
+    pub async fn ensure_increment_state_storage() -> anyhow::Result<usize> {
+        SUL_DB
+            .query(INCREMENT_STATE_SCHEMA)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化增量状态表失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("初始化增量状态表语句失败: {e}"))?;
+
+        SUL_DB
+            .query(
+                "UPDATE dbnum_watermark SET applied_sesno = sesno \
+                 WHERE applied_sesno = NONE AND sesno != NONE;",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT dbnum, math::max(sesno) AS sesno FROM dbnum_info_table \
+                 WHERE dbnum != NONE AND sesno != NONE GROUP BY dbnum;",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 统计水位失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 统计水位语句失败: {e}"))?;
+        let legacy: Vec<LegacyInfoWatermark> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码旧 DBNUM 统计水位失败: {e}"))?;
+
+        for chunk in legacy.chunks(500) {
+            let sql = chunk
+                .iter()
+                .map(|row| {
+                    format!(
+                        "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
+                         applied_sesno = applied_sesno ?? {sesno}, \
+                         sesno = sesno ?? {sesno}, updated_at = time::now();",
+                        dbnum = row.dbnum,
+                        sesno = row.sesno,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            SUL_DB
+                .query(sql)
+                .await
+                .map_err(|e| anyhow::anyhow!("固化旧 DBNUM 统计水位失败: {e}"))?
+                .check()
+                .map_err(|e| anyhow::anyhow!("固化旧 DBNUM 统计水位语句失败: {e}"))?;
+        }
+        Ok(legacy.len())
+    }
+
     /// List registered DB files. Used by project scans to surface files that
     /// disappeared instead of silently omitting their dbnum.
     pub async fn list_registered() -> anyhow::Result<Vec<DbnumState>> {
@@ -274,6 +419,62 @@ impl DbnumState {
         Ok(resolve_migrated_applied_sesno(existing_applied, legacy_sesno, info_max).unwrap_or(0))
     }
 
+    /// 读登记身份并对一次观察下裁决（纯读，不写任何东西）。
+    ///
+    /// 这是全仓判定文件异常的唯一入口：读状态、比判据、分类，一次做完，谁都不用
+    /// 再自己拼 [`check_file_against_state`] 的六个参数——过去四个调用点各拼一遍，
+    /// 其中两个干脆忘了拼。
+    ///
+    /// 读失败**必须上浮**，不能吞成「从未登记」。吞掉的话 `applied_sesno` 退化成 0，
+    /// 回退检不出来，`needs_initial_load` 还会判成「首次导入」——一次数据库抖动就能
+    /// 让一个跑了很久的库被当成新库重新全量解析。各调用方自己决定是跳过还是失败。
+    pub async fn classify_scan(obs: &FileObservation) -> anyhow::Result<ScanVerdict> {
+        let prior = Self::read(obs.dbnum).await?;
+        let anomaly = check_file_against_state(
+            prior
+                .as_ref()
+                .map(|s| s.db_type.as_str())
+                .filter(|s| !s.is_empty()),
+            prior
+                .as_ref()
+                .map(|s| s.file_path.as_str())
+                .filter(|s| !s.is_empty()),
+            prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0),
+            &obs.db_type,
+            &obs.file_path,
+            obs.file_latest_sesno,
+        );
+        Ok(ScanVerdict { prior, anomaly })
+    }
+
+    /// 按裁决落库这次观察：阻断只写观察值，否则连文件身份一并刷新。
+    ///
+    /// 这是落库观察的**唯一入口**——底下那两条语句都是私有的，模块外拿不到。
+    /// 「选哪条」不能有第二个决定点：选错一次，异常就把自己抹掉，而且是静默的
+    /// ——下一轮扫描一切正常，只是那个库再也不会被拦下来了。
+    pub async fn record_observation(
+        obs: &FileObservation,
+        verdict: &ScanVerdict,
+    ) -> anyhow::Result<()> {
+        if verdict.blocked() {
+            Self::record_blocked_observation(obs).await
+        } else {
+            Self::record_scan(obs).await
+        }
+    }
+
+    /// 测试夹具专用：无条件写入文件身份，绕开裁决。
+    ///
+    /// 只给「需要把某个身份摆进库里当前置条件」的 live 测试用（例如故意重放一个
+    /// 更旧的基线，那种观察会被判成回退，走正门就写不进身份）。名字取得这么长
+    /// 是故意的：生产代码里出现它，评审一眼就能看见。
+    #[cfg(test)]
+    pub(crate) async fn force_scan_identity_for_test(
+        obs: &FileObservation,
+    ) -> anyhow::Result<()> {
+        Self::record_scan(obs).await
+    }
+
     /// Persist a scan observation WITHOUT touching the applied watermark.
     ///
     /// Refreshes only the file-identity + observation fields and `scanned_at`
@@ -282,7 +483,10 @@ impl DbnumState {
     /// authoritative watermark unchanged; it is established durably only on the
     /// success path via [`Self::advance_applied`], while reads resolve it through
     /// the one-time migration in [`resolve_migrated_applied_sesno`].
-    pub async fn record_scan(obs: &FileObservation) -> anyhow::Result<()> {
+    ///
+    /// 私有：外面只能经 [`Self::record_observation`] 落库，由裁决决定走这条还是
+    /// 只写观察值的那条。
+    async fn record_scan(obs: &FileObservation) -> anyhow::Result<()> {
         let modified_expr = obs
             .file_modified_at
             .as_deref()
@@ -320,8 +524,10 @@ impl DbnumState {
     ///
     /// 观察值（大小、文件最新会话号、扫描时刻）照写：人从面板上仍要看得见
     /// 「现场那个文件长什么样」，这也是判断阻断是否已被人工处理掉的依据。
-    /// 与 [`Self::record_scan`] 一样，永不触碰 `applied_sesno`（ADR-001）。
-    pub async fn record_blocked_observation(obs: &FileObservation) -> anyhow::Result<()> {
+    /// 与 `record_scan` 一样，永不触碰 `applied_sesno`（ADR-001）。
+    ///
+    /// 私有：外面只能经 [`Self::record_observation`] 落库。
+    async fn record_blocked_observation(obs: &FileObservation) -> anyhow::Result<()> {
         let sql = format!(
             "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
              file_size = {file_size}, file_latest_sesno = {file_latest_sesno}, \
@@ -363,6 +569,23 @@ impl DbnumState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_schema_covers_every_increment_state_table() {
+        for table in [
+            WATERMARK_TABLE,
+            INFO_TABLE,
+            "increment_update_attempt",
+            "model_update_pending",
+            "incr_side_effect_pending",
+            "queue_control",
+        ] {
+            assert!(
+                INCREMENT_STATE_SCHEMA.contains(&format!("IF NOT EXISTS {table} ")),
+                "missing startup definition for {table}"
+            );
+        }
+    }
 
     #[test]
     fn migration_prefers_established_applied_over_legacy_and_info() {
@@ -740,5 +963,93 @@ mod tests {
             matches!(second_round, Some(FileAnomaly::TypeChanged { .. })),
             "第二轮必须仍能检出同一个异常，实际 {second_round:?}"
         );
+    }
+
+    /// 手动入队与 worker 执行体都是 `if let Some(reason) = verdict.block_reason()`
+    /// 才拦——所以「阻断」与「有话说」必须严格同步。一个阻断类异常若返回 `None`，
+    /// 那两处会一声不吭地把它放过去，恰好是本次要修的那类洞。
+    #[test]
+    fn every_blocking_anomaly_says_why_and_only_those() {
+        let cases = [
+            FileAnomaly::Rollback {
+                file_latest_sesno: 80,
+                applied_sesno: 120,
+            },
+            FileAnomaly::PathMigrated {
+                old_path: "/old".into(),
+                new_path: "/new".into(),
+            },
+            FileAnomaly::TypeChanged {
+                stored_db_type: "DESI".into(),
+                observed_db_type: "SYST".into(),
+            },
+            FileAnomaly::Duplicate {
+                paths: vec!["/a".into(), "/b".into()],
+            },
+            FileAnomaly::Missing {
+                path: "/gone".into(),
+            },
+        ];
+        for anomaly in &cases {
+            assert_eq!(
+                anomaly.block_reason().is_some(),
+                anomaly.blocks(),
+                "{anomaly:?}：阻断与理由必须同时有或同时无"
+            );
+        }
+    }
+
+    /// 回退那句的措辞被 `docs/specs/web-service-api.md` 的回执样例钉着。
+    #[test]
+    fn the_rollback_reason_matches_the_published_receipt_wording() {
+        let reason = FileAnomaly::Rollback {
+            file_latest_sesno: 812,
+            applied_sesno: 1005,
+        }
+        .block_reason()
+        .expect("回退是阻断类异常");
+        assert_eq!(
+            reason,
+            "文件回退或被替换（file_latest_sesno=812 < applied_sesno=1005），已阻断"
+        );
+    }
+
+    /// 从未登记过的库：水位与上一次观察都取 0，且不算异常——首次导入走的是
+    /// `needs_initial_load`，不是阻断。
+    #[test]
+    fn an_unregistered_dbnum_yields_a_clean_verdict() {
+        let verdict = ScanVerdict {
+            prior: None,
+            anomaly: None,
+        };
+        assert_eq!(verdict.applied_sesno(), 0);
+        assert_eq!(verdict.previous_file_latest_sesno(), 0);
+        assert!(!verdict.blocked());
+        assert!(verdict.block_reason().is_none());
+    }
+
+    /// 路径迁移是良性搬家：不阻断，所以调用方照常执行，而落库会走刷新身份那条
+    /// 语句把登记路径更新过来。
+    #[test]
+    fn a_migrated_path_does_not_block_the_batch() {
+        let verdict = ScanVerdict {
+            prior: Some(DbnumState {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                file_path: "/old/desi_1".into(),
+                file_latest_sesno: 120,
+                applied_sesno: 120,
+                initialized: true,
+                ..Default::default()
+            }),
+            anomaly: Some(FileAnomaly::PathMigrated {
+                old_path: "/old/desi_1".into(),
+                new_path: "/new/desi_1".into(),
+            }),
+        };
+        assert_eq!(verdict.applied_sesno(), 120);
+        assert_eq!(verdict.previous_file_latest_sesno(), 120);
+        assert!(!verdict.blocked());
+        assert!(verdict.block_reason().is_none());
     }
 }

@@ -83,7 +83,7 @@ impl ModelRefreshPolicy {
             "ModelRefreshPolicy: 生成模型，根数量: {}",
             db_option.debug_root_refnos.as_ref().unwrap().len()
         );
-        gen_all_geos_data(vec![], &db_option, None).await?;
+        gen_all_geos_data(&db_option).await?;
         Ok(())
     }
 

@@ -30,8 +30,6 @@ pub mod sync_publisher;
 
 pub mod side_effect_pending;
 
-pub mod increment_record;
-
 pub mod helper;
 
 pub mod cata_closure;

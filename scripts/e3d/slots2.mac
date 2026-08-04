@@ -1,0 +1,72 @@
+-- Dump the dabacon per-noun attribute descriptor table from the live session.
+-- Probes both the long and the short PML object name in one pass.
+
+!out = 'D:/work/plant-code/old/gen-model/output'
+!log = object FILE(!out + '/slots_export.log')
+!lines = ARRAY()
+!lines.append('step1 macro running')
+!log.writeFile('OVERWRITE', !lines)
+
+!res = 'none'
+!ok = TRUE
+!haveL = TRUE
+!haveS = TRUE
+
+import 'GenModelSlots2'
+handle any
+    !ok = FALSE
+endhandle
+if (!ok) then
+    !lines.append('import GenModelSlots2 : OK')
+else
+    !lines.append('import GenModelSlots2 : FAIL')
+endif
+!log.writeFile('OVERWRITE', !lines)
+
+if (!ok) then
+    !eL = object NOUNLAYOUTEXPORT()
+    handle any
+        !haveL = FALSE
+    endhandle
+    if (!haveL) then
+        !lines.append('LONG  NOUNLAYOUTEXPORT : OK')
+    else
+        !lines.append('LONG  NOUNLAYOUTEXPORT : FAIL')
+    endif
+endif
+!log.writeFile('OVERWRITE', !lines)
+
+if (!ok) then
+    !eS = object GMSLOTS()
+    handle any
+        !haveS = FALSE
+    endhandle
+    if (!haveS) then
+        !lines.append('SHORT GMSLOTS : OK')
+    else
+        !lines.append('SHORT GMSLOTS : FAIL')
+    endif
+endif
+!log.writeFile('OVERWRITE', !lines)
+
+if (!haveS) then
+    !lines.append('calling GMSLOTS.Run')
+    !log.writeFile('OVERWRITE', !lines)
+    !res = !eS.Run(!out + '/noun_descriptor_slots.json', '3000')
+    handle any
+        !res = 'GMSLOTS.Run threw'
+    endhandle
+elseif (!haveL) then
+    !lines.append('calling NOUNLAYOUTEXPORT.ExportSlotsN')
+    !log.writeFile('OVERWRITE', !lines)
+    !res = !eL.ExportSlotsN(!out + '/noun_descriptor_slots.json', '3000')
+    handle any
+        !res = 'ExportSlotsN threw'
+    endhandle
+endif
+
+!lines.append('result ' + !res)
+!lines.append('done')
+!log.writeFile('OVERWRITE', !lines)
+
+$P GMSLOTS $!res

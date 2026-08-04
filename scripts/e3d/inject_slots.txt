@@ -1,0 +1,4 @@
+import 'GenModelNounLayout'
+!gmE = object NOUNLAYOUTEXPORT()
+!gmS = !gmE.ExportSlotsN('D:/work/plant-code/old/gen-model/output/noun_descriptor_slots.json','3000')
+$P GMSLOTS $!gmS

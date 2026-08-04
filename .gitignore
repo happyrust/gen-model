@@ -3,7 +3,6 @@
 /assets/
 /asset/
 models/
-final.obj
 watcher.json
 /all_attr_info.json
 accel_tree.bin
@@ -11,3 +10,22 @@ accel_tree.bin
 aios-database.exe
 mqtt-server.exe
 simple-http-server.exe
+
+# 运行与调试产生的临时产物（生成日志、进程日志、导出的 mesh）
+*.log
+*.obj
+logs_*.txt
+
+# bin/surreal.exe 起的本地工作库数据目录（rocksdb，随时可重灌）
+/.surreal/
+
+# 按端口区分的站点运行目录（scripts/Invoke-SiteDbnumParse.ps1 生成，随时可重建）
+/.sites/
+
+# 本地工具缓存与手动配置备份（可重建 / 仅本机有效）
+.sigmap-cache.json
+.brooks-lint-history.json
+*.gm9bak
+
+# 根目录下以下划线开头的一次性排查/探针产物（_sys_parse、_ref_rev_probe 等）
+/_*

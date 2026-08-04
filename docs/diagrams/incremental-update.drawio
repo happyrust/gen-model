@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="① 增量更新总流程">
+    <mxGraphModel dx="1400" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p1band1" value="① 发现与门控 · src/data_interface/increment_manager.rs" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="40" width="1840" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_init" value="init_watcher&#xa;启动时 WalkDir 全盘扫描&#xa;（按文件大小降序）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band1">
+          <mxGeometry x="40" y="60" width="310" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_watch" value="async_watch&#xa;PollWatcher 定时轮询（默认 30s）&#xa;适配 SMB / NFS 远程共享目录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band1">
+          <mxGeometry x="390" y="60" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_manual" value="manual_update&#xa;手动预览 / 执行&#xa;（与自动路径同口径）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band1">
+          <mxGeometry x="760" y="60" width="290" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_gate" value="文件门控&#xa;should_exclude_file&#xa;should_process_database" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p1band1">
+          <mxGeometry x="1090" y="60" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_f6" value="F6 scan_and_check_file&#xa;文件身份 / 回退 / 路径迁移&#xa;同 dbnum 多文件 → 阻断" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p1band1">
+          <mxGeometry x="1460" y="60" width="340" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1band2" value="② 增量窗口解析 · sesno_range.rs（ADR-001：applied_sesno 是唯一权威水位）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="280" width="1840" height="320" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_wm" value="dbnum_watermark:{dbnum}&#xa;applied_sesno（已应用，权威）&#xa;file_latest_sesno（仅观察）" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="40" y="55" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_cmp" value="file_latest_sesno&#xa;&gt; applied_sesno ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="410" y="50" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_near" value="get_nearest_large_sesno(applied+1)&#xa;会话号不连续 → 跳到最近可用会话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="790" y="55" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_range" value="更新窗口&#xa;range = nearest ..= file_latest" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="1170" y="55" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_adr" value="ADR-001 约束&#xa;观察字段与 applied_sesno 分开写&#xa;水位只在数据批次成功后推进" style="rounded=0;dashed=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="p1band2">
+          <mxGeometry x="1510" y="55" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_skip" value="否 → 本文件无增量&#xa;跳过（水位不动）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="410" y="210" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_cold" value="冷启动（水位 = 0）&#xa;仅 SYST/DICT/GLB/GLOB 全量首载；DESI/CATA 一律跳过" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p1band2">
+          <mxGeometry x="790" y="210" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1band3" value="③ 落库与水位推进 · increment_pipeline.rs（按文件隔离：单文件失败不影响其它文件）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="650" width="1840" height="350" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_attempt" value="load_attempt(dbnum)&#xa;上次是否崩在半路？&#xa;是 → 复用固定窗口重放" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="40" y="60" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_collect" value="collect_changes&#xa;PdmsIO 按 sesno 收集&#xa;EleOperationData（增/改/删）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="380" y="60" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_plan" value="build_model_update_plan&#xa;【落库前算】此时 OWNER 图 /&#xa;反向索引仍是更新前状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1;" vertex="1" parent="p1band3">
+          <mxGeometry x="720" y="60" width="350" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_prep" value="prepare_attempt&#xa;把「固定 range + 模型计划」&#xa;写成恢复记录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="1110" y="60" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_attstore" value="increment_update_attempt&#xa;（短命恢复记录）" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="1470" y="60" width="330" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_persist" value="persist_latest_main_data&#xa;只写 pe 最新态（不存历史会话）&#xa;分块事务 chunk=500 + UPSERT 幂等" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="1105" y="210" width="330" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_cache" value="invalidate_caches&#xa;清 PE / 属性 / world-transform 缓存&#xa;（含 OWNER 搬迁新旧两侧）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="760" y="210" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_rev" value="maintain_reverse_index&#xa;ref_rev 正向引用反转（ADR-003）&#xa;非致命：失败只告警，不阻塞水位" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="p1band3">
+          <mxGeometry x="400" y="210" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_final" value="finalize_attempt【单事务】&#xa;入队 ModelWorkItem&#xa;+ 推进 applied_sesno + 删恢复记录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="p1band3">
+          <mxGeometry x="30" y="210" width="330" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1band4" value="④ 模型工作执行 · model_update_pending::drain（持久队列，可重放，与水位解耦）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="1050" width="1840" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_queue" value="model_update_pending&#xa;status ∈ {pending, failed}&#xa;失败 → attempts+1，下次 drain 重试" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="p1band4">
+          <mxGeometry x="760" y="60" width="340" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_regen" value="RegenRoot&#xa;generate_roots → gen_all_geos_data&#xa;（可选 CATA 引用闭包预取）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p1band4">
+          <mxGeometry x="40" y="200" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_trans" value="Transform&#xa;update_world_transforms&#xa;子树 inst_relate 节点，批 50" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p1band4">
+          <mxGeometry x="480" y="200" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_del" value="DeleteCleanup&#xa;delete_inst_relate_subtree&#xa;清已删元素的旧几何（含子树）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p1band4">
+          <mxGeometry x="920" y="200" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_casc" value="CascadeExpand&#xa;expand_live_reverse_cascade&#xa;反查引用者 → 再入队 RegenRoot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p1band4">
+          <mxGeometry x="1360" y="200" width="420" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1band5" value="⑤ 下游副作用 · 失败不回滚水位，落 SideEffectCompensator 待补偿" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="140" y="1440" width="1840" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_mysql" value="MySQL pdms_element&#xa;（feature = &quot;sql&quot;）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band5">
+          <mxGeometry x="40" y="60" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_syst" value="SYST 增量后&#xa;sync_team_data 刷新 TEAM 派生表" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band5">
+          <mxGeometry x="410" y="60" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_mqtt" value="SyncPublisher&#xa;MQTT 异地同步存档" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p1band5">
+          <mxGeometry x="780" y="60" width="320" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p1_comp" value="SideEffectCompensator&#xa;启动时 / 每次事件前 drain 重试" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p1band5">
+          <mxGeometry x="1140" y="60" width="340" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_init" target="p1_gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_watch" target="p1_gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_manual" target="p1_gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_gate" target="p1_f6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1e" value="读水位" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_f6" target="p1_wm">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1770" y="255" />
+              <mxPoint x="345" y="255" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_wm" target="p1_cmp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2b" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_cmp" target="p1_near">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_near" target="p1_range">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2d" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeColor=#b85450;" edge="1" parent="1" source="p1_cmp" target="p1_skip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2e" value="水位=0 且 SYS meta" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.8;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;dashed=1;" edge="1" parent="1" source="p1_cmp" target="p1_cold">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2f" value="逐文件进入落库流水线" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_range" target="p1_attempt">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1460" y="625" />
+              <mxPoint x="330" y="625" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3a" value="否（正常）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_attempt" target="p1_collect">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_collect" target="p1_plan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_plan" target="p1_prep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3d" value="写入" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_prep" target="p1_attstore">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3e" value="崩溃后：复用固定窗口 + 旧计划" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;fontSize=12;fontColor=#b85450;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_attstore" target="p1_attempt">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1775" y="680" />
+              <mxPoint x="330" y="680" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3f" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_prep" target="p1_persist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3g" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_persist" target="p1_cache">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3h" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_cache" target="p1_rev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3i" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_rev" target="p1_final">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3j" value="推进 applied_sesno（唯一写入点）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#82b366;fontSize=12;fontColor=#3d6b2b;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_final" target="p1_wm">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="90" y="915" />
+              <mxPoint x="90" y="385" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4a" value="工作项已持久化" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_final" target="p1_queue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="335" y="1155" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_queue" target="p1_regen">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.4;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_queue" target="p1_trans">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.6;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_queue" target="p1_del">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.8;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_queue" target="p1_casc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4f" value="再入队" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;fontSize=12;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_casc" target="p1_queue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1950" y="1305" />
+              <mxPoint x="1950" y="1155" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5a" value="execute_incr_update 编排" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.8;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p1_final" target="p1_mysql">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="110" y="948" />
+              <mxPoint x="110" y="1545" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_mysql" target="p1_syst">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_syst" target="p1_mqtt">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5d" value="任一失败 → 落库待补偿" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;fontSize=12;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p1_mqtt" target="p1_comp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="② 影响判定与生成根归一">
+    <mxGraphModel dx="1400" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p2_in" value="EleOperationData（一次元素操作，来自某个 sesno）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="500" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_d1" value="detail 类型？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="790" y="170" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_add" value="Add / Deleted&#xa;→ 直接 Regen（StructuralMembership）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="340" width="420" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_mod" value="Modified&#xa;→ 逐属性归类 classify_operation_effects&#xa;（children 变化 / 属性差异为空 也保守 Regen）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="700" y="340" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_none" value="None&#xa;→ Skip（无操作）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1380" y="340" width="380" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2band" value="属性效果分类 model_impact::classify_attribute_effect_with_meta —— 宁多勿漏：只有明确中性才跳过" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="100" y="500" width="1660" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_egeo" value="DirectGeometry → Regen&#xa;DIAM / XLEN / HEIG / RADI / PARA* / P-point 参数&#xa;（直接几何输入，改了就重建网格）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="40" y="60" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_edep" value="DependencyCascade → Regen + 反查级联&#xa;SPRE / CATR / PRTREF / HREF / DESP …&#xa;（经目录、规格、邻居间接影响几何）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="580" y="60" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_estr" value="StructuralMembership → Regen&#xa;OWNER / CHILDREN / NOUN / TYPE / LEVE&#xa;（OWNER 搬迁：新旧两侧生成根都要重建）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="1120" y="60" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_eunk" value="Unknown → Regen（保守）&#xa;静态清单未覆盖的属性、UDA:&lt;id&gt;&#xa;A2：若 att_type = ELEMENT（引用属性）则升级为 DependencyCascade" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="40" y="190" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_etrans" value="TransformOnly → 仅更新 world transform&#xa;POS / POSL / ORI / YDIR / ZDIR …&#xa;例外：noun 是 loop 容器（POIN/VERT/PAVE/PLOO）→ 升级 Regen&#xa;（点坐标是属主网格的输入，不是独立实例位姿）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="580" y="190" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_edata" value="DataOnly → Skip&#xa;NAME / DESC / PURP / FUNCTION&#xa;（纯业务元数据，落库但不动几何）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="p2band">
+          <mxGeometry x="1120" y="190" width="500" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_impact" value="归约三态 OperationEffectSummary::impact()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="890" width="500" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_regen" value="Regen&#xa;重生成几何" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="200" y="1030" width="440" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_trans" value="TransformOnly&#xa;只更新 world transform，网格不变" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="740" y="1030" width="440" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_skip" value="Skip&#xa;不做模型工作" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="1030" width="420" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_net" value="净变化折叠 merge_net_change_details（整个待更新窗口按 refno 合并）&#xa;新增后修改 → Added ｜ 多次修改 → Modified ｜ 修改后删除 → Deleted ｜ 新增后删除 → Cancelled（丢弃，不产生任何工作）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="200" y="1170" width="1000" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_revfail" value="反向索引读失败 → 降级&#xa;resolve_unit_rollup_without_reverse_index&#xa;并为每个受影响元素登记 CascadeExpand 待办" style="rounded=1;dashed=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="1170" width="460" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2band15" value="交付单元归并 manual_update::resolve_unit_rollup —— 三源合一后再按生成根策略归一（ADR-003）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1330" width="1560" height="320" as="geometry" />
+        </mxCell>
+        <mxCell id="p2r1" value="① load_base_graph&#xa;落库前的 Surreal PE / OWNER 链&#xa;计划在写库前算，所以它就是前态快照（含本窗口将删除的元素）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="p2band15">
+          <mxGeometry x="30" y="50" width="480" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2r2" value="② build_owner_overlay&#xa;窗口内 Add / Modified 的后态 OWNER 覆盖图&#xa;（含同窗口一起搬迁的祖先）+ 净删除集" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="p2band15">
+          <mxGeometry x="540" y="50" width="480" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2r3" value="③ load_ref_reversal_closure&#xa;ref_rev 反向引用的传递闭包（有界 BFS）&#xa;穿透 SPCO / SCOM 这类自身没有交付单元的目录中间件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="p2band15">
+          <mxGeometry x="1050" y="50" width="480" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p2r4" value="build_unit_rollup：增 / 改按后态解析，删按前态解析&#xa;· 跨单元搬迁 → 旧单元记 moved_out、新单元记 moved_in，两侧都重生成&#xa;· 反向级联 → 被引用元素变更时，所有引用者所在交付单元一并 cascaded（目录链 TABITE → SPCO → BRAN 逐跳跟进）&#xa;· 没有交付单元祖先 → 计入 no_generation + warning；不做整 ZONE 兜底，也不阻塞数据批次" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;align=left;spacingLeft=24;" vertex="1" parent="p2band15">
+          <mxGeometry x="30" y="200" width="1500" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2band2" value="生成根归一 generation_root.rs —— 一个变化元素 → 恰好一个生成根；同一根一批只生成一次" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1720" width="1000" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g1" value="① 最近的最小交付单元（MDU）祖先&#xa;默认 BRAN / HANG / SUPPO / EQUI&#xa;可用 delivery_unit_types 配置替换/追加" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="p2band2">
+          <mxGeometry x="30" y="60" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g2" value="② 无 MDU → significant owner&#xa;上溯 owner；跨 loop 容器&#xa;(LOOP/PLOO/VERT/PAVE) 继续上溯，≤32 层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="p2band2">
+          <mxGeometry x="510" y="60" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g3" value="③ owner 为 SITE / ZONE（颗粒过粗）&#xa;→ 改用元素自身作根（如 EQUI / PIPE / STRU）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="p2band2">
+          <mxGeometry x="30" y="190" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_g4" value="④ 元素自身即 SITE / ZONE / WORL&#xa;→ 不生成（绝不整区重算）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="p2band2">
+          <mxGeometry x="510" y="190" width="460" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2wband" value="ModelWorkItem（落 model_update_pending 持久队列）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="1720" width="660" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_w1" value="RegenRoot · 以生成根重建几何" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p2wband">
+          <mxGeometry x="20" y="50" width="620" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_w2" value="Transform · 仅更新 world transform" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p2wband">
+          <mxGeometry x="20" y="120" width="620" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_w3" value="DeleteCleanup · 清已删元素子树旧几何" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p2wband">
+          <mxGeometry x="20" y="190" width="620" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p2_w4" value="CascadeExpand · 反查引用者后再展开为 RegenRoot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p2wband">
+          <mxGeometry x="20" y="260" width="620" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="f1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_in" target="p2_d1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d1" target="p2_add">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d1" target="p2_mod">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_d1" target="p2_none">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_mod" target="p2band">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2band" target="p2_impact">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_impact" target="p2_regen">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_impact" target="p2_trans">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_impact" target="p2_skip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_add" target="p2_regen">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="60" y="390" />
+              <mxPoint x="60" y="1075" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_none" target="p2_skip">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1830" y="390" />
+              <mxPoint x="1830" y="1075" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_regen" target="p2_net">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_trans" target="p2_net">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14" value="Regen 元素 → 交付单元归并" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p2_net" target="p2band15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.16;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2r1" target="p2r4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2r2" target="p2r4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.84;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2r3" target="p2r4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.2;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2r3" target="p2_revfail">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14e" value="每个变化 → 恰好一个生成根" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p2band15" target="p2band2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f15" value="生成根 → RegenRoot" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p2band2" target="p2wband">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f16" value="Transform / DeleteCleanup 直接成项" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.9;exitY=1;exitDx=0;exitDy=0;entryX=0.742;entryY=0;entryDx=0;entryDy=0;fontSize=12;" edge="1" parent="1" source="p2_net" target="p2wband">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1100" y="1300" />
+              <mxPoint x="1690" y="1300" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f17" value="CascadeExpand 延迟项" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;fontSize=12;fontColor=#b85450;exitX=0.97;exitY=1;exitDx=0;exitDy=0;entryX=0.827;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="p2_revfail" target="p2wband">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1746" y="1500" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="③ 一致性与容错">
+    <mxGraphModel dx="1400" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="p3band1" value="正常时序（单文件 apply_one）" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="780" height="1020" as="geometry" />
+        </mxCell>
+        <mxCell id="t0" value="① 门控 + F6 文件身份校验&#xa;record_scan 只写观察字段" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="60" width="700" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="② prepare_attempt&#xa;写 increment_update_attempt：固定 range + 模型计划" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="190" width="700" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" value="③ persist_latest_main_data&#xa;分块事务 chunk=500 · UPSERT 幂等 · 只写 pe 最新态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="330" width="700" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="t3" value="④ maintain_reverse_index / datacenter_version&#xa;（按约定非致命）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="470" width="700" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="t4" value="⑤ finalize_attempt【单事务】&#xa;入队 ModelWorkItem + 推进 applied_sesno + 删恢复记录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="600" width="700" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="t5" value="⑥ model_update_pending::drain&#xa;执行 RegenRoot / Transform / DeleteCleanup / CascadeExpand" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="750" width="700" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="t6" value="⑦ 下游副作用&#xa;MySQL / SYST 派生 / MQTT 异地同步" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="p3band1">
+          <mxGeometry x="40" y="890" width="700" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3band2" value="崩溃 / 异常 → 恢复策略" style="swimlane;startSize=40;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontStyle=1;verticalAlign=top;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="920" y="60" width="1000" height="1020" as="geometry" />
+        </mxCell>
+        <mxCell id="c5" value="文件回退（file_latest &lt; applied）/ 同 dbnum 多个文件&#xa;→ 阻断该文件，水位绝不回退，也不自动挑选文件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="60" width="920" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="崩在 ②~⑤ 之间&#xa;→ attempt 记录仍在、水位未动 → 下次复用「固定窗口 + 落库前算好的旧计划」原样重放&#xa;（PE 可能半写，更新后的 OWNER 图已不可信，所以不重算计划）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="190" width="920" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="落库事务失败 / 半写&#xa;→ 水位不推进；UPSERT 幂等使同一窗口重放从可收敛状态开始&#xa;（避免「半写 + 重试撞已存在记录」把 dbnum 水位卡死）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="330" width="920" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="crev" value="反向索引 / datacenter 写失败&#xa;→ 只记 warning，绝不阻塞数据批次与水位；缺一条引用边最多漏一次级联，靠后续触及或全量重建自愈" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="470" width="920" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="崩在 ⑤ 之后、模型执行之前&#xa;→ 水位已推进，但工作项已在 model_update_pending 落库 → 下次 drain 照常补做（不需要重放数据）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="600" width="920" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="模型生成失败&#xa;→ status = failed，attempts + 1，记 last_error；下次 watcher / 手动触发时 drain 重试，水位不回退&#xa;（另有 conservative_regen 失败 → owner_regen 粗粒度安全超集兜底）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="750" width="920" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c6" value="下游副作用失败（MySQL / SYST 派生 / MQTT）&#xa;→ 记 warning + SideEffectCompensator 落库待补偿，启动时与每次事件前 drain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="p3band2">
+          <mxGeometry x="40" y="890" width="920" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3inv" value="核心不变式（ADR-001）&#xa;① applied_sesno 只在「该 dbnum 的数据批次整体成功」后推进，绝不回退、绝不虚增&#xa;② 文件观察字段（file_latest_sesno / scanned_at / 文件身份）与 applied_sesno 分开写：观察写失败不得影响水位&#xa;③ 模型工作计划在落库前算好并持久化，使「数据成功、模型没做完」可安全重放&#xa;④ 模型生成与下游同步失败都不回滚水位，改由持久队列 + 补偿器重试；逻辑窗口恒为 (applied_sesno, file_latest_sesno]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;spacingLeft=20;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1130" width="1860" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="g1e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t0" target="t1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g2e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t1" target="t2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g3e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t2" target="t3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g4e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t3" target="t4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g5e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t4" target="t5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g6e" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="t5" target="t6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t0" target="c5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t1" target="c1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t2" target="c2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#d79b00;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t3" target="crev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#d6b656;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t4" target="c3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t5" target="c4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="h6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="t6" target="c6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
