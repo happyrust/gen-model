@@ -65,6 +65,7 @@ use crate::data_interface::model_impact::{
     classify_operation_impact, owner_change,
 };
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
+use crate::data_interface::project_paths::resolve_project_root;
 use crate::data_interface::sesno_range::SesnoRangeResolver;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
@@ -2557,15 +2558,18 @@ impl AiosDBManager {
         project: &str,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
-        let project_dir = self
-            .db_option
-            .get_project_path(project)
+        let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
         // 按 dbnum 点名的入口不设范围门：调用方已经自己决定了要哪个库，
         // 再套一层 MDB 门只会把点名挡掉。
         let candidates = self
-            .scan_project_candidates(&project_dir, &UpdateScope::unrestricted(), &mut warnings)
+            .scan_project_candidates(
+                project,
+                &project_dir,
+                &UpdateScope::unrestricted(),
+                &mut warnings,
+            )
             .shift_remove(&dbnum)
             .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
         if candidates.len() != 1 {
@@ -2722,9 +2726,7 @@ impl AiosDBManager {
         project: &str,
         mdb: Option<&str>,
     ) -> anyhow::Result<ManualUpdatePreview> {
-        let project_dir = self
-            .db_option
-            .get_project_path(project)
+        let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         if !project_dir.exists() {
             anyhow::bail!("项目目录不存在: {}", project_dir.display());
@@ -2732,7 +2734,7 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
 
         let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
-        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut warnings);
+        let by_dbnum = self.scan_project_candidates(project, &project_dir, &scope, &mut warnings);
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
         let mut dbnums = Vec::new();
@@ -2749,7 +2751,7 @@ impl AiosDBManager {
                 for state in states {
                     let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
                     // 范围外的库没进扫描，「登记了却没扫到」对它不构成文件缺失。
-                    if !self.in_scope(&scope, &state.db_type, state.dbnum) {
+                    if !self.in_scope(&scope, project, &state.db_type, state.dbnum) {
                         continue;
                     }
                     if !state.file_path.is_empty()
@@ -2784,7 +2786,7 @@ impl AiosDBManager {
             // `manual_db_nums` 手工收窄掉的库不是「没有文件」，是本次故意不看它。
             // 不隔开的话，调试时把范围收到一个库，另外 28 个会顶着「项目内无此文件」
             // 冒出来——那是假话，文件就在磁盘上。
-            if !self.should_process_database("DESI", dbnum) {
+            if !self.should_process_database(project, "DESI", dbnum) {
                 continue;
             }
             dbnums.push(DbnumPreview {
@@ -2858,7 +2860,7 @@ impl AiosDBManager {
         mdb: Option<&str>,
     ) -> anyhow::Result<DbnumStatusReport> {
         let mut report = DbnumStatusReport::default();
-        let Some(project_dir) = self.db_option.get_project_path(project) else {
+        let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
             anyhow::bail!("无法解析项目目录: {project}");
         };
         if !project_dir.exists() {
@@ -2867,7 +2869,8 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
         report.warnings.extend(scope.warning().map(str::to_owned));
 
-        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut report.warnings);
+        let by_dbnum =
+            self.scan_project_candidates(project, &project_dir, &scope, &mut report.warnings);
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
         let project_prefix = format!(
@@ -2880,7 +2883,7 @@ impl AiosDBManager {
         );
 
         for state in registered {
-            let excluded = !self.in_scope(&scope, &state.db_type, state.dbnum);
+            let excluded = !self.in_scope(&scope, project, &state.db_type, state.dbnum);
             let stored_path = state.file_path.replace('/', "\\").to_ascii_lowercase();
             let in_this_project =
                 !state.file_path.is_empty() && stored_path.starts_with(&project_prefix);
@@ -2972,8 +2975,17 @@ impl AiosDBManager {
     /// `pub(crate)`：自动 watcher 的启动重扫与文件事件也走它（`increment_manager`）。
     /// 两条触发路径喂的是同一个队列、同一个 worker，入队口径只能有一份——自动路径
     /// 过去只过前两道，于是 MDB 外的设计库照样入队，而预览说它不在范围里。
-    pub(crate) fn in_scope(&self, scope: &UpdateScope, db_type: &str, dbnum: u32) -> bool {
-        self.should_process_database(db_type, dbnum) && scope.admits(db_type, dbnum)
+    ///
+    /// `project` 是这个库**所属的项目**（文件所在目录决定），不是配置里的主项目名：
+    /// 第一道门要靠它挡掉别的项目的运行态系统库（三个项目的 sys 库都是 dbnum 8191）。
+    pub(crate) fn in_scope(
+        &self,
+        scope: &UpdateScope,
+        project: &str,
+        db_type: &str,
+        dbnum: u32,
+    ) -> bool {
+        self.should_process_database(project, db_type, dbnum) && scope.admits(db_type, dbnum)
     }
 
     /// 本期执行范围。
@@ -3015,6 +3027,7 @@ impl AiosDBManager {
     /// 文件认不认」，它管「这个库在不在本期执行范围里」。
     fn scan_project_candidates(
         &self,
+        project: &str,
         project_dir: &std::path::Path,
         scope: &UpdateScope,
         warnings: &mut Vec<String>,
@@ -3072,7 +3085,7 @@ impl AiosDBManager {
                 continue;
             }
             let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
-            if !self.in_scope(scope, &db_type, db_no) {
+            if !self.in_scope(scope, project, &db_type, db_no) {
                 continue;
             }
 
@@ -3125,6 +3138,7 @@ impl AiosDBManager {
         // 路径下一轮也再检不出同一个异常。
         let obs = FileObservation {
             dbnum: cand.db_num,
+            project: project.to_string(),
             db_type: cand.db_type.clone(),
             file_name: cand.file_name.clone(),
             file_path: cand.path.display().to_string(),
@@ -3246,7 +3260,7 @@ impl AiosDBManager {
             namespace: self.db_option.surreal_ns.clone(),
             ..Default::default()
         };
-        let Some(project_dir) = self.db_option.get_project_path(project) else {
+        let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
             receipt.warnings.push(format!("无法解析项目目录: {project}"));
             return receipt;
         };
@@ -3273,7 +3287,8 @@ impl AiosDBManager {
         // 不报的话人只能假定它跟预览那次一样。
         receipt.mdb = scope.mdb().to_owned();
 
-        let by_dbnum = self.scan_project_candidates(&project_dir, &scope, &mut receipt.warnings);
+        let by_dbnum =
+            self.scan_project_candidates(project, &project_dir, &scope, &mut receipt.warnings);
         receipt.scanned = by_dbnum.len();
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
@@ -3307,6 +3322,7 @@ impl AiosDBManager {
             // 去跑另一个库的会话，把 8000 的 applied_sesno 推到别人的会话号上。
             let obs = FileObservation {
                 dbnum,
+                project: project.to_string(),
                 db_type: cand.db_type.clone(),
                 file_name: cand.file_name.clone(),
                 file_path: cand.path.display().to_string(),
@@ -3380,6 +3396,7 @@ impl AiosDBManager {
         let dbnum = cand.db_num;
         let obs = FileObservation {
             dbnum,
+            project: project.to_string(),
             db_type: cand.db_type.clone(),
             file_name: cand.file_name.clone(),
             file_path: cand.path.display().to_string(),

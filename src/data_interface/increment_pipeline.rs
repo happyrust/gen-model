@@ -1892,6 +1892,7 @@ mod live_tests {
         // 而只写观察值，前置身份就摆不进去。
         DbnumState::force_scan_identity_for_test(&FileObservation {
             dbnum: 8000,
+            project: manager.db_option.project_name.clone(),
             db_type: "DESI".into(),
             file_name: current
                 .file_name()

@@ -165,7 +165,14 @@ impl InMemoryCataLocator {
             projects.sort_unstable();
             projects.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
             for catalogue_project in projects {
-                let catalogue_dir = PathBuf::from(&option.project_path).join(&catalogue_project);
+                let Some(catalogue_dir) =
+                    crate::data_interface::project_paths::resolve_project_root(
+                        option,
+                        &catalogue_project,
+                    )
+                else {
+                    continue;
+                };
                 if !catalogue_dir.is_dir() {
                     continue;
                 }

@@ -50,6 +50,12 @@ const LEGACY_INFO_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FR
 #[derive(Debug, Clone, Default)]
 pub struct FileObservation {
     pub dbnum: u32,
+    /// 这个文件所属的项目（由它所在的监控目录决定，不是配置里的主项目名）。
+    ///
+    /// `dbnum` 在 AVEVA 里只在**项目内**唯一，而本表按裸 dbnum 做记录 id。带上项目
+    /// 才能认出「这一行不是你的」：三个项目的 sys 库都是 8191，实测里 zdjsys 的
+    /// 观察值就这么把 amssys 那一行的 `file_latest_sesno` 写成了 52。
+    pub project: String,
     pub db_type: String,
     pub file_name: String,
     pub file_path: String,
@@ -63,6 +69,9 @@ pub struct FileObservation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbnumState {
     pub dbnum: u32,
+    /// 这一行归哪个项目。空串表示旧数据（本字段引入前写的），此时不做归属校验。
+    #[serde(default)]
+    pub owner_project: String,
     pub db_type: String,
     pub file_name: String,
     pub file_path: String,
@@ -82,6 +91,8 @@ pub struct DbnumState {
 struct StateRow {
     #[serde(default)]
     dbnum: Option<u32>,
+    #[serde(default)]
+    owner_project: Option<String>,
     #[serde(default)]
     db_type: Option<String>,
     #[serde(default)]
@@ -133,6 +144,17 @@ pub enum FileAnomaly {
     Duplicate { paths: Vec<String> },
     /// A registered file is no longer present at its recorded path.
     Missing { path: String },
+    /// 这个 dbnum 的登记行归另一个项目所有。
+    ///
+    /// `dbnum` 只在项目内唯一（三个项目的 sys 库都是 8191），而本表按裸 dbnum
+    /// 做记录 id。正常情况下别的项目的运行态系统库压根进不了摄入范围
+    /// （`should_process_database`），这一条是那道门被绕过时的兜底：**连观察值
+    /// 都不许写**，否则就是实测过的那种污染——行还写着 amssys 的身份，
+    /// `file_latest_sesno` 却是 zdjsys 的 52。
+    ForeignProject {
+        stored_project: String,
+        observed_project: String,
+    },
 }
 
 impl FileAnomaly {
@@ -170,7 +192,19 @@ impl FileAnomaly {
             FileAnomaly::Missing { path } => {
                 Some(format!("登记文件缺失，已阻断: {path}"))
             }
+            FileAnomaly::ForeignProject {
+                stored_project,
+                observed_project,
+            } => Some(format!(
+                "该 dbnum 的登记行属于项目 {stored_project}，现场文件来自 {observed_project}，\
+                 已阻断（dbnum 只在项目内唯一，本库只承载主项目的系统库）"
+            )),
         }
+    }
+
+    /// 是不是「这一行不归你」——这类异常连观察值都不许写。
+    pub fn is_foreign_project(&self) -> bool {
+        matches!(self, FileAnomaly::ForeignProject { .. })
     }
 }
 
@@ -582,6 +616,7 @@ impl DbnumState {
                 let effective = resolve_migrated_applied_sesno(row.applied_sesno, row.sesno, None);
                 Some(DbnumState {
                     dbnum,
+                    owner_project: row.owner_project.unwrap_or_default(),
                     db_type: row.db_type.unwrap_or_default(),
                     file_name: row.file_name.unwrap_or_default(),
                     file_path: row.file_path.unwrap_or_default(),
@@ -635,6 +670,7 @@ impl DbnumState {
         let applied = resolve_migrated_applied_sesno(row.applied_sesno, row.sesno, info_max);
         Ok(Some(DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
+            owner_project: row.owner_project.unwrap_or_default(),
             db_type: row.db_type.unwrap_or_default(),
             file_name: row.file_name.unwrap_or_default(),
             file_path: row.file_path.unwrap_or_default(),
@@ -667,6 +703,26 @@ impl DbnumState {
     /// 让一个跑了很久的库被当成新库重新全量解析。各调用方自己决定是跳过还是失败。
     pub async fn classify_scan(obs: &FileObservation) -> anyhow::Result<ScanVerdict> {
         let prior = Self::read(obs.dbnum).await?;
+
+        // 归属校验先于其余判据：登记行归别的项目时，后面那些「回退 / 类型变更」
+        // 都是拿两个项目的文件在对比，结论没有意义（实测里 acpsys 就被判成了
+        // 「回退」——判据是错的，只是结论恰好安全）。空的 owner_project 是本字段
+        // 引入之前的旧行，不做校验，等它被自己的项目扫一次自然补上。
+        if let Some(state) = prior.as_ref() {
+            let stored = state.owner_project.trim();
+            let observed = obs.project.trim();
+            if !stored.is_empty() && !observed.is_empty() && !stored.eq_ignore_ascii_case(observed)
+            {
+                return Ok(ScanVerdict {
+                    anomaly: Some(FileAnomaly::ForeignProject {
+                        stored_project: stored.to_string(),
+                        observed_project: observed.to_string(),
+                    }),
+                    prior,
+                });
+            }
+        }
+
         let anomaly = check_file_against_state(
             prior
                 .as_ref()
@@ -693,6 +749,22 @@ impl DbnumState {
         obs: &FileObservation,
         verdict: &ScanVerdict,
     ) -> anyhow::Result<()> {
+        // 归属不符时**一个字都不写**。阻断路径本来也只写观察值，但那三个字段
+        // （file_size / file_latest_sesno / scanned_at）恰恰就是被写脏的那几个：
+        // 行还挂着 amssys 的身份，file_latest_sesno 却成了 zdjsys 的 52，
+        // 面板上看到的是一个不存在的文件状态。
+        if verdict
+            .anomaly
+            .as_ref()
+            .is_some_and(FileAnomaly::is_foreign_project)
+        {
+            log::warn!(
+                "dbnum={} 的登记行不归项目 {} 所有，跳过落库（连观察值也不写）",
+                obs.dbnum,
+                obs.project
+            );
+            return Ok(());
+        }
         if verdict.blocked() {
             Self::record_blocked_observation(obs).await
         } else {
@@ -732,11 +804,13 @@ impl DbnumState {
 
         let sql = format!(
             "UPSERT {WATERMARK_TABLE}:{dbnum} SET \
-             dbnum = {dbnum}, db_type = '{db_type}', file_name = '{file_name}', \
+             dbnum = {dbnum}, owner_project = '{owner_project}', \
+             db_type = '{db_type}', file_name = '{file_name}', \
              file_path = '{file_path}', file_size = {file_size}, \
              file_latest_sesno = {file_latest_sesno}, file_modified_at = {modified_expr}, \
              scanned_at = time::now(), updated_at = time::now();",
             dbnum = obs.dbnum,
+            owner_project = escape_surql_str(&obs.project),
             db_type = escape_surql_str(&obs.db_type),
             file_name = escape_surql_str(&obs.file_name),
             file_path = escape_surql_str(&obs.file_path),
@@ -955,16 +1029,21 @@ mod tests {
             FileAnomaly::Missing {
                 path: "/gone".into(),
             },
+            FileAnomaly::ForeignProject {
+                stored_project: "AvevaMarineSample".into(),
+                observed_project: "ZDJ".into(),
+            },
         ];
         for anomaly in &cases {
             let expected = match anomaly {
                 // 良性搬家：登记路径跟着更新即可。
                 FileAnomaly::PathMigrated { .. } => false,
-                // 其余四种都动了「这个 dbnum 对应哪个文件」这件事的根基。
+                // 其余几种都动了「这个 dbnum 对应哪个文件」这件事的根基。
                 FileAnomaly::Rollback { .. }
                 | FileAnomaly::TypeChanged { .. }
                 | FileAnomaly::Duplicate { .. }
-                | FileAnomaly::Missing { .. } => true,
+                | FileAnomaly::Missing { .. }
+                | FileAnomaly::ForeignProject { .. } => true,
             };
             assert_eq!(anomaly.blocks(), expected, "{anomaly:?} 的阻断口径不符");
         }
@@ -1093,6 +1172,7 @@ mod tests {
         // 扫描到文件被移动且带来更新的会话：身份字段该更新，水位不该动。
         DbnumState::record_scan(&FileObservation {
             dbnum,
+            project: "TestProject".to_string(),
             db_type: "DESI".to_string(),
             file_name: "zz_t605.dbnum".to_string(),
             file_path: r"D:\zz_t605\moved\desi_1".to_string(),
@@ -1111,6 +1191,7 @@ mod tests {
         // 再扫到一个更旧的文件（回退观察）：观察值照实写，水位仍不得倒退。
         DbnumState::record_scan(&FileObservation {
             dbnum,
+            project: "TestProject".to_string(),
             db_type: "DESI".to_string(),
             file_name: "zz_t605.dbnum".to_string(),
             file_path: r"D:\zz_t605\moved\desi_1".to_string(),
@@ -1191,6 +1272,7 @@ mod tests {
             .expect("establish watermark");
         DbnumState::record_scan(&FileObservation {
             dbnum,
+            project: "TestProject".to_string(),
             db_type: "DESI".to_string(),
             file_name: "zz_us2_0001".to_string(),
             file_path: r"D:\zz_us2\ams000\zz_us2_0001".to_string(),
@@ -1219,6 +1301,7 @@ mod tests {
         // 阻断路径的落库。
         DbnumState::record_blocked_observation(&FileObservation {
             dbnum,
+            project: "TestProject".to_string(),
             db_type: "CATA".to_string(),
             file_name: "zz_us2_0001".to_string(),
             file_path: observed_path.clone(),

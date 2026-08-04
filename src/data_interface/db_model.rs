@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use aios_core::SUL_DB;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
@@ -377,13 +376,23 @@ impl AiosDBManager {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let projects = db_option.get_project_dir_names().clone();
 
-        let db_paths =
-            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()))
-                .unwrap_or_default();
+        // 监控目录逐项目解析：本地盘与共享目录（UNC / 映射盘）混排都要认，而且一个
+        // 项目解析失败不能带走其余项目。解析结论无论成败都打出来——这份目录集合同时
+        // 是自动看门狗的监听面和手动摄入的候选面，它空着就等于「服务在跑但什么都不更新」，
+        // 而过去这里是 `collect_db_dirs(..).unwrap_or_default()`，失败连一个字都不留。
+        let plan = crate::data_interface::project_paths::plan_watch_dirs(db_option);
+        // 「这个目录属于哪个项目」只有解析这一刻知道，摄入侧靠它给批次定归属。
+        crate::data_interface::project_paths::record_watch_dir_owners(&plan);
+        let db_paths = plan.dirs();
+        println!("监控目录解析（共 {} 个库目录）:\n{}", db_paths.len(), plan.describe());
+        for problem in plan.problems() {
+            log::warn!("监控目录解析失败: {problem}");
+            eprintln!("监控目录解析失败: {problem}");
+        }
         let mut watcher = PdmsWatcher::new(db_paths);
         #[cfg(feature = "debug_watch")]
         {
-            dbg!(&db_paths);
+            dbg!(&watcher.watch_dirs);
             dbg!(watcher.headers.len());
             dbg!(watcher.file_name_full_path_map.len());
         }

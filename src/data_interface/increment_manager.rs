@@ -36,6 +36,7 @@ use walkdir::WalkDir;
 // 本地模块导入
 use crate::api::element::gen_pdms_element_insert_sql;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::project_paths::{MountState, path_starts_with};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::*;
 use tracing_subscriber::fmt::format;
@@ -50,11 +51,33 @@ mod tests {
     #[test]
     fn duplicate_dbnums_are_detected_across_separate_paths() {
         let duplicates = duplicate_dbnums([
-            (7997, PathBuf::from("first")),
-            (8000, PathBuf::from("only")),
-            (7997, PathBuf::from("second")),
+            ("AMS".to_string(), 7997, PathBuf::from("first")),
+            ("AMS".to_string(), 8000, PathBuf::from("only")),
+            ("AMS".to_string(), 7997, PathBuf::from("second")),
         ]);
-        assert_eq!(duplicates, HashSet::from([7997]));
+        assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 7997)]));
+    }
+
+    /// 不同项目各自的 sys 库天然共用 dbnum=8191（amssys / acpsys / zdjsys）。
+    /// 只按 dbnum 判重会把三个正常的库一起阻断——实测就是这么发生的。
+    #[test]
+    fn same_dbnum_in_different_projects_is_not_a_duplicate() {
+        let duplicates = duplicate_dbnums([
+            ("AvevaMarineSample".to_string(), 8191, PathBuf::from("ams000/amssys")),
+            ("AvevaCatalogue".to_string(), 8191, PathBuf::from("acp000/acpsys")),
+            ("ZDJ".to_string(), 8191, PathBuf::from("ZDJ000/zdjsys")),
+        ]);
+        assert!(duplicates.is_empty(), "跨项目同号不是重复: {duplicates:?}");
+    }
+
+    /// 同一个项目里的人手副本仍然要被拦住——这才是 F6 本来要防的东西。
+    #[test]
+    fn a_copy_inside_one_project_is_still_blocked() {
+        let duplicates = duplicate_dbnums([
+            ("AMS".to_string(), 1112, PathBuf::from("ams000/ams1112_0001")),
+            ("AMS".to_string(), 1112, PathBuf::from("ams000/ams1112_0001 copy")),
+        ]);
+        assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 1112)]));
     }
 
     /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
@@ -121,6 +144,43 @@ mod tests {
         }
     }
 
+    /// 两条自动路径给批次定的「归属项目」必须来自文件所在的监控目录，不能是配置里
+    /// 的主项目名。
+    ///
+    /// 后者是 SurrealDB 的库名，拿它当归属的后果实测过：`acp000\acp7006_0001` 被记成
+    /// `AvevaMarineSample`，执行侧于是去 `ams000` 里找它，`initialize_project_dbnum_baseline`
+    /// 报「项目 AvevaMarineSample 未找到 dbnum=7006」，批次每一轮都 failed 一次，
+    /// 而日志里只有一句「状态 failed」，看不出是归属记错了。
+    ///
+    /// 这一步嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接钉源码。
+    #[test]
+    fn both_auto_paths_take_the_owning_project_from_the_watch_dir() {
+        let src = include_str!("increment_manager.rs");
+        for (name, marker) in [
+            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            ("async_watch", concat!("pub async fn ", "async_watch(")),
+        ] {
+            let body = src
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{name} 未找到"))
+                .1;
+            let discover_at = body
+                .find(".discover_batch(")
+                .unwrap_or_else(|| panic!("{name}: 缺少 discover_batch 调用"));
+            let owning_at = body.find(concat!("self.owning_", "project(")).unwrap_or_else(|| {
+                panic!("{name}: 归属项目必须取自监控目录（owning_project），不能用 project_name")
+            });
+            assert!(
+                owning_at < discover_at,
+                "{name}: 必须先定归属项目再 discover_batch，否则批次带着错的项目入队"
+            );
+            assert!(
+                !body[..discover_at].contains(concat!("db_option.project_", "name.clone()")),
+                "{name}: 发现阶段不得用配置里的主项目名当文件归属"
+            );
+        }
+    }
+
     /// 手动路径的候选目录必须与自动 watcher 的监控目录是同一份，否则手动执行能把
     /// 监听不到的库排进队列（B4：数据落了库、此后永不更新，看起来却很新鲜）。
     /// 监控目录按项目收集（每个项目取它的 `*000` 库目录），按前缀过滤就还原出本项目那几个。
@@ -148,11 +208,83 @@ mod tests {
     #[test]
     fn database_filter_uses_the_manager_option() {
         let mut option = DbOption::default();
+        option.project_name = "Main".to_string();
         option.manual_db_nums = Some(vec![1001]);
 
-        assert!(should_process_database_with(&option, "DESI", 1001));
-        assert!(!should_process_database_with(&option, "DESI", 7997));
-        assert!(should_process_database_with(&option, "SYST", 8191));
+        assert!(should_process_database_with(&option, "Main", "DESI", 1001));
+        assert!(!should_process_database_with(&option, "Main", "DESI", 7997));
+        assert!(should_process_database_with(&option, "Main", "SYST", 8191));
+    }
+
+    /// 归属不符的观察**一个字都不许写**。
+    ///
+    /// 阻断路径本来就只写观察值（file_size / file_latest_sesno / scanned_at），
+    /// 但那恰恰是被写脏的那几个：`dbnum_watermark:8191` 挂着 amssys 的身份，
+    /// `file_latest_sesno` 却是 zdjsys 的 52 —— 面板上看到的是一个不存在的文件状态。
+    /// 这两步嵌在依赖实库的函数里，只能钉源码。
+    #[test]
+    fn a_foreign_project_observation_is_not_persisted_at_all() {
+        let src = include_str!("dbnum_state.rs");
+        let body = src
+            .split_once(concat!("pub async fn ", "record_observation("))
+            .expect("record_observation 未找到")
+            .1;
+        let guard_at = body
+            .find(concat!("is_foreign_", "project"))
+            .expect("record_observation 必须先挡掉归属不符的观察");
+        let blocked_at = body
+            .find(concat!("record_blocked_", "observation("))
+            .expect("record_observation 应当有阻断落库分支");
+        assert!(
+            guard_at < blocked_at,
+            "归属校验必须先于阻断落库：阻断分支写的正是被跨项目写脏的那几个观察字段"
+        );
+
+        let classify = src
+            .split_once(concat!("pub async fn ", "classify_scan("))
+            .expect("classify_scan 未找到")
+            .1;
+        let owner_at = classify
+            .find("owner_project")
+            .expect("classify_scan 必须先比对登记行的归属项目");
+        let check_at = classify
+            .find(concat!("check_file_against_", "state("))
+            .expect("classify_scan 应当调用 check_file_against_state");
+        assert!(
+            owner_at < check_at,
+            "归属校验要先于回退/类型判据：两个项目的文件放一起比，判据本身就没有意义"
+        );
+    }
+
+    /// 一个 Surreal 库只服务一个主项目：别的项目的运行态系统库（SYST/GLB/GLOB）
+    /// 压根不该进摄入范围。
+    ///
+    /// dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的 sys 库都是 8191，而本库的
+    /// 状态层（`dbnum_watermark` 的记录 id、`dbnum_info_table`、`pe.dbnum` 聚合）
+    /// 全部按裸 dbnum 做键。放进来的实测后果：`dbnum_watermark:8191` 记着 amssys
+    /// 的身份，`file_latest_sesno` 却被 zdjsys 的值写脏。
+    ///
+    /// DICT 目录库不在此列：它是被主项目依赖的数据，dbnum 也不冲突，照旧摄入。
+    #[test]
+    fn foreign_project_runtime_sys_databases_are_out_of_scope() {
+        let mut option = DbOption::default();
+        option.project_name = "AvevaMarineSample".to_string();
+
+        for db_type in PROJECT_RUNTIME_SYS_TYPES {
+            assert!(
+                should_process_database_with(&option, "AvevaMarineSample", db_type, 8191),
+                "主项目自己的 {db_type} 必须摄入"
+            );
+            assert!(
+                !should_process_database_with(&option, "AvevaCatalogue", db_type, 8191),
+                "别的项目的 {db_type} 不该进范围"
+            );
+        }
+
+        assert!(
+            should_process_database_with(&option, "AvevaCatalogue", "DICT", 7006),
+            "目录库是主项目依赖的数据，跨项目照旧摄入"
+        );
     }
 
     /// 库文件白名单。正反例全部取自 `D:/AVEVA/Projects/E3D3.1` 下真实躺着的文件
@@ -216,7 +348,11 @@ mod tests {
                 let path = entry.file_type().is_file().then(|| entry.into_path())?;
                 let info = try_parse_db_basic_info(&path)?;
                 manager
-                    .should_process_database(&info.db_type, info.db_no)
+                    .should_process_database(
+                        &manager.db_option.project_name.clone(),
+                        &info.db_type,
+                        info.db_no,
+                    )
                     .then_some((path, info))
             })
             .expect("configured watch dirs contain an E3D database");
@@ -232,9 +368,11 @@ mod tests {
         fs::write(fixture.join("second"), header).expect("write second header");
         manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
 
+        // 判重键是 (归属项目, dbnum)；夹具目录不在任何监控目录的归属登记里，
+        // `owning_project` 按约定退回配置里的主项目名。
         assert_eq!(
             manager.duplicate_dbnums_across_watch_dirs(),
-            HashSet::from([source.1.db_no])
+            HashSet::from([(manager.db_option.project_name.clone(), source.1.db_no)])
         );
 
         fs::remove_dir_all(&fixture).expect("remove duplicate directory");
@@ -561,7 +699,7 @@ fn should_exclude_file(file_path: &std::path::Path) -> bool {
 /// 水位为什么不动。
 ///
 /// 不在这里做 `is_file()`：那要多一次 stat，而三个调用点各自都已排除目录。
-pub(crate) fn is_candidate_db_file(path: &std::path::Path) -> bool {
+pub fn is_candidate_db_file(path: &std::path::Path) -> bool {
     if should_exclude_file(path) {
         return false;
     }
@@ -576,8 +714,37 @@ pub(crate) fn is_candidate_db_file(path: &std::path::Path) -> bool {
     true
 }
 
-fn should_process_database_with(db_option: &DbOption, db_type: &str, db_num: u32) -> bool {
+/// 「项目运行态」系统库：MDB / DB / CURD 这些**项目自身**的结构数据。
+///
+/// 与 DICT 目录库的区别是数据域，不是类型高低：DICT 是被主项目依赖的数据，
+/// 跨项目引用是正常业务；SYST/GLB/GLOB 描述的是「那个项目自己怎么组织」，
+/// 对本库毫无意义。而且 dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的
+/// sys 库都是 8191，本库的状态层（`dbnum_watermark` 记录 id、`dbnum_info_table`、
+/// `pe.dbnum` 聚合）却全部按裸 dbnum 做键，放进来就是三份数据抢同一行。
+pub const PROJECT_RUNTIME_SYS_TYPES: [&str; 3] = ["SYST", "GLB", "GLOB"];
+
+/// 这个库是不是「别的项目的运行态系统库」。
+pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_type: &str) -> bool {
+    PROJECT_RUNTIME_SYS_TYPES.contains(&db_type)
+        && !project.trim().eq_ignore_ascii_case(db_option.project_name.trim())
+}
+
+fn should_process_database_with(
+    db_option: &DbOption,
+    project: &str,
+    db_type: &str,
+    db_num: u32,
+) -> bool {
     if !CHECK_DB_TYPES.contains(&db_type) {
+        return false;
+    }
+
+    // 一个 Surreal 库只服务一个主项目。别的项目的运行态系统库不属于本库的数据域
+    // ——这不是「异常阻断」，是压根不在摄入范围内，两者不能混为一谈。
+    if is_foreign_runtime_sys(db_option, project, db_type) {
+        log::debug!(
+            "忽略非主项目的运行态系统库: project={project} db_type={db_type} dbnum={db_num}"
+        );
         return false;
     }
 
@@ -655,19 +822,33 @@ pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "
 /// 子目录时，把它配成监控目录，而不是把遍历放深。
 pub(crate) const INGEST_MAX_DEPTH: usize = 1;
 
-fn duplicate_dbnums(entries: impl IntoIterator<Item = (u32, PathBuf)>) -> HashSet<u32> {
+/// 同一个**项目**里出现两次的 dbnum。
+///
+/// 键必须带归属项目：不同项目各自的 sys 库（amssys / acpsys / zdjsys）天然共用
+/// dbnum=8191，只按 dbnum 判重会把三个正常的库一起阻断。防人手副本
+/// （`ams1112_0001 copy`）靠的是「同项目内同号」，不受影响。
+fn duplicate_dbnums(
+    entries: impl IntoIterator<Item = (String, u32, PathBuf)>,
+) -> HashSet<(String, u32)> {
     let mut seen = HashSet::new();
     entries
         .into_iter()
-        .filter_map(|(dbnum, _)| (!seen.insert(dbnum)).then_some(dbnum))
+        .filter_map(|(project, dbnum, _)| {
+            let key = (project, dbnum);
+            (!seen.insert(key.clone())).then_some(key)
+        })
         .collect()
 }
 
 /// 监控目录里落在 `project_dir` 下的那些。
+///
+/// 比较走 [`path_starts_with`] 而不是 `Path::starts_with`：后者逐段区分大小写，
+/// 而 Windows 上 `D:/AVEVA/...ZDJ` 与 `d:\aveva\...zdj` 是同一个目录。判错的后果
+/// 是手动侧「一个候选都没有」，自动侧却在监听同一个目录——两条路径就此分家。
 fn dirs_under(watch_dirs: &[PathBuf], project_dir: &std::path::Path) -> Vec<PathBuf> {
     watch_dirs
         .iter()
-        .filter(|dir| dir.starts_with(project_dir))
+        .filter(|dir| path_starts_with(dir, project_dir))
         .cloned()
         .collect()
 }
@@ -716,21 +897,53 @@ impl AiosDBManager {
     /// 监控目录是按项目收集的（每个项目取其 `*000` 库目录），所以按前缀过滤就能还原
     /// 「本项目的那几个」。
     pub(crate) fn ingestible_dirs(&self, project_dir: &std::path::Path) -> Vec<PathBuf> {
-        dirs_under(&self.watcher.watch_dirs, project_dir)
+        dirs_under(&self.watch_dirs(), project_dir)
     }
 
-    fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<u32> {
-        duplicate_dbnums(self.watcher.watch_dirs.iter().flat_map(|watch_dir| {
+    /// 当前真正生效的监控目录：启动时解析出的那批，并上共享盘恢复后才补挂进来的那批。
+    ///
+    /// 摄入侧必须读这一份而不是 `self.watcher.watch_dirs`——后者是启动快照，
+    /// 补挂进来的目录只会被轮询、不会被摄入，正好制造出「监听得到但永不入队」。
+    pub(crate) fn watch_dirs(&self) -> Vec<PathBuf> {
+        use crate::data_interface::project_paths::{discovered_watch_dirs, path_identity};
+
+        let mut dirs = self.watcher.watch_dirs.clone();
+        let mut seen: HashSet<String> = dirs.iter().map(|dir| path_identity(dir)).collect();
+        for dir in discovered_watch_dirs() {
+            if seen.insert(path_identity(&dir)) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+
+    /// 文件的归属项目：看它落在哪个监控目录下。
+    ///
+    /// 解析不出来时退回配置里的主项目名并告警——那是「监控目录归属没登记」的信号，
+    /// 而不是一个可以静默接受的默认值：归属记错会让执行侧去错误的项目目录里找文件，
+    /// F6 判重键也随之退化。告警走 `warn_unattributed_once`（stderr + 按目录去重），
+    /// 只有 log::warn 的话现场根本看不见退化已经发生。
+    pub(crate) fn owning_project(&self, path: &std::path::Path) -> String {
+        crate::data_interface::project_paths::project_of_path(path).unwrap_or_else(|| {
+            let fallback = self.db_option.project_name.clone();
+            crate::data_interface::project_paths::warn_unattributed_once(path, &fallback);
+            fallback
+        })
+    }
+
+    fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<(String, u32)> {
+        duplicate_dbnums(self.watch_dirs().into_iter().flat_map(|watch_dir| {
+            let project = self.owning_project(&watch_dir);
             WalkDir::new(watch_dir)
                 .max_depth(INGEST_MAX_DEPTH)
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_file())
                 .filter(|entry| is_candidate_db_file(entry.path()))
-                .filter_map(|entry| {
+                .filter_map(move |entry| {
                     let info = try_parse_db_basic_info(entry.path())?;
-                    self.should_process_database(&info.db_type, info.db_no)
-                        .then(|| (info.db_no, entry.path().to_path_buf()))
+                    self.should_process_database(&project, &info.db_type, info.db_no)
+                        .then(|| (project.clone(), info.db_no, entry.path().to_path_buf()))
                 })
         }))
     }
@@ -763,8 +976,15 @@ impl AiosDBManager {
     /// 注意这只是**第一道**门。`CHECK_DB_TYPES` 里有 CATA，但入队还要过
     /// `in_scope` 的第二道（`UpdateScope::admits`），而它对 CATA 恒返回 false
     /// ——所以 CATA 库实际上进不了数据批次队列（2026-07-31 决策 A，spec 001 · US5）。
-    pub(crate) fn should_process_database(&self, db_type: &str, db_num: u32) -> bool {
-        should_process_database_with(&self.db_option, db_type, db_num)
+    /// 6. **别的项目的运行态系统库（SYST/GLB/GLOB）不摄入**：dbnum 只在项目内唯一，
+    ///    三个项目的 sys 库都是 8191，而状态层按裸 dbnum 做键。DICT 目录库不在此列。
+    pub(crate) fn should_process_database(
+        &self,
+        project: &str,
+        db_type: &str,
+        db_num: u32,
+    ) -> bool {
+        should_process_database_with(&self.db_option, project, db_type, db_num)
     }
 
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
@@ -779,6 +999,7 @@ impl AiosDBManager {
     /// 在自动路径上照常应用，而手动预览把它标成阻断。
     pub(crate) async fn scan_and_check_file(
         &self,
+        project: &str,
         path: &std::path::Path,
         file_name: &str,
         db_type: &str,
@@ -790,6 +1011,7 @@ impl AiosDBManager {
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let obs = FileObservation {
             dbnum: db_num,
+            project: project.to_string(),
             db_type: db_type.to_string(),
             file_name: file_name.to_string(),
             file_path: path.display().to_string(),
@@ -836,6 +1058,13 @@ impl AiosDBManager {
             Some(FileAnomaly::PathMigrated { old_path, new_path }) => println!(
                 "F6 文件路径迁移 dbnum={db_num}: {old_path} -> {new_path}（已更新登记路径）"
             ),
+            Some(FileAnomaly::ForeignProject {
+                stored_project,
+                observed_project,
+            }) => println!(
+                "F6 dbnum={db_num} 的登记行属于项目 {stored_project}，现场文件来自 \
+                 {observed_project}，已阻断且不写任何观察值（dbnum 只在项目内唯一）"
+            ),
         }
 
         !verdict.blocked()
@@ -879,6 +1108,34 @@ impl AiosDBManager {
     /// `ensure_archives` 只有启动那一次为真：`SyncPublisher::ensure_archive` 会把整个
     /// 库文件重压一遍，重扫时再压一遍纯属白烧 CPU。
     async fn sweep_watch_dirs(&self, origin: &str, ensure_archives: bool) -> anyhow::Result<()> {
+        let watch_dirs = self.watch_dirs();
+        // 目录集合为空时这轮重扫会「成功地」扫出 0 个候选，与「确实没有新会话」
+        // 长得一模一样。它同时也是手动摄入的候选面，所以必须自己喊出来。
+        // 这个判定只属于整面重扫：子集补扫（share-remount）的列表由调用方保证非空。
+        if watch_dirs.is_empty() {
+            let msg = format!(
+                "[{origin}] 监控目录列表为空：没有解析出任何 *000 库目录，本轮不会发现任何库；\
+                 检查 DbOption.toml 的 project_path / included_projects / project_dirs，\
+                 启动日志「监控目录解析」一段列出了逐项目原因"
+            );
+            log::error!("{msg}");
+            eprintln!("{msg}");
+        }
+        self.sweep_dirs(origin, ensure_archives, watch_dirs).await
+    }
+
+    /// 对给定目录子集做一轮发现与入队（[`Self::sweep_watch_dirs`] 的执行体）。
+    ///
+    /// 目录集合参数化是给共享盘重挂轮用的：补挂成功后只补扫刚恢复的那几个目录。
+    /// 整面重扫在网络盘上可能分钟级，而那次 await 就睡在 `async_watch` 的事件
+    /// select 循环里——扫多久，文件事件就积压多久。刚恢复的目录本来就必须扫
+    /// （PollWatcher 不补发停机期间的事件），其余目录没有理由陪跑。
+    async fn sweep_dirs(
+        &self,
+        origin: &str,
+        ensure_archives: bool,
+        watch_dirs: Vec<PathBuf>,
+    ) -> anyhow::Result<()> {
         // 本期执行范围与手动路径走同一个谓词（`in_scope`）。自动路径过去只过类型
         // 白名单，于是 MDB 外的设计库照样入队——预览说它不在范围里、队列里却有它的
         // 任务行，而两条路径喂的是同一个 worker。
@@ -901,21 +1158,32 @@ impl AiosDBManager {
 
         let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
             IndexMap::new();
-        // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。
-        let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
-        let mut blocked_dupes: HashSet<u32> = HashSet::new();
+        // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。按「归属项目 + dbnum」
+        // 判重，跨项目同号的 sys 库不算重复。
+        let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
+        let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
         let time = Instant::now();
-        log::debug!("[{origin}] 监控目录: {:?}", self.watcher.watch_dirs);
+        log::debug!("[{origin}] 监控目录: {watch_dirs:?}");
 
         // 遍历所有监控目录（深度见 [`INGEST_MAX_DEPTH`]）。
-        for watch_dir in &self.watcher.watch_dirs {
+        for watch_dir in &watch_dirs {
             // 按文件大小降序排列，优先处理大文件
             for entry in WalkDir::new(watch_dir).max_depth(INGEST_MAX_DEPTH).sort_by(|a, b| {
                 let a_len = a.path().metadata().map(|m| m.len()).unwrap_or_default();
                 let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
                 b_len.cmp(&a_len)
             }) {
-                let dir_entry = entry.map_err(|e| anyhow::anyhow!("获取目录条目失败: {}", e))?;
+                // 单个条目读不动就跳过它。过去这里是 `?`：共享盘在遍历途中抖一下，
+                // 整轮重扫就此中止，而启动路径上 `init_watcher()` 的 `?` 会把这个错误
+                // 一路抛到 `run_cli`，**整个服务起不来**。同一条纪律见下面的文件名分支。
+                let dir_entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        log::warn!("[{origin}] 跳过读不动的目录条目（{watch_dir:?}）: {error}");
+                        eprintln!("[{origin}] 跳过读不动的目录条目（{watch_dir:?}）: {error}");
+                        continue;
+                    }
+                };
                 let path = dir_entry.path();
 
                 // 跳过目录
@@ -948,14 +1216,25 @@ impl AiosDBManager {
                     continue;
                 };
 
+                // 归属项目取自「文件落在哪个监控目录下」，不是配置里的主项目名。
+                // 后者是 SurrealDB 的库名，拿它当归属会让 acp000 / ZDJ000 下的库被送去
+                // 主项目目录里找，必然找不到、批次必然 failed（见 `project_of_path`）。
+                // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
+                let project = self.owning_project(path);
+
                 // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，三道门合成
                 // 一个谓词，与手动路径共用（`in_scope`）。
-                if !self.in_scope(&scope, &db_type, db_no) {
+                if !self.in_scope(&scope, &project, &db_type, db_no) {
+                    if is_foreign_runtime_sys(&self.db_option, &project, &db_type) {
+                        println!(
+                            "[{origin}] 忽略非主项目的运行态系统库: project={project} \
+                             db_type={db_type} dbnum={db_no} file={file_name}\
+                             （dbnum 只在项目内唯一，本库只承载主项目 {} 的系统库）",
+                            self.db_option.project_name
+                        );
+                    }
                     continue;
                 }
-
-                // 获取项目名称和文件最新会话号
-                let project = self.db_option.project_name.clone();
                 let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_latest_sesno()
                     .unwrap_or_default();
@@ -972,17 +1251,29 @@ impl AiosDBManager {
                 // UPSERT 身份字段（file_name/file_path/file_size/file_latest_sesno），重复
                 // 文件一旦先落库，就会把首见文件的身份覆盖掉，此后即使阻断该 dbnum，
                 // dbnum_watermark 里记的也已经是「后来那个」文件，回退/迁移检测的基准被污染。
-                if let Some(prev) = seen_dbnums.insert(db_no, path.to_path_buf()) {
-                    blocked_dupes.insert(db_no);
+                //
+                // 键是 (归属项目, dbnum) 而不是单独的 dbnum：不同项目各自的 sys 库
+                // （amssys / acpsys / zdjsys）天然共用 dbnum=8191，只按 dbnum 判重会把
+                // 三个正常的库一起阻断。同项目内的人手副本仍然照旧被拦住。
+                if let Some(prev) = seen_dbnums.insert((project.clone(), db_no), path.to_path_buf())
+                {
+                    blocked_dupes.insert((project.clone(), db_no));
                     println!(
-                        "F6 发现同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
-                        db_no, prev, path
+                        "F6 发现项目 {} 内同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
+                        project, db_no, prev, path
                     );
                     continue;
                 }
                 // F6：文件观察落库 + 回退/迁移检测；回退（file_latest < applied）阻断该文件（水位不回退）。
                 if !self
-                    .scan_and_check_file(path, file_name, &db_type, db_no, file_latest_sesno as i32)
+                    .scan_and_check_file(
+                        &project,
+                        path,
+                        file_name,
+                        &db_type,
+                        db_no,
+                        file_latest_sesno as i32,
+                    )
                     .await
                 {
                     continue;
@@ -1014,7 +1305,9 @@ impl AiosDBManager {
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
-            params.retain(|_p, found| !blocked_dupes.contains(&found.dbnum));
+            params.retain(|_p, found| {
+                !blocked_dupes.contains(&(found.project.clone(), found.dbnum))
+            });
         }
 
         // 等所有文件检查完毕后，逐条入队；执行与发布归数据批次 worker。
@@ -1115,6 +1408,83 @@ impl AiosDBManager {
         }
     }
 
+    /// 重挂轮：重新解析配置、补挂缺席的目录，挂上了就补一次重扫。
+    ///
+    /// 重新解析是必须的而不是「顺手」：共享盘在启动那一刻不可达时，
+    /// `plan_watch_dirs` 连它的 `*000` 子目录都列不出来，那些目录压根没进过启动列表，
+    /// 只重试老列表永远等不到它们。新解析出来的目录同时登记进
+    /// `project_paths::record_discovered_watch_dirs`，摄入侧才看得见它们。
+    ///
+    /// 补挂之后要重扫：PollWatcher 只报「挂载之后」的变化，停机 / 掉线期间攒下的
+    /// 会话不会有任何事件，不重扫就要等下一次有人动那个库才被发现。
+    async fn remount_watch_dirs(&self, watcher: &mut PollWatcher, mounted: &mut MountState) {
+        use crate::data_interface::project_paths::{
+            path_identity, plan_watch_dirs, record_discovered_watch_dirs, record_watch_dir_owners,
+        };
+
+        let known: HashSet<String> = self
+            .watcher
+            .watch_dirs
+            .iter()
+            .map(|dir| path_identity(dir))
+            .collect();
+        // 解析要走阻塞线程：对着一台掉线的共享机 `read_dir` 会卡住整个 runtime。
+        let db_option = self.db_option.clone();
+        let plan = match tokio::task::spawn_blocking(move || plan_watch_dirs(&db_option)).await {
+            Ok(plan) => plan,
+            Err(error) => {
+                log::warn!("重挂轮解析监控目录失败: {error}");
+                return;
+            }
+        };
+        record_watch_dir_owners(&plan);
+        let discovered = record_discovered_watch_dirs(plan.dirs(), &known);
+        if !discovered.is_empty() {
+            println!("重挂轮发现新的监控目录: {discovered:?}");
+        }
+
+        // 先复查已挂目录还在不在：「挂上过」不等于「还在被监听」，中途掉线的目录
+        // 不降级的话永远不会被这一轮回头看。恢复时必须先 unwatch 再重挂——直接重挂
+        // 会让 PollWatcher 把同一个目录列两遍，F6 立刻整库阻断。
+        let dirs = self.watch_dirs();
+        let newly_lost = mounted.refresh_health(&dirs);
+        if !newly_lost.is_empty() {
+            log::warn!("监控目录失联，降级等待恢复: {newly_lost:?}");
+            eprintln!("监控目录失联，降级等待恢复: {newly_lost:?}");
+        }
+        let released = mounted.unwatch_lost(watcher);
+        if released > 0 {
+            println!("重挂轮解除了 {released} 个失联目录的旧监听，准备重挂");
+        }
+
+        let missing = mounted.missing(dirs);
+        if missing.is_empty() {
+            return;
+        }
+
+        let before = mounted.len();
+        let failures = mounted.mount(watcher, &missing);
+        let added = mounted.len() - before;
+        if added == 0 {
+            log::warn!("重挂轮：{} 个目录仍不可达（{}）", missing.len(), failures.join("；"));
+            return;
+        }
+
+        // 只补扫这次真正挂上的目录，不做整面重扫：这段 await 睡在 async_watch 的
+        // 事件 select 循环里，扫多久事件就积压多久；网络盘整面扫可能分钟级，而
+        // 其余目录本轮什么都没发生，没有理由陪跑。
+        let added_dirs: Vec<PathBuf> = missing
+            .iter()
+            .filter(|dir| mounted.contains(dir))
+            .cloned()
+            .collect();
+        println!("重挂轮补挂了 {added} 个监控目录，开始补扫停机期间的会话: {added_dirs:?}");
+        if let Err(error) = self.sweep_dirs("share-remount", false, added_dirs).await {
+            log::error!("补挂后的重扫失败: {error:#}");
+            eprintln!("补挂后的重扫失败: {error:#}");
+        }
+    }
+
     /// 开始异步监控数据文件夹
     ///
     /// 启动文件系统监控器，实时监测数据库文件的变化并执行增量更新。
@@ -1158,27 +1528,50 @@ impl AiosDBManager {
         println!(
             "async_watch 使用 PollWatcher 定时轮询（间隔 {poll_secs}s），适配远程共享目录的增量发现"
         );
-        log::debug!("async_watch 监控目录: {:?}", self.watcher.watch_dirs);
 
-        // 为每个监控目录设置文件监控（NonRecursive：轮询目录直属的 E3D 库文件）
-        //
+        // 共享盘不会挑着服务启动的那一秒在线：晚上线、维护重启、网络抖动都是常态。
+        // 因此挂载不是一次性动作——挂不上的目录进重挂轮，每 AIOS_WATCH_REMOUNT_SECS
+        // 秒重试一次（含重新解析：盘不在时连它的 `*000` 目录都列不出来），挂上就补一次
+        // 重扫把停机期间的会话追回来。设为 0 关闭重挂，退回「一个都挂不上就报错退出」。
+        let remount_secs = std::env::var("AIOS_WATCH_REMOUNT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        let mut mounted = MountState::new();
+        let watch_dirs = self.watch_dirs();
+        log::debug!("async_watch 监控目录: {watch_dirs:?}");
+
         // 单个目录不可达（共享盘掉线、路径写错）不再 panic 掉整个看门狗（T903）：
-        // 逐目录告警并继续挂载其余目录。但一个都没挂上时必须报错——那等同于
-        // 「看门狗在跑却什么都不监控」，是比 panic 更难发现的静默失效。
-        let mut watched = 0usize;
-        for dir in self.watcher.watch_dirs.iter() {
-            match watcher.watch(dir.as_path(), RecursiveMode::NonRecursive) {
-                Ok(()) => watched += 1,
-                Err(e) => {
-                    log::error!("文件监控设置失败，跳过该目录 {dir:?}: {e:?}");
-                    eprintln!("文件监控设置失败，跳过该目录 {dir:?}: {e:?}");
-                }
+        // 逐目录告警并继续挂载其余目录。一个都没挂上时也不能装作在工作——那等同于
+        // 「看门狗在跑却什么都不监控」，是比 panic 更难发现的静默失效，所以要么进
+        // 重挂轮并持续告警，要么（关掉重挂时）带着逐目录原因报错退出。
+        let failures = mounted.mount(&mut watcher, &watch_dirs);
+        if mounted.is_empty() {
+            // 目录列表本身为空是另一种病（配置解析阶段就没解析出目录，见
+            // `project_paths::plan_watch_dirs`），此处一个 for 都不会进，过去它与
+            // 「三个共享盘全掉线」报的是同一句话。
+            let detail = if watch_dirs.is_empty() {
+                "监控目录列表为空：配置里没有解析出任何 *000 库目录。检查 DbOption.toml 的 \
+                 project_path / included_projects / project_dirs（共享目录可在 project_dirs \
+                 里对该项目单独写绝对路径或 UNC），启动日志「监控目录解析」一段列出了逐项目原因"
+                    .to_string()
+            } else {
+                format!("没有任何监控目录挂载成功；逐目录原因: {}", failures.join("；"))
+            };
+            if remount_secs == 0 {
+                return Err(notify::Error::generic(&format!(
+                    "{detail}（AIOS_WATCH_REMOUNT_SECS=0，重挂已关闭，看门狗退出）"
+                )));
             }
-        }
-        if watched == 0 {
-            return Err(notify::Error::generic(
-                "没有任何监控目录挂载成功，增量看门狗无法工作",
-            ));
+            log::error!("{detail}；每 {remount_secs}s 重试一次，恢复即自动接管");
+            eprintln!("{detail}；每 {remount_secs}s 重试一次，恢复即自动接管");
+        } else {
+            println!(
+                "已挂载 {}/{} 个监控目录: {:?}",
+                mounted.len(),
+                watch_dirs.len(),
+                watch_dirs
+            );
         }
 
         // 创建必要的目录结构
@@ -1196,8 +1589,22 @@ impl AiosDBManager {
         // 那是数据批次 worker 空闲轮的职责——watcher 只负责「发现即入队」，
         // 事件回调再也不会被一轮增量执行堵住（ADR-011 §2 治的正是这个）。
 
-        // 持续监听文件变化事件
-        while let Some(res) = rx.next().await {
+        // 持续监听文件变化事件；与之并行的是共享盘重挂轮（见 `remount_secs`）。
+        let mut remount_tick = tokio::time::interval(std::time::Duration::from_secs(
+            remount_secs.max(1),
+        ));
+        remount_tick.tick().await; // interval 的第一拍是立即触发的，丢掉
+        loop {
+            let res = tokio::select! {
+                incoming = rx.next() => match incoming {
+                    Some(res) => res,
+                    None => break,
+                },
+                _ = remount_tick.tick(), if remount_secs > 0 => {
+                    self.remount_watch_dirs(&mut watcher, &mut mounted).await;
+                    continue;
+                }
+            };
             match res {
                 Ok(event) => {
                     // 过滤事件类型，只处理增/改/删这类内容相关事件。
@@ -1249,9 +1656,9 @@ impl AiosDBManager {
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&filtered_paths) {
                         println!("成功扫描到 {} 个数据库头部", new_headers.len());
                         let mut params = IndexMap::new();
-                        // F6：本批次内同 dbnum 多文件检测（阻断不挑选）。
-                        let mut seen_dbnums: HashMap<u32, PathBuf> = HashMap::new();
-                        let mut blocked_dupes: HashSet<u32> = HashSet::new();
+                        // F6：本批次内同 dbnum 多文件检测（阻断不挑选），键含归属项目。
+                        let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
+                        let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
 
                         // 处理每个扫描到的数据库头部信息
                         for (path, new_header) in &new_headers {
@@ -1282,29 +1689,44 @@ impl AiosDBManager {
                             let db_type = &db_basic_info.db_type;
                             let db_num = db_basic_info.db_no;
 
+                            // 归属项目取自文件所在的监控目录，与启动重扫同口径；
+                            // 必须先于范围门（范围门要用它判别的项目的运行态系统库）。
+                            let project = self.owning_project(path);
+
                             // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，
                             // 与启动重扫、手动触发共用同一个谓词。
-                            if !self.in_scope(&scope, db_type, db_num) {
-                                println!(
-                                    "不在本期执行范围，跳过数据库: 类型={}, 编号={}",
-                                    db_type, db_num
-                                );
+                            if !self.in_scope(&scope, &project, db_type, db_num) {
+                                if is_foreign_runtime_sys(&self.db_option, &project, db_type) {
+                                    println!(
+                                        "忽略非主项目的运行态系统库: project={project} \
+                                         db_type={db_type} dbnum={db_num}"
+                                    );
+                                } else {
+                                    println!(
+                                        "不在本期执行范围，跳过数据库: 类型={}, 编号={}",
+                                        db_type, db_num
+                                    );
+                                }
                                 continue;
                             }
 
                             // F6：同一 dbnum 出现多个文件 → 阻断该 dbnum（不自动挑选）。
                             // 与 init_watcher 同口径，必须先于 scan_and_check_file（审计 B3）。
-                            if let Some(prev) = seen_dbnums.insert(db_num, path.to_path_buf()) {
-                                blocked_dupes.insert(db_num);
+                            // 键含归属项目：跨项目同号的 sys 库不是重复。
+                            if let Some(prev) =
+                                seen_dbnums.insert((project.clone(), db_num), path.to_path_buf())
+                            {
+                                blocked_dupes.insert((project.clone(), db_num));
                                 println!(
-                                    "F6 发现同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
-                                    db_num, prev, path
+                                    "F6 发现项目 {} 内同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
+                                    project, db_num, prev, path
                                 );
                                 continue;
                             }
                             // F6：文件观察落库 + 回退/迁移检测；回退阻断该文件（水位不回退）。
                             if !self
                                 .scan_and_check_file(
+                                    &project,
                                     path,
                                     file_name,
                                     db_type,
@@ -1320,8 +1742,6 @@ impl AiosDBManager {
                                 "检查文件: {}, 数据库编号: {}, 文件会话号: {}",
                                 file_name, db_num, new_header.latest_ses_data.sesno
                             );
-
-                            let project = self.db_option.project_name.clone();
 
                             // 水位对比即发现；基线与增量窗口都只是「有活要干」，
                             // 由 worker 冻结点重扫时决定怎么干（与 init 同口径）。
@@ -1348,7 +1768,9 @@ impl AiosDBManager {
                         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，不入队）。
                         if !blocked_dupes.is_empty() {
                             println!("F6 阻断重复 dbnum: {blocked_dupes:?}");
-                            params.retain(|_p, found| !blocked_dupes.contains(&found.dbnum));
+                            params.retain(|_p, found| {
+                                !blocked_dupes.contains(&(found.project.clone(), found.dbnum))
+                            });
                         }
 
                         // 如果没有需要入队的批次，跳过后续处理

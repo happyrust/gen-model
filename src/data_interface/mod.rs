@@ -8,6 +8,8 @@ pub mod mesh_manager;
 
 pub mod db_manager;
 
+pub mod project_paths;
+
 pub mod increment_manager;
 
 pub mod increment_pipeline;
