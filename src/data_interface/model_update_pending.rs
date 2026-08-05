@@ -421,6 +421,7 @@ pub(crate) fn render_finalize_tail(
     let mut statements = window_statements.to_vec();
     statements.extend(plan.work_items.iter().map(render_upsert));
     statements.push(render_watermark_advance(dbnum, end_sesno));
+    statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
     statements.join("\n")
 }

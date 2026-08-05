@@ -11,7 +11,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::Local;
@@ -42,6 +42,8 @@ const IDLE_WAKE: Duration = Duration::from_secs(30);
 /// （`enqueue_room_recalc`）：待办的重生成一旦真的改了包围盒，这些目标会被重新
 /// 排进来再算一次；没改包围盒的话，早算出来的归属本来就是对的。
 const ROOM_ROUND_FLOOR: Duration = Duration::from_secs(600);
+const STAGED_COMMIT_ATTEMPTS: u32 = 4;
+const STAGED_COMMIT_BACKOFF: Duration = Duration::from_millis(250);
 
 /// worker 还在不在。
 ///
@@ -58,6 +60,8 @@ static WORKER_LIVE: AtomicBool = AtomicBool::new(false);
 /// 旗子还立着但心跳很旧，说明它卡在某个长批次上（大库一轮以分钟计，正常）；
 /// 旗子倒了才是真死了。两个信号分开报，才分得清「慢」和「死」。
 static WORKER_BEAT: AtomicI64 = AtomicI64::new(0);
+static LAST_STAGED_COMMIT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_STAGED_COMMIT_RETRIES: AtomicU64 = AtomicU64::new(0);
 
 /// 刚落库过 SYS meta → 本期执行范围可能已经变宽，空闲轮要重扫一次监控目录。
 ///
@@ -396,6 +400,23 @@ async fn execute_frozen_batch(
 
     // 窗口阻断：任一生成根失败 → 持久层零落盘。
     if window_model_failed {
+        let bad_roots = result
+            .units
+            .iter()
+            .filter(|unit| unit.status == UnitGenStatus::Failed)
+            .map(|unit| unit.root_refno.clone())
+            .collect::<Vec<_>>();
+        if !bad_roots.is_empty()
+            && let Err(error) = crate::data_interface::staging::attempts::record_window_block_at(
+                job.dbnum,
+                result.batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno),
+                "模型生成重试已耗尽",
+                &bad_roots,
+            )
+            .await
+        {
+            result.warnings.push(format!("记录窗口阻断失败: {error:#}"));
+        }
         for unit in &mut result.units {
             if unit.status == UnitGenStatus::Generated {
                 unit.status = UnitGenStatus::Failed;
@@ -463,7 +484,26 @@ async fn execute_frozen_batch(
         )),
     }
 
-    if let Err(error) = window.commit_registered_to(&aios_core::SUL_DB).await {
+    let commit_started = std::time::Instant::now();
+    let commit = retry_with_backoff(
+        STAGED_COMMIT_ATTEMPTS,
+        STAGED_COMMIT_BACKOFF,
+        || window.commit_registered_to(&aios_core::SUL_DB),
+    )
+    .await;
+    LAST_STAGED_COMMIT_MS.store(
+        commit_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+    LAST_STAGED_COMMIT_RETRIES.store(
+        commit
+            .as_ref()
+            .map_or(STAGED_COMMIT_ATTEMPTS as u64 - 1, |(_, attempts)| {
+                attempts.saturating_sub(1) as u64
+            }),
+        Ordering::Relaxed,
+    );
+    if let Err(error) = commit {
         result
             .warnings
             .push(format!("增量暂存窗口写回失败: {error:#}"));
@@ -600,6 +640,40 @@ async fn execute_frozen_batch(
         postcommit_failed,
     );
     result
+}
+
+pub fn staged_commit_metrics() -> serde_json::Value {
+    serde_json::json!({
+        "last_duration_ms": LAST_STAGED_COMMIT_MS.load(Ordering::Relaxed),
+        "last_retries": LAST_STAGED_COMMIT_RETRIES.load(Ordering::Relaxed),
+    })
+}
+
+async fn retry_with_backoff<T, F, Fut>(
+    max_attempts: u32,
+    initial_delay: Duration,
+    mut operation: F,
+) -> anyhow::Result<(T, u32)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut delay = initial_delay;
+    for attempt in 1..=max_attempts.max(1) {
+        match operation().await {
+            Ok(value) => return Ok((value, attempt)),
+            Err(error) if attempt == max_attempts.max(1) => return Err(error),
+            Err(error) => {
+                log::warn!(
+                    "暂存窗口写回第 {attempt} 次失败，{:?} 后重试: {error:#}",
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2);
+            }
+        }
+    }
+    unreachable!("max_attempts is normalized to at least one")
 }
 
 fn failed_window_result(
@@ -768,7 +842,53 @@ async fn execute_frozen_batch_body(
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
     let (units, settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
         if staged {
-            let worklist = merge_unit_worklist(new_units, Vec::new());
+            let mut worklist = merge_unit_worklist(new_units, Vec::new());
+            let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
+            if let Ok(Some(block)) =
+                crate::data_interface::staging::attempts::load_window_block(job.dbnum).await
+                && block.end_sesno.is_some_and(|blocked_end| end_sesno > blocked_end)
+            {
+                let affected = worklist
+                    .iter()
+                    .map(|task| task.root_refno.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) = crate::data_interface::staging::attempts::reset_roots_on_absorb(
+                    job.dbnum,
+                    &affected,
+                )
+                .await
+                {
+                    warnings.push(format!("新会话吸收重置 attempts 失败: {error:#}"));
+                    registry.set_unit_totals(&job.task_id, 0);
+                    return DataBatchTaskResult {
+                        project: job.project.clone(),
+                        status: ManualUpdateStatus::Failed,
+                        batch,
+                        units: Vec::new(),
+                        warnings: std::mem::take(warnings),
+                    };
+                }
+            }
+            match crate::data_interface::staging::attempts::load_root_attempts(job.dbnum).await {
+                Ok(attempts) => {
+                    for task in &mut worklist {
+                        if let Some(previous) = attempts.get(&task.root_refno) {
+                            task.attempts = previous.attempts;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warnings.push(format!("读取窗口生成 attempts 失败: {error:#}"));
+                    registry.set_unit_totals(&job.task_id, 0);
+                    return DataBatchTaskResult {
+                        project: job.project.clone(),
+                        status: ManualUpdateStatus::Failed,
+                        batch,
+                        units: Vec::new(),
+                        warnings: std::mem::take(warnings),
+                    };
+                }
+            }
             run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
         } else {
             match load_pending_model_units_for_retry(job.dbnum).await {
@@ -879,9 +999,48 @@ async fn run_single_unit(
         );
     }
 
+    let mut attempts = task.attempts;
+    let mut control_failed = false;
     let outcome = if staged {
         crate::data_interface::staging::hold_staged_generation_root(&task.root_refno).await;
-        generate_unit_model(mgr, &task.root_refno).await
+        let mut delay = Duration::from_millis(100);
+        loop {
+            if crate::data_interface::staging::attempts::reaches_block_threshold(attempts) {
+                break Err(anyhow::anyhow!(
+                    "生成根 {} 已达到 attempts 上限 {}",
+                    task.root_refno,
+                    attempts
+                ));
+            }
+            match generate_unit_model(mgr, &task.root_refno).await {
+                Ok(()) => break Ok(()),
+                Err(error) => {
+                    match crate::data_interface::staging::attempts::record_root_failure(
+                        task.dbnum,
+                        &task.root_refno,
+                        &format!("{error:#}"),
+                    )
+                    .await
+                    {
+                        Ok(value) => attempts = value,
+                        Err(record_error) => {
+                            control_failed = true;
+                            warnings.push(format!(
+                                "记录生成根 attempts 失败 root={}: {record_error:#}",
+                                task.root_refno
+                            ));
+                            break Err(error);
+                        }
+                    }
+                    if crate::data_interface::staging::attempts::reaches_block_threshold(attempts)
+                    {
+                        break Err(error);
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
     } else {
         let lock = generation_root_lock(&task.root_refno);
         let _guard = lock.lock().await;
@@ -898,7 +1057,7 @@ async fn run_single_unit(
             )
             .await;
         }
-        false
+        control_failed
     } else {
         match model_update_pending::settle_regen_work(
             &task.root_refno,
@@ -920,7 +1079,8 @@ async fn run_single_unit(
         }
     };
     let (status, attempts, message) = match outcome {
-        Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
+        Ok(()) => (UnitGenStatus::Generated, attempts, None),
+        Err(_) if staged => (UnitGenStatus::Failed, attempts, generation_error),
         Err(_) => (UnitGenStatus::Failed, task.attempts + 1, generation_error),
     };
     emit(
@@ -1385,6 +1545,21 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, end_sesno: i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staged_commit_retries_with_backoff_until_success() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let (value, used) = retry_with_backoff(4, Duration::ZERO, || async {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            anyhow::ensure!(attempt >= 3, "injected write-back failure");
+            Ok(attempt)
+        })
+        .await
+        .expect("third attempt succeeds");
+        assert_eq!(value, 3);
+        assert_eq!(used, 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 
     fn unit_task(
         attempts: u32,

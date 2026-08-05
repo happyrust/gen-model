@@ -405,6 +405,11 @@ impl ActiveStagedWindow {
 
     /// 终态清理（提交成功或废弃共用）：DROP 本窗口的 database 并出册。
     pub async fn drop_database(self) -> anyhow::Result<()> {
+        if let Some(finalize) = self.staged_finalize().await
+            && !finalize.cache_refnos.is_empty()
+        {
+            aios_core::clear_all_caches_batch(&finalize.cache_refnos).await;
+        }
         let label = self.meta.label.clone();
         let result = self
             .db

@@ -56,6 +56,9 @@ fn resolve_identity<'a>(
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) =
         crate::data_interface::batch_worker::worker_liveness();
+    let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
+        .await
+        .unwrap_or_default();
     Json(json!({
         "status": "ok",
         "project": state.identity.project,
@@ -69,6 +72,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
+        "staging_window_blocks": window_blocks,
+        "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,

@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 
@@ -31,7 +31,7 @@ use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_pending::{ATTEMPT_TABLE, MAX_ATTEMPTS};
 
 /// 一个生成根的失败记录。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RootAttempt {
     pub dbnum: u32,
     pub root_refno: String,
@@ -45,10 +45,12 @@ pub struct RootAttempt {
 }
 
 /// 窗口阻断状态记录。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WindowBlock {
     pub dbnum: u32,
     pub reason: String,
+    #[serde(default)]
+    pub end_sesno: Option<i32>,
     #[serde(default)]
     pub bad_roots: Vec<String>,
     #[serde(default)]
@@ -195,9 +197,35 @@ pub async fn record_window_block(
     record_window_block_on(&aios_core::SUL_DB, dbnum, reason, bad_roots).await
 }
 
+pub async fn record_window_block_at(
+    dbnum: u32,
+    end_sesno: i32,
+    reason: &str,
+    bad_roots: &[String],
+) -> anyhow::Result<()> {
+    record_window_block_at_on(
+        &aios_core::SUL_DB,
+        dbnum,
+        Some(end_sesno),
+        reason,
+        bad_roots,
+    )
+    .await
+}
+
 pub async fn record_window_block_on(
     db: &Surreal<Any>,
     dbnum: u32,
+    reason: &str,
+    bad_roots: &[String],
+) -> anyhow::Result<()> {
+    record_window_block_at_on(db, dbnum, None, reason, bad_roots).await
+}
+
+async fn record_window_block_at_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    end_sesno: Option<i32>,
     reason: &str,
     bad_roots: &[String],
 ) -> anyhow::Result<()> {
@@ -206,9 +234,12 @@ pub async fn record_window_block_on(
         .map(|r| format!("'{}'", escape_surql_str(r)))
         .collect::<Vec<_>>()
         .join(", ");
+    let end_sesno = end_sesno
+        .map(|value| format!(", end_sesno = {value}"))
+        .unwrap_or_default();
     let sql = format!(
         "UPSERT {id} SET dbnum = {dbnum}, kind = 'window_block', \
-         reason = '{reason}', bad_roots = [{roots}], \
+         reason = '{reason}', bad_roots = [{roots}]{end_sesno}, \
          first_blocked_at = first_blocked_at?:time::now(), \
          last_blocked_at = time::now();",
         id = block_id(dbnum),
@@ -227,12 +258,24 @@ pub async fn load_window_block(dbnum: u32) -> anyhow::Result<Option<WindowBlock>
     load_window_block_on(&aios_core::SUL_DB, dbnum).await
 }
 
+pub async fn load_window_blocks() -> anyhow::Result<Vec<WindowBlock>> {
+    let mut response = aios_core::SUL_DB
+        .query(format!(
+            "SELECT dbnum, reason, end_sesno, bad_roots, type::string(first_blocked_at) AS first_blocked_at, \
+             type::string(last_blocked_at) AS last_blocked_at FROM {ATTEMPT_TABLE} \
+             WHERE kind = 'window_block' ORDER BY dbnum;"
+        ))
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
+}
+
 pub async fn load_window_block_on(
     db: &Surreal<Any>,
     dbnum: u32,
 ) -> anyhow::Result<Option<WindowBlock>> {
     let sql = format!(
-        "SELECT dbnum, reason, bad_roots, \
+        "SELECT dbnum, reason, end_sesno, bad_roots, \
          type::string(first_blocked_at) AS first_blocked_at, \
          type::string(last_blocked_at) AS last_blocked_at \
          FROM ONLY {};",
@@ -319,9 +362,10 @@ mod tests {
         record_root_failure_on(&db, 7998, &other_bad_root, "other failed")
             .await
             .expect("other attempt");
-        record_window_block_on(
+        record_window_block_at_on(
             &db,
             7998,
+            Some(42),
             "生成根重试穷尽",
             &[bad_root.clone(), other_bad_root.clone()],
         )
@@ -333,6 +377,7 @@ mod tests {
             .expect("blocked");
         assert_eq!(block.bad_roots, vec![bad_root.clone(), other_bad_root.clone()]);
         assert_eq!(block.reason, "生成根重试穷尽");
+        assert_eq!(block.end_sesno, Some(42));
 
         // 修复重存 → 吸收扩窗 → 重置受影响根 + 清除阻断。
         reset_roots_on_absorb_on(&db, 7998, std::slice::from_ref(&bad_root))
