@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考 · DB_Noun 类型描述符速查</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 参考 / <strong>DB_Noun 速查</strong> · <a href="glossary.html">符号速查表 →</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Reference · DB_Noun · AVEVA E3D 2.1 / PDMS 12.1.1</p>
+  <h1><code>DB_Noun</code> 类型描述符速查</h1>
+  <p class="lead">PDMS/E3D 里每一种元素类型（<code>EQUI</code>、<code>PIPE</code>、<code>ELBO</code>…）在内存中对应<strong>一个</strong> <code>DB_Noun</code> 对象。它不是元素本身，是<strong>元素类型的描述符</strong>——回答"这类东西是不是图元、怎么画、能不能改"。</p>
+  <p class="kicker">证据基线：<code>/Volumes/DPC/reverse/core.dll</code> · MD5 <code>099b9237a64002e46b918c18841f547a</code> · 15,330,816 B · imagebase <code>0x10000000</code></p>
+</header>
+
+<div class="callout infer"><span class="tag">版本警告</span>
+本页所有<strong>偏移量</strong>来自 <strong>E3D 2.1 / PDMS 12.1.1</strong> 的 <code>core.dll</code>。
+学习记录 <a href="../learning-records/0003-db-noun-schema-fields-dabacon.md">0003</a> 记录的是 <strong>E3D 3.1</strong>，偏移<strong>完全不同</strong>（见<a href="#ver">第 6 节</a>）。
+<strong>字段号（dabacon field ID）两个版本一致，偏移量不一致</strong>——跨版本移植请用字段号，不要用偏移。
+</div>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#model">一句话对象模型</a></li>
+    <li><a href="#read">取值机制：数据不在二进制里</a></li>
+    <li><a href="#lazy">两条互相独立的懒加载链</a></li>
+    <li><a href="#fields">字段偏移表（2.1 实测）</a></li>
+    <li><a href="#ids">dabacon 字段号表（跨版本稳定）</a></li>
+    <li><a href="#traps">三个陷阱</a></li>
+    <li><a href="#ver">2.1 与 3.1 的偏移差</a></li>
+    <li><a href="#repro">复现命令</a></li>
+  </ol>
+</div>
+
+<h2 id="model">1. 一句话对象模型</h2>
+<p><code>DB_Noun</code> = <strong>类型描述符</strong>，全进程每种类型一份，通过 <code>hashValue</code> 在全局字典里索引。元素实例（<code>DB_Element</code>）通过 <code>type()</code> / <code>actualType()</code> 指回自己的 <code>DB_Noun</code>。</p>
+
+<div class="diagram">DB_Element 实例                DB_Noun 描述符（每类型一份）
+┌──────────────┐   type()    ┌────────────────────────────┐
+│ /VESSEL-1    │ ──────────► │ hashValue  = &lt;EQUI 的 hash&gt; │
+│ (一个具体设备) │             │ primitive? graphics? …      │
+└──────────────┘             │ psOwner/psNext/psFirstMember│ ← 类型层级，不是元素层级
+                             └──────────────┬─────────────┘
+                                            │ (hash, fieldId)
+                                            ▼
+                                   dabacon 数据字典（外部文件）</div>
+
+<div class="callout confirm"><span class="tag">易错点</span>
+<code>psOwner</code> / <code>psNext</code> / <code>psFirstMember</code> 挂在 <code>DB_Noun</code> 上，描述的是<strong>类型之间</strong>的层级（WORL→SITE→ZONE 这种 schema 关系），<strong>不是</strong>你数据库里某个具体设备的父子关系。要遍历实例树请用 <code>DB_Element</code> 侧的 API。
+</div>
+
+<h2 id="read">2. 取值机制：数据不在二进制里</h2>
+<p>所有"这类元素是什么性质"的问题，最终都走同一个原语——按 <strong>(类型 hash, 字段号)</strong> 去 dabacon 数据字典现查：</p>
+
+<pre><code><span class="tok-k">BOOL</span> __thiscall DB_Noun::<span class="tok-f">internalGetField</span>(DB_Noun *<span class="tok-k">this</span>, <span class="tok-k">int</span> fieldId, <span class="tok-k">bool</span> *out)
+{
+  v4 = *((_DWORD *)<span class="tok-k">this</span> + 28);          <span class="tok-c">// 0x70 baseType 指针</span>
+  v8 = *(_DWORD *)(v4 + 116);          <span class="tok-c">// baseType-&gt;hashValue (0x74) = 字典主键</span>
+  a2 = 0;
+  <span class="tok-f">sub_1084F1A5</span>(&amp;v8, &amp;fieldId, &amp;a2, &amp;v6);  <span class="tok-c">// FORTRAN dabacon 查字段</span>
+  DB_Noun::<span class="tok-f">setErrorFromFortran</span>(<span class="tok-k">this</span>, v6);
+  *out = a2 &amp; 1;
+  <span class="tok-k">return</span> v6 == 0;
+}</code></pre>
+<p class="kicker">?internalGetField@DB_Noun@@IBE_NHAA_N@Z @ 0x10457890（bool 版，101 B）</p>
+
+<p>注意主键取法：<strong>不是</strong>直接用 <code>this-&gt;hashValue</code>，而是先取 <code>0x70</code> 的 <code>baseType</code> 指针、再读<em>它的</em> <code>hashValue</code>。对普通类型 <code>baseType == this</code>，两者等价；对 UDET（用户自定义类型）才分叉——这也正是 <code>isUDET()</code> 的判据。</p>
+
+<table>
+<thead><tr><th>原语</th><th>地址</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td><code>sub_1084F1A5</code></td><td>—</td><td>布尔字段（结果 <code>&amp; 1</code>）</td></tr>
+<tr><td><code>sub_1084F0DC</code></td><td>—</td><td>整型 / 数组字段</td></tr>
+<tr><td><code>internalGetField</code></td><td>0x10457840 (int)<br>0x10457890 (bool)<br>0x10457900 (string)<br>0x10457AA0 (vector&lt;int&gt;)<br>0x10457BE0 (vector&lt;DB_Noun*&gt;)</td><td>五个重载，按返回类型分</td></tr>
+</tbody>
+</table>
+
+<div class="callout confirm"><span class="tag">confirmed</span>
+类型语义<strong>不编译在 core.dll 里</strong>，而是 dabacon 字典里的数据。改字典就能改行为，不用换 DLL。<code>core.dll</code> 只实现"怎么问"的逻辑。
+</div>
+
+<h2 id="lazy">3. 两条互相独立的懒加载链</h2>
+<p>常用属性不会每次都查字典，而是首访时批量灌进对象、之后读缓存。<strong>有两条链，各有各的标志位和加载函数，互不触发</strong>：</p>
+
+<table>
+<thead><tr><th>链</th><th>标志位</th><th>加载函数</th><th>覆盖字段</th></tr></thead>
+<tbody>
+<tr><td>主链</td><td><code>0x78</code> dataLoaded</td><td><code>ReadData()</code> @ 0x10457D00</td><td>层级指针、画法、权限位等 ~20 个</td></tr>
+<tr><td>DAB 链</td><td><code>0x79</code> dabLoaded</td><td><code>ReadDataDab()</code> @ 0x10454F50</td><td>目前只见 <code>primaryList</code> (0xA4)</td></tr>
+</tbody>
+</table>
+
+<pre><code><span class="tok-c">// 主链：绝大多数访问器长这样</span>
+<span class="tok-k">int</span> DB_Noun::psOwner(DB_Noun *<span class="tok-k">this</span>) {
+  <span class="tok-k">if</span> ( !*((_BYTE *)<span class="tok-k">this</span> + 120) )   <span class="tok-c">// 0x78 dataLoaded</span>
+    DB_Noun::ReadData(<span class="tok-k">this</span>);
+  <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 38);     <span class="tok-c">// 0x98</span>
+}
+
+<span class="tok-c">// DAB 链：注意标志位和函数都不一样</span>
+<span class="tok-k">bool</span> DB_Noun::primaryList(DB_Noun *<span class="tok-k">this</span>) {
+  <span class="tok-k">if</span> ( !*((_BYTE *)<span class="tok-k">this</span> + 121) )   <span class="tok-c">// 0x79 dabLoaded</span>
+    DB_Noun::ReadDataDab(<span class="tok-k">this</span>);
+  <span class="tok-k">return</span> *((_BYTE *)<span class="tok-k">this</span> + 164);     <span class="tok-c">// 0xA4</span>
+}</code></pre>
+
+<h2 id="fields">4. 字段偏移表（E3D 2.1 实测）</h2>
+<p>下表每一行都由<strong>访问器反编译</strong>得出，并与 <code>ReadData()</code> 的写入偏移<strong>双向对上</strong>。</p>
+
+<table>
+<thead><tr><th>偏移</th><th>宽度</th><th>字段 / 访问器</th><th>加载方式</th></tr></thead>
+<tbody>
+<tr><td><code>0x28</code></td><td>dword</td><td>hasDerivedTypes</td><td>直读</td></tr>
+<tr><td><code>0x70</code></td><td>dword</td><td><strong>baseType</strong>（<code>isUDET</code> 拿它和 <code>this</code> 比）</td><td>直读</td></tr>
+<tr><td><code>0x74</code></td><td>dword</td><td><strong>hashValue</strong>（字典主键）</td><td>直读</td></tr>
+<tr><td><code>0x78</code></td><td>byte</td><td><strong>dataLoaded</strong> 标志</td><td>—</td></tr>
+<tr><td><code>0x79</code></td><td>byte</td><td><strong>dabLoaded</strong> 标志</td><td>—</td></tr>
+<tr><td><code>0x98</code></td><td>dword</td><td>psOwner</td><td>ReadData</td></tr>
+<tr><td><code>0x9C</code></td><td>dword</td><td>psNext</td><td>ReadData</td></tr>
+<tr><td><code>0xA0</code></td><td>dword</td><td>psFirstMember</td><td>ReadData</td></tr>
+<tr><td><code>0xA4</code></td><td>byte</td><td>primaryList</td><td><strong>ReadDataDab</strong></td></tr>
+<tr><td><code>0xA8</code></td><td>dword</td><td>secondaryHierarchy</td><td>ReadData</td></tr>
+<tr><td><code>0xAC</code></td><td>dword</td><td>hardType</td><td>直读</td></tr>
+<tr><td><code>0xD0</code></td><td>byte</td><td>visible</td><td>ReadData</td></tr>
+<tr><td><code>0xD4</code></td><td>dword</td><td>spatialMap</td><td>ReadData</td></tr>
+<tr><td><code>0xD8</code></td><td>dword</td><td>changeType</td><td>ReadData（为 0 时回填默认）</td></tr>
+<tr><td><code>0xDC</code></td><td>byte</td><td>toplevel</td><td>ReadData</td></tr>
+<tr><td><code>0xDD</code></td><td>byte</td><td>defaultVolumeQuery</td><td>ReadData</td></tr>
+<tr><td><code>0xE0</code></td><td>dword</td><td><strong>graphicsBehaviour</strong>（画法）</td><td>ReadData</td></tr>
+<tr><td><code>0xE4</code></td><td>byte</td><td>pickable</td><td>ReadData</td></tr>
+<tr><td><code>0x108</code></td><td>byte</td><td>clasherWithin</td><td>ReadData</td></tr>
+<tr><td><code>0x109</code></td><td>byte</td><td>clasherSection</td><td>ReadData</td></tr>
+<tr><td><code>0x10A</code></td><td>byte</td><td>modifiable</td><td>ReadData</td></tr>
+<tr><td><code>0x10B</code></td><td>byte</td><td>statusEligible</td><td>ReadData</td></tr>
+<tr><td><code>0x10C</code></td><td>byte</td><td>world</td><td>ReadData</td></tr>
+<tr><td><code>0x138</code></td><td>dword</td><td>oldkey</td><td>直读</td></tr>
+<tr><td><code>0x140</code></td><td>dword</td><td>isUDTG</td><td>直读</td></tr>
+</tbody>
+</table>
+<p class="kicker">结构体总长 ≥ <code>0x144</code>（0x140 处是 dword）。</p>
+
+<h2 id="ids">5. dabacon 字段号表（跨版本稳定）</h2>
+<p><strong>这张表才是可移植的资产。</strong> 同一个字段号在 2.1 和 3.1 里都指同一个语义，只是落到不同偏移。</p>
+
+<table>
+<thead><tr><th>字段号</th><th>语义</th><th>2.1 偏移</th><th>3.1 偏移<span class="kicker">（记录 0003）</span></th></tr></thead>
+<tbody>
+<tr><td><code>266716114</code></td><td>psOwner</td><td>0x98</td><td>—</td></tr>
+<tr><td><code>65664829</code></td><td>secondaryHierarchy</td><td>0xA8</td><td>—</td></tr>
+<tr><td><code>722704</code></td><td>visible</td><td>0xD0 (208)</td><td>164</td></tr>
+<tr><td><code>847458</code></td><td>spatialMap</td><td>0xD4</td><td>—</td></tr>
+<tr><td><code>76272573</code></td><td>changeType</td><td>0xD8</td><td>—</td></tr>
+<tr><td><code>661628</code></td><td>toplevel</td><td>0xDC (220)</td><td>176</td></tr>
+<tr><td><code>89369995</code></td><td>defaultVolumeQuery</td><td>0xDD (221)</td><td>177</td></tr>
+<tr><td><code>5099119</code></td><td><strong>graphicsBehaviour</strong></td><td>0xE0 (224)</td><td>0xB4 (180)</td></tr>
+<tr><td><code>750400</code></td><td>pickable</td><td>0xE4 (228)</td><td>184</td></tr>
+<tr><td><code>261556351</code><span class="kicker"> 0xF970A7F</span></td><td>（未命名）</td><td>0xE8 (232)</td><td>188</td></tr>
+<tr><td><code>281413407</code><span class="kicker"> 0x10C6071F</span></td><td>（未命名）</td><td>0xF8 (248)</td><td>200</td></tr>
+<tr><td><code>206078421</code></td><td>clasherWithin</td><td>0x108 (264)</td><td>212</td></tr>
+<tr><td><code>46622793</code></td><td>clasherSection</td><td>0x109 (265)</td><td>213</td></tr>
+<tr><td><code>621476</code></td><td>modifiable</td><td>0x10A (266)</td><td>214</td></tr>
+<tr><td><code>204468292</code></td><td>statusEligible</td><td>0x10B (267)</td><td>215</td></tr>
+<tr><td><code>843594</code></td><td>world</td><td>0x10C (268)</td><td>216</td></tr>
+<tr><td><code>861007</code></td><td>（未命名）</td><td>0x120 (288)</td><td>236</td></tr>
+<tr><td><code>602413</code></td><td>（未命名）</td><td>0x130 (304)</td><td>—</td></tr>
+<tr><td><code>13953605</code></td><td>（未命名）</td><td>0x134 (308)</td><td>252</td></tr>
+</tbody>
+</table>
+
+<p>另有一批<strong>不进缓存、每次现查</strong>的谓词（记录 0003 在 3.1 上实测的字段号，2.1 同名方法存在但地址不同）：
+<span class="pill">primitive 659518</span><span class="pill">geomset 859903</span><span class="pill">extrusion 663225</span><span class="pill">isPointsetPoint 290555737</span></p>
+
+<h2 id="traps">6. 三个陷阱</h2>
+
+<div class="callout infer"><span class="tag">陷阱 1</span>
+<code>isValid()</code> 的语义是<strong>反</strong>的：
+<pre><code><span class="tok-k">BOOL</span> DB_Noun::isValid(DB_Noun *<span class="tok-k">this</span>) { <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 29) == 0; }</code></pre>
+它在 <code>hashValue <strong>== 0</strong></code> 时返回真。按字面"有效则真"去用会全盘反掉。语义上它更接近 <code>isNull</code>／"未解析出类型"。
+<code>ReadData()</code> 里正是 <code>hashValue == 0</code> 这一支走 <code>"Unknown Element Type"</code>。
+</div>
+
+<div class="callout infer"><span class="tag">陷阱 2</span>
+<code>0xA4</code> 夹在几个层级指针（0x98–0xA8）中间，但它<strong>不是指针</strong>，是 <code>primaryList</code> 布尔，而且走 DAB 链。按"层级指针区"整块解释会解释错。
+</div>
+
+<div class="callout infer"><span class="tag">陷阱 3</span>
+偏移<strong>不能跨版本线性平移</strong>。2.1→3.1 的差值不是常数：早期字段差 24 B，中段 44 B，尾部到 56 B——说明中间有多处增删。想跨版本只能认字段号。
+</div>
+
+<h2 id="ver">7. 2.1 与 3.1 的偏移差</h2>
+<table>
+<thead><tr><th>项</th><th>E3D 2.1 / PDMS 12.1.1<span class="kicker">（本页）</span></th><th>E3D 3.1<span class="kicker">（记录 0003）</span></th></tr></thead>
+<tbody>
+<tr><td>imagebase</td><td><code>0x10000000</code></td><td>地址形如 <code>0x58xxxxx</code></td></tr>
+<tr><td>字典句柄取法</td><td><code>*(this+0x70) → +0x74</code></td><td><code>*(this+0x58) → +92</code></td></tr>
+<tr><td>hashValue</td><td><code>0x74</code></td><td><code>0x5C</code></td></tr>
+<tr><td>dataLoaded 标志</td><td><code>0x78</code></td><td><code>0x60</code>（this+96）</td></tr>
+<tr><td>graphicsBehaviour</td><td><code>0xE0</code></td><td><code>0xB4</code></td></tr>
+<tr><td>ReadData</td><td><code>0x10457D00</code></td><td><code>0x58D6D20</code></td></tr>
+<tr><td>internalGetField(bool)</td><td><code>0x10457890</code></td><td><code>0x58D9BD0</code></td></tr>
+<tr><td>结构体大小</td><td>≥ <code>0x144</code> (324)</td><td><code>0x12C</code> (300)，来自 <code>operator new</code></td></tr>
+<tr><td><strong>dabacon 字段号</strong></td><td colspan="2" style="text-align:center"><strong>两版一致</strong></td></tr>
+</tbody>
+</table>
+
+<h2 id="repro">8. 复现命令</h2>
+<p>本页数据全部由 <code>ida-bridge</code> headless 会话产出，可原样重跑：</p>
+<pre><code><span class="tok-c"># 1. 起桥 + 挂已分析好的库</span>
+ida-bridge server start
+ida-bridge supervisor start-idalib --idb /Volumes/DPC/reverse/core.dll.i64
+
+<span class="tok-c"># 2. 查方法清单（SQL 走的是 IDA 索引，不用写 IDAPython）</span>
+ida-bridge exec &lt;client-id&gt; --sql \
+  "SELECT name, start_ea FROM funcs WHERE name LIKE '%DB_Noun%'"
+
+<span class="tok-c"># 3. 反编译单个访问器</span>
+ida-bridge exec &lt;client-id&gt; -c "
+import ida_hexrays, ida_name
+ida_hexrays.init_hexrays_plugin()
+print(str(ida_hexrays.decompile(ida_name.get_name_ea(0,'?psOwner@DB_Noun@@QBEHXZ'))))"
+
+<span class="tok-c"># 4. 用完记得放开，否则 IDA GUI 打不开同一个库</span>
+ida-bridge supervisor stop &lt;client-id&gt;</code></pre>
+
+<div class="callout tip"><span class="tag">注意</span>
+<code>ida-bridge</code> 默认<strong>永不自动保存</strong>。只读查询零风险；要落库改动必须显式 <code>ida-bridge supervisor save &lt;client-id&gt;</code>。
+</div>
+
+<footer class="foot">
+  参考文档 · 基线 <code>core.dll</code> MD5 <code>099b9237…f547a</code>（E3D 2.1 / PDMS 12.1.1）。
+  相关：<a href="../lessons/0004-db-noun-type-descriptor.html">课 04</a> ·
+  <a href="glossary.html">符号速查表</a> ·
+  <a href="../learning-records/0003-db-noun-schema-fields-dabacon.md">学习记录 0003（3.1）</a> ·
+  <a href="../learning-records/0010-db-noun-e3d21-offsets-and-version-drift.md">学习记录 0010</a> ·
+  <a href="../MISSION.md">MISSION</a>
+</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课 04 · DB_Noun：类型判定的答案到底从哪来</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+<nav class="crumbs"><a href="../MISSION.md">MISSION</a> / 课程 / <strong>04 · DB_Noun 类型描述符</strong> · <a href="../reference/db-noun.html">DB_Noun 速查 →</a></nav>
+
+<header class="hero">
+  <p class="eyebrow">Lesson 0004 · Reverse engineering · AVEVA E3D 2.1 / PDMS 12.1.1</p>
+  <h1><code>DB_Noun</code>：类型判定的答案<br>到底从哪来</h1>
+  <p class="lead">MISSION 的验收条件里有一条：<em>"能凭记忆复述『类型判定』依赖 <code>DB_Noun</code> 的哪些标志位、数据从哪来。"</em> 这一课就是来收掉它的。学完你拿到任意一个 <code>DB_Noun</code> 谓词，都能<strong>不用反编译</strong>就说出它的答案来自哪一层。</p>
+  <p class="kicker">预计 12–15 分钟 · 基线：<code>/Volumes/DPC/reverse/core.dll</code>（MD5 <code>099b9237…f547a</code>）· 工具：ida-bridge headless</p>
+</header>
+
+<div class="callout infer"><span class="tag">先说版本</span>
+本课基线是 <strong>E3D 2.1 / PDMS 12.1.1</strong> 的 <code>core.dll</code>，<strong>不是</strong> MISSION 主线的 3.1。
+学习记录 <a href="../learning-records/0003-db-noun-schema-fields-dabacon.md">0003</a> 讲的是 3.1，两者<strong>偏移量完全不同</strong>。
+这不是坏事——正因为有两个版本可比，才逼出了本课最有价值的那条结论（<a href="#drift">第 5 节</a>）。
+</div>
+
+<div class="toc">
+  <strong>本课路线</strong>
+  <ol>
+    <li><a href="#what">它是类型描述符，不是元素</a></li>
+    <li><a href="#three">一眼判断：三条取值路径</a></li>
+    <li><a href="#lazy">两条互不触发的懒加载链</a></li>
+    <li><a href="#trap">一个会让你全盘搞反的陷阱</a></li>
+    <li><a href="#drift">版本漂移：偏移会变，字段号不变</a></li>
+    <li><a href="#gen">落到 gen-model</a></li>
+    <li><a href="#quiz">自测</a></li>
+  </ol>
+</div>
+
+<h2 id="what">1. 它是类型描述符，不是元素</h2>
+
+<p>先把名字对上。AVEVA 官方文档在列属性类型时，写的是一个你可能扫过去没在意的词：</p>
+
+<div class="callout confirm"><span class="tag">官方口径</span>
+属性类型清单里有一项叫 <strong><code>ElementType (or Noun)</code></strong>。
+—— <a href="https://docs.aveva.com/bundle/e3d-design/page/911796.html">Database Attributes, AVEVA E3D Design</a>
+</div>
+
+<p>所以 <code>DB_Noun</code> 不是 AVEVA 程序员随口起的名字，<strong>Noun 就是 AVEVA 对"元素类型"这一概念的正式称呼</strong>。<code>EQUI</code>、<code>PIPE</code>、<code>ELBO</code> 各对应<strong>一个</strong> <code>DB_Noun</code> 对象，全进程共享。你数据库里一万个设备，共用同一个 <code>DB_Noun</code>。</p>
+
+<div class="diagram">DB_Element（元素实例，成千上万个）      DB_Noun（类型描述符，每类型一个）
+┌────────────────┐    type()      ┌──────────────────────────────┐
+│ /VESSEL-1      │ ─────────────► │ hashValue = &lt;EQUI 的 hash&gt;     │
+│ /VESSEL-2      │ ─────────────► │ 是不是图元？怎么画？能不能改？   │
+│ /VESSEL-3      │ ─────────────► │                              │
+└────────────────┘                └───────────────┬──────────────┘
+                                                  │ 用 (hash, 字段号) 去问
+                                                  ▼
+                                        dabacon 数据字典（外部文件）</div>
+
+<p>这解释了一个容易踩的坑：<code>DB_Noun</code> 上挂着 <code>psOwner</code> / <code>psNext</code> / <code>psFirstMember</code>，看着像树遍历，但它们描述的是 <strong>类型之间</strong>的 schema 层级（WORL 底下能挂 SITE、SITE 底下能挂 ZONE），<strong>不是</strong>你项目里某个具体设备的父子关系。官方文档说的正是这件事：</p>
+
+<div class="callout confirm"><span class="tag">官方口径</span>
+"The allowed hierarchy is defined in a Database Schema. The database schema is the 'meta data'… Database Schemas cannot be modified by users."
+—— <a href="https://docs.aveva.com/bundle/e3d-design/page/911791.html">Hierarchical Data Model, AVEVA E3D Design</a>
+</div>
+
+<h2 id="three">2. 一眼判断：三条取值路径</h2>
+
+<p>这是本课的核心技能。<code>DB_Noun</code> 的每个谓词，答案只可能来自三个地方之一。反编译出来一眼就能分：</p>
+
+<h3>路径 A：字典现查（每次都问）</h3>
+<pre><code><span class="tok-k">BOOL</span> DB_Noun::<span class="tok-f">internalGetField</span>(DB_Noun *<span class="tok-k">this</span>, <span class="tok-k">int</span> fieldId, <span class="tok-k">bool</span> *out)
+{
+  v4 = *((_DWORD *)<span class="tok-k">this</span> + 28);          <span class="tok-c">// 0x70 = baseType 指针</span>
+  v8 = *(_DWORD *)(v4 + 116);          <span class="tok-c">// baseType-&gt;hashValue (0x74) = 字典主键</span>
+  <span class="tok-f">sub_1084F1A5</span>(&amp;v8, &amp;fieldId, &amp;a2, &amp;v6);  <span class="tok-c">// FORTRAN dabacon 查</span>
+  *out = a2 &amp; 1;
+  <span class="tok-k">return</span> v6 == 0;
+}</code></pre>
+<p class="kicker">0x10457890 · <code>primitive</code> / <code>geomset</code> / <code>extrusion</code> 走这条</p>
+
+<p>注意主键怎么取的：<strong>不是</strong>直接读自己的 <code>hashValue</code>，而是先取 <code>0x70</code> 的 <code>baseType</code> 指针，再读<em>它的</em> <code>hashValue</code>。对普通类型 <code>baseType == this</code>，绕一圈等于没绕；对 UDET（用户自定义类型）就分叉了——顺手也就解释了 <code>isUDET</code> 为什么长这样：</p>
+<pre><code><span class="tok-k">BOOL</span> DB_Noun::isUDET(DB_Noun *<span class="tok-k">this</span>) { <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 28) != (_DWORD)<span class="tok-k">this</span>; }
+<span class="tok-c">//                                          baseType 不指向自己 ⇒ 是用户自定义类型</span></code></pre>
+
+<h3>路径 B：读 ReadData 灌好的缓存</h3>
+<pre><code><span class="tok-k">int</span> DB_Noun::psOwner(DB_Noun *<span class="tok-k">this</span>) {
+  <span class="tok-k">if</span> ( !*((_BYTE *)<span class="tok-k">this</span> + 120) )   <span class="tok-c">// 0x78 dataLoaded == 0？</span>
+    DB_Noun::ReadData(<span class="tok-k">this</span>);      <span class="tok-c">// 首访：一次把 ~20 个字段全灌进来</span>
+  <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 38);     <span class="tok-c">// 0x98，之后都读这里</span>
+}</code></pre>
+<p class="kicker">特征：函数体里有 <code>if(!flag) ReadData()</code> 前缀</p>
+
+<h3>路径 C：结构自身，不查字典</h3>
+<pre><code><span class="tok-k">int</span> DB_Noun::hashValue(DB_Noun *<span class="tok-k">this</span>) { <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 29); }  <span class="tok-c">// 0x74，构造时写入</span></code></pre>
+<p class="kicker">特征：光秃秃一行 return，4–9 字节的函数</p>
+
+<div class="callout example"><span class="tag">练一下</span>
+<code>graphicsBehaviour</code>（画法）是哪条路径？<br>
+反编译是 <code>if(!*(this+120)) ReadData(); return *((_DWORD*)this+56);</code> → <strong>路径 B</strong>，缓存在 <code>0xE0</code>，由 <code>ReadData</code> 用字段号 <code>5099119</code> 灌入。
+</div>
+
+<h2 id="lazy">3. 两条互不触发的懒加载链</h2>
+
+<p>路径 B 其实有<strong>两条</strong>，各有各的标志位和加载函数，<strong>互不触发</strong>。这点记录 0003 没覆盖：</p>
+
+<table>
+<thead><tr><th>链</th><th>标志位</th><th>加载函数</th><th>谁在用</th></tr></thead>
+<tbody>
+<tr><td>主链</td><td><code>0x78</code> dataLoaded</td><td><code>ReadData()</code> 0x10457D00</td><td>层级指针、画法、权限位…约 20 个</td></tr>
+<tr><td>DAB 链</td><td><code>0x79</code> dabLoaded</td><td><code>ReadDataDab()</code> 0x10454F50</td><td>目前只见 <code>primaryList</code></td></tr>
+</tbody>
+</table>
+
+<pre><code><span class="tok-k">bool</span> DB_Noun::primaryList(DB_Noun *<span class="tok-k">this</span>) {
+  <span class="tok-k">if</span> ( !*((_BYTE *)<span class="tok-k">this</span> + 121) )   <span class="tok-c">// 0x79，不是 0x78</span>
+    DB_Noun::ReadDataDab(<span class="tok-k">this</span>);   <span class="tok-c">// 也不是 ReadData</span>
+  <span class="tok-k">return</span> *((_BYTE *)<span class="tok-k">this</span> + 164);     <span class="tok-c">// 0xA4</span>
+}</code></pre>
+
+<div class="callout confirm"><span class="tag">为什么值得记</span>
+如果你在写"模拟 core.dll 行为"的代码，<strong>调 <code>ReadData()</code> 不会让 <code>primaryList</code> 变得可用</strong>，反过来也一样。两条链要分别处理。
+</div>
+
+<h2 id="trap">4. 一个会让你全盘搞反的陷阱</h2>
+
+<pre><code><span class="tok-k">BOOL</span> DB_Noun::isValid(DB_Noun *<span class="tok-k">this</span>) { <span class="tok-k">return</span> *((_DWORD *)<span class="tok-k">this</span> + 29) == 0; }</code></pre>
+
+<p><code>this+29</code> 就是 <code>hashValue</code>。也就是说——<strong><code>isValid()</code> 在 hashValue 等于 0 的时候返回真</strong>。</p>
+
+<p>按字面意思"有效则真"去用，判断会<strong>整个反掉</strong>。语义上它更接近 <code>isNull()</code>／"这个类型没解析出来"。旁证在 <code>ReadData()</code> 里——正是 <code>hashValue == 0</code> 这一支走向 <code>"Unknown Element Type"</code>：</p>
+
+<pre><code>v11 = *((_DWORD *)<span class="tok-k">this</span> + 80);
+<span class="tok-k">if</span> ( !v11 )
+  <span class="tok-f">sub_10004A90</span>(<span class="tok-s">"Unknown Element Type"</span>, 0x14u);
+<span class="tok-k">else if</span> ( DB_Udtg::findUdtg(v11, &amp;v13) )   <span class="tok-c">// 兜底：查用户自定义类型字典</span>
+  ...DB_Udtg::description(v16)...</code></pre>
+
+<h2 id="drift">5. 版本漂移：偏移会变，字段号不变</h2>
+
+<p>这是本课最有实践价值的一条，而且是<strong>拿两个版本对撞才撞出来的</strong>。</p>
+
+<p>把本课（2.1）和记录 0003（3.1）放一起，同一个语义字段的偏移<strong>全都对不上</strong>：</p>
+
+<table>
+<thead><tr><th>字段</th><th>E3D 2.1</th><th>E3D 3.1</th><th>差</th></tr></thead>
+<tbody>
+<tr><td>hashValue</td><td><code>0x74</code></td><td><code>0x5C</code></td><td>24</td></tr>
+<tr><td>dataLoaded</td><td><code>0x78</code></td><td><code>0x60</code></td><td>24</td></tr>
+<tr><td>visible</td><td>208</td><td>164</td><td>44</td></tr>
+<tr><td>graphicsBehaviour</td><td>224 <code>0xE0</code></td><td>180 <code>0xB4</code></td><td>44</td></tr>
+<tr><td>modifiable</td><td>266</td><td>214</td><td>52</td></tr>
+<tr><td>（字段 13953605）</td><td>308</td><td>252</td><td>56</td></tr>
+</tbody>
+</table>
+
+<p>差值是 24 → 44 → 52 → 56，<strong>不是常数</strong>。说明两版之间有<strong>多处</strong>增删字段，你没法靠"整体平移 N 字节"把一版的偏移换算到另一版。</p>
+
+<div class="callout confirm"><span class="tag">但是</span>
+<strong>dabacon 字段号两版完全一致。</strong> <code>5099119</code> 在 2.1 和 3.1 里都是 graphicsBehaviour，
+<code>621476</code> 都是 modifiable，<code>722704</code> 都是 visible。
+变的是"放在结构体第几个字节"，没变的是"在字典里叫几号"。
+</div>
+
+<p>结论很硬：<strong>字段号是可移植的资产，偏移量是一次性的。</strong> 完整对照表见 <a href="../reference/db-noun.html#ids">速查表第 5 节</a>。</p>
+
+<h2 id="gen">6. 落到 gen-model</h2>
+
+<ul>
+<li><strong>别把偏移写进代码。</strong> 你要复刻的是"按字段号问元数据"这个<em>机制</em>，不是某一版的内存布局。<code>all_attr_info.json</code> 这类元数据快照就是对的方向——它存的是语义映射，不是字节位置。</li>
+<li><strong>类型判定要数据驱动。</strong> core.dll 自己都不硬编码"EQUI 是不是图元"，而是拿 <code>(hash, 659518)</code> 去问字典。gen-model 硬编码类型表就等于把 AVEVA 刻意做成数据的东西又焊回代码里。</li>
+<li><strong>两级缓存的取舍可以照抄。</strong> "首访批量灌、后续读缓存"正是解析器按 schema 一次解码元素隐含块的思路。但注意 AVEVA 分了两条独立链——说明<em>加载代价不同的字段应该分组</em>，不必一次全读。</li>
+<li><strong>UDET 要单独一条路。</strong> <code>baseType != this</code> 就走用户自定义类型分支（<code>DB_Udtg::findUdtg</code>）。增量里把 UDA 属性按未知保守处理，和这个设计是一致的。</li>
+</ul>
+
+<h2 id="quiz">7. 自测</h2>
+
+<div class="quiz">
+  <p class="q">Q1. 反编译出 <code>if(!*(this+120)) ReadData(); return *((_DWORD*)this+56);</code>，这个谓词的答案来自</p>
+  <button data-correct="0" data-fb="不对。字典现查的特征是函数体里直接出现 internalGetField 调用。">每次调用都去查询 dabacon 数据字典</button>
+  <button data-correct="1" data-fb="对。有 if(!flag) ReadData() 前缀 ⇒ 路径 B，值是首访时批量灌进来的缓存。">首访时批量灌入对象里的缓存字段</button>
+  <button data-correct="0" data-fb="不对。构造期写入的字段不带懒加载前缀，是光秃秃一行 return。">对象构造时就已写好的固定字段</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q2. <code>isValid()</code> 返回真，说明这个 <code>DB_Noun</code></p>
+  <button data-correct="0" data-fb="反了。它的实现是 hashValue == 0 才返回真，名字骗人。">类型已解析、可以正常使用</button>
+  <button data-correct="1" data-fb="对。实现是 hashValue == 0，语义其实更接近 isNull，ReadData 里这一支走 Unknown Element Type。">hashValue 为零、类型没解析出</button>
+  <button data-correct="0" data-fb="不对。权限位是 modifiable(0x10A)，和 isValid 无关。">当前用户对它有修改的权限</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q3. 要把 3.1 的分析结论搬到 2.1 上，可以直接复用的是</p>
+  <button data-correct="0" data-fb="不行。两版差值是 24/44/52/56，不是常数，说明中间多处增删。">结构体偏移，整体平移固定字节数</button>
+  <button data-correct="1" data-fb="对。5099119 在两版都是 graphicsBehaviour。字段号是语义主键，跨版本稳定。">dabacon 字段号，两版语义完全一致</button>
+  <button data-correct="0" data-fb="不行。imagebase 都不同（0x10000000 vs 0x58xxxxx），函数地址无一相同。">函数地址，加上模块基址的差值</button>
+  <div class="fb"></div>
+</div>
+
+<div class="quiz">
+  <p class="q">Q4. 调用 <code>ReadData()</code> 之后，<code>primaryList</code> 的值</p>
+  <button data-correct="0" data-fb="不对。ReadData 只置 0x78，不碰 0x79，也不写 0xA4。">一定已经就绪，可以直接读取</button>
+  <button data-correct="1" data-fb="对。它挂在 DAB 链上：标志位 0x79、加载函数 ReadDataDab，和主链互不触发。">仍未加载，它走的是另一条链</button>
+  <button data-correct="0" data-fb="不对。它是实打实的缓存字段，在 0xA4，只是加载入口不同。">不存在缓存，每次都现场查询</button>
+  <div class="fb"></div>
+</div>
+
+<hr>
+
+<h3>建议精读的一手来源</h3>
+<p>本课的反编译结论已经自洽，但要理解 AVEVA <em>为什么</em>这么设计，读这一页最值：
+<a href="https://docs.aveva.com/bundle/e3d-design/page/911791.html"><strong>Hierarchical Data Model — AVEVA E3D Design</strong></a>。
+它用官方口径讲清了"schema 是不可被用户修改的 meta data"——而 <code>DB_Noun</code> 整个类，就是这句话在 C++ 里的实现。读完再回头看第 2 节的 <code>internalGetField</code>，会顺很多。</p>
+
+<div class="callout tip"><span class="tag">我是你的老师</span>
+有任何一步没跟上——某个偏移怎么推出来的、<code>sub_1084F1A5</code> 底下还有什么、UDET 那条分支想展开——直接问我，我们可以当场把库挂起来现查。<br>
+下一步最有价值的三个方向：① 展开 <code>DB_Udtg::findUdtg</code>，把 UDET/UDA 那条路走完；② 把 <code>ReadData</code> 里 5 个还没命名的字段号（<code>261556351</code> / <code>281413407</code> / <code>861007</code> / <code>602413</code> / <code>13953605</code>）对到语义上；③ 拿 <code>XBaseDll.dll</code> 交叉验证字段号是否在别处复用。
+</div>
+
+<footer class="foot">
+  课 04 · 基于 <code>ida-bridge</code> headless 对 <code>/Volumes/DPC/reverse/core.dll</code>（E3D 2.1 / PDMS 12.1.1）的实测。
+  相关：<a href="0001-core-dll-geometry-graphics.html">课 01</a> ·
+  <a href="0002-ref-rev-reverse-reference-index.html">课 02</a> ·
+  <a href="0003-batch-model-generation.html">课 03</a> ·
+  <a href="../reference/db-noun.html">DB_Noun 速查</a> ·
+  <a href="../reference/glossary.html">符号速查表</a> ·
+  <a href="../learning-records/0010-db-noun-e3d21-offsets-and-version-drift.md">学习记录 0010</a> ·
+  <a href="../MISSION.md">MISSION</a>
+</footer>
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
