@@ -1,0 +1,40 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：BRAN /C-IY-1R330-B   (dbnum 8000, pe:24384_22404)
+
+命令序列取自 E3D 3.1 自带的 PMLUI/intf/review/mexpmain —— 该宏正是
+Design Export 表单点 Run 时生成并执行的临时宏，这里把它的原生命令
+直接固化下来，绕开表单，使导出可脚本化重跑。
+
+驱动 expdri.so 取自 %AVEVA_DESIGN_DFLTS%/export/driver-config 中
+唯一的 Review 驱动条目（EXECUTABLE\expdri.so）。
+
+口径：全导（保温 + 障碍一并输出），对拍侧按 geo_type 分桶豁免。
+------------------------------------------------------------------------
+$)
+
+$P RVM-EXPORT-BEGIN
+
+$* ---- 表现设置：保温/障碍/管子全开，隐含管段各自独立容器 ----
+repre insu on transl 0
+repre obst on transl 0
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/C-IY-1R330-B.rvm"
+export filenote 'RVM baseline for BRAN /C-IY-1R330-B (dbnum 8000)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：只导这一条 BRAN 及其成员 ----
+export /C-IY-1R330-B
+
+$* ---- 执行 ----
+export finish
+
+$P RVM-EXPORT-DONE

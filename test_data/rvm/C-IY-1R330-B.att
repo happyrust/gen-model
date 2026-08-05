@@ -1,0 +1,3877 @@
+﻿AVEVA_Attributes_File v1.0 , start: NEW , end: END , name_end: := , sep: &end&
+NEW Header Information
+  Source:= AVEVA E3D Design Data &end& Date:= 04 Aug 2026 &end& Time:= 17:50
+  Project:= AMS &end& MDB:= /ALL &end& Element:= /C-IY-1R330-B
+END
+NEW /1RX03-EQUI
+          NAME:=  /1RX03-EQUI
+          TYPE:=  SITE
+          LOCK:=  false
+         OWNER:=  /*
+          DESC:=  unset
+          FUNC:=  unset
+          PURP:=  unset
+          NUMB:=  0
+          AREA:=  0
+           POS:=  E 0mm N 0mm U 0mm
+           ORI:=  Y is N and Z is U
+          MODU:=  unset
+          ORRF:=  =0/0
+          STMF:=  =0/0
+        UUIDIA:=  unset
+          RLST:=  unset
+     :CNPESPCO:=  unset
+ :CNPEDESIGNER:=  unset
+      :3D_SJJD:=  C
+      :3D_FAZT:=  unset
+      :3D_SJZT:=  Designing
+      :3D_WCZT:=  0
+      :3D_THZT:=  unset
+      :3D_SJRY:=  unset
+      :3D_JDRY:=  unset
+      :3D_SHRY:=  unset
+      :3D_SDRY:=  unset
+      :3D_PZRY:=  unset
+      :3D_SJBG:=  unset
+      :3D_GCBG:=  unset
+      :3D_PZJC:=  unset
+      :3D_GXZH:=  unset
+      :3D_MXGH:=  unset
+      :3D_FAMX:=  unset
+      :3D_KKZT:=  unset
+     :G_EXPORT:=  false
+     :FABELIST:=  unset
+     :FABMODNR:=  1
+    :FABTARGET:=  Target Contractor
+    :FABSOURCE:=  unset
+    :FABDECODE:=  Design Code
+      :FABPRID:=  Object
+      :FABSTID:=  Project Number
+      :FABCLID:=  Customer
+      :FABEFID:=  Project Leader
+    :FABTRRVNO:=  _.0
+     :FABTRANO:=  1
+     :FABREVNO:=  0
+     :FABITIME:=  unset
+     :FABIDATE:=  unset
+     :FABETIME:=  unset
+     :FABEDATE:=  unset
+       :MDSCP1:=  unset
+       :MDSCP2:=  unset
+       :MDSCP3:=  unset
+NEW /1RX03-LCT
+          NAME:=  /1RX03-LCT
+          TYPE:=  ZONE
+          LOCK:=  false
+         OWNER:=  /1RX03-EQUI
+          DESC:=  核辅助厂房
+          FUNC:=  ELEC
+          PURP:=  NI
+          NUMB:=  0
+          AREA:=  0
+           POS:=  E 0mm N 0mm U 0mm
+           ORI:=  Y is N and Z is U
+          PSPE:=  =0/0
+          ISPE:=  =0/0
+          TSPE:=  =0/0
+        BENDMA:=  =0/0
+         DUNIO:=  2
+          MODU:=  unset
+          ORRF:=  =0/0
+          STMF:=  =0/0
+        OFFSRF:=  =0/0
+        UUIDIA:=  unset
+          RLST:=  unset
+         FSTAT:=  unset
+        FACODE:=  unset
+        SPCREF:=  =0/0
+        MODNME:=  unset
+    :CNPEDIVCO:=  unset
+ :CNPEDESIGNER:=  unset
+      :3D_SJJD:=  C
+      :3D_FAZT:=  unset
+      :3D_SJZT:=  Designing
+      :3D_WCZT:=  0
+      :3D_THZT:=  unset
+      :3D_SJRY:=  lirj
+      :3D_JDRY:=  unset
+      :3D_SHRY:=  unset
+      :3D_SDRY:=  unset
+      :3D_PZRY:=  unset
+      :3D_SJBG:=  unset
+      :3D_GCBG:=  unset
+      :3D_PZJC:=  unset
+      :3D_GXZH:=  unset
+      :3D_MXGH:=  unset
+      :3D_FAMX:=  unset
+      :3D_KKZT:=  unset
+        :G_ICS:=  unset
+     :G_EXPORT:=  false
+     :FABELIST:=  unset
+     :FABMODNR:=  1
+    :FABTARGET:=  Target Contractor
+    :FABSOURCE:=  unset
+    :FABDECODE:=  Design Code
+      :FABPRID:=  Object
+      :FABSTID:=  Project Number
+      :FABCLID:=  Customer
+      :FABEFID:=  Project Leader
+    :FABTRRVNO:=  _.0
+     :FABTRANO:=  1
+     :FABREVNO:=  0
+     :FABITIME:=  unset
+     :FABIDATE:=  unset
+     :FABETIME:=  unset
+     :FABEDATE:=  unset
+      :MDSBARS:=  true
+       :MDSCP1:=  unset
+       :MDSCP2:=  unset
+       :MDSCP3:=  unset
+      :MDSEDIT:=  true
+ :MDSHANGGROUP:=  0
+   :MDSHANGROT:=  1:false,1,2
+        :MDSHV:=  BOTH
+   :MDSMAXBORE:=  1200
+  :MDSMAXPIPES:=  10
+   :MDSMINBORE:=  0
+     :MDSRANGE:=  unset
+  :MDSAUTOFILE:=  unset
+NEW /1RX-330
+                NAME:=  /1RX-330
+                TYPE:=  PIPE
+                LOCK:=  false
+               OWNER:=  /1RX03-LCT
+                DESC:=  unset
+                FUNC:=  unset
+                PURP:=  unset
+                BUIL:=  false
+                SHOP:=  false
+                ISOH:=  false
+                BORE:=  0mm
+                TEMP:=  -100000degC
+                PRES:=  0pascal
+              TPRESS:=  0pascal
+                PSPE:=  /ACP1000-Ventilated
+                ISPE:=  =0/0
+                TSPE:=  =0/0
+                MATR:=  =0/0
+                FLUR:=  =0/0
+                CASR:=  =0/0
+                CCEN:=  0
+                CCLA:=  0
+                LNTP:=  unset
+                EREC:=  0
+                 REV:=  -1
+                SAFC:=  0
+                DUTY:=  unset
+                DSCO:=  unset
+                PTSP:=  unset
+                INSC:=  unset
+                SKEY:=  unset
+                LISS:=  false
+                WMAX:=  0
+                PMAX:=  0
+                SMAX:=  0
+                JMAX:=  0
+                DRRF:=  =0/0
+                CDRG:=  unset
+                CNUM:=  unset
+                CARE:=  unset
+                SPLP:=  unset
+                ORRF:=  =0/0
+              BENDMA:=  =0/0
+              UUIDIA:=  unset
+                RLST:=  unset
+              DELDSG:=  FALS
+               FAREA:=  unset
+              FPLINE:=  unset
+                FDRA:=  unset
+                FREV:=  unset
+                FRDR:=  unset
+               FSTAT:=  unset
+               PLANU:=  unset
+                JNTC:=  0
+                WLDC:=  0
+               HEATT:=  0
+              MDSYSF:=  unset
+              INPRTR:=  =0/0
+              OUPRTR:=  =0/0
+              SLOREF:=  =0/0
+              NOHUMA:=  false
+       :CNPEDESIGNER:=  unset
+            :3D_SJJD:=  C
+            :3D_FAZT:=  unset
+            :3D_SJZT:=  Designing
+            :3D_WCZT:=  0
+            :3D_THZT:=  unset
+            :3D_SJRY:=  unset
+            :3D_JDRY:=  unset
+            :3D_SHRY:=  unset
+            :3D_SDRY:=  unset
+            :3D_PZRY:=  unset
+            :3D_SJBG:=  unset
+            :3D_GCBG:=  unset
+            :3D_PZJC:=  unset
+            :3D_GXZH:=  unset
+            :3D_MXGH:=  unset
+            :3D_FAMX:=  unset
+            :3D_KKZT:=  unset
+        :CNPEVERSION:=  unset
+           :G_STATUS:=  DESIGN
+ :MECHANICALREPORTNO:=  unset
+          :PSISYSTEM:=  unset
+            :PSIDATE:=  unset
+         :MDSCOMMENT:=  unset
+NEW /C-IY-1R330-B
+                  NAME:=  /C-IY-1R330-B
+                  TYPE:=  BRAN
+                  LOCK:=  false
+                 OWNER:=  /1RX-330
+                  DESC:=  unset
+                  FUNC:=  unset
+                  PURP:=  unset
+                  BUIL:=  false
+                  SHOP:=  false
+                  ISOH:=  false
+                  HPOS:=  W 20876mm S 9922mm U 430mm
+                  TPOS:=  W 13920.13mm N 16991.02mm U 430mm
+                  HDIR:=  N 25 W
+                  TDIR:=  S 44 W
+                  HREF:=  =0/0
+                  TREF:=  =0/0
+                  LHEA:=  true
+                  LTAI:=  true
+                  HBOR:=  100mm
+                  TBOR:=  100mm
+                  HCON:=  BOXI
+                  TCON:=  BOXI
+                 HEADW:=  0mm
+                 TAILW:=  0mm
+                 HEADH:=  0mm
+                 TAILH:=  0mm
+                 HZAXI:=  unset
+                 TZAXI:=  unset
+                  DETA:=  false
+                  LSTR:=  false
+                  LNTP:=  unset
+                  EREC:=  0
+                  TEMP:=  -100000degC
+                  PRES:=  0pascal
+                TPRESS:=  0pascal
+                  FLOW:=  unset
+                  HSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+                  CCEN:=  0
+                  CCLA:=  0
+                  SAFC:=  0
+                  MATR:=  =0/0
+                  FLUR:=  =0/0
+                  CASR:=  =0/0
+                  PSPE:=  /ACP1000-Trough
+                  ISPE:=  =0/0
+                  TSPE:=  =0/0
+                  DUTY:=  unset
+                  DSCO:=  unset
+                  PTSP:=  unset
+                  INSC:=  unset
+                  SPLH:=  unset
+                  HDMT:=  unset
+                  HDMF:=  unset
+                  TDMT:=  unset
+                  TDMF:=  unset
+                  LISS:=  false
+                  WMAX:=  0
+                  PMAX:=  0
+                  PTNH:=  0
+                  SMAX:=  0
+                  JMAX:=  0
+                  MTOH:=  unset
+                  PTNB:=  unset
+                  DRRF:=  =0/0
+                  SPSP:=  unset
+                  JNUM:=  unset
+                  JOIP:=  unset
+                  ORRF:=  =0/0
+                BENDMA:=  =0/0
+                UUIDIA:=  unset
+                  INCO:=
+                 PLANU:=  unset
+                  BSTA:=  0
+                  HWRF:=  =0/0
+                  TWRF:=  =0/0
+                  BRLO:=  0
+                  RLST:=  unset
+                 TSFBR:=  false
+                DELDSG:=  FALS
+                MDSYSF:=  unset
+                INPRTR:=  =0/0
+                OUPRTR:=  =0/0
+                SLOREF:=  =0/0
+                AEXCES:=  0mm
+                LEXCES:=  0mm
+                  LOOS:=  false
+                LCHKDA:=  unset
+           :SCHREFHOLE:=  unset
+           :SCHREFHOLE:=  unset
+         :CNPEDESIGNER:=  unset
+             :PLANREF1:=  unset
+             :PLANREF2:=  unset
+             :PLANREF3:=  unset
+              :ROOM_NO:=  unset
+              :HXYSIZE:=  unset
+              :TXYSIZE:=  unset
+               :ISOREF:=  unset
+                :CLEAN:=  unset
+                 :AREA:=  unset
+            :HYDROLOOP:=  unset
+          :CNPEVERSION:=  unset
+                :G_ICS:=  unset
+            :BRANWIDTH:=  unset
+             :BRANHIGH:=  unset
+         :ISODRAWINGNO:=  unset
+        :H-AIRQUANTITY:=  0
+      :H-FLOWDIRECTION:=  true
+       :H-PRESSURESPEC:=  TRUE
+        :H-TEMPERATURE:=  unset
+   :ICSR-DOSERATE-NROP:=  unset
+   :ICSR-DOSERATE-NRSH:=  unset
+   :ICSR-DOSERATE-ACCI:=  unset
+             :PFILOOSE:=  unset
+           :PFILEXCESS:=  unset
+           :PFIAEXCESS:=  unset
+            :PFCONSCHK:=  false
+            :PSISYSTEM:=  unset
+              :HXYSIZE:=  unset
+              :TXYSIZE:=  unset
+           :MDSCOMMENT:=  unset
+             :MDSDTYPE:=  unset
+              :MDSTRUN:=  false
+  NEW FTUBE 1 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22405
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 20876mm S 9922mm U 430mm
+             ORI:=  Y is W 25 S and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 20876mm S 9922mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 20876mm S 9922mm U 430mm
+            LPOS:=  W 21509.927mm S 8562.538mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 1 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22406
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 21510.88mm S 8560.5mm U 430mm
+                ORI:=  Y is W 25 S and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 21510.88mm S 8560.5mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  5.00271degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  2.25mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 21509.929mm S 8562.539mm U 430mm
+               LPOS:=  W 21511.649mm S 8558.386mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 1 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22406
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.004mm
+      ITPS:=  W 21511.65mm S 8558.388mm U 430mm
+      APOS:=  W 21511.649mm S 8558.386mm U 430mm
+      LPOS:=  W 21511.65mm S 8558.39mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 2 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22407
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 21511.65mm S 8558.39mm U 430mm
+             ORI:=  Y is W 19.9973 S and Z is U
+            DESP:=  0 0 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 21511.65mm S 8558.39mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1491.92mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 21511.65mm S 8558.39mm U 430mm
+            LPOS:=  W 22021.851mm S 7156.42mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 2 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22408
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22022.46mm S 7154.73mm U 430mm
+                ORI:=  Y is W 19.9973 S and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22022.46mm S 7154.73mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  3.99729degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.797mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22021.845mm S 7156.419mm U 430mm
+               LPOS:=  W 22022.955mm S 7153.002mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 2 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22408
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.005mm
+      ITPS:=  W 22022.958mm S 7153.001mm U 430mm
+      APOS:=  W 22022.955mm S 7153.002mm U 430mm
+      LPOS:=  W 22022.96mm S 7153mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 3 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22409
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22022.96mm S 7153mm U 430mm
+             ORI:=  Y is W 16 S and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22022.96mm S 7153mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22022.96mm S 7153mm U 430mm
+            LPOS:=  W 22436.416mm S 5711.107mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 3 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22410
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22436.91mm S 5709.38mm U 430mm
+                ORI:=  Y is W 16 S and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22436.91mm S 5709.38mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  4degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.798mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22436.414mm S 5711.109mm U 430mm
+               LPOS:=  W 22437.284mm S 5707.621mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 3 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22410
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.004mm
+      ITPS:=  W 22437.282mm S 5707.62mm U 430mm
+      APOS:=  W 22437.284mm S 5707.621mm U 430mm
+      LPOS:=  W 22437.28mm S 5707.62mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 4 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22411
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22437.28mm S 5707.62mm U 430mm
+             ORI:=  Y is W 12 S and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22437.28mm S 5707.62mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1493mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22437.28mm S 5707.62mm U 430mm
+            LPOS:=  W 22747.692mm S 4247.246mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 4 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22412
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22802.89mm S 3987.58mm U 430mm
+                ORI:=  Y is N 12 W and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR60:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22802.89mm S 3987.58mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  265.47mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22747.696mm S 4247.249mm U 430mm
+               LPOS:=  W 22605.607mm S 3809.946mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 4 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22412
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.005mm
+      ITPS:=  W 22605.605mm S 3809.945mm U 430mm
+      APOS:=  W 22605.607mm S 3809.946mm U 430mm
+      LPOS:=  W 22605.603mm S 3809.944mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW BEND 5 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22413
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22408.32mm S 3632.31mm U 430mm
+                ORI:=  Y is E 42 N and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBL60:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22408.32mm S 3632.31mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  265.47mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22605.603mm S 3809.944mm U 430mm
+               LPOS:=  W 22463.514mm S 3372.641mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 5 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22413
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.004mm
+      ITPS:=  W 22463.514mm S 3372.639mm U 430mm
+      APOS:=  W 22463.514mm S 3372.641mm U 430mm
+      LPOS:=  W 22463.515mm S 3372.637mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW BEND 6 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22414
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22464.09mm S 3369.93mm U 430mm
+                ORI:=  Y is W 12 S and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22464.09mm S 3369.93mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  6.1528degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  2.768mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22463.515mm S 3372.637mm U 430mm
+               LPOS:=  W 22464.372mm S 3367.177mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 6 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22414
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.009mm
+      ITPS:=  W 22464.376mm S 3367.178mm U 430mm
+      APOS:=  W 22464.372mm S 3367.177mm U 430mm
+      LPOS:=  W 22464.38mm S 3367.18mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 5 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22415
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22464.38mm S 3367.18mm U 430mm
+             ORI:=  Y is W 5.8472 S and Z is U
+            DESP:=  unset
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22464.38mm S 3367.18mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1237.55mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22464.38mm S 3367.18mm U 430mm
+            LPOS:=  W 22590.456mm S 2136.069mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW FTUBE 6 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22416
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  E 0mm N 0mm U 0mm
+             ORI:=  Y is N and Z is U
+            DESP:=  unset
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  =0/0
+            LSTU:=  =0/0
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  E 0mm N 0mm U 0mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  0mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+  END
+  NEW BEND 7 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22417
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22590.58mm S 2134.79mm U 430mm
+                ORI:=  Y is W 5.8472 S and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22590.58mm S 2134.79mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  2.85047degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.281mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22590.449mm S 2136.065mm U 430mm
+               LPOS:=  W 22590.647mm S 2133.51mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 7 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22417
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.006mm
+      ITPS:=  W 22590.649mm S 2133.509mm U 430mm
+      APOS:=  W 22590.647mm S 2133.51mm U 430mm
+      LPOS:=  W 22590.652mm S 2133.507mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW BEND 8 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22418
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22604.53mm S 1868.4mm U 430mm
+                ORI:=  Y is N 2.99672 W and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBL60:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22604.53mm S 1868.4mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  265.47mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22590.652mm S 2133.507mm U 430mm
+               LPOS:=  W 22841.059mm S 1747.866mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 8 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22418
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.009mm
+      ITPS:=  W 22841.06mm S 1747.87mm U 430mm
+      APOS:=  W 22841.059mm S 1747.866mm U 430mm
+      LPOS:=  W 22841.061mm S 1747.875mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW BEND 9 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22419
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 23077.59mm S 1627.34mm U 430mm
+                ORI:=  Y is W 27.0033 N and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR60:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 23077.59mm S 1627.34mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  265.47mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22841.061mm S 1747.875mm U 430mm
+               LPOS:=  W 23091.468mm S 1362.233mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 9 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22419
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.009mm
+      ITPS:=  W 23091.464mm S 1362.231mm U 430mm
+      APOS:=  W 23091.468mm S 1362.233mm U 430mm
+      LPOS:=  W 23091.46mm S 1362.23mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 7 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22420
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 23091.46mm S 1362.23mm U 430mm
+             ORI:=  Y is W 2.99672 S and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 23091.46mm S 1362.23mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1091mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 23091.46mm S 1362.23mm U 430mm
+            LPOS:=  W 23148.496mm S 272.722mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 10 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22421
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 23148.59mm S 270.93mm U 430mm
+                ORI:=  Y is W 2.99672 S and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 23148.59mm S 270.93mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  3.99672degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.797mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 23148.496mm S 272.724mm U 430mm
+               LPOS:=  W 23148.559mm S 269.133mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 10 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22421
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.004mm
+      ITPS:=  W 23148.559mm S 269.132mm U 430mm
+      APOS:=  W 23148.559mm S 269.133mm U 430mm
+      LPOS:=  W 23148.56mm S 269.13mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 8 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22422
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 23148.56mm S 269.13mm U 430mm
+             ORI:=  Y is W 1 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 23148.56mm S 269.13mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 23148.56mm S 269.13mm U 430mm
+            LPOS:=  W 23122.381mm N 1230.642mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 11 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22423
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 23122.35mm N 1232.44mm U 430mm
+                ORI:=  Y is W 1 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 23122.35mm N 1232.44mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  4.0021degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.799mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 23122.381mm N 1230.641mm U 430mm
+               LPOS:=  W 23122.193mm N 1234.233mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 11 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22423
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.007mm
+      ITPS:=  W 23122.197mm N 1234.231mm U 430mm
+      APOS:=  W 23122.193mm N 1234.233mm U 430mm
+      LPOS:=  W 23122.2mm N 1234.23mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 9 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22424
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 23122.2mm N 1234.23mm U 430mm
+             ORI:=  Y is W 5.0021 N and Z is U
+            DESP:=  0 0 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 23122.2mm N 1234.23mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1493.71mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 23122.2mm N 1234.23mm U 430mm
+            LPOS:=  W 22991.96mm N 2722.251mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 12 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22425
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22991.84mm N 2723.6mm U 430mm
+                ORI:=  Y is W 5.0021 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22991.84mm N 2723.6mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  2.9979degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.348mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22991.958mm N 2722.258mm U 430mm
+               LPOS:=  W 22991.652mm N 2724.935mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 12 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22425
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.005mm
+      ITPS:=  W 22991.651mm N 2724.932mm U 430mm
+      APOS:=  W 22991.652mm N 2724.935mm U 430mm
+      LPOS:=  W 22991.65mm N 2724.93mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 10 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22426
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22991.65mm N 2724.93mm U 430mm
+             ORI:=  Y is W 8 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22991.65mm N 2724.93mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22991.65mm N 2724.93mm U 430mm
+            LPOS:=  W 22782.89mm N 4210.332mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 13 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22427
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22782.58mm N 4212.57mm U 430mm
+                ORI:=  Y is W 8 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22782.58mm N 4212.57mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  5.00481degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  2.251mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22782.893mm N 4210.341mm U 430mm
+               LPOS:=  W 22782.074mm N 4214.763mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 13 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22427
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.005mm
+      ITPS:=  W 22782.072mm N 4214.761mm U 430mm
+      APOS:=  W 22782.074mm N 4214.763mm U 430mm
+      LPOS:=  W 22782.07mm N 4214.76mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 11 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22428
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22782.07mm N 4214.76mm U 430mm
+             ORI:=  Y is W 13.0048 N and Z is U
+            DESP:=  0 0 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22782.07mm N 4214.76mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1492.82mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22782.07mm N 4214.76mm U 430mm
+            LPOS:=  W 22446.137mm N 5669.291mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 14 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22429
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 22445.84mm N 5670.6mm U 430mm
+                ORI:=  Y is W 13.0048 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 22445.84mm N 5670.6mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  2.99519degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  1.346mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22446.143mm N 5669.288mm U 430mm
+               LPOS:=  W 22445.469mm N 5671.894mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 14 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22429
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.01mm
+      ITPS:=  W 22445.464mm N 5671.892mm U 430mm
+      APOS:=  W 22445.469mm N 5671.894mm U 430mm
+      LPOS:=  W 22445.46mm N 5671.89mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 12 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22430
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 22445.46mm N 5671.89mm U 430mm
+             ORI:=  Y is W 16 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 22445.46mm N 5671.89mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 22445.46mm N 5671.89mm U 430mm
+            LPOS:=  W 22032.004mm N 7113.783mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 15 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22431
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 21935.54mm N 7450.23mm U 430mm
+                ORI:=  Y is N 16 E and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR90:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 21935.54mm N 7450.23mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  350mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 22032.013mm N 7113.788mm U 430mm
+               LPOS:=  W 21599.098mm N 7353.757mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 15 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22431
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.011mm
+      ITPS:=  W 21599.094mm N 7353.753mm U 430mm
+      APOS:=  W 21599.098mm N 7353.757mm U 430mm
+      LPOS:=  W 21599.09mm N 7353.75mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 13 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22432
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 21599.09mm N 7353.75mm U 430mm
+             ORI:=  Y is N 16 E and Z is U
+            DESP:=  unset
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 21599.09mm N 7353.75mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  500mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 21599.09mm N 7353.75mm U 430mm
+            LPOS:=  W 21118.459mm N 7215.931mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 16 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22433
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 20782.02mm N 7119.46mm U 430mm
+                ORI:=  Y is E 16 S and Z is U
+               DESP:=  unset
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBL90:100X150
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 20782.02mm N 7119.46mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  90degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  350mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 21118.462mm N 7215.933mm U 430mm
+               LPOS:=  W 20685.547mm N 7455.902mm U 430mm
+               DTXR:=  Horizontal Bend R=150
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 16 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22433
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.003mm
+      ITPS:=  W 20685.548mm N 7455.901mm U 430mm
+      APOS:=  W 20685.547mm N 7455.902mm U 430mm
+      LPOS:=  W 20685.55mm N 7455.9mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 14 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22434
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 20685.55mm N 7455.9mm U 430mm
+             ORI:=  Y is W 26 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 20685.55mm N 7455.9mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  3000mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 20685.55mm N 7455.9mm U 430mm
+            LPOS:=  W 19370.437mm N 10152.282mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW FTUBE 15 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22435
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 19370.44mm N 10152.28mm U 430mm
+             ORI:=  Y is W 26 N and Z is U
+            DESP:=  0 0 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 19370.44mm N 10152.28mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1000mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 19370.44mm N 10152.28mm U 430mm
+            LPOS:=  W 18932.069mm N 11051.074mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW FTUBE 16 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22436
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 18932.06mm N 11051.08mm U 430mm
+             ORI:=  Y is W 34 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 18932.06mm N 11051.08mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  3000mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 18932.06mm N 11051.08mm U 430mm
+            LPOS:=  W 17254.481mm N 13538.193mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 17 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22437
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 17251.96mm N 13541.93mm U 430mm
+                ORI:=  Y is W 34 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBR:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 17251.96mm N 13541.93mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  10.015degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  4.512mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 17254.483mm N 13538.189mm U 430mm
+               LPOS:=  W 17248.825mm N 13545.175mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW ileave tube of BEND 17 of BRANCH /C-IY-1R330-B
+      NAME:=  ileave tube of =24384/22437
+      TYPE:=  TUBI
+     OWNER:=  /C-IY-1R330-B
+      GRDE:=  0
+      LBOR:=  100mm
+      SPRE:=  /ACP1000-Trough/ACP1000-TUBE:100
+      ITLE:=  0.007mm
+      ITPS:=  W 17248.827mm N 13545.178mm U 430mm
+      APOS:=  W 17248.825mm N 13545.175mm U 430mm
+      LPOS:=  W 17248.83mm N 13545.18mm U 430mm
+      DTXR:=  Cable Tray Tube
+  END
+  NEW FTUBE 17 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22438
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 17248.83mm N 13545.18mm U 430mm
+             ORI:=  Y is W 44.015 N and Z is U
+            DESP:=  0 0 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 17248.83mm N 13545.18mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  2991.03mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 17248.83mm N 13545.18mm U 430mm
+            LPOS:=  W 15170.523mm N 15696.203mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+  NEW BEND 18 of BRANCH /C-IY-1R330-B
+               NAME:=  =24384/22439
+               TYPE:=  BEND
+               LOCK:=  false
+              OWNER:=  /C-IY-1R330-B
+                POS:=  W 15170.51mm N 15696.21mm U 430mm
+                ORI:=  Y is W 44.015 N and Z is U
+               DESP:=  0 0 0
+               BUIL:=  false
+               SHOP:=  false
+               ISOH:=  false
+               SPRE:=  /ACP1000-Trough/ACP1000-TBL:100
+               LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+               ARRI:=  1
+               LEAV:=  2
+               POSI:=  W 15170.51mm N 15696.21mm U 430mm
+               ISPE:=  =0/0
+               TSPE:=  =0/0
+               ANGL:=  0.014987degree
+               RADI:=  0mm
+               LOFF:=  true
+               CREF:=  =0/0
+              CSFBR:=  false
+              TSFBR:=  false
+              ASFBR:=  false
+              LSFBR:=  false
+               SPLN:=  unset
+               SPLT:=  unset
+               MTOR:=  unset
+               CMPX:=  unset
+               PTNO:=  0
+               PTNT:=  0
+               PTNB:=  unset
+               JNUM:=  unset
+               JOIP:=  unset
+               MTOC:=  unset
+               MTOT:=  unset
+               MTOX:=  unset
+               SPSP:=  unset
+               DPFN:=  unset
+             DPGRID:=  0
+             NWELDS:=  0
+               DMTY:=  unset
+               DMFA:=  unset
+               ORRF:=  =0/0
+               INVF:=  unset
+               BSEL:=  unset
+               MATN:=  unset
+               RLOC:=  -1
+               RLIN:=  unset
+               RLEX:=  unset
+               HREL:=  true
+             SPKCHG:=  =0/0
+             DELDSG:=  FALS
+              NCUTS:=  0
+             INPRTR:=  =0/0
+             OUPRTR:=  =0/0
+             USEFED:=  0mm
+             AEXCES:=  0mm
+             LEXCES:=  0mm
+               LOOS:=  false
+             CLUTCH:=  unset
+             SLODIR:=  unset
+          :SCROOMNO:=  unset
+         :ISOBRANNO:=  unset
+        :H-SECTCODE:=  unset
+     :H-FLOW-VOLUME:=  unset
+            :H-LOSS:=  unset
+      :ISOSHIPCOORD:=  unset
+         :CUTLENGTH:=  0.007mm
+          :PFILOOSE:=  unset
+        :PFILEXCESS:=  unset
+        :PFIAEXCESS:=  unset
+          :NODETYPE:=  unset
+           :NODEGAP:=  unset
+         :NODESTIFF:=  unset
+      :NODEFRICTION:=  unset
+         :PSIWEIGHT:=  0kg
+            :MDSADP:=  unset
+         :MDSADPREM:=  unset
+         :MDSANCREF:=  unset
+         :MDSBPREF1:=  =0/0
+        :MDSCOMMENT:=  unset
+            :MDSCP1:=  unset
+            :MDSCP2:=  unset
+            :MDSCP3:=  unset
+        :MDSLINKREF:=  unset
+       :MDSGUIDEREF:=  =0/0
+       :MDSITEMCODE:=  unset
+         :MDSMATREF:=  =0/0
+           :MDSNOTE:=  unset
+        :MDSNOTEPOS:=  unset
+      :MDSNUDGEDIST:=  0mm
+        :MDSPACKREF:=  =0/0
+            :MDSPAD:=  unset
+        :MDSROTATED:=  false
+         :MDSROTDIR:=  unset
+           :MDSSREF:=  =0/0
+           :MDSSTOP:=  unset
+          :MDSSTOP2:=  unset
+       :MDSSUPPTYPE:=  unset
+        :MDSSWASHER:=  false
+        :MDSTRIMMER:=  false
+      :MDSTRUNNOTE1:=  unset
+      :MDSTRUNNOTE2:=  unset
+      :MDSTUBENOTE1:=  unset
+      :MDSTUBENOTE2:=  unset
+        :MDSVPRMMTO:=  true
+               APOS:=  W 15170.515mm N 15696.205mm U 430mm
+               LPOS:=  W 15170.505mm N 15696.215mm U 430mm
+               DTXR:=  Horizontal adjust splice plate
+               MTXX:=  Hot Dip Galvanized
+  END
+  NEW FTUBE 18 of BRANCH /C-IY-1R330-B
+            NAME:=  =24384/22440
+            TYPE:=  FTUB
+            LOCK:=  false
+           OWNER:=  /C-IY-1R330-B
+             POS:=  W 15170.51mm N 15696.21mm U 430mm
+             ORI:=  Y is W 44 N and Z is U
+            DESP:=  0 0 0 1 1 0
+            BUIL:=  false
+            SHOP:=  false
+            ISOH:=  false
+            SPRE:=  /ACP1000-Trough/ACP1000-TFVL:100
+            LSTU:=  /ACP1000-Trough/ACP1000-TUBE:100
+            ARRI:=  1
+            LEAV:=  2
+            POSI:=  W 15170.51mm N 15696.21mm U 430mm
+            ISPE:=  =0/0
+            TSPE:=  =0/0
+            HEIG:=  1800mm
+           CSFBR:=  false
+           TSFBR:=  false
+           ASFBR:=  false
+           LSFBR:=  false
+            SPLN:=  unset
+            SPLT:=  unset
+            MTOR:=  unset
+            CMPX:=  unset
+            PTNO:=  0
+            PTNT:=  0
+            PTNB:=  unset
+            JNUM:=  unset
+            JOIP:=  unset
+            MTOC:=  unset
+            MTOT:=  unset
+            MTOX:=  unset
+            SPSP:=  unset
+            DPFN:=  unset
+          DPGRID:=  0
+          NWELDS:=  0
+            ORRF:=  =0/0
+            INVF:=  unset
+            BSEL:=  unset
+            MATN:=  unset
+            RLOC:=  -1
+            RLIN:=  unset
+            RLEX:=  unset
+            HREL:=  true
+          SPKCHG:=  =0/0
+          DELDSG:=  FALS
+          INPRTR:=  =0/0
+          OUPRTR:=  =0/0
+          AEXCES:=  0mm
+          LEXCES:=  0mm
+            LOOS:=  false
+          SLODIR:=  unset
+       :SCROOMNO:=  unset
+      :ISOBRANNO:=  unset
+       :PFILOOSE:=  unset
+     :PFILEXCESS:=  unset
+     :PFIAEXCESS:=  unset
+      :PSIWEIGHT:=  0kg
+     :MDSCOMMENT:=  unset
+         :MDSCP1:=  unset
+         :MDSCP2:=  unset
+         :MDSCP3:=  unset
+     :MDSVPRMMTO:=  true
+            APOS:=  W 15170.51mm N 15696.21mm U 430mm
+            LPOS:=  W 13920.125mm N 16991.022mm U 430mm
+            DTXR:=  Variable length
+            MTXX:=  Hot Dip Galvanized
+  END
+END

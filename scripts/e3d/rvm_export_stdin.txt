@@ -1,0 +1,6 @@
+$P RVM-PROBE-ALIVE
+/C-IY-1R330-B
+q name
+q type
+$M "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_c_iy_1r330_b.mac"
+$P RVM-EXPORT-EXIT
