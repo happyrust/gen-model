@@ -773,32 +773,8 @@ impl IncrementPipeline {
         // ADR-001「失败批次不推进水位、按同一窗口重试」的安全性并不依赖「整窗口一个
         // 事务」，而是靠 Add 改用幂等 UPSERT：重试撞上上一轮已写入的记录也能覆盖收敛，
         // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
-        // 窗口内同一 refno 被连续改 N 次就写 N 次，而本模块只保留最新状态，中间态
-        // 全部会被最后一次覆盖。折叠掉它们（见 fold_window）既减语句数也减 SQL 体积。
-        let raw_ops: usize = range_eles.values().map(|v| v.len()).sum();
-        let planned = fold_window(range_eles);
-
-        let mut statements: Vec<String> = Vec::new();
-        for write in &planned {
-            let id = write.op.refno.to_string();
-            let surql = match &write.folded {
-                Some(folded) => folded.to_modify_surql(&id, write.sesno),
-                None => write.op.to_surql(&id, dbnum, write.sesno),
-            };
-            if !surql.is_empty() {
-                statements.push(surql);
-            }
-        }
-
+        let statements = Self::render_persist_statements(range_eles, dbnum);
         let total = statements.len();
-        // 被折掉的位置一定是 Modified（必然渲染出语句），所以这个差值就是净省下的语句数；
-        // 不用 planned.len() 直接比，因为两侧都含渲染为空的 None 操作，会低报降幅。
-        let folded_away = raw_ops.saturating_sub(planned.len());
-        if folded_away > 0 {
-            println!(
-                "增量窗口折叠：合并同 refno 的连续 Modified，省下 {folded_away} 条语句（实际落库 {total} 条）"
-            );
-        }
         // 分块事务提交：原实现把整窗口拼成「单个事务」，大型系统库（如 amssys 冷启动
         // 168 会话 ~4000+ 元素）会撑爆 SurrealDB ws 通道上限，报「receiving from an
         // empty and closed channel」而整体失败。改为按 TX_CHUNK 条语句一块、每块自身
@@ -822,6 +798,42 @@ impl IncrementPipeline {
             "增量主数据落库完成，共 {total} 条（分块事务提交 chunk={TX_CHUNK}，仅最新状态，不写历史）"
         );
         Ok(())
+    }
+
+    /// 渲染本窗口的全部落库语句（折叠后）。纯函数：直写路径
+    /// （[`Self::persist_latest_main_data`]）与暂存路径
+    /// （[`Self::apply_window_staged`]）共用同一份渲染，两边不可能漂移。
+    ///
+    /// 窗口内同一 refno 被连续改 N 次就写 N 次，而本模块只保留最新状态，中间态
+    /// 全部会被最后一次覆盖。折叠掉它们（见 `fold_window`）既减语句数也减 SQL
+    /// 体积；被折掉的位置一定是 Modified（必然渲染出语句），折叠量以日志报出。
+    pub(crate) fn render_persist_statements(
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+        dbnum: i32,
+    ) -> Vec<String> {
+        let raw_ops: usize = range_eles.values().map(|v| v.len()).sum();
+        let planned = fold_window(range_eles);
+
+        let mut statements: Vec<String> = Vec::new();
+        for write in &planned {
+            let id = write.op.refno.to_string();
+            let surql = match &write.folded {
+                Some(folded) => folded.to_modify_surql(&id, write.sesno),
+                None => write.op.to_surql(&id, dbnum, write.sesno),
+            };
+            if !surql.is_empty() {
+                statements.push(surql);
+            }
+        }
+
+        let folded_away = raw_ops.saturating_sub(planned.len());
+        if folded_away > 0 {
+            println!(
+                "增量窗口折叠：合并同 refno 的连续 Modified，省下 {folded_away} 条语句（实际落库 {} 条）",
+                statements.len()
+            );
+        }
+        statements
     }
 
     /// Render this window's `datacenter_version` status updates (pure).
@@ -2779,7 +2791,9 @@ mod live_tests {
             "the pe_owner edge to the BRAN must be removed: {state:?}"
         );
         assert!(
-            state[4].as_i64().is_some_and(|applied| applied >= sesno as i64),
+            state[4]
+                .as_i64()
+                .is_some_and(|applied| applied >= sesno as i64),
             "the watermark must advance past the delete window: {state:?}"
         );
         assert_eq!(

@@ -11,9 +11,8 @@
 //!   `INSERT RELATION` 的载荷必须带显式 `id` 键。裸表目标要么随机发号（重放产
 //!   生新行）、要么全表写（目标由执行时刻的表内容决定），一律拒绝。
 //! - **R2 不依赖随机值**：禁止 `rand` 族（含 `rand::uuid` 等）。
-//! - **R3 时钟只进信息性字段**：`time::now()` 只允许出现在赋值位置（`= time::now()`
-//!   / `: time::now()`），且不得出现在 `WHERE` 之后——参与目标选择或 id 构造的
-//!   时钟在重放时会选出不同的行。
+//! - **R3 不依赖时钟**：journal 禁止 `time::now()`；信息性时间戳只属于不重放的
+//!   commit tail。这样不需要猜测函数位于赋值还是目标表达式。
 //! - **R4 禁止相对更新**：`+=` / `-=` 重试重放不收敛（chunk 部分提交后整份
 //!   journal 重试会二次累加）。写绝对终态。
 //!
@@ -22,137 +21,174 @@
 //! 暂存或进日志的语句必须 `check()`。
 
 use anyhow::bail;
+use serde_json::Value as JsonValue;
+use surrealdb::sql::{Data, Id, Operator, Statement, Value, Values};
 
-/// 校验一段将进入语句日志的 SQL（可含多条语句，`;` 分隔）。
+/// 校验一段将进入语句日志的 SQL（可含多条语句）。
 ///
-/// 拒绝即整段拒绝：不合规语句不进暂存、不进日志——在源头挡住，比写回时炸掉
-/// 或静默漂移便宜得多。分号粗切在字符串字面量里含 `;` 时会误切，本仓渲染器
-/// 不产这类文本；真遇到会在开发期立刻暴露（误报，而不是漏报）。
+/// 拒绝即整段拒绝：不合规语句不进暂存、不进日志。解析、注释和字符串边界全部
+/// 交给与执行端相同的 SurrealQL parser，validator 不再维护第二套 lexer。
 pub fn validate_statement(sql: &str) -> anyhow::Result<()> {
-    for (index, statement) in sql.split(';').enumerate() {
-        let statement = strip_comments(statement);
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        validate_single(trimmed).map_err(|error| {
-            anyhow::anyhow!("journal 语句第 {} 段不满足 ReplaySafe：{error}\n语句：{trimmed}", index + 1)
+    let query = surrealdb::sql::parse(sql)
+        .map_err(|error| anyhow::anyhow!("journal SurrealQL 解析失败：{error}"))?;
+    for (index, statement) in query.iter().enumerate() {
+        validate_single(statement).map_err(|error| {
+            anyhow::anyhow!(
+                "journal 语句第 {} 段不满足 ReplaySafe：{error}\n语句：{statement}",
+                index + 1
+            )
         })?;
     }
     Ok(())
 }
 
-/// 去掉 `--` 行注释（SurrealQL 的 `//` 注释本仓渲染器不产出，不处理）。
-fn strip_comments(statement: &str) -> String {
-    statement
-        .lines()
-        .map(|line| match line.find("--") {
-            Some(pos) => &line[..pos],
-            None => line,
+/// 资源门禁用的逻辑写行数估算。显式多行 INSERT 精确计数；带 WHERE 的集合写
+/// 只能在执行后知道命中量，先按一条逻辑写计。
+pub fn estimate_write_rows(sql: &str) -> anyhow::Result<u64> {
+    let query = surrealdb::sql::parse(sql)
+        .map_err(|error| anyhow::anyhow!("资源估算 SurrealQL 解析失败：{error}"))?;
+    Ok(query
+        .iter()
+        .map(|statement| match statement {
+            Statement::Create(write) => write.what.len() as u64,
+            Statement::Upsert(write) => write.what.len() as u64,
+            Statement::Update(write) => write.what.len().max(1) as u64,
+            Statement::Delete(write) => write.what.len().max(1) as u64,
+            Statement::Insert(write) => match &write.data {
+                Data::ValuesExpression(rows) => rows.len() as u64,
+                Data::SingleExpression(Value::Array(rows)) => rows.len() as u64,
+                _ => 1,
+            },
+            // ponytail: WHERE 集合写按 1 行代理；若实测资源门禁低报，再接执行响应计数。
+            _ => 0,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .sum())
 }
 
-fn validate_single(statement: &str) -> anyhow::Result<()> {
-    let lowered = statement.to_lowercase();
+fn validate_single(statement: &Statement) -> anyhow::Result<()> {
+    reject_nondeterministic_functions(statement)?;
 
-    // R2：随机值。按 token 边界找，避免误伤 operand/brand 之类的普通词。
-    if contains_word(&lowered, "rand") {
-        bail!("依赖随机值（rand 族）——重放会产生不同结果");
-    }
-
-    // R4：相对更新。
-    if lowered.contains("+=") || lowered.contains("-=") {
-        bail!("相对更新（+=/-=）重试重放不收敛，必须写绝对终态");
-    }
-
-    // R3：time::now() 的位置。
-    if let Some(reason) = clock_misuse(&lowered) {
-        bail!("{reason}");
-    }
-
-    // R1：写语句的目标显式固定。
-    let first_word = lowered.split_whitespace().next().unwrap_or_default();
-    match first_word {
-        "create" | "upsert" => {
-            let target = lowered
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .trim_end_matches(|c| c == ';' || c == ',');
-            let explicit = target.contains(':')          // table:id（含 ⟨⟩ 与数组 id）
-                || target.starts_with("type::thing")     // type::thing('t', …)
-                || target.starts_with('$');              // 提前算好的变量
-            if !explicit {
-                bail!("{first_word} 的目标 `{target}` 不是显式 record id——裸表目标要么随机发号要么全表写");
-            }
+    match statement {
+        Statement::Create(write) => {
+            require_explicit_target("CREATE", &write.what)?;
+            validate_data(write.data.as_ref())?;
         }
-        "insert" => {
-            // INSERT [RELATION] INTO tbl <载荷>：载荷必须带显式 id 键。
-            if !lowered.contains("id:") && !lowered.contains("\"id\"") && !lowered.contains("'id'")
-            {
-                bail!("INSERT 载荷缺显式 id 键——引擎随机发号，重放产生新行");
-            }
+        Statement::Upsert(write) => {
+            require_explicit_target("UPSERT", &write.what)?;
+            validate_data(write.data.as_ref())?;
         }
-        "relate" => {
-            // RELATE 的边 id 由引擎随机发号且无法显式指定——重放会造出 id 不同的
-            // 新边。边写入一律改走带显式 id 的 INSERT RELATION。
-            bail!("RELATE 的边 id 随机发号——请改用带显式 id 的 INSERT RELATION");
+        Statement::Update(write) => {
+            require_bounded_target("UPDATE", &write.what, write.cond.is_some())?;
+            validate_data(write.data.as_ref())?;
         }
-        // UPDATE / DELETE / RELATE / LET / RETURN / DEFINE 等：目标可由 WHERE 或
-        // 变量决定，确定性由 R2/R3 保证，幂等性由 R4 与语义（绝对写）保证。
-        _ => {}
+        Statement::Delete(write) => {
+            require_bounded_target("DELETE", &write.what, write.cond.is_some())?;
+        }
+        Statement::Insert(write) => {
+            require_insert_ids(&write.data)?;
+            validate_data(Some(&write.data))?;
+        }
+        Statement::Set(_) => {}
+        Statement::Relate(_) => {
+            bail!("RELATE 的边 id 随机发号——请改用带显式 id 的 INSERT RELATION")
+        }
+        _ => bail!("journal 不接受此语句类型（只允许有界写与 LET）"),
     }
-
     Ok(())
 }
 
-/// `time::now` 的每次出现都必须是赋值位置（`=` / `:` 之后），且不得在 WHERE 里。
-fn clock_misuse(lowered: &str) -> Option<String> {
-    let where_pos = lowered.find(" where ");
-    for (pos, _) in lowered.match_indices("time::now") {
-        if let Some(wp) = where_pos {
-            if pos > wp {
-                return Some("time::now() 出现在 WHERE 中——目标选择依赖执行时刻".into());
-            }
-        }
-        let prefix = &lowered[..pos];
-        match prefix.trim_end().chars().last() {
-            Some('=') | Some(':') => {}
-            _ => {
-                return Some(
-                    "time::now() 不在赋值位置——只允许写进信息性字段（`= time::now()` / `: time::now()`）"
-                        .into(),
-                );
-            }
-        }
+fn validate_data(data: Option<&Data>) -> anyhow::Result<()> {
+    let operators = match data {
+        Some(Data::SetExpression(items) | Data::UpdateExpression(items)) => items,
+        _ => return Ok(()),
+    };
+    if operators
+        .iter()
+        .any(|(_, operator, _)| matches!(operator, Operator::Inc | Operator::Dec | Operator::Ext))
+    {
+        bail!("相对更新（+=/-=/+?=）重试重放不收敛，必须写绝对终态");
     }
-    None
+    Ok(())
 }
 
-/// `needle` 是否以独立 token 出现（前后都不是标识符字符）。
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let before_ok = abs == 0
-            || !haystack[..abs]
-                .chars()
-                .last()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let after = abs + needle.len();
-        let after_ok = after >= haystack.len()
-            || !haystack[after..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + needle.len();
+fn require_explicit_target(kind: &str, values: &Values) -> anyhow::Result<()> {
+    if values.len() != 1 || !is_explicit_record(&values[0]) {
+        bail!("{kind} 目标必须是单个显式 record id");
     }
-    false
+    Ok(())
+}
+
+fn require_bounded_target(kind: &str, values: &Values, has_where: bool) -> anyhow::Result<()> {
+    if values.iter().all(is_explicit_record)
+        || (has_where && values.iter().all(|value| matches!(value, Value::Table(_))))
+    {
+        return Ok(());
+    }
+    bail!("{kind} 目标必须是显式 record id，或带 WHERE 的单表目标")
+}
+
+fn is_explicit_record(value: &Value) -> bool {
+    match value {
+        Value::Thing(thing) => !matches!(&thing.id, Id::Generate(_) | Id::Range(_)),
+        Value::Param(_) => true,
+        Value::Function(function) => function.name() == Some("type::thing"),
+        _ => false,
+    }
+}
+
+fn require_insert_ids(data: &Data) -> anyhow::Result<()> {
+    let has_id = |fields: &Vec<(surrealdb::sql::Idiom, Value)>| {
+        fields.iter().any(|(field, _)| field.to_string() == "id")
+    };
+    let valid = match data {
+        Data::ValuesExpression(rows) => !rows.is_empty() && rows.iter().all(has_id),
+        Data::SingleExpression(Value::Object(object)) => object.contains_key("id"),
+        Data::SingleExpression(Value::Array(array)) => !array.is_empty()
+            && array.iter().all(|value| {
+                matches!(value, Value::Object(object) if object.contains_key("id"))
+            }),
+        _ => false,
+    };
+    if !valid {
+        bail!("INSERT 每行载荷都必须带显式 id 键");
+    }
+    Ok(())
+}
+
+fn reject_nondeterministic_functions(statement: &Statement) -> anyhow::Result<()> {
+    let ast = serde_json::to_value(statement)?;
+    visit_ast(&ast)
+}
+
+fn visit_ast(node: &JsonValue) -> anyhow::Result<()> {
+    match node {
+        JsonValue::Object(object) => {
+            if let Some(function) = object.get("Function") {
+                let parts = function
+                    .get("Normal")
+                    .or_else(|| function.get("Custom"))
+                    .and_then(JsonValue::as_array)
+                    .ok_or_else(|| anyhow::anyhow!("journal 不接受脚本或匿名函数"))?;
+                let name = parts
+                    .first()
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("journal 不接受未知函数 AST"))?;
+                if name == "time::now" || name == "rand" || name.starts_with("rand::") {
+                    bail!("journal 依赖非确定函数 `{name}`");
+                }
+            }
+            for value in object.values() {
+                visit_ast(value)?;
+            }
+        }
+        JsonValue::Array(values) => {
+            for value in values {
+                visit_ast(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -169,9 +205,6 @@ mod tests {
             "UPDATE pe:a SET deleted = true",
             "INSERT RELATION INTO pe_owner [{ id: pe_owner:[pe:a, 0], in: pe:a, out: pe:b }]",
             "LET $pe = pe:⟨1_2⟩; UPDATE type::thing('datacenter_version', $pe) SET status = 'Delete'",
-            // 信息性时间戳：赋值位置的 time::now() 合法。
-            "UPSERT dbnum_watermark:7997 SET applied_sesno = 42, updated_at = time::now()",
-            "UPSERT log:x CONTENT { at: time::now(), msg: 'ok' }",
         ] {
             validate_statement(sql).unwrap_or_else(|e| panic!("应接受：{sql}\n{e}"));
         }
@@ -205,10 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_clock_outside_informational_assignments() {
+    fn rejects_clock_anywhere_in_journal() {
         for sql in [
             "DELETE ses WHERE date < time::now()",
             "UPSERT type::thing('t', time::now()) SET x = 1",
+            "UPSERT log:x CONTENT { at: time::now(), msg: 'ok' }",
         ] {
             assert!(validate_statement(sql).is_err(), "应拒绝：{sql}");
         }
@@ -218,6 +252,12 @@ mod tests {
     fn rejects_relative_updates() {
         assert!(validate_statement("UPDATE pe:a SET n += 1").is_err());
         assert!(validate_statement("UPDATE pe:a SET n -= 1").is_err());
+        assert!(
+            validate_statement("UPDATE pe:a SET msg = '--', n += 1").is_err(),
+            "字符串里的注释符不能截断后续 AST"
+        );
+        validate_statement("UPSERT pe:a SET msg = 'a;b -- literal'")
+            .expect("字符串里的分号和注释符必须由 parser 正确处理");
     }
 
     #[test]

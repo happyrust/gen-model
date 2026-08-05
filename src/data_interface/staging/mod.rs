@@ -24,8 +24,8 @@ pub use resources::{ResourceBand, ResourceGauge, ResourceThresholds};
 /// 上下文缺席 → 行为与历史一致（直连 `SUL_DB`）；两个世界互不污染进程缓存。
 #[cfg(test)]
 mod routing_tests {
-    use aios_core::staging::{with_staging_reads, StagingReadContext};
     use aios_core::RefnoEnum;
+    use aios_core::staging::{StagingReadContext, with_staging_reads};
     use surrealdb::engine::any::connect;
 
     /// 刻意不连接 `SUL_DB`：上下文缺席时被路由的读打到未初始化的全局句柄上
@@ -58,6 +58,26 @@ mod routing_tests {
             .await
             .expect("staged read");
         assert_eq!(attmap.get_type_str(), "PIPE", "应读到暂存里种下的属性行");
+        let noun = with_staging_reads(ctx.clone(), aios_core::get_type_name(refno))
+            .await
+            .expect("type name routed");
+        assert_eq!(noun, "PIPE");
+        let implicit = with_staging_reads(
+            ctx.clone(),
+            aios_core::get_implicit_named_attmap(refno, "PIPE"),
+        )
+        .await
+        .expect("implicit row routed");
+        assert_eq!(implicit.get_type_str(), "PIPE");
+
+        let child = with_staging_reads(ctx.clone(), async move {
+            aios_core::staging::spawn_with_staging_reads(aios_core::get_type_name(refno))
+                .await
+                .expect("child join")
+        })
+        .await
+        .expect("child keeps staged context");
+        assert_eq!(child, "PIPE");
 
         // 暂存 miss 是合法结果（预载缺失由上层兜底），绝不回落持久层。
         let missing: RefnoEnum = "4000000001_99".into();
@@ -65,6 +85,13 @@ mod routing_tests {
             .await
             .expect("staged miss 应是 Ok(None) 而不是回落持久层的结果");
         assert!(miss.is_none());
+        let typed_miss = with_staging_reads(ctx.clone(), aios_core::get_type_name(missing)).await;
+        assert!(
+            typed_miss
+                .expect_err("type-name miss must fail closed")
+                .to_string()
+                .contains("staging read miss")
+        );
 
         // 上下文缺席：同一入口回到历史行为（直打 SUL_DB——本测试未连接，必错）。
         // 若这里 Ok，说明暂存世界的值泄漏进了进程缓存或路由错了世界。

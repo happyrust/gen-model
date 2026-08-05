@@ -68,6 +68,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
+        "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,

@@ -31,8 +31,14 @@ pub const STAGING_NS: &str = "staging";
 
 static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
-/// 进程内登记表：label → 窗口元数据。终态清扫以它裁定孤儿。
-static REGISTRY: Lazy<Mutex<BTreeMap<String, StagingWindowMeta>>> =
+#[derive(Clone)]
+struct RegisteredWindow {
+    meta: StagingWindowMeta,
+    gauge: Arc<ResourceGauge>,
+}
+
+/// 进程内登记表：label → 窗口元数据与资源面板。终态清扫以它裁定孤儿。
+static REGISTRY: Lazy<Mutex<BTreeMap<String, RegisteredWindow>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 
 /// 常驻暂存实例的一次性连接守卫。
@@ -114,15 +120,22 @@ pub async fn create_window_on(
         start_sesno,
         end_sesno,
     };
+    let gauge = ResourceGauge::new(thresholds);
     REGISTRY
         .lock()
         .expect("registry lock")
-        .insert(label, meta.clone());
+        .insert(
+            label,
+            RegisteredWindow {
+                meta: meta.clone(),
+                gauge: gauge.clone(),
+            },
+        );
 
     Ok(StagingWindow {
         meta,
         db: instance.clone(),
-        gauge: ResourceGauge::new(thresholds),
+        gauge,
     })
 }
 
@@ -222,7 +235,7 @@ impl StagingWindow {
             .expect("registry lock")
             .get_mut(&self.meta.label)
         {
-            entry.end_sesno = new_end_sesno;
+            entry.meta.end_sesno = new_end_sesno;
         }
         Ok(())
     }
@@ -252,7 +265,32 @@ pub fn registered_windows() -> Vec<StagingWindowMeta> {
         .lock()
         .expect("registry lock")
         .values()
-        .cloned()
+        .map(|entry| entry.meta.clone())
+        .collect()
+}
+
+/// `/health` 使用的活动窗口资源快照。
+pub fn resource_snapshots() -> Vec<serde_json::Value> {
+    REGISTRY
+        .lock()
+        .expect("registry lock")
+        .values()
+        .map(|entry| {
+            let snapshot = entry.gauge.snapshot();
+            serde_json::json!({
+                "dbnum": entry.meta.dbnum,
+                "window_id": entry.meta.window_id,
+                "label": entry.meta.label,
+                "start_sesno": entry.meta.start_sesno,
+                "end_sesno": entry.meta.end_sesno,
+                "band": format!("{:?}", snapshot.band).to_lowercase(),
+                "staged_sql_bytes": snapshot.staged_sql_bytes,
+                "journal_bytes": snapshot.journal_bytes,
+                "estimated_write_rows": snapshot.estimated_write_rows,
+                "journal_entries": snapshot.journal_entries,
+                "staged_statements": snapshot.staged_statements,
+            })
+        })
         .collect()
 }
 
@@ -359,6 +397,9 @@ mod tests {
                 warn_bytes: 4,
                 refuse_absorb_bytes: 8,
                 abandon_bytes: 1 << 30,
+                warn_rows: 1 << 30,
+                refuse_absorb_rows: 1 << 31,
+                abandon_rows: 1 << 32,
             },
         )
         .await

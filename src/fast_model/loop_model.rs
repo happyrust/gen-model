@@ -47,7 +47,7 @@ pub async fn gen_loop_geos(
         let all_loop_owner_refnos = all_refnos.clone();
         let sjus_map_clone = sjus_map_arc.clone();
         let sender = sender.clone();
-        let handle = tokio::spawn(async move {
+        let handle = aios_core::staging::spawn_with_staging_reads(async move {
             let negative_nouns = shared::negative_noun_refs();
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;

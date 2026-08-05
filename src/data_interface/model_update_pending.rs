@@ -405,6 +405,26 @@ fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
     )
 }
 
+/// ADR-017 T1.3：窗口收口尾事务的语句序列（**不含**事务包装）。
+///
+/// 暂存路径由 `StagedExecutor::commit` 把它包装成写回的最后一个事务；直写路径
+/// 由 [`render_finalize_transaction`] 原样包装——两条路径共用同一份渲染，收口
+/// 内容不可能漂移。顺序：窗口语句（datacenter 交付状态，本就是 commit-time
+/// 语义）→ durable 模型工作 → 水位推进 → 恢复记录删除。
+/// 收口条件（水位单调、revision 判真）全部在持久层事务内判定。
+pub(crate) fn render_finalize_tail(
+    dbnum: u32,
+    end_sesno: i32,
+    plan: &ModelUpdatePlan,
+    window_statements: &[String],
+) -> String {
+    let mut statements = window_statements.to_vec();
+    statements.extend(plan.work_items.iter().map(render_upsert));
+    statements.push(render_watermark_advance(dbnum, end_sesno));
+    statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
+    statements.join("\n")
+}
+
 /// Render the single transaction that closes a window: first the caller's
 /// `window_statements` (side effects that must share this watermark's fate),
 /// then the durable model work, the watermark advance and the recovery-record
@@ -415,13 +435,9 @@ fn render_finalize_transaction(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
-    let mut statements = window_statements.to_vec();
-    statements.extend(plan.work_items.iter().map(render_upsert));
-    statements.push(render_watermark_advance(dbnum, end_sesno));
-    statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        statements.join("\n")
+        render_finalize_tail(dbnum, end_sesno, plan, window_statements)
     )
 }
 
@@ -841,9 +857,16 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
             } else {
                 room_model::ElementRoomHistory::default()
             };
-            run_room_task(&mgr.db_option, &rooms, &panels, &history, item.action, refno)
-                .await
-                .map(|_| ())
+            run_room_task(
+                &mgr.db_option,
+                &rooms,
+                &panels,
+                &history,
+                item.action,
+                refno,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }

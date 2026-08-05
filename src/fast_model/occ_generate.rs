@@ -492,7 +492,7 @@ pub async fn gen_inst_meshes(
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
             let pts_json_map = pts_json_map.clone();
-            let task = tokio::spawn(async move {
+            let task = aios_core::staging::spawn_with_staging_reads(async move {
                 let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
                 // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
                 // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
@@ -1199,7 +1199,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = tokio::spawn(async move {
+        let task = aios_core::staging::spawn_with_staging_reads(async move {
             for g in group {
                 let pes = g
                     .boolean_group

@@ -92,22 +92,36 @@ impl StagedExecutor {
     /// 暂存执行逐语句 `check()`：暂存世界的静默错误同样是错模型（F2）。
     pub async fn execute(&mut self, sql: impl Into<String>, mode: ExecMode) -> anyhow::Result<()> {
         let sql = sql.into();
+        if matches!(mode, ExecMode::Both | ExecMode::CommitOnly) {
+            replay_safe::validate_statement(&sql)?;
+        }
+        let estimated_rows = replay_safe::estimate_write_rows(&sql)?;
         if let Some(gauge) = &self.gauge {
-            if gauge.band() == ResourceBand::Abandon {
+            let additional_bytes = match mode {
+                ExecMode::Both => (sql.len() as u64).saturating_mul(2),
+                ExecMode::StagingOnly | ExecMode::CommitOnly => sql.len() as u64,
+            };
+            let projected = gauge.projected_band(additional_bytes, estimated_rows);
+            if projected == ResourceBand::Abandon {
                 bail!(
-                    "[{}] 暂存资源到达废弃档位（摄入 {} 字节），停止摄入——窗口转资源阻断",
+                    "[{}] 当前语句将使暂存资源到达废弃档位（已有 {} 字节，预计新增 {} 字节/{} 行），停止摄入",
                     self.label,
-                    gauge.total_bytes()
+                    gauge.total_bytes(),
+                    additional_bytes,
+                    estimated_rows,
                 );
+            }
+            if gauge.band() < ResourceBand::Warn && projected >= ResourceBand::Warn {
+                eprintln!("[{}] 暂存资源进入 {projected:?} 档位", self.label);
             }
         }
         match mode {
             ExecMode::Both => {
-                replay_safe::validate_statement(&sql)?;
                 self.run_on_staging(&sql).await?;
                 if let Some(gauge) = &self.gauge {
                     gauge.record_staged(sql.len());
                     gauge.record_journal(sql.len());
+                    gauge.record_write_rows(estimated_rows);
                 }
                 self.journal.push(JournalEntry { sql, mode });
             }
@@ -115,12 +129,13 @@ impl StagedExecutor {
                 self.run_on_staging(&sql).await?;
                 if let Some(gauge) = &self.gauge {
                     gauge.record_staged(sql.len());
+                    gauge.record_write_rows(estimated_rows);
                 }
             }
             ExecMode::CommitOnly => {
-                replay_safe::validate_statement(&sql)?;
                 if let Some(gauge) = &self.gauge {
                     gauge.record_journal(sql.len());
+                    gauge.record_write_rows(estimated_rows);
                 }
                 self.journal.push(JournalEntry { sql, mode });
             }
@@ -208,6 +223,7 @@ impl StagedExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_interface::staging::ResourceThresholds;
     use surrealdb::engine::any::connect;
 
     /// 每个用例独立的 mem 实例 + 命名 staging database（仿 T0.3 的命名约定）。
@@ -297,6 +313,33 @@ mod tests {
             .expect_err("暂存执行失败必须上抛");
         assert!(!error.to_string().is_empty());
         assert!(executor.journal().is_empty(), "失败语句不得入账");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn projected_abandon_rejects_before_staging_or_accounting() {
+        let staging = staging_handle("staging_7997_resource").await;
+        let gauge = ResourceGauge::new(ResourceThresholds {
+            warn_bytes: 8,
+            refuse_absorb_bytes: 16,
+            abandon_bytes: 24,
+            warn_rows: 100,
+            refuse_absorb_rows: 200,
+            abandon_rows: 300,
+        });
+        let mut executor = StagedExecutor::new(staging.clone(), "staging_7997_resource")
+            .with_gauge(gauge.clone());
+
+        executor
+            .execute("UPSERT pe:a SET noun = 'LONG_PIPE_NAME'", ExecMode::Both)
+            .await
+            .expect_err("预计越过 abandon 的当前语句必须在执行前拒绝");
+
+        assert!(executor.journal().is_empty());
+        assert_eq!(gauge.total_bytes(), 0);
+        assert_eq!(
+            select_values(&staging, "SELECT * FROM pe").await,
+            "{\"Array\":[]}"
+        );
     }
 
     /// 写回：按原序分块重放 + 尾事务收口，终态与语句语义一致。

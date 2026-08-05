@@ -16,7 +16,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 type DbWriteTask = tokio::task::JoinHandle<anyhow::Result<()>>;
 
 fn spawn_db_write(sql: String) -> DbWriteTask {
-    tokio::spawn(async move {
+    aios_core::staging::spawn_with_staging_reads(async move {
         SUL_DB.query(sql).await?.check()?;
         Ok(())
     })
@@ -784,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn failed_instance_write_reaches_the_caller() {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(tokio::spawn(async {
+        tasks.push(aios_core::staging::spawn_with_staging_reads(async {
             Err::<(), anyhow::Error>(anyhow::anyhow!("forced instance write failure"))
         }));
 
@@ -803,10 +803,10 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let delayed_completed = completed.clone();
         let mut tasks = FuturesUnordered::new();
-        tasks.push(tokio::spawn(async {
+        tasks.push(aios_core::staging::spawn_with_staging_reads(async {
             Err::<(), anyhow::Error>(anyhow::anyhow!("first write failed"))
         }));
-        tasks.push(tokio::spawn(async move {
+        tasks.push(aios_core::staging::spawn_with_staging_reads(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             delayed_completed.store(true, Ordering::SeqCst);
             Ok(())

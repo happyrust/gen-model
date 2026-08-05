@@ -31,6 +31,9 @@ pub struct ResourceThresholds {
     pub warn_bytes: u64,
     pub refuse_absorb_bytes: u64,
     pub abandon_bytes: u64,
+    pub warn_rows: u64,
+    pub refuse_absorb_rows: u64,
+    pub abandon_rows: u64,
 }
 
 impl Default for ResourceThresholds {
@@ -38,11 +41,25 @@ impl Default for ResourceThresholds {
     /// 单窗口摄入配额取其零头；真实项目的调参入口留给 T4.3（配置 + /health）。
     fn default() -> Self {
         Self {
-            warn_bytes: 512 * 1024 * 1024,
-            refuse_absorb_bytes: 1024 * 1024 * 1024,
-            abandon_bytes: 2 * 1024 * 1024 * 1024,
+            warn_bytes: env_u64("AIOS_STAGING_WARN_BYTES", 512 * 1024 * 1024),
+            refuse_absorb_bytes: env_u64(
+                "AIOS_STAGING_REFUSE_ABSORB_BYTES",
+                1024 * 1024 * 1024,
+            ),
+            abandon_bytes: env_u64("AIOS_STAGING_ABANDON_BYTES", 2 * 1024 * 1024 * 1024),
+            warn_rows: env_u64("AIOS_STAGING_WARN_ROWS", 1_000_000),
+            refuse_absorb_rows: env_u64("AIOS_STAGING_REFUSE_ABSORB_ROWS", 2_000_000),
+            abandon_rows: env_u64("AIOS_STAGING_ABANDON_ROWS", 4_000_000),
         }
     }
+}
+
+fn env_u64(name: &str, fallback: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
 }
 
 /// 一个提交单元的资源观测面板。执行器在每次成功执行后记账；
@@ -54,6 +71,7 @@ pub struct ResourceGauge {
     journal_bytes: AtomicU64,
     journal_entries: AtomicU64,
     staged_statements: AtomicU64,
+    estimated_write_rows: AtomicU64,
 }
 
 impl ResourceGauge {
@@ -64,6 +82,7 @@ impl ResourceGauge {
             journal_bytes: AtomicU64::new(0),
             journal_entries: AtomicU64::new(0),
             staged_statements: AtomicU64::new(0),
+            estimated_write_rows: AtomicU64::new(0),
         })
     }
 
@@ -83,18 +102,33 @@ impl ResourceGauge {
         self.journal_entries.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_write_rows(&self, rows: u64) {
+        self.estimated_write_rows
+            .fetch_add(rows, Ordering::Relaxed);
+    }
+
     /// 合计摄入量（同一配额：暂存 SQL 字节 + journal 字节）。
     pub fn total_bytes(&self) -> u64 {
         self.staged_sql_bytes.load(Ordering::Relaxed) + self.journal_bytes.load(Ordering::Relaxed)
     }
 
     pub fn band(&self) -> ResourceBand {
-        let total = self.total_bytes();
-        if total >= self.thresholds.abandon_bytes {
+        self.projected_band(0, 0)
+    }
+
+    pub fn projected_band(&self, additional_bytes: u64, additional_rows: u64) -> ResourceBand {
+        let total = self.total_bytes().saturating_add(additional_bytes);
+        let rows = self
+            .estimated_write_rows
+            .load(Ordering::Relaxed)
+            .saturating_add(additional_rows);
+        if total >= self.thresholds.abandon_bytes || rows >= self.thresholds.abandon_rows {
             ResourceBand::Abandon
-        } else if total >= self.thresholds.refuse_absorb_bytes {
+        } else if total >= self.thresholds.refuse_absorb_bytes
+            || rows >= self.thresholds.refuse_absorb_rows
+        {
             ResourceBand::RefuseAbsorb
-        } else if total >= self.thresholds.warn_bytes {
+        } else if total >= self.thresholds.warn_bytes || rows >= self.thresholds.warn_rows {
             ResourceBand::Warn
         } else {
             ResourceBand::Normal
@@ -109,6 +143,7 @@ impl ResourceGauge {
             journal_bytes: self.journal_bytes.load(Ordering::Relaxed),
             journal_entries: self.journal_entries.load(Ordering::Relaxed),
             staged_statements: self.staged_statements.load(Ordering::Relaxed),
+            estimated_write_rows: self.estimated_write_rows.load(Ordering::Relaxed),
         }
     }
 }
@@ -120,6 +155,7 @@ pub struct ResourceSnapshot {
     pub journal_bytes: u64,
     pub journal_entries: u64,
     pub staged_statements: u64,
+    pub estimated_write_rows: u64,
 }
 
 #[cfg(test)]
@@ -131,6 +167,9 @@ mod tests {
             warn_bytes: 10,
             refuse_absorb_bytes: 20,
             abandon_bytes: 30,
+            warn_rows: 100,
+            refuse_absorb_rows: 200,
+            abandon_rows: 300,
         })
     }
 
@@ -156,5 +195,13 @@ mod tests {
         assert_eq!(snap.journal_bytes, 15);
         assert_eq!(snap.staged_statements, 2);
         assert_eq!(snap.journal_entries, 2);
+        assert_eq!(snap.estimated_write_rows, 0);
+    }
+
+    #[test]
+    fn projected_rows_escalate_before_recording() {
+        let gauge = tiny();
+        assert_eq!(gauge.projected_band(0, 300), ResourceBand::Abandon);
+        assert_eq!(gauge.band(), ResourceBand::Normal);
     }
 }

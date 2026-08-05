@@ -139,7 +139,7 @@ pub fn reaches_block_threshold(attempts: u32) -> bool {
     attempts >= MAX_ATTEMPTS
 }
 
-/// 冻结吸收扩窗：重置受影响根的 attempts 并清除窗口阻断记录。
+/// 冻结吸收扩窗：重置受影响根的 attempts；仅当所有坏根都被新数据触及时解除阻断。
 /// 新数据是全新的重算理由——这是「窗口阻断」的唯一解除机制（ADR-017 §8）。
 pub async fn reset_roots_on_absorb(dbnum: u32, roots: &[String]) -> anyhow::Result<()> {
     reset_roots_on_absorb_on(&aios_core::SUL_DB, dbnum, roots).await
@@ -150,11 +150,34 @@ pub async fn reset_roots_on_absorb_on(
     dbnum: u32,
     roots: &[String],
 ) -> anyhow::Result<()> {
+    let reset: std::collections::BTreeSet<&str> = roots.iter().map(String::as_str).collect();
+    let remaining_bad_roots = load_window_block_on(db, dbnum)
+        .await?
+        .map(|block| {
+            block
+                .bad_roots
+                .into_iter()
+                .filter(|root| !reset.contains(root.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut statements: Vec<String> = roots
         .iter()
         .map(|root| format!("DELETE {};", root_id(dbnum, root)))
         .collect();
-    statements.push(format!("DELETE {};", block_id(dbnum)));
+    if remaining_bad_roots.is_empty() {
+        statements.push(format!("DELETE {};", block_id(dbnum)));
+    } else {
+        let roots = remaining_bad_roots
+            .iter()
+            .map(|root| format!("'{}'", escape_surql_str(root)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        statements.push(format!(
+            "UPDATE {} SET bad_roots = [{roots}], last_blocked_at = time::now();",
+            block_id(dbnum)
+        ));
+    }
     db.query(statements.join("\n"))
         .await
         .with_context(|| format!("吸收重置 attempts dbnum={dbnum} 传输失败"))?
@@ -283,6 +306,7 @@ mod tests {
     async fn absorb_reset_is_the_unblock_mechanism() {
         let db = control_plane().await;
         let bad_root = "4000000002_77".to_string();
+        let other_bad_root = "4000000002_88".to_string();
 
         let mut attempts = 0;
         for i in 0..MAX_ATTEMPTS {
@@ -292,27 +316,43 @@ mod tests {
         }
         assert!(reaches_block_threshold(attempts));
 
-        record_window_block_on(&db, 7998, "生成根重试穷尽", std::slice::from_ref(&bad_root))
+        record_root_failure_on(&db, 7998, &other_bad_root, "other failed")
             .await
-            .expect("block");
+            .expect("other attempt");
+        record_window_block_on(
+            &db,
+            7998,
+            "生成根重试穷尽",
+            &[bad_root.clone(), other_bad_root.clone()],
+        )
+        .await
+        .expect("block");
         let block = load_window_block_on(&db, 7998)
             .await
             .expect("load block")
             .expect("blocked");
-        assert_eq!(block.bad_roots, vec![bad_root.clone()]);
+        assert_eq!(block.bad_roots, vec![bad_root.clone(), other_bad_root.clone()]);
         assert_eq!(block.reason, "生成根重试穷尽");
 
         // 修复重存 → 吸收扩窗 → 重置受影响根 + 清除阻断。
         reset_roots_on_absorb_on(&db, 7998, std::slice::from_ref(&bad_root))
             .await
             .expect("reset");
-        assert!(
-            load_root_attempts_on(&db, 7998).await.expect("load").is_empty(),
-            "吸收后 attempts 归零"
-        );
+        let attempts = load_root_attempts_on(&db, 7998).await.expect("load");
+        assert!(!attempts.contains_key(&bad_root), "受影响根 attempts 归零");
+        assert!(attempts.contains_key(&other_bad_root), "未受影响根必须保留");
+        let block = load_window_block_on(&db, 7998)
+            .await
+            .expect("load")
+            .expect("仍应阻断");
+        assert_eq!(block.bad_roots, vec![other_bad_root.clone()]);
+
+        reset_roots_on_absorb_on(&db, 7998, std::slice::from_ref(&other_bad_root))
+            .await
+            .expect("reset remaining");
         assert!(
             load_window_block_on(&db, 7998).await.expect("load").is_none(),
-            "吸收后阻断解除"
+            "所有坏根都被新数据触及时才解除阻断"
         );
     }
 

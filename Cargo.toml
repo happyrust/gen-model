@@ -76,11 +76,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms.git", rev = "65caaef2a73161cf78371355bea26fd3a0d40c41" }
-aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "7994051f2196b1b31d01678335783d06cab54142", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms.git", rev = "ca4aed82a6ce13870eec2f1c9d59bb3206b8a5c3" }
+aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "e94a620443e2fd54440ee7a94c34d83fa97765b2", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "1dd7fd4804c7ae3bcf5bf3ba5fc1d040139320a3" }
+pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "50a0e16b599ff0de384898ae51d0dc24326b8e4e" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -142,15 +142,6 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = t
 opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 opencascade-sys = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
-
-# ADR-017 开发期接线：STAGE_DB 与读路由要改 aios_core，本地克隆
-# D:\work\plant-code\rs-core-pin 当前 HEAD 正好等于上面钉住的 rev 7994051f，
-# patch 接入零漂移。发布流程：rs-core-pin 提交推到 GitHub 后升 rev、撤此段。
-# 用 [patch] 而不改 [dependencies]：parse_pdms_db / pdms_io 也 git 依赖
-# aios_core，patch 作用于整张依赖图，三方收敛到同一份（见 local-dependencies
-# 分支同款说明）。
-[patch."https://github.com/happyrust/rs-core.git"]
-aios_core = { path = "../../rs-core-pin" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

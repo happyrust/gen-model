@@ -13,8 +13,8 @@
 
 #![cfg(test)]
 
-use surrealdb::engine::any::{connect, Any};
 use surrealdb::Surreal;
+use surrealdb::engine::any::{Any, connect};
 
 use super::executor::{ExecMode, StagedExecutor};
 use super::lifecycle::init_staging_schema;
@@ -80,7 +80,9 @@ pub(crate) async fn snapshot_tables(db: &Surreal<Any>) -> String {
 pub(crate) async fn run_both_paths(script: &MiniWindowScript) -> (String, String, String, String) {
     // 暂存路径。
     let staged_target = fresh_db("parity", "staged_target").await;
-    init_staging_schema(&staged_target).await.expect("target schema");
+    init_staging_schema(&staged_target)
+        .await
+        .expect("target schema");
     apply_all(&staged_target, &script.base).await;
     let base_snapshot = snapshot_tables(&staged_target).await;
 
@@ -106,7 +108,9 @@ pub(crate) async fn run_both_paths(script: &MiniWindowScript) -> (String, String
 
     // 直写路径：同一批语句按原始顺序直接执行（今天的行为）。
     let direct_target = fresh_db("parity", "direct_target").await;
-    init_staging_schema(&direct_target).await.expect("target schema");
+    init_staging_schema(&direct_target)
+        .await
+        .expect("target schema");
     apply_all(&direct_target, &script.base).await;
     for (sql, _mode) in &script.steps {
         direct_target
@@ -127,6 +131,105 @@ pub(crate) async fn run_both_paths(script: &MiniWindowScript) -> (String, String
     let direct_final = snapshot_tables(&direct_target).await;
 
     (staged_final, direct_final, before_commit, base_snapshot)
+}
+
+/// P1 语句级对拍：**真实渲染管线**产出的窗口（`render_persist_statements` 的
+/// Added / Deleted + `render_finalize_tail` 的收口）走「executor 暂存 + 写回」
+/// 与「直写」两条路径，逐表终态相等。这是 T1.1/T1.3 接入的黄金验收——
+/// 渲染是同一份，差异只可能来自执行介质。
+#[tokio::test(flavor = "multi_thread")]
+async fn staged_parse_window_with_real_rendering_matches_direct_write() {
+    use crate::data_interface::increment_pipeline::IncrementPipeline;
+    use crate::data_interface::model_update_pending::render_finalize_tail;
+    use crate::data_interface::model_update_plan::ModelUpdatePlan;
+    use aios_core::{NamedAttrValue, RefU64};
+    use parse_pdms_db::parse::EleData;
+    use pdms_io::io::{EleOperationData, EleOperationDetail};
+    use std::collections::BTreeMap;
+
+    let added_refno = RefU64((7997u64 << 32) | 11);
+    let deleted_refno = RefU64((7997u64 << 32) | 12);
+
+    let mut ele = EleData::default();
+    ele.refno = added_refno;
+    // 渲染器（NamedAttrMap::pe / gen_sur_json）的 id、refno、owner 全部取自
+    // 属性映射的 REFNO / OWNER 属性而非 EleData 字段——缺 REFNO 会渲染出
+    // 「目标 BOX:7997_11、CONTENT id "0_0"」的 id 冲突语句，两条路径都会失败。
+    ele.whole_attmap
+        .attmap
+        .map
+        .insert("REFNO".to_string(), NamedAttrValue::RefU64Type(added_refno));
+    ele.whole_attmap.attmap.map.insert(
+        "TYPE".to_string(),
+        NamedAttrValue::StringType("BOX".to_string()),
+    );
+    ele.whole_attmap
+        .attmap
+        .map
+        .insert("DBNUM".to_string(), NamedAttrValue::IntegerType(7997));
+
+    let mut range_eles: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
+    range_eles.insert(
+        43,
+        vec![
+            EleOperationData::new(added_refno, 43, EleOperationDetail::Add(ele)),
+            EleOperationData::new(deleted_refno, 43, EleOperationDetail::Deleted),
+        ],
+    );
+
+    let statements = IncrementPipeline::render_persist_statements(&range_eles, 7997);
+    assert!(
+        !statements.is_empty(),
+        "真实渲染必须产出语句，否则对拍对象是空集"
+    );
+    // 两条路径不是同一时刻执行；信息性时间戳不属于终态等价判据。
+    let tail = render_finalize_tail(7997, 43, &ModelUpdatePlan::default(), &[])
+        .replace("time::now()", "NONE");
+
+    // 暂存路径。
+    let staging = fresh_db("staging", "staging_7997_real").await;
+    let mut executor = StagedExecutor::new(staging, "staging_7997_real");
+    for sql in &statements {
+        executor
+            .execute(sql.clone(), ExecMode::Both)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("真实渲染语句必须过 validator 并在暂存执行成功:\n{sql}\n{e}")
+            });
+    }
+    let staged_target = fresh_db("parity", "real_staged_target").await;
+    executor
+        .commit_to(&staged_target, Some(&tail))
+        .await
+        .expect("staged commit");
+
+    // 直写路径（今天的行为：分块直写 + finalize 事务）。
+    let direct_target = fresh_db("parity", "real_direct_target").await;
+    for sql in &statements {
+        direct_target
+            .query(sql)
+            .await
+            .expect("direct transport")
+            .check()
+            .unwrap_or_else(|e| panic!("direct failed: {sql}\n{e}"));
+    }
+    direct_target
+        .query(format!("BEGIN TRANSACTION;\n{tail}\nCOMMIT TRANSACTION;"))
+        .await
+        .expect("direct tail transport")
+        .check()
+        .expect("direct tail");
+
+    let staged_final = snapshot_tables(&staged_target).await;
+    let direct_final = snapshot_tables(&direct_target).await;
+    assert_eq!(
+        staged_final, direct_final,
+        "真实渲染窗口的双路径终态必须逐表相等"
+    );
+    assert!(
+        staged_final.contains("applied_sesno") && staged_final.contains("dbnum_watermark"),
+        "尾事务收口必须在场: {staged_final}"
+    );
 }
 
 /// T0.6 黄金等价：六类语句形态的 mini 窗口，暂存+写回 ≡ 直写，且写回前零落盘。

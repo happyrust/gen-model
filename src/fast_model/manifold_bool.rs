@@ -90,7 +90,7 @@ pub async fn apply_cata_neg_boolean_manifold(
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = tokio::spawn(async move {
+        let task = aios_core::staging::spawn_with_staging_reads(async move {
             for g in group {
                 let pes = g
                     .boolean_group
