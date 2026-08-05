@@ -554,7 +554,7 @@ mod tests {
         );
     }
 
-    #[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct Edge {
         panel: String,
         part: String,
@@ -1140,6 +1140,136 @@ mod tests {
                 .iter()
                 .any(|edge| edge.part == part && edge.panel == pane_a),
             "搬走之后 A 房不该再收着它: {full:#?}"
+        );
+    }
+
+    /// issue #7 的原样复刻：**先手动删掉一个构件的房间边，再挪动它，增量必须把边建回来。**
+    ///
+    /// 报告人的步骤就是这两步（`delete from room_relate:⟨…⟩` ×2，然后把 Z 坐标改成
+    /// 5821.67），结果是房间号查不到数据。这里用夹具把同一个序列钉成回归：构件在**同一
+    /// 间房内**平移，正确答案因此是「边原样回来」，比搬家更能暴露「写回那一步没发生」。
+    ///
+    /// 与 [`live_room_incremental_parity`] 的分工：那条守的是「增量 == 全量」这条收敛
+    /// 性质，走的是直调元素分支；这条守的是**队列消费路径**（`drain_rooms` → 本轮
+    /// `PanelIndex` → 元素分支），也就是生产上真正跑的那条，且起点是「边已经不在了」。
+    ///
+    /// 只能单独运行，见 [`connect_live`]：
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_deleted_edges_come_back_after_a_move -- --ignored --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_deleted_edges_come_back_after_a_move() {
+        use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
+        use aios_core::room::room::GLOBAL_AABB_TREE;
+
+        connect_live().await;
+        let db_option = fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+
+        let moved = RefnoEnum::from(refno(20).as_str());
+        let part = refno(20);
+        let (pane_a, pane_b) = panel_refnos();
+        let baseline = room_edges().await;
+        let baseline_own: Vec<Edge> = baseline
+            .iter()
+            .filter(|edge| edge.part == part)
+            .cloned()
+            .collect();
+        assert_eq!(
+            baseline_own.len(),
+            1,
+            "_20 完全在 A 房内，基线应恰有一条边: {baseline:#?}"
+        );
+
+        // 隔离 issue #7 的主嫌：业务库里的面板几何仍完整，但空间树故意不放任何 PANE。
+        // 修复前元素分支从树里找候选，这时必然捞空；现在候选必须来自 PanelIndex。
+        let panel_refs = HashSet::from([
+            RefnoEnum::from(pane_a.as_str()).refno(),
+            RefnoEnum::from(pane_b.as_str()).refno(),
+        ]);
+        let removed = GLOBAL_AABB_TREE
+            .write()
+            .await
+            .remove_by_refnos(&panel_refs);
+        assert!(removed > 0, "夹具基线应先把 PANE 放进空间树");
+        assert!(
+            GLOBAL_AABB_TREE
+                .read()
+                .await
+                .tree
+                .iter()
+                .all(|bbox| bbox.noun != "PANE"),
+            "隔离变量失败：空间树里仍有 PANE"
+        );
+
+        // 第一步（报告人做的）：手动删掉这个构件的房间边。
+        SUL_DB
+            .query(format!("DELETE room_relate WHERE out = pe:{part};"))
+            .await
+            .expect("delete the part's room edges")
+            .check()
+            .expect("valid delete");
+        assert!(
+            !room_edges().await.iter().any(|edge| edge.part == part),
+            "手动删除之后这个构件不该还有房间边"
+        );
+
+        // 第二步（报告人做的）：挪它——**留在同一间房内**，Z 抬高 170。
+        move_fixture_body(
+            &mesh_dir,
+            20,
+            Vec3::new(150.0, 450.0, 620.0),
+            Vec3::new(250.0, 550.0, 720.0),
+        )
+        .await
+        .expect("move part within the same room");
+
+        let changes = update_inst_relate_aabbs_by_refnos(&[moved], true)
+            .await
+            .expect("refresh moved aabb");
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.refno, change.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(moved, "BOX")],
+            "包围盒确实变了，否则触发源不会点火"
+        );
+        enqueue_room_recalc(&db_option, &changes)
+            .await
+            .expect("enqueue room work");
+
+        // 走生产上真正的消费路径，而不是直调元素分支。
+        let done = drain_rooms(&db_option).await.expect("drain room work");
+        assert_eq!(done, 1, "那条元素任务必须被消费掉");
+
+        let incremental = room_edges().await;
+        build_room_relations(&db_option)
+            .await
+            .expect("full rebuild after move");
+        let full = room_edges().await;
+
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        let restored: Vec<Edge> = incremental
+            .iter()
+            .filter(|edge| edge.part == part)
+            .cloned()
+            .collect();
+        assert_eq!(
+            restored, baseline_own,
+            "删掉的边必须被增量原样建回来（issue #7）\n增量: {incremental:#?}"
+        );
+        assert_eq!(
+            restored[0].panel, pane_a,
+            "构件没出 A 房，边就该回到 A 房: {restored:#?}"
+        );
+        assert_eq!(
+            incremental, full,
+            "\n增量: {incremental:#?}\n全量: {full:#?}"
         );
     }
 
