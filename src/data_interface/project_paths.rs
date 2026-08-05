@@ -65,6 +65,13 @@ pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathB
     let Some(overrides) = db_option.project_dirs.as_ref() else {
         return Some(base.join(normalize_path_input(project)));
     };
+    // `included_projects` 为空时压根没有「名字 → 下标」这层映射可查：这种配置下
+    // [`plan_watch_dirs`] 拿 `project_dirs` 自己当名单，传进来的所谓项目名其实就是
+    // 那份名单里的目录条目。不认这条的话，回退分支下每一个相对条目都恒返回
+    // `None`，报出来的还是一句「与 included_projects 对不上」——那不是真原因。
+    if db_option.included_projects.is_empty() {
+        return Some(join_project_entry(&base, project));
+    }
     let index = db_option
         .included_projects
         .iter()
@@ -81,10 +88,24 @@ fn join_project_entry(base: &Path, entry: &str) -> PathBuf {
     }
 }
 
+/// 这个目录名是不是库目录（`ams000` / `acp000` / `ZDJ000`）。
+///
+/// 光看 `000` 结尾不够：`ams1000` 也以 `000` 结尾，认成库目录之后整个目录会被挂上
+/// 监听，里面的文件全部按库文件摄入。库目录的形状是「项目代号 + `000`」，代号不
+/// 以数字收尾，所以 `000` 前面紧挨着的那个字符是数字时判否。
+///
+/// 代号本身以数字结尾的项目会被这条挡掉，那种命名没在现场见过；真出现了，判据要
+/// 换成更硬的证据（比如目录里有没有 `<代号><库号>_0001` 形状的文件），而不是把这
+/// 条放宽回去。
 fn ends_with_db_suffix(path: &Path) -> bool {
-    path.file_name()
-        .map(|name| name.to_string_lossy().ends_with(DB_DIR_SUFFIX))
-        .unwrap_or(false)
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let Some(prefix) = name.strip_suffix(DB_DIR_SUFFIX) else {
+        return false;
+    };
+    !prefix.ends_with(|ch: char| ch.is_ascii_digit())
 }
 
 /// 列出这个项目根下所有的 `*000` 库目录。
@@ -681,6 +702,49 @@ mod tests {
             identities(&plan_watch_dirs(&option).dirs()),
             identities(&[first, second])
         );
+    }
+
+    /// `included_projects` 为空、拿 `project_dirs` 当名单时，相对条目也要解析得出来。
+    ///
+    /// 这个分支下没有「名字 → 下标」可查，而 `resolve_project_root` 过去无条件要求
+    /// 名字能在 `included_projects` 里找到位置：于是每一个相对条目都恒返回 `None`，
+    /// 一个目录都监听不上，报的却是「project_dirs 与 included_projects 对不上」——
+    /// 名单压根就是空的，那句话把人往配置写错的方向带。
+    #[test]
+    fn relative_entries_resolve_when_the_project_list_is_empty() {
+        let fixture = Fixture::new("dirs-only");
+        let db_dir = fixture.dir("Proj/aaa000");
+        let option = fixture.options(&[], Some(&["Proj"]));
+
+        assert_eq!(
+            resolve_project_root(&option, "Proj"),
+            Some(normalize_path_input(&fixture.root.to_string_lossy()).join("Proj"))
+        );
+        let plan = plan_watch_dirs(&option);
+        assert_eq!(identities(&plan.dirs()), identities(&[db_dir]));
+        assert!(plan.problems().is_empty(), "{:?}", plan.problems());
+    }
+
+    /// `ams1000` 不是库目录。
+    ///
+    /// 判据过去只看 `000` 结尾，于是任何以三个零收尾的目录都会被挂上监听、里面的
+    /// 文件全部按库文件摄入。库目录是「项目代号 + 000」，代号不以数字收尾。
+    #[test]
+    fn a_directory_that_merely_ends_in_zeros_is_not_a_db_dir() {
+        let fixture = Fixture::new("zero-suffix");
+        let real = fixture.dir("Proj/ams000");
+        fixture.dir("Proj/ams1000");
+        fixture.dir("Proj/2000");
+        let option = fixture.options(&["Proj"], None);
+
+        assert_eq!(
+            identities(&plan_watch_dirs(&option).dirs()),
+            identities(&[real])
+        );
+        assert!(ends_with_db_suffix(Path::new("ams000")));
+        assert!(ends_with_db_suffix(Path::new("ZDJ000")));
+        assert!(!ends_with_db_suffix(Path::new("ams1000")));
+        assert!(!ends_with_db_suffix(Path::new("ams")));
     }
 
     /// 共享盘上常把库目录本身单独共享出来（`\\host\share\ams000`），此时项目根
