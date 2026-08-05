@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sigmap": {
+      "command": "node",
+      "args": [
+        "/opt/homebrew/bin/sigmap",
+        "--mcp",
+        "--cwd",
+        "/Volumes/DPC/work/old/gen-model"
+      ]
+    }
+  }
+}

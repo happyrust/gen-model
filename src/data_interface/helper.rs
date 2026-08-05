@@ -54,32 +54,48 @@ pub(crate) async fn collect_pe_subtree_refnos(
 /// 「删边」与「按引用计数回收 inst_info」之间**不能存在可观察的中间态**：清理条件
 /// 读的正是刚被删掉的那条 `inst_relate`。若边已删而 `if` 块没跑（语句报错、连接
 /// 中断、服务端重启），重试时 `$old_inst` 只会读到 `NONE`，整段清理被静默跳过，
-/// 而函数照样返回 `Ok`——inst_info / geo_relate / inst_geo 就此永久孤儿，且无告警。
+/// 而函数照样返回 `Ok`——inst_info 与 geo_relate 就此永久孤儿，且无告警。
 /// 包进事务后这种半执行会整体回滚，重试从干净状态开始，可自愈。
 ///
 /// `inst_info` 本身用显式 `delete $old_inst` 回收，而不是靠 `geo_relate` 三元组的
 /// `in` 端顺带删除：几何生成半途失败会留下**没有任何 `geo_relate` 边**的 `inst_info`，
 /// 顺带删除对它是空集、永远删不掉（2026-07-26 审计 B2）。
+///
+/// **`geo_relate` 的 `out` 端（`inst_geo`）不删。** 它是内容寻址的——id 就是单位几何的
+/// 哈希——因而跨 `inst_info` 共享，而这里的引用计数守卫只数得到 `inst_info` 自己的引用
+/// （`<-inst_relate`），数不到还有谁指着那块几何。跟着删的后果是**跨生成根的数据损坏**：
+/// 一个根的清理把另一个根正在用的 `inst_geo` 抹掉，两边都不会报错。最极端的是隐含直管段
+/// ——`TUBI_GEO_HASH` / `BOXI_GEO_HASH` 是全局常量，全项目所有管段共用那一个单位圆柱。
+///
+/// 不删的代价只是泄漏，而且有界：同样的几何算出同样的哈希，反复重生成同一个根不会长出
+/// 新行，只有几何参数真的变成新值才会。`aabb` / `trans` / `vec3` 这几张内容寻址表一直
+/// 就是这么处理的。真要回收，正确的位置是一次按全库引用计数的后台 sweep，而不是写入
+/// 路径上的单边删除。
+///
+/// 投影保留 `[..]` + `array::flatten` 的原形、只摘掉 `out`：`DELETE` 的入参形状不变，
+/// 改动只落在删除集本身。
 fn render_cascade_delete(inst_relate_key: &str) -> String {
     format!(
         r#"BEGIN TRANSACTION;
 let $old_inst = (select value out from {inst_relate_key})[0];
 delete from {inst_relate_key};
 if $old_inst != none and array::len($old_inst<-inst_relate) = 0 {{
-    delete array::flatten(select value [out, id] from $old_inst->geo_relate);
+    delete array::flatten(select value [id] from $old_inst->geo_relate);
     delete $old_inst;
 }};
 COMMIT TRANSACTION;"#
     )
 }
 
-/// 级联删除 inst_relate 及其关联的 geo_relate 和 inst_geo 数据
+/// 级联删除 inst_relate 及其关联的 geo_relate / inst_info
 ///
-/// 当 replace_mesh 开启时，需要完全删除之前生成的数据，包括：
-/// - inst_geo: 几何体节点
+/// 当 replace_mesh 开启时，需要删除之前生成的数据：
+/// - inst_relate: 实例关系边（目标元素自己的那条）
 /// - geo_relate: 几何关系边
-/// - inst_info: 实例信息节点
-/// - inst_relate: 实例关系边
+/// - inst_info: 实例信息节点（仅在已无其他 inst_relate 引用时）
+///
+/// **不含 `inst_geo`**：它是内容寻址的共享节点，写入路径上不做单边回收，理由见
+/// [`render_cascade_delete`]。
 ///
 /// # 参数
 /// * `refnos` - 需要删除的 refno 列表
@@ -87,7 +103,7 @@ COMMIT TRANSACTION;"#
 ///
 /// # 删除顺序
 /// 1. inst_relate（仅删除目标元素的关系）
-/// 2. 若 inst_info 已无其他 inst_relate 引用，再删除其 inst_geo / geo_relate / inst_info
+/// 2. 若 inst_info 已无其他 inst_relate 引用，再删除其 geo_relate 边与 inst_info 自身
 ///
 /// inst_info 可能由相同 catalogue hash 的多个元素共享，不能在仍有引用时删除。
 /// 每个 refno 的这两步在一个事务里（见 [`render_cascade_delete`]），失败整体回滚。
@@ -148,6 +164,100 @@ pub async fn delete_inst_relate_subtree(
     let all_vec: Vec<RefnoEnum> = all.into_iter().collect();
     delete_inst_relate_cascade(&all_vec, chunk_size).await?;
     delete_room_membership(&all_vec, chunk_size).await
+}
+
+/// 这些 refno 里，当前**确实还有** `inst_relate` 行的那些。
+///
+/// 只是为了让清理的数量与日志说的是同一件事：候选集来自 pe 子树，其中绝大多数元素
+/// 本来就没有几何，对它们调级联删除是空操作，但会把「清理了 N 行」虚报成子树大小。
+async fn existing_inst_relate_refnos(
+    refnos: &[RefnoEnum],
+    chunk_size: usize,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut existing = Vec::new();
+    for chunk in refnos.chunks(chunk_size) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_inst_relate_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE in FROM [{keys}] WHERE record::exists(id);"
+            ))
+            .await
+            .map_err(|error| anyhow!("查询现存模型关系失败: {error}"))?
+            .check()
+            .map_err(|error| anyhow!("查询现存模型关系语句失败: {error}"))?;
+        for thing in response
+            .take::<Vec<Thing>>(0)
+            .map_err(|error| anyhow!("解析现存模型关系失败: {error}"))?
+        {
+            existing.push(pe_thing_to_refno(thing)?);
+        }
+    }
+    Ok(existing)
+}
+
+/// 重生成收尾：清掉这些生成根名下**本轮没有产出任何几何**的旧模型行。
+///
+/// `save_instance_data(replace)` 的删除集是从本次产物推出来的，所以它只替换得掉「这次
+/// 也生成了」的那些行。上一版画得出、这一版画不出的元素——参数改到不再产生几何、分支
+/// 尾部不再有隐含直管段——旧行会一直留着，而模型里已经没有它了。
+///
+/// 判据是「仍挂在这个根下、却不在本轮产物里」。搬走或被删的元素**不**在这个集合里：
+/// `query_deep_visible_inst_refnos` 是对 `pe` 的活子树查询，它们早已不在根下，那条路
+/// 归 [`delete_inst_relate_subtree`]。
+///
+/// **只在生成与写入都成功之后调用。** 这个集合分不清「真的不画了」与「本轮生成没做
+/// 出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策；ADR-014 的
+/// 「保留旧显示」因此收窄为「生成失败时保留」，生成成功时以产物为准）。
+///
+/// 任何一步查询失败都**不删**并上抛：漏查一部分子树，就会把还在用的行当成陈旧行。
+/// 调用方把它降级为告警即可——少清一轮只是旧行多留一会儿，误清是模型凭空消失。
+pub async fn prune_roots_stale_model_rows(
+    roots: &[RefnoEnum],
+    produced: &HashSet<RefnoEnum>,
+    chunk_size: usize,
+) -> anyhow::Result<usize> {
+    let mut candidates: HashSet<RefnoEnum> = HashSet::new();
+    for &root in roots {
+        let subtree = aios_core::query_deep_visible_inst_refnos(root)
+            .await
+            .map_err(|error| anyhow!("生成根 {root} 的子树查询失败: {error}"))?;
+        candidates.extend(
+            subtree
+                .into_iter()
+                .filter(|refno| !produced.contains(refno)),
+        );
+    }
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let candidates: Vec<RefnoEnum> = candidates.into_iter().collect();
+    let mut stale = existing_inst_relate_refnos(&candidates, chunk_size).await?;
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    // 顺序固定，日志与重放才对得上。
+    stale.sort_by_key(RefnoEnum::to_string);
+
+    println!(
+        "重生成收尾：清理 {} 行本轮未产出几何的旧模型关系（例如 {}）",
+        stale.len(),
+        stale
+            .iter()
+            .take(5)
+            .map(RefnoEnum::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    delete_inst_relate_cascade(&stale, chunk_size).await?;
+    // 元素还在，只是不再有几何——那它也不再属于任何房间，空间树上同样不该留着它。
+    // 与删除路径同一套收尾（[`delete_room_membership`]）。
+    delete_room_membership(&stale, chunk_size).await?;
+    Ok(stale.len())
 }
 
 /// 渲染一批被删元素的房间归属清理。
@@ -245,6 +355,32 @@ mod tests {
         assert!(
             !sql.contains("[out, id, in]"),
             "inst_info must not ride the geo_relate triple delete: {sql}"
+        );
+    }
+
+    /// 共享的 `inst_geo` 不许跟着 `inst_info` 一起删。
+    ///
+    /// 它是内容寻址的（id = 单位几何的哈希），跨 `inst_info` 共享；而这里的引用计数
+    /// 守卫只数 `inst_info` 自己的引用（`<-inst_relate`），数不到谁还指着那块几何。
+    /// 跟着删就是跨生成根的数据损坏，且两边都不报错——最极端的是隐含直管段，
+    /// `TUBI_GEO_HASH` / `BOXI_GEO_HASH` 是全局常量，全项目所有管段共用一个单位圆柱。
+    ///
+    /// 反过来「不删」只是有界泄漏：同样的几何算出同样的哈希，重生成同一个根不长新行。
+    #[test]
+    fn cascade_delete_never_reclaims_shared_content_addressed_geometry() {
+        let sql = render_cascade_delete("inst_relate:7997_1");
+
+        assert!(
+            sql.contains("from $old_inst->geo_relate"),
+            "边本身仍要清: {sql}"
+        );
+        assert!(
+            !sql.contains("[out, id]"),
+            "geo_relate 的 out 端是共享的 inst_geo，不得随边一起删: {sql}"
+        );
+        assert!(
+            sql.contains("delete $old_inst;"),
+            "inst_info 仍按引用计数回收，它的引用集就是 <-inst_relate: {sql}"
         );
     }
 
@@ -364,7 +500,9 @@ mod tests {
             .check()
             .expect("valid cleanup");
         assert_eq!(after_first, vec![true, true, true, true]);
-        assert_eq!(after_last, vec![false, false, false]);
+        // inst_info 与它的 geo_relate 边在最后一个引用消失后回收；`inst_geo` 留着
+        // ——它是内容寻址的共享节点，写入路径上不做单边回收（见 render_cascade_delete）。
+        assert_eq!(after_last, vec![false, false, true]);
     }
 
     /// 临时探针：从 `AIOS_PROBE_SQL` 读 `;;` 分隔的查询并打印截断结果，用完即删。
@@ -442,6 +580,10 @@ mod tests {
         );
     }
 
+    /// 「all model nodes」指的是这几个元素**自己的**行：`inst_relate`、它们独占的
+    /// `inst_info`、以及那些 `inst_info` 的 `geo_relate` 边。`inst_geo` 不在其列
+    /// ——内容寻址的共享节点，写入路径上不做单边回收（见 [`render_cascade_delete`]）。
+    /// 名字保留原样，因为两份测试计划文档按名字引用了它。
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_soft_deleted_subtree_removes_all_model_nodes() {
@@ -515,6 +657,10 @@ mod tests {
             .expect("cleanup deleted subtree")
             .check()
             .expect("valid cleanup");
-        assert_eq!(state, vec![false; 12]);
+        // 前九项（inst_relate / inst_info / geo_relate）全清；最后三项是 `inst_geo`,
+        // 内容寻址的共享节点，写入路径上不做单边回收（见 render_cascade_delete）。
+        let mut expected = vec![false; 9];
+        expected.extend([true; 3]);
+        assert_eq!(state, expected);
     }
 }

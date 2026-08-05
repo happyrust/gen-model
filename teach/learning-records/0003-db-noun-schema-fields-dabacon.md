@@ -1,8 +1,9 @@
 # 0003 — DB_Noun 分类器的实现：dabacon 字典 + schema 字段号 + 懒加载缓存
 
 - **日期**：2026-07-23
+- **⚠ 版本基线：E3D 3.1**（`D:\AVEVA\Everything3D3.1\core.dll`，地址形如 `0x58xxxxx`）。本记录的**偏移量只对 3.1 成立**；E3D 2.1 / PDMS 12.1.1 的同名字段偏移完全不同，见 `0010`。**dabacon 字段号两版一致，可跨版本引用。**
 - **背景**：反编译 AVEVA E3D `core.dll` 的 `DB_Noun` 类型分类器，弄清 `primitive/graphicsBehaviour/geomset/extrusion/isPointsetPoint/hashValue/findNoun` **具体怎么实现**（IDA 会话 `core31-retrace`）。
-- **相关**：`0001`（分类器速查表）、`0002`（模型更新逻辑）；`docs/plans/core-dll-aligned-incremental-gen.md`。
+- **相关**：`0001`（分类器速查表）、`0002`（模型更新逻辑）、`0010`（同一个类的 2.1 基线 + 版本漂移）；`docs/plans/core-dll-aligned-incremental-gen.md`。
 
 ## 关键洞见（均有地址 / 反编译证据）
 

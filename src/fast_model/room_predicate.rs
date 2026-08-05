@@ -72,21 +72,35 @@ pub fn any_point_inside(panel: &TriMesh, world_pts: impl IntoIterator<Item = Poi
         .any(|p| panel.contains_point(&Isometry::identity(), &p))
 }
 
+/// 第一轮的完整结果：包围盒结论 + 顶点计数，盒子不可用时为 `None`。
+///
+/// 计数与结论一起给出，是因为反向路径两样都要——计数同时是 `room_relate.inside_count`
+/// 排序键（ADR-010 §5）。分两次问的话，同一块面板的八次点包含测试要跑两遍，而
+/// `TriMesh::contains_point` 每次都是一趟 BVH 遍历。
+pub fn membership_by_aabb(panel: &TriMesh, aabb: &Aabb) -> Option<(AabbVerdict, u8)> {
+    if !aabb_is_usable(aabb) {
+        return None;
+    }
+    let inside = count_vertices_inside(panel, aabb);
+    Some((verdict_of(inside), inside))
+}
+
 /// 两轮合一，供反向（元素 → 面板）使用。
 ///
 /// `world_pts` 取惰性闭包：绝大多数元素在第一轮就有结论，不该为它们付取几何点的代价。
+/// 队列路径先用 [`membership_by_aabb`] 把整批候选筛一遍，只有确实需要第二轮的才去库里
+/// 取点，再回到这里；两条路走的是同一份规则，因为本函数就是由那个函数与
+/// [`any_point_inside`] 组合出来的。
 pub fn element_in_panel<F, I>(panel: &TriMesh, aabb: &Aabb, world_pts: F) -> bool
 where
     F: FnOnce() -> I,
     I: IntoIterator<Item = Point<f32>>,
 {
-    if !aabb_is_usable(aabb) {
-        return false;
-    }
-    match classify_by_aabb(panel, aabb) {
-        AabbVerdict::Inside => true,
-        AabbVerdict::Outside => false,
-        AabbVerdict::NeedsPointCheck => any_point_inside(panel, world_pts()),
+    match membership_by_aabb(panel, aabb) {
+        None => false,
+        Some((AabbVerdict::Inside, _)) => true,
+        Some((AabbVerdict::Outside, _)) => false,
+        Some((AabbVerdict::NeedsPointCheck, _)) => any_point_inside(panel, world_pts()),
     }
 }
 
@@ -153,5 +167,42 @@ mod tests {
         assert!(!element_in_panel(&room, &broken, || {
             vec![Point::new(500.0, 500.0, 500.0)]
         }));
+        assert_eq!(membership_by_aabb(&room, &broken), None);
+    }
+
+    /// 分两段问与一次问必须得出同一个结论。队列路径为了推迟取点走的是前者，
+    /// 两者一旦分叉，跨界构件在直调路径与队列路径下就会拿到不同的房间。
+    #[test]
+    fn the_two_phase_form_agrees_with_the_single_shot_predicate() {
+        let room = panel(Vec3::ZERO, Vec3::splat(1000.0));
+        let inside_pt = || vec![Point::new(950.0, 500.0, 500.0)];
+        let cases = [
+            (aabb(Vec3::splat(400.0), Vec3::splat(600.0)), AabbVerdict::Inside, 8),
+            (
+                aabb(Vec3::splat(2000.0), Vec3::splat(2100.0)),
+                AabbVerdict::Outside,
+                0,
+            ),
+            (
+                aabb(
+                    Vec3::new(900.0, 400.0, 400.0),
+                    Vec3::new(1100.0, 600.0, 600.0),
+                ),
+                AabbVerdict::NeedsPointCheck,
+                4,
+            ),
+        ];
+        for (box_of, expected, inside_count) in cases {
+            let (verdict, count) =
+                membership_by_aabb(&room, &box_of).expect("盒子可用时必须有结论");
+            assert_eq!(verdict, expected);
+            assert_eq!(count, inside_count);
+            let two_phase = match verdict {
+                AabbVerdict::Inside => true,
+                AabbVerdict::Outside => false,
+                AabbVerdict::NeedsPointCheck => any_point_inside(&room, inside_pt()),
+            };
+            assert_eq!(two_phase, element_in_panel(&room, &box_of, inside_pt));
+        }
     }
 }

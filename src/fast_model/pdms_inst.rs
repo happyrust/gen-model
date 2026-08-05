@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::pdms_types::*;
@@ -20,6 +20,33 @@ fn spawn_db_write(sql: String) -> DbWriteTask {
         SUL_DB.query(sql).await?.check()?;
         Ok(())
     })
+}
+
+/// 渲染一批 `inst_relate` 行的**替换写入**：同一事务里先删同 id 的旧行，再整批插入。
+///
+/// 只发 `INSERT RELATION` 是不够的：本仓的 SurrealDB fork 撞已有 id 时**不报错、保留
+/// 旧行**（ADR-010 D13 在 8009 上实测）。于是「这一行到底写没写进去」完全取决于前面
+/// 那个级联删除集有没有覆盖到它，而那个集合是从**本次生成的产物**推出来的，天然漏掉
+/// 「上一版生成过、这一版不再产出几何」的元素，以及挂在 BRAN 名下的隐含直管段。漏一项
+/// 就是那一行的 `aabb` / `world_trans` 永远停在第一次生成的值，而整条链路一声不响。
+///
+/// 删除集改从**本批要写的 id** 推出来之后，这个依赖就断了：要写哪行就先删哪行，与外面
+/// 那个集合覆不覆盖得到无关。包进一个事务，是为了不给读者留下「这行刚被删、还没写回来」
+/// 的窗口。
+///
+/// 为什么不用 `UPSERT`：本仓对边表一律 `RELATE` / `INSERT RELATION` 写、`DELETE` 删，
+/// `UPSERT` 只用在普通表上（`pe` / `inst_info` / `aabb`），fork 对边表的 `UPSERT` 语义
+/// 没有实证。真做成 `UPSERT ... MERGE` 还多一个好处——`aabb` 这类本函数不写的字段会留存
+/// 下来，房间变更判定就能回到行内基线而不必抵押在空间树上；那要等有人在 fork 上验证过。
+fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
+    let ids = rows.iter().map(|(id, _)| id.as_str()).join(", ");
+    let values = rows.iter().map(|(_, json)| json.as_str()).join(",");
+    format!(
+        "BEGIN TRANSACTION;\n\
+         DELETE {ids};\n\
+         INSERT RELATION INTO inst_relate [{values}];\n\
+         COMMIT TRANSACTION;"
+    )
 }
 
 async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::Result<()> {
@@ -565,18 +592,12 @@ pub async fn save_instance_data(
                 }
             }
 
-            tubi_inst_relate_vec.push(tubi_relate_sql);
+            tubi_inst_relate_vec.push((k.to_inst_relate_key(), tubi_relate_sql));
         }
     }
 
-    // 并发保存TUBI的inst_relate记录
-    if !tubi_inst_relate_vec.is_empty() {
-        for chunk in tubi_inst_relate_vec.chunks(chunk_size) {
-            let inst_relate_sql =
-                format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-            db_futures.push(spawn_db_write(inst_relate_sql));
-        }
-    }
+    // TUBI 行的写入挪到下面与普通元素行一起发：两边的 id 都是 `inst_relate:{refno}`，
+    // 得先都算出来才能对一次重叠（见那里的说明）。
 
     // 处理负关系数据并并发保存
     if !inst_mgr.neg_relate_map.is_empty() {
@@ -659,14 +680,38 @@ pub async fn save_instance_data(
                 println!("inst relate sql: {}", &relate_sql);
             }
         }
-        inst_relate_vec.push(relate_sql);
+        inst_relate_vec.push((k.to_inst_relate_key(), relate_sql));
     }
 
-    if !inst_relate_vec.is_empty() {
-        for chunk in inst_relate_vec.chunks(chunk_size) {
-            let inst_relate_sql =
-                format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-            db_futures.push(spawn_db_write(inst_relate_sql));
+    // 隐含直管段的行 id 与普通元素同样是 `inst_relate:{refno}`，而 `insert_tubi` 的键
+    // 除了 BRAN 自身还有「管段离开的那个元件」。两边真撞上的话，两条替换事务会各删各写
+    // 同一行，谁最后提交谁赢——那是数据错误，不是并发噪音。静态定不下来它在真实库上能否
+    // 发生，所以如实喊一声：无声地丢掉一行几何，比报出来难查得多。
+    let overlapping: Vec<&str> = {
+        let tubi_ids: HashSet<&str> = tubi_inst_relate_vec
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        inst_relate_vec
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .filter(|id| tubi_ids.contains(id))
+            .collect()
+    };
+    if !overlapping.is_empty() {
+        let msg = format!(
+            "同一个 inst_relate id 同时被普通元素与隐含直管段写入（{} 条，例如 {}）：\
+             两者只有一条能留在库里。请核对 insert_tubi 的键与 inst_info_map 的键为何重叠",
+            overlapping.len(),
+            overlapping.iter().take(3).join(", ")
+        );
+        log::error!("{msg}");
+        eprintln!("{msg}");
+    }
+
+    for rows in [&inst_relate_vec, &tubi_inst_relate_vec] {
+        for chunk in rows.chunks(chunk_size) {
+            db_futures.push(spawn_db_write(render_inst_relate_replace(chunk)));
         }
     }
 
@@ -727,42 +772,6 @@ pub async fn save_instance_data(
 
     finish_db_writes(db_futures).await?;
 
-    // inst_relate 表需要在其他表插入后处理，因为有更新操作
-    // if !inst_relate_vec.is_empty() {
-    //     for chunk in inst_relate_vec.chunks(chunk_size) {
-    //         let inst_relate_sql =
-    //             format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-    //         SUL_DB.query(inst_relate_sql).await.unwrap();
-    //     }
-
-    //     // 使用SQL函数更新zone_refno
-    //     let update_zone_sql = "
-    //         LET $records = SELECT * FROM inst_relate WHERE zone_refno = NONE;
-    //         FOR $record IN $records {
-    //             LET $zone = fn::find_ancestor_type($record.in, 'ZONE');
-    //             IF $zone != NONE {
-    //                 UPDATE $record SET zone_refno = $zone[0].refno;
-    //             }
-    //         };
-    //     ";
-    //     SUL_DB.query(update_zone_sql).await.unwrap();
-
-    // 优化dt更新 - 使用批量更新而不是单独更新
-    // for chunk in keys.to_vec().chunks(chunk_size) {
-    //     let refno_list = chunk.iter()
-    //         .map(|&k| format!("\"{}\"", k))
-    //         .collect::<Vec<_>>()
-    //         .join(",");
-
-    //     let batch_update_sql = format!(
-    //         "FOR $k in [{}] {{
-    //             UPDATE inst_relate:$k SET dt=fn::ses_date(pe:$k);
-    //         }}", refno_list
-    //     );
-    //     SUL_DB.query(batch_update_sql).await.unwrap();
-    // }
-    // }
-
     Ok(())
 }
 
@@ -809,6 +818,64 @@ mod tests {
         assert!(
             completed.load(Ordering::SeqCst),
             "returning early would detach a database write into the retry window"
+        );
+    }
+
+    /// `inst_relate` 的写入必须自带删除，且删除集恰好是本批要写的那些 id。
+    ///
+    /// fork 的 `INSERT RELATION` 撞已有 id 时不报错、保留旧行，所以「这一行写没写进去」
+    /// 一旦取决于外面那个级联删除集，就等于取决于一个从**本次产物**推出来的、天然漏项的
+    /// 集合——漏掉的那行会永远停在第一次生成的值，且无人报错。删除与插入同处一个事务，
+    /// 是为了不给读者留下「刚删完、还没写回来」的窗口。
+    #[test]
+    fn inst_relate_rows_are_replaced_by_id_in_one_transaction() {
+        let rows = vec![
+            (
+                "inst_relate:7997_1".to_string(),
+                "{id: inst_relate:7997_1, in: pe:7997_1}".to_string(),
+            ),
+            (
+                "inst_relate:7997_2".to_string(),
+                "{id: inst_relate:7997_2, in: pe:7997_2}".to_string(),
+            ),
+        ];
+        let sql = render_inst_relate_replace(&rows);
+
+        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
+        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+        let delete_at = sql
+            .find("DELETE inst_relate:7997_1, inst_relate:7997_2;")
+            .expect("按本批 id 删旧行");
+        let insert_at = sql
+            .find("INSERT RELATION INTO inst_relate [")
+            .expect("再整批插入");
+        assert!(delete_at < insert_at, "删必须排在插之前: {sql}");
+        // 删除集恰好覆盖本批：多一个会误删别人的行，少一个就退回「撞 id 静默保留旧行」。
+        assert_eq!(sql.matches("inst_relate:7997_1").count(), 2, "{sql}");
+        assert_eq!(sql.matches("inst_relate:7997_2").count(), 2, "{sql}");
+    }
+
+    /// 生产写入路径上不许再出现裸的 `INSERT RELATION INTO inst_relate`。
+    ///
+    /// 换回去不会报错、不会编译失败，只会让那一行的新值在撞 id 时被静默丢弃。
+    #[test]
+    fn the_write_path_never_inserts_inst_relate_without_replacing() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn save_instance_data(")
+            .expect("save_instance_data 必须存在")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .map(|(head, _)| head)
+            .expect("函数体到测试模块为止");
+
+        assert!(
+            !body.contains("INSERT RELATION INTO inst_relate"),
+            "inst_relate 必须走 render_inst_relate_replace 的替换写入: {body}"
+        );
+        assert!(
+            body.contains("render_inst_relate_replace(chunk)"),
+            "两处 inst_relate 写入都要走同一个渲染函数: {body}"
         );
     }
 }
