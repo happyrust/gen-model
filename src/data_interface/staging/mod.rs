@@ -15,10 +15,20 @@ pub mod lifecycle;
 pub mod parity;
 pub mod replay_safe;
 pub mod resources;
+pub mod write_context;
 
 pub use executor::{ExecMode, JournalEntry, TX_CHUNK};
 pub use lifecycle::{ActiveStagedWindow, StagingWindowMeta};
 pub use resources::{ResourceBand, ResourceGauge, ResourceThresholds};
+pub(crate) use write_context::{active_staging_writes, with_staging_writes};
+
+/// 模型数据面的当前读库。窗口上下文在场时只读暂存，否则读持久层。
+pub(crate) fn active_data_db(
+) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+    aios_core::staging::active_staging_reads()
+        .map(|context| context.db().clone())
+        .unwrap_or_else(|| aios_core::SUL_DB.clone())
+}
 
 /// 读路由 seam 的验收（T0.2）：上下文在场 → 被接线的读入口只看暂存库；
 /// 上下文缺席 → 行为与历史一致（直连 `SUL_DB`）；两个世界互不污染进程缓存。

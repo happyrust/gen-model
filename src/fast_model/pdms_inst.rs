@@ -16,9 +16,8 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 type DbWriteTask = tokio::task::JoinHandle<anyhow::Result<()>>;
 
 fn spawn_db_write(sql: String) -> DbWriteTask {
-    aios_core::staging::spawn_with_staging_reads(async move {
-        SUL_DB.query(sql).await?.check()?;
-        Ok(())
+    crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+        crate::surreal_retry::execute_model_write(&sql, "save instance data").await
     })
 }
 
@@ -784,7 +783,7 @@ mod tests {
     #[tokio::test]
     async fn failed_instance_write_reaches_the_caller() {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(aios_core::staging::spawn_with_staging_reads(async {
+        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async {
             Err::<(), anyhow::Error>(anyhow::anyhow!("forced instance write failure"))
         }));
 
@@ -803,10 +802,10 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let delayed_completed = completed.clone();
         let mut tasks = FuturesUnordered::new();
-        tasks.push(aios_core::staging::spawn_with_staging_reads(async {
+        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async {
             Err::<(), anyhow::Error>(anyhow::anyhow!("first write failed"))
         }));
-        tasks.push(aios_core::staging::spawn_with_staging_reads(async move {
+        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             delayed_completed.store(true, Ordering::SeqCst);
             Ok(())

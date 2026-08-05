@@ -2,7 +2,6 @@ use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
-use crate::surreal_retry::execute_surreal_checked;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
@@ -13,7 +12,7 @@ use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
-    RefU64, RefnoEnum, SUL_DB, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
+    RefU64, RefnoEnum, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
     query_deep_visible_inst_refnos,
 };
 use aios_core::{get_db_option, init_test_surreal};
@@ -450,7 +449,9 @@ pub async fn gen_inst_meshes(
         };
         //out.aabb.d == none and
         // println!("sql is {}", &sql);
-        let mut response = SUL_DB.query(sql).await?;
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(sql)
+            .await?;
         let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0)?;
         //todo 排除已经生成了的模型
         // let mut update_geos_by_meshes = HashSet::default();
@@ -492,7 +493,7 @@ pub async fn gen_inst_meshes(
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
             let pts_json_map = pts_json_map.clone();
-            let task = aios_core::staging::spawn_with_staging_reads(async move {
+            let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                 let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
                 // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
                 // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
@@ -502,7 +503,7 @@ pub async fn gen_inst_meshes(
                     ids
                 );
                 // println!("sql is {}", &sql);
-                match SUL_DB.query(&sql).await {
+                match crate::data_interface::staging::active_data_db().query(&sql).await {
                     Ok(mut response) => {
                         let r = response.take::<Vec<QueryGeoParam>>(0);
                         if let Err(e) = &r {
@@ -668,7 +669,13 @@ pub async fn gen_inst_meshes(
                         }
                         if !update_sql.is_empty() {
                             //执行SUL_DB update,使用chunk 保存
-                            if let Err(_) = SUL_DB.query(&update_sql).await {
+                            if crate::surreal_retry::execute_model_write(
+                                &update_sql,
+                                "mark generated inst_geo state",
+                            )
+                            .await
+                            .is_err()
+                            {
                                 init_save_database_error(
                                     &update_sql,
                                     &std::panic::Location::caller().to_string(),
@@ -779,6 +786,7 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
     maintain_spatial_tree: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
+    let staged_writes = crate::data_interface::staging::active_staging_writes();
     let mut changes = Vec::new();
     for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
@@ -799,7 +807,8 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
         // 幂等，调用方把整批当一个任务结算、重放收敛。此前这里是 `.unwrap()` + 反序列化
         // 失败静默 continue——传输抖动直接 panic（同款 panic 在生产日志有实证，os error
         // 10054），坏一块就无声丢掉 100 个元素的包围盒与房间触发。
-        let mut response = SUL_DB
+        let db = crate::data_interface::staging::active_data_db();
+        let mut response = db
             .query(sql)
             .await
             .map_err(|e| anyhow::anyhow!("查询 inst_relate 包围盒输入失败: {e}"))?
@@ -854,10 +863,19 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
         // `aabb.d` 为 none，元素从 `where aabb.d != none` 的所有读者里整条消失。
         utils::save_aabb_to_surreal(&chunk_aabbs).await?;
         if !update_sql.is_empty() {
-            execute_surreal_checked(&update_sql, "update inst_relate aabb pointers").await?;
+            crate::surreal_retry::execute_model_write(
+                &update_sql,
+                "update inst_relate aabb pointers",
+            )
+            .await?;
         }
         // 关闭房间空间树时仍要保留数据库 AABB 真值，但不维护一棵不会加载、对账或查询
         // 的内存树。重新开启该功能需要重启，启动路径会用数据库记录重建并对账空间树。
+        if let Some(context) = &staged_writes {
+            let refnos = new_boxes.iter().map(|(refno, _, _)| *refno).collect::<Vec<_>>();
+            context.defer_spatial_refresh(&refnos).await;
+            continue;
+        }
         if !maintain_spatial_tree {
             continue;
         }
@@ -983,7 +1001,7 @@ pub async fn apply_insts_boolean_occ(
     {
         sql.push_str(" and !booled");
     }
-    match SUL_DB.query(&sql).await {
+    match crate::data_interface::staging::active_data_db().query(&sql).await {
         Ok(mut response) => {
             match response.take::<Vec<OccGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
@@ -1129,8 +1147,13 @@ pub async fn apply_insts_boolean_occ(
                             // dbg!(&update_sql);
                         }
                         if !update_sql.is_empty() {
-                            let r = SUL_DB.query(&update_sql).await;
-                            if let Err(_e) = r {
+                            if crate::surreal_retry::execute_model_write(
+                                &update_sql,
+                                "mark boolean model state",
+                            )
+                            .await
+                            .is_err()
+                            {
                                 init_save_database_error(
                                     &update_sql,
                                     &std::panic::Location::caller().to_string(),
@@ -1185,7 +1208,9 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
         select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
         from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group from inst_relate where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled
     "#;
-    let mut response = SUL_DB.query(sql).await?;
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(sql)
+        .await?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
     // dbg!(params.len());
     // dbg!(&params);
@@ -1199,7 +1224,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = aios_core::staging::spawn_with_staging_reads(async move {
+        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             for g in group {
                 let pes = g
                     .boolean_group
@@ -1218,7 +1243,10 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                     pes
                 );
                 // dbg!(&sql);
-                let Ok(mut resp) = SUL_DB.query(&sql).await else {
+                let Ok(mut resp) = crate::data_interface::staging::active_data_db()
+                    .query(&sql)
+                    .await
+                else {
                     continue;
                 };
                 // let gms: Vec<GmGeoData> = resp.take(0).unwrap();
@@ -1328,7 +1356,12 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                     }
                 }
                 if !update_sql.is_empty() {
-                    SUL_DB.query(update_sql).await.unwrap();
+                    crate::surreal_retry::execute_model_write(
+                        &update_sql,
+                        "mark catalogue boolean model state",
+                    )
+                    .await
+                    .unwrap();
                 }
             }
         });

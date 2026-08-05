@@ -1,11 +1,10 @@
-use aios_core::SUL_DB;
 use aios_core::error::init_save_database_error;
 use dashmap::DashMap;
 use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
 use tokio::task::JoinSet;
 
-use crate::surreal_retry::execute_surreal_checked;
+use crate::surreal_retry::execute_model_write;
 
 /// 把一批 `aabb:⟨hash⟩` 记录写进库。
 ///
@@ -32,7 +31,7 @@ pub async fn save_aabb_to_surreal(aabb_map: &DashMap<String, Aabb>) -> anyhow::R
             );
             sql.push_str(&format!("INSERT IGNORE INTO aabb {};", json));
         }
-        execute_surreal_checked(&sql, "insert aabb records").await?;
+        execute_model_write(&sql, "insert aabb records").await?;
     }
     Ok(())
 }
@@ -47,9 +46,9 @@ pub async fn save_pts_to_surreal(vec3_map: &DashMap<u64, String>) {
                 let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v.value());
                 sql.push_str(&format!("INSERT IGNORE INTO vec3 {};", json));
             }
-            match SUL_DB.query(&sql).await {
-                Ok(_) => {}
-                Err(_e) => {
+            match execute_model_write(&sql, "insert vec3 records").await {
+                Ok(()) => {}
+                Err(_) => {
                     init_save_database_error(&sql, &std::panic::Location::caller().to_string());
                 }
             };
@@ -69,7 +68,7 @@ pub async fn save_transforms_to_surreal(trans_map: &HashMap<u64, String>) -> any
             }
             // 此前是 `.unwrap()`：传输抖动直接 panic 掉整个 Transform 任务，
             // 队列行既不结算也不累计失败次数（同款 panic 在生产日志有实证）。
-            execute_surreal_checked(&sql, "insert trans records").await?;
+            execute_model_write(&sql, "insert trans records").await?;
         }
     }
     Ok(())

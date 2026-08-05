@@ -31,13 +31,54 @@ use surrealdb::sql::{Data, Id, Operator, Statement, Value, Values};
 pub fn validate_statement(sql: &str) -> anyhow::Result<()> {
     let query = surrealdb::sql::parse(sql)
         .map_err(|error| anyhow::anyhow!("journal SurrealQL 解析失败：{error}"))?;
-    for (index, statement) in query.iter().enumerate() {
+    let statements = query.iter().collect::<Vec<_>>();
+    let transaction = matches!(statements.first(), Some(Statement::Begin(_)));
+    if transaction && !matches!(statements.last(), Some(Statement::Commit(_))) {
+        bail!("journal 显式事务必须以 COMMIT 收口");
+    }
+    for (index, statement) in statements.iter().enumerate() {
+        if matches!(statement, Statement::Begin(_) | Statement::Commit(_)) {
+            let is_boundary = transaction && (index == 0 || index + 1 == statements.len());
+            if is_boundary {
+                continue;
+            }
+            bail!("journal 只接受包住整段脚本的一对 BEGIN/COMMIT");
+        }
+        if matches!(statement, Statement::Cancel(_)) {
+            bail!("journal 不接受 CANCEL TRANSACTION");
+        }
         validate_single(statement).map_err(|error| {
             anyhow::anyhow!(
                 "journal 语句第 {} 段不满足 ReplaySafe：{error}\n语句：{statement}",
                 index + 1
             )
         })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn is_explicit_transaction(sql: &str) -> bool {
+    surrealdb::sql::parse(sql).is_ok_and(|query| {
+        matches!(query.iter().next(), Some(Statement::Begin(_)))
+            && matches!(query.iter().last(), Some(Statement::Commit(_)))
+    })
+}
+
+/// 已审计的生成级联删除形态：完整事务，顶层只含 LET、DELETE 与条件删除块。
+pub(crate) fn validate_scoped_delete_transaction(sql: &str) -> anyhow::Result<()> {
+    let query = surrealdb::sql::parse(sql)
+        .map_err(|error| anyhow::anyhow!("级联删除 SurrealQL 解析失败：{error}"))?;
+    let statements = query.iter().collect::<Vec<_>>();
+    if !matches!(statements.first(), Some(Statement::Begin(_)))
+        || !matches!(statements.last(), Some(Statement::Commit(_)))
+    {
+        bail!("级联删除必须由一对 BEGIN/COMMIT 包住");
+    }
+    for statement in &statements[1..statements.len() - 1] {
+        reject_nondeterministic_functions(statement)?;
+        if !matches!(statement, Statement::Set(_) | Statement::Delete(_) | Statement::Ifelse(_)) {
+            bail!("级联删除事务只允许 LET、DELETE 与 IF 块");
+        }
     }
     Ok(())
 }
@@ -278,5 +319,15 @@ mod tests {
         )
         .expect_err("中段违规应被拒绝");
         assert!(error.to_string().contains("第 2 段"), "{error}");
+    }
+
+    #[test]
+    fn accepts_only_complete_outer_transactions() {
+        validate_statement(
+            "BEGIN TRANSACTION; DELETE pe:a->ref_rev; UPSERT pe:a SET noun = 'PIPE'; COMMIT TRANSACTION;",
+        )
+        .expect("完整外层事务可作为一个原子 journal 单元");
+        assert!(validate_statement("BEGIN TRANSACTION; UPSERT pe:a SET x = 1").is_err());
+        assert!(validate_statement("BEGIN; UPSERT pe:a SET x = 1; CANCEL; COMMIT").is_err());
     }
 }

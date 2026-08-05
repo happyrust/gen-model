@@ -1013,7 +1013,7 @@ mod cache_tests {
             .await
             .expect("stage parsed window");
         assert_eq!(staged, 2, "主数据删除 + ref_rev 清理");
-        assert_eq!(window.journal().len(), 2, "必须沿用同一 journal");
+        assert_eq!(window.journal().await.len(), 2, "必须沿用同一 journal");
 
         let db = window.staging_db().clone();
         let mut response = db

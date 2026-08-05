@@ -19,7 +19,7 @@ use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::{DBType, prim_geo::*};
 use aios_core::{RefU64, RefnoEnum, pdms_types::*};
 use aios_core::{
-    SUL_DB, query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum,
+    query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum,
 };
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
@@ -61,25 +61,25 @@ impl DbModelInstRefnos {
         let bran_hanger_refnos = self.bran_hanger_refnos.clone();
 
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             gen_meshes_in_db(db_option, &prim_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("generate prim meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             gen_meshes_in_db(db_option.clone(), &loop_owner_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("generate loop meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             gen_meshes_in_db(db_option, &use_cate_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("generate use-cata meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             for bran_refnos in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
                 // let refnos_str = bran_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
@@ -111,25 +111,25 @@ impl DbModelInstRefnos {
         let use_cate_refnos = self.use_cate_refnos.clone();
         let bran_hanger_refnos = self.bran_hanger_refnos.clone();
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             booleans_meshes_in_db(db_option, &prim_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("boolean prim meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             booleans_meshes_in_db(db_option, &loop_owner_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("boolean loop meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             booleans_meshes_in_db(db_option, &use_cate_refnos)
                 .await
                 .map_err(|error| anyhow::anyhow!("boolean use-cata meshes failed: {error:#}"))
         }));
         let db_option = db_option_arc.clone();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             for chunk in bran_hanger_refnos.chunks(20) {
                 let db_option_clone = db_option.clone();
                 let target_refnos = query_multi_children_refnos(&chunk).await.map_err(|error| {
@@ -427,7 +427,9 @@ pub async fn gen_geos_data_by_dbnum(
                         .collect::<Vec<_>>()
                         .join(",")
                 );
-                let mut response = SUL_DB.query(sql).await?;
+                let mut response = crate::data_interface::staging::active_data_db()
+                    .query(sql)
+                    .await?;
                 // response.take_errors()
                 let tuples: Vec<(RefnoEnum, f32, String)> = response.take(0)?;
                 // dbg!(&tuples[0]);
@@ -717,7 +719,10 @@ pub async fn gen_geos_data(
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            let mut response = SUL_DB.query(sql).await?.check()?;
+            let mut response = crate::data_interface::staging::active_data_db()
+                .query(sql)
+                .await?
+                .check()?;
             let bran_children_refnos = response.take::<Vec<RefnoEnum>>(0)?;
             let single_refnos = target_refnos
                 .iter()
@@ -752,7 +757,7 @@ pub async fn gen_geos_data(
                 let sjus_map_clone = loop_sjus_map_arc.clone();
                 let db_option = db_option_arc.clone();
                 let sender = sender.clone();
-                let handle = aios_core::staging::spawn_with_staging_reads(async move {
+                let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                     let start_time = Instant::now();
                     cata_model::gen_cata_geos(
                         db_option,
@@ -777,7 +782,7 @@ pub async fn gen_geos_data(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = aios_core::staging::spawn_with_staging_reads(async move {
+            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                 let start_time = Instant::now();
                 cata_model::gen_cata_geos(
                     db_option,
@@ -810,7 +815,7 @@ pub async fn gen_geos_data(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let sender = sender.clone();
             let db_option = db_option_arc.clone();
-            let handle = aios_core::staging::spawn_with_staging_reads(async move {
+            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                 loop_model::gen_loop_geos(
                     db_option,
                     &target_loop_owner_refnos,
@@ -839,7 +844,7 @@ pub async fn gen_geos_data(
             //基本体模型的生成
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = aios_core::staging::spawn_with_staging_reads(async move {
+            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                 prim_model::gen_prim_geos(db_option, target_prim_refnos.as_slice(), sender).await?;
                 anyhow::Ok(())
             });
@@ -979,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn generation_worker_error_is_returned() {
         let mut handles = FuturesUnordered::new();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async { anyhow::bail!("worker failed") }));
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { anyhow::bail!("worker failed") }));
 
         let error = wait_for_generation_workers(&mut handles)
             .await
@@ -991,7 +996,7 @@ mod tests {
     #[tokio::test]
     async fn generation_worker_panic_is_returned() {
         let mut handles = FuturesUnordered::new();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async { panic!("worker panic") }));
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { panic!("worker panic") }));
 
         let error = wait_for_generation_workers(&mut handles)
             .await
@@ -1005,8 +1010,8 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let completed_by_worker = completed.clone();
         let mut handles = FuturesUnordered::new();
-        handles.push(aios_core::staging::spawn_with_staging_reads(async { anyhow::bail!("first worker failed") }));
-        handles.push(aios_core::staging::spawn_with_staging_reads(async move {
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { anyhow::bail!("first worker failed") }));
+        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             completed_by_worker.store(true, Ordering::SeqCst);
             anyhow::Ok(())
@@ -1027,7 +1032,7 @@ mod tests {
         let writer_completed = Arc::new(AtomicBool::new(false));
         let writer_completed_by_task = writer_completed.clone();
         let (sender, receiver) = flume::bounded(1);
-        let writer = aios_core::staging::spawn_with_staging_reads(async move {
+        let writer = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             while receiver.recv_async().await.is_ok() {}
             writer_completed_by_task.store(true, Ordering::SeqCst);
             anyhow::Ok(())

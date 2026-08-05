@@ -5,7 +5,9 @@ use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::anyhow;
 use surrealdb::sql::Thing;
 
-use crate::surreal_retry::execute_surreal_checked;
+use crate::surreal_retry::{
+    execute_model_scoped_delete, execute_model_write, execute_surreal_checked,
+};
 
 /// 查询子树时的分批大小（与 increment_manager 的 QUERY_BATCH_SIZE 一致，避免 SQL 过长）。
 const SUBTREE_QUERY_BATCH: usize = 20;
@@ -34,7 +36,10 @@ pub(crate) async fn collect_pe_subtree_refnos(
             let sql = format!(
                 "array::distinct(array::flatten(SELECT VALUE <-pe_owner.in FROM [{pe_keys}]));"
             );
-            let mut response = SUL_DB.query(&sql).await?.check()?;
+            let mut response = crate::data_interface::staging::active_data_db()
+                .query(&sql)
+                .await?
+                .check()?;
             for value in response.take::<Vec<Thing>>(0)? {
                 let refno = pe_thing_to_refno(value)?;
                 if all.insert(refno) {
@@ -127,9 +132,12 @@ pub async fn delete_inst_relate_cascade(
         for refno in chunk {
             delete_sql_vec.push(render_cascade_delete(&refno.to_inst_relate_key()));
         }
-        if !delete_sql_vec.is_empty() {
-            let sql = delete_sql_vec.join("\n");
-            execute_surreal_checked(&sql, "delete model relations").await?;
+        if crate::data_interface::staging::active_staging_writes().is_some() {
+            for sql in delete_sql_vec {
+                execute_model_scoped_delete(&sql, "delete model relations").await?;
+            }
+        } else if !delete_sql_vec.is_empty() {
+            execute_surreal_checked(&delete_sql_vec.join("\n"), "delete model relations").await?;
         }
     }
 
@@ -181,7 +189,7 @@ async fn existing_inst_relate_refnos(
             .map(RefnoEnum::to_inst_relate_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = crate::data_interface::staging::active_data_db()
             .query(format!(
                 "SELECT VALUE in FROM [{keys}] WHERE record::exists(id);"
             ))
@@ -289,7 +297,7 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(", ");
-        execute_surreal_checked(
+        execute_model_write(
             &render_room_membership_delete(&pe_keys),
             "delete room membership",
         )
@@ -298,6 +306,10 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
 
     // 树上留着已删元素的包围盒，`locate_intersecting_bounds` 会继续把它当候选返回，
     // 于是重算时一个已经不存在的构件仍会被算进某间房（缺陷 D4）。
+    if let Some(context) = crate::data_interface::staging::active_staging_writes() {
+        context.defer_spatial_remove(refnos).await;
+        return Ok(());
+    }
     let stale: HashSet<aios_core::RefU64> = refnos.iter().map(RefnoEnum::refno).collect();
     let removed = GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
     if removed > 0 {
@@ -315,6 +327,9 @@ mod tests {
     #[test]
     fn cascade_delete_keeps_the_edge_delete_and_refcount_gc_in_one_transaction() {
         let sql = render_cascade_delete("inst_relate:7997_1");
+
+        crate::data_interface::staging::replay_safe::validate_scoped_delete_transaction(&sql)
+            .expect("级联删除必须能进入暂存 journal");
 
         assert!(sql.starts_with("BEGIN TRANSACTION;"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");

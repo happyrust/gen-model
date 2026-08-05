@@ -7,6 +7,27 @@ use itertools::Itertools;
 
 use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
 
+/// 写回成功后应用窗口计算期间延迟的空间树变化，并返回房间增量触发集。
+pub(crate) async fn apply_deferred_spatial_mutations(
+    deferred: crate::data_interface::staging::write_context::DeferredSpatialMutations,
+) -> anyhow::Result<Vec<crate::fast_model::occ_generate::AabbChange>> {
+    if !deferred.remove.is_empty() {
+        let removed = deferred
+            .remove
+            .iter()
+            .map(RefnoEnum::refno)
+            .collect::<std::collections::HashSet<_>>();
+        if GLOBAL_AABB_TREE.write().await.remove_by_refnos(&removed) > 0 {
+            mark_aabb_tree_dirty();
+        }
+    }
+    if deferred.refresh.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refnos = deferred.refresh.into_iter().collect::<Vec<_>>();
+    update_inst_relate_aabbs_by_refnos(&refnos, true).await
+}
+
 /// 空间树自上次写回 `accel_tree.bin` 以来是否有未持久化的增量变更。
 ///
 /// 增量路径（AABB 刷新、删除清理）只更新内存树；不落盘的话，重启后

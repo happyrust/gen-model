@@ -45,7 +45,7 @@ pub async fn gen_prim_geos(
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
         let sender = sender.clone();
-        let handle = aios_core::staging::spawn_with_staging_reads(async move {
+        let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             let negative_nouns = shared::negative_noun_refs();
             let mut shape_insts_data = ShapeInstancesData::default();
             let start_idx = i * batch_size;

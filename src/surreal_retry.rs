@@ -35,6 +35,32 @@ pub async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result
     execute_surreal_checked_on(&SUL_DB, sql, context).await
 }
 
+/// 模型生成的数据面写入口。活动窗口在场时写暂存并进入 journal；普通生成路径
+/// 继续使用持久层冲突重试。控制面不得调用此函数。
+pub async fn execute_model_write(sql: &str, context: &str) -> anyhow::Result<()> {
+    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
+        return staging
+            .execute(
+                sql,
+                crate::data_interface::staging::ExecMode::Both,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{context}: {error}"));
+    }
+    execute_surreal_checked(sql, context).await
+}
+
+/// 已审计的模型级联删除事务；普通路径仍走原有持久层重试。
+pub async fn execute_model_scoped_delete(sql: &str, context: &str) -> anyhow::Result<()> {
+    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
+        return staging
+            .execute_scoped_delete(sql)
+            .await
+            .map_err(|error| anyhow::anyhow!("{context}: {error}"));
+    }
+    execute_surreal_checked(sql, context).await
+}
+
 /// [`execute_surreal_checked`] 的显式句柄版（ADR-017 写回重放对持久层、
 /// 测试对一次性实例执行时用）。**同样要求 `sql` 幂等。**
 pub async fn execute_surreal_checked_on(

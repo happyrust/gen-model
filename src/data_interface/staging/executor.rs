@@ -95,6 +95,19 @@ impl StagedExecutor {
         if matches!(mode, ExecMode::Both | ExecMode::CommitOnly) {
             replay_safe::validate_statement(&sql)?;
         }
+        self.execute_validated(sql, mode).await
+    }
+
+    pub(super) async fn execute_scoped_delete(
+        &mut self,
+        sql: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        let sql = sql.into();
+        replay_safe::validate_scoped_delete_transaction(&sql)?;
+        self.execute_validated(sql, ExecMode::Both).await
+    }
+
+    async fn execute_validated(&mut self, sql: String, mode: ExecMode) -> anyhow::Result<()> {
         let estimated_rows = replay_safe::estimate_write_rows(&sql)?;
         if let Some(gauge) = &self.gauge {
             let additional_bytes = match mode {
@@ -186,20 +199,38 @@ impl StagedExecutor {
         chunk_size: usize,
         max_chunks: Option<usize>,
     ) -> anyhow::Result<usize> {
-        let statements: Vec<String> = self.journal.iter().map(|e| e.sql.clone()).collect();
+        let mut batches = Vec::new();
+        let mut plain = Vec::new();
+        let flush_plain = |plain: &mut Vec<String>, batches: &mut Vec<String>| {
+            if let Some(sql) = wrap_in_transaction(plain) {
+                batches.push(sql);
+                plain.clear();
+            }
+        };
+        for entry in &self.journal {
+            if replay_safe::is_explicit_transaction(&entry.sql) {
+                flush_plain(&mut plain, &mut batches);
+                batches.push(entry.sql.clone());
+            } else {
+                plain.push(entry.sql.clone());
+                if plain.len() == chunk_size.max(1) {
+                    flush_plain(&mut plain, &mut batches);
+                }
+            }
+        }
+        flush_plain(&mut plain, &mut batches);
+
         let mut replayed = 0usize;
-        for (index, chunk) in statements.chunks(chunk_size.max(1)).enumerate() {
+        for (index, sql) in batches.into_iter().enumerate() {
             if max_chunks.is_some_and(|max| index >= max) {
                 break;
             }
-            if let Some(tx_sql) = wrap_in_transaction(chunk) {
-                execute_surreal_checked_on(
-                    target,
-                    &tx_sql,
-                    &format!("[{}] 写回块 {index}", self.label),
-                )
-                .await?;
-            }
+            execute_surreal_checked_on(
+                target,
+                &sql,
+                &format!("[{}] 写回块 {index}", self.label),
+            )
+            .await?;
             replayed += 1;
         }
         Ok(replayed)
@@ -418,6 +449,24 @@ mod tests {
         let a = select_values(&interrupted, "SELECT * FROM item ORDER BY id").await;
         let b = select_values(&clean, "SELECT * FROM item ORDER BY id").await;
         assert_eq!(a, b, "中断重试后的终态必须与一次成功写回一致");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explicit_transaction_replays_without_nested_transaction() {
+        let staging = staging_handle("staging_7997_tx").await;
+        let mut executor = StagedExecutor::new(staging, "staging_7997_tx");
+        executor
+            .execute(
+                "BEGIN; UPSERT pe:a SET noun = 'PIPE'; UPSERT pe:b SET noun = 'EQUI'; COMMIT;",
+                ExecMode::Both,
+            )
+            .await
+            .expect("stage transaction");
+
+        let target = persistent_handle().await;
+        executor.commit_to(&target, None).await.expect("replay transaction");
+        let rows = select_values(&target, "SELECT VALUE id FROM pe ORDER BY id").await;
+        assert!(rows.contains("a") && rows.contains("b"), "{rows}");
     }
 
 }

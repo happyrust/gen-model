@@ -1427,7 +1427,7 @@ pub async fn gen_cata_geos_parallel_optimized(
         let db_option = db_option.clone();
         let semaphore = semaphore.clone();
 
-        let task = aios_core::staging::spawn_with_staging_reads(async move {
+        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             let _permit = semaphore.acquire().await.unwrap();
             let batch_start = Instant::now();
 

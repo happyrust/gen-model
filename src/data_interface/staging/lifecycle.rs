@@ -25,6 +25,7 @@ use surrealdb::Surreal;
 
 use super::executor::{ExecMode, JournalEntry, StagedExecutor};
 use super::resources::{ResourceBand, ResourceGauge, ResourceThresholds};
+use super::write_context::{DeferredSpatialMutations, StagingWriteContext};
 
 /// 暂存实例上所有 staging database 所在的 namespace。
 pub const STAGING_NS: &str = "staging";
@@ -74,7 +75,8 @@ pub struct ActiveStagedWindow {
     meta: StagingWindowMeta,
     db: Surreal<Any>,
     gauge: Arc<ResourceGauge>,
-    executor: StagedExecutor,
+    executor: Arc<tokio::sync::Mutex<StagedExecutor>>,
+    spatial: Arc<tokio::sync::Mutex<DeferredSpatialMutations>>,
 }
 
 /// 在生产常驻实例上开一个新窗口。
@@ -133,13 +135,16 @@ pub async fn create_window_on(
             },
         );
 
-    let executor = StagedExecutor::new(instance.clone(), meta.label.clone())
-        .with_gauge(gauge.clone());
+    let executor = Arc::new(tokio::sync::Mutex::new(
+        StagedExecutor::new(instance.clone(), meta.label.clone()).with_gauge(gauge.clone()),
+    ));
+    let spatial = Arc::new(tokio::sync::Mutex::new(DeferredSpatialMutations::default()));
     Ok(ActiveStagedWindow {
         meta,
         db: instance.clone(),
         gauge,
         executor,
+        spatial,
     })
 }
 
@@ -207,15 +212,48 @@ impl ActiveStagedWindow {
 
     /// 通过本窗口唯一的执行器写暂存/journal。
     pub async fn execute(&mut self, sql: impl Into<String>, mode: ExecMode) -> anyhow::Result<()> {
-        self.executor.execute(sql, mode).await
+        self.executor.lock().await.execute(sql, mode).await
     }
 
-    pub fn journal(&self) -> &[JournalEntry] {
-        self.executor.journal()
+    pub async fn journal(&self) -> Vec<JournalEntry> {
+        self.executor.lock().await.journal().to_vec()
+    }
+
+    pub(crate) async fn commit_to(
+        &self,
+        target: &Surreal<Any>,
+        tail_transaction: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.executor
+            .lock()
+            .await
+            .commit_to(target, tail_transaction)
+            .await
     }
 
     pub fn staging_db(&self) -> &Surreal<Any> {
-        self.executor.staging_db()
+        &self.db
+    }
+
+    pub(crate) fn write_context(&self) -> StagingWriteContext {
+        StagingWriteContext::new(self.executor.clone(), self.spatial.clone())
+    }
+
+    pub(crate) async fn take_deferred_spatial(&self) -> DeferredSpatialMutations {
+        std::mem::take(&mut *self.spatial.lock().await)
+    }
+
+    /// 在本窗口的读写上下文中运行生成调用树；子任务用 `spawn_with_staged_io`
+    /// 继续继承两种上下文。
+    pub(crate) async fn scope<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        aios_core::staging::with_staging_reads(
+            self.read_context(),
+            super::with_staging_writes(self.write_context(), future),
+        )
+        .await
     }
 
     /// 本窗口的读路由上下文。
