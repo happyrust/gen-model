@@ -19,7 +19,7 @@
 //! After the state is established (a scan / advance writes `applied_sesno`), reads
 //! use `applied_sesno` directly and never re-mix other sources.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aios_core::SUL_DB;
 use serde::{Deserialize, Serialize};
@@ -349,14 +349,33 @@ fn should_seed_from_current_database(
     watermark_table_missing || watermark_rows == 0 || !seed_marker_present
 }
 
-/// 播种完整性告警（纯函数）：pe 与统计表的按 dbnum 元素计数对不上。
+/// 完整性对不上账的 dbnum（纯函数）：pe 与统计表的按 dbnum 元素计数不相等。
 ///
 /// 正常基线路径有 `count(pe) == sum(info.count)` 的完整性校验，播种路径没有——
-/// 一个被历史全量解析中断留下洞的老库，pe 的最大会话号会接近文件尾，播种后
-/// 增量永远补不回中间的洞。这里不阻断（播种照旧），只把嫌疑喊出来让人处置。
+/// 一个被历史全量解析中断留下洞的老库，pe 的最大会话号会接近文件尾。给它播上
+/// 水位，`baseline_needs_full_parse` 就因 `applied_sesno != 0` 再也不会重建基线，
+/// 中间那些洞增量永远补不回来：库里少着元素，面板却显示已应用到最新会话。
 ///
-/// `dbnum_info_table` 整体为空（更老的库没有这张表）时无从比对，返回一条
-/// 整体提示而不是逐库刷屏。
+/// 所以这些 dbnum **不播种**。没有水位意味着它们按首次导入处理，下一次基线会把
+/// 整库重解析一遍——多花一次解析，换一份对得上账的数据。
+///
+/// `dbnum_info_table` 整体为空时（更老的库没有这张表）没有比对的依据，此时不认定
+/// 任何一个可疑：拿「无从比对」当「都有问题」会把这类库全部推去重解析。
+fn seed_suspect_dbnums(
+    pe_counts: &BTreeMap<u32, i64>,
+    info_counts: &BTreeMap<u32, i64>,
+) -> BTreeSet<u32> {
+    if pe_counts.is_empty() || info_counts.is_empty() {
+        return BTreeSet::new();
+    }
+    pe_counts
+        .iter()
+        .filter(|(dbnum, pe_count)| info_counts.get(dbnum).copied().unwrap_or(0) != **pe_count)
+        .map(|(dbnum, _)| *dbnum)
+        .collect()
+}
+
+/// 播种完整性告警：逐个说清楚哪个库对不上账、因此不给它播水位。
 fn seed_integrity_warnings(
     pe_counts: &BTreeMap<u32, i64>,
     info_counts: &BTreeMap<u32, i64>,
@@ -370,20 +389,35 @@ fn seed_integrity_warnings(
                 .to_string(),
         ];
     }
-    pe_counts
-        .iter()
-        .filter(|(dbnum, pe_count)| {
-            info_counts.get(dbnum).copied().unwrap_or(0) != **pe_count
-        })
-        .map(|(dbnum, pe_count)| {
-            let info_count = info_counts.get(dbnum).copied().unwrap_or(0);
+    seed_suspect_dbnums(pe_counts, info_counts)
+        .into_iter()
+        .map(|dbnum| {
+            let pe_count = pe_counts.get(&dbnum).copied().unwrap_or(0);
+            let info_count = info_counts.get(&dbnum).copied().unwrap_or(0);
             format!(
                 "播种完整性告警 dbnum={dbnum}：pe {pe_count} 条 != 统计 {info_count} 条；\
-                 该库可能带着历史解析中断留下的洞，播种仍按 pe 最大会话号建立基线；\
-                 如需彻底校验，请对该库重建基线（清空后走首次导入）"
+                 该库可能带着历史解析中断留下的洞，**不播种水位**，\
+                 将按首次导入在下一次基线里整库重解析"
             )
         })
         .collect()
+}
+
+/// 把播种候选分成「可以固化」与「按下不表」两拨。
+fn partition_seedable(
+    watermarks: Vec<DatabaseWatermark>,
+    suspect: &BTreeSet<u32>,
+) -> (Vec<DatabaseWatermark>, Vec<u32>) {
+    let mut seedable = Vec::with_capacity(watermarks.len());
+    let mut held_back = Vec::new();
+    for row in watermarks {
+        if suspect.contains(&row.dbnum) {
+            held_back.push(row.dbnum);
+        } else {
+            seedable.push(row);
+        }
+    }
+    (seedable, held_back)
 }
 
 fn migration_watermark_source(seed_from_current_database: bool) -> (&'static str, &'static str) {
@@ -434,10 +468,23 @@ async fn seed_marker_present() -> anyhow::Result<bool> {
 }
 
 /// 全部播种批次成功后落下完成标记。
-async fn write_seed_marker(source_name: &str, seeded_dbnums: usize) -> anyhow::Result<()> {
+///
+/// `skipped_dbnums` 也记进去：跳过的库此后靠首次导入重建基线，光打一行控制台日志
+/// 的话，事后没人说得清那一批为什么在重解析。
+async fn write_seed_marker(
+    source_name: &str,
+    seeded_dbnums: usize,
+    skipped_dbnums: &[u32],
+) -> anyhow::Result<()> {
+    let skipped = skipped_dbnums
+        .iter()
+        .map(|dbnum| dbnum.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
         "UPSERT {SEED_MARKER} SET source = '{source_name}', \
-         dbnum_count = {seeded_dbnums}, completed_at = time::now();"
+         dbnum_count = {seeded_dbnums}, skipped_dbnums = [{skipped}], \
+         completed_at = time::now();"
     );
     SUL_DB
         .query(sql)
@@ -531,6 +578,7 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
 
         let (source_sql, source_name) = migration_watermark_source(seed_from_current_database);
+        let mut suspect: BTreeSet<u32> = BTreeSet::new();
         if seed_from_current_database {
             // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
             // 现场很容易把首次兼容启动当成卡死。
@@ -544,15 +592,22 @@ impl DbnumState {
             println!(
                 "增量水位播种开始：{reason}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…"
             );
-            // 完整性嫌疑要在播种前喊出来：告警不阻断，播种照旧。
+            // 对不上账的库不播种（见 [`seed_suspect_dbnums`]）。
             match fetch_seed_integrity_counts().await {
                 Ok((pe_counts, info_counts)) => {
+                    suspect = seed_suspect_dbnums(&pe_counts, &info_counts);
                     for warning in seed_integrity_warnings(&pe_counts, &info_counts) {
                         eprintln!("{warning}");
                     }
                 }
                 Err(error) => {
-                    eprintln!("播种完整性比对失败（不阻断播种）: {error:#}");
+                    // 比对跑不起来时不能假定干净。这一轮索性不播，也不落完成标记，
+                    // 下次启动重来一遍——固化一份没校验过的水位是不可逆的，
+                    // 而重跑一次播种是幂等的。
+                    eprintln!(
+                        "播种完整性比对失败，本轮不按 PE 数据播种（不落完成标记，下次启动重试）: {error:#}"
+                    );
+                    return Ok(0);
                 }
             }
         }
@@ -566,6 +621,13 @@ impl DbnumState {
         let watermarks: Vec<DatabaseWatermark> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解码{source_name}水位失败: {e}"))?;
+        let (watermarks, held_back) = partition_seedable(watermarks, &suspect);
+        if !held_back.is_empty() {
+            eprintln!(
+                "播种跳过 {} 个对不上账的 dbnum（将按首次导入重建基线）: {held_back:?}",
+                held_back.len()
+            );
+        }
 
         for chunk in watermarks.chunks(500) {
             let sql = chunk
@@ -591,13 +653,14 @@ impl DbnumState {
         if seed_from_current_database {
             // 全部批次成功才落标记；写失败只提示不阻断——后果不过是下次启动
             // 重跑一遍 fill-only 播种，幂等无损。
-            if let Err(error) = write_seed_marker(source_name, watermarks.len()).await {
+            if let Err(error) = write_seed_marker(source_name, watermarks.len(), &held_back).await {
                 eprintln!("写播种完成标记失败（下次启动会重新播种一遍，幂等无损）: {error:#}");
             }
         }
         println!(
-            "增量水位回填检查完成：源={source_name}，来源 {} 个 dbnum，耗时 {:.1} 秒",
+            "增量水位回填检查完成：源={source_name}，固化 {} 个 dbnum，跳过 {} 个，耗时 {:.1} 秒",
             watermarks.len(),
+            held_back.len(),
             seed_started.elapsed().as_secs_f32()
         );
         Ok(watermarks.len())
@@ -971,6 +1034,70 @@ mod tests {
 
         // pe 为空（全新库）：什么都不喊。
         assert!(seed_integrity_warnings(&BTreeMap::new(), &info).is_empty());
+    }
+
+    /// 对不上账的 dbnum 不能拿到水位。
+    ///
+    /// 播种一旦给它写上 `applied_sesno`，`baseline_needs_full_parse` 就因为
+    /// `applied_sesno != 0` 再也不会重建这个库的基线——历史解析中断留下的洞增量
+    /// 永远补不回来，而面板显示「已应用到最新会话」。宁可让它按首次导入整库
+    /// 重解析一遍，也不能把一份没校验过的 pe 数据固化成水位。
+    #[test]
+    fn a_dbnum_that_does_not_add_up_is_not_given_a_watermark() {
+        let pe = BTreeMap::from([(7997u32, 1000i64), (8000, 34), (8191, 169)]);
+        let info = BTreeMap::from([(7997u32, 1000i64), (8000, 30), (251047, 6)]);
+
+        // 8000 计数不等、8191 统计缺行（按 0 比）；7997 一致。
+        let suspect = seed_suspect_dbnums(&pe, &info);
+        assert_eq!(suspect, BTreeSet::from([8000u32, 8191]));
+
+        let candidates = vec![
+            DatabaseWatermark {
+                dbnum: 7997,
+                sesno: 84,
+            },
+            DatabaseWatermark {
+                dbnum: 8000,
+                sesno: 41,
+            },
+            DatabaseWatermark {
+                dbnum: 8191,
+                sesno: 169,
+            },
+        ];
+        let (seedable, held_back) = partition_seedable(candidates, &suspect);
+        assert_eq!(
+            seedable.iter().map(|row| row.dbnum).collect::<Vec<_>>(),
+            vec![7997],
+            "只有对得上账的库能固化水位"
+        );
+        assert_eq!(held_back, vec![8000, 8191]);
+
+        // 没有比对依据时不能把「无从判断」当「都有问题」——那会把这类老库
+        // 全部推去重解析。
+        assert!(seed_suspect_dbnums(&pe, &BTreeMap::new()).is_empty());
+        assert!(seed_suspect_dbnums(&BTreeMap::new(), &info).is_empty());
+
+        // 播种循环必须吃过滤后的那份，且比对失败时整轮不播。
+        let source = include_str!("dbnum_state.rs");
+        let body = source
+            .split_once("pub async fn ensure_increment_state_storage(")
+            .expect("ensure_increment_state_storage 必须存在")
+            .1
+            .split_once("\n    /// List registered DB files")
+            .expect("它之后是 list_registered")
+            .0;
+        let partition_at = body
+            .find("partition_seedable(watermarks, &suspect)")
+            .expect("播种候选必须先过滤");
+        let upsert_at = body
+            .find("for chunk in watermarks.chunks(500)")
+            .expect("固化循环必须还在");
+        assert!(partition_at < upsert_at, "过滤要发生在固化之前: {body}");
+        assert!(
+            body.contains("本轮不按 PE 数据播种"),
+            "完整性比对失败时必须整轮不播: {body}"
+        );
     }
 
     #[test]
