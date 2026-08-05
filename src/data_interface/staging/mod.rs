@@ -11,6 +11,7 @@
 pub mod attempts;
 pub mod executor;
 pub mod lifecycle;
+pub mod preload;
 #[cfg(test)]
 pub mod parity;
 pub mod replay_safe;

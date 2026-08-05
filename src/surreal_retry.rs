@@ -40,10 +40,18 @@ pub async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result
 pub async fn execute_model_write(sql: &str, context: &str) -> anyhow::Result<()> {
     if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
         return staging
-            .execute(
-                sql,
-                crate::data_interface::staging::ExecMode::Both,
-            )
+            .execute(sql, crate::data_interface::staging::ExecMode::Both)
+            .await
+            .map_err(|error| anyhow::anyhow!("{context}: {error}"));
+    }
+    execute_surreal_checked(sql, context).await
+}
+
+/// 生成工作集预载入口。窗口内只写暂存且不进 journal；普通生成沿用历史持久层写入。
+pub async fn execute_generation_preload(sql: &str, context: &str) -> anyhow::Result<()> {
+    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
+        return staging
+            .execute(sql, crate::data_interface::staging::ExecMode::StagingOnly)
             .await
             .map_err(|error| anyhow::anyhow!("{context}: {error}"));
     }
@@ -116,4 +124,40 @@ fn conflict_retry_backoff_grows_exponentially_and_caps() {
     }
     // 线性退避会让并发写入器同步重试、一起再撞上，必须是指数增长。
     assert!(conflict_retry_backoff(4).as_millis() >= conflict_retry_backoff(1).as_millis() * 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_preload_is_staging_only_inside_a_window() {
+    use crate::data_interface::staging::ResourceThresholds;
+    use crate::data_interface::staging::lifecycle::create_window_on;
+    use surrealdb::engine::any::connect;
+
+    let instance = connect("mem://").await.expect("mem boots");
+    let window = create_window_on(&instance, 7993, 1, 1, ResourceThresholds::default())
+        .await
+        .expect("create window");
+
+    window
+        .scope(execute_generation_preload(
+            "UPSERT pe:preloaded SET noun = 'SITE'",
+            "test preload",
+        ))
+        .await
+        .expect("preload into staging");
+
+    assert!(
+        window.journal().await.is_empty(),
+        "preload must not be replayed"
+    );
+    let mut response = window
+        .staging_db()
+        .query("RETURN pe:preloaded.noun")
+        .await
+        .expect("read staged preload");
+    assert_eq!(
+        response.take::<Option<String>>(0).expect("take noun"),
+        Some("SITE".into())
+    );
+
+    window.drop_database().await.expect("cleanup");
 }

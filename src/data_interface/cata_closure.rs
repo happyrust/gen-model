@@ -1091,21 +1091,23 @@ pub async fn ensure_cata_refnos_parsed(
 
         for chunk in pe_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO pe [{}]", chunk.join(","));
-            SUL_DB.query(&sql).await?;
+            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA pe").await?;
         }
         for (table, jsons) in att_by_table {
             for chunk in jsons.chunks(INSERT_CHUNK) {
                 let sql = format!("INSERT IGNORE INTO {} [{}]", table, chunk.join(","));
-                SUL_DB.query(&sql).await?;
+                crate::surreal_retry::execute_generation_preload(&sql, "preload CATA attributes")
+                    .await?;
             }
         }
         for chunk in uda_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO ATT_UDA [{}]", chunk.join(","));
-            SUL_DB.query(&sql).await?;
+            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA UDA").await?;
         }
         for chunk in relate_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-            SUL_DB.query(&sql).await?;
+            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA ownership")
+                .await?;
         }
     }
 

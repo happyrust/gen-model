@@ -55,6 +55,15 @@ impl ModelRefreshPolicy {
         db_option.gen_mesh = true;
         db_option.debug_refno_types = vec!["CATA".into(), "LOOP".into(), "PRIM".into()];
         db_option.debug_root_refnos = Some(roots.to_vec());
+        let root_refnos = roots
+            .iter()
+            .map(|root| RefnoEnum::from(root.as_str()))
+            .collect::<Vec<_>>();
+        crate::data_interface::staging::preload::preload_generation_root_closure(
+            &db_option.project_name,
+            &root_refnos,
+        )
+        .await?;
         // 按需解析（Phase 4）：主动预取这些生成根的 CATA 依赖闭包（默认 Off；开关见 cata_closure_enabled）。
         // 与 resolve 层惰性兜底并存：主动保效率、惰性收漏边；失败仅告警、回退惰性兜底。
         if crate::data_interface::cata_closure::cata_closure_enabled() {
@@ -79,6 +88,8 @@ impl ModelRefreshPolicy {
                 }
             }
         }
+        crate::data_interface::staging::preload::preload_existing_generation_products(&root_refnos)
+            .await?;
         println!(
             "ModelRefreshPolicy: 生成模型，根数量: {}",
             db_option.debug_root_refnos.as_ref().unwrap().len()
