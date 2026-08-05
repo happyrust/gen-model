@@ -15,16 +15,23 @@
 
 ## 0. 结论摘要
 
-| # | 严重度 | 一句话 |
-|---|---|---|
-| V1 | — | **8-04 修复清单六条全部核实落地**（B2 / A1 / C2 / A2 / C1 / dbnum=0 覆盖），守护测试在位 |
-| N1 | 高 | 实机复验问题一（SYS meta 基线恒差 1）**未修**：`count != parsed_count` 守卫原样，且 `PE=1` 纯根库连空基线分支都进不去 |
-| N2 | 高 | 实机复验问题二（失败基线次轮隐形为 up_to_date）**未修**：读路径 `dbnum_info_table` 回退仍在；提交 `5fbcb695` 只覆盖「整表缺失的就地升级」这一别的场景 |
-| N3 | 高 | 实机复验问题三（空闲轮饿死后入队批次）**未修**：worker 主循环与 `drain_where` 无上限、无让位，2967 条积压仍会以一个合批挡住所有新批次 |
-| N4 | 高 | **Gate 0 回归**：`Cargo.toml` 现钉 `aios_core = rs-core.git rev f9a66adb`，该版本 `File::with_name("DbOption")` 写死按 cwd 解析、**无 `DB_OPTION_FILE` 入口**（缓存里其他 4 个检出版本都有）。58 个 `#[ignore]` live 测试重新退回「只能换 cwd 变通」的状态 |
-| W1 | 中 | 未提交的 `project_paths.rs`（11.8KB 纯逻辑新模块）**零单测**，违反本仓「每条修复配一条回退即红的测试」纪律（spec 001 FR-011） |
-| W2 | 低 | `plan_watch_dirs` 的回退分支（`included_projects` 为空、拿 `project_dirs` 当名单）下，**相对路径条目永远解析失败**，且错误文案误导（报「对不上」，实际是回退分支不支持相对条目） |
-| W3 | 低 | `collect_db_dirs_in` 的 `*000` 后缀判定会把 `ams1000` 这类目录也认作库目录（与旧实现同病，非回归） |
+「收口」列于 2026-08-05 回写；本文正文各节保留审核当时的描述，不改写，
+以便对照修复前后的口径。
+
+| # | 严重度 | 一句话 | 收口（2026-08-05） |
+|---|---|---|---|
+| V1 | — | **8-04 修复清单六条全部核实落地**（B2 / A1 / C2 / A2 / C1 / dbnum=0 覆盖），守护测试在位 | — |
+| N1 | 高 | 实机复验问题一（SYS meta 基线恒差 1）**未修**：`count != parsed_count` 守卫原样，且 `PE=1` 纯根库连空基线分支都进不去 | ✅ **L0 已收口**（`111186b2`）：守卫改为 `baseline_parse_matches(pe, root, parsed)` 即 `pe - root == parsed`，根行显式数出来而非写死 +1；`PE=1` 纯根库走 `baseline_parse_confirmed_empty` 的空基线出口。**L2 实库复跑待做** |
+| N2 | 高 | 实机复验问题二（失败基线次轮隐形为 up_to_date）**未修**：读路径 `dbnum_info_table` 回退仍在；提交 `5fbcb695` 只覆盖「整表缺失的就地升级」这一别的场景 | ✅ **L0 已收口**（`111186b2`）：`resolve_read_applied` 分两支——专用水位行存在时**不再**回退 info 表，只有整行缺失才回退；守护测试 `an_existing_failed_state_never_inherits_the_info_table_watermark`。**SC-002 逐库对拍（BL-04）待跑** |
+| N3 | 高 | 实机复验问题三（空闲轮饿死后入队批次）**未修**：worker 主循环与 `drain_where` 无上限、无让位，2967 条积压仍会以一个合批挡住所有新批次 | ✅ **L0 已收口**（`4f46ebcc`）：空闲轮自分类 Settled/MoreWork/Failed（失败不再自唤醒成热循环）、阻断范围从全局收窄到按 dbnum、房间轮加 10 分钟地板；三件各配一条回退即红的测试。**长积压实库演练（QW-01）待跑** |
+| N4 | 高 | **Gate 0 回归**：`Cargo.toml` 现钉 `aios_core = rs-core.git rev f9a66adb`，该版本 `File::with_name("DbOption")` 写死按 cwd 解析、**无 `DB_OPTION_FILE` 入口**（缓存里其他 4 个检出版本都有）。58 个 `#[ignore]` live 测试重新退回「只能换 cwd 变通」的状态 | ✅ **已收口**（`bba03d7a`）：升到 rs-core `7994051`（`f9a66adb` 的直接子提交，唯一改动就是加 `DB_OPTION_FILE`，缺省仍是 `DbOption`）。见 §3 补记 |
+| W1 | 中 | 未提交的 `project_paths.rs`（11.8KB 纯逻辑新模块）**零单测**，违反本仓「每条修复配一条回退即红的测试」纪律（spec 001 FR-011） | ✅ **已收口**（`c35e4ece`）：模块随 14 条单测一并提交，覆盖 WD-01…06 全部断言 |
+| W2 | 低 | `plan_watch_dirs` 的回退分支（`included_projects` 为空、拿 `project_dirs` 当名单）下，**相对路径条目永远解析失败**，且错误文案误导（报「对不上」，实际是回退分支不支持相对条目） | ✅ **已收口**（`c35e4ece`）：该分支改为 `base.join(...)` 直接解析相对条目；测试 `relative_entries_resolve_when_the_project_list_is_empty` |
+| W3 | 低 | `collect_db_dirs_in` 的 `*000` 后缀判定会把 `ams1000` 这类目录也认作库目录（与旧实现同病，非回归） | ✅ **已收口**（`c35e4ece`）：测试 `a_directory_that_merely_ends_in_zeros_is_not_a_db_dir` 钉死反例 |
+
+**一句话现状**：N1/N2/N3 的**纯函数半边**与 W1/W2/W3 已全部转绿，N4 已解开；
+剩下的都是**实库半边**（BL-04 的 SC-002 对拍、QW-01 的长积压演练、各 live 系列），
+它们此前全被 N4 挡着，现在可以按 `DB_OPTION_FILE` 定靶推进。
 
 ---
 
@@ -48,7 +55,7 @@ CATA 标注）已全部提交（`bd816105`…`eb59bfd5` 一带），8 条回归�
 
 ## 2. 实机复验三问题的代码现状（N1 / N2 / N3）
 
-### N1 · SYS meta 基线完整性恒差 1（未修）
+### N1 · SYS meta 基线完整性恒差 1（审核当时：未修 → **已收口 `111186b2`**）
 
 `manual_update.rs:2647-2656` 的守卫原样：
 
@@ -70,7 +77,7 @@ if let Some(parsed_count) = parsed_count
 （把根行显式数出来，不要写死 +1），或让解析返回把根元素计入。修完必须配
 「回退即红」测试。
 
-### N2 · 失败基线次轮变 up_to_date（未修，SC-002 差异仍为 4）
+### N2 · 失败基线次轮变 up_to_date（审核当时：未修 → 读路径**已收口 `111186b2`**；SC-002 待重测）
 
 链条：失败的基线解析已写下 `dbnum_info_table` 行（如 `5100 → sesno=35`）→
 下一轮 `resolve_migrated_applied_sesno(None, None, info_max)`（`dbnum_state.rs:431`）
@@ -88,7 +95,7 @@ if let Some(parsed_count) = parsed_count
 （与 `5fbcb695` 的 pe 口径统一）。修完 SC-002（`dbnum_statuses` 与 execute
 逐库一致、差异为 0）才能变绿。
 
-### N3 · 空闲轮饿死后入队批次（未修）
+### N3 · 空闲轮饿死后入队批次（审核当时：未修 → **已收口 `4f46ebcc`**；长积压实机演练待跑）
 
 `batch_worker.rs:128-142` 主循环仍是
 `drain_queue_until_empty` → `idle_round`（无上限）→ `wait_for_work`。
@@ -119,6 +126,42 @@ aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "f9a66adb.
 也确实是靠改仓库根 `DbOption.toml` 的 `manual_db_nums` 跑的（测完要人工恢复，
 证据文档末尾自己记了这笔账）。**处置**：把 rev 升到带 `DB_OPTION_FILE` 的版本，
 或在 fork 上补那 3 行。这是新测试计划阶段一的第一个门。
+
+### 补记（2026-08-05）：已解开
+
+rs-core `7994051` 是 `f9a66adb` 的**直接子提交**，两者之间只有这一个提交
+（`feat(config): DB_OPTION_FILE 环境变量定靶配置文件`）：
+
+```rust
+pub(crate) fn get_config_file_name() -> String {
+    std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "DbOption".to_string())
+}
+```
+
+缺省仍是 `DbOption`，现有服务与脚本零影响。
+
+**升级不是改一行**：`parse_pdms_db` 与 `pdms_io` 各自也钉 `aios_core`，而
+`parse_pdms_db` 在 `parse.rs` / `dict.rs` / `parse_explict_tools.rs` 共 41 处
+把 `aios_core` 类型摆在 API 面上。Cargo 把同一 URL 的不同 rev 当**不同源**，
+只升本仓会让依赖图里同时存在两份 `aios_core`，跨边界的类型对不上。
+（`[patch]` 这条路也不通：Cargo 不允许用同一个源 patch 自己。）
+
+因此三个仓一起动，顺序由依赖链决定（`pdms-io` 既直接依赖 `aios_core`，
+又经 `parse_pdms_db` 间接依赖它）：
+
+| 仓 | 提交 | 内容 |
+|---|---|---|
+| aios-parse-pdms | `65caaef` | `aios_core` → `7994051` |
+| pdms-io | `1dd7fd4` | `aios_core` → `7994051`，`parse_pdms_db` → `65caaef` |
+| gen-model | `bba03d7a` | 三个 rev 一起升 |
+
+验证：依赖图收敛到**单一** `aios_core`；`cargo check --all-targets` 干净；
+`cargo test --lib` **336 passed / 0 failed / 60 ignored**
+（日志见 `output/logs/2026-08-05_gate0-*.log`）。
+
+尚欠一步：Gate 0 的退出条件是「任取一个 `live_*` 用 `$env:DB_OPTION_FILE`
+定靶跑通」，该运行时验证**未完成**——去跑时撞上同工作树另一处进行中的
+`room_model` 重构（`PanelTreeCoverage` 尚未落地）导致编译不过，与本次升级无关。
 
 ## 4. 未提交改动审核（W1 / W2 / W3）
 
@@ -172,13 +215,26 @@ cwd 定靶问题。
 
 ## 6. 建议处理顺序
 
-1. **N4 依赖钉版**（半天内）：升 rs-core rev 或补 fork——它挡着一切 live 验证。
-2. **N2 失败基线隐形**（数据正确性 + SC-002）：与 N1 同一片代码，一起修。
-3. **N1 基线差 1**：修守卫口径 + `PE=1` 空基线出口。
-4. **N3 空闲轮饿死**：分片 + 让位；改前先落一条「排队批次在积压消化期间 N 秒内
-   必须开跑」的回归测试（现红）。
-5. **W1/W2 project_paths 补测**：趁改动还没提交，把测试跟着一起进同一笔提交。
-6. A3 定案 → B1 接线（跨仓，排进 plant-ui 侧计划）。
+1. ~~**N4 依赖钉版**（半天内）：升 rs-core rev 或补 fork——它挡着一切 live 验证。~~
+   → 已完成（`bba03d7a` + 上游 `65caaef` / `1dd7fd4`），见 §3 补记。
+2. ~~**N2 失败基线隐形**（数据正确性 + SC-002）：与 N1 同一片代码，一起修。~~
+   → 代码已修（`111186b2`）；**SC-002 逐库对拍仍待跑**。
+3. ~~**N1 基线差 1**：修守卫口径 + `PE=1` 空基线出口。~~ → 已完成（`111186b2`）。
+4. ~~**N3 空闲轮饿死**：分片 + 让位……~~ → 代码已修（`4f46ebcc`，三件各配回退即红
+   的测试）；**长积压实库演练仍待跑**。
+5. ~~**W1/W2 project_paths 补测**~~ → 已完成（`c35e4ece`，14 条单测，W3 一并修）。
+6. A3 定案 → B1 接线（跨仓，排进 plant-ui 侧计划）。**仍开**。
 
 第 1–5 条都在 `docs/2026-08-04_data-model-queue-test-plan.md` 里有对应的
 测试用例编号（BL / WD / QW 系列），修复与测试同批落地。
+
+**2026-08-05 之后的剩余队列**（按依赖顺序）：
+
+1. Gate 0 的运行时验证：用 `$env:DB_OPTION_FILE` 定靶跑通一个 `live_*`。
+2. BL-04（SC-002 逐库对拍差异归零）与 BL-01…03 的 L2 实库复跑。
+3. QW-01 长积压演练：M-B1 导出的 2967 条欠账正是天然夹具。
+4. A3 ensure 语义定案 → plant-ui B1 接线 → D-12 解封。
+   注意 plant-ui 侧有 `eye_dispatch_does_not_call_the_model_generation_api`
+   把「眼睛图标不得触发生成」钉死了，接线时要改成「显式入口才触发」而不是删掉它。
+5. plant-ui 补 `POST /update/pending-units/retry` 调用点（服务端 A2 已就绪），
+   补齐 QW-02 / Q-13 的界面半边。

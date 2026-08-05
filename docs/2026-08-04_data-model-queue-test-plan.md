@@ -1,9 +1,13 @@
 # 增量更新测试计划 v3：数据 → 模型 → 任务队列（含 plant-ui）
 
-日期：2026-08-04
+日期：2026-08-04（**现状列于 2026-08-05 回写**，见各表；用例定义与判据未改）
 被测仓：`D:\work\plant-code\old\gen-model`（服务端）+ `D:\work\plant-code\old\plant-ui`（桌面壳）
 前置审核：`docs/2026-08-04_increment-update-working-tree-audit.md`（本计划的 BL/WD/QW
 系列新用例全部来自它的 N1–N4 / W1–W2 结论）
+
+> **2026-08-05 一句话现状**：Gate 0 的依赖已解开（`bba03d7a`），WD 全系列绿，
+> BL-01…03 与 QW-01 的**纯函数半边**绿；**所有实库 / 实机判据一条未跑**。
+> §6「不能宣称」的三句话因此原样成立。
 
 ## 0. 与既有文档的关系
 
@@ -45,20 +49,33 @@
 环境已知坑（写进计划防重踩）：
 
 - `.surreal/ams-8009` 与 `D:\backup-dbs\ams-8009.db` 已损坏（format_version 7），不可用；
-- 服务端 `DbOption.toml` 与发布包 `pc/DbOption.toml` 在 8-04 复验中临时改过
-  `manual_db_nums` / `mdb_name`，用完必须恢复（复验证据文档末尾记了原值）；
+- ~~服务端 `DbOption.toml` 与发布包 `pc/DbOption.toml` 在 8-04 复验中临时改过
+  `manual_db_nums` / `mdb_name`，用完必须恢复~~ → **2026-08-05 起不必再这么做**，
+  见下方定靶方式；历史记录里的临时改动仍需按证据文档末尾的原值恢复；
 - 范围口径按 ADR-0013：**当前 MDB 声明的 DESI**，`manual_db_nums` 只是旧口径退路，
   用了要在记录里注明。
 
+**live 测试定靶方式（2026-08-05 起）**：`aios_core` 已升到带 `DB_OPTION_FILE`
+的 rev（`bba03d7a`，详见审核文档 §3 补记）。定靶用环境变量，**不要再改仓库根
+`DbOption.toml`**：
+
+```powershell
+$env:DB_OPTION_FILE = "db_options/DbOption-e2e-8042"   # 不带 .toml 后缀
+cargo test --lib -- --ignored --exact <测试名> --nocapture
+```
+
+缺省仍是 `DbOption`，所以服务与既有脚本不受影响。副本库 / 一次性 NS 的配置
+放 `db_options/`。
+
 ## 2. 门禁顺序（Gate）
 
-| Gate | 内容 | 退出条件 | 阻塞谁 |
-|---|---|---|---|
-| **G0 可执行性** | 升 `aios_core` 钉版到带 `DB_OPTION_FILE` 的 rev（审核 N4）；建 `db_options/` 放副本/一次性 NS 配置 | 任取一个 `live_*` 用 `$env:DB_OPTION_FILE` 定靶跑通 | 一切 L2/L3 |
-| **G1 数据阶段红转绿** | BL-01…04 + WD-01…06 落地（先红后绿） | `cargo test --lib` 全绿且新增用例逐条有「回退即红」记录 | 模型阶段的基线依赖 |
-| **G2 队列健壮性** | QW-01（饿死回归，现红）+ QW-02…04 实机 | 副本库上排队批次在积压消化期间按期开跑 | 队列阶段全部实机项 |
-| **G3 模型阶段实库** | S10/S11 的 live 系列 + D-01…D-15 的 B/C 级复跑 | 每条有可复现通过记录 + 日志归档 | 视觉闭环 |
-| **G4 视觉闭环** | D-01…D-15 的 plant-ui before/queue/after | 每例三图 + 重复执行无抖动 | 发版宣称 |
+| Gate | 内容 | 退出条件 | 阻塞谁 | 现状（2026-08-05） |
+|---|---|---|---|---|
+| **G0 可执行性** | 升 `aios_core` 钉版到带 `DB_OPTION_FILE` 的 rev（审核 N4）；建 `db_options/` 放副本/一次性 NS 配置 | 任取一个 `live_*` 用 `$env:DB_OPTION_FILE` 定靶跑通 | 一切 L2/L3 | **依赖已升**（`bba03d7a` + 上游 `65caaef`/`1dd7fd4`，依赖图收敛到单一 `aios_core`）；**退出条件的那次定靶运行仍欠**，`db_options/` 也还没建 |
+| **G1 数据阶段红转绿** | BL-01…04 + WD-01…06 落地（先红后绿） | `cargo test --lib` 全绿且新增用例逐条有「回退即红」记录 | 模型阶段的基线依赖 | **WD 全绿**（`c35e4ece`，14 条单测）；**BL-01/02/03 的 L0 半边绿**（`111186b2`）；**BL-04（SC-002）仍红**，它本来就是 L2 对拍 |
+| **G2 队列健壮性** | QW-01（饿死回归，现红）+ QW-02…04 实机 | 副本库上排队批次在积压消化期间按期开跑 | 队列阶段全部实机项 | **L0 半边绿**（`4f46ebcc`：空闲轮分类 / 阻断按 dbnum 收窄 / 房间轮 10 分钟地板，各配回退即红测试）；**实机半边全部未跑** |
+| **G3 模型阶段实库** | S10/S11 的 live 系列 + D-01…D-15 的 B/C 级复跑 | 每条有可复现通过记录 + 日志归档 | 视觉闭环 | 未动 |
+| **G4 视觉闭环** | D-01…D-15 的 plant-ui before/queue/after | 每例三图 + 重复执行无抖动 | 发版宣称 | 未动；D-12 另受 plant-ui B1 阻塞 |
 
 顺序理由：G0 之前点亮实库测试 = 把「测试失败」和「夹具没配对」混在一起（07-27
 计划原话，至今成立）；G1 的基线修复不先做，模型阶段在 SYS meta 库上永远带着
@@ -83,32 +100,38 @@
 
 ### 3.2 新增：BL 系列（基线初始化，来自审核 N1/N2）
 
-| ID | 断言 | 层 | 现状 |
+| ID | 断言 | 层 | 现状（2026-08-05 回写） |
 |---|---|---|---|
-| BL-01 | SYS meta 基线完整性判定把根/world 行计入口径：`PE=225, 解析=224` 的库必须初始化成功并推水位 | L0（把守卫抽成纯函数）+ L2 | **现红**（守卫恒差 1） |
-| BL-02 | `PE=1` 纯根库走空基线出口：推水位、计划为空、不再反复失败 | L0 + L2 | **现红**（空分支要求 count==0） |
-| BL-03 | 基线解析**失败**后，下一轮该库必须重新入队初始化，不得因 `dbnum_info_table` 残行被判 up_to_date | L2 | **现红**（读路径回退未修） |
-| BL-04 | SC-002：对同一磁盘现状，`GET /dbnums` 的 `initialized/blocked/excluded` 与 execute 的实际处置**逐库一致**，差异数为 0 | L2 脚本对拍 | **现红**（8-04 实测差异 4） |
+| BL-01 | SYS meta 基线完整性判定把根/world 行计入口径：`PE=225, 解析=224` 的库必须初始化成功并推水位 | L0（把守卫抽成纯函数）+ L2 | **L0 绿**（`111186b2`：`baseline_parse_matches(pe, root, parsed)`）；L2 待跑 |
+| BL-02 | `PE=1` 纯根库走空基线出口：推水位、计划为空、不再反复失败 | L0 + L2 | **L0 绿**（`111186b2`：`baseline_parse_confirmed_empty`）；L2 待跑 |
+| BL-03 | 基线解析**失败**后，下一轮该库必须重新入队初始化，不得因 `dbnum_info_table` 残行被判 up_to_date | L2 | **L0 绿**（`111186b2`：`resolve_read_applied` 分支 + 守护测试 `an_existing_failed_state_never_inherits_the_info_table_watermark`）；L2 待跑 |
+| BL-04 | SC-002：对同一磁盘现状，`GET /dbnums` 的 `initialized/blocked/excluded` 与 execute 的实际处置**逐库一致**，差异数为 0 | L2 脚本对拍 | **仍红**（8-04 实测差异 4；BL-03 的读路径已修，需重测才知道差异是否归零） |
 | BL-05 | 空库（7998 形态）基线：0 元素 0 单元，水位照推（合法空基线分支不回归） | L2 | 绿（8-04 已验，固化成可重复用例） |
 
 BL-01/02 的实现建议：把 `count / info_count / parsed_count / applied_sesno` 四个
 标量的裁决抽成纯函数（仿 `baseline_needs_full_parse`），先在 L0 钉死口径，再用
 副本库各跑一遍 L2。**修复与测试同一笔提交，回退即红。**
+→ 已按此实现（`111186b2`），L0 口径钉在 `baseline_parse_matches` /
+`baseline_parse_confirmed_empty` 两个纯函数上；**L2 那一遍是现在欠的**。
 
 ### 3.3 新增：WD 系列（监控目录解析，来自审核 W1/W2/W3）
 
-全部 L0，落在 `project_paths.rs` 的 `#[cfg(test)]`，随未提交改动一起进版本库：
+全部 L0，落在 `project_paths.rs` 的 `#[cfg(test)]`，随未提交改动一起进版本库。
 
-| ID | 断言 |
-|---|---|
-| WD-01 | `normalize_path_input`：正斜杠 UNC → 反斜杠；剥两侧引号；非 Windows 原样 |
-| WD-02 | `is_absolute_input`：`\\host`（缺 share 段）也算绝对；`"D:/x"` 带引号算绝对；`ams` 不算 |
-| WD-03 | `resolve_project_root`：`project_dirs` 绝对条目直用；相对条目拼 `project_path`；`project_dirs` 比 `included_projects` 短返回 None 不 panic |
-| WD-04 | `plan_watch_dirs` 回退分支（`included_projects` 为空）：相对 `project_dirs` 条目**也要能解析**（修 W2），或者失败文案如实说「回退分支不支持相对条目」 |
-| WD-05 | `path_starts_with`：`D:/AVEVA/X` vs `d:\aveva\x` 判同；前缀相等判真；`C:\ab` 不是 `C:\a` 的孩子 |
-| WD-06 | `collect_db_dirs_in`：根目录本身 `*000` 直接认；`ams1000` **不**认（修 W3）；`read_dir` 失败只丢该项目 |
+**全系列已于 `c35e4ece` 随模块同批提交并转绿**，共 14 条单测（含 4 条计划外的
+去重 / 掉盘重挂用例）。逐条对应关系：
+
+| ID | 断言 | 对应测试 |
+|---|---|---|
+| WD-01 | `normalize_path_input`：正斜杠 UNC → 反斜杠；剥两侧引号；非 Windows 原样 | `unc_inputs_are_normalized_and_absolute` |
+| WD-02 | `is_absolute_input`：`\\host`（缺 share 段）也算绝对；`"D:/x"` 带引号算绝对；`ams` 不算 | `unc_inputs_are_normalized_and_absolute`、`absolute_and_unc_entries_are_used_as_is` |
+| WD-03 | `resolve_project_root`：`project_dirs` 绝对条目直用；相对条目拼 `project_path`；`project_dirs` 比 `included_projects` 短返回 None 不 panic | `absolute_and_unc_entries_are_used_as_is`、`short_project_dirs_yields_none_instead_of_panicking` |
+| WD-04 | `plan_watch_dirs` 回退分支（`included_projects` 为空）：相对 `project_dirs` 条目**也要能解析**（修 W2） | `relative_entries_resolve_when_the_project_list_is_empty`（选了「让它能解析」这条，改成 `base.join(...)`） |
+| WD-05 | `path_starts_with`：`D:/AVEVA/X` vs `d:\aveva\x` 判同；前缀相等判真；`C:\ab` 不是 `C:\a` 的孩子 | `prefix_match_ignores_case_and_separator_style` |
+| WD-06 | `collect_db_dirs_in`：根目录本身 `*000` 直接认；`ams1000` **不**认（修 W3）；`read_dir` 失败只丢该项目 | `a_root_that_is_itself_a_db_dir_is_used_directly`、`a_directory_that_merely_ends_in_zeros_is_not_a_db_dir`、`one_unreadable_project_does_not_erase_the_others` |
 
 WD 系列跑通前，`project_paths` 改动不应提交——这是 spec 001 FR-011 纪律的延续。
+（该纪律已被遵守：模块与测试同在 `c35e4ece` 一笔提交里。）
 
 ### 3.4 数据阶段的 plant-ui 面
 
@@ -147,6 +170,8 @@ WD 系列跑通前，`project_paths` 改动不应提交——这是 spec 001 FR-
 |---|---|---|---|
 | M-B1 | 8000 库 7/29 基线留下的 2967 条模型欠账已导出清空（`_incrtest_pending_backup_8000.json`） | 副本上重放这批欠账是 QW-01 的天然长积压夹具，**别浪费** | G2 |
 | M-B2 | plant-ui / 宿主没有任何 `/model/ensure` 调用点（审核 B1） | D-12 无法闭环：显示缺失模型不会触发按需生成 | A3 定案 → 接线 |
+| M-B2′ | **补充（08-05 核实）**：这不是漏写，是被测试钉死的。`plant-ui/crates/plant-ui-app/src/main.rs` 的 `eye_dispatch_does_not_call_the_model_generation_api` 直接断言 `handle_cmds` 里既不含 `ensure_model` 也不含 `/api/v1/model/ensure` | 接线时**不能删掉这条测试**，要改成「眼睛图标不触发、某个显式入口才触发」，否则会退回「切可见性就偷偷生成」的老问题 | 同 M-B2 |
+| M-B5 | plant-ui 也没有 `POST /update/pending-units/retry` 的调用点（服务端 A2 已就绪：202/404 + 原子 UPDATE + `wake()`） | QW-02 / Q-13 的**界面半边**做不了，死信复活只能 curl | 客户端接线 |
 | M-B3 | ensure 超时/忙碌三态不一致（审核 A3）：120s 撞线的 SUPPO/风管 BRAN 冷生成实测 99–104s | D-12 接上后每次显示都可能撞到 | 契约定案（202 轮询 vs 504/409） |
 | M-B4 | 「模型变更通告」无实现（审核 D2） | plant-ui「陈旧标记 / 自动重画」只能靠轮询任务终态近似 | 跨仓契约设计 |
 
@@ -191,7 +216,7 @@ D-12（缺模型首次显示）在 M-B2 修复前标「客户端接线阻塞」�
 
 | ID | 命令/操作 | 必须看到 | 现状 |
 |---|---|---|---|
-| QW-01 | 副本库灌入 M-B1 的 2967 条欠账 → 空闲轮开始消化 → 向范围内库存新会话入队 | **排队批次在可说明的上限内开跑**（数字随修复方案定，如每片 N 根间让位一次）；不得等积压全部跑完 | **现红**（审核 N3，回归测试先行） |
+| QW-01 | 副本库灌入 M-B1 的 2967 条欠账 → 空闲轮开始消化 → 向范围内库存新会话入队 | **排队批次在可说明的上限内开跑**（数字随修复方案定，如每片 N 根间让位一次）；不得等积压全部跑完 | **L0 已绿 / 实机待跑**（`4f46ebcc` 改了三处：空闲轮自分类 Settled/MoreWork/Failed 使失败不再自唤醒成热循环、`drain_where` 的阻断范围从全局收窄到按 dbnum、房间轮加 10 分钟地板；各配一条回退即红的测试。**本条的实机判据尚未在副本库上验过**） |
 | QW-02 | `POST /update/pending-units/retry`（存在的行 / 不存在的行） | 202+复活行 / 404 不凭空建行；复活后 worker 立即被唤醒 | 待实机（L0 已绿） |
 | QW-03 | `POST /queue/pause` → 重启服务 → `/health` | `queue_paused=true` 活过重启；resume 恢复 | 继承（手册 #6），未跑过 |
 | QW-04 | 房间轮收敛到 0 后读最近一条 `room_recalc` 任务 | `detail` 是 `{panels:0, elements:0, dead_letters:N}`，不再是开跑前数字 | 待实机（B2 修复的实机半边） |
@@ -222,12 +247,15 @@ D-12（缺模型首次显示）在 M-B2 修复前标「客户端接线阻塞」�
 
 **不能宣称**（合并两份旧计划，一条不减）：
 
-- `cargo test --lib` 全绿 ≠ 增量更新可用——报告必须同时给 ignored 数（当前 58）；
+- `cargo test --lib` 全绿 ≠ 增量更新可用——报告必须同时给 ignored 数
+  （2026-08-05 实测 **336 passed / 0 failed / 60 ignored**；旧文写的 58 已过期）；
 - 等价类抽样 ≠ 全覆盖；`changeType` 等价类是变化处理分类，不是几何生成分类；
 - 数据成功不能顶替视觉成功；旧版截图不抵扣 plant-ui 验收；
 - 带静默早退的扫描类测试没有反空转计数断言，绿的不算绿；
 - **BL-01…04 / QW-01 转绿之前，不得宣称「SYS meta 可初始化」「面板口径与执行
   一致」「长积压下手动增量可用」**——这三句今天都是不成立的。
+  **2026-08-05 补充**：这三条的**纯函数半边**已绿（见各表），但本条约束
+  **一字不改地继续成立**——它们要的是实库判据，L0 转绿不构成宣称资格。
 
 ## 7. 证据归档
 
