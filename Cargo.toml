@@ -76,11 +76,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms.git", rev = "028ea1de93418bc3bac0fcb5aca6ec40776a7274" }
-aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "f9a66adb0099ef185e65f21825e0ecfb9204d5b9", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/aios-parse-pdms.git", rev = "65caaef2a73161cf78371355bea26fd3a0d40c41" }
+aios_core = { git = "https://github.com/happyrust/rs-core.git", rev = "7994051f2196b1b31d01678335783d06cab54142", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "b1fbe24d9f49c1699bc118591cf18bd4edc21d39" }
+pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "1dd7fd4804c7ae3bcf5bf3ba5fc1d040139320a3" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
