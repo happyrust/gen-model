@@ -3,15 +3,39 @@ use std::collections::HashMap;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::pdms_types::*;
 use aios_core::types::*;
-use aios_core::{get_db_option, SUL_DB};
+use aios_core::{SUL_DB, get_db_option};
 use bevy_transform::prelude::Transform;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use itertools::Itertools;
 
-use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::helper::delete_inst_relate_cascade;
+use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::fast_model::EXIST_MESH_GEOS;
+
+type DbWriteTask = tokio::task::JoinHandle<anyhow::Result<()>>;
+
+fn spawn_db_write(sql: String) -> DbWriteTask {
+    tokio::spawn(async move {
+        SUL_DB.query(sql).await?.check()?;
+        Ok(())
+    })
+}
+
+async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::Result<()> {
+    let mut first_error = None;
+    while let Some(result) = tasks.next().await {
+        let error = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(error) => anyhow::anyhow!("instance write task failed: {error}"),
+        };
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
 
 /// 初始化数据库的 inst_relate 表的索引
 pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
@@ -488,9 +512,7 @@ pub async fn save_instance_data(
                 stringify!(inst_geo),
                 chunk.join(",")
             );
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql_string).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql_string));
         }
     }
 
@@ -498,9 +520,7 @@ pub async fn save_instance_data(
     if !geo_relate_vec.is_empty() {
         for chunk in geo_relate_vec.chunks(chunk_size) {
             let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql));
         }
     }
 
@@ -554,9 +574,7 @@ pub async fn save_instance_data(
         for chunk in tubi_inst_relate_vec.chunks(chunk_size) {
             let inst_relate_sql =
                 format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(inst_relate_sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(inst_relate_sql));
         }
     }
 
@@ -577,9 +595,7 @@ pub async fn save_instance_data(
             for chunk in neg_relate_vec.chunks(chunk_size) {
                 let neg_relate_sql =
                     format!("INSERT RELATION INTO neg_relate [{}];", chunk.join(","));
-                let db = SUL_DB.clone();
-                let future = tokio::spawn(async move { db.query(neg_relate_sql).await });
-                db_futures.push(future);
+                db_futures.push(spawn_db_write(neg_relate_sql));
             }
         }
     }
@@ -602,9 +618,7 @@ pub async fn save_instance_data(
             for chunk in ngmr_relate_vec.chunks(chunk_size) {
                 let ngmr_relate_sql =
                     format!("INSERT RELATION INTO ngmr_relate [{}];", chunk.join(","));
-                let db = SUL_DB.clone();
-                let future = tokio::spawn(async move { db.query(ngmr_relate_sql).await });
-                db_futures.push(future);
+                db_futures.push(spawn_db_write(ngmr_relate_sql));
             }
         }
     }
@@ -652,9 +666,7 @@ pub async fn save_instance_data(
         for chunk in inst_relate_vec.chunks(chunk_size) {
             let inst_relate_sql =
                 format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(inst_relate_sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(inst_relate_sql));
         }
     }
 
@@ -666,9 +678,7 @@ pub async fn save_instance_data(
                 stringify!(inst_info),
                 chunk.join(",")
             );
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql_string).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql_string));
         }
     }
 
@@ -683,9 +693,7 @@ pub async fn save_instance_data(
                 jsons.push(json);
             }
             let sql = format!("INSERT IGNORE INTO aabb [{}];", jsons.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql));
         }
     }
 
@@ -699,9 +707,7 @@ pub async fn save_instance_data(
                 jsons.push(format!("{{'id':trans:⟨{}⟩, 'd':{}}}", k, v));
             }
             let sql = format!("INSERT IGNORE INTO trans [{}];", jsons.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql));
         }
     }
 
@@ -715,24 +721,11 @@ pub async fn save_instance_data(
                 jsons.push(format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v));
             }
             let sql = format!("INSERT IGNORE INTO vec3 [{}];", jsons.join(","));
-            let db = SUL_DB.clone();
-            let future = tokio::spawn(async move { db.query(sql).await });
-            db_futures.push(future);
+            db_futures.push(spawn_db_write(sql));
         }
     }
 
-    // 等待所有并发任务完成
-    while let Some(result) = db_futures.next().await {
-        if let Err(e) = result {
-            eprintln!("Task join error: {:?}", e);
-            // 这里可以选择继续或者返回错误
-        } else if let Ok(query_result) = result {
-            if let Err(db_err) = query_result {
-                eprintln!("Database query error: {:?}", db_err);
-                // 处理数据库错误
-            }
-        }
-    }
+    finish_db_writes(db_futures).await?;
 
     // inst_relate 表需要在其他表插入后处理，因为有更新操作
     // if !inst_relate_vec.is_empty() {
@@ -771,4 +764,51 @@ pub async fn save_instance_data(
     // }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn failed_instance_write_reaches_the_caller() {
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(tokio::spawn(async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!("forced instance write failure"))
+        }));
+
+        let error = finish_db_writes(tasks)
+            .await
+            .expect_err("a failed database write must fail model generation");
+
+        assert!(
+            format!("{error:#}").contains("forced instance write failure"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_instance_write_still_waits_for_the_other_writes_to_settle() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let delayed_completed = completed.clone();
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(tokio::spawn(async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!("first write failed"))
+        }));
+        tasks.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            delayed_completed.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        finish_db_writes(tasks)
+            .await
+            .expect_err("the write set must fail");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "returning early would detach a database write into the retry window"
+        );
+    }
 }

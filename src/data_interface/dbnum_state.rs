@@ -264,6 +264,16 @@ pub fn resolve_migrated_applied_sesno(
         .or(info_table_max_sesno)
 }
 
+fn resolve_read_applied(
+    dedicated: Option<(Option<i32>, Option<i32>)>,
+    info_table_max_sesno: Option<i32>,
+) -> Option<i32> {
+    match dedicated {
+        Some((applied, legacy)) => resolve_migrated_applied_sesno(applied, legacy, None),
+        None => resolve_migrated_applied_sesno(None, None, info_table_max_sesno),
+    }
+}
+
 /// Classify one observed file for one `dbnum` against its stored state.
 ///
 /// Returns `Some(anomaly)` when there is something to report/handle, `None` when
@@ -658,7 +668,7 @@ impl DbnumState {
         let Some(row) = row else {
             // No dedicated record. Still surface a migrated watermark if the info
             // table knows one (legacy full-parse before the watermark existed).
-            let applied = resolve_migrated_applied_sesno(None, None, info_max);
+            let applied = resolve_read_applied(None, info_max);
             return Ok(applied.map(|applied| DbnumState {
                 dbnum,
                 applied_sesno: applied,
@@ -667,7 +677,7 @@ impl DbnumState {
             }));
         };
 
-        let applied = resolve_migrated_applied_sesno(row.applied_sesno, row.sesno, info_max);
+        let applied = resolve_read_applied(Some((row.applied_sesno, row.sesno)), info_max);
         Ok(Some(DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
             owner_project: row.owner_project.unwrap_or_default(),
@@ -686,10 +696,7 @@ impl DbnumState {
     /// Read-only: never writes, so it is safe to call from preview scanning.
     pub async fn applied_sesno(dbnum: u32) -> anyhow::Result<i32> {
         let (row, info_max) = Self::read_row(dbnum).await?;
-        let (existing_applied, legacy_sesno) = row
-            .map(|r| (r.applied_sesno, r.sesno))
-            .unwrap_or((None, None));
-        Ok(resolve_migrated_applied_sesno(existing_applied, legacy_sesno, info_max).unwrap_or(0))
+        Ok(resolve_read_applied(row.map(|r| (r.applied_sesno, r.sesno)), info_max).unwrap_or(0))
     }
 
     /// 读登记身份并对一次观察下裁决（纯读，不写任何东西）。
@@ -994,6 +1001,16 @@ mod tests {
     #[test]
     fn migration_none_when_all_sources_absent() {
         assert_eq!(resolve_migrated_applied_sesno(None, None, None), None);
+    }
+
+    #[test]
+    fn an_existing_failed_state_never_inherits_the_info_table_watermark() {
+        assert_eq!(resolve_read_applied(Some((None, None)), Some(120)), None);
+        assert_eq!(resolve_read_applied(None, Some(120)), Some(120));
+        assert_eq!(
+            resolve_read_applied(Some((None, Some(99))), Some(120)),
+            Some(99)
+        );
     }
 
     #[test]

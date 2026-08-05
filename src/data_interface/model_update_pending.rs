@@ -15,6 +15,9 @@ use crate::fast_model::room_model;
 pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 const QUERY_CHUNK: usize = 500;
+// ponytail: one bounded idle page may still delay a new batch; lower this if the
+// measured generation latency exceeds the queue SLA.
+const DRAIN_PAGE_SIZE: usize = 64;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
 /// that keeps failing stays in the table as an inspectable dead letter instead
@@ -856,10 +859,12 @@ async fn run_one(
 /// table as a dead letter: the automatic watcher never picks it up again,
 /// while manual preview/retry reads the table without this cap and remains
 /// the way to inspect or revive it.
-fn render_drain_select(action_filter: &str) -> String {
+fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
+    let limit = limit.map(|value| format!(" LIMIT {value}")).unwrap_or_default();
     format!(
         "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} ORDER BY updated_at ASC;"
+         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} \
+         ORDER BY updated_at ASC{limit};"
     )
 }
 
@@ -877,9 +882,13 @@ fn joins_regen_batch(job: &PendingModelWork) -> bool {
 
 /// Drain pending work independently. Failures remain durable and are retried on
 /// a later watcher/manual invocation, even when there is no new session.
-async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result<usize> {
+async fn drain_where(
+    mgr: &AiosDBManager,
+    action_filter: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<usize> {
     let mut response = SUL_DB
-        .query(render_drain_select(action_filter))
+        .query(render_drain_select(action_filter, limit))
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("load pending model work statement failed: {error}"))?;
@@ -981,35 +990,27 @@ async fn drain_where(mgr: &AiosDBManager, action_filter: &str) -> anyhow::Result
 const NON_REGEN_ACTION_FILTER: &str =
     "AND action IN ['transform', 'delete_cleanup', 'cascade_expand']";
 const REGEN_ACTION_FILTER: &str = "AND action = 'regen_root'";
+const DATA_ACTION_FILTER: &str =
+    "AND action IN ['transform', 'delete_cleanup', 'cascade_expand', 'regen_root']";
 const ROOM_ACTION_FILTER: &str = "AND action IN ['room_recalc_panel', 'room_recalc_element']";
+
+fn data_phase_is_clear(succeeded: bool, has_more: bool) -> bool {
+    succeeded && !has_more
+}
 
 pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
     // 三个阶段的先后是硬约束，不是习惯：
     // 1. 非 regen 先跑——`cascade_expand` 会反过来入队 regen 工作；
     // 2. regen 次之——房间归属要读几何与包围盒，在重生成之前算出来的结果本身就是错的；
     // 3. 房间最后（ADR-010 §7）。
-    let phases = [
-        ("non-regen", drain_non_regen(mgr).await),
-        ("regen", drain_where(mgr, REGEN_ACTION_FILTER).await),
-        ("room recalc", drain_rooms(&mgr.db_option).await),
-    ];
-
-    let mut done = 0;
-    let mut failures = Vec::new();
-    for (phase, outcome) in phases {
-        match outcome {
-            Ok(count) => done += count,
-            Err(error) => failures.push(format!("{phase} pending tasks failed: {error:#}")),
-        }
-    }
-    if !failures.is_empty() {
-        anyhow::bail!("{}", failures.join("; "));
-    }
+    let mut done = drain_non_regen(mgr).await?;
+    done += drain_where(mgr, REGEN_ACTION_FILTER, None).await?;
+    done += drain_rooms(&mgr.db_option).await?;
     Ok(done)
 }
 
 pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
-    drain_where(mgr, NON_REGEN_ACTION_FILTER).await
+    drain_where(mgr, NON_REGEN_ACTION_FILTER, None).await
 }
 
 /// 前两个阶段（非 regen → regen），不含房间。
@@ -1018,22 +1019,35 @@ pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 /// 单独收一轮（包成 `room_recalc` 任务），不跟在积压消化后面顺手带走——那样
 /// 房间轮就没有自己的任务行了。
 pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
-    let phases = [
-        ("non-regen", drain_non_regen(mgr).await),
-        ("regen", drain_where(mgr, REGEN_ACTION_FILTER).await),
-    ];
-    let mut done = 0;
-    let mut failures = Vec::new();
-    for (phase, outcome) in phases {
-        match outcome {
-            Ok(count) => done += count,
-            Err(error) => failures.push(format!("{phase} pending tasks failed: {error:#}")),
-        }
+    let non_regen = drain_where(mgr, NON_REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await;
+    let has_more = if non_regen.is_ok() {
+        has_pending_work(NON_REGEN_ACTION_FILTER).await?
+    } else {
+        false
+    };
+    if !data_phase_is_clear(non_regen.is_ok(), has_more) {
+        return non_regen;
     }
-    if !failures.is_empty() {
-        anyhow::bail!("{}", failures.join("; "));
-    }
+
+    let mut done = non_regen?;
+    done += drain_where(mgr, REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await?;
     Ok(done)
+}
+
+async fn has_pending_work(action_filter: &str) -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query(format!(
+            "RETURN array::len((SELECT VALUE id FROM {TABLE} \
+             WHERE status IN ['pending', 'failed'] AND (attempts?:0) < {MAX_ATTEMPTS} \
+             {action_filter} LIMIT 1)) > 0;"
+        ))
+        .await?
+        .check()?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+}
+
+pub async fn has_pending_data_work() -> anyhow::Result<bool> {
+    has_pending_work(DATA_ACTION_FILTER).await
 }
 
 /// 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
@@ -1111,7 +1125,7 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
 /// `/ZZ-R-K100` 在默认关键字下根本匹配不到。
 pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<usize> {
     let mut response = SUL_DB
-        .query(render_drain_select(ROOM_ACTION_FILTER))
+        .query(render_drain_select(ROOM_ACTION_FILTER, None))
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("load pending room work statement failed: {error}"))?;
@@ -1856,13 +1870,28 @@ mod tests {
 
     #[test]
     fn drain_select_leaves_dead_letters_in_the_table() {
-        let sql = render_drain_select("AND action = 'regen_root'");
+        let sql = render_drain_select("AND action = 'regen_root'", Some(DRAIN_PAGE_SIZE));
         assert!(
             sql.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}")),
             "{sql}"
         );
         assert!(sql.contains("status IN ['pending', 'failed']"), "{sql}");
         assert!(sql.contains("AND action = 'regen_root'"), "{sql}");
+        assert!(
+            sql.contains(&format!("LIMIT {DRAIN_PAGE_SIZE}")),
+            "one idle drain must be bounded so newly queued batches get another turn: {sql}"
+        );
+        assert!(
+            !render_drain_select("AND action = 'regen_root'", None).contains("LIMIT"),
+            "explicit/manual drain keeps its drain-until-complete contract"
+        );
+    }
+
+    #[test]
+    fn regen_waits_for_a_successful_and_empty_non_regen_phase() {
+        assert!(data_phase_is_clear(true, false));
+        assert!(!data_phase_is_clear(true, true), "the 65th item keeps the barrier closed");
+        assert!(!data_phase_is_clear(false, false), "a failed page keeps the barrier closed");
     }
 
     #[test]

@@ -633,13 +633,38 @@ async fn idle_round(
     if let Err(error) = SideEffectCompensator::drain(mgr).await {
         println!("空闲副作用补偿失败（保留待重试）: {error:#}");
     }
-    match model_update_pending::drain_data_phases(mgr).await {
-        Ok(n) if n > 0 => println!("空闲模型积压消化完成 {n} 个任务"),
-        Ok(_) => {}
-        Err(error) => println!("空闲模型积压消化失败（保留待重试）: {error:#}"),
-    }
+    let data_phase_failed = match model_update_pending::drain_data_phases(mgr).await {
+        Ok(n) if n > 0 => {
+            println!("空闲模型积压消化完成 {n} 个任务");
+            false
+        }
+        Ok(_) => false,
+        Err(error) => {
+            println!("空闲模型积压消化失败（保留待重试）: {error:#}");
+            true
+        }
+    };
 
-    room_round(mgr, registry, after_batches).await;
+    let data_backlog = data_phase_failed
+        || match model_update_pending::has_pending_data_work().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                println!("检查模型积压是否清空失败（暂缓房间轮）: {error:#}");
+                true
+            }
+        };
+    // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉，房间轮不能越过它。
+    let claimed_batches = if data_backlog {
+        0
+    } else {
+        drain_queue_until_empty(mgr).await
+    };
+    if room_phase_is_clear(data_backlog, claimed_batches) {
+        room_round(mgr, registry, after_batches).await;
+    } else {
+        // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
+        BatchScheduler::global().wake();
+    }
 
     // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
     // AABB 刷新与删除清理只动内存树，这里每轮最多写一次 accel_tree.bin。不落盘的话，
@@ -650,6 +675,10 @@ async fn idle_round(
         Ok(false) => {}
         Err(error) => println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}"),
     }
+}
+
+fn room_phase_is_clear(data_backlog: bool, claimed_batches: usize) -> bool {
+    !data_backlog && claimed_batches == 0
 }
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
@@ -902,6 +931,30 @@ mod tests {
             set_detail_at > recount_at,
             "set_detail 写回的必须是收敛后那份计数"
         );
+    }
+
+    #[test]
+    fn pending_data_pages_yield_to_new_batches_before_room_recalc() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn idle_round(")
+            .expect("idle_round 必须存在")
+            .1
+            .split_once("async fn room_round(")
+            .expect("idle_round 必须在 room_round 之前结束")
+            .0;
+
+        let backlog_at = body
+            .find("has_pending_data_work")
+            .expect("有界页之后必须检查数据积压");
+        let claim_at = body
+            .find("drain_queue_until_empty")
+            .expect("房间轮前必须认领执行期间新到的批次");
+        let room_at = body.find("room_round(").expect("数据清空后必须保留房间轮");
+        assert!(backlog_at < claim_at && claim_at < room_at, "{body}");
+        assert!(room_phase_is_clear(false, 0));
+        assert!(!room_phase_is_clear(true, 0));
+        assert!(!room_phase_is_clear(false, 1));
     }
 
     /// 隔离壳的本分：panic 到此为止，换成一句话交给调用方。

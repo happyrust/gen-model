@@ -2399,11 +2399,18 @@ fn baseline_stats_need_rebuild(pe_count: usize, info_count: usize) -> bool {
     pe_count != info_count
 }
 
-/// `Some(0)` means this run's full parse succeeded and confirmed the db file
-/// holds no business elements (root-only, e.g. an empty DESIGN db) — a
-/// legitimate baseline. `None` (no parse ran) or a positive count are not.
-fn baseline_parse_confirmed_empty(parsed_count: Option<usize>) -> bool {
-    parsed_count == Some(0)
+fn baseline_parse_matches(pe_count: usize, root_count: usize, parsed_count: usize) -> bool {
+    pe_count.checked_sub(root_count) == Some(parsed_count)
+}
+
+/// `Some(0)` plus no persisted rows beyond the explicitly counted WORL root is
+/// a legitimate empty baseline. `None` still means no successful parse ran.
+fn baseline_parse_confirmed_empty(
+    parsed_count: Option<usize>,
+    pe_count: usize,
+    root_count: usize,
+) -> bool {
+    parsed_count == Some(0) && baseline_parse_matches(pe_count, root_count, 0)
 }
 
 /// Turn a freshly baselined dbnum's active ownership graph into durable,
@@ -2612,7 +2619,7 @@ impl AiosDBManager {
             Ok(rows.first().map(|row| row.count).unwrap_or_default())
         }
 
-        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
+        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize, usize)> {
             let pe_count = scalar_count(format!(
                 "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"
             ))
@@ -2622,11 +2629,16 @@ impl AiosDBManager {
                  FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL"
             ))
             .await?;
-            Ok((pe_count, info_count))
+            let root_count = scalar_count(format!(
+                "SELECT count() AS count FROM pe \
+                 WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
+            ))
+            .await?;
+            Ok((pe_count, info_count, root_count))
         }
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
-        let (mut count, mut info_count) = baseline_counts(dbnum).await?;
+        let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
         let mut parsed_count = None;
         if baseline_needs_full_parse(count, applied_sesno) {
             let options = baseline_sync_options(&self.db_option, file_name, dbnum);
@@ -2644,7 +2656,7 @@ impl AiosDBManager {
                     dbnum
                 )
             })?);
-            (count, info_count) = baseline_counts(dbnum).await?;
+            (count, info_count, root_count) = baseline_counts(dbnum).await?;
         } else if baseline_stats_need_rebuild(count, info_count) {
             crate::versioned_db::database::rebuild_dbnum_info_from_pe(
                 dbnum,
@@ -2652,23 +2664,7 @@ impl AiosDBManager {
                 db_type,
             )
             .await?;
-            (count, info_count) = baseline_counts(dbnum).await?;
-        }
-        if count == 0 {
-            if baseline_parse_confirmed_empty(parsed_count) {
-                // 空库（仅根元素，如 TEST dbnum=1/TES500）：全量解析成功但确实
-                // 没有业务元素。这是合法基线——必须推进水位，否则该 dbnum 会在
-                // 之后每次手动执行中反复以失败批次出现并阻塞增量窗口。
-                // 没有元素也就没有生成根，计划为空。
-                crate::data_interface::model_update_pending::finalize_baseline(
-                    dbnum,
-                    file_latest_sesno,
-                    &ModelUpdatePlan::default(),
-                )
-                .await?;
-                return Ok(0);
-            }
-            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", dbnum);
+            (count, info_count, root_count) = baseline_counts(dbnum).await?;
         }
         if count != info_count {
             anyhow::bail!(
@@ -2678,13 +2674,27 @@ impl AiosDBManager {
                 info_count
             );
         }
+        if baseline_parse_confirmed_empty(parsed_count, count, root_count) {
+            // 空库（无 PE 或仅 WORL 根）：全量解析成功但确实没有业务元素。
+            crate::data_interface::model_update_pending::finalize_baseline(
+                dbnum,
+                file_latest_sesno,
+                &ModelUpdatePlan::default(),
+            )
+            .await?;
+            return Ok(0);
+        }
+        if count == 0 {
+            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", dbnum);
+        }
         if let Some(parsed_count) = parsed_count
-            && count != parsed_count
+            && !baseline_parse_matches(count, root_count, parsed_count)
         {
             anyhow::bail!(
-                "dbnum={} 基线不完整: PE={} 本次成功解析={}; 不推进 applied_sesno",
+                "dbnum={} 基线不完整: PE={} WORL={} 本次成功解析={}; 不推进 applied_sesno",
                 dbnum,
                 count,
+                root_count,
                 parsed_count
             );
         }
@@ -4065,13 +4075,25 @@ mod tests {
         assert!(!baseline_stats_need_rebuild(34_653, 34_653));
     }
 
-    /// TEST dbnum=1（TES500）回归：空库（仅根元素）全量解析成功后 PE=0，
-    /// 必须视为合法基线并推进水位，而不是每次执行都报“没有 PE 数据”。
+    /// SYS 基线的 PE 统计包含 WORL 根，而解析器返回值不包含根；完整性比较必须
+    /// 先剔除显式统计出来的根行，不能假定二者原样相等。
+    #[test]
+    fn baseline_completeness_excludes_the_persisted_world_row() {
+        assert!(baseline_parse_matches(225, 1, 224));
+        assert!(baseline_parse_matches(1_229, 1, 1_228));
+        assert!(!baseline_parse_matches(225, 0, 224));
+        assert!(!baseline_parse_matches(224, 1, 224));
+    }
+
+    /// TEST dbnum=5101 回归：PE=1 的纯根库全量解析成功后返回 0 个业务元素，
+    /// 必须视为合法基线并推进水位。
     #[test]
     fn root_only_empty_db_is_a_legitimate_baseline() {
-        assert!(baseline_parse_confirmed_empty(Some(0)));
-        assert!(!baseline_parse_confirmed_empty(None));
-        assert!(!baseline_parse_confirmed_empty(Some(34_653)));
+        assert!(baseline_parse_confirmed_empty(Some(0), 1, 1));
+        assert!(baseline_parse_confirmed_empty(Some(0), 0, 0));
+        assert!(!baseline_parse_confirmed_empty(None, 1, 1));
+        assert!(!baseline_parse_confirmed_empty(Some(0), 2, 1));
+        assert!(!baseline_parse_confirmed_empty(Some(34_653), 34_654, 1));
     }
 
     // -----------------------------------------------------------------------
