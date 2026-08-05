@@ -44,6 +44,7 @@ const IDLE_WAKE: Duration = Duration::from_secs(30);
 const ROOM_ROUND_FLOOR: Duration = Duration::from_secs(600);
 const STAGED_COMMIT_ATTEMPTS: u32 = 4;
 const STAGED_COMMIT_BACKOFF: Duration = Duration::from_millis(250);
+const STAGED_STALLED_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 /// worker 还在不在。
 ///
@@ -485,39 +486,33 @@ async fn execute_frozen_batch(
     }
 
     let commit_started = std::time::Instant::now();
-    let commit = retry_with_backoff(
+    let (_, commit_attempts) = retry_until_recovered(
         STAGED_COMMIT_ATTEMPTS,
         STAGED_COMMIT_BACKOFF,
+        STAGED_STALLED_RETRY_BACKOFF,
+        |error, attempts| {
+            window.mark_writeback_stalled(error);
+            log::error!(
+                "增量暂存窗口 {} 写回第 {attempts} 次仍失败，窗口与 journal 保留: {error:#}",
+                window.label()
+            );
+        },
         || window.commit_registered_to(&aios_core::SUL_DB),
     )
     .await;
+    window.clear_writeback_stalled();
     LAST_STAGED_COMMIT_MS.store(
         commit_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         Ordering::Relaxed,
     );
     LAST_STAGED_COMMIT_RETRIES.store(
-        commit
-            .as_ref()
-            .map_or(STAGED_COMMIT_ATTEMPTS as u64 - 1, |(_, attempts)| {
-                attempts.saturating_sub(1) as u64
-            }),
+        commit_attempts.saturating_sub(1) as u64,
         Ordering::Relaxed,
     );
-    if let Err(error) = commit {
-        result
-            .warnings
-            .push(format!("增量暂存窗口写回失败: {error:#}"));
-        if let Some(batch) = &mut result.batch {
-            batch.status = BatchStatus::Failed;
-            batch.message = Some(format!("增量暂存窗口写回失败: {error:#}"));
-        }
-        result.status = ManualUpdateStatus::Failed;
-        if let Err(drop_error) = window.drop_database().await {
-            result
-                .warnings
-                .push(format!("写回失败后废弃暂存窗口失败: {drop_error:#}"));
-        }
-        return result;
+    if commit_attempts > STAGED_COMMIT_ATTEMPTS {
+        result.warnings.push(format!(
+            "增量暂存窗口写回曾滞留，持久层恢复后第 {commit_attempts} 次写回成功"
+        ));
     }
 
     let mut postcommit_failed = false;
@@ -674,6 +669,36 @@ where
         }
     }
     unreachable!("max_attempts is normalized to at least one")
+}
+
+async fn retry_until_recovered<T, F, Fut, S>(
+    initial_attempts: u32,
+    initial_delay: Duration,
+    stalled_delay: Duration,
+    mut on_stalled: S,
+    mut operation: F,
+) -> (T, u32)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+    S: FnMut(&anyhow::Error, u32),
+{
+    let initial_attempts = initial_attempts.max(1);
+    match retry_with_backoff(initial_attempts, initial_delay, &mut operation).await {
+        Ok(success) => success,
+        Err(mut error) => {
+            let mut attempts = initial_attempts;
+            loop {
+                on_stalled(&error, attempts);
+                tokio::time::sleep(stalled_delay).await;
+                attempts = attempts.saturating_add(1);
+                match operation().await {
+                    Ok(value) => return (value, attempts),
+                    Err(next_error) => error = next_error,
+                }
+            }
+        }
+    }
 }
 
 fn failed_window_result(
@@ -1559,6 +1584,28 @@ mod tests {
         assert_eq!(value, 3);
         assert_eq!(used, 3);
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn staged_commit_stalls_without_discarding_then_recovers() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let stalled = std::sync::atomic::AtomicUsize::new(0);
+        let (value, used) = retry_until_recovered(
+            2,
+            Duration::ZERO,
+            Duration::ZERO,
+            |_, _| {
+                stalled.fetch_add(1, Ordering::SeqCst);
+            },
+            || async {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                anyhow::ensure!(attempt >= 4, "injected persistent outage");
+                Ok(attempt)
+            },
+        )
+        .await;
+        assert_eq!((value, used), (4, 4));
+        assert_eq!(stalled.load(Ordering::SeqCst), 2);
     }
 
     fn unit_task(

@@ -38,6 +38,7 @@ static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 struct RegisteredWindow {
     meta: StagingWindowMeta,
     gauge: Arc<ResourceGauge>,
+    writeback_stalled: Option<String>,
 }
 
 /// 进程内登记表：label → 窗口元数据与资源面板。终态清扫以它裁定孤儿。
@@ -139,6 +140,7 @@ pub async fn create_window_on(
         RegisteredWindow {
             meta: meta.clone(),
             gauge: gauge.clone(),
+            writeback_stalled: None,
         },
     );
 
@@ -375,6 +377,27 @@ impl ActiveStagedWindow {
         }
     }
 
+    /// 写回重试耗尽后的进程内告警；窗口本体仍由 worker 持有，journal 不丢。
+    pub(crate) fn mark_writeback_stalled(&self, error: &anyhow::Error) {
+        if let Some(entry) = REGISTRY
+            .lock()
+            .expect("registry lock")
+            .get_mut(&self.meta.label)
+        {
+            entry.writeback_stalled = Some(format!("{error:#}"));
+        }
+    }
+
+    pub(crate) fn clear_writeback_stalled(&self) {
+        if let Some(entry) = REGISTRY
+            .lock()
+            .expect("registry lock")
+            .get_mut(&self.meta.label)
+        {
+            entry.writeback_stalled = None;
+        }
+    }
+
     /// 冻结吸收扩窗：只更新逻辑区间元数据，不改名、不换库。
     /// 资源状态机处于「拒绝吸收」及以上档位时拒绝——后继排队行保持独立窗口。
     pub fn absorb_extend(&mut self, new_end_sesno: i32) -> anyhow::Result<()> {
@@ -451,6 +474,8 @@ pub fn resource_snapshots() -> Vec<serde_json::Value> {
                 "label": entry.meta.label,
                 "start_sesno": entry.meta.start_sesno,
                 "end_sesno": entry.meta.end_sesno,
+                "state": if entry.writeback_stalled.is_some() { "writeback_stalled" } else { "active" },
+                "writeback_error": entry.writeback_stalled,
                 "band": format!("{:?}", snapshot.band).to_lowercase(),
                 "staged_sql_bytes": snapshot.staged_sql_bytes,
                 "journal_bytes": snapshot.journal_bytes,
@@ -612,6 +637,15 @@ mod tests {
             .find(|m| m.label == window.label())
             .expect("registered");
         assert_eq!(meta.end_sesno, 16);
+
+        window.mark_writeback_stalled(&anyhow::anyhow!("fork offline"));
+        let snapshot = resource_snapshots()
+            .into_iter()
+            .find(|row| row["label"] == window.label())
+            .expect("window snapshot");
+        assert_eq!(snapshot["state"], "writeback_stalled");
+        assert_eq!(snapshot["writeback_error"], "fork offline");
+        window.clear_writeback_stalled();
         window.drop_database().await.expect("cleanup");
     }
 
