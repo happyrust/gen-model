@@ -617,19 +617,43 @@ impl IncrementPipeline {
         };
         let cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
         warnings.extend(model_plan.warnings.iter().cloned());
+        let staged = crate::data_interface::staging::active_staging_writes();
 
         // 只保留最新数据：仅写入 pe 主数据（最新状态），不再写 sessions / element_changes 历史表
         //
         // Cache invalidation must run after every attempted persist, including a
         // partially failed batch: earlier Surreal statements may already have
         // changed data even though the watermark must remain unchanged.
-        let persist_result = StageTimings::measure(
-            &mut timings.persist,
-            Self::persist_latest_main_data(&range_eles, dbnum as i32),
-        )
-        .await;
-        let invalidated =
-            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await;
+        let persist_result = if let Some(context) = staged.as_ref() {
+            let statements = Self::render_persist_statements(&range_eles, dbnum as i32)
+                .into_iter()
+                .chain(
+                    crate::data_interface::manual_update::build_reverse_index_statements(
+                        &range_eles,
+                    ),
+                )
+                .collect::<Vec<_>>();
+            StageTimings::measure(&mut timings.persist, async {
+                for sql in statements {
+                    context
+                        .execute(sql, crate::data_interface::staging::ExecMode::Both)
+                        .await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+        } else {
+            StageTimings::measure(
+                &mut timings.persist,
+                Self::persist_latest_main_data(&range_eles, dbnum as i32),
+            )
+            .await
+        };
+        let invalidated = if staged.is_some() {
+            0
+        } else {
+            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await
+        };
         if invalidated > 0 {
             println!(
                 "IncrementPipeline: invalidated {invalidated} PE/attribute cache entries \
@@ -644,11 +668,12 @@ impl IncrementPipeline {
         // 就是某个设计实例静默不重生成；而「靠后续触及 / 全量重建自愈」里没有任何一步是
         // 自动发生的——那条边可能到下一次有人手工跑全量重建为止都不存在。所以把这批引用者
         // 记进持久补偿队列，走与其它副作用同一条重试通道。
-        if let Err(e) = StageTimings::measure(
-            &mut timings.reverse_index,
-            Self::maintain_reverse_index(&range_eles),
-        )
-        .await
+        if staged.is_none()
+            && let Err(e) = StageTimings::measure(
+                &mut timings.reverse_index,
+                Self::maintain_reverse_index(&range_eles),
+            )
+            .await
         {
             warnings.push(format!(
                 "reverse-index maintain (non-fatal) {}: {}",
@@ -673,16 +698,31 @@ impl IncrementPipeline {
         // establishes durable model work, advances the watermark and removes the
         // short-lived recovery record. If it fails, the attempt remains and the
         // whole fixed range is safe to replay.
-        StageTimings::measure(
-            &mut timings.finalize,
-            crate::data_interface::model_update_pending::finalize_attempt(
-                dbnum,
-                end_sesno,
-                &model_plan,
-                &datacenter_statements,
-            ),
-        )
-        .await?;
+        if staged.is_some() {
+            StageTimings::measure(
+                &mut timings.finalize,
+                crate::data_interface::staging::register_staged_finalize(
+                    crate::data_interface::staging::StagedFinalize {
+                        dbnum,
+                        end_sesno,
+                        plan: model_plan.clone(),
+                        window_statements: datacenter_statements,
+                    },
+                ),
+            )
+            .await?;
+        } else {
+            StageTimings::measure(
+                &mut timings.finalize,
+                crate::data_interface::model_update_pending::finalize_attempt(
+                    dbnum,
+                    end_sesno,
+                    &model_plan,
+                    &datacenter_statements,
+                ),
+            )
+            .await?;
+        }
 
         timings.report(
             dbnum,

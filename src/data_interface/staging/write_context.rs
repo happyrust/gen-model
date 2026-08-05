@@ -16,20 +16,34 @@ tokio::task_local! {
 pub(crate) struct StagingWriteContext {
     executor: Arc<Mutex<StagedExecutor>>,
     spatial: Arc<Mutex<DeferredSpatialMutations>>,
+    finalize: Arc<Mutex<Option<StagedFinalize>>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DeferredSpatialMutations {
     pub refresh: HashSet<aios_core::RefnoEnum>,
     pub remove: HashSet<aios_core::RefnoEnum>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StagedFinalize {
+    pub dbnum: u32,
+    pub end_sesno: i32,
+    pub plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
+    pub window_statements: Vec<String>,
 }
 
 impl StagingWriteContext {
     pub(super) fn new(
         executor: Arc<Mutex<StagedExecutor>>,
         spatial: Arc<Mutex<DeferredSpatialMutations>>,
+        finalize: Arc<Mutex<Option<StagedFinalize>>>,
     ) -> Self {
-        Self { executor, spatial }
+        Self {
+            executor,
+            spatial,
+            finalize,
+        }
     }
 
     pub async fn execute(&self, sql: impl Into<String>, mode: ExecMode) -> anyhow::Result<()> {
@@ -55,6 +69,21 @@ impl StagingWriteContext {
             spatial.remove.insert(*refno);
         }
     }
+
+    pub async fn register_finalize(&self, finalize: StagedFinalize) -> anyhow::Result<()> {
+        let mut slot = self.finalize.lock().await;
+        if let Some(existing) = slot.as_ref()
+            && existing.dbnum != finalize.dbnum
+        {
+            anyhow::bail!(
+                "staging window already belongs to dbnum={}, cannot finalize dbnum={}",
+                existing.dbnum,
+                finalize.dbnum
+            );
+        }
+        *slot = Some(finalize);
+        Ok(())
+    }
 }
 
 pub(crate) async fn with_staging_writes<F>(ctx: StagingWriteContext, future: F) -> F::Output
@@ -66,6 +95,14 @@ where
 
 pub(crate) fn active_staging_writes() -> Option<StagingWriteContext> {
     STAGING_WRITES.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn register_staged_finalize(finalize: StagedFinalize) -> anyhow::Result<bool> {
+    let Some(context) = active_staging_writes() else {
+        return Ok(false);
+    };
+    context.register_finalize(finalize).await?;
+    Ok(true)
 }
 
 /// 同时继承 rs-core 的读上下文与本仓的写上下文。
@@ -133,6 +170,38 @@ mod tests {
         let text = serde_json::to_string(&rows).expect("serialize");
         assert!(text.contains("a") && text.contains("b"), "{text}");
 
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_state_is_registered_without_entering_the_journal() {
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(
+            &instance,
+            7994,
+            4,
+            9,
+            ResourceThresholds::default(),
+        )
+        .await
+        .expect("create window");
+
+        window
+            .scope(register_staged_finalize(StagedFinalize {
+                dbnum: 7994,
+                end_sesno: 9,
+                plan: Default::default(),
+                window_statements: vec!["UPSERT datacenter_version:x SET ok = true;".into()],
+            }))
+            .await
+            .expect("register finalize")
+            .then_some(())
+            .expect("inside staged context");
+
+        assert!(window.journal().await.is_empty());
+        let tail = window.render_finalize_tail().await.expect("render tail");
+        assert!(tail.contains("datacenter_version:x"), "{tail}");
+        assert!(tail.contains("dbnum_watermark:7994"), "{tail}");
         window.drop_database().await.expect("cleanup");
     }
 }

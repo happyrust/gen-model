@@ -25,7 +25,7 @@ use surrealdb::Surreal;
 
 use super::executor::{ExecMode, JournalEntry, StagedExecutor};
 use super::resources::{ResourceBand, ResourceGauge, ResourceThresholds};
-use super::write_context::{DeferredSpatialMutations, StagingWriteContext};
+use super::write_context::{DeferredSpatialMutations, StagedFinalize, StagingWriteContext};
 
 /// 暂存实例上所有 staging database 所在的 namespace。
 pub const STAGING_NS: &str = "staging";
@@ -77,6 +77,7 @@ pub struct ActiveStagedWindow {
     gauge: Arc<ResourceGauge>,
     executor: Arc<tokio::sync::Mutex<StagedExecutor>>,
     spatial: Arc<tokio::sync::Mutex<DeferredSpatialMutations>>,
+    finalize: Arc<tokio::sync::Mutex<Option<StagedFinalize>>>,
 }
 
 /// 在生产常驻实例上开一个新窗口。
@@ -139,12 +140,14 @@ pub async fn create_window_on(
         StagedExecutor::new(instance.clone(), meta.label.clone()).with_gauge(gauge.clone()),
     ));
     let spatial = Arc::new(tokio::sync::Mutex::new(DeferredSpatialMutations::default()));
+    let finalize = Arc::new(tokio::sync::Mutex::new(None));
     Ok(ActiveStagedWindow {
         meta,
         db: instance.clone(),
         gauge,
         executor,
         spatial,
+        finalize,
     })
 }
 
@@ -236,7 +239,37 @@ impl ActiveStagedWindow {
     }
 
     pub(crate) fn write_context(&self) -> StagingWriteContext {
-        StagingWriteContext::new(self.executor.clone(), self.spatial.clone())
+        StagingWriteContext::new(
+            self.executor.clone(),
+            self.spatial.clone(),
+            self.finalize.clone(),
+        )
+    }
+
+    pub(crate) async fn staged_finalize(&self) -> Option<StagedFinalize> {
+        self.finalize.lock().await.clone()
+    }
+
+    pub(crate) async fn render_finalize_tail(&self) -> anyhow::Result<String> {
+        let finalize = self
+            .staged_finalize()
+            .await
+            .context("staged window has no registered finalize state")?;
+        if finalize.dbnum != self.meta.dbnum || finalize.end_sesno != self.meta.end_sesno {
+            bail!(
+                "staged finalize range mismatch: window dbnum={} end={}, finalize dbnum={} end={}",
+                self.meta.dbnum,
+                self.meta.end_sesno,
+                finalize.dbnum,
+                finalize.end_sesno
+            );
+        }
+        Ok(crate::data_interface::model_update_pending::render_finalize_tail(
+            finalize.dbnum,
+            finalize.end_sesno,
+            &finalize.plan,
+            &finalize.window_statements,
+        ))
     }
 
     pub(crate) async fn take_deferred_spatial(&self) -> DeferredSpatialMutations {
