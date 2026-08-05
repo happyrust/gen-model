@@ -3,14 +3,16 @@ use std::collections::HashSet;
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::anyhow;
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 use surrealdb::sql::Thing;
 
 use crate::surreal_retry::{
     execute_model_scoped_delete, execute_model_write, execute_surreal_checked,
 };
 
-/// 查询子树时的分批大小（与 increment_manager 的 QUERY_BATCH_SIZE 一致，避免 SQL 过长）。
-const SUBTREE_QUERY_BATCH: usize = 20;
+/// 图端点查询只拼 record id；256 个仍远低于 ws 消息上限，同时避免大子树产生数百次往返。
+const SUBTREE_QUERY_BATCH: usize = 256;
 
 pub(crate) fn pe_thing_to_refno(value: Thing) -> anyhow::Result<RefnoEnum> {
     let raw = value.to_string();
@@ -20,6 +22,13 @@ pub(crate) fn pe_thing_to_refno(value: Thing) -> anyhow::Result<RefnoEnum> {
 }
 
 pub(crate) async fn collect_pe_subtree_refnos(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    collect_pe_subtree_refnos_from(&crate::data_interface::staging::active_data_db(), refnos).await
+}
+
+pub(crate) async fn collect_pe_subtree_refnos_from(
+    db: &Surreal<Any>,
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let mut all: HashSet<RefnoEnum> = refnos.iter().copied().collect();
@@ -36,10 +45,39 @@ pub(crate) async fn collect_pe_subtree_refnos(
             let sql = format!(
                 "array::distinct(array::flatten(SELECT VALUE <-pe_owner.in FROM [{pe_keys}]));"
             );
-            let mut response = crate::data_interface::staging::active_data_db()
-                .query(&sql)
-                .await?
-                .check()?;
+            let mut response = db.query(&sql).await?.check()?;
+            for value in response.take::<Vec<Thing>>(0)? {
+                let refno = pe_thing_to_refno(value)?;
+                if all.insert(refno) {
+                    next.push(refno);
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    Ok(all)
+}
+
+pub(crate) async fn collect_pe_ancestor_refnos_from(
+    db: &Surreal<Any>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    let mut all: HashSet<RefnoEnum> = refnos.iter().copied().collect();
+    let mut frontier = refnos.to_vec();
+
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for chunk in frontier.chunks(SUBTREE_QUERY_BATCH) {
+            let pe_keys = chunk
+                .iter()
+                .map(|r| r.to_pe_key())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "array::distinct(array::flatten(SELECT VALUE ->pe_owner.out FROM [{pe_keys}]));"
+            );
+            let mut response = db.query(&sql).await?.check()?;
             for value in response.take::<Vec<Thing>>(0)? {
                 let refno = pe_thing_to_refno(value)?;
                 if all.insert(refno) {

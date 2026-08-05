@@ -28,25 +28,76 @@ async fn preload_model_mutation_targets_from(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
 ) -> anyhow::Result<usize> {
-    let refnos = load_root_refnos(source, roots).await?;
-    if refnos.is_empty() {
+    let started = std::time::Instant::now();
+    let subtree = load_root_refnos(source, roots).await?;
+    if subtree.is_empty() {
         return Ok(0);
     }
-    let keys = refnos
+    let model_refnos = load_model_refnos(source, &subtree).await?;
+    let closure_elapsed = started.elapsed();
+    let mut hierarchy_seeds = model_refnos.clone();
+    hierarchy_seeds.extend_from_slice(roots);
+    let mut hierarchy =
+        crate::data_interface::helper::collect_pe_ancestor_refnos_from(source, &hierarchy_seeds)
+            .await?
+            .into_iter()
+            .collect::<Vec<_>>();
+    hierarchy.sort_unstable();
+    let hierarchy_elapsed = started.elapsed();
+    let keys = hierarchy
         .iter()
         .map(RefnoEnum::to_pe_key)
         .collect::<Vec<_>>()
         .join(",");
-    let mut copied = copy_rows(source, "pe", &format!("SELECT * FROM pe WHERE id IN [{keys}]"))
-        .await?;
+    let mut copied = copy_rows(
+        source,
+        "pe",
+        &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
+    )
+    .await?;
+    let pe_elapsed = started.elapsed();
     copied += copy_relations(
         source,
         "pe_owner",
         &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
     )
     .await?;
-    copied += preload_existing_generation_products_from(source, roots).await?;
+    let owner_elapsed = started.elapsed();
+    copied += preload_existing_generation_products_for_refnos(source, &model_refnos).await?;
+    println!(
+        "暂存 mutation 预载: subtree={} model={} hierarchy={} copied={}，closure={:?} hierarchy={:?} pe={:?} owner={:?} total={:?}",
+        subtree.len(),
+        model_refnos.len(),
+        hierarchy.len(),
+        copied,
+        closure_elapsed,
+        hierarchy_elapsed,
+        pe_elapsed,
+        owner_elapsed,
+        started.elapsed()
+    );
     Ok(copied)
+}
+
+async fn load_model_refnos(
+    source: &Surreal<Any>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let scope = refnos
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    // ponytail: one narrow relation scan beats one graph endpoint lookup per PE; add an `in`
+    // endpoint index/query API if inst_relate itself grows beyond memory-budget measurements.
+    let mut response = source
+        .query("SELECT VALUE in FROM inst_relate;")
+        .await?
+        .check()?;
+    let mut model_refnos = response.take::<Vec<RefnoEnum>>(0)?;
+    model_refnos.retain(|refno| scope.contains(refno));
+    model_refnos.sort_unstable();
+    model_refnos.dedup();
+    Ok(model_refnos)
 }
 
 /// Reparse the current root subtree and its catalogue references into staging.
@@ -126,6 +177,13 @@ async fn preload_existing_generation_products_from(
     roots: &[RefnoEnum],
 ) -> anyhow::Result<usize> {
     let refnos = load_root_refnos(source, roots).await?;
+    preload_existing_generation_products_for_refnos(source, &refnos).await
+}
+
+async fn preload_existing_generation_products_for_refnos(
+    source: &Surreal<Any>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<usize> {
     if refnos.is_empty() {
         return Ok(0);
     }
@@ -135,83 +193,158 @@ async fn preload_existing_generation_products_from(
         .map(RefnoEnum::to_pe_key)
         .collect::<Vec<_>>()
         .join(",");
-    let inst_scope = format!("SELECT VALUE id FROM inst_relate WHERE in IN [{pe_keys}]");
-    let info_scope = format!("SELECT VALUE out FROM ({inst_scope})");
-    let geo_scope = format!("SELECT VALUE id FROM geo_relate WHERE in IN ({info_scope})");
-    let inst_geo_scope = format!("SELECT VALUE out FROM ({geo_scope})");
+    let inst_query = format!("SELECT * FROM inst_relate WHERE in IN [{pe_keys}]");
+    let info_keys = select_record_keys(
+        source,
+        &format!("SELECT VALUE out FROM inst_relate WHERE in IN [{pe_keys}]"),
+    )
+    .await?;
+    let world_keys = select_record_keys(
+        source,
+        &format!(
+            "SELECT VALUE world_trans FROM inst_relate WHERE in IN [{pe_keys}] AND world_trans != NONE"
+        ),
+    )
+    .await?;
+    let mut aabb_keys = select_record_keys(
+        source,
+        &format!("SELECT VALUE aabb FROM inst_relate WHERE in IN [{pe_keys}] AND aabb != NONE"),
+    )
+    .await?;
+    let mut copied = copy_relations(source, "inst_relate", &inst_query).await?;
+    if info_keys.is_empty() {
+        return Ok(copied);
+    }
 
-    let queries = [
-        (
-            "inst_relate",
-            format!("SELECT * FROM inst_relate WHERE in IN [{pe_keys}]"),
-        ),
-        (
-            "inst_info",
-            format!("SELECT * FROM inst_info WHERE id IN ({info_scope})"),
-        ),
-        (
-            "geo_relate",
-            format!("SELECT * FROM geo_relate WHERE in IN ({info_scope})"),
-        ),
-        (
+    let info_scope = info_keys.join(",");
+    let geo_query = format!("SELECT * FROM geo_relate WHERE in IN [{info_scope}]");
+    let inst_geo_keys = select_record_keys(
+        source,
+        &format!("SELECT VALUE out FROM geo_relate WHERE in IN [{info_scope}]"),
+    )
+    .await?;
+    let trans_keys = select_record_keys(
+        source,
+        &format!("SELECT VALUE trans FROM geo_relate WHERE in IN [{info_scope}] AND trans != NONE"),
+    )
+    .await?;
+    copied += copy_rows(
+        source,
+        "inst_info",
+        &format!("SELECT * FROM inst_info WHERE id IN [{info_scope}]"),
+    )
+    .await?;
+    copied += copy_relations(source, "geo_relate", &geo_query).await?;
+
+    let mut vec_keys = Vec::new();
+    if !inst_geo_keys.is_empty() {
+        let inst_geo_scope = inst_geo_keys.join(",");
+        vec_keys = select_record_keys(
+            source,
+            &format!(
+                "RETURN array::flatten(SELECT VALUE pts FROM inst_geo WHERE id IN [{inst_geo_scope}]);"
+            ),
+        )
+        .await?;
+        aabb_keys.extend(
+            select_record_keys(
+                source,
+                &format!(
+                    "SELECT VALUE aabb FROM inst_geo WHERE id IN [{inst_geo_scope}] AND aabb != NONE"
+                ),
+            )
+            .await?,
+        );
+        aabb_keys.sort_unstable();
+        aabb_keys.dedup();
+        copied += copy_rows(
+            source,
             "inst_geo",
-            format!("SELECT * FROM inst_geo WHERE id IN ({inst_geo_scope})"),
-        ),
-        (
-            "world_trans",
-            format!(
-                "SELECT * FROM world_trans WHERE id IN (SELECT VALUE world_trans FROM ({inst_scope}))"
-            ),
-        ),
-        (
-            "trans",
-            format!("SELECT * FROM trans WHERE id IN (SELECT VALUE trans FROM ({geo_scope}))"),
-        ),
-        (
-            "vec3",
-            format!(
-                "SELECT * FROM vec3 WHERE id IN array::flatten(SELECT VALUE pts FROM ({inst_geo_scope}))"
-            ),
-        ),
-        (
-            "aabb",
-            format!(
-                "SELECT * FROM aabb WHERE id IN array::distinct(array::flatten([SELECT VALUE aabb FROM ({inst_scope}), SELECT VALUE aabb FROM ({inst_geo_scope})]))"
-            ),
-        ),
-    ];
+            &format!("SELECT * FROM inst_geo WHERE id IN [{inst_geo_scope}]"),
+        )
+        .await?;
+    }
 
-    let mut copied = 0;
-    for (table, query) in queries {
-        copied += if matches!(table, "inst_relate" | "geo_relate") {
-            copy_relations(source, table, &query).await?
-        } else {
-            copy_rows(source, table, &query).await?
-        };
+    for (table, keys) in [
+        ("world_trans", world_keys),
+        ("trans", trans_keys),
+        ("vec3", vec_keys),
+        ("aabb", aabb_keys),
+    ] {
+        if !keys.is_empty() {
+            copied += copy_rows(
+                source,
+                table,
+                &format!("SELECT * FROM {table} WHERE id IN [{}]", keys.join(",")),
+            )
+            .await?;
+        }
     }
     Ok(copied)
+}
+
+async fn select_record_keys(source: &Surreal<Any>, query: &str) -> anyhow::Result<Vec<String>> {
+    let mut response = source.query(query).await?.check()?;
+    let value: surrealdb::Value = response.take(0)?;
+    let mut keys = Vec::new();
+    collect_record_keys(value.into_inner(), &mut keys)?;
+    keys.sort_unstable();
+    keys.dedup();
+    Ok(keys)
+}
+
+fn collect_record_keys(value: surrealdb::sql::Value, keys: &mut Vec<String>) -> anyhow::Result<()> {
+    match value {
+        surrealdb::sql::Value::Thing(thing) => keys.push(thing.to_string()),
+        surrealdb::sql::Value::Array(values) => {
+            for value in values {
+                collect_record_keys(value, keys)?;
+            }
+        }
+        surrealdb::sql::Value::None | surrealdb::sql::Value::Null => {}
+        value => anyhow::bail!("record-key query returned {value} instead of a record id"),
+    }
+    Ok(())
 }
 
 async fn load_root_refnos(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
 ) -> anyhow::Result<Vec<RefnoEnum>> {
-    let mut refnos = Vec::new();
-    for root in roots {
-        let key = root.to_pe_key();
-        let sql = format!(
-            "RETURN array::flatten(object::values((SELECT [id] AS p0, \
-             <-pe_owner<-(? AS p1)<-pe_owner<-(? AS p2)<-pe_owner<-(? AS p3)\
-             <-pe_owner<-(? AS p4)<-pe_owner<-(? AS p5)<-pe_owner<-(? AS p6)\
-             <-pe_owner<-(? AS p7)<-pe_owner<-(? AS p8)<-pe_owner<-(? AS p9)\
-             <-pe_owner<-(? AS p10)<-pe_owner<-(? AS p11) FROM ONLY {key} \
-             WHERE record::exists(id)) ?: {{}}))[? !deleted];"
-        );
-        let mut response = source.query(sql).await?.check()?;
-        refnos.extend(response.take::<Vec<RefnoEnum>>(0)?);
+    #[derive(serde::Deserialize)]
+    struct OwnerEdge {
+        #[serde(rename = "in")]
+        child: RefnoEnum,
+        #[serde(rename = "out")]
+        parent: RefnoEnum,
     }
+
+    // ponytail: one lightweight edge scan avoids thousands of WS graph lookups; replace with a
+    // server-side recursive/indexed query if pe_owner exceeds the staging memory budget.
+    let mut response = source
+        .query("SELECT in, out FROM pe_owner;")
+        .await?
+        .check()?;
+    let edges = response.take::<Vec<OwnerEdge>>(0)?;
+    let mut children = std::collections::HashMap::<RefnoEnum, Vec<RefnoEnum>>::new();
+    for edge in edges {
+        children.entry(edge.parent).or_default().push(edge.child);
+    }
+
+    let mut seen = roots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut frontier = roots.to_vec();
+    while let Some(parent) = frontier.pop() {
+        for child in children.get(&parent).into_iter().flatten() {
+            if seen.insert(*child) {
+                frontier.push(*child);
+            }
+        }
+    }
+    let mut refnos = seen.into_iter().collect::<Vec<_>>();
     refnos.sort_unstable();
-    refnos.dedup();
     Ok(refnos)
 }
 
@@ -281,11 +414,16 @@ async fn copy_relations(source: &Surreal<Any>, table: &str, query: &str) -> anyh
 
 fn render_preload_value(value: &surrealdb::sql::Value) -> String {
     match value {
-        surrealdb::sql::Value::Strand(value) => serde_json::to_string(value.as_str())
-            .expect("Surreal strings are JSON serializable"),
+        surrealdb::sql::Value::Strand(value) => {
+            serde_json::to_string(value.as_str()).expect("Surreal strings are JSON serializable")
+        }
         surrealdb::sql::Value::Array(values) => format!(
             "[{}]",
-            values.iter().map(render_preload_value).collect::<Vec<_>>().join(",")
+            values
+                .iter()
+                .map(render_preload_value)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         surrealdb::sql::Value::Object(values) => format!(
             "{{{}}}",
@@ -320,15 +458,42 @@ mod tests {
             .expect("use source");
         source.query(
             "CREATE pe:⟨4000000001_1⟩ SET deleted=false; CREATE pe:⟨4000000001_2⟩ SET deleted=false;
+             CREATE pe:⟨4000000001_3⟩ SET deleted=false;
              CREATE pe:⟨4000000001_9⟩ SET deleted=false;
              RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
+             RELATE pe:⟨4000000001_3⟩->pe_owner->pe:⟨4000000001_2⟩;
              CREATE world_trans:w1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
              CREATE vec3:v1 SET d=[1,2,3]; CREATE inst_info:i1 SET noun='PIPE';
              CREATE inst_geo:g1 SET aabb=aabb:a1, pts=[vec3:v1];
-             RELATE pe:⟨4000000001_2⟩->inst_relate->inst_info:i1 SET world_trans=world_trans:w1, aabb=aabb:a1;
+             RELATE pe:⟨4000000001_3⟩->inst_relate->inst_info:i1 SET world_trans=world_trans:w1, aabb=aabb:a1;
              RELATE inst_info:i1->geo_relate->inst_geo:g1 SET trans=trans:t1;
              CREATE inst_info:i9; RELATE pe:⟨4000000001_9⟩->inst_relate->inst_info:i9;"
         ).await.expect("fixture transport").check().expect("fixture");
+
+        let loaded = load_root_refnos(
+            &source,
+            &[
+                RefnoEnum::from("4000000001/1"),
+                RefnoEnum::from("4000000001/9"),
+            ],
+        )
+        .await
+        .expect("batch root closure");
+        assert_eq!(
+            loaded,
+            vec![
+                RefnoEnum::from("4000000001/1"),
+                RefnoEnum::from("4000000001/2"),
+                RefnoEnum::from("4000000001/3"),
+                RefnoEnum::from("4000000001/9"),
+            ]
+        );
+        assert_eq!(
+            select_record_keys(&source, "RETURN [inst_info:i1, NONE, [inst_info:i1]];")
+                .await
+                .expect("record keys ignore absent optional links"),
+            vec!["inst_info:i1"]
+        );
 
         let instance = connect("mem://").await.expect("staging mem");
         let window = create_window_on(&instance, 7992, 1, 1, ResourceThresholds::default())
@@ -363,16 +528,17 @@ mod tests {
             ))
             .await
             .expect("preload mutation target");
-        assert_eq!(copied, 11);
+        assert_eq!(copied, 13);
         let mut response = window
             .staging_db()
             .query(
                 "RETURN [pe:⟨4000000001_1⟩.id != NONE, pe:⟨4000000001_2⟩.id != NONE,
-                 count(SELECT * FROM pe_owner) = 1, pe:⟨4000000001_9⟩.id = NONE];",
+                 pe:⟨4000000001_3⟩.id != NONE, count(SELECT * FROM pe_owner) = 2,
+                 pe:⟨4000000001_9⟩.id = NONE];",
             )
             .await
             .expect("inspect mutation rows");
-        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 4]);
+        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 5]);
         assert!(window.journal().await.is_empty());
         window.drop_database().await.expect("cleanup");
     }
@@ -380,7 +546,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn room_working_set_is_staging_only() {
         let source = connect("mem://").await.expect("source mem");
-        source.use_ns("test").use_db("source").await.expect("source db");
+        source
+            .use_ns("test")
+            .use_db("source")
+            .await
+            .expect("source db");
         source
             .query(
                 "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100';
@@ -430,7 +600,10 @@ mod tests {
             ))
             .await
             .expect("load staged room map");
-        assert_eq!(map.room_num_of(RefnoEnum::from("4000000001/2")), Some("R100"));
+        assert_eq!(
+            map.room_num_of(RefnoEnum::from("4000000001/2")),
+            Some("R100")
+        );
         window.drop_database().await.expect("cleanup");
     }
 }
