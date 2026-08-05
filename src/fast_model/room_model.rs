@@ -16,7 +16,7 @@ use bevy_transform::components::Transform;
 use dashmap::{DashMap, DashSet};
 use glam::{Mat4, Vec3};
 use itertools::Itertools;
-use parry3d::bounding_volume::Aabb;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
@@ -58,8 +58,8 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("7997 全量房间计算没有产生任何成员边"))?;
 
     let element = RefnoEnum::from(first.member.replace('_', "/").as_str());
-    let coverage = survey_panel_tree_coverage(&rooms).await?;
-    recalc_element_membership(&option, &rooms, coverage, element).await?;
+    let panels = load_panel_index(&rooms).await?;
+    recalc_element_membership(&option, &rooms, &panels, element).await?;
 
     let mut response = SUL_DB.query(sql).await?.check()?;
     let incremental: Vec<Edge> = response.take(0)?;
@@ -136,6 +136,19 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         room_panel_map.rooms.len(),
         exclude_panel_refnos.len()
     );
+
+    // 整间分支的成员候选取自空间树（少量面板 × 大量构件，这才是树的正当用途；元素
+    // 分支那个反方向的依赖已经拆掉，见 [`PanelIndex`]）。树空着时每块面板都会算出
+    // 0 个成员，而这套写入是先清后写——一次启动就足以把整库房间归属抹平。判不了就
+    // 不写，与元素分支同一个口径。调用点（`lib.rs`）已把失败降级为告警，启动不受
+    // 影响；存量归属边陈旧也比被清成空强，它下一轮还能收敛回来。
+    if !room_panel_map.rooms.is_empty() && GLOBAL_AABB_TREE.read().await.is_empty() {
+        anyhow::bail!(
+            "空间树是空的，{} 间在册房间的成员判不了：跳过本次全量重建，不清掉存量房间\
+             归属边。先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）",
+            room_panel_map.rooms.len()
+        );
+    }
 
     // 单块面板失败不中断整轮：每块面板的写入是自己的事务、先清后写、可重放，
     // 一个坏面板拖垮全量重建只会让其余 123 间房也拿不到结果。失败逐条收集，
@@ -677,65 +690,104 @@ pub async fn recalc_panel_membership(
     Ok(members.keys().copied().collect())
 }
 
-/// 在册面板在空间树上的覆盖情况——元素分支据此区分「不在任何房间里」与「判不了」。
+/// 一轮 drain 复用的在册面板几何：元素分支的候选面板从这里选，**不经过空间树**。
 ///
-/// 两条重算分支对空间树的依赖方向是**相反**的：整间分支拿面板自己的包围盒去树上捞
-/// 成员，面板在不在树上都算得出来；元素分支只能反过来，在树上按 `noun == "PANE"` 找
-/// 候选（ADR-010 §6 两树合一）。于是存在一种只打中增量的坏状态——树里一块在册面板都
-/// 没有（空树、`accel_tree.bin` 来自没生成过结构库的那一次、或数量对账没触发重建）：
-/// 启动时的全量重建照样写得出 `room_relate`，而**每一个**元素任务都会捞不到候选，把
-/// 该构件的存量归属边按「不属于任何房间」清掉，且任务算成功、队列行删除、日志一行
-/// 没有。rs-core 的 `load_aabb_tree` 注释记的就是这个失效模式。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PanelTreeCoverage {
-    /// 在册面板数：属于命名合规房间、能写出 `room_relate` 边的那些。
-    pub registered: usize,
-    /// 其中在空间树上确实有条目的。
-    pub in_tree: usize,
+/// 为什么不用树：两条重算分支对树的依赖方向是相反的。整间分支拿面板自己的包围盒去
+/// 树上捞成员，面板在不在树上都算得出来；元素分支反过来要在树上按 `noun == "PANE"`
+/// 找候选，于是多出一个只打中增量的前提——树里得有在册面板。那个前提破了（空树、
+/// `accel_tree.bin` 来自没生成过结构库的那一次、数量对账放行、或没走 `run_app` 那次
+/// 对账）时，启动的全量重建照样写得出 `room_relate`，而每一个元素任务都会捞不到候选，
+/// 把该构件的存量归属边按「不属于任何房间」清掉——静默、无日志、任务还算成功。
+///
+/// 在册面板只有百来块（本项目 124 间房 / 147 块），一次 `query_insts` 就能整轮复用，
+/// 于是这个前提可以直接不要：候选改为在库里的面板包围盒上做相交筛选，与整间分支同
+/// 一个数据源、同一个相交关系，只是反着问。代价是候选筛选从 R 树的 O(log n) 变成
+/// 面板数的线性扫描，在这个量级上是噪音；换来的是元素分支与树彻底解耦。
+///
+/// 顺带省掉原来每个元素任务各发一次的候选面板 `query_insts`。
+#[derive(Default)]
+pub struct PanelIndex {
+    entries: Vec<PanelEntry>,
+    /// 与 `entries` 同序的世界包围盒，交集筛选用。
+    boxes: Vec<Aabb>,
 }
 
-impl PanelTreeCoverage {
-    /// 元素分支能不能相信「一块候选面板都没捞到」这个结果。
-    ///
-    /// 一间在册房间都没有时也算可信：那种配置下本来就写不出任何边，空集是对的。
-    pub fn can_trust_empty_candidates(&self) -> bool {
-        self.registered == 0 || self.in_tree > 0
+/// 一块在册面板的一条实例（同一个 refno 可能有多条 `inst_relate` 行）。
+struct PanelEntry {
+    panel: RefnoEnum,
+    room_num: String,
+    inst: GeomInstQuery,
+}
+
+/// 候选筛选（纯函数）：与构件世界包围盒相交的面板块下标。
+///
+/// 相交口径必须与整间分支一致——那边走 rstar 的 `locate_in_envelope_intersecting`，
+/// 与 parry 的 `Aabb::intersects` 同样是闭区间（贴面算相交）。
+fn intersecting_panel_slots(panel_boxes: &[Aabb], element_aabb: &Aabb) -> Vec<usize> {
+    panel_boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, panel)| panel.intersects(element_aabb))
+        .map(|(slot, _)| slot)
+        .collect()
+}
+
+impl PanelIndex {
+    /// 在册且几何可用的面板块数。为 0 时元素分支算出来的必然是空集——那与全量重建
+    /// 一致（那些面板在整间分支里同样一个成员都算不出来），但值得说一声。
+    pub fn usable_panels(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn candidates(&self, element_aabb: &Aabb) -> Vec<&PanelEntry> {
+        intersecting_panel_slots(&self.boxes, element_aabb)
+            .into_iter()
+            .map(|slot| &self.entries[slot])
+            .collect()
     }
 }
 
-/// 量一次在册面板的空间树覆盖率：一次树遍历，**按轮调用**。
+/// 一次查齐在册面板的几何，**按轮调用**。
 ///
-/// 与 [`load_room_panel_map`] 同一个理由——放进每个元素任务里各遍历一遍整棵树，
-/// 一轮几十个任务就会被它拖垮。
-pub async fn survey_panel_tree_coverage(rooms: &RoomPanelMap) -> anyhow::Result<PanelTreeCoverage> {
-    let registered: HashSet<RefU64> = rooms
+/// 与 [`load_room_panel_map`] 同一个理由：每个元素任务各查一遍，一轮几十个任务就会被
+/// 它拖垮。
+pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex> {
+    let registered: Vec<RefnoEnum> = rooms
         .rooms
         .iter()
-        .flat_map(|room| room.panels.iter())
-        .map(|panel| panel.refno())
+        .flat_map(|room| room.panels.iter().copied())
+        .unique()
         .collect();
     if registered.is_empty() {
-        return Ok(PanelTreeCoverage::default());
+        return Ok(PanelIndex::default());
     }
-    load_aabb_tree().await?;
-    let tree = GLOBAL_AABB_TREE.read().await;
-    let in_tree: HashSet<RefU64> = tree
-        .tree
-        .iter()
-        .filter(|bbox| bbox.noun == "PANE" && registered.contains(&bbox.refno))
-        .map(|bbox| bbox.refno)
-        .collect();
-    Ok(PanelTreeCoverage {
-        registered: registered.len(),
-        in_tree: in_tree.len(),
-    })
+    let insts: Vec<GeomInstQuery> = aios_core::query_insts(&registered, true)
+        .await
+        .map_err(|error| anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len()))?;
+
+    let mut index = PanelIndex::default();
+    for inst in insts {
+        let Some(room_num) = rooms.room_num_of(inst.refno) else {
+            continue;
+        };
+        if !aabb_is_usable(&inst.world_aabb) {
+            continue;
+        }
+        index.boxes.push(inst.world_aabb);
+        index.entries.push(PanelEntry {
+            panel: inst.refno,
+            room_num: room_num.to_string(),
+            inst,
+        });
+    }
+    Ok(index)
 }
 
 /// 元素分支：一个构件动了，反向定位它落在哪些面板里（ADR-010 §2）。
 pub async fn recalc_element_membership(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
-    coverage: PanelTreeCoverage,
+    panels: &PanelIndex,
     element: RefnoEnum,
 ) -> anyhow::Result<()> {
     // 面板本身不参与归属。整间分支把**所有**面板排除在成员之外，反向路径必须同口径，
@@ -764,40 +816,21 @@ pub async fn recalc_element_membership(
     // 候选面板取自唯一那棵全局树并按 noun 过滤（ADR §6 两树合一），再与在册面板
     // 取交集——不在册的 PANE 没有房间号，写不出边。
     //
-    // 用库里的包围盒而不是树里那份：本任务正是「这个构件的包围盒变了」才入队的，
-    // 而入队点就是刷新包围盒的那一处，库与树在此刻同步。
-    load_aabb_tree().await?;
-    let candidates: Vec<RefnoEnum> = {
-        let tree = GLOBAL_AABB_TREE.read().await;
-        tree.locate_intersecting_bounds(&element_aabb)
-            .filter(|bbox| bbox.noun == "PANE")
-            .map(|bbox| RefnoEnum::from(bbox.refno))
-            .filter(|panel| rooms.room_num_of(*panel).is_some())
-            .collect()
-    };
+    // 候选面板：在册面板里包围盒与本构件相交的那些，取自本轮加载好的库内几何
+    // （[`PanelIndex`]），不经过空间树。构件这一侧的包围盒同样取自库——本任务正是
+    // 「这个构件的包围盒变了」才入队的，而入队点就是刷新包围盒的那一处。
+    let candidates = panels.candidates(&element_aabb);
     if candidates.is_empty() {
-        // 紧接着的那次写入会删掉该构件**全部**存量归属边，所以「捞不到候选」必须先
-        // 分清成因：树是健康的就是真的不在任何房间里（与全量一致，照常收敛）；树里
-        // 一块在册面板都没有，那是判不了，按判不了处理——与本函数下面对网格失败的
-        // 口径相同，保留任务重试，绝不静默清边（ADR-010 §8）。
-        if !coverage.can_trust_empty_candidates() {
-            anyhow::bail!(
-                "空间树上一块在册面板都没有（在册 {} 块），构件 {element} 的候选面板判不了：\
-                 保留任务重试，不按「不属于任何房间」清边。先确认 accel_tree.bin 与库对账\
-                 （sync_aabb_tree_with_db）以及结构库是否已生成",
-                coverage.registered
-            );
-        }
+        // 这里的空集是可信的：候选取自库，而整间分支对这批面板算成员用的是同一份
+        // 数据、同一个相交关系，它同样不会把这个构件收进去。真正「判不了」的情形
+        // ——候选面板的网格读不出来——在下面单独处置，不会走到这条清边路径上。
         return write_element_room_relate(element, &[]).await;
     }
 
     // 一次取齐第二轮要用的实际几何点：候选面板通常只有一两块，为每块各查一次不值当。
-    let world_pts = element_world_points(element).await.map_err(|error| {
-        anyhow::anyhow!("构件 {element} 的几何点: {error:#}")
-    })?;
-    let panel_insts: Vec<GeomInstQuery> = aios_core::query_insts(&candidates, true)
+    let world_pts = element_world_points(element)
         .await
-        .map_err(|error| anyhow::anyhow!("查询 {element} 的候选面板实例失败: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
 
     let mesh_dir = db_option.get_meshes_path();
     let mut edges: HashMap<RefnoEnum, ElementRoomEdge> = HashMap::new();
@@ -805,11 +838,10 @@ pub async fn recalc_element_membership(
     // 全部入边再写回，静默跳过一块面板等于悄悄退掉该构件在这块面板的归属。
     // 任一网格失败或面板没有可用网格都中止写入并保留任务重试。
     let mut undecidable_panels: Vec<String> = Vec::new();
-    for panel_inst in &panel_insts {
-        let panel = panel_inst.refno;
-        let Some(room_num) = rooms.room_num_of(panel) else {
-            continue;
-        };
+    for candidate in &candidates {
+        let panel = candidate.panel;
+        let panel_inst = &candidate.inst;
+        let room_num = candidate.room_num.as_str();
         let mut usable_meshes = 0usize;
         let mut mesh_failures: Vec<String> = Vec::new();
         for inst in &panel_inst.insts {
@@ -1206,44 +1238,82 @@ mod tests {
         assert!(map.all_panels.contains(&unregistered));
     }
 
-    /// 「捞不到候选面板」什么时候可信（纯谓词）。
+    /// 候选筛选的相交口径（纯函数）：闭区间，贴面算相交。
     ///
-    /// 元素分支拿这个结论去删该构件**全部**存量归属边，判错的代价是无声的数据损坏。
+    /// 必须与整间分支一致——那边走 rstar 的 `locate_in_envelope_intersecting`，同样是
+    /// 闭区间。两边口径差一个等号，跨界构件就会在两条分支下得到不同答案，而 ADR-010
+    /// §9 的唯一硬标准正是「增量 == 全量」。
     #[test]
-    fn an_empty_candidate_set_is_only_trusted_when_the_tree_holds_panels() {
-        // 树上有在册面板：捞不到就是真的不在任何房间里，照常收敛成空集。
-        assert!(
-            PanelTreeCoverage {
-                registered: 124,
-                in_tree: 124
-            }
-            .can_trust_empty_candidates()
+    fn panel_candidates_are_selected_by_closed_interval_overlap() {
+        let box_of = |min: f32, max: f32| {
+            Aabb::new(
+                Point::new(min, 0.0, 0.0),
+                Point::new(max, 100.0, 100.0),
+            )
+        };
+        let panels = [box_of(0.0, 100.0), box_of(200.0, 300.0), box_of(90.0, 210.0)];
+
+        // 完全落在第一块里。
+        assert_eq!(intersecting_panel_slots(&panels, &box_of(10.0, 20.0)), vec![0]);
+        // 跨界：第一块与第三块都要收进来，多归属正是靠这个。
+        assert_eq!(
+            intersecting_panel_slots(&panels, &box_of(95.0, 105.0)),
+            vec![0, 2]
         );
-        // 只覆盖到一部分也算可信：树是活的，这个构件确实没命中。
-        assert!(
-            PanelTreeCoverage {
-                registered: 124,
-                in_tree: 1
-            }
-            .can_trust_empty_candidates()
+        // 贴面：闭区间，算相交。
+        assert_eq!(
+            intersecting_panel_slots(&panels, &box_of(100.0, 150.0)),
+            vec![0, 2]
         );
-        // 一块都不在树上：判不了，不是「不在任何房间里」。
-        assert!(
-            !PanelTreeCoverage {
-                registered: 124,
-                in_tree: 0
-            }
-            .can_trust_empty_candidates()
-        );
-        // 一间在册房间都没有：那种配置下本来就写不出边，空集是对的。
-        assert!(PanelTreeCoverage::default().can_trust_empty_candidates());
+        // 谁都不挨着。
+        assert!(intersecting_panel_slots(&panels, &box_of(400.0, 500.0)).is_empty());
+        // 一块在册面板都没有时不会凭空造出候选。
+        assert!(intersecting_panel_slots(&[], &box_of(0.0, 1.0)).is_empty());
     }
 
-    /// 元素分支的空候选集必须先过覆盖率这一关，再落到写入。
+    /// 全量重建在空树上必须拒跑，而不是把整库房间归属清成空。
     ///
-    /// 顺序反了（先写、后判）等于没判：那条 DELETE 已经把存量归属边带走了。
+    /// 它是先清后写的：树空着时每块面板都算出 0 个成员，一次启动就抹平整库。这与元素
+    /// 分支「判不了就不改写」是同一条纪律，只是方向相反——那边缺的是面板，这边缺的是
+    /// 构件。
     #[test]
-    fn the_element_branch_refuses_to_clear_edges_it_could_not_decide() {
+    fn the_full_rebuild_refuses_to_run_against_an_empty_tree() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("pub async fn build_room_relations(")
+            .expect("build_room_relations 必须存在")
+            .1
+            .split_once("\n/// 渲染一块面板的房间归属写入")
+            .expect("全量重建之后是 render_room_relate_write")
+            .0;
+
+        let guard_at = body
+            .find("GLOBAL_AABB_TREE.read().await.is_empty()")
+            .expect("空树必须挡在重建之前");
+        let bail_at = body[guard_at..]
+            .find("anyhow::bail!")
+            .map(|at| guard_at + at)
+            .expect("空树必须上抛，交给调用点降级为告警");
+        let recalc_at = body
+            .find("cal_room_refnos(")
+            .expect("重建必须调 cal_room_refnos");
+        let write_at = body
+            .find("save_room_relate(")
+            .expect("重建必须写 room_relate");
+
+        assert!(
+            bail_at < recalc_at && bail_at < write_at,
+            "空树判定必须排在任何一次重算与写入之前: {body}"
+        );
+    }
+
+    /// 元素分支不许再碰空间树。
+    ///
+    /// 整间分支拿面板包围盒去树上捞成员，面板在不在树上都算得出来；元素分支一旦反过来
+    /// 依赖「树里有 PANE 条目」，就多出一个只打中增量的前提，破了会静默清掉存量归属边
+    /// （issue #7 的主嫌）。候选改从库里的面板包围盒选之后，这个前提不该再长回来。
+    #[test]
+    fn the_element_branch_does_not_depend_on_the_spatial_tree() {
         let source = include_str!("room_model.rs");
         let body = source
             .split_once("pub async fn recalc_element_membership(")
@@ -1253,24 +1323,13 @@ mod tests {
             .expect("元素分支之后是 element_world_points")
             .0;
 
-        let empty_at = body
-            .find("if candidates.is_empty() {")
-            .expect("空候选集分支必须存在");
-        let guard_at = body
-            .find("if !coverage.can_trust_empty_candidates() {")
-            .expect("空候选集必须先问覆盖率可不可信");
-        let bail_at = body[guard_at..]
-            .find("anyhow::bail!")
-            .map(|at| guard_at + at)
-            .expect("不可信时必须上抛，保留任务重试");
-        let write_at = body[empty_at..]
-            .find("write_element_room_relate(element, &[])")
-            .map(|at| empty_at + at)
-            .expect("可信时才落空集写入");
-
         assert!(
-            empty_at < guard_at && guard_at < bail_at && bail_at < write_at,
-            "判不了必须在清边之前上抛: {body}"
+            !body.contains("GLOBAL_AABB_TREE") && !body.contains("load_aabb_tree"),
+            "元素分支的候选必须来自 PanelIndex，不能回到空间树: {body}"
+        );
+        assert!(
+            body.contains("panels.candidates(&element_aabb)"),
+            "候选必须走本轮加载的在册面板索引: {body}"
         );
     }
 

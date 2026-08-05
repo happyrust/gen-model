@@ -798,8 +798,8 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         // 各扫一遍是承受不起的。
         ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
             let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
-            let coverage = room_model::survey_panel_tree_coverage(&rooms).await?;
-            run_room_task(&mgr.db_option, &rooms, coverage, item.action, refno)
+            let panels = room_model::load_panel_index(&rooms).await?;
+            run_room_task(&mgr.db_option, &rooms, &panels, item.action, refno)
                 .await
                 .map(|_| ())
         }
@@ -810,7 +810,7 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
 async fn run_room_task(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
-    coverage: room_model::PanelTreeCoverage,
+    panels: &room_model::PanelIndex,
     action: ModelWorkAction,
     target: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
@@ -819,7 +819,7 @@ async fn run_room_task(
             room_model::recalc_panel_membership(db_option, rooms, target).await
         }
         ModelWorkAction::RoomRecalcElement => {
-            room_model::recalc_element_membership(db_option, rooms, coverage, target).await?;
+            room_model::recalc_element_membership(db_option, rooms, panels, target).await?;
             Ok(HashSet::new())
         }
         other => anyhow::bail!("{} 不是房间任务", other.as_str()),
@@ -1218,15 +1218,14 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         .partition(|job| job.action == ModelWorkAction::RoomRecalcPanel);
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
-    // 元素分支的候选面板只能从空间树上取，量一次覆盖率整轮复用（见
-    // [`room_model::PanelTreeCoverage`]）。树里一块在册面板都没有时元素分支会拒绝把
-    // 「捞不到候选」当成「不在任何房间里」，宁可失败重试也不静默清掉存量归属边。
-    let coverage = room_model::survey_panel_tree_coverage(&rooms).await?;
-    if !coverage.can_trust_empty_candidates() {
+    // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
+    // 候选面板从这里选，不再依赖空间树里有没有 PANE 条目。
+    let panel_index = room_model::load_panel_index(&rooms).await?;
+    if panel_index.usable_panels() == 0 && !rooms.rooms.is_empty() {
         println!(
-            "空间树上一块在册面板都没有（在册 {} 块）：本轮元素任务不会改写房间归属，\
-             等空间树与库对账重建后重试",
-            coverage.registered
+            "{} 间在册房间里没有一块面板有可用几何：本轮元素任务只会把归属收敛成空集，\
+             与全量重建一致；若这不符合预期，先确认结构库是否已生成",
+            rooms.rooms.len()
         );
     }
     let mut report = DrainReport::default();
@@ -1234,7 +1233,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
     for job in &panels {
-        match run_room_job(db_option, &rooms, coverage, job).await {
+        match run_room_job(db_option, &rooms, &panel_index, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -1288,7 +1287,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, &rooms, coverage, job).await {
+            match run_room_job(db_option, &rooms, &panel_index, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
@@ -1418,14 +1417,14 @@ async fn load_absorption_closure_inputs(
 async fn run_room_job(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
-    coverage: room_model::PanelTreeCoverage,
+    panels: &room_model::PanelIndex,
     job: &PendingModelWork,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let refno = RefnoEnum::from(
         RefU64::from_str(&job.target_refno)
             .map_err(|_| anyhow::anyhow!("invalid pending refno {}", job.target_refno))?,
     );
-    run_room_task(db_option, rooms, coverage, job.action, refno).await
+    run_room_task(db_option, rooms, panels, job.action, refno).await
 }
 
 #[cfg(test)]
