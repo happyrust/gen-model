@@ -17,4 +17,4 @@ pub mod snapshot;
 
 pub use compare::{CompareOptions, CompareSummary, default_report_path};
 pub use import::{ImportOptions, default_snapshot_path, import_and_save, import_rvm};
-pub use snapshot::{RvmGeometry, RvmMember, RvmSnapshot, SnapshotMeta};
+pub use snapshot::{ExportScope, RvmGeometry, RvmMember, RvmSnapshot, SnapshotMeta};

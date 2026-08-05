@@ -74,8 +74,8 @@ cargo test --lib -- --ignored --exact <测试名> --nocapture
 | **G0 可执行性** | 升 `aios_core` 钉版到带 `DB_OPTION_FILE` 的 rev（审核 N4）；建 `db_options/` 放副本/一次性 NS 配置 | 任取一个 `live_*` 用 `$env:DB_OPTION_FILE` 定靶跑通 | 一切 L2/L3 | **依赖已升**（`bba03d7a` + 上游 `65caaef`/`1dd7fd4`，依赖图收敛到单一 `aios_core`）；**退出条件的那次定靶运行仍欠**，`db_options/` 也还没建 |
 | **G1 数据阶段红转绿** | BL-01…04 + WD-01…06 落地（先红后绿） | `cargo test --lib` 全绿且新增用例逐条有「回退即红」记录 | 模型阶段的基线依赖 | **WD 全绿**（`c35e4ece`，14 条单测）；**BL-01/02/03 的 L0 半边绿**（`111186b2`）；**BL-04（SC-002）仍红**，它本来就是 L2 对拍 |
 | **G2 队列健壮性** | QW-01（饿死回归，现红）+ QW-02…04 实机 | 副本库上排队批次在积压消化期间按期开跑 | 队列阶段全部实机项 | **L0 半边绿**（`4f46ebcc`：空闲轮分类 / 阻断按 dbnum 收窄 / 房间轮 10 分钟地板，各配回退即红测试）；**实机半边全部未跑** |
-| **G3 模型阶段实库** | S10/S11 的 live 系列 + D-01…D-15 的 B/C 级复跑 | 每条有可复现通过记录 + 日志归档 | 视觉闭环 | 未动 |
-| **G4 视觉闭环** | D-01…D-15 的 plant-ui before/queue/after | 每例三图 + 重复执行无抖动 | 发版宣称 | 未动；D-12 另受 plant-ui B1 阻塞 |
+| **G3 模型阶段实库** | S10/S11 的 live 系列 + D-01…D-15 的 B/C 级复跑 | 每条有可复现通过记录 + 日志归档 | 视觉闭环 | **进行中**：补充锚点 DG-01（7997 DAMP DESP DirectGeometry）已通过 B/C/L2/L3；D-01…D-15 仍待复跑 |
+| **G4 视觉闭环** | D-01…D-15 的 plant-ui before/queue/after | 每例三图 + 重复执行无抖动 | 发版宣称 | **进行中**：DG-01 的 plant-ui 属性刷新和三维加载已通过，但同一轮 before/queue/repeat 四图未齐，尚不计严格 V 级；D-12 另受 plant-ui B1 阻塞 |
 
 顺序理由：G0 之前点亮实库测试 = 把「测试失败」和「夹具没配对」混在一起（07-27
 计划原话，至今成立）；G1 的基线修复不先做，模型阶段在 SYS meta 库上永远带着
@@ -162,6 +162,8 @@ WD 系列跑通前，`project_paths` 改动不应提交——这是 spec 001 FR-
   `IU-S10`（重生成）、`IU-S11`（补偿）、`IU-S13`（CATA 闭包）；
 - D-01～D-15 场景矩阵（07-29 报告 §5）：**后端 B/C 级已全部通过一轮**，
   plant-ui 的 V 级全部待补；
+- 补充锚点 DG-01（7997 DAMP DESP DirectGeometry）：2026-08-05 已通过 B/C/L2/L3
+  与 plant-ui 功能复测，严格 V 级仅欠同一轮四图证据；
 - noun 等价类抽样按 matrix-v2 的 25 类，未抽到的只享「同类推定」（口径不变）。
 
 ### 4.2 模型阶段当前的已知阻塞
@@ -185,6 +187,7 @@ WD 系列跑通前，`project_paths` 改动不应提交——这是 spec 001 FR-
 | MG-04 | 合批收口失败不给成功根记失败（C2）：批量生成成功 + 人为断开收口，行留在表里、attempts 不涨、下一轮幂等收口 | L2 | 待跑（L0 守护已绿） |
 | MG-05 | SCOM.GMRE 从存储属性解析（不依赖 legacy `->GMRE` 边）：BEND `24384/22456` | L2 | 已写（`#[ignore]`），等 G0 定靶 |
 | MG-06 | 房间归属增量：AABB 变更集触发、整间/元素两分支、同轮吸收封闭性 | L0 绿 + L2 | L2 待跑（ADR-010 D12 残余缺口记为已知） |
+| DG-01 | 7997 DAMP `24381/100819`：`DESP` 宽度 1000→1400，BRAN `24381/100817` 重生成；属性、网格尺度、AABB 自动刷新；恢复后精确回基线 | L2/L3 + V | **B/C/L2/L3 与 plant-ui 功能绿**；严格 V 级欠同一轮 before/queue/repeat 四图 |
 
 ### 4.4 视觉闭环（V 级，plant-ui）
 
@@ -201,6 +204,11 @@ WD 系列跑通前，`project_paths` 改动不应提交——这是 spec 001 FR-
 
 D-12（缺模型首次显示）在 M-B2 修复前标「客户端接线阻塞」，不允许用
 「服务端接口通过」顶替（07-29 §7.5 原话，仍然有效）。
+
+2026-08-05 新增 DG-01 DirectGeometry 回归锚点：session 91 执行和 plant-ui
+自动刷新通过，session 92 恢复基线；after 证据见
+`output/plant-ui-increment/D12-session91-direct-geometry-visible-offscreen.png`。由于同一轮
+before/queue/repeat 四图未齐，按本节口径暂不标成严格 V 级完成。
 
 ---
 

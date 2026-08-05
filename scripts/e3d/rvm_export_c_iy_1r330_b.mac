@@ -9,15 +9,23 @@ Design Export 表单点 Run 时生成并执行的临时宏，这里把它的原�
 驱动 expdri.so 取自 %AVEVA_DESIGN_DFLTS%/export/driver-config 中
 唯一的 Review 驱动条目（EXECUTABLE\expdri.so）。
 
-口径：全导（保温 + 障碍一并输出），对拍侧按 geo_type 分桶豁免。
+口径：窄口径（只导实体几何），与对拍器 L3 的 AABB 判定同口径。
+
+曾经是全导（insu + obst 一并输出），指望对拍侧按 geo_type 分桶豁免。行不通：
+预留净空是寄生在真实构件**内部**的一个图元（catalogue 里 OBST=1 的 SBOX），
+在 RVM 流里就是个普通 box，GeometryType 仍是 Primitive，成员级的分桶豁免
+筛不掉它；成员 AABB 照单全收，于是 17 个电缆槽各自多出 100mm 的预留净空，
+被逐个报成 AABB 超限。导出时就不产出它，比事后去猜哪个盒子是净空可靠得多。
+
+改了口径必须重导 RVM，并用 `--scope narrow` 重新 import 快照。
 ------------------------------------------------------------------------
 $)
 
 $P RVM-EXPORT-BEGIN
 
-$* ---- 表现设置：保温/障碍/管子全开，隐含管段各自独立容器 ----
-repre insu on transl 0
-repre obst on transl 0
+$* ---- 表现设置：只导实体几何；管子照旧，隐含管段各自独立容器 ----
+repre insu off
+repre obst off
 repre tube on
 export implied tube into separate containers
 

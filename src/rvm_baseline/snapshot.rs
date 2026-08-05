@@ -14,6 +14,42 @@ use anyhow::{Context, Result};
 /// 快照文件格式版本。结构不兼容时递增，compare 侧据此拒绝旧快照。
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+/// 基准 RVM 是按哪种口径导出的。
+///
+/// L3 的成员 AABB 判定只在窄口径下成立：宽口径把保温与障碍/预留体一并写进 RVM，
+/// 而生成侧有意不产出它们，两边比的不是同一个东西。这件事过去只写在
+/// [`super::compare`] 的模块注释里，判定逻辑照着它走却从不校验，而
+/// `scripts/e3d/rvm_export_c_iy_1r330_b.mac` 恰好是宽口径导的——一个电缆槽的
+/// 预留净空（catalogue 里 `OBST=1` 的那个 SBOX）于是被算成了 100mm 的几何缺陷。
+/// RVM 流里的预留体就是个普通 box，`GeometryType` 分不出来，所以口径只能由导出
+/// 方声明、以数据形式随快照走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportScope {
+    /// `repre insu off` + `repre obst off`：只有实体几何。
+    Narrow,
+    /// `repre insu on` + `repre obst on`：含保温与障碍/预留体。
+    Wide,
+    /// 未声明，含本字段引入之前的旧快照。按判不了处理，不得放行。
+    #[default]
+    Unknown,
+}
+
+impl ExportScope {
+    /// 成员 AABB 能不能直接与生成侧比。
+    pub fn allows_aabb_verdict(self) -> bool {
+        matches!(self, ExportScope::Narrow)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExportScope::Narrow => "narrow",
+            ExportScope::Wide => "wide",
+            ExportScope::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RvmSnapshot {
     pub meta: SnapshotMeta,
@@ -33,8 +69,15 @@ pub struct SnapshotMeta {
     pub geometry_count: usize,
     pub resolved: usize,
     pub unresolved: usize,
+    /// 导出这份 RVM 时用的口径，L3 的 AABB 判定资格由它决定（见 [`ExportScope`]）。
+    /// 旧快照没有这个字段，反序列化后落到 `Unknown`，对拍侧据此拒绝给出 PASS。
+    #[serde(default)]
+    pub export_scope: ExportScope,
     /// 按 RVM GeometryType 分桶计数：Primitive / Obstruction / Insulation。
     /// 对拍侧的豁免规则依赖这个分桶。
+    ///
+    /// 注意它只在**成员**粒度上有效：预留净空这类图元是寄生在真实构件内部的，
+    /// 与实体几何同为 `Primitive`，靠这个分桶筛不掉，只能靠 `export_scope`。
     pub geo_type_counts: BTreeMap<String, usize>,
     /// bbox_world 退化为一个点的几何数。rvm-rs 对部分带 transform 的原语
     /// 会解出全零矩阵，这类包围盒不能用于空间对拍，只能记账。

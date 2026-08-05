@@ -128,7 +128,15 @@ AMS 增量更新的核心链路已经完成较广覆盖：
 | D-14 | 后端中断/前端重开 | 队列和水位恢复通过 | 待验证任务队列降级、重连和最终刷新 | 后端通过，前端待复验 |
 | D-15 | 重复执行幂等 | `pe_owner`、finalize 和重复执行通过 | 待拍第二次执行无树/几何抖动 | 后端通过，前端待复验 |
 
-结论：切换到 plant-ui 后，当前没有任何场景可以直接标记为新的 D 级闭环。D-11 的旧版截图作为基线保留，但必须用 plant-ui 重拍。
+结论（截至 2026-07-29）：切换到 plant-ui 后，当时没有任何场景可以直接标记为新的 D 级闭环。D-11 的旧版截图作为基线保留，但必须用 plant-ui 重拍。
+
+### 5.1 2026-08-05 plant-ui 补充复测
+
+| 编号 | 场景 | 实测结果 | 证据状态 | 当前状态 |
+|---|---|---|---|---|
+| DG-01 | 7997 DAMP `24381/100819` 的 `DESP` 宽度 `1000 → 1400`（DirectGeometry） | session 91 预览命中 1 个模型影响项并重生成 BRAN `24381/100817`；任务成功、pending=0；`geo_relate` 保持 5，网格尺度和 AABB 随宽度变化；plant-ui 属性自动刷新并显示 1 个目标、5 个网格实例；session 92 恢复到 1000 后 AABB 精确回到基线 | [after 三维截图](../output/plant-ui-increment/D12-session91-direct-geometry-visible-offscreen.png)及运行日志已保存；同一轮 before/queue/repeat 四图未齐 | **B/C/L2/L3 与 plant-ui 功能通过；严格 V 级待补证据** |
+
+本场景是 D-01～D-15 之外新增的 DirectGeometry 回归锚点，不抵扣原矩阵中仍待 plant-ui 复验的用例。
 
 ## 6. 自动化测试与当前复测状态
 
@@ -348,7 +356,7 @@ rtk cargo test --workspace
 1. 修复 `manual_update.rs` 测试中的 `revision` 字段契约，恢复当前分支完整单元测试可运行。
 2. 启动指定的 `bin\surreal.exe`，重新执行 7997/7999/8000 完整性脚本并保存结果。
 3. 先运行 plant-ui `cargo test --workspace`，固化新前端自动化基线。
-4. 为 D-01～D-15 补齐 plant-ui 的 before/queue/after 证据；旧版截图不抵扣新前端验收。
+4. 为 D-01～D-15 补齐 plant-ui 的 before/queue/after 证据；DG-01 功能已通过但仍需补齐同一轮 before/queue/repeat；旧版截图不抵扣新前端验收。
 5. 为 7999 增加至少一组真实 E3D 增、删、改用例，而不只验证基线完整性。
 6. 补齐 SUPPO 参数修改、FLOOR/PAVE 结构属性修改和 GENSEC 新增的真实 E3D 会话截图。
 7. 验证并按需修复 plant-ui 的“显示缺失模型 → `/api/v1/model/ensure`”客户端接线。
@@ -362,6 +370,7 @@ rtk cargo test --workspace
 - 主要管道、设备、结构和目录依赖类型已有真实数据库生成证据。
 - E3D 增、删、改、移动、重排、名称修改和共享引用级联均已有实测。
 - 队列恢复、水位、重复执行和模型删除/替换机制已有验证。
+- DG-01（7997 DAMP DESP DirectGeometry）的 E3D 会话、增量执行、模型质量变化、plant-ui 属性刷新和三维加载均已通过实机复测。
 
 当前仍不能确认：
 
@@ -369,3 +378,4 @@ rtk cargo test --workspace
 - 7999 已覆盖真实 E3D 增删改。
 - 2026-07-29 当前工作树完整测试全绿。
 - plant-ui 首次显示缺失模型时会自动调用 `/api/v1/model/ensure`。
+- DG-01 已满足严格 V 级四图证据要求；当前缺同一轮 before/queue/repeat 图。

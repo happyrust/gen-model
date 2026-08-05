@@ -1,6 +1,6 @@
 use crate::fast_model::query_gm_params;
 use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
-use aios_core::expression::resolve::{resolve_axis_param, SCOM_INFO_MAP};
+use aios_core::expression::resolve::{SCOM_INFO_MAP, resolve_axis_param};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{PlinParam, ScomInfo};
 use aios_core::{CataContext, RefU64, RefnoEnum};
@@ -114,7 +114,47 @@ mod tests {
         aios_core::init_surreal().await.unwrap();
 
         let info = get_or_create_scom_info("13244_56726".into()).await.unwrap();
-        assert!(!info.gm_params.is_empty(), "SCOM.GMRE did not resolve geometry");
+        assert!(
+            !info.gm_params.is_empty(),
+            "SCOM.GMRE did not resolve geometry"
+        );
+    }
+
+    /// 目录把几何挂在哪一层，这套 ACP1000 电缆槽里有两种形态，两种都得解得出来。
+    ///
+    /// 槽体 `/ACP1000-TFVL` 的 CATE 与 SCOM 指向同一个几何集；带角度的弯头
+    /// （TBL60/TBR60/TBL90/TBR90）的 CATE 上 `GMRE` 是 `pe:0_0`，几何只挂在
+    /// SCOM 上。2026-08-05 的 RVM 对拍量到这两种形态的结果天差地别：槽只差一个
+    /// 导出口径，角度弯头的包围盒体积却与 E3D 基准差 67–97 倍。差异出在哪一步
+    /// 尚未定论，但「解析不出来」这一步必须先排除掉，否则每次都要重查一遍。
+    #[tokio::test]
+    #[ignore = "requires the configured AvevaMarineSample SurrealDB"]
+    async fn both_catalogue_shapes_resolve_geometry_from_the_scom() {
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        aios_core::init_surreal().await.unwrap();
+
+        // (SCOM refno, 名称, 该 SCOM 的几何集在库里的子节点数)
+        let cases = [
+            ("13244_51903", "/ACP1000-TFVL-100", 18),
+            ("13244_56726", "/ACP1000-TBR-100", 28),
+            ("13244_55889", "/ACP1000-TBR60-100X150", 37),
+            ("13244_57306", "/ACP1000-TBL60-100X150", 37),
+            ("13244_55598", "/ACP1000-TBR90-100X150", 37),
+            ("13244_57013", "/ACP1000-TBL90-100X150", 37),
+        ];
+
+        for (refno, name, gmse_children) in cases {
+            let info = get_or_create_scom_info(refno.into()).await.unwrap();
+            println!(
+                "{name:<24} gtype={:<5} gm_params={:<3} (几何集子节点 {gmse_children})",
+                info.gtype,
+                info.gm_params.len()
+            );
+            assert!(
+                !info.gm_params.is_empty(),
+                "{name} 的几何没解出来：几何集有 {gmse_children} 个子节点"
+            );
+        }
     }
 }
 

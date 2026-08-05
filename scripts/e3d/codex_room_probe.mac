@@ -1,0 +1,38 @@
+-- Read-only probe for the issue #7 room chain on AvevaMarineSample.
+--
+-- 24381/35842 = FRMW /1RX-RM05-R512, the only room whose panel list contains
+-- 24381/35844, the very panel that issue #7's deleted edge pointed at
+-- (room_relate id 24381_35844_24383_66460).
+--
+-- Nothing here mutates the project: no attribute write, no SAVEWORK.
+--
+-- Keep every "--" at the start of its own line: PML treats it as a comment
+-- opener anywhere on a line, so "$P --- x ---" leaves $P with no argument and
+-- fails the whole macro.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_room_probe.log" OVER
+$P CODEX_ROOM_PROBE_BEGIN
+$P SECTION_ROOM_FRMW_24381_35842
+=24381/35842
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q MEMB
+$P SECTION_PANEL_PANE_24381_35844
+=24381/35844
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+Q MEMB
+$P SECTION_DAMP_24381_100819
+=24381/100819
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+$P CODEX_ROOM_PROBE_DONE
+ALPHA LOG END

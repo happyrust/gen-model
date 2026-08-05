@@ -1,0 +1,173 @@
+# 一次性定靶配置：8009 上的 site-8000 副本（RVM 对拍 / MG-05 用）。
+# 用法：$env:DB_OPTION_FILE = "db_options/DbOption-e2e-8009"（不带 .toml 后缀）
+# 基线取自 HEAD 的 DbOption.toml，只覆盖连接与执行范围，不继承工作区的台架旋钮。
+#同步文件配置
+# ── 配置变更追踪 ─────────────────────────────────────────────────────────────
+# 与最后一次提交基线（7bba5fd4，2025-06-30）的完整差异清单见
+# docs/2026-08-04_dboption-config-changelog.md；新增键均带【新增 日期】标注。
+# ─────────────────────────────────────────────────────────────────────────────
+# 非CATA增量测试：数据已解析，跳过重新解析
+# Web 服务冒烟验证：关闭启动期全量同步（原值 true，gen-model-9 全量DESI复验遗留）
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+#【变更 2026-07-27】true→false：生产增量改为启动重扫后持续监听；2026-07-29 曾临时
+# 开回 true（aabbidx 轮），2026-08-04 web 冒烟验证再次关闭。
+sync_live = false
+#【变更 2026-07-27】false→true：增量重解析允许覆盖既有库文件记录。
+replace_dbs = true
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置
+#【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
+project_path = "D:/AVEVA/Projects/E3D3.1"
+# project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+# included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+#【变更 2026-07-27】移除 SCB：E3D3.1 下未部署该工程，避免扫描报错。
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+#project_dirs = ["AvevaMarineSample"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+surreal_ns = 1516
+module = "DESI"
+#是否生成模型数据
+#【变更 2026-07-27】true→false：非CATA增量监听模式，启动不做全量重算，
+# 靠 watcher 增量刷新（增量/按需路径内部自行强制 gen_model/gen_mesh=true）。
+gen_model = false
+gen_mesh = false
+replace_mesh = false
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#是否生成房间树
+#【变更 2026-07-29】false→true：配合房间增量与空间索引（aabbidx）验证启用。
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+#【变更 2026-07-29】16→4：ams7997 全量生成 16 并发曾在 save_instance_data
+# 撞 rocksdb 事务写冲突（empty127 轮），降到 4。
+gen_model_batch_size = 4
+
+build_cate_relate = false
+
+#【新增 2026-07-25】delivery_unit_types / append_delivery_unit_types（当前未启用，用默认集合）
+# 最小交付单元类型（增量 / 手动 / 按需生成共用的生成根口径），随"批量根重生成/
+# 交付单元"能力引入（docs/adr/ADR-012、docs/specs/manual-model-update.md）。
+# 不配置时使用默认集合 ["BRAN", "HANG", "SUPPO", "EQUI"]
+# delivery_unit_types      完全取代默认集合；写成 [] 表示不使用交付单元，全部按正常颗粒生成
+# append_delivery_unit_types  在默认集合之外追加，仅在未配置 delivery_unit_types 时生效
+# 两者都会 trim + 转大写 + 去重，且拒绝 WORL/WORLD/SITE/ZONE 和管件 FTUB
+# delivery_unit_types = ["BRAN", "HANG", "SUPPO", "EQUI"]
+# append_delivery_unit_types = ["PIPE"]
+
+#meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+#port = "4000"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100 #mysql 批量插入的数量
+
+
+#版本数据库服务配置
+v_ip = "localhost"
+v_port = 8009
+v_user = "root"
+v_password = "root"
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+
+#mqtt 事件 ip
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+#【新增 2026-07-27】http_api_addr / http_api_cors
+# Web服务(REST+WebSocket)监听地址；注释掉则不启动（需编译 http_api feature）。
+# 随手动更新/按需生成 Web 服务引入（docs/specs/web-service-api.md、ADR-011）。
+# 评审决议：0.0.0.0 供局域网前端访问。
+# 【变更 2026-07-29】8021→8022：ponytail: 8021 被旧的提权进程占用；清理后可切回。
+http_api_addr = "0.0.0.0:8022"
+# CORS 允许来源列表，["*"] 为全放行（局域网前端联调用）。
+http_api_cors = ["*"]
+
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
+reset_mdb_project = false           #是否重新生成 mdb 缓存
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+#【变更 2026-07-27】移除 "CATA"：CATA 改走闭包按需解析（cata_closure），不再全量调试解析。
+debug_refno_types = ["LOOP", "PRIM"]
+# 正式增量覆盖当前 MDB；灰度时才临时启用 included_db_files / manual_db_nums。
+# included_db_files = ["ams8000_0001"]
+#included_db_files = ["zdj7600_0001"]
+#manual_db_nums = [7999, 7997, 8000, 1112]
+#manual_db_nums = [1112]
+#【变更 2026-07-27 起启用】基线中为注释状态；各轮取值：07-27=[7997,7999,8000]、
+# 07-29=[8000]、08-04=[7998,8000]。
+# AMS 增量回归固定覆盖这三个设计库。
+# ams7997 全量生成执行窗口：临时收窄到 7997，避免手动执行把 7999 也按需初始化（跑完恢复）
+# 2026-08-04 增量实测窗口：7998（18 个会话，最小设计库）+ 8000（已应用，用来验 up_to_date 分支）
+manual_db_nums = [8000]
+# manual_db_nums = [7997, 7999, 8000]
+# exclude_db_nums = [] #不参与生成模型的数据库编号
+plat_url = ""
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+
+#【新增 2026-07-29】room_key_word（列表），替代旧键 room_keyword（单字符串，已废弃）。
+# 房间名关键词列表，用于房间面板关系匹配（fast_model/room_model.rs get_room_key_word）。
+# AMS 房间名形如 /1RX-RM03-R301；末段 R301 由 project_hd 规则校验。
+room_key_word = ["-RM"]
+
+#test_refno = "24381_46952"
+
+#debug_root_refnos = ["24381_46952"]
+gen_history_model = false
+#debug_root_refnos = ["17496/201375"]
+# debug_root_refnos = []
+
+# debug_root_refnos = ["17496_195578"]

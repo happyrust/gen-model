@@ -1,0 +1,42 @@
+-- Probe the FULL AvevaMarineSample MDB (/ALL, 71 databases) for the issue #7
+-- refnos. /ALL1 only carries 3 databases and is a strict subset of /ALL.
+--
+-- Each section writes its own log: ALPHA LOG buffers until END, so one failing
+-- command discards everything still unflushed. Splitting the sections keeps the
+-- earlier answers even when a later refno does not resolve.
+--
+-- Keep every "--" at the start of its own line: PML treats it as a comment
+-- opener anywhere on a line.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_all_a.log" OVER
+$P SECTION_A_ALIVE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_all_b.log" OVER
+$P SECTION_B_PANEL_A_24381_35844
+=24381/35844
+Q CE
+Q TYPE
+Q OWNE
+Q POS
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_all_c.log" OVER
+$P SECTION_C_ISSUE7_ELEMENT_24383_66460
+=24383/66460
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_all_d.log" OVER
+$P SECTION_D_ISSUE7_PANEL_B_24381_1391
+=24381/1391
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+ALPHA LOG END

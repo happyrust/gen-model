@@ -2,8 +2,11 @@
 //!
 //! L1 成员清单：按真实 refno join，输出 matched / missing_in_gen / extra_in_gen。
 //! L2 几何构成：两侧几何数量与类型分布——**信息项，不判红灯**，原因见下。
-//! L3 空间级：world 平移和成员 AABB 都参与判定。基准 RVM 必须使用导出器默认的
-//! 窄口径（insu/obst off、level 6），排除生成侧有意忽略的障碍/预留几何。
+//! L3 空间级：world 平移和成员 AABB 都参与判定。成员 AABB 只在**窄口径**基准
+//! （`repre insu/obst off`）下可判——宽口径把保温与障碍/预留体一并写进 RVM，
+//! 生成侧有意不产出它们，两边比的不是同一个东西。口径由快照的
+//! [`ExportScope`] 声明并在这里强制校验，不再只是一句注释：它曾经只是注释，
+//! 而夹具恰好是宽口径导的，于是一个电缆槽 100mm 的预留净空被报成了几何缺陷。
 //!
 //! 为什么 L2 只能是信息项：两侧的几何表达根本不是一套。RVM 是 E3D 为渲染
 //! 做的原语分解（Cylinder / CircularTorus / Snout…），生成侧 `inst_geo.param`
@@ -23,7 +26,7 @@ use surrealdb::engine::any::{Any, connect};
 use surrealdb::opt::auth::Root;
 
 use super::att::refno_from_att_name;
-use super::snapshot::RvmSnapshot;
+use super::snapshot::{ExportScope, RvmSnapshot};
 
 #[derive(Debug, Clone)]
 pub struct CompareOptions {
@@ -43,6 +46,8 @@ pub struct CompareOptions {
 
 #[derive(Debug, Default, Serialize)]
 pub struct CompareSummary {
+    /// 基准快照声明的导出口径。非窄口径时 AABB 不参与判定，且不得 PASS。
+    pub baseline_scope: ExportScope,
     /// 参与判定的 RVM 成员数（已解析身份且带几何）。
     pub compared: usize,
     pub matched: usize,
@@ -65,7 +70,10 @@ pub struct CompareSummary {
 
 impl CompareSummary {
     pub fn passed(&self) -> bool {
-        self.compared > 0
+        // 口径不对时下面的 aabb_compared 本来就凑不满，但那是「顺带不成立」；
+        // 显式写出来，是因为它是判定资格问题，不该靠计数巧合来兜。
+        self.baseline_scope.allows_aabb_verdict()
+            && self.compared > 0
             && self.matched == self.compared
             && self.translation_compared == self.matched
             && self.aabb_compared == self.matched
@@ -250,9 +258,11 @@ pub async fn compare(options: &CompareOptions) -> Result<CompareSummary> {
     let gen_side = load_gen_side(&db, &refnos).await?;
 
     let mut summary = CompareSummary {
+        baseline_scope: snapshot.meta.export_scope,
         unsupported_checks: vec!["world_rotation".into(), "tubi_relate".into()],
         ..Default::default()
     };
+    let aabb_is_judgeable = summary.baseline_scope.allows_aabb_verdict();
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut geo_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -326,7 +336,13 @@ pub async fn compare(options: &CompareOptions) -> Result<CompareSummary> {
             }
         }
 
-        // L3-b：窄口径基准已排除 OBST/预留体，AABB 可直接参与判定。
+        // L3-b：只有窄口径基准排除了保温与障碍/预留体，AABB 才与生成侧同口径。
+        // 口径不对就一条都不比——比出来的差异说的是口径，不是几何。
+        if !aabb_is_judgeable {
+            item["aabb_skipped"] = json!(summary.baseline_scope.as_str());
+            items.push(item);
+            continue;
+        }
         if let (Some(rvm_aabb), Some(gen_aabb)) = (member.aabb_world_mm, instance.aabb) {
             summary.aabb_compared += 1;
             let delta = (0..6)
@@ -407,6 +423,15 @@ fn print_summary(
     geo_kind_counts: &BTreeMap<String, usize>,
 ) {
     println!("RVM 基准对拍");
+    println!(
+        "  基准导出口径   : {}{}",
+        summary.baseline_scope.as_str(),
+        if summary.baseline_scope.allows_aabb_verdict() {
+            ""
+        } else {
+            "（含保温/障碍或未声明，AABB 不参与判定，不得 PASS）"
+        }
+    );
     println!("  参与判定       : {}", summary.compared);
     println!(
         "  L1 匹配/缺失/多出: {} / {} / {}",
@@ -466,9 +491,39 @@ pub fn default_report_path(root: Option<&str>) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// 宽口径基准不具备 AABB 判定资格，其它指标再漂亮也不能 PASS。
+    ///
+    /// 这条锁的是一次真实事故：口径要求只写在模块注释里，夹具却是
+    /// `repre obst on` 导的，于是 17 个电缆槽的预留净空（100mm）被逐个报成
+    /// AABB 超限，一个口径分歧看上去像三十五个几何缺陷。
+    #[test]
+    fn a_wide_scope_baseline_cannot_produce_a_spatial_verdict() {
+        let mut summary = CompareSummary {
+            baseline_scope: ExportScope::Narrow,
+            compared: 1,
+            matched: 1,
+            translation_compared: 1,
+            aabb_compared: 1,
+            ..Default::default()
+        };
+        assert!(summary.passed(), "窄口径且各项齐备时应当通过");
+
+        for scope in [ExportScope::Wide, ExportScope::Unknown] {
+            summary.baseline_scope = scope;
+            assert!(
+                !summary.passed(),
+                "{} 口径的基准不该给出空间判定",
+                scope.as_str()
+            );
+        }
+    }
+
     #[test]
     fn pass_is_fail_closed_for_missing_or_mismatched_spatial_checks() {
-        let mut summary = CompareSummary::default();
+        let mut summary = CompareSummary {
+            baseline_scope: ExportScope::Narrow,
+            ..Default::default()
+        };
         assert!(
             !summary.passed(),
             "zero compared members cannot prove correctness"

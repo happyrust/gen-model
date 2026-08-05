@@ -1,0 +1,59 @@
+-- Which database holds issue #7's element? Walk the owner chain up to the
+-- WORLD: a PDMS world is named after its database, so the last Q NAME answers
+-- it without guessing at a query keyword.
+--
+-- refno prefix 24381 is already known to be dbnum 7997 (*MASTER/HVAC): the
+-- 157257 pe rows under that prefix match dbnum_info_table's 7997 row exactly.
+-- 24383 belongs to a design DB that has never been parsed, because the MDB in
+-- use (/ALL1) carries only 7997.
+--
+-- One ALPHA LOG per section: ALPHA LOG buffers until END, so a failing command
+-- discards everything still unflushed.
+--
+-- Keep every "--" at the start of its own line: PML treats it as a comment
+-- opener anywhere on a line.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_dbof_a.log" OVER
+$P SECTION_A_ALIVE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_dbof_b.log" OVER
+$P SECTION_B_CAP_24383_66460_OWNER_CHAIN
+=24383/66460
+Q TYPE
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_dbof_c.log" OVER
+$P SECTION_C_PANEL_24381_35844_OWNER_CHAIN
+=24381/35844
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+OWNER
+Q TYPE
+Q NAME
+ALPHA LOG END

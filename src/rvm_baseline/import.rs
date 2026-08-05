@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use super::att::{AttIndex, refno_from_att_name};
 use super::identity::{noun_from_name, parse_default_name, stable_id};
-use super::snapshot::{RvmGeometry, RvmMember, RvmSnapshot, SNAPSHOT_VERSION, SnapshotMeta};
+use super::snapshot::{
+    ExportScope, RvmGeometry, RvmMember, RvmSnapshot, SNAPSHOT_VERSION, SnapshotMeta,
+};
 
 /// rvm-rs 把**几何**坐标（bbox_world、geometry.transform.translation）换算成米，
 /// E3D world 与生成侧都是毫米，所以这两处要乘回去。
@@ -34,6 +36,8 @@ pub struct ImportOptions {
     /// 根元素的真实 refno（如 `24384/22404`）。命名元素的 refno 不在 ATT 里，
     /// 只能外部给定或后续查站点库；给了就直接钉死，省一次反查。
     pub root_refno: Option<String>,
+    /// 导出这份 RVM 的口径。RVM 流里读不出来，只能由导出方声明。
+    pub export_scope: ExportScope,
     pub verbose: bool,
 }
 
@@ -114,6 +118,7 @@ pub fn import_rvm(options: &ImportOptions) -> Result<RvmSnapshot> {
         geometry_count: builder.geometry_count,
         resolved: builder.members.iter().filter(|m| m.resolved).count(),
         unresolved: builder.members.iter().filter(|m| !m.resolved).count(),
+        export_scope: options.export_scope,
         geo_type_counts: builder.geo_type_counts,
         degenerate_bbox_count: builder.degenerate_bbox_count,
     };

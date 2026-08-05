@@ -24,7 +24,7 @@ use parry3d::shape::{TriMesh, TriMeshFlags};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -156,14 +156,14 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     let mut failures = Vec::new();
     for room in &room_panel_map.rooms {
         for &panel_refno in &room.panels {
-            let members =
-                match cal_room_refnos(&mesh_dir, panel_refno, exclude_panel_refnos).await {
-                    Ok(members) => members,
-                    Err(error) => {
-                        failures.push(format!("{panel_refno} 计算房间成员失败: {error:#}"));
-                        continue;
-                    }
-                };
+            let members = match cal_room_refnos(&mesh_dir, panel_refno, exclude_panel_refnos).await
+            {
+                Ok(members) => members,
+                Err(error) => {
+                    failures.push(format!("{panel_refno} 计算房间成员失败: {error:#}"));
+                    continue;
+                }
+            };
             // 成员为空也要写：先清后写里那一步 DELETE 正是「面板挪走后旧成员必须掉」。
             if let Err(error) = save_room_relate(panel_refno, &members, &room.room_num).await {
                 failures.push(format!("{panel_refno} 写入房间归属失败: {error:#}"));
@@ -682,6 +682,18 @@ pub async fn recalc_panel_membership(
     let Some(room_num) = rooms.room_num_of(panel).map(str::to_string) else {
         // 面板已不在册：房间改名后不再合规、面板被挪出房间、或房间本身没了。
         // 旧边仍要清，否则它会一直挂着上一次的归属，且没有任何人会再来碰它。
+        let old_members = existing_members_of_panel(panel)
+            .await
+            .unwrap_or_else(|error| {
+                println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
+                HashSet::new()
+            });
+        if !old_members.is_empty() {
+            println!(
+                "[房间增量] 面板 {panel} 已不在册，清空其房间归属（原 {} 个成员掉出）",
+                old_members.len()
+            );
+        }
         save_room_relate(panel, &HashMap::new(), "").await?;
         return Ok(HashSet::new());
     };
@@ -698,8 +710,16 @@ pub async fn recalc_panel_membership(
         );
     }
     let members = cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels).await?;
+    let new_members: HashSet<RefnoEnum> = members.keys().copied().collect();
+    let old_members = existing_members_of_panel(panel)
+        .await
+        .unwrap_or_else(|error| {
+            println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
+            HashSet::new()
+        });
+    log_panel_membership_change(panel, &room_num, &old_members, &new_members);
     save_room_relate(panel, &members, &room_num).await?;
-    Ok(members.keys().copied().collect())
+    Ok(new_members)
 }
 
 /// 一轮 drain 复用的在册面板几何：元素分支的候选面板从这里选，**不经过空间树**。
@@ -757,6 +777,19 @@ impl PanelIndex {
             .map(|slot| &self.entries[slot])
             .collect()
     }
+
+    /// 与构件世界包围盒相交的在册候选面板 refno 集合。
+    ///
+    /// 与 [`recalc_element_membership`] 里的 `candidates` 用的是同一份库内面板几何、
+    /// 同一个相交口径。同轮吸收（ADR-010 §8）的封闭性检查靠它预测元素分支会碰哪些
+    /// 面板，两者必须同源——此前吸收检查从空间树取候选，树缺在册 PANE 条目
+    /// （issue #7 的典型态）时会拿到空候选、错误吸收，把元素分支本会写的边永久跳过。
+    pub fn candidate_panel_refnos(&self, element_aabb: &Aabb) -> HashSet<RefnoEnum> {
+        self.candidates(element_aabb)
+            .into_iter()
+            .map(|entry| entry.panel)
+            .collect()
+    }
 }
 
 /// 一次查齐在册面板的几何，**按轮调用**。
@@ -773,9 +806,12 @@ pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex
     if registered.is_empty() {
         return Ok(PanelIndex::default());
     }
-    let insts: Vec<GeomInstQuery> = aios_core::query_insts(&registered, true)
-        .await
-        .map_err(|error| anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len()))?;
+    let insts: Vec<GeomInstQuery> =
+        aios_core::query_insts(&registered, true)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
+            })?;
 
     let mut index = PanelIndex::default();
     for inst in insts {
@@ -795,6 +831,39 @@ pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex
     Ok(index)
 }
 
+/// 一批构件各自与在册面板相交的候选面板集合，候选面板取自 [`PanelIndex`]、构件包围盒
+/// 取自库——与 [`recalc_element_membership`] 完全同源。
+///
+/// 同轮吸收（ADR-010 §8）的封闭性检查用它预测元素分支会落进哪些面板：预测与实算读的
+/// 必须是同一份库内几何，否则树/库分歧时（issue #7 那类）两者会给出不同答案，导致错误
+/// 吸收、静默漏写归属边。查不到实例或包围盒不可用的构件如实留空（不插入映射）——在
+/// `absorption_verdict` 里「缺项」表示候选未知、一律不吸收，让元素任务照跑。
+pub async fn element_candidate_panels(
+    panels: &PanelIndex,
+    elements: &[RefnoEnum],
+) -> anyhow::Result<HashMap<RefnoEnum, HashSet<RefnoEnum>>> {
+    let mut out: HashMap<RefnoEnum, HashSet<RefnoEnum>> = HashMap::new();
+    if elements.is_empty() {
+        return Ok(out);
+    }
+    let insts: Vec<GeomInstQuery> =
+        aios_core::query_insts(elements, true)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
+            })?;
+    for inst in insts {
+        // 没有可用世界包围盒的构件：元素分支会把它收敛成空集，本身也不该有候选面板。
+        // 留空（不插入）而非插入空集——两者在 absorption_verdict 里含义不同：缺项＝
+        // 候选未知、保守不吸收。
+        if !aabb_is_usable(&inst.world_aabb) {
+            continue;
+        }
+        out.insert(inst.refno, panels.candidate_panel_refnos(&inst.world_aabb));
+    }
+    Ok(out)
+}
+
 /// 元素分支：一个构件动了，反向定位它落在哪些面板里（ADR-010 §2）。
 pub async fn recalc_element_membership(
     db_option: &DbOption,
@@ -808,6 +877,15 @@ pub async fn recalc_element_membership(
         return Ok(());
     }
 
+    // 归属变化日志用：先记下这个构件此刻挂在哪些房间，收敛后与新结果对照打印
+    // 「从哪到哪」。查询失败只影响日志、不影响重算，按空集处理但打一行告警。
+    let old_rooms = existing_room_nums_of_element(element)
+        .await
+        .unwrap_or_else(|error| {
+            println!("[房间增量] 读取构件 {element} 旧房间失败（仅日志受影响）: {error:#}");
+            BTreeSet::new()
+        });
+
     let insts: Vec<GeomInstQuery> = aios_core::query_insts(&[element], true)
         .await
         .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
@@ -817,12 +895,12 @@ pub async fn recalc_element_membership(
     // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
     let Some(element_inst) = insts.into_iter().next() else {
         println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate(element, &[]).await;
+        return write_element_room_relate_logged(element, &[], &old_rooms).await;
     };
     let element_aabb = element_inst.world_aabb;
     if !aabb_is_usable(&element_aabb) {
         println!("构件 {element} 的世界包围盒不可用，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate(element, &[]).await;
+        return write_element_room_relate_logged(element, &[], &old_rooms).await;
     }
 
     // 候选面板：在册面板里包围盒与本构件相交的那些，取自本轮加载好的库内几何
@@ -833,7 +911,7 @@ pub async fn recalc_element_membership(
         // 这里的空集是可信的：候选取自库，而整间分支对这批面板算成员用的是同一份
         // 数据、同一个相交关系，它同样不会把这个构件收进去。真正「判不了」的情形
         // ——候选面板的网格读不出来——在下面单独处置，不会走到这条清边路径上。
-        return write_element_room_relate(element, &[]).await;
+        return write_element_room_relate_logged(element, &[], &old_rooms).await;
     }
 
     // 一次取齐第二轮要用的实际几何点：候选面板通常只有一两块，为每块各查一次不值当。
@@ -904,7 +982,7 @@ pub async fn recalc_element_membership(
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();
-    write_element_room_relate(element, &edges).await
+    write_element_room_relate_logged(element, &edges, &old_rooms).await
 }
 
 /// 构件在世界坐标系下的实际几何点，与正向第二轮取的是同一批。
@@ -972,6 +1050,123 @@ async fn write_element_room_relate(
         .check()
         .map_err(|error| anyhow::anyhow!("写入 {element} 的房间归属语句失败: {error}"))?;
     Ok(())
+}
+
+/// 元素分支写入 + 归属变化日志：先算本次收敛出的房间集合，与旧集合对照打印
+/// 「从哪到哪」，再落库。日志只在真的变了时说话（见 [`log_room_membership_change`]）。
+async fn write_element_room_relate_logged(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    old_rooms: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let new_rooms: BTreeSet<String> = edges.iter().map(|edge| edge.room_num.clone()).collect();
+    log_room_membership_change("构件", element, old_rooms, &new_rooms);
+    write_element_room_relate(element, edges).await
+}
+
+/// 增量房间归属变化的控制台日志：只在归属真的变了时说一句，把「从哪到哪」讲清楚
+/// （无房间 → R、A → B、A → 无房间）。
+///
+/// 房间号集合用有序集合渲染，保证同一份变化每次打印一致（`HashSet` 遍历顺序不稳，
+/// 对拍与重放都押在确定性上）。
+fn log_room_membership_change(
+    kind: &str,
+    target: RefnoEnum,
+    old_rooms: &BTreeSet<String>,
+    new_rooms: &BTreeSet<String>,
+) {
+    if old_rooms == new_rooms {
+        return;
+    }
+    let render = |rooms: &BTreeSet<String>| {
+        if rooms.is_empty() {
+            "无房间".to_string()
+        } else {
+            rooms.iter().cloned().collect::<Vec<_>>().join(", ")
+        }
+    };
+    println!(
+        "[房间增量] {kind} {target} 归属: {} -> {}",
+        render(old_rooms),
+        render(new_rooms)
+    );
+}
+
+/// 一个构件当前挂在哪些房间：现存 `room_relate` 入边（`out = element`）的 room_num 去重。
+/// 仅供日志对照，与元素分支的先清后写读同一份库现状。
+async fn existing_room_nums_of_element(element: RefnoEnum) -> anyhow::Result<BTreeSet<String>> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT VALUE room_num FROM room_relate WHERE out = {};",
+            element.to_pe_key()
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("查询构件 {element} 现存房间号失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("查询构件 {element} 现存房间号语句失败: {error}"))?;
+    let nums: Vec<String> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解析构件 {element} 现存房间号失败: {error}"))?;
+    Ok(nums.into_iter().collect())
+}
+
+/// 整间分支的成员变化日志：哪些构件进了这间房、哪些掉了出去。
+///
+/// 整间重算是先清后写、按面板出边整批替换，因此进/出直接由新旧成员集合求差得到，
+/// 正好覆盖「构件从无到有」（新进）与「构件移出该房」（掉出）两种可见变化。
+fn log_panel_membership_change(
+    panel: RefnoEnum,
+    room_num: &str,
+    old_members: &HashSet<RefnoEnum>,
+    new_members: &HashSet<RefnoEnum>,
+) {
+    if old_members == new_members {
+        return;
+    }
+    let mut entered: Vec<String> = new_members
+        .difference(old_members)
+        .map(|refno| refno.to_string())
+        .collect();
+    let mut left: Vec<String> = old_members
+        .difference(new_members)
+        .map(|refno| refno.to_string())
+        .collect();
+    entered.sort();
+    left.sort();
+    let detail = |label: &str, refnos: &[String]| {
+        if refnos.is_empty() {
+            String::new()
+        } else {
+            format!("；{label}: {}", refnos.join(", "))
+        }
+    };
+    println!(
+        "[房间增量] 面板 {panel} 房间 {room_num}: 成员 {} -> {}（+{} 新进 / -{} 掉出）{}{}",
+        old_members.len(),
+        new_members.len(),
+        entered.len(),
+        left.len(),
+        detail("新进", &entered),
+        detail("掉出", &left),
+    );
+}
+
+/// 一块面板当前收着哪些构件：现存 `room_relate` 出边（`in = panel`）的 out 端去重。
+/// 仅供日志对照。
+async fn existing_members_of_panel(panel: RefnoEnum) -> anyhow::Result<HashSet<RefnoEnum>> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT VALUE out.id FROM room_relate WHERE in = {};",
+            panel.to_pe_key()
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("查询面板 {panel} 现存成员失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("查询面板 {panel} 现存成员语句失败: {error}"))?;
+    let members: Vec<RefnoEnum> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解析面板 {panel} 现存成员失败: {error}"))?;
+    Ok(members.into_iter().collect())
 }
 
 #[tokio::test]
@@ -1126,7 +1321,11 @@ mod tests {
     /// 因此逐个实例不同；不排序的话重放和逐边对拍都失去意义。
     #[test]
     fn rendering_is_stable_across_map_iteration_order() {
-        let entries = [member(20, 8, 0.0), member(21, 8, 10.0), member(24, 4, 450.0)];
+        let entries = [
+            member(20, 8, 0.0),
+            member(21, 8, 10.0),
+            member(24, 4, 450.0),
+        ];
         let forward = members(entries);
         let backward = members(entries.into_iter().rev());
         let sql = render_room_relate_write(panel(), &forward, "K100");
@@ -1255,15 +1454,19 @@ mod tests {
     #[test]
     fn panel_candidates_are_selected_by_closed_interval_overlap() {
         let box_of = |min: f32, max: f32| {
-            Aabb::new(
-                Point::new(min, 0.0, 0.0),
-                Point::new(max, 100.0, 100.0),
-            )
+            Aabb::new(Point::new(min, 0.0, 0.0), Point::new(max, 100.0, 100.0))
         };
-        let panels = [box_of(0.0, 100.0), box_of(200.0, 300.0), box_of(90.0, 210.0)];
+        let panels = [
+            box_of(0.0, 100.0),
+            box_of(200.0, 300.0),
+            box_of(90.0, 210.0),
+        ];
 
         // 完全落在第一块里。
-        assert_eq!(intersecting_panel_slots(&panels, &box_of(10.0, 20.0)), vec![0]);
+        assert_eq!(
+            intersecting_panel_slots(&panels, &box_of(10.0, 20.0)),
+            vec![0]
+        );
         // 跨界：第一块与第三块都要收进来，多归属正是靠这个。
         assert_eq!(
             intersecting_panel_slots(&panels, &box_of(95.0, 105.0)),

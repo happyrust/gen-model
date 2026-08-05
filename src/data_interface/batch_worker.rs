@@ -708,16 +708,20 @@ async fn idle_round(
     };
 
     let outcome = idle_outcome(failed, has_backlog, claimed_batches);
-    if room_round_is_due(outcome, since_last_room_round()) {
-        room_round(mgr, registry, after_batches).await;
-    }
+    // 房间轮也是分页的（元素侧），一页吃不完就要立刻回来——否则积压会以每 30 秒
+    // 一页的速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
+    let room_backlog = if room_round_is_due(outcome, since_last_room_round()) {
+        room_round(mgr, registry, after_batches).await
+    } else {
+        false
+    };
     // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
     //
     // 失败时**不**唤醒：`notify_one` 在无等待者时会存下一个 permit，主循环的
     // `wait_for_work(IDLE_WAKE)` 于是立刻返回。持续性故障（SurrealDB 不可达之类）
     // 下这会退化成只受查询延迟限制的热循环，每圈还打一行同样的错。这条路的退避
     // 就是 `IDLE_WAKE` 那 30 秒。
-    if wakes_immediately(outcome) {
+    if wakes_immediately(outcome, room_backlog) {
         BatchScheduler::global().wake();
     }
 
@@ -754,16 +758,22 @@ fn idle_outcome(failed: bool, has_backlog: bool, claimed_batches: usize) -> Idle
 }
 
 /// 只有「确实还有活要干」才立刻回来。失败必须退避，见 [`idle_round`] 的说明。
-fn wakes_immediately(outcome: IdleOutcome) -> bool {
-    matches!(outcome, IdleOutcome::MoreWork)
+///
+/// `room_backlog`（房间轮那一页没吃完）同样算还有活干，但它**压不过失败**：那一轮
+/// 连积压清没清都没问出来，退避照旧。
+fn wakes_immediately(outcome: IdleOutcome, room_backlog: bool) -> bool {
+    match outcome {
+        IdleOutcome::Failed => false,
+        IdleOutcome::MoreWork => true,
+        IdleOutcome::Settled => room_backlog,
+    }
 }
 
 /// 距上次收房间轮过了多久（本进程还没收过时为 `None`）。
 fn since_last_room_round() -> Option<Duration> {
     let millis = LAST_ROOM_ROUND.load(Ordering::Relaxed);
-    (millis > 0).then(|| {
-        Duration::from_millis((Local::now().timestamp_millis() - millis).max(0) as u64)
-    })
+    (millis > 0)
+        .then(|| Duration::from_millis((Local::now().timestamp_millis() - millis).max(0) as u64))
 }
 
 /// 房间轮该不该在这一轮收。
@@ -783,27 +793,30 @@ fn room_round_is_due(outcome: IdleOutcome, since_last: Option<Duration>) -> bool
 ///
 /// `gen_spatial_tree` 关着时一条房间任务都不会入队（门控在入队口），这里再拦
 /// 一道只是把「没开就别建空任务行」说清楚。
+///
+/// 返回**这一页之后是否还有房间任务**：元素侧是分页的，剩货要靠调用方立刻再来一轮，
+/// 否则积压只能按 `IDLE_WAKE` 的节拍一页一页爬。
 async fn room_round(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     after_batches: bool,
-) {
+) -> bool {
     // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则 `gen_spatial_tree`
     // 关着或没有目标时，每一个空闲轮都会判成到期。
     LAST_ROOM_ROUND.store(Local::now().timestamp_millis(), Ordering::Relaxed);
     if !mgr.db_option.gen_spatial_tree {
-        return;
+        return false;
     }
     let counts = match model_update_pending::count_room_targets().await {
         Ok(counts) => counts,
         Err(error) => {
             println!("统计待重算房间目标失败: {error:#}");
-            return;
+            return false;
         }
     };
     let live = counts.live();
     if live == 0 {
-        return;
+        return false;
     }
 
     let task_id = TaskRegistry::new_task_id("room");
@@ -849,8 +862,15 @@ async fn room_round(
     // 因本函数开头的早退不再建新行——不覆盖的话，房间全部收敛干净的那一刻起，
     // 泳道永远显示本轮开跑前的待重算数，30 分钟后误报「饥饿」且永不自愈。
     // 统计失败时保留旧 detail：宁可显示旧数字，也别把分项计数抹成空。
+    //
+    // 这次重新统计顺带回答了「还剩不剩」——分页之后那是调用方要不要立刻再来一轮的
+    // 依据。统计失败时报 false：宁可等下一个 `IDLE_WAKE`，也不拿一个不知道的数去空转。
+    let mut room_backlog = false;
     match model_update_pending::count_room_targets().await {
-        Ok(after) => registry.set_detail(&task_id, serde_json::to_value(after).unwrap_or_default()),
+        Ok(after) => {
+            room_backlog = after.live() > 0;
+            registry.set_detail(&task_id, serde_json::to_value(after).unwrap_or_default());
+        }
         Err(error) => println!("收敛后统计房间目标失败（泳道将沿用开跑前的计数）: {error:#}"),
     }
     registry.finish(&task_id, state, result_json.clone());
@@ -861,6 +881,7 @@ async fn room_round(
         Some(task_id.clone()),
         serde_json::json!({ "task_id": task_id, "state": state.as_str(), "result": result_json }),
     );
+    room_backlog
 }
 
 /// 把领域进度事件接到任务注册表（计数）与 WS 广播（`http_api` 门内）。
@@ -1067,7 +1088,10 @@ mod tests {
     #[test]
     fn a_starved_room_round_still_gets_its_turn() {
         // 常规出口不变。
-        assert!(room_round_is_due(IdleOutcome::Settled, Some(Duration::ZERO)));
+        assert!(room_round_is_due(
+            IdleOutcome::Settled,
+            Some(Duration::ZERO)
+        ));
         // 失败轮任何时候都不收：那一轮连积压清没清都没问出来。
         assert!(!room_round_is_due(IdleOutcome::Failed, None));
         assert!(!room_round_is_due(
@@ -1127,10 +1151,14 @@ mod tests {
     /// 「空闲模型积压消化失败」，而 30 秒的 `IDLE_WAKE` 退避形同虚设。
     #[test]
     fn a_failed_idle_round_backs_off_instead_of_waking_itself() {
-        assert!(!wakes_immediately(idle_outcome(true, false, 0)));
-        assert!(!wakes_immediately(idle_outcome(true, true, 3)));
-        assert!(!wakes_immediately(IdleOutcome::Settled));
-        assert!(wakes_immediately(idle_outcome(false, true, 0)));
+        assert!(!wakes_immediately(idle_outcome(true, false, 0), false));
+        assert!(!wakes_immediately(idle_outcome(true, true, 3), false));
+        assert!(!wakes_immediately(IdleOutcome::Settled, false));
+        assert!(wakes_immediately(idle_outcome(false, true, 0), false));
+
+        // 房间那一页没吃完同样算还有活干，但压不过失败：那一轮连积压清没清都没问出来。
+        assert!(wakes_immediately(IdleOutcome::Settled, true));
+        assert!(!wakes_immediately(IdleOutcome::Failed, true));
 
         // 调用点也得守住：`wake()` 只能出现一次，且必须在 `wakes_immediately` 门后。
         let source = include_str!("batch_worker.rs");
@@ -1147,7 +1175,7 @@ mod tests {
             "空闲轮只该有一处唤醒，且归 wakes_immediately 管: {body}"
         );
         assert!(
-            body.contains("if wakes_immediately(outcome) {"),
+            body.contains("if wakes_immediately(outcome, room_backlog) {"),
             "唤醒必须由 wakes_immediately 把门: {body}"
         );
     }

@@ -11,12 +11,29 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use aios_database::rvm_baseline::{
-    CompareOptions, ImportOptions, compare, default_report_path, default_snapshot_path,
-    import_and_save,
+    CompareOptions, ExportScope, ImportOptions, compare, default_report_path,
+    default_snapshot_path, import_and_save,
 };
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ScopeArg {
+    Narrow,
+    Wide,
+    Unknown,
+}
+
+impl From<ScopeArg> for ExportScope {
+    fn from(value: ScopeArg) -> Self {
+        match value {
+            ScopeArg::Narrow => ExportScope::Narrow,
+            ScopeArg::Wide => ExportScope::Wide,
+            ScopeArg::Unknown => ExportScope::Unknown,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "rvm_verify", about = "RVM 基准对拍：导入与比对")]
@@ -45,6 +62,11 @@ enum Command {
         /// 给了就直接钉上，省一次站点库反查。
         #[arg(long)]
         root_refno: Option<String>,
+        /// 这份 RVM 的导出口径：narrow = `repre insu/obst off`（只有实体几何，
+        /// AABB 才可判）；wide = 保温/障碍一并导出。RVM 流里读不出来，只能声明。
+        /// 不给就是 unknown，compare 会拒绝给出空间判定。
+        #[arg(long, value_enum, default_value_t = ScopeArg::Unknown)]
+        scope: ScopeArg,
         #[arg(long)]
         verbose: bool,
     },
@@ -90,6 +112,7 @@ async fn main() -> Result<()> {
             att,
             out,
             root_refno,
+            scope,
             verbose,
         } => {
             let out_path = out.unwrap_or_else(|| default_snapshot_path(&rvm));
@@ -99,6 +122,7 @@ async fn main() -> Result<()> {
                 att_paths: att,
                 out_path: out_path.clone(),
                 root_refno,
+                export_scope: scope.into(),
                 verbose,
             };
             let snapshot = import_and_save(&options)?;

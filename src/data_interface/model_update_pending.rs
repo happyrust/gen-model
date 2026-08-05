@@ -288,7 +288,9 @@ fn render_upsert(item: &ModelWorkItem) -> String {
         vec!["attempts = 0".to_string(), "last_error = NONE".to_string()]
     } else {
         vec![
-            format!("attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END"),
+            format!(
+                "attempts = IF {end_sesno} > (source_end_sesno?:0) THEN 0 ELSE attempts?:0 END"
+            ),
             format!(
                 "last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END"
             ),
@@ -704,7 +706,9 @@ async fn mark_regen_revision_failed(
             anyhow::anyhow!("mark model work {root_refno} failed: {query_error}")
         })?
         .check()
-        .map_err(|error| anyhow::anyhow!("mark model work {root_refno} statement failed: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("mark model work {root_refno} statement failed: {error}")
+        })?;
     Ok(())
 }
 
@@ -931,9 +935,8 @@ async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &
 /// `dbnum` queued behind it was skipped and the target that had just generated
 /// successfully paid for a second full `gen_all_geos_data` on the next round.
 async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut DrainReport) {
-    let root_lock = (job.action == ModelWorkAction::RegenRoot).then(|| {
-        crate::data_interface::manual_update::generation_root_lock(&job.target_refno)
-    });
+    let root_lock = (job.action == ModelWorkAction::RegenRoot)
+        .then(|| crate::data_interface::manual_update::generation_root_lock(&job.target_refno));
     let _root_guard = match &root_lock {
         Some(lock) => Some(lock.lock().await),
         None => None,
@@ -953,7 +956,9 @@ async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut Drain
 /// while manual preview/retry reads the table without this cap and remains
 /// the way to inspect or revive it.
 fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
-    let limit = limit.map(|value| format!(" LIMIT {value}")).unwrap_or_default();
+    let limit = limit
+        .map(|value| format!(" LIMIT {value}"))
+        .unwrap_or_default();
     format!(
         "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} \
@@ -1094,6 +1099,13 @@ const REGEN_ACTION_FILTER: &str = "AND action = 'regen_root'";
 const DATA_ACTION_FILTER: &str =
     "AND action IN ['transform', 'delete_cleanup', 'cascade_expand', 'regen_root']";
 const ROOM_ACTION_FILTER: &str = "AND action IN ['room_recalc_panel', 'room_recalc_element']";
+const ROOM_PANEL_ACTION_FILTER: &str = "AND action = 'room_recalc_panel'";
+const ROOM_ELEMENT_ACTION_FILTER: &str = "AND action = 'room_recalc_element'";
+/// 元素侧一轮最多消化多少个。
+///
+/// 比数据阶段的 [`DRAIN_PAGE_SIZE`] 大：一轮房间的固定开销是两次全量查询（在册房间
+/// 映射 + 在册面板几何），页太小的话每页都要重付一遍。
+const ROOM_DRAIN_PAGE_SIZE: usize = 256;
 
 fn data_phase_is_clear(succeeded: bool, has_more: bool) -> bool {
     succeeded && !has_more
@@ -1233,21 +1245,23 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
 /// 能用它自己的房间关键字驱动整个阶段——`init_form_config()` 读的是项目配置，夹具那间
 /// `/ZZ-R-K100` 在默认关键字下根本匹配不到。
 pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<usize> {
-    let mut response = SUL_DB
-        .query(render_drain_select(ROOM_ACTION_FILTER, None))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("load pending room work statement failed: {error}"))?;
-    let jobs: Vec<PendingModelWork> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("decode pending room work failed: {error}"))?;
-    if jobs.is_empty() {
+    // 两侧分开取，整间在前、元素在后，且**只有元素侧分页**。
+    //
+    // 整间任务的行 id 是 `room_recalc_panel_{target}`，一块 PANE 最多占一行，所以这
+    // 一侧的上界就是项目里的面板数（本项目 147 块）——它不会长成需要分页的积压。
+    // 元素侧才是无界的那一头：每一个动过的构件一行。
+    //
+    // 分页只会让吸收更保守，不会让它出错。吸收的判据是「该构件的旧边面板 ∪ 当前候选
+    // 面板 ⊆ 本轮已重算面板」，落在下一页的整间任务不在 `claimed_panels` 里，于是那个
+    // 构件照跑元素分支——多一次网格判定，不会漏删陈旧边。跨页的先后同理：两条分支
+    // 共用判定、共用边 id、都是先清后写，在同一份数据上收敛到同一个边集，先后颠倒
+    // 只是多算一遍。
+    let panels: Vec<PendingModelWork> = load_room_jobs(ROOM_PANEL_ACTION_FILTER, None).await?;
+    let elements: Vec<PendingModelWork> =
+        load_room_jobs(ROOM_ELEMENT_ACTION_FILTER, Some(ROOM_DRAIN_PAGE_SIZE)).await?;
+    if panels.is_empty() && elements.is_empty() {
         return Ok(0);
     }
-
-    let (panels, elements): (Vec<PendingModelWork>, Vec<PendingModelWork>) = jobs
-        .into_iter()
-        .partition(|job| job.action == ModelWorkAction::RoomRecalcPanel);
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
     // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
@@ -1292,7 +1306,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     let closure_inputs = if absorb_candidates.is_empty() {
         None
     } else {
-        match load_absorption_closure_inputs(&rooms, &absorb_candidates).await {
+        match load_absorption_closure_inputs(&panel_index, &absorb_candidates).await {
             Ok(inputs) => Some(inputs),
             Err(error) => {
                 println!("吸收封闭性输入加载失败，本轮不吸收任何元素任务: {error:#}");
@@ -1341,13 +1355,28 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     Ok(report.done)
 }
 
+async fn load_room_jobs(
+    action_filter: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<PendingModelWork>> {
+    let mut response = SUL_DB
+        .query(render_drain_select(action_filter, limit))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("load pending room work statement failed: {error}"))?;
+    response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode pending room work failed: {error}"))
+}
+
 /// 同轮吸收的封闭性输入：候选元素的现存归属边与当前空间树候选面板。
 #[derive(Debug, Default)]
 struct AbsorptionClosureInputs {
     /// 元素 → 现存 `room_relate` 入边的面板集合。没有旧边的元素不在映射里（等价空集）。
     old_edge_panels: std::collections::HashMap<RefnoEnum, HashSet<RefnoEnum>>,
-    /// 元素 → 当前包围盒在空间树上命中的**在册** PANE 集合。树里没有该元素条目时
-    /// 不在映射里——候选未知，吸收判定必须让路。
+    /// 元素 → 当前世界包围盒与在册面板（库内几何，[`room_model::PanelIndex`]）相交的
+    /// PANE 集合。与元素分支 `recalc_element_membership` 的候选**同源**，二者不可分叉。
+    /// 查不到实例或包围盒不可用的构件不在映射里——候选未知，吸收判定必须让路。
     candidate_panels: std::collections::HashMap<RefnoEnum, HashSet<RefnoEnum>>,
 }
 
@@ -1382,13 +1411,17 @@ fn absorption_verdict(
         .is_some_and(|candidates| absorption_is_closed(old, candidates, claimed_panels))
 }
 
-/// 为本轮吸收候选批量加载封闭性输入：一条 SELECT 查旧边，一次树遍历取候选面板。
+/// 为本轮吸收候选批量加载封闭性输入：一条 SELECT 查旧边，候选面板走库内面板几何。
+///
+/// 候选面板**不再经过空间树**：元素分支（`recalc_element_membership`）2026-08-05 已改从
+/// 本轮加载的在册面板几何（[`room_model::PanelIndex`]）选候选，这里预测它会碰哪些面板的
+/// 逻辑必须同源。留在树上的话，树缺在册 PANE 条目时（issue #7 的典型态）会拿到空候选、
+/// 错误吸收，把元素分支本会写的边永久跳过——正是那类静默漏分配。旧边仍取自库
+/// （`room_relate` 现状），本来就可信。
 async fn load_absorption_closure_inputs(
-    rooms: &room_model::RoomPanelMap,
+    panels: &room_model::PanelIndex,
     elements: &[RefnoEnum],
 ) -> anyhow::Result<AbsorptionClosureInputs> {
-    use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
-
     let mut inputs = AbsorptionClosureInputs::default();
 
     let keys = elements
@@ -1420,29 +1453,8 @@ async fn load_absorption_closure_inputs(
             .insert(row.panel);
     }
 
-    // 候选面板用元素在树上的包围盒条目求交——树与库由同一次刷新维护（记录先落、
-    // 指针后落、写入全部成功才动树），此处与元素分支读到的是同一份现状。
-    load_aabb_tree().await?;
-    let tree = GLOBAL_AABB_TREE.read().await;
-    let wanted: std::collections::HashMap<RefU64, RefnoEnum> = elements
-        .iter()
-        .map(|refno| (refno.refno(), *refno))
-        .collect();
-    let mut element_aabbs: Vec<(RefnoEnum, parry3d::bounding_volume::Aabb)> = Vec::new();
-    for bbox in tree.tree.iter() {
-        if let Some(&element) = wanted.get(&bbox.refno) {
-            element_aabbs.push((element, bbox.aabb));
-        }
-    }
-    for (element, aabb) in element_aabbs {
-        let candidates: HashSet<RefnoEnum> = tree
-            .locate_intersecting_bounds(&aabb)
-            .filter(|bbox| bbox.noun == "PANE")
-            .map(|bbox| RefnoEnum::from(bbox.refno))
-            .filter(|panel| rooms.room_num_of(*panel).is_some())
-            .collect();
-        inputs.candidate_panels.insert(element, candidates);
-    }
+    // 候选面板与元素分支同源：库内面板几何（PanelIndex）+ 库内构件世界包围盒。
+    inputs.candidate_panels = room_model::element_candidate_panels(panels, elements).await?;
     Ok(inputs)
 }
 
@@ -1504,7 +1516,10 @@ mod tests {
     #[test]
     fn a_manual_retry_revives_in_one_atomic_statement() {
         let sql = render_retry_pending_unit(ModelWorkAction::RegenRoot, "24381/100677");
-        assert!(sql.starts_with("UPDATE"), "复活不是入队，不得 UPSERT: {sql}");
+        assert!(
+            sql.starts_with("UPDATE"),
+            "复活不是入队，不得 UPSERT: {sql}"
+        );
         assert!(sql.contains("revision = (revision?:0) + 1"), "{sql}");
         assert!(sql.contains("attempts = 0"), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
@@ -1547,8 +1562,7 @@ mod tests {
             .0;
         // 按调用点形态（带左括号）断言，注释里提到这两个名字不算数。
         assert!(
-            !settlement_arm.contains("record_failure(")
-                && !settlement_arm.contains("mark_failed("),
+            !settlement_arm.contains("record_failure(") && !settlement_arm.contains("mark_failed("),
             "收口失败分支不得动行状态（不涨 attempts、不写 failed）: {settlement_arm}"
         );
         assert!(
@@ -1723,7 +1737,10 @@ mod tests {
         assert_eq!(item.db_type, "DESI");
         assert_eq!(item.action, ModelWorkAction::RegenRoot);
         assert_eq!(item.target_refno, "24381/100677");
-        assert_eq!(item.source_end_sesno, 0, "跨库会话号不可比，派生任务不认领会话");
+        assert_eq!(
+            item.source_end_sesno, 0,
+            "跨库会话号不可比，派生任务不认领会话"
+        );
     }
 
     fn room_item(action: ModelWorkAction, dbnum: u32, end_sesno: i32) -> ModelWorkItem {
@@ -1810,7 +1827,9 @@ mod tests {
         stale_old
             .old_edge_panels
             .insert(element, [panel(11)].into());
-        stale_old.candidate_panels.insert(element, [panel(10)].into());
+        stale_old
+            .candidate_panels
+            .insert(element, [panel(10)].into());
         assert!(!absorption_verdict(&stale_old, element, &claimed));
 
         // 候选里有本轮没重算的面板：它的新边只有元素分支会写，不得吸收。
@@ -1851,7 +1870,10 @@ mod tests {
             "房间任务不应按会话号决定是否复活: {sql}"
         );
         // dbnum / source_end_sesno 降为字段，只记最后一次触发来源。
-        assert!(sql.contains("dbnum = math::max([dbnum?:0, 24381])"), "{sql}");
+        assert!(
+            sql.contains("dbnum = math::max([dbnum?:0, 24381])"),
+            "{sql}"
+        );
         assert!(
             sql.contains("source_end_sesno = math::max([source_end_sesno?:0, 42])"),
             "{sql}"
@@ -1943,6 +1965,32 @@ mod tests {
         );
     }
 
+    /// 同轮吸收的封闭性检查不许再碰空间树。
+    ///
+    /// 元素分支的候选 2026-08-05 已从空间树改成库内面板几何（`PanelIndex`）；预测元素
+    /// 分支会碰哪些面板的封闭性检查必须同源。留在树上的话，树缺在册 PANE 条目时
+    /// （issue #7 的典型态）会拿到空候选、错误吸收，把元素分支本会写的边永久跳过。
+    #[test]
+    fn the_absorption_closure_does_not_depend_on_the_spatial_tree() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn load_absorption_closure_inputs(")
+            .expect("load_absorption_closure_inputs 必须存在")
+            .1
+            .split_once("\nasync fn run_room_job(")
+            .expect("封闭性输入之后是 run_room_job")
+            .0;
+
+        assert!(
+            !body.contains("GLOBAL_AABB_TREE") && !body.contains("load_aabb_tree"),
+            "吸收封闭性的候选面板必须来自 PanelIndex，不能回到空间树: {body}"
+        );
+        assert!(
+            body.contains("element_candidate_panels"),
+            "候选必须与元素分支同源，走库内面板几何: {body}"
+        );
+    }
+
     /// 每一种 action 都必须被某个 drain 阶段消费，且只被一个消费。
     ///
     /// 漏掉一种，那种任务入队之后就永远躺在表里，不报错也不执行；被两个阶段同时选中，
@@ -2025,7 +2073,10 @@ mod tests {
             room_enqueue_outcome(false, false),
             RoomEnqueue::SpatialTreeDisabled
         );
-        assert_eq!(room_enqueue_outcome(true, true), RoomEnqueue::NothingChanged);
+        assert_eq!(
+            room_enqueue_outcome(true, true),
+            RoomEnqueue::NothingChanged
+        );
         assert_eq!(room_enqueue_outcome(true, false), RoomEnqueue::Proceed);
 
         // 真值表管不到 println 本身：那条分支还得真的去喊。
@@ -2036,10 +2087,10 @@ mod tests {
             .split_once("\n}")
             .expect("函数体到第一个顶格右花括号为止")
             .0;
-        let arm_at = body
-            .find("RoomEnqueue::SpatialTreeDisabled => {")
-            .expect("开关必须单独成一个分支，不能与 changes.is_empty() 并在一起——\
-                     没有变更要排本来就无话可说");
+        let arm_at = body.find("RoomEnqueue::SpatialTreeDisabled => {").expect(
+            "开关必须单独成一个分支，不能与 changes.is_empty() 并在一起——\
+                     没有变更要排本来就无话可说",
+        );
         let warn_at = body
             .find("warn_spatial_tree_disabled_once()")
             .expect("关着时必须留下痕迹");
@@ -2049,8 +2100,14 @@ mod tests {
     #[test]
     fn regen_waits_for_a_successful_and_empty_non_regen_phase() {
         assert!(data_phase_is_clear(true, false));
-        assert!(!data_phase_is_clear(true, true), "the 65th item keeps the barrier closed");
-        assert!(!data_phase_is_clear(false, false), "a failed page keeps the barrier closed");
+        assert!(
+            !data_phase_is_clear(true, true),
+            "the 65th item keeps the barrier closed"
+        );
+        assert!(
+            !data_phase_is_clear(false, false),
+            "a failed page keeps the barrier closed"
+        );
     }
 
     #[test]
