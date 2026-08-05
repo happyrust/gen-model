@@ -2,7 +2,7 @@ use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::increment_pipeline::wrap_in_transaction;
 use crate::fast_model::room_predicate::{
     AabbVerdict, aabb_is_usable, any_point_inside, center_distance, count_vertices_inside,
-    element_in_panel, verdict_of,
+    element_in_panel, membership_by_aabb, verdict_of,
 };
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
@@ -25,7 +25,8 @@ use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[tokio::test]
 #[ignore = "manual integration: requires the configured Surreal project and room mesh files"]
@@ -58,8 +59,9 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("7997 全量房间计算没有产生任何成员边"))?;
 
     let element = RefnoEnum::from(first.member.replace('_', "/").as_str());
-    let panels = load_panel_index(&rooms).await?;
-    recalc_element_membership(&option, &rooms, &panels, element).await?;
+    let panels = load_panel_index(&option, &rooms).await?;
+    let history = ElementRoomHistory::load(&[element]).await?;
+    recalc_element_membership(&rooms, &panels, &history, element).await?;
 
     let mut response = SUL_DB.query(sql).await?.check()?;
     let incremental: Vec<Edge> = response.take(0)?;
@@ -742,6 +744,8 @@ pub struct PanelIndex {
     entries: Vec<PanelEntry>,
     /// 与 `entries` 同序的世界包围盒，交集筛选用。
     boxes: Vec<Aabb>,
+    /// 面板网格所在目录，随索引一起定下来——缓存好的三角网只对这个目录有效。
+    mesh_dir: PathBuf,
 }
 
 /// 一块在册面板的一条实例（同一个 refno 可能有多条 `inst_relate` 行）。
@@ -749,6 +753,60 @@ struct PanelEntry {
     panel: RefnoEnum,
     room_num: String,
     inst: GeomInstQuery,
+    /// 本轮第一次用到这块面板时构建，之后整轮复用（见 [`PanelEntry::meshes`]）。
+    mesh_cache: OnceLock<PanelMeshes>,
+}
+
+/// 一块面板在世界坐标系下的三角网，以及构建过程中判不了的部分。
+///
+/// 失败逐条留着而不是当场上抛：调用方要按面板汇总「哪几块判不了」，且这个结果整轮
+/// 复用，同一个失败不该在每个元素任务里各报一次不同的话。
+struct PanelMeshes {
+    tri_meshes: Vec<TriMesh>,
+    failures: Vec<String>,
+}
+
+impl PanelMeshes {
+    fn build(inst: &GeomInstQuery, mesh_dir: &Path) -> Self {
+        let mut tri_meshes = Vec::new();
+        let mut failures = Vec::new();
+        for geo in &inst.insts {
+            let file_path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
+            let mesh = match PlantMesh::des_mesh_file(&file_path) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", file_path.display()));
+                    continue;
+                }
+            };
+            let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
+                (inst.world_trans * geo.transform).compute_matrix(),
+                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
+            ) else {
+                failures.push(format!("{}: 三角网转换失败", file_path.display()));
+                continue;
+            };
+            tri_meshes.push(tri_mesh);
+        }
+        Self {
+            tri_meshes,
+            failures,
+        }
+    }
+}
+
+impl PanelEntry {
+    /// 本块面板的世界坐标三角网，**一轮只构建一次**。
+    ///
+    /// 缓存的理由不是省 CPU 而是省重复：元素侧一页最多几百个任务，它们通常挤在同一间
+    /// 房里，同一块墙板的 `.mesh` 于是被读盘并三角化上百遍。[`PanelIndex`] 此前只把面板
+    /// 的**库内行**整轮复用，网格仍在每个元素任务里现做。
+    ///
+    /// 惰性而非加载时构建：一轮只有两个元素任务时，不该为 147 块在册面板全部读盘。
+    fn meshes(&self, mesh_dir: &Path) -> &PanelMeshes {
+        self.mesh_cache
+            .get_or_init(|| PanelMeshes::build(&self.inst, mesh_dir))
+    }
 }
 
 /// 候选筛选（纯函数）：与构件世界包围盒相交的面板块下标。
@@ -769,6 +827,10 @@ impl PanelIndex {
     /// 一致（那些面板在整间分支里同样一个成员都算不出来），但值得说一声。
     pub fn usable_panels(&self) -> usize {
         self.entries.len()
+    }
+
+    fn mesh_dir(&self) -> &Path {
+        &self.mesh_dir
     }
 
     fn candidates(&self, element_aabb: &Aabb) -> Vec<&PanelEntry> {
@@ -796,7 +858,14 @@ impl PanelIndex {
 ///
 /// 与 [`load_room_panel_map`] 同一个理由：每个元素任务各查一遍，一轮几十个任务就会被
 /// 它拖垮。
-pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex> {
+pub async fn load_panel_index(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+) -> anyhow::Result<PanelIndex> {
+    let mut index = PanelIndex {
+        mesh_dir: db_option.get_meshes_path(),
+        ..Default::default()
+    };
     let registered: Vec<RefnoEnum> = rooms
         .rooms
         .iter()
@@ -804,7 +873,7 @@ pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex
         .unique()
         .collect();
     if registered.is_empty() {
-        return Ok(PanelIndex::default());
+        return Ok(index);
     }
     let insts: Vec<GeomInstQuery> =
         aios_core::query_insts(&registered, true)
@@ -813,7 +882,6 @@ pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex
                 anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
             })?;
 
-    let mut index = PanelIndex::default();
     for inst in insts {
         let Some(room_num) = rooms.room_num_of(inst.refno) else {
             continue;
@@ -826,9 +894,86 @@ pub async fn load_panel_index(rooms: &RoomPanelMap) -> anyhow::Result<PanelIndex
             panel: inst.refno,
             room_num: room_num.to_string(),
             inst,
+            mesh_cache: OnceLock::new(),
         });
     }
     Ok(index)
+}
+
+/// 一轮 drain 复用的构件现存归属快照：整页元素的 `room_relate` 入边，一条 SELECT 查完。
+///
+/// 两个消费者读的本来就是同一份边——元素分支的归属变化日志要旧**房间号**，同轮吸收的
+/// 封闭性检查要旧**归属面板**（ADR-010 §8）。此前前者按元素各发一次查询、后者再为吸收
+/// 候选发一次，同一张表在一轮里被问 N+1 遍，而这些查询与重算结果无关，纯属陪跑。
+///
+/// 查不到 `room_num` 的边照样记下面板：房间号只服务日志，而封闭性检查一条边都不能漏
+/// ——漏掉的旧边会让「旧边 ⊆ 本轮已重算面板」凭空成立，把本该照跑的元素任务错误吸收。
+#[derive(Debug, Default)]
+pub struct ElementRoomHistory {
+    edges: HashMap<RefnoEnum, Vec<(RefnoEnum, Option<String>)>>,
+}
+
+impl ElementRoomHistory {
+    pub async fn load(elements: &[RefnoEnum]) -> anyhow::Result<Self> {
+        let mut history = Self::default();
+        if elements.is_empty() {
+            return Ok(history);
+        }
+        #[derive(Deserialize)]
+        struct EdgeRow {
+            panel: RefnoEnum,
+            element: RefnoEnum,
+            #[serde(default)]
+            room_num: Option<String>,
+        }
+        let keys = elements
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT in.id AS panel, out.id AS element, room_num \
+                 FROM room_relate WHERE out IN [{keys}];"
+            ))
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("查询 {} 个构件的现存房间归属失败: {error}", elements.len())
+            })?
+            .check()
+            .map_err(|error| anyhow::anyhow!("查询构件现存房间归属语句失败: {error}"))?;
+        for row in response
+            .take::<Vec<EdgeRow>>(0)
+            .map_err(|error| anyhow::anyhow!("解析构件现存房间归属失败: {error}"))?
+        {
+            history
+                .edges
+                .entry(row.element)
+                .or_default()
+                .push((row.panel, row.room_num));
+        }
+        Ok(history)
+    }
+
+    /// 一个构件当前挂在哪些房间。有序集合：日志渲染押在确定性上。
+    pub fn room_nums_of(&self, element: RefnoEnum) -> BTreeSet<String> {
+        self.edges
+            .get(&element)
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, room_num)| room_num.clone())
+            .collect()
+    }
+
+    /// 一个构件的现存归属边指向哪些面板。
+    pub fn panels_of(&self, element: RefnoEnum) -> HashSet<RefnoEnum> {
+        self.edges
+            .get(&element)
+            .into_iter()
+            .flatten()
+            .map(|(panel, _)| *panel)
+            .collect()
+    }
 }
 
 /// 一批构件各自与在册面板相交的候选面板集合，候选面板取自 [`PanelIndex`]、构件包围盒
@@ -864,11 +1009,38 @@ pub async fn element_candidate_panels(
     Ok(out)
 }
 
+/// 元素分支算出一条边时的合并：同一块面板的多条实例只留归属更强的那次。
+///
+/// `inside_count` 由第一轮的顶点计数直接带过来。此前这里为排序键又调了一次
+/// `count_vertices_inside`，同一块面板的八次点包含测试因此跑两遍——而判定函数
+/// 本来就数过了，只是没把数字交出来。
+fn merge_element_edge(
+    edges: &mut HashMap<RefnoEnum, ElementRoomEdge>,
+    candidate: &PanelEntry,
+    element: RefnoEnum,
+    element_aabb: &Aabb,
+    inside_count: u8,
+) {
+    let member = RoomMember {
+        refno: element,
+        inside_count,
+        center_dist: center_distance(&candidate.inst.world_aabb, element_aabb),
+    };
+    edges
+        .entry(candidate.panel)
+        .and_modify(|edge| edge.member = edge.member.stronger(member))
+        .or_insert(ElementRoomEdge {
+            panel: candidate.panel,
+            room_num: candidate.room_num.clone(),
+            member,
+        });
+}
+
 /// 元素分支：一个构件动了，反向定位它落在哪些面板里（ADR-010 §2）。
 pub async fn recalc_element_membership(
-    db_option: &DbOption,
     rooms: &RoomPanelMap,
     panels: &PanelIndex,
+    history: &ElementRoomHistory,
     element: RefnoEnum,
 ) -> anyhow::Result<()> {
     // 面板本身不参与归属。整间分支把**所有**面板排除在成员之外，反向路径必须同口径，
@@ -877,14 +1049,9 @@ pub async fn recalc_element_membership(
         return Ok(());
     }
 
-    // 归属变化日志用：先记下这个构件此刻挂在哪些房间，收敛后与新结果对照打印
-    // 「从哪到哪」。查询失败只影响日志、不影响重算，按空集处理但打一行告警。
-    let old_rooms = existing_room_nums_of_element(element)
-        .await
-        .unwrap_or_else(|error| {
-            println!("[房间增量] 读取构件 {element} 旧房间失败（仅日志受影响）: {error:#}");
-            BTreeSet::new()
-        });
+    // 归属变化日志用：这个构件此刻挂在哪些房间，收敛后与新结果对照打印「从哪到哪」。
+    // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
+    let old_rooms = history.room_nums_of(element);
 
     let insts: Vec<GeomInstQuery> = aios_core::query_insts(&[element], true)
         .await
@@ -914,71 +1081,69 @@ pub async fn recalc_element_membership(
         return write_element_room_relate_logged(element, &[], &old_rooms).await;
     }
 
-    // 一次取齐第二轮要用的实际几何点：候选面板通常只有一两块，为每块各查一次不值当。
-    let world_pts = element_world_points(element)
-        .await
-        .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
-
-    let mesh_dir = db_option.get_meshes_path();
+    let mesh_dir = panels.mesh_dir();
     let mut edges: HashMap<RefnoEnum, ElementRoomEdge> = HashMap::new();
     // 候选面板的网格读不出来时不能把「判不了」当「不在里面」：本函数是先删该构件
     // 全部入边再写回，静默跳过一块面板等于悄悄退掉该构件在这块面板的归属。
     // 任一网格失败或面板没有可用网格都中止写入并保留任务重试。
     let mut undecidable_panels: Vec<String> = Vec::new();
-    for candidate in &candidates {
-        let panel = candidate.panel;
-        let panel_inst = &candidate.inst;
-        let room_num = candidate.room_num.as_str();
-        let mut usable_meshes = 0usize;
-        let mut mesh_failures: Vec<String> = Vec::new();
-        for inst in &panel_inst.insts {
-            let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
-            let mesh = match PlantMesh::des_mesh_file(&file_path) {
-                Ok(mesh) => mesh,
-                Err(error) => {
-                    mesh_failures.push(format!("{}: {error}", file_path.display()));
-                    continue;
+    // 第二轮逐点兜底的待办：(候选块下标, 该块内的网格下标, 第一轮的顶点计数)。
+    let mut pending_point_checks: Vec<(usize, usize, u8)> = Vec::new();
+
+    // 第一轮只问包围盒。三角网取自本轮加载的面板索引，同一块面板整轮只构建一次
+    // ——此前每个元素任务都要把候选面板的 `.mesh` 重读一遍并重新三角化。
+    for (slot, candidate) in candidates.iter().enumerate() {
+        let meshes = candidate.meshes(mesh_dir);
+        for (mesh_slot, tri_mesh) in meshes.tri_meshes.iter().enumerate() {
+            // element_aabb 上面已经过 aabb_is_usable，这条走不到；真走到了当
+            // 「不在里面」，与 element_in_panel 同口径。
+            let Some((verdict, inside_count)) = membership_by_aabb(tri_mesh, &element_aabb) else {
+                continue;
+            };
+            match verdict {
+                AabbVerdict::Inside => {
+                    merge_element_edge(&mut edges, candidate, element, &element_aabb, inside_count)
                 }
-            };
-            let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
-                (panel_inst.world_trans * inst.transform).compute_matrix(),
-                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
-            ) else {
-                mesh_failures.push(format!("{}: 三角网转换失败", file_path.display()));
-                continue;
-            };
-            usable_meshes += 1;
-            if !element_in_panel(&tri_mesh, &element_aabb, || world_pts.iter().copied()) {
-                continue;
+                AabbVerdict::Outside => {}
+                AabbVerdict::NeedsPointCheck => {
+                    pending_point_checks.push((slot, mesh_slot, inside_count))
+                }
             }
-            // 命中的面板通常只有一两块，为排序键再数一遍八顶点比让判定函数多返回
-            // 一个计数值划算——后者会让共享谓词为反向路径长出一个专用签名。
-            let member = RoomMember {
-                refno: element,
-                inside_count: count_vertices_inside(&tri_mesh, &element_aabb),
-                center_dist: center_distance(&panel_inst.world_aabb, &element_aabb),
-            };
-            edges
-                .entry(panel)
-                .and_modify(|edge| edge.member = edge.member.stronger(member))
-                .or_insert(ElementRoomEdge {
-                    panel,
-                    room_num: room_num.to_string(),
-                    member,
-                });
         }
-        if !mesh_failures.is_empty() {
-            undecidable_panels.push(format!("{panel}({})", mesh_failures.join("; ")));
-        } else if usable_meshes == 0 {
-            undecidable_panels.push(format!("{panel}(没有可用网格)"));
+        if !meshes.failures.is_empty() {
+            undecidable_panels.push(format!(
+                "{}({})",
+                candidate.panel,
+                meshes.failures.join("; ")
+            ));
+        } else if meshes.tri_meshes.is_empty() {
+            undecidable_panels.push(format!("{}(没有可用网格)", candidate.panel));
         }
     }
+
+    // 判不了就在这里收手：本次不写、任务保留重试。排在第二轮之前，是因为这一轮的结果
+    // 无论如何都不会落库，没必要再为它取一次几何点。
     if !undecidable_panels.is_empty() {
         anyhow::bail!(
             "构件 {element} 的 {} 块候选面板网格不可完整判定，本次不改写归属: {}",
             undecidable_panels.len(),
             undecidable_panels.join(", ")
         );
+    }
+
+    // 只有跨界构件才需要实际几何点，而取点是一次库往返。此前无论第一轮判成什么都先
+    // 取一遍，八顶点全在内或全在外的构件（绝大多数）白付一次查询。
+    if !pending_point_checks.is_empty() {
+        let world_pts = element_world_points(element)
+            .await
+            .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
+        for (slot, mesh_slot, inside_count) in pending_point_checks {
+            let candidate = candidates[slot];
+            let tri_mesh = &candidate.meshes(mesh_dir).tri_meshes[mesh_slot];
+            if element_in_panel(tri_mesh, &element_aabb, || world_pts.iter().copied()) {
+                merge_element_edge(&mut edges, candidate, element, &element_aabb, inside_count);
+            }
+        }
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();
@@ -1090,24 +1255,6 @@ fn log_room_membership_change(
         render(old_rooms),
         render(new_rooms)
     );
-}
-
-/// 一个构件当前挂在哪些房间：现存 `room_relate` 入边（`out = element`）的 room_num 去重。
-/// 仅供日志对照，与元素分支的先清后写读同一份库现状。
-async fn existing_room_nums_of_element(element: RefnoEnum) -> anyhow::Result<BTreeSet<String>> {
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT VALUE room_num FROM room_relate WHERE out = {};",
-            element.to_pe_key()
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("查询构件 {element} 现存房间号失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("查询构件 {element} 现存房间号语句失败: {error}"))?;
-    let nums: Vec<String> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解析构件 {element} 现存房间号失败: {error}"))?;
-    Ok(nums.into_iter().collect())
 }
 
 /// 整间分支的成员变化日志：哪些构件进了这间房、哪些掉了出去。
@@ -1565,6 +1712,18 @@ mod tests {
         assert!(bail_at < recalc_at, "{body}");
     }
 
+    /// 元素分支的函数体，供下面几条源码断言共用。
+    fn element_branch_source() -> &'static str {
+        let source = include_str!("room_model.rs");
+        source
+            .split_once("pub async fn recalc_element_membership(")
+            .expect("recalc_element_membership 必须存在")
+            .1
+            .split_once("\n/// 构件在世界坐标系下的实际几何点")
+            .expect("元素分支之后是 element_world_points")
+            .0
+    }
+
     /// 元素分支不许再碰空间树。
     ///
     /// 整间分支拿面板包围盒去树上捞成员，面板在不在树上都算得出来；元素分支一旦反过来
@@ -1572,14 +1731,7 @@ mod tests {
     /// （issue #7 的主嫌）。候选改从库里的面板包围盒选之后，这个前提不该再长回来。
     #[test]
     fn the_element_branch_does_not_depend_on_the_spatial_tree() {
-        let source = include_str!("room_model.rs");
-        let body = source
-            .split_once("pub async fn recalc_element_membership(")
-            .expect("recalc_element_membership 必须存在")
-            .1
-            .split_once("\n/// 构件在世界坐标系下的实际几何点")
-            .expect("元素分支之后是 element_world_points")
-            .0;
+        let body = element_branch_source();
 
         assert!(
             !body.contains("GLOBAL_AABB_TREE") && !body.contains("load_aabb_tree"),
@@ -1589,6 +1741,63 @@ mod tests {
             body.contains("panels.candidates(&element_aabb)"),
             "候选必须走本轮加载的在册面板索引: {body}"
         );
+    }
+
+    /// 候选面板的三角网必须来自本轮加载的 [`PanelIndex`]，元素分支不得自己读盘。
+    ///
+    /// 元素侧一页最多 256 个任务，而它们通常挤在同一间房里。分支里现做网格的话，同一块
+    /// 墙板的 `.mesh` 会被反序列化并三角化上百遍——这是一轮房间收敛里最大的一笔开销，
+    /// 且它不产生任何新信息。整轮缓存一旦被后来的改动挪回分支内部，不会报错也不会算错，
+    /// 只会让房间轮悄悄慢一个数量级。
+    #[test]
+    fn the_element_branch_builds_no_meshes_of_its_own() {
+        let body = element_branch_source();
+
+        assert!(
+            !body.contains("des_mesh_file") && !body.contains("get_tri_mesh_with_flag"),
+            "候选面板的三角网必须走 PanelIndex 的整轮缓存: {body}"
+        );
+        assert!(
+            body.contains("candidate.meshes(mesh_dir)"),
+            "网格必须从候选块上取: {body}"
+        );
+    }
+
+    /// 实际几何点只在第一轮判不出结论时才去取。
+    ///
+    /// 取点是一次库往返，而八顶点全在内或全在外的构件——绝大多数——根本用不上它。
+    /// 这里断言的是**次序**：第一轮必须先跑完，取点必须落在「有待办」那个分支里，
+    /// 而不是回到候选循环之前无条件先取一遍。
+    #[test]
+    fn the_second_round_points_are_fetched_only_when_something_straddles() {
+        let body = element_branch_source();
+
+        let first_round_at = body
+            .find("membership_by_aabb(tri_mesh, &element_aabb)")
+            .expect("第一轮必须只问包围盒");
+        let guard_at = body
+            .find("if !pending_point_checks.is_empty()")
+            .expect("取点必须被待办列表守着");
+        let fetch_at = body
+            .find("element_world_points(element)")
+            .expect("第二轮必须取实际几何点");
+
+        assert!(first_round_at < guard_at, "第一轮必须先跑完: {body}");
+        assert!(guard_at < fetch_at, "取点必须排在守卫之后: {body}");
+    }
+
+    /// 快照缺项读成空集。
+    ///
+    /// 元素分支据此把旧房间显示成「无房间」，只影响日志；吸收那一侧另有一道门——
+    /// `drain_rooms` 在整页快照加载失败时一个都不吸收，因为空集会让「旧边 ⊆ 本轮已重算
+    /// 面板」凭空成立。
+    #[test]
+    fn a_missing_history_entry_reads_as_no_rooms_and_no_panels() {
+        let history = ElementRoomHistory::default();
+        let element = RefnoEnum::from("4000000001_20");
+
+        assert!(history.room_nums_of(element).is_empty());
+        assert!(history.panels_of(element).is_empty());
     }
 
     /// 面板从这间房挪走之后，房间自己也要能收敛到「一块面板都没有」。

@@ -1056,7 +1056,7 @@ mod tests {
     async fn live_room_incremental_parity() {
         use crate::data_interface::model_update_pending::enqueue_room_recalc;
         use crate::fast_model::room_model::{
-            load_panel_index, load_room_panel_map, recalc_element_membership,
+            ElementRoomHistory, load_panel_index, load_room_panel_map, recalc_element_membership,
         };
 
         connect_live().await;
@@ -1105,13 +1105,18 @@ mod tests {
         let rooms = load_room_panel_map(&db_option)
             .await
             .expect("load room panel map");
-        let panels = load_panel_index(&rooms).await.expect("load panel index");
+        let panels = load_panel_index(&db_option, &rooms)
+            .await
+            .expect("load panel index");
         assert_eq!(
             panels.usable_panels(),
             2,
             "夹具的两块面板都要带着可用几何进候选索引，否则这条对拍测的是空集对空集"
         );
-        recalc_element_membership(&db_option, &rooms, &panels, moved)
+        let history = ElementRoomHistory::load(&[moved])
+            .await
+            .expect("load element room history");
+        recalc_element_membership(&rooms, &panels, &history, moved)
             .await
             .expect("incremental recalc");
         let incremental = room_edges().await;

@@ -834,8 +834,14 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         // 各扫一遍是承受不起的。
         ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
             let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
-            let panels = room_model::load_panel_index(&rooms).await?;
-            run_room_task(&mgr.db_option, &rooms, &panels, item.action, refno)
+            let panels = room_model::load_panel_index(&mgr.db_option, &rooms).await?;
+            // 整间任务用不到构件的旧归属快照，别为它多发一条查询。
+            let history = if matches!(item.action, ModelWorkAction::RoomRecalcElement) {
+                room_model::ElementRoomHistory::load(&[refno]).await?
+            } else {
+                room_model::ElementRoomHistory::default()
+            };
+            run_room_task(&mgr.db_option, &rooms, &panels, &history, item.action, refno)
                 .await
                 .map(|_| ())
         }
@@ -847,6 +853,7 @@ async fn run_room_task(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
     panels: &room_model::PanelIndex,
+    history: &room_model::ElementRoomHistory,
     action: ModelWorkAction,
     target: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
@@ -855,7 +862,7 @@ async fn run_room_task(
             room_model::recalc_panel_membership(db_option, rooms, target).await
         }
         ModelWorkAction::RoomRecalcElement => {
-            room_model::recalc_element_membership(db_option, rooms, panels, target).await?;
+            room_model::recalc_element_membership(rooms, panels, history, target).await?;
             Ok(HashSet::new())
         }
         other => anyhow::bail!("{} 不是房间任务", other.as_str()),
@@ -1266,7 +1273,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     let rooms = room_model::load_room_panel_map(db_option).await?;
     // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
     // 候选面板从这里选，不再依赖空间树里有没有 PANE 条目。
-    let panel_index = room_model::load_panel_index(&rooms).await?;
+    let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
     if panel_index.usable_panels() == 0 && !rooms.rooms.is_empty() {
         println!(
             "{} 间在册房间里没有一块面板有可用几何：本轮元素任务只会把归属收敛成空集，\
@@ -1274,12 +1281,36 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
             rooms.rooms.len()
         );
     }
+
+    // 整页元素的现存归属一次查完（见 [`room_model::ElementRoomHistory`]）：归属变化
+    // 日志与同轮吸收的封闭性检查读的是同一份边。
+    //
+    // 加载失败时**一个都不吸收**：空快照会让「旧边 ⊆ 本轮已重算面板」凭空成立，
+    // 把本该照跑的元素任务错误吸收掉，而错吸收留下的陈旧边没有人会再来清。
+    let element_refnos: Vec<RefnoEnum> = elements
+        .iter()
+        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
+        .map(RefnoEnum::from)
+        .collect();
+    let history = match room_model::ElementRoomHistory::load(&element_refnos).await {
+        Ok(history) => Some(history),
+        Err(error) => {
+            println!(
+                "构件现存归属快照加载失败，本轮不吸收任何元素任务（归属变化日志会把旧房间\
+                 显示成「无房间」）: {error:#}"
+            );
+            None
+        }
+    };
+    let empty_history = room_model::ElementRoomHistory::default();
+    let history_ref = history.as_ref().unwrap_or(&empty_history);
+
     let mut report = DrainReport::default();
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
     for job in &panels {
-        match run_room_job(db_option, &rooms, &panel_index, job).await {
+        match run_room_job(db_option, &rooms, &panel_index, history_ref, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -1297,20 +1328,22 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     // 吸收的封闭性输入（ADR-010 §8，2026-07-28 修订）只为真正的候选加载一次；
     // 加载失败不放大成整轮失败，但**一个都不吸收**——封闭性未知时把元素任务照跑
     // 一遍只是多花一次网格判定，错吸收却会把陈旧边永久留在库里。
-    let absorb_candidates: Vec<RefnoEnum> = elements
+    let absorb_candidates: Vec<RefnoEnum> = element_refnos
         .iter()
-        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
-        .map(RefnoEnum::from)
+        .copied()
         .filter(|refno| claimed_members.contains(refno))
         .collect();
-    let closure_inputs = if absorb_candidates.is_empty() {
-        None
-    } else {
-        match load_absorption_closure_inputs(&panel_index, &absorb_candidates).await {
-            Ok(inputs) => Some(inputs),
-            Err(error) => {
-                println!("吸收封闭性输入加载失败，本轮不吸收任何元素任务: {error:#}");
-                None
+    let closure_inputs = match history.as_ref() {
+        // 旧边快照都没拿到，封闭性无从谈起。
+        None => None,
+        Some(_) if absorb_candidates.is_empty() => None,
+        Some(history) => {
+            match load_absorption_closure_inputs(&panel_index, history, &absorb_candidates).await {
+                Ok(inputs) => Some(inputs),
+                Err(error) => {
+                    println!("吸收封闭性输入加载失败，本轮不吸收任何元素任务: {error:#}");
+                    None
+                }
             }
         }
     };
@@ -1333,7 +1366,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, &rooms, &panel_index, job).await {
+            match run_room_job(db_option, &rooms, &panel_index, history_ref, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
@@ -1411,46 +1444,30 @@ fn absorption_verdict(
         .is_some_and(|candidates| absorption_is_closed(old, candidates, claimed_panels))
 }
 
-/// 为本轮吸收候选批量加载封闭性输入：一条 SELECT 查旧边，候选面板走库内面板几何。
+/// 为本轮吸收候选整理封闭性输入：旧边取自整页快照，候选面板走库内面板几何。
 ///
-/// 候选面板**不再经过空间树**：元素分支（`recalc_element_membership`）2026-08-05 已改从
+/// 旧边**不再自己发查询**：本轮开头的 [`room_model::ElementRoomHistory`] 已经把整页元素
+/// 的 `room_relate` 入边查回来了，元素分支的归属变化日志读的也是它。同一份边问两遍
+/// 除了多一次往返，还留下了两份可能分叉的读法。
+///
+/// 候选面板**不经过空间树**：元素分支（`recalc_element_membership`）2026-08-05 已改从
 /// 本轮加载的在册面板几何（[`room_model::PanelIndex`]）选候选，这里预测它会碰哪些面板的
 /// 逻辑必须同源。留在树上的话，树缺在册 PANE 条目时（issue #7 的典型态）会拿到空候选、
-/// 错误吸收，把元素分支本会写的边永久跳过——正是那类静默漏分配。旧边仍取自库
-/// （`room_relate` 现状），本来就可信。
+/// 错误吸收，把元素分支本会写的边永久跳过——正是那类静默漏分配。
 async fn load_absorption_closure_inputs(
     panels: &room_model::PanelIndex,
+    history: &room_model::ElementRoomHistory,
     elements: &[RefnoEnum],
 ) -> anyhow::Result<AbsorptionClosureInputs> {
     let mut inputs = AbsorptionClosureInputs::default();
 
-    let keys = elements
-        .iter()
-        .map(RefnoEnum::to_pe_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    #[derive(serde::Deserialize)]
-    struct EdgeRow {
-        panel: RefnoEnum,
-        element: RefnoEnum,
-    }
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT in.id AS panel, out.id AS element FROM room_relate WHERE out IN [{keys}];"
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("查询吸收候选的现存归属边失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("查询吸收候选的现存归属边语句失败: {error}"))?;
-    for row in response
-        .take::<Vec<EdgeRow>>(0)
-        .map_err(|error| anyhow::anyhow!("解析吸收候选的现存归属边失败: {error}"))?
-    {
-        inputs
-            .old_edge_panels
-            .entry(row.element)
-            .or_default()
-            .insert(row.panel);
+    for &element in elements {
+        let old_panels = history.panels_of(element);
+        // 没有旧边的元素**不**插入映射：`absorption_verdict` 把缺项读成空集，
+        // 而插入一个空集在语义上与之等价，留空更贴近「这条边本来就不存在」。
+        if !old_panels.is_empty() {
+            inputs.old_edge_panels.insert(element, old_panels);
+        }
     }
 
     // 候选面板与元素分支同源：库内面板几何（PanelIndex）+ 库内构件世界包围盒。
@@ -1462,13 +1479,14 @@ async fn run_room_job(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
     panels: &room_model::PanelIndex,
+    history: &room_model::ElementRoomHistory,
     job: &PendingModelWork,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let refno = RefnoEnum::from(
         RefU64::from_str(&job.target_refno)
             .map_err(|_| anyhow::anyhow!("invalid pending refno {}", job.target_refno))?,
     );
-    run_room_task(db_option, rooms, panels, job.action, refno).await
+    run_room_task(db_option, rooms, panels, history, job.action, refno).await
 }
 
 #[cfg(test)]
