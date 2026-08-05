@@ -67,6 +67,10 @@ pub mod graph_db;
 pub mod noun_layout;
 pub mod test;
 
+// RVM 基准对拍。注意与同名但无关的 `src/rvm/`（PDMS 元素遍历）区分。
+#[cfg(feature = "rvm_verify")]
+pub mod rvm_baseline;
+
 #[cfg(feature = "gui")]
 pub mod gui;
 

@@ -109,7 +109,7 @@ dependencies = [
  "dpcsync",
  "flume",
  "futures",
- "glam",
+ "glam 0.29.3",
  "gpui",
  "gpui-component",
  "hex",
@@ -140,6 +140,7 @@ dependencies = [
  "rkyv",
  "rumqttc",
  "rust-embed",
+ "rvm-rs",
  "serde",
  "serde_json",
  "serde_with",
@@ -192,7 +193,7 @@ dependencies = [
  "evalexpr",
  "flate2",
  "futures",
- "glam",
+ "glam 0.29.3",
  "hash32 0.3.1",
  "hexasphere",
  "id_tree 1.8.0 (git+https://gitee.com/happydpc/id_tree)",
@@ -1372,7 +1373,7 @@ dependencies = [
  "approx 0.5.1",
  "bevy_reflect",
  "derive_more 1.0.0",
- "glam",
+ "glam 0.29.3",
  "itertools 0.14.0",
  "rand 0.8.5",
  "rand_distr",
@@ -1418,7 +1419,7 @@ dependencies = [
  "downcast-rs 2.0.2",
  "erased-serde 0.4.6",
  "foldhash",
- "glam",
+ "glam 0.29.3",
  "serde",
  "smallvec",
  "smol_str 0.2.2",
@@ -4477,6 +4478,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.30.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
+
+[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5055,7 +5062,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c9e718d32b6e6b2b32354e1b0367025efdd0b11d6a740b905ddf5db1074679"
 dependencies = [
  "constgebra",
- "glam",
+ "glam 0.29.3",
  "tinyvec",
 ]
 
@@ -6756,7 +6763,7 @@ version = "0.33.0"
 source = "git+https://gitee.com/happydpc/nalgebra.git#f8f406aaabacc366519903c917ea753b0e43056b"
 dependencies = [
  "approx 0.5.1",
- "glam",
+ "glam 0.29.3",
  "matrixmultiply",
  "nalgebra-macros",
  "num-complex",
@@ -7605,7 +7612,7 @@ source = "git+https://github.com/happyrust/occt-rs.git?rev=1c44c6e122b42a9efaf5c
 dependencies = [
  "anyhow",
  "cxx",
- "glam",
+ "glam 0.29.3",
  "kicad-parser",
  "opencascade-sys",
  "thiserror 1.0.69",
@@ -9633,7 +9640,7 @@ source = "git+https://gitee.com/happydpc/rust-ploop-processor#36da2856c1b8853b4e
 dependencies = [
  "anyhow",
  "chrono",
- "glam",
+ "glam 0.29.3",
  "regex",
  "serde",
  "serde_json",
@@ -9889,6 +9896,21 @@ dependencies = [
  "unicode-ccc 0.4.0",
  "unicode-properties",
  "unicode-script",
+]
+
+[[package]]
+name = "rvm-rs"
+version = "0.1.0"
+source = "git+https://github.com/happyrust/rvm-rs#45470d2a0ddcabcd1f11958362e6440865bfc24e"
+dependencies = [
+ "glam 0.30.10",
+ "memmap2",
+ "nom 8.0.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "spade",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
