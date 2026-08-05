@@ -29,3 +29,45 @@ logs_*.txt
 
 # 根目录下以下划线开头的一次性排查/探针产物（_sys_parse、_ref_rev_probe 等）
 /_*
+
+# 手工备份、加速结构时点快照与编译器崩溃转储（可从当前配置 / 重新解析重建）
+*.bak-*
+DbOption.toml.*
+rustc-ice-*.txt
+
+# 本地 vendor 克隆：Cargo.toml 已按 git URL + rev 拉取 aios-parse-pdms / occt-rs，
+# 这里的副本自带 .git，入库会变成拉不出来的 gitlink
+/vendor/
+
+# 下载的第三方工具二进制（surreal.exe 等）
+/bin/*.exe
+
+# perf 测试每次运行都会重写，不反映代码状态
+/performance_trace.json
+
+# 逆向 / Agent 会话工作区与本地 agent 会话状态，仅本机有效
+/.ida_scratch/
+/.context/
+/.cursor/rules/pchat.mdc
+
+# 根目录一次性查询与命令历史残留
+/history.txt
+/inst_relate
+/dc_probe.sql
+/gm_noun_caps_probe.py
+
+__pycache__/
+*.pyc
+
+# output/ 是运行产物目录（截图、跑批日志、控制台抓取、E3D 插件 DLL、一次性 SurrealQL、
+# 逆向中间快照、按场次归档的演练目录），默认全忽略；只放行下列仓库资产：
+#   - 探针脚本
+#   - noun_layout.json：ADR-008 寻址模型权威快照，src/bin/noun_layout*_probe.rs 硬编码读取
+#   - increment-test 里已策展的那组记录（新截图默认不入库）
+/output/*
+!/output/*.py
+!/output/noun_layout.json
+!/output/increment-test/
+/output/increment-test/*
+!/output/increment-test/README.md
+!/output/increment-test/rs-plant3-d-*.png
