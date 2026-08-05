@@ -424,6 +424,26 @@ impl IncrementPipeline {
         Self
     }
 
+    /// 把解析产物写进活动窗口，并把同一批主数据/ref_rev语句收入唯一 journal。
+    /// 此阶段刻意不生成收口语句：水位与 pending 只能在模型生成也成功后提交。
+    pub(crate) async fn stage_parsed_window(
+        window: &mut crate::data_interface::staging::ActiveStagedWindow,
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+        dbnum: u32,
+    ) -> anyhow::Result<usize> {
+        use crate::data_interface::staging::ExecMode;
+
+        window.activate().await?;
+        let statements = Self::render_persist_statements(range_eles, dbnum as i32)
+            .into_iter()
+            .chain(crate::data_interface::manual_update::build_reverse_index_statements(range_eles))
+            .collect::<Vec<_>>();
+        for sql in &statements {
+            window.execute(sql, ExecMode::Both).await?;
+        }
+        Ok(statements.len())
+    }
+
     /// Side-effect-free change collection for one file over a sesno range.
     ///
     /// Opens the E3D file and returns the per-`sesno` element operations WITHOUT
@@ -953,6 +973,62 @@ impl IncrementPipeline {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_parse_keeps_one_journal_and_does_not_finalize() {
+        use crate::data_interface::staging::{
+            lifecycle::create_window_on, ExecMode, ResourceThresholds,
+        };
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let mut window = create_window_on(
+            &instance,
+            7996,
+            1,
+            1,
+            ResourceThresholds::default(),
+        )
+        .await
+        .expect("create window");
+        window
+            .execute(
+                "UPSERT pe:⟨7996_10⟩ SET noun = 'PIPE'",
+                ExecMode::StagingOnly,
+            )
+            .await
+            .expect("seed staging only");
+
+        let mut range = BTreeMap::new();
+        range.insert(
+            1,
+            vec![EleOperationData::new(
+                RefU64((7996_u64 << 32) | 10),
+                1,
+                EleOperationDetail::Deleted,
+            )],
+        );
+
+        let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, 7996)
+            .await
+            .expect("stage parsed window");
+        assert_eq!(staged, 2, "主数据删除 + ref_rev 清理");
+        assert_eq!(window.journal().len(), 2, "必须沿用同一 journal");
+
+        let db = window.staging_db().clone();
+        let mut response = db
+            .query("SELECT * FROM dbnum_watermark")
+            .await
+            .expect("query watermark");
+        let rows: surrealdb::Value = response.take(0).expect("take watermark");
+        assert_eq!(
+            serde_json::to_string(&rows).expect("serialize"),
+            "{\"Array\":[]}",
+            "解析阶段不得提前推进水位"
+        );
+
+        window.drop_database().await.expect("cleanup");
+    }
 
     #[test]
     fn reverse_index_failure_requires_durable_recovery_before_finalize() {

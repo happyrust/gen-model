@@ -10,7 +10,7 @@
 //!
 //! 共享句柄纪律：ADR §2 是「一个常驻 mem 实例、每提交单元一个 database」。
 //! `Surreal<Any>` 的克隆共享同一会话，`use_db` 是会话级切换——所以**窗口每次
-//! (重)进入执行前必须 [`StagingWindow::activate`]**。数据批次队列是单 worker
+//! (重)进入执行前必须 [`ActiveStagedWindow::activate`]**。数据批次队列是单 worker
 //! （ADR-011），任一时刻至多一个窗口在执行，阻断窗口的暂存库只是驻留、不被
 //! 查询，这条纪律因此够用。
 
@@ -23,7 +23,7 @@ use once_cell::sync::Lazy;
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 
-use super::executor::StagedExecutor;
+use super::executor::{ExecMode, JournalEntry, StagedExecutor};
 use super::resources::{ResourceBand, ResourceGauge, ResourceThresholds};
 
 /// 暂存实例上所有 staging database 所在的 namespace。
@@ -70,10 +70,11 @@ pub struct StagingWindowMeta {
 }
 
 /// 一个提交单元的暂存窗口：staging database + 资源面板 + 元数据。
-pub struct StagingWindow {
+pub struct ActiveStagedWindow {
     meta: StagingWindowMeta,
     db: Surreal<Any>,
     gauge: Arc<ResourceGauge>,
+    executor: StagedExecutor,
 }
 
 /// 在生产常驻实例上开一个新窗口。
@@ -81,7 +82,7 @@ pub async fn create_window(
     dbnum: u32,
     start_sesno: i32,
     end_sesno: i32,
-) -> anyhow::Result<StagingWindow> {
+) -> anyhow::Result<ActiveStagedWindow> {
     ensure_stage_instance().await?;
     create_window_on(
         &aios_core::staging::STAGE_DB,
@@ -100,7 +101,7 @@ pub async fn create_window_on(
     start_sesno: i32,
     end_sesno: i32,
     thresholds: ResourceThresholds,
-) -> anyhow::Result<StagingWindow> {
+) -> anyhow::Result<ActiveStagedWindow> {
     let window_id = NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst);
     let label = format!("staging_{dbnum}_{window_id}");
 
@@ -132,10 +133,13 @@ pub async fn create_window_on(
             },
         );
 
-    Ok(StagingWindow {
+    let executor = StagedExecutor::new(instance.clone(), meta.label.clone())
+        .with_gauge(gauge.clone());
+    Ok(ActiveStagedWindow {
         meta,
         db: instance.clone(),
         gauge,
+        executor,
     })
 }
 
@@ -179,7 +183,7 @@ pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
     Ok(())
 }
 
-impl StagingWindow {
+impl ActiveStagedWindow {
     pub fn meta(&self) -> &StagingWindowMeta {
         &self.meta
     }
@@ -201,10 +205,17 @@ impl StagingWindow {
             .with_context(|| format!("激活暂存库 {} 失败", self.meta.label))
     }
 
-    /// 本窗口的暂存执行器（带资源计量）。
-    pub fn executor(&self) -> StagedExecutor {
-        StagedExecutor::new(self.db.clone(), self.meta.label.clone())
-            .with_gauge(self.gauge.clone())
+    /// 通过本窗口唯一的执行器写暂存/journal。
+    pub async fn execute(&mut self, sql: impl Into<String>, mode: ExecMode) -> anyhow::Result<()> {
+        self.executor.execute(sql, mode).await
+    }
+
+    pub fn journal(&self) -> &[JournalEntry] {
+        self.executor.journal()
+    }
+
+    pub fn staging_db(&self) -> &Surreal<Any> {
+        self.executor.staging_db()
     }
 
     /// 本窗口的读路由上下文。

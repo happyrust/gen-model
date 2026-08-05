@@ -119,12 +119,22 @@ fn require_explicit_target(kind: &str, values: &Values) -> anyhow::Result<()> {
 }
 
 fn require_bounded_target(kind: &str, values: &Values, has_where: bool) -> anyhow::Result<()> {
-    if values.iter().all(is_explicit_record)
+    if values.iter().all(is_bounded_target)
         || (has_where && values.iter().all(|value| matches!(value, Value::Table(_))))
     {
         return Ok(());
     }
     bail!("{kind} 目标必须是显式 record id，或带 WHERE 的单表目标")
+}
+
+fn is_bounded_target(value: &Value) -> bool {
+    is_explicit_record(value)
+        || matches!(
+            value,
+            Value::Edges(edges)
+                if !matches!(&edges.from.id, Id::Generate(_) | Id::Range(_))
+                    && !edges.what.is_empty()
+        )
 }
 
 fn is_explicit_record(value: &Value) -> bool {
@@ -202,6 +212,7 @@ mod tests {
             "UPSERT pe:⟨4000000001_10⟩ CONTENT { noun: 'PIPE', dbnum: 7997 }",
             "UPSERT type::thing('pe', $refno) SET noun = 'PIPE'",
             "DELETE inst_relate WHERE zone_refno = pe:⟨1_2⟩",
+            "DELETE pe:⟨1_2⟩->ref_rev",
             "UPDATE pe:a SET deleted = true",
             "INSERT RELATION INTO pe_owner [{ id: pe_owner:[pe:a, 0], in: pe:a, out: pe:b }]",
             "LET $pe = pe:⟨1_2⟩; UPDATE type::thing('datacenter_version', $pe) SET status = 'Delete'",

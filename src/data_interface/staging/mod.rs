@@ -16,8 +16,8 @@ pub mod parity;
 pub mod replay_safe;
 pub mod resources;
 
-pub use executor::{ExecMode, JournalEntry, StagedExecutor, TX_CHUNK};
-pub use lifecycle::{StagingWindow, StagingWindowMeta};
+pub use executor::{ExecMode, JournalEntry, TX_CHUNK};
+pub use lifecycle::{ActiveStagedWindow, StagingWindowMeta};
 pub use resources::{ResourceBand, ResourceGauge, ResourceThresholds};
 
 /// 读路由 seam 的验收（T0.2）：上下文在场 → 被接线的读入口只看暂存库；

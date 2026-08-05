@@ -49,7 +49,7 @@ pub struct JournalEntry {
 ///
 /// 句柄约定：`staging` 已 `use_ns`/`use_db` 到该单元的 staging database
 /// （`staging_{dbnum}_{window_id}`，T0.3 的生命周期模块负责建库与初始化）。
-pub struct StagedExecutor {
+pub(super) struct StagedExecutor {
     staging: Surreal<Any>,
     label: String,
     journal: Vec<JournalEntry>,
@@ -205,19 +205,6 @@ impl StagedExecutor {
         Ok(replayed)
     }
 
-    /// 废弃：DROP 本单元的 staging database 并丢弃日志（执行器被消耗）。
-    ///
-    /// staging 只活在内存实例里，进程退出自然消失；这里的显式 DROP 是长驻
-    /// 进程内的资源回收（T0.3 的登记表与终态清扫在上层兜底）。
-    pub async fn abandon(self) -> anyhow::Result<()> {
-        self.staging
-            .query(format!("REMOVE DATABASE IF EXISTS `{}`;", self.label))
-            .await
-            .with_context(|| format!("[{}] 废弃暂存库传输失败", self.label))?
-            .check()
-            .with_context(|| format!("[{}] 废弃暂存库失败", self.label))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -433,20 +420,4 @@ mod tests {
         assert_eq!(a, b, "中断重试后的终态必须与一次成功写回一致");
     }
 
-    /// 废弃：DROP staging database，同一库名下不留任何行。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn abandon_drops_the_staging_database() {
-        let staging = staging_handle("staging_7997_5").await;
-        let mut executor = StagedExecutor::new(staging.clone(), "staging_7997_5");
-        executor
-            .execute("UPSERT pe:doomed SET noun = 'PIPE'", ExecMode::Both)
-            .await
-            .expect("both");
-
-        executor.abandon().await.expect("abandon");
-
-        // 句柄仍指向同名库：REMOVE DATABASE 后它是一张白纸。
-        let after = select_values(&staging, "SELECT * FROM pe").await;
-        assert_eq!(after, "{\"Array\":[]}", "废弃后不得残留: {after}");
-    }
 }
