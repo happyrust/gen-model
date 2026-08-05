@@ -338,27 +338,34 @@ async fn execute_frozen_batch(
 
     // 位姿 / 删除 / 级联先行——级联展开会反过来入队 regen 工作，随后一起并进
     // 本批的单元工作单（与旧手动路径的顺序一致）。
+    let mut non_regen_failed = false;
     if let Err(error) = model_update_pending::drain_non_regen(mgr).await {
         warnings.push(format!(
             "执行位姿/删除/级联模型任务失败（已保留待重试）: {error:#}"
         ));
         side_effect_failed = true;
+        non_regen_failed = true;
     }
 
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
-    let (units, settlement_failed) = match load_pending_model_units_for_retry(job.dbnum).await {
-        Ok(pending) => {
-            let worklist = merge_unit_worklist(new_units, pending);
-            run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+    let (units, settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
+        match load_pending_model_units_for_retry(job.dbnum).await {
+            Ok(pending) => {
+                let worklist = merge_unit_worklist(new_units, pending);
+                run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
+                ));
+                registry.set_unit_totals(&job.task_id, 0);
+                (Vec::new(), true)
+            }
         }
-        Err(error) => {
-            warnings.push(format!(
-                "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
-            ));
-            registry.set_unit_totals(&job.task_id, 0);
-            (Vec::new(), true)
-        }
+    } else {
+        registry.set_unit_totals(&job.task_id, 0);
+        (Vec::new(), true)
     };
     side_effect_failed |= settlement_failed;
 
@@ -383,6 +390,10 @@ async fn execute_frozen_batch(
         units,
         warnings: std::mem::take(warnings),
     }
+}
+
+fn batch_regen_is_allowed(non_regen_failed: bool) -> bool {
+    !non_regen_failed
 }
 
 fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
@@ -955,6 +966,12 @@ mod tests {
         assert!(room_phase_is_clear(false, 0));
         assert!(!room_phase_is_clear(true, 0));
         assert!(!room_phase_is_clear(false, 1));
+    }
+
+    #[test]
+    fn failed_non_regen_work_blocks_the_batch_regen_worklist() {
+        assert!(batch_regen_is_allowed(false));
+        assert!(!batch_regen_is_allowed(true));
     }
 
     /// 隔离壳的本分：panic 到此为止，换成一句话交给调用方。
