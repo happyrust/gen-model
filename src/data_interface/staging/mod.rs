@@ -53,8 +53,11 @@ mod routing_tests {
         let pe_key = refno.to_pe_key();
         staging
             .query(format!(
-                "UPSERT PIPE:⟨4000000001_10⟩ CONTENT {{ TYPE: 'PIPE', NAME: 'p1' }};\
-                 UPSERT {pe_key} CONTENT {{ noun: 'PIPE', refno: PIPE:⟨4000000001_10⟩ }};"
+                "UPSERT SITE:⟨4000000001_1⟩ CONTENT {{ TYPE: 'SITE', NAME: 'root' }};\
+                 UPSERT pe:⟨4000000001_1⟩ CONTENT {{ noun: 'SITE', refno: SITE:⟨4000000001_1⟩ }};\
+                 UPSERT PIPE:⟨4000000001_10⟩ CONTENT {{ TYPE: 'PIPE', NAME: 'p1' }};\
+                 UPSERT {pe_key} CONTENT {{ noun: 'PIPE', refno: PIPE:⟨4000000001_10⟩, owner: pe:⟨4000000001_1⟩ }};\
+                 INSERT RELATION INTO pe_owner [{{ id: pe_owner:[{pe_key}, 0], in: {pe_key}, out: pe:⟨4000000001_1⟩ }}];"
             ))
             .await
             .expect("plant staged rows")
@@ -79,6 +82,23 @@ mod routing_tests {
         .await
         .expect("implicit row routed");
         assert_eq!(implicit.get_type_str(), "PIPE");
+
+        let root: RefnoEnum = "4000000001_1".into();
+        let children = with_staging_reads(ctx.clone(), aios_core::get_children_refnos(root))
+            .await
+            .expect("children routed");
+        assert_eq!(children, vec![refno]);
+        let types = with_staging_reads(
+            ctx.clone(),
+            aios_core::get_self_and_owner_type_name(refno),
+        )
+        .await
+        .expect("owner types routed");
+        assert_eq!(types, vec!["PIPE", "SITE"]);
+        let deep = with_staging_reads(ctx.clone(), aios_core::query_deep_children_refnos(root))
+            .await
+            .expect("deep hierarchy routed");
+        assert!(deep.contains(&refno), "{deep:?}");
 
         let child = with_staging_reads(ctx.clone(), async move {
             aios_core::staging::spawn_with_staging_reads(aios_core::get_type_name(refno))
