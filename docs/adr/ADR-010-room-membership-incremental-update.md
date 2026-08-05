@@ -197,8 +197,9 @@
     把管段行一并捞进来，用**元素**的世界变换覆盖管段行的「单位圆柱 → 世界管段」
     缩放矩阵，管段会被画成分支原点处的单位圆柱。现按 out 排除
     `inst_info:⟨1⟩/⟨2⟩` 的行。代价：纯 POS/ORI 移动后管段（视觉与房间归属）
-    停在旧位置，滞后到该分支下次重生成才追上——管段无独立几何源，位姿层无从
+    停在旧位置，滞后到该分支下次重生成才追上——管段无独立几何源，    位姿层无从
     重推其变换，这是已知代价而非缺陷（TUBI 语料注释同口径）。
+    **（2026-08-05 已关闭，见下方增补：那不是代价，是 issue #5。）**
   - **网格失败不再静默清边**：两条重算分支对 `.mesh` 读失败/三角化失败此前一律
     `continue`，「判不了」被当成「不在里面」，先清后写随即把存量边抹掉且无日志。
     现在：面板（或元素分支的某块候选面板）**一个网格都不可用**升级为错误——任务
@@ -254,6 +255,35 @@
   - **仍未闭合**：issue #7 的根因仍未确定——本轮拆掉的是它最可能的成因并让其余成因
     可见，但没有在报告人的库上复现过。见
     `docs/2026-08-05_issue-7-room-incremental-audit.md`。
+- 2026-08-05 增补 2（issue #5：隐含直管段不跟随管件移动，**07-28 记的那条「已知代价」
+  其实是缺陷**）——
+  - 链路：挪一个管件 → `POS` → `classify_operation_impact` 判 `TransformOnly` → 计划层
+    给管件自己排 `Transform` → `update_world_transforms` 的子树收集**显式排除**管段行
+    → 管段的 `world_trans` / `aabb` 停在旧值。整条 BRAN 被挪动时同样如此：管件跟着走、
+    管段留在原地；房间归属也跟着停在旧位置。
+  - 07-28 那次排除本身是对的：管段没有自己的 `pe`，`inst_relate` 行挂在 BRAN/HANG 名下、
+    `out` 指向共享单位几何，`world_trans` 是 `insert_tubi` 按成员 arrive/leave 点推导的
+    「单位圆柱 → 世界管段」缩放矩阵；拿元素的世界变换覆盖它会把管段画成分支原点处的
+    单位圆柱。错的是把剩下那半当成可接受的代价——它只在该分支下次重生成时才自愈，
+    也就是说改尺寸会顺带修好，单纯挪位置永远修不好。
+  - 修法：**别在位姿层重推管段变换，而是让这类变更别走便宜路径**。计划层新增
+    `reroute_derived_geometry_units`——生成根落在 `DERIVED_GEOMETRY_UNIT_NOUNS`
+    （`BRAN` / `HANG`）的位姿目标，从 transform 集移进 regen 集，由既有的交付单元
+    rollup 排出 `RegenRoot`。与 `is_loop_container_noun` 同一条道理（点容器的 POS 是
+    属主网格的输入，所以直接判 `Regen`），区别只在判据落在属主链上、
+    `classify_operation_impact` 看不到，只能在计划层做。EQUI/SUPPO 这类没有派生几何的
+    单元不受影响，继续走便宜路径。
+  - 两处次序是硬约束：改判必须夹在 `partition_operation_impacts` 与
+    `mask_details_to_regen` 之间。排在掩码之后的话，改判过去的目标会被掩成非
+    `model_affecting`，rollup 看不到它、不建 `RegenRoot`，而它同时已经从 transform 集里
+    被摘走——这一次移动会凭空消失。有源码断言钉着。
+  - 生成根解析失败保持原判并告警，不掐数据窗口（与房间面板枚举失败同一口径）。
+  - 代价：挪一个管件从「一次变换刷新」变成「一条分支重生成」。BRAN 本来就是 ADR-012
+    定义的最小交付单元，重生成一条分支正是为这种情况准备的。
+  - 测试：单元判据真值表、改判与掩码的次序源码断言；真实会话 live 用例
+    `live_projams_real_attribute_sessions_plan_and_execute_distinctly` 里那条 FTUB.POS
+    的期望从 `Transform` 改为 `RegenRoot`（不再钉死根 refno，改为断言根的 noun 带隐含
+    直管段）。`cargo test --lib --features http_api` 346 通过 / 0 失败。
 
 日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 一轮增补）
 关联：`docs/2026-07-27_room-incremental-audit-report.md`（缺陷取证 D1–D7）；

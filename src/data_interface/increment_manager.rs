@@ -2239,8 +2239,13 @@ impl AiosDBManager {
             // 隐含直管段的行（out 指向共享单位几何 inst_info:⟨1⟩/⟨2⟩，挂在 BRAN/HANG
             // 名下）必须排除：它的 world_trans 是「单位圆柱 → 世界管段」的缩放矩阵，
             // 由生成层按分支成员的 arrive/leave 点现场推导；拿元素本身的世界变换去覆盖
-            // 它，管段会被画成分支原点处的一个单位圆柱。纯位姿移动后管段停在旧位置
-            // （滞后到下次该分支重生成才追上）是这里的已知代价，比覆坏变换要轻。
+            // 它，管段会被画成分支原点处的一个单位圆柱。
+            //
+            // 排除曾经的代价是「挪一个管件，管件动了而管段停在旧位置」（issue #5）。
+            // 那条口子现在堵在计划层：生成根是 BRAN/HANG 的位姿变更不再排 Transform
+            // 工作项，改判整根重生成（`model_update_plan::reroute_derived_geometry_units`）
+            // ——管段的正确变换只有生成层算得出来。所以走到这里的位姿目标，其子树里
+            // 本就不该有需要跟着动的管段；这道排除是防御，不是取舍。
             let sql = format!(
                 "array::flatten(SELECT VALUE IF record::exists(type::thing('inst_relate', record::id(id))) \
                  AND type::thing('inst_relate', record::id(id)).out != inst_info:⟨1⟩ \

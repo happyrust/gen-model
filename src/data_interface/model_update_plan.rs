@@ -206,6 +206,64 @@ pub(crate) fn partition_operation_impacts(
     }
 }
 
+/// 生成根是这些类型时，成员的纯位姿变更也必须整根重生成，不能走便宜路径。
+///
+/// 隐含直管段（TUBI/BOXI）的几何是**分支成员位置的函数**，不是任何单个元素的实例
+/// 变换：它的 `inst_relate` 行挂在 BRAN/HANG 名下、`out` 指向共享单位几何，
+/// `world_trans` 由 `cata_model::insert_tubi` 按成员的 arrive/leave 点现场推导。位姿
+/// 层够不着它——`update_world_transforms` 只会算「这个 pe 的世界变换」，拿它去覆盖
+/// 管段行会把管段画成分支原点处的单位圆柱，所以那里显式排除了管段行（2026-07-28）。
+/// 排除的代价就是「挪一个管件，管件动了而管段停在旧位置」，滞后到该分支下次重生成
+/// 才追上（issue #5）。
+///
+/// 修法不是回到位姿层重推管段变换——那一层手里没有邻居的 arrive/leave 点——而是让
+/// 这类变更别走便宜路径。这与 `is_loop_container_noun` 是同一条道理：点容器的 POS 是
+/// 属主网格的**输入**，所以它直接判 `Regen`；管件位置是隐含直管段的输入，同理。区别
+/// 只在判据落在属主链上，而 `classify_operation_impact` 只看得到元素自己的 noun，
+/// 所以这一步必须在计划层做。
+const DERIVED_GEOMETRY_UNIT_NOUNS: [&str; 2] = ["BRAN", "HANG"];
+
+/// 这个交付单元的几何是否由成员位置派生（见 [`DERIVED_GEOMETRY_UNIT_NOUNS`]）。
+fn unit_derives_geometry_from_member_positions(noun: &str) -> bool {
+    let noun = noun.trim().to_ascii_uppercase();
+    DERIVED_GEOMETRY_UNIT_NOUNS.contains(&noun.as_str())
+}
+
+/// 把生成根会派生几何的位姿目标从 `Transform` 改判重生成（issue #5）。
+///
+/// 生成根解析失败时保持原判并告警：那只让该分支的管段滞后到下次重生成，而让整个
+/// 数据窗口失败是数据缺口——与本文件里房间面板枚举失败的处置同一口径。
+async fn reroute_derived_geometry_units(partition: &mut OperationImpactPartition) -> Vec<String> {
+    use crate::data_interface::generation_root::{
+        configured_delivery_unit_types, resolve_live_element_generation_root,
+    };
+
+    let targets: Vec<RefnoEnum> = partition.transform_refnos.iter().copied().collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let unit_types = configured_delivery_unit_types();
+    let mut warnings = Vec::new();
+    let mut rerouted = Vec::new();
+    for refno in targets {
+        match resolve_live_element_generation_root(refno, &unit_types).await {
+            Ok(Some(root)) if unit_derives_geometry_from_member_positions(&root.noun) => {
+                rerouted.push(refno);
+            }
+            Ok(_) => {}
+            Err(error) => warnings.push(format!(
+                "{refno} 的生成根解析失败，位姿变更按便宜路径处理\
+                 （若它是管件，该分支的隐含直管段会滞后到下次重生成）: {error:#}"
+            )),
+        }
+    }
+    for refno in rerouted {
+        partition.transform_refnos.remove(&refno);
+        partition.regen_refnos.insert(refno);
+    }
+    warnings
+}
+
 /// 交付单元 rollup 眼中的净变更：只有重建类变更保留 `model_affecting`。
 /// 纯位姿目标属于 `Transform` 工作项，不参与单元重生成，也不该被 rollup
 /// 计进 `no_generation`。
@@ -488,10 +546,16 @@ pub(crate) async fn build_model_update_plan(
             ));
         }
     }
+    let mut partition = partition_operation_impacts(range_eles, &details);
+    // issue #5：生成根从成员位置派生几何（BRAN/HANG 的隐含直管段）时，纯位姿变更也得
+    // 整根重生成——便宜路径结构上算不出管段。必须排在 `mask_details_to_regen` 之前，
+    // 否则改判过去的目标会被掩成非 model_affecting，rollup 看不到它，既不重生成也不再
+    // 有 Transform 工作项，这一次移动就凭空消失了。
+    baseline_warnings.extend(reroute_derived_geometry_units(&mut partition).await);
     let OperationImpactPartition {
         regen_refnos,
         transform_refnos,
-    } = partition_operation_impacts(range_eles, &details);
+    } = partition;
     let deleted_refnos: HashSet<RefnoEnum> = details
         .iter()
         .filter(|detail| detail.net == NetOp::Deleted)
@@ -711,6 +775,54 @@ mod tests {
             partition.regen_refnos,
             HashSet::from([RefnoEnum::from(geom), RefnoEnum::from(both)]),
             "几何变更与「位姿+几何」都归重建"
+        );
+    }
+
+    /// 哪些交付单元的几何由成员位置派生（issue #5）。
+    ///
+    /// 写宽一条的后果是把大量本可以走便宜路径的移动升级成整根重生成；写窄一条的后果
+    /// 是管段继续停在旧位置，而且没有任何测试会红。
+    #[test]
+    fn only_units_with_implicit_tubing_regenerate_on_a_member_move() {
+        // 隐含直管段挂在 BRAN/HANG 名下，几何由成员的 arrive/leave 点推导。
+        assert!(unit_derives_geometry_from_member_positions("BRAN"));
+        assert!(unit_derives_geometry_from_member_positions("HANG"));
+        assert!(unit_derives_geometry_from_member_positions(" bran "));
+        // 这些单元没有派生几何，移动它们只需刷新实例变换。
+        for noun in ["EQUI", "SUPPO", "PANE", "STRU", ""] {
+            assert!(
+                !unit_derives_geometry_from_member_positions(noun),
+                "{noun} 没有由成员位置派生的几何，不该被升级成整根重生成"
+            );
+        }
+    }
+
+    /// 改判必须排在 `mask_details_to_regen` 之前。
+    ///
+    /// 顺序反了不是「少改一点」而是**把这次移动整个弄丢**：改判过去的目标会被掩成
+    /// 非 `model_affecting`，rollup 看不到它、不建 `RegenRoot`，而它同时已经从
+    /// transform 集里被摘走、也不再有 `Transform` 工作项。
+    #[test]
+    fn the_reroute_runs_before_the_rollup_mask() {
+        let source = include_str!("model_update_plan.rs");
+        let body = source
+            .split_once("pub(crate) async fn build_model_update_plan(")
+            .expect("build_model_update_plan 必须存在")
+            .1;
+
+        let partition_at = body
+            .find("partition_operation_impacts(range_eles, &details)")
+            .expect("先分区");
+        let reroute_at = body
+            .find("reroute_derived_geometry_units(&mut partition)")
+            .expect("再按生成根改判");
+        let mask_at = body
+            .find("mask_details_to_regen(&details, &regen_refnos)")
+            .expect("最后才掩码给 rollup");
+
+        assert!(
+            partition_at < reroute_at && reroute_at < mask_at,
+            "改判必须夹在分区与掩码之间: {body}"
         );
     }
 
@@ -1047,21 +1159,33 @@ mod tests {
             2,
             "{transform_impacts:#?}"
         );
+        // FTUB 是管件：属性级判定仍是纯位姿（上面两条断言），但计划层按生成根改判成
+        // 整根重生成——隐含直管段的几何是分支成员位置的函数，便宜路径算不出它
+        // （issue #5）。这里只断言动作与根的 noun，不写死根 refno：根由属主链解析，
+        // 钉死它会让这条真实会话用例绑在一次特定的建模结果上。
         let transform_plan = build_model_update_plan(8000, 28, "DESI", &transform)
             .await
             .expect("build transform model plan");
+        let actions = transform_plan
+            .work_items
+            .iter()
+            .map(|item| item.action)
+            .collect::<Vec<_>>();
         assert_eq!(
-            transform_plan
-                .work_items
-                .iter()
-                .map(|item| (item.action, item.target_refno.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(ModelWorkAction::Transform, "24384/22403")]
+            actions,
+            vec![ModelWorkAction::RegenRoot],
+            "管件移动必须排整根重生成，不能是 Transform: {:#?}",
+            transform_plan.work_items
         );
-        manager
-            .update_world_transforms(&HashSet::from([RefnoEnum::from("24384/22403")]))
+        let root = transform_plan.work_items[0].target_refno.clone();
+        assert!(
+            unit_derives_geometry_from_member_positions(&transform_plan.work_items[0].noun),
+            "生成根应当是带隐含直管段的单元: {:#?}",
+            transform_plan.work_items
+        );
+        ModelRefreshPolicy::generate_roots(&manager, &[root])
             .await
-            .expect("refresh FTUB transform for real POS sessions");
+            .expect("regenerate the branch for real FTUB.POS sessions");
 
         let data_file = PathBuf::from(std::env::var("AIOS_PROJAMS_DATA_ONLY_FILE").unwrap_or_else(
             |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
