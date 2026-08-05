@@ -960,13 +960,11 @@ pub(crate) struct StagedRoomReport {
     pub failures: Vec<String>,
 }
 
-/// Run the room work that can be decided entirely from the staged database.
-/// Panel/room structural changes need the post-commit spatial tree and current topology,
-/// so those windows deliberately keep all room targets pending. Pure element moves are
-/// fully decidable from the preloaded panel products plus staged element geometry.
+/// Run room work against the staged topology and geometry. Panel candidates still come from
+/// the pre-window global tree; changed elements are corrected afterward by their element tasks.
 pub(crate) async fn run_staged_room_work(
     db_option: &aios_core::options::DbOption,
-    rooms: &room_model::RoomPanelMap,
+    preloaded_rooms: &room_model::RoomPanelMap,
     plan_items: &[ModelWorkItem],
     aabb_changes: &HashMap<RefnoEnum, String>,
 ) -> anyhow::Result<StagedRoomReport> {
@@ -995,19 +993,11 @@ pub(crate) async fn run_staged_room_work(
         return Ok(StagedRoomReport::default());
     }
 
-    // A structural panel/room edit invalidates the pre-window room map. Those targets stay
-    // pending for the post-commit round instead of mixing old topology with new geometry.
-    if targets
-        .keys()
-        .any(|(action, _)| *action == ModelWorkAction::RoomRecalcPanel)
-    {
-        return Ok(StagedRoomReport {
-            failures: vec!["本窗口含房间/面板结构变更，房间目标保留到写回后重算".into()],
-            ..Default::default()
-        });
-    }
-
-    let panels = room_model::load_panel_index(db_option, rooms).await?;
+    let mut rooms = room_model::load_room_panel_map_from_pe(db_option).await?;
+    rooms
+        .all_panels
+        .extend(preloaded_rooms.all_panels.iter().copied());
+    let panels = room_model::load_panel_index(db_option, &rooms).await?;
     let elements = targets
         .iter()
         .filter(|((action, _), _)| *action == ModelWorkAction::RoomRecalcElement)
@@ -1016,8 +1006,10 @@ pub(crate) async fn run_staged_room_work(
     let history = room_model::ElementRoomHistory::load(&elements).await?;
     let mut report = StagedRoomReport::default();
 
+    let mut targets = targets.into_iter().collect::<Vec<_>>();
+    targets.sort_by_key(|((action, _), _)| *action != ModelWorkAction::RoomRecalcPanel);
     for ((action, target), (refno, from_aabb)) in targets {
-        match run_room_task(db_option, rooms, &panels, &history, action, refno).await {
+        match run_room_task(db_option, &rooms, &panels, &history, action, refno).await {
             Ok(_) => {
                 report.succeeded_plan_items.insert((action, target));
                 if from_aabb {
@@ -1727,8 +1719,25 @@ mod tests {
         window.drop_database().await.expect("cleanup");
     }
 
-    #[tokio::test]
-    async fn staged_structural_room_work_stays_pending() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_removed_panel_clears_its_old_relations() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        window
+            .staging_db()
+            .query(
+                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
+            )
+            .await
+            .expect("fixture")
+            .check()
+            .expect("fixture statement");
         let mut option = aios_core::options::DbOption::default();
         option.gen_spatial_tree = true;
         let item = ModelWorkItem {
@@ -1740,16 +1749,25 @@ mod tests {
             noun: "PANE".into(),
         };
 
-        let report = run_staged_room_work(
-            &option,
-            &room_model::RoomPanelMap::default(),
-            &[item],
-            &HashMap::new(),
-        )
-        .await
-        .expect("structural work is deferred");
-        assert!(report.succeeded_plan_items.is_empty());
-        assert_eq!(report.failures.len(), 1);
+        let report = window
+            .scope(run_staged_room_work(
+                &option,
+                &room_model::RoomPanelMap::default(),
+                &[item],
+                &HashMap::new(),
+            ))
+            .await
+            .expect("removed panel work");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.succeeded_plan_items.len(), 1);
+        let mut response = window
+            .staging_db()
+            .query("SELECT VALUE id FROM room_relate")
+            .await
+            .expect("inspect");
+        assert!(response.take::<Vec<String>>(0).expect("edges").is_empty());
+        assert_eq!(window.journal().await.len(), 1);
+        window.drop_database().await.expect("cleanup");
     }
 
     #[test]

@@ -385,6 +385,34 @@ pub async fn load_room_panel_map(db_option: &DbOption) -> anyhow::Result<RoomPan
     load_room_panel_groups(&db_option.get_room_key_word(), configured_match_room_fn()).await
 }
 
+/// Staged windows preload the canonical PE topology, not noun tables whose INSERT events would
+/// execute during preload. Read the same room grouping directly from `pe + pe_owner`.
+pub async fn load_room_panel_map_from_pe(db_option: &DbOption) -> anyhow::Result<RoomPanelMap> {
+    let filter = db_option
+        .get_room_key_word()
+        .iter()
+        .map(|word| format!("string::contains(name, '{}')", escape_surql_str(word)))
+        .join(" or ");
+    #[cfg(feature = "project_hd")]
+    let sql = format!(
+        "SELECT VALUE [id, array::last(string::split(name, '-')), \
+         array::flatten([id<-pe_owner<-pe, id<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']] \
+         FROM pe WHERE noun='FRMW' AND ({filter})"
+    );
+    #[cfg(feature = "project_hh")]
+    let sql = format!(
+        "SELECT VALUE [id, array::last(string::split(name, '-')), \
+         array::flatten([id<-pe_owner<-pe])[?noun='PANE']] \
+         FROM pe WHERE noun='SBFR' AND ({filter})"
+    );
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(sql)
+        .await?
+        .check()?;
+    let groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
+    Ok(room_panel_map_from_groups(groups, configured_match_room_fn()))
+}
+
 /// 构建房间和面板之间的关联关系
 ///
 /// # 参数
@@ -486,6 +514,16 @@ where
         .check()?;
     let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
 
+    Ok(room_panel_map_from_groups(room_groups, match_room_fn))
+}
+
+fn room_panel_map_from_groups<F>(
+    room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)>,
+    match_room_fn: F,
+) -> RoomPanelMap
+where
+    F: Fn(&str) -> bool,
+{
     let mut map = RoomPanelMap::default();
     for (room_refno, room_num_str, panel_refnos) in room_groups {
         map.all_panels.extend(panel_refnos.iter().copied());
@@ -499,7 +537,7 @@ where
             panels: panel_refnos,
         });
     }
-    Ok(map)
+    map
 }
 
 /// 把房间 → 面板的现状写回 `room_panel_relate`。

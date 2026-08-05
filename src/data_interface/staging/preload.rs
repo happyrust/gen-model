@@ -39,7 +39,7 @@ async fn preload_model_mutation_targets_from(
         .join(",");
     let mut copied = copy_rows(source, "pe", &format!("SELECT * FROM pe WHERE id IN [{keys}]"))
         .await?;
-    copied += copy_rows(
+    copied += copy_relations(
         source,
         "pe_owner",
         &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
@@ -87,22 +87,36 @@ async fn preload_room_working_set_from(
     rooms: &crate::fast_model::room_model::RoomPanelMap,
 ) -> anyhow::Result<usize> {
     let panels = rooms.all_panels.iter().copied().collect::<Vec<_>>();
-    let panel_keys = panels
+    let room_roots = rooms.rooms.iter().map(|room| room.room).collect::<Vec<_>>();
+    let mut topology = load_root_refnos(source, &room_roots).await?;
+    topology.extend(panels.iter().copied());
+    topology.sort_unstable();
+    topology.dedup();
+    let topology_keys = topology
         .iter()
         .map(RefnoEnum::to_pe_key)
         .collect::<Vec<_>>()
         .join(",");
-    let mut copied = if panel_keys.is_empty() {
+    let mut copied = if topology_keys.is_empty() {
         0
     } else {
-        copy_rows(
+        let mut copied = copy_rows(
             source,
             "pe",
-            &format!("SELECT * FROM pe WHERE id IN [{panel_keys}]"),
+            &format!("SELECT * FROM pe WHERE id IN [{topology_keys}]"),
         )
-        .await?
+        .await?;
+        copied += copy_relations(
+            source,
+            "pe_owner",
+            &format!(
+                "SELECT * FROM pe_owner WHERE in IN [{topology_keys}] AND out IN [{topology_keys}]"
+            ),
+        )
+        .await?;
+        copied
     };
-    copied += copy_rows(source, "room_relate", "SELECT * FROM room_relate").await?;
+    copied += copy_relations(source, "room_relate", "SELECT * FROM room_relate").await?;
     copied += preload_existing_generation_products_from(source, &panels).await?;
     Ok(copied)
 }
@@ -169,7 +183,11 @@ async fn preload_existing_generation_products_from(
 
     let mut copied = 0;
     for (table, query) in queries {
-        copied += copy_rows(source, table, &query).await?;
+        copied += if matches!(table, "inst_relate" | "geo_relate") {
+            copy_relations(source, table, &query).await?
+        } else {
+            copy_rows(source, table, &query).await?
+        };
     }
     Ok(copied)
 }
@@ -206,13 +224,83 @@ async fn copy_rows(source: &Surreal<Any>, table: &str, query: &str) -> anyhow::R
         _ => 0,
     };
     if count > 0 {
+        let literal = render_preload_value(&value);
         crate::surreal_retry::execute_generation_preload(
-            &format!("INSERT IGNORE INTO {table} {value};"),
+            &format!("INSERT IGNORE INTO {table} {literal};"),
             &format!("preload {table}"),
         )
         .await?;
     }
     Ok(count)
+}
+
+async fn copy_relations(source: &Surreal<Any>, table: &str, query: &str) -> anyhow::Result<usize> {
+    let mut response = source.query(query).await?.check()?;
+    let value: surrealdb::Value = response.take(0)?;
+    let rows = match value.into_inner() {
+        surrealdb::sql::Value::Array(rows) => rows
+            .into_iter()
+            .map(|row| match row {
+                surrealdb::sql::Value::Object(row) => Ok(row),
+                _ => anyhow::bail!("preload {table} returned a non-object relation row"),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        _ => anyhow::bail!("preload {table} returned a non-array relation result"),
+    };
+    let mut statements = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let id = row.remove("id").and_then(|value| match value {
+            surrealdb::sql::Value::Thing(value) => Some(value),
+            _ => None,
+        });
+        let input = row.remove("in").and_then(|value| match value {
+            surrealdb::sql::Value::Thing(value) => Some(value),
+            _ => None,
+        });
+        let output = row.remove("out").and_then(|value| match value {
+            surrealdb::sql::Value::Thing(value) => Some(value),
+            _ => None,
+        });
+        let (Some(id), Some(input), Some(output)) = (id, input, output) else {
+            anyhow::bail!("preload {table} returned a row without relation id/in/out");
+        };
+        statements.push(format!(
+            "IF !record::exists({id}) {{ RELATE {input}->{id}->{output} CONTENT {}; }};",
+            render_preload_value(&surrealdb::sql::Value::Object(row))
+        ));
+    }
+    if !statements.is_empty() {
+        crate::surreal_retry::execute_generation_preload(
+            &statements.join("\n"),
+            &format!("preload {table}"),
+        )
+        .await?;
+    }
+    Ok(statements.len())
+}
+
+fn render_preload_value(value: &surrealdb::sql::Value) -> String {
+    match value {
+        surrealdb::sql::Value::Strand(value) => serde_json::to_string(value.as_str())
+            .expect("Surreal strings are JSON serializable"),
+        surrealdb::sql::Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(render_preload_value).collect::<Vec<_>>().join(",")
+        ),
+        surrealdb::sql::Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}:{}",
+                    serde_json::to_string(key).expect("object keys are JSON serializable"),
+                    render_preload_value(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        value => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -295,8 +383,9 @@ mod tests {
         source.use_ns("test").use_db("source").await.expect("source db");
         source
             .query(
-                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW';
+                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100';
                  CREATE pe:⟨4000000001_2⟩ SET noun='PANE';
+                 RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
                  RELATE pe:⟨4000000001_2⟩->room_relate:panel_member->pe:⟨4000000001_3⟩ SET room_num='R100';",
             )
             .await
@@ -309,28 +398,39 @@ mod tests {
             .await
             .expect("window");
         let rooms = crate::fast_model::room_model::RoomPanelMap {
+            rooms: vec![crate::fast_model::room_model::RoomPanels {
+                room: RefnoEnum::from("4000000001/1"),
+                room_num: "R100".into(),
+                panels: vec![RefnoEnum::from("4000000001/2")],
+            }],
             all_panels: std::collections::HashSet::from([RefnoEnum::from("4000000001/2")]),
-            ..Default::default()
         };
         let copied = window
             .scope(preload_room_working_set_from(&source, &rooms))
             .await
             .expect("preload rooms");
 
-        assert_eq!(copied, 2);
+        assert_eq!(copied, 4);
         assert!(window.journal().await.is_empty());
         let mut response = window
             .staging_db()
-            .query("SELECT VALUE record::id(id) FROM room_relate;")
+            .query(
+                "RETURN [count(SELECT * FROM room_relate), count(SELECT * FROM pe),
+                 count(SELECT * FROM pe_owner)];",
+            )
             .await
             .expect("inspect");
         assert_eq!(
-            response
-                .take::<Vec<String>>(0)
-                .expect("room rows")
-                .len(),
-            1
+            response.take::<Vec<usize>>(0).expect("room rows"),
+            vec![1, 2, 1]
         );
+        let map = window
+            .scope(crate::fast_model::room_model::load_room_panel_map_from_pe(
+                &aios_core::options::DbOption::default(),
+            ))
+            .await
+            .expect("load staged room map");
+        assert_eq!(map.room_num_of(RefnoEnum::from("4000000001/2")), Some("R100"));
         window.drop_database().await.expect("cleanup");
     }
 }
