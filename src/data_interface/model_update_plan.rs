@@ -235,7 +235,7 @@ fn unit_derives_geometry_from_member_positions(noun: &str) -> bool {
 /// 数据窗口失败是数据缺口——与本文件里房间面板枚举失败的处置同一口径。
 async fn reroute_derived_geometry_units(partition: &mut OperationImpactPartition) -> Vec<String> {
     use crate::data_interface::generation_root::{
-        configured_delivery_unit_types, resolve_live_element_generation_root,
+        GenerationNode, configured_delivery_unit_types, resolve_element_generation_root,
     };
 
     let targets: Vec<RefnoEnum> = partition.transform_refnos.iter().copied().collect();
@@ -243,17 +243,35 @@ async fn reroute_derived_geometry_units(partition: &mut OperationImpactPartition
         return Vec::new();
     }
     let unit_types = configured_delivery_unit_types();
+    let graph = match crate::data_interface::manual_update::load_base_graph(
+        targets.iter().copied().collect(),
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(error) => {
+            return vec![format!(
+                "位姿目标的持久前态 owner 图读取失败，保持便宜路径: {error:#}"
+            )];
+        }
+    };
     let mut warnings = Vec::new();
     let mut rerouted = Vec::new();
     for refno in targets {
-        match resolve_live_element_generation_root(refno, &unit_types).await {
-            Ok(Some(root)) if unit_derives_geometry_from_member_positions(&root.noun) => {
+        match resolve_element_generation_root(refno, &unit_types, |candidate| {
+            graph.get(&candidate).map(|node| GenerationNode {
+                owner: node.owner,
+                noun: node.noun.clone(),
+                name: node.name.clone(),
+            })
+        }) {
+            Some(root) if unit_derives_geometry_from_member_positions(&root.noun) => {
                 rerouted.push(refno);
             }
-            Ok(_) => {}
-            Err(error) => warnings.push(format!(
+            Some(_) => {}
+            None => warnings.push(format!(
                 "{refno} 的生成根解析失败，位姿变更按便宜路径处理\
-                 （若它是管件，该分支的隐含直管段会滞后到下次重生成）: {error:#}"
+                 （若它是管件，该分支的隐含直管段会滞后到下次重生成）"
             )),
         }
     }

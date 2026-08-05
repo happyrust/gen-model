@@ -18,14 +18,16 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use once_cell::sync::Lazy;
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use super::executor::{ExecMode, JournalEntry, StagedExecutor};
 use super::resources::{ResourceBand, ResourceGauge, ResourceThresholds};
-use super::write_context::{DeferredSpatialMutations, StagedFinalize, StagingWriteContext};
+use super::write_context::{
+    DeferredSpatialMutations, HeldRootLocks, StagedFinalize, StagingWriteContext,
+};
 
 /// 暂存实例上所有 staging database 所在的 namespace。
 pub const STAGING_NS: &str = "staging";
@@ -78,6 +80,13 @@ pub struct ActiveStagedWindow {
     executor: Arc<tokio::sync::Mutex<StagedExecutor>>,
     spatial: Arc<tokio::sync::Mutex<DeferredSpatialMutations>>,
     finalize: Arc<tokio::sync::Mutex<Option<StagedFinalize>>>,
+    regen_settlements: Arc<tokio::sync::Mutex<Vec<(String, u64)>>>,
+    mysql_changes: Arc<
+        tokio::sync::Mutex<
+            Option<std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>,
+        >,
+    >,
+    root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
 }
 
 /// 在生产常驻实例上开一个新窗口。
@@ -125,22 +134,22 @@ pub async fn create_window_on(
         end_sesno,
     };
     let gauge = ResourceGauge::new(thresholds);
-    REGISTRY
-        .lock()
-        .expect("registry lock")
-        .insert(
-            label,
-            RegisteredWindow {
-                meta: meta.clone(),
-                gauge: gauge.clone(),
-            },
-        );
+    REGISTRY.lock().expect("registry lock").insert(
+        label,
+        RegisteredWindow {
+            meta: meta.clone(),
+            gauge: gauge.clone(),
+        },
+    );
 
     let executor = Arc::new(tokio::sync::Mutex::new(
         StagedExecutor::new(instance.clone(), meta.label.clone()).with_gauge(gauge.clone()),
     ));
     let spatial = Arc::new(tokio::sync::Mutex::new(DeferredSpatialMutations::default()));
     let finalize = Arc::new(tokio::sync::Mutex::new(None));
+    let regen_settlements = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mysql_changes = Arc::new(tokio::sync::Mutex::new(None));
+    let root_locks = Arc::new(tokio::sync::Mutex::new(HeldRootLocks::default()));
     Ok(ActiveStagedWindow {
         meta,
         db: instance.clone(),
@@ -148,6 +157,9 @@ pub async fn create_window_on(
         executor,
         spatial,
         finalize,
+        regen_settlements,
+        mysql_changes,
+        root_locks,
     })
 }
 
@@ -166,8 +178,8 @@ pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
     {
         let hd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("resource/surreal/fn_query_room_code.surql");
-        let text = std::fs::read_to_string(&hd)
-            .with_context(|| format!("读取 {} 失败", hd.display()))?;
+        let text =
+            std::fs::read_to_string(&hd).with_context(|| format!("读取 {} 失败", hd.display()))?;
         db.query(text).await?;
     }
     // 刻意不装 update_dbnum_event（F4，见 findings 文档）：该事件体假定 pe 的
@@ -243,11 +255,24 @@ impl ActiveStagedWindow {
             self.executor.clone(),
             self.spatial.clone(),
             self.finalize.clone(),
+            self.regen_settlements.clone(),
+            self.mysql_changes.clone(),
+            self.root_locks.clone(),
         )
     }
 
     pub(crate) async fn staged_finalize(&self) -> Option<StagedFinalize> {
         self.finalize.lock().await.clone()
+    }
+
+    pub(crate) async fn deferred_regen_settlements(&self) -> Vec<(String, u64)> {
+        self.regen_settlements.lock().await.clone()
+    }
+
+    pub(crate) async fn take_deferred_mysql_changes(
+        &self,
+    ) -> Option<std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>> {
+        self.mysql_changes.lock().await.take()
     }
 
     pub(crate) async fn render_finalize_tail(&self) -> anyhow::Result<String> {
@@ -264,12 +289,14 @@ impl ActiveStagedWindow {
                 finalize.end_sesno
             );
         }
-        Ok(crate::data_interface::model_update_pending::render_finalize_tail(
-            finalize.dbnum,
-            finalize.end_sesno,
-            &finalize.plan,
-            &finalize.window_statements,
-        ))
+        Ok(
+            crate::data_interface::model_update_pending::render_finalize_tail(
+                finalize.dbnum,
+                finalize.end_sesno,
+                &finalize.plan,
+                &finalize.window_statements,
+            ),
+        )
     }
 
     /// Replay the journal, close the authoritative watermark transaction, then invalidate
@@ -310,6 +337,21 @@ impl ActiveStagedWindow {
     /// 本窗口的读路由上下文。
     pub fn read_context(&self) -> aios_core::staging::StagingReadContext {
         aios_core::staging::StagingReadContext::new(self.db.clone(), self.meta.label.clone())
+    }
+
+    /// 把窗口元数据上的逻辑上界对齐到实际 finalize 登记的 `end_sesno`。
+    ///
+    /// 建窗时用的是冻结重扫的 `file_latest_sesno`；解析出的应用窗口可能因会话空隙
+    /// 更窄。写回前必须一致，否则 `commit_registered_to` 的范围校验会拒绝。
+    pub fn align_end_sesno(&mut self, end_sesno: i32) {
+        self.meta.end_sesno = end_sesno;
+        if let Some(entry) = REGISTRY
+            .lock()
+            .expect("registry lock")
+            .get_mut(&self.meta.label)
+        {
+            entry.meta.end_sesno = end_sesno;
+        }
     }
 
     /// 冻结吸收扩窗：只更新逻辑区间元数据，不改名、不换库。
@@ -487,15 +529,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_finalize_commits_journal_and_watermark_together() {
         let instance = own_instance().await;
-        let mut window = create_window_on(
-            &instance,
-            7905,
-            3,
-            7,
-            ResourceThresholds::default(),
-        )
-        .await
-        .expect("create window");
+        let mut window = create_window_on(&instance, 7905, 3, 7, ResourceThresholds::default())
+            .await
+            .expect("create window");
         window
             .execute("UPSERT pe:x SET noun = 'PIPE'", ExecMode::Both)
             .await
@@ -533,6 +569,23 @@ mod tests {
             Some("PIPE".into())
         );
         assert_eq!(response.take::<Option<i32>>(1).expect("watermark"), Some(7));
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn align_end_sesno_can_narrow_or_widen_window_meta() {
+        let instance = own_instance().await;
+        let mut window = create_window_on(&instance, 7906, 10, 20, ResourceThresholds::default())
+            .await
+            .expect("create");
+        window.align_end_sesno(16);
+        assert_eq!(window.meta().end_sesno, 16);
+        let registered = registered_windows();
+        let meta = registered
+            .iter()
+            .find(|m| m.label == window.label())
+            .expect("registered");
+        assert_eq!(meta.end_sesno, 16);
         window.drop_database().await.expect("cleanup");
     }
 
@@ -601,10 +654,7 @@ mod tests {
             dropped.contains(&"staging_7904_9999999".to_string()),
             "孤儿应被清扫: {dropped:?}"
         );
-        assert!(
-            !dropped.contains(&label),
-            "在册窗口不得被清扫: {dropped:?}"
-        );
+        assert!(!dropped.contains(&label), "在册窗口不得被清扫: {dropped:?}");
 
         window.drop_database().await.expect("drop");
         assert!(

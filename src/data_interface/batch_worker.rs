@@ -311,7 +311,267 @@ async fn run_one_batch(
     );
 }
 
+/// 稳态增量默认走 ADR-017 kv-mem 暂存窗口。
+///
+/// - `start_sesno <= 1`：对应 `applied_sesno == 0` 的基线/冷启动，豁免暂存。
+/// - 环境变量 `GEN_MODEL_DIRECT_INCREMENT=1`：紧急回退到旧直写路径。
+fn use_staged_increment_window(job: &FrozenBatch) -> bool {
+    job.start_sesno > 1 && std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").is_none()
+}
+
 async fn execute_frozen_batch(
+    mgr: &Arc<AiosDBManager>,
+    registry: &'static TaskRegistry,
+    job: &FrozenBatch,
+    cand: FileCandidate,
+    progress: &Option<ManualUpdateProgress>,
+    warnings: &mut Vec<String>,
+) -> DataBatchTaskResult {
+    if !use_staged_increment_window(job) {
+        return execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await;
+    }
+
+    let mut window = match crate::data_interface::staging::lifecycle::create_window(
+        job.dbnum,
+        job.start_sesno,
+        cand.file_latest_sesno,
+    )
+    .await
+    {
+        Ok(window) => window,
+        Err(error) => {
+            warnings.push(format!("创建增量暂存窗口失败: {error:#}"));
+            return failed_window_result(job, warnings, "创建增量暂存窗口失败");
+        }
+    };
+    println!(
+        "数据批次 dbnum={} 使用 kv-mem 暂存窗口 {}（sesno {}..={}）",
+        job.dbnum,
+        window.label(),
+        job.start_sesno,
+        cand.file_latest_sesno
+    );
+
+    let mut result = window
+        .scope(execute_frozen_batch_body(
+            mgr, registry, job, cand, progress, warnings,
+        ))
+        .await;
+    let data_applied = result
+        .batch
+        .as_ref()
+        .is_some_and(|batch| batch.status == BatchStatus::Applied);
+    let generation_failed = result
+        .units
+        .iter()
+        .any(|unit| unit.status == UnitGenStatus::Failed);
+
+    // 无数据可提交（up_to_date / skipped / 应用失败）：丢掉暂存，保留 body 原状态。
+    if !data_applied {
+        if let Err(error) = window.drop_database().await {
+            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
+        }
+        return result;
+    }
+
+    // 窗口阻断：任一生成根失败 → 持久层零落盘。
+    if generation_failed {
+        for unit in &mut result.units {
+            if unit.status == UnitGenStatus::Generated {
+                unit.status = UnitGenStatus::Failed;
+                unit.message = Some("暂存窗口未提交，生成结果已废弃".into());
+            }
+        }
+        if let Some(batch) = &mut result.batch {
+            batch.status = BatchStatus::Failed;
+            batch.message = Some("模型生成未全部成功，暂存窗口未提交".into());
+        }
+        result.status = ManualUpdateStatus::Failed;
+        if let Err(error) = window.drop_database().await {
+            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
+        }
+        return result;
+    }
+
+    // finalize 按实际应用上界登记；与建窗时的 file_latest 可能因空隙/解析窗口不一致。
+    if let Some(batch) = &result.batch {
+        window.align_end_sesno(batch.end_sesno);
+    }
+
+    if window.staged_finalize().await.is_none() {
+        result
+            .warnings
+            .push("暂存窗口缺少 finalize 登记，拒绝写回（避免推进水位却无 journal）".into());
+        if let Some(batch) = &mut result.batch {
+            batch.status = BatchStatus::Failed;
+            batch.message = Some("暂存窗口缺少 finalize 登记".into());
+        }
+        result.status = ManualUpdateStatus::Failed;
+        if let Err(error) = window.drop_database().await {
+            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
+        }
+        return result;
+    }
+
+    if let Err(error) = window.commit_registered_to(&aios_core::SUL_DB).await {
+        result
+            .warnings
+            .push(format!("增量暂存窗口写回失败: {error:#}"));
+        if let Some(batch) = &mut result.batch {
+            batch.status = BatchStatus::Failed;
+            batch.message = Some(format!("增量暂存窗口写回失败: {error:#}"));
+        }
+        result.status = ManualUpdateStatus::Failed;
+        if let Err(drop_error) = window.drop_database().await {
+            result
+                .warnings
+                .push(format!("写回失败后废弃暂存窗口失败: {drop_error:#}"));
+        }
+        return result;
+    }
+
+    let mut postcommit_failed = false;
+    #[cfg(feature = "sql")]
+    if let Some(changes) = window.take_deferred_mysql_changes().await {
+        match mgr.update_mysql_pdms_elements(&changes).await {
+            Ok(_) => println!("写回后 MySQL pdms_element 更新成功: dbnum={}", job.dbnum),
+            Err(error) => {
+                result.warnings.push(format!(
+                    "dbnum={}: 写回后 MySQL pdms_element 更新失败: {error}",
+                    job.dbnum
+                ));
+                postcommit_failed = true;
+            }
+        }
+    }
+    let settlements = window.deferred_regen_settlements().await;
+    if !settlements.is_empty()
+        && let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await
+    {
+        result.warnings.push(format!(
+            "写回后收口旧模型 pending 失败（保留待重试）: {error:#}"
+        ));
+        postcommit_failed = true;
+    }
+
+    let deferred = window.take_deferred_spatial().await;
+    match crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await {
+        Ok(changes) => {
+            if let Err(error) =
+                model_update_pending::enqueue_room_recalc(&mgr.db_option, &changes).await
+            {
+                result
+                    .warnings
+                    .push(format!("写回后房间增量任务入队失败: {error:#}"));
+                postcommit_failed = true;
+            }
+        }
+        Err(error) => {
+            result
+                .warnings
+                .push(format!("写回后应用空间树增量失败: {error:#}"));
+            postcommit_failed = true;
+        }
+    }
+
+    if let Err(error) = window.drop_database().await {
+        result
+            .warnings
+            .push(format!("清理已提交暂存窗口失败: {error:#}"));
+        postcommit_failed = true;
+    }
+
+    // 窗口内跳过的持久层副作用与非 regen 工作，写回后再消费。
+    match SideEffectCompensator::drain(mgr).await {
+        Ok(n) if n > 0 => println!("写回后副作用补偿完成 {n} 个任务"),
+        Ok(_) => {}
+        Err(error) => {
+            result
+                .warnings
+                .push(format!("写回后副作用补偿失败（保留待重试）: {error:#}"));
+            postcommit_failed = true;
+        }
+    }
+    match model_update_pending::drain_non_regen_report(mgr).await {
+        Ok(report) if !report.failures.is_empty() => {
+            result.warnings.push(format!(
+                "写回后模型非重生成任务失败（保留待重试）: {}",
+                report.failures.join("; ")
+            ));
+            postcommit_failed = true;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            result
+                .warnings
+                .push(format!("写回后读取模型非重生成任务失败: {error:#}"));
+            postcommit_failed = true;
+        }
+    }
+
+    if job.db_type == "SYST"
+        && let Some(batch) = &result.batch
+    {
+        if let Err(error) =
+            SideEffectCompensator::enqueue_syst(job.dbnum, batch.end_sesno, &job.db_type).await
+        {
+            result
+                .warnings
+                .push(format!("SYST 派生任务入队失败: {error:#}"));
+            postcommit_failed = true;
+        }
+        SCOPE_DIRTY.store(true, Ordering::SeqCst);
+    }
+
+    match SideEffectCompensator::drain(mgr).await {
+        Ok(n) if n > 0 => println!("写回后副作用补偿完成 {n} 个任务"),
+        Ok(_) => {}
+        Err(error) => {
+            result
+                .warnings
+                .push(format!("写回后副作用补偿失败（保留待重试）: {error:#}"));
+            postcommit_failed = true;
+        }
+    }
+
+    #[cfg(feature = "mqtt")]
+    if let Some(batch) = &result.batch {
+        publish_sync(mgr, job, batch.end_sesno).await;
+    }
+
+    let batch_slice = result.batch.clone().into_iter().collect::<Vec<_>>();
+    result.status = include_model_side_effect_failure(
+        aggregate_manual_status(&batch_slice, &result.units),
+        postcommit_failed,
+    );
+    result
+}
+
+fn failed_window_result(
+    job: &FrozenBatch,
+    warnings: &mut Vec<String>,
+    message: &str,
+) -> DataBatchTaskResult {
+    DataBatchTaskResult {
+        project: job.project.clone(),
+        status: ManualUpdateStatus::Failed,
+        batch: Some(DataBatchResult {
+            dbnum: job.dbnum,
+            db_type: job.db_type.clone(),
+            file_path: job.path.display().to_string(),
+            start_sesno: job.start_sesno,
+            end_sesno: job.end_sesno,
+            status: BatchStatus::Failed,
+            message: Some(message.into()),
+            merged_sesnos: Vec::new(),
+            changed_elements: 0,
+        }),
+        units: Vec::new(),
+        warnings: std::mem::take(warnings),
+    }
+}
+
+async fn execute_frozen_batch_body(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     job: &FrozenBatch,
@@ -328,7 +588,10 @@ async fn execute_frozen_batch(
 
     // SYST 数据落库后，TEAM 等派生表要跟着刷。走持久补偿队列而不是就地同步：
     // 同一条重试通道、同一个 MAX_ATTEMPTS，崩了下一轮接着来。
-    if applied && job.db_type == "SYST" {
+    if applied
+        && job.db_type == "SYST"
+        && crate::data_interface::staging::active_staging_writes().is_none()
+    {
         if let Some(b) = &batch {
             if let Err(error) =
                 SideEffectCompensator::enqueue_syst(job.dbnum, b.end_sesno, &job.db_type).await
@@ -340,13 +603,18 @@ async fn execute_frozen_batch(
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
+    let staged = crate::data_interface::staging::active_staging_writes().is_some();
     let mut side_effect_failed = false;
-    match SideEffectCompensator::drain(mgr).await {
-        Ok(n) if n > 0 => println!("批次后副作用补偿完成 {n} 个任务"),
-        Ok(_) => {}
-        Err(error) => {
-            warnings.push(format!("副作用补偿失败（已保留待重试）: {error:#}"));
-            side_effect_failed = true;
+    // 暂存窗口内不跑持久层副作用/非 regen drain：否则会把别库或旧 pending 的写
+    // 误记进本窗口 journal。写回成功后由外层 `execute_frozen_batch` 再消费。
+    if !staged {
+        match SideEffectCompensator::drain(mgr).await {
+            Ok(n) if n > 0 => println!("批次后副作用补偿完成 {n} 个任务"),
+            Ok(_) => {}
+            Err(error) => {
+                warnings.push(format!("副作用补偿失败（已保留待重试）: {error:#}"));
+                side_effect_failed = true;
+            }
         }
     }
 
@@ -357,24 +625,26 @@ async fn execute_frozen_batch(
     // 的前置没做完」：只有失败牵涉到 `job.dbnum` 时才拦下本批的生成，否则隔壁库
     // 的一条坏行会让每个库的每一批都一个交付单元都不生成。
     let mut non_regen_failed = false;
-    match model_update_pending::drain_non_regen_report(mgr).await {
-        Ok(report) => {
-            if !report.failures.is_empty() {
+    if !staged {
+        match model_update_pending::drain_non_regen_report(mgr).await {
+            Ok(report) => {
+                if !report.failures.is_empty() {
+                    warnings.push(format!(
+                        "执行位姿/删除/级联模型任务失败（已保留待重试）: {}",
+                        report.failures.join("; ")
+                    ));
+                    side_effect_failed = true;
+                    non_regen_failed = report.blocks(job.dbnum);
+                }
+            }
+            Err(error) => {
+                // 整个阶段没跑起来（读表/解码失败），本批前置是否做完无从确认，按阻断处理。
                 warnings.push(format!(
-                    "执行位姿/删除/级联模型任务失败（已保留待重试）: {}",
-                    report.failures.join("; ")
+                    "读取位姿/删除/级联模型任务失败（本批模型生成已延后，持久任务保留）: {error:#}"
                 ));
                 side_effect_failed = true;
-                non_regen_failed = report.blocks(job.dbnum);
+                non_regen_failed = true;
             }
-        }
-        Err(error) => {
-            // 整个阶段没跑起来（读表/解码失败），本批前置是否做完无从确认，按阻断处理。
-            warnings.push(format!(
-                "读取位姿/删除/级联模型任务失败（本批模型生成已延后，持久任务保留）: {error:#}"
-            ));
-            side_effect_failed = true;
-            non_regen_failed = true;
         }
     }
 
@@ -402,7 +672,7 @@ async fn execute_frozen_batch(
 
     // 异地同步发布（与旧自动路径对齐：数据批次成功才发布该文件）。
     #[cfg(feature = "mqtt")]
-    if applied {
+    if applied && crate::data_interface::staging::active_staging_writes().is_none() {
         // 报真正应用到的会话号，与紧邻的 SYST 派生入账同口径；`job.end_sesno`
         // 是入队时的预期上界，冻结重扫之后可能已经不是它了。
         let end_sesno = batch.as_ref().map_or(job.end_sesno, |b| b.end_sesno);
@@ -428,7 +698,8 @@ fn batch_regen_is_allowed(non_regen_failed: bool) -> bool {
 }
 
 fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
-    task.revision.is_some()
+    crate::data_interface::staging::active_staging_writes().is_none()
+        && task.revision.is_some()
         && model_update_pending::root_joins_regen_batch(task.attempts, &task.root_refno)
 }
 
@@ -454,7 +725,8 @@ async fn run_single_unit(
         );
     }
 
-    let Some(revision) = task.revision else {
+    let staged = crate::data_interface::staging::active_staging_writes().is_some();
+    if task.revision.is_none() && !staged {
         let message = format!(
             "模型任务缺少 pending revision，已跳过生成 root={}",
             task.root_refno
@@ -483,31 +755,48 @@ async fn run_single_unit(
             },
             true,
         );
-    };
+    }
 
-    let lock = generation_root_lock(&task.root_refno);
-    let guard = lock.lock().await;
-    let outcome = generate_unit_model(mgr, &task.root_refno).await;
-    let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-    let settlement_failed = if let Err(error) = model_update_pending::settle_regen_work(
-        &task.root_refno,
-        Some(revision),
-        generation_error.as_deref(),
-    )
-    .await
-    {
-        log::error!(
-            "收口模型 pending 失败 dbnum={} root={}: {error:#}",
-            task.dbnum,
-            task.root_refno
-        );
-        warnings.push(error.to_string());
-        true
+    let outcome = if staged {
+        crate::data_interface::staging::hold_staged_generation_root(&task.root_refno).await;
+        generate_unit_model(mgr, &task.root_refno).await
     } else {
-        false
+        let lock = generation_root_lock(&task.root_refno);
+        let _guard = lock.lock().await;
+        generate_unit_model(mgr, &task.root_refno).await
     };
-    drop(guard);
-
+    let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
+    let settlement_failed = if staged {
+        if outcome.is_ok()
+            && let Some(revision) = task.revision
+        {
+            crate::data_interface::staging::defer_staged_regen_settlement(
+                task.root_refno.clone(),
+                revision,
+            )
+            .await;
+        }
+        false
+    } else {
+        match model_update_pending::settle_regen_work(
+            &task.root_refno,
+            task.revision,
+            generation_error.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => false,
+            Err(error) => {
+                log::error!(
+                    "收口模型 pending 失败 dbnum={} root={}: {error:#}",
+                    task.dbnum,
+                    task.root_refno
+                );
+                warnings.push(error.to_string());
+                true
+            }
+        }
+    };
     let (status, attempts, message) = match outcome {
         Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
         Err(_) => (UnitGenStatus::Failed, task.attempts + 1, generation_error),
@@ -1006,6 +1295,66 @@ mod tests {
             Some(7),
             "not-a-refno"
         )));
+    }
+
+    #[test]
+    fn steady_state_batches_default_to_kv_mem_staging() {
+        use crate::data_interface::batch_scheduler::FrozenBatch;
+        use std::path::PathBuf;
+
+        let steady = FrozenBatch {
+            task_id: "t1".into(),
+            project: "p".into(),
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            path: PathBuf::from("x"),
+            file_name: "x".into(),
+            start_sesno: 12,
+            end_sesno: 15,
+        };
+        let baseline = FrozenBatch {
+            start_sesno: 1,
+            end_sesno: 76,
+            ..steady.clone()
+        };
+        assert!(
+            use_staged_increment_window(&steady),
+            "稳态增量（start_sesno>1）默认走 kv-mem"
+        );
+        assert!(
+            !use_staged_increment_window(&baseline),
+            "applied=0 的基线窗口豁免暂存"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_units_wait_for_commit_instead_of_settling_persistent_pending() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 8191, 40, 42, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let joins = window
+            .scope(async { unit_joins_regen_batch(&unit_task(0, Some(7), "16777216/5")) })
+            .await;
+        assert!(!joins, "staged roots settle only after the window commits");
+
+        window
+            .scope(
+                crate::data_interface::staging::defer_staged_regen_settlement(
+                    "16777216/5".into(),
+                    7,
+                ),
+            )
+            .await;
+        assert_eq!(
+            window.deferred_regen_settlements().await,
+            vec![("16777216/5".into(), 7)]
+        );
+        window.drop_database().await.expect("cleanup");
     }
 
     /// 接住 panic 之后要能说出「哪儿炸了」。取不出载荷时也得给一句话——任务终态里

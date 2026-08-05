@@ -702,13 +702,17 @@ impl IncrementPipeline {
         // short-lived recovery record. If it fails, the attempt remains and the
         // whole fixed range is safe to replay.
         if staged.is_some() {
+            let mut finalize_plan = model_plan.clone();
+            finalize_plan.work_items.retain(|item| {
+                item.action != crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot
+            });
             StageTimings::measure(
                 &mut timings.finalize,
                 crate::data_interface::staging::register_staged_finalize(
                     crate::data_interface::staging::StagedFinalize {
                         dbnum,
                         end_sesno,
-                        plan: model_plan.clone(),
+                        plan: finalize_plan,
                         window_statements: datacenter_statements,
                         cache_refnos: staged_cache_refnos.unwrap_or_default(),
                     },
@@ -1021,20 +1025,14 @@ mod cache_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_parse_keeps_one_journal_and_does_not_finalize() {
         use crate::data_interface::staging::{
-            lifecycle::create_window_on, ExecMode, ResourceThresholds,
+            ExecMode, ResourceThresholds, lifecycle::create_window_on,
         };
         use surrealdb::engine::any::connect;
 
         let instance = connect("mem://").await.expect("mem boots");
-        let mut window = create_window_on(
-            &instance,
-            7996,
-            1,
-            1,
-            ResourceThresholds::default(),
-        )
-        .await
-        .expect("create window");
+        let mut window = create_window_on(&instance, 7996, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
         window
             .execute(
                 "UPSERT pe:⟨7996_10⟩ SET noun = 'PIPE'",

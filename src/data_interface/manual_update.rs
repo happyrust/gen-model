@@ -1294,7 +1294,7 @@ async fn fetch_base_graph_nodes(
     Ok(nodes)
 }
 
-async fn load_base_graph(
+pub(crate) async fn load_base_graph(
     seeds: HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
     collect_base_graph(seeds, fetch_base_graph_nodes).await
@@ -3660,10 +3660,15 @@ impl AiosDBManager {
             // 与旧口径一致（不回滚水位）。
             #[cfg(feature = "sql")]
             if let Some(success) = incr.successes.first() {
-                match self.update_mysql_pdms_elements(&success.range_eles).await {
-                    Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
-                    Err(e) => {
-                        warnings.push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}"))
+                if !crate::data_interface::staging::defer_staged_mysql_changes(
+                    success.range_eles.clone(),
+                )
+                .await
+                {
+                    match self.update_mysql_pdms_elements(&success.range_eles).await {
+                        Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
+                        Err(e) => warnings
+                            .push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}")),
                     }
                 }
             }

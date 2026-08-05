@@ -1,7 +1,7 @@
 //! 模型生成写路由：task-local 上下文在场时写活动窗口，否则沿用持久层路径。
 
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -17,6 +17,9 @@ pub(crate) struct StagingWriteContext {
     executor: Arc<Mutex<StagedExecutor>>,
     spatial: Arc<Mutex<DeferredSpatialMutations>>,
     finalize: Arc<Mutex<Option<StagedFinalize>>>,
+    regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
+    mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
+    root_locks: Arc<Mutex<HeldRootLocks>>,
 }
 
 #[derive(Clone, Default)]
@@ -34,16 +37,28 @@ pub(crate) struct StagedFinalize {
     pub cache_refnos: Vec<aios_core::RefnoEnum>,
 }
 
+#[derive(Default)]
+pub(crate) struct HeldRootLocks {
+    roots: HashSet<String>,
+    guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 impl StagingWriteContext {
     pub(super) fn new(
         executor: Arc<Mutex<StagedExecutor>>,
         spatial: Arc<Mutex<DeferredSpatialMutations>>,
         finalize: Arc<Mutex<Option<StagedFinalize>>>,
+        regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
+        mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
+        root_locks: Arc<Mutex<HeldRootLocks>>,
     ) -> Self {
         Self {
             executor,
             spatial,
             finalize,
+            regen_settlements,
+            mysql_changes,
+            root_locks,
         }
     }
 
@@ -85,6 +100,33 @@ impl StagingWriteContext {
         *slot = Some(finalize);
         Ok(())
     }
+
+    pub async fn defer_regen_settlement(&self, root_refno: String, revision: u64) {
+        self.regen_settlements
+            .lock()
+            .await
+            .push((root_refno, revision));
+    }
+
+    pub async fn defer_mysql_changes(
+        &self,
+        changes: BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+    ) {
+        *self.mysql_changes.lock().await = Some(changes);
+    }
+
+    pub async fn hold_generation_root(&self, root_refno: &str) {
+        {
+            let mut held = self.root_locks.lock().await;
+            if !held.roots.insert(root_refno.to_string()) {
+                return;
+            }
+        }
+        let guard = crate::data_interface::manual_update::generation_root_lock(root_refno)
+            .lock_owned()
+            .await;
+        self.root_locks.lock().await.guards.push(guard);
+    }
 }
 
 pub(crate) async fn with_staging_writes<F>(ctx: StagingWriteContext, future: F) -> F::Output
@@ -104,6 +146,32 @@ pub(crate) async fn register_staged_finalize(finalize: StagedFinalize) -> anyhow
     };
     context.register_finalize(finalize).await?;
     Ok(true)
+}
+
+pub(crate) async fn defer_staged_regen_settlement(root_refno: String, revision: u64) -> bool {
+    let Some(context) = active_staging_writes() else {
+        return false;
+    };
+    context.defer_regen_settlement(root_refno, revision).await;
+    true
+}
+
+pub(crate) async fn defer_staged_mysql_changes(
+    changes: BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+) -> bool {
+    let Some(context) = active_staging_writes() else {
+        return false;
+    };
+    context.defer_mysql_changes(changes).await;
+    true
+}
+
+pub(crate) async fn hold_staged_generation_root(root_refno: &str) -> bool {
+    let Some(context) = active_staging_writes() else {
+        return false;
+    };
+    context.hold_generation_root(root_refno).await;
+    true
 }
 
 /// 同时继承 rs-core 的读上下文与本仓的写上下文。
@@ -131,30 +199,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn spawned_model_writes_share_the_window_journal() {
         let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(
-            &instance,
-            7995,
-            1,
-            1,
-            ResourceThresholds::default(),
-        )
-        .await
-        .expect("create window");
+        let window = create_window_on(&instance, 7995, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
 
         with_staging_writes(window.write_context(), async {
             let a = spawn_with_staged_io(async {
-                crate::surreal_retry::execute_model_write(
-                    "UPSERT pe:a SET noun = 'PIPE'",
-                    "test a",
-                )
-                .await
+                crate::surreal_retry::execute_model_write("UPSERT pe:a SET noun = 'PIPE'", "test a")
+                    .await
             });
             let b = spawn_with_staged_io(async {
-                crate::surreal_retry::execute_model_write(
-                    "UPSERT pe:b SET noun = 'EQUI'",
-                    "test b",
-                )
-                .await
+                crate::surreal_retry::execute_model_write("UPSERT pe:b SET noun = 'EQUI'", "test b")
+                    .await
             });
             a.await.expect("join a").expect("write a");
             b.await.expect("join b").expect("write b");
@@ -177,15 +233,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn finalize_state_is_registered_without_entering_the_journal() {
         let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(
-            &instance,
-            7994,
-            4,
-            9,
-            ResourceThresholds::default(),
-        )
-        .await
-        .expect("create window");
+        let window = create_window_on(&instance, 7994, 4, 9, ResourceThresholds::default())
+            .await
+            .expect("create window");
 
         window
             .scope(register_staged_finalize(StagedFinalize {
@@ -204,6 +254,40 @@ mod tests {
         let tail = window.render_finalize_tail().await.expect("render tail");
         assert!(tail.contains("datacenter_version:x"), "{tail}");
         assert!(tail.contains("dbnum_watermark:7994"), "{tail}");
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_generation_lock_lives_until_the_window_ends() {
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7991, 2, 3, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let root = "4000000001/8";
+        let lock = crate::data_interface::manual_update::generation_root_lock(root);
+
+        window.scope(hold_staged_generation_root(root)).await;
+        assert!(
+            lock.try_lock().is_err(),
+            "commit boundary still owns the root"
+        );
+        window.drop_database().await.expect("cleanup");
+        assert!(lock.try_lock().is_ok(), "window end releases the root");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mysql_changes_wait_for_window_commit_boundary() {
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7990, 2, 3, ResourceThresholds::default())
+            .await
+            .expect("window");
+
+        assert!(
+            window
+                .scope(defer_staged_mysql_changes(BTreeMap::new()))
+                .await
+        );
+        assert!(window.take_deferred_mysql_changes().await.is_some());
         window.drop_database().await.expect("cleanup");
     }
 }
