@@ -1,6 +1,6 @@
 //! Durable, per-target model work queued before the incremental watermark.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
@@ -892,6 +892,85 @@ async fn run_room_task(
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct StagedRoomReport {
+    pub succeeded_plan_items: std::collections::BTreeSet<(ModelWorkAction, String)>,
+    pub succeeded_aabb_targets: HashSet<RefnoEnum>,
+    pub failures: Vec<String>,
+}
+
+/// Run the room work that can be decided entirely from the staged database.
+/// Panel/room structural changes need the post-commit spatial tree and current topology,
+/// so those windows deliberately keep all room targets pending. Pure element moves are
+/// fully decidable from the preloaded panel products plus staged element geometry.
+pub(crate) async fn run_staged_room_work(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    plan_items: &[ModelWorkItem],
+    aabb_changes: &HashMap<RefnoEnum, String>,
+) -> anyhow::Result<StagedRoomReport> {
+    let mut targets = std::collections::BTreeMap::<
+        (ModelWorkAction, String),
+        (RefnoEnum, bool),
+    >::new();
+    for item in plan_items.iter().filter(|item| item.action.is_room_recalc()) {
+        let refno = RefU64::from_str(&item.target_refno)
+            .map(RefnoEnum::from)
+            .map_err(|_| anyhow::anyhow!("invalid staged room refno {}", item.target_refno))?;
+        targets.insert((item.action, item.target_refno.clone()), (refno, false));
+    }
+    for (&refno, noun) in aabb_changes {
+        let action = if noun == "PANE" {
+            ModelWorkAction::RoomRecalcPanel
+        } else {
+            ModelWorkAction::RoomRecalcElement
+        };
+        targets
+            .entry((action, refno.to_pdms_str()))
+            .and_modify(|entry| entry.1 = true)
+            .or_insert((refno, true));
+    }
+    if targets.is_empty() || !db_option.gen_spatial_tree {
+        return Ok(StagedRoomReport::default());
+    }
+
+    // A structural panel/room edit invalidates the pre-window room map. Those targets stay
+    // pending for the post-commit round instead of mixing old topology with new geometry.
+    if targets
+        .keys()
+        .any(|(action, _)| *action == ModelWorkAction::RoomRecalcPanel)
+    {
+        return Ok(StagedRoomReport {
+            failures: vec!["本窗口含房间/面板结构变更，房间目标保留到写回后重算".into()],
+            ..Default::default()
+        });
+    }
+
+    let panels = room_model::load_panel_index(db_option, rooms).await?;
+    let elements = targets
+        .iter()
+        .filter(|((action, _), _)| *action == ModelWorkAction::RoomRecalcElement)
+        .map(|(_, (refno, _))| *refno)
+        .collect::<Vec<_>>();
+    let history = room_model::ElementRoomHistory::load(&elements).await?;
+    let mut report = StagedRoomReport::default();
+
+    for ((action, target), (refno, from_aabb)) in targets {
+        match run_room_task(db_option, rooms, &panels, &history, action, refno).await {
+            Ok(_) => {
+                report.succeeded_plan_items.insert((action, target));
+                if from_aabb {
+                    report.succeeded_aabb_targets.insert(refno);
+                }
+            }
+            Err(error) => report
+                .failures
+                .push(format!("房间目标 {target} 暂存计算失败，已保留 pending: {error:#}")),
+        }
+    }
+    Ok(report)
+}
+
 /// 一轮 drain 的产出：完成数、逐条失败原因，以及失败牵涉到的 `dbnum`。
 ///
 /// 失败的 `dbnum` 要单独带出来，是因为非 regen 积压是**全局**的：批次执行前那次
@@ -1531,6 +1610,86 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_element_room_work_clears_edges_and_joins_the_journal() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        window
+            .staging_db()
+            .query(
+                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
+            )
+            .await
+            .expect("fixture")
+            .check()
+            .expect("fixture statement");
+
+        let mut option = aios_core::options::DbOption::default();
+        option.gen_spatial_tree = true;
+        let item = ModelWorkItem {
+            dbnum: 7988,
+            db_type: "DESI".into(),
+            source_end_sesno: 2,
+            action: ModelWorkAction::RoomRecalcElement,
+            target_refno: "4000000001/20".into(),
+            noun: "EQUI".into(),
+        };
+        let report = window
+            .scope(run_staged_room_work(
+                &option,
+                &room_model::RoomPanelMap::default(),
+                &[item],
+                &HashMap::new(),
+            ))
+            .await
+            .expect("room work");
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(report.succeeded_plan_items.contains(&(
+            ModelWorkAction::RoomRecalcElement,
+            "4000000001/20".into()
+        )));
+        assert_eq!(window.journal().await.len(), 1);
+        let mut response = window
+            .staging_db()
+            .query("SELECT VALUE id FROM room_relate")
+            .await
+            .expect("inspect");
+        assert!(response.take::<Vec<String>>(0).expect("edges").is_empty());
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn staged_structural_room_work_stays_pending() {
+        let mut option = aios_core::options::DbOption::default();
+        option.gen_spatial_tree = true;
+        let item = ModelWorkItem {
+            dbnum: 7988,
+            db_type: "DESI".into(),
+            source_end_sesno: 2,
+            action: ModelWorkAction::RoomRecalcPanel,
+            target_refno: "4000000001/10".into(),
+            noun: "PANE".into(),
+        };
+
+        let report = run_staged_room_work(
+            &option,
+            &room_model::RoomPanelMap::default(),
+            &[item],
+            &HashMap::new(),
+        )
+        .await
+        .expect("structural work is deferred");
+        assert!(report.succeeded_plan_items.is_empty());
+        assert_eq!(report.failures.len(), 1);
+    }
 
     #[test]
     fn pending_regeneration_holds_the_shared_root_lock_through_settlement() {

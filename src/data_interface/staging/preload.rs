@@ -37,6 +37,42 @@ pub(crate) async fn preload_generation_root_closure(
     Ok(outcome.parsed)
 }
 
+/// Preload the small, shared room-classification working set before parsing the window.
+/// Parsed room/panel edits then overwrite these pre-window rows inside staging.
+pub(crate) async fn preload_room_working_set(
+    rooms: &crate::fast_model::room_model::RoomPanelMap,
+) -> anyhow::Result<usize> {
+    if super::active_staging_writes().is_none() {
+        return Ok(0);
+    }
+    preload_room_working_set_from(&SUL_DB, rooms).await
+}
+
+async fn preload_room_working_set_from(
+    source: &Surreal<Any>,
+    rooms: &crate::fast_model::room_model::RoomPanelMap,
+) -> anyhow::Result<usize> {
+    let panels = rooms.all_panels.iter().copied().collect::<Vec<_>>();
+    let panel_keys = panels
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut copied = if panel_keys.is_empty() {
+        0
+    } else {
+        copy_rows(
+            source,
+            "pe",
+            &format!("SELECT * FROM pe WHERE id IN [{panel_keys}]"),
+        )
+        .await?
+    };
+    copied += copy_rows(source, "room_relate", "SELECT * FROM room_relate").await?;
+    copied += preload_existing_generation_products_from(source, &panels).await?;
+    Ok(copied)
+}
+
 async fn preload_existing_generation_products_from(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
@@ -138,7 +174,7 @@ async fn copy_rows(source: &Surreal<Any>, table: &str, query: &str) -> anyhow::R
     if count > 0 {
         crate::surreal_retry::execute_generation_preload(
             &format!("INSERT IGNORE INTO {table} {value};"),
-            "preload existing generation products",
+            &format!("preload {table}"),
         )
         .await?;
     }
@@ -197,6 +233,51 @@ mod tests {
             .await
             .expect("inspect staging");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 9]);
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn room_working_set_is_staging_only() {
+        let source = connect("mem://").await.expect("source mem");
+        source.use_ns("test").use_db("source").await.expect("source db");
+        source
+            .query(
+                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW';
+                 CREATE pe:⟨4000000001_2⟩ SET noun='PANE';
+                 RELATE pe:⟨4000000001_2⟩->room_relate:panel_member->pe:⟨4000000001_3⟩ SET room_num='R100';",
+            )
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture");
+
+        let instance = connect("mem://").await.expect("staging mem");
+        let window = create_window_on(&instance, 7989, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let rooms = crate::fast_model::room_model::RoomPanelMap {
+            all_panels: std::collections::HashSet::from([RefnoEnum::from("4000000001/2")]),
+            ..Default::default()
+        };
+        let copied = window
+            .scope(preload_room_working_set_from(&source, &rooms))
+            .await
+            .expect("preload rooms");
+
+        assert_eq!(copied, 2);
+        assert!(window.journal().await.is_empty());
+        let mut response = window
+            .staging_db()
+            .query("SELECT VALUE record::id(id) FROM room_relate;")
+            .await
+            .expect("inspect");
+        assert_eq!(
+            response
+                .take::<Vec<String>>(0)
+                .expect("room rows")
+                .len(),
+            1
+        );
         window.drop_database().await.expect("cleanup");
     }
 }

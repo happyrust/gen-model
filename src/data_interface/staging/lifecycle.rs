@@ -265,6 +265,23 @@ impl ActiveStagedWindow {
         self.finalize.lock().await.clone()
     }
 
+    pub(crate) async fn settle_staged_room_items(
+        &self,
+        succeeded: &std::collections::BTreeSet<(
+            crate::data_interface::model_update_plan::ModelWorkAction,
+            String,
+        )>,
+    ) {
+        if succeeded.is_empty() {
+            return;
+        }
+        if let Some(finalize) = self.finalize.lock().await.as_mut() {
+            finalize.plan.work_items.retain(|item| {
+                !succeeded.contains(&(item.action, item.target_refno.clone()))
+            });
+        }
+    }
+
     pub(crate) async fn deferred_regen_settlements(&self) -> Vec<(String, u64)> {
         self.regen_settlements.lock().await.clone()
     }
@@ -319,6 +336,10 @@ impl ActiveStagedWindow {
 
     pub(crate) async fn take_deferred_spatial(&self) -> DeferredSpatialMutations {
         std::mem::take(&mut *self.spatial.lock().await)
+    }
+
+    pub(crate) async fn deferred_spatial(&self) -> DeferredSpatialMutations {
+        self.spatial.lock().await.clone()
     }
 
     /// 在本窗口的读写上下文中运行生成调用树；子任务用 `spawn_with_staged_io`

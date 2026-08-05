@@ -874,6 +874,32 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
         if let Some(context) = &staged_writes {
             let refnos = new_boxes.iter().map(|(refno, _, _)| *refno).collect::<Vec<_>>();
             context.defer_spatial_refresh(&refnos).await;
+            let target_refnos = new_boxes
+                .iter()
+                .map(|(refno, _, _)| refno.refno())
+                .collect::<HashSet<_>>();
+            let stale_by_refno = {
+                let tree = GLOBAL_AABB_TREE.read().await;
+                let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
+                for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
+                    stale.entry(old.refno).or_default().push(old.aabb);
+                }
+                stale
+            };
+            let room_changes = new_boxes
+                .iter()
+                .filter_map(|(refno, noun, new_box)| {
+                    let olds = stale_by_refno
+                        .get(&refno.refno())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    tree_box_changed(olds, new_box).then(|| AabbChange {
+                        refno: *refno,
+                        noun: noun.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            context.defer_room_changes(&room_changes).await;
             continue;
         }
         if !maintain_spatial_tree {

@@ -352,6 +352,25 @@ async fn execute_frozen_batch(
         cand.file_latest_sesno
     );
 
+    let room_map = match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
+        Ok(rooms) => Some(rooms),
+        Err(error) => {
+            warnings.push(format!(
+                "读取提交前房间面板映射失败，本窗口房间任务将保留 pending: {error:#}"
+            ));
+            None
+        }
+    };
+    if let Some(rooms) = &room_map
+        && let Err(error) = window
+            .scope(crate::data_interface::staging::preload::preload_room_working_set(rooms))
+            .await
+    {
+        warnings.push(format!(
+            "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
+        ));
+    }
+
     let mut result = window
         .scope(execute_frozen_batch_body(
             mgr, registry, job, cand, progress, warnings,
@@ -413,6 +432,36 @@ async fn execute_frozen_batch(
         return result;
     }
 
+    let mut staged_rooms = model_update_pending::StagedRoomReport::default();
+    let finalize = window
+        .staged_finalize()
+        .await
+        .expect("finalize presence checked above");
+    let spatial = window.deferred_spatial().await;
+    let room_result = match &room_map {
+        Some(rooms) => window
+            .scope(model_update_pending::run_staged_room_work(
+                &mgr.db_option,
+                rooms,
+                &finalize.plan.work_items,
+                &spatial.room_changes,
+            ))
+            .await,
+        None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
+    };
+    match room_result {
+        Ok(report) => {
+            window
+                .settle_staged_room_items(&report.succeeded_plan_items)
+                .await;
+            result.warnings.extend(report.failures.iter().cloned());
+            staged_rooms = report;
+        }
+        Err(error) => result.warnings.push(format!(
+            "暂存房间轮初始化失败，全部房间目标保留 pending: {error:#}"
+        )),
+    }
+
     if let Err(error) = window.commit_registered_to(&aios_core::SUL_DB).await {
         result
             .warnings
@@ -456,7 +505,12 @@ async fn execute_frozen_batch(
 
     let deferred = window.take_deferred_spatial().await;
     match crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await {
-        Ok(changes) => {
+        Ok(mut changes) => {
+            changes.retain(|change| {
+                !staged_rooms
+                    .succeeded_aabb_targets
+                    .contains(&change.refno)
+            });
             if let Err(error) =
                 model_update_pending::enqueue_room_recalc(&mgr.db_option, &changes).await
             {

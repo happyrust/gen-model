@@ -218,8 +218,8 @@ async fn existing_member_counts() -> anyhow::Result<HashMap<RefnoEnum, usize>> {
         panel: RefnoEnum,
         c: usize,
     }
-    let mut response = SUL_DB
-        .query("SELECT in.id AS panel, count() AS c FROM room_relate GROUP BY panel;")
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query("SELECT in AS panel, count() AS c FROM room_relate GROUP BY panel;")
         .await
         .map_err(|error| anyhow::anyhow!("查询存量房间成员数失败: {error}"))?
         .check()
@@ -324,13 +324,11 @@ async fn save_room_relate(
     room_num: &str,
 ) -> anyhow::Result<()> {
     let sql = render_room_relate_write(panel_refno, within_refnos, room_num);
-    SUL_DB
-        .query(&sql)
-        .await
-        .map_err(|error| anyhow::anyhow!("写入 {panel_refno} 的房间归属失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("写入 {panel_refno} 的房间归属语句失败: {error}"))?;
-    Ok(())
+    crate::surreal_retry::execute_model_scoped_delete(
+        &sql,
+        &format!("写入 {panel_refno} 的房间归属"),
+    )
+    .await
 }
 
 /// 一间通过命名校验、参与房间归属计算的房间及其面板。
@@ -482,7 +480,10 @@ where
     "#
     );
 
-    let mut response = SUL_DB.query(sql).await?.check()?;
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(sql)
+        .await?
+        .check()?;
     let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
 
     let mut map = RoomPanelMap::default();
@@ -563,10 +564,10 @@ fn merge_member(acc: &mut HashMap<RefnoEnum, RoomMember>, member: RoomMember) {
 /// 正反两个方向都从这里取点，取法不同就等于判定口径不同（ADR-010 §3）。
 async fn query_geom_pts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomPtsQuery>> {
     let pes = refnos.iter().map(RefnoEnum::to_pe_key).join(",");
-    let mut response = SUL_DB
+    let mut response = crate::data_interface::staging::active_data_db()
         .query(format!(
             r#"select
-                 in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
+                 in as refno, world_trans.d as world_trans, aabb.d as world_aabb,
                  (select value [trans.d, (->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
                from array::flatten([{pes}]->inst_relate)
                where !booled and aabb.d != none and world_trans.d != none
@@ -1070,9 +1071,9 @@ impl ElementRoomHistory {
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = crate::data_interface::staging::active_data_db()
             .query(format!(
-                "SELECT in.id AS panel, out.id AS element, room_num \
+                "SELECT in AS panel, out AS element, room_num \
                  FROM room_relate WHERE out IN [{keys}];"
             ))
             .await
@@ -1347,13 +1348,11 @@ async fn write_element_room_relate(
     edges: &[ElementRoomEdge],
 ) -> anyhow::Result<()> {
     let sql = render_element_relate_write(element, edges);
-    SUL_DB
-        .query(&sql)
-        .await
-        .map_err(|error| anyhow::anyhow!("写入 {element} 的房间归属失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("写入 {element} 的房间归属语句失败: {error}"))?;
-    Ok(())
+    crate::surreal_retry::execute_model_scoped_delete(
+        &sql,
+        &format!("写入 {element} 的房间归属"),
+    )
+    .await
 }
 
 /// 元素分支写入 + 归属变化日志：先算本次收敛出的房间集合，与旧集合对照打印
@@ -1440,9 +1439,9 @@ fn log_panel_membership_change(
 /// 一块面板当前收着哪些构件：现存 `room_relate` 出边（`in = panel`）的 out 端去重。
 /// 仅供日志对照。
 async fn existing_members_of_panel(panel: RefnoEnum) -> anyhow::Result<HashSet<RefnoEnum>> {
-    let mut response = SUL_DB
+    let mut response = crate::data_interface::staging::active_data_db()
         .query(format!(
-            "SELECT VALUE out.id FROM room_relate WHERE in = {};",
+            "SELECT VALUE out FROM room_relate WHERE in = {};",
             panel.to_pe_key()
         ))
         .await

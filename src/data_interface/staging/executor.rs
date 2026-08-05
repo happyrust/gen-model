@@ -157,12 +157,14 @@ impl StagedExecutor {
     }
 
     async fn run_on_staging(&self, sql: &str) -> anyhow::Result<()> {
-        self.staging
+        let response = self
+            .staging
             .query(sql)
             .await
-            .with_context(|| format!("[{}] 暂存执行传输失败", self.label))?
-            .check()
-            .with_context(|| format!("[{}] 暂存执行语句失败", self.label))?;
+            .with_context(|| format!("[{}] 暂存执行传输失败", self.label))?;
+        if let Err(error) = response.check() {
+            bail!("[{}] 暂存执行语句失败: {error}", self.label);
+        }
         Ok(())
     }
 
