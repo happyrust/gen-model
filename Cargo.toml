@@ -110,6 +110,9 @@ jsonxf = "1.1.1"
 #], optional = true }
 surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features = false, features = [
     "protocol-ws",
+    # ADR-017 暂存介质：进程内嵌入式 mem 引擎（Surreal<Any> 指向 mem://）。
+    # 写回目标仍是 ws 连的 fork 服务器，本仓不开 kv-rocksdb。
+    "kv-mem",
     #    "kv-rocksdb",
 ] }
 async-once-cell = "0.5.3"
@@ -139,6 +142,15 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = t
 opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 opencascade-sys = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
+
+# ADR-017 开发期接线：STAGE_DB 与读路由要改 aios_core，本地克隆
+# D:\work\plant-code\rs-core-pin 当前 HEAD 正好等于上面钉住的 rev 7994051f，
+# patch 接入零漂移。发布流程：rs-core-pin 提交推到 GitHub 后升 rev、撤此段。
+# 用 [patch] 而不改 [dependencies]：parse_pdms_db / pdms_io 也 git 依赖
+# aios_core，patch 作用于整张依赖图，三方收敛到同一份（见 local-dependencies
+# 分支同款说明）。
+[patch."https://github.com/happyrust/rs-core.git"]
+aios_core = { path = "../../rs-core-pin" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

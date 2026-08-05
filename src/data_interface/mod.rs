@@ -49,3 +49,5 @@ pub mod batch_scheduler;
 pub mod batch_worker;
 
 pub mod task_registry;
+
+pub mod staging;

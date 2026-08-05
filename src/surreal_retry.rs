@@ -32,11 +32,20 @@ fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
 /// 再由 `check()` 交出第一个错误，此时排在冲突点之前的语句已经提交。整段重试会让
 /// 它们再跑一遍，所以每条语句重复执行都必须是空操作。
 pub async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result<()> {
+    execute_surreal_checked_on(&SUL_DB, sql, context).await
+}
+
+/// [`execute_surreal_checked`] 的显式句柄版（ADR-017 写回重放对持久层、
+/// 测试对一次性实例执行时用）。**同样要求 `sql` 幂等。**
+pub async fn execute_surreal_checked_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    sql: &str,
+    context: &str,
+) -> anyhow::Result<()> {
     const MAX_ATTEMPTS: usize = 16;
     for attempt in 1..=MAX_ATTEMPTS {
         let result = async {
-            SUL_DB
-                .query(sql)
+            db.query(sql)
                 .await
                 .map_err(|error| anyhow::anyhow!("{context} transport failed: {error}"))?
                 .check()

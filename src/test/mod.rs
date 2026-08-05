@@ -6,6 +6,8 @@
 // mod test_api;
 // mod test_spatial;
 mod test_gen_model;
+#[cfg(test)]
+mod fork_surreal_compat;
 pub mod test_performance;
 // mod test_incr_update;
 
