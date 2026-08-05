@@ -140,6 +140,47 @@ opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e
 opencascade-sys = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
 
+# ── 开发分支：自研库改走本地克隆 ────────────────────────────────────────────
+#
+# 上面 [dependencies] 里的 git+rev 仍是权威来源声明，不要删；这里只把它们重定向
+# 到本地工作副本，改一行 Rust 就能直接编，不必再走「提交 → push → 升 rev」三步。
+#
+# 为什么必须用 [patch] 而不是把 [dependencies] 改成 path：parse_pdms_db 与
+# pdms_io 在**它们自己的** Cargo.toml 里也各自 git 依赖 aios_core。只把本仓改成
+# path，依赖图里会同时出现两份 aios_core，而 parse_pdms_db 在 parse.rs /
+# dict.rs / parse_explict_tools.rs 共 41 处把 aios_core 类型摆在 API 面上，
+# 跨边界必然类型不匹配。patch 作用于整张图，三方一起收敛到同一份。
+#
+# 前提：下面三个路径必须存在，且分支对得上（都在 codex/public-dependency-pin-20260804）。
+# 不具备这些克隆的机器，把这三个 [patch] 段整体注释掉即可退回纯 git 依赖。
+#
+#   ../../rs-core-pin        = D:\work\plant-code\rs-core-pin
+#   vendor/aios-parse-pdms   = 本仓 vendor/（已 gitignore）
+#   ../pdms-io               = D:\work\plant-code\old\pdms-io
+#
+# 注意同名克隆有好几份，别接错：plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
+# 上、plant-code/pdms-io 在 engine-v2-core-dll-aligned 上、pdms-io-fork 在 dev-3.1
+# 上，三者都带着大量未提交改动，不是本分支要的东西。
+
+[patch."https://github.com/happyrust/rs-core.git"]
+aios_core = { path = "../../rs-core-pin" }
+
+[patch."https://github.com/happyrust/aios-parse-pdms.git"]
+parse_pdms_db = { path = "vendor/aios-parse-pdms" }
+
+[patch."https://github.com/happyrust/pdms-io.git"]
+pdms_io = { path = "../pdms-io" }
+
+# occt-rs 也有本地克隆（vendor/occt-rs，正在 1c44c6e，与上面钉的 rev 一致），
+# 但 opencascade 挂在可选的 occ feature 上，默认构建走不到它，所以先不接。
+# 要接就取消下面三行注释——注意被 patch 的是 github 源，gitee → github 那层
+# 重定向由上面那个 [patch] 段负责，两段叠加生效。
+#
+# [patch."https://github.com/happyrust/occt-rs.git"]
+# opencascade = { path = "vendor/occt-rs/crates/opencascade" }
+# opencascade-sys = { path = "vendor/occt-rs/crates/opencascade-sys" }
+# kicad-parser = { path = "vendor/occt-rs/crates/kicad-parser" }
+
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 
@@ -170,12 +211,9 @@ features = [
 #panic = 'abort'
 #codegen-units = 1
 
-# [patch."https://gitee.com/happydpc/aios-parse-pdms.git"]
-# parse_pdms_db = { path = "../aios-parse-pdms" }
-
-# [patch."https://gitee.com/happydpc/pdms-io.git"]
-# pdms_io = { path = "../pdms-io" }
-
+# parse_pdms_db / pdms_io 的本地重定向已上移到文件中部的 [patch] 段，并改成了
+# github 源——这两个依赖 0f5aabd5 起就不再从 gitee 拉，原先留在这里的 gitee
+# 段即使取消注释也不会命中任何东西。
 
 # [patch."https://gitee.com/happydpc/surrealdb.git"]
 # surrealdb = { path = "../surrealdb/crates/sdk" }
