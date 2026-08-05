@@ -1,0 +1,16 @@
+-- fable-gen-2 cleanup session: undo the original demo changes.
+-- BEND 9 back down 300mm, BRAN renamed back to /M-IY-1R330-B.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/fable2_incr_demo5.log" OVER
+=24384/22456
+Q POS
+BY D 300
+Q POS
+=24384/22441
+Q NAME
+NAME /M-IY-1R330-B
+Q NAME
+SAVEWORK 'fable-gen-2 cleanup: restore BEND 9 and branch name'
+$P __FABLE2_DONE5__
+ALPHA LOG END
+FINISH

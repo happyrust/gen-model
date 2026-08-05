@@ -1,0 +1,10 @@
+-- ProjAMS 7997 model-changing incremental test.
+-- DAMP 24381/100819 belongs to BRAN 24381/100817.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_pos_apply.log" OVER
+=24381/100819
+Q CE
+POS E -6054.58984375 N 2224.10009765625 D 2280
+Q POS
+SAVEWORK 'CODEX plant-ui model update apply: DAMP +100mm E'
+ALPHA LOG END
