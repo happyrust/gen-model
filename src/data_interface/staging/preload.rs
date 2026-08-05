@@ -15,6 +15,40 @@ pub(crate) async fn preload_existing_generation_products(
     preload_existing_generation_products_from(&SUL_DB, roots).await
 }
 
+/// Copy the unchanged PE subtree and existing products needed by transform/delete prerequisites.
+/// `INSERT IGNORE` preserves rows already rewritten by the current parse.
+pub(crate) async fn preload_model_mutation_targets(roots: &[RefnoEnum]) -> anyhow::Result<usize> {
+    if super::active_staging_writes().is_none() || roots.is_empty() {
+        return Ok(0);
+    }
+    preload_model_mutation_targets_from(&SUL_DB, roots).await
+}
+
+async fn preload_model_mutation_targets_from(
+    source: &Surreal<Any>,
+    roots: &[RefnoEnum],
+) -> anyhow::Result<usize> {
+    let refnos = load_root_refnos(source, roots).await?;
+    if refnos.is_empty() {
+        return Ok(0);
+    }
+    let keys = refnos
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut copied = copy_rows(source, "pe", &format!("SELECT * FROM pe WHERE id IN [{keys}]"))
+        .await?;
+    copied += copy_rows(
+        source,
+        "pe_owner",
+        &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
+    )
+    .await?;
+    copied += preload_existing_generation_products_from(source, roots).await?;
+    Ok(copied)
+}
+
 /// Reparse the current root subtree and its catalogue references into staging.
 /// Persistent ids recover unchanged descendants; the staged traversal adds nodes born in this window.
 pub(crate) async fn preload_generation_root_closure(
@@ -233,6 +267,25 @@ mod tests {
             .await
             .expect("inspect staging");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 9]);
+
+        let copied = window
+            .scope(preload_model_mutation_targets_from(
+                &source,
+                &[RefnoEnum::from("4000000001/1")],
+            ))
+            .await
+            .expect("preload mutation target");
+        assert_eq!(copied, 11);
+        let mut response = window
+            .staging_db()
+            .query(
+                "RETURN [pe:⟨4000000001_1⟩.id != NONE, pe:⟨4000000001_2⟩.id != NONE,
+                 count(SELECT * FROM pe_owner) = 1, pe:⟨4000000001_9⟩.id = NONE];",
+            )
+            .await
+            .expect("inspect mutation rows");
+        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 4]);
+        assert!(window.journal().await.is_empty());
         window.drop_database().await.expect("cleanup");
     }
 

@@ -23,6 +23,7 @@ pub use lifecycle::{ActiveStagedWindow, StagingWindowMeta};
 pub use resources::{ResourceBand, ResourceGauge, ResourceThresholds};
 pub(crate) use write_context::{active_staging_writes, with_staging_writes};
 pub(crate) use write_context::{register_staged_finalize, StagedFinalize};
+pub(crate) use write_context::{active_staged_finalize_plan, settle_staged_plan_items};
 pub(crate) use write_context::defer_staged_mysql_changes;
 pub(crate) use write_context::defer_staged_regen_settlement;
 pub(crate) use write_context::hold_staged_generation_root;

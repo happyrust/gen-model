@@ -1074,7 +1074,8 @@ pub fn assemble_ref_reversal(
 /// filtering the edge table, so the lookup cost follows the number of matching
 /// edges rather than the table size. `array::flatten` is required because a
 /// multi-record traversal otherwise groups `in`/`out` per source record.
-async fn fetch_ref_rev_edges(
+async fn fetch_ref_rev_edges_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>> {
     #[derive(serde::Deserialize)]
@@ -1097,7 +1098,7 @@ async fn fetch_ref_rev_edges(
             "SELECT in, out FROM array::flatten([{}]<-ref_rev);",
             chunk.join(", ")
         );
-        let mut response = SUL_DB.query(&sql).await?;
+        let mut response = db.query(&sql).await?;
         let rows: Vec<Row> = response.take(0)?;
         for row in rows {
             edges.push((
@@ -1107,6 +1108,12 @@ async fn fetch_ref_rev_edges(
         }
     }
     Ok(edges)
+}
+
+async fn fetch_ref_rev_edges(
+    seeds: &HashSet<RefnoEnum>,
+) -> anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>> {
+    fetch_ref_rev_edges_on(&SUL_DB, seeds).await
 }
 
 pub(crate) async fn load_ref_reversal(
@@ -1251,7 +1258,8 @@ where
     Ok(base)
 }
 
-async fn fetch_base_graph_nodes(
+async fn fetch_base_graph_nodes_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     frontier: HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<(RefnoEnum, OwnerNode)>> {
     const QUERY_CHUNK: usize = 500;
@@ -1263,7 +1271,7 @@ async fn fetch_base_graph_nodes(
     let mut nodes = Vec::new();
 
     for chunk in keys.chunks(QUERY_CHUNK) {
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT id, owner, noun, name FROM [{}] WHERE record::exists(id);",
                 chunk.join(",")
@@ -1292,6 +1300,12 @@ async fn fetch_base_graph_nodes(
         }
     }
     Ok(nodes)
+}
+
+async fn fetch_base_graph_nodes(
+    frontier: HashSet<RefnoEnum>,
+) -> anyhow::Result<Vec<(RefnoEnum, OwnerNode)>> {
+    fetch_base_graph_nodes_on(&SUL_DB, frontier).await
 }
 
 pub(crate) async fn load_base_graph(
@@ -1723,6 +1737,13 @@ pub(crate) fn referrer_is_design(dbnum: Option<u32>, non_design_dbnums: &HashSet
 async fn load_referrer_dbnums(
     referrers: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<HashMap<RefnoEnum, u32>> {
+    load_referrer_dbnums_on(&SUL_DB, referrers).await
+}
+
+async fn load_referrer_dbnums_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    referrers: &HashSet<RefnoEnum>,
+) -> anyhow::Result<HashMap<RefnoEnum, u32>> {
     const QUERY_CHUNK: usize = 500;
 
     #[derive(Deserialize)]
@@ -1740,7 +1761,7 @@ async fn load_referrer_dbnums(
     let mut by_refno = HashMap::new();
 
     for chunk in keys.chunks(QUERY_CHUNK) {
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT id, dbnum FROM [{}] WHERE record::exists(id);",
                 chunk.join(",")
@@ -1822,6 +1843,66 @@ pub(crate) async fn expand_live_reverse_cascade(
         );
         log::warn!("{message}");
         println!("{message}");
+    }
+    Ok(roots.into_values().collect())
+}
+
+/// Expand against persistent state plus this window's overlay. Keeping removed old edges is
+/// conservative: it can over-regenerate, while new staged references can no longer be missed.
+pub(crate) async fn expand_staged_reverse_cascade(
+    seed: RefnoEnum,
+) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
+    use crate::data_interface::generation_root::{
+        GenerationNode, configured_delivery_unit_types, resolve_element_generation_root,
+    };
+
+    let staged = crate::data_interface::staging::active_data_db();
+    let (reversal, _) = collect_ref_reversal_closure_with_limit(
+        &HashSet::from([seed]),
+        usize::MAX,
+        None,
+        |frontier| {
+            let staged = staged.clone();
+            async move {
+                let mut edges = fetch_ref_rev_edges_on(&SUL_DB, &frontier).await?;
+                edges.extend(fetch_ref_rev_edges_on(&staged, &frontier).await?);
+                edges.sort_unstable();
+                edges.dedup();
+                Ok(edges)
+            }
+        },
+    )
+    .await?;
+    let referrers = reversal.values().flatten().copied().collect::<HashSet<_>>();
+    let graph = collect_base_graph(referrers.clone(), |frontier| {
+        let staged = staged.clone();
+        async move {
+            let persistent = fetch_base_graph_nodes_on(&SUL_DB, frontier.clone()).await?;
+            let overlay = fetch_base_graph_nodes_on(&staged, frontier).await?;
+            let mut nodes = persistent.into_iter().collect::<HashMap<_, _>>();
+            nodes.extend(overlay);
+            Ok(nodes.into_iter().collect())
+        }
+    })
+    .await?;
+    let mut referrer_dbnums = load_referrer_dbnums(&referrers).await?;
+    referrer_dbnums.extend(load_referrer_dbnums_on(&staged, &referrers).await?);
+    let non_design_dbnums = load_non_design_dbnums().await?;
+    let unit_types = configured_delivery_unit_types();
+    let mut roots = BTreeMap::new();
+    for referrer in referrers {
+        if !referrer_is_design(referrer_dbnums.get(&referrer).copied(), &non_design_dbnums) {
+            continue;
+        }
+        if let Some(root) = resolve_element_generation_root(referrer, &unit_types, |candidate| {
+            graph.get(&candidate).map(|node| GenerationNode {
+                owner: node.owner,
+                noun: node.noun.clone(),
+                name: node.name.clone(),
+            })
+        }) {
+            roots.insert(root.root.to_pdms_str(), root);
+        }
     }
     Ok(roots.into_values().collect())
 }

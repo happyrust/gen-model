@@ -265,7 +265,7 @@ impl ActiveStagedWindow {
         self.finalize.lock().await.clone()
     }
 
-    pub(crate) async fn settle_staged_room_items(
+    pub(crate) async fn settle_staged_plan_items(
         &self,
         succeeded: &std::collections::BTreeSet<(
             crate::data_interface::model_update_plan::ModelWorkAction,

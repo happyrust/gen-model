@@ -871,6 +871,67 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct StagedNonRegenReport {
+    pub derived_roots: Vec<crate::data_interface::generation_root::GenerationRoot>,
+    pub succeeded_plan_items: BTreeSet<(ModelWorkAction, String)>,
+    pub failures: Vec<String>,
+}
+
+/// Execute this window's prerequisites without touching the durable pending queue.
+pub(crate) async fn run_staged_non_regen_work(
+    mgr: &AiosDBManager,
+    plan_items: &[ModelWorkItem],
+) -> StagedNonRegenReport {
+    let mut report = StagedNonRegenReport::default();
+    for action in [
+        ModelWorkAction::Transform,
+        ModelWorkAction::DeleteCleanup,
+        ModelWorkAction::CascadeExpand,
+    ] {
+        for item in plan_items.iter().filter(|item| item.action == action) {
+            let refno = match RefU64::from_str(&item.target_refno).map(RefnoEnum::from) {
+                Ok(refno) => refno,
+                Err(_) => {
+                    report.failures.push(format!(
+                        "{} 目标 {} 无效",
+                        action.as_str(), item.target_refno
+                    ));
+                    continue;
+                }
+            };
+            let outcome = match action {
+                ModelWorkAction::Transform => {
+                    mgr.update_world_transforms(&HashSet::from([refno])).await
+                }
+                ModelWorkAction::DeleteCleanup => {
+                    crate::data_interface::helper::delete_inst_relate_subtree(&[refno], 300).await
+                }
+                ModelWorkAction::CascadeExpand => {
+                    crate::data_interface::manual_update::expand_staged_reverse_cascade(refno)
+                        .await
+                        .map(|roots| report.derived_roots.extend(roots))
+                }
+                _ => unreachable!(),
+            };
+            match outcome {
+                Ok(()) => {
+                    report
+                        .succeeded_plan_items
+                        .insert((action, item.target_refno.clone()));
+                }
+                Err(error) => report.failures.push(format!(
+                    "{} 目标 {} 暂存执行失败: {error:#}",
+                    action.as_str(), item.target_refno
+                )),
+            }
+        }
+    }
+    report.derived_roots.sort_by_key(|root| root.root);
+    report.derived_roots.dedup_by_key(|root| root.root);
+    report
+}
+
 /// 执行一个房间重算任务，返回本次写入了归属边的构件集合。
 async fn run_room_task(
     db_option: &aios_core::options::DbOption,

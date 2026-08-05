@@ -114,6 +114,24 @@ impl StagingWriteContext {
         Ok(())
     }
 
+    async fn finalize_plan(&self) -> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
+        self.finalize.lock().await.as_ref().map(|state| state.plan.clone())
+    }
+
+    async fn settle_plan_items(
+        &self,
+        succeeded: &std::collections::BTreeSet<(
+            crate::data_interface::model_update_plan::ModelWorkAction,
+            String,
+        )>,
+    ) {
+        if let Some(finalize) = self.finalize.lock().await.as_mut() {
+            finalize.plan.work_items.retain(|item| {
+                !succeeded.contains(&(item.action, item.target_refno.clone()))
+            });
+        }
+    }
+
     pub async fn defer_regen_settlement(&self, root_refno: String, revision: u64) {
         self.regen_settlements
             .lock()
@@ -159,6 +177,24 @@ pub(crate) async fn register_staged_finalize(finalize: StagedFinalize) -> anyhow
     };
     context.register_finalize(finalize).await?;
     Ok(true)
+}
+
+pub(crate) async fn active_staged_finalize_plan(
+) -> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
+    active_staging_writes()?.finalize_plan().await
+}
+
+pub(crate) async fn settle_staged_plan_items(
+    succeeded: &std::collections::BTreeSet<(
+        crate::data_interface::model_update_plan::ModelWorkAction,
+        String,
+    )>,
+) -> bool {
+    let Some(context) = active_staging_writes() else {
+        return false;
+    };
+    context.settle_plan_items(succeeded).await;
+    true
 }
 
 pub(crate) async fn defer_staged_regen_settlement(root_refno: String, revision: u64) -> bool {
@@ -251,19 +287,55 @@ mod tests {
             .expect("create window");
 
         window
-            .scope(register_staged_finalize(StagedFinalize {
+            .scope(async {
+                let plan = crate::data_interface::model_update_plan::ModelUpdatePlan {
+                    work_items: vec![
+                        crate::data_interface::model_update_plan::ModelWorkItem {
+                            dbnum: 7994,
+                            db_type: "DESI".into(),
+                            source_end_sesno: 9,
+                            action: crate::data_interface::model_update_plan::ModelWorkAction::Transform,
+                            target_refno: "4000000001/1".into(),
+                            noun: "EQUI".into(),
+                        },
+                        crate::data_interface::model_update_plan::ModelWorkItem {
+                            dbnum: 7994,
+                            db_type: "DESI".into(),
+                            source_end_sesno: 9,
+                            action: crate::data_interface::model_update_plan::ModelWorkAction::CascadeExpand,
+                            target_refno: "4000000001/2".into(),
+                            noun: "SCOM".into(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                register_staged_finalize(StagedFinalize {
                 dbnum: 7994,
                 end_sesno: 9,
-                plan: Default::default(),
+                plan,
                 window_statements: vec!["UPSERT datacenter_version:x SET ok = true;".into()],
                 cache_refnos: Vec::new(),
-            }))
+                })
+                .await
+                .expect("register finalize");
+                assert_eq!(active_staged_finalize_plan().await.unwrap().work_items.len(), 2);
+                settle_staged_plan_items(&std::collections::BTreeSet::from([(
+                    crate::data_interface::model_update_plan::ModelWorkAction::Transform,
+                    "4000000001/1".into(),
+                )]))
+                .await
+            })
             .await
-            .expect("register finalize")
             .then_some(())
             .expect("inside staged context");
 
         assert!(window.journal().await.is_empty());
+        let finalize = window.staged_finalize().await.expect("finalize remains");
+        assert_eq!(finalize.plan.work_items.len(), 1);
+        assert_eq!(
+            finalize.plan.work_items[0].action,
+            crate::data_interface::model_update_plan::ModelWorkAction::CascadeExpand
+        );
         let tail = window.render_finalize_tail().await.expect("render tail");
         assert!(tail.contains("datacenter_version:x"), "{tail}");
         assert!(tail.contains("dbnum_watermark:7994"), "{tail}");

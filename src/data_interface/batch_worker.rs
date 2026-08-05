@@ -384,6 +384,7 @@ async fn execute_frozen_batch(
         .units
         .iter()
         .any(|unit| unit.status == UnitGenStatus::Failed);
+    let window_model_failed = generation_failed || result.status != ManualUpdateStatus::Success;
 
     // 无数据可提交（up_to_date / skipped / 应用失败）：丢掉暂存，保留 body 原状态。
     if !data_applied {
@@ -394,7 +395,7 @@ async fn execute_frozen_batch(
     }
 
     // 窗口阻断：任一生成根失败 → 持久层零落盘。
-    if generation_failed {
+    if window_model_failed {
         for unit in &mut result.units {
             if unit.status == UnitGenStatus::Generated {
                 unit.status = UnitGenStatus::Failed;
@@ -403,7 +404,7 @@ async fn execute_frozen_batch(
         }
         if let Some(batch) = &mut result.batch {
             batch.status = BatchStatus::Failed;
-            batch.message = Some("模型生成未全部成功，暂存窗口未提交".into());
+            batch.message = Some("模型前置或生成未全部成功，暂存窗口未提交".into());
         }
         result.status = ManualUpdateStatus::Failed;
         if let Err(error) = window.drop_database().await {
@@ -452,7 +453,7 @@ async fn execute_frozen_batch(
     match room_result {
         Ok(report) => {
             window
-                .settle_staged_room_items(&report.succeeded_plan_items)
+                .settle_staged_plan_items(&report.succeeded_plan_items)
                 .await;
             result.warnings.extend(report.failures.iter().cloned());
             staged_rooms = report;
@@ -633,7 +634,7 @@ async fn execute_frozen_batch_body(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
-    let (batch, new_units) = mgr
+    let (batch, mut new_units) = mgr
         .execute_one_dbnum(&job.project, &cand, progress, warnings)
         .await;
     let applied = batch
@@ -658,9 +659,71 @@ async fn execute_frozen_batch_body(
     }
 
     let staged = crate::data_interface::staging::active_staging_writes().is_some();
-    let mut side_effect_failed = false;
-    // 暂存窗口内不跑持久层副作用/非 regen drain：否则会把别库或旧 pending 的写
-    // 误记进本窗口 journal。写回成功后由外层 `execute_frozen_batch` 再消费。
+    let mut non_regen_failed = false;
+    if staged && applied {
+        match crate::data_interface::staging::active_staged_finalize_plan().await {
+            Some(plan) => {
+                let mutation_targets = plan
+                    .work_items
+                    .iter()
+                    .filter(|item| matches!(
+                        item.action,
+                        crate::data_interface::model_update_plan::ModelWorkAction::Transform
+                            | crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup
+                    ))
+                    .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
+                    .filter(|refno| refno.is_valid())
+                    .collect::<Vec<_>>();
+                let report = match crate::data_interface::staging::preload::preload_model_mutation_targets(
+                    &mutation_targets,
+                )
+                .await
+                {
+                    Ok(_) => model_update_pending::run_staged_non_regen_work(
+                        mgr,
+                        &plan.work_items,
+                    )
+                    .await,
+                    Err(error) => {
+                        warnings.push(format!("窗口内模型前置工作集预载失败: {error:#}"));
+                        non_regen_failed = true;
+                        Default::default()
+                    }
+                };
+                crate::data_interface::staging::settle_staged_plan_items(
+                    &report.succeeded_plan_items,
+                )
+                .await;
+                let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
+                new_units.extend(report.derived_roots.into_iter().map(|root| {
+                    crate::data_interface::manual_update::UnitTask {
+                        dbnum: job.dbnum,
+                        root_refno: root.root.to_pdms_str(),
+                        noun: root.noun,
+                        source_end_sesno: end_sesno,
+                        attempts: 0,
+                        revision: None,
+                        old_owner: None,
+                        new_owner: None,
+                    }
+                }));
+                if !report.failures.is_empty() {
+                    warnings.push(format!(
+                        "窗口内位姿/删除/级联前置失败: {}",
+                        report.failures.join("; ")
+                    ));
+                    non_regen_failed = true;
+                }
+            }
+            None => {
+                warnings.push("暂存窗口缺少 finalize plan，模型前置未执行".into());
+                non_regen_failed = true;
+            }
+        }
+    }
+    let mut side_effect_failed = non_regen_failed;
+    // 暂存窗口内不跑全局持久层副作用/drain：只执行上面当前 plan 的前置，避免把
+    // 别库或旧 pending 的写误记进本窗口 journal。
     if !staged {
         match SideEffectCompensator::drain(mgr).await {
             Ok(n) if n > 0 => println!("批次后副作用补偿完成 {n} 个任务"),
@@ -678,7 +741,6 @@ async fn execute_frozen_batch_body(
     // 这一轮消化是**全局**的（非 regen 积压不分库），所以「有失败」不等于「本批
     // 的前置没做完」：只有失败牵涉到 `job.dbnum` 时才拦下本批的生成，否则隔壁库
     // 的一条坏行会让每个库的每一批都一个交付单元都不生成。
-    let mut non_regen_failed = false;
     if !staged {
         match model_update_pending::drain_non_regen_report(mgr).await {
             Ok(report) => {
@@ -705,17 +767,23 @@ async fn execute_frozen_batch_body(
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
     let (units, settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
-        match load_pending_model_units_for_retry(job.dbnum).await {
-            Ok(pending) => {
-                let worklist = merge_unit_worklist(new_units, pending);
-                run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
-                ));
-                registry.set_unit_totals(&job.task_id, 0);
-                (Vec::new(), true)
+        if staged {
+            let worklist = merge_unit_worklist(new_units, Vec::new());
+            run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+        } else {
+            match load_pending_model_units_for_retry(job.dbnum).await {
+                Ok(pending) => {
+                    let worklist = merge_unit_worklist(new_units, pending);
+                    run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings)
+                        .await
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
+                    ));
+                    registry.set_unit_totals(&job.task_id, 0);
+                    (Vec::new(), true)
+                }
             }
         }
     } else {
