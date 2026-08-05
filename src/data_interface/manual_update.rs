@@ -2352,8 +2352,8 @@ pub struct ManualUpdatePreview {
     pub up_to_date: bool,
 }
 
-/// `GET /dbnums` 的一行：登记状态 + 文件异常 + 阻断/排除标志。
-#[derive(Debug, Clone, Serialize)]
+/// `GET /dbnums` 的一行：登记状态 + 文件异常 + 阻断/排除/够不着标志。
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DbnumStatus {
     pub dbnum: u32,
     pub db_type: String,
@@ -2368,9 +2368,18 @@ pub struct DbnumStatus {
     pub anomaly: Option<FileAnomaly>,
     /// 阻断：不入队、不应用，水位不动。五种异常里只有路径迁移不阻断。
     pub blocked: bool,
-    /// 排除在本期执行范围之外（`manual_db_nums` / 类型门控）——与阻断不是一回事，
-    /// 界面上不许合成一行（QUEUE-FIELD-MAP §3）。
+    /// 排除在本期执行范围之外：类型不对，或者不在当前 MDB 声明的 DESI 名单里
+    /// （ADR-0013 之后范围由 MDB 定）。与阻断不是一回事，界面上不许合成一行
+    /// （QUEUE-FIELD-MAP §3）。
     pub excluded: bool,
+    /// 当前 MDB **声明了**这个库，但当前项目目录里没有它的文件。
+    ///
+    /// 它与 `excluded` 恰好是相反的意思，而队列面板此前只有那两档——于是同一个库
+    /// 在向导里叫「MDB 声明了它，项目目录里没有这个文件」，到队列面板会被讲成
+    /// 「不在当前 MDB 声明的名单里」。判定与 `DbnumPreview.not_in_project` 同源：
+    /// 在 MDB 声明的 DESI 名单里、既没登记过也没扫到。不阻断也不执行。
+    #[serde(default)]
+    pub not_in_project: bool,
 }
 
 /// [`AiosDBManager::dbnum_statuses`] 的整体结果。
@@ -2956,6 +2965,7 @@ impl AiosDBManager {
                 anomaly,
                 blocked,
                 excluded,
+                not_in_project: false,
             });
         }
 
@@ -2984,6 +2994,27 @@ impl AiosDBManager {
                 anomaly,
                 blocked,
                 excluded: false,
+                not_in_project: false,
+            });
+        }
+
+        // MDB 声明了、既没登记过也没扫到的库。与预览那边同一个循环、同一道
+        // `should_process_database` 闸门——少了这一段，队列面板只有「阻断」与
+        // 「排除」两档，够不着的库要么整个不出现，要么被讲成「不在 MDB 声明的
+        // 名单里」，而那正好是相反的意思。
+        for dbnum in scope.declared_desi() {
+            if registered_dbnums.contains(&dbnum) || by_dbnum.contains_key(&dbnum) {
+                continue;
+            }
+            // 手工收窄掉的库不是「没有文件」，是本次故意不看它——文件就在磁盘上。
+            if !self.should_process_database(project, "DESI", dbnum) {
+                continue;
+            }
+            report.dbnums.push(DbnumStatus {
+                dbnum,
+                db_type: "DESI".to_owned(),
+                not_in_project: true,
+                ..Default::default()
             });
         }
 
@@ -3840,6 +3871,37 @@ mod tests {
         let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
         let retry = render_pending_units_sql(Some(cap), None);
         assert!(retry.contains(&format!("(attempts?:0) < {cap}")), "{retry}");
+    }
+
+    /// `/dbnums` 与预览对「够不着」必须给出同一档，否则两个界面讲反话。
+    ///
+    /// 预览那边为 `declared_desi()` 里既没登记也没扫到的库补一行 `not_in_project`；
+    /// `/dbnums` 少了这段的话，同一个库要么整个不出现，要么只能落到 `excluded`
+    /// 那一档——而那句「不在当前 MDB 声明的名单里」正好是相反的意思（施工单 Q5）。
+    /// 两处的闸门也必须是同一个 `should_process_database`：手工收窄掉的库不是
+    /// 「没有文件」，文件就在磁盘上。
+    #[test]
+    fn the_dbnum_report_declares_unreachable_libraries_the_same_way_the_preview_does() {
+        let source = include_str!("manual_update.rs");
+        let report = source
+            .split_once("pub async fn dbnum_statuses(")
+            .expect("dbnum_statuses 必须存在")
+            .1
+            .split_once("\n    /// 这个库进不进本期执行范围")
+            .expect("函数体到下一个条目为止")
+            .0;
+        assert!(
+            report.contains("for dbnum in scope.declared_desi()"),
+            "少了这一段，够不着的库在队列面板上根本不出现: {report}"
+        );
+        assert!(
+            report.contains("not_in_project: true"),
+            "补出来的行必须标成够不着，落到 excluded 就是反话: {report}"
+        );
+        assert!(
+            report.contains("should_process_database(project, \"DESI\", dbnum)"),
+            "闸门要与预览同一个：手工收窄掉的库文件就在磁盘上，不是够不着: {report}"
+        );
     }
 
     /// 检查视图捞回来的死信必须自己带着「我已经死了」，边界与执行侧的上限**同一个常量**。
