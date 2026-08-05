@@ -1274,11 +1274,23 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
     // 候选面板从这里选，不再依赖空间树里有没有 PANE 条目。
     let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
-    if panel_index.usable_panels() == 0 && !rooms.rooms.is_empty() {
+    // 覆盖率如实报，而不是只在「一块都没有」时才出声：147 块在册面板里只有 12 块有
+    // 几何（issue #7 审核实测）也是异常，而那种状态此前一声不响。落在缺几何面板里的
+    // 构件本轮会被收敛成「不属于任何房间」——这与全量重建一致（那边现在同样跳过它们），
+    // 所以不是分歧，是覆盖率。低到什么程度算异常只有现场知道。
+    let missing = panel_index.missing_panels();
+    if !missing.is_empty() {
         println!(
-            "{} 间在册房间里没有一块面板有可用几何：本轮元素任务只会把归属收敛成空集，\
-             与全量重建一致；若这不符合预期，先确认结构库是否已生成",
-            rooms.rooms.len()
+            "{} 间在册房间的面板里有 {} 块没有可用几何（例如 {}）：落在它们里面的构件\
+             本轮会被收敛成「不属于任何房间」。若这不符合预期，先确认结构库是否已生成",
+            rooms.rooms.len(),
+            missing.len(),
+            missing
+                .iter()
+                .take(5)
+                .map(RefnoEnum::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -1822,6 +1834,32 @@ mod tests {
         assert_eq!(
             room_recalc_item(&change(100677, "EQUI")).action,
             ModelWorkAction::RoomRecalcElement
+        );
+    }
+
+    /// 面板覆盖率要按「缺了几块」报，不能只在「一块都没有」时才出声。
+    ///
+    /// 147 块在册面板里只有 12 块有几何（issue #7 审核实测）同样是异常，而全 0 判据
+    /// 对它一声不响——落在那 135 块里的构件每一轮都被收敛成「不属于任何房间」，现场
+    /// 只看得到房间号消失。
+    #[test]
+    fn the_room_round_reports_partial_panel_coverage() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub async fn drain_rooms(")
+            .expect("drain_rooms 必须存在")
+            .1
+            .split_once("\nasync fn load_room_jobs(")
+            .expect("drain_rooms 之后是 load_room_jobs")
+            .0;
+
+        assert!(
+            body.contains("missing_panels()"),
+            "覆盖率必须按缺失面板数报: {body}"
+        );
+        assert!(
+            !body.contains("usable_panels() == 0"),
+            "只在一块都没有时才出声，等于放过 12/147 那种状态: {body}"
         );
     }
 

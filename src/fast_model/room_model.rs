@@ -152,26 +152,54 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         );
     }
 
+    // 重建前的存量成员数，一条查询查完。收尾时用它说出「哪几块面板从有成员变成了 0」
+    // ——先清后写这条路上唯一会造成数据损失的转变就是它，而此前全量重建这一侧一行日志
+    // 都没有（增量两条分支反倒都有）。查不到就不报这一项，不影响重建本身。
+    let previous_members = existing_member_counts().await.unwrap_or_else(|error| {
+        println!("[房间全量] 读取存量成员数失败（本次不报成员变化）: {error:#}");
+        HashMap::new()
+    });
+
     // 单块面板失败不中断整轮：每块面板的写入是自己的事务、先清后写、可重放，
     // 一个坏面板拖垮全量重建只会让其余 123 间房也拿不到结果。失败逐条收集，
     // 收尾统一上抛——既不静默，也不放大。
     let mut failures = Vec::new();
+    let mut without_geometry: Vec<RefnoEnum> = Vec::new();
+    let mut written_edges = 0usize;
+    let mut emptied: Vec<RefnoEnum> = Vec::new();
     for room in &room_panel_map.rooms {
         for &panel_refno in &room.panels {
             let members = match cal_room_refnos(&mesh_dir, panel_refno, exclude_panel_refnos).await
             {
-                Ok(members) => members,
+                // 没有几何就判不了，跳过而**不写**：写空集等于把这块面板的存量归属边
+                // 抹掉。成批出现（结构库没生成）时逐块报错只会刷屏，收尾汇总一行即可。
+                Ok(PanelMembers::NoGeometry) => {
+                    without_geometry.push(panel_refno);
+                    continue;
+                }
+                Ok(PanelMembers::Computed(members)) => members,
                 Err(error) => {
                     failures.push(format!("{panel_refno} 计算房间成员失败: {error:#}"));
                     continue;
                 }
             };
             // 成员为空也要写：先清后写里那一步 DELETE 正是「面板挪走后旧成员必须掉」。
+            if members.is_empty() && previous_members.get(&panel_refno).copied().unwrap_or(0) > 0 {
+                emptied.push(panel_refno);
+            }
+            written_edges += members.len();
             if let Err(error) = save_room_relate(panel_refno, &members, &room.room_num).await {
                 failures.push(format!("{panel_refno} 写入房间归属失败: {error:#}"));
             }
         }
     }
+
+    report_full_rebuild(
+        exclude_panel_refnos.len(),
+        written_edges,
+        &without_geometry,
+        &emptied,
+    );
 
     if !failures.is_empty() {
         anyhow::bail!(
@@ -181,6 +209,64 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// 每块面板当前收着多少个成员，一条查询查完。
+async fn existing_member_counts() -> anyhow::Result<HashMap<RefnoEnum, usize>> {
+    #[derive(Deserialize)]
+    struct Row {
+        panel: RefnoEnum,
+        c: usize,
+    }
+    let mut response = SUL_DB
+        .query("SELECT in.id AS panel, count() AS c FROM room_relate GROUP BY panel;")
+        .await
+        .map_err(|error| anyhow::anyhow!("查询存量房间成员数失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("查询存量房间成员数语句失败: {error}"))?;
+    Ok(response
+        .take::<Vec<Row>>(0)
+        .map_err(|error| anyhow::anyhow!("解析存量房间成员数失败: {error}"))?
+        .into_iter()
+        .map(|row| (row.panel, row.c))
+        .collect())
+}
+
+/// 全量重建的收尾汇报：写了多少、几块面板没几何、几块从有成员掉到 0。
+///
+/// 后两项是这条路上唯二会「让房间号消失」的形态。此前它们都不出声：没几何的面板被
+/// 当成 0 个成员照常写（把存量边清掉），而掉到 0 这件事从来没人统计。
+fn report_full_rebuild(
+    registered_panels: usize,
+    written_edges: usize,
+    without_geometry: &[RefnoEnum],
+    emptied: &[RefnoEnum],
+) {
+    let sample = |refnos: &[RefnoEnum]| {
+        refnos
+            .iter()
+            .take(5)
+            .map(RefnoEnum::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    println!("房间归属重建完成: 写入 {written_edges} 条成员边");
+    if !without_geometry.is_empty() {
+        println!(
+            "  {} / {} 块在册面板没有任何几何实例，已跳过（**未**清除它们的存量归属边）\
+             ——例如 {}。这通常意味着结构库还没生成过",
+            without_geometry.len(),
+            registered_panels,
+            sample(without_geometry)
+        );
+    }
+    if !emptied.is_empty() {
+        println!(
+            "  {} 块面板的成员从非空变成 0（例如 {}）——若非预期，先查它们的网格与包围盒",
+            emptied.len(),
+            sample(emptied)
+        );
+    }
 }
 
 /// 渲染一块面板的房间归属写入：**先清后写**，整体一个事务（ADR-010 §8）。
@@ -495,11 +581,27 @@ async fn query_geom_pts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomPtsQuery
         .map_err(|error| anyhow::anyhow!("解析失败: {error}"))
 }
 
+/// 一块面板的成员计算结果。
+///
+/// 「算出来是空集」与「压根算不了」必须在类型上分开：写入是先清后写，把后者当成前者
+/// 就等于**主动**把这块面板的存量归属边抹掉，而且任务还算成功。
+#[derive(Debug)]
+pub enum PanelMembers {
+    /// 算出来了。空集是正当结果——「这块面板里确实没有构件」，那条 DELETE 该发。
+    Computed(HashMap<RefnoEnum, RoomMember>),
+    /// 这块面板在库里没有任何几何实例，判不了。
+    ///
+    /// 与「网格读不出来」同样是判不了，区别只在它通常成批出现（结构库从未生成过——
+    /// 本项目 147 块在册面板只有 12 块有几何），所以交给调用方汇总上报，而不是逐块
+    /// 当成一次失败刷屏。
+    NoGeometry,
+}
+
 pub async fn cal_room_refnos(
     mesh_dir: &PathBuf,
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
-) -> anyhow::Result<HashMap<RefnoEnum, RoomMember>> {
+) -> anyhow::Result<PanelMembers> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
     // 这里曾经是 `unwrap_or_default()`：面板实例只要有一个字段形状不对
     //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
@@ -509,8 +611,11 @@ pub async fn cal_room_refnos(
         .await
         .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
     // dbg!(&geom_insts);
+    // 此前这里 `return Ok(Default::default())`——把「没有几何」当成「没有成员」交出去，
+    // 调用方紧接着先清后写，于是这块面板的存量归属边被静默清空。它与下面「网格一个都
+    // 不可用」是同一件事，处置也该一样：不写。
     if geom_insts.is_empty() {
-        return Ok(Default::default());
+        return Ok(PanelMembers::NoGeometry);
     }
 
     let mut within_refnos: HashMap<RefnoEnum, RoomMember> = HashMap::new();
@@ -668,7 +773,7 @@ pub async fn cal_room_refnos(
         anyhow::bail!("面板 {panel_refno} 没有可用网格，本次不改写归属");
     }
 
-    Ok(within_refnos)
+    Ok(PanelMembers::Computed(within_refnos))
 }
 
 /// 整间分支：一块面板动了，重算它名下的全部归属（ADR-010 §2）。
@@ -711,7 +816,18 @@ pub async fn recalc_panel_membership(
              先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）"
         );
     }
-    let members = cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels).await?;
+    // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
+    // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
+    // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
+    let members = match cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)
+        .await?
+    {
+        PanelMembers::Computed(members) => members,
+        PanelMembers::NoGeometry => anyhow::bail!(
+            "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
+             它的包围盒刚变过才排的这次重算，此刻却没有几何——先确认结构库是否被清过"
+        ),
+    };
     let new_members: HashSet<RefnoEnum> = members.keys().copied().collect();
     let old_members = existing_members_of_panel(panel)
         .await
@@ -746,6 +862,8 @@ pub struct PanelIndex {
     boxes: Vec<Aabb>,
     /// 面板网格所在目录，随索引一起定下来——缓存好的三角网只对这个目录有效。
     mesh_dir: PathBuf,
+    /// 在册、但没能进索引的面板：`query_insts` 没返回行，或世界包围盒不可用。
+    missing: Vec<RefnoEnum>,
 }
 
 /// 一块在册面板的一条实例（同一个 refno 可能有多条 `inst_relate` 行）。
@@ -829,6 +947,19 @@ impl PanelIndex {
         self.entries.len()
     }
 
+    /// 在册却没能进索引的那些面板。
+    ///
+    /// 元素分支的候选只在进了索引的面板里选，所以这些面板对增量路径等于不存在——落在
+    /// 它们里面的构件会被收敛成「不属于任何房间」。这与全量重建**一致**（那边现在同样
+    /// 跳过它们），所以不是两条分支分歧，而是覆盖率问题：覆盖率低到什么程度算异常只有
+    /// 现场知道，所以如实报出来，别替它判。
+    ///
+    /// 此前这件事只有「一块都没有」时才说得出口，而 147 块里只有 12 块有几何这种状态
+    /// （issue #7 审核实测）一声不响。
+    pub fn missing_panels(&self) -> &[RefnoEnum] {
+        &self.missing
+    }
+
     fn mesh_dir(&self) -> &Path {
         &self.mesh_dir
     }
@@ -882,6 +1013,7 @@ pub async fn load_panel_index(
                 anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
             })?;
 
+    let mut indexed: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
         let Some(room_num) = rooms.room_num_of(inst.refno) else {
             continue;
@@ -889,6 +1021,7 @@ pub async fn load_panel_index(
         if !aabb_is_usable(&inst.world_aabb) {
             continue;
         }
+        indexed.insert(inst.refno);
         index.boxes.push(inst.world_aabb);
         index.entries.push(PanelEntry {
             panel: inst.refno,
@@ -897,6 +1030,12 @@ pub async fn load_panel_index(
             mesh_cache: OnceLock::new(),
         });
     }
+    // 在册却没进索引的：查不到实例，或包围盒不可用。顺序固定，日志才对得上。
+    index.missing = registered
+        .into_iter()
+        .filter(|panel| !indexed.contains(panel))
+        .collect();
+    index.missing.sort_by_key(RefnoEnum::to_string);
     Ok(index)
 }
 
@@ -1710,6 +1849,55 @@ mod tests {
             .map(|at| guard_at + at)
             .expect("空树必须上抛，让任务保留重试而不是算成功");
         assert!(bail_at < recalc_at, "{body}");
+    }
+
+    /// 「没有几何」不得被折成「没有成员」写下去。
+    ///
+    /// 两条路都是先清后写：把 `NoGeometry` 当空集交出去，就等于**主动**把这块面板的
+    /// 存量归属边抹掉，而任务还算成功、日志一行没有。全量那边跳过并在收尾汇总上报
+    /// （结构库没生成时这是成批的，逐块报错只会刷屏）；增量整间分支上抛保留重试
+    /// （它的入队条件是这块面板的包围盒刚变过，此刻却没有几何，本身就是信号）。
+    #[test]
+    fn a_panel_without_geometry_is_never_written_as_an_empty_member_set() {
+        let source = include_str!("room_model.rs");
+
+        let full = source
+            .split_once("pub async fn build_room_relations(")
+            .expect("build_room_relations 必须存在")
+            .1
+            .split_once("\n/// 每块面板当前收着多少个成员")
+            .expect("全量重建之后是 existing_member_counts")
+            .0;
+        let no_geometry_at = full
+            .find("PanelMembers::NoGeometry)")
+            .expect("全量重建必须显式处理没有几何的面板");
+        let write_at = full
+            .find("save_room_relate(")
+            .expect("重建必须写 room_relate");
+        assert!(no_geometry_at < write_at, "{full}");
+        assert!(
+            full[no_geometry_at..write_at].contains("continue"),
+            "没有几何的面板必须跳过，而不是写一个空集把它的存量边清掉: {full}"
+        );
+
+        let panel_branch = source
+            .split_once("pub async fn recalc_panel_membership(")
+            .expect("recalc_panel_membership 必须存在")
+            .1
+            .split_once("/// 一轮 drain 复用的在册面板几何")
+            .expect("整间分支之后是 PanelIndex")
+            .0;
+        let arm_at = panel_branch
+            .find("PanelMembers::NoGeometry =>")
+            .expect("整间分支必须显式处理没有几何的面板");
+        let bail_at = panel_branch[arm_at..]
+            .find("anyhow::bail!")
+            .map(|at| arm_at + at)
+            .expect("整间分支必须上抛，让任务保留重试而不是算成功");
+        let write_at = panel_branch
+            .find("save_room_relate(panel, &members")
+            .expect("整间分支必须写回成员");
+        assert!(bail_at < write_at, "{panel_branch}");
     }
 
     /// 元素分支的函数体，供下面几条源码断言共用。
