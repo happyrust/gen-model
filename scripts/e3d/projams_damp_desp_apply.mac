@@ -3,7 +3,7 @@
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_damp_desp_apply.log" OVER
 =24381/100819
 Q CE
-DESP 1 1400
+DESPAR NUM2 1400
 Q DESP
 SAVEWORK 'CODEX plant-ui geometry rebuild apply: DAMP DESP1 1000 to 1400'
 ALPHA LOG END
