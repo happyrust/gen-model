@@ -32,6 +32,17 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
 
+/// 房间轮的保底间隔。
+///
+/// ADR-011 §8 让房间轮等「队列跑空」，可持续入库的项目里那个条件可能一轮都不
+/// 成立：每个空闲轮不是还有 durable 积压，就是刚认领了新到的批次，房间归属于是
+/// 永远收不上，面板只看到待重算数一路涨。超过这个间隔就强收一轮。
+///
+/// 提前收一轮不会留下永久错误。房间任务的入队判据是「AABB 确实变了」
+/// （`enqueue_room_recalc`）：待办的重生成一旦真的改了包围盒，这些目标会被重新
+/// 排进来再算一次；没改包围盒的话，早算出来的归属本来就是对的。
+const ROOM_ROUND_FLOOR: Duration = Duration::from_secs(600);
+
 /// worker 还在不在。
 ///
 /// `ensure_batch_worker` 用 `OnceLock` 保证只启动一次——反过来说 worker 一旦因
@@ -54,6 +65,9 @@ static WORKER_BEAT: AtomicI64 = AtomicI64::new(0);
 /// SYS meta，有人往 MDB 里加一个库也是同样的形状——那些刚进范围的设计库自己没有
 /// 文件变更事件，不重扫就得等下次重启才会被发现。
 static SCOPE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// 最近一次收房间轮的时刻（epoch 毫秒，0 = 本进程还没收过）。见 [`ROOM_ROUND_FLOOR`]。
+static LAST_ROOM_ROUND: AtomicI64 = AtomicI64::new(0);
 
 fn beat() {
     WORKER_BEAT.store(Local::now().timestamp_millis(), Ordering::Relaxed);
@@ -338,13 +352,30 @@ async fn execute_frozen_batch(
 
     // 位姿 / 删除 / 级联先行——级联展开会反过来入队 regen 工作，随后一起并进
     // 本批的单元工作单（与旧手动路径的顺序一致）。
+    //
+    // 这一轮消化是**全局**的（非 regen 积压不分库），所以「有失败」不等于「本批
+    // 的前置没做完」：只有失败牵涉到 `job.dbnum` 时才拦下本批的生成，否则隔壁库
+    // 的一条坏行会让每个库的每一批都一个交付单元都不生成。
     let mut non_regen_failed = false;
-    if let Err(error) = model_update_pending::drain_non_regen(mgr).await {
-        warnings.push(format!(
-            "执行位姿/删除/级联模型任务失败（已保留待重试）: {error:#}"
-        ));
-        side_effect_failed = true;
-        non_regen_failed = true;
+    match model_update_pending::drain_non_regen_report(mgr).await {
+        Ok(report) => {
+            if !report.failures.is_empty() {
+                warnings.push(format!(
+                    "执行位姿/删除/级联模型任务失败（已保留待重试）: {}",
+                    report.failures.join("; ")
+                ));
+                side_effect_failed = true;
+                non_regen_failed = report.blocks(job.dbnum);
+            }
+        }
+        Err(error) => {
+            // 整个阶段没跑起来（读表/解码失败），本批前置是否做完无从确认，按阻断处理。
+            warnings.push(format!(
+                "读取位姿/删除/级联模型任务失败（本批模型生成已延后，持久任务保留）: {error:#}"
+            ));
+            side_effect_failed = true;
+            non_regen_failed = true;
+        }
     }
 
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
@@ -656,24 +687,37 @@ async fn idle_round(
         }
     };
 
-    let data_backlog = data_phase_failed
-        || match model_update_pending::has_pending_data_work().await {
-            Ok(pending) => pending,
+    // 消化失败时不必再问「还有没有活」——这一轮已经在退避那条路上了。
+    let (has_backlog, backlog_check_failed) = if data_phase_failed {
+        (false, false)
+    } else {
+        match model_update_pending::has_pending_data_work().await {
+            Ok(pending) => (pending, false),
             Err(error) => {
                 println!("检查模型积压是否清空失败（暂缓房间轮）: {error:#}");
-                true
+                (false, true)
             }
-        };
+        }
+    };
+    let failed = data_phase_failed || backlog_check_failed;
     // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉，房间轮不能越过它。
-    let claimed_batches = if data_backlog {
+    let claimed_batches = if failed || has_backlog {
         0
     } else {
         drain_queue_until_empty(mgr).await
     };
-    if room_phase_is_clear(data_backlog, claimed_batches) {
+
+    let outcome = idle_outcome(failed, has_backlog, claimed_batches);
+    if room_round_is_due(outcome, since_last_room_round()) {
         room_round(mgr, registry, after_batches).await;
-    } else {
-        // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
+    }
+    // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
+    //
+    // 失败时**不**唤醒：`notify_one` 在无等待者时会存下一个 permit，主循环的
+    // `wait_for_work(IDLE_WAKE)` 于是立刻返回。持续性故障（SurrealDB 不可达之类）
+    // 下这会退化成只受查询延迟限制的热循环，每圈还打一行同样的错。这条路的退避
+    // 就是 `IDLE_WAKE` 那 30 秒。
+    if wakes_immediately(outcome) {
         BatchScheduler::global().wake();
     }
 
@@ -688,8 +732,51 @@ async fn idle_round(
     }
 }
 
-fn room_phase_is_clear(data_backlog: bool, claimed_batches: usize) -> bool {
-    !data_backlog && claimed_batches == 0
+/// 一个空闲轮消化完这一页之后的处置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleOutcome {
+    /// 这一页干净、表里也没剩货：可以收房间轮了。
+    Settled,
+    /// 还有下一页，或者消化期间又来了批次：立刻回主循环再来一轮。
+    MoreWork,
+    /// 这一轮出错了：不收房间轮，也不唤醒，交给 `IDLE_WAKE` 退避。
+    Failed,
+}
+
+fn idle_outcome(failed: bool, has_backlog: bool, claimed_batches: usize) -> IdleOutcome {
+    if failed {
+        IdleOutcome::Failed
+    } else if has_backlog || claimed_batches > 0 {
+        IdleOutcome::MoreWork
+    } else {
+        IdleOutcome::Settled
+    }
+}
+
+/// 只有「确实还有活要干」才立刻回来。失败必须退避，见 [`idle_round`] 的说明。
+fn wakes_immediately(outcome: IdleOutcome) -> bool {
+    matches!(outcome, IdleOutcome::MoreWork)
+}
+
+/// 距上次收房间轮过了多久（本进程还没收过时为 `None`）。
+fn since_last_room_round() -> Option<Duration> {
+    let millis = LAST_ROOM_ROUND.load(Ordering::Relaxed);
+    (millis > 0).then(|| {
+        Duration::from_millis((Local::now().timestamp_millis() - millis).max(0) as u64)
+    })
+}
+
+/// 房间轮该不该在这一轮收。
+///
+/// `Settled` 是常规出口（ADR-011 §8：队列跑空才收）。`MoreWork` 本该让位，但持续
+/// 入库时它每一轮都成立，所以攒够 [`ROOM_ROUND_FLOOR`] 就强收一轮。`Failed` 任何
+/// 时候都不收——那一轮连积压清没清都没问出来。
+fn room_round_is_due(outcome: IdleOutcome, since_last: Option<Duration>) -> bool {
+    match outcome {
+        IdleOutcome::Settled => true,
+        IdleOutcome::MoreWork => since_last.is_none_or(|elapsed| elapsed >= ROOM_ROUND_FLOOR),
+        IdleOutcome::Failed => false,
+    }
 }
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
@@ -701,6 +788,9 @@ async fn room_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) {
+    // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则 `gen_spatial_tree`
+    // 关着或没有目标时，每一个空闲轮都会判成到期。
+    LAST_ROOM_ROUND.store(Local::now().timestamp_millis(), Ordering::Relaxed);
     if !mgr.db_option.gen_spatial_tree {
         return;
     }
@@ -963,15 +1053,149 @@ mod tests {
             .expect("房间轮前必须认领执行期间新到的批次");
         let room_at = body.find("room_round(").expect("数据清空后必须保留房间轮");
         assert!(backlog_at < claim_at && claim_at < room_at, "{body}");
-        assert!(room_phase_is_clear(false, 0));
-        assert!(!room_phase_is_clear(true, 0));
-        assert!(!room_phase_is_clear(false, 1));
+        assert_eq!(idle_outcome(false, false, 0), IdleOutcome::Settled);
+        assert_eq!(idle_outcome(true, false, 0), IdleOutcome::Failed);
+        assert_eq!(idle_outcome(false, true, 0), IdleOutcome::MoreWork);
+        assert_eq!(idle_outcome(false, false, 1), IdleOutcome::MoreWork);
+    }
+
+    /// 房间轮不能被持续到达的数据批次无限期挤掉。
+    ///
+    /// `MoreWork`（还有 durable 积压，或刚认领了新批次）本该给数据让位，但持续
+    /// 入库的项目里它每一轮都成立，而生产里 `drain_rooms` 的唯一消费者就是
+    /// `room_round`——没有保底的话房间归属永远收不上，泳道只会一路涨到误报饥饿。
+    #[test]
+    fn a_starved_room_round_still_gets_its_turn() {
+        // 常规出口不变。
+        assert!(room_round_is_due(IdleOutcome::Settled, Some(Duration::ZERO)));
+        // 失败轮任何时候都不收：那一轮连积压清没清都没问出来。
+        assert!(!room_round_is_due(IdleOutcome::Failed, None));
+        assert!(!room_round_is_due(
+            IdleOutcome::Failed,
+            Some(ROOM_ROUND_FLOOR * 10)
+        ));
+        // 还有活干时让位……
+        assert!(!room_round_is_due(
+            IdleOutcome::MoreWork,
+            Some(Duration::ZERO)
+        ));
+        assert!(!room_round_is_due(
+            IdleOutcome::MoreWork,
+            Some(ROOM_ROUND_FLOOR - Duration::from_secs(1))
+        ));
+        // ……但让不过保底。
+        assert!(room_round_is_due(
+            IdleOutcome::MoreWork,
+            Some(ROOM_ROUND_FLOOR)
+        ));
+        assert!(
+            room_round_is_due(IdleOutcome::MoreWork, None),
+            "本进程还没收过房间轮时先收一轮"
+        );
+
+        let source = include_str!("batch_worker.rs");
+        let idle_body = source
+            .split_once("async fn idle_round(")
+            .expect("idle_round 必须存在")
+            .1
+            .split_once("/// 一个空闲轮消化完这一页之后的处置")
+            .expect("idle_round 之后是 IdleOutcome 的定义")
+            .0;
+        assert!(
+            idle_body.contains("if room_round_is_due(outcome, since_last_room_round()) {"),
+            "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
+        );
+
+        let room_body = source
+            .split_once("async fn room_round(")
+            .expect("room_round 必须存在")
+            .1
+            .split_once("\nasync fn ")
+            .expect("room_round 之后还有别的函数")
+            .0;
+        assert!(
+            room_body.contains("LAST_ROOM_ROUND.store("),
+            "room_round 必须记下本轮时刻，否则保底要么永不到期要么每轮到期: {room_body}"
+        );
+    }
+
+    /// 空闲轮消化失败时不能自我唤醒——那会把持续性故障变成热循环。
+    ///
+    /// `wake()` 是 `Notify::notify_one()`：无等待者时它存下一个 permit，于是主循环
+    /// 紧接着的 `wait_for_work(IDLE_WAKE)` 立刻返回。失败路径上照发的话，
+    /// SurrealDB 不可达这类持续故障下，worker 会以查询延迟为周期空转，每圈打一行
+    /// 「空闲模型积压消化失败」，而 30 秒的 `IDLE_WAKE` 退避形同虚设。
+    #[test]
+    fn a_failed_idle_round_backs_off_instead_of_waking_itself() {
+        assert!(!wakes_immediately(idle_outcome(true, false, 0)));
+        assert!(!wakes_immediately(idle_outcome(true, true, 3)));
+        assert!(!wakes_immediately(IdleOutcome::Settled));
+        assert!(wakes_immediately(idle_outcome(false, true, 0)));
+
+        // 调用点也得守住：`wake()` 只能出现一次，且必须在 `wakes_immediately` 门后。
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn idle_round(")
+            .expect("idle_round 必须存在")
+            .1
+            .split_once("/// 一个空闲轮消化完这一页之后的处置")
+            .expect("idle_round 之后是 IdleOutcome 的定义")
+            .0;
+        assert_eq!(
+            body.matches(".wake()").count(),
+            1,
+            "空闲轮只该有一处唤醒，且归 wakes_immediately 管: {body}"
+        );
+        assert!(
+            body.contains("if wakes_immediately(outcome) {"),
+            "唤醒必须由 wakes_immediately 把门: {body}"
+        );
     }
 
     #[test]
     fn failed_non_regen_work_blocks_the_batch_regen_worklist() {
         assert!(batch_regen_is_allowed(false));
         assert!(!batch_regen_is_allowed(true));
+    }
+
+    /// 前置阻断只认**本批这个库**的失败。
+    ///
+    /// 批次执行前那次 `drain_non_regen` 扫的是全局积压（非 regen 工作不分库）。
+    /// 按「这一轮有没有失败」来阻断的话，任意一个库里一条坏 transform 就会让
+    /// 每个库的每一批都跳过整张单元工作单——所有交付单元停摆，直到那条行涨到
+    /// `MAX_ATTEMPTS` 进死信才自动解封。
+    #[test]
+    fn another_databases_failure_does_not_block_this_batch() {
+        use crate::data_interface::model_update_pending::DrainReport;
+
+        let mut report = DrainReport::default();
+        report.failed_dbnums.insert(7997);
+
+        assert!(report.blocks(7997), "本库的前置失败必须拦下本批");
+        assert!(!report.blocks(8000), "隔壁库的失败不该牵连本批");
+        assert!(batch_regen_is_allowed(report.blocks(8000)));
+
+        // 来源库未知（dbnum = 0）的入队牵连范围判断不了，只能按阻断处理。
+        let mut unknown = DrainReport::default();
+        unknown.failed_dbnums.insert(0);
+        assert!(unknown.blocks(8000));
+
+        // 一条都没失败时谁也不拦。
+        assert!(!DrainReport::default().blocks(8000));
+
+        // 调用点也得守住：判据必须带上本批的 dbnum，不能退回「这一轮有没有失败」。
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch 必须存在")
+            .1
+            .split_once("fn batch_regen_is_allowed(")
+            .expect("execute_frozen_batch 在 batch_regen_is_allowed 之前结束")
+            .0;
+        assert!(
+            body.contains("report.blocks(job.dbnum)"),
+            "前置阻断必须按本批 dbnum 判定: {body}"
+        );
     }
 
     /// 隔离壳的本分：panic 到此为止，换成一句话交给调用方。

@@ -1,6 +1,6 @@
 //! Durable, per-target model work queued before the incremental watermark.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
@@ -803,25 +803,68 @@ async fn run_room_task(
     }
 }
 
+/// 一轮 drain 的产出：完成数、逐条失败原因，以及失败牵涉到的 `dbnum`。
+///
+/// 失败的 `dbnum` 要单独带出来，是因为非 regen 积压是**全局**的：批次执行前那次
+/// `drain_non_regen` 会扫掉所有库的位姿/删除/级联工作。只报一个「这轮有失败」的
+/// 布尔值，调用方就分不清失败的是自己这一批还是隔壁库，只能一律按前置失败阻断
+/// 自己的模型生成——一条坏行于是停掉全线。
+#[derive(Debug, Default)]
+pub struct DrainReport {
+    pub done: usize,
+    pub failures: Vec<String>,
+    pub failed_dbnums: BTreeSet<u32>,
+}
+
+impl DrainReport {
+    fn record(&mut self, dbnum: u32, message: String) {
+        self.failed_dbnums.insert(dbnum);
+        self.failures.push(message);
+    }
+
+    /// 这一轮的失败是否够格阻断 `dbnum` 这一批的后续模型生成。
+    ///
+    /// `dbnum = 0` 是「来源库未知」的入队（见 [`record_id_of`]）：牵连范围无从判断，
+    /// 按阻断处理。
+    pub fn blocks(&self, dbnum: u32) -> bool {
+        self.failed_dbnums.contains(&dbnum) || self.failed_dbnums.contains(&0)
+    }
+
+    /// 折回调用方原来的 `Result<usize>` 口径。
+    fn into_result(self) -> anyhow::Result<usize> {
+        if !self.failures.is_empty() {
+            let done = self.done;
+            anyhow::bail!(
+                "{} pending model task(s) failed after {done} completed: {}",
+                self.failures.len(),
+                self.failures.join("; ")
+            );
+        }
+        Ok(self.done)
+    }
+}
+
 /// Record a durable failure for one job and collect it for the drain summary.
 ///
 /// Clearing the queue row counts the same as the work itself: a target whose row
 /// can never be removed keeps climbing towards [`MAX_ATTEMPTS`] instead of
 /// re-running a full generation every watcher cycle forever.
-async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, failures: &mut Vec<String>) {
+async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &mut DrainReport) {
     let message = format!("{error:#}");
     if let Err(mark_error) = mark_failed(job, &message).await {
-        failures.push(format!(
-            "{} {}: {message}; mark failed: {mark_error:#}",
-            job.action.as_str(),
-            job.target_refno
-        ));
+        report.record(
+            job.dbnum,
+            format!(
+                "{} {}: {message}; mark failed: {mark_error:#}",
+                job.action.as_str(),
+                job.target_refno
+            ),
+        );
     } else {
-        failures.push(format!(
-            "{} {}: {message}",
-            job.action.as_str(),
-            job.target_refno
-        ));
+        report.record(
+            job.dbnum,
+            format!("{} {}: {message}", job.action.as_str(), job.target_refno),
+        );
     }
 }
 
@@ -832,12 +875,7 @@ async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, failures:
 /// used to — aborted the whole round on one flaky `DELETE`, so every other
 /// `dbnum` queued behind it was skipped and the target that had just generated
 /// successfully paid for a second full `gen_all_geos_data` on the next round.
-async fn run_one(
-    mgr: &AiosDBManager,
-    job: &PendingModelWork,
-    done: &mut usize,
-    failures: &mut Vec<String>,
-) {
+async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut DrainReport) {
     let root_lock = (job.action == ModelWorkAction::RegenRoot).then(|| {
         crate::data_interface::manual_update::generation_root_lock(&job.target_refno)
     });
@@ -850,8 +888,8 @@ async fn run_one(
         Err(error) => Err(error),
     };
     match outcome {
-        Ok(()) => *done += 1,
-        Err(error) => record_failure(job, &error, failures).await,
+        Ok(()) => report.done += 1,
+        Err(error) => record_failure(job, &error, report).await,
     }
 }
 
@@ -887,6 +925,18 @@ async fn drain_where(
     action_filter: &str,
     limit: Option<usize>,
 ) -> anyhow::Result<usize> {
+    drain_where_report(mgr, action_filter, limit)
+        .await?
+        .into_result()
+}
+
+/// [`drain_where`] 的本体。`Err` 只留给「这一轮根本没跑起来」（读表 / 解码失败）；
+/// 逐条任务的失败进 [`DrainReport`]，由调用方决定牵连范围。
+async fn drain_where_report(
+    mgr: &AiosDBManager,
+    action_filter: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<DrainReport> {
     let mut response = SUL_DB
         .query(render_drain_select(action_filter, limit))
         .await?
@@ -908,8 +958,7 @@ async fn drain_where(
     let (batchable, singles): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
         regen_jobs.into_iter().partition(joins_regen_batch);
 
-    let mut done = 0;
-    let mut failures = Vec::new();
+    let mut report = DrainReport::default();
 
     if !batchable.is_empty() {
         let mut roots: Vec<String> = Vec::with_capacity(batchable.len());
@@ -938,7 +987,7 @@ async fn drain_where(
                     .map(|job| (job.target_refno.clone(), job.revision))
                     .collect::<Vec<_>>();
                 match clear_regen_work_batch(&settlements).await {
-                    Ok(()) => done += batchable.len(),
+                    Ok(()) => report.done += batchable.len(),
                     Err(error) => {
                         // 收口失败不是生成失败（2026-07-30 审计 C2）：这批根刚刚全部
                         // 生成成功，唯一没做完的是把队列行删掉。给它们逐根 mark_failed
@@ -947,11 +996,15 @@ async fn drain_where(
                         // 行留在表里不动（attempts 仍是 0），下一轮 drain 会重新取到
                         // 它们、重跑一遍幂等生成、再试一次收口；batch_worker 那条同构
                         // 路径（`settlement_failed`）也是这个口径。
-                        failures.push(format!(
+                        let message = format!(
                             "batch settlement failed for {} generated root(s), \
                              rows stay pending for the next drain: {error:#}",
                             settlements.len()
-                        ));
+                        );
+                        for job in &batchable {
+                            report.failed_dbnums.insert(job.dbnum);
+                        }
+                        report.failures.push(message);
                     }
                 }
             }
@@ -964,24 +1017,17 @@ async fn drain_where(
                     roots.len()
                 );
                 for job in &batchable {
-                    run_one(mgr, job, &mut done, &mut failures).await;
+                    run_one(mgr, job, &mut report).await;
                 }
             }
         }
     }
 
     for job in singles.iter().chain(other_jobs.iter()) {
-        run_one(mgr, job, &mut done, &mut failures).await;
+        run_one(mgr, job, &mut report).await;
     }
 
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} pending model task(s) failed after {done} completed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-    Ok(done)
+    Ok(report)
 }
 
 // 三个阶段的 action 白名单。合起来必须正好覆盖 `ModelWorkAction` 的全部取值：漏掉
@@ -1011,6 +1057,14 @@ pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 
 pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
     drain_where(mgr, NON_REGEN_ACTION_FILTER, None).await
+}
+
+/// 与 [`drain_non_regen`] 同一轮工作，但把失败牵涉到的 `dbnum` 一起带出来。
+///
+/// 批次执行前的那次前置消化用它：非 regen 积压是全局的，只有**本批这个库**的
+/// 前置失败才该拦下本批的模型生成。
+pub async fn drain_non_regen_report(mgr: &AiosDBManager) -> anyhow::Result<DrainReport> {
+    drain_where_report(mgr, NON_REGEN_ACTION_FILTER, None).await
 }
 
 /// 前两个阶段（非 regen → regen），不含房间。
@@ -1141,8 +1195,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         .partition(|job| job.action == ModelWorkAction::RoomRecalcPanel);
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
-    let mut done = 0;
-    let mut failures = Vec::new();
+    let mut report = DrainReport::default();
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
@@ -1154,11 +1207,11 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
                     claimed_panels.insert(RefnoEnum::from(refno));
                 }
                 match delete_work(job).await {
-                    Ok(()) => done += 1,
-                    Err(error) => record_failure(job, &error, &mut failures).await,
+                    Ok(()) => report.done += 1,
+                    Err(error) => record_failure(job, &error, &mut report).await,
                 }
             }
-            Err(error) => record_failure(job, &error, &mut failures).await,
+            Err(error) => record_failure(job, &error, &mut report).await,
         }
     }
 
@@ -1207,19 +1260,20 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
             }
         };
         match outcome {
-            Ok(()) => done += 1,
-            Err(error) => record_failure(job, &error, &mut failures).await,
+            Ok(()) => report.done += 1,
+            Err(error) => record_failure(job, &error, &mut report).await,
         }
     }
 
-    if !failures.is_empty() {
+    if !report.failures.is_empty() {
         anyhow::bail!(
-            "{} pending room task(s) failed after {done} completed: {}",
-            failures.len(),
-            failures.join("; ")
+            "{} pending room task(s) failed after {} completed: {}",
+            report.failures.len(),
+            report.done,
+            report.failures.join("; ")
         );
     }
-    Ok(done)
+    Ok(report.done)
 }
 
 /// 同轮吸收的封闭性输入：候选元素的现存归属边与当前空间树候选面板。
