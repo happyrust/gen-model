@@ -27,10 +27,7 @@ src = open(os.path.join(REPO, "src", "data_interface", "model_impact.rs"),
 
 
 def curated_affects():
-    start = src.index("pub fn attribute_affects_model")
-    bs = src.index("matches!(", start)
-    be = src.index(") || name.starts_with(\"PARA\")", bs)
-    return set(re.findall(r'"([A-Z0-9_:]+)"', src[bs:be]))
+    return const_set("DIRECT_GEOMETRY_ATTR_NAMES")
 
 
 def const_set(name):
