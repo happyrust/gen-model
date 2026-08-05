@@ -1,0 +1,8 @@
+-- Read-only probe for the 7997 negative-cylinder geometry sample.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_ncy_query.log" OVER
+=24381/100680
+Q CE
+Q DIAM
+Q HEIG
+ALPHA LOG END

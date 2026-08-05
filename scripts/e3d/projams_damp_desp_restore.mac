@@ -1,0 +1,9 @@
+-- Restore the DAMP geometry parameter changed by projams_damp_desp_apply.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_damp_desp_restore.log" OVER
+=24381/100819
+Q CE
+DESP 1 1000
+Q DESP
+SAVEWORK 'CODEX plant-ui geometry rebuild restore: DAMP DESP1 1400 to 1000'
+ALPHA LOG END

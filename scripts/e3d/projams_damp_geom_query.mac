@@ -1,0 +1,7 @@
+-- Read-only geometry-parameter probe for DAMP 24381/100819.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_damp_geom_query.log" OVER
+=24381/100819
+Q CE
+Q DESP
+ALPHA LOG END
