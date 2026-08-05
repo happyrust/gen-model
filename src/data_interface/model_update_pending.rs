@@ -186,7 +186,11 @@ pub async fn enqueue_room_recalc(
     db_option: &aios_core::options::DbOption,
     changes: &[AabbChange],
 ) -> anyhow::Result<()> {
-    if !db_option.gen_spatial_tree || changes.is_empty() {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    if !db_option.gen_spatial_tree {
+        warn_spatial_tree_disabled_once();
         return Ok(());
     }
     let mut items: std::collections::BTreeMap<String, ModelWorkItem> =
@@ -200,6 +204,23 @@ pub async fn enqueue_room_recalc(
         ..Default::default()
     })
     .await
+}
+
+static SPATIAL_TREE_DISABLED_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `gen_spatial_tree` 关着时一条房间任务都不排——按进程说一次。
+///
+/// 这是配置层面的事实，不必每批包围盒变更各说一遍。但**必须说**：这条路上队列里从此
+/// 不会出现任何 `room_recalc` 行，`room_round` 每轮早退、泳道空着，现场能看到的只有
+/// 「模型动了、房间号不动」，没有任何东西解释为什么。
+fn warn_spatial_tree_disabled_once() {
+    if !SPATIAL_TREE_DISABLED_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        println!(
+            "gen_spatial_tree 关闭：包围盒变更不排房间重算任务，room_relate 与材料表房间号\
+             将停在上一次全量重建的结果"
+        );
+    }
 }
 
 /// 这次入队要不要**无条件**把死信复活（清零 `attempts` / `last_error`）。
@@ -777,7 +798,8 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         // 各扫一遍是承受不起的。
         ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
             let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
-            run_room_task(&mgr.db_option, &rooms, item.action, refno)
+            let coverage = room_model::survey_panel_tree_coverage(&rooms).await?;
+            run_room_task(&mgr.db_option, &rooms, coverage, item.action, refno)
                 .await
                 .map(|_| ())
         }
@@ -788,6 +810,7 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
 async fn run_room_task(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
+    coverage: room_model::PanelTreeCoverage,
     action: ModelWorkAction,
     target: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
@@ -796,7 +819,7 @@ async fn run_room_task(
             room_model::recalc_panel_membership(db_option, rooms, target).await
         }
         ModelWorkAction::RoomRecalcElement => {
-            room_model::recalc_element_membership(db_option, rooms, target).await?;
+            room_model::recalc_element_membership(db_option, rooms, coverage, target).await?;
             Ok(HashSet::new())
         }
         other => anyhow::bail!("{} 不是房间任务", other.as_str()),
@@ -1195,12 +1218,23 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         .partition(|job| job.action == ModelWorkAction::RoomRecalcPanel);
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
+    // 元素分支的候选面板只能从空间树上取，量一次覆盖率整轮复用（见
+    // [`room_model::PanelTreeCoverage`]）。树里一块在册面板都没有时元素分支会拒绝把
+    // 「捞不到候选」当成「不在任何房间里」，宁可失败重试也不静默清掉存量归属边。
+    let coverage = room_model::survey_panel_tree_coverage(&rooms).await?;
+    if !coverage.can_trust_empty_candidates() {
+        println!(
+            "空间树上一块在册面板都没有（在册 {} 块）：本轮元素任务不会改写房间归属，\
+             等空间树与库对账重建后重试",
+            coverage.registered
+        );
+    }
     let mut report = DrainReport::default();
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
     for job in &panels {
-        match run_room_job(db_option, &rooms, job).await {
+        match run_room_job(db_option, &rooms, coverage, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -1254,7 +1288,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, &rooms, job).await {
+            match run_room_job(db_option, &rooms, coverage, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
@@ -1384,13 +1418,14 @@ async fn load_absorption_closure_inputs(
 async fn run_room_job(
     db_option: &aios_core::options::DbOption,
     rooms: &room_model::RoomPanelMap,
+    coverage: room_model::PanelTreeCoverage,
     job: &PendingModelWork,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let refno = RefnoEnum::from(
         RefU64::from_str(&job.target_refno)
             .map_err(|_| anyhow::anyhow!("invalid pending refno {}", job.target_refno))?,
     );
-    run_room_task(db_option, rooms, job.action, refno).await
+    run_room_task(db_option, rooms, coverage, job.action, refno).await
 }
 
 #[cfg(test)]
@@ -1939,6 +1974,30 @@ mod tests {
             !render_drain_select("AND action = 'regen_root'", None).contains("LIMIT"),
             "explicit/manual drain keeps its drain-until-complete contract"
         );
+    }
+
+    /// `gen_spatial_tree` 关着是「一条房间任务都不排」，这件事必须留下痕迹。
+    ///
+    /// 静默返回 `Ok(())` 时现场只看得到「模型动了、房间号不动」：队列里没有 room_recalc
+    /// 行、房间轮每轮早退、泳道空着，没有任何一处解释原因。
+    #[test]
+    fn a_disabled_spatial_tree_says_so_before_dropping_room_work() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub async fn enqueue_room_recalc(")
+            .expect("enqueue_room_recalc 必须存在")
+            .1
+            .split_once("\nstatic SPATIAL_TREE_DISABLED_WARNED")
+            .expect("入队函数之后是告警开关")
+            .0;
+        let gate_at = body
+            .find("if !db_option.gen_spatial_tree {")
+            .expect("开关必须单独成一个分支，不能与 changes.is_empty() 并在一起——\
+                     没有变更要排本来就无话可说");
+        let warn_at = body
+            .find("warn_spatial_tree_disabled_once()")
+            .expect("关着时必须留下痕迹");
+        assert!(gate_at < warn_at, "{body}");
     }
 
     #[test]

@@ -1055,7 +1055,9 @@ mod tests {
     #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
     async fn live_room_incremental_parity() {
         use crate::data_interface::model_update_pending::enqueue_room_recalc;
-        use crate::fast_model::room_model::{load_room_panel_map, recalc_element_membership};
+        use crate::fast_model::room_model::{
+            load_room_panel_map, recalc_element_membership, survey_panel_tree_coverage,
+        };
 
         connect_live().await;
         let db_option = fixture_baseline().await;
@@ -1103,7 +1105,14 @@ mod tests {
         let rooms = load_room_panel_map(&db_option)
             .await
             .expect("load room panel map");
-        recalc_element_membership(&db_option, &rooms, moved)
+        let coverage = survey_panel_tree_coverage(&rooms)
+            .await
+            .expect("survey panel tree coverage");
+        assert!(
+            coverage.in_tree > 0,
+            "夹具的两块面板必须在空间树上，否则元素分支根本不该相信自己的空候选集"
+        );
+        recalc_element_membership(&db_option, &rooms, coverage, moved)
             .await
             .expect("incremental recalc");
         let incremental = room_edges().await;

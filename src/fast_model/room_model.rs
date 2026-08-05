@@ -58,7 +58,8 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("7997 全量房间计算没有产生任何成员边"))?;
 
     let element = RefnoEnum::from(first.member.replace('_', "/").as_str());
-    recalc_element_membership(&option, &rooms, element).await?;
+    let coverage = survey_panel_tree_coverage(&rooms).await?;
+    recalc_element_membership(&option, &rooms, coverage, element).await?;
 
     let mut response = SUL_DB.query(sql).await?.check()?;
     let incremental: Vec<Edge> = response.take(0)?;
@@ -676,10 +677,65 @@ pub async fn recalc_panel_membership(
     Ok(members.keys().copied().collect())
 }
 
+/// 在册面板在空间树上的覆盖情况——元素分支据此区分「不在任何房间里」与「判不了」。
+///
+/// 两条重算分支对空间树的依赖方向是**相反**的：整间分支拿面板自己的包围盒去树上捞
+/// 成员，面板在不在树上都算得出来；元素分支只能反过来，在树上按 `noun == "PANE"` 找
+/// 候选（ADR-010 §6 两树合一）。于是存在一种只打中增量的坏状态——树里一块在册面板都
+/// 没有（空树、`accel_tree.bin` 来自没生成过结构库的那一次、或数量对账没触发重建）：
+/// 启动时的全量重建照样写得出 `room_relate`，而**每一个**元素任务都会捞不到候选，把
+/// 该构件的存量归属边按「不属于任何房间」清掉，且任务算成功、队列行删除、日志一行
+/// 没有。rs-core 的 `load_aabb_tree` 注释记的就是这个失效模式。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PanelTreeCoverage {
+    /// 在册面板数：属于命名合规房间、能写出 `room_relate` 边的那些。
+    pub registered: usize,
+    /// 其中在空间树上确实有条目的。
+    pub in_tree: usize,
+}
+
+impl PanelTreeCoverage {
+    /// 元素分支能不能相信「一块候选面板都没捞到」这个结果。
+    ///
+    /// 一间在册房间都没有时也算可信：那种配置下本来就写不出任何边，空集是对的。
+    pub fn can_trust_empty_candidates(&self) -> bool {
+        self.registered == 0 || self.in_tree > 0
+    }
+}
+
+/// 量一次在册面板的空间树覆盖率：一次树遍历，**按轮调用**。
+///
+/// 与 [`load_room_panel_map`] 同一个理由——放进每个元素任务里各遍历一遍整棵树，
+/// 一轮几十个任务就会被它拖垮。
+pub async fn survey_panel_tree_coverage(rooms: &RoomPanelMap) -> anyhow::Result<PanelTreeCoverage> {
+    let registered: HashSet<RefU64> = rooms
+        .rooms
+        .iter()
+        .flat_map(|room| room.panels.iter())
+        .map(|panel| panel.refno())
+        .collect();
+    if registered.is_empty() {
+        return Ok(PanelTreeCoverage::default());
+    }
+    load_aabb_tree().await?;
+    let tree = GLOBAL_AABB_TREE.read().await;
+    let in_tree: HashSet<RefU64> = tree
+        .tree
+        .iter()
+        .filter(|bbox| bbox.noun == "PANE" && registered.contains(&bbox.refno))
+        .map(|bbox| bbox.refno)
+        .collect();
+    Ok(PanelTreeCoverage {
+        registered: registered.len(),
+        in_tree: in_tree.len(),
+    })
+}
+
 /// 元素分支：一个构件动了，反向定位它落在哪些面板里（ADR-010 §2）。
 pub async fn recalc_element_membership(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
+    coverage: PanelTreeCoverage,
     element: RefnoEnum,
 ) -> anyhow::Result<()> {
     // 面板本身不参与归属。整间分支把**所有**面板排除在成员之外，反向路径必须同口径，
@@ -691,12 +747,17 @@ pub async fn recalc_element_membership(
     let insts: Vec<GeomInstQuery> = aios_core::query_insts(&[element], true)
         .await
         .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
-    // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉。
+    // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建
+    // 也捞不到它（进不了空间树就不是任何面板的候选），空集才是与全量一致的结果。
+    // 打一行日志是因为这条路本不该走到：元素任务的入队条件是「包围盒确实变了」，能变
+    // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
     let Some(element_inst) = insts.into_iter().next() else {
+        println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
         return write_element_room_relate(element, &[]).await;
     };
     let element_aabb = element_inst.world_aabb;
     if !aabb_is_usable(&element_aabb) {
+        println!("构件 {element} 的世界包围盒不可用，房间归属按空集收敛（存量入边已清）");
         return write_element_room_relate(element, &[]).await;
     }
 
@@ -715,6 +776,18 @@ pub async fn recalc_element_membership(
             .collect()
     };
     if candidates.is_empty() {
+        // 紧接着的那次写入会删掉该构件**全部**存量归属边，所以「捞不到候选」必须先
+        // 分清成因：树是健康的就是真的不在任何房间里（与全量一致，照常收敛）；树里
+        // 一块在册面板都没有，那是判不了，按判不了处理——与本函数下面对网格失败的
+        // 口径相同，保留任务重试，绝不静默清边（ADR-010 §8）。
+        if !coverage.can_trust_empty_candidates() {
+            anyhow::bail!(
+                "空间树上一块在册面板都没有（在册 {} 块），构件 {element} 的候选面板判不了：\
+                 保留任务重试，不按「不属于任何房间」清边。先确认 accel_tree.bin 与库对账\
+                 （sync_aabb_tree_with_db）以及结构库是否已生成",
+                coverage.registered
+            );
+        }
         return write_element_room_relate(element, &[]).await;
     }
 
@@ -1131,6 +1204,74 @@ mod tests {
         // 但它仍在排除集里——面板不该被别的房间收为成员。
         assert_eq!(map.room_num_of(unregistered), None);
         assert!(map.all_panels.contains(&unregistered));
+    }
+
+    /// 「捞不到候选面板」什么时候可信（纯谓词）。
+    ///
+    /// 元素分支拿这个结论去删该构件**全部**存量归属边，判错的代价是无声的数据损坏。
+    #[test]
+    fn an_empty_candidate_set_is_only_trusted_when_the_tree_holds_panels() {
+        // 树上有在册面板：捞不到就是真的不在任何房间里，照常收敛成空集。
+        assert!(
+            PanelTreeCoverage {
+                registered: 124,
+                in_tree: 124
+            }
+            .can_trust_empty_candidates()
+        );
+        // 只覆盖到一部分也算可信：树是活的，这个构件确实没命中。
+        assert!(
+            PanelTreeCoverage {
+                registered: 124,
+                in_tree: 1
+            }
+            .can_trust_empty_candidates()
+        );
+        // 一块都不在树上：判不了，不是「不在任何房间里」。
+        assert!(
+            !PanelTreeCoverage {
+                registered: 124,
+                in_tree: 0
+            }
+            .can_trust_empty_candidates()
+        );
+        // 一间在册房间都没有：那种配置下本来就写不出边，空集是对的。
+        assert!(PanelTreeCoverage::default().can_trust_empty_candidates());
+    }
+
+    /// 元素分支的空候选集必须先过覆盖率这一关，再落到写入。
+    ///
+    /// 顺序反了（先写、后判）等于没判：那条 DELETE 已经把存量归属边带走了。
+    #[test]
+    fn the_element_branch_refuses_to_clear_edges_it_could_not_decide() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("pub async fn recalc_element_membership(")
+            .expect("recalc_element_membership 必须存在")
+            .1
+            .split_once("\n/// 构件在世界坐标系下的实际几何点")
+            .expect("元素分支之后是 element_world_points")
+            .0;
+
+        let empty_at = body
+            .find("if candidates.is_empty() {")
+            .expect("空候选集分支必须存在");
+        let guard_at = body
+            .find("if !coverage.can_trust_empty_candidates() {")
+            .expect("空候选集必须先问覆盖率可不可信");
+        let bail_at = body[guard_at..]
+            .find("anyhow::bail!")
+            .map(|at| guard_at + at)
+            .expect("不可信时必须上抛，保留任务重试");
+        let write_at = body[empty_at..]
+            .find("write_element_room_relate(element, &[])")
+            .map(|at| empty_at + at)
+            .expect("可信时才落空集写入");
+
+        assert!(
+            empty_at < guard_at && guard_at < bail_at && bail_at < write_at,
+            "判不了必须在清边之前上抛: {body}"
+        );
     }
 
     /// 面板从这间房挪走之后，房间自己也要能收敛到「一块面板都没有」。
