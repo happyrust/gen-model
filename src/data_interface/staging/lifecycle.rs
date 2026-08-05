@@ -272,6 +272,24 @@ impl ActiveStagedWindow {
         ))
     }
 
+    /// Replay the journal, close the authoritative watermark transaction, then invalidate
+    /// persistent caches. Nothing after `commit_to` may make the committed data disappear.
+    pub(crate) async fn commit_registered_to(
+        &self,
+        target: &Surreal<Any>,
+    ) -> anyhow::Result<StagedFinalize> {
+        let finalize = self
+            .staged_finalize()
+            .await
+            .context("staged window has no registered finalize state")?;
+        let tail = self.render_finalize_tail().await?;
+        self.commit_to(target, Some(&tail)).await?;
+        if !finalize.cache_refnos.is_empty() {
+            aios_core::clear_all_caches_batch(&finalize.cache_refnos).await;
+        }
+        Ok(finalize)
+    }
+
     pub(crate) async fn take_deferred_spatial(&self) -> DeferredSpatialMutations {
         std::mem::take(&mut *self.spatial.lock().await)
     }
@@ -464,6 +482,58 @@ mod tests {
 
         first.drop_database().await.expect("cleanup first");
         second.drop_database().await.expect("cleanup second");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registered_finalize_commits_journal_and_watermark_together() {
+        let instance = own_instance().await;
+        let mut window = create_window_on(
+            &instance,
+            7905,
+            3,
+            7,
+            ResourceThresholds::default(),
+        )
+        .await
+        .expect("create window");
+        window
+            .execute("UPSERT pe:x SET noun = 'PIPE'", ExecMode::Both)
+            .await
+            .expect("stage data");
+        window
+            .scope(super::super::register_staged_finalize(
+                super::super::StagedFinalize {
+                    dbnum: 7905,
+                    end_sesno: 7,
+                    plan: Default::default(),
+                    window_statements: Vec::new(),
+                    cache_refnos: Vec::new(),
+                },
+            ))
+            .await
+            .expect("register finalize");
+
+        let target = own_instance().await;
+        target
+            .use_ns("test")
+            .use_db("commit_target")
+            .await
+            .expect("target db");
+        window
+            .commit_registered_to(&target)
+            .await
+            .expect("commit registered window");
+
+        let mut response = target
+            .query("RETURN pe:x.noun; RETURN dbnum_watermark:7905.applied_sesno;")
+            .await
+            .expect("query committed state");
+        assert_eq!(
+            response.take::<Option<String>>(0).expect("noun"),
+            Some("PIPE".into())
+        );
+        assert_eq!(response.take::<Option<i32>>(1).expect("watermark"), Some(7));
+        window.drop_database().await.expect("cleanup");
     }
 
     /// 吸收扩窗：改区间不改名；资源档位到「拒绝吸收」后拒绝。

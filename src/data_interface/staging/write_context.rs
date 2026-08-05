@@ -31,6 +31,7 @@ pub(crate) struct StagedFinalize {
     pub end_sesno: i32,
     pub plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
     pub window_statements: Vec<String>,
+    pub cache_refnos: Vec<aios_core::RefnoEnum>,
 }
 
 impl StagingWriteContext {
@@ -192,6 +193,7 @@ mod tests {
                 end_sesno: 9,
                 plan: Default::default(),
                 window_statements: vec!["UPSERT datacenter_version:x SET ok = true;".into()],
+                cache_refnos: Vec::new(),
             }))
             .await
             .expect("register finalize")

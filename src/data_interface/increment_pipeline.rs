@@ -618,6 +618,9 @@ impl IncrementPipeline {
         let cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
         warnings.extend(model_plan.warnings.iter().cloned());
         let staged = crate::data_interface::staging::active_staging_writes();
+        let staged_cache_refnos = staged
+            .is_some()
+            .then(|| cache_refnos.iter().copied().collect::<Vec<_>>());
 
         // 只保留最新数据：仅写入 pe 主数据（最新状态），不再写 sessions / element_changes 历史表
         //
@@ -707,6 +710,7 @@ impl IncrementPipeline {
                         end_sesno,
                         plan: model_plan.clone(),
                         window_statements: datacenter_statements,
+                        cache_refnos: staged_cache_refnos.unwrap_or_default(),
                     },
                 ),
             )
