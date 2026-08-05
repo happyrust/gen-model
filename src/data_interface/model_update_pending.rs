@@ -179,9 +179,9 @@ fn room_recalc_item(change: &AabbChange) -> ModelWorkItem {
 /// 的 id 本来就幂等，重复入队只是白跑一趟往返。
 ///
 /// `gen_spatial_tree` 关着时一条都不排。那个开关同时管着全量重建与空间树对账：关着
-/// 意味着 `build_room_relations` 从不运行、树也从不与库对账，此时跑增量不只是徒劳
-/// ——元素分支是「先删该构件的所有入边再写回」，而候选面板取自那棵没人维护的树，
-/// 捞不到候选就只剩下那条 DELETE，等于把上一次全量建出来的边悄悄抹掉。
+/// 意味着 `build_room_relations` 从不运行、树也从不与库对账，而整间分支的成员候选正
+/// 取自那棵没人维护的树。两条分支都是「先清后写」，拿一棵没人维护的树算出来的结果去
+/// 改写归属，只会把上一次算对的边换成错的。
 pub async fn enqueue_room_recalc(
     db_option: &aios_core::options::DbOption,
     changes: &[AabbChange],

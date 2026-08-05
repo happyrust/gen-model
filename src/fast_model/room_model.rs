@@ -685,6 +685,18 @@ pub async fn recalc_panel_membership(
         save_room_relate(panel, &HashMap::new(), "").await?;
         return Ok(HashSet::new());
     };
+    // 与 [`build_room_relations`] 同一道门。成员候选取自空间树，树空着时这块面板会
+    // 算出 0 个成员，而写入是先清后写——一次房间改名或一次面板移动就足以把这间房的
+    // 归属清空，任务还返回成功、队列行随即删除、日志一行没有。上面那条清边路径不受
+    // 影响：面板已不在册是与树无关的事实，它的边本来就该清掉。
+    //
+    // 判不了就不写：上抛让任务保留重试，存量边陈旧也比被清成空强。
+    if GLOBAL_AABB_TREE.read().await.is_empty() {
+        anyhow::bail!(
+            "空间树是空的，面板 {panel} 的成员判不了：不改写它的房间归属（任务保留重试）。\
+             先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）"
+        );
+    }
     let members = cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels).await?;
     save_room_relate(panel, &members, &room_num).await?;
     Ok(members.keys().copied().collect())
@@ -813,9 +825,6 @@ pub async fn recalc_element_membership(
         return write_element_room_relate(element, &[]).await;
     }
 
-    // 候选面板取自唯一那棵全局树并按 noun 过滤（ADR §6 两树合一），再与在册面板
-    // 取交集——不在册的 PANE 没有房间号，写不出边。
-    //
     // 候选面板：在册面板里包围盒与本构件相交的那些，取自本轮加载好的库内几何
     // （[`PanelIndex`]），不经过空间树。构件这一侧的包围盒同样取自库——本任务正是
     // 「这个构件的包围盒变了」才入队的，而入队点就是刷新包围盒的那一处。
@@ -1305,6 +1314,52 @@ mod tests {
             bail_at < recalc_at && bail_at < write_at,
             "空树判定必须排在任何一次重算与写入之前: {body}"
         );
+    }
+
+    /// 增量整间分支在空树上同样必须拒跑。
+    ///
+    /// 全量重建那道门只挡住了启动那一次。增量整间分支走的是同一个 `cal_room_refnos`、
+    /// 同一套先清后写，缺门时一条 `RoomRecalcPanel` 任务就能把那间房的归属清空——而
+    /// 那种任务是 D12 房间改名 / 面板搬迁与 PANE 自身移动的常规产物，不是罕见路径。
+    /// 元素分支已经把树依赖整个拆掉，这条是剩下的那一半。
+    ///
+    /// 「面板已不在册」那条清边路径**不**受这道门管：它与树无关，面板不在册就是不在
+    /// 册，边本来就该清掉。
+    #[test]
+    fn the_panel_branch_refuses_to_recalc_against_an_empty_tree() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("pub async fn recalc_panel_membership(")
+            .expect("recalc_panel_membership 必须存在")
+            .1
+            .split_once("/// 一轮 drain 复用的在册面板几何")
+            .expect("整间分支之后是 PanelIndex")
+            .0;
+
+        let unregistered_at = body
+            .find("save_room_relate(panel, &HashMap::new(), \"\")")
+            .expect("面板不在册时仍要清边");
+        let guard_at = body
+            .find("GLOBAL_AABB_TREE.read().await.is_empty()")
+            .expect("空树必须挡在重算之前");
+        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
+        let write_at = body
+            .find("save_room_relate(panel, &members")
+            .expect("整间分支必须写回成员");
+
+        assert!(
+            unregistered_at < guard_at,
+            "不在册的清边与树无关，不该被这道门挡住: {body}"
+        );
+        assert!(
+            guard_at < recalc_at && guard_at < write_at,
+            "空树判定必须排在重算与写入之前: {body}"
+        );
+        let bail_at = body[guard_at..]
+            .find("anyhow::bail!")
+            .map(|at| guard_at + at)
+            .expect("空树必须上抛，让任务保留重试而不是算成功");
+        assert!(bail_at < recalc_at, "{body}");
     }
 
     /// 元素分支不许再碰空间树。
