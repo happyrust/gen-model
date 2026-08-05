@@ -1969,6 +1969,14 @@ pub struct PendingModelUnit {
     pub attempts: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// 已达 [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS)：
+    /// 自动路径**永不再碰**它，只有 `POST /update/pending-units/retry` 能复活。
+    ///
+    /// 不是库里的列，是读的时候按 `attempts` 算出来的——上限是服务端常量，客户端
+    /// 拿着 `attempts` 也判不出死没死，于是界面只能对每一行一律说「后台自动重试」，
+    /// 而那句话对死信是**字面错误**：模型会一直停在旧几何，没人知道。
+    #[serde(default)]
+    pub dead: bool,
     /// Revision-safe settlement token. Loaded for execution but intentionally
     /// omitted from the inspection/API JSON contract.
     #[serde(default, skip_serializing)]
@@ -2006,9 +2014,19 @@ async fn load_pending_units_where(
         .await?
         .check()
         .map_err(|error| anyhow::anyhow!("读取模型待重试语句失败: {error}"))?;
-    response
+    let mut units: Vec<PendingModelUnit> = response
         .take(0)
-        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))
+        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))?;
+    for unit in &mut units {
+        unit.dead = is_dead_letter(unit.attempts);
+    }
+    Ok(units)
+}
+
+/// 一行到没到自动路径的重试上限。**读的时候算，不存库**——上限是服务端常量，
+/// 存一份下来就多一个会与常量错开的真值。
+pub fn is_dead_letter(attempts: u32) -> bool {
+    attempts >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
 }
 
 /// Every pending model-retry task, dead letters included (read-only).
@@ -3824,6 +3842,29 @@ mod tests {
         assert!(retry.contains(&format!("(attempts?:0) < {cap}")), "{retry}");
     }
 
+    /// 检查视图捞回来的死信必须自己带着「我已经死了」，边界与执行侧的上限**同一个常量**。
+    ///
+    /// 客户端拿到的只有 `attempts`，上限是服务端常量、不在契约里——两边各写一个 5
+    /// 就是两个会错开的真值。所以判定放在服务端、随行带出：少了它，界面对一个
+    /// `attempts = 5` 的行只能继续说「后台自动重试」，而自动路径永不再碰它。
+    #[test]
+    fn the_inspection_view_marks_rows_the_automatic_path_will_never_touch_again() {
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        assert!(!is_dead_letter(cap - 1), "还能自动重试的行不许标成死信");
+        assert!(is_dead_letter(cap), "到顶那一行就是死信，边界是 >=");
+        assert!(is_dead_letter(cap + 1));
+
+        // 序列化必须真把它带出去：`dead` 是界面区分两种文案的唯一依据，
+        // 漏在 JSON 之外的话客户端 `serde(default)` 会静默收成 false。
+        let dead = PendingModelUnit {
+            attempts: cap,
+            dead: is_dead_letter(cap),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&dead).expect("契约要能序列化");
+        assert!(json.contains("\"dead\":true"), "{json}");
+    }
+
     /// 批次工作单只捞本库的积压。全库口径下 dbnum=A 的批次会去跑 B/C/D 的根，结果
     /// 还记在 A 那条任务名下；而检查视图必须保持全库，否则界面看不到别的库的死信。
     #[test]
@@ -5448,6 +5489,7 @@ mod tests {
             source_end_sesno: end_sesno,
             attempts,
             last_error: Some("boom".into()),
+            dead: is_dead_letter(attempts),
             revision: 7,
         }
     }

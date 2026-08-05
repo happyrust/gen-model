@@ -247,7 +247,11 @@ pub async fn pending_units(
     let units = load_pending_model_units()
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "units": units })))
+    // 死信单独数一个出来。逐行的 `dead` 已经够界面区分文案，但「这个项目现在欠着
+    // 几个永远不会自愈的根」是状态栏那一格要的整数，而房间轮早就有同名的
+    // `dead_letters`（ADR-011 §10）——regen_root 这一侧一直没有对应的出口。
+    let dead_letters = units.iter().filter(|unit| unit.dead).count();
+    Ok(Json(json!({ "units": units, "dead_letters": dead_letters })))
 }
 
 #[derive(Debug, Deserialize)]
