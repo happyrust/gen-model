@@ -166,8 +166,13 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
         let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         let insert_task = tokio::task::spawn(async move {
+            // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
+            // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
+            // 写入只覆盖得到这次也生成了的那些。
+            let mut produced: HashSet<RefnoEnum> = HashSet::new();
             while let Ok(shape_insts) = receiver.recv_async().await {
                 let inst_cnt = shape_insts.inst_cnt();
+                produced.extend(shape_insts.get_show_refnos());
                 // 不再 unwrap：写入失败必须向上传播，让 ModelRefreshPolicy::generate_roots
                 // 返回 Err；model_update_pending 会把根任务标记为 failed 并在后续 drain
                 // 时重试（增量删旧/加新的错误传播链关键一环）。
@@ -176,12 +181,27 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
                 save_instance_data(&shape_insts, true).await?;
                 println!("Insert manual shape insts: {}", inst_cnt);
             }
-            anyhow::Ok(())
+            anyhow::Ok(produced)
         });
         let generation_result =
             capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
-        let target_root_refnos =
+        let (target_root_refnos, produced) =
             finish_shape_writer(generation_result, sender, insert_task).await?;
+
+        // 收尾清理只在生成与写入都成功之后跑：这个差集分不清「真的不画了」与「本轮
+        // 生成没做出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策，
+        // ADR-014 的保留旧显示因此收窄为「生成失败时」）。失败降级为告警——少清一轮
+        // 只是旧行多留一会儿，误清是模型凭空消失。
+        if let Err(error) = crate::data_interface::helper::prune_roots_stale_model_rows(
+            &target_root_refnos,
+            &produced,
+            300,
+        )
+        .await
+        {
+            println!("清理本轮未产出几何的旧模型行失败（旧行保留，下次重生成再试）: {error:#}");
+        }
+
         if db_option.gen_mesh {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
             // ModelRefreshPolicy::generate_roots 返回 Err，从而保留 model_update_pending
@@ -229,7 +249,8 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
                 sender.clone(),
             ))
             .await;
-            let db_refnos = finish_shape_writer(generation_result, sender, insert_task).await?;
+            let (db_refnos, ()) =
+                finish_shape_writer(generation_result, sender, insert_task).await?;
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
             if db_option_arc.gen_mesh {
                 let time = Instant::now();
@@ -269,19 +290,23 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-async fn finish_shape_writer<T>(
+/// 等生成与写入两侧都收尾，两边都成功才把结果交出去。
+///
+/// 写入侧的产物类型是泛型：定向重生成要把「本轮产出过几何的元素」带出来做收尾清理，
+/// 整库全量生成不需要，交 `()`。
+async fn finish_shape_writer<T, W>(
     generation_result: anyhow::Result<T>,
     sender: flume::Sender<ShapeInstancesData>,
-    insert_task: tokio::task::JoinHandle<anyhow::Result<()>>,
-) -> anyhow::Result<T> {
+    insert_task: tokio::task::JoinHandle<anyhow::Result<W>>,
+) -> anyhow::Result<(T, W)> {
     drop(sender);
     let writer_result = match insert_task.await {
         Ok(result) => result,
         Err(error) => Err(anyhow::anyhow!("shape writer task failed: {error}")),
     };
     match (generation_result, writer_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
+        (Ok(value), Ok(written)) => Ok((value, written)),
+        (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(writer_error)) => {
             Err(error.context(format!("shape writer also failed: {writer_error:#}")))
@@ -915,6 +940,40 @@ mod tests {
             .find("persist_aabb_tree()")
             .expect("全量生成仍要写回 accel_tree.bin");
         assert!(gate_at < persist_at, "落盘必须待在 !targeted 分支里");
+    }
+
+    /// 陈旧行清理必须排在「生成与写入都成功」之后，且它自己失败时只降级为告警。
+    ///
+    /// 排到前面、或者不看成败，就会在一次半途失败的生成之后把「本轮没做出来」的行当成
+    /// 「不再画了」删掉——正是 ADR-014 要挡的方向。反过来给它一个 `?`，则会让一次
+    /// **已经成功**的生成因为清理查询抖动而整根判失败、重来一遍。
+    #[test]
+    fn stale_row_pruning_waits_for_success_and_never_fails_a_finished_run() {
+        let source = include_str!("gen_model.rs");
+        let body = source
+            .split_once(concat!("pub async fn ", "gen_all_geos_data("))
+            .expect("gen_all_geos_data must exist")
+            .1
+            .split_once(concat!("async fn ", "finish_shape_writer"))
+            .expect("finish_shape_writer must follow it")
+            .0;
+
+        let settle_at = body
+            .find("finish_shape_writer(generation_result, sender, insert_task).await?")
+            .expect("生成与写入必须先一起收尾");
+        let prune_at = body
+            .find("prune_roots_stale_model_rows(")
+            .expect("收尾之后才清理陈旧行");
+        assert!(settle_at < prune_at, "清理必须排在收尾之后: {body}");
+
+        let warn_at = body
+            .find("清理本轮未产出几何的旧模型行失败")
+            .expect("清理失败必须降级为告警");
+        assert!(prune_at < warn_at, "{body}");
+        assert!(
+            !body[prune_at..warn_at].contains("await?"),
+            "清理失败不得上抛，否则一次已经成功的生成会因为它整根重来: {body}"
+        );
     }
 
     #[tokio::test]

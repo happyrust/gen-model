@@ -166,6 +166,100 @@ pub async fn delete_inst_relate_subtree(
     delete_room_membership(&all_vec, chunk_size).await
 }
 
+/// 这些 refno 里，当前**确实还有** `inst_relate` 行的那些。
+///
+/// 只是为了让清理的数量与日志说的是同一件事：候选集来自 pe 子树，其中绝大多数元素
+/// 本来就没有几何，对它们调级联删除是空操作，但会把「清理了 N 行」虚报成子树大小。
+async fn existing_inst_relate_refnos(
+    refnos: &[RefnoEnum],
+    chunk_size: usize,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut existing = Vec::new();
+    for chunk in refnos.chunks(chunk_size) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_inst_relate_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE in FROM [{keys}] WHERE record::exists(id);"
+            ))
+            .await
+            .map_err(|error| anyhow!("查询现存模型关系失败: {error}"))?
+            .check()
+            .map_err(|error| anyhow!("查询现存模型关系语句失败: {error}"))?;
+        for thing in response
+            .take::<Vec<Thing>>(0)
+            .map_err(|error| anyhow!("解析现存模型关系失败: {error}"))?
+        {
+            existing.push(pe_thing_to_refno(thing)?);
+        }
+    }
+    Ok(existing)
+}
+
+/// 重生成收尾：清掉这些生成根名下**本轮没有产出任何几何**的旧模型行。
+///
+/// `save_instance_data(replace)` 的删除集是从本次产物推出来的，所以它只替换得掉「这次
+/// 也生成了」的那些行。上一版画得出、这一版画不出的元素——参数改到不再产生几何、分支
+/// 尾部不再有隐含直管段——旧行会一直留着，而模型里已经没有它了。
+///
+/// 判据是「仍挂在这个根下、却不在本轮产物里」。搬走或被删的元素**不**在这个集合里：
+/// `query_deep_visible_inst_refnos` 是对 `pe` 的活子树查询，它们早已不在根下，那条路
+/// 归 [`delete_inst_relate_subtree`]。
+///
+/// **只在生成与写入都成功之后调用。** 这个集合分不清「真的不画了」与「本轮生成没做
+/// 出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策；ADR-014 的
+/// 「保留旧显示」因此收窄为「生成失败时保留」，生成成功时以产物为准）。
+///
+/// 任何一步查询失败都**不删**并上抛：漏查一部分子树，就会把还在用的行当成陈旧行。
+/// 调用方把它降级为告警即可——少清一轮只是旧行多留一会儿，误清是模型凭空消失。
+pub async fn prune_roots_stale_model_rows(
+    roots: &[RefnoEnum],
+    produced: &HashSet<RefnoEnum>,
+    chunk_size: usize,
+) -> anyhow::Result<usize> {
+    let mut candidates: HashSet<RefnoEnum> = HashSet::new();
+    for &root in roots {
+        let subtree = aios_core::query_deep_visible_inst_refnos(root)
+            .await
+            .map_err(|error| anyhow!("生成根 {root} 的子树查询失败: {error}"))?;
+        candidates.extend(
+            subtree
+                .into_iter()
+                .filter(|refno| !produced.contains(refno)),
+        );
+    }
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let candidates: Vec<RefnoEnum> = candidates.into_iter().collect();
+    let mut stale = existing_inst_relate_refnos(&candidates, chunk_size).await?;
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    // 顺序固定，日志与重放才对得上。
+    stale.sort_by_key(RefnoEnum::to_string);
+
+    println!(
+        "重生成收尾：清理 {} 行本轮未产出几何的旧模型关系（例如 {}）",
+        stale.len(),
+        stale
+            .iter()
+            .take(5)
+            .map(RefnoEnum::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    delete_inst_relate_cascade(&stale, chunk_size).await?;
+    // 元素还在，只是不再有几何——那它也不再属于任何房间，空间树上同样不该留着它。
+    // 与删除路径同一套收尾（[`delete_room_membership`]）。
+    delete_room_membership(&stale, chunk_size).await?;
+    Ok(stale.len())
+}
+
 /// 渲染一批被删元素的房间归属清理。
 ///
 /// **两个方向都要删。** 作为成员，元素有 `room_relate` 入边；如果它本身是一块 PANE，
