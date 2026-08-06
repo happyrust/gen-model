@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::dbnum_state::WATERMARK_TABLE;
+use crate::data_interface::increment_pipeline::wrap_in_transaction;
 
 /// B+树索引起始标记 / 无效 ref0（需跳过）。
 const INVALID_REF0_SENTINEL: u32 = 0x8000_0001;
@@ -510,6 +511,33 @@ fn open_db_session(project: &str, path: &Path) -> anyhow::Result<DbBasicData> {
     parse_pdms_db::parse::parse_file_db_basic_data(&path.to_path_buf(), file_name, project)
 }
 
+/// 成员表收敛成可落库的形态：滤掉无效 ref0，同一 child 只保留首个槽位。
+///
+/// `unique_pe_owner` 建在 `(in, out)` 上，同一 owner 下同一个 child 占两个槽位在库里
+/// 根本无法表示，整块重插必撞唯一索引。这里就地收敛到唯一可表示的终态并告警定位到
+/// 元素，而不是中断整批解析：本函数同时服务 CATA 闭包与 DESI 设计子树遍历，且几行
+/// 之下的**解析失败**也只是跳过按 cache-miss 处理——一条成员表毛刺没有理由把整个
+/// 生成单元推进死信。
+fn dedupe_members(refno: RefU64, raw: &[RefU64]) -> Vec<RefU64> {
+    let mut seen = HashSet::with_capacity(raw.len());
+    let mut children = Vec::with_capacity(raw.len());
+    for &child in raw {
+        if !is_valid_ref0(child.get_0()) {
+            continue;
+        }
+        if seen.insert(child) {
+            children.push(child);
+        } else {
+            log::warn!(
+                "[cata_closure] 元素 {} 的成员表重复列出 {}，只保留首个槽位",
+                refno.to_pe_key(),
+                child.to_pe_key()
+            );
+        }
+    }
+    children
+}
+
 /// 用已打开会话解析一批 refno（不重读文件 / 不重建索引）。
 ///
 /// `attmap_sink`：可选保留完整属性表（Phase 3 惰性兜底落库需要；闭包发现 pass 传 `None` 省内存）。
@@ -536,12 +564,7 @@ async fn parse_refnos_with_session(
             Ok(ele) => {
                 let merged = ele.whole_attmap.merge();
                 let outbound = outbound_refs_of(&merged);
-                let children: Vec<RefU64> = ele
-                    .children
-                    .iter()
-                    .copied()
-                    .filter(|r| is_valid_ref0(r.get_0()))
-                    .collect();
+                let children = dedupe_members(refno, &ele.children);
                 if let Some(sink) = attmap_sink.as_deref_mut() {
                     sink.insert(refno, (merged.clone(), children.clone()));
                 }
@@ -994,6 +1017,97 @@ pub async fn run_cata_closure_pass_for_refnos<L: CataDbLocator>(
 /// 落库分批大小。
 const INSERT_CHUNK: usize = 500;
 
+/// 替换一个 owner 完整成员块的两条语句：先按复合 id 的 owner 前缀范围删掉旧块，
+/// 再整块重插。
+///
+/// 前缀范围直走 record range，不经过 `WHERE out = owner` 的全表扫。两条语句必须落在
+/// 同一个事务里才收敛（换槽、缩短、失败重放都靠这一点），但**哪个事务**由调用方定：
+/// 单个 owner 走 [`render_pe_owner_replace`]，成批走 [`OwnerReplaceBatches`]。
+/// 空 children 也必须发删除，才能清掉成员表缩短到 0 后留下的幽灵边。
+///
+/// 重复 child 在这里是硬错：解析路径已由 [`dedupe_members`] 收敛过，能走到这里说明
+/// 调用方绕开了那道收敛，宁可这一个 owner 带着 owner/child 报错，也不要放一段必然
+/// 撞 `unique_pe_owner` 的 SQL 进 journal。
+fn render_pe_owner_statements(op: &str, children: &[RefU64]) -> anyhow::Result<Vec<String>> {
+    let mut seen = HashSet::with_capacity(children.len());
+    let mut inserts = Vec::with_capacity(children.len());
+    for (slot, child) in children.iter().enumerate() {
+        if !seen.insert(child) {
+            anyhow::bail!(
+                "owner {} 的成员块重复列出 child {}，与 unique_pe_owner 冲突",
+                op,
+                child.to_pe_key()
+            );
+        }
+        let cp = child.to_pe_key();
+        inserts.push(format!(
+            "{{ id: pe_owner:[{op}, {slot}], in: {cp}, out: {op} }}"
+        ));
+    }
+
+    let mut statements = vec![format!("DELETE pe_owner:[{op}, NONE]..=[{op}, ..]")];
+    if !inserts.is_empty() {
+        statements.push(format!(
+            "INSERT RELATION INTO pe_owner [{}]",
+            inserts.join(",")
+        ));
+    }
+    Ok(statements)
+}
+
+/// 单个 owner 自成一个事务。原子替换的最小单元，也是 ReplaySafe 断言与 fork 对拍
+/// 用的标准形态。
+pub(crate) fn render_pe_owner_replace(op: &str, children: &[RefU64]) -> anyhow::Result<String> {
+    let statements = render_pe_owner_statements(op, children)?;
+    Ok(wrap_in_transaction(&statements).expect("owner 替换至少有一条删除语句"))
+}
+
+/// 把连续若干个 owner 的替换攒进同一个事务再发。
+///
+/// 一个 owner 一次 `execute_model_write` 是错的量级：CATA 闭包解析出来的绝大多数元素
+/// 是**叶子**，它们的替换只有一条删空范围的语句，却各自占一次往返。在暂存窗口里代价
+/// 还要翻倍——[`StagedExecutor::replay_journal_to`] 对每条显式事务单独成批，**并且会
+/// 先把攒着的普通语句批 flush 掉**，于是 N 个 owner 既是 N 条 journal、N 次写回事务，
+/// 又把周围本该按 `TX_CHUNK` 攒够 500 条的批量切成 N 段。
+///
+/// 合并只让提交粒度变粗，不削弱原子性：每个 owner 的删与插仍在同一事务内相邻，整批
+/// 要么全落要么全不落，重放照旧收敛。两个阈值都取 [`INSERT_CHUNK`]——按 child 行数封
+/// 顶事务载荷，按 owner 个数封顶叶子扎堆时的语句条数。
+#[derive(Default)]
+struct OwnerReplaceBatches {
+    batches: Vec<String>,
+    pending: Vec<String>,
+    pending_owners: usize,
+    pending_rows: usize,
+}
+
+impl OwnerReplaceBatches {
+    fn push(&mut self, op: &str, children: &[RefU64]) -> anyhow::Result<()> {
+        self.pending
+            .extend(render_pe_owner_statements(op, children)?);
+        self.pending_owners += 1;
+        self.pending_rows += children.len();
+        if self.pending_owners >= INSERT_CHUNK || self.pending_rows >= INSERT_CHUNK {
+            self.flush();
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) {
+        if let Some(sql) = wrap_in_transaction(&self.pending) {
+            self.batches.push(sql);
+        }
+        self.pending.clear();
+        self.pending_owners = 0;
+        self.pending_rows = 0;
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.flush();
+        self.batches
+    }
+}
+
 /// 惰性兜底全局互斥：并发 miss 串行化，避免重复解析同一批元素（落库 INSERT IGNORE 幂等）。
 static LAZY_CATA_FALLBACK_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
 
@@ -1051,13 +1165,14 @@ pub async fn ensure_cata_refnos_parsed(
     let delta = resolver.resolve().await?;
     let retained = resolver.take_attmaps();
 
-    // 3. 落库：pe + ATT_{noun} + ATT_UDA + pe_owner，全部幂等。
+    // 3. 落库：pe + ATT_{noun} + ATT_UDA + pe_owner，全部幂等。这里只保证每个
+    // owner 的边替换原子；其它表沿用独立幂等写，失败后由同一闭包重跑补齐。
     let mut parsed = 0usize;
     for (dbnum, refs) in &delta.by_dbnum {
         let mut pe_jsons: Vec<String> = Vec::new();
         let mut att_by_table: HashMap<String, Vec<String>> = HashMap::new();
         let mut uda_jsons: Vec<String> = Vec::new();
-        let mut relate_jsons: Vec<String> = Vec::new();
+        let mut owner_replaces = OwnerReplaceBatches::default();
 
         for refno in refs {
             let Some((att, children)) = retained.get(refno) else {
@@ -1078,22 +1193,16 @@ pub async fn ensure_cata_refnos_parsed(
                 }
             }
 
-            // pe_owner 关系（与 versioned_db::pe::save_pe_relates 同构）。
-            let op = refno.to_pe_key();
-            for (i, child) in children.iter().enumerate() {
-                let cp = child.to_pe_key();
-                relate_jsons.push(format!(
-                    "{{ id: pe_owner:[{op}, {i}], in: {cp}, out: {op} }}"
-                ));
-            }
+            // pe_owner 关系：一个 owner 是不可拆分的一致性单元，删与插必须相邻同事务。
+            owner_replaces.push(&refno.to_pe_key(), children)?;
             parsed += 1;
         }
 
         // ADR-017 §7：CATA 按需解析产物**随窗口提交**，不再直写持久层——窗口内走
         // `execute_model_write`（暂存生效 + 进 journal），写回时 INSERT IGNORE 对
         // 持久层已有行是空操作、新元素落地；窗口外回落历史持久层直写。载荷全部
-        // 带显式 id（pe 显式传入，ATT_*/ATT_UDA/pe_owner 由 rs-core 渲染函数插入），
-        // 满足 ReplaySafe，重放幂等。
+        // 带显式 id（pe 显式传入，ATT_*/ATT_UDA 由 rs-core 渲染函数插入），满足
+        // ReplaySafe；pe_owner 的幂等由「owner 前缀范围删 + 同事务整块重插」保证（见上）。
         for chunk in pe_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO pe [{}]", chunk.join(","));
             crate::surreal_retry::execute_model_write(&sql, "persist CATA pe").await?;
@@ -1101,18 +1210,15 @@ pub async fn ensure_cata_refnos_parsed(
         for (table, jsons) in att_by_table {
             for chunk in jsons.chunks(INSERT_CHUNK) {
                 let sql = format!("INSERT IGNORE INTO {} [{}]", table, chunk.join(","));
-                crate::surreal_retry::execute_model_write(&sql, "persist CATA attributes")
-                    .await?;
+                crate::surreal_retry::execute_model_write(&sql, "persist CATA attributes").await?;
             }
         }
         for chunk in uda_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO ATT_UDA [{}]", chunk.join(","));
             crate::surreal_retry::execute_model_write(&sql, "persist CATA UDA").await?;
         }
-        for chunk in relate_jsons.chunks(INSERT_CHUNK) {
-            let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-            crate::surreal_retry::execute_model_write(&sql, "persist CATA ownership")
-                .await?;
+        for sql in owner_replaces.finish() {
+            crate::surreal_retry::execute_model_write(&sql, "replace CATA ownership").await?;
         }
     }
 
@@ -1439,6 +1545,203 @@ pub async fn preload_cata_for_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pe_owner owner 块替换契约：范围删除 + 完整重插必须是一个 ReplaySafe 事务。
+    #[test]
+    fn pe_owner_replace_is_atomic_and_owner_scoped() {
+        let child_a = RefU64((24381u64 << 32) | 34109);
+        let child_b = RefU64((24381u64 << 32) | 34110);
+        let sql = render_pe_owner_replace("pe:16189_0", &[child_a, child_b])
+            .expect("无重复的成员块必须能渲染");
+        assert!(
+            sql.contains("DELETE pe_owner:[pe:16189_0, NONE]..=[pe:16189_0, ..]"),
+            "必须按 owner 的复合 id 前缀清掉完整旧块: {sql}"
+        );
+        assert!(
+            sql.starts_with("BEGIN TRANSACTION;") && sql.ends_with("COMMIT TRANSACTION;"),
+            "删除与重插必须共用一个显式事务: {sql}"
+        );
+        crate::data_interface::staging::replay_safe::validate_statement(&sql)
+            .expect("owner 替换事务必须满足 ReplaySafe");
+    }
+
+    /// owner 替换的成批提交：合并只改提交粒度，不许改语义。
+    ///
+    /// 三条主张——每批仍是一个完整的 ReplaySafe 事务；一个 owner 的删与插绝不被批
+    /// 边界切开（切开就等于把该 owner 的成员块清空后不再重插）；叶子扎堆时也不会攒
+    /// 出一个无上限的巨型事务。
+    #[test]
+    fn owner_replacements_batch_without_splitting_any_owner() {
+        let child = |n: u64| RefU64((24381u64 << 32) | n);
+
+        let mut batches = OwnerReplaceBatches::default();
+        for owner in 0..3u64 {
+            batches
+                .push(&format!("pe:16189_{owner}"), &[child(owner), child(owner + 100)])
+                .expect("成员块无重复");
+        }
+        let merged = batches.finish();
+        // 先钉最要命的那条：批边界切开一个 owner，等于把它的成员块清空后不再重插。
+        for owner in 0..3u64 {
+            let delete =
+                format!("DELETE pe_owner:[pe:16189_{owner}, NONE]..=[pe:16189_{owner}, ..]");
+            let insert = format!("in: {}, out: pe:16189_{owner}", child(owner).to_pe_key());
+            let batch = merged
+                .iter()
+                .find(|sql| sql.contains(&delete))
+                .expect("每个 owner 的删除都在某一批里");
+            let insert_at = batch
+                .find(&insert)
+                .expect("同一 owner 的重插必须与它的删除同批");
+            assert!(
+                batch.find(&delete).expect("删除已在本批") < insert_at,
+                "删必须排在同一 owner 的插之前:\n{batch}"
+            );
+        }
+        assert_eq!(merged.len(), 1, "远未到阈值的几个 owner 应攒成一个事务");
+        crate::data_interface::staging::replay_safe::validate_statement(&merged[0])
+            .expect("合并后的事务必须仍满足 ReplaySafe");
+
+        // 叶子（空成员表）只出一条删除语句，靠 owner 计数封顶，不靠 child 行数。
+        let mut leaves = OwnerReplaceBatches::default();
+        for owner in 0..(INSERT_CHUNK * 2) {
+            leaves.push(&format!("pe:70000_{owner}"), &[]).expect("空成员块");
+        }
+        let leaf_batches = leaves.finish();
+        assert_eq!(leaf_batches.len(), 2, "{} 个叶子应封顶成两批", INSERT_CHUNK * 2);
+        for sql in &leaf_batches {
+            crate::data_interface::staging::replay_safe::validate_statement(sql)
+                .expect("纯删除批同样要过 ReplaySafe");
+            assert!(!sql.contains("INSERT RELATION"), "空成员表不该写任何边:\n{sql}");
+        }
+
+        assert!(
+            OwnerReplaceBatches::default().finish().is_empty(),
+            "没有 owner 时不该发空事务"
+        );
+    }
+
+    /// 成员表毛刺的处置分工：解析边界就地收敛（不中断整批），渲染边界兜底硬拒
+    /// （挡住绕开收敛的调用方，且错误要能定位到 owner 与 child）。
+    #[test]
+    fn duplicate_members_converge_at_parse_and_are_refused_at_render() {
+        let owner = RefU64((16189u64 << 32) | 0);
+        let child_a = RefU64((24381u64 << 32) | 34109);
+        let child_b = RefU64((24381u64 << 32) | 34110);
+
+        assert_eq!(
+            dedupe_members(owner, &[child_a, child_b, child_a]),
+            vec![child_a, child_b],
+            "重复成员只保留首个槽位，其余照旧解析下去"
+        );
+        let sentinel = RefU64((INVALID_REF0_SENTINEL as u64) << 32);
+        assert_eq!(
+            dedupe_members(owner, &[RefU64(0), child_a, sentinel]),
+            vec![child_a],
+            "无效 ref0 仍在同一处滤掉"
+        );
+
+        let message = render_pe_owner_replace("pe:16189_0", &[child_a, child_a])
+            .expect_err("渲染边界不放行必然撞唯一索引的成员块")
+            .to_string();
+        assert!(
+            message.contains("pe:16189_0"),
+            "错误必须带 owner: {message}"
+        );
+        assert!(
+            message.contains("pe:24381_34109"),
+            "错误必须带重复 child: {message}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pe_owner_replace_isolates_owner_removes_tail_and_handles_large_blocks() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("issue14")
+            .use_db("issue14")
+            .await
+            .expect("select db");
+        db.query(
+            "DEFINE TABLE pe_owner TYPE RELATION IN pe OUT pe SCHEMALESS; \
+             DEFINE INDEX unique_pe_owner ON pe_owner FIELDS in, out UNIQUE;",
+        )
+        .await
+        .expect("define schema")
+        .check()
+        .expect("valid schema");
+
+        let child_a = RefU64((24381u64 << 32) | 34109);
+        let child_b = RefU64((24381u64 << 32) | 34110);
+        let child_c = RefU64((24381u64 << 32) | 34111);
+        let initial = render_pe_owner_replace("pe:16189_0", &[child_a, child_b, child_c])
+            .expect("render initial block");
+        db.query(initial)
+            .await
+            .expect("write initial block")
+            .check()
+            .expect("valid initial block");
+        db.query(render_pe_owner_replace("pe:16189_1", &[child_c]).expect("render adjacent owner"))
+            .await
+            .expect("write adjacent owner")
+            .check()
+            .expect("valid adjacent owner");
+
+        let shrunk = render_pe_owner_replace("pe:16189_0", &[child_b]).expect("render shrunk block");
+        for _ in 0..2 {
+            db.query(&shrunk)
+                .await
+                .expect("replace owner block")
+                .check()
+                .expect("replacement must be replay-safe");
+        }
+
+        let mut response = db
+            .query("SELECT VALUE in FROM pe_owner WHERE out = pe:16189_0")
+            .await
+            .expect("read owner block")
+            .check()
+            .expect("valid owner query");
+        let children = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
+            .expect("decode children");
+        assert_eq!(children.len(), 1, "缩短后的尾槽必须全部删除");
+        assert_eq!(children[0].to_string(), child_b.to_pe_key());
+
+        let mut response = db
+            .query("SELECT VALUE in FROM pe_owner WHERE out = pe:16189_1")
+            .await
+            .expect("read adjacent owner")
+            .check()
+            .expect("valid adjacent owner query");
+        let adjacent = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
+            .expect("decode adjacent owner");
+        assert_eq!(adjacent.len(), 1, "owner 范围删除不能越界到相邻 owner");
+        assert_eq!(adjacent[0].to_string(), child_c.to_pe_key());
+
+        let large = (1..=1000)
+            .map(|slot| RefU64((50000u64 << 32) | slot))
+            .collect::<Vec<_>>();
+        for children in [&large[..], &large[..10], &large[..]] {
+            db.query(render_pe_owner_replace("pe:50000_0", children).expect("render large block"))
+                .await
+                .expect("replace large owner")
+                .check()
+                .expect("large owner transaction must succeed");
+        }
+        let mut response = db
+            .query("SELECT VALUE in FROM pe_owner WHERE out = pe:50000_0")
+            .await
+            .expect("read large owner")
+            .check()
+            .expect("valid large owner query");
+        let large_children = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
+            .expect("decode large owner");
+        assert_eq!(large_children.len(), 1000);
+    }
 
     #[test]
     fn dependency_cache_is_scoped_to_each_generation_root() {

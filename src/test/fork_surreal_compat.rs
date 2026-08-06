@@ -27,10 +27,11 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use surrealdb::engine::any::{connect, Any};
-use surrealdb::opt::auth::Root;
-use surrealdb::opt::Config;
+use aios_core::RefU64;
 use surrealdb::Surreal;
+use surrealdb::engine::any::{Any, connect};
+use surrealdb::opt::Config;
+use surrealdb::opt::auth::Root;
 
 /// 嵌入式 mem 引擎上开一个独立 database（ns 固定 `compat`，db 按用例隔离）。
 async fn mem_db(db: &str) -> Surreal<Any> {
@@ -218,12 +219,7 @@ async fn exec_capture(db: &Surreal<Any>, sql: &str) -> Vec<Result<String, String
 
 /// 双跑一段脚本并逐步对拍。`scripts` 的每个元素 = 一次 `query()` 调用
 /// （事务块必须整块作为一个元素提交）。
-async fn assert_dual_same(
-    case: &str,
-    mem: &Surreal<Any>,
-    fork: &Surreal<Any>,
-    scripts: &[&str],
-) {
+async fn assert_dual_same(case: &str, mem: &Surreal<Any>, fork: &Surreal<Any>, scripts: &[&str]) {
     for (step, sql) in scripts.iter().enumerate() {
         let mem_out = exec_capture(mem, sql).await;
         let fork_out = exec_capture(fork, sql).await;
@@ -364,7 +360,10 @@ async fn mem_startup_define_replay_applies_and_hd_room_code_wins() {
     }
 
     let table_info = {
-        let mut response = mem.query("INFO FOR TABLE pe").await.expect("INFO FOR TABLE");
+        let mut response = mem
+            .query("INFO FOR TABLE pe")
+            .await
+            .expect("INFO FOR TABLE");
         let value: surrealdb::Value = response.take(0).expect("take table info");
         value.to_string()
     };
@@ -429,6 +428,104 @@ async fn dual_insert_id_collision_behavior_agrees() {
         ],
     )
     .await;
+}
+
+/// 一个 owner 现存的成员边（`[owner, 槽位]` 升序）。
+async fn owner_block(db: &Surreal<Any>, owner: &str) -> Vec<String> {
+    let mut response = db
+        .query(format!(
+            "SELECT VALUE id FROM pe_owner WHERE out = {owner} ORDER BY id"
+        ))
+        .await
+        .expect("读 owner 块传输")
+        .check()
+        .expect("读 owner 块");
+    let mut ids = response
+        .take::<Vec<surrealdb::sql::Thing>>(0)
+        .expect("解码边 id")
+        .into_iter()
+        .map(|thing| thing.to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+/// issue #14 的落库形态押在「owner 复合 id 前缀范围」上：
+/// `DELETE pe_owner:[owner, NONE]..=[owner, ..]` 要正好圈住这一个 owner 的全部槽位。
+///
+/// 这一条只有跨引擎对拍才算数。范围的边界依赖 SurrealDB 的**值序**（`NONE` 作下界、
+/// `..` 排在所有槽位号之上），而生产写回落在 rocksdb 后端的 fork 服务器上、
+/// 暂存与本仓全部回归跑在 mem 引擎上——两边值序但凡有出入，失败形态是静默把
+/// 相邻 owner 的边一起删掉，没有任何报错。
+///
+/// 语句一律由生产渲染函数 [`render_pe_owner_replace`] 现渲染，不在这里抄一份字面量：
+/// 抄下来的 SQL 只能证明「这个形状在两个引擎上一致」，证明不了生产还在发这个形状。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_pe_owner_owner_range_delete_agrees() {
+    use crate::data_interface::cata_closure::render_pe_owner_replace;
+
+    let Some((mem, fork, _guard)) = dual_dbs("pe_owner_range").await else {
+        return;
+    };
+    // 相邻 owner 取同一个 ref0 的相邻序号，是前缀范围最容易串味的排布。
+    let owner_a = RefU64((16189u64 << 32) | 0);
+    let owner_b = RefU64((16189u64 << 32) | 1);
+    let key_a = owner_a.to_pe_key();
+    let key_b = owner_b.to_pe_key();
+    let children = (0..4)
+        .map(|i| RefU64((24381u64 << 32) | (34109 + i)))
+        .collect::<Vec<_>>();
+
+    let seed_a = render_pe_owner_replace(&key_a, &children[..3]).expect("render owner A");
+    // B 的槽位号与 A 完全重叠，且首个成员与 A 共用——A 的范围删除不许碰它。
+    let seed_b = render_pe_owner_replace(&key_b, &[children[0], children[3]]).expect("render B");
+    let shrink_a = render_pe_owner_replace(&key_a, &children[1..2]).expect("render shrunk A");
+    let bare_range_delete = format!("DELETE pe_owner:[{key_a}, NONE]..=[{key_a}, ..];");
+
+    // 唯一索引在场是前提：issue #14 的原始故障就是换槽重插撞 `unique_pe_owner`。
+    let schema = "DEFINE TABLE pe_owner TYPE RELATION IN pe OUT pe SCHEMALESS; \
+                  DEFINE INDEX unique_pe_owner ON pe_owner FIELDS in, out UNIQUE;";
+    let readback = "SELECT id, in FROM pe_owner ORDER BY id;";
+
+    assert_dual_same(
+        "pe_owner_range",
+        &mem,
+        &fork,
+        &[
+            schema,
+            &seed_a,
+            &seed_b,
+            readback,
+            // oracle 点名的裸范围删除：只清 A。
+            &bare_range_delete,
+            readback,
+            // 成员表缩短 3 → 1，且同一事务重放两次必须收敛到同一终态。
+            &seed_a,
+            &shrink_a,
+            &shrink_a,
+            readback,
+        ],
+    )
+    .await;
+
+    // 对拍只证明两边一致，终态对不对要另外钉：A 剩尾槽已清，B 一根没少。
+    let survivor = format!("pe_owner:[{key_a}, 0]");
+    let b_block = vec![
+        format!("pe_owner:[{key_b}, 0]"),
+        format!("pe_owner:[{key_b}, 1]"),
+    ];
+    for (engine, db) in [("mem", &mem), ("fork", &fork)] {
+        assert_eq!(
+            owner_block(db, &key_a).await,
+            vec![survivor.clone()],
+            "[{engine}] 缩短后的尾槽必须全部删除"
+        );
+        assert_eq!(
+            owner_block(db, &key_b).await,
+            b_block,
+            "[{engine}] owner 前缀范围删除不能越界到相邻 owner"
+        );
+    }
 }
 
 /// 事务语义对拍：中途失败整段回滚、CANCEL 显式回滚、THROW 中止。
