@@ -141,17 +141,32 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     );
 
     // 整间分支的成员候选取自空间树（少量面板 × 大量构件，这才是树的正当用途；元素
-    // 分支那个反方向的依赖已经拆掉，见 [`PanelIndex`]）。树空着时每块面板都会算出
-    // 0 个成员，而这套写入是先清后写——一次启动就足以把整库房间归属抹平。判不了就
-    // 不写，与元素分支同一个口径。调用点（`lib.rs`）已把失败降级为告警，启动不受
-    // 影响；存量归属边陈旧也比被清成空强，它下一轮还能收敛回来。
-    if !room_panel_map.rooms.is_empty() && GLOBAL_AABB_TREE.read().await.is_empty() {
-        anyhow::bail!(
-            "空间树是空的，{} 间在册房间的成员判不了：跳过本次全量重建，不清掉存量房间\
-             归属边。先检查项目树文件的 epoch 校验（load_project_tree_verified），\
-             或用 rebuild_tree_from_pointers / sync_aabb_tree_with_db 修复",
-            room_panel_map.rooms.len()
-        );
+    // 分支那个反方向的依赖已经拆掉，见 [`PanelIndex`]）。树里捞不到候选时每块面板都会
+    // 算出 0 个成员，而这套写入是先清后写——一次重建就足以把整库房间归属抹平。判不了就
+    // 不写，与元素分支同一个口径。调用点（`lib.rs`）已把失败降级为告警，启动不受影响；
+    // 存量归属边陈旧也比被清成空强，它下一轮还能收敛回来。
+    //
+    // 判据曾经是 `is_empty()`，而那挡不住真正发生过的那一幕：**树非空、但整整缺了一个
+    // 库**。2026-08-06 现场就是这样——树里只有另一个项目的两千条，7997 的四万多条不在，
+    // 于是 147 块在册面板逐块算出空集、逐块先清后写，`room_relate` 全库从上千条掉到 1
+    // 条（仅剩的那条还是事后元素分支单独写回的）。所以改成覆盖率判据。
+    if !room_panel_map.rooms.is_empty() {
+        let tree_entries = GLOBAL_AABB_TREE.read().await.tree.size();
+        let db_pointers = usable_aabb_pointer_count().await.unwrap_or_else(|error| {
+            println!("[房间全量] 读取可用包围盒指针数失败（本次跳过覆盖率判定）: {error:#}");
+            0
+        });
+        let short = db_pointers > 0 && tree_entries * 100 < db_pointers * MIN_TREE_COVERAGE_PERCENT;
+        if tree_entries == 0 || short {
+            anyhow::bail!(
+                "空间树只有 {tree_entries} 条，而库里可用的包围盒指针有 {db_pointers} 条\
+                 （下限 {MIN_TREE_COVERAGE_PERCENT}%）：{} 间在册房间的成员判不了，跳过本次\
+                 全量重建，不清掉存量归属边。先检查项目树文件的 epoch 校验\
+                 （load_project_tree_verified），或用 rebuild_tree_from_pointers 修复；\
+                 指针本身缺失（几何在而 aabb 从没算过）要走 sync_aabb_tree_with_db",
+                room_panel_map.rooms.len()
+            );
+        }
     }
 
     // 重建前的存量成员数，一条查询查完。收尾时用它说出「哪几块面板从有成员变成了 0」
@@ -211,6 +226,39 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// 空间树至少要装下库里可用包围盒指针的这个比例，全量重建才允许改写房间归属。
+///
+/// 健康时两者只差个位数（内存里刚刷新、还没落盘的那几条，以及两次独立读取之间新进的
+/// 行）；而「整整缺了一个库」是几十个百分点的缺口。90 落在这两者中间，够宽松也够拦得住。
+/// 判据不取「相等」正是因为树与库是两次独立读取，卡死会把正常抖动误判成故障。
+const MIN_TREE_COVERAGE_PERCENT: usize = 90;
+
+/// 库里有多少条包围盒指针**能**进空间树——与 `rebuild_tree_from_pointers` 同一个口径。
+///
+/// 只数指针，不数几何：几何在而 `aabb` 从没算过的行（8000 / 1112 现场就有几千条）本来
+/// 就进不了树，把它们算进分母会让这道门对着一个永远够不到的目标常态误报。
+async fn usable_aabb_pointer_count() -> anyhow::Result<usize> {
+    #[derive(Deserialize)]
+    struct Row {
+        count: usize,
+    }
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(
+            "SELECT count() FROM inst_relate \
+             WHERE world_trans.d != none AND aabb.d != none GROUP ALL;",
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("查询可用包围盒指针数失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("查询可用包围盒指针数语句失败: {error}"))?;
+    Ok(response
+        .take::<Vec<Row>>(0)
+        .map_err(|error| anyhow::anyhow!("解析可用包围盒指针数失败: {error}"))?
+        .first()
+        .map(|row| row.count)
+        .unwrap_or(0))
 }
 
 /// 每块面板当前收着多少个成员，一条查询查完。
@@ -1933,29 +1981,35 @@ mod tests {
         assert!(intersecting_panel_slots(&[], &box_of(0.0, 1.0)).is_empty());
     }
 
-    /// 全量重建在空树上必须拒跑，而不是把整库房间归属清成空。
+    /// 全量重建在**树装不下库**时必须拒跑，而不是把整库房间归属清成空。
     ///
-    /// 它是先清后写的：树空着时每块面板都算出 0 个成员，一次启动就抹平整库。这与元素
-    /// 分支「判不了就不改写」是同一条纪律，只是方向相反——那边缺的是面板，这边缺的是
-    /// 构件。
+    /// 它是先清后写的：树里捞不到候选时每块面板都算出 0 个成员，一次重建就抹平整库。
+    /// 判据不能是 `is_empty()`——真正发生过的那一幕是**树非空、但整整缺了一个库**
+    /// （树里只有另一个项目的两千条，本项目的四万多条不在），`is_empty()` 一路放行，
+    /// `room_relate` 从上千条掉到 1 条。所以这里钉的是覆盖率判据。
     #[test]
-    fn the_full_rebuild_refuses_to_run_against_an_empty_tree() {
+    fn the_full_rebuild_refuses_to_run_against_a_tree_that_lags_the_database() {
         let source = include_str!("room_model.rs");
         let body = source
             .split_once("pub async fn build_room_relations(")
             .expect("build_room_relations 必须存在")
             .1
-            .split_once("\n/// 渲染一块面板的房间归属写入")
-            .expect("全量重建之后是 render_room_relate_write")
+            .split_once("\n/// 空间树至少要装下库里可用包围盒指针的这个比例")
+            .expect("全量重建之后是覆盖率下限常量")
             .0;
 
+        assert!(
+            body.contains("usable_aabb_pointer_count()")
+                && body.contains("MIN_TREE_COVERAGE_PERCENT"),
+            "判据必须是覆盖率：退回 is_empty() 会重新放行「树非空但缺了一个库」: {body}"
+        );
         let guard_at = body
-            .find("GLOBAL_AABB_TREE.read().await.is_empty()")
-            .expect("空树必须挡在重建之前");
+            .find("usable_aabb_pointer_count()")
+            .expect("覆盖率判定必须挡在重建之前");
         let bail_at = body[guard_at..]
             .find("anyhow::bail!")
             .map(|at| guard_at + at)
-            .expect("空树必须上抛，交给调用点降级为告警");
+            .expect("覆盖不够必须上抛，交给调用点降级为告警");
         let recalc_at = body
             .find("cal_room_refnos(")
             .expect("重建必须调 cal_room_refnos");
@@ -1965,7 +2019,7 @@ mod tests {
 
         assert!(
             bail_at < recalc_at && bail_at < write_at,
-            "空树判定必须排在任何一次重算与写入之前: {body}"
+            "覆盖率判定必须排在任何一次重算与写入之前: {body}"
         );
     }
 
