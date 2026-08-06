@@ -324,6 +324,16 @@ fn use_staged_increment_window(job: &FrozenBatch) -> bool {
     job.start_sesno > 1 && std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").is_none()
 }
 
+/// 这个暂存窗口有没有房间语义（要不要付面板映射加载 + 房间工作集预载 + 房间轮）。
+///
+/// 房间目标只从两处产生：DESI 解析计划的结构触发（`RoomRecalc*` plan 项）与 DESI
+/// 生成的包围盒变化——SYST / CATA / DICT 窗口两者皆无（ADR-017 §6 纯解析提交单元）；
+/// `gen_spatial_tree` 关着时房间任务在入队口就被门控（`enqueue_room_recalc`）。
+/// `db_type` 用冻结点重扫的现场值，与执行体同源。
+fn staged_window_has_room_semantics(db_type: &str, gen_spatial_tree: bool) -> bool {
+    gen_spatial_tree && db_type.eq_ignore_ascii_case("DESI")
+}
+
 async fn execute_frozen_batch(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -349,38 +359,68 @@ async fn execute_frozen_batch(
             return failed_window_result(job, warnings, "创建增量暂存窗口失败");
         }
     };
+    let window_started = std::time::Instant::now();
     println!(
-        "数据批次 dbnum={} 使用 kv-mem 暂存窗口 {}（sesno {}..={}）",
+        "数据批次 dbnum={} db_type={} 使用 kv-mem 暂存窗口 {}（sesno {}..={}）",
         job.dbnum,
+        cand.db_type,
         window.label(),
         job.start_sesno,
         cand.file_latest_sesno
     );
 
-    let room_map = match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
-        Ok(rooms) => Some(rooms),
-        Err(error) => {
-            warnings.push(format!(
-                "读取提交前房间面板映射失败，本窗口房间任务将保留 pending: {error:#}"
-            ));
-            None
+    // 房间语义只属于「设计库 × 空间树开启」的窗口：SYST / CATA / DICT 是纯解析
+    // 提交单元（ADR-017 §6），没有生成环节、不产出房间目标，面板映射的全表扫描
+    // 与整张 `room_relate` 的工作集预载对它们是纯开销；`gen_spatial_tree` 关着时
+    // 房间任务在入队口就被门控，同理跳过。万一将来有房间目标漏进这类窗口，
+    // 它们仍以 plan 项身份随尾事务落 durable pending，由空闲轮收敛，不会丢。
+    let room_semantics =
+        staged_window_has_room_semantics(&cand.db_type, mgr.db_option.gen_spatial_tree);
+    let preload_started = std::time::Instant::now();
+    let room_map = if room_semantics {
+        match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
+            Ok(rooms) => Some(rooms),
+            Err(error) => {
+                warnings.push(format!(
+                    "读取提交前房间面板映射失败，本窗口房间任务将保留 pending: {error:#}"
+                ));
+                None
+            }
         }
+    } else {
+        println!(
+            "房间预载 dbnum={} 跳过（db_type={} 空间树={}，本窗口没有房间语义）",
+            job.dbnum, cand.db_type, mgr.db_option.gen_spatial_tree
+        );
+        None
     };
-    if let Some(rooms) = &room_map
-        && let Err(error) = window
+    if let Some(rooms) = &room_map {
+        let load_ms = preload_started.elapsed().as_millis();
+        match window
             .scope(crate::data_interface::staging::preload::preload_room_working_set(rooms))
             .await
-    {
-        warnings.push(format!(
-            "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
-        ));
+        {
+            Ok(()) => println!(
+                "房间预载 dbnum={} 在册房间={} 面板={}：映射加载={load_ms}ms 工作集预载={}ms",
+                job.dbnum,
+                rooms.rooms.len(),
+                rooms.all_panels.len(),
+                preload_started.elapsed().as_millis().saturating_sub(load_ms)
+            ),
+            Err(error) => warnings.push(format!(
+                "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
+            )),
+        }
     }
+    let setup_ms = window_started.elapsed().as_millis();
 
+    let body_started = std::time::Instant::now();
     let mut result = window
         .scope(execute_frozen_batch_body(
             mgr, registry, job, cand, progress, warnings,
         ))
         .await;
+    let body_ms = body_started.elapsed().as_millis();
     let data_applied = result
         .batch
         .as_ref()
@@ -455,19 +495,50 @@ async fn execute_frozen_batch(
         .await
         .expect("finalize presence checked above");
     let spatial = window.deferred_spatial().await;
-    let room_result = match &room_map {
-        Some(rooms) => window
-            .scope(model_update_pending::run_staged_room_work(
-                &mgr.db_option,
-                rooms,
-                &finalize.plan.work_items,
-                &spatial.room_changes,
-            ))
-            .await,
-        None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
+    let planned_room_targets = finalize
+        .plan
+        .work_items
+        .iter()
+        .filter(|item| item.action.is_room_recalc())
+        .count();
+    let room_started = std::time::Instant::now();
+    // 无房间语义的窗口不跑房间轮也不告警——空报告让后面的 aabb 目标兜底入队
+    // 路径（succeeded_aabb_targets 为空 → 全部保留）保持原语义。
+    let room_result = if !room_semantics {
+        Ok(model_update_pending::StagedRoomReport::default())
+    } else {
+        println!(
+            "窗口内房间计算开始 dbnum={} 计划触发={planned_room_targets} 包围盒变化={}",
+            job.dbnum,
+            spatial.room_changes.len()
+        );
+        match &room_map {
+            Some(rooms) => window
+                .scope(model_update_pending::run_staged_room_work(
+                    &mgr.db_option,
+                    rooms,
+                    &finalize.plan.work_items,
+                    &spatial.room_changes,
+                ))
+                .await,
+            None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
+        }
     };
+    let room_ms = room_started.elapsed().as_millis();
     match room_result {
         Ok(report) => {
+            if room_semantics {
+                println!(
+                    "窗口内房间计算完成 dbnum={} 收敛={} 其中包围盒目标={} 失败={}（耗时 {room_ms}ms）",
+                    job.dbnum,
+                    report.succeeded_plan_items.len(),
+                    report.succeeded_aabb_targets.len(),
+                    report.failures.len()
+                );
+                for failure in &report.failures {
+                    println!("  房间目标未收敛，保留 pending: {failure}");
+                }
+            }
             window
                 .settle_staged_plan_items(&report.succeeded_plan_items)
                 .await;
@@ -479,8 +550,20 @@ async fn execute_frozen_batch(
         )),
     }
 
+    let gauge = window.gauge().snapshot();
+    println!(
+        "开始写回 dbnum={} 窗口={} journal={} 条 / {} 字节，暂存语句={} 条 / {} 字节，预计写入行={}，资源档位={:?}",
+        job.dbnum,
+        window.label(),
+        gauge.journal_entries,
+        gauge.journal_bytes,
+        gauge.staged_statements,
+        gauge.staged_sql_bytes,
+        gauge.estimated_write_rows,
+        gauge.band
+    );
     let commit_started = std::time::Instant::now();
-    let (_, commit_attempts) = retry_until_recovered(
+    let (committed, commit_attempts) = retry_until_recovered(
         STAGED_COMMIT_ATTEMPTS,
         STAGED_COMMIT_BACKOFF,
         STAGED_STALLED_RETRY_BACKOFF,
@@ -495,6 +578,13 @@ async fn execute_frozen_batch(
     )
     .await;
     window.clear_writeback_stalled();
+    let commit_ms = commit_started.elapsed().as_millis();
+    println!(
+        "写回完成 dbnum={} 水位推进至 sesno={}，失效缓存={} 项，尝试={commit_attempts} 次（耗时 {commit_ms}ms）",
+        job.dbnum,
+        committed.end_sesno,
+        committed.cache_refnos.len()
+    );
     LAST_STAGED_COMMIT_MS.store(
         commit_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         Ordering::Relaxed,
@@ -509,11 +599,17 @@ async fn execute_frozen_batch(
         ));
     }
 
+    let postcommit_started = std::time::Instant::now();
     let mut postcommit_failed = false;
     #[cfg(feature = "sql")]
     if let Some(changes) = window.take_deferred_mysql_changes().await {
+        let rows = changes.values().map(Vec::len).sum::<usize>();
         match mgr.update_mysql_pdms_elements(&changes).await {
-            Ok(_) => println!("写回后 MySQL pdms_element 更新成功: dbnum={}", job.dbnum),
+            Ok(_) => println!(
+                "写回后 MySQL pdms_element 更新成功: dbnum={} 库={} 元素={rows}",
+                job.dbnum,
+                changes.len()
+            ),
             Err(error) => {
                 result.warnings.push(format!(
                     "dbnum={}: 写回后 MySQL pdms_element 更新失败: {error}",
@@ -524,23 +620,37 @@ async fn execute_frozen_batch(
         }
     }
     let settlements = window.deferred_regen_settlements().await;
-    if !settlements.is_empty()
-        && let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await
-    {
-        result.warnings.push(format!(
-            "写回后收口旧模型 pending 失败（保留待重试）: {error:#}"
-        ));
-        postcommit_failed = true;
+    if !settlements.is_empty() {
+        match model_update_pending::clear_regen_work_batch(&settlements).await {
+            Ok(()) => println!(
+                "写回后收口模型 pending {} 个生成根: dbnum={}",
+                settlements.len(),
+                job.dbnum
+            ),
+            Err(error) => {
+                result.warnings.push(format!(
+                    "写回后收口旧模型 pending 失败（保留待重试）: {error:#}"
+                ));
+                postcommit_failed = true;
+            }
+        }
     }
 
     let deferred = window.take_deferred_spatial().await;
     match crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await {
         Ok(mut changes) => {
+            let applied = changes.len();
             changes.retain(|change| {
                 !staged_rooms
                     .succeeded_aabb_targets
                     .contains(&change.refno)
             });
+            println!(
+                "写回后空间树增量已应用 dbnum={} 包围盒变化={applied}，其中 {} 个已在窗口内收敛房间，{} 个补排房间任务",
+                job.dbnum,
+                applied - changes.len(),
+                changes.len()
+            );
             if let Err(error) =
                 model_update_pending::enqueue_room_recalc(&mgr.db_option, &changes).await
             {
@@ -624,6 +734,20 @@ async fn execute_frozen_batch(
     result.status = include_model_side_effect_failure(
         aggregate_manual_status(&batch_slice, &result.units),
         postcommit_failed,
+    );
+    let generated = result
+        .units
+        .iter()
+        .filter(|unit| unit.status == UnitGenStatus::Generated)
+        .count();
+    println!(
+        "数据批次 阶段耗时 dbnum={} 交付单元={}（生成成功 {generated}）告警={}: \
+         窗口准备={setup_ms}ms 数据应用+模型生成={body_ms}ms 房间={room_ms}ms \
+         写回={commit_ms}ms 写回后={}ms",
+        job.dbnum,
+        result.units.len(),
+        result.warnings.len(),
+        postcommit_started.elapsed().as_millis()
     );
     result
 }
@@ -1728,6 +1852,21 @@ mod tests {
         assert!(
             !use_staged_increment_window(&baseline),
             "applied=0 的基线窗口豁免暂存"
+        );
+    }
+
+    /// 房间语义只属于「DESI × 空间树开启」的窗口：SYST/CATA/DICT 批次不该付
+    /// 面板映射全表扫描与 `room_relate` 整表预载（2026-08-06 审核 L2）。
+    #[test]
+    fn only_design_windows_pay_for_room_preload() {
+        assert!(staged_window_has_room_semantics("DESI", true));
+        assert!(staged_window_has_room_semantics("desi", true), "类型比较大小写不敏感");
+        assert!(!staged_window_has_room_semantics("SYST", true));
+        assert!(!staged_window_has_room_semantics("CATA", true));
+        assert!(!staged_window_has_room_semantics("DICT", true));
+        assert!(
+            !staged_window_has_room_semantics("DESI", false),
+            "空间树关闭时房间任务在入队口就被门控，预载同样是纯开销"
         );
     }
 
