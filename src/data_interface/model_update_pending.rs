@@ -1030,7 +1030,8 @@ pub(crate) struct StagedRoomReport {
 }
 
 /// Run room work against the staged topology and geometry. Panel candidates still come from
-/// the pre-window global tree; changed elements are corrected afterward by their element tasks.
+/// the pre-window global tree, minus what this window already deleted (`staged_spatial_removals`);
+/// elements that merely moved are corrected afterward by their own element tasks.
 pub(crate) async fn run_staged_room_work(
     db_option: &aios_core::options::DbOption,
     preloaded_rooms: &room_model::RoomPanelMap,
@@ -1075,9 +1076,39 @@ pub(crate) async fn run_staged_room_work(
     let history = room_model::ElementRoomHistory::load(&elements).await?;
     let mut report = StagedRoomReport::default();
 
+    // 面板先、元素后：两条分支共用 `{panel}_{element}` 边 id 且都是先清后写，所以整间
+    // 分支按窗口内**尚未摘树**的旧包围盒收编的移动构件，会被随后的元素任务改正。
+    //
+    // 这条收敛论证的前提是本轮**逐个跑、一个不吸收**。`drain_rooms` 那套同轮吸收一旦
+    // 搬进来，被旧位置错误收编的移动构件恰好满足它的封闭性判据而跳过元素任务，那条按
+    // 旧位置写的边就永久留在库里——整间分支的排除集只兜得住本窗口的删除，兜不住移动。
     let mut targets = targets.into_iter().collect::<Vec<_>>();
     targets.sort_by_key(|((action, _), _)| *action != ModelWorkAction::RoomRecalcPanel);
     for ((action, target), (refno, from_aabb)) in targets {
+        // H-1（2026-08-06 审核）：整间目标在暂存映射与预载映射里都查不到时，分不清
+        // 「真的不在册」与「工作集预载不完整」——改名成为合规房间的面板正是后者：
+        // 面板的 pe_owner 边不随改名重写，暂存里这间房解析出来是 0 块面板。走清边
+        // 成功会静默丢归属且队列不留痕，宁可 fail-closed 保留 pending，提交后的
+        // durable 房间轮用持久层完整映射收敛。真正的注销（改名失规、面板挪出）在
+        // 预载映射里有正面证据（它提交前在册），不会走到这里。唯一放行的例外：纯
+        // AABB 触发且现存归属为空——清边是无害空操作，拦下反而让每块非房间 PANE
+        // 的几何变更都积一条 pending。
+        if action == ModelWorkAction::RoomRecalcPanel
+            && rooms.room_num_of(refno).is_none()
+            && preloaded_rooms.room_num_of(refno).is_none()
+        {
+            let harmless_noop = from_aabb
+                && room_model::existing_members_of_panel(refno)
+                    .await
+                    .is_ok_and(|members| members.is_empty());
+            if !harmless_noop {
+                report.failures.push(format!(
+                    "房间目标 {target} 在暂存与预载映射中都不可见（房间工作集预载可能不完整），\
+                     fail-closed 保留 pending"
+                ));
+                continue;
+            }
+        }
         match run_room_task(db_option, &rooms, &panels, &history, action, refno).await {
             Ok(_) => {
                 report.succeeded_plan_items.insert((action, target));
@@ -1785,10 +1816,12 @@ mod tests {
             .query("SELECT VALUE id FROM room_relate")
             .await
             .expect("inspect");
-        assert!(response.take::<Vec<String>>(0).expect("edges").is_empty());
+        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("edges").is_empty());
         window.drop_database().await.expect("cleanup");
     }
 
+    /// 面板提交前在册（预载映射有正面证据）、暂存 PE 里已经解析不出——这是真正的
+    /// 注销（房间改名失规 / 面板挪出），清边成功是正确语义。
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_removed_panel_clears_its_old_relations() {
         use crate::data_interface::staging::ResourceThresholds;
@@ -1818,11 +1851,20 @@ mod tests {
             target_refno: "4000000001/10".into(),
             noun: "PANE".into(),
         };
+        let panel = RefnoEnum::from("4000000001/10".parse::<RefU64>().unwrap());
+        let preloaded = room_model::RoomPanelMap {
+            rooms: vec![room_model::RoomPanels {
+                room: RefnoEnum::from("4000000001/1".parse::<RefU64>().unwrap()),
+                room_num: "R100".into(),
+                panels: vec![panel],
+            }],
+            all_panels: std::collections::HashSet::from([panel]),
+        };
 
         let report = window
             .scope(run_staged_room_work(
                 &option,
-                &room_model::RoomPanelMap::default(),
+                &preloaded,
                 &[item],
                 &HashMap::new(),
             ))
@@ -1835,14 +1877,90 @@ mod tests {
             .query("SELECT VALUE id FROM room_relate")
             .await
             .expect("inspect");
-        assert!(response.take::<Vec<String>>(0).expect("edges").is_empty());
+        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("edges").is_empty());
         let mut response = window
             .staging_db()
             .query("SELECT VALUE id FROM room_panel_relate")
             .await
             .expect("inspect topology");
-        assert!(response.take::<Vec<String>>(0).expect("topology edges").is_empty());
+        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("topology edges").is_empty());
         assert_eq!(window.journal().await.len(), 2);
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// H-1：整间目标在暂存映射与预载映射里都不可见时不许走清边成功——结构触发生的
+    /// 目标 fail-closed 保留 pending、存量边原封不动；纯 AABB 触发且现存归属为空的
+    /// 目标是无害空操作，放行且算成功。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_blind_panel_is_fail_closed_instead_of_cleared() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        // 面板 10：有存量归属边（改名成为合规房间前算过），双映射盲区 → 必须保留。
+        window
+            .staging_db()
+            .query(
+                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
+            )
+            .await
+            .expect("fixture")
+            .check()
+            .expect("fixture statement");
+        let mut option = aios_core::options::DbOption::default();
+        option.gen_spatial_tree = true;
+        let item = ModelWorkItem {
+            dbnum: 7988,
+            db_type: "DESI".into(),
+            source_end_sesno: 2,
+            action: ModelWorkAction::RoomRecalcPanel,
+            target_refno: "4000000001/10".into(),
+            noun: "PANE".into(),
+        };
+        // 面板 30：纯 AABB 触发、没有任何存量边 → 无害空操作，放行。
+        let aabb_changes = HashMap::from([(
+            RefnoEnum::from("4000000001/30".parse::<RefU64>().unwrap()),
+            "PANE".to_string(),
+        )]);
+
+        let report = window
+            .scope(run_staged_room_work(
+                &option,
+                &room_model::RoomPanelMap::default(),
+                &[item],
+                &aabb_changes,
+            ))
+            .await
+            .expect("blind panel work");
+
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(
+            report.failures[0].contains("fail-closed"),
+            "{:?}",
+            report.failures
+        );
+        assert!(!report.succeeded_plan_items.contains(&(
+            ModelWorkAction::RoomRecalcPanel,
+            "4000000001/10".into()
+        )));
+        assert!(report.succeeded_plan_items.contains(&(
+            ModelWorkAction::RoomRecalcPanel,
+            "4000000001/30".into()
+        )));
+        let mut response = window
+            .staging_db()
+            .query("RETURN [count(SELECT * FROM room_relate WHERE in = pe:4000000001_10) = 1];")
+            .await
+            .expect("inspect");
+        assert_eq!(
+            response.take::<Vec<bool>>(0).expect("edges"),
+            vec![true],
+            "存量归属边必须原封不动"
+        );
         window.drop_database().await.expect("cleanup");
     }
 
@@ -2381,6 +2499,42 @@ mod tests {
         assert!(
             body.contains("element_candidate_panels"),
             "候选必须与元素分支同源，走库内面板几何: {body}"
+        );
+    }
+
+    /// 暂存房间轮必须逐个跑，不得引入 `drain_rooms` 那套同轮吸收。
+    ///
+    /// 窗口内的整间分支按**尚未摘树**的旧包围盒取候选：删除已由排除集兜住
+    /// （`room_model::recalc_panel_membership` 并入 `staged_spatial_removals`），移动则
+    /// 只能靠随后的元素任务改正。而 `absorption_verdict` 的判据是「旧边 ∪ 候选 ⊆ 本轮
+    /// 已重算面板」——被整间分支按旧位置错误收编的移动构件恰好满足它，元素任务于是被
+    /// 跳过，那条按旧位置写的边随窗口提交并永久留在库里，没有任何人会再来清。吸收在
+    /// `drain_rooms` 里成立是因为那时空间树已经收敛；窗口内它还没有。
+    #[test]
+    fn the_staged_room_round_runs_panels_first_and_absorbs_nothing() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub(crate) async fn run_staged_room_work(")
+            .expect("run_staged_room_work 必须存在")
+            .1
+            .split_once("pub struct DrainReport")
+            .expect("暂存房间轮之后是 DrainReport")
+            .0;
+
+        let sort_at = body.find("sort_by_key").expect("整间目标必须排在元素之前");
+        let run_at = body
+            .find("run_room_task(")
+            .expect("暂存房间轮必须逐个跑房间任务");
+        assert!(sort_at < run_at, "{body}");
+        assert!(
+            body.contains("*action != ModelWorkAction::RoomRecalcPanel"),
+            "排序键必须把整间目标排在前面: {body}"
+        );
+        // 按调用点形态（带左括号）断言，注释里提到这些名字不算数。
+        assert!(
+            !body.contains("absorption_verdict(")
+                && !body.contains("load_absorption_closure_inputs("),
+            "窗口内不得吸收元素任务：移动构件的陈旧边只有元素分支会清: {body}"
         );
     }
 

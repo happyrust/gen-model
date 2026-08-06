@@ -626,15 +626,38 @@ pub(crate) async fn build_model_update_plan(
             .iter()
             .map(|refno| refno.to_pdms_str())
             .collect();
+        let mut preload_panels = room_triggers.moved_panels.clone();
         if !room_triggers.renamed_rooms.is_empty() {
             match panels_under_rooms(&room_triggers.renamed_rooms).await {
                 Ok(panels) => {
                     panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
+                    preload_panels.extend(panels);
                 }
                 Err(error) => warnings.push(format!(
                     "dbnum={dbnum}: 房间改名的面板枚举失败，房间号刷新延迟到下次全量重建: {error:#}"
                 )),
             }
+        }
+        // H-1：改名「成为」合规房间时，房间自己的 pe 行会被本窗口解析重写，但面板的
+        // `pe_owner` 边不变、不进解析，也不在窗口起点的预载范围（那只 BFS 提交前已
+        // 合规的房间根）。结构触发在计划期已知，把这些根的子树拓扑与面板产物显式补进
+        // 暂存，暂存房间轮才能从暂存 PE 解析出「面板属于哪间房」。窗口外是无操作；
+        // 失败降级为告警——房间轮的 fail-closed 守卫会把受影响面板保留成 durable pending。
+        match crate::data_interface::staging::preload::preload_room_structural_targets(
+            &room_triggers.renamed_rooms,
+            &preload_panels,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(rows) => println!(
+                "房间结构触发预载 dbnum={dbnum}: 改名房间={} 相关面板={} 共 {rows} 行",
+                room_triggers.renamed_rooms.len(),
+                preload_panels.len(),
+            ),
+            Err(error) => warnings.push(format!(
+                "dbnum={dbnum}: 房间结构触发工作集预载失败，相关面板任务将保留 pending: {error:#}"
+            )),
         }
         if !panel_targets.is_empty() {
             work_items.extend(panel_targets.into_iter().map(|target| ModelWorkItem {

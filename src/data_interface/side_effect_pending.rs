@@ -295,6 +295,21 @@ impl SideEffectCompensator {
         Ok(jobs.len())
     }
 
+    /// 还有没有已提交、但空间树尚未收敛的意图。
+    ///
+    /// 「空间树是不是陈旧的」这件事只有库里说了算：进程内的失败标志跨不过重启，
+    /// 而未收敛的意图恰恰是崩溃后最该被认出来的那一类。
+    pub async fn has_pending_spatial_work() -> anyhow::Result<bool> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND status IN ['pending', 'failed'] LIMIT 1;"
+            ))
+            .await?
+            .check()?;
+        Ok(!response.take::<Vec<Thing>>(0)?.is_empty())
+    }
+
     pub async fn spatial_reconcile_status() -> anyhow::Result<serde_json::Value> {
         let mut response = SUL_DB
             .query(format!(

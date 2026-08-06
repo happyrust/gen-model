@@ -14,6 +14,8 @@ pub mod manifold_bool;
 
 pub mod room_fixture;
 
+pub mod room_live_issue7;
+
 pub mod room_predicate;
 
 pub mod room_model;

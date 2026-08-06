@@ -29,6 +29,7 @@ pub(crate) use write_context::{active_staged_finalize_plan, settle_staged_plan_i
 pub(crate) use write_context::defer_staged_mysql_changes;
 pub(crate) use write_context::defer_staged_regen_settlement;
 pub(crate) use write_context::hold_staged_generation_root;
+pub(crate) use write_context::staged_spatial_removals;
 
 /// 模型数据面的当前读库。窗口上下文在场时只读暂存，否则读持久层。
 pub(crate) fn active_data_db(

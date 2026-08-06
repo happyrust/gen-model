@@ -149,7 +149,7 @@ debug_refno_types = ["LOOP", "PRIM"]
 # 取证结论：issue 截图里的 /1WCC0211 属于 7999，而 7999 一直被排除在 manual_db_nums 外
 # （applied=3、file=41，库里的树是旧全量同步残留）——这正是「检测到增量但树不更新」的直接原因。
 # 跑完可收窄回 [7998, 8000]。
-manual_db_nums = [7997, 7998, 7999, 8000]
+manual_db_nums = [1112]
 # manual_db_nums = [7997, 7999, 8000]
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""

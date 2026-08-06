@@ -10,11 +10,13 @@
 //! [`DEFAULT_DELIVERY_UNIT_TYPES`] outright, while `append_delivery_unit_types`
 //! extends it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use aios_core::RefnoEnum;
 use serde::{Deserialize, Serialize};
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use crate::data_interface::model_impact::is_loop_container_noun;
 
@@ -301,6 +303,73 @@ pub async fn resolve_live_element_generation_root(
                 .map(|(_, node)| node.clone())
         },
     ))
+}
+
+/// 按**指定库**批量解析生成根，整批共用一份 owner 链缓存。
+///
+/// 暂存窗口里的锁范围解析必须走这条路而不是 [`resolve_live_element_generation_root`]：
+/// 解析阶段的删除与修改都渲染成 `UPDATE pe:…`，而 `UPDATE` 命不中记录就是空操作，
+/// 暂存库起点又是空的——这两类目标在窗口内查无此行，归属会静默解析成 `None`。
+/// 窗口前的归属只有持久层说了算。
+///
+/// 兄弟节点共享祖先，缓存把一棵子树的链遍历从「每个节点一整条链」压回「每个祖先一次」。
+pub async fn resolve_generation_roots_on(
+    db: &Surreal<Any>,
+    refnos: &[RefnoEnum],
+    unit_types: &[String],
+) -> anyhow::Result<Vec<GenerationRoot>> {
+    let mut nodes: HashMap<RefnoEnum, Option<GenerationNode>> = HashMap::new();
+    let mut roots = Vec::new();
+    for &refno in refnos {
+        load_chain_into(db, refno, &mut nodes).await?;
+        let resolved = resolve_element_generation_root(refno, unit_types, |candidate| {
+            nodes.get(&candidate).cloned().flatten()
+        });
+        if let Some(root) = resolved {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
+/// 把 `start` 到根的整条 owner 链读进 `nodes`；已缓存的祖先不再查库。
+///
+/// 终止条件与 [`collect_chain`] 逐条对齐（缺行 / 无 owner / 粗层级容器 / 深度上限），
+/// 否则缓存里会缺掉纯函数要读的那一节。
+async fn load_chain_into(
+    db: &Surreal<Any>,
+    start: RefnoEnum,
+    nodes: &mut HashMap<RefnoEnum, Option<GenerationNode>>,
+) -> anyhow::Result<()> {
+    let mut current = start;
+    let mut seen = HashSet::new();
+
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if !seen.insert(current) {
+            anyhow::bail!("owner chain contains a cycle at {current}");
+        }
+        let node = match nodes.get(&current) {
+            Some(cached) => cached.clone(),
+            None => {
+                let node = aios_core::get_pe_on(db, current).await?.map(|pe| GenerationNode {
+                    owner: (pe.owner.is_valid() && pe.owner != current).then_some(pe.owner),
+                    noun: pe.noun,
+                    name: pe.name,
+                });
+                nodes.insert(current, node.clone());
+                node
+            }
+        };
+        let Some(node) = node else { return Ok(()) };
+        if is_coarse_hierarchy_noun(&node.noun) {
+            return Ok(());
+        }
+        let Some(owner) = node.owner else {
+            return Ok(());
+        };
+        current = owner;
+    }
+    Ok(())
 }
 
 pub async fn resolve_live_owner_generation_root(

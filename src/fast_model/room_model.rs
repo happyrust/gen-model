@@ -923,12 +923,18 @@ pub async fn recalc_panel_membership(
              先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）"
         );
     }
+    // 候选取自空间树，而窗口内的删除是**推迟到提交后**才从树上摘的
+    // （`defer_spatial_remove`）：此刻树上还留着这些构件的旧包围盒。不排除的话，
+    // 同一个窗口里 DeleteCleanup 刚清掉的归属边，会被这块面板按旧位置原样写回，
+    // 而且面板任务算成功、边要等下一次这块面板被触发才清得掉。移动的构件不在此列
+    // ——「面板先、元素后」的同轮元素任务会把它收敛回来，纯删除没有元素任务兜底。
+    // 窗口外这个集合恒为空，直写路径的行为不变。
+    let mut exclude = rooms.all_panels.clone();
+    exclude.extend(crate::data_interface::staging::staged_spatial_removals().await);
     // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
-    let members = match cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)
-        .await?
-    {
+    let members = match cal_room_refnos(&db_option.get_meshes_path(), panel, &exclude).await? {
         PanelMembers::Computed(members) => members,
         PanelMembers::NoGeometry => anyhow::bail!(
             "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
@@ -1550,8 +1556,10 @@ fn log_panel_membership_change(
 }
 
 /// 一块面板当前收着哪些构件：现存 `room_relate` 出边（`in = panel`）的 out 端去重。
-/// 仅供日志对照。
-async fn existing_members_of_panel(panel: RefnoEnum) -> anyhow::Result<HashSet<RefnoEnum>> {
+/// 供日志对照，也供暂存房间轮的 fail-closed 守卫判断「清边是不是无害空操作」。
+pub(crate) async fn existing_members_of_panel(
+    panel: RefnoEnum,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
     let mut response = crate::data_interface::staging::active_data_db()
         .query(format!(
             "SELECT VALUE out FROM room_relate WHERE in = {};",
@@ -2000,6 +2008,35 @@ mod tests {
             .map(|at| guard_at + at)
             .expect("空树必须上抛，让任务保留重试而不是算成功");
         assert!(bail_at < recalc_at, "{body}");
+    }
+
+    /// 窗口内被删掉的构件不得被整间分支按旧位置重新收编。
+    ///
+    /// 摘树推迟到提交之后（`defer_spatial_remove`），所以窗口内树上还留着这些构件的旧
+    /// 包围盒。同一个窗口里 DeleteCleanup 刚清掉它们的归属边，紧随其后的面板目标又会
+    /// 把它们按旧位置写回 `room_relate`——journal 顺序保证这个错误终态被提交，面板任务
+    /// 还算成功，垃圾边要等下次这块面板被触发才清得掉。移动的构件不在此列：同轮的元素
+    /// 任务会把它收敛回来；纯删除没有元素任务兜底，是唯一漏网的形态。
+    #[test]
+    fn the_panel_branch_excludes_elements_this_window_already_deleted() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("pub async fn recalc_panel_membership(")
+            .expect("recalc_panel_membership 必须存在")
+            .1
+            .split_once("/// 一轮 drain 复用的在册面板几何")
+            .expect("整间分支之后是 PanelIndex")
+            .0;
+
+        let extend_at = body
+            .find("staged_spatial_removals()")
+            .expect("排除集必须并入窗口内的待摘构件");
+        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
+        assert!(extend_at < recalc_at, "{body}");
+        assert!(
+            !body.contains("cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)"),
+            "排除集不能退回只有在册面板那一份: {body}"
+        );
     }
 
     /// 「没有几何」不得被折成「没有成员」写下去。

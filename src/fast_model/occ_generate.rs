@@ -871,6 +871,17 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
         }
         // 关闭房间空间树时仍要保留数据库 AABB 真值，但不维护一棵不会加载、对账或查询
         // 的内存树。重新开启该功能需要重启，启动路径会用数据库记录重建并对账空间树。
+        //
+        // 这道门必须排在暂存分支**之前**。`enqueue_room_recalc` 的入队口门控押的正是
+        // 「不维护空间树时本函数恒返回空变更集」，而暂存分支不返回变更集、直接把意图
+        // 寄存进窗口。排在门后面的话，`gen_spatial_tree` 关着的 DESI 窗口里树从未加载，
+        // `tree_box_changed` 对每个元素都判成「首次见到」，整批被捕获成房间变化随尾事务
+        // 落成 durable pending，而空闲轮的房间轮按同一个开关早退——这些行永远没有消费者。
+        // 延迟刷新同理：收敛一棵没人加载、没人查询的树，只会把一份残缺的 accel_tree.bin
+        // 写回磁盘。
+        if !maintain_spatial_tree {
+            continue;
+        }
         if let Some(context) = &staged_writes {
             let refnos = new_boxes.iter().map(|(refno, _, _)| *refno).collect::<Vec<_>>();
             context.defer_spatial_refresh(&refnos).await;
@@ -900,9 +911,6 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
                 })
                 .collect::<Vec<_>>();
             context.defer_room_changes(&room_changes).await;
-            continue;
-        }
-        if !maintain_spatial_tree {
             continue;
         }
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
@@ -1441,6 +1449,44 @@ mod aabb_write_order_tests {
             pointers_at < spatial_gate_at && spatial_gate_at < tree_at,
             "内存树必须在本块 DB 写入全部成功之后才动，失败块不得留下树新库旧的半掺状态"
         );
+    }
+
+    /// 不维护空间树时，暂存窗口同样不得寄存任何空间/房间意图。
+    ///
+    /// `enqueue_room_recalc` 的入队口门控押着「本函数在不维护空间树时恒返回空变更集」，
+    /// 而暂存分支不走返回值、直接把意图寄存进窗口。它一旦排到 `maintain_spatial_tree`
+    /// 门的后面，`gen_spatial_tree` 关着的窗口会把整批元素捕获成房间变化（树没加载，
+    /// 旧条目恒空 → `tree_box_changed` 恒真）随尾事务落成 durable pending，而房间轮按
+    /// 同一个开关早退——这些行永远没有消费者，只会一直涨。
+    #[test]
+    fn a_disabled_spatial_tree_defers_nothing_into_the_staging_window() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(")
+            .expect("刷新函数必须存在")
+            .1
+            .split_once("\n/// 「这个元素的包围盒相对房间系统上一次看到的状态变了吗」")
+            .expect("刷新函数之后是 tree_box_changed 的文档")
+            .0;
+
+        let gate_at = body
+            .find("if !maintain_spatial_tree")
+            .expect("spatial-tree disabled fast path missing");
+        let staged_at = body
+            .find("if let Some(context) = &staged_writes")
+            .expect("暂存分支必须存在");
+        let room_at = body
+            .find("defer_room_changes(")
+            .expect("暂存分支必须寄存房间变化");
+        let refresh_at = body
+            .find("defer_spatial_refresh(")
+            .expect("暂存分支必须寄存延迟刷新");
+
+        assert!(
+            gate_at < staged_at,
+            "maintain_spatial_tree 的门必须排在暂存分支之前: {body}"
+        );
+        assert!(gate_at < room_at && gate_at < refresh_at, "{body}");
     }
 }
 

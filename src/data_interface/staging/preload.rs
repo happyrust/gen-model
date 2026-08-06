@@ -15,26 +15,45 @@ pub(crate) async fn preload_existing_generation_products(
     preload_existing_generation_products_from(&SUL_DB, roots).await
 }
 
-/// Copy the unchanged PE subtree and existing products needed by transform/delete prerequisites.
-/// `INSERT IGNORE` preserves rows already rewritten by the current parse.
-pub(crate) async fn preload_model_mutation_targets(roots: &[RefnoEnum]) -> anyhow::Result<usize> {
-    if super::active_staging_writes().is_none() || roots.is_empty() {
-        return Ok(0);
-    }
-    preload_model_mutation_targets_from(&SUL_DB, roots).await
+/// 一次窗口内模型修改（位姿 / 删除）所依赖的**窗口前**闭包。
+///
+/// 解析与拷贝拆成两步，是为了让统一根锁夹在中间：锁范围要按窗口前状态解析，而拷贝
+/// 本身已经是一次 staging 模型写，必须在持锁之后（ADR-017 I8）。拆开还顺带让两件事
+/// 共用同一次闭包计算——`inst_relate` 的整表扫描一个窗口只付一次。
+#[derive(Debug, Default)]
+pub(crate) struct ModelMutationPreload {
+    subtree_len: usize,
+    model_refnos: Vec<RefnoEnum>,
+    hierarchy: Vec<RefnoEnum>,
 }
 
-async fn preload_model_mutation_targets_from(
+impl ModelMutationPreload {
+    /// 子树里**带模型产物**的节点。本窗口要改的正是它们的产物，所以统一根锁要覆盖的
+    /// 也正是它们各自所属的生成根——子树里其余节点没有产物，锁它们的根是空付出。
+    pub(crate) fn model_refnos(&self) -> &[RefnoEnum] {
+        &self.model_refnos
+    }
+}
+
+/// 只读地解析闭包：不碰暂存库，可以在持锁之前跑。
+pub(crate) async fn plan_model_mutation_preload(
+    roots: &[RefnoEnum],
+) -> anyhow::Result<ModelMutationPreload> {
+    if super::active_staging_writes().is_none() || roots.is_empty() {
+        return Ok(ModelMutationPreload::default());
+    }
+    plan_model_mutation_preload_from(&SUL_DB, roots).await
+}
+
+async fn plan_model_mutation_preload_from(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
-) -> anyhow::Result<usize> {
-    let started = std::time::Instant::now();
+) -> anyhow::Result<ModelMutationPreload> {
     let subtree = load_root_refnos(source, roots).await?;
     if subtree.is_empty() {
-        return Ok(0);
+        return Ok(ModelMutationPreload::default());
     }
     let model_refnos = load_model_refnos(source, &subtree).await?;
-    let closure_elapsed = started.elapsed();
     let mut hierarchy_seeds = model_refnos.clone();
     hierarchy_seeds.extend_from_slice(roots);
     let mut hierarchy =
@@ -43,8 +62,31 @@ async fn preload_model_mutation_targets_from(
             .into_iter()
             .collect::<Vec<_>>();
     hierarchy.sort_unstable();
-    let hierarchy_elapsed = started.elapsed();
-    let keys = hierarchy
+    Ok(ModelMutationPreload {
+        subtree_len: subtree.len(),
+        model_refnos,
+        hierarchy,
+    })
+}
+
+/// Copy the unchanged PE subtree and existing products needed by transform/delete prerequisites.
+/// `INSERT IGNORE` preserves rows already rewritten by the current parse.
+pub(crate) async fn apply_model_mutation_preload(
+    preload: &ModelMutationPreload,
+) -> anyhow::Result<usize> {
+    if super::active_staging_writes().is_none() || preload.hierarchy.is_empty() {
+        return Ok(0);
+    }
+    apply_model_mutation_preload_from(&SUL_DB, preload).await
+}
+
+async fn apply_model_mutation_preload_from(
+    source: &Surreal<Any>,
+    preload: &ModelMutationPreload,
+) -> anyhow::Result<usize> {
+    let started = std::time::Instant::now();
+    let keys = preload
+        .hierarchy
         .iter()
         .map(RefnoEnum::to_pe_key)
         .collect::<Vec<_>>()
@@ -63,15 +105,14 @@ async fn preload_model_mutation_targets_from(
     )
     .await?;
     let owner_elapsed = started.elapsed();
-    copied += preload_existing_generation_products_for_refnos(source, &model_refnos).await?;
+    copied += preload_existing_generation_products_for_refnos(source, &preload.model_refnos)
+        .await?;
     println!(
-        "暂存 mutation 预载: subtree={} model={} hierarchy={} copied={}，closure={:?} hierarchy={:?} pe={:?} owner={:?} total={:?}",
-        subtree.len(),
-        model_refnos.len(),
-        hierarchy.len(),
+        "暂存 mutation 预载: subtree={} model={} hierarchy={} copied={}，pe={:?} owner={:?} total={:?}",
+        preload.subtree_len,
+        preload.model_refnos.len(),
+        preload.hierarchy.len(),
         copied,
-        closure_elapsed,
-        hierarchy_elapsed,
         pe_elapsed,
         owner_elapsed,
         started.elapsed()
@@ -175,6 +216,57 @@ async fn preload_room_working_set_from(
     )
     .await?;
     copied += preload_existing_generation_products_from(source, &panels).await?;
+    Ok(copied)
+}
+
+/// Copy the room subtrees named by structural triggers (renamed rooms / moved panels) into staging.
+///
+/// 窗口起点的 [`preload_room_working_set`] 只认「提交前已合规」的房间；本窗口内改名
+/// **成为**合规房间的组不在那份映射里，而面板的 `pe_owner` 边不随改名重写、也不会被
+/// 本窗口解析写进暂存——不补拷的话，暂存房间轮从暂存 PE 解析出的这间房永远是 0 块
+/// 面板，计划里的整间目标随即走「已不在册」的清边成功路径（H-1）。结构触发在计划期
+/// 已知，这里按触发种子把子树拓扑与面板产物补进暂存；`INSERT IGNORE` /
+/// `record::exists` 语义保证已被本窗口解析重写的行不被回退。
+pub(crate) async fn preload_room_structural_targets(
+    rooms: &[RefnoEnum],
+    panels: &[RefnoEnum],
+) -> anyhow::Result<usize> {
+    if super::active_staging_writes().is_none() || (rooms.is_empty() && panels.is_empty()) {
+        return Ok(0);
+    }
+    preload_room_structural_targets_from(&SUL_DB, rooms, panels).await
+}
+
+async fn preload_room_structural_targets_from(
+    source: &Surreal<Any>,
+    rooms: &[RefnoEnum],
+    panels: &[RefnoEnum],
+) -> anyhow::Result<usize> {
+    let mut topology = load_root_refnos(source, rooms).await?;
+    topology.extend(panels.iter().copied());
+    topology.sort_unstable();
+    topology.dedup();
+    if topology.is_empty() {
+        return Ok(0);
+    }
+    let keys = topology
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut copied = copy_rows(
+        source,
+        "pe",
+        &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
+    )
+    .await?;
+    copied += copy_relations(
+        source,
+        "pe_owner",
+        &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
+    )
+    .await?;
+    copied += preload_existing_generation_products_for_refnos(source, panels).await?;
     Ok(copied)
 }
 
@@ -317,40 +409,35 @@ async fn load_root_refnos(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
 ) -> anyhow::Result<Vec<RefnoEnum>> {
-    #[derive(serde::Deserialize)]
-    struct OwnerEdge {
-        #[serde(rename = "in")]
-        child: RefnoEnum,
-        #[serde(rename = "out")]
-        parent: RefnoEnum,
+    let mut refnos = Vec::new();
+    for roots in roots.chunks(100) {
+        let keys = roots
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = source
+            .query(format!(
+                "RETURN array::flatten(SELECT VALUE array::flatten(object::values({{ \
+                 p0: [id], p1: <-pe_owner<-(?), \
+                 p2: <-pe_owner<-(?)<-pe_owner<-(?), \
+                 p3: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p4: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p5: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p6: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p7: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p8: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p9: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p10: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
+                 p11: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?) \
+                 }})) FROM [{keys}] WHERE record::exists(id));"
+            ))
+            .await?
+            .check()?;
+        refnos.extend(response.take::<Vec<RefnoEnum>>(0)?);
     }
-
-    // ponytail: one lightweight edge scan avoids thousands of WS graph lookups; replace with a
-    // server-side recursive/indexed query if pe_owner exceeds the staging memory budget.
-    let mut response = source
-        .query("SELECT in, out FROM pe_owner;")
-        .await?
-        .check()?;
-    let edges = response.take::<Vec<OwnerEdge>>(0)?;
-    let mut children = std::collections::HashMap::<RefnoEnum, Vec<RefnoEnum>>::new();
-    for edge in edges {
-        children.entry(edge.parent).or_default().push(edge.child);
-    }
-
-    let mut seen = roots
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let mut frontier = roots.to_vec();
-    while let Some(parent) = frontier.pop() {
-        for child in children.get(&parent).into_iter().flatten() {
-            if seen.insert(*child) {
-                frontier.push(*child);
-            }
-        }
-    }
-    let mut refnos = seen.into_iter().collect::<Vec<_>>();
     refnos.sort_unstable();
+    refnos.dedup();
     Ok(refnos)
 }
 
@@ -527,11 +614,15 @@ mod tests {
             .expect("inspect staging");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 9]);
 
-        let copied = window
-            .scope(preload_model_mutation_targets_from(
+        let plan = window
+            .scope(plan_model_mutation_preload_from(
                 &source,
                 &[RefnoEnum::from("4000000001/1")],
             ))
+            .await
+            .expect("plan mutation preload");
+        let copied = window
+            .scope(apply_model_mutation_preload_from(&source, &plan))
             .await
             .expect("preload mutation target");
         assert_eq!(copied, 13);
@@ -546,6 +637,83 @@ mod tests {
             .expect("inspect mutation rows");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 5]);
         assert!(window.journal().await.is_empty());
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// H-1 回归：改名「成为」合规房间的组不在窗口起点的预载范围里，结构触发预载要把
+    /// 子树拓扑与面板产物补进暂存、且不回退本窗口解析已写入的行——之后暂存映射才能
+    /// 解析出「面板属于这间房」。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn room_structural_targets_backfill_renamed_room_topology() {
+        let source = connect("mem://").await.expect("source mem");
+        source
+            .use_ns("test")
+            .use_db("source")
+            .await
+            .expect("source db");
+        source
+            .query(
+                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-BAD1', deleted=false;
+                 CREATE pe:⟨4000000001_2⟩ SET noun='PANE', deleted=false;
+                 CREATE pe:⟨4000000001_9⟩ SET noun='PANE', deleted=false;
+                 RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
+                 CREATE world_trans:w1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
+                 CREATE vec3:v1 SET d=[1,2,3]; CREATE inst_info:i1 SET noun='PANE';
+                 CREATE inst_geo:g1 SET aabb=aabb:a1, pts=[vec3:v1];
+                 RELATE pe:⟨4000000001_2⟩->inst_relate->inst_info:i1 SET world_trans=world_trans:w1, aabb=aabb:a1;
+                 RELATE inst_info:i1->geo_relate->inst_geo:g1 SET trans=trans:t1;",
+            )
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture");
+
+        let instance = connect("mem://").await.expect("staging mem");
+        let window = create_window_on(&instance, 7987, 3, 3, ResourceThresholds::default())
+            .await
+            .expect("window");
+        // 模拟本窗口的解析：改名会话把房间自己的 pe 行写进暂存（新名字已合规）。
+        window
+            .staging_db()
+            .query("CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100', deleted=false;")
+            .await
+            .expect("parsed rename transport")
+            .check()
+            .expect("parsed rename");
+
+        let copied = window
+            .scope(preload_room_structural_targets_from(
+                &source,
+                &[RefnoEnum::from("4000000001/1")],
+                &[RefnoEnum::from("4000000001/2")],
+            ))
+            .await
+            .expect("preload structural targets");
+
+        assert_eq!(copied, 11);
+        assert!(window.journal().await.is_empty());
+        let mut response = window
+            .staging_db()
+            .query(
+                "RETURN [pe:⟨4000000001_1⟩.name = 'X-RM-R100', pe:⟨4000000001_2⟩.id != NONE,
+                 count(SELECT * FROM pe_owner) = 1, count(SELECT * FROM inst_relate) = 1,
+                 inst_geo:g1.id != NONE, vec3:v1.id != NONE, pe:⟨4000000001_9⟩.id = NONE];",
+            )
+            .await
+            .expect("inspect staging");
+        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 7]);
+
+        let map = window
+            .scope(crate::fast_model::room_model::load_room_panel_map_from_pe(
+                &aios_core::options::DbOption::default(),
+            ))
+            .await
+            .expect("load staged room map");
+        assert_eq!(
+            map.room_num_of(RefnoEnum::from("4000000001/2")),
+            Some("R100"),
+            "改名成为合规房间后，暂存映射必须解析出它名下的面板"
+        );
         window.drop_database().await.expect("cleanup");
     }
 

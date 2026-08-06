@@ -1072,6 +1072,80 @@ mod cache_tests {
         window.drop_database().await.expect("cleanup");
     }
 
+    /// 解析阶段过后，暂存里**依然没有**删除/修改目标的 `pe` 行。
+    ///
+    /// 两类操作渲染出来的主数据语句都是 `UPDATE pe:…`，而 SurrealDB 2.x 的 `UPDATE`
+    /// 命不中记录就是空操作；暂存库起点是空的，这两类目标的 `pe` 行只存在于持久层。
+    /// 于是任何在窗口上下文里解析生成根的调用都只会拿到 `None`——「一次性持有全部
+    /// 生成根锁」在暂存世界里会静默退化成一把都不持有。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_cannot_see_the_ownership_of_deleted_or_modified_targets() {
+        use crate::data_interface::staging::{ResourceThresholds, lifecycle::create_window_on};
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let mut window = create_window_on(&instance, 7995, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
+
+        let deleted = RefU64((7995_u64 << 32) | 10);
+        let modified = RefU64((7995_u64 << 32) | 11);
+        let mut range = BTreeMap::new();
+        range.insert(
+            1,
+            vec![
+                EleOperationData::new(deleted, 1, EleOperationDetail::Deleted),
+                EleOperationData::new(
+                    modified,
+                    1,
+                    EleOperationDetail::Modified(ModifiedElement {
+                        current_data: Default::default(),
+                        added_attrs: Default::default(),
+                        deleted_attrs: Default::default(),
+                        modified_attrs: Default::default(),
+                        added_explicit_attrs: Default::default(),
+                        deleted_explicit_attrs: Default::default(),
+                        modified_explicit_attrs: Default::default(),
+                        added_uda_attrs: Default::default(),
+                        deleted_uda_attrs: Default::default(),
+                        modified_uda_attrs: Default::default(),
+                        noun: "DAMP".to_string(),
+                        children_changed: None,
+                    }),
+                ),
+            ],
+        );
+
+        IncrementPipeline::stage_parsed_window(&mut window, &range, 7995)
+            .await
+            .expect("stage parsed window");
+
+        let unit_types = vec!["BRAN".to_string()];
+        for refno in [deleted, modified] {
+            let refno = RefnoEnum::from(refno);
+            let pe = window
+                .scope(aios_core::get_pe(refno))
+                .await
+                .expect("staged read");
+            assert!(pe.is_none(), "暂存里不该凭空出现 {refno} 的 pe 行: {pe:?}");
+            let root = window
+                .scope(
+                    crate::data_interface::generation_root::resolve_live_element_generation_root(
+                        refno,
+                        &unit_types,
+                    ),
+                )
+                .await
+                .expect("staged root resolution");
+            assert!(
+                root.is_none(),
+                "暂存态解析不出 {refno} 的生成根，锁范围会静默漏掉它: {root:?}"
+            );
+        }
+
+        window.drop_database().await.expect("cleanup");
+    }
+
     #[test]
     fn reverse_index_failure_requires_durable_recovery_before_finalize() {
         let source = include_str!("increment_pipeline.rs");

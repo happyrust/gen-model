@@ -367,9 +367,23 @@ fn staged_window_has_room_semantics(db_type: &str, gen_spatial_tree: bool) -> bo
     gen_spatial_tree && db_type.eq_ignore_ascii_case("DESI")
 }
 
+/// 一次性锁住本窗口将要改动的**全部**生成根（ADR-017 I8；方案 W2.1/W2.2）。
+///
+/// 位姿与删除改的是整棵子树的模型产物，所以锁范围不是目标本身，而是子树里带产物的
+/// 节点各自所属的生成根——那份名单由 [`ModelMutationPreload`] 顺带算出，不必再对每个
+/// 目标单独展开一次后代。
+///
+/// 归属一律按**窗口前状态**（持久层）解析。暂存里这些目标的 `pe` 行压根不存在：解析
+/// 阶段的删除与修改都渲染成 `UPDATE pe:…`，而 `UPDATE` 命不中就是空操作，照暂存解析
+/// 的结果恒为 `None`，等于一把锁都不持有（`the_window_cannot_see_the_ownership_of_
+/// deleted_or_modified_targets` 钉的就是这一条）。
+///
+/// 排序去重是防死锁纪律：多个持有者必须按同一顺序（refno 字典序）获取。
 async fn hold_staged_model_mutation_roots(
     new_units: &[crate::data_interface::manual_update::UnitTask],
     plan: &crate::data_interface::model_update_plan::ModelUpdatePlan,
+    mutation_targets: &[aios_core::RefnoEnum],
+    mutation_preload: &crate::data_interface::staging::preload::ModelMutationPreload,
 ) -> anyhow::Result<usize> {
     use crate::data_interface::model_update_plan::ModelWorkAction;
 
@@ -385,27 +399,18 @@ async fn hold_staged_model_mutation_roots(
         )
         .collect::<std::collections::BTreeSet<_>>();
 
-    for item in plan.work_items.iter().filter(|item| {
-        matches!(item.action, ModelWorkAction::Transform | ModelWorkAction::DeleteCleanup)
-    }) {
-        let target = item
-            .target_refno
-            .parse::<aios_core::RefU64>()
-            .map(aios_core::RefnoEnum::from)
-            .map_err(|_| anyhow::anyhow!("无效模型修改目标 {}", item.target_refno))?;
-        let mut candidates = vec![target];
-        candidates.extend(aios_core::query_deep_children_refnos(target).await?);
-        for candidate in candidates {
-            if let Some(root) =
-                crate::data_interface::generation_root::resolve_live_element_generation_root(
-                    candidate,
-                    &unit_types,
-                )
-                .await?
-            {
-                roots.insert(root.root.to_pdms_str());
-            }
-        }
+    let mut candidates = mutation_targets.to_vec();
+    candidates.extend_from_slice(mutation_preload.model_refnos());
+    candidates.sort_unstable();
+    candidates.dedup();
+    for root in crate::data_interface::generation_root::resolve_generation_roots_on(
+        &aios_core::SUL_DB,
+        &candidates,
+        &unit_types,
+    )
+    .await?
+    {
+        roots.insert(root.root.to_pdms_str());
     }
 
     for root in &roots {
@@ -577,9 +582,15 @@ async fn execute_frozen_batch(
     }
 
     let spatial = window.deferred_spatial().await;
-    window
-        .merge_room_recalc_changes(&spatial.room_changes)
-        .await;
+    // 暂存路径的入队口就是这次 merge，门控与 `enqueue_room_recalc` 必须是同一道：
+    // 合并进 plan 等于随尾事务落成 durable pending，而 `room_round` 按 `gen_spatial_tree`
+    // 早退，开关关着时这些行永远等不到消费者，只会在 `/update/pending-units` 里一直涨。
+    // 门只看开关不看 db_type：开着时即便房间目标漏进非 DESI 窗口，空闲轮照样收得掉。
+    if mgr.db_option.gen_spatial_tree {
+        window
+            .merge_room_recalc_changes(&spatial.room_changes)
+            .await;
+    }
     let finalize = window
         .staged_finalize()
         .await
@@ -1010,28 +1021,39 @@ async fn execute_frozen_batch_body(
                     .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
                     .filter(|refno| refno.is_valid())
                     .collect::<Vec<_>>();
-                let report = match hold_staged_model_mutation_roots(&new_units, &plan).await {
-                    Ok(held) => match crate::data_interface::staging::preload::preload_model_mutation_targets(
+                // 顺序即纪律：闭包解析（只读持久层）→ 持锁 → 预载拷贝 → 前置执行。
+                // 拷贝是本窗口第一次 staging 模型写，一旦跑在持锁之前，按需生成就能挤进
+                // 「拷走窗口前产物」与「锁上这个根」之间，窗口写回再把它的成果覆盖掉。
+                let prereq = async {
+                    let mutation_preload =
+                        crate::data_interface::staging::preload::plan_model_mutation_preload(
+                            &mutation_targets,
+                        )
+                        .await
+                        .map_err(|error| format!("窗口内模型前置闭包解析失败: {error:#}"))?;
+                    let held = hold_staged_model_mutation_roots(
+                        &new_units,
+                        &plan,
                         &mutation_targets,
+                        &mutation_preload,
                     )
                     .await
-                    {
-                        Ok(_) => {
-                            println!("窗口内模型修改已持有 {held} 个生成根锁");
-                            model_update_pending::run_staged_non_regen_work(
-                                mgr,
-                                &plan.work_items,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            warnings.push(format!("窗口内模型前置工作集预载失败: {error:#}"));
-                            non_regen_failed = true;
-                            Default::default()
-                        }
-                    },
-                    Err(error) => {
-                        warnings.push(format!("窗口内模型生成根锁范围解析失败: {error:#}"));
+                    .map_err(|error| format!("窗口内模型生成根锁范围解析失败: {error:#}"))?;
+                    crate::data_interface::staging::preload::apply_model_mutation_preload(
+                        &mutation_preload,
+                    )
+                    .await
+                    .map_err(|error| format!("窗口内模型前置工作集预载失败: {error:#}"))?;
+                    Ok::<usize, String>(held)
+                }
+                .await;
+                let report = match prereq {
+                    Ok(held) => {
+                        println!("窗口内模型修改已持有 {held} 个生成根锁");
+                        model_update_pending::run_staged_non_regen_work(mgr, &plan.work_items).await
+                    }
+                    Err(reason) => {
+                        warnings.push(reason);
                         non_regen_failed = true;
                         Default::default()
                     }
@@ -1824,6 +1846,21 @@ async fn room_round(
     if !mgr.db_option.gen_spatial_tree {
         return false;
     }
+    // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
+    // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
+    // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
+    // 出队那道门只管住了新批次，空闲轮照跑，房间轮得自己再拦一道。
+    match SideEffectCompensator::has_pending_spatial_work().await {
+        Ok(false) => {}
+        Ok(true) => {
+            println!("提交后空间收敛未完成，本轮不收房间（陈旧空间树上算出的归属会覆盖对的边）");
+            return false;
+        }
+        Err(error) => {
+            println!("检查提交后空间收敛状态失败（暂缓房间轮）: {error:#}");
+            return false;
+        }
+    }
     let counts = match model_update_pending::count_room_targets().await {
         Ok(counts) => counts,
         Err(error) => {
@@ -2060,6 +2097,116 @@ mod tests {
             .expect("spatial reconcile gate");
         let dequeue = body.find("freeze_next(registry)").expect("dequeue call");
         assert!(reconcile < dequeue, "spatial convergence must precede dequeue");
+    }
+
+    /// 统一根锁必须夹在「只读闭包解析」与「拷贝进暂存」之间。
+    ///
+    /// 拷贝是本窗口第一次 staging 模型写。跑在持锁之前，按需生成就能在「拷走窗口前
+    /// 产物」与「锁上这个根」之间挤进来：它照持久层旧态生成并落库，窗口写回再拿基于
+    /// 旧拷贝算出的结果把它覆盖掉（ADR-017 I8）。
+    #[test]
+    fn the_root_lock_closes_before_anything_is_copied_into_staging() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch_body(")
+            .expect("staged body must exist")
+            .1
+            .split_once("run_staged_non_regen_work(")
+            .expect("前置执行是这段的终点")
+            .0;
+
+        let plan_at = body
+            .find("plan_model_mutation_preload(")
+            .expect("闭包解析必须先于持锁");
+        let hold_at = body
+            .find("hold_staged_model_mutation_roots(")
+            .expect("窗口必须一次性持有全部生成根锁");
+        let copy_at = body
+            .find("apply_model_mutation_preload(")
+            .expect("预载拷贝必须存在");
+        assert!(
+            plan_at < hold_at && hold_at < copy_at,
+            "顺序必须是 闭包解析 → 持锁 → 拷贝: {body}"
+        );
+    }
+
+    /// 位姿 / 删除目标的生成根只能按窗口前状态（持久层）解析。
+    ///
+    /// 暂存里这些目标的 `pe` 行并不存在——解析阶段的删除与修改都渲染成 `UPDATE pe:…`，
+    /// 命不中就是空操作。照暂存解析恒为 `None`，锁范围会静默塌成空集。
+    #[test]
+    fn mutation_roots_resolve_against_the_pre_window_persistent_state() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn hold_staged_model_mutation_roots(")
+            .expect("锁范围收集必须存在")
+            .1
+            .split_once("\nasync fn ")
+            .expect("之后还有别的函数")
+            .0;
+
+        assert!(
+            body.contains("resolve_generation_roots_on(") && body.contains("SUL_DB"),
+            "锁范围必须显式解析持久层: {body}"
+        );
+        assert!(
+            !body.contains("resolve_live_element_generation_root("),
+            "被路由的读在窗口里看的是暂存，解析不出被删/被改元素的归属: {body}"
+        );
+    }
+
+    /// `gen_spatial_tree` 关着时，包围盒变化不得被合并成 durable 房间任务。
+    ///
+    /// 这次 merge 就是暂存路径的入队口，门控必须与 `enqueue_room_recalc` 同一道：
+    /// 合并进 plan 等于随尾事务落 pending，而 `room_round` 按同一个开关早退，
+    /// 于是这些行永远没有消费者，只会在 `/update/pending-units` 里一直堆。
+    #[test]
+    fn aabb_room_changes_only_become_durable_work_when_the_spatial_tree_is_on() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("staged batch must exist")
+            .1
+            .split_once("async fn drop_window_and_sweep(")
+            .expect("staged batch body boundary")
+            .0;
+
+        let merge_at = body
+            .find("merge_room_recalc_changes(")
+            .expect("包围盒变化必须并进 finalize plan");
+        let gate_at = body[..merge_at]
+            .rfind("if mgr.db_option.gen_spatial_tree")
+            .expect("merge 之前必须有 gen_spatial_tree 门");
+        assert!(
+            body[gate_at..merge_at].lines().count() <= 6,
+            "门与 merge 之间不该再插别的分支，否则门管不住它: {}",
+            &body[gate_at..merge_at]
+        );
+    }
+
+    /// 空间收敛没做完时，空闲轮不得收房间。
+    ///
+    /// `drain_queue_until_empty` 的收敛门只挡住了新批次出队；主循环紧接着照跑空闲轮，
+    /// 而整间分支的成员候选正取自那棵已知陈旧的树，待摘的删除也还压在意图里。
+    #[test]
+    fn a_stale_spatial_tree_also_holds_back_the_room_round() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn room_round(")
+            .expect("room_round 必须存在")
+            .1
+            .split_once("\nasync fn ")
+            .expect("room_round 之后还有别的函数")
+            .0;
+
+        let spatial_at = body
+            .find("has_pending_spatial_work()")
+            .expect("房间轮必须先问空间收敛做完没有");
+        let count_at = body
+            .find("count_room_targets()")
+            .expect("房间轮必须统计目标");
+        let drain_at = body.find("drain_rooms").expect("房间轮必须消化房间任务");
+        assert!(spatial_at < count_at && spatial_at < drain_at, "{body}");
     }
 
     #[test]

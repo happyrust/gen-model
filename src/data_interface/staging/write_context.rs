@@ -87,6 +87,11 @@ impl StagingWriteContext {
         }
     }
 
+    /// 本窗口已经决定要从空间树上摘掉、但要等提交后才真摘的那些 refno。
+    pub async fn deferred_spatial_removals(&self) -> HashSet<aios_core::RefnoEnum> {
+        self.spatial.lock().await.remove.clone()
+    }
+
     pub async fn defer_room_changes(
         &self,
         changes: &[crate::fast_model::occ_generate::AabbChange],
@@ -195,6 +200,17 @@ pub(crate) async fn settle_staged_plan_items(
     };
     context.settle_plan_items(succeeded).await;
     true
+}
+
+/// 当前窗口里已被删除、但空间树上还留着旧包围盒的构件（窗口外为空集）。
+///
+/// 摘树推迟到提交之后（[`StagingWriteContext::defer_spatial_remove`]），所以窗口内
+/// 任何**从树上取候选**的计算都必须自己把这批排除掉，否则会拿它们的旧位置继续算。
+pub(crate) async fn staged_spatial_removals() -> HashSet<aios_core::RefnoEnum> {
+    match active_staging_writes() {
+        Some(context) => context.deferred_spatial_removals().await,
+        None => HashSet::new(),
+    }
 }
 
 pub(crate) async fn defer_staged_regen_settlement(root_refno: String, revision: u64) -> bool {
