@@ -38,6 +38,8 @@
 4. 增量面板重算只维护 `room_relate`；现与 `room_panel_relate` 使用同一面板重算入口，staging 与 durable drain 共用。
 5. 窗口未吸收已有 pending revision，成功根可能在提交后再次生成；现合并本库 pending、窗口内恢复 fresh 合批、成功根从 finalize 计划移除，并以 revision 条件在尾事务收口已有行。
 
+A5 当时留的「等待**或**拒绝」二选一，实现阶段已定为**拒绝**：`model/ensure` 用 `try_lock`，命中被窗口持有的根即回 409 conflict，不排队。第 3 条把锁域从单根扩到「窗口触碰的全部根 × 整个窗口时长」之后，这个拒绝面积明显变大，属于本次唯一对外可见的行为变化（口径见 ADR-017 结果 / 约束）。
+
 验收证据以当次 `cargo test --lib`、`cargo test --lib --features http_api`、隔离 room_fixture 与崩溃/持久化故障注入结果为准，不再引用固定测试数量。
 | F1-F3 | 三大担心：journal 假 redo / 暂存与提交不等价 / 长窗口资源失控 | 与 A2/A1+E1/B1 同源 | 已由上述条目覆盖（T0.5、T0.6+T5.2/T5.3、T0.3） | — |
 

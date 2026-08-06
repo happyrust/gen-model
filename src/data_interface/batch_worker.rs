@@ -1276,6 +1276,36 @@ fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask)
         && model_update_pending::root_joins_regen_batch(task.attempts, &task.root_refno)
 }
 
+/// 这个刚生成成功的根，要拿哪个 revision 去收口它的**存量** durable pending 行。
+///
+/// `UnitTask.revision` 只带得到本库那一份：工作单按 `dbnum` 精确过滤
+/// （`load_pending_model_units_for_retry`——别让 A 库的批次去跑 B 库的根），而按需生成
+/// 写的行是 `dbnum: 0`（`ensure_regen_pending`），反向级联派生的行同样不认领 dbnum。
+/// **跑**要限本库，**收口**不必：行 id 只按 `(action, target)` 定址，而这个根要的就是
+/// 刚刚做完的这件事。少了这次补查，那两类行会原封不动留到提交之后，空闲轮
+/// `drain_data_phases` 立刻对着持久层把同一个根再生成一遍。
+///
+/// 补查不看 attempts：死信也收。那行记的工作本窗口已经做成了，留着它只会要求人工复活
+/// 一件早已完成的事。
+async fn staged_settlement_revision(
+    task: &crate::data_interface::manual_update::UnitTask,
+) -> Option<u64> {
+    if task.revision.is_some() {
+        return task.revision;
+    }
+    match model_update_pending::current_regen_revision(&task.root_refno).await {
+        Ok(revision) => revision,
+        Err(error) => {
+            log::warn!(
+                "读取生成根 {} 的存量 pending revision 失败，本窗口不收口它\
+                 （提交后空闲轮会把它再生成一遍）: {error:#}",
+                task.root_refno
+            );
+            None
+        }
+    }
+}
+
 async fn run_single_unit(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -1381,7 +1411,7 @@ async fn run_single_unit(
     let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
     let settlement_failed = if staged {
         if outcome.is_ok() {
-            if let Some(revision) = task.revision {
+            if let Some(revision) = staged_settlement_revision(&task).await {
                 crate::data_interface::staging::defer_staged_regen_settlement(
                     task.root_refno.clone(),
                     revision,
@@ -1530,19 +1560,15 @@ async fn run_unit_worklist(
                     batch_started.elapsed().as_millis(),
                     render_roots(&roots)
                 );
-                let settlements = batchable
-                    .iter()
-                    .filter_map(|task| {
-                        task.revision
-                            .map(|revision| (task.root_refno.clone(), revision))
-                    })
-                    .collect::<Vec<_>>();
                 if staged {
-                    for (root, revision) in settlements {
-                        crate::data_interface::staging::defer_staged_regen_settlement(
-                            root, revision,
-                        )
-                        .await;
+                    for task in &batchable {
+                        if let Some(revision) = staged_settlement_revision(task).await {
+                            crate::data_interface::staging::defer_staged_regen_settlement(
+                                task.root_refno.clone(),
+                                revision,
+                            )
+                            .await;
+                        }
                     }
                     let succeeded = roots
                         .iter()
@@ -1555,12 +1581,21 @@ async fn run_unit_worklist(
                         })
                         .collect();
                     crate::data_interface::staging::settle_staged_plan_items(&succeeded).await;
-                } else if let Err(error) =
-                    model_update_pending::clear_regen_work_batch(&settlements).await
-                {
-                    log::error!("批量收口模型 pending 失败 roots={}: {error:#}", roots.len());
-                    warnings.push(error.to_string());
-                    settlement_failed = true;
+                } else {
+                    let settlements = batchable
+                        .iter()
+                        .filter_map(|task| {
+                            task.revision
+                                .map(|revision| (task.root_refno.clone(), revision))
+                        })
+                        .collect::<Vec<_>>();
+                    if let Err(error) =
+                        model_update_pending::clear_regen_work_batch(&settlements).await
+                    {
+                        log::error!("批量收口模型 pending 失败 roots={}: {error:#}", roots.len());
+                        warnings.push(error.to_string());
+                        settlement_failed = true;
+                    }
                 }
                 drop(guards);
                 drop(locks);
@@ -2262,6 +2297,32 @@ mod tests {
             Some(7),
             "not-a-refno"
         )));
+    }
+
+    /// 窗口生成成功的根，要连它**存量**的 durable pending 一起收口——哪怕那行不是本库记的。
+    ///
+    /// 工作单按 `dbnum` 精确过滤（别让 A 库的批次去跑 B 库的根），于是 `UnitTask.revision`
+    /// 只带得到本库那一份；而按需生成写的行是 `dbnum: 0`，反向级联派生的行同样不认领
+    /// dbnum。两个 staged 收口点若直接读 `task.revision`，那两类行就原封不动留到提交之后，
+    /// 空闲轮 `drain_data_phases` 立刻对着持久层把同一个根再生成一遍——缺陷 5 的原样症状，
+    /// 只是换了一类行。
+    #[test]
+    fn staged_settlement_also_clears_pending_rows_this_database_never_recorded() {
+        // 掐掉测试模块自身，否则下面这个字面量会把自己数进去。
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("测试模块在文件末尾")
+            .0;
+
+        assert_eq!(
+            source.matches("staged_settlement_revision(").count(),
+            3,
+            "一次定义 + 逐根与批量两个 staged 收口点"
+        );
+        assert!(
+            !source.contains("if let Some(revision) = task.revision"),
+            "staged 收口不能只认 UnitTask 上那一份 revision：dbnum=0 的存量行会漏收"
+        );
     }
 
     #[test]
