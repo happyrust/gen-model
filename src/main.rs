@@ -27,7 +27,6 @@ use aios_core::SUL_DB;
 use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::ssc_setting::{
     set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,

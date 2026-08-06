@@ -877,7 +877,7 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
         // 寄存进窗口。排在门后面的话，`gen_spatial_tree` 关着的 DESI 窗口里树从未加载，
         // `tree_box_changed` 对每个元素都判成「首次见到」，整批被捕获成房间变化随尾事务
         // 落成 durable pending，而空闲轮的房间轮按同一个开关早退——这些行永远没有消费者。
-        // 延迟刷新同理：收敛一棵没人加载、没人查询的树，只会把一份残缺的 accel_tree.bin
+        // 延迟刷新同理：收敛一棵没人加载、没人查询的树，只会把一份残缺的项目树文件
         // 写回磁盘。
         if !maintain_spatial_tree {
             continue;

@@ -17,6 +17,11 @@
 //!
 //! 这条用例**会写真库**（模型实例、`.mesh` 文件、这一间房的归属边、队列行），并在收尾
 //! 把构件的 `POS` 原样写回。跑之前先确认 8009 上是你能写的那套数据。
+//!
+//! 同一套靶子上另有两条，来自
+//! [issue #13](https://github.com/happyrust/gen-model/issues/13) 的 C2 与 C3：构件**移出**
+//! 房间后归属要消失（上面那条只验了移动后能回来），以及按需生成留下的 `dbnum: 0` 存量
+//! pending 行对它自己那个库是不可见的。
 
 #[cfg(test)]
 mod tests {
@@ -133,13 +138,36 @@ mod tests {
         response.take(0).expect("decode aabb")
     }
 
-    /// 清掉本轮排出的房间队列行，别把真库的队列留脏。
+    /// 这个生成根在 `model_update_pending` 里的那一行，渲染成
+    /// `[id, dbnum, revision, attempts, status]`；没有则 `None`。
+    async fn pending_row_of(root_refno: &str) -> Option<String> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE <string>[record::id(id), dbnum, revision, attempts, status] \
+                 FROM model_update_pending \
+                 WHERE action = 'regen_root' AND target_refno = '{root_refno}';"
+            ))
+            .await
+            .expect("query pending row")
+            .check()
+            .expect("valid pending query");
+        let rows: Vec<String> = response.take(0).expect("decode pending row");
+        rows.into_iter().next()
+    }
+
+    /// 只清掉本轮为这两个靶子排出的房间队列行。
+    ///
+    /// 这里曾经是 `DELETE … WHERE action IN ['room_recalc_element', 'room_recalc_panel']`
+    /// ——一把清空整张表的房间行。在真库上跑一次就会连带抹掉别人的积压（实测抹掉过 41 条
+    /// `dbnum = 1112` 的 `room_recalc_element`），而那些行没有任何东西会把它们排回来：
+    /// 房间任务的入队条件是「AABB 真的变了」，删掉就等于那批构件的归属静默停在旧值。
+    /// 收尾只该收自己排的那两行，按确定的 record id 定点删。
     async fn clear_room_queue() {
         SUL_DB
-            .query(
-                "DELETE model_update_pending \
-                 WHERE action IN ['room_recalc_element', 'room_recalc_panel'];",
-            )
+            .query(format!(
+                "DELETE model_update_pending:room_recalc_element_{ELEMENT};\
+                 DELETE model_update_pending:room_recalc_panel_{PANEL};"
+            ))
             .await
             .expect("clear room queue")
             .check()
@@ -289,6 +317,159 @@ mod tests {
             restored, baseline,
             "\n位置写回之后归属也要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}"
         );
+    }
+
+    /// issue #13 C2：构件**移出**房间之后，归属边必须消失。
+    ///
+    /// 上面那条只覆盖了「移动 +100 之后仍回到 R512」——移完 AABB 的 `mins.z` 是 5907.67，
+    /// 人还在房间里，验的是「边能回来」。反方向没人测：把它挪到房间外，那条边必须被清掉。
+    /// 这一半失手同样是静默的——元素分支先清后写，清那一步只覆盖本轮候选面板，漏了就留下
+    /// 一条指向它早已离开的房间的陈旧边，而任务照样成功。
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8009 cargo test --lib --features http_api \
+    ///     live_issue13_c2_moving_out_of_the_room_clears_membership -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: 写真实项目库（这个构件的 POS、它的归属边与队列行）"]
+    async fn live_issue13_c2_moving_out_of_the_room_clears_membership() {
+        connect_live().await;
+
+        let element = RefnoEnum::from(ELEMENT);
+        let panel = RefnoEnum::from(PANEL);
+        let mut db_option = get_db_option().clone();
+        db_option.room_key_word = Some(vec![ROOM_KEY_WORD.to_string()]);
+        db_option.gen_spatial_tree = true;
+
+        let original_z = pos_z().await;
+        let baseline = edges_of_element().await;
+        assert!(
+            !baseline.is_empty(),
+            "起点就没有归属边，这条用例无从谈起——先跑 \
+             live_issue7_real_db_deleted_edges_come_back，或按 -RM05-R512 重建一次这间房"
+        );
+        println!("[issue13-c2] 起点 POS.z={original_z} 归属={baseline:#?}");
+
+        load_aabb_tree().await.expect("load spatial tree");
+        update_inst_relate_aabbs_by_refnos(&[panel, element], true)
+            .await
+            .expect("refresh both aabbs into the tree");
+
+        let mgr = AiosDBManager::init_form_config()
+            .await
+            .expect("init db manager");
+        clear_room_queue().await;
+
+        // 真的挪出去：+100 是上面那条用例的量级，构件还在房间里。
+        set_pos_z(original_z + 100_000.0).await;
+        aios_core::clear_all_caches_batch(&[element]).await;
+        mgr.update_world_transforms(&HashSet::from([element]))
+            .await
+            .expect("transform work item");
+        println!("[issue13-c2] 移出后队列: {:?}", room_queue_rows().await);
+        println!("[issue13-c2] 移出后 aabb: {:?}", element_aabb_json().await);
+        let done_out = drain_rooms(&db_option).await.expect("drain room work");
+        let after_out = edges_of_element().await;
+
+        // 收尾：写回原位，把归属收敛回基线。
+        set_pos_z(original_z).await;
+        aios_core::clear_all_caches_batch(&[element]).await;
+        mgr.update_world_transforms(&HashSet::from([element]))
+            .await
+            .expect("restore transform");
+        let _ = drain_rooms(&db_option).await;
+        let restored = edges_of_element().await;
+        clear_room_queue().await;
+
+        assert!(done_out >= 1, "那条元素任务必须被消费掉，实得 {done_out}");
+        assert!(
+            after_out.is_empty(),
+            "\n构件已经挪出 R512，它的归属边必须被清掉\n实得: {after_out:#?}"
+        );
+        assert_eq!(
+            restored, baseline,
+            "\n写回原位之后归属要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}"
+        );
+    }
+
+    /// issue #13 C3：按需生成留下的存量 pending 行，对它自己那个库是不可见的。
+    ///
+    /// 重试工作单按 `dbnum` **精确过滤**（`load_pending_model_units_for_retry`，为的是别让
+    /// A 库的批次去跑 B 库的根），而 `ensure_regen_pending` 写的行 `dbnum` 是 0。于是窗口
+    /// 即便把这个根重新生成成功，也拿不到它的 revision，尾事务不会收它，提交后空闲轮立刻
+    /// 对着持久层把同一个根再生成一遍。修复是在 `UnitTask.revision` 缺位时补查一次
+    /// `current_regen_revision`——那条路不按 dbnum 过滤。
+    ///
+    /// 三件事在真库真根上钉死：写的确实是 `dbnum: 0`；按库号取的工作单确实看不见它；而
+    /// 按 `dbnum = 0` 取得到，所以「看不见」只能归因于那道过滤，不是行本身有问题。
+    ///
+    /// ```text
+    /// AIOS_LIVE_WS=ws://localhost:8009 cargo test --lib --features http_api \
+    ///     live_issue13_c3_on_demand_pending_is_invisible_to_its_own_database -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: 在真库上写一行 model_update_pending 再删掉"]
+    async fn live_issue13_c3_on_demand_pending_is_invisible_to_its_own_database() {
+        use crate::data_interface::manual_update::load_pending_model_units_for_retry;
+        use crate::data_interface::model_update_pending::{
+            current_regen_revision, ensure_regen_pending,
+        };
+
+        /// `pe:24383_66460`（那个 CAP）的生成根，`/1WCC1135/B1`。
+        const ROOT: &str = "24383/66459";
+        const ROOT_DBNUM: u32 = 7999;
+
+        connect_live().await;
+
+        assert!(
+            pending_row_of(ROOT).await.is_none(),
+            "真库里已经有 {ROOT} 的 pending 行了，这条用例会把它覆盖掉——先确认那行是谁的"
+        );
+
+        let revision = ensure_regen_pending(ROOT, "BRAN")
+            .await
+            .expect("按需生成落 durable pending");
+        let row = pending_row_of(ROOT).await.expect("刚写的行必须查得到");
+        println!("[issue13-c3] 按需生成写的行: {row}");
+        assert!(
+            row.starts_with("[regen_root_24383_66459, 0,"),
+            "按需生成写的行 dbnum 必须是 0——这正是它被窗口漏收的根因: {row}"
+        );
+
+        let by_dbnum = load_pending_model_units_for_retry(ROOT_DBNUM)
+            .await
+            .expect("按库号取重试工作单");
+        let by_zero = load_pending_model_units_for_retry(0)
+            .await
+            .expect("按 dbnum=0 取重试工作单");
+        let looked_up = current_regen_revision(ROOT).await.expect("补查当前 revision");
+
+        // 收尾放在断言之前：断言一旦红了，这行不能留在真库里。
+        SUL_DB
+            .query(format!(
+                "DELETE model_update_pending \
+                 WHERE action = 'regen_root' AND target_refno = '{ROOT}';"
+            ))
+            .await
+            .expect("cleanup pending row")
+            .check()
+            .expect("valid cleanup");
+
+        assert!(
+            !by_dbnum.iter().any(|unit| unit.root_refno == ROOT),
+            "按 dbnum={ROOT_DBNUM} 取的工作单不该看见 dbnum=0 的行；看得见就说明那道过滤变了，\
+             本用例连同它守的那个补查一起要重新评估"
+        );
+        assert!(
+            by_zero.iter().any(|unit| unit.root_refno == ROOT),
+            "dbnum=0 那一侧必须取得到——否则上面那条『看不见』就不能归因于 dbnum 过滤"
+        );
+        assert_eq!(
+            looked_up,
+            Some(revision),
+            "补查这条路必须看得见它，否则窗口把这个根生成成功之后仍然收不了口"
+        );
+        assert!(pending_row_of(ROOT).await.is_none(), "收尾没删干净");
     }
 
     /// 只读探针：把两步复现的几个前提各查一遍，失败时用它分清是哪一段没到位。

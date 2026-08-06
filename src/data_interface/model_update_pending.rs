@@ -484,6 +484,10 @@ pub(crate) fn render_finalize_tail_with_effects(
                 remove_refnos,
             )?,
         );
+        // 空间版本号与意图、水位同一事务递增：启动侧拿 sidecar 与它比相等来决定
+        // 树文件还能不能信（load_project_tree_verified）。只有携带空间意图的尾
+        // 事务才 bump——没动树的提交不该作废别人的文件。
+        statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     }
     statements.extend(settled_regen.iter().map(|(root, revision)| {
         render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
@@ -2735,12 +2739,29 @@ mod tests {
         .expect("staged finalize tail");
 
         let spatial = sql.find("spatial_reconcile_8191_42").expect("spatial intent");
+        let epoch = sql
+            .find("UPSERT spatial_epoch:current")
+            .expect("epoch bump must ride the same tail");
         let settlement = sql
             .find("action = 'regen_root' AND target_refno = '16777216/5' AND (revision?:0) = 7")
             .expect("revision-guarded settlement");
         let watermark = sql.find("UPSERT dbnum_watermark:8191").expect("watermark");
         assert!(spatial < watermark, "{sql}");
+        assert!(
+            epoch < watermark,
+            "空间版本号必须与意图、水位同一事务且先于水位: {sql}"
+        );
         assert!(settlement < watermark, "{sql}");
+    }
+
+    /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
+    #[test]
+    fn tail_without_spatial_effects_does_not_bump_the_epoch() {
+        let sql = render_finalize_tail(8191, 42, &ModelUpdatePlan::default(), &[]);
+        assert!(
+            !sql.contains("spatial_epoch"),
+            "无空间意图时不得 bump: {sql}"
+        );
     }
 
     #[test]

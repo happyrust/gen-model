@@ -1624,6 +1624,23 @@ impl AiosDBManager {
             remount_secs.max(1),
         ));
         remount_tick.tick().await; // interval 的第一拍是立即触发的，丢掉
+
+        // 周期对账重扫：PollWatcher 的事件只发一次，处理途中失败（SUL_DB 连接抖动、
+        // 服务器重启——2026-08-06 现场）事件就永久丢了，E3D 不再保存的话那次变更
+        // 谁也追不回来。这里按固定间隔把「文件最新会话号 vs applied 水位」整面重比
+        // 一遍，一切来源的漏事件都在一个周期内被追回。入队按水位判定天然幂等，
+        // 与启动重扫 / 重挂补扫共用同一条 `sweep_watch_dirs` 路径。
+        // `AIOS_WATCH_RECONCILE_SECS` 覆盖间隔，0 = 关闭；整面重扫在网络盘上可能
+        // 较慢且与事件处理共用本循环，间隔别设太小。
+        let reconcile_secs = std::env::var("AIOS_WATCH_RECONCILE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(300);
+        let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_secs(
+            reconcile_secs.max(1),
+        ));
+        reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        reconcile_tick.tick().await; // 第一拍立即触发，而启动重扫刚扫过，丢掉
         loop {
             let res = tokio::select! {
                 incoming = rx.next() => match incoming {
@@ -1632,6 +1649,15 @@ impl AiosDBManager {
                 },
                 _ = remount_tick.tick(), if remount_secs > 0 => {
                     self.remount_watch_dirs(&mut watcher, &mut mounted).await;
+                    continue;
+                }
+                _ = reconcile_tick.tick(), if reconcile_secs > 0 => {
+                    if let Err(error) = self.sweep_watch_dirs("reconcile", false).await {
+                        // 失败不退避不计数：下一拍就是重试。
+                        let msg = format!("[reconcile] 周期对账重扫失败，等下一拍重试: {error:#}");
+                        log::warn!("{msg}");
+                        eprintln!("{msg}");
+                    }
                     continue;
                 }
             };
@@ -1671,10 +1697,12 @@ impl AiosDBManager {
 
                     println!("开始扫描数据库头部信息，过滤后路径: {:?}", &filtered_paths);
 
-                    // 本期执行范围每批重解一次：MDB 可能刚被改过（它自己就存在 SYS meta
-                    // 库里，而那个库的落库也会走这条路径）。解不出来就整批不入队，与
-                    // 启动重扫和手动触发同一条纪律——绝不退回「扫全项目」。
-                    let scope = match self.update_scope(None).await {
+                    // 本期执行范围走缓存解析：名单只在 SYS meta 批次落库时才变（那一刻
+                    // 缓存被显式失效），SUL_DB 瞬时不可用时暖缓存放行——一次连接抖动
+                    // 不该把整批事件丢掉（2026-08-06 现场）。解不出来（冷缓存 + 故障，
+                    // 或配置错误）仍整批不入队，绝不退回「扫全项目」；丢掉的事件由
+                    // 周期对账重扫兜底追回（见本循环的 reconcile_tick）。
+                    let scope = match self.update_scope_cached().await {
                         Ok(scope) => scope,
                         Err(error) => {
                             eprintln!("无法确定本期执行范围，本批文件事件不入队: {error:#}");

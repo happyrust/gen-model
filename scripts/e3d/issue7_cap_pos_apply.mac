@@ -1,0 +1,11 @@
+-- issue #7 end-to-end apply: raise the CAP 100mm so ams7999_0001 gets a real session.
+-- Baseline POS (from surreal pe:24383_66460): E -5001.4501953125 N 10705.8095703125 U 5821.669921875
+--   $M "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_pos_apply.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_pos_apply.log" OVER
+=24383/66460
+Q CE
+POS E -5001.4501953125 N 10705.8095703125 U 5921.669921875
+Q POS
+SAVEWORK 'CODEX issue7 e2e: CAP +100mm U'
+ALPHA LOG END

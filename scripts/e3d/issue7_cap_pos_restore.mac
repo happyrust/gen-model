@@ -1,0 +1,10 @@
+-- Restore the CAP moved by issue7_cap_pos_apply.mac.
+--   $M "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_pos_restore.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_pos_restore.log" OVER
+=24383/66460
+Q CE
+POS E -5001.4501953125 N 10705.8095703125 U 5821.669921875
+Q POS
+SAVEWORK 'CODEX issue7 e2e: CAP restore'
+ALPHA LOG END

@@ -267,7 +267,15 @@ impl SideEffectCompensator {
                 }
             }
             crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await?;
-            crate::fast_model::aabb_tree::persist_aabb_tree().await
+            // 只在树真的动过时落盘（脏位由 remove/refresh 两个变更入口维护）。
+            // 无条件全量序列化有一个销毁性的边界：`gen_spatial_tree` 关着时删除清理
+            // 照样寄存 remove 意图（那条路不看开关），而本进程从未加载过树——对空树
+            // 摘完之后把**空树**写过 `accel_tree_{project}.bin`，上一次开关开着时攒下
+            // 的全量成果就此被覆盖，下次开回开关只能靠启动期 `sync_aabb_tree_with_db`
+            // 全量重建自愈。开关开着时它也省掉无变更收敛轮的整树序列化。
+            crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty()
+                .await
+                .map(|_| ())
         }
         .await;
         if let Err(error) = outcome {
@@ -477,5 +485,33 @@ mod tests {
         )
         .expect_err("same refno cannot be refreshed and removed");
         assert!(error.to_string().contains("同时 refresh/remove"));
+    }
+
+    /// 收敛只许在树真的动过时落盘。
+    ///
+    /// 无条件 `persist_aabb_tree()` 的销毁性边界：`gen_spatial_tree` 关着时删除清理
+    /// 照样寄存 remove 意图（`delete_room_membership` 不看开关），尾事务照写 spatial
+    /// 行，而本进程从未加载过树——收敛轮对空树摘除零条之后，会把**空树**序列化覆盖
+    /// `accel_tree_{project}.bin`，销毁上一次开关开着时的全量成果。脏位门控的
+    /// `persist_aabb_tree_if_dirty` 在两个变更入口（摘除 > 0、刷新换过条目）之外
+    /// 不落盘，正好挡住这条路。真实落盘写 cwd 文件，单测不能实跑，只能钉源码。
+    #[test]
+    fn reconcile_persists_only_a_mutated_tree() {
+        let source = include_str!("side_effect_pending.rs");
+        let body = source
+            .split_once("pub async fn reconcile_spatial_pending(")
+            .expect("reconcile_spatial_pending must exist")
+            .1
+            .split_once("pub async fn has_pending_spatial_work(")
+            .expect("reconcile 之后是 pending 探针")
+            .0;
+        assert!(
+            body.contains("persist_aabb_tree_if_dirty("),
+            "收敛必须走脏位门控的落盘: {body}"
+        );
+        assert!(
+            !body.contains(concat!("persist_aabb_tree", "()")),
+            "无条件全量落盘会让空树覆盖项目树文件: {body}"
+        );
     }
 }

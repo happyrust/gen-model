@@ -183,7 +183,7 @@ async fn instance_counts(refno: RefnoEnum) -> anyhow::Result<InstanceCounts> {
     if scope.is_empty() {
         return Ok(InstanceCounts::default());
     }
-    let rows = aios_core::query_insts(scope.iter(), true).await?;
+    let rows = crate::data_interface::staging::query_valid_insts(&scope).await?;
     let renderable = rows
         .iter()
         .map(|row| {

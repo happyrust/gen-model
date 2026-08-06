@@ -53,9 +53,46 @@ fn resolve_identity<'a>(
 /// 由 `OnceLock` 只启动一次，死了就是永久死了、批次全停在 queued——而在此之前
 /// 这个端点会一路报 `status: ok`，外面分不出「大库在慢慢跑」和「消费者没了」。
 /// 两个字段要一起看：旗子立着而空转秒数很大 = 卡在长批次上；旗子倒了 = 真死了。
+///
+/// `sul_db` 回答的是「持久层现在连不连得上、刚才断没断过」。`connected` 来自
+/// 现场探活（`RETURN 1`，2 秒超时——WS 死连接上的查询会挂住，不设限 /health
+/// 自己就先失联）；断连账本（次数 / 最近时刻 / 最近错误）由写路径与探活失败
+/// 共同记账，进程内状态、重启清零。SDK 会自动重连，所以常见形态是
+/// `connected: true` 而 `last_disconnect_at` 是几分钟前——「刚才断过一次，
+/// 现在好了」正是这份字段组合要说的话。
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) =
         crate::data_interface::batch_worker::worker_liveness();
+    let probe_started = std::time::Instant::now();
+    let sul_db_connected = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        aios_core::SUL_DB.query("RETURN 1;"),
+    )
+    .await
+    {
+        Ok(Ok(_)) => json!({
+            "connected": true,
+            "ping_ms": probe_started.elapsed().as_millis() as u64,
+        }),
+        Ok(Err(error)) => {
+            crate::surreal_retry::record_sul_db_disconnect(&format!(
+                "/health 探活 transport failed: {error}"
+            ));
+            json!({ "connected": false, "ping_ms": serde_json::Value::Null })
+        }
+        Err(_) => {
+            crate::surreal_retry::record_sul_db_disconnect(
+                "/health 探活 transport failed: 超过 2 秒未响应",
+            );
+            json!({ "connected": false, "ping_ms": serde_json::Value::Null })
+        }
+    };
+    let (disconnects_total, last_disconnect_at, last_disconnect_error) =
+        crate::surreal_retry::sul_db_disconnect_snapshot();
+    let mut sul_db = sul_db_connected;
+    sul_db["disconnects_total"] = json!(disconnects_total);
+    sul_db["last_disconnect_at"] = json!(last_disconnect_at);
+    sul_db["last_disconnect_error"] = json!(last_disconnect_error);
     let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
         .await
         .unwrap_or_default();
@@ -79,6 +116,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
+        "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         "staging_window_blocks": window_blocks,
         "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
@@ -400,4 +438,40 @@ mod tests {
             .expect("background task should signal completion");
     }
 
+    /// `/health` 的 `sul_db` 字段：形状 + 探活纪律。
+    ///
+    /// `connected` 必须来自**带超时**的现场探活——WS 死连接上的查询会无限挂起，
+    /// 不包 timeout 的话持久层一断 /health 自己先失联，而运维恰恰在那种时刻查它。
+    /// 五个键（connected / ping_ms / disconnects_total / last_disconnect_at /
+    /// last_disconnect_error）是对外承诺，掉一个都是破坏性修改。
+    #[test]
+    fn health_exposes_sul_db_probe_and_disconnect_ledger() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health 之后是 update_preview")
+            .0;
+
+        let timeout_at = body
+            .find("tokio::time::timeout(")
+            .expect("探活必须带超时");
+        let probe_at = body
+            .find("SUL_DB.query(\"RETURN 1;\")")
+            .expect("必须现场探活持久层");
+        assert!(timeout_at < probe_at, "超时必须包住探活查询: {body}");
+
+        for key in [
+            "\"sul_db\"",
+            "\"connected\"",
+            "\"ping_ms\"",
+            "disconnects_total",
+            "last_disconnect_at",
+            "last_disconnect_error",
+        ] {
+            assert!(body.contains(key), "health 必须暴露 {key}: {body}");
+        }
+    }
 }

@@ -255,3 +255,88 @@
 - **不**新增独立 spatial 队列、锁管理器、后台服务或 ADR-018。
 - 冷生成、全量生成、RVM 基准流程保持不变；`GEN_MODEL_DIRECT_INCREMENT=1` 的紧急回退路径
   行为不变。
+
+## 6. 第二轮实现审核的落点映射（commit `9d673c44`）
+
+W1–W5 合入之后的复审又点出三条，都已在 `9d673c44` 收掉。**行号以该 commit 为准**
+（工作树随后续提交会漂）。共同点值得先说：三条全是「暂存路径绕过了直写路径早就立好的
+那道门」——门本身没错，错在暂存分支从门旁边走了过去。
+
+### H-2 `gen_spatial_tree` 关着的窗口制造永不消费的房间 pending
+
+| 落点 | 改动 |
+|---|---|
+| `src/fast_model/occ_generate.rs:882` | `if !maintain_spatial_tree { continue; }` 提到暂存分支（`:885`）**之前** |
+| `src/data_interface/batch_worker.rs:589-592` | `merge_room_recalc_changes` 套上 `gen_spatial_tree` 门 |
+
+根因比「merge 处缺门」深一层。`enqueue_room_recalc` 的入队口门控押着一条写在注释里的
+不变量：**变更集唯一的产地 `update_inst_relate_aabbs_by_refnos_with_spatial_tree` 在
+不维护空间树时恒返回空集**。暂存分支不走返回值、直接把意图寄存进窗口，于是它排在门
+后面就等于把这条不变量作废：`gen_spatial_tree=false` 时树从未 `load_aabb_tree`
+（`src/lib.rs:419`），`tree_box_changed` 对每个元素都判成「首次见到」，整批被捕获成
+房间变化 → 随尾事务落成 durable `RoomRecalc*` → 而 `room_round` 按同一个开关早退，
+这些行永远没有消费者，只在 `/update/pending-units` 里涨。
+
+门只看 `gen_spatial_tree`、不看 `room_semantics`：开关开着时即便房间目标漏进非 DESI
+窗口，空闲轮照样收得掉，那正是 `execute_frozen_batch` 既有注释描述的意图。
+
+**顺带闭合的同根漏点**：`defer_spatial_refresh` 也是无条件的。开关关着时每个窗口依旧
+写一行 `spatial_reconcile`，而 `reconcile_spatial_pending` 会把它应用到那棵从未加载的
+空树上再调 `persist_aabb_tree()`——把一份残缺的 `accel_tree_{project}.bin` 写回磁盘，
+而且这一步就跑在出队门上（W1.3），它一失败整条队列停。门提到分支之前，两侧一起关。
+
+守卫：`occ_generate.rs:1462` `a_disabled_spatial_tree_defers_nothing_into_the_staging_window`
+（钉门与暂存分支的先后）、`batch_worker.rs:2164`
+`aabb_room_changes_only_become_durable_work_when_the_spatial_tree_is_on`。
+
+### M-1 窗口内整间分支把本窗口刚删除的构件按旧位置写回
+
+| 落点 | 改动 |
+|---|---|
+| `src/fast_model/room_model.rs:932-937` | 排除集改为 `rooms.all_panels ∪ staged_spatial_removals()`，再喂给 `cal_room_refnos` |
+| `src/data_interface/staging/write_context.rs:91` | `StagingWriteContext::deferred_spatial_removals()` |
+| `src/data_interface/staging/write_context.rs:209` | 模块级 `staged_spatial_removals()`，窗口外恒为空集 |
+| `src/data_interface/staging/mod.rs:32` | 重导出 |
+
+摘树推迟到提交之后（`helper.rs::delete_room_membership` 的 `defer_spatial_remove`），
+所以窗口内树上还留着已删构件的旧包围盒，而整间分支的成员候选正是从树上捞的，第一轮
+`Inside` 判定不查库直接收编。同一个窗口里 `DeleteCleanup` 先清掉该构件的房间边，随后的
+面板目标又把它按旧包围盒写回 `room_relate`——journal 顺序保证这个错误终态被提交，且面板
+任务成功 `settle`，垃圾边要等下一次该面板被触发才清得掉。
+
+移动的构件不在此列：「面板先、元素后」的同轮元素任务会把它收敛回来。**纯删除没有元素
+任务兜底，是唯一漏网的形态**——这也正是暂存房间轮必须逐个跑、不能引入 `drain_rooms`
+那套同轮吸收的原因。窗口外该集合恒为空，直写路径行为不变。
+
+守卫：`room_model.rs:2021` `the_panel_branch_excludes_elements_this_window_already_deleted`。
+
+### M-2 空间收敛失败只挡出队，不挡空闲轮的房间 drain
+
+| 落点 | 改动 |
+|---|---|
+| `src/data_interface/side_effect_pending.rs:302` | `SideEffectCompensator::has_pending_spatial_work()`（`LIMIT 1` 存在性查询）|
+| `src/data_interface/batch_worker.rs:1853` | `room_round`（`:1838`）在 `gen_spatial_tree` 门之后、`count_room_targets` 之前再拦一道 |
+
+`drain_queue_until_empty` 收敛失败即停止出队（W1.3），但主循环随后照跑空闲轮，
+`room_round → drain_rooms` 会在一棵已知陈旧的树上跑整间分支。这与 R-B 自己的论据
+（「继续出队等于在陈旧空间树上算房间」）直接矛盾，还会放大 M-1——删除此刻还没从树上摘掉。
+
+拦在 `room_round` 而不是 `idle_round`：它是生产上 `drain_rooms` 的**唯一**漏斗
+（`model_update_pending::drain` 虽含房间阶段，但 worker 走的是 `drain_data_phases`）。
+判据查库而不看进程内失败标志：后者跨不过重启，而未收敛的意图恰恰是崩溃后最该被认出来
+的那一类。
+
+守卫：`batch_worker.rs:2192` `a_stale_spatial_tree_also_holds_back_the_room_round`。
+
+### 顺带修掉的一条顺序相关 flaky 用例
+
+`model_update_pending.rs` 里几处 `SELECT VALUE id FROM room_relate` 把返回的 `Thing`
+反序列化成 `Vec<String>`。断言 `is_empty()` 的那几处靠 0 行侥幸踩不到反序列化——一旦真的
+出现残留边（也就是它们存在的意义），报的是反序列化错而不是断言失败。统一改成
+`take::<Vec<surrealdb::sql::Thing>>`。
+
+### 本轮实测记录（2026-08-06 第二轮）
+
+`cargo test --lib` 与 `cargo test --lib --features http_api` 均 438/438，
+`cargo clippy --lib --features http_api` 在改动文件上无告警。四条新增守卫都是离线源码
+断言，钉的是顺序与门控，不需要 live 库就拦得住回归。

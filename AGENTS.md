@@ -17,24 +17,29 @@ Always run `sigmap ask` (or `sigmap --query`) before searching for files relevan
 
 ## todos
 ```
-src/data_interface/increment_manager.rs:1981  # TODO: 暂时通过查询surreal来获取最终得值
-src/fast_model/room_model.rs:75  # TODO: need figure out
-src/lib.rs:239  # TODO: 还有个问题，可能需要通过队列来排队任务
-src/lib.rs:352  # TODO: 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
+src\data_interface\increment_manager.rs:2015  # TODO: 暂时通过查询surreal来获取最终得值
+src\fast_model\gen_model.rs:669  # TODO: 检查两个类型是否有可能在一个层级树里，如果不需要可以跳过
+src\fast_model\occ_generate.rs:456  # TODO: 排除已经生成了的模型
+src\fast_model\occ_generate.rs:622  # TODO: edge 这里取中点就可以了
+src\fast_model\occ_generate.rs:713  # TODO: (与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
+src\fast_model\room_model.rs:75  # TODO: need figure out
+src\versioned_db\database.rs:322  # TODO: 改成一对多的实现
+src\versioned_db\database.rs:796  # TODO: 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
 ```
 
 ## src
 
-### src/data_interface/batch_worker.rs
+### src\data_interface\batch_worker.rs
 ```
-pub struct DataBatchTaskResult  :98-104  # 一个数据批次任务的终态结果（写进任务注册表的 `result`）。
-impl WorkerLiveGuard  :78-84
-pub fn worker_liveness() → (bool, Option<i64>)  :87-91  # `/health` 用：worker 是否还活着、距最近一次推进过了多少秒（从未推进则 `None`）。
-pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>)  :111-129  # 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
-pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) → usize  :189-198  # 把当前排队中的批次全部消费掉（FIFO，逐个冻结执行），返回执行条数。
+pub struct DataBatchTaskResult  :103-109  # 一个数据批次任务的终态结果（写进任务注册表的 `result`）。
+impl WorkerLiveGuard  :83-89
+pub fn worker_liveness() → (bool, Option<i64>)  :92-96  # `/health` 用：worker 是否还活着、距最近一次推进过了多少秒（从未推进则 `None`）。
+pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>)  :116-134  # 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
+pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) → usize  :196-220  # 把当前排队中的批次全部消费掉（FIFO，逐个冻结执行），返回执行条数。
+pub fn staged_commit_metrics() → serde_json::Value  :825-830
 ```
 
-### src/data_interface/dbnum_state.rs
+### src\data_interface\dbnum_state.rs
 ```
 pub struct FileObservation  :51-66  # File observation captured during a (read-only) scan
 pub struct DbnumState  :70-85  # Effective DBNUM state resolved from the stored record (+ one
@@ -49,199 +54,329 @@ impl ScanVerdict  :228-250
   pub fn previous_file_latest_sesno(&self) → i32  :235-235  # 上一次观察到的文件最新会话号（未登记时为 0）。
   pub fn blocked(&self) → bool  :242-242
   pub fn block_reason(&self) → Option<String>  :247-247  # 说给人听的阻断理由；不阻断的异常返回 `None`。
-impl DbnumState  :531-671
+impl DbnumState  :531-664
   pub async fn ensure_increment_state_storage() → anyhow::Result<usize>  :540-540  # Ensure an old Surreal database can run the current increment
-  pub async fn list_registered() → a  :671-671  # List registered DB files
 pub fn resolve_migrated_applied_sesno(existing_applied: Option<i32>, legacy_watermark_sesno: Option<i32>, info_table_max_sesno: Option<i32>,) → Option<i32>  :257-265  # Resolve the effective applied watermark from the three order
 pub fn check_file_against_state(stored_db_type: Option<&str>, stored_path: Option<&str>, applied_sesno: i32, observed_db_type: &str, observed_path: &str, observed_file_latest_sesno: i32,) → Option<FileAnomaly>  :281-310  # Classify one observed file for one `dbnum` against its store
 ```
 
-### src/data_interface/increment_manager.rs
+### src\data_interface\generation_root.rs
 ```
-pub struct IncrementInfo  :557-568  # 增量更新信息结构体
-impl IncrementInfo  :772-802
-  pub fn is_modified(&self) → bool  :779-779  # 检查元素是否被修改
-  pub fn is_deleted(&self) → bool  :789-789  # 检查元素是否被删除
-  pub fn is_added(&self) → bool  :799-799  # 检查元素是否为新增
-impl AiosDBManager  :863-1064
-  pub async fn update_mysql_pdms_elements_simple(&self, range_eles: &BTreeMap<u32, Vec<EleOperationData>>,) → anyhow::Result<()>  :885-888  # 简化的MySQL pdms_element表更新方法
-pub fn is_pdms_db_file_name(name: &str) → bool  :589-610  # 这个文件名是不是一个 AVEVA 库文件。三位项目前缀打头，后面只认两种形态：
-pub fn is_candidate_db_file(path: &std::path::Path) → bool  :702-715  # 这个路径是不是一个**候选库文件**：两道门都过才算。
-```
-
-### src/data_interface/manual_update.rs
-```
-pub struct NetChange  :173-179  # Net change for one `refno` after merging the whole window
-pub struct NetChangeDetail  :186-190  # Net change of one `refno` with its identity kept for graph r
-pub struct DeliveryUnitSummary  :252-284  # One affected minimal delivery unit (spec §预览结构)
-pub struct ZoneSummary  :290-303  # Net change statistics grouped by the nearest owning ZONE
-pub struct OwnerNode  :307-312  # One node of the ownership graph used for delivery-unit resol
-pub struct OwnershipSnapshot  :321-332  # Pre/post ownership snapshot for the pending window
-pub struct ResolvedUnit  :505-510  # A resolved delivery unit for one change in one state
-pub struct ReverseRefEdges  :685-693  # One changed element's contribution to the ADR-003 reverse-re
-pub struct ReverseIndexRebuildReport  :768-779  # Result of a full `ref_rev` rebuild from the current live `pe
-pub struct DataBatchResult  :1862-1877  # Result of one `dbnum` data batch within a manual execution
-pub struct ModelUnitResult  :1890-1907  # Result of one model delivery unit within a manual execution
-pub struct ManualUpdateResult  :1911-1917  # Full result of one manual update execution
-pub struct PendingModelUnit  :1961-1984  # Surreal table holding per-unit model pending-retry tasks (sp
-pub struct UnitTask  :2064-2079  # One model delivery-unit generation task inside an execution 
-pub struct SessionPreview  :2253-2258  # Raw per-session change counts (spec §预览结构: 会话层保留原始变化记录)
-pub struct TransformTargetSummary  :2264-2272  # 一个纯位姿（`POS`/`ORI`）变更目标：执行阶段走 `transform` 便宜工作项
-pub struct DbnumPreview  :2276-2331  # Preview for one `dbnum` batch
-pub struct ManualUpdatePreview  :2335-2353  # Full read-only preview of a project's pending manual update
-pub struct DbnumStatus  :2357-2374  # `GET /dbnums` 的一行：登记状态 + 文件异常 + 阻断/排除标志。
-pub struct DbnumStatusReport  :2378-2381  # [`AiosDBManager::dbnum_statuses`] 的整体结果。
-pub enum IncomingKind  :110-114  # One incoming element operation kind within a session (drops 
-pub enum NetOp  :131-138  # Net operation for one `refno` after merging all its ops acro
-pub enum ManualUpdateStatus  :1836-1846  # Final status of one manual update run (spec §失败与重试 最终任务状态)
-pub enum BatchStatus  :1851-1858  # Outcome of one `dbnum` data batch
-pub enum UnitGenStatus  :1882-1886  # Outcome of one model delivery-unit generation
+pub struct GenerationNode  :45-49
+pub struct GenerationRoot  :52-57
+pub enum GenerationRootKind  :38-42
+pub fn is_coarse_hierarchy_noun(noun: &str) → bool  :59-62
+pub fn is_delivery_unit_noun(noun: &str, unit_types: &[String]) → bool  :64-70
+pub fn resolve_delivery_unit_types(appended: &[String]) → Vec<String>  :102-104  # Defaults ∪ configured additions
+pub fn resolve_delivery_unit_types_from_config(configured: Option<&[String]>, appended: &[String],) → Vec<String>  :113-133  # Resolve the effective delivery-unit type set from project co
+pub fn configured_delivery_unit_types() → Vec<String>  :139-152  # Effective delivery-unit types for the running project
+pub fn resolve_element_generation_root(refno: RefnoEnum, unit_types: &[String], lookup: impl FnMut(RefnoEnum) → Option<GenerationNode>, ) -...  :209-236  # Resolve a changed element:
+pub fn resolve_owner_generation_root(owner: RefnoEnum, unit_types: &[String], lookup: impl FnMut(RefnoEnum) → Option<GenerationNode>, ) -...  :241-259  # Resolve an old/new OWNER reference
+pub async fn resolve_live_element_generation_root(refno: RefnoEnum, unit_types: &[String],) → anyhow::Result<Option<Gener...  :291-306
+pub async fn resolve_generation_roots_on(db: &Surreal<Any>, refnos: &[RefnoEnum], unit_types: &[String],) → anyhow::Result<Vec<Generati...  :316-333  # 按**指定库**批量解析生成根，整批共用一份 owner 链缓存。
+pub async fn resolve_live_owner_generation_root(owner: RefnoEnum, unit_types: &[String],) → anyhow::Result<Option<Gener...  :375-390
 ```
 
-### src/data_interface/model_update_pending.rs
+### src\data_interface\increment_manager.rs
+```
+pub struct IncrementInfo  :573-584  # 增量更新信息结构体
+impl IncrementInfo  :823-853
+  pub fn is_modified(&self) → bool  :830-830  # 检查元素是否被修改
+  pub fn is_deleted(&self) → bool  :840-840  # 检查元素是否被删除
+  pub fn is_added(&self) → bool  :850-850  # 检查元素是否为新增
+impl AiosDBManager  :910-1095
+  pub async fn update_mysql_pdms_elements_simple(&self, range_eles: &BTreeMap<u32, Vec<EleOperationData>>,) → anyhow::Result<()>  :932-935  # 简化的MySQL pdms_element表更新方法
+pub fn is_pdms_db_file_name(name: &str) → bool  :605-626  # 这个文件名是不是一个 AVEVA 库文件。三位项目前缀打头，后面只认两种形态：
+pub fn is_candidate_db_file(path: &std::path::Path) → bool  :718-731  # 这个路径是不是一个**候选库文件**：两道门都过才算。
+```
+
+### src\data_interface\increment_pipeline.rs
+```
+pub struct IncrFileSuccess  :29-47  # One file that completed Surreal persist + watermark advance
+pub struct IncrFileError  :51-54  # One file that failed before watermark advance
+pub struct IncrResult  :58-63  # Result of [`IncrementPipeline::apply`]
+pub struct IncrementPipeline  :360-360  # Independent deep module: collect delta → Surreal persist → d
+impl IncrResult  :65-85
+  pub fn all_changed_refnos(&self) → Vec<RefU64>  :66-66
+  pub fn geometry_changed_refnos(&self) → Vec<RefU64>  :74-74  # Refnos from successes that are not SYS meta DBs (eligible fo
+  pub fn had_work(&self) → bool  :82-82
+impl StageTimings  :334-356
+impl IncrementPipeline  :422-584
+  pub fn new() → Self  :423-423
+  pub fn collect_changes(path: &std::path::Path, sesno_range: RangeInclusive<i32>,) → anyhow::Result<BTreeMap<u32...  :453-456  # Side-effect-free change collection for one file over a sesno
+  pub async fn apply(&self, increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String) → IncrResult  :472-475  # Apply incremental updates for the given sesno ranges
+  pub async fn apply_with_precollected(&self, increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String) → IncrResult  :490-497  # 同 [`Self::apply`]，但允许调用方交出**已经收集好**的增量窗口，避免同一个文件
+pub async fn selfcheck_surreal_functions()  :403-420  # 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
+```
+
+### src\data_interface\manual_update.rs
+```
+pub struct NetChange  :175-181  # Net change for one `refno` after merging the whole window
+pub struct NetChangeDetail  :188-192  # Net change of one `refno` with its identity kept for graph r
+pub struct DeliveryUnitSummary  :254-286  # One affected minimal delivery unit (spec §预览结构)
+pub struct ZoneSummary  :292-305  # Net change statistics grouped by the nearest owning ZONE
+pub struct OwnerNode  :309-314  # One node of the ownership graph used for delivery-unit resol
+pub struct OwnershipSnapshot  :323-334  # Pre/post ownership snapshot for the pending window
+pub struct ResolvedUnit  :507-512  # A resolved delivery unit for one change in one state
+pub struct ReverseRefEdges  :687-695  # One changed element's contribution to the ADR-003 reverse-re
+pub struct ReverseIndexRebuildReport  :770-781  # Result of a full `ref_rev` rebuild from the current live `pe
+pub struct DataBatchResult  :1945-1960  # Result of one `dbnum` data batch within a manual execution
+pub struct ModelUnitResult  :1973-1990  # Result of one model delivery unit within a manual execution
+pub struct ManualUpdateResult  :1994-2000  # Full result of one manual update execution
+pub struct PendingModelUnit  :2044-2067  # Surreal table holding per-unit model pending-retry tasks (sp
+pub struct UnitTask  :2147-2162  # One model delivery-unit generation task inside an execution 
+pub struct SessionPreview  :2336-2341  # Raw per-session change counts (spec §预览结构: 会话层保留原始变化记录)
+pub struct TransformTargetSummary  :2347-2355  # 一个纯位姿（`POS`/`ORI`）变更目标：执行阶段走 `transform` 便宜工作项
+pub struct DbnumPreview  :2359-2414  # Preview for one `dbnum` batch
+pub struct ManualUpdatePreview  :2418-2436  # Full read-only preview of a project's pending manual update
+pub struct DbnumStatus  :2440-2466  # `GET /dbnums` 的一行：登记状态 + 文件异常 + 阻断/排除/够不着标志。
+pub struct DbnumStatusReport  :2470-2473  # [`AiosDBManager::dbnum_statuses`] 的整体结果。
+pub enum IncomingKind  :112-116  # One incoming element operation kind within a session (drops 
+pub enum NetOp  :133-140  # Net operation for one `refno` after merging all its ops acro
+pub enum ManualUpdateStatus  :1919-1929  # Final status of one manual update run (spec §失败与重试 最终任务状态)
+pub enum BatchStatus  :1934-1941  # Outcome of one `dbnum` data batch
+pub enum UnitGenStatus  :1965-1969  # Outcome of one model delivery-unit generation
+```
+
+### src\data_interface\model_update_pending.rs
 ```
 pub struct IncrementUpdateAttempt  :36-43  # Short-lived recovery record written before any PE mutation
 pub struct PendingModelWork  :56-71
-pub struct DrainReport  :879-883  # 一轮 drain 的产出：完成数、逐条失败原因，以及失败牵涉到的 `dbnum`。
-pub struct RoomTargetCounts  :1183-1190  # 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
-impl DrainReport  :885-911
-  pub fn blocks(&self, dbnum: u32) → bool  :895-895  # 这一轮的失败是否够格阻断 `dbnum` 这一批的后续模型生成。
-impl RoomTargetCounts  :1192-1197
-  pub fn live(&self) → usize  :1194-1194  # 本轮 drain 会处理的目标总数（死信不算）。
+pub struct DrainReport  :1138-1142  # 一轮 drain 的产出：完成数、逐条失败原因，以及失败牵涉到的 `dbnum`。
+pub struct RoomTargetCounts  :1442-1449  # 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
+impl DrainReport  :1144-1170
+  pub fn blocks(&self, dbnum: u32) → bool  :1154-1154  # 这一轮的失败是否够格阻断 `dbnum` 这一批的后续模型生成。
+impl RoomTargetCounts  :1451-1456
+  pub fn live(&self) → usize  :1453-1453  # 本轮 drain 会处理的目标总数（死信不算）。
 pub async fn enqueue_plan(plan: &ModelUpdatePlan) → anyhow::Result<()>  :96-114  # Persist the exact model work before advancing `applied_sesno
 pub async fn enqueue_room_recalc(db_option: &aios_core::options::DbOption, changes: &[AabbChange],) → anyhow::Result<()>  :185-208  # 包围盒真的变了 → 排一次房间归属重算。
 pub async fn load_attempt(dbnum: u32) → anyhow::Result<Option<Incre...  :331-362
 pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) → anyhow::Result<()>  :364-395
-pub async fn finalize_attempt(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan, window_statements: &[String],) → anyhow::Result<()>  :451-473  # Atomically establish durable model work, advance the authori
-pub async fn finalize_baseline(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan,) → anyhow::Result<()>  :483-497  # Atomically establish a freshly parsed `dbnum`'s model work a
-pub async fn ensure_regen_pending(root_refno: &str, noun: &str) → anyhow::Result<u64>  :600-620  # 确保 `(regen_root, root)` 存在一行 durable pending，返回它的收口令牌（spec §
-pub async fn current_regen_revision(root_refno: &str) → anyhow::Result<Option<u64>>  :624-642  # 取该生成根当前的收口令牌。存量表里同一个根可能还留着一条旧 id 的行，取较大的
-pub async fn settle_regen_work(root_refno: &str, expected_revision: Option<u64>, generation_error: Option<&str>,) → anyhow::Result<()>  :715-727
-pub async fn retry_pending_unit(action: ModelWorkAction, target_refno: &str,) → anyhow::Result<Option<Pendi...  :753-769  # 人工复活一行待重试任务（死信的唯一 HTTP 出口，spec §4
-pub async fn drain(mgr: &AiosDBManager) → anyhow::Result<usize>  :1121-1130
-pub async fn drain_non_regen(mgr: &AiosDBManager) → anyhow::Result<usize>  :1132-1134
-pub async fn drain_non_regen_report(mgr: &AiosDBManager) → anyhow::Result<DrainReport>  :1140-1142  # 与 [`drain_non_regen`] 同一轮工作，但把失败牵涉到的 `dbnum` 一起带出来。
-pub async fn drain_data_phases(mgr: &AiosDBManager) → anyhow::Result<usize>  :1149-1163  # 前两个阶段（非 regen → regen），不含房间。
-pub async fn has_pending_data_work() → anyhow::Result<bool>  :1177-1179
-pub async fn count_room_targets() → anyhow::Result<RoomTargetCo...  :1201-1240  # 统计待重算房间目标，供空闲轮决定要不要收房间并给 `room_recalc` 任务当
-pub async fn drain_rooms(db_option: &aios_core::options::DbOption) → anyhow::Result<usize>  :1254-1389  # 第三阶段：房间归属重算。
+pub async fn finalize_attempt(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan, window_statements: &[String],) → anyhow::Result<()>  :540-562  # Atomically establish durable model work, advance the authori
+pub async fn finalize_baseline(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan,) → anyhow::Result<()>  :572-586  # Atomically establish a freshly parsed `dbnum`'s model work a
+pub async fn ensure_regen_pending(root_refno: &str, noun: &str) → anyhow::Result<u64>  :689-709  # 确保 `(regen_root, root)` 存在一行 durable pending，返回它的收口令牌（spec §
+pub async fn current_regen_revision(root_refno: &str) → anyhow::Result<Option<u64>>  :713-731  # 取该生成根当前的收口令牌。存量表里同一个根可能还留着一条旧 id 的行，取较大的
+pub async fn settle_regen_work(root_refno: &str, expected_revision: Option<u64>, generation_error: Option<&str>,) → anyhow::Result<()>  :804-816
+pub async fn retry_pending_unit(action: ModelWorkAction, target_refno: &str,) → anyhow::Result<Option<Pendi...  :842-858  # 人工复活一行待重试任务（死信的唯一 HTTP 出口，spec §4
+pub async fn drain(mgr: &AiosDBManager) → anyhow::Result<usize>  :1380-1389
+pub async fn drain_non_regen(mgr: &AiosDBManager) → anyhow::Result<usize>  :1391-1393
+pub async fn drain_non_regen_report(mgr: &AiosDBManager) → anyhow::Result<DrainReport>  :1399-1401  # 与 [`drain_non_regen`] 同一轮工作，但把失败牵涉到的 `dbnum` 一起带出来。
+pub async fn drain_data_phases(mgr: &AiosDBManager) → anyhow::Result<usize>  :1408-1422  # 前两个阶段（非 regen → regen），不含房间。
+pub async fn has_pending_data_work() → anyhow::Result<bool>  :1436-1438
+pub async fn count_room_targets() → anyhow::Result<RoomTargetCo...  :1460-1499  # 统计待重算房间目标，供空闲轮决定要不要收房间并给 `room_recalc` 任务当
+pub async fn drain_rooms(db_option: &aios_core::options::DbOption) → anyhow::Result<usize>  :1513-1660  # 第三阶段：房间归属重算。
 ```
 
-### src/data_interface/model_update_plan.rs
+### src\data_interface\model_update_plan.rs
 ```
 pub struct ModelWorkItem  :64-73
 pub struct ModelUpdatePlan  :76-91
 pub enum ModelWorkAction  :18-28
 impl ModelWorkAction  :30-61
   pub fn parse(name: &str) → Option<Self>  :50-50  # [`Self::as_str`] 的逆（HTTP 层解析 `pending-units/retry` 的请求体用）。
-impl RoomStructuralTriggers  :340-344
-  pub fn is_empty(&self) → bool  :341-341
+impl RoomStructuralTriggers  :358-362
+  pub fn is_empty(&self) → bool  :359-359
 ```
 
-### src/fast_model/resolve.rs
+### src\data_interface\sesno_range.rs
 ```
-pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) → anyhow::Result<ScomInfo>  :11-82  # 收集SCOM的信息, 暂时慎用缓存
-pub async fn resolve_axis_params(refno: RefnoEnum, context: Option<CataContext>,) → anyhow::Result<BTreeMap<i32...  :85-101  # 求解axis的数值
-pub async fn resolve_desi_comp(desi_refno: RefnoEnum, mut tubi_scom: Option<RefnoEnum>,) → anyhow::Result<CateGeomsInfo>  :162-200  # 求解design component
-```
-
-### src/fast_model/room_fixture.rs
-```
-impl Body  :101-105
-pub fn box_mesh_for_test(min: Vec3, max: Vec3) → PlantMesh  :45-47  # 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝
-pub fn panel_refnos() → (String, String)  :144-146  # 面板 A / B 的 refno，供断言使用。
-pub fn part_refnos() → (Vec<String>, Vec<String>, ...  :149-155  # 完全在 A 内、完全在 B 内、以及跨界的构件 refno。
-pub async fn create_room_fixture(mesh_dir: &Path) → anyhow::Result<()>  :158-230  # 建夹具：写 `
-pub async fn move_fixture_body(mesh_dir: &Path, seq: u64, min: Vec3, max: Vec3,) → anyhow::Result<()>  :238-264  # 把一个构件搬到新位置。
-pub async fn drop_room_fixture(mesh_dir: &Path) → anyhow::Result<()>  :267-309  # 拆夹具：删库里的记录与 `
+pub struct SesnoUpdatePlan  :26-36  # Resolved incremental window for one DB file
+pub struct SesnoRangeResolver  :40-40  # Independent module: watermark (dbnum) + nearest sesno → opti
+impl SesnoRangeResolver  :42-170
+  pub fn new() → Self  :43-43
+  pub async fn query_watermark(dbnum: u32) → anyhow::Result<u32>  :60-60  # Authoritative watermark for this dbnum
+  pub async fn resolve(&self, path: &Path, project: &str, dbnum: u32, file_latest_sesno: i32, skip_cata: bool, db_type: &str,) → anyhow::Result<Option<Sesno...  :69-77  # Build an update plan when `file_latest_sesno > watermark`, o
+  pub async fn resolve_with_header(&self, path: &Path, project: &str, basic_info: DbPageBasicInfo, skip_cata: bool, db_type: &str,) → anyhow::Result<Option<Sesno...  :101-108  # Convenience when caller already has `DbPageBasicInfo` (watch
 ```
 
-### src/fast_model/room_model.rs
+### src\data_interface\side_effect_pending.rs
 ```
-pub struct RoomPanels  :252-256  # 一间通过命名校验、参与房间归属计算的房间及其面板。
-pub struct RoomPanelMap  :265-268  # 房间 → 面板的映射结果。
-pub struct RoomMember  :447-453  # 一个构件相对某块面板的归属，附带排序用的强度。
-pub struct PanelIndex  :743-749  # 一轮 drain 复用的在册面板几何：元素分支的候选面板从这里选，**不经过空间树**。
-pub struct ElementRoomHistory  :912-914  # 一轮 drain 复用的构件现存归属快照：整页元素的 `room_relate` 入边，一条 SELECT 查完。
-impl RoomPanelMap  :270-282
-  pub fn room_num_of(&self, panel: RefnoEnum) → Option<&str>  :276-276  # 一块面板所属房间的房间号。
-impl RoomMember  :455-466
-impl PanelMeshes  :769-796
-impl PanelEntry  :798-810
-impl PanelIndex  :825-855
-  pub fn usable_panels(&self) → usize  :828-828  # 在册且几何可用的面板块数。为 0 时元素分支算出来的必然是空集——那与全量重建
-  pub fn candidate_panel_refnos(&self, element_aabb: &Aabb) → HashSet<RefnoEnum>  :849-849  # 与构件世界包围盒相交的在册候选面板 refno 集合。
-impl ElementRoomHistory  :916-977
-  pub async fn load(elements: &[RefnoEnum]) → anyhow::Result<Self>  :917-917
-  pub fn room_nums_of(&self, element: RefnoEnum) → BTreeSet<String>  :959-959  # 一个构件当前挂在哪些房间。有序集合：日志渲染押在确定性上。
-  pub fn panels_of(&self, element: RefnoEnum) → HashSet<RefnoEnum>  :969-969  # 一个构件的现存归属边指向哪些面板。
+pub struct PendingJob  :40-57
+pub struct SideEffectCompensator  :61-61  # Independent module: enqueue / complete / drain side-effect j
+pub enum SideEffectKind  :21-27
+impl SideEffectKind  :29-37
+impl SideEffectCompensator  :63-225
+  pub async fn enqueue_from_incr(_mgr: &AiosDBManager, incr: &IncrResult) → anyhow::Result<()>  :105-105  # After PE+watermark success: enqueue only legacy non-model si
+  pub async fn enqueue_syst(dbnum: u32, end_sesno: i32, db_type: &str) → anyhow::Result<()>  :129-129  # 单个 SYST 批次落库后登记一条派生同步任务（数据批次 worker 用）。
+  pub async fn enqueue_ref_rev(dbnum: u32, end_sesno: i32, db_type: &str, referrers: &[RefU64],) → anyhow::Result<()>  :142-147  # 反向引用索引没维护上 → 记一条定点重建任务。
+  pub async fn mark_done(kind: SideEffectKind, dbnum: u32, end_sesno: i32) → anyhow::Result<()>  :195-195
+  pub async fn mark_failed(kind: SideEffectKind, dbnum: u32, end_sesno: i32, err: &str,) → anyhow::Result<()>  :209-214
+```
+
+### src\data_interface\staging\attempts.rs
+```
+pub struct RootAttempt  :35-45  # 一个生成根的失败记录。
+pub struct WindowBlock  :49-60  # 窗口阻断状态记录。
+pub async fn record_root_failure(dbnum: u32, root_refno: &str, error: &str,) → anyhow::Result<u32>  :71-77  # 记一次根失败，返回自增后的 attempts。首次失败时刻只写一次。
+pub async fn record_root_failure_on(db: &Surreal<Any>, dbnum: u32, root_refno: &str, error: &str,) → anyhow::Result<u32>  :79-106
+pub async fn load_root_attempts(dbnum: u32) → anyhow::Result<BTreeMap<Str...  :109-111  # 该 dbnum 全部生成根的失败记录（root_refno → 记录）。
+pub async fn load_root_attempts_on(db: &Surreal<Any>, dbnum: u32,) → anyhow::Result<BTreeMap<Str...  :113-137
+pub fn reaches_block_threshold(attempts: u32) → bool  :140-142  # 该根是否已到窗口阻断门槛。
+pub async fn reset_roots_on_absorb(dbnum: u32, roots: &[String]) → anyhow::Result<()>  :146-148  # 冻结吸收扩窗：重置受影响根的 attempts；仅当所有坏根都被新数据触及时解除阻断。
+pub async fn reset_roots_on_absorb_on(db: &Surreal<Any>, dbnum: u32, roots: &[String],) → anyhow::Result<()>  :150-189
+pub async fn record_window_block(dbnum: u32, reason: &str, bad_roots: &[String],) → anyhow::Result<()>  :192-198  # 记录（或刷新）窗口阻断状态。首次记录时刻只写一次。
+pub async fn record_window_block_at(dbnum: u32, end_sesno: i32, reason: &str, bad_roots: &[String],) → anyhow::Result<()>  :200-214
+pub async fn record_window_block_on(db: &Surreal<Any>, dbnum: u32, reason: &str, bad_roots: &[String],) → anyhow::Result<()>  :216-223
+pub async fn load_window_block(dbnum: u32) → anyhow::Result<Option<Windo...  :257-259  # 读取窗口阻断状态（面板 / `/health` 用）。
+pub async fn load_window_blocks() → anyhow::Result<Vec<WindowBl...  :261-271
+pub async fn load_window_block_on(db: &Surreal<Any>, dbnum: u32,) → anyhow::Result<Option<Windo...  :273-294
+pub fn render_clear_window_attempts(dbnum: u32) → String  :299-303  # 渲染「窗口成功提交」尾事务里的 attempts 清除语句：删掉该 dbnum 的全部
+```
+
+### src\data_interface\staging\lifecycle.rs
+```
+pub struct StagingWindowMeta  :67-74  # 一个提交单元的窗口元数据（登记表内容）。
+pub struct ActiveStagedWindow  :77-91  # 一个提交单元的暂存窗口：staging database + 资源面板 + 元数据。
+impl ActiveStagedWindow  :208-372
+  pub fn meta(&self) → &StagingWindowMeta  :209-209
+  pub fn label(&self) → &str  :213-213
+  pub fn gauge(&self) → &Arc<ResourceGauge>  :217-217
+  pub async fn activate(&self) → anyhow::Result<()>  :222-222  # 窗口(重)进入执行前必须调用：把共享会话切回本窗口的 database。
+  pub async fn execute(&mut self, sql: impl Into<String>, mode: ExecMode) → anyhow::Result<()>  :231-231  # 通过本窗口唯一的执行器写暂存/journal。
+  pub async fn journal(&self) → Vec<JournalEntry>  :235-235
+  pub fn staging_db(&self) → &Surreal<Any>  :251-251
+pub async fn ensure_stage_instance() → anyhow::Result<()>  :52-63  # 确保进程常驻的 `STAGE_DB`（`mem://`）已连接。幂等，可在任意入口调用。
+pub async fn create_window(dbnum: u32, start_sesno: i32, end_sesno: i32,) → anyhow::Result<ActiveStaged...  :94-108  # 在生产常驻实例上开一个新窗口。
+pub async fn create_window_on(instance: &Surreal<Any>, dbnum: u32, start_sesno: i32, end_sesno: i32, thresholds: ResourceThresholds,) → anyhow::Result<ActiveStaged...  :111-166  # 在显式实例上开窗口（测试与一致性套件用同一条生产路径）。
+pub async fn init_staging_schema(db: &Surreal<Any>) → anyhow::Result<()>  :175-206  # 暂存库建库初始化：与生产启动序列（`run_cli` 的 schema 段）同一套 DEFINE。
+pub fn registered_windows() → Vec<StagingWindowMeta>  :487-494  # 登记表快照（观测 / 面板用）。
+pub fn resource_snapshots() → Vec<serde_json::Value>  :497-521  # `/health` 使用的活动窗口资源快照。
+pub async fn sweep_orphan_staging_databases_on(instance: &Surreal<Any>,) → anyhow::Result<Vec<String>>  :525-564  # 窗口终态清扫：DROP 暂存实例上所有「不在册」的 staging database。
+pub async fn sweep_orphan_staging_databases() → anyhow::Result<Vec<String>>  :567-570  # 生产常驻实例上的终态清扫。
+```
+
+### src\data_interface\staging\preload.rs
+```
+impl ModelMutationPreload  :30-36
+```
+
+### src\data_interface\staging\write_context.rs
+```
+impl StagingWriteContext  :47-175
+  pub async fn execute(&self, sql: impl Into<String>, mode: ExecMode) → anyhow::Result<()>  :66-66
+  pub async fn execute_scoped_delete(&self, sql: impl Into<String>) → anyhow::Result<()>  :70-70
+  pub async fn defer_spatial_refresh(&self, refnos: &[aios_core::RefnoEnum])  :74-74
+  pub async fn defer_spatial_remove(&self, refnos: &[aios_core::RefnoEnum])  :82-82
+  pub async fn deferred_spatial_removals(&self) → HashSet<aios_core::RefnoEnum>  :91-91  # 本窗口已经决定要从空间树上摘掉、但要等提交后才真摘的那些 refno。
+  pub async fn defer_room_changes(&self, changes: &[crate::fast_model::occ_generate::AabbChange],)  :95-98
+  pub async fn register_finalize(&self, finalize: StagedFinalize) → anyhow::Result<()>  :107-107
+  pub async fn defer_regen_settlement(&self, root_refno: String, revision: u64)  :140-140
+```
+
+### src\data_interface\update_scope.rs
+```
+pub struct UpdateScope  :34-42  # 一次扫描的执行范围。
+impl UpdateScope  :44-171
+  pub async fn resolve(mdb: &str) → anyhow::Result<Self>  :55-55  # 解出 `mdb` 声明的 DESI 库号。
+  pub fn unrestricted() → Self  :118-118  # 不设限。按 dbnum 点名的入口用它——回归工具与按需初始化的调用方已经自己
+  pub fn warning(&self) → Option<&str>  :128-128  # 范围没解出设计库名单时的那句话，调用方要原样放进自己的 warnings。
+  pub fn admits(&self, db_type: &str, dbnum: u32) → bool  :147-147  # 这个库进不进本期执行范围。
+  pub fn mdb(&self) → &str  :158-158  # MDB 名（已带前导 `/`）。不设限时是空串。
+  pub fn declared_desi(&self) → impl Iterator<Item = u32> + '_  :163-163  # MDB 声明的 DESI 库号，升序。
+  pub fn declares(&self, dbnum: u32) → bool  :168-168  # 是否按 dbnum 逐个点名（`unrestricted` 时恒为假：那种模式下没有"声明"可言）。
+```
+
+### src\fast_model\gen_model.rs
+```
+pub struct DbModelInstRefnos  :45-50  # 一个db生成模型里，汇总的参考号集合
+impl DbModelInstRefnos  :52-148
+  pub async fn execute_gen_inst_meshes(&self, db_option_arc: Option<Arc<DbOption>>,) → anyhow::Result<()>  :53-56
+  pub async fn execute_boolean_meshes(&self, db_option_arc: Option<Arc<DbOption>>,) → anyhow::Result<()>  :104-107
+pub async fn gen_all_geos_data(db_option: &DbOption) → anyhow::Result<bool>  :160-291  # 生成几何体数据。
+pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) → anyhow::Result<()>  :347-369  # 更新模型数据
+pub async fn gen_geos_data_by_dbnum(dbno: u32, db_option_arc: Arc<DbOption>, sender: flume::Sender<ShapeInstancesData>,) → anyhow::Result<DbModelInstR...  :383-527  # 生成几何体数据
+pub async fn gen_geos_data(dbno: Option<u32>, manual_refnos: Vec<RefnoEnum>, db_option: &DbOption, sender: flume::Sender<ShapeInstancesData>,) → anyhow::Result<Vec<RefnoEnum>>  :610-737  # 生成几何体数据
+pub async fn query_tubi_size(refno: RefnoEnum, tubi_cat_ref: RefnoEnum, is_hang: bool,) → anyhow::Result<TubiSize>  :888-914  # 查询tubi的大小
+```
+
+### src\fast_model\occ_generate.rs
+```
+pub struct AabbChange  :746-749  # 一个元素的包围盒确实变了。
+pub struct NegInfo  :960-967
+pub struct ParamNegInfo  :981-988
+pub struct CataNegGroup  :1222-1226
+pub struct GmGeoData  :1229-1236
+pub async fn test_gen_geos() → anyhow::Result<()>  :37-43  # 生成小的几何体
+pub async fn gen_meshes_in_db(option: Option<Arc<DbOption>>, refnos: &[RefnoEnum],) → anyhow::Result<()>  :127-172  # 生成模型的部分，update aabb
+pub async fn booleans_meshes_in_db(option: Option<Arc<DbOption>>, refnos: &[RefnoEnum],) → anyhow::Result<()>  :175-203  # 执行布尔运算的部分
+pub async fn process_meshes_update_db(option: Option<Arc<DbOption>>, refnos: &[RefnoEnum],) → anyhow::Result<()>  :213-264  # 处理网格并更新数据库
+pub async fn process_meshes_update_db_deep_default(refnos: &[RefnoEnum]) → anyhow::Result<()>  :275-278  # 使用默认数据库选项更新深层模型网格数据
+pub async fn process_meshes_update_db_deep(dboption: &DbOption, refnos: &[RefnoEnum],) → anyhow::Result<()>  :290-398  # 使用指定数据库选项更新深层模型网格数据
+pub async fn gen_inst_meshes(refnos: &[RefnoEnum], replace_exist: bool, dir: PathBuf,) → anyhow::Result<()>  :423-543  # 生成实例的网格数据
+pub async fn update_inst_relate_aabbs_by_refnos(refnos: &[RefnoEnum], replace_exist: bool,) → anyhow::Result<Vec<AabbChan...  :776-781  # 刷新inst_relate 的 aabb
+pub async fn apply_insts_boolean_occ(refnos: &[RefnoEnum], replace_exist: bool, dir: PathBuf,) → anyhow::Result<()>  :1011-1118
+pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) → anyhow::Result<()>  :1240-1356
+```
+
+### src\fast_model\room_model.rs
+```
+pub struct RoomPanels  :366-370  # 一间通过命名校验、参与房间归属计算的房间及其面板。
+pub struct RoomPanelMap  :379-382  # 房间 → 面板的映射结果。
+pub struct RoomMember  :640-646  # 一个构件相对某块面板的归属，附带排序用的强度。
+pub struct PanelIndex  :977-985  # 一轮 drain 复用的在册面板几何：元素分支的候选面板从这里选，**不经过空间树**。
+pub struct ElementRoomHistory  :1169-1171  # 一轮 drain 复用的构件现存归属快照：整页元素的 `room_relate` 入边，一条 SELECT 查完。
+pub enum PanelMembers  :696-705  # 一块面板的成员计算结果。
+impl RoomPanelMap  :384-400
+  pub fn room_num_of(&self, panel: RefnoEnum) → Option<&str>  :390-390  # 一块面板所属房间的房间号。
+impl RoomMember  :648-659
+impl PanelMeshes  :1005-1032
+impl PanelEntry  :1034-1046
+impl PanelIndex  :1061-1104
+  pub fn usable_panels(&self) → usize  :1064-1064  # 在册且几何可用的面板块数。为 0 时元素分支算出来的必然是空集——那与全量重建
+  pub fn missing_panels(&self) → &[RefnoEnum]  :1077-1077  # 在册却没能进索引的那些面板。
+  pub fn candidate_panel_refnos(&self, element_aabb: &Aabb) → HashSet<RefnoEnum>  :1098-1098  # 与构件世界包围盒相交的在册候选面板 refno 集合。
+impl ElementRoomHistory  :1173-1234
+  pub async fn load(elements: &[RefnoEnum]) → anyhow::Result<Self>  :1174-1174
+  pub fn room_nums_of(&self, element: RefnoEnum) → BTreeSet<String>  :1216-1216  # 一个构件当前挂在哪些房间。有序集合：日志渲染押在确定性上。
+  pub fn panels_of(&self, element: RefnoEnum) → HashSet<RefnoEnum>  :1226-1226  # 一个构件的现存归属边指向哪些面板。
 pub async fn test_cal_rooms() → anyhow::Result<()>  :33-73
-pub async fn test_cal_distance() → anyhow::Result<()>  :78-115
-pub async fn build_room_relations(db_option: &DbOption) → anyhow::Result<()>  :129-184  # 构建房间关系
-pub async fn load_room_panel_map(db_option: &DbOption) → anyhow::Result<RoomPanelMap>  :300-302  # 只读地加载房间 → 面板映射，供增量路径使用。
-pub fn match_room_name_hd(room_name: &str) → bool  :317-320  # hd 正则匹配是否满足房间命名规则
-pub fn match_room_name_hh(room_name: &str) → bool  :323-325  # hh 正则匹配是否满足房间命名规则
-pub async fn cal_room_refnos(mesh_dir: &PathBuf, panel_refno: RefnoEnum, exclude_refnos: &HashSet<RefnoEnum>,) → anyhow::Result<HashMap<Refn...  :498-638
-pub async fn recalc_panel_membership(db_option: &DbOption, rooms: &RoomPanelMap, panel: RefnoEnum,) → anyhow::Result<HashSet<Refn...  :679-725  # 整间分支：一块面板动了，重算它名下的全部归属（ADR-010 §2）。
+pub async fn test_cal_distance() → anyhow::Result<()>  :78-116
+pub async fn build_room_relations(db_option: &DbOption) → anyhow::Result<()>  :130-214  # 构建房间关系
+pub async fn load_room_panel_map(db_option: &DbOption) → anyhow::Result<RoomPanelMap>  :418-420  # 只读地加载房间 → 面板映射，供增量路径使用。
+pub async fn load_room_panel_map_from_pe(db_option: &DbOption) → anyhow::Result<RoomPanelMap>  :424-448  # Staged windows preload the canonical PE topology, not noun t
+pub fn match_room_name_hd(room_name: &str) → bool  :463-466  # hd 正则匹配是否满足房间命名规则
 ```
 
-### src/lib.rs
+### src\versioned_db\database.rs
 ```
-pub async fn run_cli(db_option: DbOption) → anyhow::Result<()>  :127-320
-pub async fn run_app(option: Option<DbOptionExt>) → anyhow::Result<()>  :385-428  # 运行app
-```
-
-### src/rvm_baseline/compare.rs
-```
-pub struct CompareOptions  :32-45
-pub struct CompareSummary  :48-69
-impl CompareSummary  :71-87
-  pub fn passed(&self) → bool  :72-72
-pub async fn compare(options: &CompareOptions) → Result<CompareSummary>  :227-374
-pub fn default_report_path(root: Option<&str>) → PathBuf  :482-488
-```
-
-### src/rvm_baseline/import.rs
-```
-pub struct ImportOptions  :31-42
-impl Builder  :142-275
-pub fn import_rvm(options: &ImportOptions) → Result<RvmSnapshot>  :44-130
-pub fn import_and_save(options: &ImportOptions) → Result<RvmSnapshot>  :485-489  # 便于 CLI 直接落盘。
-pub fn default_snapshot_path(rvm_path: &Path) → PathBuf  :491-499
+pub enum SenderJsonsData  :53-59
+pub trait MySqlMethods  :288-294
+pub async fn rebuild_dbnum_info_from_pe(dbnum: u32, file_name: &str, db_type: &str,) → anyhow::Result<usize>  :228-285  # 从 pe 全量重算一个 dbnum 的 `dbnum_info_table` 统计（DELETE + 按 ref0 重建
+pub async fn create_project_database(project: &str, url: &str) → anyhow::Result<()>  :298-306  # 初始化project database
+pub async fn create_info_database(aios_mgr: &AiosDBMgr) → anyhow::Result<()>  :310-380  # 初始化 info 库和表
+pub async fn sync_pdms(db_option: &DbOption) → anyhow::Result<()>  :384-511  # 初始化同步pdms数据到数据
+pub async fn define_dbnum_event() → anyhow::Result<()>  :513-569
+pub async fn verify_dbnum_event_definition() → anyhow::Result<bool>  :573-590  # 读回 pe 表上 `update_dbnum_event` 的实际定义，校验是好版（string::split 解析
+pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) → bool  :593-612
+pub async fn check_and_clear_db(db_no: u32) → anyhow::Result<()>  :614-635
+pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, cur_dbno_set: Arc<DashSet<u32>>, db_types: &[&str], proj_progress_chunk: usize,) → anyhow::Result<HashMap<u32,...  :639-765  # 多线程同步数据，包括增量同步
 ```
 
-### src/rvm_baseline/snapshot.rs
+### src\versioned_db\member_prune.rs
 ```
-pub struct RvmSnapshot  :54-57
-pub struct SnapshotMeta  :60-85
-pub struct RvmMember  :88-115
-pub struct RvmGeometry  :118-133
-pub enum ExportScope  :28-36  # 基准 RVM 是按哪种口径导出的。
-impl ExportScope  :38-51
-  pub fn allows_aabb_verdict(self) → bool  :40-40  # 成员 AABB 能不能直接与生成侧比。
-  pub fn as_str(self) → &'static str  :44-44
-impl RvmSnapshot  :135-198
-  pub fn save(&self, path: &Path) → Result<()>  :136-136
-  pub fn load(path: &Path) → Result<Self>  :148-148
-  pub fn print_summary(&self)  :163-163
+pub struct PruneReport  :31-38  # 一次裁剪的产出。计数进日志，也是回归测试的断言口径。
+impl PruneReport  :40-45
+  pub fn is_empty(&self) → bool  :42-42  # 这一轮有没有真的动过成员树。
+pub fn prune_resurrected_members(world: RefU64, children_map: &mut HashMap<RefU64, Vec<RefU64>>, members_of: F,) → PruneReport where F: Fn(Ref...  :56-100  # 按「元素自己的成员块」裁掉补链轮多挂的边，再丢弃自 `world` 不可达的元素。
+pub fn authoritative_members(bytes: &[u8], refno_table_map: &DashMap<RefU64, EleDataEntry>, refno: RefU64,) → Vec<RefU64>  :106-118  # 一个元素自己那条记录列出的成员（越界或查不到记录时为空）。
 ```
 
-### src/web_service/handlers.rs
+### src\web_service\handlers.rs
 ```
 pub struct ProjectReq  :19-31
-pub struct TaskListQuery  :118-125
-pub struct EnsureModelReq  :155-163
-pub struct PendingUnitRetryReq  :258-267
-pub async fn health(State(state) → Json<serde_json::Value>  :56-75  # GET /api/v1/health
-pub async fn update_preview(State(state) → Result<Json<serde_json::Val...  :78-92  # POST /api/v1/update/preview — 映射 `preview_manual_update`（spe
-pub async fn update_execute(State(state) → Result<impl IntoResponse, A...  :99-115  # POST /api/v1/update/execute — 扫描 + 入队，202 返回入队回执（ADR-011 §12
-pub async fn tasks_list(State(state) → Json<serde_json::Value>  :128-138  # GET /api/v1/tasks
-pub async fn task_get(State(state) → Result<Json<serde_json::Val...  :141-152  # GET /api/v1/tasks/{id}
-pub async fn model_ensure(State(state) → Result<Json<serde_json::Val...  :188-226  # POST /api/v1/model/ensure — 映射 `ensure_model_generated`（幂等同步
-pub async fn pending_units(State(_state) → Result<Json<serde_json::Val...  :244-255  # GET /api/v1/update/pending-units — 映射 `load_pending_model_un
-pub async fn pending_units_retry(State(state) → Result<impl IntoResponse, A...  :274-308  # POST /api/v1/update/pending-units/retry — 人工复活一行死信（spec §4
-pub async fn dbnums(State(state) → Result<Json<serde_json::Val...  :315-326  # GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4
-pub async fn queue_snapshot(State(_state) → Json<serde_json::Value>  :332-335  # GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项
-pub async fn queue_pause(State(_state) → Result<Json<serde_json::Val...  :342-349  # POST /api/v1/queue/pause — 暂停出队（ADR-011 §9）。
-pub async fn queue_resume(State(_state) → Result<Json<serde_json::Val...  :352-361  # POST /api/v1/queue/resume — 恢复出队并唤醒 worker（ADR-011 §9）。
+pub struct TaskListQuery  :133-140
+pub struct EnsureModelReq  :170-178
+pub struct PendingUnitRetryReq  :273-282
+pub async fn health(State(state) → Json<serde_json::Value>  :56-90  # GET /api/v1/health
+pub async fn update_preview(State(state) → Result<Json<serde_json::Val...  :93-107  # POST /api/v1/update/preview — 映射 `preview_manual_update`（spe
+pub async fn update_execute(State(state) → Result<impl IntoResponse, A...  :114-130  # POST /api/v1/update/execute — 扫描 + 入队，202 返回入队回执（ADR-011 §12
+pub async fn tasks_list(State(state) → Json<serde_json::Value>  :143-153  # GET /api/v1/tasks
+pub async fn task_get(State(state) → Result<Json<serde_json::Val...  :156-167  # GET /api/v1/tasks/{id}
+pub async fn model_ensure(State(state) → Result<Json<serde_json::Val...  :203-241  # POST /api/v1/model/ensure — 映射 `ensure_model_generated`（幂等同步
+pub async fn pending_units(State(_state) → Result<Json<serde_json::Val...  :259-270  # GET /api/v1/update/pending-units — 映射 `load_pending_model_un
+pub async fn pending_units_retry(State(state) → Result<impl IntoResponse, A...  :289-323  # POST /api/v1/update/pending-units/retry — 人工复活一行死信（spec §4
+pub async fn dbnums(State(state) → Result<Json<serde_json::Val...  :330-341  # GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4
+pub async fn queue_snapshot(State(_state) → Json<serde_json::Value>  :347-350  # GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项
+pub async fn queue_pause(State(_state) → Result<Json<serde_json::Val...  :357-364  # POST /api/v1/queue/pause — 暂停出队（ADR-011 §9）。
+pub async fn queue_resume(State(_state) → Result<Json<serde_json::Val...  :367-376  # POST /api/v1/queue/resume — 恢复出队并唤醒 worker（ADR-011 §9）。
 ```

@@ -351,7 +351,7 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
     let stale: HashSet<aios_core::RefU64> = refnos.iter().map(RefnoEnum::refno).collect();
     let removed = GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
     if removed > 0 {
-        // 摘除同样是「内存树相对 accel_tree.bin 的未持久化变更」：不标脏的话，
+        // 摘除同样是「内存树相对项目树文件的未持久化变更」：不标脏的话，
         // 重启读回旧文件，被删构件会重新以候选身份出现在房间重算里。
         crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     }

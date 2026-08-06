@@ -1134,6 +1134,45 @@ mod tests {
         );
     }
 
+    /// issue #5 复测——用报告人截图里的**那条**分支，不是随便找一个管件。
+    ///
+    /// 截图里的元素是 PIPE `/1WCC1135`（`24383/66458`）名下的 BRAN `/1WCC1135/B1`
+    /// （`24383/66459`），只有一个成员 CAP（`24383/66460`）；`24383` 前缀属 dbnum 7999
+    /// （`dbnum_info_table:24383`）。隐含直管段挂在 BRAN 名下（`inst_relate:24383_66459`）,
+    /// 几何由 HPOS→TPOS 与成员的 arrive/leave 点推导，`update_world_transforms` 够不着。
+    ///
+    /// 这里只验计划层这一跳——issue #5 的修法就在这一跳上：挪这个 CAP 必须排出该 BRAN 的
+    /// `RegenRoot`，而不是 CAP 自己的 `Transform`。**只读**：不重生成、不写库。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: reads the real /1WCC1135/B1 owner chain from the configured project"]
+    async fn live_issue5_moving_the_reported_cap_plans_a_branch_regeneration() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let bran = RefnoEnum::from("24383/66459");
+        let cap = RefnoEnum::from("24383/66460");
+
+        let plan = build_model_update_plan(
+            7999,
+            42,
+            "DESI",
+            &BTreeMap::from([(42, vec![live_modified_op(cap, bran, "CAP", "POS")])]),
+        )
+        .await
+        .expect("build the reported CAP's move plan");
+
+        assert_eq!(
+            plan.work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str(), item.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ModelWorkAction::RegenRoot, "24383/66459", "BRAN")],
+            "挪 /1WCC1135/B1 的 CAP 必须整根重生成——便宜路径算不出隐含直管段: {:#?}",
+            plan.work_items
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: verifies real ProjAMS direct, transform and data-only sessions"]
     async fn live_projams_real_attribute_sessions_plan_and_execute_distinctly() {

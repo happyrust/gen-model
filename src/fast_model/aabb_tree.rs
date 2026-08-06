@@ -1,16 +1,25 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
-use dashmap::DashMap;
-use itertools::Itertools;
 
 use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
 
-/// 写回成功后应用窗口计算期间延迟的空间树变化，并返回房间增量触发集。
+/// 写回成功后应用窗口计算期间延迟的空间树变化（提交后收敛专用）。
+///
+/// refresh 分支从**已提交的主库**按 `inst_relate.aabb` 指针值同步树条目
+/// （[`sync_tree_from_committed_pointers`]），不重算几何、不写库：窗口 journal
+/// 重放已经把刷新层算出的值落成主库真值，这里只需要让树追上库。此前这一步复跑
+/// `update_inst_relate_aabbs_by_refnos(.., true)`，对着主库把几何 AABB 整个重算
+/// 并重写一遍——跑在「收敛失败即停止出队」的关键路径上（I7），时长随窗口规模
+/// 线性涨，还平白引入几何 join 这块失败面。
+///
+/// 房间触发不在这里产生：AABB 房间目标已在窗口内并入 finalize plan 随尾事务
+/// 持久化，收敛只负责树本身。
 pub(crate) async fn apply_deferred_spatial_mutations(
     deferred: crate::data_interface::staging::write_context::DeferredSpatialMutations,
-) -> anyhow::Result<Vec<crate::fast_model::occ_generate::AabbChange>> {
+) -> anyhow::Result<()> {
     if !deferred.remove.is_empty() {
         let removed = deferred
             .remove
@@ -22,19 +31,96 @@ pub(crate) async fn apply_deferred_spatial_mutations(
         }
     }
     if deferred.refresh.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let refnos = deferred.refresh.into_iter().collect::<Vec<_>>();
-    update_inst_relate_aabbs_by_refnos(&refnos, true).await
+    let mut refnos = deferred.refresh.into_iter().collect::<Vec<_>>();
+    refnos.sort();
+    sync_tree_from_committed_pointers(&refnos).await?;
+    Ok(())
 }
 
-/// 空间树自上次写回 `accel_tree.bin` 以来是否有未持久化的增量变更。
+/// `(refno, noun, aabb 指针值)` 的查询行——树条目所需的全部信息。
+#[derive(serde::Deserialize)]
+struct PointerRow {
+    refno: RefnoEnum,
+    noun: Option<String>,
+    aabb: parry3d::bounding_volume::Aabb,
+}
+
+impl PointerRow {
+    fn into_box(self) -> RStarBoundingBox {
+        RStarBoundingBox::new(
+            self.aabb,
+            self.refno,
+            self.noun.unwrap_or_else(|| "UNSET".to_string()),
+        )
+    }
+}
+
+/// 从已提交主库按指针值同步这些 refno 的树条目，返回实际进树的条数。
 ///
-/// 增量路径（AABB 刷新、删除清理）只更新内存树；不落盘的话，重启后
-/// `load_aabb_tree` 读回旧文件、`sync_aabb_tree_with_db` 又只对账**数量**
-/// （搬动不改变条数），启动时的全量房间重建就会拿旧位置把增量已收敛的
-/// `room_relate` 边改写回搬家前的状态——不是「不再收敛」，是「主动回退」。
-/// 落盘时机归 worker 空闲轮（ADR-010 落盘时机，2026-07-28 已决）。
+/// 进树口径与刷新层一致（`world_trans.d != none and aabb.d != none`）；库里已经
+/// 没有可用指针的 refno 不进树——对应「从未刷新过 / 几何不可用」的行，它们本来
+/// 也不在树上。查询失败上抛：提交后收敛失败必须阻断出队（I7），不能静默放行。
+async fn sync_tree_from_committed_pointers(refnos: &[RefnoEnum]) -> anyhow::Result<usize> {
+    const CHUNK: usize = 500;
+    let mut synced = 0usize;
+    for chunk in refnos.chunks(CHUNK) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let inst_keys = aios_core::get_inst_relate_keys(chunk);
+        let sql = format!(
+            "select in as refno, in.noun as noun, aabb.d as aabb from {inst_keys} \
+             where world_trans.d != none and aabb.d != none"
+        );
+        let mut response = SUL_DB
+            .query(&sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("读取已提交包围盒指针失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("读取已提交包围盒指针语句失败: {e}"))?;
+        let rows: Vec<PointerRow> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解析已提交包围盒指针失败: {e}"))?;
+        if rows.len() < chunk.len() {
+            // 树的口径是「镜像已提交指针」：指针已消失的 refresh 目标必须摘除，
+            // 跳过会让旧盒一直留在树上当房间候选，直到下一次指针重建才自愈。
+            let present = rows
+                .iter()
+                .map(|row| row.refno.refno())
+                .collect::<std::collections::HashSet<_>>();
+            let vanished = chunk
+                .iter()
+                .map(RefnoEnum::refno)
+                .filter(|refno| !present.contains(refno))
+                .collect::<std::collections::HashSet<_>>();
+            println!(
+                "提交后空间收敛：{} 个 refresh 目标中 {} 个在主库已无可用指针，摘除其树条目",
+                chunk.len(),
+                vanished.len()
+            );
+            if GLOBAL_AABB_TREE.write().await.remove_by_refnos(&vanished) > 0 {
+                mark_aabb_tree_dirty();
+            }
+        }
+        let boxes = rows.into_iter().map(PointerRow::into_box).collect::<Vec<_>>();
+        let count = boxes.len();
+        let stale = GLOBAL_AABB_TREE.write().await.sync_refnos(boxes);
+        if count > 0 || !stale.is_empty() {
+            mark_aabb_tree_dirty();
+        }
+        synced += count;
+    }
+    Ok(synced)
+}
+
+/// 空间树自上次写回项目树文件以来是否有未持久化的增量变更。
+///
+/// 增量路径（AABB 刷新、删除清理）只更新内存树；已提交的空间意图
+/// （`spatial_reconcile` 行）保证崩溃后能从库里重放，这个标记决定的只是
+/// 「这一轮要不要真的写文件」。落盘时机归 worker 空闲轮（ADR-010 落盘时机，
+/// 2026-07-28 已决）。
 static AABB_TREE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// 增量路径动过内存树之后调用：标记「有变更待落盘」。
@@ -42,75 +128,159 @@ pub fn mark_aabb_tree_dirty() {
     AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
 }
 
-/// rs-core 硬编码的裸文件名：`serialize_to_bin_file` / `deserialize_from_bin_file`
-/// 都写死它（cwd 相对），且重建 refno 反向索引的方法是私有的，本仓无法绕开
-/// rs-core 自己读写别的路径。
-const BARE_TREE_FILE: &str = "accel_tree.bin";
-
-/// 带项目名的落盘文件：`accel_tree_{project}.bin`（ADR-010 §6「路径带项目名」）。
-fn project_tree_file() -> String {
+/// 本项目空间树的落盘文件：`accel_tree_{project}.bin`（ADR-010 §6「路径带项目名」）。
+///
+/// 读写都由本仓自己做：bincode 编码与 rs-core 的 `serialize_to_bin_file` 同构
+/// （`AccelerationTree` 的反向索引等派生字段是 `#[serde(skip)]`，不进文件），
+/// 反序列化后的索引由 `ensure_refno_index` 在首次按 refno 操作时自愈重建，
+/// 有单测钉着这条假设。rs-core 硬编码的裸 `accel_tree.bin` 不再参与——此前的
+/// 「搬运语义」（加载前复制到裸名、落盘后归档回项目名）在多项目并发共用 cwd
+/// 时是竞态窗口，现在整个消失。
+pub fn project_tree_file() -> String {
     format!(
         "accel_tree_{}.bin",
         aios_core::get_db_option().project_name
     )
 }
 
-/// 启动加载空间树**之前**调用：把本项目的树文件放到 rs-core 硬编码的裸路径上。
-///
-/// 裸文件名的两个后果都有实证：换工作目录启动静默空树（2026-08-04 演练日志），
-/// 多项目先后共用一个部署目录时读到**别的项目**的树——重启后
-/// `sync_aabb_tree_with_db` 只对账数量，随后启动期的全量房间重建会拿错树的
-/// 旧位置改写 `room_relate`。搬运语义：
-/// - 项目专属文件存在 → 复制到裸名（覆盖别的项目残留）；
-/// - 只有裸文件 → 首次迁移，沿用它，下次落盘起写回项目名；
-/// - 都没有 → 空树告警由 rs-core 加载路径给出。
-///
-/// 已知限制：多项目**并发**共用同一个 cwd 时，裸文件仍是竞态窗口——rs-core
-/// 硬编码之下无解，先后切换项目的场景（实际部署形态）已由本函数闭环。
-pub fn stage_project_aabb_tree_file() {
-    let project_file = project_tree_file();
-    if std::path::Path::new(&project_file).is_file() {
-        match std::fs::copy(&project_file, BARE_TREE_FILE) {
-            Ok(_) => println!("空间树使用项目专属文件 {project_file}"),
-            Err(error) => eprintln!(
-                "放置项目空间树文件失败（{project_file} -> {BARE_TREE_FILE}），\
-                 将按现有裸文件或空树启动: {error}"
-            ),
-        }
-        return;
-    }
-    if std::path::Path::new(BARE_TREE_FILE).is_file() {
-        println!(
-            "未找到 {project_file}，沿用既有 {BARE_TREE_FILE}\
-            （首次迁移：下次落盘起写入项目专属文件）"
-        );
-    }
+/// 树文件的 sidecar 元数据：`accel_tree_{project}.meta.json`。
+fn project_tree_meta_file() -> String {
+    format!(
+        "accel_tree_{}.meta.json",
+        aios_core::get_db_option().project_name
+    )
 }
 
-/// 落盘成功后把裸文件归档为项目专属名。
+/// sidecar 内容：树文件对应的库侧空间版本号与条目数。
 ///
-/// 失败必须上抛：吞掉的话项目文件停在旧值，下次启动 `stage` 会拿旧树覆盖
-/// 刚写好的裸文件——比不归档更糟。调用方靠保留脏位让下一轮连同序列化一起重试。
-fn archive_project_aabb_tree_file() -> anyhow::Result<()> {
-    let project_file = project_tree_file();
-    std::fs::copy(BARE_TREE_FILE, &project_file)
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("归档空间树到 {project_file} 失败: {error}"))
+/// `epoch` 是启动信任判据：与库侧 [`SPATIAL_EPOCH_ID`] 相等才信文件（见
+/// [`load_project_tree_verified`]）；`entries` 与 `saved_at_unix` 仅作诊断。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct TreeFileMeta {
+    epoch: u64,
+    entries: u64,
+    saved_at_unix: u64,
 }
 
-/// 脏则写回 `accel_tree.bin` 并归档项目专属文件（worker 空闲轮收尾调用），
-/// 返回是否真的写了。
+/// 原子写文件：先写临时文件再 rename 覆盖。
+///
+/// 这个文件由空闲轮反复重写（17 MB 量级），原地重写意味着每次落盘都有一个
+/// 「写半截崩溃 → 文件损坏」的窗口。std 的 `rename` 在 Windows 上带
+/// REPLACE_EXISTING 语义，读者要么看到旧文件要么看到新文件（与 rs-core 旧
+/// 路径同一纪律）。
+fn write_file_atomic(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let tmp = format!("{path}.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| anyhow::anyhow!("创建临时文件 {tmp} 失败: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| anyhow::anyhow!("写入临时文件 {tmp} 失败: {e}"))?;
+        file.sync_all()
+            .map_err(|e| anyhow::anyhow!("同步临时文件 {tmp} 失败: {e}"))?;
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| anyhow::anyhow!("覆盖 {path} 失败: {e}"))?;
+    Ok(())
+}
+
+fn write_project_tree_file(tree: &AccelerationTree) -> anyhow::Result<()> {
+    let bytes = bincode::serialize(tree)
+        .map_err(|e| anyhow::anyhow!("序列化空间树失败: {e}"))?;
+    write_file_atomic(&project_tree_file(), &bytes)
+}
+
+fn read_project_tree_file() -> anyhow::Result<AccelerationTree> {
+    let path = project_tree_file();
+    let bytes =
+        std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
+    bincode::deserialize(&bytes).map_err(|e| anyhow::anyhow!("反序列化 {path} 失败: {e}"))
+}
+
+fn write_tree_meta(meta: &TreeFileMeta) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(meta)?;
+    write_file_atomic(&project_tree_meta_file(), &bytes)
+}
+
+fn read_tree_meta() -> anyhow::Result<TreeFileMeta> {
+    let path = project_tree_meta_file();
+    let bytes =
+        std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("解析 {path} 失败: {e}"))
+}
+
+/// 库侧空间版本号所在的固定记录。
+///
+/// 每条携带空间意图（refresh / remove）的尾事务顺带把它 +1
+/// （[`render_spatial_epoch_bump`]）——水位、意图、版本号同一个事务里同生同死。
+/// 启动时 sidecar 的 epoch 与它不相等，就说明「树文件之后还有过没被镜像进文件
+/// 的空间提交」，文件不可信。
+const SPATIAL_EPOCH_ID: &str = "spatial_epoch:current";
+
+/// 渲染尾事务里的空间版本号递增语句（与 `spatial_reconcile` 意图同一事务使用）。
+///
+/// 窗口重试导致的多次递增无害：版本号只与 sidecar 比相等、不表达次数，多 bump
+/// 一次至多让下次启动多做一次指针重建。
+pub(crate) fn render_spatial_epoch_bump() -> String {
+    format!(
+        "UPSERT {SPATIAL_EPOCH_ID} SET value = (value?:0) + 1, updated_at = time::now();"
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct EpochRow {
+    #[serde(default)]
+    value: u64,
+}
+
+/// 读库侧当前空间版本号（记录不存在按 0）。
+pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
+    let mut response = SUL_DB
+        // `value` 是 SurrealQL 的保留字（`SELECT VALUE …` 的投影修饰符）：不加反引号
+        // 整条语句在 parse 阶段就失败，而启动路径上的 `?` 会把整个进程带下去。
+        .query(format!("SELECT `value` FROM {SPATIAL_EPOCH_ID};"))
+        .await
+        .map_err(|e| anyhow::anyhow!("读取空间版本号失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("读取空间版本号语句失败: {e}"))?;
+    Ok(response
+        .take::<Vec<EpochRow>>(0)?
+        .first()
+        .map(|row| row.value)
+        .unwrap_or(0))
+}
+
+/// 序列化当前内存树到项目文件并盖 sidecar 章。
+///
+/// epoch 在写文件**之前**读：并发的尾事务若在读章与写盘之间又推高了版本号，
+/// sidecar 只会偏旧 → 下次启动宁可多做一次指针重建，方向安全；反过来先写后读
+/// 会把新章盖在旧内容上。直写 / 全量路径不递增 epoch，但它们改完树都会走到
+/// 这里落盘，章一样盖得上。
+async fn persist_project_tree_now() -> anyhow::Result<()> {
+    let epoch = read_db_spatial_epoch().await?;
+    let entries = {
+        let tree = GLOBAL_AABB_TREE.read().await;
+        write_project_tree_file(&tree)?;
+        tree.size() as u64
+    };
+    write_tree_meta(&TreeFileMeta {
+        epoch,
+        entries,
+        saved_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    })
+}
+
+/// 脏则写回项目树文件（worker 空闲轮收尾调用），返回是否真的写了。
 ///
 /// 落盘失败时**保留**脏标记，下一轮重试——清掉的话一次磁盘抖动就把变更永远留在内存里。
 pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
     if !AABB_TREE_DIRTY.swap(false, Ordering::SeqCst) {
         return Ok(false);
     }
-    let written = match GLOBAL_AABB_TREE.read().await.serialize_to_bin_file() {
-        Ok(_) => archive_project_aabb_tree_file(),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = written {
+    if let Err(error) = persist_project_tree_now().await {
         AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
         return Err(error);
     }
@@ -121,9 +291,100 @@ pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
 ///
 /// 全量序列化覆盖了此前一切增量变更，所以顺手清标记，免得空闲轮紧接着再白写一遍。
 pub async fn persist_aabb_tree() -> anyhow::Result<()> {
-    GLOBAL_AABB_TREE.read().await.serialize_to_bin_file()?;
-    archive_project_aabb_tree_file()?;
+    persist_project_tree_now().await?;
     AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// 启动加载：sidecar 的 epoch 与库一致才信项目树文件，否则从库指针分页重建。
+///
+/// 取代旧的「裸文件搬运 + `load_aabb_tree` + 条数对账」三件套：
+/// - 条数对账辨认不出「搬动」——同数漂移直接放行（ADR-010 落盘时机一节记的
+///   回退隐患，这类漂移正是重启回退 `room_relate` 的根源）；
+/// - 旧的兜底重建 `manual_update_aabbs(true)` 全库重算几何并回写整个
+///   `inst_relate.aabb` 列，启动又慢又重；指针重建只读不写。
+///
+/// 已在内存里的树保持不动（live 夹具先填树再启动的场景），与 `load_aabb_tree`
+/// 同一幂等口径。`GEN_MODEL_DIRECT_INCREMENT` / `AIOS_FORCE_SPATIAL_REBUILD`
+/// 设置时无条件重建：直写路径不产生空间意图也不递增 epoch，崩溃丢掉的树变更
+/// sidecar 认不出来，宁可重建。
+pub async fn load_project_tree_verified() -> anyhow::Result<()> {
+    if !GLOBAL_AABB_TREE.read().await.is_empty() {
+        return Ok(());
+    }
+    let db_epoch = read_db_spatial_epoch().await?;
+    let force_rebuild = std::env::var("AIOS_FORCE_SPATIAL_REBUILD").is_ok()
+        || std::env::var("GEN_MODEL_DIRECT_INCREMENT").is_ok();
+    if force_rebuild {
+        println!("按环境变量要求跳过空间树文件，从库指针重建");
+    } else {
+        match read_tree_meta() {
+            Ok(meta) if meta.epoch == db_epoch => match read_project_tree_file() {
+                Ok(tree) => {
+                    let entries = tree.size();
+                    *GLOBAL_AABB_TREE.write().await = tree;
+                    println!(
+                        "空间树使用项目文件 {}（{entries} 条，epoch {db_epoch}）",
+                        project_tree_file()
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("空间树文件不可用（{error:#}），改从库指针重建");
+                }
+            },
+            Ok(meta) => {
+                println!(
+                    "空间树文件 epoch {} 落后库侧 {db_epoch}，改从库指针重建",
+                    meta.epoch
+                );
+            }
+            Err(error) => {
+                println!("空间树 sidecar 不可用（{error:#}），改从库指针重建");
+            }
+        }
+    }
+    rebuild_tree_from_pointers().await
+}
+
+/// 从库指针整树重建：分页读 `inst_relate` 的 `(refno, noun, aabb.d)`，bulk-load
+/// 进全局树后立即落盘盖章。
+///
+/// 只读不写库；进树口径与刷新层一致（`world_trans.d != none and aabb.d != none`）。
+/// 没赶上刷新的行（指针缺失）不进树——它们此前也从不在树上；真要把这类行补进
+/// 来（重算几何并回写指针），用显式修复工具 [`manual_update_aabbs`]。
+pub async fn rebuild_tree_from_pointers() -> anyhow::Result<()> {
+    const PAGE: usize = 5000;
+    let mut boxes: Vec<RStarBoundingBox> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let sql = format!(
+            "select in as refno, in.noun as noun, aabb.d as aabb from inst_relate \
+             where world_trans.d != none and aabb.d != none limit {PAGE} start {offset}"
+        );
+        let mut response = SUL_DB
+            .query(&sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("分页读取包围盒指针失败（start {offset}）: {e}"))?
+            .check()
+            .map_err(|e| {
+                anyhow::anyhow!("分页读取包围盒指针语句失败（start {offset}）: {e}")
+            })?;
+        let rows: Vec<PointerRow> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解析包围盒指针失败（start {offset}）: {e}"))?;
+        let fetched = rows.len();
+        boxes.extend(rows.into_iter().map(PointerRow::into_box));
+        if fetched < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+    let entries = boxes.len();
+    *GLOBAL_AABB_TREE.write().await = AccelerationTree::load(boxes);
+    // 重建产物立即落盘盖章，不落的话下次启动还得再重建一遍。
+    persist_aabb_tree().await?;
+    println!("空间树已从库指针重建并落盘: {entries} 条");
     Ok(())
 }
 
@@ -144,12 +405,13 @@ async fn count_rows(sql: &str) -> anyhow::Result<usize> {
         .max(0) as usize)
 }
 
-/// 用库里的包围盒数量与内存空间树对账，少了就重建。
+/// 用库里的包围盒数量与内存空间树对账，少了就重建（**手工诊断 / 修复入口**）。
 ///
-/// 树只有 `manual_update_aabbs` 一个填充入口——`load_aabb_tree` 从库分页 bulk-load
-/// 的那段是注释掉的，它只反序列化 `accel_tree.bin`。而旧的重建条件是「树为空」，
-/// 于是文件里只要残留几条，`is_empty()` 就为假，重建永远不触发，树就永久停在残留
-/// 状态，库里其余的包围盒一个都进不来（ADR-010 D8）。
+/// 启动路径已不再调用它——epoch 校验（[`load_project_tree_verified`]）取代了
+/// 条数对账：条数辨认不出同数漂移，而这里的兜底重建 `manual_update_aabbs(true)`
+/// 会全库重算几何并回写 `inst_relate.aabb`，又慢又重。保留它是因为指针重建
+/// 覆盖不了「指针本身缺失 / 陈旧」的修复场景（几何在而 aabb 从没算过）——
+/// 那正是这条重算路径的正当用途。
 pub async fn sync_aabb_tree_with_db() -> anyhow::Result<()> {
     let tree_count = GLOBAL_AABB_TREE.read().await.tree.size();
 
@@ -189,11 +451,12 @@ pub async fn sync_aabb_tree_with_db() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 手动更新所有 inst_relate 的 AABB 包围盒
+/// 手动更新所有 inst_relate 的 AABB 包围盒（**显式修复工具**，启动路径不再依赖）。
 ///
 /// 此函数会分批遍历数据库中 inst_relate 表中的条目，
 /// 获取它们的引用号（refnos），然后调用 update_inst_relate_aabbs_by_refnos
-/// 函数更新这些条目的 AABB 包围盒数据。
+/// 函数更新这些条目的 AABB 包围盒数据——重算几何并**回写库**，与只读的
+/// [`rebuild_tree_from_pointers`] 是两种工具：指针陈旧或缺失时用它补账。
 ///
 /// # 参数
 ///
@@ -257,7 +520,7 @@ mod tests {
     use surrealdb::opt::auth::Root;
 
     /// 落盘失败必须保留脏标记（清掉等于把变更永远留在内存里），成功路径才允许清。
-    /// `persist_*` 会写真实的 `accel_tree.bin`，单测不能实跑，只能钉源码。
+    /// `persist_*` 会写真实的项目树文件，单测不能实跑，只能钉源码。
     #[test]
     fn persist_failure_keeps_the_dirty_flag() {
         let source = include_str!("aabb_tree.rs");
@@ -287,15 +550,181 @@ mod tests {
         assert!(AABB_TREE_DIRTY.swap(false, Ordering::SeqCst));
     }
 
+    /// 提交后收敛不得重算几何、不得写库：窗口 journal 重放已经把刷新层的计算结果
+    /// 落成主库真值，收敛只许「按指针把树追上库」。此前这里复跑
+    /// `update_inst_relate_aabbs_by_refnos(.., true)`，把几何 AABB 整个重算并重写
+    /// 一遍——跑在阻断出队的关键路径上。回退即红。
+    #[test]
+    fn post_commit_reconcile_syncs_pointers_instead_of_recomputing() {
+        let source = include_str!("aabb_tree.rs");
+        let body = source
+            .split_once(concat!(
+                "pub(crate) async fn ",
+                "apply_deferred_spatial_mutations("
+            ))
+            .expect("apply_deferred_spatial_mutations must exist")
+            .1
+            .split_once(concat!("\n", "/// `(refno, noun, aabb 指针值)`"))
+            .expect("PointerRow doc must follow")
+            .0;
+        assert!(
+            body.contains("sync_tree_from_committed_pointers"),
+            "refresh 分支必须走指针同步: {body}"
+        );
+        assert!(
+            !body.contains("update_inst_relate_aabbs_by_refnos"),
+            "提交后收敛不得重算几何/写库: {body}"
+        );
+    }
+
+    /// 启动重建只许读库：`rebuild_tree_from_pointers` 是 epoch 不匹配时的兜底，
+    /// 若它回到 `manual_update_aabbs` 那条重算路径，每次文件失配的启动都会把
+    /// 整个 `inst_relate.aabb` 列重写一遍。回退即红。
+    #[test]
+    fn pointer_rebuild_reads_only() {
+        let source = include_str!("aabb_tree.rs");
+        let body = source
+            .split_once(concat!("pub async fn ", "rebuild_tree_from_pointers("))
+            .expect("rebuild_tree_from_pointers must exist")
+            .1
+            .split_once(concat!("\n", "#[derive(serde::Deserialize)]"))
+            .expect("CountRow must follow")
+            .0;
+        assert!(
+            !body.contains("manual_update_aabbs") && !body.contains("update_inst_relate_aabbs"),
+            "指针重建不得重算几何/回写库: {body}"
+        );
+        assert!(
+            body.contains("AccelerationTree::load"),
+            "重建必须 bulk-load 整树: {body}"
+        );
+    }
+
+    /// 启动信任判据必须是「sidecar epoch == 库侧 epoch」，且失配时落到指针重建。
+    /// 退回条数对账（`sync_aabb_tree_with_db`）会重新放行同数漂移。
+    #[test]
+    fn verified_load_gates_on_epoch_and_falls_back_to_pointer_rebuild() {
+        let source = include_str!("aabb_tree.rs");
+        let body = source
+            .split_once(concat!("pub async fn ", "load_project_tree_verified("))
+            .expect("load_project_tree_verified must exist")
+            .1
+            .split_once(concat!("pub async fn ", "rebuild_tree_from_pointers("))
+            .expect("rebuild must follow")
+            .0;
+        assert!(
+            body.contains("meta.epoch == db_epoch"),
+            "信任文件必须以 epoch 相等为前提: {body}"
+        );
+        assert!(
+            body.contains("rebuild_tree_from_pointers().await"),
+            "失配路径必须收敛到指针重建: {body}"
+        );
+        assert!(
+            !body.contains("sync_aabb_tree_with_db"),
+            "启动路径不得退回条数对账: {body}"
+        );
+    }
+
+    /// 树的口径是「镜像已提交指针」：指针已消失的 refresh 目标必须摘除树条目，
+    /// 而不是跳过——跳过会让旧盒一直留在树上当房间候选，直到下一次指针重建
+    /// 才自愈。回退即红。
+    #[test]
+    fn pointer_sync_evicts_targets_whose_pointer_vanished() {
+        let source = include_str!("aabb_tree.rs");
+        let body = source
+            .split_once(concat!("async fn ", "sync_tree_from_committed_pointers("))
+            .expect("sync_tree_from_committed_pointers must exist")
+            .1
+            .split_once(concat!("\n", "/// 空间树自上次写回"))
+            .expect("dirty-flag doc must follow")
+            .0;
+        assert!(
+            body.contains("remove_by_refnos"),
+            "指针消失的 refresh 目标必须摘除树条目: {body}"
+        );
+    }
+
+    /// `gen_spatial_tree` 关着 = 冻结房间/空间派生数据（运维开关语义，2026-08-06）：
+    /// 启动不得为一棵没人查询的树做加载乃至整表分页的指针重建——降级态启动反而
+    /// 更重，还把 `run_app` 里那道同名门控架空。回退即红。
+    #[test]
+    fn startup_tree_load_respects_the_spatial_switch() {
+        let source = include_str!("../lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli must exist")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_app must follow run_cli")
+            .0;
+        let gate = body
+            .find("if db_option.gen_spatial_tree")
+            .expect("run_cli 的启动树加载必须有开关门控");
+        let load = body
+            .find("load_project_tree_verified")
+            .expect("run_cli 必须走 epoch 校验加载");
+        assert!(
+            gate < load,
+            "开关门控必须先于加载调用，否则降级态启动仍会整表指针重建"
+        );
+    }
+
+    /// R3 的安全前提：绕开 rs-core 的 `deserialize_from_bin_file`（它私有地重建
+    /// 反向索引）直接 bincode 反序列化后，首次按 refno 操作必须自愈索引——
+    /// 否则 `sync_refnos` 删不中旧盒，同一 refno 会在树里堆叠历史包围盒。
+    #[test]
+    fn deserialized_tree_self_heals_its_refno_index() {
+        fn bbox(seq: u64, min: f32, max: f32) -> RStarBoundingBox {
+            RStarBoundingBox::new(
+                parry3d::bounding_volume::Aabb::new(
+                    parry3d::math::Point::new(min, min, min),
+                    parry3d::math::Point::new(max, max, max),
+                ),
+                RefnoEnum::from(format!("4000000001/{seq}").as_str()),
+                "BOX".to_string(),
+            )
+        }
+        let tree = AccelerationTree::load(vec![bbox(1, 0.0, 10.0), bbox(2, 20.0, 30.0)]);
+        let bytes = bincode::serialize(&tree).expect("serialize");
+        let mut restored: AccelerationTree = bincode::deserialize(&bytes).expect("deserialize");
+
+        let stale = restored.sync_refnos(vec![bbox(1, 100.0, 110.0)]);
+        assert_eq!(stale.len(), 1, "反向索引必须自愈，否则旧盒删不中");
+        assert_eq!(restored.size(), 2, "同一 refno 不允许堆叠历史包围盒");
+    }
+
+    /// sidecar 元数据的编解码往返。
+    #[test]
+    fn tree_meta_roundtrip() {
+        let meta = TreeFileMeta {
+            epoch: 42,
+            entries: 906,
+            saved_at_unix: 1_754_000_000,
+        };
+        let bytes = serde_json::to_vec(&meta).expect("encode");
+        let back: TreeFileMeta = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(back.epoch, 42);
+        assert_eq!(back.entries, 906);
+    }
+
+    /// 版本号递增语句：固定记录、自增一、缺省从 0 起。
+    #[test]
+    fn epoch_bump_targets_the_singleton_record() {
+        let sql = render_spatial_epoch_bump();
+        assert!(sql.contains(SPATIAL_EPOCH_ID), "必须写固定记录: {sql}");
+        assert!(sql.contains("(value?:0) + 1"), "必须缺省 0 自增一: {sql}");
+    }
+
     /// D8（ADR-010）：`accel_tree.bin` 里只要残留几条，旧的 `is_empty()` 判断就不会触发
     /// 重建，树永久停在残留状态——实测历史日志里它最多只到 45 条，而库里有 906 个包围盒。
     /// 本用例连真库，对比重建前后的条目数。
     ///
-    /// 会写库（重算并回写 `inst_relate.aabb`）与 cwd 下的 `accel_tree.bin`，故默认 ignore。
+    /// 会写库（重算并回写 `inst_relate.aabb`）与 cwd 下的项目树文件，故默认 ignore。
     /// 用法：
     /// `AIOS_LIVE_WS=ws://localhost:8009 cargo test live_sync_aabb_tree -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: rewrites inst_relate.aabb and accel_tree.bin"]
+    #[ignore = "manual live: rewrites inst_relate.aabb and the project tree file"]
     async fn live_sync_aabb_tree_fills_tree_from_db() {
         let endpoint = std::env::var("AIOS_LIVE_WS").expect("set AIOS_LIVE_WS");
         let ns = std::env::var("AIOS_LIVE_NS").unwrap_or_else(|_| "1516".into());
