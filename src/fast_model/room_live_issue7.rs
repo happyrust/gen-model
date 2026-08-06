@@ -39,6 +39,7 @@ mod tests {
 
     use crate::data_interface::model_update_pending::drain_rooms;
     use crate::data_interface::tidb_manager::AiosDBManager;
+    use crate::fast_model::aabb_tree::rebuild_tree_from_pointers;
     use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::room_model::build_room_relations;
 
@@ -232,6 +233,9 @@ mod tests {
 
         // ---- 2. 全量基线 ----
         load_aabb_tree().await.expect("load spatial tree");
+        rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild complete spatial tree from persistent pointers");
         update_inst_relate_aabbs_by_refnos(&[panel, element], true)
             .await
             .expect("refresh both aabbs into the tree");
@@ -300,6 +304,17 @@ mod tests {
         mgr.update_world_transforms(&HashSet::from([element]))
             .await
             .expect("transform work item");
+        // 共享实库可能已有超过一页的房间积压；把本测试自己的确定性任务提到本轮首页，
+        // 不删除也不改动别人的任务。
+        SUL_DB
+            .query(format!(
+                "UPDATE model_update_pending:room_recalc_element_{ELEMENT} \
+                 SET updated_at = d'1970-01-01T00:00:00Z';"
+            ))
+            .await
+            .expect("prioritize target room task")
+            .check()
+            .expect("valid target room priority update");
         println!("[issue7] 移动后队列: {:?}", room_queue_rows().await);
         println!("[issue7] 移动后 aabb: {:?}", element_aabb_json().await);
         let done = drain_rooms(&db_option).await.expect("drain room work");
@@ -473,11 +488,8 @@ mod tests {
 
     /// 把这个分支重生成一遍——`RegenRoot` 落到执行层就是这一步。
     async fn regenerate_branch(mgr: &AiosDBManager) {
-        aios_core::clear_all_caches_batch(&[
-            RefnoEnum::from(ELEMENT),
-            RefnoEnum::from(BRANCH),
-        ])
-        .await;
+        aios_core::clear_all_caches_batch(&[RefnoEnum::from(ELEMENT), RefnoEnum::from(BRANCH)])
+            .await;
         crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
             mgr,
             &[RefnoEnum::from(BRANCH).to_pdms_str()],
@@ -655,7 +667,9 @@ mod tests {
         let by_zero = load_pending_model_units_for_retry(0)
             .await
             .expect("按 dbnum=0 取重试工作单");
-        let looked_up = current_regen_revision(ROOT).await.expect("补查当前 revision");
+        let looked_up = current_regen_revision(ROOT)
+            .await
+            .expect("补查当前 revision");
 
         // 收尾放在断言之前：断言一旦红了，这行不能留在真库里。
         SUL_DB
@@ -696,23 +710,37 @@ mod tests {
     async fn live_issue7_probe() {
         connect_live().await;
         for (label, sql) in [
-            ("构件", format!("SELECT VALUE <string>[id, noun, dbnum, deleted] FROM pe:{ELEMENT};")),
-            ("面板", format!("SELECT VALUE <string>[id, noun, dbnum, deleted] FROM pe:{PANEL};")),
+            (
+                "构件",
+                format!("SELECT VALUE <string>[id, noun, dbnum, deleted] FROM pe:{ELEMENT};"),
+            ),
+            (
+                "面板",
+                format!("SELECT VALUE <string>[id, noun, dbnum, deleted] FROM pe:{PANEL};"),
+            ),
             (
                 "面板在册",
-                format!("SELECT VALUE <string>[id, room_num] FROM room_panel_relate WHERE out = pe:{PANEL};"),
+                format!(
+                    "SELECT VALUE <string>[id, room_num] FROM room_panel_relate WHERE out = pe:{PANEL};"
+                ),
             ),
             (
                 "构件几何",
-                format!("SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{ELEMENT};"),
+                format!(
+                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{ELEMENT};"
+                ),
             ),
             (
                 "面板几何",
-                format!("SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{PANEL};"),
+                format!(
+                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{PANEL};"
+                ),
             ),
             (
                 "归属边",
-                format!("SELECT VALUE <string>[id, room_num] FROM room_relate WHERE out = pe:{ELEMENT};"),
+                format!(
+                    "SELECT VALUE <string>[id, room_num] FROM room_relate WHERE out = pe:{ELEMENT};"
+                ),
             ),
         ] {
             let rows: Vec<String> = SUL_DB

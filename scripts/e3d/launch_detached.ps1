@@ -134,7 +134,8 @@ try {
         throw "GetExitCodeProcess failed, win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     "detached pid=$($pi.dwProcessId) exit=$exitCode"
-    exit ([int]$exitCode)
+    if ($exitCode -eq 0) { exit 0 }
+    exit 1
 }
 catch {
     if (-not $cleanupVerified) {

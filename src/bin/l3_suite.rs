@@ -913,21 +913,21 @@ impl E3dDriver {
         let _ = fs::remove_file(&alive_log);
         let _ = fs::remove_file(&done_log);
         let _ = fs::remove_file(&scenario_log);
-        let macro_arg = macro_path.to_string_lossy().replace('\\', "/");
-        let alive_arg = alive_log.to_string_lossy().replace('\\', "/");
-        let done_arg = done_log.to_string_lossy().replace('\\', "/");
+        let macro_arg = e3d_path(&macro_path);
+        let alive_arg = e3d_path(&alive_log);
+        let done_arg = e3d_path(&done_log);
         fs::write(
             &wrapper_path,
             format!(
                 "ALPHA LOG \"{alive_arg}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{macro_arg}\"\nALPHA LOG \"{done_arg}\" OVER\n$P L3-DONE\nALPHA LOG END\nQUIT\n"
             ),
         )?;
-        let wrapper_arg = wrapper_path.to_string_lossy().replace('\\', "/");
+        let wrapper_arg = e3d_path(&wrapper_path);
         let driver_stdout = File::create(&driver_log)?;
         let driver_stderr = driver_stdout.try_clone()?;
         let mut launcher = Command::new("cmd")
             .args(["/d", "/c"])
-            .arg(&self.launcher)
+            .arg(e3d_path(&self.launcher))
             .arg(&wrapper_arg)
             .env("L3_E3D_PROJECTS_DIR", &self.projects_dir)
             .env("L3_E3D_PROJECT_EVAR", &self.project_evar)
@@ -988,6 +988,14 @@ impl E3dDriver {
             thread::sleep(Duration::from_secs(2));
         }
     }
+}
+
+fn e3d_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    path
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&path)
+        .replace('\\', "/")
 }
 
 fn execute_and_wait(
@@ -1704,6 +1712,11 @@ mod tests {
             ["m2", "m1"]
         );
         assert!(select_scenarios("m9").is_err());
+    }
+
+    #[test]
+    fn e3d_paths_drop_windows_verbatim_prefix() {
+        assert_eq!(e3d_path(Path::new(r"\\?\D:\work\case.mac")), "D:/work/case.mac");
     }
 
     #[test]

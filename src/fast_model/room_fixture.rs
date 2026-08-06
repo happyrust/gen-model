@@ -311,6 +311,7 @@ pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_model::aabb_tree::rebuild_tree_from_pointers;
     use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::room_model::build_room_relations;
     use aios_core::room::room::load_aabb_tree;
@@ -437,9 +438,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: writes fixture records and .mesh files"]
     async fn live_room_structural_triggers_enqueue_panel_recalc() {
-        use crate::data_interface::model_update_plan::{
-            ModelWorkAction, build_model_update_plan,
-        };
+        use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
         use aios_core::NamedAttrValue;
         use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
         use std::collections::BTreeMap;
@@ -586,9 +585,7 @@ mod tests {
     async fn live_room_rename_into_compliance_recomputes_membership() {
         use crate::data_interface::increment_pipeline::IncrementPipeline;
         use crate::data_interface::model_update_pending::run_staged_room_work;
-        use crate::data_interface::model_update_plan::{
-            ModelWorkAction, build_model_update_plan,
-        };
+        use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
         use crate::data_interface::staging::lifecycle::create_window_on;
         use crate::data_interface::staging::{
             ResourceThresholds, StagedFinalize, register_staged_finalize,
@@ -694,9 +691,7 @@ mod tests {
         .await
         .expect("create staged window");
         window
-            .scope(crate::data_interface::staging::preload::preload_room_working_set(
-                &preloaded,
-            ))
+            .scope(crate::data_interface::staging::preload::preload_room_working_set(&preloaded))
             .await
             .expect("preload room working set");
 
@@ -719,7 +714,8 @@ mod tests {
         let mut want = vec![pane_a_refno.to_pdms_str(), pane_b_refno.to_pdms_str()];
         want.sort();
         assert_eq!(
-            planned, want,
+            planned,
+            want,
             "改名触发必须为名下两块 PANE 排整间任务（依赖全局 room_key_word 命中 `-RM`，\
              当前配置: {:?}）",
             aios_core::get_db_option().get_room_key_word()
@@ -866,10 +862,8 @@ mod tests {
 
         let (in_a, in_b, straddler) = part_refnos();
         assert!(
-            edges
-                .iter()
-                .all(|edge| edge.room_num == NEW_ROOM_NUM
-                    && (edge.panel == pane_a || edge.panel == pane_b)),
+            edges.iter().all(|edge| edge.room_num == NEW_ROOM_NUM
+                && (edge.panel == pane_a || edge.panel == pane_b)),
             "归属边只该属于这间房的两块面板、且带新房间号: {edges:#?}"
         );
         let a_parts: HashSet<String> = edges
@@ -1559,10 +1553,7 @@ mod tests {
             RefnoEnum::from(pane_a.as_str()).refno(),
             RefnoEnum::from(pane_b.as_str()).refno(),
         ]);
-        let removed = GLOBAL_AABB_TREE
-            .write()
-            .await
-            .remove_by_refnos(&panel_refs);
+        let removed = GLOBAL_AABB_TREE.write().await.remove_by_refnos(&panel_refs);
         assert!(removed > 0, "夹具基线应先把 PANE 放进空间树");
         assert!(
             GLOBAL_AABB_TREE
@@ -1616,6 +1607,9 @@ mod tests {
         assert_eq!(done, 1, "那条元素任务必须被消费掉");
 
         let incremental = room_edges().await;
+        rebuild_tree_from_pointers()
+            .await
+            .expect("restore complete spatial tree before full parity rebuild");
         build_room_relations(&db_option)
             .await
             .expect("full rebuild after move");
