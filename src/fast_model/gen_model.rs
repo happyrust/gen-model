@@ -272,7 +272,7 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
         "GLOBAL_AABB_TREE: {:?}",
         GLOBAL_AABB_TREE.read().await.tree.size()
     );
-    // 只有全量生成无条件写回 `accel_tree.bin`——它本来就覆盖了此前的一切增量变更。
+    // 只有全量生成无条件写回项目树文件——它本来就覆盖了此前的一切增量变更。
     //
     // 定向生成一概不写。这个文件现在约 21 MB，而定向路径一次可能只改了一个 BOX 的
     // XLEN；合批失败回退逐根时更是每个根写一遍。增量路径动内存树的两处（AABB 刷新、

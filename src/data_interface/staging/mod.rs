@@ -39,6 +39,38 @@ pub(crate) fn active_data_db(
         .unwrap_or_else(|| aios_core::SUL_DB.clone())
 }
 
+/// 查询可参与几何计算的实例。
+///
+/// `aios_core::query_insts` 只过滤空 AABB；一条悬空的 `world_trans` 会让整批
+/// `GeomInstQuery` 反序列化失败。这里把两个必需字段的口径收齐，缺几何的行由调用方按
+/// “不可用/待重试”处理，而不是拖垮同批所有正常实例。
+pub(crate) async fn query_valid_insts(
+    refnos: &[aios_core::RefnoEnum],
+) -> anyhow::Result<Vec<aios_core::GeomInstQuery>> {
+    if refnos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys = aios_core::get_inst_relate_keys(refnos);
+    let mut response = active_data_db()
+        .query(format!(
+            r#"SELECT
+                   in AS refno, in.old_pe AS old_refno, in.owner AS owner,
+                   generic, aabb.d AS world_aabb, world_trans.d AS world_trans,
+                   out.ptset.d.pt AS pts,
+                   IF booled_id != NONE {{ [{{ "geo_hash": booled_id }}] }}
+                   ELSE {{ (SELECT trans.d AS transform, record::id(out) AS geo_hash
+                            FROM out->geo_relate
+                            WHERE visible && out.meshed && trans.d != NONE && geo_type = 'Pos') }}
+                   AS insts,
+                   booled_id != NONE AS has_neg, dt AS date
+               FROM {keys}
+               WHERE aabb.d != NONE AND world_trans.d != NONE"#
+        ))
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
+}
+
 /// 读路由 seam 的验收（T0.2）：上下文在场 → 被接线的读入口只看暂存库；
 /// 上下文缺席 → 行为与历史一致（直连 `SUL_DB`）；两个世界互不污染进程缓存。
 #[cfg(test)]
@@ -139,5 +171,41 @@ mod routing_tests {
             outside.is_err(),
             "上下文缺席时不得看见暂存数据（SUL_DB 未连接应报错）：{outside:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn valid_inst_query_skips_dangling_world_transform() {
+        let staging = connect("mem://").await.expect("mem boots");
+        staging
+            .use_ns("staging")
+            .use_db("valid_insts")
+            .await
+            .expect("use staging db");
+        staging
+            .query(
+                "CREATE pe:⟨4000000001_1⟩ SET owner = pe:⟨4000000001_1⟩;\
+                 CREATE pe:⟨4000000001_2⟩ SET owner = pe:⟨4000000001_1⟩;\
+                 CREATE aabb:valid SET d = { mins: [0, 0, 0], maxs: [1, 1, 1] };\
+                 CREATE trans:identity SET d = { translation: [0, 0, 0], \
+                     rotation: [0, 0, 0, 1], scale: [1, 1, 1] };\
+                 CREATE inst_info:valid; CREATE inst_info:dangling;\
+                 RELATE pe:⟨4000000001_1⟩->inst_relate:⟨4000000001_1⟩->inst_info:valid \
+                     SET aabb = aabb:valid, world_trans = trans:identity, generic = 'PANE';\
+                 RELATE pe:⟨4000000001_2⟩->inst_relate:⟨4000000001_2⟩->inst_info:dangling \
+                     SET aabb = aabb:valid, world_trans = trans:missing, generic = 'PANE';",
+            )
+            .await
+            .expect("plant inst rows")
+            .check()
+            .expect("planted");
+
+        let good: RefnoEnum = "4000000001_1".into();
+        let dangling: RefnoEnum = "4000000001_2".into();
+        let ctx = StagingReadContext::new(staging, "valid_insts");
+        let rows = with_staging_reads(ctx, super::query_valid_insts(&[good, dangling]))
+            .await
+            .expect("dangling transform must not poison the batch");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].refno, good);
     }
 }

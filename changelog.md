@@ -4,6 +4,18 @@
 
 ### 新增
 
+- **执行范围缓存 + 周期对账重扫**（现场：数据批次执行中 SUL_DB 连接抖动，watcher 的
+  范围解析报 `receiving from an empty and closed channel`，整批文件事件被丢弃且无重试）：
+  - 文件事件路径的 MDB 范围解析改走进程内单槽缓存（`UpdateScope::resolve_cached`）。
+    名单只在 SYS meta 批次落库时才变，那一刻与 `SCOPE_DIRTY` 同点显式失效；TTL 兜底
+    `AIOS_SCOPE_CACHE_SECS`（默认 300s，0 关闭）。SUL_DB 瞬时不可用时暖缓存放行并告警，
+    冷缓存与配置错误（mdb_name 没填 / MDB 名不存在）维持 fail-closed 上抛。
+    启动重扫、重挂补扫、周期对账与手动路径仍每次真查（fresh），它们就是缓存的刷新点。
+  - watcher 事件循环新增周期对账重扫（`AIOS_WATCH_RECONCILE_SECS`，默认 300s，0 关闭）：
+    按间隔整面重比「文件最新会话号 vs applied 水位」，把连接抖动、服务重启等一切来源
+    丢掉的文件事件在一个周期内追回；入队按水位判定天然幂等，与启动重扫共用
+    `sweep_watch_dirs`。
+
 - **issue #10 复现套件**（`src/data_interface/staging/issue10_add_node.rs`，仅测试编译）：
   用真实渲染与真实暂存窗口（`stage_parsed_window` → `register_staged_finalize` →
   `commit_registered_to`）在 mem 引擎上模拟 E3D「复制 BRAN 并 SAVEWORK」的连续增量，

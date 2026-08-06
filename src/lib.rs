@@ -19,7 +19,7 @@ use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
 use aios_core::pdms_data::AttInfoMap;
 use aios_core::pdms_types::*;
-use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
+use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::ssc_setting::{
     set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,
@@ -231,10 +231,18 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         mgr.init_watcher().await?;
     }
 
-    // rs-core 只认 cwd 下的裸 accel_tree.bin；先把本项目的专属文件放上去，
-    // 否则换目录静默空树、多项目共用目录互读对方的树（ADR-010 §6）。
-    crate::fast_model::aabb_tree::stage_project_aabb_tree_file();
-    load_aabb_tree().await.unwrap();
+    // 启动加载：sidecar epoch 与库一致才信项目树文件，否则从库指针重建
+    // （ADR-010 §6 修订：裸文件搬运与条数对账一并退役）。
+    // `gen_spatial_tree` 关着（止血/演练降级）时整段跳过：开关语义是冻结房间/空间
+    // 派生数据，为一棵没人查询的树做加载乃至整表分页的指针重建，只会让降级态启动
+    // 反而更重；脏位门控保证跳过后也不会把空树写回项目树文件。
+    // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
+    // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
+    if db_option.gen_spatial_tree
+        && let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await
+    {
+        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+    }
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
@@ -385,7 +393,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
-    use crate::fast_model::aabb_tree::sync_aabb_tree_with_db;
     use aios_core::init_surreal;
     // 如果传入的是DbOptionExt，则取其内部的DbOption
     let db_option: DbOption = option
@@ -417,11 +424,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
-        // Try to load existing AABB tree first.
-        // rs-core 只认 cwd 下的裸 accel_tree.bin，先放置本项目的专属文件（ADR-010 §6）。
-        crate::fast_model::aabb_tree::stage_project_aabb_tree_file();
-        load_aabb_tree().await?;
-        sync_aabb_tree_with_db().await?;
+        // epoch 校验通过才信项目树文件，失配从库指针重建；条数对账
+        // （sync_aabb_tree_with_db）退役为手工诊断工具（ADR-010 §6 修订）。
+        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
     }
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await

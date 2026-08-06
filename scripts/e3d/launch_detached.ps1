@@ -8,9 +8,9 @@
 # batch file that has already sourced evars.bat.
 
 param(
-    [string]$Exe = 'D:\AVEVA\Everything3D3.1\des.exe',
+    [string]$Exe = 'C:\Program Files (x86)\AVEVA\Everything3D3.1\des.exe',
     [string]$Arguments = 'ams SYSTEM/XXXXXX /ALL',
-    [string]$WorkingDirectory = 'D:\AVEVA\Everything3D3.1'
+    [string]$WorkingDirectory = 'C:\Program Files (x86)\AVEVA\Everything3D3.1'
 )
 
 Add-Type -TypeDefinition @'

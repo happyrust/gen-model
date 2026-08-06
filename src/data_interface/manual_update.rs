@@ -3130,18 +3130,34 @@ impl AiosDBManager {
                  本期执行范围由 MDB 定，宁可这次不跑，也不能悄悄回落到服务端配置里的另一个 MDB"
             ),
             Some(mdb) => mdb,
-            // 配置里那个也可能是空的。让它落到 `resolve` 只会得到「库里没有名为 / 的
-            // MDB」这种查不出所以然的报错，而自动 watcher 现在也走这条路——范围解不出来
-            // 它一个库都不入队，届时没人猜得到问题出在一行没填的配置上。
-            None => match self.db_option.mdb_name.trim() {
-                "" => anyhow::bail!(
-                    "DbOption 里的 mdb_name 是空的，本期执行范围无从谈起。\
-                     它决定哪些设计库参与更新（手动与自动两条路径都读它），请先填上"
-                ),
-                mdb => mdb,
-            },
+            None => self.configured_mdb()?,
         };
         UpdateScope::resolve(mdb).await
+    }
+
+    /// [`Self::update_scope`] 的看门狗事件版：走 [`UpdateScope::resolve_cached`]。
+    ///
+    /// 名单只在 SYS meta 批次落库时才变（那一刻缓存被显式失效，见 `batch_worker`
+    /// 的 `SCOPE_DIRTY` 置位点），事件按 mtime 轮询源源不断，每次都重查纯属浪费；
+    /// 更要紧的是 SUL_DB 瞬时不可用时暖缓存能放行事件，不再整批丢弃。
+    /// 配置错误（mdb_name 没填 / MDB 名不存在）照常上抛——那要人修，缓存不装好。
+    /// 启动重扫、周期对账与手动路径仍走 [`Self::update_scope`]（fresh），
+    /// 它们本身就是缓存的刷新点。
+    pub(crate) async fn update_scope_cached(&self) -> anyhow::Result<UpdateScope> {
+        UpdateScope::resolve_cached(self.configured_mdb()?).await
+    }
+
+    /// 配置里的 MDB 名。空值要在这里就喊出来：让它落到 `resolve` 只会得到
+    /// 「库里没有名为 / 的 MDB」这种查不出所以然的报错，而自动 watcher 也走这条路
+    /// ——范围解不出来它一个库都不入队，届时没人猜得到问题出在一行没填的配置上。
+    fn configured_mdb(&self) -> anyhow::Result<&str> {
+        match self.db_option.mdb_name.trim() {
+            "" => anyhow::bail!(
+                "DbOption 里的 mdb_name 是空的，本期执行范围无从谈起。\
+                 它决定哪些设计库参与更新（手动与自动两条路径都读它），请先填上"
+            ),
+            mdb => Ok(mdb),
+        }
     }
 
     /// Pass 1: walk this project's ingestible DB directories and group candidate

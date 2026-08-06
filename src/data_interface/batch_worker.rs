@@ -781,6 +781,8 @@ async fn execute_frozen_batch(
                 .push(format!("SYST 派生任务入队失败: {error:#}"));
             postcommit_failed = true;
         }
+        // 范围名单可能刚变：事件路径的缓存一并作废，下一次事件重查。
+        crate::data_interface::update_scope::invalidate_scope_cache();
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
@@ -995,6 +997,7 @@ async fn execute_frozen_batch_body(
             }
         }
         // MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽。
+        crate::data_interface::update_scope::invalidate_scope_cache();
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
@@ -1800,11 +1803,12 @@ async fn idle_round(
     }
 
     // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
-    // AABB 刷新与删除清理只动内存树，这里每轮最多写一次 accel_tree.bin。不落盘的话，
-    // 重启读回旧文件 + 数量对账放行 + 启动全量房间重建，会把增量已收敛的房间边
-    // 改写回搬家前的状态。失败保留脏标记，下一空闲轮重试。
+    // AABB 刷新与删除清理只动内存树，这里每轮最多写一次项目树文件。不落盘的话，
+    // 重启读回旧文件 + 启动全量房间重建，会把增量已收敛的房间边改写回搬家前的
+    // 状态（epoch 校验能认出「文件之后还有空间提交」，但直写路径的变更没有
+    // epoch 痕迹，仍要靠这里的落盘闭环）。失败保留脏标记，下一空闲轮重试。
     match crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty().await {
-        Ok(true) => println!("空间树增量变更已写回 accel_tree.bin"),
+        Ok(true) => println!("空间树增量变更已写回项目树文件"),
         Ok(false) => {}
         Err(error) => println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}"),
     }

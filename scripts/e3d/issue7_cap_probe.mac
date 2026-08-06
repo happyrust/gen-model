@@ -1,0 +1,11 @@
+-- issue #7 probe: CAP 1 of BRAN /1WCC1135/B1 (=24383/66460, dbnum 7999).
+-- Read-only. Run from the E3D command window:
+--   $M "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_probe.mac"
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/issue7_cap_probe.log" OVER
+=24383/66460
+Q CE
+Q TYPE
+Q POS
+Q OWNER
+ALPHA LOG END

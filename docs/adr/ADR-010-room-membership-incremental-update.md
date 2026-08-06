@@ -195,6 +195,8 @@
     且反向索引重建私有，采用搬运语义——加载前把 `accel_tree_{project}.bin` 放到
     裸名上（只有裸文件则首次迁移），落盘成功后归档回项目名，归档失败上抛由脏位
     驱动重试。已知限制：多项目**并发**共用同一 cwd 时裸文件仍是竞态窗口。
+    **（2026-08-06 搬运语义整体退役：文件 IO 收归 gen-model 直接读写项目名文件，
+    竞态窗口随裸文件一起消失，见下方增补 4。）**
   - **纯位姿移动不再覆坏管段变换**：`update_world_transforms` 的子树收集此前
     把管段行一并捞进来，用**元素**的世界变换覆盖管段行的「单位圆柱 → 世界管段」
     缩放矩阵，管段会被画成分支原点处的单位圆柱。现按 out 排除
@@ -306,8 +308,48 @@
   - 回退即红：`NoGeometry` 在全量侧必须 `continue` 且排在任何 `save_room_relate` 之前、
     在增量整间分支必须 `bail!` 且排在写回之前；房间轮的覆盖率提示不得退回全 0 判据。
     `cargo test --lib --features http_api` 358 通过。
+- 2026-08-06 增补 4（**空间树的管理归位：指针驱动收敛、epoch 校验、文件 IO 收归本仓**）——
+  - 背景：树承担三重角色（查询加速、`tree_box_changed` 的变更判定基线、整间分支的
+    成员盒来源），它不是纯缓存而是第二真值源。ADR-017/W1 把「提交后收敛」做成
+    durable + fail-closed 之后，剩下的结构性负担集中在三处，本轮一并收掉。
+  - **提交后收敛改为指针驱动（不再重算几何、不再写库）**：
+    `apply_deferred_spatial_mutations` 的 refresh 分支此前复跑
+    `update_inst_relate_aabbs_by_refnos(.., true)`——对主库把几何 AABB 整个重算并
+    重写一遍，可窗口 journal 重放刚把同样的值落成主库真值。现改为
+    `sync_tree_from_committed_pointers`：按 refno 分块读回已提交的
+    `(refno, noun, aabb.d)`（口径与刷新层进树一致：`world_trans.d != none and
+    aabb.d != none`）→ `sync_refnos` 进树。收敛跑在「失败即停止出队」的关键路径
+    上（I7），现在是纯读 + 树同步 + 落盘，时长与失败面都显著缩小。房间触发不受
+    影响——AABB 房间目标在窗口内并入 finalize plan 随尾事务持久化（W3.3），收敛
+    只负责树本身。
+  - **epoch 校验取代条数对账，指针重建取代全量重算**：库侧新增单例记录
+    `spatial_epoch:current`，每条携带空间意图的尾事务顺带 `+1`
+    （`render_spatial_epoch_bump`，与意图、水位同一事务；无空间意图的提交不
+    bump）。树文件旁新增 sidecar `accel_tree_{project}.meta.json`（epoch、条数、
+    落盘时间；epoch 在写文件**之前**读，方向偏保守）。启动改走
+    `load_project_tree_verified`：sidecar epoch 与库相等才信文件，否则
+    `rebuild_tree_from_pointers` 分页读指针 bulk-load 整树并立即落盘盖章——只读
+    不写，取代旧兜底 `manual_update_aabbs(true)`（全库重算几何并回写整个
+    `inst_relate.aabb` 列，又慢又重）。条数对账 `sync_aabb_tree_with_db` 与
+    `manual_update_aabbs` 都退役为手工诊断/修复工具（指针重建覆盖不了「指针本身
+    缺失/陈旧」的补账场景，那仍是重算路径的正当用途）。窗口重试导致的多次 bump
+    无害：epoch 只比相等不表达次数，至多多做一次指针重建。
+  - **文件 IO 收归 gen-model，裸名搬运退役**：`AccelerationTree` 本身
+    `Serialize + Deserialize`，反向索引等派生字段 `#[serde(skip)]`，反序列化后由
+    `ensure_refno_index` 在首次按 refno 操作时自愈（本仓有单测钉住这条假设）。
+    gen-model 直接原子读写 `accel_tree_{project}.bin`（tmp + rename），
+    `stage_project_aabb_tree_file` / `archive_project_aabb_tree_file` 与 rs-core 的
+    `load_aabb_tree` / `serialize_to_bin_file` 一并退出生产路径；多项目并发共用
+    cwd 的裸文件竞态随之消失。
+  - **残余（自觉记录）**：直写紧急路径（`GEN_MODEL_DIRECT_INCREMENT=1`）不产生
+    空间意图也不递增 epoch，崩溃丢掉的内存树变更 sidecar 认不出来——该环境变量
+    存在时启动无条件走指针重建；另备 `AIOS_FORCE_SPATIAL_REBUILD=1` 作运维强制
+    重建开关。树内 `mesh_cache` 不随 regen 失效的问题只影响交互拾取，本轮未动。
+  - 回退即红的测试：收敛路径不得出现 `update_inst_relate_aabbs_by_refnos`、指针
+    重建只读不写、启动信任判据必须是 epoch 相等且失配收敛到指针重建、epoch bump
+    与意图同事务先于水位、无空间意图不 bump、反序列化后索引自愈（防同 refno 堆叠）。
 
-日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 三轮增补）
+日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 三轮增补，2026-08-06 一轮增补）
 关联：`docs/2026-07-27_room-incremental-audit-report.md`（缺陷取证 D1–D7）；
 `docs/2026-07-27_room-incremental-implementation-report.md`（变更清单、验证证据、残留风险）；
 `src/fast_model/room_model.rs`；`src/data_interface/model_update_pending.rs`；

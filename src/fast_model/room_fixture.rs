@@ -554,6 +554,370 @@ mod tests {
         );
     }
 
+    /// H-1 的端到端回归：FRMW 在暂存窗口内改名「成为」合规房间时，窗口必须当场
+    /// 解析出面板并算出归属，而不是让整间目标走「已不在册」的清边成功路径静默吞掉。
+    ///
+    /// 走与生产数据批次（`execute_frozen_batch` 的 staged 路径）同一套窗口设施、
+    /// 同一个顺序：窗口起点预载提交前合规房间工作集 → 窗口作用域内
+    /// `build_model_update_plan`（H-1 的结构触发预载在这里把改名房间的子树拓扑与
+    /// 面板产物补进暂存）→ `stage_parsed_window` 解析改名（渲染为 `UPDATE pe SET
+    /// name`，依赖预载先把旧 pe 行拷进暂存）→ 登记 finalize → `run_staged_room_work`
+    /// → `settle_staged_plan_items` → `commit_registered_to` 写回持久层。
+    ///
+    /// 修复的两半各有一道断言钉着：预载缺失时暂存映射解析出 0 块面板
+    /// （staged_map 断言直接红）；fail-closed 守卫兜底时目标记失败保留 pending
+    /// （report.failures 断言红）。修复在位时，提交后两张房间关系表都要带着新
+    /// 房间号收敛，且不留任何 durable pending 死信。
+    ///
+    /// 跨界构件 _24 骑在两块面板的重叠区上，第二轮逐点判定要读它的
+    /// `inst_geo.pts`——结构触发预载只拷面板产物、不拷成员几何，暂存读不回落，
+    /// 所以窗口内它两边都判不进。断言用 ⊇/⊆ 把它留成自由变量：现状不在不红，
+    /// 将来预载扩到成员几何后出现也不红。
+    ///
+    /// 只能单独运行，见 [`connect_live`]：
+    ///
+    /// ```text
+    /// ./scripts/Start-Surreal8009.ps1 -Memory -Bind 127.0.0.1:8071
+    /// AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
+    ///     live_room_rename_into_compliance_recomputes_membership -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, a watermark row and .mesh files"]
+    async fn live_room_rename_into_compliance_recomputes_membership() {
+        use crate::data_interface::increment_pipeline::IncrementPipeline;
+        use crate::data_interface::model_update_pending::run_staged_room_work;
+        use crate::data_interface::model_update_plan::{
+            ModelWorkAction, build_model_update_plan,
+        };
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use crate::data_interface::staging::{
+            ResourceThresholds, StagedFinalize, register_staged_finalize,
+        };
+        use crate::fast_model::room_model::{load_room_panel_map, load_room_panel_map_from_pe};
+        use aios_core::NamedAttrValue;
+        use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
+        use std::collections::{BTreeMap, HashMap};
+        use surrealdb::engine::any::connect;
+
+        // 两个名字都带 `-RM`：结构触发看的是**全局** DbOption 的关键字，映射加载
+        // 看的是本用例传下去的 db_option——这里让两边用同一个词。旧名尾段 BAD9
+        // 不满足 `^[A-Z]\d{3}$`，提交前不是合规房间；新名尾段 K200 合规。
+        const OLD_NAME: &str = "/ZZ-RM-BAD9";
+        const NEW_NAME: &str = "/ZZ-RM-K200";
+        const NEW_ROOM_NUM: &str = "K200";
+
+        fn rename_op(seq: u64, old_name: &str, new_name: &str, sesno: u32) -> EleOperationData {
+            // NAME 放 `modified_explicit_attrs`：结构触发两个映射都认，而解析渲染
+            // （`to_modify_surql`）只对显式 NAME 生成 `UPDATE pe SET name = …`。
+            let mut modified_explicit_attrs = std::collections::HashMap::new();
+            modified_explicit_attrs.insert(
+                "NAME".to_string(),
+                (
+                    NamedAttrValue::StringType(old_name.into()),
+                    NamedAttrValue::StringType(new_name.into()),
+                ),
+            );
+            EleOperationData::new(
+                RefnoEnum::from(refno(seq).as_str()).refno(),
+                sesno,
+                EleOperationDetail::Modified(ModifiedElement {
+                    current_data: Default::default(),
+                    added_attrs: Default::default(),
+                    deleted_attrs: Default::default(),
+                    modified_attrs: Default::default(),
+                    added_explicit_attrs: Default::default(),
+                    deleted_explicit_attrs: Default::default(),
+                    modified_explicit_attrs,
+                    added_uda_attrs: Default::default(),
+                    deleted_uda_attrs: Default::default(),
+                    modified_uda_attrs: Default::default(),
+                    noun: "FRMW".to_string(),
+                    children_changed: None,
+                }),
+            )
+        }
+
+        connect_live().await;
+        let mut db_option = get_db_option().clone();
+        db_option.room_key_word = Some(vec!["-RM".to_string()]);
+        db_option.gen_spatial_tree = true;
+        let mesh_dir = db_option.get_meshes_path();
+
+        create_room_fixture(&mesh_dir)
+            .await
+            .expect("create fixture");
+        let room = refno(1);
+        // H-1 的前置态：命中关键字、但不合规——这间房在提交前不是房间。
+        SUL_DB
+            .query(format!(
+                "UPDATE pe:{room} SET name = '{OLD_NAME}'; \
+                 UPDATE FRMW:{room} SET NAME = '{OLD_NAME}';"
+            ))
+            .await
+            .expect("rename fixture room to a non-compliant name")
+            .check()
+            .expect("valid initial rename");
+
+        // 夹具几何进树（与其余 live 用例同一手法；刻意不 load_aabb_tree）。
+        let fixture_refnos: Vec<RefnoEnum> = bodies()
+            .iter()
+            .map(|body| RefnoEnum::from(refno(body.seq).as_str()))
+            .collect();
+        update_inst_relate_aabbs_by_refnos(&fixture_refnos, true)
+            .await
+            .expect("push fixture aabbs into tree");
+
+        let dbnum = u32::try_from(FIXTURE_DBNUM).expect("fixture dbnum fits u32");
+        let end_sesno: i32 = 9;
+        let (pane_a, pane_b) = panel_refnos();
+        let pane_a_refno = RefnoEnum::from(pane_a.as_str());
+        let pane_b_refno = RefnoEnum::from(pane_b.as_str());
+
+        // 窗口起点：提交前合规房间映射。这间房不合规 → 不在映射里（正是 H-1 盲区）。
+        let preloaded = load_room_panel_map(&db_option)
+            .await
+            .expect("load pre-window room map");
+        assert!(
+            preloaded.room_num_of(pane_a_refno).is_none(),
+            "初始名不合规，提交前映射不该把它当房间: {:?}",
+            preloaded.rooms
+        );
+
+        let instance = connect("mem://").await.expect("staging mem boots");
+        let mut window = create_window_on(
+            &instance,
+            dbnum,
+            end_sesno,
+            end_sesno,
+            ResourceThresholds::default(),
+        )
+        .await
+        .expect("create staged window");
+        window
+            .scope(crate::data_interface::staging::preload::preload_room_working_set(
+                &preloaded,
+            ))
+            .await
+            .expect("preload room working set");
+
+        // 与生产同序：先在窗口作用域内建计划——H-1 的结构触发预载在这里发生。
+        let ops = BTreeMap::from([(
+            end_sesno as u32,
+            vec![rename_op(1, OLD_NAME, NEW_NAME, end_sesno as u32)],
+        )]);
+        let plan = window
+            .scope(build_model_update_plan(dbnum, end_sesno, "DESI", &ops))
+            .await
+            .expect("plan inside the staged window");
+        let mut planned: Vec<String> = plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RoomRecalcPanel)
+            .map(|item| item.target_refno.clone())
+            .collect();
+        planned.sort();
+        let mut want = vec![pane_a_refno.to_pdms_str(), pane_b_refno.to_pdms_str()];
+        want.sort();
+        assert_eq!(
+            planned, want,
+            "改名触发必须为名下两块 PANE 排整间任务（依赖全局 room_key_word 命中 `-RM`，\
+             当前配置: {:?}）",
+            aios_core::get_db_option().get_room_key_word()
+        );
+        assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
+
+        // 再解析入暂存：改名渲染为 `UPDATE pe SET name`，更新的正是预载拷进来的旧行。
+        let staged = IncrementPipeline::stage_parsed_window(&mut window, &ops, dbnum)
+            .await
+            .expect("stage parsed rename");
+        assert!(staged > 0, "改名会话必须进 journal");
+
+        // H-1 的机制断言：暂存映射现在必须解析出「面板属于这间房」。
+        let staged_map = window
+            .scope(load_room_panel_map_from_pe(&db_option))
+            .await
+            .expect("load staged room map");
+        assert_eq!(
+            staged_map.room_num_of(pane_a_refno),
+            Some(NEW_ROOM_NUM),
+            "结构触发预载 + 窗口解析之后，暂存映射必须解析出面板 A 属于这间房"
+        );
+        assert_eq!(
+            staged_map.room_num_of(pane_b_refno),
+            Some(NEW_ROOM_NUM),
+            "面板 B 同理"
+        );
+
+        window
+            .scope(register_staged_finalize(StagedFinalize {
+                dbnum,
+                end_sesno,
+                plan: plan.clone(),
+                window_statements: Vec::new(),
+                cache_refnos: Vec::new(),
+            }))
+            .await
+            .expect("register finalize");
+
+        let report = window
+            .scope(run_staged_room_work(
+                &db_option,
+                &preloaded,
+                &plan.work_items,
+                &HashMap::new(),
+            ))
+            .await
+            .expect("staged room work");
+        assert!(
+            report.failures.is_empty(),
+            "H-1 预载在位时暂存房间轮不该再有盲区（fail-closed 只兜预载缺失）: {:?}",
+            report.failures
+        );
+        assert_eq!(
+            report.succeeded_plan_items.len(),
+            2,
+            "{:?}",
+            report.succeeded_plan_items
+        );
+        window
+            .settle_staged_plan_items(&report.succeeded_plan_items)
+            .await;
+
+        window
+            .commit_registered_to(&SUL_DB)
+            .await
+            .expect("staged write-back");
+        window.drop_database().await.expect("drop staging db");
+
+        // ---- 提交后的持久层取证（先取数、后清理、再断言，与其余用例同一纪律）----
+        let mut response = SUL_DB
+            .query(format!("RETURN pe:{room}.name;"))
+            .await
+            .expect("query committed room name")
+            .check()
+            .expect("valid name query");
+        let committed_name: Option<String> = response.take(0).expect("decode room name");
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
+                 FROM room_relate ORDER BY panel, part;",
+            )
+            .await
+            .expect("query room_relate")
+            .check()
+            .expect("valid room_relate query");
+        let mut edges: Vec<Edge> = response.take(0).expect("decode room_relate");
+        edges.sort();
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
+                 FROM room_panel_relate ORDER BY panel, part;",
+            )
+            .await
+            .expect("query room_panel_relate")
+            .check()
+            .expect("valid room_panel_relate query");
+        // 复用 Edge 的形状：in=房间（panel 字段）、out=面板（part 字段）。
+        let mut topology: Vec<Edge> = response.take(0).expect("decode room_panel_relate");
+        topology.sort();
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE record::id(id) FROM model_update_pending \
+                 WHERE action IN ['room_recalc_element', 'room_recalc_panel'];",
+            )
+            .await
+            .expect("query pending rows")
+            .check()
+            .expect("valid pending query");
+        let pending: Vec<String> = response.take(0).expect("decode pending rows");
+
+        let mut response = SUL_DB
+            .query(format!("RETURN dbnum_watermark:{dbnum}.applied_sesno;"))
+            .await
+            .expect("query watermark")
+            .check()
+            .expect("valid watermark query");
+        let applied: Option<i32> = response.take(0).expect("decode watermark");
+
+        // 收尾：水位行是本用例特有的落库，清掉；夹具与队列走公共清理。
+        if std::env::var("AIOS_KEEP_FIXTURE").is_err() {
+            SUL_DB
+                .query(format!("DELETE dbnum_watermark:{dbnum};"))
+                .await
+                .expect("cleanup watermark")
+                .check()
+                .expect("valid watermark cleanup");
+        }
+        drop_fixture_and_queue(&mesh_dir).await;
+
+        assert_eq!(
+            committed_name.as_deref(),
+            Some(NEW_NAME),
+            "窗口解析的改名必须随 journal 写回持久层"
+        );
+        assert_eq!(applied, Some(end_sesno), "写回尾事务必须推进水位");
+        assert!(
+            pending.is_empty(),
+            "窗口内收敛的面板不得残留 durable pending 死信: {pending:?}"
+        );
+
+        let (in_a, in_b, straddler) = part_refnos();
+        assert!(
+            edges
+                .iter()
+                .all(|edge| edge.room_num == NEW_ROOM_NUM
+                    && (edge.panel == pane_a || edge.panel == pane_b)),
+            "归属边只该属于这间房的两块面板、且带新房间号: {edges:#?}"
+        );
+        let a_parts: HashSet<String> = edges
+            .iter()
+            .filter(|edge| edge.panel == pane_a)
+            .map(|edge| edge.part.clone())
+            .collect();
+        let b_parts: HashSet<String> = edges
+            .iter()
+            .filter(|edge| edge.panel == pane_b)
+            .map(|edge| edge.part.clone())
+            .collect();
+        let a_min: HashSet<String> = in_a.iter().cloned().collect();
+        let b_min: HashSet<String> = in_b.iter().cloned().collect();
+        let mut a_max = a_min.clone();
+        a_max.insert(straddler.clone());
+        let mut b_max = b_min.clone();
+        b_max.insert(straddler.clone());
+        assert!(
+            a_parts.is_superset(&a_min) && a_parts.is_subset(&a_max),
+            "改名成为合规房间后，面板 A 必须当场算出完全在内的成员（H-1 修复前这里是空集）\
+             \n实得: {a_parts:?}\n下界: {a_min:?}\n上界: {a_max:?}"
+        );
+        assert!(
+            b_parts.is_superset(&b_min) && b_parts.is_subset(&b_max),
+            "面板 B 同理\n实得: {b_parts:?}\n下界: {b_min:?}\n上界: {b_max:?}"
+        );
+
+        // 两张表同源一致：房间 → 面板拓扑恰是这两块面板，房间号一致。
+        let mut want_topology = vec![
+            Edge {
+                panel: room.clone(),
+                part: pane_a.clone(),
+                room_num: NEW_ROOM_NUM.into(),
+            },
+            Edge {
+                panel: room.clone(),
+                part: pane_b.clone(),
+                room_num: NEW_ROOM_NUM.into(),
+            },
+        ];
+        want_topology.sort();
+        assert_eq!(
+            topology, want_topology,
+            "room_panel_relate 必须与 room_relate 同一轮收敛出同一间房"
+        );
+    }
+
     #[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct Edge {
         panel: String,

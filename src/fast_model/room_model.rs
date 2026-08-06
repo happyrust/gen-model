@@ -78,7 +78,8 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
 pub async fn test_cal_distance() -> anyhow::Result<()> {
     init_test_surreal().await;
     let panel_refno = "24381/34303".into();
-    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno], true)
+    let mut geom_insts: Vec<GeomInstQuery> =
+        crate::data_interface::staging::query_valid_insts(&[panel_refno])
         .await
         .unwrap_or_default();
     // dbg!(&geom_insts);
@@ -147,7 +148,8 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     if !room_panel_map.rooms.is_empty() && GLOBAL_AABB_TREE.read().await.is_empty() {
         anyhow::bail!(
             "空间树是空的，{} 间在册房间的成员判不了：跳过本次全量重建，不清掉存量房间\
-             归属边。先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）",
+             归属边。先检查项目树文件的 epoch 校验（load_project_tree_verified），\
+             或用 rebuild_tree_from_pointers / sync_aabb_tree_with_db 修复",
             room_panel_map.rooms.len()
         );
     }
@@ -712,7 +714,8 @@ pub async fn cal_room_refnos(
     //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
     // 反序列化错误就被吞成空 Vec，紧接着下面的 `is_empty()` 让整间房**无声地**算成
     // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
-    let geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno], true)
+    let geom_insts: Vec<GeomInstQuery> =
+        crate::data_interface::staging::query_valid_insts(&[panel_refno])
         .await
         .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
     // dbg!(&geom_insts);
@@ -920,7 +923,8 @@ pub async fn recalc_panel_membership(
     if GLOBAL_AABB_TREE.read().await.is_empty() {
         anyhow::bail!(
             "空间树是空的，面板 {panel} 的成员判不了：不改写它的房间归属（任务保留重试）。\
-             先确认 accel_tree.bin 与库的对账（sync_aabb_tree_with_db）"
+             先检查项目树文件的 epoch 校验（load_project_tree_verified），\
+             或用 rebuild_tree_from_pointers / sync_aabb_tree_with_db 修复"
         );
     }
     // 候选取自空间树，而窗口内的删除是**推迟到提交后**才从树上摘的
@@ -1121,7 +1125,7 @@ pub async fn load_panel_index(
         return Ok(index);
     }
     let insts: Vec<GeomInstQuery> =
-        aios_core::query_insts(&registered, true)
+        crate::data_interface::staging::query_valid_insts(&registered)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
@@ -1245,7 +1249,7 @@ pub async fn element_candidate_panels(
         return Ok(out);
     }
     let insts: Vec<GeomInstQuery> =
-        aios_core::query_insts(elements, true)
+        crate::data_interface::staging::query_valid_insts(elements)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
@@ -1306,7 +1310,8 @@ pub async fn recalc_element_membership(
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
     let old_rooms = history.room_nums_of(element);
 
-    let insts: Vec<GeomInstQuery> = aios_core::query_insts(&[element], true)
+    let insts: Vec<GeomInstQuery> =
+        crate::data_interface::staging::query_valid_insts(&[element])
         .await
         .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
     // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建

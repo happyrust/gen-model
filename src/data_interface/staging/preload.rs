@@ -180,8 +180,12 @@ async fn preload_room_working_set_from(
 ) -> anyhow::Result<usize> {
     let panels = rooms.all_panels.iter().copied().collect::<Vec<_>>();
     let room_roots = rooms.rooms.iter().map(|room| room.room).collect::<Vec<_>>();
-    let mut topology = load_root_refnos(source, &room_roots).await?;
-    topology.extend(panels.iter().copied());
+    let mut topology =
+        crate::data_interface::helper::collect_pe_ancestor_refnos_from(source, &panels)
+            .await?
+            .into_iter()
+            .collect::<Vec<_>>();
+    topology.extend(room_roots);
     topology.sort_unstable();
     topology.dedup();
     let topology_keys = topology
@@ -321,11 +325,19 @@ async fn preload_existing_generation_products_for_refnos(
         &format!("SELECT VALUE out FROM geo_relate WHERE in IN [{info_scope}]"),
     )
     .await?;
-    let trans_keys = select_record_keys(
+    let mut trans_keys = select_record_keys(
         source,
         &format!("SELECT VALUE trans FROM geo_relate WHERE in IN [{info_scope}] AND trans != NONE"),
     )
     .await?;
+    // 真实库的 `inst_relate.world_trans` 指向 `trans:*`；旧夹具也出现过
+    // `world_trans:*`。按记录自身的表拷贝，不能把 `trans:*` 拿去查 `world_trans` 表。
+    let (world_keys, world_trans_keys): (Vec<_>, Vec<_>) = world_keys
+        .into_iter()
+        .partition(|key| key.starts_with("trans:"));
+    trans_keys.extend(world_keys);
+    trans_keys.sort_unstable();
+    trans_keys.dedup();
     copied += copy_rows(
         source,
         "inst_info",
@@ -364,7 +376,7 @@ async fn preload_existing_generation_products_for_refnos(
     }
 
     for (table, keys) in [
-        ("world_trans", world_keys),
+        ("world_trans", world_trans_keys),
         ("trans", trans_keys),
         ("vec3", vec_keys),
         ("aabb", aabb_keys),
@@ -405,10 +417,24 @@ fn collect_record_keys(value: surrealdb::sql::Value, keys: &mut Vec<String>) -> 
     Ok(())
 }
 
+/// 子树闭包的服务端图查询深度（`p1..=p11`，外加 `p0` 的根自身）。
+///
+/// 祖先方向的链遍历有 `MAX_ANCESTOR_DEPTH = 32` 兜底，这个向下的方向却是**硬截断**：
+/// 第 12 层真有行时闭包就不完整——预载缺行、统一根锁漏根，而且没有任何报错。所以
+/// [`load_root_refnos`] 带一个溢出探针，宁可整批 fail-closed 也不静默截断；真撞上了，
+/// 把这个常数加深即可（查询按层展开，成本随深度线性）。
+const SUBTREE_CLOSURE_DEPTH: usize = 11;
+
 async fn load_root_refnos(
     source: &Surreal<Any>,
     roots: &[RefnoEnum],
 ) -> anyhow::Result<Vec<RefnoEnum>> {
+    const HOP: &str = "<-pe_owner<-(?)";
+    let levels = std::iter::once("p0: [id]".to_string())
+        .chain((1..=SUBTREE_CLOSURE_DEPTH).map(|depth| format!("p{depth}: {}", HOP.repeat(depth))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let probe = HOP.repeat(SUBTREE_CLOSURE_DEPTH + 1);
     let mut refnos = Vec::new();
     for roots in roots.chunks(100) {
         let keys = roots
@@ -418,23 +444,32 @@ async fn load_root_refnos(
             .join(",");
         let mut response = source
             .query(format!(
-                "RETURN array::flatten(SELECT VALUE array::flatten(object::values({{ \
-                 p0: [id], p1: <-pe_owner<-(?), \
-                 p2: <-pe_owner<-(?)<-pe_owner<-(?), \
-                 p3: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p4: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p5: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p6: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p7: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p8: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p9: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p10: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?), \
-                 p11: <-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?)<-pe_owner<-(?) \
-                 }})) FROM [{keys}] WHERE record::exists(id));"
+                "RETURN array::flatten(SELECT VALUE array::flatten(object::values({{ {levels} }})) \
+                 FROM [{keys}] WHERE record::exists(id));\n\
+                 RETURN [array::len(array::flatten(SELECT VALUE {probe} \
+                 FROM [{keys}] WHERE record::exists(id)))];"
             ))
             .await?
             .check()?;
         refnos.extend(response.take::<Vec<RefnoEnum>>(0)?);
+        let overflow = response
+            .take::<Vec<usize>>(1)?
+            .into_iter()
+            .next()
+            .unwrap_or(0);
+        if overflow > 0 {
+            anyhow::bail!(
+                "子树闭包在第 {} 层仍有 {overflow} 行（根样本: {}）：超出 SUBTREE_CLOSURE_DEPTH，\
+                 拒绝静默截断——预载缺行会让统一根锁漏根、暂存读回落到错误状态",
+                SUBTREE_CLOSURE_DEPTH + 1,
+                roots
+                    .iter()
+                    .take(3)
+                    .map(RefnoEnum::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     refnos.sort_unstable();
     refnos.dedup();
@@ -541,6 +576,59 @@ mod tests {
     use crate::data_interface::staging::lifecycle::create_window_on;
     use surrealdb::engine::any::connect;
 
+    /// 子树闭包的深度是查询按层展开出来的**硬上限**：第 12 层真有行时，闭包缺行、
+    /// 统一根锁漏根，而旧实现一声不响。溢出探针必须把它变成整批失败。
+    ///
+    /// 链深恰好压线（11 跳）时照常返回完整闭包——探针不许把合法深度误杀。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subtree_deeper_than_the_closure_ceiling_fails_closed() {
+        let source = connect("mem://").await.expect("source mem");
+        source
+            .use_ns("test")
+            .use_db("source")
+            .await
+            .expect("use source");
+        // 根 200，链式后代 201..=211：正好 11 跳，压线合法。
+        let mut fixture = String::from("CREATE pe:⟨4000000001_200⟩ SET deleted=false;");
+        for seq in 201..=211 {
+            fixture.push_str(&format!(
+                "CREATE pe:⟨4000000001_{seq}⟩ SET deleted=false; \
+                 RELATE pe:⟨4000000001_{seq}⟩->pe_owner->pe:⟨4000000001_{}⟩;",
+                seq - 1
+            ));
+        }
+        source
+            .query(fixture)
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture");
+
+        let root = RefnoEnum::from("4000000001/200");
+        let closure = load_root_refnos(&source, &[root])
+            .await
+            .expect("11 跳压线的闭包必须成功");
+        assert_eq!(closure.len(), 12, "根 + 11 层后代一个都不能少: {closure:?}");
+
+        // 第 12 跳出现 → 拒绝静默截断。
+        source
+            .query(
+                "CREATE pe:⟨4000000001_212⟩ SET deleted=false; \
+                 RELATE pe:⟨4000000001_212⟩->pe_owner->pe:⟨4000000001_211⟩;",
+            )
+            .await
+            .expect("deepen transport")
+            .check()
+            .expect("deepen");
+        let error = load_root_refnos(&source, &[root])
+            .await
+            .expect_err("超过闭包深度必须整批失败，而不是静默截断");
+        assert!(
+            error.to_string().contains("SUBTREE_CLOSURE_DEPTH"),
+            "{error:#}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn copies_only_the_root_product_closure_without_journaling() {
         let source = connect("mem://").await.expect("source mem");
@@ -555,10 +643,10 @@ mod tests {
              CREATE pe:⟨4000000001_9⟩ SET deleted=false;
              RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
              RELATE pe:⟨4000000001_3⟩->pe_owner->pe:⟨4000000001_2⟩;
-             CREATE world_trans:w1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
+             CREATE trans:wt1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
              CREATE vec3:v1 SET d=[1,2,3]; CREATE inst_info:i1 SET noun='PIPE';
              CREATE inst_geo:g1 SET aabb=aabb:a1, pts=[vec3:v1];
-             RELATE pe:⟨4000000001_3⟩->inst_relate->inst_info:i1 SET world_trans=world_trans:w1, aabb=aabb:a1;
+             RELATE pe:⟨4000000001_3⟩->inst_relate->inst_info:i1 SET world_trans=trans:wt1, aabb=aabb:a1;
              RELATE inst_info:i1->geo_relate->inst_geo:g1 SET trans=trans:t1;
              CREATE inst_info:i9; RELATE pe:⟨4000000001_9⟩->inst_relate->inst_info:i9;"
         ).await.expect("fixture transport").check().expect("fixture");
@@ -607,7 +695,7 @@ mod tests {
             .query(
                 "RETURN [count(SELECT * FROM inst_relate) = 1, inst_info:i1.id != NONE,
              count(SELECT * FROM geo_relate) = 1, inst_geo:g1.id != NONE,
-             world_trans:w1.id != NONE, trans:t1.id != NONE, aabb:a1.id != NONE,
+             trans:wt1.id != NONE, trans:t1.id != NONE, aabb:a1.id != NONE,
              vec3:v1.id != NONE, inst_info:i9.id = NONE];",
             )
             .await

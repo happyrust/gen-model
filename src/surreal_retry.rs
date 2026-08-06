@@ -10,6 +10,47 @@ pub fn is_retryable_surreal_write_error(error: &str) -> bool {
     error.contains("read or write conflict") || error.contains("transaction can be retried")
 }
 
+/// 传输层失败在错误文本里的标记。[`execute_surreal_checked_on`] 渲染它，
+/// [`is_sul_db_transport_error`] 识别它——两处必须共用同一个常量，否则断连
+/// 账本会静默漏记（错误文案改一个字就失联）。
+const TRANSPORT_FAILURE_MARKER: &str = "transport failed";
+
+/// 这条错误是不是 SUL_DB 传输层失败（连接断开、发送/接收失败），
+/// 而不是语句错误。只有前者该进断连账本。
+pub fn is_sul_db_transport_error(message: &str) -> bool {
+    message.contains(TRANSPORT_FAILURE_MARKER)
+}
+
+/// SUL_DB 传输层故障账本（`/health` 的「刚才断过一次」）。
+///
+/// 记录点有两类：写路径的 [`execute_surreal_checked`]（生产写入几乎都经它），
+/// 以及 `/health` 自己的探活失败。进程内状态，重启清零——「历史上断过几次」
+/// 属于日志，这里只回答「这个进程最近断没断过、断在什么时候」。
+static SUL_DB_DISCONNECTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SUL_DB_LAST_DISCONNECT: std::sync::Mutex<Option<(String, String)>> =
+    std::sync::Mutex::new(None);
+
+/// 记一笔传输层失败：计数 +1，覆盖「最近一次」的时刻与错误文本。
+pub fn record_sul_db_disconnect(error: &str) {
+    SUL_DB_DISCONNECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut last = SUL_DB_LAST_DISCONNECT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *last = Some((chrono::Local::now().to_rfc3339(), error.to_string()));
+}
+
+/// 断连账本快照：(累计次数, 最近一次时刻 RFC3339, 最近一次错误文本)。
+pub fn sul_db_disconnect_snapshot() -> (u64, Option<String>, Option<String>) {
+    let total = SUL_DB_DISCONNECTS.load(std::sync::atomic::Ordering::Relaxed);
+    let last = SUL_DB_LAST_DISCONNECT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match last.as_ref() {
+        Some((at, error)) => (total, Some(at.clone()), Some(error.clone())),
+        None => (total, None, None),
+    }
+}
+
 /// 冲突重试的等待时长。
 ///
 /// 多个写入器争同一批 key 时冲突是持续的：固定或线性退避会让几个批次同步重试、
@@ -32,7 +73,16 @@ fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
 /// 再由 `check()` 交出第一个错误，此时排在冲突点之前的语句已经提交。整段重试会让
 /// 它们再跑一遍，所以每条语句重复执行都必须是空操作。
 pub async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result<()> {
-    execute_surreal_checked_on(&SUL_DB, sql, context).await
+    let result = execute_surreal_checked_on(&SUL_DB, sql, context).await;
+    // 断连账本只认 SUL_DB：`_on` 变体还服务测试实例与写回重放，不在这里挂钩的话
+    // 一次性 mem 实例的失败也会被记成「持久层断连」。
+    if let Err(error) = &result {
+        let message = format!("{error:#}");
+        if is_sul_db_transport_error(&message) {
+            record_sul_db_disconnect(&message);
+        }
+    }
+    result
 }
 
 /// 模型生成的数据面写入口。活动窗口在场时写暂存并进入 journal；普通生成路径
@@ -81,7 +131,9 @@ pub async fn execute_surreal_checked_on(
         let result = async {
             db.query(sql)
                 .await
-                .map_err(|error| anyhow::anyhow!("{context} transport failed: {error}"))?
+                .map_err(|error| {
+                    anyhow::anyhow!("{context} {TRANSPORT_FAILURE_MARKER}: {error}")
+                })?
                 .check()
                 .map_err(|error| anyhow::anyhow!("{context} statement failed: {error}"))?;
             Ok::<(), anyhow::Error>(())
@@ -109,6 +161,28 @@ fn surreal_write_conflicts_are_retryable_but_syntax_errors_are_not() {
     assert!(!is_retryable_surreal_write_error(
         "Parse error: unexpected token"
     ));
+}
+
+/// 断连账本只认传输层失败；语句错误（语法、约束）不是断连，不许污染
+/// `/health` 的「最近断连」。标记常量由执行器渲染、由分类器识别，两边共用
+/// 同一个 `TRANSPORT_FAILURE_MARKER`，这里钉住渲染出的文本确实能被认出来。
+#[test]
+fn only_transport_failures_enter_the_disconnect_ledger() {
+    let rendered = format!("save pe {TRANSPORT_FAILURE_MARKER}: connection reset (os error 10054)");
+    assert!(is_sul_db_transport_error(&rendered));
+    assert!(!is_sul_db_transport_error(
+        "save pe statement failed: Parse error: unexpected token"
+    ));
+
+    let (before, _, _) = sul_db_disconnect_snapshot();
+    record_sul_db_disconnect(&rendered);
+    let (after, at, error) = sul_db_disconnect_snapshot();
+    assert_eq!(after, before + 1, "计数必须单调递增");
+    assert!(at.is_some(), "最近一次断连必须带时刻");
+    assert!(
+        error.is_some_and(|text| text.contains("10054")),
+        "最近一次断连必须带错误文本"
+    );
 }
 
 #[test]
