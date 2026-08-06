@@ -1,4 +1,4 @@
-# DbOption.toml 配置变更清单（基线 2025-06-30 → 2026-08-04）
+# DbOption.toml 配置变更清单（基线 2025-06-30 → 2026-08-06）
 
 ## 背景
 
@@ -34,7 +34,7 @@
 | `gen_spatial_tree` | `false` | `true` | 2026-07-29 | 配合房间增量与空间索引（aabbidx）验证启用 |
 | `gen_model_batch_size` | `16` | `4` | 2026-07-29 | ams7997 全量生成 16 并发在 `save_instance_data` 撞 RocksDB 事务写冲突（empty127 轮） |
 | `debug_refno_types` | `["CATA","LOOP","PRIM"]` | `["LOOP","PRIM"]` | 2026-07-27 | CATA 改走闭包按需解析（`cata_closure`），不再全量调试解析 |
-| `manual_db_nums` | 注释（未启用） | `[7998, 8000]` | 2026-07-27 起启用 | 各轮实测窗口：07-27 `[7997,7999,8000]` → 07-29 `[8000]` → 08-04 `[7998,8000]`（7998 为 18 会话最小设计库，8000 验 up_to_date 分支） |
+| `manual_db_nums` | 注释（未启用） | `[7997, 7998, 7999, 8000]` | 2026-07-27 起启用 | 各轮实测窗口：07-27 `[7997,7999,8000]` → 07-29 `[8000]` → 08-04 `[7998,8000]`（7998 为 18 会话最小设计库，8000 验 up_to_date 分支） → 08-06 `[7997,7998,7999,8000]`（issue #10 的 E3D 实测窗口，重新纳入 7997/7999；跑完可收窄回 `[7998,8000]`） |
 | `room_keyword` | `"-R-"` | **键已删除** | 2026-07-29 | 被 `room_key_word`（列表）取代，见上表 |
 | `debug_root_refnos` | `[]` | 注释掉 | — | 清理：缺省即为空，无语义变化 |
 | `incr_sync` | `false`（多一个空格） | `false` | — | 仅格式整理，无语义变化 |
@@ -44,6 +44,7 @@
 - **≤ 2026-07-27**：切换 E3D3.1 / 移除 SCB；关闭启动期全量生成（`gen_model`/`gen_mesh`→false）与 `sync_live`；`replace_dbs`→true；`debug_refno_types` 去 CATA；启用 `manual_db_nums`；新增 Web 服务键 `http_api_addr`(8021)/`http_api_cors`；（07-25 前后）交付单元键随 ADR-012 引入。
 - **2026-07-27 → 07-29**：`http_api_addr` 8021→8022；`gen_spatial_tree`→true；`gen_model_batch_size` 16→4；`room_keyword`→`room_key_word=["-RM"]`。
 - **2026-08-04**：`sync_live` 复关（Web 冒烟验证）；`manual_db_nums` 调至 `[7998, 8000]` 增量实测窗口。
+- **2026-08-06**：`manual_db_nums` 放宽至 `[7997, 7998, 7999, 8000]`，重新纳入 issue #10 取证涉及的 7997（基线库 `.surreal/ams-7997-e3d-test-20260805`，applied=92）与 7999（此前被排除，applied=3、file=41）。
 
 ## 四、注意事项
 

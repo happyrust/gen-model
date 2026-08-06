@@ -5,9 +5,9 @@
 // pub mod common;
 // mod test_api;
 // mod test_spatial;
-mod test_gen_model;
 #[cfg(test)]
 mod fork_surreal_compat;
+mod test_gen_model;
 pub mod test_performance;
 // mod test_incr_update;
 

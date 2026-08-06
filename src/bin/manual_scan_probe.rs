@@ -16,10 +16,9 @@ async fn main() -> anyhow::Result<()> {
     option.project_name = project.clone();
     option.included_projects = vec![project.clone()];
     if args.get(1).is_some_and(|value| value == "sessions") {
-        let project_dir = aios_database::data_interface::project_paths::resolve_project_root(
-            &option, &project,
-        )
-        .ok_or_else(|| anyhow::anyhow!("project path missing: {project}"))?;
+        let project_dir =
+            aios_database::data_interface::project_paths::resolve_project_root(&option, &project)
+                .ok_or_else(|| anyhow::anyhow!("project path missing: {project}"))?;
         for state in DbnumState::list_registered()
             .await?
             .into_iter()
