@@ -1,0 +1,8 @@
+-- RL2: move the issue #7 CAP far outside R512.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cap_out_apply.log" OVER
+=24383/66460
+Q CE
+POS E -5001.4501953125 N 10705.8095703125 U 105821.669921875
+Q POS
+SAVEWORK 'CODEX room RL2: CAP outside R512'
+ALPHA LOG END

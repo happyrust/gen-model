@@ -1,0 +1,8 @@
+-- Restore the RL3 room name.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_name_out_restore.log" OVER
+=24381/35842
+Q CE
+NAME /1RX-RM05-R512
+Q NAME
+SAVEWORK 'CODEX room RL3: restore room name'
+ALPHA LOG END

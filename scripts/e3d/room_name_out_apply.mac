@@ -1,0 +1,8 @@
+-- RL3: rename the room so it no longer matches the configured room keyword.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_name_out_apply.log" OVER
+=24381/35842
+Q CE
+NAME /1RX-CODEX-NOROOM
+Q NAME
+SAVEWORK 'CODEX room RL3: rename room out of scope'
+ALPHA LOG END
