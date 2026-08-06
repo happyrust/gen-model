@@ -55,26 +55,26 @@ async fn scalar(sql: &str) -> i64 {
     rows.into_iter().next().unwrap_or(0)
 }
 
-/// 这个根的子树在链路各段各留下多少东西。
-async fn chain_counts(root: RefnoEnum) -> (i64, i64, i64) {
-    let key = root.to_pe_key();
-    // 子树用 pe_owner 反向闭包取；根自己也算进去。
-    let subtree = format!(
-        "(SELECT VALUE id FROM pe WHERE id = {key} OR id IN \
-         (SELECT VALUE in FROM pe_owner WHERE out = {key}))"
-    );
+/// 整个库在链路各段各留下多少东西。
+///
+/// **按库统计而不是按子树**：子树版本要先从 `pe`（本库 49 万行）里筛闭包，再拿结果去
+/// `IN` 一遍 `inst_relate`，等于嵌套全表扫，实测挂在那里十几分钟一动不动（进程只烧掉
+/// 0.19 秒 CPU，纯等 I/O）。按库统计只扫 `inst_relate` 这 4.8 万行，秒级出结果，而
+/// 前后差值一样说明得了问题——只要跑的时候别有人在同一个库上生成别的根。
+async fn chain_counts(dbnum: u32) -> (i64, i64, i64) {
     let insts = scalar(&format!(
-        "SELECT VALUE c FROM (SELECT count() AS c FROM inst_relate WHERE in IN {subtree} GROUP ALL);"
+        "SELECT VALUE c FROM (SELECT count() AS c FROM inst_relate \
+         WHERE in.dbnum = {dbnum} GROUP ALL);"
     ))
     .await;
     let with_geo = scalar(&format!(
         "SELECT VALUE c FROM (SELECT count() AS c FROM inst_relate \
-         WHERE in IN {subtree} AND count(out->geo_relate) > 0 GROUP ALL);"
+         WHERE in.dbnum = {dbnum} AND count(out->geo_relate) > 0 GROUP ALL);"
     ))
     .await;
     let with_aabb = scalar(&format!(
         "SELECT VALUE c FROM (SELECT count() AS c FROM inst_relate \
-         WHERE in IN {subtree} AND aabb.d != none GROUP ALL);"
+         WHERE in.dbnum = {dbnum} AND aabb.d != none GROUP ALL);"
     ))
     .await;
     (insts, with_geo, with_aabb)
@@ -87,13 +87,17 @@ async fn generating_one_root_fills_geometry_aabb_and_tree() {
 
     let root_refno = std::env::var("AIOS_PROBE_ROOT").unwrap_or_else(|_| DEFAULT_ROOT.into());
     let root = RefnoEnum::from(root_refno.as_str());
-    println!("[probe] 靶子生成根 {root_refno}");
+    let dbnum: u32 = std::env::var("AIOS_PROBE_DBNUM")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(8000);
+    println!("[probe] 靶子生成根 {root_refno}（按 dbnum={dbnum} 统计链路）");
 
     load_project_tree_verified()
         .await
         .expect("load spatial tree");
     let tree_before = GLOBAL_AABB_TREE.read().await.tree.size();
-    let (insts_before, geo_before, aabb_before) = chain_counts(root).await;
+    let (insts_before, geo_before, aabb_before) = chain_counts(dbnum).await;
     println!(
         "[probe] 生成前: inst_relate={insts_before} 其中有几何={geo_before} 有包围盒={aabb_before}，空间树={tree_before}"
     );
@@ -101,8 +105,11 @@ async fn generating_one_root_fills_geometry_aabb_and_tree() {
     let mgr = AiosDBManager::init_form_config()
         .await
         .expect("init db manager");
+    // `ensure` 幂等：这个根只要已经有可渲染实例就直接 `AlreadyAvailable` 返回，压根不生成。
+    // 探针要的是「跑一遍生成」，所以给个强制开关。
+    let force = std::env::var("AIOS_PROBE_FORCE").is_ok();
     let result = mgr
-        .ensure_model_generated(root, false)
+        .ensure_model_generated(root, force)
         .await
         .unwrap_or_else(|error| panic!("生成 {root_refno} 失败: {error:#}"));
     println!(
@@ -114,17 +121,27 @@ async fn generating_one_root_fills_geometry_aabb_and_tree() {
     );
 
     let tree_after = GLOBAL_AABB_TREE.read().await.tree.size();
-    let (insts_after, geo_after, aabb_after) = chain_counts(root).await;
+    let (insts_after, geo_after, aabb_after) = chain_counts(dbnum).await;
     println!(
         "[probe] 生成后: inst_relate={insts_after} 其中有几何={geo_after} 有包围盒={aabb_after}，空间树={tree_after}"
     );
 
-    // 链路的判据不是「实例变多了」——`ensure` 幂等，实例行本来就在。要看的是那两段断掉的
-    // 环节接没接上：实例下面挂上几何，以及包围盒指针写出来。
+    // 什么都没动就别下结论。`ensure` 对已有产物的根直接返回 `AlreadyAvailable`，这时
+    // 前后计数相等是理所当然的，不是「生成路径坏了」——把它错报成缺陷比不报还糟。
+    if geo_after == geo_before && aabb_after == aabb_before {
+        println!(
+            "[probe] 前后无变化，`ensure` 的状态是 {:?}。若是 AlreadyAvailable，说明这个根\
+             已经有可渲染实例、生成被跳过了：换一个没有产物的根，或设 AIOS_PROBE_FORCE=1 强制重生成",
+            result.status
+        );
+        return;
+    }
+
+    // 真的生成了，才谈那两段断掉的环节接没接上：实例下面挂上几何，以及包围盒指针写出来。
     assert!(
         geo_after > geo_before,
-        "生成之后实例仍然没有 geo_relate（{geo_before} -> {geo_after}）——\
-         那 2967 条 regen_root 消化掉也补不出包围盒，得回头查生成路径本身"
+        "生成动了东西，但实例仍然没有多出 geo_relate（{geo_before} -> {geo_after}）——\
+         回头查生成路径本身，消化 regen_root 积压补不出包围盒"
     );
     assert!(
         aabb_after > aabb_before,
