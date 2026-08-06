@@ -29,7 +29,7 @@ pub(crate) struct DeferredSpatialMutations {
     pub room_changes: HashMap<aios_core::RefnoEnum, String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct StagedFinalize {
     pub dbnum: u32,
     pub end_sesno: i32,

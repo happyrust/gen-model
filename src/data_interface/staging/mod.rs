@@ -10,6 +10,8 @@
 
 pub mod attempts;
 pub mod executor;
+#[cfg(test)]
+mod issue10_add_node;
 pub mod lifecycle;
 pub mod preload;
 #[cfg(test)]

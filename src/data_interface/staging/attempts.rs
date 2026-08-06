@@ -222,7 +222,7 @@ pub async fn record_window_block_on(
     record_window_block_at_on(db, dbnum, None, reason, bad_roots).await
 }
 
-async fn record_window_block_at_on(
+pub(crate) async fn record_window_block_at_on(
     db: &Surreal<Any>,
     dbnum: u32,
     end_sesno: Option<i32>,
