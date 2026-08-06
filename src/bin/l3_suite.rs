@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Local;
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const API: &str = "http://127.0.0.1:8028/api/v1";
@@ -39,7 +39,8 @@ struct Scenario {
     dbnum: u32,
     apply_macro: Option<&'static str>,
     restore_macro: Option<&'static str>,
-    target: &'static str,
+    focus_before: Option<&'static str>,
+    focus_after: Option<&'static str>,
     refno: &'static str,
     expect: Expect,
     rvm: bool,
@@ -51,7 +52,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7997,
         apply_macro: Some("scripts/e3d/projams_damp_desp_apply.mac"),
         restore_macro: Some("scripts/e3d/projams_damp_desp_restore.mac"),
-        target: "1CUP001VAR",
+        focus_before: Some("1CUP001VAR"),
+        focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
         expect: Expect::Regen {
             roots: &["24381/100817"],
@@ -63,7 +65,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7997,
         apply_macro: Some("scripts/e3d/projams_incr_pos_apply.mac"),
         restore_macro: Some("scripts/e3d/projams_incr_pos_restore.mac"),
-        target: "1CUP001VAR",
+        focus_before: Some("1CUP001VAR"),
+        focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
         expect: Expect::TransformOnly {
             root: "24381/100817",
@@ -75,7 +78,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7997,
         apply_macro: Some("scripts/e3d/projams_incr_delete_apply.mac"),
         restore_macro: None,
-        target: "24381/107146",
+        focus_before: Some("24381/107146"),
+        focus_after: None,
         refno: "24381_107146",
         expect: Expect::Deleted {
             root: "24381/107104",
@@ -87,7 +91,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7997,
         apply_macro: Some("scripts/e3d/projams_incr_name_apply.mac"),
         restore_macro: Some("scripts/e3d/projams_incr_name_restore.mac"),
-        target: "1CUP001VAR",
+        focus_before: Some("1CUP001VAR"),
+        focus_after: Some("1CUP001VAR_CODEX"),
         refno: "24381_100819",
         expect: Expect::DataOnly,
         rvm: false,
@@ -97,7 +102,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 8000,
         apply_macro: Some("scripts/e3d/l3_gensec_add_apply.mac"),
         restore_macro: Some("scripts/e3d/l3_gensec_add_restore.mac"),
-        target: "CODEX_L3_GENSEC",
+        focus_before: None,
+        focus_after: Some("CODEX_L3_GENSEC"),
         refno: "",
         expect: Expect::Regen {
             roots: &["24384/25872"],
@@ -109,7 +115,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 8000,
         apply_macro: Some("scripts/e3d/l3_ftub_move_apply.mac"),
         restore_macro: Some("scripts/e3d/l3_ftub_move_restore.mac"),
-        target: "24384/22403",
+        focus_before: Some("24384/22403"),
+        focus_after: Some("24384/22403"),
         refno: "24384_22403",
         expect: Expect::Regen {
             roots: &["24384/22402", "24384/22404"],
@@ -122,7 +129,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7997,
         apply_macro: None,
         restore_macro: None,
-        target: "",
+        focus_before: None,
+        focus_after: None,
         refno: "",
         expect: Expect::DataOnly,
         rvm: false,
@@ -132,7 +140,8 @@ const SCENARIOS: &[Scenario] = &[
         dbnum: 7999,
         apply_macro: Some("scripts/e3d/issue7_cap_pos_apply.mac"),
         restore_macro: Some("scripts/e3d/issue7_cap_pos_restore.mac"),
-        target: "24383/66460",
+        focus_before: Some("24383/66460"),
+        focus_after: Some("24383/66460"),
         refno: "24383_66460",
         expect: Expect::Room,
         rvm: false,
@@ -152,18 +161,59 @@ struct Cli {
     output: Option<PathBuf>,
     #[arg(long, default_value = "db_options/l3-golden-v1.json")]
     baseline_manifest: PathBuf,
+    /// AMS-compatible E3D project work-copy used by `--check-driver`.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// E3D project code passed to `des.exe`.
+    #[arg(long, default_value = "AMS")]
+    e3d_project: String,
+    #[arg(long, default_value = "SYSTEM/XXXXXX")]
+    e3d_login: String,
+    #[arg(long, default_value = "/ALL")]
+    e3d_mdb: String,
+    /// Seconds to wait for the session's `L3-ALIVE` sentinel before giving up.
+    /// A login that never reaches the command loop must not burn the full
+    /// per-macro timeout on every scenario of an unattended run.
+    #[arg(long, default_value_t = 300)]
+    alive_timeout_secs: u64,
+    /// Record the running stack's initialized dbnum watermarks and stop.
+    #[arg(long)]
+    record_baseline: bool,
+    /// Run one macro through the E3D driver and stop, without the suite stack.
+    /// Bring-up check for the unattended channel: does a session log into this
+    /// project and execute at all?
+    #[arg(long)]
+    check_driver: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct BaselineManifest {
     dbnums: Vec<BaselineDbnum>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct BaselineDbnum {
     dbnum: u32,
     file_latest_sesno: i64,
     applied_sesno: i64,
+}
+
+/// 「宏路径进、哨兵日志出」的 E3D 通道（测试计划 §3 的 `E3dDriver`）。
+///
+/// 通道整体可换：调用方只交出一个宏的仓内相对路径，拿回该宏自己的 ALPHA LOG。
+/// 登录目标（项目目录 / 项目代号 / 账号 / MDB）在这里收口，套件因此既能开在金基线
+/// 工作副本上，也能直接开在目标项目上。
+struct E3dDriver {
+    launcher: PathBuf,
+    projects_dir: PathBuf,
+    project_evar: PathBuf,
+    project: String,
+    login: String,
+    mdb: String,
+    /// 登录到命令循环（写出 `L3-ALIVE`）的上限。
+    alive_timeout: Duration,
+    /// 整个宏的上限。
+    timeout: Duration,
 }
 
 struct Paths {
@@ -181,15 +231,17 @@ struct Paths {
 }
 
 impl Paths {
-    fn discover(repo: PathBuf) -> Result<Self> {
+    fn discover(repo: PathBuf, project_dir: Option<PathBuf>) -> Result<Self> {
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| repo.join("target"));
         Ok(Self {
-            project_work: env_path(
-                "L3_PROJECT_WORK",
-                r"D:\AVEVA\Projects\E3D31-L3\AvevaMarineSample",
-            ),
+            project_work: project_dir.unwrap_or_else(|| {
+                env_path(
+                    "L3_PROJECT_WORK",
+                    r"D:\AVEVA\Projects\E3D31-L3\AvevaMarineSample",
+                )
+            }),
             project_golden: env_path(
                 "L3_PROJECT_GOLDEN",
                 r"D:\AVEVA\Projects\E3D31-L3-golden-v1\AvevaMarineSample",
@@ -288,10 +340,43 @@ struct CaseReport {
     notes: Vec<String>,
 }
 
+struct RunHeader {
+    scenarios: Vec<&'static str>,
+    project_dir: String,
+    mdb: String,
+    baseline: String,
+    keep_stack: bool,
+    skip_restore: bool,
+    stack_failure: Option<String>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo = std::env::current_dir()?.canonicalize()?;
-    let paths = Paths::discover(repo)?;
+    ensure!(
+        cli.project_dir.is_none() || cli.check_driver.is_some(),
+        "--project-dir is only supported by --check-driver; the full suite uses its fixed L3 work-copy"
+    );
+    ensure!(
+        cli.check_driver.is_some()
+            || (cli.e3d_project.eq_ignore_ascii_case("AMS") && cli.e3d_mdb == "/ALL"),
+        "the full suite is fixed to E3D project AMS and MDB /ALL"
+    );
+    let paths = Paths::discover(repo, cli.project_dir)?;
+    let driver = E3dDriver {
+        launcher: paths.e3d_driver.clone(),
+        projects_dir: paths
+            .project_work
+            .parent()
+            .ok_or_else(|| anyhow!("project directory has no project root"))?
+            .to_path_buf(),
+        project_evar: paths.project_work.join("evarsAvevaMarineSample.bat"),
+        project: cli.e3d_project,
+        login: cli.e3d_login,
+        mdb: cli.e3d_mdb,
+        alive_timeout: Duration::from_secs(cli.alive_timeout_secs),
+        timeout: DEFAULT_TIMEOUT,
+    };
     let selected = select_scenarios(&cli.scenarios)?;
     let run_dir = cli.output.unwrap_or_else(|| {
         paths.repo.join(format!(
@@ -300,6 +385,23 @@ fn main() -> Result<()> {
         ))
     });
     fs::create_dir_all(&run_dir)?;
+    if let Some(probe) = &cli.check_driver {
+        ensure!(
+            driver.launcher.is_file(),
+            "E3D launcher is missing: {}",
+            driver.launcher.display()
+        );
+        assert_no_e3d_session()?;
+        let log = driver.run(&paths.repo, probe)?;
+        fs::write(run_dir.join("check-driver.log"), &log)?;
+        println!(
+            "E3D driver OK: project={} mdb={} projects_dir={}\n{log}",
+            driver.project,
+            driver.mdb,
+            driver.projects_dir.display()
+        );
+        return Ok(());
+    }
     paths.preflight_files(!cli.skip_restore)?;
     assert_clean_host()?;
     if !cli.skip_restore {
@@ -307,27 +409,59 @@ fn main() -> Result<()> {
     }
 
     let mut stack = start_stack(&paths, &run_dir, cli.keep_stack)?;
-    validate_baseline(&paths.repo.join(&cli.baseline_manifest), &run_dir)?;
+    let manifest_path = paths.repo.join(&cli.baseline_manifest);
+    if cli.record_baseline {
+        return record_baseline(&manifest_path);
+    }
+    let baseline = validate_baseline(&manifest_path, &run_dir, cli.skip_restore)?;
 
     let mut reports = Vec::new();
-    for scenario in selected {
-        stack.alive()?;
+    let mut stack_failure = None;
+    for scenario in &selected {
+        if let Err(error) = stack.alive() {
+            stack_failure = Some(format!("{error:#}"));
+            break;
+        }
         let mut report = CaseReport {
             id: scenario.id.into(),
             ..Default::default()
         };
-        match run_scenario(scenario, &paths, &run_dir) {
+        let mut stop_after_case = false;
+        match run_scenario(scenario, &paths, &driver, &run_dir) {
             Ok(notes) => {
                 report.passed = true;
                 report.notes = notes;
             }
-            Err(error) => report.first_failure = Some(format!("{error:#}")),
+            Err(error) => {
+                report.first_failure = Some(format!("{error:#}"));
+                if let Err(cleanup) = assert_no_e3d_session() {
+                    stack_failure = Some(format!(
+                        "E3D cleanup was not confirmed after {}: {cleanup:#}",
+                        scenario.id
+                    ));
+                    stop_after_case = true;
+                }
+            }
         }
         reports.push(report);
+        if stop_after_case {
+            break;
+        }
     }
-    write_report(&run_dir, &reports)?;
+    let header = RunHeader {
+        scenarios: selected.iter().map(|scenario| scenario.id).collect(),
+        project_dir: paths.project_work.display().to_string(),
+        mdb: driver.mdb.clone(),
+        baseline,
+        keep_stack: cli.keep_stack,
+        skip_restore: cli.skip_restore,
+        stack_failure,
+    };
+    write_report(&run_dir, &header, &reports)?;
     ensure!(
-        reports.iter().all(|r| r.passed),
+        header.stack_failure.is_none()
+            && reports.len() == selected.len()
+            && reports.iter().all(|report| report.passed),
         "one or more L3 scenarios failed; see {}",
         run_dir.join("report.md").display()
     );
@@ -382,16 +516,49 @@ fn assert_clean_host() -> Result<()> {
     for port in [8048, 8028, 5719] {
         ensure!(!port_open(port), "dedicated port {port} is already in use");
     }
+    assert_no_e3d_session()
+}
+
+/// 两个会话开同一个项目会互相抢 claim。宁可拒跑，也不让套件与人手上那个会话打架。
+fn assert_no_e3d_session() -> Result<()> {
     let tasks = command_output(Command::new("tasklist").args(["/FO", "CSV", "/NH"]))?;
-    let lower = tasks.to_ascii_lowercase();
+    // 说清楚是谁占着。无人值守跑的时候，「an E3D session is still running」这句话
+    // 对着一台没人看的机器等于什么都没说。
+    let sessions = tasks
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("\"des.exe\"") || lower.starts_with("\"pdmsconsole.exe\"")
+        })
+        .map(|line| {
+            line.split(',')
+                .take(2)
+                .map(|field| field.trim_matches('"'))
+                .collect::<Vec<_>>()
+                .join(" pid=")
+        })
+        .collect::<Vec<_>>();
     ensure!(
-        !lower.contains("des.exe") && !lower.contains("pdmsconsole.exe"),
-        "an E3D session is still running"
+        sessions.is_empty(),
+        "an E3D session is still running: {}",
+        sessions.join(", ")
     );
     Ok(())
 }
 
 fn restore_golden_pair(paths: &Paths) -> Result<()> {
+    // `robocopy /MIR` 会把目标目录里金基线没有的东西删掉。恢复的源与目标撞在一起
+    // 就不是恢复而是自毁，这一道拦的是配置写反的那一刻。
+    ensure!(
+        paths.project_golden != paths.project_work,
+        "golden and work project point at the same directory: {}",
+        paths.project_work.display()
+    );
+    ensure!(
+        paths.surreal_golden != paths.surreal_work,
+        "golden and work Surreal store point at the same directory: {}",
+        paths.surreal_work.display()
+    );
     mirror(&paths.project_golden, &paths.project_work)?;
     mirror(&paths.surreal_golden, &paths.surreal_work)?;
     for entry in fs::read_dir(&paths.repo)? {
@@ -482,8 +649,57 @@ fn spawn_logged(command: &mut Command, log: &Path) -> Result<Child> {
         .with_context(|| format!("spawn {:?}", command))
 }
 
-fn validate_baseline(manifest_path: &Path, out: &Path) -> Result<()> {
-    let manifest: BaselineManifest = serde_json::from_slice(&fs::read(manifest_path).with_context(|| format!("read baseline manifest {}; cast the golden pair first and copy l3-golden-v1.example.json", manifest_path.display()))?)?;
+/// 把当前栈的 `/dbnums` 记成金基线水位判据（测试计划 §4 制作第 4 步）。
+fn record_baseline(manifest_path: &Path) -> Result<()> {
+    let status = http_json("GET", &format!("{API}/dbnums"), None)?;
+    let rows = status
+        .get("dbnums")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("/dbnums response has no dbnums array"))?;
+    let dbnums = rows
+        .iter()
+        .filter(|row| row.get("initialized").and_then(Value::as_bool) == Some(true))
+        .map(|row| BaselineDbnum {
+            dbnum: row.get("dbnum").and_then(Value::as_u64).unwrap_or(0) as u32,
+            file_latest_sesno: row
+                .get("file_latest_sesno")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1),
+            applied_sesno: row
+                .get("applied_sesno")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1),
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !dbnums.is_empty(),
+        "no initialized dbnum to record; the golden stack has nothing imported yet"
+    );
+    fs::write(
+        manifest_path,
+        serde_json::to_vec_pretty(&BaselineManifest { dbnums })?,
+    )?;
+    println!("baseline recorded: {}", manifest_path.display());
+    Ok(())
+}
+
+/// 校验现场与金基线记录成对。返回写进报告头的基线口径。
+fn validate_baseline(manifest_path: &Path, out: &Path, skip_restore: bool) -> Result<String> {
+    if skip_restore && !manifest_path.is_file() {
+        // 直接开在目标项目上时本来就没有金基线可对。这不是默默放行：报告头会把
+        // 「无基线」写死在那一行，读报告的人一眼看得出这一轮的水位没有judge。
+        return Ok(format!(
+            "none (--skip-restore, no manifest at {})",
+            manifest_path.display()
+        ));
+    }
+    let manifest: BaselineManifest =
+        serde_json::from_slice(&fs::read(manifest_path).with_context(|| {
+            format!(
+                "read baseline manifest {}; cast the golden pair, then run with --record-baseline",
+                manifest_path.display()
+            )
+        })?)?;
     let status = http_json("GET", &format!("{API}/dbnums"), None)?;
     fs::write(
         out.join("baseline-dbnums.json"),
@@ -520,18 +736,27 @@ fn validate_baseline(manifest_path: &Path, out: &Path) -> Result<()> {
             expected.dbnum
         );
     }
-    Ok(())
+    Ok(format!("{}", manifest_path.display()))
 }
 
-fn run_scenario(s: &Scenario, paths: &Paths, run_dir: &Path) -> Result<Vec<String>> {
+fn run_scenario(
+    s: &Scenario,
+    paths: &Paths,
+    driver: &E3dDriver,
+    run_dir: &Path,
+) -> Result<Vec<String>> {
     if s.id == "f7" {
         return Ok(vec![
             "idempotency is exercised after every mutation scenario".into(),
         ]);
     }
+    let mut notes = Vec::new();
     let dir = run_dir.join(s.id);
     fs::create_dir_all(&dir)?;
-    focus_target(paths, s.target, &dir)?;
+    match s.focus_before {
+        Some(target) => focus_target(paths, target, &dir, "before")?,
+        None => notes.push("V: target does not exist yet, before.png is unfocused".into()),
+    }
     inspect_shot(paths, &dir.join(format!("{}-before.png", s.id)))?;
     let before = database_snapshot(s)?;
     fs::write(dir.join("before.json"), serde_json::to_vec_pretty(&before)?)?;
@@ -541,7 +766,7 @@ fn run_scenario(s: &Scenario, paths: &Paths, run_dir: &Path) -> Result<Vec<Strin
     } else {
         HashSet::new()
     };
-    let macro_log = run_macro(paths, s.apply_macro.unwrap(), DEFAULT_TIMEOUT)?;
+    let macro_log = driver.run(&paths.repo, s.apply_macro.unwrap())?;
     fs::write(dir.join("apply-macro.log"), &macro_log)?;
     let preview = http_json("POST", &format!("{API}/update/preview"), Some(identity()))?;
     fs::write(
@@ -552,6 +777,24 @@ fn run_scenario(s: &Scenario, paths: &Paths, run_dir: &Path) -> Result<Vec<Strin
     let (receipt, tasks) = execute_and_wait(&dir, paths, Some(s.id))?;
     if matches!(s.expect, Expect::Room) {
         wait_room(&dir, &room_before)?;
+    }
+    // V 级判据的一半在这里：树上还找不找得到那个节点。删除场景要求找不到，
+    // 新增/改名场景要求按**新**名字找得到——四张图只采不判的话，这两件事没人管。
+    match s.focus_after {
+        Some(target) => focus_target(paths, target, &dir, "after")?,
+        None => {
+            let stale = s
+                .focus_before
+                .map(|target| tree_locates(paths, target))
+                .transpose()?
+                .unwrap_or(false);
+            ensure!(
+                !stale,
+                "V: {} is still on the plant-ui tree after the mutation",
+                s.focus_before.unwrap_or("target")
+            );
+            notes.push("V: target left the tree as expected".into());
+        }
     }
     inspect_shot(paths, &dir.join(format!("{}-after.png", s.id)))?;
     let after = database_snapshot(s)?;
@@ -581,10 +824,10 @@ fn run_scenario(s: &Scenario, paths: &Paths, run_dir: &Path) -> Result<Vec<Strin
     )?;
 
     if s.rvm {
-        run_rvm(s, paths)?;
+        notes.push(run_rvm(s, paths)?);
     }
     if let Some(restore) = s.restore_macro {
-        let restore_log = run_macro(paths, restore, DEFAULT_TIMEOUT)?;
+        let restore_log = driver.run(&paths.repo, restore)?;
         fs::write(dir.join("restore-macro.log"), restore_log)?;
         let (_, restore_tasks) = execute_and_wait(&dir.join("restore"), paths, None)?;
         ensure!(
@@ -603,16 +846,22 @@ fn run_scenario(s: &Scenario, paths: &Paths, run_dir: &Path) -> Result<Vec<Strin
             "restore did not return PE/model state to baseline"
         );
     }
-    Ok(vec![format!("I-1/I-2/I-7 passed for dbnum {}", s.dbnum)])
+    notes.insert(0, format!("I-1/I-2/I-7 passed for dbnum {}", s.dbnum));
+    Ok(notes)
 }
 
-fn focus_target(paths: &Paths, target: &str, dir: &Path) -> Result<()> {
+fn focus_target(paths: &Paths, target: &str, dir: &Path, phase: &str) -> Result<()> {
     let output = inspect(paths, &["tree", target])?;
-    fs::write(dir.join("inspect-tree.txt"), &output)?;
+    fs::write(dir.join(format!("inspect-tree-{phase}.txt")), &output)?;
     let (x, y) = first_rect_center(&output)
-        .ok_or_else(|| anyhow!("inspect tree could not locate target {target}"))?;
+        .ok_or_else(|| anyhow!("inspect tree could not locate {phase} target {target}"))?;
     inspect(paths, &["click", &x.to_string(), &y.to_string()])?;
     Ok(())
+}
+
+/// 树上还找不找得到这个节点。删除场景的 V 级判据靠它。
+fn tree_locates(paths: &Paths, target: &str) -> Result<bool> {
+    Ok(first_rect_center(&inspect(paths, &["tree", target])?).is_some())
 }
 
 fn first_rect_center(tree: &str) -> Option<(i32, i32)> {
@@ -628,66 +877,116 @@ fn first_rect_center(tree: &str) -> Option<(i32, i32)> {
     })
 }
 
-fn run_macro(paths: &Paths, relative: &str, timeout: Duration) -> Result<String> {
-    let macro_path = paths.repo.join(relative);
-    ensure!(
-        macro_path.is_file(),
-        "scenario macro is missing: {}",
-        macro_path.display()
-    );
-    let driver_dir = paths.repo.join("output/l3-suite");
-    fs::create_dir_all(&driver_dir)?;
-    let wrapper_path = driver_dir.join("driver.mac");
-    let alive_log = driver_dir.join("driver-alive.log");
-    let done_log = driver_dir.join("driver-done.log");
-    let scenario_log = macro_path.with_extension("log");
-    let _ = fs::remove_file(&alive_log);
-    let _ = fs::remove_file(&done_log);
-    let _ = fs::remove_file(&scenario_log);
-    let macro_arg = macro_path.to_string_lossy().replace('\\', "/");
-    let alive_arg = alive_log.to_string_lossy().replace('\\', "/");
-    let done_arg = done_log.to_string_lossy().replace('\\', "/");
-    fs::write(
-        &wrapper_path,
-        format!(
-            "ALPHA LOG \"{alive_arg}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{macro_arg}\"\nALPHA LOG \"{done_arg}\" OVER\n$P L3-DONE\nALPHA LOG END\nQUIT\n"
-        ),
-    )?;
-    let wrapper_arg = wrapper_path.to_string_lossy().replace('\\', "/");
-    let mut launcher = Command::new("cmd")
-        .arg("/c")
-        .arg(&paths.e3d_driver)
-        .arg(&wrapper_arg)
-        .spawn()?;
-    let deadline = Instant::now() + timeout;
-    let mut launcher_status = None;
-    loop {
-        if launcher_status.is_none() {
-            launcher_status = launcher.try_wait()?;
-            if let Some(status) = launcher_status {
+impl E3dDriver {
+    /// 跑一个宏，返回该宏自己的 ALPHA LOG 内容。
+    ///
+    /// 会话是一次性的：wrapper 写 `L3-ALIVE`、`$M` 场景宏、写 `L3-DONE`、`QUIT`
+    /// （ADR-019）。两级超时——登录没在 `alive_timeout` 内到达命令循环就立刻收摊，
+    /// 不把整轮的时间预算耗在一个连不上的会话上。
+    fn run(&self, repo: &Path, relative: &str) -> Result<String> {
+        let macro_path = repo.join(relative);
+        ensure!(
+            macro_path.is_file(),
+            "scenario macro is missing: {}",
+            macro_path.display()
+        );
+        let macro_source = fs::read_to_string(&macro_path)?;
+        ensure!(
+            !macro_source
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("QUIT")),
+            "scenario macro must return to the wrapper; remove QUIT from {}",
+            macro_path.display()
+        );
+        let driver_dir = repo.join("output/l3-suite").join(format!(
+            "driver-{}-{}",
+            std::process::id(),
+            Local::now().format("%Y%m%d%H%M%S%6f")
+        ));
+        fs::create_dir_all(&driver_dir)?;
+        let wrapper_path = driver_dir.join("driver.mac");
+        let alive_log = driver_dir.join("driver-alive.log");
+        let done_log = driver_dir.join("driver-done.log");
+        let pid_file = driver_dir.join("driver.pid");
+        let driver_log = driver_dir.join("driver.log");
+        let scenario_log = macro_path.with_extension("log");
+        let _ = fs::remove_file(&alive_log);
+        let _ = fs::remove_file(&done_log);
+        let _ = fs::remove_file(&scenario_log);
+        let macro_arg = macro_path.to_string_lossy().replace('\\', "/");
+        let alive_arg = alive_log.to_string_lossy().replace('\\', "/");
+        let done_arg = done_log.to_string_lossy().replace('\\', "/");
+        fs::write(
+            &wrapper_path,
+            format!(
+                "ALPHA LOG \"{alive_arg}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{macro_arg}\"\nALPHA LOG \"{done_arg}\" OVER\n$P L3-DONE\nALPHA LOG END\nQUIT\n"
+            ),
+        )?;
+        let wrapper_arg = wrapper_path.to_string_lossy().replace('\\', "/");
+        let driver_stdout = File::create(&driver_log)?;
+        let driver_stderr = driver_stdout.try_clone()?;
+        let mut launcher = Command::new("cmd")
+            .args(["/d", "/c"])
+            .arg(&self.launcher)
+            .arg(&wrapper_arg)
+            .env("L3_E3D_PROJECTS_DIR", &self.projects_dir)
+            .env("L3_E3D_PROJECT_EVAR", &self.project_evar)
+            .env("L3_E3D_PROJECT", &self.project)
+            .env("L3_E3D_LOGIN", &self.login)
+            .env("L3_E3D_MDB", &self.mdb)
+            .env("L3_E3D_TIMEOUT_SECONDS", self.timeout.as_secs().to_string())
+            .env("L3_E3D_PID_FILE", &pid_file)
+            .stdout(Stdio::from(driver_stdout))
+            .stderr(Stdio::from(driver_stderr))
+            .spawn()?;
+        let started = Instant::now();
+        let deadline = started + self.timeout + Duration::from_secs(15);
+        let mut alive = false;
+        loop {
+            if let Some(status) = launcher.try_wait()? {
+                let log = fs::read_to_string(&driver_log).unwrap_or_default();
+                if !status.success() {
+                    terminate_pid_file(&pid_file).context("clean E3D after its launcher failed")?;
+                    bail!("E3D TTY driver failed for {relative}: {status}; log: {log}");
+                }
                 ensure!(
-                    status.success(),
-                    "E3D launcher failed for {relative}: {status}"
+                    fs::read_to_string(&alive_log)
+                        .unwrap_or_default()
+                        .contains("L3-ALIVE"),
+                    "E3D TTY logged in but did not start wrapper {relative}; log: {log}"
                 );
+                ensure!(
+                    fs::read_to_string(&done_log)
+                        .unwrap_or_default()
+                        .contains("L3-DONE"),
+                    "E3D TTY exited before wrapper completed {relative}; log: {log}"
+                );
+                return fs::read_to_string(&scenario_log)
+                    .with_context(|| format!("read E3D macro log {}", scenario_log.display()));
             }
+            alive = alive
+                || fs::read_to_string(&alive_log)
+                    .unwrap_or_default()
+                    .contains("L3-ALIVE");
+            let stalled_login = !alive && started.elapsed() >= self.alive_timeout;
+            if stalled_login || Instant::now() >= deadline {
+                let launcher_cleanup = terminate_tree(launcher.id());
+                let e3d_cleanup = terminate_pid_file(&pid_file);
+                launcher_cleanup.context("stop timed-out E3D launcher")?;
+                e3d_cleanup.context("stop timed-out E3D session")?;
+                let log = fs::read_to_string(&driver_log).unwrap_or_default();
+                let phase = if stalled_login {
+                    format!(
+                        "never reached the command loop within {}s",
+                        self.alive_timeout.as_secs()
+                    )
+                } else {
+                    format!("ran past {}s", self.timeout.as_secs())
+                };
+                bail!("E3D TTY session {phase} for {relative}; log: {log}");
+            }
+            thread::sleep(Duration::from_secs(2));
         }
-        if alive_log.is_file()
-            && done_log.is_file()
-            && fs::read_to_string(&done_log)
-                .unwrap_or_default()
-                .contains("L3-DONE")
-            && !process_running("des.exe")?
-        {
-            return fs::read_to_string(&scenario_log)
-                .with_context(|| format!("read E3D macro log {}", scenario_log.display()));
-        }
-        if Instant::now() >= deadline {
-            kill_tree(launcher.id());
-            kill_image("des.exe");
-            kill_image("pdmsconsole.exe");
-            bail!("E3D macro timed out: {relative}");
-        }
-        thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -1075,8 +1374,12 @@ fn database_snapshot(s: &Scenario) -> Result<Value> {
         .map(|root| format!("pe:{}", root.replace('/', "_")))
         .collect::<Vec<_>>()
         .join(",");
+    // `pending` 是 I-2 的欠账口径，**排除房间 action**：房间目标由空闲轮单独收敛
+    // （ADR-011 §8），它们带着触发库的 dbnum 落在同一张表里，算进欠账会让任何一个
+    // 房间还没收干净的库永远判 FAIL。房间的收敛由 I-8 那条路径单独判。
+    // `room_pending` 只入证据、不参与断言。
     let sql = format!(
-        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db}), inst: (SELECT in, out, aabb, world_trans FROM inst_relate WHERE in = pe:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe_owner WHERE in = pe:{refno}), room: (SELECT in, out, room_num, inside_count, center_dist FROM room_relate WHERE out = pe:{refno}) }};",
+        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action NOT IN ['room_recalc_panel', 'room_recalc_element']), room_pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action IN ['room_recalc_panel', 'room_recalc_element']), inst: (SELECT in, out, aabb, world_trans FROM inst_relate WHERE in = pe:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe_owner WHERE in = pe:{refno}), room: (SELECT in, out, room_num, inside_count, center_dist FROM room_relate WHERE out = pe:{refno}) }};",
         db = s.dbnum,
         refno = if s.refno.is_empty() { "0_0" } else { s.refno },
     );
@@ -1101,6 +1404,7 @@ fn restorable_payload(value: &Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("watermark");
         object.remove("pending");
+        object.remove("room_pending");
     }
     payload
 }
@@ -1112,9 +1416,18 @@ fn snapshot_watermark(snapshot: &Value) -> Result<i64> {
         .ok_or_else(|| anyhow!("snapshot has no applied watermark: {snapshot}"))
 }
 
-fn run_rvm(s: &Scenario, paths: &Paths) -> Result<()> {
-    let command = std::env::var_os("L3_RVM_COMMAND")
-        .ok_or_else(|| anyhow!("L3_RVM_COMMAND is required for RVM scenario {}", s.id))?;
+/// RVM 几何基准比对（测试计划 §6：只挂几何类场景）。
+///
+/// 基准比对是**挂载项**，不是场景本身的判据：没配 `L3_RVM_COMMAND` 就跳过并在报告里
+/// 说出来。让它硬失败等于把「几何基准没准备好」讲成「M1 挂了」，而且是在整场跑完
+/// 之后才讲。
+fn run_rvm(s: &Scenario, paths: &Paths) -> Result<String> {
+    let Some(command) = std::env::var_os("L3_RVM_COMMAND") else {
+        return Ok(format!(
+            "RVM: skipped for {} (L3_RVM_COMMAND unset, no geometry baseline compared)",
+            s.id
+        ));
+    };
     let status = Command::new("cmd")
         .args(["/d", "/s", "/c"])
         .arg(command)
@@ -1122,7 +1435,7 @@ fn run_rvm(s: &Scenario, paths: &Paths) -> Result<()> {
         .env("L3_SCENARIO", s.id)
         .status()?;
     ensure!(status.success(), "RVM comparison failed: {status}");
-    Ok(())
+    Ok(format!("RVM: baseline compared for {}", s.id))
 }
 
 fn identity() -> Value {
@@ -1256,15 +1569,6 @@ fn port_open(port: u16) -> bool {
     .is_ok()
 }
 
-fn process_running(image: &str) -> Result<bool> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH"])
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .to_ascii_lowercase()
-        .contains(&image.to_ascii_lowercase()))
-}
-
 fn command_output(command: &mut Command) -> Result<String> {
     let output = command.output()?;
     ensure!(
@@ -1280,10 +1584,51 @@ fn kill_tree(pid: u32) {
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
 }
-fn kill_image(image: &str) {
-    let _ = Command::new("taskkill")
-        .args(["/IM", image, "/T", "/F"])
-        .status();
+
+fn pid_running(pid: u32) -> Result<bool> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "tasklist failed while checking pid {pid}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+}
+
+fn terminate_tree(pid: u32) -> Result<()> {
+    if !pid_running(pid)? {
+        return Ok(());
+    }
+    let output = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !pid_running(pid)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "pid {pid} survived taskkill {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn terminate_pid_file(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let pid = fs::read_to_string(path)?
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("invalid E3D pid file {}", path.display()))?;
+    terminate_tree(pid)?;
+    fs::remove_file(path)?;
+    Ok(())
 }
 
 fn sha256(path: &Path) -> Result<String> {
@@ -1303,9 +1648,28 @@ fn sha256(path: &Path) -> Result<String> {
         .ok_or_else(|| anyhow!("certutil output has no SHA-256 digest: {text}"))
 }
 
-fn write_report(run_dir: &Path, reports: &[CaseReport]) -> Result<()> {
+fn write_report(run_dir: &Path, header: &RunHeader, reports: &[CaseReport]) -> Result<()> {
     let mut file = File::create(run_dir.join("report.md"))?;
     writeln!(file, "# L3 suite {}\n", Local::now().to_rfc3339())?;
+    writeln!(file, "| Field | Value |")?;
+    writeln!(file, "|---|---|")?;
+    writeln!(file, "| scenarios | {} |", header.scenarios.join(","))?;
+    writeln!(file, "| project | {} |", header.project_dir)?;
+    writeln!(file, "| mdb | {} |", header.mdb)?;
+    writeln!(file, "| baseline | {} |", header.baseline)?;
+    writeln!(
+        file,
+        "| bypasses | keep-stack={} skip-restore={} |",
+        header.keep_stack, header.skip_restore
+    )?;
+    if let Some(failure) = &header.stack_failure {
+        writeln!(
+            file,
+            "| stack | DIED mid-run: {} |",
+            failure.replace('|', "\\|").replace('\n', " ")
+        )?;
+    }
+    writeln!(file)?;
     writeln!(file, "| Scenario | Result | First failure / notes |")?;
     writeln!(file, "|---|---|---|")?;
     for report in reports {
@@ -1361,6 +1725,53 @@ mod tests {
         let ok = json!([{"status":"OK","result":[{"count": 1}]}]);
         assert_eq!(surreal_result(&ok).unwrap(), &json!([{"count": 1}]));
         assert!(surreal_result(&json!([{"status":"ERR","detail":"bad sql"}])).is_err());
+    }
+
+    /// 场景表是数据，但它得是**自洽**的数据：V 级判据整个押在这两列上，而写错
+    /// 一列的代价是「跑到一半才发现 before 图定位的是个还不存在的节点」。
+    #[test]
+    fn every_scenario_declares_a_coherent_tree_focus() {
+        for s in SCENARIOS {
+            let mutates = s.apply_macro.is_some();
+            assert_eq!(
+                mutates,
+                s.id != "f7",
+                "{}: only the built-in repeat row may have no apply macro",
+                s.id
+            );
+            if matches!(s.expect, Expect::Deleted { .. }) {
+                assert!(
+                    s.focus_before.is_some() && s.focus_after.is_none(),
+                    "{}: a delete scenario must locate the node before and require it gone after",
+                    s.id
+                );
+            }
+            if mutates && s.focus_before.is_none() {
+                assert!(
+                    s.focus_after.is_some(),
+                    "{}: a node that does not exist beforehand must be asserted present afterwards",
+                    s.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scenario_macros_leave_session_shutdown_to_the_driver() {
+        for relative in SCENARIOS
+            .iter()
+            .flat_map(|scenario| [scenario.apply_macro, scenario.restore_macro])
+            .flatten()
+        {
+            let source =
+                fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)).unwrap();
+            assert!(
+                !source
+                    .lines()
+                    .any(|line| line.trim().eq_ignore_ascii_case("QUIT")),
+                "{relative} exits before the wrapper can write L3-DONE"
+            );
+        }
     }
 
     #[test]

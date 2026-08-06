@@ -9,9 +9,8 @@
 --
 -- Baseline to diff against: docs/evidence/2026-07-27-d03-delete-session-baseline.md
 --
--- Run as the entry macro of a fresh single-purpose session, so that SAVEWORK
--- commits this deletion and nothing else:
---   scripts\e3d\run_ams_c_entrymacro.bat "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_delete_apply.mac"
+-- Run through l3_suite's fresh single-purpose wrapper, so that SAVEWORK commits
+-- this deletion and nothing else. The wrapper owns the L3-DONE sentinel and QUIT.
 -- It also works typed into an E3D Design Command Window, but then SAVEWORK
 -- would fold any other pending edits of that session into the same session
 -- number and the window would no longer isolate the deletion.
@@ -28,4 +27,3 @@ Q CE
 SAVEWORK 'CODEX D-03 delete VTWA 24381/107146'
 $P CODEX-D03-DELETE-DONE
 ALPHA LOG END
-QUIT

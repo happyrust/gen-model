@@ -1,0 +1,12 @@
+-- 只读驱动探针：证明无人值守 TTY 会话能登录目标项目并执行宏。
+-- 不改任何数据、不 SAVEWORK、不 QUIT——收尾由 runner 的 wrapper 负责。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_driver_probe.log" OVER
+$P L3-PROBE-ALIVE
+Q PROJ
+Q MDB
+=24381/100819
+Q CE
+Q NAME
+$P L3-PROBE-DONE
+ALPHA LOG END
