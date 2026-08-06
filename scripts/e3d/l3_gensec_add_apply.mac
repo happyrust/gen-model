@@ -1,0 +1,13 @@
+-- F5 / D-04: clone one known-good GENSEC below its existing SUPPO.
+-- COPY is intentionally used after NEW: it preserves the validated GENSEC/SPINE geometry.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_gensec_add_apply.log" OVER
+$P L3-F5-ALIVE
+=24384/25872
+NEW GENSEC /CODEX_L3_GENSEC
+COPY =24384/25923
+Q CE
+Q OWNE
+SAVEWORK 'L3 F5 add cloned GENSEC under SUPPO 24384/25872'
+$P L3-F5-DONE
+ALPHA LOG END

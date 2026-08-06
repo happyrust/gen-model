@@ -1,0 +1,12 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-spike/spike_a.log" OVER
+$P SPIKE-ALIVE
+ALPHA LOG END
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-spike/spike_b.log" OVER
+=24381/100819
+Q CE
+Q NAME
+ALPHA LOG END
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-spike/spike_c.log" OVER
+$P SPIKE-DONE
+ALPHA LOG END
+QUIT

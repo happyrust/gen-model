@@ -1,0 +1,12 @@
+-- Restore F6 by moving the same FTUB back to its baseline BRAN.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_ftub_move_restore.log" OVER
+$P L3-F6-RESTORE-ALIVE
+=24384/22402
+INCLUDE =24384/22403
+=24384/22403
+Q CE
+Q OWNE
+SAVEWORK 'L3 F6 restore FTUB 24384/22403 to BRAN 24384/22402'
+$P L3-F6-RESTORE-DONE
+ALPHA LOG END
