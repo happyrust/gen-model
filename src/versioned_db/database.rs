@@ -42,6 +42,7 @@ use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
+use crate::versioned_db::member_prune;
 use crate::versioned_db::pe::*;
 use crate::versioned_db::task::get_global_db_sender;
 
@@ -889,6 +890,29 @@ pub async fn sync_total_async_threaded(
                         continue;
                     }
                 };
+                // issue #10：解析的补链轮按记录自带的 owner 把「owner 成员表里没列出
+                // 它」的父子边补回去，而那正是 E3D 表达删除的方式，于是已删子树被整棵
+                // 复活、和重建出来的同名子树在库里并存。按元素自己的成员块把多挂的边
+                // 摘掉，随之不可达的元素一并丢弃（判据与取舍见 `member_prune`）。
+                {
+                    let world = db_basic.world_refno;
+                    let bytes = &db_basic.bytes;
+                    let refno_table_map = &db_basic.refno_table_map;
+                    let report = member_prune::prune_resurrected_members(
+                        world,
+                        &mut db_basic.children_map,
+                        |refno| member_prune::authoritative_members(bytes, refno_table_map, refno),
+                    );
+                    if report.skipped_no_root_authority {
+                        println!("{file_name}: 根成员表为空，跳过已删元素裁剪，保持解析原样");
+                    } else if !report.is_empty() {
+                        println!(
+                            "{file_name}: 裁掉补链多挂的父子边 {} 条、随之不可达的元素 {} 个",
+                            report.dropped_edges, report.dropped_elements
+                        );
+                    }
+                }
+
                 let all_refnos = db_basic
                     .children_map
                     .keys()
