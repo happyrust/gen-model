@@ -82,3 +82,11 @@
 ## 5. 明确不做（本期）
 
 - 不做常驻全库镜像；不做任何形式的降级提交（自动或人工）；不改基线 / 冷启动 / 全量生成路径；不动 ADR-012 合批策略与 fresh/retry 判据；不动 ADR-015 pending 身份；phase-2 fork 暂存会话只立方向不设计细节。
+
+## 6. 落地情况（2026-08-06 实现审核后补记）
+
+- P0–P3 与写回主链路已合入（`src/data_interface/staging/`、`batch_worker::execute_frozen_batch`）；P5 的 live 隔离性探针 / 终态对拍 / 故障注入 / 性能基线（T5.1–T5.5）**尚未落地**，T0.6 mini parity harness 与单元级 I1 探针在位。
+- **T1.4 / T2.6 的自觉简化**：同一 staging database 的吸收扩窗（`absorb_extend`）未接入生产——冻结点重扫已把新会话并进本批区间，窗口失败（阻断或写回前废弃）即 DROP 暂存，下一批从零重建；「重试只重跑失败根」的重试经济发生在**批内**（`run_single_unit` 的暂存内联重试），不跨批保留。资源状态机的 `RefuseAbsorb` 档位因此当前仅作观测。阻断解除机制不变：新会话触及的根 attempts 归零（`roots_touched_since` 按尾段变化的单元 rollup 判定；2026-08-06 修复前误为整份 worklist 重置，任何无关新会话都会全量解锁死信）。
+- 房间边写入改为 `DELETE + INSERT RELATION`（显式 `{panel}_{element}` id）经 `execute_model_write` 进 journal（2026-08-06 修复：此前 `RELATE` 形态被 ReplaySafe validator 整类拒绝，窗口内任何非空归属写入必败、全部落 pending，§T3.2 名存实亡）。
+- CATA 按需解析产物按 ADR-017 §7 落地为 `Both`（暂存生效 + 进 journal 随窗口提交；2026-08-06 修复：此前误为 `StagingOnly`，产物随窗口 DROP 丢失、持久层 CATA 覆盖停止增长）。
+- 窗口终态清扫（`sweep_orphan_staging_databases`）已接到每个窗口终态（`batch_worker::drop_window_and_sweep`；2026-08-06 前只建未接）。

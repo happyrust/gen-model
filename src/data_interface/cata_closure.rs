@@ -1089,24 +1089,29 @@ pub async fn ensure_cata_refnos_parsed(
             parsed += 1;
         }
 
+        // ADR-017 §7：CATA 按需解析产物**随窗口提交**，不再直写持久层——窗口内走
+        // `execute_model_write`（暂存生效 + 进 journal），写回时 INSERT IGNORE 对
+        // 持久层已有行是空操作、新元素落地；窗口外回落历史持久层直写。载荷全部
+        // 带显式 id（pe 显式传入，ATT_*/ATT_UDA/pe_owner 由 rs-core 渲染函数插入），
+        // 满足 ReplaySafe，重放幂等。
         for chunk in pe_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO pe [{}]", chunk.join(","));
-            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA pe").await?;
+            crate::surreal_retry::execute_model_write(&sql, "persist CATA pe").await?;
         }
         for (table, jsons) in att_by_table {
             for chunk in jsons.chunks(INSERT_CHUNK) {
                 let sql = format!("INSERT IGNORE INTO {} [{}]", table, chunk.join(","));
-                crate::surreal_retry::execute_generation_preload(&sql, "preload CATA attributes")
+                crate::surreal_retry::execute_model_write(&sql, "persist CATA attributes")
                     .await?;
             }
         }
         for chunk in uda_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT IGNORE INTO ATT_UDA [{}]", chunk.join(","));
-            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA UDA").await?;
+            crate::surreal_retry::execute_model_write(&sql, "persist CATA UDA").await?;
         }
         for chunk in relate_jsons.chunks(INSERT_CHUNK) {
             let sql = format!("INSERT RELATION INTO pe_owner [{}]", chunk.join(","));
-            crate::surreal_retry::execute_generation_preload(&sql, "preload CATA ownership")
+            crate::surreal_retry::execute_model_write(&sql, "persist CATA ownership")
                 .await?;
         }
     }

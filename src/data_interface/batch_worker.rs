@@ -393,9 +393,7 @@ async fn execute_frozen_batch(
 
     // 无数据可提交（up_to_date / skipped / 应用失败）：丢掉暂存，保留 body 原状态。
     if !data_applied {
-        if let Err(error) = window.drop_database().await {
-            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
-        }
+        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
 
@@ -429,9 +427,7 @@ async fn execute_frozen_batch(
             batch.message = Some("模型前置或生成未全部成功，暂存窗口未提交".into());
         }
         result.status = ManualUpdateStatus::Failed;
-        if let Err(error) = window.drop_database().await {
-            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
-        }
+        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
 
@@ -449,9 +445,7 @@ async fn execute_frozen_batch(
             batch.message = Some("暂存窗口缺少 finalize 登记".into());
         }
         result.status = ManualUpdateStatus::Failed;
-        if let Err(error) = window.drop_database().await {
-            result.warnings.push(format!("废弃暂存窗口失败: {error:#}"));
-        }
+        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
 
@@ -564,10 +558,7 @@ async fn execute_frozen_batch(
         }
     }
 
-    if let Err(error) = window.drop_database().await {
-        result
-            .warnings
-            .push(format!("清理已提交暂存窗口失败: {error:#}"));
+    if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await {
         postcommit_failed = true;
     }
 
@@ -699,6 +690,62 @@ where
             }
         }
     }
+}
+
+/// 窗口终态收尾：DROP 本窗口的暂存库，随后清扫暂存实例上「不在册」的孤儿库。
+///
+/// 清扫是 T0.3 登记表的兜底半边——DROP 失败的窗口已经出册，残库若无人回收会
+/// 驻留 mem 实例直到进程退出。清扫自身的失败只打日志不折进任务终态：数据都在
+/// 进程内存里，最坏情况就是等进程重启。返回 DROP 本身是否成功。
+async fn drop_window_and_sweep(
+    window: crate::data_interface::staging::ActiveStagedWindow,
+    drop_context: &str,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let mut dropped_ok = true;
+    if let Err(error) = window.drop_database().await {
+        warnings.push(format!("{drop_context}: {error:#}"));
+        dropped_ok = false;
+    }
+    match crate::data_interface::staging::lifecycle::sweep_orphan_staging_databases().await {
+        Ok(swept) if !swept.is_empty() => {
+            println!("窗口终态清扫回收孤儿暂存库: {}", swept.join(", "));
+        }
+        Ok(_) => {}
+        Err(error) => println!("窗口终态清扫孤儿暂存库失败（进程重启兜底）: {error:#}"),
+    }
+    dropped_ok
+}
+
+/// 冻结吸收解除阻断时的「受影响根」（ADR-017 §8）：只有被 `blocked_end` 之后新会话
+/// 真正触及的交付单元根，attempts 才归零——新数据是它们全新的重算理由。窗口
+/// worklist 里其余的根来自旧会话的整窗重放，保持死信，避免任何无关新会话都替
+/// 它们重付一轮注定失败的生成。判定复用计划层的单元 rollup：对
+/// `(blocked_end, end_sesno]` 尾段重新收集变化，取其 RegenRoot 目标。
+async fn roots_touched_since(
+    job: &FrozenBatch,
+    blocked_end: i32,
+    end_sesno: i32,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let range_eles = crate::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
+        &job.path,
+        (blocked_end + 1)..=end_sesno,
+    )?;
+    let plan = crate::data_interface::model_update_plan::build_model_update_plan(
+        job.dbnum,
+        end_sesno,
+        &job.db_type,
+        &range_eles,
+    )
+    .await?;
+    Ok(plan
+        .work_items
+        .into_iter()
+        .filter(|item| {
+            item.action == crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot
+        })
+        .map(|item| item.target_refno)
+        .collect())
 }
 
 fn failed_window_result(
@@ -871,18 +918,31 @@ async fn execute_frozen_batch_body(
             let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
             if let Ok(Some(block)) =
                 crate::data_interface::staging::attempts::load_window_block(job.dbnum).await
-                && block.end_sesno.is_some_and(|blocked_end| end_sesno > blocked_end)
+                && let Some(blocked_end) = block.end_sesno
+                && end_sesno > blocked_end
             {
-                let affected = worklist
-                    .iter()
-                    .map(|task| task.root_refno.clone())
-                    .collect::<Vec<_>>();
-                if let Err(error) = crate::data_interface::staging::attempts::reset_roots_on_absorb(
-                    job.dbnum,
-                    &affected,
-                )
-                .await
-                {
+                // 只重置被新会话触及的根（ADR-017 §8）；未触及的坏根保持死信，
+                // 阻断只在全部坏根都被新数据触及时才真正解除（attempts.rs 的
+                // `reset_roots_on_absorb` 负责这半边判定）。
+                let reset_outcome = match roots_touched_since(job, blocked_end, end_sesno).await {
+                    Ok(touched) => {
+                        let affected = worklist
+                            .iter()
+                            .map(|task| task.root_refno.clone())
+                            .filter(|root| touched.contains(root))
+                            .collect::<Vec<_>>();
+                        if affected.is_empty() {
+                            Ok(())
+                        } else {
+                            crate::data_interface::staging::attempts::reset_roots_on_absorb(
+                                job.dbnum, &affected,
+                            )
+                            .await
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = reset_outcome {
                     warnings.push(format!("新会话吸收重置 attempts 失败: {error:#}"));
                     registry.set_unit_totals(&job.task_id, 0);
                     return DataBatchTaskResult {

@@ -292,21 +292,49 @@ fn render_room_relate_write(
 
     let mut members: Vec<&RoomMember> = within_refnos.values().collect();
     members.sort_by_key(|member| member.refno.to_string());
-    for member in members {
-        // inside_count / center_dist 是 fn::room_relate_of 的排序键（ADR-010 §5）。
+    let rows = members
+        .iter()
+        .map(|member| {
+            render_room_edge_row(
+                panel_refno,
+                member.refno,
+                room_num,
+                member.inside_count,
+                member.center_dist,
+            )
+        })
+        .collect::<Vec<_>>();
+    if !rows.is_empty() {
         statements.push(format!(
-            "RELATE {panel_key}->room_relate:{}_{}->{} SET room_num = '{}', \
-             inside_count = {}, center_dist = {}",
-            panel_refno,
-            member.refno,
-            member.refno.to_pe_key(),
-            escape_surql_str(room_num),
-            member.inside_count,
-            member.center_dist,
+            "INSERT RELATION INTO room_relate [{}]",
+            rows.join(",")
         ));
     }
 
     wrap_in_transaction(&statements).unwrap_or_default()
+}
+
+/// 一条 `room_relate` 边的载荷。两条重算分支共用，保证同一条边在两边渲染逐字一致。
+///
+/// `INSERT RELATION` 带显式 `{panel}_{element}` id 而不是 `RELATE`：RELATE 被
+/// ReplaySafe journal 校验整类拒绝（暂存窗口内房间写要进语句日志随窗口提交），
+/// 而显式 id 的 INSERT RELATION 与先行 DELETE 同处一个事务，重放收敛
+/// （fork 对撞 id 的 INSERT RELATION 静默保留旧行——D13——同事务先删后插不会撞）。
+/// `inside_count` / `center_dist` 是 fn::room_relate_of 的排序键（ADR-010 §5）。
+fn render_room_edge_row(
+    panel: RefnoEnum,
+    element: RefnoEnum,
+    room_num: &str,
+    inside_count: u8,
+    center_dist: f32,
+) -> String {
+    format!(
+        "{{ id: room_relate:{panel}_{element}, in: {}, out: {}, room_num: '{}', \
+         inside_count: {inside_count}, center_dist: {center_dist} }}",
+        panel.to_pe_key(),
+        element.to_pe_key(),
+        escape_surql_str(room_num),
+    )
 }
 
 /// 保存房间关联关系到数据库
@@ -324,7 +352,7 @@ async fn save_room_relate(
     room_num: &str,
 ) -> anyhow::Result<()> {
     let sql = render_room_relate_write(panel_refno, within_refnos, room_num);
-    crate::surreal_retry::execute_model_scoped_delete(
+    crate::surreal_retry::execute_model_write(
         &sql,
         &format!("写入 {panel_refno} 的房间归属"),
     )
@@ -1365,16 +1393,22 @@ fn render_element_relate_write(element: RefnoEnum, edges: &[ElementRoomEdge]) ->
 
     let mut edges: Vec<&ElementRoomEdge> = edges.iter().collect();
     edges.sort_by_key(|edge| edge.panel.to_string());
-    for edge in edges {
+    let rows = edges
+        .iter()
+        .map(|edge| {
+            render_room_edge_row(
+                edge.panel,
+                element,
+                &edge.room_num,
+                edge.member.inside_count,
+                edge.member.center_dist,
+            )
+        })
+        .collect::<Vec<_>>();
+    if !rows.is_empty() {
         statements.push(format!(
-            "RELATE {}->room_relate:{}_{}->{element_key} SET room_num = '{}', \
-             inside_count = {}, center_dist = {}",
-            edge.panel.to_pe_key(),
-            edge.panel,
-            element,
-            escape_surql_str(&edge.room_num),
-            edge.member.inside_count,
-            edge.member.center_dist,
+            "INSERT RELATION INTO room_relate [{}]",
+            rows.join(",")
         ));
     }
 
@@ -1386,7 +1420,7 @@ async fn write_element_room_relate(
     edges: &[ElementRoomEdge],
 ) -> anyhow::Result<()> {
     let sql = render_element_relate_write(element, edges);
-    crate::surreal_retry::execute_model_scoped_delete(
+    crate::surreal_retry::execute_model_write(
         &sql,
         &format!("写入 {element} 的房间归属"),
     )
@@ -1604,7 +1638,10 @@ mod tests {
             sql.contains("DELETE room_relate WHERE in = pe:4000000001_10"),
             "{sql}"
         );
-        assert!(!sql.contains("RELATE"), "空成员集不该写任何边:\n{sql}");
+        assert!(
+            !sql.contains("INSERT RELATION"),
+            "空成员集不该写任何边:\n{sql}"
+        );
     }
 
     /// 删除必须与写入同处一个事务：中途失败若只落了 DELETE，这块面板的房间归属就凭空消失。
@@ -1616,8 +1653,8 @@ mod tests {
             "K100",
         );
         assert!(
-            position_of(&sql, "DELETE room_relate") < position_of(&sql, "RELATE"),
-            "DELETE 必须排在所有 RELATE 之前:\n{sql}"
+            position_of(&sql, "DELETE room_relate") < position_of(&sql, "INSERT RELATION"),
+            "DELETE 必须排在写入之前:\n{sql}"
         );
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with(";\nCOMMIT TRANSACTION;"), "{sql}");
@@ -1630,14 +1667,50 @@ mod tests {
         let sql = render_room_relate_write(panel(), &members([member(20, 8, 12.5)]), "K100");
         assert!(
             sql.contains(
-                "RELATE pe:4000000001_10->room_relate:4000000001_10_4000000001_20\
-                 ->pe:4000000001_20"
+                "{ id: room_relate:4000000001_10_4000000001_20, \
+                 in: pe:4000000001_10, out: pe:4000000001_20"
             ),
             "{sql}"
         );
         // 排序键跟着边一起写，缺了 fn::room_relate_of 会退化成按 room_num 排序。
-        assert!(sql.contains("inside_count = 8"), "{sql}");
-        assert!(sql.contains("center_dist = 12.5"), "{sql}");
+        assert!(sql.contains("inside_count: 8"), "{sql}");
+        assert!(sql.contains("center_dist: 12.5"), "{sql}");
+    }
+
+    /// 暂存窗口把房间写入按 `Both` 收进语句日志（ADR-017 §5），所以渲染出的
+    /// 事务必须整段通过 ReplaySafe validator——此前的 `RELATE` 形态被整类拒绝，
+    /// 窗口内任何非空归属写入都会失败并落 pending（2026-08-06 审核 H1）。
+    #[test]
+    fn room_writes_are_journal_admissible() {
+        use crate::data_interface::staging::replay_safe;
+
+        let panel_sql = render_room_relate_write(
+            panel(),
+            &members([member(20, 8, 12.5), member(24, 4, 450.0)]),
+            "K100",
+        );
+        replay_safe::validate_statement(&panel_sql)
+            .unwrap_or_else(|error| panic!("整间分支必须可进 journal：{error}\n{panel_sql}"));
+        assert!(
+            replay_safe::is_explicit_transaction(&panel_sql),
+            "整间写入必须保持显式事务（写回时独占一块原子重放）:\n{panel_sql}"
+        );
+
+        let element = RefnoEnum::from("4000000001_20");
+        let element_sql = render_element_relate_write(
+            element,
+            &[ElementRoomEdge {
+                panel: panel(),
+                room_num: "K100".into(),
+                member: member(20, 8, 12.5),
+            }],
+        );
+        replay_safe::validate_statement(&element_sql)
+            .unwrap_or_else(|error| panic!("元素分支必须可进 journal：{error}\n{element_sql}"));
+        assert!(
+            replay_safe::is_explicit_transaction(&element_sql),
+            "元素写入必须保持显式事务（写回时独占一块原子重放）:\n{element_sql}"
+        );
     }
 
     /// 同一份成员集必须渲染出同一条 SQL。`HashMap` 每次构造都换哈希种子，遍历顺序
@@ -1655,9 +1728,9 @@ mod tests {
 
         assert_eq!(sql, render_room_relate_write(panel(), &backward, "K100"));
         assert!(
-            position_of(&sql, "->pe:4000000001_20") < position_of(&sql, "->pe:4000000001_21")
-                && position_of(&sql, "->pe:4000000001_21")
-                    < position_of(&sql, "->pe:4000000001_24"),
+            position_of(&sql, "out: pe:4000000001_20") < position_of(&sql, "out: pe:4000000001_21")
+                && position_of(&sql, "out: pe:4000000001_21")
+                    < position_of(&sql, "out: pe:4000000001_24"),
             "成员应按 refno 升序渲染:\n{sql}"
         );
     }
@@ -1667,7 +1740,7 @@ mod tests {
     #[test]
     fn room_num_is_escaped_into_the_literal() {
         let sql = render_room_relate_write(panel(), &members([member(20, 8, 0.0)]), "K'100");
-        assert!(sql.contains(r"room_num = 'K\'100'"), "{sql}");
+        assert!(sql.contains(r"room_num: 'K\'100'"), "{sql}");
     }
 
     #[test]
@@ -1725,7 +1798,7 @@ mod tests {
             sql.contains("DELETE room_relate WHERE out = pe:4000000001_20"),
             "{sql}"
         );
-        assert!(!sql.contains("RELATE"), "{sql}");
+        assert!(!sql.contains("INSERT RELATION"), "{sql}");
 
         let panel_sql = render_room_relate_write(panel(), &HashMap::new(), "K100");
         assert!(
