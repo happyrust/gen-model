@@ -2207,4 +2207,33 @@ mod tests {
         assert!(removed.contains("DELETE room_panel_relate WHERE out = pe:4000000001_10"));
         assert!(!removed.contains("INSERT RELATION"));
     }
+
+    /// 两个 `room_panel_relate` 写入都必须进得了窗口 journal。
+    ///
+    /// 这张表此前是裸 `RELATE`——边 id 无法显式指定，被 ReplaySafe R1 整类拒绝，于是
+    /// 房间双表在暂存路径上根本对不上。改成 `DELETE + INSERT RELATION`（显式
+    /// `{room}_{panel}` id）之后形状是对的，但「被拒」是**静默**的那种失败：语句进不了
+    /// journal，提交后两张表继续背离，没有任何东西会喊。所以准入本身要有断言，而不是
+    /// 只断言文本长什么样。
+    #[test]
+    fn both_room_panel_writes_are_admitted_into_the_window_journal() {
+        use crate::data_interface::staging::replay_safe::validate_statement;
+
+        let room = RoomPanels {
+            room: RefnoEnum::from("4000000001_1"),
+            room_num: "K100".into(),
+            panels: vec![RefnoEnum::from("4000000001_10")],
+        };
+
+        validate_statement(&render_room_panel_relate_write(
+            room.room,
+            &room.panels,
+            &room.room_num,
+        ))
+        .expect("整间重写必须过 ReplaySafe");
+        validate_statement(&render_panel_room_topology_write(room.panels[0], Some(&room)))
+            .expect("面板拓扑重写必须过 ReplaySafe");
+        validate_statement(&render_panel_room_topology_write(room.panels[0], None))
+            .expect("面板不在册时的清边同样要过 ReplaySafe");
+    }
 }

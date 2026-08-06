@@ -151,17 +151,26 @@ impl StagingWriteContext {
         *self.mysql_changes.lock().await = Some(changes);
     }
 
+    /// 持有这个生成根的锁直到窗口析构；同一个根重复调用是无操作（ADR-017 I8）。
+    ///
+    /// 整段在 `root_locks` 里做完——**登记与到手必须是同一步**。拆成「先登记、放开、
+    /// 再去拿」的话，集合里有这个根只说明有人开始拿、而不是拿到了：并发的第二个调用者
+    /// 看见它就直接返回，于是在锁还没到手时就认为锁在手，照样去改这个根的模型产物。
+    /// 今天三个调用点都是顺序 for 循环、碰不到这个交错，但窗口本来就备着
+    /// `spawn_with_staged_io` 这种并发子任务机制，这条不变量不该靠调用点的写法来保证。
+    ///
+    /// 跨 await 攥着 `root_locks` 不会自锁：它只有这一个使用者，而第二个调用者在这里
+    /// 排队正是想要的语义。
     pub async fn hold_generation_root(&self, root_refno: &str) {
-        {
-            let mut held = self.root_locks.lock().await;
-            if !held.roots.insert(root_refno.to_string()) {
-                return;
-            }
+        let mut held = self.root_locks.lock().await;
+        if held.roots.contains(root_refno) {
+            return;
         }
         let guard = crate::data_interface::manual_update::generation_root_lock(root_refno)
             .lock_owned()
             .await;
-        self.root_locks.lock().await.guards.push(guard);
+        held.roots.insert(root_refno.to_string());
+        held.guards.push(guard);
     }
 }
 
@@ -292,6 +301,52 @@ mod tests {
         let text = serde_json::to_string(&rows).expect("serialize");
         assert!(text.contains("a") && text.contains("b"), "{text}");
 
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// 第二个调用者必须等到锁**真的到手**才返回，而不是看见「有人登记过」就走。
+    ///
+    /// 登记与到手若不是同一步，下面这次 `hold` 会在锁还捏在别人手里时立刻返回，调用方
+    /// 于是以为自己持有这个根、照样去改它的模型产物（ADR-017 I8 名存实亡）。这里先在
+    /// 窗口外把根锁占住，逼出那个交错：新实现下第二个调用者只能继续排队。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_hold_waits_instead_of_assuming_the_lock_is_already_ours() {
+        use crate::data_interface::manual_update::generation_root_lock;
+        use std::time::Duration;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7993, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let context = window.write_context();
+        let root = "16777216/97531";
+
+        // 窗口外的持有者：模拟按需生成正攥着这个根。
+        let outsider = generation_root_lock(root).lock_owned().await;
+
+        let racer = context.clone();
+        let first = tokio::spawn(async move { racer.hold_generation_root(root).await });
+        // 让第一个调用者走到它的 await 上。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let second = tokio::time::timeout(
+            Duration::from_millis(200),
+            context.hold_generation_root(root),
+        )
+        .await;
+        assert!(
+            second.is_err(),
+            "锁还在窗口外的持有者手里，第二个调用者不许提前返回"
+        );
+
+        drop(outsider);
+        first.await.expect("join first hold");
+        assert!(
+            generation_root_lock(root).try_lock().is_err(),
+            "第一个调用者返回之后，这个根必须确实被窗口持有"
+        );
+
+        drop(context);
         window.drop_database().await.expect("cleanup");
     }
 
