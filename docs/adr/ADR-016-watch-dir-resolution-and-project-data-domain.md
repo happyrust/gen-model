@@ -88,7 +88,8 @@ F6 的判重键随之从 `dbnum` 改成 `(归属项目, dbnum)`：跨项目同�
 | DESI | ✅ 按依赖关系 | 同上 |
 | SYST / GLB / GLOB | ❌ | 描述的是「那个项目自己怎么组织」，对本库无意义；而且 dbnum 只在项目内唯一，本库状态层（`dbnum_watermark` 记录 id、`dbnum_info_table`、`pe.dbnum` 聚合）全部按裸 dbnum 做键 |
 
-落点在 `should_process_database`（第一道门），**不是**监控目录解析层——那一层只回答
+落点在摄入范围门（`increment_manager::in_scope_with`；2026-08-06 之前叫
+`should_process_database`，见文末「后续变更」），**不是**监控目录解析层——那一层只回答
 「有哪些东西存在」，不回答「哪些东西业务需要」。而且这**不是「异常阻断」而是
 「不在数据域内」**，两个语义不能合并：阻断意味着系统期待处理它却发现异常，
 不在范围意味着系统根本不负责。所以日志是单独一句、措辞明确不会被当成「漏扫了」：
@@ -159,6 +160,7 @@ UNC 反斜杠直指 `ams000` + 一台不可达主机）跑 `watch_dirs_probe`：
   与 PollWatcher 实际监听的集合一致——补挂进来的目录不会只被轮询、不被摄入。
 - `in_scope` / `should_process_database` / `scan_project_candidates` 都多了 `project`
   参数，四条触发路径（启动重扫、文件事件、手动预览、手动执行）共用同一个谓词。
+  （2026-08-06：前两者合并成 `increment_manager::in_scope_with`，见文末「后续变更」。）
 - 非主项目的 SYST/GLB/GLOB 从此不进队列。它们本来也没被摄入（先被 F6 误判为重复、
   后被回退门拦下），区别是现在**理由是真的**，而且不再连坐其他库。
 - 同一份数据被本地路径与 UNC 路径各列一次时，因为必须占用两个不同的项目名，
@@ -174,3 +176,17 @@ UNC 反斜杠直指 `ams000` + 一台不可达主机）跑 `watch_dirs_probe`：
   的两条访问路径」：需要引入 `windows` crate 或开 nightly 的 `windows_by_handle`，
   而 `(项目, dbnum)` 键已经把它的破坏力拆掉，成本收益不划算。降级顺序若将来实现，
   应为 `FILE_ID_INFO` → `canonicalize` → 字面路径，不可颠倒。
+
+## 后续变更
+
+**2026-08-06 — 摄入范围门收敛为「MDB 声明的 DESI」。** 本 ADR 写的时候，范围门是
+`in_scope = should_process_database && UpdateScope::admits`，前者串着类型白名单、
+`only_sync_sys`、`exclude_db_nums`、`manual_db_nums`。两者合并成
+`increment_manager::in_scope_with`，只剩本 ADR 第三条决策（非主项目的运行态系统库）
+与 `UpdateScope::admits`。
+
+动机是 issue #10：手写的 `manual_db_nums` 把 7999 挡在增量之外，而它与「MDB 里没有
+这个库」在日志上是同一句话——现场看到的只是每 30 秒重复一次的「不在本期执行范围，
+跳过数据库: 类型=DESI, 编号=7999」，模型树则表现为「检测到增量但不更新」。
+本 ADR 的第三条决策没有变化，只是换了个落点函数名；那几个配置项仍供全量模型生成与
+按需基线解析使用，与「这个库要不要增量」无关。

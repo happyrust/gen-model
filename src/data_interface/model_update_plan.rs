@@ -485,8 +485,7 @@ async fn panels_under_rooms(rooms: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum
 ///
 /// # 当前不可达（2026-07-31 决策，spec 001 · US5）
 ///
-/// **生产路径上没有任何 CATA 窗口会走到这里。** 入队要过
-/// `AiosDBManager::in_scope` = `should_process_database && UpdateScope::admits`，
+/// **生产路径上没有任何 CATA 窗口会走到这里。** 入队要过 `AiosDBManager::in_scope`，
 /// 而 [`crate::data_interface::update_scope::UpdateScope::admits`] 对 CATA 恒返回
 /// `false`（唯一的例外 `UpdateScope::unrestricted()` 只被按 dbnum 点名的按需初始化
 /// 用）。所以目录改动目前**不会**经这条链触发设计实例重生成。

@@ -38,6 +38,7 @@ use crate::api::element::gen_pdms_element_insert_sql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::project_paths::{MountState, path_starts_with};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::update_scope::UpdateScope;
 use crate::fast_model::*;
 use tracing_subscriber::fmt::format;
 
@@ -114,9 +115,9 @@ mod tests {
         }
     }
 
-    /// 手动与自动喂的是同一个队列，入队口径只能有一份。自动路径过去只过
-    /// `should_process_database`（类型白名单 + `manual_db_nums`），于是 MDB 外的设计库
-    /// 照样入队——预览说它不在本期执行范围里，队列里却有它的任务行。
+    /// 手动与自动喂的是同一个队列，入队口径只能有一份。自动路径过去只过类型白名单
+    /// 与手写的 dbnum 名单，于是 MDB 外的设计库照样入队——预览说它不在本期执行
+    /// 范围里，队列里却有它的任务行。
     ///
     /// 手法同上：这道门嵌在依赖实库的大函数里，没法用纯函数钉住，只能钉源码。
     #[test]
@@ -205,15 +206,34 @@ mod tests {
         assert!(try_parse_db_basic_info(Path::new("missing-e3d-db")).is_none());
     }
 
+    /// 范围只由 MDB 定：`manual_db_nums` 这类手写名单再也不参与增量判定。
+    ///
+    /// 它们在这道门上待了太久，代价是 issue #10——7999 被 `manual_db_nums` 挡在外面，
+    /// watcher 每 30 秒发现一次增量、每次跳过，日志上却与「MDB 里没这个库」一模一样。
+    /// 现在配置里怎么写都不影响：MDB 说了算。
     #[test]
-    fn database_filter_uses_the_manager_option() {
+    fn handwritten_dbnum_lists_no_longer_narrow_the_increment_scope() {
         let mut option = DbOption::default();
         option.project_name = "Main".to_string();
         option.manual_db_nums = Some(vec![1001]);
+        option.exclude_db_nums = Some(vec![7997]);
+        option.only_sync_sys = true;
+        let scope = UpdateScope::for_tests("/ALL", &[1001, 7997]);
 
-        assert!(should_process_database_with(&option, "Main", "DESI", 1001));
-        assert!(!should_process_database_with(&option, "Main", "DESI", 7997));
-        assert!(should_process_database_with(&option, "Main", "SYST", 8191));
+        for dbnum in [1001, 7997] {
+            assert!(
+                in_scope_with(&option, &scope, "Main", "DESI", dbnum),
+                "MDB 声明了 {dbnum}，配置里的手写名单不该有否决权"
+            );
+        }
+        assert!(
+            !in_scope_with(&option, &scope, "Main", "DESI", 8000),
+            "MDB 没声明 8000，它就不进范围"
+        );
+        assert!(
+            in_scope_with(&option, &scope, "Main", "SYST", 8191),
+            "SYS meta 始终解析：MDB 的成员名单本身就存在它里面"
+        );
     }
 
     /// 归属不符的观察**一个字都不许写**。
@@ -269,20 +289,21 @@ mod tests {
     fn foreign_project_runtime_sys_databases_are_out_of_scope() {
         let mut option = DbOption::default();
         option.project_name = "AvevaMarineSample".to_string();
+        let scope = UpdateScope::for_tests("/ALL", &[8000]);
 
         for db_type in PROJECT_RUNTIME_SYS_TYPES {
             assert!(
-                should_process_database_with(&option, "AvevaMarineSample", db_type, 8191),
+                in_scope_with(&option, &scope, "AvevaMarineSample", db_type, 8191),
                 "主项目自己的 {db_type} 必须摄入"
             );
             assert!(
-                !should_process_database_with(&option, "AvevaCatalogue", db_type, 8191),
+                !in_scope_with(&option, &scope, "AvevaCatalogue", db_type, 8191),
                 "别的项目的 {db_type} 不该进范围"
             );
         }
 
         assert!(
-            should_process_database_with(&option, "AvevaCatalogue", "DICT", 7006),
+            in_scope_with(&option, &scope, "AvevaCatalogue", "DICT", 7006),
             "目录库是主项目依赖的数据，跨项目照旧摄入"
         );
     }
@@ -345,15 +366,10 @@ mod tests {
                     .filter_map(Result::ok)
             })
             .find_map(|entry| {
+                // 判重不过范围门，所以随便一个能读出头的候选文件都能当夹具源。
                 let path = entry.file_type().is_file().then(|| entry.into_path())?;
-                let info = try_parse_db_basic_info(&path)?;
-                manager
-                    .should_process_database(
-                        &manager.db_option.project_name.clone(),
-                        &info.db_type,
-                        info.db_no,
-                    )
-                    .then_some((path, info))
+                is_candidate_db_file(&path).then_some(())?;
+                Some((path.clone(), try_parse_db_basic_info(&path)?))
             })
             .expect("configured watch dirs contain an E3D database");
         let mut source_file = fs::File::open(&source.0).expect("open source E3D header");
@@ -729,16 +745,30 @@ pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_typ
         && !project.trim().eq_ignore_ascii_case(db_option.project_name.trim())
 }
 
-fn should_process_database_with(
+/// 增量摄入的唯一判定：**本期 MDB 声明的 DESI**。
+///
+/// 只剩两条判据：
+///
+/// 1. 别的项目的运行态系统库（SYST/GLB/GLOB）永远不进——这不是可配的口味，
+///    dbnum 在 AVEVA 里只在项目内唯一，三个项目的 sys 库都是 8191，而本库的状态层
+///    全部按裸 dbnum 做键，放进来就是三份数据抢同一行；
+/// 2. [`UpdateScope::admits`]——SYS meta（SYST/DICT/GLB/GLOB）放行，因为 MDB 的成员
+///    名单本身就存在这些库里；其余只认本 MDB 声明过的 DESI。
+///
+/// 从前这里还串着一道 `should_process_database`：类型白名单 + `only_sync_sys` +
+/// `exclude_db_nums` + `manual_db_nums`。它们制造的是同一句「不在本期执行范围」下的
+/// 两种成因——「MDB 里没有这个库」与「有人在配置里把它划掉了」在现场长得一模一样。
+/// issue #10 卡的正是这个：7999 被 `manual_db_nums` 挡着，watcher 每 30 秒发现一次
+/// 增量、每次都跳过，而模型树看起来只是「不更新」。范围现在只由 MDB 定，手写名单
+/// 不再参与增量判定（`manual_db_nums` / `exclude_db_nums` 仍供全量模型生成与按需
+/// 基线解析使用，见 `fast_model::gen_model` 与 `manual_update::baseline_sync_options`）。
+pub(crate) fn in_scope_with(
     db_option: &DbOption,
+    scope: &UpdateScope,
     project: &str,
     db_type: &str,
     db_num: u32,
 ) -> bool {
-    if !CHECK_DB_TYPES.contains(&db_type) {
-        return false;
-    }
-
     // 一个 Surreal 库只服务一个主项目。别的项目的运行态系统库不属于本库的数据域
     // ——这不是「异常阻断」，是压根不在摄入范围内，两者不能混为一谈。
     if is_foreign_runtime_sys(db_option, project, db_type) {
@@ -747,26 +777,47 @@ fn should_process_database_with(
         );
         return false;
     }
+    scope.admits(db_type, db_num)
+}
 
-    let is_sys_meta = crate::data_interface::sesno_range::COLD_START_DB_TYPES.contains(&db_type);
-    if db_option.only_sync_sys && !is_sys_meta {
-        return false;
+/// 「这个库为什么被跳过」——说给盯着控制台的人听。
+///
+/// 光说「不在本期执行范围」是句同义反复：人接着要问的一定是「哪个 MDB、它到底
+/// 声明了什么」。范围只由 MDB 定之后这个答案是确定的，那就把它直接写进日志。
+pub(crate) fn out_of_scope_reason(scope: &UpdateScope, db_type: &str, db_num: u32) -> String {
+    let declared = scope.declared_desi().count();
+    if db_type != "DESI" {
+        return format!(
+            "不在本期执行范围，跳过数据库: 类型={db_type}, 编号={db_num}\
+             （只有 DESI 与 SYS meta 参与增量，{db_type} 不参与）"
+        );
     }
-    if db_option
-        .exclude_db_nums
-        .as_ref()
-        .is_some_and(|dbnums| dbnums.contains(&db_num))
-    {
-        return false;
-    }
-    if is_sys_meta {
-        return true;
-    }
+    format!(
+        "不在本期执行范围，跳过数据库: 类型={db_type}, 编号={db_num}\
+         （MDB {} 的 CURD 里没有它；本期声明了 {declared} 个 DESI）",
+        scope.mdb()
+    )
+}
 
-    db_option
-        .manual_db_nums
-        .as_ref()
-        .is_none_or(|dbnums| dbnums.is_empty() || dbnums.contains(&db_num))
+/// 同一句范围告警只说一次。
+///
+/// 文件事件是 30 秒一轮的轮询，范围没解出来的话每一轮都会重算出同一句话；
+/// 每轮都打等于把它埋进自己的噪声里。换了一句（比如 MDB 从「一条都没有」变成
+/// 「有但 CURD 是空的」）就该重新说。
+fn warn_scope_once(warning: &str) {
+    use std::sync::Mutex;
+    static LAST: Mutex<String> = Mutex::new(String::new());
+
+    let mut last = match LAST.lock() {
+        Ok(last) => last,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if *last == warning {
+        return;
+    }
+    last.clear();
+    last.push_str(warning);
+    println!("{warning}");
 }
 
 impl IncrementInfo {
@@ -809,10 +860,6 @@ const TRANSFORM_BATCH_SIZE: usize = 50;
 
 /// 查询inst_relate数据的批量大小（最小，避免查询超时）
 const QUERY_BATCH_SIZE: usize = 20;
-
-/// 需要检查的数据库类型列表
-/// 包含目录(CATA)、设计(DESI)、字典(DICT)、系统(SYST)、全局(GLB/GLOB)等类型
-pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
 
 /// 只认监控目录的**直属**文件。
 ///
@@ -931,6 +978,11 @@ impl AiosDBManager {
         })
     }
 
+    /// F6：同一 dbnum 在监控目录里出现了多个文件。
+    ///
+    /// **不过范围门**：判重看的是磁盘上有几个候选文件，与这个库这一期跑不跑无关。
+    /// 范围收窄时若连判重也跟着收窄，一个躺在目录里的 `ams1112_0001 copy` 会在范围
+    /// 放开的那一天才第一次被发现，而那时它已经污染过一轮文件身份了。
     fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<(String, u32)> {
         duplicate_dbnums(self.watch_dirs().into_iter().flat_map(|watch_dir| {
             let project = self.owning_project(&watch_dir);
@@ -942,49 +994,9 @@ impl AiosDBManager {
                 .filter(|entry| is_candidate_db_file(entry.path()))
                 .filter_map(move |entry| {
                     let info = try_parse_db_basic_info(entry.path())?;
-                    self.should_process_database(&project, &info.db_type, info.db_no)
-                        .then(|| (project.clone(), info.db_no, entry.path().to_path_buf()))
+                    Some((project.clone(), info.db_no, entry.path().to_path_buf()))
                 })
         }))
-    }
-
-    /// 检查数据库文件是否应该被处理
-    ///
-    /// 根据配置的过滤规则检查数据库文件是否应该被包含在增量更新处理中。
-    ///
-    /// # 参数
-    ///
-    /// * `db_type` - 数据库类型字符串
-    /// * `db_num` - 数据库编号 (u32类型，与DbBasicInfo保持一致)
-    ///
-    /// # 返回值
-    ///
-    /// * `bool` - 如果文件应该被处理返回true，否则返回false
-    ///
-    /// # 过滤规则
-    ///
-    /// 1. 检查数据库类型是否在支持列表中
-    /// 2. `only_sync_sys` 时仅允许 SYS meta（与全量同步路径一致）
-    /// 3. **SYS meta（SYST/DICT/GLB/GLOB）默认始终解析**：MDB/DB/CURD 等项目结构
-    ///    数据存放于此，不受 `manual_db_nums` 窄范围过滤影响（客户端模型树依赖）
-    /// 4. 显式 `exclude_db_nums` 对所有类型（含 SYS meta）生效
-    /// 5. 非系统库再检查是否在手动指定的 `manual_db_nums` 列表中（如果配置了）
-    ///
-    /// init_watcher / async_watch 共用此门控；SesnoRangeResolver 的 `skip_cata`
-    /// 两侧均传 `false`，避免双路径对 CATA 分叉。
-    ///
-    /// 注意这只是**第一道**门。`CHECK_DB_TYPES` 里有 CATA，但入队还要过
-    /// `in_scope` 的第二道（`UpdateScope::admits`），而它对 CATA 恒返回 false
-    /// ——所以 CATA 库实际上进不了数据批次队列（2026-07-31 决策 A，spec 001 · US5）。
-    /// 6. **别的项目的运行态系统库（SYST/GLB/GLOB）不摄入**：dbnum 只在项目内唯一，
-    ///    三个项目的 sys 库都是 8191，而状态层按裸 dbnum 做键。DICT 目录库不在此列。
-    pub(crate) fn should_process_database(
-        &self,
-        project: &str,
-        db_type: &str,
-        db_num: u32,
-    ) -> bool {
-        should_process_database_with(&self.db_option, project, db_type, db_num)
     }
 
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
@@ -1162,6 +1174,8 @@ impl AiosDBManager {
         // 判重，跨项目同号的 sys 库不算重复。
         let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
         let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
+        // 范围外的库：聚合成一句，别让 258 行「跳过」把重扫日志淹掉。
+        let mut out_of_scope: Vec<String> = Vec::new();
         let time = Instant::now();
         log::debug!("[{origin}] 监控目录: {watch_dirs:?}");
 
@@ -1222,8 +1236,7 @@ impl AiosDBManager {
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
 
-                // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，三道门合成
-                // 一个谓词，与手动路径共用（`in_scope`）。
+                // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
                 if !self.in_scope(&scope, &project, &db_type, db_no) {
                     if is_foreign_runtime_sys(&self.db_option, &project, &db_type) {
                         println!(
@@ -1232,6 +1245,10 @@ impl AiosDBManager {
                              （dbnum 只在项目内唯一，本库只承载主项目 {} 的系统库）",
                             self.db_option.project_name
                         );
+                    } else {
+                        // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
+                        // 287 个 DESI，MDB 只声明 29 个），聚合成一句收在循环外。
+                        out_of_scope.push(format!("{db_type}:{db_no}"));
                     }
                     continue;
                 }
@@ -1301,6 +1318,19 @@ impl AiosDBManager {
                     None => {}
                 }
             }
+        }
+
+        // 范围外的库一条条打会刷屏，一条不打又会让「我明明改了这个库」无处对账
+        // ——按 MDB 口径报一次总数与样本，人一眼能判断是不是自己要的那个库落在外面。
+        if !out_of_scope.is_empty() {
+            let sample = out_of_scope.iter().take(12).join("、");
+            println!(
+                "[{origin}] {} 个库不在 MDB {} 的声明名单里，本轮不入队（本期声明 {} 个 DESI）：{sample}{}",
+                out_of_scope.len(),
+                scope.mdb(),
+                scope.declared_desi().count(),
+                if out_of_scope.len() > 12 { " …" } else { "" }
+            );
         }
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
@@ -1651,6 +1681,13 @@ impl AiosDBManager {
                             continue;
                         }
                     };
+                    // 范围解不出名单时那句解释必须出现在**这条**路径上。少了它，
+                    // 「MDB 还没解析出来」在现场只表现为每 30 秒重复一遍的
+                    // 「不在本期执行范围」，没有任何线索指向 SYS meta 库。
+                    // 事件是轮询来的，同一句话每轮都会重算，故按内容去重。
+                    if let Some(warning) = scope.warning() {
+                        warn_scope_once(warning);
+                    }
 
                     // 扫描变化文件的数据库头部信息（使用过滤后的路径）
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&filtered_paths) {
@@ -1693,8 +1730,8 @@ impl AiosDBManager {
                             // 必须先于范围门（范围门要用它判别的项目的运行态系统库）。
                             let project = self.owning_project(path);
 
-                            // 类型白名单 + `manual_db_nums` + 本期 MDB 声明的设计库，
-                            // 与启动重扫、手动触发共用同一个谓词。
+                            // 本期 MDB 声明的设计库（SYS meta 例外），与启动重扫、
+                            // 手动触发共用同一个谓词。
                             if !self.in_scope(&scope, &project, db_type, db_num) {
                                 if is_foreign_runtime_sys(&self.db_option, &project, db_type) {
                                     println!(
@@ -1702,10 +1739,7 @@ impl AiosDBManager {
                                          db_type={db_type} dbnum={db_num}"
                                     );
                                 } else {
-                                    println!(
-                                        "不在本期执行范围，跳过数据库: 类型={}, 编号={}",
-                                        db_type, db_num
-                                    );
+                                    println!("{}", out_of_scope_reason(&scope, db_type, db_num));
                                 }
                                 continue;
                             }

@@ -227,8 +227,9 @@
 - `anomaly` 五种（spec §文件异常）：`rollback` / `path_migrated` / `type_changed` /
   `duplicate`（带 `paths[]` 交给人挑）/ `missing`。**只有 `path_migrated` 不阻断**。
 - `blocked`：阻断的库压根不入队，队列面板没有它们的行——这里是「这个库的水位为
-  什么一直不动」的唯一出处。`excluded`：不在本期执行范围（`manual_db_nums` /
-  类型门控），与阻断不是一回事，界面上不许合成一行。
+  什么一直不动」的唯一出处。`excluded`：不在本期执行范围，即**当前 MDB 没有声明
+  这个 DESI**（2026-08-06 起范围只由 MDB 定，`manual_db_nums` 一类手写名单不再参与），
+  与阻断不是一回事，界面上不许合成一行。
 - 旧字段是新形状的子集，既有消费者不受影响。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）

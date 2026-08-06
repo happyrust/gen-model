@@ -3,7 +3,7 @@
 //! One place for: watermark read semantics + nearest-session jump + range build.
 //! Callers (init_watcher / async_watch) only supply file identity + file latest sesno.
 //!
-//! Prefer filtering DB types in the caller's `should_process_database` and pass
+//! Prefer filtering DB types in the caller's scope gate (`in_scope_with`) and pass
 //! `skip_cata=false` from both init and watch so the two paths cannot diverge.
 //!
 //! Special case: when watermark is 0, DESI/CATA stay skipped (unsafe to guess

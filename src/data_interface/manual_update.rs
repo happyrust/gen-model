@@ -58,7 +58,9 @@ use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
 use crate::data_interface::helper::pe_thing_to_refno;
-use crate::data_interface::increment_manager::{INGEST_MAX_DEPTH, is_candidate_db_file};
+use crate::data_interface::increment_manager::{
+    INGEST_MAX_DEPTH, in_scope_with, is_candidate_db_file,
+};
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
@@ -2901,12 +2903,6 @@ impl AiosDBManager {
             if observed_dbnums.contains(&dbnum) || dbnums.iter().any(|d| d.dbnum == dbnum) {
                 continue;
             }
-            // `manual_db_nums` 手工收窄掉的库不是「没有文件」，是本次故意不看它。
-            // 不隔开的话，调试时把范围收到一个库，另外 28 个会顶着「项目内无此文件」
-            // 冒出来——那是假话，文件就在磁盘上。
-            if !self.should_process_database(project, "DESI", dbnum) {
-                continue;
-            }
             dbnums.push(DbnumPreview {
                 dbnum,
                 db_type: "DESI".to_owned(),
@@ -3079,16 +3075,11 @@ impl AiosDBManager {
             });
         }
 
-        // MDB 声明了、既没登记过也没扫到的库。与预览那边同一个循环、同一道
-        // `should_process_database` 闸门——少了这一段，队列面板只有「阻断」与
-        // 「排除」两档，够不着的库要么整个不出现，要么被讲成「不在 MDB 声明的
-        // 名单里」，而那正好是相反的意思。
+        // MDB 声明了、既没登记过也没扫到的库。与预览那边同一个循环——少了这一段，
+        // 队列面板只有「阻断」与「排除」两档，够不着的库要么整个不出现，要么被讲成
+        // 「不在 MDB 声明的名单里」，而那正好是相反的意思。
         for dbnum in scope.declared_desi() {
             if registered_dbnums.contains(&dbnum) || by_dbnum.contains_key(&dbnum) {
-                continue;
-            }
-            // 手工收窄掉的库不是「没有文件」，是本次故意不看它——文件就在磁盘上。
-            if !self.should_process_database(project, "DESI", dbnum) {
                 continue;
             }
             report.dbnums.push(DbnumStatus {
@@ -3103,21 +3094,19 @@ impl AiosDBManager {
         Ok(report)
     }
 
-    /// 这个库进不进本期执行范围：类型白名单 + `manual_db_nums` 手工收窄，
-    /// 再加 MDB 声明的 DESI 名单。
+    /// 这个库进不进本期执行范围：**当前 MDB 声明的 DESI**，别的一概不进。
+    ///
+    /// 判据全在 [`in_scope_with`]，那里也记着为什么手写名单不再参与。
     ///
     /// **三处判定必须走同一个谓词**——扫描进不进候选、「登记了却没扫到」算不算
     /// 文件缺失、`GET /dbnums` 那行的 `excluded`。过去缺失判定漏了这一道，
-    /// 于是范围一收窄，范围外每个登记过的库都变成一行假的「文件缺失·已阻断」：
-    /// `manual_db_nums = [7997]` 时 AvevaMarineSample 报了 287 行，登记表里
-    /// 288 个 DESI 减去唯一扫到的那个，一个不差。
+    /// 于是范围一收窄，范围外每个登记过的库都变成一行假的「文件缺失·已阻断」。
     ///
     /// `pub(crate)`：自动 watcher 的启动重扫与文件事件也走它（`increment_manager`）。
-    /// 两条触发路径喂的是同一个队列、同一个 worker，入队口径只能有一份——自动路径
-    /// 过去只过前两道，于是 MDB 外的设计库照样入队，而预览说它不在范围里。
+    /// 两条触发路径喂的是同一个队列、同一个 worker，入队口径只能有一份。
     ///
     /// `project` 是这个库**所属的项目**（文件所在目录决定），不是配置里的主项目名：
-    /// 第一道门要靠它挡掉别的项目的运行态系统库（三个项目的 sys 库都是 dbnum 8191）。
+    /// 判据要靠它分辨别的项目的运行态系统库（三个项目的 sys 库都是 dbnum 8191）。
     pub(crate) fn in_scope(
         &self,
         scope: &UpdateScope,
@@ -3125,7 +3114,7 @@ impl AiosDBManager {
         db_type: &str,
         dbnum: u32,
     ) -> bool {
-        self.should_process_database(project, db_type, dbnum) && scope.admits(db_type, dbnum)
+        in_scope_with(&self.db_option, scope, project, db_type, dbnum)
     }
 
     /// 本期执行范围。
@@ -3964,8 +3953,10 @@ mod tests {
     /// 预览那边为 `declared_desi()` 里既没登记也没扫到的库补一行 `not_in_project`；
     /// `/dbnums` 少了这段的话，同一个库要么整个不出现，要么只能落到 `excluded`
     /// 那一档——而那句「不在当前 MDB 声明的名单里」正好是相反的意思（施工单 Q5）。
-    /// 两处的闸门也必须是同一个 `should_process_database`：手工收窄掉的库不是
-    /// 「没有文件」，文件就在磁盘上。
+    ///
+    /// 这个循环走的是 `declared_desi()`，也就是本 MDB 亲口声明的库；范围只由 MDB 定
+    /// 之后，它们个个在范围内，再往里塞一道收窄门只会让「MDB 说有、面板不显示」
+    /// 卷土重来——`manual_db_nums` 时代正是这么把 issue #10 的 7999 藏起来的。
     #[test]
     fn the_dbnum_report_declares_unreachable_libraries_the_same_way_the_preview_does() {
         let source = include_str!("manual_update.rs");
@@ -3985,8 +3976,8 @@ mod tests {
             "补出来的行必须标成够不着，落到 excluded 就是反话: {report}"
         );
         assert!(
-            report.contains("should_process_database(project, \"DESI\", dbnum)"),
-            "闸门要与预览同一个：手工收窄掉的库文件就在磁盘上，不是够不着: {report}"
+            !report.contains("should_process_database"),
+            "MDB 声明过的库不许再被第二道手写名单筛一遍: {report}"
         );
     }
 

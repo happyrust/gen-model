@@ -4,6 +4,11 @@
 //! 手写的 `manual_db_nums`。AvevaMarineSample 目录里躺着 287 个 DESI，
 //! 而人真正打开的 MDB `/ALL` 只声明了 29 个，界面就照 287 个列。
 //!
+//! 反过来，手写名单收窄时又会把 MDB 里的库悄悄挡掉：issue #10 的 7999 就这么在
+//! 「每 30 秒发现一次增量、每次跳过」里躺了几周。所以那几个配置项已经从增量判定
+//! 里拿掉了（2026-08-06），**这里是增量范围的唯一定义**。它们仍供全量模型生成与
+//! 按需基线解析使用，与「这个库要不要增量」无关。
+//!
 //! 取的是 **MDB 声明口径**，不是「已解析出 SITE 的库」（rs-core 的
 //! `query_mdb_db_nums` 是后者，模型树用它）：MDB 列了却从没导入过的库正是
 //! `initialization_required` 那一档，该出现在范围里等人确认；用交集口径它们
@@ -94,6 +99,18 @@ impl UpdateScope {
             unrestricted: false,
             warning,
         })
+    }
+
+    /// 直接给一份声明名单，只给测试用：`resolve` 要连真库，而范围门的调用方
+    /// （`in_scope_with` 等）散在别的模块里，构造不出 `UpdateScope`。
+    #[cfg(test)]
+    pub(crate) fn for_tests(mdb: &str, desi: &[u32]) -> Self {
+        Self {
+            mdb: mdb.to_string(),
+            desi: desi.iter().copied().collect(),
+            unrestricted: false,
+            warning: None,
+        }
     }
 
     /// 不设限。按 dbnum 点名的入口用它——回归工具与按需初始化的调用方已经自己

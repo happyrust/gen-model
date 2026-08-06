@@ -148,7 +148,7 @@ pub enum FileAnomaly {
     ///
     /// `dbnum` 只在项目内唯一（三个项目的 sys 库都是 8191），而本表按裸 dbnum
     /// 做记录 id。正常情况下别的项目的运行态系统库压根进不了摄入范围
-    /// （`should_process_database`），这一条是那道门被绕过时的兜底：**连观察值
+    /// （`in_scope_with`），这一条是那道门被绕过时的兜底：**连观察值
     /// 都不许写**，否则就是实测过的那种污染——行还写着 amssys 的身份，
     /// `file_latest_sesno` 却是 zdjsys 的 52。
     ForeignProject {
