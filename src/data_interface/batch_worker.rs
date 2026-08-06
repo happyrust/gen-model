@@ -251,6 +251,7 @@ async fn run_one_batch(
     job: FrozenBatch,
 ) {
     let task_id = job.task_id.clone();
+    let started = std::time::Instant::now();
     println!(
         "开始执行数据批次 dbnum={} sesno {}..={}（task {task_id}）",
         job.dbnum, job.start_sesno, job.end_sesno
@@ -309,10 +310,25 @@ async fn run_one_batch(
         Some(task_id.clone()),
         serde_json::json!({ "task_id": task_id, "state": state.as_str(), "result": result_json }),
     );
+    // 完成行报**实际应用**的窗口：冻结重扫与会话合并之后它可能比入队时宽；
+    // 跳过/失败批次的 batch 窗口是 0（或整个缺席），退回冻结任务自己的区间。
+    let applied_window = result
+        .batch
+        .as_ref()
+        .filter(|batch| batch.end_sesno > 0)
+        .map_or((job.start_sesno, job.end_sesno), |batch| {
+            (batch.start_sesno, batch.end_sesno)
+        });
     println!(
-        "数据批次执行完毕 dbnum={}（task {task_id}，状态 {}）",
-        job.dbnum,
-        state.as_str()
+        "{}",
+        render_batch_finished_line(
+            job.dbnum,
+            &task_id,
+            state.as_str(),
+            applied_window,
+            started.elapsed().as_millis(),
+            Local::now(),
+        )
     );
 }
 
@@ -400,8 +416,8 @@ async fn execute_frozen_batch(
             .scope(crate::data_interface::staging::preload::preload_room_working_set(rooms))
             .await
         {
-            Ok(()) => println!(
-                "房间预载 dbnum={} 在册房间={} 面板={}：映射加载={load_ms}ms 工作集预载={}ms",
+            Ok(rows) => println!(
+                "房间预载 dbnum={} 在册房间={} 面板={} 工作集={rows} 行：映射加载={load_ms}ms 预载={}ms",
                 job.dbnum,
                 rooms.rooms.len(),
                 rooms.all_panels.len(),
@@ -933,6 +949,13 @@ async fn execute_frozen_batch_body(
     if staged && applied {
         match crate::data_interface::staging::active_staged_finalize_plan().await {
             Some(plan) => {
+                println!(
+                    "窗口内模型计划 dbnum={} 共 {} 项：{}",
+                    job.dbnum,
+                    plan.work_items.len(),
+                    render_plan_summary(&plan.work_items)
+                );
+                let prereq_started = std::time::Instant::now();
                 let mutation_targets = plan
                     .work_items
                     .iter()
@@ -960,6 +983,14 @@ async fn execute_frozen_batch_body(
                         Default::default()
                     }
                 };
+                println!(
+                    "窗口内模型前置完成 dbnum={} 收敛={} 级联新增生成根={} 失败={}（耗时 {}ms）",
+                    job.dbnum,
+                    report.succeeded_plan_items.len(),
+                    report.derived_roots.len(),
+                    report.failures.len(),
+                    prereq_started.elapsed().as_millis()
+                );
                 crate::data_interface::staging::settle_staged_plan_items(
                     &report.succeeded_plan_items,
                 )
@@ -1210,6 +1241,7 @@ async fn run_single_unit(
 
     let mut attempts = task.attempts;
     let mut control_failed = false;
+    let unit_started = std::time::Instant::now();
     let outcome = if staged {
         crate::data_interface::staging::hold_staged_generation_root(&task.root_refno).await;
         let mut delay = Duration::from_millis(100);
@@ -1292,6 +1324,17 @@ async fn run_single_unit(
         Err(_) if staged => (UnitGenStatus::Failed, attempts, generation_error),
         Err(_) => (UnitGenStatus::Failed, task.attempts + 1, generation_error),
     };
+    let unit_ms = unit_started.elapsed().as_millis();
+    match &message {
+        None => println!(
+            "  交付单元生成成功 dbnum={} root={} noun={} 尝试={attempts}（耗时 {unit_ms}ms）",
+            task.dbnum, task.root_refno, task.noun
+        ),
+        Some(reason) => println!(
+            "  交付单元生成失败 dbnum={} root={} noun={} 尝试={attempts}（耗时 {unit_ms}ms）: {reason}",
+            task.dbnum, task.root_refno, task.noun
+        ),
+    }
     emit(
         progress,
         ManualUpdateEvent::ModelUnitFinished {
@@ -1329,10 +1372,20 @@ async fn run_unit_worklist(
     use crate::data_interface::manual_update::{emit, generation_root_lock};
 
     registry.set_unit_totals(task_id, worklist.len() as u32);
+    let started = std::time::Instant::now();
+    let dbnum = worklist.first().map(|task| task.dbnum);
     let mut results = Vec::with_capacity(worklist.len());
     let mut settlement_failed = false;
     let (batchable, singles): (Vec<_>, Vec<_>) =
         worklist.into_iter().partition(unit_joins_regen_batch);
+    if let Some(dbnum) = dbnum {
+        println!(
+            "模型生成开始 dbnum={dbnum} 交付单元={}（批量重生成 {} / 逐根 {}）",
+            batchable.len() + singles.len(),
+            batchable.len(),
+            singles.len()
+        );
+    }
 
     if !batchable.is_empty() {
         for task in &batchable {
@@ -1360,10 +1413,17 @@ async fn run_unit_worklist(
         for lock in &locks {
             guards.push(lock.lock().await);
         }
+        let batch_started = std::time::Instant::now();
         match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(mgr, &roots)
             .await
         {
             Ok(()) => {
+                println!(
+                    "  批量重生成 {} 个根成功（耗时 {}ms）：{}",
+                    roots.len(),
+                    batch_started.elapsed().as_millis(),
+                    render_roots(&roots)
+                );
                 let settlements = batchable
                     .iter()
                     .map(|task| {
@@ -1408,8 +1468,9 @@ async fn run_unit_worklist(
                 drop(guards);
                 drop(locks);
                 println!(
-                    "批量重生成 {} 个根失败，回退逐根重试以定位问题根: {error:#}",
-                    roots.len()
+                    "  批量重生成 {} 个根失败（耗时 {}ms），回退逐根重试以定位问题根: {error:#}",
+                    roots.len(),
+                    batch_started.elapsed().as_millis()
                 );
                 for task in batchable {
                     let (result, failed) =
@@ -1431,7 +1492,82 @@ async fn run_unit_worklist(
     results.sort_by(|left, right| {
         (left.dbnum, left.root_refno.as_str()).cmp(&(right.dbnum, right.root_refno.as_str()))
     });
+    if let Some(dbnum) = dbnum {
+        let generated = results
+            .iter()
+            .filter(|unit| unit.status == UnitGenStatus::Generated)
+            .count();
+        println!(
+            "模型生成完成 dbnum={dbnum} 成功={generated} 失败={}（耗时 {}ms）",
+            results.len() - generated,
+            started.elapsed().as_millis()
+        );
+    }
     (results, settlement_failed)
+}
+
+/// 计划项按 action 分组的计数，形如 `regen_root=3 transform=12 room_recalc_element=5`。
+///
+/// 一个批次要做什么全在这张计划里，而只报总数分不出代价：12 项既可能是 12 次
+/// 整根重生成，也可能是 12 次纯位姿刷新，两者差着数量级。
+fn render_plan_summary(
+    items: &[crate::data_interface::model_update_plan::ModelWorkItem],
+) -> String {
+    let mut counts = std::collections::BTreeMap::<&'static str, usize>::new();
+    for item in items {
+        *counts.entry(item.action.as_str()).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "空".to_string();
+    }
+    counts
+        .into_iter()
+        .map(|(action, count)| format!("{action}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 一次增量批次的完成行（issue #12）。
+///
+/// 完成行此前只报 dbnum / task / 状态，整条链路只有各阶段的耗时毫秒、没有一个
+/// 墙钟时刻：在 E3D 里 SAVEWORK 的人对着控制台，分不清眼前这批日志是不是自己
+/// 刚才那次保存触发的。sesno 窗口回答「检测到的是哪次增量」，墙钟完成时间回答
+/// 「本次保存有没有被处理」——两样都要在完成行里自己说全，不能指望人往回翻
+/// 滚屏找开始行。
+fn render_batch_finished_line<Tz: chrono::TimeZone>(
+    dbnum: u32,
+    task_id: &str,
+    state: &str,
+    (start_sesno, end_sesno): (i32, i32),
+    total_ms: u128,
+    finished_at: chrono::DateTime<Tz>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    format!(
+        "数据批次执行完毕 dbnum={dbnum} sesno {start_sesno}..={end_sesno}\
+         （task {task_id}，状态 {state}，总耗时 {total_ms}ms，完成时间 {}）",
+        finished_at.format("%Y-%m-%d %H:%M:%S")
+    )
+}
+
+/// 生成根列表的日志渲染：多到刷屏时只留前若干个。
+///
+/// 一次批量重生成可以带上百个根，整串打出来会把它前后的阶段行冲掉——而排查时
+/// 真正要的是「哪一批、多少个、长什么样」。
+fn render_roots(roots: &[String]) -> String {
+    const SHOWN: usize = 8;
+    let head = roots
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match roots.len().checked_sub(SHOWN) {
+        Some(rest) if rest > 0 => format!("{head} …另有 {rest} 个"),
+        _ => head,
+    }
 }
 
 /// 队列跑空后的收尾轮：积压补偿 + 房间收敛（ADR-011 §8）。
@@ -1615,27 +1751,43 @@ async fn room_round(
             "total": live,
         }),
     );
-    if after_batches {
-        println!(
-            "队列已跑空，收一轮房间归属重算（{live} 个目标：{} 块面板 / {} 个构件，另有 {} 条死信）",
-            counts.panels, counts.elements, counts.dead_letters
-        );
-    }
+    println!(
+        "{}，收一轮房间归属重算（{live} 个目标：{} 块面板 / {} 个构件，另有 {} 条死信；task {task_id}）",
+        if after_batches {
+            "队列已跑空"
+        } else {
+            "距上轮房间已超过保底间隔"
+        },
+        counts.panels,
+        counts.elements,
+        counts.dead_letters
+    );
 
+    let room_started = std::time::Instant::now();
     let (state, result_json) = match model_update_pending::drain_rooms(&mgr.db_option).await {
         Ok(done) => {
             for _ in 0..done {
                 registry.bump_units_done(&task_id);
             }
+            println!(
+                "房间归属重算完成 {done}/{live} 个目标（耗时 {}ms，task {task_id}）",
+                room_started.elapsed().as_millis()
+            );
             (
                 TaskState::Succeeded,
                 serde_json::json!({ "done": done, "total": live }),
             )
         }
-        Err(error) => (
-            TaskState::Failed,
-            serde_json::json!({ "total": live, "error": format!("{error:#}") }),
-        ),
+        Err(error) => {
+            println!(
+                "房间归属重算失败（{live} 个目标保留 pending，耗时 {}ms，task {task_id}）: {error:#}",
+                room_started.elapsed().as_millis()
+            );
+            (
+                TaskState::Failed,
+                serde_json::json!({ "total": live, "error": format!("{error:#}") }),
+            )
+        }
     };
     // 收尾必须用收敛后的计数覆盖建行时那份 detail。客户端泳道读的是最近一条
     // room_recalc 的 detail（live = panels + elements），而收敛到 0 的下一空闲轮
@@ -1868,6 +2020,85 @@ mod tests {
             !staged_window_has_room_semantics("DESI", false),
             "空间树关闭时房间任务在入队口就被门控，预载同样是纯开销"
         );
+    }
+
+    /// 阶段日志要能一眼看出这批在做什么，而不是只报一个总数。
+    #[test]
+    fn the_plan_summary_counts_every_action_separately() {
+        use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
+
+        let item = |action: ModelWorkAction, refno: &str| ModelWorkItem {
+            dbnum: 7353,
+            db_type: "DESI".into(),
+            source_end_sesno: 95,
+            action,
+            target_refno: refno.into(),
+            noun: String::new(),
+        };
+        assert_eq!(render_plan_summary(&[]), "空");
+        assert_eq!(
+            render_plan_summary(&[
+                item(ModelWorkAction::RegenRoot, "=1/1"),
+                item(ModelWorkAction::Transform, "=1/2"),
+                item(ModelWorkAction::RegenRoot, "=1/3"),
+            ]),
+            "regen_root=2 transform=1"
+        );
+    }
+
+    /// issue #12：完成行必须自带「哪次增量（sesno 窗口）+ 什么时候完成（墙钟）」。
+    ///
+    /// 此前完成行只有 dbnum / task / 状态，全程只报耗时毫秒：在 E3D 里 SAVEWORK
+    /// 的人对着控制台，分不清屏幕上这批日志对应哪次保存，也无从判断自己这次
+    /// 增量有没有被检测到。
+    #[test]
+    fn the_finished_line_carries_window_and_wall_clock() {
+        use chrono::TimeZone;
+
+        let finished = chrono::Utc
+            .with_ymd_and_hms(2026, 8, 5, 17, 1, 48)
+            .unwrap();
+        assert_eq!(
+            render_batch_finished_line(
+                7997,
+                "db-20260805-170148-000003",
+                "succeeded",
+                (73, 73),
+                2130,
+                finished,
+            ),
+            "数据批次执行完毕 dbnum=7997 sesno 73..=73\
+             （task db-20260805-170148-000003，状态 succeeded，总耗时 2130ms，\
+             完成时间 2026-08-05 17:01:48）"
+        );
+
+        // 调用点也得守住：run_one_batch 的收尾必须经这个渲染器出去，退回手写
+        // println 会把窗口或墙钟悄悄丢掉。
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_one_batch(")
+            .expect("run_one_batch 必须存在")
+            .1
+            .split_once("fn use_staged_increment_window(")
+            .expect("run_one_batch 之后是 use_staged_increment_window")
+            .0;
+        assert!(
+            body.contains("render_batch_finished_line("),
+            "完成行必须经 render_batch_finished_line 渲染: {body}"
+        );
+    }
+
+    /// 上百个根整串打出来会把前后的阶段行冲掉，截断后仍要报出总量。
+    #[test]
+    fn long_root_lists_are_truncated_but_still_report_the_total() {
+        let roots = (0..10).map(|i| format!("=1/{i}")).collect::<Vec<_>>();
+        assert_eq!(render_roots(&roots[..2]), "=1/0, =1/1");
+        assert_eq!(
+            render_roots(&roots[..8]),
+            "=1/0, =1/1, =1/2, =1/3, =1/4, =1/5, =1/6, =1/7",
+            "正好一屏时不该冒出「另有 0 个」"
+        );
+        assert!(render_roots(&roots).ends_with("…另有 2 个"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
