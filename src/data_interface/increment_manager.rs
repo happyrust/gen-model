@@ -2304,10 +2304,17 @@ impl AiosDBManager {
             // 它，管段会被画成分支原点处的一个单位圆柱。
             //
             // 排除曾经的代价是「挪一个管件，管件动了而管段停在旧位置」（issue #5）。
-            // 那条口子现在堵在计划层：生成根是 BRAN/HANG 的位姿变更不再排 Transform
-            // 工作项，改判整根重生成（`model_update_plan::reroute_derived_geometry_units`）
-            // ——管段的正确变换只有生成层算得出来。所以走到这里的位姿目标，其子树里
-            // 本就不该有需要跟着动的管段；这道排除是防御，不是取舍。
+            // 那条口子堵在计划层，管段的正确变换只有生成层算得出来，所以计划层的办法
+            // 一律是「让拥有这段管的那个单元整根重生成」
+            // （`model_update_plan::reroute_derived_geometry_units`）：
+            //
+            // - 位姿目标落在 BRAN/HANG 里（挪管件、挪整条分支）→ 目标本身改判重生成，
+            //   根本不会排 Transform 工作项，走不到这里；
+            // - 位姿目标在 BRAN/HANG 之上（挪 PIPE/STRU/ZONE/SITE）→ 它保留 Transform
+            //   刷子树，同时子树里的每个 BRAN/HANG 各排一条 RegenRoot。
+            //
+            // 第二种情形下这道排除仍然会跳过子树里的管段行——那是对的：那些行由随后的
+            // 重生成重写，这里拿元素的世界变换覆盖它们只会画出一堆单位圆柱。
             let sql = format!(
                 "array::flatten(SELECT VALUE IF record::exists(type::thing('inst_relate', record::id(id))) \
                  AND type::thing('inst_relate', record::id(id)).out != inst_info:⟨1⟩ \

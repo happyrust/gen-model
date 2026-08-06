@@ -273,6 +273,12 @@ pub struct DeliveryUnitSummary {
     pub model_affecting: u32,
     /// `true` when the execute phase will (re)generate this unit.
     pub will_generate: bool,
+    /// 这个单元自己没变，是**祖先动了**：某个属主的纯位姿变更让它的隐含直管段作废，
+    /// 而管段的世界变换只有生成层推得出来（issue #5 的容器侧，见
+    /// `model_update_plan::DERIVED_GEOMETRY_UNIT_NOUNS`）。这类单元的变更计数全为 0
+    /// 但仍 `will_generate`——计数是 0 正是它的语义，不是漏统计。
+    #[serde(default)]
+    pub owner_moved: bool,
     /// Delivery-unit root's OWNER (parent) in the PRE-update state (`a/b`), if
     /// resolvable. Lets the frontend refresh / prune the OLD tree branch when the
     /// unit itself moved or was deleted (plan 阶段 6.2 「原 OWNER」).
@@ -1559,6 +1565,8 @@ pub fn build_unit_rollup(
             cascaded: a.cascaded,
             model_affecting: a.model_affecting,
             will_generate: a.will_generate,
+            // rollup 排出来的单元都是自己有变更才在这里，与「祖先动了」互斥。
+            owner_moved: false,
             old_owner: owner_pdms(a.root, false),
             new_owner: owner_pdms(a.root, true),
         })
@@ -3337,29 +3345,39 @@ impl AiosDBManager {
                         // 子树的 ZONE/SITE 位移」错报成 no_generation「跳过模型生成」，
                         // 又把「成员纯位姿变化」错报成整单 will_generate（执行阶段
                         // 实际不整单重生成）。
-                        let partition =
+                        let mut partition =
                             crate::data_interface::model_update_plan::partition_operation_impacts(
                                 &range_eles,
                                 &details,
                             );
+                        // issue #5：预览必须复刻执行计划的这一步，次序也一样。少走它，
+                        // 管件移动会显示成「便宜路径」（执行阶段其实整根重生成），容器
+                        // 移动牵出的那一批分支则根本不出现。
+                        let reroute =
+                            crate::data_interface::model_update_plan::reroute_derived_geometry_units(
+                                &mut partition,
+                            )
+                            .await;
+                        warnings.extend(
+                            reroute
+                                .warnings
+                                .iter()
+                                .map(|w| format!("dbnum={}: {w}", cand.db_num)),
+                        );
                         let regen_details =
                             crate::data_interface::model_update_plan::mask_details_to_regen(
                                 &details,
                                 &partition.regen_refnos,
                             );
-                        let rollup = resolve_unit_rollup(
-                            cand.db_num,
-                            &range_eles,
-                            &regen_details,
-                        )
-                        .await?;
+                        let rollup =
+                            resolve_unit_rollup(cand.db_num, &range_eles, &regen_details).await?;
                         preview.units = rollup.units;
-                        preview.zones = resolve_zone_rollup(
-                            &range_eles,
-                            &details,
-                            &preview.units,
-                        )
-                        .await?;
+                        crate::data_interface::model_update_plan::append_derived_geometry_units(
+                            &mut preview.units,
+                            &reroute.descendant_units,
+                        );
+                        preview.zones =
+                            resolve_zone_rollup(&range_eles, &details, &preview.units).await?;
                         preview.transform_targets =
                             build_transform_target_summaries(&partition.transform_refnos).await;
                         preview.no_generation = rollup.no_generation;
@@ -3943,6 +3961,44 @@ mod tests {
         assert!(
             body.contains("model_plan.units"),
             "交付单元必须来自 pipeline 交回的 model_plan，两处各算一次口径会分叉"
+        );
+    }
+
+    /// 预览必须逐步复刻执行计划的分区序列，次序也一样。
+    ///
+    /// 2026-08-04 修掉过一次同族分歧（预览把容器位姿错报成「跳过模型生成」）。issue #5
+    /// 的改判又给这条序列加了一步：少走它，管件移动在预览里显示成便宜路径（执行阶段
+    /// 其实整根重生成），容器移动牵出的那一批分支在预览里根本不出现——面板说的又不是
+    /// 执行要做的。
+    #[test]
+    fn the_preview_replays_the_execute_partition_step_for_step() {
+        let src = include_str!("manual_update.rs");
+        let body = src
+            .split_once(concat!("async fn ", "preview_one_dbnum"))
+            .expect("preview_one_dbnum 未找到")
+            .1;
+        let body = body
+            .split_once(concat!("\n#[cfg", "(test)]"))
+            .map(|(head, _)| head)
+            .unwrap_or(body);
+
+        let step = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("预览缺了这一步: {needle}\n{body}"))
+        };
+        let partition_at = step("partition_operation_impacts(");
+        let reroute_at = step("reroute_derived_geometry_units(");
+        let mask_at = step("mask_details_to_regen(");
+        let rollup_at = step("resolve_unit_rollup(");
+        let append_at = step("append_derived_geometry_units(");
+
+        assert!(
+            partition_at < reroute_at && reroute_at < mask_at && mask_at < rollup_at,
+            "改判必须夹在分区与掩码之间，掩码之后才轮到 rollup"
+        );
+        assert!(
+            rollup_at < append_at,
+            "子树牵出来的单元并在 rollup 之后，才不会覆盖带真实计数的那一条"
         );
     }
 

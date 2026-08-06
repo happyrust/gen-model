@@ -288,6 +288,46 @@
     `live_projams_real_attribute_sessions_plan_and_execute_distinctly` 里那条 FTUB.POS
     的期望从 `Transform` 改为 `RegenRoot`（不再钉死根 refno，改为断言根的 noun 带隐含
     直管段）。`cargo test --lib --features http_api` 346 通过 / 0 失败。
+  - **（2026-08-06 补完：上面只修了一半，见下方增补 2b。）**
+
+- 2026-08-06 增补 2b（issue #5 的**容器侧**：判据没落在属主链之上的那一半）——
+  - 增补 2 问的是「**目标自己的生成根**是不是 BRAN/HANG」。挪管件、挪整条分支都命中，
+    但挪**分支之上**的任何东西都不命中：`PIPE` / `STRU` 的生成根是它自己（正常颗粒），
+    `ZONE` / `SITE` / `WORL` 按契约根本解析不出生成根。这些目标继续走 `Transform`，
+    `update_world_transforms` 刷整棵子树却按 `out=inst_info:⟨1⟩/⟨2⟩` 排除管段行——
+    容器动了，脚下每条分支的管段全部停在旧位置。与 issue #5 报的是同一个缺陷，只是
+    落在层级树的上一层。
+  - 这不是假想路径：容器位姿变更排 `Transform` 刷整棵子树是实测行为
+    （2026-08-04 AMS 会话 35，ZONE `24384/22400`，子树 67 个模型节点，见
+    `docs/2026-08-04_container-transform-cascade-gap.md`）。真库里
+    ZONE `24383/66457`（`/1WCC-PIPE-RX`，117 条 PIPE / 187 条 BRAN）下就躺着
+    `tubi_relate:[pe:24383_66459, 0]`，`world_trans` 记着世界坐标
+    `[-5001.45, 10705.81, 5701.67]`。
+  - 修法沿用同一条判据，只是多落一个位置：位姿目标**保留**便宜路径（子树里非管段的
+    实例仍靠它刷），同时把子树里每个 `DERIVED_GEOMETRY_UNIT_NOUNS` 单元排进重生成
+    （`derived_geometry_units_under` → `append_derived_geometry_units` 并进 rollup 单元表）。
+    并进 `units` 而不是直接追加工作项：`units` 同时是 `RegenRoot` 工作项与执行阶段
+    生成工作单（`collect_unit_tasks`）的来源，只补一边等于只做一半。
+  - 子树遍历不是新增开销：执行阶段的 `update_world_transforms` 对同一批目标走的就是
+    同一棵 `collect_pe_subtree_refnos`。扫的是**改判前**的整份目标——自己已经改判的
+    目标其子树里再嵌一个派生几何单元的话，重生成外层不会重推内层。
+  - **预览同步对齐**：`preview_one_dbnum` 此前只做 `partition_operation_impacts`，
+    没有复刻增补 2 的改判——管件移动在预览里显示成便宜路径（执行阶段其实整根重生成），
+    容器牵出的那批分支则根本不出现。现在预览逐步复刻执行序列（分区 → 改判 → 掩码 →
+    rollup → 并入），有源码断言钉着次序。
+  - `DeliveryUnitSummary` 新增 `owner_moved`（`serde(default)`，向后兼容）：这类单元
+    变更计数全为 0 但仍 `will_generate`，标志位把「计数是 0 正是它的语义」说清楚。
+  - 容器解析不出生成根不再告警：那是设计如此，脚下的管段由子树扫描兜住。只有真正
+    断链的目标才值得喊一声。
+  - 测试：`pose_target_regenerating_itself…` 真值表（PIPE/STRU/ZONE/SITE/WORL/EQUI/
+    NOZZ/SUPPO/断链各一行）、`the_subtree_scan_picks_exactly…`、
+    `no_pose_change_anywhere_leaves_implied_tubing_behind`（扫全树，两条判据必须严丝
+    合缝）、`derived_units_join_the_worklist_without_shadowing_the_rollup`、两条次序
+    源码断言，以及 live 用例
+    `live_issue5_moving_a_container_regenerates_the_branches_beneath_it`（真库：挪 PIPE
+    得到 `RegenRoot(BRAN) + Transform(PIPE)`；挪 ZONE 得到 >100 条 `RegenRoot`）。
+    临时关掉子树扫描复跑该 live 用例，挪 PIPE 只剩一条 `Transform`、零 `RegenRoot`
+    ——正是修复前的形态。`cargo test --lib --features http_api` 468 通过 / 0 失败。
 
 - 2026-08-05 增补 3（**「面板没有几何」不再被折成「面板里没有构件」**）——
   - 上一轮把元素分支对空间树的依赖拆掉之后，剩下的同类缺口在**面板自己这一侧**：

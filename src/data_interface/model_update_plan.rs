@@ -1,13 +1,14 @@
 //! Shared, deterministic model work plan for incremental updates.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aios_core::{RefnoEnum, SUL_DB};
 use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::{Deserialize, Serialize};
 
 use crate::data_interface::manual_update::{
-    DeliveryUnitSummary, NetChangeDetail, NetOp, merge_net_change_details, resolve_unit_rollup,
+    DeliveryUnitSummary, NetChangeDetail, NetOp, OwnerNode, merge_net_change_details,
+    resolve_unit_rollup,
 };
 use crate::data_interface::model_impact::{
     OperationImpact, classify_operation_impact, normalize_attribute_name, owner_change,
@@ -221,6 +222,16 @@ pub(crate) fn partition_operation_impacts(
 /// 属主网格的**输入**，所以它直接判 `Regen`；管件位置是隐含直管段的输入，同理。区别
 /// 只在判据落在属主链上，而 `classify_operation_impact` 只看得到元素自己的 noun，
 /// 所以这一步必须在计划层做。
+///
+/// 同一条判据要落在**两个**位置上，缺一半就还是 issue #5：
+///
+/// 1. 目标自己的生成根是这类单元（挪一个管件、挪整条 BRAN）→ 改判整根重生成；
+/// 2. 目标**在这类单元之上**（挪 PIPE / STRU / ZONE / SITE）→ 保留便宜路径刷子树，
+///    另外把子树里的每个这类单元排进重生成。
+///
+/// 第 2 条不是假想：ZONE 位姿变更走 `Transform` 刷整棵子树是实测路径
+/// （2026-08-04 AMS 会话 35，见 `docs/2026-08-04_container-transform-cascade-gap.md`），
+/// 而子树收集恰恰排除管段行——容器一动，脚下每条分支的管段全部停在旧位置。
 const DERIVED_GEOMETRY_UNIT_NOUNS: [&str; 2] = ["BRAN", "HANG"];
 
 /// 这个交付单元的几何是否由成员位置派生（见 [`DERIVED_GEOMETRY_UNIT_NOUNS`]）。
@@ -229,57 +240,196 @@ fn unit_derives_geometry_from_member_positions(noun: &str) -> bool {
     DERIVED_GEOMETRY_UNIT_NOUNS.contains(&noun.as_str())
 }
 
-/// 把生成根会派生几何的位姿目标从 `Transform` 改判重生成（issue #5）。
+/// 一次位姿改判的产出。
+///
+/// 「目标自己就落在派生几何单元里」的那半已经写回 `partition`（从 transform 集移进
+/// regen 集，由既有的交付单元 rollup 排出 `RegenRoot`）。这里带出的是**目标之上**
+/// 的那半：容器留在便宜路径上，但它脚下的派生几何单元得单独排重生成。
+#[derive(Debug, Default)]
+pub(crate) struct DerivedGeometryReroute {
+    /// 子树里必须整根重生成的派生几何单元：`a/b` → noun，按 refno 串有序。
+    pub(crate) descendant_units: BTreeMap<String, String>,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// 纯裁决：哪些位姿目标自己就该整根重生成（[`DERIVED_GEOMETRY_UNIT_NOUNS`] 第 1 条）。
 ///
 /// 生成根解析失败时保持原判并告警：那只让该分支的管段滞后到下次重生成，而让整个
-/// 数据窗口失败是数据缺口——与本文件里房间面板枚举失败的处置同一口径。
-async fn reroute_derived_geometry_units(partition: &mut OperationImpactPartition) -> Vec<String> {
+/// 数据窗口失败是数据缺口——与本文件里房间面板枚举失败的处置同一口径。粗层级容器
+/// （WORL/SITE/ZONE）解析不出生成根是**设计如此**，不是失败，不告警：它们脚下的
+/// 派生几何单元由第 2 条兜住。
+fn pose_targets_regenerating_themselves(
+    targets: &[RefnoEnum],
+    graph: &HashMap<RefnoEnum, OwnerNode>,
+    unit_types: &[String],
+) -> (Vec<RefnoEnum>, Vec<String>) {
     use crate::data_interface::generation_root::{
-        GenerationNode, configured_delivery_unit_types, resolve_element_generation_root,
+        GenerationNode, is_coarse_hierarchy_noun, resolve_element_generation_root,
     };
 
-    let targets: Vec<RefnoEnum> = partition.transform_refnos.iter().copied().collect();
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    let unit_types = configured_delivery_unit_types();
-    let graph = match crate::data_interface::manual_update::load_base_graph(
-        targets.iter().copied().collect(),
-    )
-    .await
-    {
-        Ok(graph) => graph,
-        Err(error) => {
-            return vec![format!(
-                "位姿目标的持久前态 owner 图读取失败，保持便宜路径: {error:#}"
-            )];
-        }
-    };
-    let mut warnings = Vec::new();
     let mut rerouted = Vec::new();
-    for refno in targets {
-        match resolve_element_generation_root(refno, &unit_types, |candidate| {
+    let mut warnings = Vec::new();
+    for &refno in targets {
+        let root = resolve_element_generation_root(refno, unit_types, |candidate| {
             graph.get(&candidate).map(|node| GenerationNode {
                 owner: node.owner,
                 noun: node.noun.clone(),
                 name: node.name.clone(),
             })
-        }) {
+        });
+        match root {
             Some(root) if unit_derives_geometry_from_member_positions(&root.noun) => {
                 rerouted.push(refno);
             }
             Some(_) => {}
-            None => warnings.push(format!(
-                "{refno} 的生成根解析失败，位姿变更按便宜路径处理\
-                 （若它是管件，该分支的隐含直管段会滞后到下次重生成）"
-            )),
+            None => {
+                let is_container = graph
+                    .get(&refno)
+                    .is_some_and(|node| is_coarse_hierarchy_noun(&node.noun));
+                if !is_container {
+                    warnings.push(format!(
+                        "{refno} 的生成根解析失败，位姿变更按便宜路径处理\
+                         （若它是管件，该分支的隐含直管段会滞后到下次重生成）"
+                    ));
+                }
+            }
         }
     }
-    for refno in rerouted {
-        partition.transform_refnos.remove(&refno);
-        partition.regen_refnos.insert(refno);
+    (rerouted, warnings)
+}
+
+/// 纯裁决：一棵子树快照里，哪些节点是几何由成员位置派生的交付单元
+/// （[`DERIVED_GEOMETRY_UNIT_NOUNS`] 第 2 条）。
+fn select_derived_geometry_units<'a>(
+    nodes: impl IntoIterator<Item = (RefnoEnum, &'a str)>,
+) -> BTreeMap<String, String> {
+    nodes
+        .into_iter()
+        .filter(|(_, noun)| unit_derives_geometry_from_member_positions(noun))
+        .map(|(refno, noun)| (refno.to_pdms_str(), noun.trim().to_ascii_uppercase()))
+        .collect()
+}
+
+/// 位姿目标子树里那些几何由成员位置派生的交付单元。
+///
+/// 子树遍历不是新增开销：执行阶段的 `update_world_transforms` 对同一批目标走的就是
+/// 同一棵 `collect_pe_subtree_refnos`。计划层跑在持久化之前，读到的是**前态**层级
+/// ——纯位姿变更不动 OWNER，前后态子树相同，正是这里要的。
+async fn derived_geometry_units_under(
+    targets: &[RefnoEnum],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    use crate::data_interface::helper::{collect_pe_subtree_refnos, pe_thing_to_refno};
+    use surrealdb::sql::Thing;
+
+    #[derive(serde::Deserialize)]
+    struct UnitRow {
+        id: Thing,
+        noun: String,
     }
-    warnings
+
+    let noun_list = DERIVED_GEOMETRY_UNIT_NOUNS
+        .iter()
+        .map(|noun| format!("'{noun}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let subtree: Vec<RefnoEnum> = collect_pe_subtree_refnos(targets)
+        .await?
+        .into_iter()
+        .collect();
+
+    let mut rows = Vec::new();
+    for chunk in subtree.chunks(500) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT id, noun FROM [{keys}] WHERE record::exists(id) AND deleted != true \
+                 AND string::uppercase(string::trim(noun)) IN [{noun_list}];"
+            ))
+            .await?
+            .check()?;
+        for row in response.take::<Vec<UnitRow>>(0)? {
+            rows.push((pe_thing_to_refno(row.id)?, row.noun));
+        }
+    }
+    Ok(select_derived_geometry_units(
+        rows.iter().map(|(refno, noun)| (*refno, noun.as_str())),
+    ))
+}
+
+/// 把生成根会派生几何的位姿变更从便宜路径上摘出来（issue #5）。
+///
+/// 执行计划与手动更新预览（`manual_update::preview_one_dbnum`）共用这一个入口。预览
+/// 少走一步就会重现 2026-08-04 那种口径分歧：管件移动在预览里显示为「便宜路径」，
+/// 执行阶段却整根重生成，而容器移动牵出的那一批分支预览里根本不出现。
+pub(crate) async fn reroute_derived_geometry_units(
+    partition: &mut OperationImpactPartition,
+) -> DerivedGeometryReroute {
+    use crate::data_interface::generation_root::configured_delivery_unit_types;
+
+    let mut out = DerivedGeometryReroute::default();
+    let targets: Vec<RefnoEnum> = partition.transform_refnos.iter().copied().collect();
+    if targets.is_empty() {
+        return out;
+    }
+    let unit_types = configured_delivery_unit_types();
+    match crate::data_interface::manual_update::load_base_graph(targets.iter().copied().collect())
+        .await
+    {
+        Ok(graph) => {
+            let (rerouted, warnings) =
+                pose_targets_regenerating_themselves(&targets, &graph, &unit_types);
+            out.warnings = warnings;
+            for refno in rerouted {
+                partition.transform_refnos.remove(&refno);
+                partition.regen_refnos.insert(refno);
+            }
+        }
+        Err(error) => out.warnings.push(format!(
+            "位姿目标的持久前态 owner 图读取失败，保持便宜路径: {error:#}"
+        )),
+    }
+
+    // 扫的是**改判前**的整份目标，不是剩下那些：自己已经改判的目标，其子树里再嵌一个
+    // 派生几何单元的话，重生成外层那根并不会重推内层的管段。多扫出来的那条与 rollup
+    // 撞车时由 `append_derived_geometry_units` 去重，代价只是一次子树遍历——而漏扫
+    // 之后没有任何东西会红。
+    match derived_geometry_units_under(&targets).await {
+        Ok(units) => out.descendant_units = units,
+        Err(error) => out.warnings.push(format!(
+            "位姿目标的子树派生几何单元枚举失败，容器移动后其隐含直管段会滞后到\
+             下次重生成: {error:#}"
+        )),
+    }
+    out
+}
+
+/// 把容器移动牵出的派生几何单元并进 rollup 单元表。
+///
+/// 并进 `units` 而不是直接追加 `RegenRoot` 工作项：`units` 同时是执行阶段的生成
+/// 工作单（`manual_update::collect_unit_tasks`）与 `work_items` 里 `RegenRoot` 的
+/// 唯一来源，只补一边等于只做一半。rollup 已经排到的根不重复登记——那一条带着
+/// 真实的变更计数，比这里合成的更有信息量。
+pub(crate) fn append_derived_geometry_units(
+    units: &mut Vec<DeliveryUnitSummary>,
+    descendant_units: &BTreeMap<String, String>,
+) {
+    let known: HashSet<String> = units.iter().map(|unit| unit.root_refno.clone()).collect();
+    units.extend(
+        descendant_units
+            .iter()
+            .filter(|(refno, _)| !known.contains(*refno))
+            .map(|(refno, noun)| DeliveryUnitSummary {
+                root_refno: refno.clone(),
+                noun: noun.clone(),
+                will_generate: true,
+                owner_moved: true,
+                ..Default::default()
+            }),
+    );
 }
 
 /// 交付单元 rollup 眼中的净变更：只有重建类变更保留 `model_affecting`。
@@ -568,7 +718,8 @@ pub(crate) async fn build_model_update_plan(
     // 整根重生成——便宜路径结构上算不出管段。必须排在 `mask_details_to_regen` 之前，
     // 否则改判过去的目标会被掩成非 model_affecting，rollup 看不到它，既不重生成也不再
     // 有 Transform 工作项，这一次移动就凭空消失了。
-    baseline_warnings.extend(reroute_derived_geometry_units(&mut partition).await);
+    let reroute = reroute_derived_geometry_units(&mut partition).await;
+    baseline_warnings.extend(reroute.warnings);
     let OperationImpactPartition {
         regen_refnos,
         transform_refnos,
@@ -581,7 +732,11 @@ pub(crate) async fn build_model_update_plan(
     let regen_details = mask_details_to_regen(&details, &regen_refnos);
 
     let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details).await?;
-    let units = rollup.units;
+    let mut units = rollup.units;
+    // 容器动了 → 它脚下的派生几何单元跟着重生成。必须在 `work_items_from_units`
+    // 之前并进来：`units` 是 `RegenRoot` 工作项与执行阶段生成工作单的共同来源。
+    append_derived_geometry_units(&mut units, &reroute.descendant_units);
+    let units = units;
     let mut warnings = rollup.warnings;
     warnings.extend(baseline_warnings);
     let mut work_items = work_items_from_units(
@@ -681,6 +836,8 @@ pub(crate) async fn build_model_update_plan(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// `parse` 是 `as_str` 的逆。漏一条的话，那种 action 的死信从 HTTP 复活端点
@@ -842,6 +999,10 @@ mod tests {
     /// 顺序反了不是「少改一点」而是**把这次移动整个弄丢**：改判过去的目标会被掩成
     /// 非 `model_affecting`，rollup 看不到它、不建 `RegenRoot`，而它同时已经从
     /// transform 集里被摘走、也不再有 `Transform` 工作项。
+    ///
+    /// 子树那半（`append_derived_geometry_units`）则必须排在 `work_items_from_units`
+    /// **之前**：`units` 是 `RegenRoot` 工作项的唯一来源，晚一步并进去等于只改了报告
+    /// 不改工作。
     #[test]
     fn the_reroute_runs_before_the_rollup_mask() {
         let source = include_str!("model_update_plan.rs");
@@ -859,10 +1020,313 @@ mod tests {
         let mask_at = body
             .find("mask_details_to_regen(&details, &regen_refnos)")
             .expect("最后才掩码给 rollup");
+        let append_at = body
+            .find("append_derived_geometry_units(&mut units,")
+            .expect("子树里的派生几何单元要并进 units");
+        let work_items_at = body
+            .find("work_items_from_units(")
+            .expect("再由 units 排工作项");
 
         assert!(
             partition_at < reroute_at && reroute_at < mask_at,
             "改判必须夹在分区与掩码之间: {body}"
+        );
+        assert!(
+            append_at < work_items_at,
+            "子树派生几何单元必须先并进 units 再排工作项: {body}"
+        );
+    }
+
+    /// 改判要对**改判前**的整份位姿目标扫子树。
+    ///
+    /// 只扫剩下那些的话，自己已经改判的目标其子树里再嵌一个派生几何单元就会漏——
+    /// 重生成外层那根不会重推内层的管段。这条与 `no_pose_change_anywhere_…` 配对：
+    /// 那条钉判据，这条钉判据真的被接在了生产路径上。
+    #[test]
+    fn the_subtree_scan_covers_every_pose_target() {
+        let source = include_str!("model_update_plan.rs");
+        let body = source
+            .split_once("async fn reroute_derived_geometry_units(")
+            .expect("reroute_derived_geometry_units 必须存在")
+            .1;
+        let body = body
+            .split_once("fn append_derived_geometry_units(")
+            .expect("函数体到下一个定义为止")
+            .0;
+
+        assert!(
+            body.contains("derived_geometry_units_under(&targets)"),
+            "子树扫描必须吃改判前的整份目标: {body}"
+        );
+    }
+
+    /// 造一棵前态 owner 图：`(id, owner, noun)`。
+    fn owner_graph(rows: &[(u64, Option<u64>, &str)]) -> HashMap<RefnoEnum, OwnerNode> {
+        rows.iter()
+            .map(|(id, owner, noun)| {
+                (
+                    node_refno(*id),
+                    OwnerNode {
+                        owner: owner.map(node_refno),
+                        noun: (*noun).to_string(),
+                        name: format!("/{noun}-{id}"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn node_refno(id: u64) -> RefnoEnum {
+        RefnoEnum::from(aios_core::RefU64((1u64 << 32) | id))
+    }
+
+    /// 一棵覆盖真实形态的层级：管道（PIPE→BRAN→元件）、支吊架（STRU→FRMW→HANG→
+    /// 成员）、设备（EQUI→NOZZ）、独立支撑（SUPPO）各一支，全挂在同一个 ZONE 下。
+    fn sample_hierarchy() -> HashMap<RefnoEnum, OwnerNode> {
+        owner_graph(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (10, Some(3), "PIPE"),
+            (11, Some(10), "BRAN"),
+            (12, Some(11), "ELBO"),
+            (13, Some(11), "FTUB"),
+            (20, Some(3), "STRU"),
+            (21, Some(20), "FRMW"),
+            (22, Some(21), "HANG"),
+            (23, Some(22), "ATTA"),
+            (30, Some(3), "EQUI"),
+            (31, Some(30), "NOZZ"),
+            (40, Some(3), "SUPPO"),
+        ])
+    }
+
+    fn default_unit_types() -> Vec<String> {
+        crate::data_interface::generation_root::DEFAULT_DELIVERY_UNIT_TYPES
+            .iter()
+            .map(|noun| noun.to_string())
+            .collect()
+    }
+
+    /// `refno` 自己 + 它在 `graph` 里的全部后代。
+    fn subtree_of(graph: &HashMap<RefnoEnum, OwnerNode>, refno: RefnoEnum) -> Vec<RefnoEnum> {
+        let mut out = vec![refno];
+        let mut cursor = 0;
+        while cursor < out.len() {
+            let parent = out[cursor];
+            cursor += 1;
+            out.extend(
+                graph
+                    .iter()
+                    .filter(|(_, node)| node.owner == Some(parent))
+                    .map(|(child, _)| *child),
+            );
+        }
+        out
+    }
+
+    /// 子树扫描在 `graph` 上的等价物（真库里由 `derived_geometry_units_under` 查 pe）。
+    fn derived_units_in_subtree(
+        graph: &HashMap<RefnoEnum, OwnerNode>,
+        refno: RefnoEnum,
+    ) -> BTreeMap<String, String> {
+        let nodes = subtree_of(graph, refno);
+        select_derived_geometry_units(
+            nodes
+                .iter()
+                .filter_map(|node| graph.get(node).map(|entry| (*node, entry.noun.as_str()))),
+        )
+    }
+
+    /// 自身或最近祖先里的派生几何单元。
+    fn derived_unit_at_or_above(
+        graph: &HashMap<RefnoEnum, OwnerNode>,
+        refno: RefnoEnum,
+    ) -> Option<String> {
+        let mut current = Some(refno);
+        while let Some(node_refno) = current {
+            let node = graph.get(&node_refno)?;
+            if unit_derives_geometry_from_member_positions(&node.noun) {
+                return Some(node_refno.to_pdms_str());
+            }
+            current = node.owner;
+        }
+        None
+    }
+
+    /// 第 1 条判据的真值表：**目标自己**该不该改判整根重生成。
+    ///
+    /// 容器（ZONE/SITE/WORL）解析不出生成根是设计如此，不该告警——它们脚下的管段
+    /// 由第 2 条兜住。只有真正断链的目标才值得喊一声。
+    #[test]
+    fn pose_target_regenerates_itself_only_inside_a_derived_geometry_unit() {
+        let graph = sample_hierarchy();
+        let unit_types = default_unit_types();
+        let broken = node_refno(99);
+
+        let expect = |id: u64, regen: bool, warn: bool| {
+            let refno = node_refno(id);
+            let (rerouted, warnings) =
+                pose_targets_regenerating_themselves(&[refno], &graph, &unit_types);
+            let noun = graph
+                .get(&refno)
+                .map_or("<缺失>", |node| node.noun.as_str());
+            assert_eq!(
+                rerouted == vec![refno],
+                regen,
+                "移动 {noun}({id}) 是否应改判整根重生成"
+            );
+            assert_eq!(!warnings.is_empty(), warn, "移动 {noun}({id}) 是否应告警");
+        };
+
+        // 落在派生几何单元里 → 整根重生成（管段是成员位置的函数）。
+        expect(12, true, false); // ELBO：issue #5 报的就是这一条
+        expect(13, true, false); // FTUB：不是交付单元，上溯到 BRAN
+        expect(11, true, false); // BRAN 自己被整条挪走
+        expect(23, true, false); // ATTA：支吊架成员
+        expect(22, true, false); // HANG 自己
+        // 在派生几何单元**之上** → 保留便宜路径，由子树扫描兜底，不告警。
+        expect(10, false, false); // PIPE
+        expect(20, false, false); // STRU
+        expect(3, false, false); // ZONE：容器，解析不出根是设计如此
+        expect(2, false, false); // SITE
+        expect(1, false, false); // WORL
+        // 与派生几何无关的单元 → 原判，便宜路径就够。
+        expect(30, false, false); // EQUI
+        expect(31, false, false); // NOZZ
+        expect(40, false, false); // SUPPO
+        // 真正断链的目标才告警。
+        let (rerouted, warnings) =
+            pose_targets_regenerating_themselves(&[broken], &graph, &unit_types);
+        assert!(rerouted.is_empty());
+        assert_eq!(warnings.len(), 1, "owner 链断了要喊一声: {warnings:?}");
+    }
+
+    /// 第 2 条判据：子树扫描只挑派生几何单元，一个不多一个不少。
+    #[test]
+    fn the_subtree_scan_picks_exactly_the_units_with_implied_tubing() {
+        let graph = sample_hierarchy();
+        let bran = node_refno(11).to_pdms_str();
+        let hang = node_refno(22).to_pdms_str();
+
+        assert_eq!(
+            derived_units_in_subtree(&graph, node_refno(3))
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![bran.clone(), hang.clone()],
+            "挪 ZONE：脚下的 BRAN 与 HANG 都得重生成"
+        );
+        assert_eq!(
+            derived_units_in_subtree(&graph, node_refno(10))
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![bran.clone()],
+            "挪 PIPE：只牵动它自己那条分支"
+        );
+        assert_eq!(
+            derived_units_in_subtree(&graph, node_refno(20))
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![hang],
+            "挪 STRU：牵动它名下的支吊架"
+        );
+        assert!(
+            derived_units_in_subtree(&graph, node_refno(30)).is_empty(),
+            "挪 EQUI：没有派生几何，便宜路径就够"
+        );
+        assert_eq!(
+            derived_units_in_subtree(&graph, node_refno(11))
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![bran],
+            "BRAN 自己在扫描里也认得出来（第 1 条失手时的兜底）"
+        );
+        assert!(
+            derived_units_in_subtree(&graph, node_refno(12)).is_empty(),
+            "叶子元件脚下没有任何单元"
+        );
+    }
+
+    /// issue #5 的完整口径：树上**任何**一个位置发生纯位姿变更，所有几何依赖它的
+    /// 隐含直管段都必须有人重推。
+    ///
+    /// 依赖关系只有两个方向：管段所在的单元包着这个目标（祖先链上最近的那个），或者
+    /// 管段所在的单元被这个目标包着（子树里的全部）。两条判据各管一头，合起来必须
+    /// 严丝合缝。只修元素那半的话，`PIPE`/`STRU`/`ZONE`/`SITE`/`WORL` 五行会红——
+    /// 那正是 issue #5 留下的口子。
+    #[test]
+    fn no_pose_change_anywhere_leaves_implied_tubing_behind() {
+        let graph = sample_hierarchy();
+        let unit_types = default_unit_types();
+
+        for (&moved, node) in &graph {
+            let mut expected: BTreeSet<String> = derived_units_in_subtree(&graph, moved)
+                .into_keys()
+                .collect();
+            expected.extend(derived_unit_at_or_above(&graph, moved));
+
+            let (rerouted, _) = pose_targets_regenerating_themselves(&[moved], &graph, &unit_types);
+            let mut actual: BTreeSet<String> = derived_units_in_subtree(&graph, moved)
+                .into_keys()
+                .collect();
+            if !rerouted.is_empty() {
+                actual.extend(derived_unit_at_or_above(&graph, moved));
+            }
+
+            assert_eq!(
+                actual, expected,
+                "挪 {}({moved}) 之后，这些单元的隐含直管段没人重推",
+                node.noun
+            );
+        }
+    }
+
+    /// 子树牵出来的单元要真的变成生成工作，且不覆盖 rollup 自己排到的那一条。
+    #[test]
+    fn derived_units_join_the_worklist_without_shadowing_the_rollup() {
+        let bran = node_refno(11).to_pdms_str();
+        let hang = node_refno(22).to_pdms_str();
+        let mut units = vec![DeliveryUnitSummary {
+            root_refno: bran.clone(),
+            noun: "BRAN".into(),
+            modified: 3,
+            model_affecting: 3,
+            will_generate: true,
+            ..Default::default()
+        }];
+
+        append_derived_geometry_units(
+            &mut units,
+            &BTreeMap::from([
+                (bran.clone(), "BRAN".to_string()),
+                (hang.clone(), "HANG".to_string()),
+            ]),
+        );
+
+        assert_eq!(units.len(), 2, "rollup 已经排到的根不重复登记");
+        let rolled = units.iter().find(|unit| unit.root_refno == bran).unwrap();
+        assert_eq!(
+            rolled.modified, 3,
+            "rollup 那条带着真实计数，不能被合成条覆盖"
+        );
+        assert!(!rolled.owner_moved);
+
+        let pulled = units.iter().find(|unit| unit.root_refno == hang).unwrap();
+        assert!(pulled.will_generate, "祖先动了也要真的重生成");
+        assert!(pulled.owner_moved, "计数全 0 是语义，靠这个标志说清楚");
+        assert_eq!(pulled.model_affecting, 0);
+
+        // 并进 units 之后才算数：RegenRoot 工作项只从 units 来。
+        let items = work_items_from_units(1, 42, "DESI", &units, &HashSet::new(), &HashSet::new());
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ModelWorkAction::RegenRoot, bran.as_str()),
+                (ModelWorkAction::RegenRoot, hang.as_str()),
+            ]
         );
     }
 
@@ -1170,6 +1634,86 @@ mod tests {
             vec![(ModelWorkAction::RegenRoot, "24383/66459", "BRAN")],
             "挪 /1WCC1135/B1 的 CAP 必须整根重生成——便宜路径算不出隐含直管段: {:#?}",
             plan.work_items
+        );
+    }
+
+    /// issue #5 的容器侧：挪**分支之上**的东西，脚下的隐含直管段同样得重推。
+    ///
+    /// 管件那半修好之后，`PIPE`/`ZONE` 仍然落在便宜路径上——`update_world_transforms`
+    /// 刷整棵子树却按 `out=inst_info:⟨1⟩/⟨2⟩` 排除管段行，于是容器动了、脚下每条分支
+    /// 的管段全部停在旧位置。这条用真库的 `/1WCC1135`（1 条分支）与
+    /// `/1WCC-PIPE-RX`（117 条 PIPE）验证两件事：容器自己保留 `Transform`
+    /// 刷子树，脚下的每条 BRAN 各排一条 `RegenRoot`。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: reads the real /1WCC-PIPE-RX zone from the configured project"]
+    async fn live_issue5_moving_a_container_regenerates_the_branches_beneath_it() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let site = RefnoEnum::from("24383/66456");
+        let zone = RefnoEnum::from("24383/66457");
+        let pipe = RefnoEnum::from("24383/66458");
+        let bran = "24383/66459";
+
+        let plan_for = async |target: RefnoEnum, owner: RefnoEnum, noun: &str| {
+            build_model_update_plan(
+                7999,
+                42,
+                "DESI",
+                &BTreeMap::from([(42, vec![live_modified_op(target, owner, noun, "POS")])]),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("build {noun} move plan: {error:#}"))
+        };
+
+        // 挪一整条 PIPE：它名下只有 /1WCC1135/B1 一条分支。
+        let moved_pipe = plan_for(pipe, zone, "PIPE").await;
+        assert_eq!(
+            moved_pipe
+                .work_items
+                .iter()
+                .map(|item| (item.action, item.target_refno.as_str(), item.noun.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ModelWorkAction::RegenRoot, bran, "BRAN"),
+                (ModelWorkAction::Transform, "24383/66458", ""),
+            ],
+            "挪 PIPE：分支重生成推管段，PIPE 自己仍走便宜路径刷子树: {:#?}",
+            moved_pipe.work_items
+        );
+
+        // 挪一整个 ZONE：脚下 117 条 PIPE 的分支全部要重生成。
+        let moved_zone = plan_for(zone, site, "ZONE").await;
+        let regen_roots = moved_zone
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .map(|item| item.target_refno.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            regen_roots.contains(&bran),
+            "挪 ZONE 必须带上它脚下的每条分支: {regen_roots:?}"
+        );
+        assert!(
+            regen_roots.len() > 100,
+            "/1WCC-PIPE-RX 名下有 117 条 PIPE，重生成根不该只有 {} 条",
+            regen_roots.len()
+        );
+        assert!(
+            moved_zone.work_items.iter().any(|item| {
+                item.action == ModelWorkAction::Transform && item.target_refno == "24383/66457"
+            }),
+            "容器自己保留便宜路径：子树里非管段的那些实例靠它刷: {:#?}",
+            moved_zone.work_items
+        );
+        assert!(
+            moved_zone
+                .units
+                .iter()
+                .filter(|unit| unit.owner_moved)
+                .all(|unit| unit.will_generate && unit.model_affecting == 0),
+            "祖先动了牵进来的单元：计数为 0 但照样生成"
         );
     }
 
