@@ -24,7 +24,9 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = false
+#【变更 2026-08-06】false→true：空间/房间计算是默认需求，false 仅作运维止血/演练隔离
+#（见 docs/2026-08-04_dboption-config-changelog.md 2026-08-06 条目）。
+gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100

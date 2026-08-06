@@ -45,6 +45,8 @@
 - **2026-07-27 → 07-29**：`http_api_addr` 8021→8022；`gen_spatial_tree`→true；`gen_model_batch_size` 16→4；`room_keyword`→`room_key_word=["-RM"]`。
 - **2026-08-04**：`sync_live` 复关（Web 冒烟验证）；`manual_db_nums` 调至 `[7998, 8000]` 增量实测窗口。
 - **2026-08-06**：`manual_db_nums` 放宽至 `[7997, 7998, 7999, 8000]`，重新纳入 issue #10 取证涉及的 7997（基线库 `.surreal/ams-7997-e3d-test-20260805`，applied=92）与 7999（此前被排除，applied=3、file=41）。
+- **2026-08-06（增量范围只认 MDB）**：`manual_db_nums` / `exclude_db_nums` / `only_sync_sys` **不再参与增量判定**——增量范围只由 `mdb_name` 那个 MDB 声明的 DESI 决定（`data_interface/update_scope.rs`），代码上 `should_process_database` 并入 `increment_manager::in_scope_with`。起因正是上一条：手写名单挡掉 7999 时，日志与「MDB 里没有这个库」一模一样，现场只看得到每 30 秒重复一次的「不在本期执行范围，跳过数据库: 类型=DESI, 编号=7999」。这三个键仍对全量模型生成与按需基线解析生效，因此上表里 `manual_db_nums` 的取值仍有意义，只是**不再限制增量跑哪些库**——本地站点从此按 `/ALL` 声明的 29 个 DESI 全量增量。
+- **2026-08-06（`gen_spatial_tree` 开关治理）**：结论钉死——开关保留，但角色从「功能形态开关」转为**运维开关**（止血降级 / 演练隔离），所有配置的默认姿态为 `true`。备用配置 `DbOption-ams.toml` / `DbOption-zsy.toml` / `DbOption_text.toml` 残留的 `false` 一并翻正，消除「整份拷回把 false 带回来」的 issue #7 复发路径。`load_spatial_tree` / `save_spatial_tree_to_db` 确认为**死键**（rs-core 仅定义、本仓与 rs-core 均零读取），但它们是必填 bool 字段，从 toml 删键会让 config 反序列化报 missing field 起不来——因此只就地标注、不删，待 rs-core 删除字段后随之移除。同批记录默认值改进方向：rs-core `DbOption` 的 bool 缺省为 false，「缺键=关」与「默认需要空间/房间计算」相悖，下次动 rs-core 时应将 `gen_spatial_tree` 缺省翻为 true（或连带清理死字段）。
 
 ## 四、注意事项
 
@@ -52,3 +54,9 @@
   `manual_db_nums`、`sync_live`），部署到其它站点时应按站点实际情况取值，不应照抄。
 - `http_api_addr` / `delivery_unit_types` / `room_key_word` 三组新键是**功能性配置**，
   部署新站点时需要显式决策；其余多为运行窗口开关。
+- `gen_spatial_tree` 是**运维开关**，默认保持 `true`。关 = 冻结房间/空间派生数据：入队口
+  一条房间任务不排（进程级告警一次）、生成路径不维护空间树且恒返回空变更集、房间轮早退、
+  DESI 暂存窗口跳过面板/`room_relate` 预载；解析与数据批次照常流动，`/health` 暴露开关状态。
+  恢复 = 开着重启，启动全量房间重建兜底关闭窗口期的归属漂移。注意它只挡「新工作」：已存在
+  的 `spatial_reconcile` 残留行不受它门控（`reconcile_spatial_pending` 不看这个开关），
+  中毒残留行仍会挡出队，需手工处置。
