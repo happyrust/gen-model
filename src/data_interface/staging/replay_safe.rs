@@ -20,9 +20,11 @@
 //! `define_common_functions` 静默吞语句错误，validator 与执行器不得继承——凡进
 //! 暂存或进日志的语句必须 `check()`。
 
+use std::ops::Bound;
+
 use anyhow::bail;
 use serde_json::Value as JsonValue;
-use surrealdb::sql::{Data, Id, Operator, Statement, Value, Values};
+use surrealdb::sql::{Array, Data, Id, Operator, Statement, Thing, Value, Values};
 
 /// 校验一段将进入语句日志的 SQL（可含多条语句）。
 ///
@@ -76,7 +78,10 @@ pub(crate) fn validate_scoped_delete_transaction(sql: &str) -> anyhow::Result<()
     }
     for statement in &statements[1..statements.len() - 1] {
         reject_nondeterministic_functions(statement)?;
-        if !matches!(statement, Statement::Set(_) | Statement::Delete(_) | Statement::Ifelse(_)) {
+        if !matches!(
+            statement,
+            Statement::Set(_) | Statement::Delete(_) | Statement::Ifelse(_)
+        ) {
             bail!("级联删除事务只允许 LET、DELETE 与 IF 块");
         }
     }
@@ -172,10 +177,47 @@ fn is_bounded_target(value: &Value) -> bool {
     is_explicit_record(value)
         || matches!(
             value,
+            Value::Thing(thing)
+                if thing.tb == "pe_owner" && is_owner_scoped_range(thing)
+        )
+        || matches!(
+            value,
             Value::Edges(edges)
                 if !matches!(&edges.from.id, Id::Generate(_) | Id::Range(_))
                     && !edges.what.is_empty()
         )
+}
+
+/// `pe_owner:[<owner>, <槽位区间>]`：两侧边界都是数组，且第 0 位是**同一个**显式
+/// record。这样的范围恰好圈住一个 owner 的全部槽位，界与显式 id 一样硬。
+///
+/// 只认表名是不够的，两种写法都能过表名那关却圈到别人头上，而且都不报错：
+///
+/// - `pe_owner:[owner, NONE]..`——上界漏写。它从该 owner 起一路删到表尾，
+///   相邻 owner 的成员块一起没（fork 2.1.4 实测，`status = OK`）。这不是假想
+///   威胁：2026-08-07 的一次编辑真的把它写到过工作区里，靠渲染器的字面量断言
+///   才拦下——那条断言只护得住这一个调用方。
+/// - `pe_owner:[owner_a, NONE]..=[owner_z, ..]`——跨 owner。
+fn is_owner_scoped_range(thing: &Thing) -> bool {
+    let Id::Range(range) = &thing.id else {
+        return false;
+    };
+    let (Some(beg), Some(end)) = (array_bound(&range.beg), array_bound(&range.end)) else {
+        return false;
+    };
+    matches!(
+        (beg.first(), end.first()),
+        (Some(Value::Thing(low)), Some(Value::Thing(high)))
+            if low == high && !matches!(&low.id, Id::Generate(_) | Id::Range(_))
+    )
+}
+
+/// 取一个范围端点的数组形制；`Bound::Unbounded` 与非数组端点一律不认。
+fn array_bound(bound: &Bound<Id>) -> Option<&Array> {
+    match bound {
+        Bound::Included(Id::Array(array)) | Bound::Excluded(Id::Array(array)) => Some(array),
+        _ => None,
+    }
 }
 
 fn is_explicit_record(value: &Value) -> bool {
@@ -194,10 +236,12 @@ fn require_insert_ids(data: &Data) -> anyhow::Result<()> {
     let valid = match data {
         Data::ValuesExpression(rows) => !rows.is_empty() && rows.iter().all(has_id),
         Data::SingleExpression(Value::Object(object)) => object.contains_key("id"),
-        Data::SingleExpression(Value::Array(array)) => !array.is_empty()
-            && array.iter().all(|value| {
-                matches!(value, Value::Object(object) if object.contains_key("id"))
-            }),
+        Data::SingleExpression(Value::Array(array)) => {
+            !array.is_empty()
+                && array.iter().all(
+                    |value| matches!(value, Value::Object(object) if object.contains_key("id")),
+                )
+        }
         _ => false,
     };
     if !valid {
@@ -253,6 +297,7 @@ mod tests {
             "UPSERT pe:⟨4000000001_10⟩ CONTENT { noun: 'PIPE', dbnum: 7997 }",
             "UPSERT type::thing('pe', $refno) SET noun = 'PIPE'",
             "DELETE inst_relate WHERE zone_refno = pe:⟨1_2⟩",
+            "DELETE pe_owner:[pe:a, NONE]..=[pe:a, ..]",
             "DELETE pe:⟨1_2⟩->ref_rev",
             "UPDATE pe:a SET deleted = true",
             "INSERT RELATION INTO pe_owner [{ id: pe_owner:[pe:a, 0], in: pe:a, out: pe:b }]",
@@ -278,12 +323,31 @@ mod tests {
     #[test]
     fn rejects_bare_table_targets_and_id_less_inserts() {
         for sql in [
-            "CREATE pe SET noun = 'PIPE'",           // 随机发号
-            "UPSERT inst_relate SET dirty = true",   // 全表写
-            "INSERT INTO plain_t { v: 1 }",          // 载荷无 id
+            "CREATE pe SET noun = 'PIPE'",         // 随机发号
+            "UPSERT inst_relate SET dirty = true", // 全表写
+            "INSERT INTO plain_t { v: 1 }",        // 载荷无 id
             "INSERT RELATION INTO rel_t [{ in: pe:a, out: pe:b }]",
+            "DELETE item:[a, NONE]..=[a, ..]", // record range 只为 pe_owner 审计放行
             // RELATE 的边 id 无法显式指定，重放必然造新边。
             "RELATE pe:a->room_relate->pe:b SET room_num = 'R101'",
+        ] {
+            assert!(validate_statement(sql).is_err(), "应拒绝：{sql}");
+        }
+    }
+
+    /// `pe_owner` 的范围放行卡的是**形状**，不是表名。
+    ///
+    /// 只比表名的话，两种越界写法都能进 journal，而且执行时都不报错——写回照样
+    /// 提交，相邻 owner 的成员块凭空消失，没有任何东西会喊。第一条是 2026-08-07
+    /// 真实漏进工作区的那一发，留作回归。
+    #[test]
+    fn accepts_only_owner_scoped_pe_owner_ranges() {
+        validate_statement("DELETE pe_owner:[pe:a, NONE]..=[pe:a, ..]").expect("单 owner 前缀范围");
+
+        for sql in [
+            "DELETE pe_owner:[pe:a, NONE]..",            // 上界漏写：一路删到表尾
+            "DELETE pe_owner:[pe:a, NONE]..=[pe:z, ..]", // 跨 owner
+            "DELETE pe_owner:0..=999",                   // 非数组端点
         ] {
             assert!(validate_statement(sql).is_err(), "应拒绝：{sql}");
         }
