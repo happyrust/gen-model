@@ -139,7 +139,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     // 暂停是持久化的操作意图（ADR-011 §9）：重启后必须原样恢复，
     // 否则「别再动数据」的用意会被重启抹掉且毫无提示。
     match scheduler.restore_persisted_pause().await {
-        Ok(true) => println!("队列处于暂停状态（重启前设置），恢复前不出队、不消化积压"),
+        Ok(true) => println!(
+            "队列处于暂停状态（重启前设置），恢复前不出新批次；已提交数据的空间收敛继续"
+        ),
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
@@ -147,7 +149,7 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     loop {
         beat();
         let ran = drain_queue_until_empty(&mgr).await;
-        // 队列跑空（或暂停）：暂停挡的是出队与积压消化——人按暂停就是「别再动数据」。
+        // spatial 收敛已在 drain 的出队门前执行；暂停只挡新批次与普通积压。
         if !scheduler.is_paused() {
             // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
             // 一样会把唯一的消费者带走。
@@ -195,7 +197,22 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let scheduler = BatchScheduler::global();
     let registry = TaskRegistry::global();
     let mut ran = 0usize;
-    while let Some(job) = scheduler.freeze_next(registry) {
+    loop {
+        match SideEffectCompensator::reconcile_spatial_pending(mgr).await {
+            Ok(done) if done > 0 => {
+                println!("领取下一批前完成 {done} 个提交后空间收敛任务");
+                beat();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::error!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
+                eprintln!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
+                break;
+            }
+        }
+        let Some(job) = scheduler.freeze_next(registry) else {
+            break;
+        };
         run_one_batch_isolated(mgr, registry, scheduler, job).await;
         ran += 1;
     }
@@ -350,6 +367,53 @@ fn staged_window_has_room_semantics(db_type: &str, gen_spatial_tree: bool) -> bo
     gen_spatial_tree && db_type.eq_ignore_ascii_case("DESI")
 }
 
+async fn hold_staged_model_mutation_roots(
+    new_units: &[crate::data_interface::manual_update::UnitTask],
+    plan: &crate::data_interface::model_update_plan::ModelUpdatePlan,
+) -> anyhow::Result<usize> {
+    use crate::data_interface::model_update_plan::ModelWorkAction;
+
+    let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
+    let mut roots = new_units
+        .iter()
+        .map(|unit| unit.root_refno.clone())
+        .chain(
+            plan.work_items
+                .iter()
+                .filter(|item| item.action == ModelWorkAction::RegenRoot)
+                .map(|item| item.target_refno.clone()),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for item in plan.work_items.iter().filter(|item| {
+        matches!(item.action, ModelWorkAction::Transform | ModelWorkAction::DeleteCleanup)
+    }) {
+        let target = item
+            .target_refno
+            .parse::<aios_core::RefU64>()
+            .map(aios_core::RefnoEnum::from)
+            .map_err(|_| anyhow::anyhow!("无效模型修改目标 {}", item.target_refno))?;
+        let mut candidates = vec![target];
+        candidates.extend(aios_core::query_deep_children_refnos(target).await?);
+        for candidate in candidates {
+            if let Some(root) =
+                crate::data_interface::generation_root::resolve_live_element_generation_root(
+                    candidate,
+                    &unit_types,
+                )
+                .await?
+            {
+                roots.insert(root.root.to_pdms_str());
+            }
+        }
+    }
+
+    for root in &roots {
+        crate::data_interface::staging::hold_staged_generation_root(root).await;
+    }
+    Ok(roots.len())
+}
+
 async fn execute_frozen_batch(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -393,7 +457,7 @@ async fn execute_frozen_batch(
     let room_semantics =
         staged_window_has_room_semantics(&cand.db_type, mgr.db_option.gen_spatial_tree);
     let preload_started = std::time::Instant::now();
-    let room_map = if room_semantics {
+    let mut room_map = if room_semantics {
         match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
             Ok(rooms) => Some(rooms),
             Err(error) => {
@@ -410,6 +474,7 @@ async fn execute_frozen_batch(
         );
         None
     };
+    let mut room_preload_failed = false;
     if let Some(rooms) = &room_map {
         let load_ms = preload_started.elapsed().as_millis();
         match window
@@ -423,10 +488,16 @@ async fn execute_frozen_batch(
                 rooms.all_panels.len(),
                 preload_started.elapsed().as_millis().saturating_sub(load_ms)
             ),
-            Err(error) => warnings.push(format!(
-                "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
-            )),
+            Err(error) => {
+                room_preload_failed = true;
+                warnings.push(format!(
+                    "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
+                ));
+            }
         }
+    }
+    if room_preload_failed {
+        room_map = None;
     }
     let setup_ms = window_started.elapsed().as_millis();
 
@@ -505,12 +576,14 @@ async fn execute_frozen_batch(
         return result;
     }
 
-    let mut staged_rooms = model_update_pending::StagedRoomReport::default();
+    let spatial = window.deferred_spatial().await;
+    window
+        .merge_room_recalc_changes(&spatial.room_changes)
+        .await;
     let finalize = window
         .staged_finalize()
         .await
         .expect("finalize presence checked above");
-    let spatial = window.deferred_spatial().await;
     let planned_room_targets = finalize
         .plan
         .work_items
@@ -559,7 +632,6 @@ async fn execute_frozen_batch(
                 .settle_staged_plan_items(&report.succeeded_plan_items)
                 .await;
             result.warnings.extend(report.failures.iter().cloned());
-            staged_rooms = report;
         }
         Err(error) => result.warnings.push(format!(
             "暂存房间轮初始化失败，全部房间目标保留 pending: {error:#}"
@@ -635,53 +707,24 @@ async fn execute_frozen_batch(
             }
         }
     }
-    let settlements = window.deferred_regen_settlements().await;
-    if !settlements.is_empty() {
-        match model_update_pending::clear_regen_work_batch(&settlements).await {
-            Ok(()) => println!(
-                "写回后收口模型 pending {} 个生成根: dbnum={}",
-                settlements.len(),
+    let (spatial_done, spatial_attempts) = retry_until_recovered(
+        STAGED_COMMIT_ATTEMPTS,
+        STAGED_COMMIT_BACKOFF,
+        STAGED_STALLED_RETRY_BACKOFF,
+        |error, attempts| {
+            log::error!(
+                "dbnum={} 提交后空间收敛第 {attempts} 次仍失败，阻止后续批次出队: {error:#}",
                 job.dbnum
-            ),
-            Err(error) => {
-                result.warnings.push(format!(
-                    "写回后收口旧模型 pending 失败（保留待重试）: {error:#}"
-                ));
-                postcommit_failed = true;
-            }
-        }
-    }
-
-    let deferred = window.take_deferred_spatial().await;
-    match crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await {
-        Ok(mut changes) => {
-            let applied = changes.len();
-            changes.retain(|change| {
-                !staged_rooms
-                    .succeeded_aabb_targets
-                    .contains(&change.refno)
-            });
-            println!(
-                "写回后空间树增量已应用 dbnum={} 包围盒变化={applied}，其中 {} 个已在窗口内收敛房间，{} 个补排房间任务",
-                job.dbnum,
-                applied - changes.len(),
-                changes.len()
             );
-            if let Err(error) =
-                model_update_pending::enqueue_room_recalc(&mgr.db_option, &changes).await
-            {
-                result
-                    .warnings
-                    .push(format!("写回后房间增量任务入队失败: {error:#}"));
-                postcommit_failed = true;
-            }
-        }
-        Err(error) => {
-            result
-                .warnings
-                .push(format!("写回后应用空间树增量失败: {error:#}"));
-            postcommit_failed = true;
-        }
+        },
+        || SideEffectCompensator::reconcile_spatial_pending(mgr),
+    )
+    .await;
+    if spatial_done > 0 {
+        println!(
+            "写回后空间树与文件已收敛 dbnum={} 任务={} 尝试={spatial_attempts}",
+            job.dbnum, spatial_done
+        );
     }
 
     if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await {
@@ -967,18 +1010,28 @@ async fn execute_frozen_batch_body(
                     .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
                     .filter(|refno| refno.is_valid())
                     .collect::<Vec<_>>();
-                let report = match crate::data_interface::staging::preload::preload_model_mutation_targets(
-                    &mutation_targets,
-                )
-                .await
-                {
-                    Ok(_) => model_update_pending::run_staged_non_regen_work(
-                        mgr,
-                        &plan.work_items,
+                let report = match hold_staged_model_mutation_roots(&new_units, &plan).await {
+                    Ok(held) => match crate::data_interface::staging::preload::preload_model_mutation_targets(
+                        &mutation_targets,
                     )
-                    .await,
+                    .await
+                    {
+                        Ok(_) => {
+                            println!("窗口内模型修改已持有 {held} 个生成根锁");
+                            model_update_pending::run_staged_non_regen_work(
+                                mgr,
+                                &plan.work_items,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            warnings.push(format!("窗口内模型前置工作集预载失败: {error:#}"));
+                            non_regen_failed = true;
+                            Default::default()
+                        }
+                    },
                     Err(error) => {
-                        warnings.push(format!("窗口内模型前置工作集预载失败: {error:#}"));
+                        warnings.push(format!("窗口内模型生成根锁范围解析失败: {error:#}"));
                         non_regen_failed = true;
                         Default::default()
                     }
@@ -1069,7 +1122,23 @@ async fn execute_frozen_batch_body(
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
     let (units, settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
         if staged {
-            let mut worklist = merge_unit_worklist(new_units, Vec::new());
+            let pending = match load_pending_model_units_for_retry(job.dbnum).await {
+                Ok(pending) => pending,
+                Err(error) => {
+                    warnings.push(format!(
+                        "读取本库模型待重试列表失败，暂存窗口拒绝生成: {error:#}"
+                    ));
+                    registry.set_unit_totals(&job.task_id, 0);
+                    return DataBatchTaskResult {
+                        project: job.project.clone(),
+                        status: ManualUpdateStatus::Failed,
+                        batch,
+                        units: Vec::new(),
+                        warnings: std::mem::take(warnings),
+                    };
+                }
+            };
+            let mut worklist = merge_unit_worklist(new_units, pending);
             let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
             if let Ok(Some(block)) =
                 crate::data_interface::staging::attempts::load_window_block(job.dbnum).await
@@ -1180,8 +1249,8 @@ fn batch_regen_is_allowed(non_regen_failed: bool) -> bool {
 }
 
 fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
-    crate::data_interface::staging::active_staging_writes().is_none()
-        && task.revision.is_some()
+    let staged = crate::data_interface::staging::active_staging_writes().is_some();
+    (staged || task.revision.is_some())
         && model_update_pending::root_joins_regen_batch(task.attempts, &task.root_refno)
 }
 
@@ -1289,12 +1358,19 @@ async fn run_single_unit(
     };
     let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
     let settlement_failed = if staged {
-        if outcome.is_ok()
-            && let Some(revision) = task.revision
-        {
-            crate::data_interface::staging::defer_staged_regen_settlement(
-                task.root_refno.clone(),
-                revision,
+        if outcome.is_ok() {
+            if let Some(revision) = task.revision {
+                crate::data_interface::staging::defer_staged_regen_settlement(
+                    task.root_refno.clone(),
+                    revision,
+                )
+                .await;
+            }
+            crate::data_interface::staging::settle_staged_plan_items(
+                &std::collections::BTreeSet::from([(
+                    crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
+                    task.root_refno.clone(),
+                )]),
             )
             .await;
         }
@@ -1405,10 +1481,18 @@ async fn run_unit_worklist(
         let mut lock_roots = roots.clone();
         lock_roots.sort_unstable();
         lock_roots.dedup();
-        let locks = lock_roots
-            .iter()
-            .map(|root| generation_root_lock(root))
-            .collect::<Vec<_>>();
+        let staged = crate::data_interface::staging::active_staging_writes().is_some();
+        let locks = if staged {
+            for root in &lock_roots {
+                crate::data_interface::staging::hold_staged_generation_root(root).await;
+            }
+            Vec::new()
+        } else {
+            lock_roots
+                .iter()
+                .map(|root| generation_root_lock(root))
+                .collect::<Vec<_>>()
+        };
         let mut guards = Vec::with_capacity(locks.len());
         for lock in &locks {
             guards.push(lock.lock().await);
@@ -1426,14 +1510,31 @@ async fn run_unit_worklist(
                 );
                 let settlements = batchable
                     .iter()
-                    .map(|task| {
-                        (
-                            task.root_refno.clone(),
-                            task.revision.expect("batchable tasks have revisions"),
-                        )
+                    .filter_map(|task| {
+                        task.revision
+                            .map(|revision| (task.root_refno.clone(), revision))
                     })
                     .collect::<Vec<_>>();
-                if let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await
+                if staged {
+                    for (root, revision) in settlements {
+                        crate::data_interface::staging::defer_staged_regen_settlement(
+                            root, revision,
+                        )
+                        .await;
+                    }
+                    let succeeded = roots
+                        .iter()
+                        .cloned()
+                        .map(|root| {
+                            (
+                                crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
+                                root,
+                            )
+                        })
+                        .collect();
+                    crate::data_interface::staging::settle_staged_plan_items(&succeeded).await;
+                } else if let Err(error) =
+                    model_update_pending::clear_regen_work_batch(&settlements).await
                 {
                     log::error!("批量收口模型 pending 失败 roots={}: {error:#}", roots.len());
                     warnings.push(error.to_string());
@@ -1944,6 +2045,45 @@ mod tests {
         assert_eq!(stalled.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn spatial_reconcile_is_the_gate_before_every_dequeue() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("pub async fn drain_queue_until_empty(")
+            .expect("queue drain must exist")
+            .1
+            .split_once("/// [`run_one_batch`]")
+            .expect("queue drain must end before the isolation wrapper")
+            .0;
+        let reconcile = body
+            .find("reconcile_spatial_pending(mgr)")
+            .expect("spatial reconcile gate");
+        let dequeue = body.find("freeze_next(registry)").expect("dequeue call");
+        assert!(reconcile < dequeue, "spatial convergence must precede dequeue");
+    }
+
+    #[test]
+    fn failed_room_preload_disables_the_staged_room_round() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("staged batch must exist")
+            .1
+            .split_once("async fn drop_window_and_sweep(")
+            .expect("staged batch body boundary")
+            .0;
+        let failed = body
+            .find("room_preload_failed = true")
+            .expect("preload failure marker");
+        let fail_closed = body[failed..]
+            .find("room_map = None")
+            .expect("fail-closed room map");
+        let room_round = body[failed..]
+            .find("run_staged_room_work(")
+            .expect("staged room round");
+        assert!(fail_closed < room_round, "preload failure must disable room work");
+    }
+
     fn unit_task(
         attempts: u32,
         revision: Option<u64>,
@@ -2102,7 +2242,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn staged_units_wait_for_commit_instead_of_settling_persistent_pending() {
+    async fn staged_fresh_units_join_batch_and_settle_only_in_finalize_tail() {
         use crate::data_interface::staging::ResourceThresholds;
         use crate::data_interface::staging::lifecycle::create_window_on;
         use surrealdb::engine::any::connect;
@@ -2114,7 +2254,11 @@ mod tests {
         let joins = window
             .scope(async { unit_joins_regen_batch(&unit_task(0, Some(7), "16777216/5")) })
             .await;
-        assert!(!joins, "staged roots settle only after the window commits");
+        assert!(joins, "fresh staged roots use the ADR-012 batch path");
+        let new_only_joins = window
+            .scope(async { unit_joins_regen_batch(&unit_task(0, None, "16777216/6")) })
+            .await;
+        assert!(new_only_joins, "new staged roots do not need a durable revision");
 
         window
             .scope(

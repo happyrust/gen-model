@@ -391,6 +391,10 @@ impl RoomPanelMap {
             .find(|room| room.panels.contains(&panel))
             .map(|room| room.room_num.as_str())
     }
+
+    fn room_of_panel(&self, panel: RefnoEnum) -> Option<&RoomPanels> {
+        self.rooms.iter().find(|room| room.panels.contains(&panel))
+    }
 }
 
 /// 房间命名规则按项目在编译期选定。
@@ -476,14 +480,48 @@ fn render_room_panel_relate_write(
 ) -> String {
     let room_key = room_refno.to_pe_key();
     let mut statements = vec![format!("DELETE room_panel_relate WHERE in = {room_key}")];
-    for panel in panels {
+    if !panels.is_empty() {
+        let rows = panels
+            .iter()
+            .map(|panel| {
+                format!(
+                    "{{ id: room_panel_relate:{room_refno}_{panel}, in: {room_key}, out: {}, room_num: '{}' }}",
+                    panel.to_pe_key(),
+                    escape_surql_str(room_num),
+                )
+            })
+            .collect::<Vec<_>>();
         statements.push(format!(
-            "RELATE {room_key}->room_panel_relate:{room_refno}_{panel}->{} SET room_num = '{}'",
-            panel.to_pe_key(),
-            escape_surql_str(room_num),
+            "INSERT RELATION INTO room_panel_relate [{}]",
+            rows.join(",")
         ));
     }
     wrap_in_transaction(&statements).unwrap_or_default()
+}
+
+fn render_panel_room_topology_write(panel: RefnoEnum, room: Option<&RoomPanels>) -> String {
+    let panel_key = panel.to_pe_key();
+    let mut statements = vec![format!("DELETE room_panel_relate WHERE out = {panel_key}")];
+    if let Some(room) = room {
+        statements.push(format!(
+            "INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:{}_{panel}, in: {}, out: {panel_key}, room_num: '{}' }}]",
+            room.room,
+            room.room.to_pe_key(),
+            escape_surql_str(&room.room_num),
+        ));
+    }
+    wrap_in_transaction(&statements).unwrap_or_default()
+}
+
+async fn save_panel_room_topology(
+    panel: RefnoEnum,
+    room: Option<&RoomPanels>,
+) -> anyhow::Result<()> {
+    crate::surreal_retry::execute_model_write(
+        &render_panel_room_topology_write(panel, room),
+        &format!("写入 {panel} 的房间面板拓扑"),
+    )
+    .await
 }
 
 /// 构建房间和面板之间的关联关系
@@ -853,7 +891,7 @@ pub async fn recalc_panel_membership(
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    let Some(room_num) = rooms.room_num_of(panel).map(str::to_string) else {
+    let Some(room) = rooms.room_of_panel(panel) else {
         // 面板已不在册：房间改名后不再合规、面板被挪出房间、或房间本身没了。
         // 旧边仍要清，否则它会一直挂着上一次的归属，且没有任何人会再来碰它。
         let old_members = existing_members_of_panel(panel)
@@ -869,8 +907,10 @@ pub async fn recalc_panel_membership(
             );
         }
         save_room_relate(panel, &HashMap::new(), "").await?;
+        save_panel_room_topology(panel, None).await?;
         return Ok(HashSet::new());
     };
+    let room_num = room.room_num.clone();
     // 与 [`build_room_relations`] 同一道门。成员候选取自空间树，树空着时这块面板会
     // 算出 0 个成员，而写入是先清后写——一次房间改名或一次面板移动就足以把这间房的
     // 归属清空，任务还返回成功、队列行随即删除、日志一行没有。上面那条清边路径不受
@@ -904,6 +944,7 @@ pub async fn recalc_panel_membership(
         });
     log_panel_membership_change(panel, &room_num, &old_members, &new_members);
     save_room_relate(panel, &members, &room_num).await?;
+    save_panel_room_topology(panel, Some(room)).await?;
     Ok(new_members)
 }
 
@@ -1754,13 +1795,13 @@ mod tests {
 
         assert!(
             position_of(&sql, "DELETE room_panel_relate WHERE in = pe:4000000001_1")
-                < position_of(&sql, "RELATE"),
+                < position_of(&sql, "INSERT RELATION"),
             "{sql}"
         );
         assert!(
             sql.contains(
-                "RELATE pe:4000000001_1->room_panel_relate:4000000001_1_4000000001_10\
-                 ->pe:4000000001_10"
+                "id: room_panel_relate:4000000001_1_4000000001_10, in: pe:4000000001_1, \
+                 out: pe:4000000001_10"
             ),
             "{sql}"
         );
@@ -2106,6 +2147,27 @@ mod tests {
             sql.contains("DELETE room_panel_relate WHERE in = pe:4000000001_1"),
             "{sql}"
         );
-        assert!(!sql.contains("RELATE"), "{sql}");
+        assert!(!sql.contains("INSERT RELATION"), "{sql}");
+    }
+
+    #[test]
+    fn panel_topology_rewrite_clears_old_room_before_writing_current_room() {
+        let panel = RefnoEnum::from("4000000001_10");
+        let room = RoomPanels {
+            room: RefnoEnum::from("4000000001_1"),
+            room_num: "K100".into(),
+            panels: vec![panel],
+        };
+        let sql = render_panel_room_topology_write(panel, Some(&room));
+        assert!(
+            position_of(&sql, "DELETE room_panel_relate WHERE out = pe:4000000001_10")
+                < position_of(&sql, "INSERT RELATION"),
+            "{sql}"
+        );
+        assert!(sql.contains("in: pe:4000000001_1, out: pe:4000000001_10"), "{sql}");
+
+        let removed = render_panel_room_topology_write(panel, None);
+        assert!(removed.contains("DELETE room_panel_relate WHERE out = pe:4000000001_10"));
+        assert!(!removed.contains("INSERT RELATION"));
     }
 }

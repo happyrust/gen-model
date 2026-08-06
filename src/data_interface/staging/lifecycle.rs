@@ -284,6 +284,25 @@ impl ActiveStagedWindow {
         }
     }
 
+    pub(crate) async fn merge_room_recalc_changes(
+        &self,
+        changes: &std::collections::HashMap<aios_core::RefnoEnum, String>,
+    ) {
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(finalize) = self.finalize.lock().await.as_mut() {
+            let dbnum = finalize.dbnum;
+            let end_sesno = finalize.end_sesno;
+            crate::data_interface::model_update_pending::merge_room_recalc_changes(
+                &mut finalize.plan,
+                dbnum,
+                end_sesno,
+                changes,
+            );
+        }
+    }
+
     pub(crate) async fn deferred_regen_settlements(&self) -> Vec<(String, u64)> {
         self.regen_settlements.lock().await.clone()
     }
@@ -308,13 +327,27 @@ impl ActiveStagedWindow {
                 finalize.end_sesno
             );
         }
-        Ok(
-            crate::data_interface::model_update_pending::render_finalize_tail(
-                finalize.dbnum,
-                finalize.end_sesno,
-                &finalize.plan,
-                &finalize.window_statements,
-            ),
+        let spatial = self.deferred_spatial().await;
+        let mut refresh = spatial
+            .refresh
+            .into_iter()
+            .map(|refno| refno.to_pdms_str())
+            .collect::<Vec<_>>();
+        let mut remove = spatial
+            .remove
+            .into_iter()
+            .map(|refno| refno.to_pdms_str())
+            .collect::<Vec<_>>();
+        refresh.sort_unstable();
+        remove.sort_unstable();
+        crate::data_interface::model_update_pending::render_finalize_tail_with_effects(
+            finalize.dbnum,
+            finalize.end_sesno,
+            &finalize.plan,
+            &finalize.window_statements,
+            &refresh,
+            &remove,
+            &self.deferred_regen_settlements().await,
         )
     }
 

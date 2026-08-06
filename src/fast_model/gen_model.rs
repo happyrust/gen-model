@@ -165,7 +165,7 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
     if targeted {
         let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
-        let insert_task = tokio::task::spawn(async move {
+        let insert_task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
             // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
             // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
             // 写入只覆盖得到这次也生成了的那些。

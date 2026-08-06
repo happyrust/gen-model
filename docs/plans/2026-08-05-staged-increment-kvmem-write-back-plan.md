@@ -6,7 +6,7 @@
 
 - **I1 零落盘**：窗口计算期间，持久层（rocksdb 后端 SurrealDB 服务器）的数据表零写入。白名单只有控制面：`dbnum_watermark`（仅扫描观察字段）、`increment_update_attempt`（attempts / 阻断记录）、`queue_control`、`model_update_pending`（房间 / 派生 / 按需）。
 - **I2 水位门控**：`applied_sesno` 只在写回尾事务推进；写回任何一块失败不推、不回退。
-- **I3 重试经济**：staging database 跨重试保留，重试只重跑失败根；进程崩溃 = 整窗口重算并收敛（幂等）。
+- **I3 重试经济**：同一批次内只重跑失败根；跨批次或进程崩溃后重建完整窗口并幂等收敛。
 - **I4 终态等价**：同一窗口「暂存 + 写回」的持久层终态 == 现行直写路径终态，逐表对拍相等。
 - **I5 失败语义**：生成根死信 = 窗口阻断（一级告警、持久层零痕迹）；房间失败不阻断、留 pending。
 - **I6 豁免不变**：基线 / 冷启动 / `gen_all_geos_data` 全量路径行为一字不变。
@@ -35,37 +35,37 @@
 
 - **T1.1** `persist_latest_main_data` 改走 StagedExecutor（`Both`）：语句既在暂存库生效（供后续生成读窗口新态）也进日志。
 - **T1.2** `ref_rev` 反向索引语句改 `Both`；重审 ADR-003 的 durable 恢复语义——窗口失败 = 整窗重放，`enqueue_ref_rev` 恢复记录只保留给跨窗口修复通道。
-- **T1.3** `finalize_attempt` 重构为「尾事务渲染器」：datacenter 语句（本就是 commit-time 语义）+ 水位推进 + attempts 清除 + 房间/派生 pending 的 revision 条件收口，全部在持久层一个事务判真执行。
+- **T1.3** `finalize_attempt` 重构为「尾事务渲染器」：datacenter 语句、未完成模型/房间工作、空间刷新/删除 durable intent、成功生成根的 revision 条件收口、水位推进与 attempts 清除，全部在持久层一个事务判真执行。
 - **T1.4** 冻结吸收与暂存扩展：窗口执行起点重扫抬高上界时，吸收区间的增量解析补充进**同一个** staging database（window_id 命名不变，元数据记录吸收后的逻辑区间）；吸收同时重置受影响根的 attempts（T0.4）；资源状态机处于「拒绝吸收」档位时不吸收，后继排队行保持独立。
 
 ### P2 生成轮接入（核心）
 
-- **T2.0 副作用延迟挂钩（本阶段前置，原 P4 内容提前）**：空间树应用与 `AABB_TREE_DIRTY`、MQTT 模型变更通告、`accel_tree.bin` 落盘全部改挂到写回成功回调；缓存失效以提交 / 废弃为边界。生成轮接入之前必须先落地，否则暂存计算会把未提交状态泄漏进空间树与通告。
+- **T2.0 提交后空间收敛（本阶段前置）**：空间刷新/删除意图与水位同事务持久化；worker 在领取下一批前应用内存树并持久化项目空间树文件，成功后结算。失败跨重启持续重试并阻断出队，queue pause 不阻止已提交数据收敛。MQTT 通告仍延迟到写回成功之后，缓存失效以提交 / 废弃为边界。
 - **T2.1 计划层读切换**：`build_model_update_plan` 的 owner 链 / 类型 / 名称读走暂存库；按需把变化元素的祖先链部分解析进暂存（索引优先定位 + 迭代上溯）。
 - **T2.2 生成根闭包预解析**：对每个生成根，把「根子树 + CATA 引用闭包」部分解析进暂存库（复用既有 部分解析 / 生成根闭包 / 索引优先建表 机制，把落库目标从持久层改为暂存库）。
 - **T2.3 既有产物预载**：根的 `inst_relate/inst_info/geo_relate/inst_geo/world_trans/aabb` 与隐含直管段（tubi）旧行，从持久层点查拷入暂存库——保证部分失败时旧行可见、删除集推导与今天一致。
 - **T2.4 生成执行链指向暂存**：`save_instance_data`、`update_inst_relate_aabbs_by_refnos`、`query_deep_visible_inst_refnos`、`update_world_transforms`、级联删除等在批次上下文一律走暂存句柄；**惰性兜底跨源版**——设计 / 目录 miss → 文件定点解析入暂存；产物 miss → 持久层点查拷入（两类 miss 都必须打日志）。
 - **T2.5 commit-time-only 审计**：逐语句过一遍生成写路径，全局扫描 / 修补语句（`zone_refno` 回填等）按读写集分类标注——纯终态扫描直接 `CommitOnly`；写集与暂存读集相交的必须同时以工作集范围在暂存执行；依赖唯一性补洞或删除后状态的必须显式定义执行顺序；CommitOnly 语句写回时按 journal 原始位置执行（中间态语义 = 今日直写）。产出审计清单入库（表格：语句、位置、读集、写集、判定、理由）。StagedExecutor 对未标注的跨表扫描写语句默认拒绝执行（防新增遗漏）。
-- **T2.6 窗口状态机与生成根锁**：全部根成功 → 进入写回；存在失败根 → 按 attempts 重试（复用暂存成果）；穷尽 → 窗口阻断（告警 + 面板可见），staging 保留至阻断解除或进程退出。窗口对其生成根在「生成开始 → 写回完成」全程持有生成根锁；on-demand 命中被暂存根时等待或拒绝（回执注明窗口进行中）。
+- **T2.6 窗口状态机与生成根锁**：全部根成功 → 进入写回；存在失败根 → 批内按 attempts 重试；穷尽 → 窗口阻断。窗口在非 regen 修改前解析并排序持有 RegenRoot、Transform 子树与 DeleteCleanup 旧态覆盖的全部生成根，直到写回及提交后空间收敛结束。fresh 根窗口内合批，批失败逐根回退；成功根从 finalize 计划移除且不进入 durable pending。
 
 ### P3 房间轮接入
 
-- **T3.1** `AabbChange` 由暂存侧包围盒刷新产出；本窗口房间任务在窗口内执行（drain 第三阶段挪进窗口）；PanelIndex 的面板行预载进暂存（百余行，逐轮一次）。
-- **T3.2** 房间先清后写语句进日志（`Both`）；任务成功 → settle 语句随尾事务；任务失败 → durable pending 照旧入表（控制面直写，允许）；空闲轮房间轮保留，只消化积压，其执行同样以小提交单元走 StagedExecutor。
+- **T3.1** `AabbChange` 由暂存侧包围盒刷新产出；房间根/面板拓扑、`room_relate`、`room_panel_relate` 与面板模型产物组成完整预载工作集，任一步失败则整轮 fail-closed。
+- **T3.2** 结构与 AABB 房间目标在窗口房间轮前合并进 finalize 计划；成功项移除，失败或未执行项由尾事务持久化。面板重算以共享实现同时维护 `room_relate` 与 `room_panel_relate`；staging 与 durable drain 共用该实现。
 - **T3.3** 同轮吸收 / 封闭性检查在暂存语义下复验（吸收判定读的旧边来自持久层批前状态 + 本轮进程内写入集，语义与今天一致，需测试钉住）。
 
 ### P4 写回收尾与可观测性
 
 - **T4.1** 写回执行与恢复状态机：分块重放 + 尾事务；写回失败且进程存活 → 保留暂存与内存 journal、指数退避重试 N 次，仍失败进入「写回滞留」告警（区别于窗口阻断——数据是好的，只是持久层不可用）；进程崩溃 → journal 随进程消失，唯一路径是整窗口重算，重算的 regen 删除集覆盖先前半提交行、幂等收敛。两条恢复路径由构造互斥（journal 只活在内存），实现与测试都要钉住这一点。
 - **T4.2** 副作用回归验证：T2.0 已把挂钩前置，此处补齐废弃 / 重算路径的缓存失效（`clear_all_caches_batch` 纪律）与全链路回归。
-- **T4.3** 可观测性：任务面板与 `/health` 增加窗口阻断状态（坏根、attempts、首次失败时刻）、staging 内存与资源状态机档位、写回时长与重试次数。
+- **T4.3** 可观测性：任务面板与 `/health` 增加窗口阻断状态、staging 资源、写回指标，以及空间收敛 pending 数、重试次数、最近错误与 stalled 状态。
 
 ### P5 验收与对拍（唯一硬标准：I4 终态等价 + I1 零落盘）
 
 - **T5.1 隔离性探针**：live 用例在窗口执行中途对持久层做数据表快照 diff，必须为空（控制面白名单除外）。
 - **T5.2 终态对拍**：room_fixture 式合成库 + 真实会话 live 用例（`live_projams_real_attribute_sessions_*` 系列），同一窗口分别走「暂存写回」与「现行直写」，逐表（pe / attrs / inst_* / trans / aabb / room_* / datacenter / 水位 / pending）比较相等；对拍维度另加：mesh 文件集合 hash、空间树 checksum、MQTT 通告条数与口径。
-- **T5.3 故障注入**：坏根阻断（水位不动、持久层零痕迹、修复重存后收敛）；写回中途 kill -9（重启幂等重放收敛）；房间坏网格（窗口提交成功、pending 留存、空闲轮收敛）；吸收扩窗（同一 staging 扩展、终态等价）。
-- **T5.4 全量回归**：`cargo test --lib --features http_api`（当前 346 条）全绿 + live 夹具逐个实跑。
+- **T5.3 故障注入**：坏根阻断；写回中途 kill -9；尾事务后、空间应用前崩溃；空间应用/持久化失败后重启恢复；房间预载失败；Transform/Delete 与按需生成竞争；合批失败逐根回退且无二次生成。
+- **T5.4 全量回归**：`cargo test --lib`、`cargo test --lib --features http_api` 全绿，测试数量以当次输出为准；隔离数据库 room_fixture 与崩溃恢复用例逐个实跑。
 - **T5.5 性能与内存基线**：典型窗口（单元素改动 / 整 BRAN 重排 / 百元素窗口）的端到端耗时与 staging 峰值内存，对比现行路径，回归阈值入 CI 报告。
 
 ## 4. 风险清单
@@ -81,7 +81,7 @@
 
 ## 5. 明确不做（本期）
 
-- 不做常驻全库镜像；不做任何形式的降级提交（自动或人工）；不改基线 / 冷启动 / 全量生成路径；不动 ADR-012 合批策略与 fresh/retry 判据；不动 ADR-015 pending 身份；phase-2 fork 暂存会话只立方向不设计细节。
+- 不做常驻全库镜像；不做任何形式的降级提交（自动或人工）；不改基线 / 冷启动 / 全量生成路径；恢复 ADR-012 的 fresh 合批与逐根回退，不改 ADR-015 pending 身份；phase-2 fork 暂存会话只立方向不设计细节。
 
 ## 6. 落地情况（2026-08-06 实现审核后补记）
 
@@ -90,3 +90,4 @@
 - 房间边写入改为 `DELETE + INSERT RELATION`（显式 `{panel}_{element}` id）经 `execute_model_write` 进 journal（2026-08-06 修复：此前 `RELATE` 形态被 ReplaySafe validator 整类拒绝，窗口内任何非空归属写入必败、全部落 pending，§T3.2 名存实亡）。
 - CATA 按需解析产物按 ADR-017 §7 落地为 `Both`（暂存生效 + 进 journal 随窗口提交；2026-08-06 修复：此前误为 `StagingOnly`，产物随窗口 DROP 丢失、持久层 CATA 覆盖停止增长）。
 - 窗口终态清扫（`sweep_orphan_staging_databases`）已接到每个窗口终态（`batch_worker::drop_window_and_sweep`；2026-08-06 前只建未接）。
+- 2026-08-06 五缺陷闭环：尾事务登记 `SpatialReconcile` 并在出队前强制收敛；窗口吸收本库已有 pending revision 并原子结算；所有模型修改根统一持锁；房间预载失败整轮跳过；面板重算同步维护两张房间关系表。详细开发与验收清单见 `docs/plans/2026-08-06-staged-increment-five-defect-closure-plan.md`。

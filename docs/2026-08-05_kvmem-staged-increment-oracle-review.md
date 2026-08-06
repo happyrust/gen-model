@@ -27,6 +27,18 @@
 | E1 | P0 缺语义等价黄金测试（高） | 成立 | **采纳**：T0.6 mini-window parity harness（门槛） | 方案 T0.6 |
 | E2 | 对拍缺 mesh 集合 hash / MQTT 计数 / 空间树 checksum / 缓存失效次数（高） | 前三项成立；缓存失效计数噪音大 | **部分采纳**（前三项入 T5.2） | 方案 T5.2 |
 | E3 | 副作用纪律放 P4 太晚，泄漏进空间树/通告（中） | 成立且属正确性问题 | **采纳**：前置为 T2.0，并写进 ADR §9 | ADR-017 §9、方案 T2.0/T4.2 |
+
+## 2026-08-06 实现审核附录
+
+后续代码审核又确认五个实现级缺口，并据此修订 ADR-017 与开发方案：
+
+1. 房间工作集预载失败后仍可能用不完整 staging 拓扑执行；现约束为任一步失败整轮 fail-closed，任务保留 pending。
+2. 水位后的空间刷新、删除与房间触发只有内存状态；现由尾事务写入 durable `SpatialReconcile`，worker 在下一批出队前完成内存树与文件持久化，失败跨重启重试。
+3. Transform/DeleteCleanup 未覆盖生成根锁；现于任何非 regen 模型修改前解析、排序并持有全部受影响根，锁持续到提交后空间收敛完成。
+4. 增量面板重算只维护 `room_relate`；现与 `room_panel_relate` 使用同一面板重算入口，staging 与 durable drain 共用。
+5. 窗口未吸收已有 pending revision，成功根可能在提交后再次生成；现合并本库 pending、窗口内恢复 fresh 合批、成功根从 finalize 计划移除，并以 revision 条件在尾事务收口已有行。
+
+验收证据以当次 `cargo test --lib`、`cargo test --lib --features http_api`、隔离 room_fixture 与崩溃/持久化故障注入结果为准，不再引用固定测试数量。
 | F1-F3 | 三大担心：journal 假 redo / 暂存与提交不等价 / 长窗口资源失控 | 与 A2/A1+E1/B1 同源 | 已由上述条目覆盖（T0.5、T0.6+T5.2/T5.3、T0.3） | — |
 
 ## 结论

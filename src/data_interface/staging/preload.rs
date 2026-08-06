@@ -168,6 +168,12 @@ async fn preload_room_working_set_from(
         copied
     };
     copied += copy_relations(source, "room_relate", "SELECT * FROM room_relate").await?;
+    copied += copy_relations(
+        source,
+        "room_panel_relate",
+        "SELECT * FROM room_panel_relate",
+    )
+    .await?;
     copied += preload_existing_generation_products_from(source, &panels).await?;
     Ok(copied)
 }
@@ -556,6 +562,7 @@ mod tests {
                 "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100';
                  CREATE pe:⟨4000000001_2⟩ SET noun='PANE';
                  RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
+                 RELATE pe:⟨4000000001_1⟩->room_panel_relate:room_panel->pe:⟨4000000001_2⟩ SET room_num='R100';
                  RELATE pe:⟨4000000001_2⟩->room_relate:panel_member->pe:⟨4000000001_3⟩ SET room_num='R100';",
             )
             .await
@@ -580,19 +587,19 @@ mod tests {
             .await
             .expect("preload rooms");
 
-        assert_eq!(copied, 4);
+        assert_eq!(copied, 5);
         assert!(window.journal().await.is_empty());
         let mut response = window
             .staging_db()
             .query(
-                "RETURN [count(SELECT * FROM room_relate), count(SELECT * FROM pe),
+                "RETURN [count(SELECT * FROM room_relate), count(SELECT * FROM room_panel_relate), count(SELECT * FROM pe),
                  count(SELECT * FROM pe_owner)];",
             )
             .await
             .expect("inspect");
         assert_eq!(
             response.take::<Vec<usize>>(0).expect("room rows"),
-            vec![1, 2, 1]
+            vec![1, 1, 2, 1]
         );
         let map = window
             .scope(crate::fast_model::room_model::load_room_panel_map_from_pe(

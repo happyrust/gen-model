@@ -22,6 +22,8 @@ pub enum SideEffectKind {
     SystDerived,
     /// 某个窗口的反向引用索引没维护上，需要按引用者定点重建（ADR-003）。
     RefRevMaintain,
+    /// 水位提交后必须完成的空间树刷新/删除与文件持久化。
+    SpatialReconcile,
 }
 
 impl SideEffectKind {
@@ -29,6 +31,7 @@ impl SideEffectKind {
         match self {
             Self::SystDerived => "syst_derived",
             Self::RefRevMaintain => "ref_rev_maintain",
+            Self::SpatialReconcile => "spatial_reconcile",
         }
     }
 }
@@ -42,6 +45,10 @@ pub struct PendingJob {
     pub db_type: String,
     #[serde(default)]
     pub changed_refnos: Vec<String>,
+    #[serde(default)]
+    pub refresh_refnos: Vec<String>,
+    #[serde(default)]
+    pub remove_refnos: Vec<String>,
     pub status: String,
     #[serde(default)]
     pub attempts: u32,
@@ -56,6 +63,36 @@ pub struct SideEffectCompensator;
 impl SideEffectCompensator {
     fn record_id(kind: SideEffectKind, dbnum: u32, end_sesno: i32) -> String {
         format!("{}:{}_{}_{}", TABLE, kind.as_str(), dbnum, end_sesno)
+    }
+
+    /// Render one durable post-commit spatial intent for the window tail transaction.
+    pub(crate) fn render_spatial_reconcile_upsert(
+        dbnum: u32,
+        end_sesno: i32,
+        refresh_refnos: &[String],
+        remove_refnos: &[String],
+    ) -> anyhow::Result<String> {
+        let refresh = refresh_refnos
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let remove = remove_refnos
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(refno) = refresh.intersection(&remove).next() {
+            anyhow::bail!("空间任务 refno {refno} 同时 refresh/remove");
+        }
+        let id = Self::record_id(SideEffectKind::SpatialReconcile, dbnum, end_sesno);
+        let refresh_json = serde_json::to_string(&refresh.into_iter().collect::<Vec<_>>())?;
+        let remove_json = serde_json::to_string(&remove.into_iter().collect::<Vec<_>>())?;
+        Ok(format!(
+            "UPSERT {id} SET kind = 'spatial_reconcile', dbnum = {dbnum}, \
+             end_sesno = {end_sesno}, db_type = 'DESI', changed_refnos = [], \
+             refresh_refnos = {refresh_json}, remove_refnos = {remove_json}, \
+             status = 'pending', attempts = attempts?:0, last_error = NONE, \
+             updated_at = time::now();"
+        ))
     }
 
     /// After PE+watermark success: enqueue only legacy non-model side effects.
@@ -193,6 +230,88 @@ impl SideEffectCompensator {
         Ok(())
     }
 
+    /// Complete every committed spatial intent before the worker admits another data batch.
+    /// Spatial jobs deliberately ignore [`MAX_ATTEMPTS`]: abandoning one would publish a
+    /// watermark whose global spatial state can never catch up.
+    pub async fn reconcile_spatial_pending(_mgr: &AiosDBManager) -> anyhow::Result<usize> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND status IN ['pending', 'failed'] ORDER BY updated_at ASC;"
+            ))
+            .await?
+            .check()?;
+        let jobs: Vec<PendingJob> = response.take(0)?;
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+
+        let outcome = async {
+            let mut deferred = crate::data_interface::staging::write_context::DeferredSpatialMutations::default();
+            for job in &jobs {
+                for raw in &job.refresh_refnos {
+                    let refno = raw
+                        .parse::<RefU64>()
+                        .map(RefnoEnum::from)
+                        .map_err(|_| anyhow::anyhow!("invalid spatial refresh refno {raw}"))?;
+                    deferred.remove.remove(&refno);
+                    deferred.refresh.insert(refno);
+                }
+                for raw in &job.remove_refnos {
+                    let refno = raw
+                        .parse::<RefU64>()
+                        .map(RefnoEnum::from)
+                        .map_err(|_| anyhow::anyhow!("invalid spatial remove refno {raw}"))?;
+                    deferred.refresh.remove(&refno);
+                    deferred.remove.insert(refno);
+                }
+            }
+            crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await?;
+            crate::fast_model::aabb_tree::persist_aabb_tree().await
+        }
+        .await;
+        if let Err(error) = outcome {
+            let message = format!("{error:#}");
+            for job in &jobs {
+                let _ = Self::mark_failed(
+                    SideEffectKind::SpatialReconcile,
+                    job.dbnum,
+                    job.end_sesno,
+                    &message,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+
+        for job in &jobs {
+            Self::mark_done(
+                SideEffectKind::SpatialReconcile,
+                job.dbnum,
+                job.end_sesno,
+            )
+            .await?;
+        }
+        Ok(jobs.len())
+    }
+
+    pub async fn spatial_reconcile_status() -> anyhow::Result<serde_json::Value> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND status IN ['pending', 'failed'] ORDER BY updated_at DESC;"
+            ))
+            .await?
+            .check()?;
+        let jobs: Vec<PendingJob> = response.take(0)?;
+        Ok(serde_json::json!({
+            "pending": jobs.len(),
+            "retries": jobs.iter().map(|job| job.attempts as u64).sum::<u64>(),
+            "last_error": jobs.iter().find_map(|job| job.last_error.as_deref()),
+            "stalled": jobs.iter().any(|job| job.attempts >= MAX_ATTEMPTS),
+        }))
+    }
+
     async fn mark_abandoned(id: &Thing, reason: &str) -> anyhow::Result<()> {
         let sql = format!(
             "UPDATE {id} SET status = 'abandoned', last_error = '{}', updated_at = time::now();",
@@ -214,6 +333,7 @@ impl SideEffectCompensator {
     pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
         let sql = format!(
             "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+             AND kind != 'spatial_reconcile' \
              AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC;"
         );
         let mut response = SUL_DB.query(sql).await?.check()?;
@@ -265,6 +385,9 @@ impl SideEffectCompensator {
                     }
                     .await
                 }
+                SideEffectKind::SpatialReconcile => {
+                    unreachable!("spatial jobs are drained before dequeue")
+                }
             };
 
             let outcome = match result {
@@ -305,4 +428,39 @@ impl SideEffectCompensator {
     // `complete_syst_jobs` / `fail_syst_jobs` 随 `execute_incr_update` 退役：
     // 合流后 SYST 派生只走本补偿队列（enqueue_syst → drain 逐作业 mark_done /
     // mark_failed），不再有「先同步跑一遍、成了再回头销行」的旁路。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SideEffectCompensator, SideEffectKind};
+
+    #[test]
+    fn spatial_reconcile_row_is_deterministic_and_keeps_final_net_mutation() {
+        let sql = SideEffectCompensator::render_spatial_reconcile_upsert(
+            24381,
+            42,
+            &["16777216/1".to_string(), "16777216/2".to_string()],
+            &["16777216/3".to_string()],
+        )
+        .expect("spatial reconcile SQL");
+
+        assert!(sql.contains("incr_side_effect_pending:spatial_reconcile_24381_42"));
+        assert!(sql.contains("kind = 'spatial_reconcile'"));
+        assert!(sql.contains("refresh_refnos = [\"16777216/1\",\"16777216/2\"]"));
+        assert!(sql.contains("remove_refnos = [\"16777216/3\"]"));
+        assert_eq!(SideEffectKind::SpatialReconcile.as_str(), "spatial_reconcile");
+    }
+
+    #[test]
+    fn spatial_reconcile_rejects_conflicting_refno() {
+        let duplicate = "16777216/1".to_string();
+        let error = SideEffectCompensator::render_spatial_reconcile_upsert(
+            24381,
+            42,
+            std::slice::from_ref(&duplicate),
+            std::slice::from_ref(&duplicate),
+        )
+        .expect_err("same refno cannot be refreshed and removed");
+        assert!(error.to_string().contains("同时 refresh/remove"));
+    }
 }

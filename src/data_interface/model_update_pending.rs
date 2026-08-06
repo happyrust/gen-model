@@ -418,12 +418,80 @@ pub(crate) fn render_finalize_tail(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
+    render_finalize_tail_with_effects(
+        dbnum,
+        end_sesno,
+        plan,
+        window_statements,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("empty finalize effects are valid")
+}
+
+/// Make AABB-derived room work part of the same durable plan that advances the watermark.
+pub(crate) fn merge_room_recalc_changes(
+    plan: &mut ModelUpdatePlan,
+    dbnum: u32,
+    end_sesno: i32,
+    changes: &HashMap<RefnoEnum, String>,
+) {
+    let mut existing = plan
+        .work_items
+        .iter()
+        .map(|item| (item.action, item.target_refno.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut ordered = changes.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(refno, _)| **refno);
+    for (&refno, noun) in ordered {
+        let action = if noun == "PANE" {
+            ModelWorkAction::RoomRecalcPanel
+        } else {
+            ModelWorkAction::RoomRecalcElement
+        };
+        let target_refno = refno.to_pdms_str();
+        if existing.insert((action, target_refno.clone())) {
+            plan.work_items.push(ModelWorkItem {
+                dbnum,
+                db_type: "DESI".to_string(),
+                source_end_sesno: end_sesno,
+                action,
+                target_refno,
+                noun: noun.clone(),
+            });
+        }
+    }
+}
+
+pub(crate) fn render_finalize_tail_with_effects(
+    dbnum: u32,
+    end_sesno: i32,
+    plan: &ModelUpdatePlan,
+    window_statements: &[String],
+    refresh_refnos: &[String],
+    remove_refnos: &[String],
+    settled_regen: &[(String, u64)],
+) -> anyhow::Result<String> {
     let mut statements = window_statements.to_vec();
     statements.extend(plan.work_items.iter().map(render_upsert));
+    if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
+        statements.push(
+            crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
+                dbnum,
+                end_sesno,
+                refresh_refnos,
+                remove_refnos,
+            )?,
+        );
+    }
+    statements.extend(settled_regen.iter().map(|(root, revision)| {
+        render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
+    }));
     statements.push(render_watermark_advance(dbnum, end_sesno));
     statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
-    statements.join("\n")
+    Ok(statements.join("\n"))
 }
 
 /// Render the single transaction that closes a window: first the caller's
@@ -1678,7 +1746,8 @@ mod tests {
         window
             .staging_db()
             .query(
-                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
+                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';
+                 RELATE pe:4000000001_1->room_panel_relate:old->pe:4000000001_10 SET room_num='R100';",
             )
             .await
             .expect("fixture")
@@ -1767,7 +1836,13 @@ mod tests {
             .await
             .expect("inspect");
         assert!(response.take::<Vec<String>>(0).expect("edges").is_empty());
-        assert_eq!(window.journal().await.len(), 1);
+        let mut response = window
+            .staging_db()
+            .query("SELECT VALUE id FROM room_panel_relate")
+            .await
+            .expect("inspect topology");
+        assert!(response.take::<Vec<String>>(0).expect("topology edges").is_empty());
+        assert_eq!(window.journal().await.len(), 2);
         window.drop_database().await.expect("cleanup");
     }
 
@@ -2490,6 +2565,48 @@ mod tests {
             .find("UPSERT dbnum_watermark:8191")
             .unwrap_or_else(|| panic!("{sql}"));
         assert!(status_at < watermark_at, "{sql}");
+    }
+
+    #[test]
+    fn staged_tail_persists_spatial_intent_and_revision_guarded_settlement_before_watermark() {
+        let sql = render_finalize_tail_with_effects(
+            8191,
+            42,
+            &ModelUpdatePlan::default(),
+            &[],
+            &["16777216/2".to_string()],
+            &["16777216/3".to_string()],
+            &[("16777216/5".to_string(), 7)],
+        )
+        .expect("staged finalize tail");
+
+        let spatial = sql.find("spatial_reconcile_8191_42").expect("spatial intent");
+        let settlement = sql
+            .find("action = 'regen_root' AND target_refno = '16777216/5' AND (revision?:0) = 7")
+            .expect("revision-guarded settlement");
+        let watermark = sql.find("UPSERT dbnum_watermark:8191").expect("watermark");
+        assert!(spatial < watermark, "{sql}");
+        assert!(settlement < watermark, "{sql}");
+    }
+
+    #[test]
+    fn aabb_room_changes_are_part_of_the_finalize_plan_before_room_settlement() {
+        let mut plan = ModelUpdatePlan::default();
+        let changes = HashMap::from([
+            (RefnoEnum::from("16777216/2".parse::<RefU64>().unwrap()), "PANE".to_string()),
+            (RefnoEnum::from("16777216/3".parse::<RefU64>().unwrap()), "EQUI".to_string()),
+        ]);
+        merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
+        merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
+
+        assert_eq!(plan.work_items.len(), 2);
+        assert!(plan.work_items.iter().any(|item| {
+            item.action == ModelWorkAction::RoomRecalcPanel && item.target_refno == "16777216/2"
+        }));
+        assert!(plan.work_items.iter().any(|item| {
+            item.action == ModelWorkAction::RoomRecalcElement && item.target_refno == "16777216/3"
+        }));
+        assert!(plan.work_items.iter().all(|item| item.dbnum == 8191 && item.source_end_sesno == 42));
     }
 
     /// A baseline that advanced its watermark without queueing generation work

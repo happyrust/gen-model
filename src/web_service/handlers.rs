@@ -59,6 +59,14 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
         .await
         .unwrap_or_default();
+    let spatial_reconcile = crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status()
+        .await
+        .unwrap_or_else(|error| json!({
+            "pending": 0,
+            "retries": 0,
+            "last_error": format!("读取空间收敛状态失败: {error:#}"),
+            "stalled": true,
+        }));
     Json(json!({
         "status": "ok",
         "project": state.identity.project,
@@ -74,6 +82,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         "staging_window_blocks": window_blocks,
         "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
+        "spatial_reconcile": spatial_reconcile,
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,
