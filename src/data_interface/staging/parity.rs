@@ -520,3 +520,129 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
     let applied: Option<i32> = response.take(0).expect("watermark value");
     assert_eq!(applied, Some(2), "写回尾事务必须推进水位");
 }
+
+/// 2026-08-07 修复计划 §3.4 的另一半：**窗口废弃后持久层 `world_trans` 不变**。
+///
+/// P0-1 后果 2 的悬空形态只在两个时刻看得见——「写回成功前」与「窗口阻断 / 废弃
+/// 后永久」。上面那条钉的是前者（中途 diff）然后就提交了；提交成功之后新 trans
+/// 记录随 journal 落盘，指针照样解得开，那个时刻取不到证据。本条钉后者：窗口把
+/// Transform 产物算完**不写回**直接废弃，持久层必须还是窗口前那一份自洽状态——
+/// 指针仍指旧 trans 记录、`.d` 解得开、元素照旧落在 `world_trans.d != NONE` 的
+/// 读者视野里。
+///
+/// 修复前指针 UPDATE 直打持久层，这个元素的 `world_trans` 会指向一条只存在于
+/// 暂存库的新 hash；暂存库随窗口一起蒸发之后，它从 viewer / 几何查询 / 包围盒
+/// 刷新 / 房间判定**全部**读者里消失，且无人能修（D9 形态）。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_window_leaves_the_persistent_world_trans_resolvable() {
+    use super::lifecycle::create_window_on;
+    use super::resources::ResourceThresholds;
+    use crate::data_interface::increment_manager::refresh_world_transform_products;
+    use aios_core::options::DbOption;
+    use aios_core::{RefU64, RefnoEnum};
+
+    const DBNUM: u32 = 7984;
+    // 保留段，序号避开其它夹具——GLOBAL_AABB_TREE 是进程级共享。
+    let refu = |n: u64| RefU64((4000000001u64 << 32) | n);
+    let root = RefnoEnum::from(refu(779001));
+    let equi = RefnoEnum::from(refu(779002));
+    let root_pe = root.to_pe_key();
+    let equi_pe = equi.to_pe_key();
+    let equi_inst = equi.to_inst_relate_key();
+    let root_id = root_pe.trim_start_matches("pe:").to_string();
+    let equi_id = equi_pe.trim_start_matches("pe:").to_string();
+    let equi_inst_id = equi_inst.trim_start_matches("inst_relate:").to_string();
+
+    // 窗口前的持久态：名词表行已带新 POS（解析已应用），产物仍是旧的一整套
+    // （trans:zzab_old ← inst_relate.world_trans，且 trans:zzab_old 自身在场）。
+    let fixture = format!(
+        "UPSERT {root_pe} CONTENT {{ noun: 'SITE', deleted: false, refno: SITE:⟨{root_id}⟩ }};\
+         UPSERT SITE:⟨{root_id}⟩ CONTENT {{ TYPE: 'SITE', NAME: '/ZZAB-ROOT' }};\
+         UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: {root_pe}, refno: EQUI:⟨{equi_id}⟩ }};\
+         UPSERT EQUI:⟨{equi_id}⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZAB-EQUI', POS: [3000.0, 0.0, 0.0] }};\
+         UPSERT trans:zzab_old CONTENT {{ d: {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }} }};\
+         UPSERT aabb:zzab_geo CONTENT {{ d: {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }} }};\
+         UPSERT inst_info:zzab_geo CONTENT {{ dbnum: {DBNUM} }};\
+         UPSERT inst_geo:zzab_geo CONTENT {{ meshed: true, visible: true, aabb: aabb:zzab_geo }};\
+         INSERT RELATION INTO geo_relate [{{ id: geo_relate:zzab_geo, in: inst_info:zzab_geo, out: inst_geo:zzab_geo, trans: trans:zzab_old, geo_type: 'Pos', visible: true }}];\
+         INSERT RELATION INTO inst_relate [{{ id: {equi_inst}, in: {equi_pe}, out: inst_info:zzab_geo, world_trans: trans:zzab_old, aabb: aabb:zzab_geo, solid: true, generic: 'EQUI' }}];"
+    );
+
+    let target = fresh_db("abandon", "abandon_persistent").await;
+    init_staging_schema(&target).await.expect("target schema");
+    apply_all(&target, &[fixture.clone()]).await;
+    let baseline = snapshot_data_tables(&target).await;
+
+    let instance = connect("mem://").await.expect("staging mem boots");
+    let window = create_window_on(&instance, DBNUM, 2, 2, ResourceThresholds::default())
+        .await
+        .expect("create window");
+    window
+        .staging_db()
+        .query(&fixture)
+        .await
+        .expect("preload transport")
+        .check()
+        .expect("preload applied");
+
+    let db_option = DbOption::default();
+    window
+        .scope(refresh_world_transform_products(&db_option, &[equi]))
+        .await
+        .expect("窗口计算全程不得触碰持久层（SUL_DB 未连接，直写即错）");
+
+    // 暂存里指针确实改指了新 hash——没有这一条，下面的「持久层没变」就可能只是
+    // 因为 Transform 压根没算出东西来。
+    let mut response = window
+        .staging_db()
+        .query(format!("RETURN record::id({equi_inst}.world_trans);"))
+        .await
+        .expect("staged pointer transport")
+        .check()
+        .expect("valid staged pointer query");
+    let staged_trans: Option<String> = response.take(0).expect("take staged trans id");
+    assert_ne!(
+        staged_trans.as_deref(),
+        Some("zzab_old"),
+        "前提：窗口内必须真的算出了新 trans 记录并改指，否则本用例什么都没验"
+    );
+
+    // 窗口废弃：不写回，直接扔掉暂存库（阻断 / 资源超限 / 进程重启的终态形态）。
+    window.drop_database().await.expect("drop staging db");
+
+    assert_eq!(
+        changed_data_tables(&baseline, &snapshot_data_tables(&target).await),
+        std::collections::BTreeSet::new(),
+        "窗口废弃后持久层数据面必须与窗口前一字不差"
+    );
+
+    let mut response = target
+        .query(format!(
+            "RETURN record::id({equi_inst}.world_trans);\
+             RETURN {equi_inst}.world_trans.d != NONE;\
+             SELECT VALUE record::id(id) FROM inst_relate WHERE world_trans.d != NONE;"
+        ))
+        .await
+        .expect("persistent pointer transport")
+        .check()
+        .expect("valid persistent pointer query");
+    let trans_id: Option<String> = response.take(0).expect("take trans id");
+    let resolvable: Option<bool> = response.take(1).expect("take resolvable");
+    let visible: Vec<String> = response.take(2).expect("take visible rows");
+
+    assert_eq!(
+        trans_id.as_deref(),
+        Some("zzab_old"),
+        "窗口废弃后持久层指针必须还指着窗口前那条 trans 记录"
+    );
+    assert_eq!(
+        resolvable,
+        Some(true),
+        "持久层指针必须解得开——指向暂存专属记录就是永久悬空（D9）"
+    );
+    assert!(
+        visible.contains(&equi_inst_id),
+        "元素必须仍出现在 `world_trans.d != NONE` 的读者视野里（viewer / 几何查询 / \
+         包围盒刷新 / 房间判定共用这条判据）: {visible:?}"
+    );
+}
