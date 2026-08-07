@@ -1,0 +1,68 @@
+name: Windows binary
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-binary-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            C:\vcpkg\installed
+          key: windows-release-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install OpenCASCADE
+        shell: pwsh
+        run: |
+          vcpkg install opencascade:x64-windows
+          "OCC_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows" >> $env:GITHUB_ENV
+
+      - name: Build release binary
+        run: >-
+          cargo build --release --locked --bin aios-database
+          --no-default-features
+          --features ws,gen_model,manifold,occ,project_hd,http_api
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          $out = "dist/aios-database-windows-x64"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item target/release/aios-database.exe $out
+          Get-ChildItem "$env:OCC_ROOT/bin/*.dll" | Copy-Item -Destination $out
+          @"
+          commit=$env:GITHUB_SHA
+          ref=$env:GITHUB_REF
+          built_at=$([DateTime]::UtcNow.ToString('O'))
+          target=x86_64-pc-windows-msvc
+          "@ | Set-Content "$out/BUILD.txt" -Encoding utf8
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aios-database-windows-x64
+          path: dist/aios-database-windows-x64
+          if-no-files-found: error
+          retention-days: 30
