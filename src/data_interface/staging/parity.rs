@@ -643,3 +643,178 @@ async fn an_abandoned_window_leaves_the_persistent_world_trans_resolvable() {
          包围盒刷新 / 房间判定共用这条判据）: {visible:?}"
     );
 }
+
+/// W1（2026-08-07 方案 W5.2）：带 POS 祖先的 Transform 走**解析式祖先预载 +
+/// 真实窗口 + 写回**，三条断言——
+///
+/// 1. **I1 零落盘**：预载（StagingOnly）与窗口计算中途，持久层数据面与基线
+///    一字不差；journal 里不得出现任何祖先预载行（pe / 名词表 / 链边）；
+/// 2. **绝对位置**：写回后持久层 `world_trans.d.translation` 恰等于完整祖先链
+///    合成的真值 [1000, 500, 7]——不是「变了」，是「对了」；
+/// 3. **写回 diff 恰等于 journal 终态**：变化只落在 Transform 自己的产物表
+///    （trans / aabb / inst_relate），祖先设计数据表（pe / WORL / SITE / ZONE /
+///    EQUI / pe_owner）零变化——StagingOnly 的旧态没混进写回。
+#[tokio::test(flavor = "multi_thread")]
+async fn staged_transform_with_a_pos_ancestor_writes_back_the_absolute_position() {
+    use super::ancestor_preload::fixtures::world_chain;
+    use super::ancestor_preload::{
+        apply_ancestor_preload, resolve_ancestor_closure, validate_ancestor_preload,
+    };
+    use super::lifecycle::create_window_on;
+    use super::resources::ResourceThresholds;
+    use super::{StagedFinalize, register_staged_finalize};
+    use crate::data_interface::increment_manager::refresh_world_transform_products;
+    use aios_core::RefnoEnum;
+    use aios_core::options::DbOption;
+
+    const DBNUM: u32 = 7978;
+    // 保留段 785xxx，避开其它夹具——GLOBAL_AABB_TREE 是进程级共享。
+    let (chain, worl, equi_ref) = world_chain(785000);
+    let equi = RefnoEnum::from(equi_ref);
+    let equi_pe = equi.to_pe_key();
+    let equi_inst = equi.to_inst_relate_key();
+
+    // 窗口前的持久层世界：完整祖先链（pe + 名词表行，POS 齐备）+ 旧产物。
+    // 设计数据与文件态同源（纯位姿变更的解析已应用形态），祖先在持久层本就
+    // 在场——暂存侧的它们只能来自解析式预载，这正是本用例要证的通路。
+    let base_fixture = format!(
+        "UPSERT pe:4000000001_785001 CONTENT {{ noun: 'WORL', deleted: false, refno: WORL:⟨4000000001_785001⟩ }};\
+         UPSERT WORL:⟨4000000001_785001⟩ CONTENT {{ TYPE: 'WORL', NAME: '/*' }};\
+         UPSERT pe:4000000001_785002 CONTENT {{ noun: 'SITE', deleted: false, owner: pe:4000000001_785001, refno: SITE:⟨4000000001_785002⟩ }};\
+         UPSERT SITE:⟨4000000001_785002⟩ CONTENT {{ TYPE: 'SITE', NAME: '/ZZAP-SITE', POS: [0.0, 0.0, 7.0] }};\
+         UPSERT pe:4000000001_785003 CONTENT {{ noun: 'ZONE', deleted: false, owner: pe:4000000001_785002, refno: ZONE:⟨4000000001_785003⟩ }};\
+         UPSERT ZONE:⟨4000000001_785003⟩ CONTENT {{ TYPE: 'ZONE', NAME: '/ZZAP-ZONE', POS: [0.0, 500.0, 0.0] }};\
+         UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: pe:4000000001_785003, refno: EQUI:⟨4000000001_785004⟩ }};\
+         UPSERT EQUI:⟨4000000001_785004⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZAP-EQUI', POS: [1000.0, 0.0, 0.0] }};\
+         UPSERT trans:zzpa_old CONTENT {{ d: {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }} }};\
+         UPSERT aabb:zzpa_geo CONTENT {{ d: {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }} }};\
+         UPSERT inst_info:zzpa_geo CONTENT {{ dbnum: {DBNUM} }};\
+         UPSERT inst_geo:zzpa_geo CONTENT {{ meshed: true, visible: true, aabb: aabb:zzpa_geo }};\
+         INSERT RELATION INTO geo_relate [{{ id: geo_relate:zzpa_geo, in: inst_info:zzpa_geo, out: inst_geo:zzpa_geo, trans: trans:zzpa_old, geo_type: 'Pos', visible: true }}];\
+         INSERT RELATION INTO inst_relate [{{ id: {equi_inst}, in: {equi_pe}, out: inst_info:zzpa_geo, world_trans: trans:zzpa_old, aabb: aabb:zzpa_geo, solid: true, generic: 'EQUI' }}];"
+    );
+
+    let target = fresh_db("ancestor_parity", "ancestor_parity_persistent").await;
+    init_staging_schema(&target).await.expect("target schema");
+    apply_all(
+        &target,
+        &[
+            base_fixture.clone(),
+            format!("UPSERT dbnum_watermark:{DBNUM} SET dbnum = {DBNUM}, applied_sesno = 1;"),
+        ],
+    )
+    .await;
+    let baseline = snapshot_data_tables(&target).await;
+
+    let instance = connect("mem://").await.expect("staging mem boots");
+    let window = create_window_on(&instance, DBNUM, 2, 2, ResourceThresholds::default())
+        .await
+        .expect("create window");
+    // 暂存只种「窗口解析会写的」：目标自己的 pe + 名词表行 + 既有产物——
+    // 祖先一行都不种，逼它们走解析式预载。
+    window
+        .staging_db()
+        .query(format!(
+            "UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: pe:4000000001_785003, refno: EQUI:⟨4000000001_785004⟩ }};\
+             UPSERT EQUI:⟨4000000001_785004⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZAP-EQUI', POS: [1000.0, 0.0, 0.0] }};\
+             UPSERT trans:zzpa_old CONTENT {{ d: {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }} }};\
+             UPSERT aabb:zzpa_geo CONTENT {{ d: {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }} }};\
+             UPSERT inst_info:zzpa_geo CONTENT {{ dbnum: {DBNUM} }};\
+             UPSERT inst_geo:zzpa_geo CONTENT {{ meshed: true, visible: true, aabb: aabb:zzpa_geo }};\
+             INSERT RELATION INTO geo_relate [{{ id: geo_relate:zzpa_geo, in: inst_info:zzpa_geo, out: inst_geo:zzpa_geo, trans: trans:zzpa_old, geo_type: 'Pos', visible: true }}];\
+             INSERT RELATION INTO inst_relate [{{ id: {equi_inst}, in: {equi_pe}, out: inst_info:zzpa_geo, world_trans: trans:zzpa_old, aabb: aabb:zzpa_geo, solid: true, generic: 'EQUI' }}];"
+        ))
+        .await
+        .expect("plant staged fixture")
+        .check()
+        .expect("staged fixture applied");
+
+    let closure = {
+        let mut lookup = {
+            let chain = chain.clone();
+            move |refno| std::future::ready(Ok(chain.get(&refno).cloned()))
+        };
+        resolve_ancestor_closure(&[equi_ref], worl, 2, &mut lookup)
+            .await
+            .expect("resolve ancestor closure")
+    };
+
+    let db_option = DbOption::default();
+    window
+        .scope(async {
+            apply_ancestor_preload(&closure, DBNUM).await?;
+            validate_ancestor_preload(&closure).await?;
+            refresh_world_transform_products(&db_option, &[equi]).await?;
+            register_staged_finalize(StagedFinalize {
+                dbnum: DBNUM,
+                end_sesno: 2,
+                plan: Default::default(),
+                window_statements: Vec::new(),
+                cache_refnos: Vec::new(),
+            })
+            .await
+        })
+        .await
+        .expect("窗口计算全程不得触碰持久层（SUL_DB 未连接，直写即错）");
+
+    // 断言 1a：journal 里没有任何祖先预载行（StagingOnly 纪律）。
+    for entry in window.journal().await {
+        assert!(
+            !entry.sql.contains("INSERT IGNORE INTO pe [")
+                && !entry.sql.contains("INSERT IGNORE INTO WORL")
+                && !entry.sql.contains("INSERT IGNORE INTO SITE")
+                && !entry.sql.contains("INSERT IGNORE INTO ZONE")
+                && !entry.sql.contains("INSERT IGNORE INTO EQUI")
+                && !entry.sql.contains("pe_owner:["),
+            "祖先预载行绝不进 journal: {}",
+            entry.sql
+        );
+    }
+    // 断言 1b：写回之前持久层数据面零变化。
+    assert_eq!(
+        changed_data_tables(&baseline, &snapshot_data_tables(&target).await),
+        std::collections::BTreeSet::new(),
+        "I1 零落盘：窗口计算中途持久层数据面必须与基线一字不差"
+    );
+
+    window
+        .commit_registered_to(&target)
+        .await
+        .expect("staged write-back");
+    window.drop_database().await.expect("cleanup");
+
+    // 断言 2：写回后的绝对位置 = 完整祖先链合成的真值。
+    let mut response = target
+        .query(format!("RETURN {equi_inst}.world_trans.d.translation;"))
+        .await
+        .expect("persistent world trans transport")
+        .check()
+        .expect("valid persistent world trans query");
+    let translation: Vec<f64> = response.take(0).expect("take translation");
+    assert_eq!(
+        translation,
+        vec![1000.0, 500.0, 7.0],
+        "写回后的世界变换必须合成 ZONE/SITE 的位移（修复前会静默丢成 [1000,0,0]）"
+    );
+
+    // 断言 3：写回 diff 恰等于 journal 终态——只有 Transform 自己的产物表
+    // （外加尾事务登记的空间意图 spatial_epoch）变了，祖先设计数据表零变化。
+    let changed = changed_data_tables(&baseline, &snapshot_data_tables(&target).await);
+    assert_eq!(
+        changed,
+        std::collections::BTreeSet::from([
+            "aabb".to_string(),
+            "inst_relate".to_string(),
+            "spatial_epoch".to_string(),
+            "trans".to_string(),
+        ]),
+        "写回只许改 Transform 的产物表与尾事务的空间意图；祖先旧态（pe / 名词表 / 链边）\
+         不得混进写回"
+    );
+    let mut response = target
+        .query(format!("RETURN dbnum_watermark:{DBNUM}.applied_sesno;"))
+        .await
+        .expect("watermark transport");
+    let applied: Option<i32> = response.take(0).expect("watermark value");
+    assert_eq!(applied, Some(2), "写回尾事务必须推进水位");
+}

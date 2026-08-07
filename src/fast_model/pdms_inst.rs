@@ -122,6 +122,279 @@ pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
 }
 
 
+/// 一个生成行（inst_relate / tubi_relate）的渲染期元数据（W4，决议 D6）。
+///
+/// 这些值从前以 `fn::find_ancestor_type` / `fn::anc_u64` / `{pe}.dbnum` /
+/// `fn::ses_date` 的形态**内联在 journal 字面量里**：窗口内对暂存求值一遍、
+/// 写回重放时对持久层**再求值一遍**——重放硬依赖持久层灌了这些函数（与
+/// issue #16 同族的故障面）。现在渲染时解一次、写死固定值，journal 变成纯数据。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResolvedInstMeta {
+    /// 最近的 ZONE（含自身），无则 NONE——与 `fn::find_ancestor_type(pe,'ZONE')` 同义。
+    pub zone_refno: Option<RefU64>,
+    /// 自身 → 顶的祖先链 RefU64 打包值（含自身）——与 `fn::anc_u64(pe)` 同义，
+    /// 但走 Rust 链不吃函数展开层数的静默截断。
+    pub anc: Vec<u64>,
+    /// `pe.dbnum`。
+    pub dbnum: Option<i64>,
+    /// `fn::ses_date(pe)` 的渲染就绪字面量（`d'…'` / NONE）。
+    pub dt_literal: Option<String>,
+}
+
+impl ResolvedInstMeta {
+    pub(crate) fn zone_literal(&self) -> String {
+        self.zone_refno
+            .map(|refno| refno.to_pe_key())
+            .unwrap_or_else(|| "NONE".into())
+    }
+
+    pub(crate) fn anc_literal(&self) -> String {
+        format!(
+            "[{}]",
+            self.anc.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+        )
+    }
+
+    pub(crate) fn dbnum_literal(&self) -> String {
+        self.dbnum
+            .map(|dbnum| dbnum.to_string())
+            .unwrap_or_else(|| "NONE".into())
+    }
+
+    pub(crate) fn dt_literal(&self) -> &str {
+        self.dt_literal.as_deref().unwrap_or("NONE")
+    }
+}
+
+/// 生产入口：经读路由解析（暂存窗口内查暂存——W1 已保证生成根的子树与祖先都在；
+/// 直写模式查持久层）。`ses` 行是 append-only 历史：暂存里只有本窗口的新会话，
+/// 旧会话的日期回落持久层点查——单写者下「暂存新态 + 持久层旧态」的合成恰等于
+/// 写回重放后的持久层，也就是老字面量在重放时求值看到的同一个世界。
+pub(crate) async fn resolve_inst_meta(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<HashMap<RefU64, ResolvedInstMeta>> {
+    let db = crate::data_interface::staging::active_data_db();
+    let ses_fallback = aios_core::staging::active_staging_reads().map(|_| SUL_DB.clone());
+    resolve_inst_meta_on(&db, ses_fallback.as_ref(), refnos).await
+}
+
+pub(crate) async fn resolve_inst_meta_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ses_fallback: Option<&surrealdb::Surreal<surrealdb::engine::any::Any>>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<HashMap<RefU64, ResolvedInstMeta>> {
+    use crate::data_interface::cata_closure::is_valid_ref0;
+    const CHUNK: usize = 200;
+    /// 防御性走链上限（owner 环 / 数据损坏的最后一道闸）。
+    const WALK_CAP: usize = 64;
+
+    #[derive(serde::Deserialize)]
+    struct PeMetaRow {
+        id: RefnoEnum,
+        #[serde(default)]
+        owner: Option<RefnoEnum>,
+        #[serde(default)]
+        noun: Option<String>,
+        #[serde(default)]
+        dbnum: Option<i64>,
+        #[serde(default)]
+        sesno: Option<i64>,
+    }
+    type PeMeta = (Option<RefU64>, Option<String>, Option<i64>, Option<i64>);
+
+    let mut seeds: Vec<RefU64> = refnos
+        .iter()
+        .map(RefnoEnum::refno)
+        .filter(|refno| is_valid_ref0(refno.get_0()))
+        .collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    if seeds.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // 1) 层级预取：seed 层 → owner 层 → …（`None` = 行不存在，问过了）。
+    let mut cache: HashMap<RefU64, Option<PeMeta>> = HashMap::new();
+    let mut frontier = seeds.clone();
+    let mut level = 0usize;
+    while !frontier.is_empty() {
+        level += 1;
+        anyhow::ensure!(
+            level <= WALK_CAP,
+            "生成行元数据解析：owner 链层级超过 {WALK_CAP}（疑似成环），拒绝继续"
+        );
+        let mut next = Vec::new();
+        for chunk in frontier.chunks(CHUNK) {
+            let keys = chunk
+                .iter()
+                .map(|refno| refno.to_pe_key())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response = db
+                .query(format!(
+                    "SELECT id, owner, noun, dbnum, sesno FROM [{keys}] WHERE record::exists(id);"
+                ))
+                .await?
+                .check()?;
+            let rows: Vec<PeMetaRow> = response.take(0)?;
+            let mut found = std::collections::HashSet::new();
+            for row in rows {
+                let refno = row.id.refno();
+                found.insert(refno);
+                let owner = row
+                    .owner
+                    .map(|owner| owner.refno())
+                    .filter(|owner| is_valid_ref0(owner.get_0()));
+                if let Some(owner) = owner
+                    && !cache.contains_key(&owner)
+                {
+                    next.push(owner);
+                }
+                cache.insert(refno, Some((owner, row.noun, row.dbnum, row.sesno)));
+            }
+            for refno in chunk {
+                if !found.contains(refno) {
+                    cache.entry(*refno).or_insert(None);
+                }
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        next.retain(|refno| !cache.contains_key(refno));
+        frontier = next;
+    }
+
+    // 2) 逐 seed 出链：zone / anc / dbnum / sesno。
+    let mut out: HashMap<RefU64, ResolvedInstMeta> = HashMap::new();
+    let mut ses_pairs: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
+    for &seed in &seeds {
+        let Some(Some(seed_meta)) = cache.get(&seed).cloned() else {
+            // 行不在：与旧字面量对缺行的求值语义一致（fn:: 全 NONE / 空数组）。
+            println!(
+                "生成行元数据解析：{} 的 pe 行不在当前世界，zone/anc/dbnum/dt 按空态渲染",
+                seed.to_pe_key()
+            );
+            out.insert(seed, ResolvedInstMeta::default());
+            continue;
+        };
+        let mut chain = Vec::new();
+        let mut zone = None;
+        let mut cursor = seed;
+        loop {
+            let Some(Some(meta)) = cache.get(&cursor).cloned() else {
+                // owner 字段指向的行不存在：这不是「到顶」，是断链。W1 之后暂存
+                // 里生成根的闭包与祖先都应在场，缺 = 预载被破坏；直写模式缺 =
+                // 持久层数据损坏。宁可响亮失败进重试，也不烘一个错值进 journal。
+                anyhow::bail!(
+                    "生成行元数据解析：{} 的祖先链在 {} 处断裂（owner 指向的行不存在）。\
+                     暂存窗口内这意味着祖先预载被破坏，直写模式意味着持久层所有权数据损坏",
+                    seed.to_pe_key(),
+                    cursor.to_pe_key()
+                );
+            };
+            anyhow::ensure!(
+                cursor.0 <= i64::MAX as u64,
+                "refno 打包值 {} 超出 SurrealDB int（i64）上限，拒绝静默截断",
+                cursor.0
+            );
+            anyhow::ensure!(
+                chain.len() <= WALK_CAP,
+                "生成行元数据解析：{} 的祖先链超过 {WALK_CAP} 跳（疑似成环）",
+                seed.to_pe_key()
+            );
+            chain.push(cursor.0);
+            if zone.is_none() && meta.1.as_deref() == Some("ZONE") {
+                zone = Some(cursor);
+            }
+            match meta.0 {
+                Some(owner) => cursor = owner,
+                None => break,
+            }
+        }
+        if let (Some(dbnum), Some(sesno)) = (seed_meta.2, seed_meta.3) {
+            ses_pairs.insert((dbnum, sesno));
+        }
+        out.insert(
+            seed,
+            ResolvedInstMeta {
+                zone_refno: zone,
+                anc: chain,
+                dbnum: seed_meta.2,
+                dt_literal: None, // 下面按 (dbnum, sesno) 批量补
+            },
+        );
+    }
+
+    // 3) 会话日期：`ses:[dbnum, sesno].date`。先问当前世界（暂存窗口内含本窗口
+    //    新会话），miss 再回落持久层（旧会话的历史行）。
+    let mut ses_dates: HashMap<(i64, i64), String> = HashMap::new();
+    let pairs = ses_pairs.into_iter().collect::<Vec<_>>();
+    for chunk in pairs.chunks(CHUNK) {
+        let probes = chunk
+            .iter()
+            .map(|(dbnum, sesno)| format!("ses:[{dbnum}, {sesno}].date"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = db.query(format!("RETURN [{probes}];")).await?.check()?;
+        let values: surrealdb::Value = response.take(0)?;
+        let surrealdb::sql::Value::Array(values) = values.into_inner() else {
+            anyhow::bail!("会话日期探针返回了非数组结果");
+        };
+        for (pair, value) in chunk.iter().zip(values.iter()) {
+            if !matches!(value, surrealdb::sql::Value::None | surrealdb::sql::Value::Null) {
+                ses_dates.insert(
+                    *pair,
+                    crate::data_interface::staging::preload::render_preload_value(value),
+                );
+            }
+        }
+    }
+    if let Some(fallback) = ses_fallback {
+        let missing = pairs
+            .iter()
+            .filter(|pair| !ses_dates.contains_key(pair))
+            .copied()
+            .collect::<Vec<_>>();
+        for chunk in missing.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let probes = chunk
+                .iter()
+                .map(|(dbnum, sesno)| format!("ses:[{dbnum}, {sesno}].date"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response = fallback
+                .query(format!("RETURN [{probes}];"))
+                .await?
+                .check()?;
+            let values: surrealdb::Value = response.take(0)?;
+            let surrealdb::sql::Value::Array(values) = values.into_inner() else {
+                anyhow::bail!("会话日期回落探针返回了非数组结果");
+            };
+            for (pair, value) in chunk.iter().zip(values.iter()) {
+                if !matches!(value, surrealdb::sql::Value::None | surrealdb::sql::Value::Null) {
+                    ses_dates.insert(
+                        *pair,
+                        crate::data_interface::staging::preload::render_preload_value(value),
+                    );
+                }
+            }
+        }
+    }
+    for &seed in &seeds {
+        if let Some(Some(seed_meta)) = cache.get(&seed)
+            && let (Some(dbnum), Some(sesno)) = (seed_meta.2, seed_meta.3)
+            && let Some(date) = ses_dates.get(&(dbnum, sesno))
+            && let Some(meta) = out.get_mut(&seed)
+        {
+            meta.dt_literal = Some(date.clone());
+        }
+    }
+
+    Ok(out)
+}
+
 ///保存instance 数据到数据库（并行优化版本）
 pub async fn save_instance_data(
     inst_mgr: &ShapeInstancesData,
@@ -145,6 +418,15 @@ pub async fn save_instance_data(
         let keys = inst_mgr.inst_info_map.keys().copied().collect::<Vec<_>>();
         delete_inst_relate_cascade(&keys, chunk_size).await?;
     }
+
+    // W4（D6）：zone_refno / anc / dbnum / dt 在渲染时解一次、写死进字面量——
+    // journal 纯数据化，写回重放不再对持久层求值任何 fn::。
+    let inst_meta = {
+        let mut meta_refnos: Vec<RefnoEnum> = inst_mgr.inst_info_map.keys().copied().collect();
+        meta_refnos.extend(inst_mgr.inst_tubi_map.keys().copied());
+        resolve_inst_meta(&meta_refnos).await?
+    };
+    let missing_meta = ResolvedInstMeta::default();
 
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
     let mut inst_geo_vec = vec![];
@@ -251,15 +533,19 @@ pub async fn save_instance_data(
                 );
             }
 
-            // 为TUBI创建inst_relate记录
+            // 为TUBI创建inst_relate记录（zone_refno/anc/dbnum 为渲染期已解值，W4）
+            let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
             let tubi_relate_sql = format!(
-                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, aabb: aabb:⟨{4}⟩, generic: '{5}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), anc: fn::anc_u64({1}), dbnum: {1}.dbnum, has_cata_neg: {6}, solid: {7}}}",
+                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, aabb: aabb:⟨{4}⟩, generic: '{5}', zone_refno: {6}, anc: {7}, dbnum: {8}, has_cata_neg: {9}, solid: {10}}}",
                 k.to_inst_relate_key(),
                 k.to_pe_key(),
                 v.id_str(),
                 transform_hash,
                 aabb_hash,
                 v.generic_type.to_string(),
+                meta.zone_literal(),
+                meta.anc_literal(),
+                meta.dbnum_literal(),
                 v.has_cata_neg,
                 v.is_solid,
             );
@@ -342,13 +628,19 @@ pub async fn save_instance_data(
             );
         }
 
+        // zone_refno/anc/dbnum/dt 为渲染期已解值（W4）：journal 纯数据化。
+        let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), anc: fn::anc_u64({1}), dbnum: {1}.dbnum, dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}}}",
+            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: {5}, anc: {6}, dbnum: {7}, dt: {8}, has_cata_neg: {9}, solid: {10}}}",
             k.to_inst_relate_key(),
             k.to_pe_key(),
             v.id_str(),
             transform_hash,
             v.generic_type.to_string(),
+            meta.zone_literal(),
+            meta.anc_literal(),
+            meta.dbnum_literal(),
+            meta.dt_literal(),
             v.has_cata_neg,
             v.is_solid,
         );
@@ -624,5 +916,211 @@ mod tests {
             body.contains("render_inst_relate_replace(chunk)"),
             "两处 inst_relate 写入都要走同一个渲染函数: {body}"
         );
+    }
+}
+
+/// W4（D6）：生成行元数据的渲染期解析——journal 纯数据化。
+#[cfg(test)]
+mod inst_meta_tests {
+    use super::*;
+    use aios_core::RefnoEnum;
+    use surrealdb::engine::any::connect;
+
+    /// 注意**不能**用 4000000001 保留段：ref0 超过 2^31，RefU64 打包值越过
+    /// SurrealDB int（i64）上限，会被 anc 的溢出守卫按设计拒绝（P1 边界约束）。
+    /// 这里用生产量级的 ref0（两万级），序号取 786xxx 避开其它系列；本模块只读
+    /// pe/ses，不碰进程级 GLOBAL_AABB_TREE。
+    fn refu(n: u64) -> RefU64 {
+        RefU64((24379u64 << 32) | n)
+    }
+
+    /// WORL(786001) ← SITE(786002) ← ZONE(786003) ← EQUI(786004, dbnum/sesno 带全)。
+    async fn seeded_db(name: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta").use_db(name).await.expect("use db");
+        crate::data_interface::staging::lifecycle::init_staging_schema(&db)
+            .await
+            .expect("schema + fn definitions");
+        db.query(
+            "UPSERT pe:24379_786001 CONTENT { noun: 'WORL' };\
+             UPSERT pe:24379_786002 CONTENT { noun: 'SITE', owner: pe:24379_786001 };\
+             UPSERT pe:24379_786003 CONTENT { noun: 'ZONE', owner: pe:24379_786002 };\
+             UPSERT pe:24379_786004 CONTENT { noun: 'EQUI', owner: pe:24379_786003, dbnum: 7997, sesno: 43 };\
+             UPSERT ses:[7997, 43] CONTENT { date: d'2026-08-07T00:00:00Z' };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seeded");
+        db
+    }
+
+    /// R3 的核心钉：渲染期解出的固定字面量与被退役的 `fn::` 在**同一个世界**上
+    /// 求值必须逐值相等（在引擎里用 `==` 比，绕开字符串形制差异）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolved_literals_equal_the_retired_fn_evaluations() {
+        let db = seeded_db("fn_parity").await;
+        let equi = RefnoEnum::from(refu(786004));
+        let metas = resolve_inst_meta_on(&db, None, &[equi])
+            .await
+            .expect("resolve");
+        let meta = metas.get(&refu(786004)).expect("meta for equi");
+
+        let pe = equi.to_pe_key();
+        let mut response = db
+            .query(format!(
+                "RETURN {} == fn::find_ancestor_type({pe}, 'ZONE');\
+                 RETURN {} == fn::anc_u64({pe});\
+                 RETURN {} == {pe}.dbnum;\
+                 RETURN {} == fn::ses_date({pe});",
+                meta.zone_literal(),
+                meta.anc_literal(),
+                meta.dbnum_literal(),
+                meta.dt_literal(),
+            ))
+            .await
+            .expect("parity transport")
+            .check()
+            .expect("parity query");
+        for (index, field) in ["zone_refno", "anc", "dbnum", "dt"].iter().enumerate() {
+            let equal: Option<bool> = response.take(index).expect("take flag");
+            assert_eq!(
+                equal,
+                Some(true),
+                "{field} 的已解值必须与被退役的 fn:: 求值逐值相等: {meta:?}"
+            );
+        }
+        assert_eq!(meta.zone_refno, Some(refu(786003)));
+        assert_eq!(
+            meta.anc,
+            vec![
+                refu(786004).0,
+                refu(786003).0,
+                refu(786002).0,
+                refu(786001).0
+            ],
+            "anc = 自身 → 顶（含自身）"
+        );
+        assert_eq!(meta.dt_literal(), "d'2026-08-07T00:00:00Z'");
+    }
+
+    /// `ses` 行是 append-only 历史：当前世界（暂存）miss 时回落持久层——
+    /// 未变更元素的 dt 才不会被烘成 NONE。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_dates_fall_back_to_the_persistent_history() {
+        let staging = connect("mem://").await.expect("mem boots");
+        staging
+            .use_ns("inst_meta")
+            .use_db("ses_fallback_staging")
+            .await
+            .expect("use db");
+        staging
+            .query(
+                "UPSERT pe:24379_786011 CONTENT { noun: 'ZONE' };\
+                 UPSERT pe:24379_786012 CONTENT { noun: 'EQUI', owner: pe:24379_786011, dbnum: 7997, sesno: 7 };",
+            )
+            .await
+            .expect("staging seed transport")
+            .check()
+            .expect("staging seeded");
+
+        let persistent = connect("mem://").await.expect("mem boots");
+        persistent
+            .use_ns("inst_meta")
+            .use_db("ses_fallback_persistent")
+            .await
+            .expect("use db");
+        persistent
+            .query("UPSERT ses:[7997, 7] CONTENT { date: d'2025-01-02T03:04:05Z' };")
+            .await
+            .expect("persistent seed transport")
+            .check()
+            .expect("persistent seeded");
+
+        let equi = RefnoEnum::from(refu(786012));
+        let metas = resolve_inst_meta_on(&staging, Some(&persistent), &[equi])
+            .await
+            .expect("resolve");
+        assert_eq!(
+            metas.get(&refu(786012)).expect("meta").dt_literal(),
+            "d'2025-01-02T03:04:05Z'",
+            "旧会话的日期必须从持久层历史回落解出"
+        );
+    }
+
+    /// 断链（owner 指向的行不存在）→ 响亮失败：宁可生成任务进重试，也不烘一个
+    /// 错误的 zone/anc 进 journal。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_broken_owner_chain_fails_loudly() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta")
+            .use_db("broken_chain")
+            .await
+            .expect("use db");
+        db.query(
+            "UPSERT pe:24379_786022 CONTENT { noun: 'EQUI', owner: pe:24379_786021, dbnum: 7997, sesno: 1 };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seeded");
+
+        let error = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786022))])
+            .await
+            .expect_err("断链必须失败");
+        assert!(error.to_string().contains("断裂"), "{error:#}");
+    }
+
+    /// 与旧 fn:: 对缺行的语义一致：seed 自己的行不在 → 空态渲染
+    /// （zone NONE / anc [] / dbnum NONE / dt NONE），不报错。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_seed_renders_the_empty_shapes_the_fns_produced() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta")
+            .use_db("missing_seed")
+            .await
+            .expect("use db");
+
+        let metas = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786031))])
+            .await
+            .expect("resolve");
+        let meta = metas.get(&refu(786031)).expect("meta");
+        assert_eq!(meta.zone_literal(), "NONE");
+        assert_eq!(meta.anc_literal(), "[]");
+        assert_eq!(meta.dbnum_literal(), "NONE");
+        assert_eq!(meta.dt_literal(), "NONE");
+    }
+
+    /// 「回退即红」源码钉（W4/D6）：生成写入路径的字面量必须是纯数据——
+    /// `save_instance_data` 与 `gen_cata_geos` 的函数体里不许再出现
+    /// `fn::find_ancestor_type(` / `fn::ses_date(` / `fn::anc_u64(` 内联求值。
+    /// （启动自愈回填 `backfill_inst_relate_anc` 是直打持久层的非 journal 路径，
+    /// 允许继续用 fn::，不在本钉范围。）
+    #[test]
+    fn generation_literals_are_pure_data_with_no_inline_fn_calls() {
+        let inst_source = include_str!("pdms_inst.rs");
+        let inst_body = inst_source
+            .split_once("pub async fn save_instance_data(")
+            .expect("save_instance_data 必须存在")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .map(|(head, _)| head)
+            .expect("函数体到测试模块为止");
+        let cata_source = include_str!("cata_model.rs");
+        let cata_body = cata_source
+            .split_once("pub async fn gen_cata_geos(")
+            .expect("gen_cata_geos 必须存在")
+            .1;
+
+        for marker in ["fn::find_ancestor_type(", "fn::ses_date(", "fn::anc_u64("] {
+            assert!(
+                !inst_body.contains(marker),
+                "save_instance_data 的字面量必须是已解值（D6 回退即红）: {marker}"
+            );
+            assert!(
+                !cata_body.contains(marker),
+                "gen_cata_geos 的字面量必须是已解值（D6 回退即红）: {marker}"
+            );
+        }
     }
 }

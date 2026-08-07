@@ -59,6 +59,11 @@ impl ModelRefreshPolicy {
             .iter()
             .map(|root| RefnoEnum::from(root.as_str()))
             .collect::<Vec<_>>();
+        // W2（2026-08-07 方案 D2）：暂存窗口内，根**之上**的祖先链（到 WORL）由
+        // batch_worker prereq 的 `staging::ancestor_preload` 解析式预载并验证
+        // （种子含 RegenRoot 与本批新单元根）；下面的子树重解析 + CATA 闭包只
+        // 负责根自身与根以下，惰性闭包退回本职——兜 CATA 漏边，不再承担 DESI
+        // 祖先正确性。窗口外（直写/手动/补偿路径）读的是持久层，祖先本就在场。
         crate::data_interface::staging::preload::preload_generation_root_closure(
             &db_option.project_name,
             &root_refnos,

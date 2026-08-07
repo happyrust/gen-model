@@ -3,7 +3,7 @@
 //! Interface: `apply(ranges_map) -> IncrResult`
 //! Does NOT own model refresh or MQTT sync (callers consume `IncrResult`).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -389,33 +389,78 @@ fn validate_prepared_attempt(
 
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
 ///
-/// `render_datacenter_statements` 会渲出 `fn::find_ancestor_types(...)`，而 A3 把
-/// datacenter 语句并进了收口事务——它从「可失败的副作用」变成了「水位推进的必要
-/// 条件」。这个函数定义在 `resource/surreal/common.surql`，而**全仓没有任何代码
-/// 负责把那份脚本灌进库**，它是部署时的手工步骤。漏灌的后果是每一个 DESI 窗口的
-/// 收口都失败、水位永不推进、同一区间无限重放，而错误信息长成
-/// `finalize increment attempt dbnum=… statement failed: …`，一个字都不提
-/// datacenter，排查的人会先去翻水位和模型队列。
+/// 历史背景：datacenter 语句曾渲出 `fn::find_ancestor_types(...)` 在收口事务里
+/// 现场上溯，而 A3 把它并进了收口——「可失败的副作用」变成「水位推进的必要
+/// 条件」，函数漏灌 = 每个 DESI 窗口收口必败（issue #16）。W3/W4 之后 journal
+/// 已纯数据化、datacenter 语句是固定目标 UPDATE；收口里剩余的 `fn::` 硬依赖只有
+/// OWNER 搬迁重算的 `fn::anc_u64` + `fn::find_ancestor_type`，探针已对准它们
+/// （W6 审计：`docs/2026-08-07_journal-fn-dependency-audit.md`）。
 ///
-/// 只探测，不加载：`common.surql` 是 `REMOVE FUNCTION` + `DEFINE FUNCTION` 的形态，
-/// 启动时无条件重建会把库里手工调过的函数静默盖掉，而那份脚本本身的权威版本
-/// 还没定。缺失也不阻止启动——SYST / CATA / DICT 窗口不依赖它。
+/// 这些函数定义在 `resource/surreal/common.surql`；启动序列会从 **exe 工作
+/// 目录**的 `resource/surreal/` 整目录灌一遍（`define_common_functions`，日志
+/// 「载入surreal …」），所以函数在不在，取决于部署包带的脚本版本与启动时的工作
+/// 目录。脚本旧了/目录不对，函数照样缺，而缺失时收口的错误信息长成
+/// `finalize increment attempt dbnum=… statement failed: …`，排查的人会先去翻
+/// 水位和模型队列。
+///
+/// 这里只探测，不再加载：启动加载已经跑过一次，自检再无条件重建只会把库里
+/// 手工调过的函数静默盖掉。缺失也不阻止启动——SYST / CATA / DICT 窗口不依赖它，
+/// 每个 DESI 批次执行前还会由 [`desi_finalize_preflight`] 再预检一次并拒绝执行。
 pub async fn selfcheck_surreal_functions() {
-    const PROBE: &str =
-        "RETURN fn::find_ancestor_types(type::thing('pe','__startup_selfcheck__'),['ZONE']);";
-    let probed = match aios_core::SUL_DB.query(PROBE).await {
-        Ok(response) => response.check().map(|_| ()),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = probed {
-        let msg = format!(
-            "启动自检未通过：调用 fn::find_ancestor_types 失败（{error}）。\
-             它是 DESI 窗口收口事务的硬前置，定义在 resource/surreal/common.surql，\
-             需要手工灌进当前库。不灌的话每个 DESI 窗口的收口都会失败、\
-             applied_sesno 永不推进，而那时的错误信息不会指向这里。"
-        );
-        log::error!("{msg}");
-        eprintln!("{msg}");
+    match desi_finalize_preflight().await {
+        FinalizePreflight::Ready => {}
+        FinalizePreflight::Missing(reason) | FinalizePreflight::Unverified(reason) => {
+            let msg = format!(
+                "启动自检未通过：{reason}。\
+                 不灌的话每个 DESI 批次都会被执行前预检拒绝（issue #16 之前的形态是\
+                 整窗白跑后卡在写回无限重试、applied_sesno 永不推进）。"
+            );
+            log::error!("{msg}");
+            eprintln!("{msg}");
+        }
+    }
+}
+
+/// DESI 收口预检的裁决。
+pub enum FinalizePreflight {
+    /// 硬前置在场，放行。
+    Ready,
+    /// 硬前置确定性缺失（函数没灌进当前库或被人删了）。批次应当即刻失败——
+    /// 拖到写回阶段只会先白跑整个窗口（房间预载、目录闭包、模型重生成），
+    /// 再一头扎进无限重试。
+    Missing(String),
+    /// 探针自己没跑成（连接一类的临时故障）。不据此定罪：照常执行，
+    /// 写回路径的重试自己会兜住真正的持久层故障。
+    Unverified(String),
+}
+
+/// 批次执行前探一次 DESI 收口/写回的 `fn::` 前置（与
+/// [`selfcheck_surreal_functions`] 同一根探针）。
+///
+/// issue #16 的教训：前置缺失时写回对持久层确定性失败，`retry_until_recovered`
+/// 无限重试而控制台一个字都不说——水位不动、重启重放同一区间、模型永远不更新。
+/// 预检把「确定性缺失」提前到开窗之前，换成一条带修法的人话终态。
+///
+/// 探针对象随 W6 审计（`docs/2026-08-07_journal-fn-dependency-audit.md`）对准
+/// **剩余的收口硬依赖**：W3/W4 之后 journal 已纯数据化、datacenter 语句是固定
+/// 目标 UPDATE，收口里唯一还对持久层求值 `fn::` 的是 OWNER 搬迁的
+/// anc/zone_refno 定点重算（`render_anc_repair_statements`）——用的是
+/// `fn::anc_u64` 与 `fn::find_ancestor_type`。两个函数同出
+/// `resource/surreal/common.surql`；旧版脚本（没有 P1 新增的 `fn::anc_u64`）
+/// 现在会被正确拒绝，而不是等到含搬迁的窗口在写回里无限重试。
+pub async fn desi_finalize_preflight() -> FinalizePreflight {
+    const PROBE: &str = "RETURN fn::anc_u64(type::thing('pe','__finalize_preflight__'));\
+                         RETURN fn::find_ancestor_type(type::thing('pe','__finalize_preflight__'),'ZONE');";
+    match aios_core::SUL_DB.query(PROBE).await {
+        Err(error) => FinalizePreflight::Unverified(format!("探针查询未送达持久层（{error}）")),
+        Ok(response) => match response.check() {
+            Ok(_) => FinalizePreflight::Ready,
+            Err(error) => FinalizePreflight::Missing(format!(
+                "调用 fn::anc_u64 / fn::find_ancestor_type 失败（{error}）。它们是收口\
+                 事务里 OWNER 搬迁重算的硬前置，定义在 resource/surreal/common.surql\
+                 ——脚本没灌进当前库或版本太旧（缺 P1 新增的 fn::anc_u64）"
+            )),
+        },
     }
 }
 
@@ -690,12 +735,24 @@ impl IncrementPipeline {
             .await?;
         }
 
-        // Rendering only — the timing slot no longer covers any datacenter I/O,
-        // which now happens inside the finalize transaction below.
-        let datacenter_statements = StageTimings::measure(&mut timings.datacenter, async {
-            Self::datacenter_statements(&range_eles, db_type)
-        })
-        .await;
+        // Resolve-then-render（W3）：这个计时槽现在只含**窗口前持久态的点查**
+        // （overlay 兜不住的祖先 noun/owner），产出的语句是固定目标 id 的纯
+        // UPDATE——收口事务里不再有任何 datacenter 上溯 I/O，也不再依赖持久层
+        // 灌了 fn::find_ancestor_types。
+        let mut window_statements = StageTimings::measure(
+            &mut timings.datacenter,
+            Self::datacenter_statements(&range_eles, db_type),
+        )
+        .await?;
+        // OWNER 搬迁的定点 anc/zone_refno 重算与水位共命运（窗口回滚则重放）。
+        let moved = Self::moved_refnos(&range_eles);
+        if !moved.is_empty() {
+            println!(
+                "IncrementPipeline: {} 个元素发生 OWNER 搬迁，提交尾重算其子树 anc/zone_refno",
+                moved.len()
+            );
+            window_statements.extend(Self::render_anc_repair_statements(&moved));
+        }
 
         // One final transaction publishes this window's delivery-status updates,
         // establishes durable model work, advances the watermark and removes the
@@ -713,7 +770,7 @@ impl IncrementPipeline {
                         dbnum,
                         end_sesno,
                         plan: finalize_plan,
-                        window_statements: datacenter_statements,
+                        window_statements,
                         cache_refnos: staged_cache_refnos.unwrap_or_default(),
                     },
                 ),
@@ -726,7 +783,7 @@ impl IncrementPipeline {
                     dbnum,
                     end_sesno,
                     &model_plan,
-                    &datacenter_statements,
+                    &window_statements,
                 ),
             )
             .await?;
@@ -752,6 +809,50 @@ impl IncrementPipeline {
             },
             warnings,
         ))
+    }
+
+    /// 本窗口里发生 OWNER 搬迁的元素（`ChangeBucket::Moved` 口径）。
+    ///
+    /// 交付单元自己搬家会走重生成、实例行随之整体重写；这份名单主要治「单元层级
+    /// 之上的容器搬家」（PIPE/ZONE 改挂 OWNER）——那种变更不产生任何模型工作项，
+    /// 子树 inst_relate/tubi_relate 行上物化的 `anc`/`zone_refno` 却已陈旧。
+    /// 名单不按 noun 过滤：单元根多修一次是幂等空转，漏修是静默陈旧。
+    fn moved_refnos(range_eles: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<RefU64> {
+        use crate::data_interface::model_impact::{ChangeBucket, user_change_buckets};
+        let mut seen = HashSet::new();
+        range_eles
+            .values()
+            .flatten()
+            .flat_map(user_change_buckets)
+            .filter(|(bucket, _)| *bucket == ChangeBucket::Moved)
+            .map(|(_, refno)| refno.refno())
+            .filter(|refno| seen.insert(*refno))
+            .collect()
+    }
+
+    /// 渲染搬家元素子树的 `anc`/`zone_refno` 定点重算语句（进 finalize 事务，
+    /// 与水位共命运；层级查询优化方案 P1 的搬家维护）。
+    ///
+    /// `anc CONTAINS 搬家元素`：搬家把整棵子树一起带走，受影响行的 anc 无论
+    /// 新旧算法都含着这个元素，所以这一个条件恰好圈出全部受影响行；重算发生在
+    /// 数据落库之后，走的是提交后的活 owner 链。
+    fn render_anc_repair_statements(moved: &[RefU64]) -> Vec<String> {
+        moved
+            .iter()
+            .flat_map(|refno| {
+                let n = refno.0;
+                [
+                    format!(
+                        "UPDATE (SELECT VALUE id FROM inst_relate WHERE anc CONTAINS {n}) SET \
+                         anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
+                    ),
+                    format!(
+                        "UPDATE (SELECT VALUE id FROM tubi_relate WHERE anc CONTAINS {n}) SET \
+                         anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
+                    ),
+                ]
+            })
+            .collect()
     }
 
     /// 本窗口里真正动过的 refno，按首次出现去重。
@@ -904,60 +1005,230 @@ impl IncrementPipeline {
         statements
     }
 
-    /// Render this window's `datacenter_version` status updates (pure).
+    /// 本窗口每个 refno 的**净态**（noun / owner，按会话升序后写覆盖先写）——
+    /// datacenter 上溯的 overlay 层：窗口里改过的元素以窗口终态为准，没改过的
+    /// 落到持久层窗口前态（单写者下两层合成 == 主数据重放后的持久层状态，
+    /// 也就是老的 commit-time `fn::find_ancestor_types` 现场上溯看到的世界）。
+    fn window_net_states(
+        data: &BTreeMap<u32, Vec<EleOperationData>>,
+    ) -> HashMap<RefU64, (Option<String>, Option<RefU64>)> {
+        use crate::data_interface::cata_closure::is_valid_ref0;
+        use crate::data_interface::model_impact::{added_owner, owner_change};
+        let mut states: HashMap<RefU64, (Option<String>, Option<RefU64>)> = HashMap::new();
+        for op in data.values().flatten() {
+            let entry = states.entry(op.refno).or_default();
+            match &op.detail {
+                EleOperationDetail::Add(_) => {
+                    let noun = op.get_noun_type();
+                    if !noun.is_empty() {
+                        entry.0 = Some(noun);
+                    }
+                    if let Some(owner) = added_owner(op) {
+                        entry.1 = Some(owner.refno());
+                    }
+                }
+                EleOperationDetail::Modified(modified) => {
+                    if !modified.noun.is_empty() {
+                        entry.0 = Some(modified.noun.clone());
+                    }
+                    if is_valid_ref0(modified.current_data.owner.get_0()) {
+                        entry.1 = Some(modified.current_data.owner);
+                    } else if let (_, Some(new_owner)) = owner_change(op) {
+                        entry.1 = Some(new_owner.refno());
+                    }
+                }
+                // Deleted 不带任何新态：它的 noun/owner 就是窗口前持久态
+                // （软删不改行内容，与老形态 commit-time 读 $pe.noun/$pe.owner
+                // 看到的是同一份）。
+                EleOperationDetail::Deleted | EleOperationDetail::None => {}
+            }
+        }
+        states
+    }
+
+    /// Resolve-then-render this window's `datacenter_version` status updates
+    /// （W3，决议 D5）：上溯在**渲染时**用 Rust 侧走链完成——overlay（本窗口
+    /// 净态）优先、持久层窗口前态兜底（`load_pe`，与锁域解析同一
+    /// `mutation_roots_resolve_against_the_pre_window_persistent_state` 纪律）——
+    /// 产出**固定目标 id 的纯 UPDATE**。收口事务从此不再依赖持久层的
+    /// `fn::find_ancestor_types` 现场求值（issue #16 的故障面），也不再受
+    /// `fn::ancestor` 9 跳展开预算限制（Rust 走链上限 64）。
     ///
     /// `UPDATE` only touches delivery records that already exist, so an element
     /// that was never published to the data centre is a silent no-op — the
     /// statements are safe to emit for every changed element. Each one carries
     /// its own `;` so a batch can be concatenated verbatim.
-    fn render_datacenter_statements(
+    ///
+    /// 上溯解不出目标（链断 / 没有单元层祖先，如 SITE 自身的属性修改）时**跳过**
+    /// 该语句：老形态里这是 `$pe = NONE` 塞进 `type::thing` 的未定义行为角落，
+    /// 现在是显式的「无交付记录可标，无事发生」。
+    async fn resolve_datacenter_statements_with<F, Fut>(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         delivery_unit_types: &[String],
-    ) -> Vec<String> {
+        mut load_pe: F,
+    ) -> anyhow::Result<Vec<String>>
+    where
+        F: FnMut(Vec<RefU64>) -> Fut,
+        Fut: std::future::Future<
+                Output = anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>>,
+            >,
+    {
+        /// 防御性走链上限（owner 环 / 数据损坏的最后一道闸）。
+        const ROLLUP_WALK_CAP: usize = 64;
+
+        /// 逐 refno 的效果视图（noun, owner）：overlay 字段优先，缺的问持久层
+        /// （懒加载 + 记忆化；`cache` 里 `None` = 行不存在，问过了）。
+        async fn effective_view<F, Fut>(
+            overlay: &HashMap<RefU64, (Option<String>, Option<RefU64>)>,
+            cache: &mut HashMap<RefU64, Option<(Option<String>, Option<RefU64>)>>,
+            load_pe: &mut F,
+            refno: RefU64,
+        ) -> anyhow::Result<(Option<String>, Option<RefU64>)>
+        where
+            F: FnMut(Vec<RefU64>) -> Fut,
+            Fut: std::future::Future<
+                    Output = anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>>,
+                >,
+        {
+            use crate::data_interface::cata_closure::is_valid_ref0;
+            let overlay_entry = overlay.get(&refno).cloned().unwrap_or((None, None));
+            if overlay_entry.0.is_some() && overlay_entry.1.is_some() {
+                return Ok(overlay_entry);
+            }
+            if !cache.contains_key(&refno) {
+                let fetched = load_pe(vec![refno]).await?;
+                cache.insert(refno, fetched.get(&refno).cloned());
+            }
+            let stored = cache
+                .get(&refno)
+                .cloned()
+                .flatten()
+                .unwrap_or((None, None));
+            Ok((
+                overlay_entry.0.or(stored.0),
+                overlay_entry
+                    .1
+                    .or(stored.1.filter(|owner| is_valid_ref0(owner.get_0()))),
+            ))
+        }
+
         let mut unit = delivery_unit_types.to_vec();
         unit.push("ZONE".into());
+        let overlay = Self::window_net_states(data);
+        // 持久层窗口前态缓存：None = 行不存在（问过了）。
+        let mut persistent: HashMap<RefU64, Option<(Option<String>, Option<RefU64>)>> =
+            HashMap::new();
+
         let mut statements = Vec::new();
-        for data in data.values() {
-            for d in data {
+        for ops in data.values() {
+            for d in ops {
                 match &d.detail {
                     EleOperationDetail::Deleted => {
+                        let (noun, owner) =
+                            effective_view(&overlay, &mut persistent, &mut load_pe, d.refno)
+                                .await?;
+                        let belong_zone = match (noun.as_deref(), owner) {
+                            // BRAN 的归属 ZONE 隔一层 PIPE（与老形态的
+                            // `$pe.owner.owner` 同义）。
+                            (Some("BRAN"), Some(owner)) => {
+                                effective_view(&overlay, &mut persistent, &mut load_pe, owner)
+                                    .await?
+                                    .1
+                            }
+                            (_, owner) => owner,
+                        };
+                        let belong_zone = belong_zone
+                            .map(|refno| refno.to_pe_key())
+                            .unwrap_or_else(|| "NONE".into());
                         statements.push(format!(
-                            "let $pe = {};\
-                             let $belong_zone = if $pe.noun == 'BRAN' {{ $pe.owner.owner }} else {{ $pe.owner }};\
-                             update type::thing('{}',$pe) set status = '{:?}',belong_zone = $belong_zone;",
-                            d.refno.to_pe_key(),
-                            DATACENTER_VERSION,
-                            DataCenterRecordOperate::Delete
+                            "update {} set status = '{:?}', belong_zone = {};",
+                            d.refno.to_table_key(DATACENTER_VERSION),
+                            DataCenterRecordOperate::Delete,
+                            belong_zone
                         ));
                     }
                     EleOperationDetail::Modified(modify_data) => {
-                        statements.push(if unit.iter().any(|noun| noun == &modify_data.noun) {
-                            format!(
-                                "update {} set status = '{:?}';",
-                                d.refno.to_table_key(DATACENTER_VERSION),
-                                DataCenterRecordOperate::Modify
-                            )
+                        let target = if unit.iter().any(|noun| noun == &modify_data.noun) {
+                            Some(d.refno)
                         } else {
-                            let unit_str = unit
-                                .iter()
-                                .map(|u| format!("'{u}'"))
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            format!(
-                                "let $pe = fn::find_ancestor_types({},[{}])[0];\
-                                 update type::thing('{}',$pe) set status = '{:?}';",
-                                d.refno.to_pe_key(),
-                                unit_str,
-                                DATACENTER_VERSION,
+                            // 最近的单元层（含 ZONE）自身或祖先——与
+                            // `fn::find_ancestor_types(pe, [...])[0]` 同义，但走
+                            // overlay+持久层的 Rust 链，不吃 9 跳静默截断。
+                            let mut current = d.refno;
+                            let mut target = None;
+                            for _ in 0..ROLLUP_WALK_CAP {
+                                let (noun, owner) =
+                                    effective_view(&overlay, &mut persistent, &mut load_pe, current)
+                                        .await?;
+                                let Some(noun) = noun else {
+                                    break; // 链断：行不在（老形态同样解析不出）
+                                };
+                                if unit.iter().any(|unit_noun| unit_noun == &noun) {
+                                    target = Some(current);
+                                    break;
+                                }
+                                let Some(owner) = owner else {
+                                    break; // 到顶（WORL 之上）仍没有单元层
+                                };
+                                current = owner;
+                            }
+                            target
+                        };
+                        match target {
+                            Some(target) => statements.push(format!(
+                                "update {} set status = '{:?}';",
+                                target.to_table_key(DATACENTER_VERSION),
                                 DataCenterRecordOperate::Modify
-                            )
-                        });
+                            )),
+                            None => println!(
+                                "datacenter 上溯：{} 解不出单元层归属（链断或到顶），\
+                                 无交付记录可标，跳过",
+                                d.refno.to_pe_key()
+                            ),
+                        }
                     }
                     _ => {}
                 }
             }
         }
-        statements
+        Ok(statements)
+    }
+
+    /// 窗口前持久态的 pe 点查（noun + owner），显式 `SUL_DB` 不经读路由——
+    /// 与锁域解析同一纪律；软删行仍在场，Deleted 分支读到的正是删除前的归属。
+    async fn load_pe_noun_owner_from_persistent(
+        refnos: Vec<RefU64>,
+    ) -> anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>> {
+        #[derive(serde::Deserialize)]
+        struct PeChainRow {
+            id: RefnoEnum,
+            #[serde(default)]
+            noun: Option<String>,
+            #[serde(default)]
+            owner: Option<RefnoEnum>,
+        }
+        let mut out = HashMap::new();
+        for chunk in refnos.chunks(200) {
+            let keys = chunk
+                .iter()
+                .map(|refno| refno.to_pe_key())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response = SUL_DB
+                .query(format!(
+                    "SELECT id, noun, owner FROM [{keys}] WHERE record::exists(id);"
+                ))
+                .await?
+                .check()?;
+            let rows: Vec<PeChainRow> = response.take(0)?;
+            for row in rows {
+                out.insert(
+                    row.id.refno(),
+                    (row.noun, row.owner.map(|owner| owner.refno())),
+                );
+            }
+        }
+        Ok(out)
     }
 
     /// The statements marking this window's delivery records Modify / Delete in
@@ -976,17 +1247,22 @@ impl IncrementPipeline {
     /// the one window that carried it, and no later window revisits an element
     /// that did not change again. They are now handed to `finalize_attempt`, so
     /// they commit with the watermark or roll back and replay with it.
-    fn datacenter_statements(
+    async fn datacenter_statements(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
-    ) -> Vec<String> {
+    ) -> anyhow::Result<Vec<String>> {
         if db_type != "DESI" {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let delivery_unit_types =
             crate::data_interface::generation_root::configured_delivery_unit_types();
-        Self::render_datacenter_statements(data, &delivery_unit_types)
+        Self::resolve_datacenter_statements_with(
+            data,
+            &delivery_unit_types,
+            Self::load_pe_noun_owner_from_persistent,
+        )
+        .await
     }
 
     /// ADR-003 B1-emit: maintain the reverse-reference index (`ref_rev`) for this
@@ -1800,20 +2076,58 @@ mod datacenter_tests {
         )
     }
 
-    fn render(ops: Vec<EleOperationData>) -> Vec<String> {
+    type ChainMap = std::collections::HashMap<RefU64, (Option<String>, Option<RefU64>)>;
+
+    fn refu(n: u64) -> RefU64 {
+        RefU64((7997u64 << 32) | n)
+    }
+
+    fn chain_loader(
+        map: ChainMap,
+    ) -> impl FnMut(Vec<RefU64>) -> std::future::Ready<anyhow::Result<ChainMap>> {
+        move |refnos| {
+            std::future::ready(Ok(refnos
+                .into_iter()
+                .filter_map(|refno| map.get(&refno).cloned().map(|entry| (refno, entry)))
+                .collect()))
+        }
+    }
+
+    async fn render_with(ops: Vec<EleOperationData>, chain: ChainMap) -> Vec<String> {
         let unit_types = crate::data_interface::generation_root::resolve_delivery_unit_types(&[]);
-        IncrementPipeline::render_datacenter_statements(&BTreeMap::from([(1u32, ops)]), &unit_types)
+        IncrementPipeline::resolve_datacenter_statements_with(
+            &BTreeMap::from([(1u32, ops)]),
+            &unit_types,
+            chain_loader(chain),
+        )
+        .await
+        .expect("resolve datacenter statements")
+    }
+
+    /// 走链兜底用的窗口前持久态：1 → 6(PIPE) → 5(ZONE) → 4(SITE)，旁支 2 → 5。
+    fn pre_window_chain() -> ChainMap {
+        ChainMap::from([
+            (refu(1), (Some("FTUB".into()), Some(refu(6)))),
+            (refu(2), (Some("DAMP".into()), Some(refu(5)))),
+            (refu(6), (Some("PIPE".into()), Some(refu(5)))),
+            (refu(5), (Some("ZONE".into()), Some(refu(4)))),
+            (refu(4), (Some("SITE".into()), None)),
+        ])
     }
 
     /// Chunks are concatenated verbatim, so an unterminated statement would
     /// silently merge into its neighbour.
-    #[test]
-    fn every_statement_is_self_terminated_so_a_chunk_can_be_concatenated() {
-        let statements = render(vec![
-            modified("BRAN"),
-            modified("DAMP"),
-            EleOperationData::new(RefU64((7997u64 << 32) | 2), 1, EleOperationDetail::Deleted),
-        ]);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_statement_is_self_terminated_so_a_chunk_can_be_concatenated() {
+        let statements = render_with(
+            vec![
+                modified("BRAN"),
+                modified("DAMP"),
+                EleOperationData::new(refu(2), 1, EleOperationDetail::Deleted),
+            ],
+            pre_window_chain(),
+        )
+        .await;
 
         assert_eq!(statements.len(), 3);
         for statement in &statements {
@@ -1821,42 +2135,309 @@ mod datacenter_tests {
         }
     }
 
-    #[test]
-    fn delivery_unit_nouns_update_directly_and_others_roll_up_to_an_ancestor() {
+    /// W3（D5）：单元层名词直接标自己；其余名词的上溯在**渲染时**解出固定目标 id
+    /// ——产物里再无 `fn::find_ancestor_types` / `$pe` 现场求值（回退即红）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delivery_unit_nouns_update_directly_and_others_roll_up_to_an_ancestor() {
         for noun in ["BRAN", "HANG", "SUPPO", "EQUI"] {
-            let unit = render(vec![modified(noun)]).remove(0);
+            let unit = render_with(vec![modified(noun)], ChainMap::new())
+                .await
+                .remove(0);
             assert_eq!(
                 unit, "update datacenter_version:7997_1 set status = 'Modify';",
                 "{noun}"
             );
         }
 
-        let nested = render(vec![modified("FTUB")]).remove(0);
-        assert!(
-            nested.contains("fn::find_ancestor_types(pe:7997_1,"),
-            "{nested}"
+        // FTUB(1) → PIPE(6) → ZONE(5)：解到最近的单元层（ZONE），渲染成固定目标。
+        let nested = render_with(vec![modified("FTUB")], pre_window_chain())
+            .await
+            .remove(0);
+        assert_eq!(
+            nested,
+            "update datacenter_version:7997_5 set status = 'Modify';"
         );
-        assert!(!nested.contains("'FTUB'"), "{nested}");
-        assert!(nested.contains("'Modify'"), "{nested}");
     }
 
-    #[test]
-    fn deletions_record_the_owning_zone_and_no_ops_render_nothing() {
-        let deleted = render(vec![EleOperationData::new(
-            RefU64((7997u64 << 32) | 2),
-            1,
-            EleOperationDetail::Deleted,
-        )])
-        .remove(0);
-        assert!(deleted.contains("belong_zone"), "{deleted}");
-        assert!(deleted.contains("'Delete'"), "{deleted}");
+    /// 上溯优先吃**窗口净态**（overlay）：元素在本窗口搬了家，rollup 必须按新
+    /// OWNER 解——与老形态 commit-time 对重放后持久层求值同一语义。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollup_follows_the_windows_own_owner_moves() {
+        let mut op = modified("FTUB");
+        if let EleOperationDetail::Modified(m) = &mut op.detail {
+            // 窗口把 1 从 PIPE(6) 搬到 ZONE(7)——净态 owner 以 current_data 为准。
+            m.current_data.owner = refu(7);
+        }
+        let mut chain = pre_window_chain();
+        chain.insert(refu(7), (Some("ZONE".into()), Some(refu(4))));
 
-        let noop = render(vec![EleOperationData::new(
-            RefU64((7997u64 << 32) | 3),
-            1,
-            EleOperationDetail::None,
-        )]);
+        let statement = render_with(vec![op], chain).await.remove(0);
+        assert_eq!(
+            statement,
+            "update datacenter_version:7997_7 set status = 'Modify';",
+            "rollup 必须走窗口内的新 OWNER，而不是窗口前持久态"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletions_record_the_owning_zone_and_no_ops_render_nothing() {
+        // 非 BRAN：belong_zone = owner。
+        let deleted = render_with(
+            vec![EleOperationData::new(refu(2), 1, EleOperationDetail::Deleted)],
+            pre_window_chain(),
+        )
+        .await
+        .remove(0);
+        assert_eq!(
+            deleted,
+            "update datacenter_version:7997_2 set status = 'Delete', belong_zone = pe:7997_5;"
+        );
+
+        // BRAN：归属 ZONE 隔一层 PIPE（老形态的 $pe.owner.owner）。
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), (Some("BRAN".into()), Some(refu(6))));
+        let deleted_bran = render_with(
+            vec![EleOperationData::new(refu(3), 1, EleOperationDetail::Deleted)],
+            chain,
+        )
+        .await
+        .remove(0);
+        assert_eq!(
+            deleted_bran,
+            "update datacenter_version:7997_3 set status = 'Delete', belong_zone = pe:7997_5;"
+        );
+
+        // 链解不出（行不在持久层也不在窗口里）：belong_zone 显式 NONE。
+        let orphan = render_with(
+            vec![EleOperationData::new(refu(9), 1, EleOperationDetail::Deleted)],
+            ChainMap::new(),
+        )
+        .await
+        .remove(0);
+        assert_eq!(
+            orphan,
+            "update datacenter_version:7997_9 set status = 'Delete', belong_zone = NONE;"
+        );
+
+        let noop = render_with(
+            vec![EleOperationData::new(refu(3), 1, EleOperationDetail::None)],
+            ChainMap::new(),
+        )
+        .await;
         assert!(noop.is_empty(), "{noop:?}");
+    }
+
+    /// 「回退即红」源码钉（W3）：渲染产物是纯数据 UPDATE——出现任何
+    /// `fn::` 调用或 `$pe` 现场求值即红。上溯解不出单元层归属的元素（SITE 自身
+    /// 的属性修改）不渲染语句——老形态那是 `$pe = NONE` 塞进 `type::thing` 的
+    /// 未定义角落。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolved_statements_carry_no_server_side_walks() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(8), (Some("SITE".into()), None));
+        let statements = render_with(
+            vec![
+                modified("FTUB"),
+                modified("BRAN"),
+                EleOperationData::new(refu(2), 1, EleOperationDetail::Deleted),
+                EleOperationData::new(refu(3), 1, EleOperationDetail::None),
+                {
+                    let mut op = modified("SITE");
+                    op.refno = refu(8);
+                    op
+                },
+            ],
+            chain,
+        )
+        .await;
+
+        assert_eq!(
+            statements.len(),
+            3,
+            "SITE 自身修改解不出单元层归属，必须跳过而不是渲出 NONE 目标: {statements:?}"
+        );
+        for statement in &statements {
+            assert!(
+                !statement.contains("fn::") && !statement.contains("$pe"),
+                "收口语句必须是固定目标 id 的纯 UPDATE（D5 回退即红）: {statement}"
+            );
+        }
+    }
+
+    /// 语义等价对拍：固定目标 UPDATE 与老形态的服务端现场上溯，落在**同一批**
+    /// `datacenter_version` 行上、写出同一份终态。两个 mem 库同种同一棵 pe 链与
+    /// 交付记录，一边跑老模板（`fn::find_ancestor_types` + `type::thing`），
+    /// 一边跑新渲染，逐行对比。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fixed_target_updates_hit_the_rows_the_server_side_walk_hit() {
+        use surrealdb::engine::any::connect;
+
+        async fn seeded_db(name: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+            let db = connect("mem://").await.expect("mem boots");
+            db.use_ns("dc_parity").use_db(name).await.expect("use db");
+            crate::data_interface::staging::lifecycle::init_staging_schema(&db)
+                .await
+                .expect("schema + fn definitions");
+            db.query(
+                "UPSERT pe:7997_4 CONTENT { noun: 'SITE' };\
+                 UPSERT pe:7997_5 CONTENT { noun: 'ZONE', owner: pe:7997_4 };\
+                 UPSERT pe:7997_6 CONTENT { noun: 'PIPE', owner: pe:7997_5 };\
+                 UPSERT pe:7997_1 CONTENT { noun: 'FTUB', owner: pe:7997_6 };\
+                 UPSERT pe:7997_3 CONTENT { noun: 'BRAN', owner: pe:7997_6 };\
+                 UPSERT datacenter_version:7997_5 CONTENT { status: 'Publish' };\
+                 UPSERT datacenter_version:7997_3 CONTENT { status: 'Publish' };",
+            )
+            .await
+            .expect("seed transport")
+            .check()
+            .expect("seeded");
+            db
+        }
+
+        // 老形态（W3 之前的模板，原样手抄）。
+        let legacy = seeded_db("legacy").await;
+        legacy
+            .query(
+                "let $pe = fn::find_ancestor_types(pe:7997_1,['BRAN','HANG','SUPPO','EQUI','ZONE'])[0];\
+                 update type::thing('datacenter_version',$pe) set status = 'Modify';",
+            )
+            .await
+            .expect("legacy modify transport")
+            .check()
+            .expect("legacy modify");
+        legacy
+            .query(
+                "let $pe = pe:7997_3;\
+                 let $belong_zone = if $pe.noun == 'BRAN' { $pe.owner.owner } else { $pe.owner };\
+                 update type::thing('datacenter_version',$pe) set status = 'Delete',belong_zone = $belong_zone;",
+            )
+            .await
+            .expect("legacy delete transport")
+            .check()
+            .expect("legacy delete");
+
+        // 新形态：同一窗口 ops 经 resolve-then-render，loader 直读同种子的库
+        // （模拟窗口前持久态点查）。
+        let resolved = seeded_db("resolved").await;
+        let loader_db = resolved.clone();
+        let statements = IncrementPipeline::resolve_datacenter_statements_with(
+            &BTreeMap::from([(
+                1u32,
+                vec![
+                    modified("FTUB"),
+                    EleOperationData::new(refu(3), 1, EleOperationDetail::Deleted),
+                ],
+            )]),
+            &crate::data_interface::generation_root::resolve_delivery_unit_types(&[]),
+            move |refnos| {
+                let db = loader_db.clone();
+                async move {
+                    #[derive(serde::Deserialize)]
+                    struct Row {
+                        id: aios_core::RefnoEnum,
+                        #[serde(default)]
+                        noun: Option<String>,
+                        #[serde(default)]
+                        owner: Option<aios_core::RefnoEnum>,
+                    }
+                    let keys = refnos
+                        .iter()
+                        .map(|refno| refno.to_pe_key())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mut response = db
+                        .query(format!(
+                            "SELECT id, noun, owner FROM [{keys}] WHERE record::exists(id);"
+                        ))
+                        .await?
+                        .check()?;
+                    let rows: Vec<Row> = response.take(0)?;
+                    Ok(rows
+                        .into_iter()
+                        .map(|row| {
+                            (row.id.refno(), (row.noun, row.owner.map(|o| o.refno())))
+                        })
+                        .collect())
+                }
+            },
+        )
+        .await
+        .expect("resolve");
+        for statement in &statements {
+            resolved
+                .query(statement)
+                .await
+                .expect("resolved transport")
+                .check()
+                .expect("resolved statement");
+        }
+
+        let snapshot = |db: surrealdb::Surreal<surrealdb::engine::any::Any>| async move {
+            let mut response = db
+                .query("SELECT * FROM datacenter_version ORDER BY id;")
+                .await
+                .expect("snapshot transport")
+                .check()
+                .expect("snapshot");
+            let rows: surrealdb::Value = response.take(0).expect("rows");
+            serde_json::to_string(&rows).expect("serialize")
+        };
+        assert_eq!(
+            snapshot(legacy).await,
+            snapshot(resolved).await,
+            "固定目标 UPDATE 必须与服务端现场上溯落出同一份 datacenter_version 终态"
+        );
+    }
+
+    /// 层级查询优化 P1 的搬家维护：OWNER 变化的元素（Moved 桶）必须渲出
+    /// inst_relate / tubi_relate 各一条 anc/zone_refno 定点重算语句进 finalize
+    /// 事务；普通属性变化、新建、删除不产生重算（它们各自的重生成路径已自洽）。
+    #[test]
+    fn owner_moves_render_anc_repair_statements_and_others_do_not() {
+        use aios_core::NamedAttrValue;
+
+        let mut op = modified("PIPE");
+        if let EleOperationDetail::Modified(m) = &mut op.detail {
+            m.modified_attrs.insert(
+                "OWNER".into(),
+                (
+                    NamedAttrValue::RefU64Type(RefU64((7997u64 << 32) | 10)),
+                    NamedAttrValue::RefU64Type(RefU64((7997u64 << 32) | 20)),
+                ),
+            );
+        }
+        let moved_elem = RefU64((7997u64 << 32) | 1);
+        // 同一元素出现两次（两个 sesno 都搬）也只修一次。
+        let range = BTreeMap::from([(1u32, vec![op.clone()]), (2u32, vec![op])]);
+        let moved = IncrementPipeline::moved_refnos(&range);
+        assert_eq!(moved, vec![moved_elem]);
+
+        let statements = IncrementPipeline::render_anc_repair_statements(&moved);
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        for (statement, table) in statements.iter().zip(["inst_relate", "tubi_relate"]) {
+            assert!(statement.contains(table), "{statement}");
+            assert!(
+                statement.contains(&format!("anc CONTAINS {}", moved_elem.0)),
+                "受影响行由旧 anc 含搬家元素这一个条件圈出: {statement}"
+            );
+            assert!(
+                statement.contains("anc = fn::anc_u64(in)")
+                    && statement.contains("zone_refno = fn::find_ancestor_type(in, 'ZONE')"),
+                "anc 与 zone_refno 必须一起重算（zone_refno 的陈旧是既有隐性 bug）: {statement}"
+            );
+            assert!(statement.ends_with(';'), "chunk 拼接依赖自终止: {statement}");
+        }
+
+        // 非搬家操作：普通属性变化 / 新建 / 删除 → 无修补语句。
+        let range = BTreeMap::from([(
+            1u32,
+            vec![
+                modified("DAMP"),
+                EleOperationData::new(RefU64((7997u64 << 32) | 2), 1, EleOperationDetail::Deleted),
+            ],
+        )]);
+        assert!(IncrementPipeline::moved_refnos(&range).is_empty());
+        assert!(IncrementPipeline::render_anc_repair_statements(&[]).is_empty());
     }
 }
 

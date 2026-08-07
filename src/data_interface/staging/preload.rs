@@ -20,18 +20,37 @@ pub(crate) async fn preload_existing_generation_products(
 /// 解析与拷贝拆成两步，是为了让统一根锁夹在中间：锁范围要按窗口前状态解析，而拷贝
 /// 本身已经是一次 staging 模型写，必须在持锁之后（ADR-017 I8）。拆开还顺带让两件事
 /// 共用同一次闭包计算——`inst_relate` 的整表扫描一个窗口只付一次。
+///
+/// 2026-08-07 方案 W1（D3）之后，这里只剩两类**文件里没有**的窗口前旧态：
+///
+/// - **旧生成产物**（inst_relate/inst_info/geo_relate/…，ADR-017 读路由规则②）；
+/// - **删除子树的 pe 拓扑**：被删元素已从文件 refno 索引消失、无从解析，而删除
+///   级联的暂存子树遍历（`collect_pe_subtree_refnos` → `active_data_db`）靠这份
+///   拓扑圈出待清理的产物行——它与产物同类，只在持久层还有。
+///
+/// Transform / regen 的设计数据（pe + 名词表 + 链边）不再从持久层拷贝，改由
+/// [`super::ancestor_preload`] 从 db 文件解析进暂存。
 #[derive(Debug, Default)]
 pub(crate) struct ModelMutationPreload {
-    subtree_len: usize,
+    transform_subtree_len: usize,
+    delete_subtree_len: usize,
     model_refnos: Vec<RefnoEnum>,
-    hierarchy: Vec<RefnoEnum>,
+    transform_model_refnos: Vec<RefnoEnum>,
+    delete_hierarchy: Vec<RefnoEnum>,
 }
 
 impl ModelMutationPreload {
-    /// 子树里**带模型产物**的节点。本窗口要改的正是它们的产物，所以统一根锁要覆盖的
-    /// 也正是它们各自所属的生成根——子树里其余节点没有产物，锁它们的根是空付出。
+    /// 子树里**带模型产物**的节点（Transform ∪ Delete）。本窗口要改的正是它们的
+    /// 产物，所以统一根锁要覆盖的也正是它们各自所属的生成根——子树里其余节点没有
+    /// 产物，锁它们的根是空付出。
     pub(crate) fn model_refnos(&self) -> &[RefnoEnum] {
         &self.model_refnos
+    }
+
+    /// Transform 子树里带模型产物的节点——祖先解析式预载的种子（删除子树的
+    /// 节点已从文件消失，解析必败，刻意不在此列）。
+    pub(crate) fn transform_model_refnos(&self) -> &[RefnoEnum] {
+        &self.transform_model_refnos
     }
 }
 
@@ -63,45 +82,92 @@ pub(crate) async fn preload_dbnum_state(
 }
 
 /// 只读地解析闭包：不碰暂存库，可以在持锁之前跑。
+///
+/// Transform 与 Delete 分桶传入：两桶的模型节点合并成锁范围与产物拷贝范围
+/// （一次 `inst_relate` 扫描共用），Transform 桶单独交出祖先解析种子，Delete 桶
+/// 单独交出持久层 pe 拓扑拷贝范围（见 [`ModelMutationPreload`]）。
 pub(crate) async fn plan_model_mutation_preload(
-    roots: &[RefnoEnum],
+    transform_targets: &[RefnoEnum],
+    delete_targets: &[RefnoEnum],
 ) -> anyhow::Result<ModelMutationPreload> {
-    if super::active_staging_writes().is_none() || roots.is_empty() {
+    if super::active_staging_writes().is_none()
+        || (transform_targets.is_empty() && delete_targets.is_empty())
+    {
         return Ok(ModelMutationPreload::default());
     }
-    plan_model_mutation_preload_from(&SUL_DB, roots).await
+    plan_model_mutation_preload_from(&SUL_DB, transform_targets, delete_targets).await
 }
 
 async fn plan_model_mutation_preload_from(
     source: &Surreal<Any>,
-    roots: &[RefnoEnum],
+    transform_targets: &[RefnoEnum],
+    delete_targets: &[RefnoEnum],
 ) -> anyhow::Result<ModelMutationPreload> {
-    let subtree = load_root_refnos(source, roots).await?;
-    if subtree.is_empty() {
+    let transform_subtree = load_root_refnos(source, transform_targets).await?;
+    let delete_subtree = load_root_refnos(source, delete_targets).await?;
+    if transform_subtree.is_empty() && delete_subtree.is_empty() {
         return Ok(ModelMutationPreload::default());
     }
-    let model_refnos = load_model_refnos(source, &subtree).await?;
-    let mut hierarchy_seeds = model_refnos.clone();
-    hierarchy_seeds.extend_from_slice(roots);
-    let mut hierarchy =
-        crate::data_interface::helper::collect_pe_ancestor_refnos_from(source, &hierarchy_seeds)
-            .await?
-            .into_iter()
+    let mut union_subtree = transform_subtree.clone();
+    union_subtree.extend_from_slice(&delete_subtree);
+    union_subtree.sort_unstable();
+    union_subtree.dedup();
+    let model_refnos = load_model_refnos(source, &union_subtree).await?;
+
+    let transform_scope = transform_subtree
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let transform_model_refnos = model_refnos
+        .iter()
+        .copied()
+        .filter(|refno| transform_scope.contains(refno))
+        .collect::<Vec<_>>();
+
+    let delete_hierarchy = if delete_targets.is_empty() {
+        Vec::new()
+    } else {
+        let delete_scope = delete_subtree
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut hierarchy_seeds = model_refnos
+            .iter()
+            .copied()
+            .filter(|refno| delete_scope.contains(refno))
             .collect::<Vec<_>>();
-    hierarchy.sort_unstable();
+        hierarchy_seeds.extend_from_slice(delete_targets);
+        let mut hierarchy = crate::data_interface::helper::collect_pe_ancestor_refnos_from(
+            source,
+            &hierarchy_seeds,
+        )
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+        hierarchy.sort_unstable();
+        hierarchy
+    };
+
     Ok(ModelMutationPreload {
-        subtree_len: subtree.len(),
+        transform_subtree_len: transform_subtree.len(),
+        delete_subtree_len: delete_subtree.len(),
         model_refnos,
-        hierarchy,
+        transform_model_refnos,
+        delete_hierarchy,
     })
 }
 
-/// Copy the unchanged PE subtree and existing products needed by transform/delete prerequisites.
+/// Copy the pre-window products (and the delete subtrees' PE topology) into staging.
 /// `INSERT IGNORE` preserves rows already rewritten by the current parse.
+///
+/// Transform / regen 的 pe+pe_owner 持久层拷贝已退役（W1/D3）：那部分设计数据由
+/// [`super::ancestor_preload`] 从 db 文件解析进暂存。
 pub(crate) async fn apply_model_mutation_preload(
     preload: &ModelMutationPreload,
 ) -> anyhow::Result<usize> {
-    if super::active_staging_writes().is_none() || preload.hierarchy.is_empty() {
+    if super::active_staging_writes().is_none()
+        || (preload.model_refnos.is_empty() && preload.delete_hierarchy.is_empty())
+    {
         return Ok(0);
     }
     apply_model_mutation_preload_from(&SUL_DB, preload).await
@@ -112,36 +178,40 @@ async fn apply_model_mutation_preload_from(
     preload: &ModelMutationPreload,
 ) -> anyhow::Result<usize> {
     let started = std::time::Instant::now();
-    let keys = preload
-        .hierarchy
-        .iter()
-        .map(RefnoEnum::to_pe_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut copied = copy_rows(
-        source,
-        "pe",
-        &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
-    )
-    .await?;
-    let pe_elapsed = started.elapsed();
-    copied += copy_relations(
-        source,
-        "pe_owner",
-        &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
-    )
-    .await?;
-    let owner_elapsed = started.elapsed();
+    let mut copied = 0usize;
+    if !preload.delete_hierarchy.is_empty() {
+        let keys = preload
+            .delete_hierarchy
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        copied += copy_rows(
+            source,
+            "pe",
+            &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
+        )
+        .await?;
+        copied += copy_relations(
+            source,
+            "pe_owner",
+            &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
+        )
+        .await?;
+    }
+    let topology_elapsed = started.elapsed();
     copied +=
         preload_existing_generation_products_for_refnos(source, &preload.model_refnos).await?;
     println!(
-        "暂存 mutation 预载: subtree={} model={} hierarchy={} copied={}，pe={:?} owner={:?} total={:?}",
-        preload.subtree_len,
+        "暂存 mutation 预载: transform_subtree={} delete_subtree={} model={} \
+         transform_model={} delete_hierarchy={} copied={}，delete 拓扑={:?} total={:?}",
+        preload.transform_subtree_len,
+        preload.delete_subtree_len,
         preload.model_refnos.len(),
-        preload.hierarchy.len(),
+        preload.transform_model_refnos.len(),
+        preload.delete_hierarchy.len(),
         copied,
-        pe_elapsed,
-        owner_elapsed,
+        topology_elapsed,
         started.elapsed()
     );
     Ok(copied)
@@ -567,7 +637,9 @@ async fn copy_relations(source: &Surreal<Any>, table: &str, query: &str) -> anyh
     Ok(statements.len())
 }
 
-fn render_preload_value(value: &surrealdb::sql::Value) -> String {
+/// 把一个 Surreal 值渲染成可嵌入语句的字面量（字符串走 JSON 转义，datetime →
+/// `d'…'`，NONE → NONE）。预载拷贝与 W4 的已解值渲染共用同一份口径。
+pub(crate) fn render_preload_value(value: &surrealdb::sql::Value) -> String {
     match value {
         surrealdb::sql::Value::Strand(value) => {
             serde_json::to_string(value.as_str()).expect("Surreal strings are JSON serializable")
@@ -759,18 +831,52 @@ mod tests {
             .expect("inspect staging");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 9]);
 
+        // Transform 桶：设计数据（pe + pe_owner）不再从持久层拷（W1/D3——那部分
+        // 改由 ancestor_preload 从文件解析），apply 只剩产物；Transform 子树的
+        // 模型节点单独成桶，交给祖先解析当种子。
         let plan = window
             .scope(plan_model_mutation_preload_from(
                 &source,
                 &[RefnoEnum::from("4000000001/1")],
+                &[],
             ))
             .await
-            .expect("plan mutation preload");
+            .expect("plan transform preload");
+        assert_eq!(
+            plan.transform_model_refnos(),
+            &[RefnoEnum::from("4000000001/3")],
+            "Transform 子树的模型节点必须单独成桶（祖先解析种子）"
+        );
         let copied = window
             .scope(apply_model_mutation_preload_from(&source, &plan))
             .await
-            .expect("preload mutation target");
-        assert_eq!(copied, 13);
+            .expect("preload transform target");
+        assert_eq!(copied, 8, "Transform 桶只拷产物，不再拷 pe/pe_owner");
+        let mut response = window
+            .staging_db()
+            .query(
+                "RETURN [pe:⟨4000000001_1⟩.id = NONE, pe:⟨4000000001_2⟩.id = NONE,
+                 pe:⟨4000000001_3⟩.id = NONE, count(SELECT * FROM pe_owner) = 0];",
+            )
+            .await
+            .expect("inspect transform rows");
+        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 4]);
+
+        // Delete 桶：被删元素已从文件消失、无从解析，删除级联的暂存子树遍历
+        // （collect_pe_subtree_refnos → active_data_db）靠这份持久层拓扑拷贝。
+        let plan = window
+            .scope(plan_model_mutation_preload_from(
+                &source,
+                &[],
+                &[RefnoEnum::from("4000000001/1")],
+            ))
+            .await
+            .expect("plan delete preload");
+        let copied = window
+            .scope(apply_model_mutation_preload_from(&source, &plan))
+            .await
+            .expect("preload delete target");
+        assert_eq!(copied, 13, "Delete 桶保留 pe 拓扑 + 产物");
         let mut response = window
             .staging_db()
             .query(
@@ -779,8 +885,19 @@ mod tests {
                  pe:⟨4000000001_9⟩.id = NONE];",
             )
             .await
-            .expect("inspect mutation rows");
+            .expect("inspect delete rows");
         assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 5]);
+        // 级联删除的枚举入口必须能在暂存里从删除目标走到带产物的后代。
+        let staged_subtree = window
+            .scope(crate::data_interface::helper::collect_pe_subtree_refnos(&[
+                RefnoEnum::from("4000000001/1"),
+            ]))
+            .await
+            .expect("staged subtree walk");
+        assert!(
+            staged_subtree.contains(&RefnoEnum::from("4000000001/3")),
+            "删除级联必须能沿暂存拓扑找到带产物的后代: {staged_subtree:?}"
+        );
         assert!(window.journal().await.is_empty());
         window.drop_database().await.expect("cleanup");
     }

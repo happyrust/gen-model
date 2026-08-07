@@ -426,6 +426,33 @@ async fn execute_frozen_batch(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
+    // issue #16：收口硬前置缺失时，老形态是整个窗口（房间预载、目录闭包、模型
+    // 重生成）白跑完才一头扎进写回的无限重试——控制台无声、水位不动、重启重放
+    // 同一区间。确定性缺失在开窗之前拦下，换成一条带修法的失败终态；探针连不上
+    // 不定罪，写回路径的重试兜真正的持久层故障。直写回退路径共用同一收口渲染，
+    // 一并受此预检保护。
+    if cand.db_type.eq_ignore_ascii_case("DESI") {
+        use crate::data_interface::increment_pipeline::{
+            FinalizePreflight, desi_finalize_preflight,
+        };
+        match desi_finalize_preflight().await {
+            FinalizePreflight::Ready => {}
+            FinalizePreflight::Missing(reason) => {
+                let message = format!(
+                    "数据批次 dbnum={} DESI 收口预检未通过，本批不执行: {reason}",
+                    job.dbnum
+                );
+                log::error!("{message}");
+                eprintln!("{message}");
+                warnings.push(message);
+                return failed_window_result(job, warnings, "DESI 收口预检未通过：收口依赖的 SurrealDB 函数缺失");
+            }
+            FinalizePreflight::Unverified(reason) => {
+                warnings.push(format!("DESI 收口预检未能核实（不阻断执行）: {reason}"));
+            }
+        }
+    }
+
     if !use_staged_increment_window(job) {
         return execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await;
     }
@@ -685,10 +712,16 @@ async fn execute_frozen_batch(
         STAGED_STALLED_RETRY_BACKOFF,
         |error, attempts| {
             window.mark_writeback_stalled(error);
-            log::error!(
-                "增量暂存窗口 {} 写回第 {attempts} 次仍失败，窗口与 journal 保留: {error:#}",
-                window.label()
+            // issue #16：log::error 在 enable_log=false（默认）时整个被丢弃，写回
+            // 滞留曾经完全无声。控制台必须同步喊出来，否则外在表现就是「执行了
+            // 增量但模型没变、重启又检测到同一区间」。
+            let message = format!(
+                "增量暂存窗口 {} 写回第 {attempts} 次仍失败，窗口与 journal 保留，{}s 后自动重试；期间水位不推进，重启会重放同一区间: {error:#}",
+                window.label(),
+                STAGED_STALLED_RETRY_BACKOFF.as_secs()
             );
+            log::error!("{message}");
+            eprintln!("{message}");
         },
         || window.commit_registered_to(&aios_core::SUL_DB),
     )
@@ -737,10 +770,13 @@ async fn execute_frozen_batch(
         STAGED_COMMIT_BACKOFF,
         STAGED_STALLED_RETRY_BACKOFF,
         |error, attempts| {
-            log::error!(
-                "dbnum={} 提交后空间收敛第 {attempts} 次仍失败，阻止后续批次出队: {error:#}",
-                job.dbnum
+            let message = format!(
+                "dbnum={} 提交后空间收敛第 {attempts} 次仍失败，阻止后续批次出队，{}s 后自动重试: {error:#}",
+                job.dbnum,
+                STAGED_STALLED_RETRY_BACKOFF.as_secs()
             );
+            log::error!("{message}");
+            eprintln!("{message}");
         },
         || SideEffectCompensator::reconcile_spatial_pending(mgr),
     )
@@ -1028,27 +1064,65 @@ async fn execute_frozen_batch_body(
                     render_plan_summary(&plan.work_items)
                 );
                 let prereq_started = std::time::Instant::now();
-                let mutation_targets = plan
-                    .work_items
-                    .iter()
-                    .filter(|item| matches!(
-                        item.action,
-                        crate::data_interface::model_update_plan::ModelWorkAction::Transform
-                            | crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup
-                    ))
-                    .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
-                    .filter(|refno| refno.is_valid())
-                    .collect::<Vec<_>>();
-                // 顺序即纪律：闭包解析（只读持久层）→ 持锁 → 预载拷贝 → 前置执行。
-                // 拷贝是本窗口第一次 staging 模型写，一旦跑在持锁之前，按需生成就能挤进
-                // 「拷走窗口前产物」与「锁上这个根」之间，窗口写回再把它的成果覆盖掉。
+                let plan_targets = |action: crate::data_interface::model_update_plan::ModelWorkAction| {
+                    plan.work_items
+                        .iter()
+                        .filter(|item| item.action == action)
+                        .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
+                        .filter(|refno| refno.is_valid())
+                        .collect::<Vec<_>>()
+                };
+                let transform_targets =
+                    plan_targets(crate::data_interface::model_update_plan::ModelWorkAction::Transform);
+                let delete_targets = plan_targets(
+                    crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup,
+                );
+                let mut mutation_targets = transform_targets.clone();
+                mutation_targets.extend_from_slice(&delete_targets);
+                // finalize 已按实际应用上界登记在 batch 里；祖先解析的 sesno 封口
+                // 用同一口径（W1：不许拿超出窗口终点的文件态当祖先旧态）。
+                let window_end_sesno = batch
+                    .as_ref()
+                    .map_or(job.end_sesno, |batch| batch.end_sesno);
+                // 顺序即纪律：闭包解析（只读持久层）→ 祖先解析（只读文件）→ 持锁 →
+                // 预载拷贝/装载 → 装载验证 → 前置执行。拷贝与装载是本窗口最早的
+                // staging 模型写，一旦跑在持锁之前，按需生成就能挤进「拷走窗口前
+                // 产物」与「锁上这个根」之间，窗口写回再把它的成果覆盖掉（ADR-017 I8）。
                 let prereq = async {
                     let mutation_preload =
                         crate::data_interface::staging::preload::plan_model_mutation_preload(
-                            &mutation_targets,
+                            &transform_targets,
+                            &delete_targets,
                         )
                         .await
                         .map_err(|error| format!("窗口内模型前置闭包解析失败: {error:#}"))?;
+                    // W1（2026-08-07 方案 D2/D3）：全部模型工作项的祖先链设计数据从
+                    // db 文件解析进暂存——种子 = Transform 目标 + Transform 子树模型
+                    // 节点 + RegenRoot 根 + 本批新单元根；删除目标已从文件消失，其
+                    // 拓扑走上面的持久层拷贝。解析（只读文件）在持锁之前，装载在
+                    // 持锁与产物拷贝之后。
+                    let ancestor_seeds =
+                        crate::data_interface::staging::ancestor_preload::ancestor_seed_refnos(
+                            &plan.work_items,
+                            &new_units,
+                            &transform_targets,
+                            mutation_preload.transform_model_refnos(),
+                        );
+                    let ancestor_closure = if ancestor_seeds.is_empty() {
+                        None
+                    } else {
+                        let session =
+                            crate::data_interface::staging::ancestor_preload::AncestorParseSession::open(
+                                &cand.path,
+                            )
+                            .map_err(|error| format!("窗口内祖先解析会话打开失败: {error:#}"))?;
+                        Some(
+                            session
+                                .resolve(&ancestor_seeds, window_end_sesno)
+                                .await
+                                .map_err(|error| format!("窗口内祖先链解析失败: {error:#}"))?,
+                        )
+                    };
                     let held = hold_staged_model_mutation_roots(
                         &new_units,
                         &plan,
@@ -1062,6 +1136,18 @@ async fn execute_frozen_batch_body(
                     )
                     .await
                     .map_err(|error| format!("窗口内模型前置工作集预载失败: {error:#}"))?;
+                    if let Some(closure) = &ancestor_closure {
+                        crate::data_interface::staging::ancestor_preload::apply_ancestor_preload(
+                            closure, job.dbnum,
+                        )
+                        .await
+                        .map_err(|error| format!("窗口内祖先链装载失败: {error:#}"))?;
+                        crate::data_interface::staging::ancestor_preload::validate_ancestor_preload(
+                            closure,
+                        )
+                        .await
+                        .map_err(|error| format!("窗口内祖先链完整性验证未通过: {error:#}"))?;
+                    }
                     Ok::<usize, String>(held)
                 }
                 .await;
@@ -2153,11 +2239,19 @@ mod tests {
         );
     }
 
-    /// 统一根锁必须夹在「只读闭包解析」与「拷贝进暂存」之间。
+    /// 统一根锁必须夹在「只读解析（持久层闭包 + 文件祖先链）」与「写进暂存
+    /// （产物拷贝 / 祖先装载）」之间，装载之后必须验证。
     ///
-    /// 拷贝是本窗口第一次 staging 模型写。跑在持锁之前，按需生成就能在「拷走窗口前
-    /// 产物」与「锁上这个根」之间挤进来：它照持久层旧态生成并落库，窗口写回再拿基于
-    /// 旧拷贝算出的结果把它覆盖掉（ADR-017 I8）。
+    /// 拷贝与装载是本窗口最早的 staging 模型写。跑在持锁之前，按需生成就能在
+    /// 「拷走窗口前产物」与「锁上这个根」之间挤进来：它照持久层旧态生成并落库，
+    /// 窗口写回再拿基于旧拷贝算出的结果把它覆盖掉（ADR-017 I8）。
+    ///
+    /// W1（2026-08-07 方案）追加的两道钉：
+    /// - 祖先解析（`AncestorParseSession`，只读文件）在持锁之前、装载
+    ///   （`apply_ancestor_preload`）在产物拷贝之后、验证
+    ///   （`validate_ancestor_preload`）收尾；
+    /// - 祖先种子由 `ancestor_seed_refnos` 统一给出（含 RegenRoot 与本批新单元
+    ///   根——regen 的祖先正确性从此不押在 CATA 惰性闭包的顺带解析上）。
     #[test]
     fn the_root_lock_closes_before_anything_is_copied_into_staging() {
         let source = include_str!("batch_worker.rs");
@@ -2172,15 +2266,32 @@ mod tests {
         let plan_at = body
             .find("plan_model_mutation_preload(")
             .expect("闭包解析必须先于持锁");
+        let seeds_at = body
+            .find("ancestor_seed_refnos(")
+            .expect("祖先种子必须统一给出（Transform + RegenRoot + 新单元根）");
+        let parse_at = body
+            .find("AncestorParseSession::open(")
+            .expect("祖先解析必须存在");
         let hold_at = body
             .find("hold_staged_model_mutation_roots(")
             .expect("窗口必须一次性持有全部生成根锁");
         let copy_at = body
             .find("apply_model_mutation_preload(")
             .expect("预载拷贝必须存在");
+        let ancestor_at = body
+            .find("apply_ancestor_preload(")
+            .expect("祖先装载必须存在");
+        let validate_at = body
+            .find("validate_ancestor_preload(")
+            .expect("祖先装载后必须验证");
         assert!(
-            plan_at < hold_at && hold_at < copy_at,
-            "顺序必须是 闭包解析 → 持锁 → 拷贝: {body}"
+            plan_at < seeds_at
+                && seeds_at < parse_at
+                && parse_at < hold_at
+                && hold_at < copy_at
+                && copy_at < ancestor_at
+                && ancestor_at < validate_at,
+            "顺序必须是 闭包解析 → 祖先解析 → 持锁 → 拷贝 → 装载 → 验证: {body}"
         );
     }
 
@@ -2691,6 +2802,50 @@ mod tests {
         assert!(
             body.contains("report.blocks(job.dbnum)"),
             "前置阻断必须按本批 dbnum 判定: {body}"
+        );
+    }
+
+    /// issue #16 的两道护栏钉在源码结构上：
+    /// 1) DESI 收口预检必须挡在一切窗口工作（暂存分流/开窗/预载）之前——拖到
+    ///    写回才发现确定性缺失，等于整窗白跑后无声卡死；
+    /// 2) 写回滞留必须在控制台喊出来（eprintln）——log::error 在
+    ///    enable_log=false（默认配置）时整个被丢弃，静默滞留正是 issue #16
+    ///    「执行了增量但模型没变、重启又检测到同一区间」的外在形态。
+    #[test]
+    fn issue16_preflight_and_stall_visibility_are_pinned() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch 必须存在")
+            .1
+            .split_once("async fn drop_window_and_sweep(")
+            .expect("staged batch body boundary")
+            .0;
+
+        let preflight_at = body
+            .find("desi_finalize_preflight(")
+            .expect("DESI 批次执行前必须预检收口硬前置");
+        let staged_split_at = body
+            .find("use_staged_increment_window(")
+            .expect("暂存/直写分流必须存在");
+        let window_at = body
+            .find("lifecycle::create_window(")
+            .expect("开窗调用必须存在");
+        assert!(
+            preflight_at < staged_split_at && preflight_at < window_at,
+            "预检必须先于暂存分流与开窗"
+        );
+
+        let stalled_at = body
+            .find("mark_writeback_stalled(error)")
+            .expect("写回滞留标记必须存在");
+        let cleared_at = body
+            .find("clear_writeback_stalled()")
+            .expect("写回滞留清除必须存在");
+        let stall_block = &body[stalled_at..cleared_at];
+        assert!(
+            stall_block.contains("eprintln!"),
+            "写回滞留必须打到控制台（log::error 在 enable_log=false 时会被丢弃）"
         );
     }
 

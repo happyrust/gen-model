@@ -800,9 +800,20 @@ pub async fn gen_cata_geos(
     let mut db_time_get_branch_att = 0;
     let mut db_time_get_branch_transform = 0;
 
+    // W4（D6）：tubi_relate 的 anc/dbnum 在渲染时解一次、写死进字面量——
+    // journal 纯数据化，写回重放不再对持久层求值 fn::anc_u64 / `.dbnum`。
+    let branch_metas = crate::fast_model::pdms_inst::resolve_inst_meta(
+        &branch_map.iter().map(|entry| *entry.key()).collect::<Vec<_>>(),
+    )
+    .await?;
+    let missing_branch_meta = crate::fast_model::pdms_inst::ResolvedInstMeta::default();
+
     for bran_data in branch_map.iter() {
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
+        let branch_meta = branch_metas
+            .get(&branch_refno.refno())
+            .unwrap_or(&missing_branch_meta);
 
         let t_get_children = Instant::now();
         // let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
@@ -897,7 +908,7 @@ pub async fn gen_cata_geos(
                         );
                         tubi_relates.push(format!(
                                 "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
+                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
                                 branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
@@ -906,6 +917,8 @@ pub async fn gen_cata_geos(
                                 gen_bytes_hash::<_, 64>(&aabb),
                                 gen_bytes_hash::<_, 64>(&t),
                                 current_tubing.tubi_size.to_string(),
+                                branch_meta.anc_literal(),
+                                branch_meta.dbnum_literal(),
                             ));
                         current_tubing.index += 1;
                     }
@@ -1041,7 +1054,7 @@ pub async fn gen_cata_geos(
                                         );
                                         let sql = format!(
                                             "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
+                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
                                             branch_refno.to_pe_key(),
                                             branch_refno.to_pe_key(),
                                             current_tubing.index,
@@ -1050,6 +1063,8 @@ pub async fn gen_cata_geos(
                                             gen_bytes_hash::<_, 64>(&aabb),
                                             gen_bytes_hash::<_, 64>(&t),
                                             current_tubing.tubi_size.to_string(),
+                                            branch_meta.anc_literal(),
+                                            branch_meta.dbnum_literal(),
                                         );
                                         tubi_relates.push(sql);
                                         current_tubing.index += 1;
@@ -1143,7 +1158,7 @@ pub async fn gen_cata_geos(
                             );
                             tubi_relates.push(format!(
                                 "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
+                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
                                 branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
@@ -1152,6 +1167,8 @@ pub async fn gen_cata_geos(
                                 gen_bytes_hash::<_, 64>(&aabb),
                                 gen_bytes_hash::<_, 64>(&t),
                                 current_tubing.tubi_size.to_string(),
+                                branch_meta.anc_literal(),
+                                branch_meta.dbnum_literal(),
                             ));
                             current_tubing.index += 1;
                         }

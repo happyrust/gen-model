@@ -91,3 +91,4 @@
 - CATA 按需解析产物按 ADR-017 §7 落地为 `Both`（暂存生效 + 进 journal 随窗口提交；2026-08-06 修复：此前误为 `StagingOnly`，产物随窗口 DROP 丢失、持久层 CATA 覆盖停止增长）。
 - 窗口终态清扫（`sweep_orphan_staging_databases`）已接到每个窗口终态（`batch_worker::drop_window_and_sweep`；2026-08-06 前只建未接）。
 - 2026-08-06 五缺陷闭环：尾事务登记 `SpatialReconcile` 并在出队前强制收敛；窗口吸收本库已有 pending revision 并原子结算；所有模型修改根统一持锁；房间预载失败整轮跳过；面板重算同步维护两张房间关系表。详细开发与验收清单见 `docs/plans/2026-08-06-staged-increment-five-defect-closure-plan.md`。
+- 2026-08-07 祖先链解析式预载与收口去 fn:: 化（T2.1/T2.5 的未竟部分 + R1「静默错模型」的正面回答）：模型工作项祖先链从 db 文件解析进暂存并 fail-closed 验证（`staging/ancestor_preload.rs`），窗口内 ancestor/transform 不再把未变更祖先的位移静默当零；datacenter 收口与生成字面量改 resolve-then-render，journal 纯数据化；收口 `fn::` 依赖台账见 `docs/2026-08-07_journal-fn-dependency-audit.md`。方案与逐工作包落地记录：`docs/plans/2026-08-07-staged-ancestor-parse-preload-plan.md` §8。

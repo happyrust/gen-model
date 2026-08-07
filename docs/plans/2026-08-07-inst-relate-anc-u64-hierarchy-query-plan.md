@@ -195,6 +195,36 @@ vendor/rs-core 查询形态，逐根断言新旧 refno 集合完全一致（全�
 **解析那一档已消灭**；要进 3 s 档需投影瘦身（pts / insts 子查询拆出、或写入时
 物化 insts 数组），列为 P3 后续优化项，不阻塞本方案收尾。
 
+### P2+ 投影瘦身（2026-08-07 探索结论，slim 版已落地）
+
+**实库成本画像**（AMS 整表 53,582 行，逐句探针，扣除 CLI 基线 ~0.6 s）：
+
+| 投影成分 | 净耗时 | 说明 |
+|---|---|---|
+| 平表扫描（无解引用） | 0.7 s | 物化后的理论地板 |
+| + `aabb.d` / `world_trans.d` 解引用 | +2.0 s | 每行 2 次点查 |
+| + `insts` 子查询 | +8.7 s | **大头**：图跳 + 每边 trans/meshed 解引用 |
+| + `in.id`/`in.old_pe`/`in.owner`/ptset/dt | +3.0 s | **可砍**：UI 全链路无消费者 |
+
+**去重批查此路不通**（实测锤死）：aabb / world_trans / inst_info 是世界坐标系
+数据，天然每实例一份（distinct 51,425 / 50,711 / 52,827 vs 55,021 行），
+按 distinct 分面批查无收益。
+
+- [x] **slim 版已落地**：`query_insts_slim`（vendor/rs-core）——只投影 UI 消费
+      的字段，refno 直接取边上 `in` 链接不解引用，owner 由 `anc[1]` 还原，
+      old_refno/pts/dt/has_neg 缺省；anc 路径切用。AMS 实测整场
+      **16.8 s → 13.9 s**；对拍新增 owner 口径（anc[1] vs 实时 `in.owner`
+      逐行相符——顺带证明存量 anc 链新鲜）。相对旧路径基线（151.9 s）**11×**。
+- [ ] **3 s 档 = 写时物化（P4 候选，暂缓）**：inst_relate 行内物化
+      `aabb_d(6)` / `wt_d(16)` / `insts_flat[{h,t}]`，读侧变纯平表扫描
+      （预计整场 ~2 s）。维护点五处：建行内联（d 值在内存）、
+      `gen_inst_meshes` 置 meshed 的同批语句反向刷 `insts_flat`
+      （需 `idx_inst_relate_out`）、transform 便宜路径换链接时同步刷、
+      `update_inst_relate_aabbs_by_refnos` 同步、存量回填。
+      **暂缓原因**：与并行推进的「暂存祖先解析式预载」W4（同在
+      `save_instance_data` 字面量上做 resolve-then-render）正面相撞，
+      须待其落地后实施或与之同批。
+
 ### P3 清理与衔接（半天）
 
 - [ ] 删旧深遍历路径与开关；`fn::find_ancestor_type` 在 inst 写入链上的调用退役；

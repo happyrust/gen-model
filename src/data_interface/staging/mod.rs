@@ -4,10 +4,12 @@
 //! - [`replay_safe`]：ReplaySafe 语句规范与 validator，进日志的语句在入口处过检（T0.5）；
 //! - [`lifecycle`]：staging database 命名 / 建库初始化 / 登记表 / 终态清扫（T0.3）；
 //! - [`resources`]：资源三级状态机（告警 / 拒绝吸收 / 废弃暂存）（T0.3）；
-//! - [`attempts`]：per-root attempts 控制面与窗口阻断记录（T0.4）。
+//! - [`attempts`]：per-root attempts 控制面与窗口阻断记录（T0.4）；
+//! - [`ancestor_preload`]：模型工作项祖先链的解析式预载（2026-08-07 方案 W1）。
 //!
 //! 词汇见 `CONTEXT.md`「暂存与写回」章节；决策见 `docs/adr/ADR-017`。
 
+pub mod ancestor_preload;
 pub mod attempts;
 pub mod executor;
 #[cfg(test)]

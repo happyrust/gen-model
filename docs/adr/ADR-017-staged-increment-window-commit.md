@@ -66,3 +66,24 @@ Transform 工作项的 world_trans 指针批量 UPDATE 直写持久层（P0，�
 T5.1 精简版窗口中途持久层快照 diff 探针（`staging/parity.rs`）；顺带删除了可
 整体绕过暂存路由的死代码 `save_instance_data_single`。live 版 T5.1–T5.5 仍留
 在 P5 待办。
+
+## 2026-08-07 落地补记（二）：祖先链解析式预载与收口去 fn:: 化
+
+方案与决议：`docs/plans/2026-08-07-staged-ancestor-parse-preload-plan.md`
+（十问决议 D1–D10 + §8 逐工作包落地记录）。对本 ADR 的影响：
+
+- **读路由规则①的祖先缺口补齐（W1）**：模型工作项（Transform 目标 + 其子树带
+  产物节点 + RegenRoot 根 + 本批新单元根）的祖先链设计数据（pe + 名词表行 +
+  ATT_UDA + 链边，到顶含 WORL）由 `staging/ancestor_preload.rs` 从 db 文件
+  解析进暂存（StagingOnly 不进 journal），装载后完整性验证 fail-closed；此前
+  名词表行不进暂存，窗口内世界变换把未变更祖先的位移静默当 (0,0,0)。
+  mutation preload 的 pe+pe_owner 持久层拷贝退役范围收窄到 Transform/regen——
+  **删除子树的拓扑拷贝保留**（被删元素无从解析，删除级联的暂存子树枚举靠它，
+  与规则②的产物拷贝同一法理）。
+- **规则③的两类 commit-time 上溯消除（W3/W4）**：datacenter 状态语句改
+  resolve-then-render（窗口 overlay + 持久层窗口前态的 Rust 合成链，固定目标
+  id 纯 UPDATE）；生成字面量的 zone_refno/anc/dbnum/dt 渲染期解值。journal
+  自此纯数据化，写回重放不再对持久层求值任何 `fn::`。
+- **收口 fn:: 依赖台账（W6）**：`docs/2026-08-07_journal-fn-dependency-audit.md`。
+  剩余唯一收口硬依赖 = OWNER 搬迁的 anc/zone_refno 定点重算
+  （`fn::anc_u64` + `fn::find_ancestor_type`）；DESI 批次预检探针已对准它们。

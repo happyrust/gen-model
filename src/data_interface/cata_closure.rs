@@ -32,7 +32,7 @@ use crate::data_interface::increment_pipeline::wrap_in_transaction;
 const INVALID_REF0_SENTINEL: u32 = 0x8000_0001;
 
 #[inline]
-fn is_valid_ref0(ref0: u32) -> bool {
+pub(crate) fn is_valid_ref0(ref0: u32) -> bool {
     ref0 != 0 && ref0 != INVALID_REF0_SENTINEL
 }
 
@@ -518,7 +518,7 @@ fn open_db_session(project: &str, path: &Path) -> anyhow::Result<DbBasicData> {
 /// 元素，而不是中断整批解析：本函数同时服务 CATA 闭包与 DESI 设计子树遍历，且几行
 /// 之下的**解析失败**也只是跳过按 cache-miss 处理——一条成员表毛刺没有理由把整个
 /// 生成单元推进死信。
-fn dedupe_members(refno: RefU64, raw: &[RefU64]) -> Vec<RefU64> {
+pub(crate) fn dedupe_members(refno: RefU64, raw: &[RefU64]) -> Vec<RefU64> {
     let mut seen = HashSet::with_capacity(raw.len());
     let mut children = Vec::with_capacity(raw.len());
     for &child in raw {
