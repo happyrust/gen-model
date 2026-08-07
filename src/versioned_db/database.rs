@@ -520,27 +520,32 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
             let $ref_0 = <int>array::at($id_parts, 0);
             let $ref_1 = <int>array::at($id_parts, 1);
             let $is_delete = $value.deleted and $event = "UPDATE";
-            let $max_sesno = if $after.sesno > $before.sesno?:0 { $after.sesno } else { $before.sesno };
+            -- NONE 免疫（2026-08-06 审计）：补链创建的 WORL `/*` 带 sesno=0，旧写法
+            -- `IF $after.sesno > $before.sesno?:0` 在 CREATE 时两边都不成立，取到
+            -- $before.sesno = NONE，MERGE 后 info 行**没有 sesno 字段**，读侧
+            -- math::max 直接炸（1112 / 7999 实测）。max 套 ?:0 后恒为数值。
+            let $max_sesno = math::max([$after.sesno?:0, $before.sesno?:0]);
             -- 根据事件类型处理  type::thing("dbnum_info_table", $ref_0)
+            -- 页内水位只升不降：sesno=0 的伪元素后到时不得把已见过的会话号抹小。
             IF $event = "CREATE"   {
                 UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
                     dbnum: $dbnum,
                     count: count?:0 + 1,
-                    sesno: $max_sesno,
+                    sesno: math::max([sesno?:0, $max_sesno]),
                     max_ref1: $ref_1,
                     updated_at: time::now()
                 };
             } ELSE IF $event = "DELETE" OR $is_delete  {
                 UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
                     count: count - 1,
-                    sesno: $max_sesno,
+                    sesno: math::max([sesno?:0, $max_sesno]),
                     max_ref1: $ref_1,
                     updated_at: time::now()
                 }
                 WHERE count > 0;
             }  ELSE IF $event = "UPDATE" {
                 UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
-                    sesno: $max_sesno,
+                    sesno: math::max([sesno?:0, $max_sesno]),
                     updated_at: time::now()
                 };
             };

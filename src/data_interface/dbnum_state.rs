@@ -704,10 +704,14 @@ impl DbnumState {
 
     /// Read the raw stored row + info-table fallback for one `dbnum`.
     async fn read_row(dbnum: u32) -> anyhow::Result<(Option<StateRow>, Option<i32>)> {
+        // `sesno != NONE`：info 行可能缺 sesno 字段（历史上事件对 sesno=0 的补链
+        // 伪元素写出过无 sesno 的行），混进聚合会让 math::max 整条报错，进而把
+        // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
         let sql = format!(
             "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
              applied_sesno, sesno FROM {WATERMARK_TABLE}:{dbnum};\
-             RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} WHERE dbnum = {dbnum}));"
+             RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} \
+             WHERE dbnum = {dbnum} AND sesno != NONE));"
         );
         let mut response = SUL_DB
             .query(sql)
