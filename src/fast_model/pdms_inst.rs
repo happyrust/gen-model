@@ -783,9 +783,11 @@ mod tests {
     #[tokio::test]
     async fn failed_instance_write_reaches_the_caller() {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async {
-            Err::<(), anyhow::Error>(anyhow::anyhow!("forced instance write failure"))
-        }));
+        tasks.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async {
+                Err::<(), anyhow::Error>(anyhow::anyhow!("forced instance write failure"))
+            }),
+        );
 
         let error = finish_db_writes(tasks)
             .await
@@ -802,14 +804,18 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let delayed_completed = completed.clone();
         let mut tasks = FuturesUnordered::new();
-        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async {
-            Err::<(), anyhow::Error>(anyhow::anyhow!("first write failed"))
-        }));
-        tasks.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            delayed_completed.store(true, Ordering::SeqCst);
-            Ok(())
-        }));
+        tasks.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async {
+                Err::<(), anyhow::Error>(anyhow::anyhow!("first write failed"))
+            }),
+        );
+        tasks.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                delayed_completed.store(true, Ordering::SeqCst);
+                Ok(())
+            }),
+        );
 
         finish_db_writes(tasks)
             .await

@@ -247,7 +247,8 @@ impl SideEffectCompensator {
         }
 
         let outcome = async {
-            let mut deferred = crate::data_interface::staging::write_context::DeferredSpatialMutations::default();
+            let mut deferred =
+                crate::data_interface::staging::write_context::DeferredSpatialMutations::default();
             for job in &jobs {
                 for raw in &job.refresh_refnos {
                     let refno = raw
@@ -293,12 +294,7 @@ impl SideEffectCompensator {
         }
 
         for job in &jobs {
-            Self::mark_done(
-                SideEffectKind::SpatialReconcile,
-                job.dbnum,
-                job.end_sesno,
-            )
-            .await?;
+            Self::mark_done(SideEffectKind::SpatialReconcile, job.dbnum, job.end_sesno).await?;
         }
         Ok(jobs.len())
     }
@@ -471,7 +467,10 @@ mod tests {
         assert!(sql.contains("kind = 'spatial_reconcile'"));
         assert!(sql.contains("refresh_refnos = [\"16777216/1\",\"16777216/2\"]"));
         assert!(sql.contains("remove_refnos = [\"16777216/3\"]"));
-        assert_eq!(SideEffectKind::SpatialReconcile.as_str(), "spatial_reconcile");
+        assert_eq!(
+            SideEffectKind::SpatialReconcile.as_str(),
+            "spatial_reconcile"
+        );
     }
 
     #[test]

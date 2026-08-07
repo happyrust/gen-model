@@ -484,7 +484,8 @@ async fn a_poisoned_write_back_stalls_the_window_but_replay_converges_after_repa
     let error = window
         .commit_registered_to(&target)
         .await
-        .err().expect("坏事件在场时写回必须失败");
+        .err()
+        .expect("坏事件在场时写回必须失败");
     assert!(
         format!("{error:#}").contains("写回块")
             || format!("{error:#}").contains("statement failed"),

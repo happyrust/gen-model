@@ -105,8 +105,8 @@ async fn apply_model_mutation_preload_from(
     )
     .await?;
     let owner_elapsed = started.elapsed();
-    copied += preload_existing_generation_products_for_refnos(source, &preload.model_refnos)
-        .await?;
+    copied +=
+        preload_existing_generation_products_for_refnos(source, &preload.model_refnos).await?;
     println!(
         "暂存 mutation 预载: subtree={} model={} hierarchy={} copied={}，pe={:?} owner={:?} total={:?}",
         preload.subtree_len,

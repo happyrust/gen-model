@@ -77,12 +77,8 @@ impl AiosDBManager {
         let pending_revision = Some(ensure_regen_pending(&root_refno, &root_noun).await?);
         let outcome = generate_unit_model(self, &root_refno).await;
         let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-        if let Err(error) = settle_regen_work(
-            &root_refno,
-            pending_revision,
-            generation_error.as_deref(),
-        )
-        .await
+        if let Err(error) =
+            settle_regen_work(&root_refno, pending_revision, generation_error.as_deref()).await
         {
             log::error!("收口模型 pending 失败 root={root_refno}: {error:#}");
         }
@@ -207,7 +203,9 @@ async fn written_instance_count(scope: &[RefnoEnum]) -> anyhow::Result<usize> {
         }
         let inst_keys = aios_core::get_inst_relate_keys(chunk);
         let mut response = SUL_DB
-            .query(format!("RETURN array::len(SELECT VALUE id FROM {inst_keys});"))
+            .query(format!(
+                "RETURN array::len(SELECT VALUE id FROM {inst_keys});"
+            ))
             .await?;
         let count: Option<usize> = response.take(0)?;
         total += count.unwrap_or_default();
@@ -232,9 +230,7 @@ impl std::fmt::Display for UnresolvableRoot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => f.write_str("构件不存在"),
-            Self::Container => {
-                f.write_str("容器不能做生成根，请展开一层后对子节点逐个 ensure")
-            }
+            Self::Container => f.write_str("容器不能做生成根，请展开一层后对子节点逐个 ensure"),
             Self::NoRoot => f.write_str("构件向上找不到任何合法生成根"),
         }
     }
@@ -249,8 +245,12 @@ async fn resolve_generation_root(
     if let Some(root) = resolve_live_element_generation_root(requested_refno, &unit_types).await? {
         return Ok((root.root, root.noun));
     }
-    Err(anyhow::Error::new(unresolvable_reason(requested_refno).await)
-        .context(format!("构件 {} 无法解析生成根", requested_refno.to_pdms_str())))
+    Err(
+        anyhow::Error::new(unresolvable_reason(requested_refno).await).context(format!(
+            "构件 {} 无法解析生成根",
+            requested_refno.to_pdms_str()
+        )),
+    )
 }
 
 /// 分型只在失败之后跑，正常路径不多这一次查询。查询本身出错时按「不存在」报——

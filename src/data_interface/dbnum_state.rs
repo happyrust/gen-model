@@ -189,9 +189,7 @@ impl FileAnomaly {
                 "同 dbnum 存在多个文件，已阻断: {}",
                 paths.join("; ")
             )),
-            FileAnomaly::Missing { path } => {
-                Some(format!("登记文件缺失，已阻断: {path}"))
-            }
+            FileAnomaly::Missing { path } => Some(format!("登记文件缺失，已阻断: {path}")),
             FileAnomaly::ForeignProject {
                 stored_project,
                 observed_project,
@@ -499,8 +497,7 @@ async fn write_seed_marker(
 ///
 /// pe 侧是第二次全表扫描（与水位聚合分开发，互不影响已验证的水位语句）；
 /// 只在走 pe 源播种的启动里执行一次。
-async fn fetch_seed_integrity_counts()
--> anyhow::Result<(BTreeMap<u32, i64>, BTreeMap<u32, i64>)> {
+async fn fetch_seed_integrity_counts() -> anyhow::Result<(BTreeMap<u32, i64>, BTreeMap<u32, i64>)> {
     #[derive(Deserialize)]
     struct DbnumCount {
         dbnum: u32,
@@ -557,8 +554,11 @@ impl DbnumState {
             count_watermark_rows().await?
         };
         let marker_present = seed_marker_present().await?;
-        let seed_from_current_database =
-            should_seed_from_current_database(watermark_table_missing, watermark_rows, marker_present);
+        let seed_from_current_database = should_seed_from_current_database(
+            watermark_table_missing,
+            watermark_rows,
+            marker_present,
+        );
 
         SUL_DB
             .query(INCREMENT_STATE_SCHEMA)
@@ -848,9 +848,7 @@ impl DbnumState {
     /// 更旧的基线，那种观察会被判成回退，走正门就写不进身份）。名字取得这么长
     /// 是故意的：生产代码里出现它，评审一眼就能看见。
     #[cfg(test)]
-    pub(crate) async fn force_scan_identity_for_test(
-        obs: &FileObservation,
-    ) -> anyhow::Result<()> {
+    pub(crate) async fn force_scan_identity_for_test(obs: &FileObservation) -> anyhow::Result<()> {
         Self::record_scan(obs).await
     }
 
@@ -983,10 +981,16 @@ mod tests {
         let seed = should_seed_from_current_database(missing, 0, false);
         let keep_legacy = should_seed_from_current_database(existing, 7, true);
         assert!(migration_watermark_source(seed).0.contains("FROM pe"));
-        assert!(migration_watermark_source(seed).0.contains("GROUP BY dbnum"));
-        assert!(migration_watermark_source(keep_legacy)
-            .0
-            .contains("FROM dbnum_info_table"));
+        assert!(
+            migration_watermark_source(seed)
+                .0
+                .contains("GROUP BY dbnum")
+        );
+        assert!(
+            migration_watermark_source(keep_legacy)
+                .0
+                .contains("FROM dbnum_info_table")
+        );
     }
 
     /// 崩溃窗口：上一轮在建表之后、播种完成之前死掉。空表（一批都没写上）与
@@ -1022,9 +1026,11 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("dbnum=8000")
             && w.contains("pe 34 条")
             && w.contains("统计 30 条")));
-        assert!(warnings
-            .iter()
-            .any(|w| w.contains("dbnum=8191") && w.contains("统计 0 条")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("dbnum=8191") && w.contains("统计 0 条"))
+        );
 
         // 统计表整体为空：一条整体提示。
         let empty_info = BTreeMap::new();

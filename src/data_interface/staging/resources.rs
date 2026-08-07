@@ -9,8 +9,8 @@
 //! 这是**摄入量代理**而不是精确堆占用——mem 引擎不暴露每库字节数，代理量
 //! 单调、便宜、与真实占用同数量级，足以在 OOM 之前拉响三级动作。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 资源档位，按严重度排序。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,10 +42,7 @@ impl Default for ResourceThresholds {
     fn default() -> Self {
         Self {
             warn_bytes: env_u64("AIOS_STAGING_WARN_BYTES", 512 * 1024 * 1024),
-            refuse_absorb_bytes: env_u64(
-                "AIOS_STAGING_REFUSE_ABSORB_BYTES",
-                1024 * 1024 * 1024,
-            ),
+            refuse_absorb_bytes: env_u64("AIOS_STAGING_REFUSE_ABSORB_BYTES", 1024 * 1024 * 1024),
             abandon_bytes: env_u64("AIOS_STAGING_ABANDON_BYTES", 2 * 1024 * 1024 * 1024),
             warn_rows: env_u64("AIOS_STAGING_WARN_ROWS", 1_000_000),
             refuse_absorb_rows: env_u64("AIOS_STAGING_REFUSE_ABSORB_ROWS", 2_000_000),
@@ -103,8 +100,7 @@ impl ResourceGauge {
     }
 
     pub fn record_write_rows(&self, rows: u64) {
-        self.estimated_write_rows
-            .fetch_add(rows, Ordering::Relaxed);
+        self.estimated_write_rows.fetch_add(rows, Ordering::Relaxed);
     }
 
     /// 合计摄入量（同一配额：暂存 SQL 字节 + journal 字节）。

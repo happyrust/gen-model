@@ -131,9 +131,7 @@ pub async fn execute_surreal_checked_on(
         let result = async {
             db.query(sql)
                 .await
-                .map_err(|error| {
-                    anyhow::anyhow!("{context} {TRANSPORT_FAILURE_MARKER}: {error}")
-                })?
+                .map_err(|error| anyhow::anyhow!("{context} {TRANSPORT_FAILURE_MARKER}: {error}"))?
                 .check()
                 .map_err(|error| anyhow::anyhow!("{context} statement failed: {error}"))?;
             Ok::<(), anyhow::Error>(())

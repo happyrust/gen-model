@@ -177,7 +177,11 @@ mod tests {
         let room = panel(Vec3::ZERO, Vec3::splat(1000.0));
         let inside_pt = || vec![Point::new(950.0, 500.0, 500.0)];
         let cases = [
-            (aabb(Vec3::splat(400.0), Vec3::splat(600.0)), AabbVerdict::Inside, 8),
+            (
+                aabb(Vec3::splat(400.0), Vec3::splat(600.0)),
+                AabbVerdict::Inside,
+                8,
+            ),
             (
                 aabb(Vec3::splat(2000.0), Vec3::splat(2100.0)),
                 AabbVerdict::Outside,

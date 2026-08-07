@@ -345,9 +345,9 @@ mod tests {
         validate_statement("DELETE pe_owner:[pe:a, NONE]..=[pe:a, ..]").expect("单 owner 前缀范围");
 
         for sql in [
-            "DELETE pe_owner:[pe:a, NONE]..",            // 上界漏写：一路删到表尾
+            "DELETE pe_owner:[pe:a, NONE]..", // 上界漏写：一路删到表尾
             "DELETE pe_owner:[pe:a, NONE]..=[pe:z, ..]", // 跨 owner
-            "DELETE pe_owner:0..=999",                   // 非数组端点
+            "DELETE pe_owner:0..=999",        // 非数组端点
         ] {
             assert!(validate_statement(sql).is_err(), "应拒绝：{sql}");
         }

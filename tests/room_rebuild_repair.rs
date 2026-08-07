@@ -87,7 +87,10 @@ async fn rebuild_room_membership_on_the_live_project() {
             println!("[repair] 只重建命中 {keyword} 的房间");
             db_option.room_key_word = Some(vec![keyword]);
         }
-        Err(_) => println!("[repair] 用配置里的 room_key_word：{:?}", db_option.get_room_key_word()),
+        Err(_) => println!(
+            "[repair] 用配置里的 room_key_word：{:?}",
+            db_option.get_room_key_word()
+        ),
     }
 
     // 走与 `run_cli` 同一条加载路径：sidecar 的 epoch 与库一致才信树文件，否则从库指针重建。

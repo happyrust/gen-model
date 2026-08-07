@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
-use surrealdb::engine::any::Any;
+use anyhow::{Context, bail};
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use super::replay_safe;
 use super::resources::{ResourceBand, ResourceGauge};
@@ -180,8 +180,7 @@ impl StagedExecutor {
     ) -> anyhow::Result<()> {
         self.replay_journal_to(target, TX_CHUNK, None).await?;
         if let Some(tail) = tail_transaction {
-            let tail_tx = wrap_in_transaction(&[tail.to_string()])
-                .expect("非空尾事务必然可包装");
+            let tail_tx = wrap_in_transaction(&[tail.to_string()]).expect("非空尾事务必然可包装");
             execute_surreal_checked_on(target, &tail_tx, &format!("[{}] 写回尾事务", self.label))
                 .await?;
         }
@@ -227,17 +226,12 @@ impl StagedExecutor {
             if max_chunks.is_some_and(|max| index >= max) {
                 break;
             }
-            execute_surreal_checked_on(
-                target,
-                &sql,
-                &format!("[{}] 写回块 {index}", self.label),
-            )
-            .await?;
+            execute_surreal_checked_on(target, &sql, &format!("[{}] 写回块 {index}", self.label))
+                .await?;
             replayed += 1;
         }
         Ok(replayed)
     }
-
 }
 
 #[cfg(test)]
@@ -286,7 +280,10 @@ mod tests {
             .await
             .expect("Both");
         executor
-            .execute("UPSERT pe:preloaded SET noun = 'SITE'", ExecMode::StagingOnly)
+            .execute(
+                "UPSERT pe:preloaded SET noun = 'SITE'",
+                ExecMode::StagingOnly,
+            )
             .await
             .expect("StagingOnly");
         executor
@@ -299,7 +296,10 @@ mod tests {
 
         // 暂存世界：Both 与 StagingOnly 可见，CommitOnly 未执行。
         let staged = select_values(&staging, "SELECT VALUE id FROM pe ORDER BY id").await;
-        assert!(staged.contains("\"a\"") && staged.contains("preloaded"), "{staged}");
+        assert!(
+            staged.contains("\"a\"") && staged.contains("preloaded"),
+            "{staged}"
+        );
 
         // 日志：Both 与 CommitOnly 在场且保持原始顺序，StagingOnly 缺席。
         let journal = executor.journal();
@@ -346,8 +346,8 @@ mod tests {
             refuse_absorb_rows: 200,
             abandon_rows: 300,
         });
-        let mut executor = StagedExecutor::new(staging.clone(), "staging_7997_resource")
-            .with_gauge(gauge.clone());
+        let mut executor =
+            StagedExecutor::new(staging.clone(), "staging_7997_resource").with_gauge(gauge.clone());
 
         executor
             .execute("UPSERT pe:a SET noun = 'LONG_PIPE_NAME'", ExecMode::Both)
@@ -399,12 +399,18 @@ mod tests {
 
         // 尾事务单独收口。
         executor
-            .commit_to(&target, Some("UPSERT dbnum_watermark:7997 SET applied_sesno = 42"))
+            .commit_to(
+                &target,
+                Some("UPSERT dbnum_watermark:7997 SET applied_sesno = 42"),
+            )
             .await
             .expect("commit with tail");
 
         let counter = select_values(&target, "SELECT VALUE v FROM counter").await;
-        assert_eq!(counter, "{\"Array\":[{\"Number\":{\"Int\":3}}]}", "最后写入胜出");
+        assert_eq!(
+            counter, "{\"Array\":[{\"Number\":{\"Int\":3}}]}",
+            "最后写入胜出"
+        );
         let tag = select_values(&target, "SELECT VALUE tag FROM row").await;
         assert_eq!(
             tag, "{\"Array\":[{\"Strand\":\"patched\"}]}",
@@ -412,7 +418,10 @@ mod tests {
         );
         let watermark =
             select_values(&target, "SELECT VALUE applied_sesno FROM dbnum_watermark").await;
-        assert_eq!(watermark, "{\"Array\":[{\"Number\":{\"Int\":42}}]}", "尾事务已收口");
+        assert_eq!(
+            watermark, "{\"Array\":[{\"Number\":{\"Int\":42}}]}",
+            "尾事务已收口"
+        );
     }
 
     /// T0.5 收敛测试：写回中断后拿同一份 journal 整体重放，终态与一次成功
@@ -446,7 +455,10 @@ mod tests {
 
         // 对照路径：一次成功写回。
         let clean = persistent_handle().await;
-        executor.commit_to(&clean, None).await.expect("clean commit");
+        executor
+            .commit_to(&clean, None)
+            .await
+            .expect("clean commit");
 
         let a = select_values(&interrupted, "SELECT * FROM item ORDER BY id").await;
         let b = select_values(&clean, "SELECT * FROM item ORDER BY id").await;
@@ -466,9 +478,11 @@ mod tests {
             .expect("stage transaction");
 
         let target = persistent_handle().await;
-        executor.commit_to(&target, None).await.expect("replay transaction");
+        executor
+            .commit_to(&target, None)
+            .await
+            .expect("replay transaction");
         let rows = select_values(&target, "SELECT VALUE id FROM pe ORDER BY id").await;
         assert!(rows.contains("a") && rows.contains("b"), "{rows}");
     }
-
 }

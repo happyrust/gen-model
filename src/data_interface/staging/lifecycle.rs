@@ -278,9 +278,10 @@ impl ActiveStagedWindow {
             return;
         }
         if let Some(finalize) = self.finalize.lock().await.as_mut() {
-            finalize.plan.work_items.retain(|item| {
-                !succeeded.contains(&(item.action, item.target_refno.clone()))
-            });
+            finalize
+                .plan
+                .work_items
+                .retain(|item| !succeeded.contains(&(item.action, item.target_refno.clone())));
         }
     }
 

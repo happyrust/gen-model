@@ -541,7 +541,11 @@ fn name_change_hits_room_keyword(
             return true;
         }
     }
-    for (attr, value) in modified.added_attrs.iter().chain(&modified.added_explicit_attrs) {
+    for (attr, value) in modified
+        .added_attrs
+        .iter()
+        .chain(&modified.added_explicit_attrs)
+    {
         if normalize_attribute_name(attr) == "NAME" && hits(value) {
             return true;
         }
@@ -823,8 +827,7 @@ pub(crate) async fn build_model_update_plan(
                 noun: "PANE".to_string(),
             }));
             work_items.sort_by_key(|item| (item.action, item.target_refno.clone()));
-            work_items
-                .dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
+            work_items.dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
         }
     }
     Ok(ModelUpdatePlan {
@@ -1352,10 +1355,20 @@ mod tests {
         let masked = mask_details_to_regen(&details, &HashSet::from([geom]));
         assert_eq!(masked.len(), 2, "净变更一条不丢，只掩掉调度语义");
         assert!(
-            !masked.iter().find(|d| d.refno == pose).unwrap().model_affecting,
+            !masked
+                .iter()
+                .find(|d| d.refno == pose)
+                .unwrap()
+                .model_affecting,
             "纯位姿目标在 rollup 眼中不再 model_affecting"
         );
-        assert!(masked.iter().find(|d| d.refno == geom).unwrap().model_affecting);
+        assert!(
+            masked
+                .iter()
+                .find(|d| d.refno == geom)
+                .unwrap()
+                .model_affecting
+        );
     }
 
     #[test]
@@ -1948,10 +1961,9 @@ mod tests {
             selected.push(operation.clone());
         }
 
-        let plan =
-            build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)]))
-                .await
-                .expect("build nested-created model plan");
+        let plan = build_model_update_plan(8000, 21, "DESI", &BTreeMap::from([(21, selected)]))
+            .await
+            .expect("build nested-created model plan");
         let roots = plan
             .work_items
             .iter()

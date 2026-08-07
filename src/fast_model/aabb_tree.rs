@@ -104,7 +104,10 @@ async fn sync_tree_from_committed_pointers(refnos: &[RefnoEnum]) -> anyhow::Resu
                 mark_aabb_tree_dirty();
             }
         }
-        let boxes = rows.into_iter().map(PointerRow::into_box).collect::<Vec<_>>();
+        let boxes = rows
+            .into_iter()
+            .map(PointerRow::into_box)
+            .collect::<Vec<_>>();
         let count = boxes.len();
         let stale = GLOBAL_AABB_TREE.write().await.sync_refnos(boxes);
         if count > 0 || !stale.is_empty() {
@@ -137,10 +140,7 @@ pub fn mark_aabb_tree_dirty() {
 /// 「搬运语义」（加载前复制到裸名、落盘后归档回项目名）在多项目并发共用 cwd
 /// 时是竞态窗口，现在整个消失。
 pub fn project_tree_file() -> String {
-    format!(
-        "accel_tree_{}.bin",
-        aios_core::get_db_option().project_name
-    )
+    format!("accel_tree_{}.bin", aios_core::get_db_option().project_name)
 }
 
 /// 树文件的 sidecar 元数据：`accel_tree_{project}.meta.json`。
@@ -179,21 +179,18 @@ fn write_file_atomic(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
         file.sync_all()
             .map_err(|e| anyhow::anyhow!("同步临时文件 {tmp} 失败: {e}"))?;
     }
-    std::fs::rename(&tmp, path)
-        .map_err(|e| anyhow::anyhow!("覆盖 {path} 失败: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| anyhow::anyhow!("覆盖 {path} 失败: {e}"))?;
     Ok(())
 }
 
 fn write_project_tree_file(tree: &AccelerationTree) -> anyhow::Result<()> {
-    let bytes = bincode::serialize(tree)
-        .map_err(|e| anyhow::anyhow!("序列化空间树失败: {e}"))?;
+    let bytes = bincode::serialize(tree).map_err(|e| anyhow::anyhow!("序列化空间树失败: {e}"))?;
     write_file_atomic(&project_tree_file(), &bytes)
 }
 
 fn read_project_tree_file() -> anyhow::Result<AccelerationTree> {
     let path = project_tree_file();
-    let bytes =
-        std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
+    let bytes = std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
     bincode::deserialize(&bytes).map_err(|e| anyhow::anyhow!("反序列化 {path} 失败: {e}"))
 }
 
@@ -204,8 +201,7 @@ fn write_tree_meta(meta: &TreeFileMeta) -> anyhow::Result<()> {
 
 fn read_tree_meta() -> anyhow::Result<TreeFileMeta> {
     let path = project_tree_meta_file();
-    let bytes =
-        std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
+    let bytes = std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("解析 {path} 失败: {e}"))
 }
 
@@ -222,9 +218,7 @@ const SPATIAL_EPOCH_ID: &str = "spatial_epoch:current";
 /// 窗口重试导致的多次递增无害：版本号只与 sidecar 比相等、不表达次数，多 bump
 /// 一次至多让下次启动多做一次指针重建。
 pub(crate) fn render_spatial_epoch_bump() -> String {
-    format!(
-        "UPSERT {SPATIAL_EPOCH_ID} SET value = (value?:0) + 1, updated_at = time::now();"
-    )
+    format!("UPSERT {SPATIAL_EPOCH_ID} SET value = (value?:0) + 1, updated_at = time::now();")
 }
 
 #[derive(serde::Deserialize)]
@@ -367,9 +361,7 @@ pub async fn rebuild_tree_from_pointers() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("分页读取包围盒指针失败（start {offset}）: {e}"))?
             .check()
-            .map_err(|e| {
-                anyhow::anyhow!("分页读取包围盒指针语句失败（start {offset}）: {e}")
-            })?;
+            .map_err(|e| anyhow::anyhow!("分页读取包围盒指针语句失败（start {offset}）: {e}"))?;
         let rows: Vec<PointerRow> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解析包围盒指针失败（start {offset}）: {e}"))?;

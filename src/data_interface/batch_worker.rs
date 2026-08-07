@@ -139,9 +139,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     // 暂停是持久化的操作意图（ADR-011 §9）：重启后必须原样恢复，
     // 否则「别再动数据」的用意会被重启抹掉且毫无提示。
     match scheduler.restore_persisted_pause().await {
-        Ok(true) => println!(
-            "队列处于暂停状态（重启前设置），恢复前不出新批次；已提交数据的空间收敛继续"
-        ),
+        Ok(true) => {
+            println!("队列处于暂停状态（重启前设置），恢复前不出新批次；已提交数据的空间收敛继续")
+        }
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
@@ -491,7 +491,10 @@ async fn execute_frozen_batch(
                 job.dbnum,
                 rooms.rooms.len(),
                 rooms.all_panels.len(),
-                preload_started.elapsed().as_millis().saturating_sub(load_ms)
+                preload_started
+                    .elapsed()
+                    .as_millis()
+                    .saturating_sub(load_ms)
             ),
             Err(error) => {
                 room_preload_failed = true;
@@ -540,7 +543,10 @@ async fn execute_frozen_batch(
         if !bad_roots.is_empty()
             && let Err(error) = crate::data_interface::staging::attempts::record_window_block_at(
                 job.dbnum,
-                result.batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno),
+                result
+                    .batch
+                    .as_ref()
+                    .map_or(job.end_sesno, |batch| batch.end_sesno),
                 "模型生成重试已耗尽",
                 &bad_roots,
             )
@@ -613,14 +619,16 @@ async fn execute_frozen_batch(
             spatial.room_changes.len()
         );
         match &room_map {
-            Some(rooms) => window
-                .scope(model_update_pending::run_staged_room_work(
-                    &mgr.db_option,
-                    rooms,
-                    &finalize.plan.work_items,
-                    &spatial.room_changes,
-                ))
-                .await,
+            Some(rooms) => {
+                window
+                    .scope(model_update_pending::run_staged_room_work(
+                        &mgr.db_option,
+                        rooms,
+                        &finalize.plan.work_items,
+                        &spatial.room_changes,
+                    ))
+                    .await
+            }
             None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
         }
     };
@@ -688,10 +696,7 @@ async fn execute_frozen_batch(
         commit_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         Ordering::Relaxed,
     );
-    LAST_STAGED_COMMIT_RETRIES.store(
-        commit_attempts.saturating_sub(1) as u64,
-        Ordering::Relaxed,
-    );
+    LAST_STAGED_COMMIT_RETRIES.store(commit_attempts.saturating_sub(1) as u64, Ordering::Relaxed);
     if commit_attempts > STAGED_COMMIT_ATTEMPTS {
         result.warnings.push(format!(
             "增量暂存窗口写回曾滞留，持久层恢复后第 {commit_attempts} 次写回成功"
@@ -738,7 +743,8 @@ async fn execute_frozen_batch(
         );
     }
 
-    if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await {
+    if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await
+    {
         postcommit_failed = true;
     }
 
@@ -1073,7 +1079,9 @@ async fn execute_frozen_batch_body(
                     &report.succeeded_plan_items,
                 )
                 .await;
-                let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
+                let end_sesno = batch
+                    .as_ref()
+                    .map_or(job.end_sesno, |batch| batch.end_sesno);
                 new_units.extend(report.derived_roots.into_iter().map(|root| {
                     crate::data_interface::manual_update::UnitTask {
                         dbnum: job.dbnum,
@@ -1164,7 +1172,9 @@ async fn execute_frozen_batch_body(
                 }
             };
             let mut worklist = merge_unit_worklist(new_units, pending);
-            let end_sesno = batch.as_ref().map_or(job.end_sesno, |batch| batch.end_sesno);
+            let end_sesno = batch
+                .as_ref()
+                .map_or(job.end_sesno, |batch| batch.end_sesno);
             if let Ok(Some(block)) =
                 crate::data_interface::staging::attempts::load_window_block(job.dbnum).await
                 && let Some(blocked_end) = block.end_sesno
@@ -1397,8 +1407,7 @@ async fn run_single_unit(
                             break Err(error);
                         }
                     }
-                    if crate::data_interface::staging::attempts::reaches_block_threshold(attempts)
-                    {
+                    if crate::data_interface::staging::attempts::reaches_block_threshold(attempts) {
                         break Err(error);
                     }
                     tokio::time::sleep(delay).await;
@@ -2135,7 +2144,10 @@ mod tests {
             .find("reconcile_spatial_pending(mgr)")
             .expect("spatial reconcile gate");
         let dequeue = body.find("freeze_next(registry)").expect("dequeue call");
-        assert!(reconcile < dequeue, "spatial convergence must precede dequeue");
+        assert!(
+            reconcile < dequeue,
+            "spatial convergence must precede dequeue"
+        );
     }
 
     /// 统一根锁必须夹在「只读闭包解析」与「拷贝进暂存」之间。
@@ -2267,7 +2279,10 @@ mod tests {
         let room_round = body[failed..]
             .find("run_staged_room_work(")
             .expect("staged room round");
-        assert!(fail_closed < room_round, "preload failure must disable room work");
+        assert!(
+            fail_closed < room_round,
+            "preload failure must disable room work"
+        );
     }
 
     fn unit_task(
@@ -2364,7 +2379,10 @@ mod tests {
     #[test]
     fn only_design_windows_pay_for_room_preload() {
         assert!(staged_window_has_room_semantics("DESI", true));
-        assert!(staged_window_has_room_semantics("desi", true), "类型比较大小写不敏感");
+        assert!(
+            staged_window_has_room_semantics("desi", true),
+            "类型比较大小写不敏感"
+        );
         assert!(!staged_window_has_room_semantics("SYST", true));
         assert!(!staged_window_has_room_semantics("CATA", true));
         assert!(!staged_window_has_room_semantics("DICT", true));
@@ -2407,9 +2425,7 @@ mod tests {
     fn the_finished_line_carries_window_and_wall_clock() {
         use chrono::TimeZone;
 
-        let finished = chrono::Utc
-            .with_ymd_and_hms(2026, 8, 5, 17, 1, 48)
-            .unwrap();
+        let finished = chrono::Utc.with_ymd_and_hms(2026, 8, 5, 17, 1, 48).unwrap();
         assert_eq!(
             render_batch_finished_line(
                 7997,
@@ -2470,7 +2486,10 @@ mod tests {
         let new_only_joins = window
             .scope(async { unit_joins_regen_batch(&unit_task(0, None, "16777216/6")) })
             .await;
-        assert!(new_only_joins, "new staged roots do not need a durable revision");
+        assert!(
+            new_only_joins,
+            "new staged roots do not need a durable revision"
+        );
 
         window
             .scope(

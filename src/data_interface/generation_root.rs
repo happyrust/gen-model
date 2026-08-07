@@ -351,11 +351,13 @@ async fn load_chain_into(
         let node = match nodes.get(&current) {
             Some(cached) => cached.clone(),
             None => {
-                let node = aios_core::get_pe_on(db, current).await?.map(|pe| GenerationNode {
-                    owner: (pe.owner.is_valid() && pe.owner != current).then_some(pe.owner),
-                    noun: pe.noun,
-                    name: pe.name,
-                });
+                let node = aios_core::get_pe_on(db, current)
+                    .await?
+                    .map(|pe| GenerationNode {
+                        owner: (pe.owner.is_valid() && pe.owner != current).then_some(pe.owner),
+                        noun: pe.noun,
+                        name: pe.name,
+                    });
                 nodes.insert(current, node.clone());
                 node
             }

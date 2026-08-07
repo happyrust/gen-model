@@ -418,16 +418,8 @@ pub(crate) fn render_finalize_tail(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
-    render_finalize_tail_with_effects(
-        dbnum,
-        end_sesno,
-        plan,
-        window_statements,
-        &[],
-        &[],
-        &[],
-    )
-    .expect("empty finalize effects are valid")
+    render_finalize_tail_with_effects(dbnum, end_sesno, plan, window_statements, &[], &[], &[])
+        .expect("empty finalize effects are valid")
 }
 
 /// Make AABB-derived room work part of the same durable plan that advances the watermark.
@@ -968,7 +960,8 @@ pub(crate) async fn run_staged_non_regen_work(
                 Err(_) => {
                     report.failures.push(format!(
                         "{} 目标 {} 无效",
-                        action.as_str(), item.target_refno
+                        action.as_str(),
+                        item.target_refno
                     ));
                     continue;
                 }
@@ -995,7 +988,8 @@ pub(crate) async fn run_staged_non_regen_work(
                 }
                 Err(error) => report.failures.push(format!(
                     "{} 目标 {} 暂存执行失败: {error:#}",
-                    action.as_str(), item.target_refno
+                    action.as_str(),
+                    item.target_refno
                 )),
             }
         }
@@ -1042,11 +1036,12 @@ pub(crate) async fn run_staged_room_work(
     plan_items: &[ModelWorkItem],
     aabb_changes: &HashMap<RefnoEnum, String>,
 ) -> anyhow::Result<StagedRoomReport> {
-    let mut targets = std::collections::BTreeMap::<
-        (ModelWorkAction, String),
-        (RefnoEnum, bool),
-    >::new();
-    for item in plan_items.iter().filter(|item| item.action.is_room_recalc()) {
+    let mut targets =
+        std::collections::BTreeMap::<(ModelWorkAction, String), (RefnoEnum, bool)>::new();
+    for item in plan_items
+        .iter()
+        .filter(|item| item.action.is_room_recalc())
+    {
         let refno = RefU64::from_str(&item.target_refno)
             .map(RefnoEnum::from)
             .map_err(|_| anyhow::anyhow!("invalid staged room refno {}", item.target_refno))?;
@@ -1120,9 +1115,9 @@ pub(crate) async fn run_staged_room_work(
                     report.succeeded_aabb_targets.insert(refno);
                 }
             }
-            Err(error) => report
-                .failures
-                .push(format!("房间目标 {target} 暂存计算失败，已保留 pending: {error:#}")),
+            Err(error) => report.failures.push(format!(
+                "房间目标 {target} 暂存计算失败，已保留 pending: {error:#}"
+            )),
         }
     }
     Ok(report)
@@ -1810,17 +1805,23 @@ mod tests {
             .expect("room work");
 
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(report.succeeded_plan_items.contains(&(
-            ModelWorkAction::RoomRecalcElement,
-            "4000000001/20".into()
-        )));
+        assert!(
+            report
+                .succeeded_plan_items
+                .contains(&(ModelWorkAction::RoomRecalcElement, "4000000001/20".into()))
+        );
         assert_eq!(window.journal().await.len(), 1);
         let mut response = window
             .staging_db()
             .query("SELECT VALUE id FROM room_relate")
             .await
             .expect("inspect");
-        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("edges").is_empty());
+        assert!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("edges")
+                .is_empty()
+        );
         window.drop_database().await.expect("cleanup");
     }
 
@@ -1881,13 +1882,23 @@ mod tests {
             .query("SELECT VALUE id FROM room_relate")
             .await
             .expect("inspect");
-        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("edges").is_empty());
+        assert!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("edges")
+                .is_empty()
+        );
         let mut response = window
             .staging_db()
             .query("SELECT VALUE id FROM room_panel_relate")
             .await
             .expect("inspect topology");
-        assert!(response.take::<Vec<surrealdb::sql::Thing>>(0).expect("topology edges").is_empty());
+        assert!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("topology edges")
+                .is_empty()
+        );
         assert_eq!(window.journal().await.len(), 2);
         window.drop_database().await.expect("cleanup");
     }
@@ -1947,14 +1958,16 @@ mod tests {
             "{:?}",
             report.failures
         );
-        assert!(!report.succeeded_plan_items.contains(&(
-            ModelWorkAction::RoomRecalcPanel,
-            "4000000001/10".into()
-        )));
-        assert!(report.succeeded_plan_items.contains(&(
-            ModelWorkAction::RoomRecalcPanel,
-            "4000000001/30".into()
-        )));
+        assert!(
+            !report
+                .succeeded_plan_items
+                .contains(&(ModelWorkAction::RoomRecalcPanel, "4000000001/10".into()))
+        );
+        assert!(
+            report
+                .succeeded_plan_items
+                .contains(&(ModelWorkAction::RoomRecalcPanel, "4000000001/30".into()))
+        );
         let mut response = window
             .staging_db()
             .query("RETURN [count(SELECT * FROM room_relate WHERE in = pe:4000000001_10) = 1];")
@@ -2738,7 +2751,9 @@ mod tests {
         )
         .expect("staged finalize tail");
 
-        let spatial = sql.find("spatial_reconcile_8191_42").expect("spatial intent");
+        let spatial = sql
+            .find("spatial_reconcile_8191_42")
+            .expect("spatial intent");
         let epoch = sql
             .find("UPSERT spatial_epoch:current")
             .expect("epoch bump must ride the same tail");
@@ -2768,8 +2783,14 @@ mod tests {
     fn aabb_room_changes_are_part_of_the_finalize_plan_before_room_settlement() {
         let mut plan = ModelUpdatePlan::default();
         let changes = HashMap::from([
-            (RefnoEnum::from("16777216/2".parse::<RefU64>().unwrap()), "PANE".to_string()),
-            (RefnoEnum::from("16777216/3".parse::<RefU64>().unwrap()), "EQUI".to_string()),
+            (
+                RefnoEnum::from("16777216/2".parse::<RefU64>().unwrap()),
+                "PANE".to_string(),
+            ),
+            (
+                RefnoEnum::from("16777216/3".parse::<RefU64>().unwrap()),
+                "EQUI".to_string(),
+            ),
         ]);
         merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
         merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
@@ -2781,7 +2802,11 @@ mod tests {
         assert!(plan.work_items.iter().any(|item| {
             item.action == ModelWorkAction::RoomRecalcElement && item.target_refno == "16777216/3"
         }));
-        assert!(plan.work_items.iter().all(|item| item.dbnum == 8191 && item.source_end_sesno == 42));
+        assert!(
+            plan.work_items
+                .iter()
+                .all(|item| item.dbnum == 8191 && item.source_end_sesno == 42)
+        );
     }
 
     /// A baseline that advanced its watermark without queueing generation work

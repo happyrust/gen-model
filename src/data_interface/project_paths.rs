@@ -171,7 +171,9 @@ impl WatchDirPlan {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.projects.iter().all(|project| project.db_dirs.is_empty())
+        self.projects
+            .iter()
+            .all(|project| project.db_dirs.is_empty())
     }
 
     /// 逐项目的失败原因，一行一条。
@@ -200,7 +202,10 @@ impl WatchDirPlan {
                 .map(|root| root.display().to_string())
                 .unwrap_or_else(|| "<未解析出目录>".to_string());
             match &project.problem {
-                Some(problem) => lines.push(format!("  - {} -> {root} [跳过] {problem}", project.project)),
+                Some(problem) => lines.push(format!(
+                    "  - {} -> {root} [跳过] {problem}",
+                    project.project
+                )),
                 None => lines.push(format!(
                     "  - {} -> {root} [{} 个库目录] {}",
                     project.project,
@@ -255,7 +260,9 @@ pub fn plan_watch_dirs(db_option: &DbOption) -> WatchDirPlan {
             Ok(dirs) => (dirs, None),
             Err(error) => (
                 Vec::new(),
-                Some(format!("目录不可读（共享盘掉线 / 路径写错 / 无权限）: {error}")),
+                Some(format!(
+                    "目录不可读（共享盘掉线 / 路径写错 / 无权限）: {error}"
+                )),
             ),
         };
 
@@ -369,9 +376,7 @@ impl MountState {
 
     /// `dirs` 里还没挂上的那些。
     pub fn missing(&self, dirs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-        dirs.into_iter()
-            .filter(|dir| !self.contains(dir))
-            .collect()
+        dirs.into_iter().filter(|dir| !self.contains(dir)).collect()
     }
 
     /// 复查已挂目录还在不在，把不可达的降级为「失联」并从已挂集合里摘掉。
@@ -582,8 +587,8 @@ mod tests {
             let mut option = aios_core::get_db_option().clone();
             option.project_path = self.root.to_string_lossy().into_owned();
             option.included_projects = projects.iter().map(|name| name.to_string()).collect();
-            option.project_dirs = overrides
-                .map(|dirs| dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>());
+            option.project_dirs =
+                overrides.map(|dirs| dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>());
             option
         }
     }
@@ -801,7 +806,10 @@ mod tests {
     #[test]
     fn prefix_match_ignores_case_and_separator_style() {
         let child = Path::new(r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000");
-        assert!(path_starts_with(child, Path::new(r"D:\AVEVA\Projects\E3D3.1\ZDJ")));
+        assert!(path_starts_with(
+            child,
+            Path::new(r"D:\AVEVA\Projects\E3D3.1\ZDJ")
+        ));
         assert!(path_starts_with(child, child));
         assert!(!path_starts_with(
             child,
@@ -880,7 +888,10 @@ mod tests {
         // 恢复。
         std::fs::create_dir_all(&dir).expect("bring the directory back");
         assert_eq!(mounted.unwatch_lost(&mut watcher), 1);
-        mounted.mount(&mut watcher, &mounted.missing(plan_watch_dirs(&option).dirs()));
+        mounted.mount(
+            &mut watcher,
+            &mounted.missing(plan_watch_dirs(&option).dirs()),
+        );
         assert_eq!(mounted.len(), 1, "恢复后只能有一份挂载");
         assert!(mounted.missing(plan_watch_dirs(&option).dirs()).is_empty());
     }
@@ -923,9 +934,7 @@ mod tests {
 
         // 空转轮：什么都没变就不该再挂一次。
         assert!(
-            mounted
-                .missing(plan_watch_dirs(&option).dirs())
-                .is_empty(),
+            mounted.missing(plan_watch_dirs(&option).dirs()).is_empty(),
             "已挂上的目录不能被重复挂载"
         );
     }

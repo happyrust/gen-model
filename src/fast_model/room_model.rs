@@ -80,8 +80,8 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
     let panel_refno = "24381/34303".into();
     let mut geom_insts: Vec<GeomInstQuery> =
         crate::data_interface::staging::query_valid_insts(&[panel_refno])
-        .await
-        .unwrap_or_default();
+            .await
+            .unwrap_or_default();
     // dbg!(&geom_insts);
     if geom_insts.is_empty() {
         return Ok(());
@@ -402,11 +402,7 @@ async fn save_room_relate(
     room_num: &str,
 ) -> anyhow::Result<()> {
     let sql = render_room_relate_write(panel_refno, within_refnos, room_num);
-    crate::surreal_retry::execute_model_write(
-        &sql,
-        &format!("写入 {panel_refno} 的房间归属"),
-    )
-    .await
+    crate::surreal_retry::execute_model_write(&sql, &format!("写入 {panel_refno} 的房间归属")).await
 }
 
 /// 一间通过命名校验、参与房间归属计算的房间及其面板。
@@ -492,7 +488,10 @@ pub async fn load_room_panel_map_from_pe(db_option: &DbOption) -> anyhow::Result
         .await?
         .check()?;
     let groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
-    Ok(room_panel_map_from_groups(groups, configured_match_room_fn()))
+    Ok(room_panel_map_from_groups(
+        groups,
+        configured_match_room_fn(),
+    ))
 }
 
 /// 构建房间和面板之间的关联关系
@@ -764,8 +763,8 @@ pub async fn cal_room_refnos(
     // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
     let geom_insts: Vec<GeomInstQuery> =
         crate::data_interface::staging::query_valid_insts(&[panel_refno])
-        .await
-        .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
+            .await
+            .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
     // dbg!(&geom_insts);
     // 此前这里 `return Ok(Default::default())`——把「没有几何」当成「没有成员」交出去，
     // 调用方紧接着先清后写，于是这块面板的存量归属边被静默清空。它与下面「网格一个都
@@ -1172,12 +1171,11 @@ pub async fn load_panel_index(
     if registered.is_empty() {
         return Ok(index);
     }
-    let insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(&registered)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
-            })?;
+    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(&registered)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
+        })?;
 
     let mut indexed: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
@@ -1296,12 +1294,11 @@ pub async fn element_candidate_panels(
     if elements.is_empty() {
         return Ok(out);
     }
-    let insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(elements)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
-            })?;
+    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(elements)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
+        })?;
     for inst in insts {
         // 没有可用世界包围盒的构件：元素分支会把它收敛成空集，本身也不该有候选面板。
         // 留空（不插入）而非插入空集——两者在 absorption_verdict 里含义不同：缺项＝
@@ -1358,8 +1355,7 @@ pub async fn recalc_element_membership(
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
     let old_rooms = history.room_nums_of(element);
 
-    let insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(&[element])
+    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(&[element])
         .await
         .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
     // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建
@@ -1520,11 +1516,7 @@ async fn write_element_room_relate(
     edges: &[ElementRoomEdge],
 ) -> anyhow::Result<()> {
     let sql = render_element_relate_write(element, edges);
-    crate::surreal_retry::execute_model_write(
-        &sql,
-        &format!("写入 {element} 的房间归属"),
-    )
-    .await
+    crate::surreal_retry::execute_model_write(&sql, &format!("写入 {element} 的房间归属")).await
 }
 
 /// 元素分支写入 + 归属变化日志：先算本次收敛出的房间集合，与旧集合对照打印
@@ -2093,7 +2085,9 @@ mod tests {
         let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
         assert!(extend_at < recalc_at, "{body}");
         assert!(
-            !body.contains("cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)"),
+            !body.contains(
+                "cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)"
+            ),
             "排除集不能退回只有在册面板那一份: {body}"
         );
     }
@@ -2256,11 +2250,16 @@ mod tests {
         };
         let sql = render_panel_room_topology_write(panel, Some(&room));
         assert!(
-            position_of(&sql, "DELETE room_panel_relate WHERE out = pe:4000000001_10")
-                < position_of(&sql, "INSERT RELATION"),
+            position_of(
+                &sql,
+                "DELETE room_panel_relate WHERE out = pe:4000000001_10"
+            ) < position_of(&sql, "INSERT RELATION"),
             "{sql}"
         );
-        assert!(sql.contains("in: pe:4000000001_1, out: pe:4000000001_10"), "{sql}");
+        assert!(
+            sql.contains("in: pe:4000000001_1, out: pe:4000000001_10"),
+            "{sql}"
+        );
 
         let removed = render_panel_room_topology_write(panel, None);
         assert!(removed.contains("DELETE room_panel_relate WHERE out = pe:4000000001_10"));
@@ -2290,8 +2289,11 @@ mod tests {
             &room.room_num,
         ))
         .expect("整间重写必须过 ReplaySafe");
-        validate_statement(&render_panel_room_topology_write(room.panels[0], Some(&room)))
-            .expect("面板拓扑重写必须过 ReplaySafe");
+        validate_statement(&render_panel_room_topology_write(
+            room.panels[0],
+            Some(&room),
+        ))
+        .expect("面板拓扑重写必须过 ReplaySafe");
         validate_statement(&render_panel_room_topology_write(room.panels[0], None))
             .expect("面板不在册时的清边同样要过 ReplaySafe");
     }

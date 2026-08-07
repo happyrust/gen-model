@@ -3,47 +3,47 @@ use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
-use crate::fast_model::{get_generic_type, resolve_desi_comp, shared, SEND_INST_SIZE};
+use crate::fast_model::{SEND_INST_SIZE, get_generic_type, resolve_desi_comp, shared};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
-use aios_core::prim_geo::category::{convert_to_brep_shapes, CateBrepShape};
+use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
 use aios_core::prim_geo::profile::create_profile_geos;
 use aios_core::prim_geo::*;
 use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::math_tool::to_pdms_vec_str;
 use aios_core::{
-    gen_bytes_hash, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, HASH_PSEUDO_ATT_MAPS, SUL_DB,
+    HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, SUL_DB, gen_bytes_hash,
 };
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::future::join_all;
-use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+use futures::stream::FuturesUnordered;
 use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parry3d::bounding_volume::*;
 use std::collections::{HashMap, HashSet};
 use std::mem::take;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use tokio::sync::Semaphore;
 use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, error, info, warn};
 
 // 使用 aios_core 中的 CataHashRefnoKV 定义
 pub use aios_core::pdms_types::CataHashRefnoKV;
 
 // #[cfg(feature = "profile")]
-use tracing::{info_span, instrument, Level};
+use tracing::{Level, info_span, instrument};
 
 // For Chrome tracing
 use std::path::Path;
@@ -1392,13 +1392,25 @@ pub async fn gen_cata_geos_parallel_optimized(
 
     // 判断是否为BRAN/HANG类型
     let is_bran = branch_map.len() > 0;
-    info!("🔧 处理类型: {}", if is_bran { "BRAN/HANG" } else { "单个元件库" });
+    info!(
+        "🔧 处理类型: {}",
+        if is_bran {
+            "BRAN/HANG"
+        } else {
+            "单个元件库"
+        }
+    );
 
     // 根据CPU核心数确定并发数量
-    let cpu_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let max_concurrent = (cpu_count * 2).min(16).max(4); // 最少4个，最多16个
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    info!("⚙️ 使用 {} 个并发任务 (CPU核心数: {})", max_concurrent, cpu_count);
+    info!(
+        "⚙️ 使用 {} 个并发任务 (CPU核心数: {})",
+        max_concurrent, cpu_count
+    );
 
     // 计算批次大小 - 根据元件库数量动态调整
     let batch_size = if unique_cata_cnt <= 10 {
@@ -1427,32 +1439,47 @@ pub async fn gen_cata_geos_parallel_optimized(
         let db_option = db_option.clone();
         let semaphore = semaphore.clone();
 
-        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-            let batch_start = Instant::now();
+        let task =
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let batch_start = Instant::now();
 
-            info!("📋 开始处理批次 {}/{} (包含 {} 个元件库)",
-                  batch_idx + 1, total_batches, chunk_keys.len());
+                info!(
+                    "📋 开始处理批次 {}/{} (包含 {} 个元件库)",
+                    batch_idx + 1,
+                    total_batches,
+                    chunk_keys.len()
+                );
 
-            let result = process_cata_batch_optimized(
-                batch_idx + 1,
-                chunk_keys,
-                target_cata_map,
-                branch_map,
-                sjus_map_arc,
-                db_option,
-                sender,
-                is_bran,
-            ).await;
+                let result = process_cata_batch_optimized(
+                    batch_idx + 1,
+                    chunk_keys,
+                    target_cata_map,
+                    branch_map,
+                    sjus_map_arc,
+                    db_option,
+                    sender,
+                    is_bran,
+                )
+                .await;
 
-            let batch_time = batch_start.elapsed();
-            match &result {
-                Ok(_) => info!("✅ 批次 {} 完成，耗时: {}ms", batch_idx + 1, batch_time.as_millis()),
-                Err(e) => error!("❌ 批次 {} 失败，耗时: {}ms，错误: {}", batch_idx + 1, batch_time.as_millis(), e),
-            }
+                let batch_time = batch_start.elapsed();
+                match &result {
+                    Ok(_) => info!(
+                        "✅ 批次 {} 完成，耗时: {}ms",
+                        batch_idx + 1,
+                        batch_time.as_millis()
+                    ),
+                    Err(e) => error!(
+                        "❌ 批次 {} 失败，耗时: {}ms，错误: {}",
+                        batch_idx + 1,
+                        batch_time.as_millis(),
+                        e
+                    ),
+                }
 
-            result
-        });
+                result
+            });
 
         all_tasks.push(task);
     }
@@ -1490,7 +1517,10 @@ pub async fn gen_cata_geos_parallel_optimized(
     info!("  - 成功批次: {}", success_count);
     info!("  - 失败批次: {}", error_count);
     info!("  - 总耗时: {}ms", total_time.as_millis());
-    info!("  - 平均每个元件库: {:.2}ms", total_time.as_millis() as f64 / unique_cata_cnt as f64);
+    info!(
+        "  - 平均每个元件库: {:.2}ms",
+        total_time.as_millis() as f64 / unique_cata_cnt as f64
+    );
 
     if error_count > 0 {
         warn!("⚠️ 有 {} 个批次处理失败，请检查日志", error_count);
@@ -1532,8 +1562,13 @@ async fn process_cata_batch_optimized(
     for (idx, cata_hash) in chunk_keys.iter().enumerate() {
         let element_start = Instant::now();
 
-        debug!("🔧 批次 {} 处理元件库 {}/{}: {}",
-               batch_id, idx + 1, chunk_keys.len(), cata_hash);
+        debug!(
+            "🔧 批次 {} 处理元件库 {}/{}: {}",
+            batch_id,
+            idx + 1,
+            chunk_keys.len(),
+            cata_hash
+        );
 
         // 查找使用此元件库的所有元素
         let related_elements: Vec<_> = target_cata_map
@@ -1547,7 +1582,11 @@ async fn process_cata_batch_optimized(
             continue;
         }
 
-        debug!("📦 元件库 {} 关联 {} 个元素", cata_hash, related_elements.len());
+        debug!(
+            "📦 元件库 {} 关联 {} 个元素",
+            cata_hash,
+            related_elements.len()
+        );
 
         // 处理每个使用此元件库的元素
         for refno in related_elements {
@@ -1609,7 +1648,9 @@ async fn process_cata_batch_optimized(
                 refno,
                 &Default::default(), // brep_shape_map
                 &Default::default(), // design_axis_map
-            ).await {
+            )
+            .await
+            {
                 warn!("生成元素 {} 几何体失败: {}", refno, e);
                 continue;
             }
@@ -1644,7 +1685,11 @@ async fn process_cata_batch_optimized(
         }
 
         let element_time = element_start.elapsed();
-        debug!("✅ 元件库 {} 处理完成，耗时: {}ms", cata_hash, element_time.as_millis());
+        debug!(
+            "✅ 元件库 {} 处理完成，耗时: {}ms",
+            cata_hash,
+            element_time.as_millis()
+        );
     }
 
     // 发送结果
@@ -1661,8 +1706,14 @@ async fn process_cata_batch_optimized(
     info!("📊 批次 {} 性能统计:", batch_id);
     info!("  - 处理元素数量: {}", processed_elements);
     info!("  - 总耗时: {}ms", batch_time.as_millis());
-    info!("  - 平均每元素: {:.2}ms",
-          if processed_elements > 0 { batch_time.as_millis() as f64 / processed_elements as f64 } else { 0.0 });
+    info!(
+        "  - 平均每元素: {:.2}ms",
+        if processed_elements > 0 {
+            batch_time.as_millis() as f64 / processed_elements as f64
+        } else {
+            0.0
+        }
+    );
     info!("  - 数据库操作耗时:");
     info!("    * 获取属性映射: {}ms", db_time_get_named_attmap);
     info!("    * 获取世界变换: {}ms", db_time_get_world_transform);

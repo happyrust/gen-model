@@ -13,9 +13,9 @@ pub mod executor;
 #[cfg(test)]
 mod issue10_add_node;
 pub mod lifecycle;
-pub mod preload;
 #[cfg(test)]
 pub mod parity;
+pub mod preload;
 pub mod replay_safe;
 pub mod resources;
 pub mod write_context;
@@ -23,17 +23,16 @@ pub mod write_context;
 pub use executor::{ExecMode, JournalEntry, TX_CHUNK};
 pub use lifecycle::{ActiveStagedWindow, StagingWindowMeta};
 pub use resources::{ResourceBand, ResourceGauge, ResourceThresholds};
-pub(crate) use write_context::{active_staging_writes, with_staging_writes};
-pub(crate) use write_context::{register_staged_finalize, StagedFinalize};
-pub(crate) use write_context::{active_staged_finalize_plan, settle_staged_plan_items};
 pub(crate) use write_context::defer_staged_mysql_changes;
 pub(crate) use write_context::defer_staged_regen_settlement;
 pub(crate) use write_context::hold_staged_generation_root;
 pub(crate) use write_context::staged_spatial_removals;
+pub(crate) use write_context::{StagedFinalize, register_staged_finalize};
+pub(crate) use write_context::{active_staged_finalize_plan, settle_staged_plan_items};
+pub(crate) use write_context::{active_staging_writes, with_staging_writes};
 
 /// 模型数据面的当前读库。窗口上下文在场时只读暂存，否则读持久层。
-pub(crate) fn active_data_db(
-) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+pub(crate) fn active_data_db() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
     aios_core::staging::active_staging_reads()
         .map(|context| context.db().clone())
         .unwrap_or_else(|| aios_core::SUL_DB.clone())
@@ -129,12 +128,9 @@ mod routing_tests {
             .await
             .expect("children routed");
         assert_eq!(children, vec![refno]);
-        let types = with_staging_reads(
-            ctx.clone(),
-            aios_core::get_self_and_owner_type_name(refno),
-        )
-        .await
-        .expect("owner types routed");
+        let types = with_staging_reads(ctx.clone(), aios_core::get_self_and_owner_type_name(refno))
+            .await
+            .expect("owner types routed");
         assert_eq!(types, vec!["PIPE", "SITE"]);
         let deep = with_staging_reads(ctx.clone(), aios_core::query_deep_children_refnos(root))
             .await

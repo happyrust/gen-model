@@ -403,7 +403,10 @@ mod tests {
     static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fetched(known: &[&str], dbnos: &[u32]) -> anyhow::Result<(Vec<String>, Vec<u32>)> {
-        Ok((known.iter().map(|s| s.to_string()).collect(), dbnos.to_vec()))
+        Ok((
+            known.iter().map(|s| s.to_string()).collect(),
+            dbnos.to_vec(),
+        ))
     }
 
     /// 事件路径的核心承诺：SUL_DB 瞬时不可用时，暖缓存放行、fresh 路径照常上抛。
@@ -413,8 +416,8 @@ mod tests {
         invalidate_scope_cache();
 
         // 一次成功解析把缓存焐热。
-        let scope = UpdateScope::finish("/T".into(), fetched(&["/T"], &[7999]), false)
-            .expect("成功解析");
+        let scope =
+            UpdateScope::finish("/T".into(), fetched(&["/T"], &[7999]), false).expect("成功解析");
         assert!(scope.admits("DESI", 7999));
 
         // 基础设施错误 + 允许回退（事件路径）→ 暖缓存放行。

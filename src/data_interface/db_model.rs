@@ -384,7 +384,11 @@ impl AiosDBManager {
         // 「这个目录属于哪个项目」只有解析这一刻知道，摄入侧靠它给批次定归属。
         crate::data_interface::project_paths::record_watch_dir_owners(&plan);
         let db_paths = plan.dirs();
-        println!("监控目录解析（共 {} 个库目录）:\n{}", db_paths.len(), plan.describe());
+        println!(
+            "监控目录解析（共 {} 个库目录）:\n{}",
+            db_paths.len(),
+            plan.describe()
+        );
         for problem in plan.problems() {
             log::warn!("监控目录解析失败: {problem}");
             eprintln!("监控目录解析失败: {problem}");

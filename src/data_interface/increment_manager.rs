@@ -64,8 +64,16 @@ mod tests {
     #[test]
     fn same_dbnum_in_different_projects_is_not_a_duplicate() {
         let duplicates = duplicate_dbnums([
-            ("AvevaMarineSample".to_string(), 8191, PathBuf::from("ams000/amssys")),
-            ("AvevaCatalogue".to_string(), 8191, PathBuf::from("acp000/acpsys")),
+            (
+                "AvevaMarineSample".to_string(),
+                8191,
+                PathBuf::from("ams000/amssys"),
+            ),
+            (
+                "AvevaCatalogue".to_string(),
+                8191,
+                PathBuf::from("acp000/acpsys"),
+            ),
             ("ZDJ".to_string(), 8191, PathBuf::from("ZDJ000/zdjsys")),
         ]);
         assert!(duplicates.is_empty(), "跨项目同号不是重复: {duplicates:?}");
@@ -75,8 +83,16 @@ mod tests {
     #[test]
     fn a_copy_inside_one_project_is_still_blocked() {
         let duplicates = duplicate_dbnums([
-            ("AMS".to_string(), 1112, PathBuf::from("ams000/ams1112_0001")),
-            ("AMS".to_string(), 1112, PathBuf::from("ams000/ams1112_0001 copy")),
+            (
+                "AMS".to_string(),
+                1112,
+                PathBuf::from("ams000/ams1112_0001"),
+            ),
+            (
+                "AMS".to_string(),
+                1112,
+                PathBuf::from("ams000/ams1112_0001 copy"),
+            ),
         ]);
         assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 1112)]));
     }
@@ -94,7 +110,10 @@ mod tests {
     fn duplicate_dbnum_guard_precedes_scan_record_on_both_auto_paths() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            (
+                "sweep_watch_dirs",
+                concat!("async fn ", "sweep_watch_dirs("),
+            ),
             ("async_watch", concat!("pub async fn ", "async_watch(")),
         ] {
             let body = src
@@ -124,7 +143,10 @@ mod tests {
     fn both_auto_paths_gate_on_the_shared_scope_predicate() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            (
+                "sweep_watch_dirs",
+                concat!("async fn ", "sweep_watch_dirs("),
+            ),
             ("async_watch", concat!("pub async fn ", "async_watch(")),
         ] {
             let body = src
@@ -158,7 +180,10 @@ mod tests {
     fn both_auto_paths_take_the_owning_project_from_the_watch_dir() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            (
+                "sweep_watch_dirs",
+                concat!("async fn ", "sweep_watch_dirs("),
+            ),
             ("async_watch", concat!("pub async fn ", "async_watch(")),
         ] {
             let body = src
@@ -168,9 +193,13 @@ mod tests {
             let discover_at = body
                 .find(".discover_batch(")
                 .unwrap_or_else(|| panic!("{name}: 缺少 discover_batch 调用"));
-            let owning_at = body.find(concat!("self.owning_", "project(")).unwrap_or_else(|| {
-                panic!("{name}: 归属项目必须取自监控目录（owning_project），不能用 project_name")
-            });
+            let owning_at = body
+                .find(concat!("self.owning_", "project("))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: 归属项目必须取自监控目录（owning_project），不能用 project_name"
+                    )
+                });
             assert!(
                 owning_at < discover_at,
                 "{name}: 必须先定归属项目再 discover_batch，否则批次带着错的项目入队"
@@ -329,11 +358,11 @@ mod tests {
         }
 
         for name in [
-            "ams1112_0001 copy",                          // 人手复制，带空格
-            "ams1112_0001 copy 3",                        //
-            "ams1112_0001_old",                           // 后缀不是四位数字
-            "ams1112_0001-new",                           // 旧规则唯一挡得住的那种
-            "ams1112_0001.zip",                           // 带扩展名
+            "ams1112_0001 copy",                             // 人手复制，带空格
+            "ams1112_0001 copy 3",                           //
+            "ams1112_0001_old",                              // 后缀不是四位数字
+            "ams1112_0001-new",                              // 旧规则唯一挡得住的那种
+            "ams1112_0001.zip",                              // 带扩展名
             "ams7997_0001.codex-before-d03-delete-20260727", // 日期后缀备份
             "amscom.codex-before-d03-relaunch-20260727",
             "TES1001_0001 - 副本",
@@ -504,7 +533,10 @@ mod tests {
     fn every_auto_path_gates_on_the_shared_candidate_predicate() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            ("sweep_watch_dirs", concat!("async fn ", "sweep_watch_dirs(")),
+            (
+                "sweep_watch_dirs",
+                concat!("async fn ", "sweep_watch_dirs("),
+            ),
             ("async_watch", concat!("pub async fn ", "async_watch(")),
             (
                 "duplicate_dbnums_across_watch_dirs",
@@ -557,7 +589,9 @@ mod tests {
         );
 
         let classify_at = body.find("classify_scan(").expect("已在上面断言过存在");
-        let record_at = body.find("record_observation(").expect("已在上面断言过存在");
+        let record_at = body
+            .find("record_observation(")
+            .expect("已在上面断言过存在");
         assert!(
             classify_at < record_at,
             "必须先裁决再落库：落库会按 dbnum 覆盖 db_type/file_path，\
@@ -608,10 +642,7 @@ pub fn is_pdms_db_file_name(name: &str) -> bool {
         return false;
     }
     let rest = &name[3..];
-    if matches!(
-        rest.to_ascii_lowercase().as_str(),
-        "sys" | "com" | "mis"
-    ) {
+    if matches!(rest.to_ascii_lowercase().as_str(), "sys" | "com" | "mis") {
         return true;
     }
     // `<库号>` 或 `<库号>_<四位序号>`，别的一律不是。
@@ -742,7 +773,9 @@ pub const PROJECT_RUNTIME_SYS_TYPES: [&str; 3] = ["SYST", "GLB", "GLOB"];
 /// 这个库是不是「别的项目的运行态系统库」。
 pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_type: &str) -> bool {
     PROJECT_RUNTIME_SYS_TYPES.contains(&db_type)
-        && !project.trim().eq_ignore_ascii_case(db_option.project_name.trim())
+        && !project
+            .trim()
+            .eq_ignore_ascii_case(db_option.project_name.trim())
 }
 
 /// 增量摄入的唯一判定：**本期 MDB 声明的 DESI**。
@@ -1182,11 +1215,14 @@ impl AiosDBManager {
         // 遍历所有监控目录（深度见 [`INGEST_MAX_DEPTH`]）。
         for watch_dir in &watch_dirs {
             // 按文件大小降序排列，优先处理大文件
-            for entry in WalkDir::new(watch_dir).max_depth(INGEST_MAX_DEPTH).sort_by(|a, b| {
-                let a_len = a.path().metadata().map(|m| m.len()).unwrap_or_default();
-                let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
-                b_len.cmp(&a_len)
-            }) {
+            for entry in WalkDir::new(watch_dir)
+                .max_depth(INGEST_MAX_DEPTH)
+                .sort_by(|a, b| {
+                    let a_len = a.path().metadata().map(|m| m.len()).unwrap_or_default();
+                    let b_len = b.path().metadata().map(|m| m.len()).unwrap_or_default();
+                    b_len.cmp(&a_len)
+                })
+            {
                 // 单个条目读不动就跳过它。过去这里是 `?`：共享盘在遍历途中抖一下，
                 // 整轮重扫就此中止，而启动路径上 `init_watcher()` 的 `?` 会把这个错误
                 // 一路抛到 `run_cli`，**整个服务起不来**。同一条纪律见下面的文件名分支。
@@ -1335,9 +1371,8 @@ impl AiosDBManager {
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
-            params.retain(|_p, found| {
-                !blocked_dupes.contains(&(found.project.clone(), found.dbnum))
-            });
+            params
+                .retain(|_p, found| !blocked_dupes.contains(&(found.project.clone(), found.dbnum)));
         }
 
         // 等所有文件检查完毕后，逐条入队；执行与发布归数据批次 worker。
@@ -1496,7 +1531,11 @@ impl AiosDBManager {
         let failures = mounted.mount(watcher, &missing);
         let added = mounted.len() - before;
         if added == 0 {
-            log::warn!("重挂轮：{} 个目录仍不可达（{}）", missing.len(), failures.join("；"));
+            log::warn!(
+                "重挂轮：{} 个目录仍不可达（{}）",
+                missing.len(),
+                failures.join("；")
+            );
             return;
         }
 
@@ -1586,7 +1625,10 @@ impl AiosDBManager {
                  里对该项目单独写绝对路径或 UNC），启动日志「监控目录解析」一段列出了逐项目原因"
                     .to_string()
             } else {
-                format!("没有任何监控目录挂载成功；逐目录原因: {}", failures.join("；"))
+                format!(
+                    "没有任何监控目录挂载成功；逐目录原因: {}",
+                    failures.join("；")
+                )
             };
             if remount_secs == 0 {
                 return Err(notify::Error::generic(&format!(
@@ -1620,9 +1662,8 @@ impl AiosDBManager {
         // 事件回调再也不会被一轮增量执行堵住（ADR-011 §2 治的正是这个）。
 
         // 持续监听文件变化事件；与之并行的是共享盘重挂轮（见 `remount_secs`）。
-        let mut remount_tick = tokio::time::interval(std::time::Duration::from_secs(
-            remount_secs.max(1),
-        ));
+        let mut remount_tick =
+            tokio::time::interval(std::time::Duration::from_secs(remount_secs.max(1)));
         remount_tick.tick().await; // interval 的第一拍是立即触发的，丢掉
 
         // 周期对账重扫：PollWatcher 的事件只发一次，处理途中失败（SUL_DB 连接抖动、
@@ -1636,9 +1677,8 @@ impl AiosDBManager {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(300);
-        let mut reconcile_tick = tokio::time::interval(std::time::Duration::from_secs(
-            reconcile_secs.max(1),
-        ));
+        let mut reconcile_tick =
+            tokio::time::interval(std::time::Duration::from_secs(reconcile_secs.max(1)));
         reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         reconcile_tick.tick().await; // 第一拍立即触发，而启动重扫刚扫过，丢掉
         loop {

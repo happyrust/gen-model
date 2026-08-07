@@ -119,8 +119,14 @@ impl StagingWriteContext {
         Ok(())
     }
 
-    async fn finalize_plan(&self) -> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
-        self.finalize.lock().await.as_ref().map(|state| state.plan.clone())
+    async fn finalize_plan(
+        &self,
+    ) -> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
+        self.finalize
+            .lock()
+            .await
+            .as_ref()
+            .map(|state| state.plan.clone())
     }
 
     async fn settle_plan_items(
@@ -131,9 +137,10 @@ impl StagingWriteContext {
         )>,
     ) {
         if let Some(finalize) = self.finalize.lock().await.as_mut() {
-            finalize.plan.work_items.retain(|item| {
-                !succeeded.contains(&(item.action, item.target_refno.clone()))
-            });
+            finalize
+                .plan
+                .work_items
+                .retain(|item| !succeeded.contains(&(item.action, item.target_refno.clone())));
         }
     }
 
@@ -193,8 +200,8 @@ pub(crate) async fn register_staged_finalize(finalize: StagedFinalize) -> anyhow
     Ok(true)
 }
 
-pub(crate) async fn active_staged_finalize_plan(
-) -> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
+pub(crate) async fn active_staged_finalize_plan()
+-> Option<crate::data_interface::model_update_plan::ModelUpdatePlan> {
     active_staging_writes()?.finalize_plan().await
 }
 

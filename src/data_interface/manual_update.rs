@@ -2550,21 +2550,19 @@ fn baseline_work_items(
     }
     let mut roots = BTreeMap::new();
     for refno in nodes.keys() {
-        let Some(root) =
-            crate::data_interface::generation_root::resolve_element_generation_root(
-                *refno,
-                unit_types,
-                |candidate| {
-                    nodes.get(&candidate).map(|node| {
-                        crate::data_interface::generation_root::GenerationNode {
-                            owner: node.owner,
-                            noun: node.noun.clone(),
-                            name: node.name.clone(),
-                        }
-                    })
-                },
-            )
-        else {
+        let Some(root) = crate::data_interface::generation_root::resolve_element_generation_root(
+            *refno,
+            unit_types,
+            |candidate| {
+                nodes.get(&candidate).map(|node| {
+                    crate::data_interface::generation_root::GenerationNode {
+                        owner: node.owner,
+                        noun: node.noun.clone(),
+                        name: node.name.clone(),
+                    }
+                })
+            },
+        ) else {
             continue;
         };
         roots.entry(root.root.to_pdms_str()).or_insert(root);
@@ -2652,11 +2650,9 @@ async fn baseline_model_plan(
     if db_type != "DESI" {
         return Ok(ModelUpdatePlan::default());
     }
-    let nodes = load_baseline_nodes(dbnum)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
-        })?;
+    let nodes = load_baseline_nodes(dbnum).await.map_err(|error| {
+        anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
+    })?;
     Ok(baseline_work_items(
         dbnum,
         db_type,
@@ -2776,12 +2772,8 @@ impl AiosDBManager {
             })?);
             (count, info_count, root_count) = baseline_counts(dbnum).await?;
         } else if baseline_stats_need_rebuild(count, info_count) {
-            crate::versioned_db::database::rebuild_dbnum_info_from_pe(
-                dbnum,
-                file_name,
-                db_type,
-            )
-            .await?;
+            crate::versioned_db::database::rebuild_dbnum_info_from_pe(dbnum, file_name, db_type)
+                .await?;
             (count, info_count, root_count) = baseline_counts(dbnum).await?;
         }
         if count != info_count {
@@ -2820,12 +2812,7 @@ impl AiosDBManager {
         // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
         // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
         // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        let plan = baseline_model_plan(
-            dbnum,
-            db_type,
-            file_latest_sesno,
-        )
-        .await?;
+        let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
         let roots = plan.work_items.len();
         crate::data_interface::model_update_pending::finalize_baseline(
             dbnum,
@@ -3021,8 +3008,12 @@ impl AiosDBManager {
                 } else {
                     let cand = &candidates[0];
                     check_file_against_state(
-                        Some(&state.db_type).filter(|s| !s.is_empty()).map(|s| s.as_str()),
-                        Some(&state.file_path).filter(|s| !s.is_empty()).map(|s| s.as_str()),
+                        Some(&state.db_type)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.as_str()),
+                        Some(&state.file_path)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.as_str()),
                         state.applied_sesno,
                         &cand.db_type,
                         &cand.path.display().to_string(),
@@ -3424,7 +3415,9 @@ impl AiosDBManager {
             ..Default::default()
         };
         let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
-            receipt.warnings.push(format!("无法解析项目目录: {project}"));
+            receipt
+                .warnings
+                .push(format!("无法解析项目目录: {project}"));
             return receipt;
         };
         if !project_dir.exists() {
@@ -3816,8 +3809,7 @@ async fn build_transform_target_summaries(
             Ok(Some(pe)) => (pe.noun.trim().to_ascii_uppercase(), pe.name),
             _ => (String::new(), String::new()),
         };
-        let container =
-            crate::data_interface::generation_root::is_coarse_hierarchy_noun(&noun);
+        let container = crate::data_interface::generation_root::is_coarse_hierarchy_noun(&noun);
         out.push(TransformTargetSummary {
             refno: refno.to_pdms_str(),
             noun,
@@ -4231,7 +4223,6 @@ mod tests {
         assert!(!needs_initial_load(0, 0));
     }
 
-
     /// A baseline used to advance its watermark and queue nothing, so every root
     /// the user never edited again stayed modelless forever (incremental windows
     /// only revisit what changed). Design baselines must therefore hand back
@@ -4252,13 +4243,7 @@ mod tests {
             (r(9), owner_node(Some(r(3)), "EQUI")),
         ]);
 
-        let plan = baseline_work_items(
-            7997,
-            "DESI",
-            76,
-            &nodes,
-            &resolve_delivery_unit_types(&[]),
-        );
+        let plan = baseline_work_items(7997, "DESI", 76, &nodes, &resolve_delivery_unit_types(&[]));
 
         assert_eq!(plan.work_items.len(), 3);
         assert!(
@@ -4288,15 +4273,9 @@ mod tests {
         );
 
         assert!(
-            baseline_work_items(
-                7997,
-                "CATA",
-                76,
-                &nodes,
-                &resolve_delivery_unit_types(&[])
-            )
-            .work_items
-            .is_empty()
+            baseline_work_items(7997, "CATA", 76, &nodes, &resolve_delivery_unit_types(&[]))
+                .work_items
+                .is_empty()
         );
     }
 
@@ -6008,7 +5987,13 @@ mod live_tests {
             .expect("init manager");
 
         let dbnums = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
-            .map(|value| vec![value.parse::<u32>().expect("AIOS_MANUAL_UPDATE_DBNUM must be u32")])
+            .map(|value| {
+                vec![
+                    value
+                        .parse::<u32>()
+                        .expect("AIOS_MANUAL_UPDATE_DBNUM must be u32"),
+                ]
+            })
             .unwrap_or_else(|_| vec![7997, 7999, 8000]);
         for dbnum in dbnums {
             let count = mgr

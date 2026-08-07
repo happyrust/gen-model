@@ -493,201 +493,224 @@ pub async fn gen_inst_meshes(
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
             let pts_json_map = pts_json_map.clone();
-            let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
-                // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
-                // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
-                let mut unbuildable: Vec<String> = Vec::new();
-                let sql = format!(
-                    "select <string> record::id(id) as id, param from [{}] where param != NONE",
-                    ids
-                );
-                // println!("sql is {}", &sql);
-                match crate::data_interface::staging::active_data_db().query(&sql).await {
-                    Ok(mut response) => {
-                        let r = response.take::<Vec<QueryGeoParam>>(0);
-                        if let Err(e) = &r {
-                            init_deserialize_error(
-                                "Vec<QueryGeoParam>",
-                                e,
-                                &sql,
-                                &std::panic::Location::caller().to_string(),
-                            );
-                            return;
-                        }
-                        let result: Vec<QueryGeoParam> = r.unwrap();
-                        if result.is_empty() {
-                            return;
-                        }
-                        i += 1;
-                        // dbg!(&result);
-                        for g in result {
-                            //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
-                            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                            println!("gen mesh param: {}", &g.id);
-                            //检查是否是PrimPolyhedron
-                            let is_polyhedron = match &g.param {
-                                PdmsGeoParam::PrimPolyhedron(_) => true,
-                                _ => false,
-                            };
-                            match g.param.gen_occ_shape() {
-                                Ok(shape) => {
-                                    let mut aabb = Aabb::new_invalid();
-                                    for edge in shape.edges() {
-                                        for point in edge.approximation_segments_custom(2.0, 2.0) {
-                                            aabb.take_point(nalgebra::Point3::new(
-                                                point.x as f32,
-                                                point.y as f32,
-                                                point.z as f32,
-                                            ));
+            let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
+                async move {
+                    let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
+                    // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
+                    // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
+                    let mut unbuildable: Vec<String> = Vec::new();
+                    let sql = format!(
+                        "select <string> record::id(id) as id, param from [{}] where param != NONE",
+                        ids
+                    );
+                    // println!("sql is {}", &sql);
+                    match crate::data_interface::staging::active_data_db()
+                        .query(&sql)
+                        .await
+                    {
+                        Ok(mut response) => {
+                            let r = response.take::<Vec<QueryGeoParam>>(0);
+                            if let Err(e) = &r {
+                                init_deserialize_error(
+                                    "Vec<QueryGeoParam>",
+                                    e,
+                                    &sql,
+                                    &std::panic::Location::caller().to_string(),
+                                );
+                                return;
+                            }
+                            let result: Vec<QueryGeoParam> = r.unwrap();
+                            if result.is_empty() {
+                                return;
+                            }
+                            i += 1;
+                            // dbg!(&result);
+                            for g in result {
+                                //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
+                                #[cfg(any(
+                                    feature = "debug_model",
+                                    feature = "debug_model_no_obj"
+                                ))]
+                                println!("gen mesh param: {}", &g.id);
+                                //检查是否是PrimPolyhedron
+                                let is_polyhedron = match &g.param {
+                                    PdmsGeoParam::PrimPolyhedron(_) => true,
+                                    _ => false,
+                                };
+                                match g.param.gen_occ_shape() {
+                                    Ok(shape) => {
+                                        let mut aabb = Aabb::new_invalid();
+                                        for edge in shape.edges() {
+                                            for point in
+                                                edge.approximation_segments_custom(2.0, 2.0)
+                                            {
+                                                aabb.take_point(nalgebra::Point3::new(
+                                                    point.x as f32,
+                                                    point.y as f32,
+                                                    point.z as f32,
+                                                ));
+                                            }
                                         }
-                                    }
-                                    //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
-                                    //如果是作为负实体可以稍微降一些？
-                                    let mut coeff = 0.005;
-                                    // dbg!(&g.id);
-                                    if thing_neg_map.get(&g.id).copied().unwrap_or(false) {
-                                        match g.param {
-                                            PdmsGeoParam::PrimExtrusion(_)
-                                            | PdmsGeoParam::PrimRevolution(_) => {
-                                                coeff /= 10.0;
-                                                // dbg!(&coeff);
-                                            }
-                                            _ => {
-                                                coeff /= 5.0;
-                                            }
-                                        };
-                                    }
+                                        //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
+                                        //如果是作为负实体可以稍微降一些？
+                                        let mut coeff = 0.005;
+                                        // dbg!(&g.id);
+                                        if thing_neg_map.get(&g.id).copied().unwrap_or(false) {
+                                            match g.param {
+                                                PdmsGeoParam::PrimExtrusion(_)
+                                                | PdmsGeoParam::PrimRevolution(_) => {
+                                                    coeff /= 10.0;
+                                                    // dbg!(&coeff);
+                                                }
+                                                _ => {
+                                                    coeff /= 5.0;
+                                                }
+                                            };
+                                        }
 
-                                    let mut tol = if is_polyhedron {
-                                        0.01
-                                    } else {
-                                        (aabb.half_extents().magnitude() as f64 * coeff).min(50.0)
-                                    };
-                                    // dbg!(tol);
-                                    shapes_map.insert(g.id, (shape, tol));
-                                }
-                                // 参数不可能出几何（空轮廓的挤出体就是一例）。
-                                // :417 的取数按 `!out.bad` 过滤，所以标不上 bad
-                                // 就等于每一轮生成都把同一份废参数重算一遍。
-                                Err(e) => {
-                                    let affected = aios_core::query_refnos_by_geo_hash(&g.id)
-                                        .await
-                                        .unwrap_or_default();
-                                    eprintln!(
-                                        "几何 {} 建不出形状，标记跳过（波及 {} 个构件）：{e}",
-                                        g.id,
-                                        affected.len()
-                                    );
-                                    #[cfg(any(
-                                        feature = "debug_model",
-                                        feature = "debug_model_no_obj",
-                                        feature = "log_error"
-                                    ))]
-                                    println!("受影响的构件: {affected:?}");
-                                    unbuildable.push(g.id);
+                                        let mut tol = if is_polyhedron {
+                                            0.01
+                                        } else {
+                                            (aabb.half_extents().magnitude() as f64 * coeff)
+                                                .min(50.0)
+                                        };
+                                        // dbg!(tol);
+                                        shapes_map.insert(g.id, (shape, tol));
+                                    }
+                                    // 参数不可能出几何（空轮廓的挤出体就是一例）。
+                                    // :417 的取数按 `!out.bad` 过滤，所以标不上 bad
+                                    // 就等于每一轮生成都把同一份废参数重算一遍。
+                                    Err(e) => {
+                                        let affected = aios_core::query_refnos_by_geo_hash(&g.id)
+                                            .await
+                                            .unwrap_or_default();
+                                        eprintln!(
+                                            "几何 {} 建不出形状，标记跳过（波及 {} 个构件）：{e}",
+                                            g.id,
+                                            affected.len()
+                                        );
+                                        #[cfg(any(
+                                            feature = "debug_model",
+                                            feature = "debug_model_no_obj",
+                                            feature = "log_error"
+                                        ))]
+                                        println!("受影响的构件: {affected:?}");
+                                        unbuildable.push(g.id);
+                                    }
                                 }
                             }
-                        }
-                        let mut update_sql = "".to_string();
-                        for id in &unbuildable {
-                            update_sql.push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
-                        }
+                            let mut update_sql = "".to_string();
+                            for id in &unbuildable {
+                                update_sql
+                                    .push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
+                            }
 
-                        for (id, (s, tol)) in &shapes_map {
-                            let mut m_tol = *tol;
-                            // dbg!(m_tol);
-                            let mut success = false;
-                            // #[cfg(feature = "debug_model")]
-                            // s.write_step(format!("{}.step", id)).unwrap();
-                            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                            println!("gen mesh hash: {}", id);
-                            match PlantMesh::gen_occ_mesh(s, m_tol) {
-                                Ok(mesh) if mesh.aabb.is_none() => {
-                                    // 三角化出来没有包围盒，与失败等价。原先这里
-                                    // `continue` 跳过了下面的标记，于是它也每轮重算。
-                                    eprintln!("几何 {id} 三角化后没有包围盒，标记跳过");
-                                }
-                                Ok(mesh) => {
-                                    #[cfg(feature = "debug_model")]
-                                    mesh.export_obj(false, &format!("{}.obj", id));
-                                    // dbg!((id, m_tol, mesh.vertices.len()));
-                                    //保存到文件到dir下
-                                    if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
+                            for (id, (s, tol)) in &shapes_map {
+                                let mut m_tol = *tol;
+                                // dbg!(m_tol);
+                                let mut success = false;
+                                // #[cfg(feature = "debug_model")]
+                                // s.write_step(format!("{}.step", id)).unwrap();
+                                #[cfg(any(
+                                    feature = "debug_model",
+                                    feature = "debug_model_no_obj"
+                                ))]
+                                println!("gen mesh hash: {}", id);
+                                match PlantMesh::gen_occ_mesh(s, m_tol) {
+                                    Ok(mesh) if mesh.aabb.is_none() => {
+                                        // 三角化出来没有包围盒，与失败等价。原先这里
+                                        // `continue` 跳过了下面的标记，于是它也每轮重算。
+                                        eprintln!("几何 {id} 三角化后没有包围盒，标记跳过");
+                                    }
+                                    Ok(mesh) => {
                                         #[cfg(feature = "debug_model")]
                                         mesh.export_obj(false, &format!("{}.obj", id));
-                                        let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                                        let mut pt_hashes = HashSet::new();
-                                        for edge in s.edges() {
-                                            //TODO edge 这里取中点就可以了
-                                            // for point in edge.approximation_segments_custom(1.0, 1.0) {
-                                            for point in [edge.start_point(), edge.end_point()] {
-                                                let pts_hash = RsVec3(point.as_vec3()).gen_hash();
-                                                pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
-                                                if !pts_json_map.contains_key(&pts_hash) {
-                                                    pts_json_map.insert(
-                                                        pts_hash,
-                                                        serde_json::to_string(&point).unwrap(),
-                                                    );
+                                        // dbg!((id, m_tol, mesh.vertices.len()));
+                                        //保存到文件到dir下
+                                        if mesh
+                                            .ser_to_file(&dir.join(format!("{}.mesh", id)))
+                                            .is_ok()
+                                        {
+                                            #[cfg(feature = "debug_model")]
+                                            mesh.export_obj(false, &format!("{}.obj", id));
+                                            let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+                                            let mut pt_hashes = HashSet::new();
+                                            for edge in s.edges() {
+                                                //TODO edge 这里取中点就可以了
+                                                // for point in edge.approximation_segments_custom(1.0, 1.0) {
+                                                for point in [edge.start_point(), edge.end_point()]
+                                                {
+                                                    let pts_hash =
+                                                        RsVec3(point.as_vec3()).gen_hash();
+                                                    pt_hashes
+                                                        .insert(format!("vec3:⟨{}⟩", pts_hash));
+                                                    if !pts_json_map.contains_key(&pts_hash) {
+                                                        pts_json_map.insert(
+                                                            pts_hash,
+                                                            serde_json::to_string(&point).unwrap(),
+                                                        );
+                                                    }
                                                 }
                                             }
-                                        }
-                                        update_sql.push_str(&format!(
+                                            update_sql.push_str(&format!(
                                         "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
                                         id,
                                         aabb_hash,
                                         pt_hashes.into_iter().join(","),
                                     ));
-                                        aabb_map
-                                            .entry(aabb_hash.to_string())
-                                            .or_insert(mesh.aabb.unwrap());
-                                        success = true;
+                                            aabb_map
+                                                .entry(aabb_hash.to_string())
+                                                .or_insert(mesh.aabb.unwrap());
+                                            success = true;
+                                        }
+                                    }
+                                    //显示哪些模型可能会受影响
+                                    Err(e) => {
+                                        let affected = aios_core::query_refnos_by_geo_hash(id)
+                                            .await
+                                            .unwrap_or_default();
+                                        eprintln!(
+                                            "几何 {id} 三角化失败，标记跳过（波及 {} 个构件）：{e}",
+                                            affected.len()
+                                        );
+                                        #[cfg(any(
+                                            feature = "debug_model",
+                                            feature = "debug_model_no_obj",
+                                            feature = "log_error"
+                                        ))]
+                                        println!("受影响的构件: {affected:?}");
                                     }
                                 }
-                                //显示哪些模型可能会受影响
-                                Err(e) => {
-                                    let affected = aios_core::query_refnos_by_geo_hash(id)
-                                        .await
-                                        .unwrap_or_default();
-                                    eprintln!(
-                                        "几何 {id} 三角化失败，标记跳过（波及 {} 个构件）：{e}",
-                                        affected.len()
-                                    );
-                                    #[cfg(any(
-                                        feature = "debug_model",
-                                        feature = "debug_model_no_obj",
-                                        feature = "log_error"
-                                    ))]
-                                    println!("受影响的构件: {affected:?}");
+                                if !success {
+                                    //有问题的模型，就不需要每次都重复生成了
+                                    update_sql.push_str(&format!(
+                                        "update inst_geo:⟨{}⟩ set bad=true;",
+                                        id
+                                    ));
                                 }
                             }
-                            if !success {
-                                //有问题的模型，就不需要每次都重复生成了
-                                update_sql
-                                    .push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", id));
-                            }
-                        }
-                        if !update_sql.is_empty() {
-                            //执行SUL_DB update,使用chunk 保存
-                            if crate::surreal_retry::execute_model_write(
-                                &update_sql,
-                                "mark generated inst_geo state",
-                            )
-                            .await
-                            .is_err()
-                            {
-                                init_save_database_error(
+                            if !update_sql.is_empty() {
+                                //执行SUL_DB update,使用chunk 保存
+                                if crate::surreal_retry::execute_model_write(
                                     &update_sql,
-                                    &std::panic::Location::caller().to_string(),
-                                );
+                                    "mark generated inst_geo state",
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    init_save_database_error(
+                                        &update_sql,
+                                        &std::panic::Location::caller().to_string(),
+                                    );
+                                }
                             }
                         }
+                        Err(e) => {
+                            init_query_error(&sql, e, &std::panic::Location::caller().to_string());
+                        }
                     }
-                    Err(e) => {
-                        init_query_error(&sql, e, &std::panic::Location::caller().to_string());
-                    }
-                }
-            });
+                },
+            );
             tasks.push(task);
         }
 
@@ -883,7 +906,10 @@ pub(crate) async fn update_inst_relate_aabbs_by_refnos_with_spatial_tree(
             continue;
         }
         if let Some(context) = &staged_writes {
-            let refnos = new_boxes.iter().map(|(refno, _, _)| *refno).collect::<Vec<_>>();
+            let refnos = new_boxes
+                .iter()
+                .map(|(refno, _, _)| *refno)
+                .collect::<Vec<_>>();
             context.defer_spatial_refresh(&refnos).await;
             let target_refnos = new_boxes
                 .iter()
@@ -1035,7 +1061,10 @@ pub async fn apply_insts_boolean_occ(
     {
         sql.push_str(" and !booled");
     }
-    match crate::data_interface::staging::active_data_db().query(&sql).await {
+    match crate::data_interface::staging::active_data_db()
+        .query(&sql)
+        .await
+    {
         Ok(mut response) => {
             match response.take::<Vec<OccGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
@@ -1258,147 +1287,149 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            for g in group {
-                let pes = g
-                    .boolean_group
-                    .iter()
-                    .flatten()
-                    .map(|x| x.to_pe_key())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                // dbg!(g.refno);
-                let sql = format!(
-                    r#"
+        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
+            async move {
+                for g in group {
+                    let pes = g
+                        .boolean_group
+                        .iter()
+                        .flatten()
+                        .map(|x| x.to_pe_key())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    // dbg!(g.refno);
+                    let sql = format!(
+                        r#"
                     select record::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where visible and !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
-                    g.refno.to_pe_key(),
-                    pes
-                );
-                // dbg!(&sql);
-                let Ok(mut resp) = crate::data_interface::staging::active_data_db()
-                    .query(&sql)
-                    .await
-                else {
-                    continue;
-                };
-                // let gms: Vec<GmGeoData> = resp.take(0).unwrap();
-                let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
-                    dbg!(&sql);
-                    continue;
-                };
-                // dbg!(&gms);
-
-                let mut update_sql = String::new();
-                for bg in g.boolean_group {
-                    let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
-                        continue;
-                    };
-                    // dbg!(pos);
-                    let Ok(Ok(mut pos_shape)) = pos
-                        .param
-                        .gen_occ_shape()
-                        .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
+                        g.refno.to_pe_key(),
+                        pes
+                    );
+                    // dbg!(&sql);
+                    let Ok(mut resp) = crate::data_interface::staging::active_data_db()
+                        .query(&sql)
+                        .await
                     else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
                         continue;
                     };
-                    // pos_shape
-                    //     .write_step(format!("{}.step", "pos"))
-                    //     .unwrap();
+                    // let gms: Vec<GmGeoData> = resp.take(0).unwrap();
+                    let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
+                        dbg!(&sql);
+                        continue;
+                    };
+                    // dbg!(&gms);
 
-                    let mut neg_shapes = vec![];
-                    for &neg in bg.iter().skip(1) {
-                        // dbg!(neg);
-                        let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                    let mut update_sql = String::new();
+                    for bg in g.boolean_group {
+                        let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
                             continue;
                         };
-                        // dbg!(neg_geo.trans.compute_matrix().as_dmat4());
-                        let Ok(neg_shape) = neg_geo.param.gen_occ_shape() else {
+                        // dbg!(pos);
+                        let Ok(Ok(mut pos_shape)) = pos
+                            .param
+                            .gen_occ_shape()
+                            .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
+                        else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
                             continue;
                         };
-                        if let Ok(t_neg_shape) = neg_shape
-                            .0
-                            .transformed_by_gmat(&neg_geo.trans.compute_matrix().as_dmat4())
-                        {
-                            // #[cfg(debug_assertions)]
-                            // t_neg_shape.write_step(format!("{}.step", neg)).unwrap();
-                            neg_shapes.push(t_neg_shape);
-                        }
-                    }
-                    if !neg_shapes.is_empty() {
-                        // for neg_shape in neg_shapes {
-                        let new_id = g.refno.hash_with_another_refno(bg[0]);
-                        if let Ok(pos_shape) = pos_shape.subtract_shapes(&neg_shapes, true) {
-                            let mut aabb = Aabb::new_invalid();
-                            for edge in pos_shape.edges() {
-                                for point in edge.approximation_segments_custom(1.0, 1.0) {
-                                    aabb.take_point(nalgebra::Point3::new(
-                                        point.x as f32,
-                                        point.y as f32,
-                                        point.z as f32,
-                                    ));
-                                }
+                        // pos_shape
+                        //     .write_step(format!("{}.step", "pos"))
+                        //     .unwrap();
+
+                        let mut neg_shapes = vec![];
+                        for &neg in bg.iter().skip(1) {
+                            // dbg!(neg);
+                            let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                                continue;
+                            };
+                            // dbg!(neg_geo.trans.compute_matrix().as_dmat4());
+                            let Ok(neg_shape) = neg_geo.param.gen_occ_shape() else {
+                                continue;
+                            };
+                            if let Ok(t_neg_shape) = neg_shape
+                                .0
+                                .transformed_by_gmat(&neg_geo.trans.compute_matrix().as_dmat4())
+                            {
+                                // #[cfg(debug_assertions)]
+                                // t_neg_shape.write_step(format!("{}.step", neg)).unwrap();
+                                neg_shapes.push(t_neg_shape);
                             }
-                            let tol = aabb.half_extents().magnitude() as f64 * 0.01;
-                            // dbg!(tol);
-                            // #[cfg(debug_assertions)]
-                            // pos_shape
-                            //     .write_step(format!("{}.step", "final"))
-                            //     .unwrap();
-                            let mut success = false;
-                            if let Ok(mesh) = PlantMesh::gen_occ_mesh(&pos_shape, tol as _) {
-                                //保存到文件到dir下
-                                if mesh
-                                    .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
-                                    .is_ok()
-                                {
-                                    update_sql.push_str(&format!(
+                        }
+                        if !neg_shapes.is_empty() {
+                            // for neg_shape in neg_shapes {
+                            let new_id = g.refno.hash_with_another_refno(bg[0]);
+                            if let Ok(pos_shape) = pos_shape.subtract_shapes(&neg_shapes, true) {
+                                let mut aabb = Aabb::new_invalid();
+                                for edge in pos_shape.edges() {
+                                    for point in edge.approximation_segments_custom(1.0, 1.0) {
+                                        aabb.take_point(nalgebra::Point3::new(
+                                            point.x as f32,
+                                            point.y as f32,
+                                            point.z as f32,
+                                        ));
+                                    }
+                                }
+                                let tol = aabb.half_extents().magnitude() as f64 * 0.01;
+                                // dbg!(tol);
+                                // #[cfg(debug_assertions)]
+                                // pos_shape
+                                //     .write_step(format!("{}.step", "final"))
+                                //     .unwrap();
+                                let mut success = false;
+                                if let Ok(mesh) = PlantMesh::gen_occ_mesh(&pos_shape, tol as _) {
+                                    //保存到文件到dir下
+                                    if mesh
+                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
+                                        .is_ok()
+                                    {
+                                        update_sql.push_str(&format!(
                                         "create inst_geo:⟨{}⟩ set meshed = true, aabb = {}, visible = true;",
                                         new_id, &pos.aabb_id
                                     ));
-                                    // 有索引的关系，所以geom_refno需要点变化
-                                    update_sql.push_str(&format!(
+                                        // 有索引的关系，所以geom_refno需要点变化
+                                        update_sql.push_str(&format!(
                                         "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:{}, geo_type='Pos', trans=trans:⟨0⟩;",
                                         &g.inst_info_id,
                                         new_id,
                                         format!("{}_b", bg[0]),
                                     ));
+                                        update_sql.push_str(&format!(
+                                            "update {}<-inst_relate set booled=true;",
+                                            &g.inst_info_id,
+                                        ));
+                                        success = true;
+                                    }
+                                }
+
+                                if !success {
                                     update_sql.push_str(&format!(
-                                        "update {}<-inst_relate set booled=true;",
+                                        "update {}<-inst_relate set bad_bool=true;",
                                         &g.inst_info_id,
                                     ));
-                                    success = true;
                                 }
-                            }
-
-                            if !success {
-                                update_sql.push_str(&format!(
-                                    "update {}<-inst_relate set bad_bool=true;",
-                                    &g.inst_info_id,
-                                ));
                             }
                         }
                     }
+                    if !update_sql.is_empty() {
+                        crate::surreal_retry::execute_model_write(
+                            &update_sql,
+                            "mark catalogue boolean model state",
+                        )
+                        .await
+                        .unwrap();
+                    }
                 }
-                if !update_sql.is_empty() {
-                    crate::surreal_retry::execute_model_write(
-                        &update_sql,
-                        "mark catalogue boolean model state",
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        });
+            },
+        );
         tasks.push(task);
     }
     dbg!(tasks.len());
@@ -1507,7 +1538,10 @@ mod aabb_change_tests {
     fn unchanged_only_when_exactly_one_equal_entry() {
         let unchanged = [cube(0.0, 10.0)];
         assert!(!tree_box_changed(&unchanged, &cube(0.0, 10.0)));
-        assert!(tree_box_changed(&unchanged, &cube(0.0, 11.0)), "盒子动了必须算变");
+        assert!(
+            tree_box_changed(&unchanged, &cube(0.0, 11.0)),
+            "盒子动了必须算变"
+        );
     }
 
     /// 树上没有条目 = 房间系统从没见过它，必须回填一次——隐含直管段此前从未进树，

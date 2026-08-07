@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_pending::{ATTEMPT_TABLE, MAX_ATTEMPTS};
@@ -60,7 +60,10 @@ pub struct WindowBlock {
 }
 
 fn root_id(dbnum: u32, root_refno: &str) -> String {
-    format!("{ATTEMPT_TABLE}:[{dbnum}, '{}']", escape_surql_str(root_refno))
+    format!(
+        "{ATTEMPT_TABLE}:[{dbnum}, '{}']",
+        escape_surql_str(root_refno)
+    )
 }
 
 fn block_id(dbnum: u32) -> String {
@@ -68,11 +71,7 @@ fn block_id(dbnum: u32) -> String {
 }
 
 /// 记一次根失败，返回自增后的 attempts。首次失败时刻只写一次。
-pub async fn record_root_failure(
-    dbnum: u32,
-    root_refno: &str,
-    error: &str,
-) -> anyhow::Result<u32> {
+pub async fn record_root_failure(dbnum: u32, root_refno: &str, error: &str) -> anyhow::Result<u32> {
     record_root_failure_on(&aios_core::SUL_DB, dbnum, root_refno, error).await
 }
 
@@ -324,7 +323,10 @@ mod tests {
             .expect("record 1");
         assert_eq!(first, 1);
         let after_first = load_root_attempts_on(&db, 7997).await.expect("load");
-        let first_ts = after_first[&root].first_failed_at.clone().expect("first ts");
+        let first_ts = after_first[&root]
+            .first_failed_at
+            .clone()
+            .expect("first ts");
 
         let second = record_root_failure_on(&db, 7997, &root, "boom-2")
             .await
@@ -341,7 +343,12 @@ mod tests {
         assert_eq!(row.last_error.as_deref(), Some("boom-2"));
 
         // 别的 dbnum 互不可见。
-        assert!(load_root_attempts_on(&db, 8001).await.expect("load").is_empty());
+        assert!(
+            load_root_attempts_on(&db, 8001)
+                .await
+                .expect("load")
+                .is_empty()
+        );
     }
 
     /// 到达 MAX_ATTEMPTS → 阻断记录可写可读；吸收重置 = 阻断解除机制（钉住）。
@@ -375,7 +382,10 @@ mod tests {
             .await
             .expect("load block")
             .expect("blocked");
-        assert_eq!(block.bad_roots, vec![bad_root.clone(), other_bad_root.clone()]);
+        assert_eq!(
+            block.bad_roots,
+            vec![bad_root.clone(), other_bad_root.clone()]
+        );
         assert_eq!(block.reason, "生成根重试穷尽");
         assert_eq!(block.end_sesno, Some(42));
 
@@ -396,7 +406,10 @@ mod tests {
             .await
             .expect("reset remaining");
         assert!(
-            load_window_block_on(&db, 7998).await.expect("load").is_none(),
+            load_window_block_on(&db, 7998)
+                .await
+                .expect("load")
+                .is_none(),
             "所有坏根都被新数据触及时才解除阻断"
         );
     }
@@ -407,11 +420,15 @@ mod tests {
     async fn tail_clear_statement_scopes_to_one_dbnum_and_spares_recovery_record() {
         let db = control_plane().await;
 
-        record_root_failure_on(&db, 7999, "1_1", "x").await.expect("r1");
+        record_root_failure_on(&db, 7999, "1_1", "x")
+            .await
+            .expect("r1");
         record_window_block_on(&db, 7999, "阻断", &["1_1".into()])
             .await
             .expect("block");
-        record_root_failure_on(&db, 8000, "2_2", "y").await.expect("r2");
+        record_root_failure_on(&db, 8000, "2_2", "y")
+            .await
+            .expect("r2");
         // 仿真既有的 dbnum 恢复记录（finalize_attempt 的收口对象）。
         db.query(format!(
             "UPSERT {ATTEMPT_TABLE}:7999 SET dbnum = 7999, status = 'prepared';"
@@ -427,15 +444,27 @@ mod tests {
             .check()
             .expect("cleared");
 
-        assert!(load_root_attempts_on(&db, 7999).await.expect("load").is_empty());
-        assert!(load_window_block_on(&db, 7999).await.expect("load").is_none());
+        assert!(
+            load_root_attempts_on(&db, 7999)
+                .await
+                .expect("load")
+                .is_empty()
+        );
+        assert!(
+            load_window_block_on(&db, 7999)
+                .await
+                .expect("load")
+                .is_none()
+        );
         assert_eq!(
             load_root_attempts_on(&db, 8000).await.expect("load").len(),
             1,
             "其他 dbnum 不受影响"
         );
         let mut response = db
-            .query(format!("SELECT VALUE status FROM ONLY {ATTEMPT_TABLE}:7999;"))
+            .query(format!(
+                "SELECT VALUE status FROM ONLY {ATTEMPT_TABLE}:7999;"
+            ))
             .await
             .expect("query recovery");
         let status: Option<String> = response.take(0).expect("take");

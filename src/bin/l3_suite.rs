@@ -992,8 +992,7 @@ impl E3dDriver {
 
 fn e3d_path(path: &Path) -> String {
     let path = path.to_string_lossy();
-    path
-        .strip_prefix(r"\\?\")
+    path.strip_prefix(r"\\?\")
         .unwrap_or(&path)
         .replace('\\', "/")
 }
@@ -1716,7 +1715,10 @@ mod tests {
 
     #[test]
     fn e3d_paths_drop_windows_verbatim_prefix() {
-        assert_eq!(e3d_path(Path::new(r"\\?\D:\work\case.mac")), "D:/work/case.mac");
+        assert_eq!(
+            e3d_path(Path::new(r"\\?\D:\work\case.mac")),
+            "D:/work/case.mac"
+        );
     }
 
     #[test]

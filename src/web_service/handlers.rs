@@ -61,8 +61,7 @@ fn resolve_identity<'a>(
 /// `connected: true` 而 `last_disconnect_at` 是几分钟前——「刚才断过一次，
 /// 现在好了」正是这份字段组合要说的话。
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (worker_alive, worker_idle_secs) =
-        crate::data_interface::batch_worker::worker_liveness();
+    let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let probe_started = std::time::Instant::now();
     let sul_db_connected = match tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -304,7 +303,9 @@ pub async fn pending_units(
     // 几个永远不会自愈的根」是状态栏那一格要的整数，而房间轮早就有同名的
     // `dead_letters`（ADR-011 §10）——regen_root 这一侧一直没有对应的出口。
     let dead_letters = units.iter().filter(|unit| unit.dead).count();
-    Ok(Json(json!({ "units": units, "dead_letters": dead_letters })))
+    Ok(Json(
+        json!({ "units": units, "dead_letters": dead_letters }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,7 +376,9 @@ pub async fn dbnums(
         .dbnum_statuses(&identity.project, Some(&identity.mdb))
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(json!({ "dbnums": report.dbnums, "warnings": report.warnings })))
+    Ok(Json(
+        json!({ "dbnums": report.dbnums, "warnings": report.warnings }),
+    ))
 }
 
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
@@ -392,7 +395,9 @@ pub async fn queue_snapshot(State(_state): State<AppState>) -> Json<serde_json::
 /// 只挡出队与空闲轮，**正在跑的那条会跑完为止**——服务端没有中止接口，界面
 /// 文案只能说「不再出队」。标志持久化、活过重启：人按暂停多半正是为了
 /// 「别再动数据了，我要查问题 / 改配置 / 重启」。
-pub async fn queue_pause(State(_state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn queue_pause(
+    State(_state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
     scheduler
         .set_paused_persistent(true)
@@ -455,9 +460,7 @@ mod tests {
             .expect("health 之后是 update_preview")
             .0;
 
-        let timeout_at = body
-            .find("tokio::time::timeout(")
-            .expect("探活必须带超时");
+        let timeout_at = body.find("tokio::time::timeout(").expect("探活必须带超时");
         let probe_at = body
             .find("SUL_DB.query(\"RETURN 1;\")")
             .expect("必须现场探活持久层");

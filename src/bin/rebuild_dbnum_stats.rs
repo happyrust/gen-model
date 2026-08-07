@@ -66,10 +66,7 @@ async fn identity(dbnum: u32) -> anyhow::Result<(String, String)> {
             .cloned()
             .unwrap_or_default()
     };
-    Ok((
-        pick(|i| i.file_name.as_ref()),
-        pick(|i| i.db_type.as_ref()),
-    ))
+    Ok((pick(|i| i.file_name.as_ref()), pick(|i| i.db_type.as_ref())))
 }
 
 #[tokio::main]

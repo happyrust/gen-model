@@ -61,42 +61,50 @@ impl DbModelInstRefnos {
         let bran_hanger_refnos = self.bran_hanger_refnos.clone();
 
         let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            gen_meshes_in_db(db_option, &prim_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("generate prim meshes failed: {error:#}"))
-        }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                gen_meshes_in_db(db_option, &prim_refnos)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("generate prim meshes failed: {error:#}"))
+            }),
+        );
         let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            gen_meshes_in_db(db_option.clone(), &loop_owner_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("generate loop meshes failed: {error:#}"))
-        }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                gen_meshes_in_db(db_option.clone(), &loop_owner_refnos)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("generate loop meshes failed: {error:#}"))
+            }),
+        );
         let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            gen_meshes_in_db(db_option, &use_cate_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("generate use-cata meshes failed: {error:#}"))
-        }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                gen_meshes_in_db(db_option, &use_cate_refnos)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("generate use-cata meshes failed: {error:#}"))
+            }),
+        );
         let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            for bran_refnos in bran_hanger_refnos.chunks(20) {
-                let db_option_clone = db_option.clone();
-                // let refnos_str = bran_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
-                let target_refnos =
-                    query_multi_children_refnos(&bran_refnos)
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                for bran_refnos in bran_hanger_refnos.chunks(20) {
+                    let db_option_clone = db_option.clone();
+                    // let refnos_str = bran_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+                    let target_refnos =
+                        query_multi_children_refnos(&bran_refnos)
+                            .await
+                            .map_err(|error| {
+                                anyhow::anyhow!("query BRAN/HANG mesh children failed: {error:#}")
+                            })?;
+                    gen_meshes_in_db(db_option_clone, &target_refnos)
                         .await
                         .map_err(|error| {
-                            anyhow::anyhow!("query BRAN/HANG mesh children failed: {error:#}")
+                            anyhow::anyhow!("generate BRAN/HANG meshes failed: {error:#}")
                         })?;
-                gen_meshes_in_db(db_option_clone, &target_refnos)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("generate BRAN/HANG meshes failed: {error:#}")
-                    })?;
-            }
-            Ok(())
-        }));
+                }
+                Ok(())
+            }),
+        );
         wait_for_generation_workers(&mut handles).await
     }
 
@@ -111,38 +119,47 @@ impl DbModelInstRefnos {
         let use_cate_refnos = self.use_cate_refnos.clone();
         let bran_hanger_refnos = self.bran_hanger_refnos.clone();
         let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            booleans_meshes_in_db(db_option, &prim_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("boolean prim meshes failed: {error:#}"))
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            booleans_meshes_in_db(db_option, &loop_owner_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("boolean loop meshes failed: {error:#}"))
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            booleans_meshes_in_db(db_option, &use_cate_refnos)
-                .await
-                .map_err(|error| anyhow::anyhow!("boolean use-cata meshes failed: {error:#}"))
-        }));
-        let db_option = db_option_arc.clone();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            for chunk in bran_hanger_refnos.chunks(20) {
-                let db_option_clone = db_option.clone();
-                let target_refnos = query_multi_children_refnos(&chunk).await.map_err(|error| {
-                    anyhow::anyhow!("query BRAN/HANG boolean children failed: {error:#}")
-                })?;
-                booleans_meshes_in_db(db_option_clone, &target_refnos)
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                booleans_meshes_in_db(db_option, &prim_refnos)
                     .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("boolean BRAN/HANG meshes failed: {error:#}")
-                    })?;
-            }
-            Ok(())
-        }));
+                    .map_err(|error| anyhow::anyhow!("boolean prim meshes failed: {error:#}"))
+            }),
+        );
+        let db_option = db_option_arc.clone();
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                booleans_meshes_in_db(db_option, &loop_owner_refnos)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("boolean loop meshes failed: {error:#}"))
+            }),
+        );
+        let db_option = db_option_arc.clone();
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                booleans_meshes_in_db(db_option, &use_cate_refnos)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("boolean use-cata meshes failed: {error:#}"))
+            }),
+        );
+        let db_option = db_option_arc.clone();
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                for chunk in bran_hanger_refnos.chunks(20) {
+                    let db_option_clone = db_option.clone();
+                    let target_refnos =
+                        query_multi_children_refnos(&chunk).await.map_err(|error| {
+                            anyhow::anyhow!("query BRAN/HANG boolean children failed: {error:#}")
+                        })?;
+                    booleans_meshes_in_db(db_option_clone, &target_refnos)
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("boolean BRAN/HANG meshes failed: {error:#}")
+                        })?;
+                }
+                Ok(())
+            }),
+        );
         wait_for_generation_workers(&mut handles).await
     }
 }
@@ -165,24 +182,25 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
     if targeted {
         let (sender, receiver) = flume::bounded(CHUNK_SIZE);
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
-        let insert_task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
-            // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
-            // 写入只覆盖得到这次也生成了的那些。
-            let mut produced: HashSet<RefnoEnum> = HashSet::new();
-            while let Ok(shape_insts) = receiver.recv_async().await {
-                let inst_cnt = shape_insts.inst_cnt();
-                produced.extend(shape_insts.get_show_refnos());
-                // 不再 unwrap：写入失败必须向上传播，让 ModelRefreshPolicy::generate_roots
-                // 返回 Err；model_update_pending 会把根任务标记为 failed 并在后续 drain
-                // 时重试（增量删旧/加新的错误传播链关键一环）。
-                // replace_exist = true：定向重生成必须先删旧实例再写新的，否则改小的
-                // 几何会留着上一版的行。
-                save_instance_data(&shape_insts, true).await?;
-                println!("Insert manual shape insts: {}", inst_cnt);
-            }
-            anyhow::Ok(produced)
-        });
+        let insert_task =
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
+                // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
+                // 写入只覆盖得到这次也生成了的那些。
+                let mut produced: HashSet<RefnoEnum> = HashSet::new();
+                while let Ok(shape_insts) = receiver.recv_async().await {
+                    let inst_cnt = shape_insts.inst_cnt();
+                    produced.extend(shape_insts.get_show_refnos());
+                    // 不再 unwrap：写入失败必须向上传播，让 ModelRefreshPolicy::generate_roots
+                    // 返回 Err；model_update_pending 会把根任务标记为 failed 并在后续 drain
+                    // 时重试（增量删旧/加新的错误传播链关键一环）。
+                    // replace_exist = true：定向重生成必须先删旧实例再写新的，否则改小的
+                    // 几何会留着上一版的行。
+                    save_instance_data(&shape_insts, true).await?;
+                    println!("Insert manual shape insts: {}", inst_cnt);
+                }
+                anyhow::Ok(produced)
+            });
         let generation_result =
             capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
         let (target_root_refnos, produced) =
@@ -757,22 +775,24 @@ pub async fn gen_geos_data(
                 let sjus_map_clone = loop_sjus_map_arc.clone();
                 let db_option = db_option_arc.clone();
                 let sender = sender.clone();
-                let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                    let start_time = Instant::now();
-                    cata_model::gen_cata_geos(
-                        db_option,
-                        Arc::new(target_bran_reuse_cata_map),
-                        Arc::new(branch_refnos_map),
-                        sjus_map_clone,
-                        sender,
-                    )
-                    .await?;
-                    println!(
-                        "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
-                        start_time.elapsed().as_millis()
-                    );
-                    anyhow::Ok(())
-                });
+                let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(
+                    async move {
+                        let start_time = Instant::now();
+                        cata_model::gen_cata_geos(
+                            db_option,
+                            Arc::new(target_bran_reuse_cata_map),
+                            Arc::new(branch_refnos_map),
+                            sjus_map_clone,
+                            sender,
+                        )
+                        .await?;
+                        println!(
+                            "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                            start_time.elapsed().as_millis()
+                        );
+                        anyhow::Ok(())
+                    },
+                );
                 all_handles.push(handle);
             }
         }
@@ -782,22 +802,23 @@ pub async fn gen_geos_data(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                let start_time = Instant::now();
-                cata_model::gen_cata_geos(
-                    db_option,
-                    Arc::new(target_single_cata_map),
-                    Arc::new(Default::default()),
-                    sjus_map_clone,
-                    sender,
-                )
-                .await?;
-                println!(
-                    "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
-                    start_time.elapsed().as_millis()
-                );
-                anyhow::Ok(())
-            });
+            let handle =
+                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                    let start_time = Instant::now();
+                    cata_model::gen_cata_geos(
+                        db_option,
+                        Arc::new(target_single_cata_map),
+                        Arc::new(Default::default()),
+                        sjus_map_clone,
+                        sender,
+                    )
+                    .await?;
+                    println!(
+                        "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    );
+                    anyhow::Ok(())
+                });
             all_handles.push(handle);
         }
 
@@ -815,16 +836,17 @@ pub async fn gen_geos_data(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let sender = sender.clone();
             let db_option = db_option_arc.clone();
-            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                loop_model::gen_loop_geos(
-                    db_option,
-                    &target_loop_owner_refnos,
-                    sjus_map_clone,
-                    sender,
-                )
-                .await?;
-                anyhow::Ok(())
-            });
+            let handle =
+                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                    loop_model::gen_loop_geos(
+                        db_option,
+                        &target_loop_owner_refnos,
+                        sjus_map_clone,
+                        sender,
+                    )
+                    .await?;
+                    anyhow::Ok(())
+                });
             all_handles.push(handle);
         }
 
@@ -844,10 +866,12 @@ pub async fn gen_geos_data(
             //基本体模型的生成
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                prim_model::gen_prim_geos(db_option, target_prim_refnos.as_slice(), sender).await?;
-                anyhow::Ok(())
-            });
+            let handle =
+                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                    prim_model::gen_prim_geos(db_option, target_prim_refnos.as_slice(), sender)
+                        .await?;
+                    anyhow::Ok(())
+                });
             all_handles.push(handle);
         }
 
@@ -984,7 +1008,11 @@ mod tests {
     #[tokio::test]
     async fn generation_worker_error_is_returned() {
         let mut handles = FuturesUnordered::new();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { anyhow::bail!("worker failed") }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async {
+                anyhow::bail!("worker failed")
+            }),
+        );
 
         let error = wait_for_generation_workers(&mut handles)
             .await
@@ -996,7 +1024,11 @@ mod tests {
     #[tokio::test]
     async fn generation_worker_panic_is_returned() {
         let mut handles = FuturesUnordered::new();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { panic!("worker panic") }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async {
+                panic!("worker panic")
+            }),
+        );
 
         let error = wait_for_generation_workers(&mut handles)
             .await
@@ -1010,12 +1042,18 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let completed_by_worker = completed.clone();
         let mut handles = FuturesUnordered::new();
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async { anyhow::bail!("first worker failed") }));
-        handles.push(crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            completed_by_worker.store(true, Ordering::SeqCst);
-            anyhow::Ok(())
-        }));
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async {
+                anyhow::bail!("first worker failed")
+            }),
+        );
+        handles.push(
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                completed_by_worker.store(true, Ordering::SeqCst);
+                anyhow::Ok(())
+            }),
+        );
 
         wait_for_generation_workers(&mut handles)
             .await
@@ -1032,11 +1070,12 @@ mod tests {
         let writer_completed = Arc::new(AtomicBool::new(false));
         let writer_completed_by_task = writer_completed.clone();
         let (sender, receiver) = flume::bounded(1);
-        let writer = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            while receiver.recv_async().await.is_ok() {}
-            writer_completed_by_task.store(true, Ordering::SeqCst);
-            anyhow::Ok(())
-        });
+        let writer =
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                while receiver.recv_async().await.is_ok() {}
+                writer_completed_by_task.store(true, Ordering::SeqCst);
+                anyhow::Ok(())
+            });
 
         let generation_result = capture_generation(async {
             panic!("generator panic");

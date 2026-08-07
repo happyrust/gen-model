@@ -90,113 +90,116 @@ pub async fn apply_cata_neg_boolean_manifold(
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-            for g in group {
-                let pes = g
-                    .boolean_group
-                    .iter()
-                    .flatten()
-                    .map(|x| x.to_pe_key())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                // dbg!(g.refno);
-                let sql = format!(
-                    r#"
+        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
+            async move {
+                for g in group {
+                    let pes = g
+                        .boolean_group
+                        .iter()
+                        .flatten()
+                        .map(|x| x.to_pe_key())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    // dbg!(g.refno);
+                    let sql = format!(
+                        r#"
                     select record::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
-                    g.refno.to_pe_key(),
-                    pes
-                );
-                // println!("geom sql is {}", &sql);
-                let Ok(mut resp) = SUL_DB.query(&sql).await else {
-                    continue;
-                };
-                //
-                let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
-                    dbg!(&sql);
-                    continue;
-                };
-                // dbg!(&gms);
-
-                let mut update_sql = String::new();
-                for bg in g.boolean_group {
-                    let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
+                        g.refno.to_pe_key(),
+                        pes
+                    );
+                    // println!("geom sql is {}", &sql);
+                    let Ok(mut resp) = SUL_DB.query(&sql).await else {
                         continue;
                     };
-
-                    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                    println!("正在负实体计算的mesh hash: {}", &pos.id);
-
-                    let Ok(mut pos_manifold) = load_manifold(
-                        &dir_clone,
-                        &pos.id,
-                        pos.trans.compute_matrix().as_dmat4(),
-                        false,
-                    ) else {
-                        println!("布尔运算失败: 无法加载正实体 manifold, refno: {}", &g.refno);
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
+                    //
+                    let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
+                        dbg!(&sql);
                         continue;
                     };
+                    // dbg!(&gms);
 
-                    // dbg!(&update_sql);
-                    let mut neg_manifolds = vec![];
-                    //负实体的精度要比正实体大
-                    for &neg in bg.iter().skip(1) {
-                        let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                    let mut update_sql = String::new();
+                    for bg in g.boolean_group {
+                        let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
                             continue;
                         };
-                        let m = neg_geo.trans.compute_matrix().as_dmat4();
-                        if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m, true) {
-                            neg_manifolds.push(manifold);
+
+                        #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                        println!("正在负实体计算的mesh hash: {}", &pos.id);
+
+                        let Ok(mut pos_manifold) = load_manifold(
+                            &dir_clone,
+                            &pos.id,
+                            pos.trans.compute_matrix().as_dmat4(),
+                            false,
+                        ) else {
+                            println!("布尔运算失败: 无法加载正实体 manifold, refno: {}", &g.refno);
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
+                            continue;
+                        };
+
+                        // dbg!(&update_sql);
+                        let mut neg_manifolds = vec![];
+                        //负实体的精度要比正实体大
+                        for &neg in bg.iter().skip(1) {
+                            let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                                continue;
+                            };
+                            let m = neg_geo.trans.compute_matrix().as_dmat4();
+                            if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m, true) {
+                                neg_manifolds.push(manifold);
+                            }
                         }
-                    }
-                    //没有负实体也要加上为_b后缀，表示已经进行过分析计算了。
-                    // if !neg_manifolds.is_empty()
-                    {
-                        let new_id = g.refno.hash_with_another_refno(bg[0]);
-                        let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
-                        let mesh = PlantMesh::from(&final_manifold);
-                        #[cfg(feature = "debug_model")]
-                        mesh.export_obj(false, &format!("{}.obj", g.refno));
-                        //保存到文件到dir下
-                        if mesh
-                            .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
-                            .is_ok()
+                        //没有负实体也要加上为_b后缀，表示已经进行过分析计算了。
+                        // if !neg_manifolds.is_empty()
                         {
-                            update_sql.push_str(&format!(
-                                "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
-                                new_id, &pos.aabb_id
-                            ));
-                            // 有索引的关系，所以geom_refno需要点变化
-                            let relate_sql = format!(
-                                "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩, visible = true;",
-                                &g.inst_info_id,
-                                new_id,
-                                format!("{}_b", bg[0]),
-                            );
-                            // println!("cate neg relate sql is {}", &relate_sql);
-                            update_sql.push_str(relate_sql.as_str());
-                            update_sql.push_str(&format!(
-                                "update {}<-inst_relate set booled=true;",
-                                &g.inst_info_id,
-                            ));
-                            // dbg!(&update_sql);
+                            let new_id = g.refno.hash_with_another_refno(bg[0]);
+                            let final_manifold =
+                                pos_manifold.batch_boolean_subtract(&neg_manifolds);
+                            let mesh = PlantMesh::from(&final_manifold);
+                            #[cfg(feature = "debug_model")]
+                            mesh.export_obj(false, &format!("{}.obj", g.refno));
+                            //保存到文件到dir下
+                            if mesh
+                                .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
+                                .is_ok()
+                            {
+                                update_sql.push_str(&format!(
+                                    "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
+                                    new_id, &pos.aabb_id
+                                ));
+                                // 有索引的关系，所以geom_refno需要点变化
+                                let relate_sql = format!(
+                                    "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩, visible = true;",
+                                    &g.inst_info_id,
+                                    new_id,
+                                    format!("{}_b", bg[0]),
+                                );
+                                // println!("cate neg relate sql is {}", &relate_sql);
+                                update_sql.push_str(relate_sql.as_str());
+                                update_sql.push_str(&format!(
+                                    "update {}<-inst_relate set booled=true;",
+                                    &g.inst_info_id,
+                                ));
+                                // dbg!(&update_sql);
+                            }
                         }
                     }
+                    if !update_sql.is_empty() {
+                        SUL_DB.query(update_sql).await.unwrap();
+                    }
                 }
-                if !update_sql.is_empty() {
-                    SUL_DB.query(update_sql).await.unwrap();
-                }
-            }
-        });
+            },
+        );
         tasks.push(task);
     }
     // dbg!(tasks.len());

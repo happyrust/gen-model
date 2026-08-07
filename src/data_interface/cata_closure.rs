@@ -1577,7 +1577,10 @@ mod tests {
         let mut batches = OwnerReplaceBatches::default();
         for owner in 0..3u64 {
             batches
-                .push(&format!("pe:16189_{owner}"), &[child(owner), child(owner + 100)])
+                .push(
+                    &format!("pe:16189_{owner}"),
+                    &[child(owner), child(owner + 100)],
+                )
                 .expect("成员块无重复");
         }
         let merged = batches.finish();
@@ -1605,14 +1608,24 @@ mod tests {
         // 叶子（空成员表）只出一条删除语句，靠 owner 计数封顶，不靠 child 行数。
         let mut leaves = OwnerReplaceBatches::default();
         for owner in 0..(INSERT_CHUNK * 2) {
-            leaves.push(&format!("pe:70000_{owner}"), &[]).expect("空成员块");
+            leaves
+                .push(&format!("pe:70000_{owner}"), &[])
+                .expect("空成员块");
         }
         let leaf_batches = leaves.finish();
-        assert_eq!(leaf_batches.len(), 2, "{} 个叶子应封顶成两批", INSERT_CHUNK * 2);
+        assert_eq!(
+            leaf_batches.len(),
+            2,
+            "{} 个叶子应封顶成两批",
+            INSERT_CHUNK * 2
+        );
         for sql in &leaf_batches {
             crate::data_interface::staging::replay_safe::validate_statement(sql)
                 .expect("纯删除批同样要过 ReplaySafe");
-            assert!(!sql.contains("INSERT RELATION"), "空成员表不该写任何边:\n{sql}");
+            assert!(
+                !sql.contains("INSERT RELATION"),
+                "空成员表不该写任何边:\n{sql}"
+            );
         }
 
         assert!(
@@ -1688,7 +1701,8 @@ mod tests {
             .check()
             .expect("valid adjacent owner");
 
-        let shrunk = render_pe_owner_replace("pe:16189_0", &[child_b]).expect("render shrunk block");
+        let shrunk =
+            render_pe_owner_replace("pe:16189_0", &[child_b]).expect("render shrunk block");
         for _ in 0..2 {
             db.query(&shrunk)
                 .await
