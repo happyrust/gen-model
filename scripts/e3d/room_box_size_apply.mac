@@ -1,0 +1,8 @@
+-- Enlarge a BOX inside R512 so model regeneration must recalculate its room edge.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_box_size_apply.log" OVER
+=24381/101446
+Q CE
+XLEN 140
+Q XLEN
+SAVEWORK 'CODEX room BOX XLEN 100 to 140'
+ALPHA LOG END

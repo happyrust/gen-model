@@ -36,7 +36,9 @@ struct Case {
     dbnum: u32,
     db_file: String,
     action: &'static str,
-    target: &'static str,
+    target: String,
+    element: String,
+    expected_noun: String,
     expect_room: bool,
     prepare_baseline: bool,
     delete_baseline: bool,
@@ -46,8 +48,12 @@ impl Case {
     fn from_env() -> Self {
         let change = std::env::var("AIOS_ROOM_CHANGE").unwrap_or_else(|_| "element".into());
         let (default_dbnum, action, target) = match change.as_str() {
-            "element" => (7999, "room_recalc_element", ELEMENT),
-            "room" => (7997, "room_recalc_panel", PANEL),
+            "element" => (
+                7999,
+                "room_recalc_element",
+                std::env::var("AIOS_ROOM_ELEMENT").unwrap_or_else(|_| ELEMENT.into()),
+            ),
+            "room" => (7997, "room_recalc_panel", PANEL.into()),
             other => panic!("unknown AIOS_ROOM_CHANGE={other}"),
         };
         let dbnum = std::env::var("AIOS_ROOM_DBNUM")
@@ -61,6 +67,8 @@ impl Case {
             db_file: std::env::var("AIOS_ROOM_DB_FILE").unwrap_or(default_file),
             action,
             target,
+            element: std::env::var("AIOS_ROOM_ELEMENT").unwrap_or_else(|_| ELEMENT.into()),
+            expected_noun: std::env::var("AIOS_ROOM_EXPECT_NOUN").unwrap_or_else(|_| "CAP".into()),
             expect_room: env_flag("AIOS_ROOM_EXPECT_ROOM", true),
             prepare_baseline: env_flag("AIOS_ROOM_PREPARE_BASELINE", true),
             delete_baseline: env_flag("AIOS_ROOM_DELETE_BASELINE", true),
@@ -131,11 +139,11 @@ async fn scalar_i32(sql: &str) -> i32 {
         .expect("scalar exists")
 }
 
-async fn edges() -> Vec<Edge> {
+async fn edges(element: &str) -> Vec<Edge> {
     let mut response = SUL_DB
         .query(format!(
             "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
-             FROM room_relate WHERE out = pe:{ELEMENT} ORDER BY panel;"
+             FROM room_relate WHERE out = pe:{element} ORDER BY panel;"
         ))
         .await
         .expect("query room edges")
@@ -157,20 +165,33 @@ async fn topology() -> Vec<Topology> {
     response.take(0).expect("decode room topology")
 }
 
-async fn snapshot(tag: &str, dbnum: u32) {
+async fn aabb(element: &str) -> Vec<String> {
+    rows(&format!(
+        "SELECT VALUE <string>aabb.* FROM inst_relate:{element};"
+    ))
+    .await
+}
+
+async fn snapshot(tag: &str, case: &Case) {
     let total =
         rows("SELECT VALUE <string>c FROM (SELECT count() AS c FROM room_relate GROUP ALL);").await;
     let watermark = rows(&format!(
         "SELECT VALUE <string>[dbnum, applied_sesno, file_latest_sesno] \
-         FROM dbnum_watermark WHERE dbnum = {dbnum};"
+         FROM dbnum_watermark WHERE dbnum = {};",
+        case.dbnum
     ))
     .await;
-    let pos = rows(&format!("SELECT VALUE <string>POS FROM CAP:{ELEMENT};")).await;
+    let model = rows(&format!(
+        "SELECT VALUE <string>[noun, POS, AABB] FROM pe:{};",
+        case.element
+    ))
+    .await;
     println!(
-        "[e2e/{tag}] 归属边={:?} 房间拓扑={:?} room_relate={total:?} 水位={watermark:?} POS={pos:?}",
-        edges().await,
+        "[e2e/{tag}] 归属边={:?} 房间拓扑={:?} room_relate={total:?} 水位={watermark:?}",
+        edges(&case.element).await,
         topology().await
     );
+    println!("[e2e/{tag}] 模型={model:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -183,14 +204,18 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
             .await
             .expect("init db manager"),
     );
-    let element = RefnoEnum::from(ELEMENT);
+    let element = RefnoEnum::from(case.element.as_str());
 
-    // 只清本案例靶子的陈旧任务，避免共享实库里的旧 room 任务制造假通过。
+    assert_eq!(
+        rows(&format!("SELECT VALUE <string>noun FROM pe:{};", case.element)).await,
+        vec![case.expected_noun.clone()],
+        "E3D 模型类型基线漂移"
+    );
+
+    // 只清本案例靶子的陈旧房间任务，避免共享实库里的旧任务制造假通过。
     SUL_DB
         .query(format!(
-            "DELETE model_update_pending WHERE \
-             (action = 'regen_root' AND target_refno IN ['24381/35843', '24383/66459']) \
-             OR id = model_update_pending:{0}_{1};",
+            "DELETE model_update_pending:{0}_{1};",
             case.action, case.target
         ))
         .await
@@ -211,7 +236,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     db_option.gen_spatial_tree = true;
     let baseline = vec![Edge {
         panel: PANEL.into(),
-        part: ELEMENT.into(),
+        part: case.element.clone(),
         room_num: ROOM.into(),
     }];
     let baseline_topology = vec![Topology {
@@ -220,7 +245,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         room_num: ROOM.into(),
     }];
     if case.prepare_baseline {
-        for target in [PANEL, ELEMENT] {
+        for target in [PANEL, case.element.as_str()] {
             mgr.ensure_model_generated(RefnoEnum::from(target), false)
                 .await
                 .unwrap_or_else(|error| panic!("prepare model {target}: {error:#}"));
@@ -237,7 +262,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         recalc_element_membership(&rooms, &panels, &history, element)
             .await
             .expect("prepare exact room baseline");
-        assert_eq!(edges().await, baseline, "apply 前房间归属基线漂移");
+        assert_eq!(edges(&case.element).await, baseline, "apply 前房间归属基线漂移");
         assert_eq!(
             topology().await,
             baseline_topology,
@@ -245,15 +270,19 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         );
     }
 
-    snapshot("before", case.dbnum).await;
+    snapshot("before", &case).await;
+    let before_aabb = aabb(&case.element).await;
+    if case.action == "room_recalc_element" {
+        assert!(!before_aabb.is_empty(), "增量前模型必须有 AABB 基线");
+    }
     if case.delete_baseline {
         SUL_DB
-            .query(format!("DELETE room_relate WHERE out = pe:{ELEMENT};"))
+            .query(format!("DELETE room_relate WHERE out = pe:{};", case.element))
             .await
             .expect("delete room edges")
             .check()
             .expect("valid delete");
-        assert!(edges().await.is_empty(), "删除基线边后不该还有归属边");
+        assert!(edges(&case.element).await.is_empty(), "删除基线边后不该还有归属边");
     }
 
     // 只把宏命中的这一批放进队列。不能把现场会话号写死：每次 E3D SAVEWORK 都会递增。
@@ -291,7 +320,14 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "[e2e] 消费了 {ran} 个批次，耗时 {} ms",
         started.elapsed().as_millis()
     );
-    snapshot("after-batch", case.dbnum).await;
+    snapshot("after-batch", &case).await;
+    if case.action == "room_recalc_element" {
+        assert_ne!(
+            aabb(&case.element).await,
+            before_aabb,
+            "模型属性变化后 AABB 必须由增量更新"
+        );
+    }
 
     assert!(
         !rows(&format!(
@@ -326,9 +362,13 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     let rooms_done = drain_rooms(&db_option).await.expect("drain room phase");
     println!("[e2e] 房间轮消化 {rooms_done} 条");
 
-    snapshot("after", case.dbnum).await;
+    snapshot("after", &case).await;
     let expected_edges = if case.expect_room { baseline } else { vec![] };
-    assert_eq!(edges().await, expected_edges, "元件房间归属未按场景收敛");
+    assert_eq!(
+        edges(&case.element).await,
+        expected_edges,
+        "元件房间归属未按场景收敛"
+    );
     let expected_topology = if case.action == "room_recalc_panel" && !case.expect_room {
         vec![]
     } else {

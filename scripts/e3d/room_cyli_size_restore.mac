@@ -1,0 +1,8 @@
+-- Restore the CYLI baseline dimensions.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cyli_size_restore.log" OVER
+=24381/101426
+Q CE
+DIAM 50
+Q DIAM
+SAVEWORK 'CODEX room CYLI DIAM restore 50'
+ALPHA LOG END

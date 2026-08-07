@@ -2,7 +2,7 @@
 param(
     [string]$ProjectDir = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample',
     [string]$Datastore = 'rocksdb:.surreal/ams-7997-e3d-test-20260805',
-    [string[]]$Cases = @('same-room', 'element-out', 'room-rename'),
+    [string[]]$Cases = @('same-room', 'element-out', 'room-rename', 'box-size', 'cyli-size'),
     [string]$Output = "output/room-e3d-e2e/$(Get-Date -Format yyyyMMdd-HHmmss)"
 )
 
@@ -12,9 +12,15 @@ $out = Join-Path $repo $Output
 New-Item -ItemType Directory -Force $out | Out-Null
 $startedSurreal = $null
 
-function Invoke-Driver([string]$macro, [string]$dir) {
+function Invoke-Driver([string]$macro, [string]$dir, [string]$expected = '') {
     & $script:l3 --check-driver $macro --project-dir $ProjectDir --output (Join-Path $out $dir)
     if ($LASTEXITCODE) { throw "E3D driver failed: $macro" }
+    if ($expected) {
+        $log = Get-Content (Join-Path $out "$dir/check-driver.log") -Raw
+        if ($log -notmatch [regex]::Escape($expected)) {
+            throw "E3D driver output did not contain '$expected': $macro"
+        }
+    }
 }
 
 function Invoke-Increment([string]$dir) {
@@ -27,11 +33,15 @@ function Invoke-Increment([string]$dir) {
 function Set-CaseEnv(
     [string]$change,
     [int]$dbnum,
+    [string]$element,
+    [string]$noun,
     [bool]$expectRoom,
     [bool]$prepareBaseline,
     [bool]$deleteBaseline
 ) {
     $env:AIOS_ROOM_CHANGE = $change
+    $env:AIOS_ROOM_ELEMENT = $element
+    $env:AIOS_ROOM_EXPECT_NOUN = $noun
     $env:AIOS_ROOM_DBNUM = "$dbnum"
     $env:AIOS_ROOM_DB_FILE = Join-Path $ProjectDir "ams000\ams${dbnum}_0001"
     $env:AIOS_ROOM_EXPECT_ROOM = if ($expectRoom) { '1' } else { '0' }
@@ -43,6 +53,8 @@ function Invoke-Case(
     [string]$name,
     [string]$change,
     [int]$dbnum,
+    [string]$element,
+    [string]$noun,
     [string]$applyMacro,
     [string]$restoreMacro,
     [bool]$applyExpectsRoom,
@@ -50,7 +62,7 @@ function Invoke-Case(
 ) {
     $restoreRequired = $false
     try {
-        Set-CaseEnv $change $dbnum $applyExpectsRoom $true $deleteBaseline
+        Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline
         # The macro may SAVEWORK before the driver reports a later cleanup error.
         $restoreRequired = $true
         Invoke-Driver $applyMacro "$name-apply-driver"
@@ -58,9 +70,13 @@ function Invoke-Case(
     }
     finally {
         if ($restoreRequired) {
-            Invoke-Driver $restoreMacro "$name-restore-driver"
-            Set-CaseEnv $change $dbnum $true $false $deleteBaseline
-            Invoke-Increment "$name-restore-increment"
+            try {
+                Invoke-Driver $restoreMacro "$name-restore-driver"
+            }
+            finally {
+                Set-CaseEnv $change $dbnum $element $noun $true $false $deleteBaseline
+                Invoke-Increment "$name-restore-increment"
+            }
         }
     }
 }
@@ -99,19 +115,33 @@ try {
     foreach ($case in $Cases) {
         switch ($case) {
             'same-room' {
-                Invoke-Case $case 'element' 7999 `
+                Invoke-Case $case 'element' 7999 '24383_66460' 'CAP' `
                     'scripts/e3d/issue7_cap_pos_apply.mac' `
                     'scripts/e3d/issue7_cap_pos_restore.mac' $true $true
             }
             'element-out' {
-                Invoke-Case $case 'element' 7999 `
+                Invoke-Case $case 'element' 7999 '24383_66460' 'CAP' `
                     'scripts/e3d/room_cap_out_apply.mac' `
                     'scripts/e3d/room_cap_out_restore.mac' $false $false
             }
             'room-rename' {
-                Invoke-Case $case 'room' 7997 `
+                Invoke-Case $case 'room' 7997 '24383_66460' 'CAP' `
                     'scripts/e3d/room_name_out_apply.mac' `
                     'scripts/e3d/room_name_out_restore.mac' $false $false
+            }
+            'box-size' {
+                Invoke-Driver 'scripts/e3d/room_box_size_probe.mac' `
+                    'box-size-preflight-driver' 'Xlength 100mm'
+                Invoke-Case $case 'element' 7997 '24381_101446' 'BOX' `
+                    'scripts/e3d/room_box_size_apply.mac' `
+                    'scripts/e3d/room_box_size_restore.mac' $true $true
+            }
+            'cyli-size' {
+                Invoke-Driver 'scripts/e3d/room_cyli_size_probe.mac' `
+                    'cyli-size-preflight-driver' 'Diameter 50mm'
+                Invoke-Case $case 'element' 7997 '24381_101426' 'CYLI' `
+                    'scripts/e3d/room_cyli_size_apply.mac' `
+                    'scripts/e3d/room_cyli_size_restore.mac' $true $true
             }
             default { throw "Unknown room E2E case: $case" }
         }

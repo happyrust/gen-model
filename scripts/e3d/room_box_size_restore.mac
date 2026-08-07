@@ -1,0 +1,8 @@
+-- Restore the BOX baseline dimensions.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_box_size_restore.log" OVER
+=24381/101446
+Q CE
+XLEN 100
+Q XLEN
+SAVEWORK 'CODEX room BOX XLEN restore 100'
+ALPHA LOG END

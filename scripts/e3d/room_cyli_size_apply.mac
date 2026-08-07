@@ -1,0 +1,8 @@
+-- Enlarge a CYLI inside R512 so model regeneration must recalculate its room edge.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cyli_size_apply.log" OVER
+=24381/101426
+Q CE
+DIAM 80
+Q DIAM
+SAVEWORK 'CODEX room CYLI DIAM 50 to 80'
+ALPHA LOG END
