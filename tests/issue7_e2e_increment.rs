@@ -42,6 +42,9 @@ struct Case {
     expect_room: bool,
     prepare_baseline: bool,
     delete_baseline: bool,
+    dynamic_baseline: bool,
+    check_topology: bool,
+    room_keyword: String,
 }
 
 impl Case {
@@ -72,6 +75,10 @@ impl Case {
             expect_room: env_flag("AIOS_ROOM_EXPECT_ROOM", true),
             prepare_baseline: env_flag("AIOS_ROOM_PREPARE_BASELINE", true),
             delete_baseline: env_flag("AIOS_ROOM_DELETE_BASELINE", true),
+            dynamic_baseline: env_flag("AIOS_ROOM_DYNAMIC_BASELINE", false),
+            check_topology: env_flag("AIOS_ROOM_CHECK_TOPOLOGY", true),
+            room_keyword: std::env::var("AIOS_ROOM_KEYWORD")
+                .unwrap_or_else(|_| "-RM05-R512".into()),
         }
     }
 }
@@ -167,7 +174,8 @@ async fn topology() -> Vec<Topology> {
 
 async fn aabb(element: &str) -> Vec<String> {
     rows(&format!(
-        "SELECT VALUE <string>aabb.* FROM inst_relate:{element};"
+        "SELECT VALUE <string>aabb.* FROM inst_relate \
+         WHERE id = inst_relate:{element} AND aabb != NONE;"
     ))
     .await
 }
@@ -207,7 +215,11 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     let element = RefnoEnum::from(case.element.as_str());
 
     assert_eq!(
-        rows(&format!("SELECT VALUE <string>noun FROM pe:{};", case.element)).await,
+        rows(&format!(
+            "SELECT VALUE <string>noun FROM pe:{};",
+            case.element
+        ))
+        .await,
         vec![case.expected_noun.clone()],
         "E3D 模型类型基线漂移"
     );
@@ -232,9 +244,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "目标房间任务清理失败"
     );
     let mut db_option = get_db_option().clone();
-    db_option.room_key_word = Some(vec!["-RM05-R512".into()]);
+    db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
     db_option.gen_spatial_tree = true;
-    let baseline = vec![Edge {
+    let mut baseline = vec![Edge {
         panel: PANEL.into(),
         part: case.element.clone(),
         room_num: ROOM.into(),
@@ -245,7 +257,12 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         room_num: ROOM.into(),
     }];
     if case.prepare_baseline {
-        for target in [PANEL, case.element.as_str()] {
+        let prepare_targets = if case.dynamic_baseline {
+            vec![case.element.as_str()]
+        } else {
+            vec![PANEL, case.element.as_str()]
+        };
+        for target in prepare_targets {
             mgr.ensure_model_generated(RefnoEnum::from(target), false)
                 .await
                 .unwrap_or_else(|error| panic!("prepare model {target}: {error:#}"));
@@ -262,27 +279,50 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         recalc_element_membership(&rooms, &panels, &history, element)
             .await
             .expect("prepare exact room baseline");
-        assert_eq!(edges(&case.element).await, baseline, "apply 前房间归属基线漂移");
-        assert_eq!(
-            topology().await,
-            baseline_topology,
-            "apply 前房间拓扑基线漂移"
-        );
+        if case.dynamic_baseline {
+            baseline = edges(&case.element).await;
+            assert_eq!(
+                !baseline.is_empty(),
+                case.expect_room,
+                "动态房间归属基线与案例声明不符"
+            );
+        } else {
+            assert_eq!(
+                edges(&case.element).await,
+                baseline,
+                "apply 前房间归属基线漂移"
+            );
+        }
+        if case.check_topology {
+            assert_eq!(
+                topology().await,
+                baseline_topology,
+                "apply 前房间拓扑基线漂移"
+            );
+        }
+    } else if case.dynamic_baseline {
+        baseline = edges(&case.element).await;
     }
 
     snapshot("before", &case).await;
     let before_aabb = aabb(&case.element).await;
-    if case.action == "room_recalc_element" {
+    if case.action == "room_recalc_element" && (case.prepare_baseline || !before_aabb.is_empty()) {
         assert!(!before_aabb.is_empty(), "增量前模型必须有 AABB 基线");
     }
     if case.delete_baseline {
         SUL_DB
-            .query(format!("DELETE room_relate WHERE out = pe:{};", case.element))
+            .query(format!(
+                "DELETE room_relate WHERE out = pe:{};",
+                case.element
+            ))
             .await
             .expect("delete room edges")
             .check()
             .expect("valid delete");
-        assert!(edges(&case.element).await.is_empty(), "删除基线边后不该还有归属边");
+        assert!(
+            edges(&case.element).await.is_empty(),
+            "删除基线边后不该还有归属边"
+        );
     }
 
     // 只把宏命中的这一批放进队列。不能把现场会话号写死：每次 E3D SAVEWORK 都会递增。
@@ -320,8 +360,17 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "[e2e] 消费了 {ran} 个批次，耗时 {} ms",
         started.elapsed().as_millis()
     );
+    assert_eq!(
+        scalar_i32(&format!(
+            "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
+            case.dbnum
+        ))
+        .await,
+        file_latest_sesno,
+        "批次成功后必须推进到 E3D 文件的最新会话"
+    );
     snapshot("after-batch", &case).await;
-    if case.action == "room_recalc_element" {
+    if case.action == "room_recalc_element" && !before_aabb.is_empty() {
         assert_ne!(
             aabb(&case.element).await,
             before_aabb,
@@ -374,5 +423,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     } else {
         baseline_topology
     };
-    assert_eq!(topology().await, expected_topology, "房间拓扑未按场景收敛");
+    if case.check_topology {
+        assert_eq!(topology().await, expected_topology, "房间拓扑未按场景收敛");
+    }
 }

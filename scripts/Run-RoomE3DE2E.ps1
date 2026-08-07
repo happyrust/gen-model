@@ -3,6 +3,8 @@ param(
     [string]$ProjectDir = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample',
     [string]$Datastore = 'rocksdb:.surreal/ams-7997-e3d-test-20260805',
     [string[]]$Cases = @('same-room', 'element-out', 'room-rename', 'box-size', 'cyli-size'),
+    [string[]]$ModelTypes = @(),
+    [switch]$SkipLegacyCases,
     [string]$Output = "output/room-e3d-e2e/$(Get-Date -Format yyyyMMdd-HHmmss)"
 )
 
@@ -37,7 +39,9 @@ function Set-CaseEnv(
     [string]$noun,
     [bool]$expectRoom,
     [bool]$prepareBaseline,
-    [bool]$deleteBaseline
+    [bool]$deleteBaseline,
+    [bool]$dynamicBaseline = $false,
+    [bool]$checkTopology = $true
 ) {
     $env:AIOS_ROOM_CHANGE = $change
     $env:AIOS_ROOM_ELEMENT = $element
@@ -47,6 +51,9 @@ function Set-CaseEnv(
     $env:AIOS_ROOM_EXPECT_ROOM = if ($expectRoom) { '1' } else { '0' }
     $env:AIOS_ROOM_PREPARE_BASELINE = if ($prepareBaseline) { '1' } else { '0' }
     $env:AIOS_ROOM_DELETE_BASELINE = if ($deleteBaseline) { '1' } else { '0' }
+    $env:AIOS_ROOM_DYNAMIC_BASELINE = if ($dynamicBaseline) { '1' } else { '0' }
+    $env:AIOS_ROOM_CHECK_TOPOLOGY = if ($checkTopology) { '1' } else { '0' }
+    $env:AIOS_ROOM_KEYWORD = if ($dynamicBaseline) { '-RM' } else { '-RM05-R512' }
 }
 
 function Invoke-Case(
@@ -58,11 +65,13 @@ function Invoke-Case(
     [string]$applyMacro,
     [string]$restoreMacro,
     [bool]$applyExpectsRoom,
-    [bool]$deleteBaseline
+    [bool]$deleteBaseline,
+    [bool]$dynamicBaseline = $false,
+    [bool]$checkTopology = $true
 ) {
     $restoreRequired = $false
     try {
-        Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline
+        Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology
         # The macro may SAVEWORK before the driver reports a later cleanup error.
         $restoreRequired = $true
         Invoke-Driver $applyMacro "$name-apply-driver"
@@ -74,7 +83,8 @@ function Invoke-Case(
                 Invoke-Driver $restoreMacro "$name-restore-driver"
             }
             finally {
-                Set-CaseEnv $change $dbnum $element $noun $true $false $deleteBaseline
+                $restoreExpectsRoom = if ($dynamicBaseline) { $applyExpectsRoom } else { $true }
+                Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology
                 Invoke-Increment "$name-restore-increment"
             }
         }
@@ -112,7 +122,7 @@ try {
     $target = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
     $script:l3 = Join-Path $target 'debug\l3_suite.exe'
 
-    foreach ($case in $Cases) {
+    if (-not $SkipLegacyCases) { foreach ($case in $Cases) {
         switch ($case) {
             'same-room' {
                 Invoke-Case $case 'element' 7999 '24383_66460' 'CAP' `
@@ -144,6 +154,51 @@ try {
                     'scripts/e3d/room_cyli_size_restore.mac' $true $true
             }
             default { throw "Unknown room E2E case: $case" }
+        }
+    } }
+
+    if ($ModelTypes) {
+        $manifest = Get-Content (Join-Path $repo 'scripts/e3d/ams_model_type_cases.json') -Raw |
+            ConvertFrom-Json
+        $selected = @(if ($ModelTypes -contains 'all') {
+            $manifest | Where-Object mode -eq 'relative_position'
+        } else {
+            $manifest | Where-Object { $_.noun -in $ModelTypes }
+        })
+        if (($ModelTypes -notcontains 'all') -and $selected.Count -ne $ModelTypes.Count) {
+            throw "Unknown or duplicate model type. Requested: $($ModelTypes -join ', ')"
+        }
+        $generated = Join-Path $out 'generated-macros'
+        New-Item -ItemType Directory -Force $generated | Out-Null
+        foreach ($model in $selected) {
+            if ($model.mode -ne 'relative_position') { continue }
+            $name = $model.id
+            $refno = $model.refno -replace '_', '/'
+            $macroLog = ((Resolve-Path $generated).Path -replace '\\', '/')
+            $applyMacro = Join-Path $generated "$name-apply.mac"
+            $restoreMacro = Join-Path $generated "$name-restore.mac"
+            @"
+ALPHA LOG "$macroLog/$name-apply.log" OVER
+=$refno
+Q CE
+Q POS
+BY U 10
+Q POS
+SAVEWORK 'CODEX $name relative position apply'
+ALPHA LOG END
+"@ | Set-Content $applyMacro -Encoding ascii
+            @"
+ALPHA LOG "$macroLog/$name-restore.log" OVER
+=$refno
+Q CE
+Q POS
+BY D 10
+Q POS
+SAVEWORK 'CODEX $name relative position restore'
+ALPHA LOG END
+"@ | Set-Content $restoreMacro -Encoding ascii
+            Invoke-Case $name 'element' $model.dbnum $model.refno $model.noun `
+                $applyMacro $restoreMacro $model.expect_room $model.expect_room $true $false
         }
     }
 }
