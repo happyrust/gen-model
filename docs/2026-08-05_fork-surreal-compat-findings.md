@@ -53,3 +53,22 @@
 - T0.3 暂存库建库初始化 = `replay_startup_defines` 这一套（本套件已在全新 mem 库上
   排练通过，`REMOVE FUNCTION` 的静默错误不影响最终函数集）。
 - 新增全局扫描 / 修补语句时，把行为疑点加进本套件双跑（`assert_dual_same` 一步一拍）。
+
+## 2026-08-07 增补（层级查询优化 P0，用例 `dual_inst_relate_anc_u64_contains_index_agrees`）
+
+层级查询优化方案（`docs/plans/2026-08-07-inst-relate-anc-u64-hierarchy-query-plan.md`）
+的 Go/No-Go 验证，`AIOS_COMPAT_REQUIRE=1` 下全套 11 条用例全绿：
+
+| 行为点 | 结论 |
+|---|---|
+| `DEFINE INDEX ... COLUMNS anc`（数组列、普通语法） | mem 与 fork 均合法建成 |
+| `WHERE anc CONTAINS <u64>` 的 EXPLAIN | 两引擎都走 `idx_ir_anc`（绝对断言，非仅对拍）——**主路线 Go** |
+| `WHERE dbnum = n` 的 EXPLAIN | 两引擎都走 `idx_ir_dbnum`（备选路线地板同时成立） |
+| `CONTAINSANY [a, b]`（多根合并查） | 两引擎结果一致（未做走索引断言，热路径是单根 CONTAINS） |
+| `anc` 存 `i64::MAX`（RefU64 打包值天花板） | 写读往返保真，CONTAINS 命中一致 |
+
+- **F1 已修**（同日）：索引语法去掉 2.1.4 不认的 `TYPE BTREE`，改
+  `DEFINE INDEX IF NOT EXISTS ... COLUMNS zone_refno`，吞错改显式上抛；
+  生产（`pdms_inst::init_inst_relate_indices`）与暂存
+  （`init_staging_schema`）共用常量 `INST_RELATE_ZONE_INDEX_SQL` 一条语句。
+  `dual_startup_define_replay_info_parity` 在修复后保持两引擎一字不差。

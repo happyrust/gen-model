@@ -63,14 +63,62 @@ async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::R
     first_error.map_or(Ok(()), Err)
 }
 
-/// 初始化数据库的 inst_relate 表的索引
+/// 初始化数据库的 inst_relate / tubi_relate 表的索引。
+///
+/// F1（`docs/2026-08-05_fork-surreal-compat-findings.md`）：旧语法带 `TYPE BTREE`，
+/// 在 fork 2.1.4 上是解析错误，又被 `let _ =` 吞掉——索引在生产从未建成，
+/// `zone_refno` 过滤一直全表扫。现在用合法语法建普通索引并显式上抛错误；
+/// `IF NOT EXISTS` 保证每次启动重放幂等。
 pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
-    // 创建 zone_refno 字段的索引
-    let create_index_sql = "
-        DEFINE INDEX idx_inst_relate_zone_refno ON TABLE inst_relate COLUMNS zone_refno TYPE BTREE;
-    ";
-    let _ = SUL_DB.query(create_index_sql).await;
+    SUL_DB.query(INST_RELATE_INDEX_SQL).await?.check()?;
     Ok(())
+}
+
+/// 实例边表索引的唯一事实来源：生产启动（[`init_inst_relate_indices`]）与
+/// 暂存库建库（`staging::lifecycle::init_staging_schema`）用同一组语句。
+///
+/// `anc`（RefU64 打包祖先链，数组列）与 `dbnum` 服务层级查询优化
+/// （`docs/plans/2026-08-07-inst-relate-anc-u64-hierarchy-query-plan.md`）：
+/// 任意根的子树实例 = `WHERE anc CONTAINS $root` 一条索引查询。
+/// 2.1.4 上数组列普通索引 + CONTAINS 走索引已由双跑套件钉住（P0，Go）。
+pub const INST_RELATE_INDEX_SQL: &str = "\
+    DEFINE INDEX IF NOT EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate COLUMNS zone_refno;\n\
+    DEFINE INDEX IF NOT EXISTS idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\n\
+    DEFINE INDEX IF NOT EXISTS idx_inst_relate_dbnum ON TABLE inst_relate COLUMNS dbnum;\n\
+    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
+    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;";
+
+/// 存量 `inst_relate` / `tubi_relate` 行的 `anc` + `dbnum` 回填（幂等，自愈式）。
+///
+/// 每轮圈 `anc = NONE` 的一批行、按 `in` 端 pe 的活 owner 链重算，直到无行可补。
+/// 分批是为了限住单事务体量；顺序无所谓，中断重跑无害。TUBI 行历史上连
+/// `zone_refno` 都没有，这里一并补上。返回 (inst_relate 补行数, tubi_relate 补行数)。
+pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
+    async fn drain_table(table: &str) -> anyhow::Result<usize> {
+        const BATCH: usize = 2000;
+        let mut total = 0usize;
+        loop {
+            let sql = format!(
+                "LET $rows = SELECT VALUE id FROM {table} WHERE anc = NONE LIMIT {BATCH};\n\
+                 UPDATE $rows SET anc = fn::anc_u64(in), dbnum = in.dbnum, \
+                 zone_refno = zone_refno ?? fn::find_ancestor_type(in, 'ZONE') RETURN NONE;\n\
+                 RETURN array::len($rows);"
+            );
+            let mut response = SUL_DB.query(sql).await?.check()?;
+            let filled: Option<usize> = response.take(2)?;
+            let filled = filled.unwrap_or(0);
+            total += filled;
+            if filled < BATCH {
+                return Ok(total);
+            }
+        }
+    }
+    let inst = drain_table("inst_relate").await?;
+    let tubi = drain_table("tubi_relate").await?;
+    if inst > 0 || tubi > 0 {
+        println!("anc/dbnum 回填完成：inst_relate {inst} 行，tubi_relate {tubi} 行");
+    }
+    Ok((inst, tubi))
 }
 
 
@@ -205,7 +253,7 @@ pub async fn save_instance_data(
 
             // 为TUBI创建inst_relate记录
             let tubi_relate_sql = format!(
-                "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, aabb: aabb:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
+                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, aabb: aabb:⟨{4}⟩, generic: '{5}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), anc: fn::anc_u64({1}), dbnum: {1}.dbnum, has_cata_neg: {6}, solid: {7}}}",
                 k.to_inst_relate_key(),
                 k.to_pe_key(),
                 v.id_str(),
@@ -295,7 +343,7 @@ pub async fn save_instance_data(
         }
 
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}}}",
+            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: fn::find_ancestor_type({1}, 'ZONE'), anc: fn::anc_u64({1}), dbnum: {1}.dbnum, dt: fn::ses_date({1}), has_cata_neg: {5}, solid: {6}}}",
             k.to_inst_relate_key(),
             k.to_pe_key(),
             v.id_str(),
@@ -410,6 +458,69 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 手动 live（层级查询优化 P1→P2 部署步）：对**配置库**执行 anc/dbnum
+    /// 部署三件套——灌 `fn::refno_u64` / `fn::anc_u64`（只抠 common.surql 里这
+    /// 两个定义，不整目录重放、不盖其他函数）、建索引（IF NOT EXISTS）、幂等
+    /// 回填。等价于「新版 gen-model 启动一次」中与本方案相关的那部分，供不重启
+    /// 服务先行验收读侧（plant-ui `tests/anc_model_query_parity.rs`）。可重复跑。
+    #[tokio::test]
+    #[ignore = "manual live: writes fn defines + indexes + anc backfill to the configured Surreal"]
+    async fn live_backfill_anc_on_configured_db() {
+        aios_core::init_test_surreal().await.expect("连接配置库");
+
+        // 从权威脚本原文抠出两个函数定义（refno_u64 起、到 anc_u64 的收尾 `};`），
+        // 避免测试里再抄一份出现两个事实来源。
+        let common = std::fs::read_to_string("resource/surreal/common.surql")
+            .expect("read resource/surreal/common.surql");
+        let start = common
+            .find("DEFINE FUNCTION OVERWRITE fn::refno_u64")
+            .expect("common.surql 里应有 fn::refno_u64 定义");
+        let anc_at = common[start..]
+            .find("DEFINE FUNCTION OVERWRITE fn::anc_u64")
+            .expect("common.surql 里应有 fn::anc_u64 定义");
+        let end = common[start + anc_at..]
+            .find("\n};")
+            .expect("anc_u64 定义应以 `};` 收尾");
+        let defines = &common[start..start + anc_at + end + 3];
+        SUL_DB
+            .query(defines)
+            .await
+            .expect("define fn::refno_u64 / fn::anc_u64")
+            .check()
+            .expect("define check");
+        println!("[live] fn::refno_u64 / fn::anc_u64 已灌入");
+
+        init_inst_relate_indices().await.expect("建索引");
+        println!("[live] 索引就绪（IF NOT EXISTS）");
+
+        let started = std::time::Instant::now();
+        let (inst, tubi) = backfill_inst_relate_anc().await.expect("回填");
+        println!(
+            "[live] 回填完成：inst_relate {inst} 行，tubi_relate {tubi} 行，耗时 {:?}",
+            started.elapsed()
+        );
+
+        let mut response = SUL_DB
+            .query(
+                "RETURN [array::len((SELECT VALUE id FROM inst_relate WHERE anc != NONE LIMIT 1)), \
+                         array::len((SELECT VALUE id FROM inst_relate WHERE anc = NONE LIMIT 1)), \
+                         array::len((SELECT VALUE id FROM tubi_relate WHERE anc = NONE LIMIT 1))];",
+            )
+            .await
+            .expect("覆盖复核查询")
+            .check()
+            .expect("覆盖复核");
+        let [has_anc, inst_none, tubi_none]: [i64; 3] = response
+            .take::<Vec<i64>>(0)
+            .expect("take 覆盖复核")
+            .try_into()
+            .expect("三元组");
+        assert_eq!(has_anc, 1, "回填后 inst_relate 应存在带 anc 的行");
+        assert_eq!(inst_none, 0, "inst_relate 不应残留 anc = NONE 行");
+        assert_eq!(tubi_none, 0, "tubi_relate 不应残留 anc = NONE 行");
+        println!("[live] 覆盖复核通过：两表 anc 无残留 NONE");
+    }
 
     #[tokio::test]
     async fn failed_instance_write_reaches_the_caller() {

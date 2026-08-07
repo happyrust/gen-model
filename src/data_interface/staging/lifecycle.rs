@@ -168,10 +168,10 @@ pub async fn create_window_on(
 /// 暂存库建库初始化：与生产启动序列（`run_cli` 的 schema 段）同一套 DEFINE。
 /// 单一事实来源——mem↔fork 一致性套件排练的就是这个函数。
 ///
-/// 注意继承的两个既有行为（见 `docs/2026-08-05_fork-surreal-compat-findings.md`）：
-/// `define_common_functions` 静默吞逐语句错误（全新库上 REMOVE 不存在的函数）；
-/// `idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法在 2.1.4 不合法、生产从未建成
-/// （F1），这里 1:1 复刻吞错行为。
+/// 注意继承的既有行为（见 `docs/2026-08-05_fork-surreal-compat-findings.md`）：
+/// `define_common_functions` 静默吞逐语句错误（全新库上 REMOVE 不存在的函数）。
+/// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修：
+/// 生产与这里共用 `INST_RELATE_ZONE_INDEX_SQL` 一条合法语句，错误显式上抛。
 pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
     aios_core::function::define_common_functions_on(db).await?;
     // run_cli 的 D11 矫正：project_hd 下 hh 文件按目录序后加载覆盖了 hd 版，
@@ -197,11 +197,11 @@ pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
     aios_core::define_fullname_index_on(db).await?;
     aios_core::define_pe_index_on(db).await?;
     aios_core::define_ses_index_on(db).await?;
-    // gen-model 侧唯一的启动期 DEFINE（init_inst_relate_indices）——F1：语法不合法，
-    // 生产以 `let _` 吞错、索引从未建成，这里保持一致。
-    let _ = db
-        .query("DEFINE INDEX idx_inst_relate_zone_refno ON TABLE inst_relate COLUMNS zone_refno TYPE BTREE;")
-        .await;
+    // gen-model 侧唯一的启动期 DEFINE（init_inst_relate_indices）——与生产同一组
+    // 语句（F1 已修 + anc/dbnum 索引，见常量文档）。
+    db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+        .await?
+        .check()?;
     Ok(())
 }
 

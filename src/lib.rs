@@ -188,6 +188,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Err(e) = crate::fast_model::pdms_inst::init_inst_relate_indices().await {
         eprintln!("初始化inst_relate索引失败: {}", e);
     }
+    // 存量行 anc/dbnum 自愈回填（幂等；全新库与已回填库一轮空转即返回）
+    if let Err(e) = crate::fast_model::pdms_inst::backfill_inst_relate_anc().await {
+        eprintln!("inst_relate anc/dbnum 回填失败（下次启动重试）: {}", e);
+    }
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let db_option = Arc::new(db_option.clone());

@@ -538,6 +538,43 @@ DEFINE FUNCTION fn::find_ancestor_type($pe: record, $t: string){
     (array::flatten(select value fn::ancestor(id) from $pe)[?$self.noun=$t])[0]
 };
 
+-- pe record id（"ref0_ref1"，历史行为 ['ref0_ref1', sesno]）→ RefU64 打包整数
+-- （ref0<<32|ref1）。层级查询优化（docs/plans/2026-08-07-inst-relate-anc-u64-
+-- hierarchy-query-plan.md）：anc/dbnum 走纯数字，与 record id 形制解耦。
+-- ref0 实测两万级，乘积距 i64 上限很远；真越界由 int 溢出报错，不静默截断。
+DEFINE FUNCTION OVERWRITE fn::refno_u64($r: record) {
+    LET $raw = record::id($r);
+    LET $id = if type::is::array($raw) { <string> array::at($raw, 0) } else { <string> $raw };
+    LET $parts = string::split($id, '_');
+    RETURN <int> $parts[0] * 4294967296 + <int> $parts[1];
+};
+
+-- 自身 → 顶层的祖先链（含自身），RefU64 打包整数数组。写 inst_relate/tubi_relate
+-- 的 anc 字段用。走 pe.owner 记录链接（便宜的向上方向）；12 跳与 find_deep_children
+-- 系列的层深一致（fn::ancestor 只有 9 跳，深层构件会够不到 SITE，这里不复用它）。
+DEFINE FUNCTION OVERWRITE fn::anc_u64($r: record) {
+    LET $chain = if $r.id == none { [] } else {
+        array::complement(
+            (SELECT VALUE [id,
+                owner,
+                owner.owner,
+                owner.owner.owner,
+                owner.owner.owner.owner,
+                owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner.owner.owner.owner.owner,
+                owner.owner.owner.owner.owner.owner.owner.owner.owner.owner.owner.owner]
+             FROM ONLY $r LIMIT 1),
+            [NONE, pe:0_0]
+        )
+    };
+    RETURN array::map($chain, |$a| fn::refno_u64($a));
+};
+
 // 根据类型返回子节点
 remove function fn::find_deep_children_type;
 define function fn::find_deep_children_type($pe:record,$t:string) {

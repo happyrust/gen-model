@@ -897,7 +897,7 @@ pub async fn gen_cata_geos(
                         );
                         tubi_relates.push(format!(
                                 "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
                                 branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
@@ -1041,7 +1041,7 @@ pub async fn gen_cata_geos(
                                         );
                                         let sql = format!(
                                             "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
                                             branch_refno.to_pe_key(),
                                             branch_refno.to_pe_key(),
                                             current_tubing.index,
@@ -1143,7 +1143,7 @@ pub async fn gen_cata_geos(
                             );
                             tubi_relates.push(format!(
                                 "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc=fn::anc_u64({0}), dbnum={0}.dbnum;",
                                 branch_refno.to_pe_key(),
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
