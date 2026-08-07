@@ -30,14 +30,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            C:\vcpkg\installed
+            C:\vcpkg\installed\x64-windows-release
           key: windows-release-${{ hashFiles('Cargo.lock') }}
 
       - name: Install OpenCASCADE
         shell: pwsh
         run: |
-          vcpkg install opencascade:x64-windows
-          "OCC_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows" >> $env:GITHUB_ENV
+          vcpkg install opencascade:x64-windows-release `
+            --overlay-triplets="$env:GITHUB_WORKSPACE\.github\vcpkg-triplets"
+          "OCC_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-release" >> $env:GITHUB_ENV
 
       - name: Build release binary
         run: >-
