@@ -15,24 +15,41 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # .cargo/config.toml 把 target-dir 指到仓库外（../target）；CI 里收回工作区内，
+  # 缓存与打包路径才能对上。环境变量优先级高于 config 文件。
+  CARGO_TARGET_DIR: target
+  # 代码用了一批 #![feature(...)]，.cargo/config.toml 还带 -Z threads=8：必须 nightly。
+  # 固定到与本地开发一致、已知可编译的版本；要升级只改这一行。
+  RUST_TOOLCHAIN: nightly-2026-08-02
+  # manifold-sys 的 bindgen 要 libclang。不显式给，.cargo/config.toml 会填进
+  # runner 上不存在的 D:\LLVM\bin，clang-sys 见到无效路径直接报错不再探测。
+  LIBCLANG_PATH: C:\Program Files\LLVM\bin
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - name: Install Rust nightly
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
+          cargo --version
+
+      - name: Restore vcpkg cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            C:\vcpkg\installed\x64-windows-release
-          key: windows-release-${{ hashFiles('Cargo.lock') }}
+            C:\vcpkg\installed
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-occ-${{ hashFiles('.github/vcpkg-triplets/**') }}
+          restore-keys: vcpkg-occ-
 
       - name: Install OpenCASCADE
         shell: pwsh
@@ -41,11 +58,46 @@ jobs:
             --overlay-triplets="$env:GITHUB_WORKSPACE\.github\vcpkg-triplets"
           "OCC_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-release" >> $env:GITHUB_ENV
 
+      # OCC 一次要编 ~50 分钟，而失败的 job 不会执行 actions/cache 的 post 保存。
+      # 装完立刻显式落缓存：后面 cargo 再失败，这 50 分钟也不用重来。
+      - name: Save vcpkg cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            ~\AppData\Local\vcpkg\archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: cargo-release-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-release-${{ hashFiles('Cargo.lock') }}-
+            cargo-release-
+
       - name: Build release binary
         run: >-
           cargo build --release --locked --bin aios-database
           --no-default-features
           --features ws,gen_model,manifold,occ,project_hd,http_api
+
+      # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
+      - name: Save cargo cache
+        if: always() && steps.cargo-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: cargo-release-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
       - name: Package binary
         shell: pwsh
