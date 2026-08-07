@@ -360,11 +360,10 @@ fn use_staged_increment_window(job: &FrozenBatch) -> bool {
 /// 这个暂存窗口有没有房间语义（要不要付面板映射加载 + 房间工作集预载 + 房间轮）。
 ///
 /// 房间目标只从两处产生：DESI 解析计划的结构触发（`RoomRecalc*` plan 项）与 DESI
-/// 生成的包围盒变化——SYST / CATA / DICT 窗口两者皆无（ADR-017 §6 纯解析提交单元）；
-/// `gen_spatial_tree` 关着时房间任务在入队口就被门控（`enqueue_room_recalc`）。
+/// 生成的包围盒变化——SYST / CATA / DICT 窗口两者皆无（ADR-017 §6 纯解析提交单元）。
 /// `db_type` 用冻结点重扫的现场值，与执行体同源。
-fn staged_window_has_room_semantics(db_type: &str, gen_spatial_tree: bool) -> bool {
-    gen_spatial_tree && db_type.eq_ignore_ascii_case("DESI")
+fn staged_window_has_room_semantics(db_type: &str) -> bool {
+    db_type.eq_ignore_ascii_case("DESI")
 }
 
 /// 一次性锁住本窗口将要改动的**全部**生成根（ADR-017 I8；方案 W2.1/W2.2）。
@@ -470,13 +469,11 @@ async fn execute_frozen_batch(
         return failed_window_result(job, warnings, "预载 DBNUM 水位失败");
     }
 
-    // 房间语义只属于「设计库 × 空间树开启」的窗口：SYST / CATA / DICT 是纯解析
-    // 提交单元（ADR-017 §6），没有生成环节、不产出房间目标，面板映射的全表扫描
-    // 与整张 `room_relate` 的工作集预载对它们是纯开销；`gen_spatial_tree` 关着时
-    // 房间任务在入队口就被门控，同理跳过。万一将来有房间目标漏进这类窗口，
+    // 房间语义只属于设计库窗口：SYST / CATA / DICT 是纯解析提交单元（ADR-017 §6），
+    // 没有生成环节、不产出房间目标，面板映射的全表扫描与整张 `room_relate` 的
+    // 工作集预载对它们是纯开销。万一将来有房间目标漏进这类窗口，
     // 它们仍以 plan 项身份随尾事务落 durable pending，由空闲轮收敛，不会丢。
-    let room_semantics =
-        staged_window_has_room_semantics(&cand.db_type, mgr.db_option.gen_spatial_tree);
+    let room_semantics = staged_window_has_room_semantics(&cand.db_type);
     let preload_started = std::time::Instant::now();
     let mut room_map = if room_semantics {
         match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
@@ -490,8 +487,8 @@ async fn execute_frozen_batch(
         }
     } else {
         println!(
-            "房间预载 dbnum={} 跳过（db_type={} 空间树={}，本窗口没有房间语义）",
-            job.dbnum, cand.db_type, mgr.db_option.gen_spatial_tree
+            "房间预载 dbnum={} 跳过（db_type={}，本窗口没有房间语义）",
+            job.dbnum, cand.db_type
         );
         None
     };
@@ -604,15 +601,11 @@ async fn execute_frozen_batch(
     }
 
     let spatial = window.deferred_spatial().await;
-    // 暂存路径的入队口就是这次 merge，门控与 `enqueue_room_recalc` 必须是同一道：
-    // 合并进 plan 等于随尾事务落成 durable pending，而 `room_round` 按 `gen_spatial_tree`
-    // 早退，开关关着时这些行永远等不到消费者，只会在 `/update/pending-units` 里一直涨。
-    // 门只看开关不看 db_type：开着时即便房间目标漏进非 DESI 窗口，空闲轮照样收得掉。
-    if mgr.db_option.gen_spatial_tree {
-        window
-            .merge_room_recalc_changes(&spatial.room_changes)
-            .await;
-    }
+    // 暂存路径的入队口就是这次 merge：合并进 plan 等于随尾事务落成 durable pending，
+    // 即便房间目标漏进非 DESI 窗口，空闲轮照样收得掉。
+    window
+        .merge_room_recalc_changes(&spatial.room_changes)
+        .await;
     let finalize = window
         .staged_finalize()
         .await
@@ -1894,9 +1887,6 @@ fn room_round_is_due(outcome: IdleOutcome, since_last: Option<Duration>) -> bool
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
 ///
-/// `gen_spatial_tree` 关着时一条房间任务都不会入队（门控在入队口），这里再拦
-/// 一道只是把「没开就别建空任务行」说清楚。
-///
 /// 返回**这一页之后是否还有房间任务**：元素侧是分页的，剩货要靠调用方立刻再来一轮，
 /// 否则积压只能按 `IDLE_WAKE` 的节拍一页一页爬。
 async fn room_round(
@@ -1904,12 +1894,9 @@ async fn room_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) -> bool {
-    // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则 `gen_spatial_tree`
-    // 关着或没有目标时，每一个空闲轮都会判成到期。
+    // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则没有目标时，
+    // 每一个空闲轮都会判成到期。
     LAST_ROOM_ROUND.store(Local::now().timestamp_millis(), Ordering::Relaxed);
-    if !mgr.db_option.gen_spatial_tree {
-        return false;
-    }
     // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
     // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
     // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
@@ -2222,35 +2209,6 @@ mod tests {
         );
     }
 
-    /// `gen_spatial_tree` 关着时，包围盒变化不得被合并成 durable 房间任务。
-    ///
-    /// 这次 merge 就是暂存路径的入队口，门控必须与 `enqueue_room_recalc` 同一道：
-    /// 合并进 plan 等于随尾事务落 pending，而 `room_round` 按同一个开关早退，
-    /// 于是这些行永远没有消费者，只会在 `/update/pending-units` 里一直堆。
-    #[test]
-    fn aabb_room_changes_only_become_durable_work_when_the_spatial_tree_is_on() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn execute_frozen_batch(")
-            .expect("staged batch must exist")
-            .1
-            .split_once("async fn drop_window_and_sweep(")
-            .expect("staged batch body boundary")
-            .0;
-
-        let merge_at = body
-            .find("merge_room_recalc_changes(")
-            .expect("包围盒变化必须并进 finalize plan");
-        let gate_at = body[..merge_at]
-            .rfind("if mgr.db_option.gen_spatial_tree")
-            .expect("merge 之前必须有 gen_spatial_tree 门");
-        assert!(
-            body[gate_at..merge_at].lines().count() <= 6,
-            "门与 merge 之间不该再插别的分支，否则门管不住它: {}",
-            &body[gate_at..merge_at]
-        );
-    }
-
     /// 空间收敛没做完时，空闲轮不得收房间。
     ///
     /// `drain_queue_until_empty` 的收敛门只挡住了新批次出队；主循环紧接着照跑空闲轮，
@@ -2390,22 +2348,18 @@ mod tests {
         );
     }
 
-    /// 房间语义只属于「DESI × 空间树开启」的窗口：SYST/CATA/DICT 批次不该付
+    /// 房间语义只属于 DESI 窗口：SYST/CATA/DICT 批次不该付
     /// 面板映射全表扫描与 `room_relate` 整表预载（2026-08-06 审核 L2）。
     #[test]
     fn only_design_windows_pay_for_room_preload() {
-        assert!(staged_window_has_room_semantics("DESI", true));
+        assert!(staged_window_has_room_semantics("DESI"));
         assert!(
-            staged_window_has_room_semantics("desi", true),
+            staged_window_has_room_semantics("desi"),
             "类型比较大小写不敏感"
         );
-        assert!(!staged_window_has_room_semantics("SYST", true));
-        assert!(!staged_window_has_room_semantics("CATA", true));
-        assert!(!staged_window_has_room_semantics("DICT", true));
-        assert!(
-            !staged_window_has_room_semantics("DESI", false),
-            "空间树关闭时房间任务在入队口就被门控，预载同样是纯开销"
-        );
+        assert!(!staged_window_has_room_semantics("SYST"));
+        assert!(!staged_window_has_room_semantics("CATA"));
+        assert!(!staged_window_has_room_semantics("DICT"));
     }
 
     /// 阶段日志要能一眼看出这批在做什么，而不是只报一个总数。

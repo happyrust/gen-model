@@ -43,12 +43,10 @@ replace_mesh = false
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
-#是否生成房间树。默认保持 true（空间/房间计算是默认需求）；false 仅作运维用：止血降级
-#（房间/空间链路故障时冻结派生数据、保数据批次流动）或演练隔离（快启动、不写树、不碰房间数据）。
-#【变更 2026-07-29】false→true：配合房间增量与空间索引（aabbidx）验证启用。
-gen_spatial_tree = true
-#【死键 2026-08-06】下两键全仓零读取（rs-core 仅定义未消费）。字段为必填 bool，删键会让
+#【死键 2026-08-07】gen_spatial_tree 的使用已从代码移除：空间/房间计算恒开启，本键
+#全仓零读取。下两键同理（rs-core 仅定义未消费）。三个字段都是必填 bool，删键会让
 #config 反序列化报 missing field 导致启动失败，待 rs-core 删除字段后随之移除。
+gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 #【变更 2026-07-29】16→4：ams7997 全量生成 16 并发曾在 save_instance_data

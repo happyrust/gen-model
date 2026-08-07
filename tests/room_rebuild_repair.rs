@@ -81,7 +81,6 @@ async fn rebuild_room_membership_on_the_live_project() {
     connect_live().await;
 
     let mut db_option = get_db_option().clone();
-    db_option.gen_spatial_tree = true;
     match std::env::var("AIOS_ROOM_KEYWORD") {
         Ok(keyword) => {
             println!("[repair] 只重建命中 {keyword} 的房间");

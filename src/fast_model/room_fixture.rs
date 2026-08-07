@@ -637,7 +637,6 @@ mod tests {
         connect_live().await;
         let mut db_option = get_db_option().clone();
         db_option.room_key_word = Some(vec!["-RM".to_string()]);
-        db_option.gen_spatial_tree = true;
         let mesh_dir = db_option.get_meshes_path();
 
         create_room_fixture(&mesh_dir)
@@ -1026,8 +1025,6 @@ mod tests {
         let mut db_option = get_db_option().clone();
         // 只匹配夹具那一间，避免把库里的真实房间一起卷进来。
         db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);
-        // 入队口以它为总开关：关着时房间增量一条都不排。
-        db_option.gen_spatial_tree = true;
 
         let mesh_dir = db_option.get_meshes_path();
         create_room_fixture(&mesh_dir)
@@ -1103,7 +1100,7 @@ mod tests {
             vec![(panel, "PANE")],
             "只有被搬走的那块面板的包围盒变了"
         );
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue room work");
         let mut response = SUL_DB
@@ -1182,7 +1179,6 @@ mod tests {
         let panel = RefnoEnum::from(refno(10).as_str());
         let member = RefnoEnum::from(refno(21).as_str());
         enqueue_room_recalc(
-            &db_option,
             &[
                 AabbChange {
                     refno: panel,
@@ -1280,7 +1276,7 @@ mod tests {
             2,
             "面板与构件的包围盒都该判为变了: {changes:?}"
         );
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue both room tasks");
 
@@ -1444,7 +1440,7 @@ mod tests {
             vec![(moved, "BOX")],
             "只有被搬走的那个构件的包围盒变了"
         );
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue room work");
         let mut response = SUL_DB
@@ -1598,7 +1594,7 @@ mod tests {
             vec![(moved, "BOX")],
             "包围盒确实变了，否则触发源不会点火"
         );
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue room work");
 
@@ -1728,7 +1724,7 @@ mod tests {
             vec![(tube, "BRAN")],
             "树上首次见到必须算变，且以 BRAN 身份走元素分支"
         );
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue backfill");
         drain_rooms(&db_option).await.expect("drain backfill");
@@ -1756,7 +1752,7 @@ mod tests {
             .await
             .expect("move-regen refresh");
         assert_eq!(changes.len(), 1, "搬家必须算变: {changes:?}");
-        enqueue_room_recalc(&db_option, &changes)
+        enqueue_room_recalc(&changes)
             .await
             .expect("enqueue move");
         drain_rooms(&db_option).await.expect("drain move");

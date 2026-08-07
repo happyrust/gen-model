@@ -208,7 +208,6 @@ mod tests {
         let panel = RefnoEnum::from(PANEL);
         let mut db_option = get_db_option().clone();
         db_option.room_key_word = Some(vec![ROOM_KEY_WORD.to_string()]);
-        db_option.gen_spatial_tree = true;
 
         let original_z = pos_z().await;
         println!("[issue7] 构件 {ELEMENT} 当前 POS.z = {original_z}");
@@ -361,7 +360,6 @@ mod tests {
         let panel = RefnoEnum::from(PANEL);
         let mut db_option = get_db_option().clone();
         db_option.room_key_word = Some(vec![ROOM_KEY_WORD.to_string()]);
-        db_option.gen_spatial_tree = true;
 
         let original_z = pos_z().await;
         let baseline = edges_of_element().await;

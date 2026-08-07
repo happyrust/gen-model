@@ -79,14 +79,14 @@
 
 ```json
 { "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
-  "started_at": "2026-07-27T21:02:11+08:00", "gen_spatial_tree": false,
+  "started_at": "2026-07-27T21:02:11+08:00",
   "queue_paused": false, "static_assets": false, "ref0_affiliation_conflicts": 0 }
 ```
 
 - `started_at`：进程启动时刻。队列不持久、重启由重扫重建（ADR-011 §4），界面靠它
   说出「服务 xx:xx 重启过，这条队列是按水位重建的；排队时长从重启起算」。
-- `gen_spatial_tree`：关着时房间增量一条不排，界面要说「房间增量没开」，
-  不许显示一条永远为 0 的泳道（ADR-011 §8）。
+- `gen_spatial_tree` 字段已于 2026-08-07 退役：空间/房间计算恒开启，界面不再需要
+  「房间增量没开」的降级文案（历史语义见 ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。

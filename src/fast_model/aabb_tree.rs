@@ -637,31 +637,6 @@ mod tests {
         );
     }
 
-    /// `gen_spatial_tree` 关着 = 冻结房间/空间派生数据（运维开关语义，2026-08-06）：
-    /// 启动不得为一棵没人查询的树做加载乃至整表分页的指针重建——降级态启动反而
-    /// 更重，还把 `run_app` 里那道同名门控架空。回退即红。
-    #[test]
-    fn startup_tree_load_respects_the_spatial_switch() {
-        let source = include_str!("../lib.rs");
-        let body = source
-            .split_once("pub async fn run_cli(")
-            .expect("run_cli must exist")
-            .1
-            .split_once("pub async fn run_app(")
-            .expect("run_app must follow run_cli")
-            .0;
-        let gate = body
-            .find("if db_option.gen_spatial_tree")
-            .expect("run_cli 的启动树加载必须有开关门控");
-        let load = body
-            .find("load_project_tree_verified")
-            .expect("run_cli 必须走 epoch 校验加载");
-        assert!(
-            gate < load,
-            "开关门控必须先于加载调用，否则降级态启动仍会整表指针重建"
-        );
-    }
-
     /// R3 的安全前提：绕开 rs-core 的 `deserialize_from_bin_file`（它私有地重建
     /// 反向索引）直接 bincode 反序列化后，首次按 refno 操作必须自愈索引——
     /// 否则 `sync_refnos` 删不中旧盒，同一 refno 会在树里堆叠历史包围盒。

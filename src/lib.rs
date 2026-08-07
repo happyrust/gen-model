@@ -230,14 +230,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     // 启动加载：sidecar epoch 与库一致才信项目树文件，否则从库指针重建
     // （ADR-010 §6 修订：裸文件搬运与条数对账一并退役）。
-    // `gen_spatial_tree` 关着（止血/演练降级）时整段跳过：开关语义是冻结房间/空间
-    // 派生数据，为一棵没人查询的树做加载乃至整表分页的指针重建，只会让降级态启动
-    // 反而更重；脏位门控保证跳过后也不会把空树写回项目树文件。
     // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
     // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
-    if db_option.gen_spatial_tree
-        && let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await
-    {
+    if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
         eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
     }
     // progress_sender.send(10)?;
@@ -270,32 +265,30 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
-    if db_option.gen_spatial_tree {
-        println!("房间关键字为: {:?}", db_option.get_room_key_word());
-        // 快速重启 / 仅靠增量收敛时可跳过启动全量房间重建（本项目 2 万面板级、很重）。
-        // gen_spatial_tree 配置不受影响：增量队列照常入队与消费，房间归属靠增量收敛。
-        if std::env::var("AIOS_SKIP_STARTUP_ROOM_BUILD").is_ok() {
-            println!(
-                "AIOS_SKIP_STARTUP_ROOM_BUILD 已设置：跳过启动全量房间重建，房间归属仅靠增量队列收敛"
-            );
-        } else {
-            println!("正在生成空间树");
-            println!("正在计算房间");
-            println!(
-                "房间空间数的数量为: {}",
-                GLOBAL_AABB_TREE.read().await.tree.size()
-            );
-            let mut time = Instant::now();
-            // 单块面板算不出来不该拦住启动：这里在 `async_watch` 之前，panic 等于整个服务
-            // 起不来，而房间归属是可以事后重建的派生数据。函数内已按面板逐条聚合失败原因，
-            // 打出来即可定位——此前那些失败是被 `unwrap_or_default()` 吞成「这间房 0 个成员」的。
-            if let Err(error) = build_room_relations(&db_option).await {
-                eprintln!("计算房间未完全成功: {error:#}");
-            }
-            println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
-            // update_cal_equip().await?;
-            update_cal_bran_component().await?;
+    println!("房间关键字为: {:?}", db_option.get_room_key_word());
+    // 快速重启 / 仅靠增量收敛时可跳过启动全量房间重建（本项目 2 万面板级、很重）。
+    // 增量队列照常入队与消费，房间归属靠增量收敛。
+    if std::env::var("AIOS_SKIP_STARTUP_ROOM_BUILD").is_ok() {
+        println!(
+            "AIOS_SKIP_STARTUP_ROOM_BUILD 已设置：跳过启动全量房间重建，房间归属仅靠增量队列收敛"
+        );
+    } else {
+        println!("正在生成空间树");
+        println!("正在计算房间");
+        println!(
+            "房间空间数的数量为: {}",
+            GLOBAL_AABB_TREE.read().await.tree.size()
+        );
+        let mut time = Instant::now();
+        // 单块面板算不出来不该拦住启动：这里在 `async_watch` 之前，panic 等于整个服务
+        // 起不来，而房间归属是可以事后重建的派生数据。函数内已按面板逐条聚合失败原因，
+        // 打出来即可定位——此前那些失败是被 `unwrap_or_default()` 吞成「这间房 0 个成员」的。
+        if let Err(error) = build_room_relations(&db_option).await {
+            eprintln!("计算房间未完全成功: {error:#}");
         }
+        println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
+        // update_cal_equip().await?;
+        update_cal_bran_component().await?;
     }
 
     let aios_mgr = AiosDBMgr::init_from_db_option().await?;
@@ -420,11 +413,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         }
     }
 
-    if db_option.gen_spatial_tree {
-        // epoch 校验通过才信项目树文件，失配从库指针重建；条数对账
-        // （sync_aabb_tree_with_db）退役为手工诊断工具（ADR-010 §6 修订）。
-        crate::fast_model::aabb_tree::load_project_tree_verified().await?;
-    }
+    // epoch 校验通过才信项目树文件，失配从库指针重建；条数对账
+    // （sync_aabb_tree_with_db）退役为手工诊断工具（ADR-010 §6 修订）。
+    crate::fast_model::aabb_tree::load_project_tree_verified().await?;
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await
 }

@@ -176,23 +176,10 @@ fn room_recalc_item(change: &AabbChange) -> ModelWorkItem {
 /// 包围盒真的变了 → 排一次房间归属重算。
 ///
 /// 只接受**变更集**：同一轮里同一个目标只需要一行，因此先按目标折叠再落库——队列行
-/// 的 id 本来就幂等，重复入队只是白跑一趟往返。
-///
-/// `gen_spatial_tree` 关着时一条都不排。那个开关同时管着全量重建与空间树对账：关着
-/// 意味着 `build_room_relations` 从不运行、树也从不与库对账，而整间分支的成员候选正
-/// 取自那棵没人维护的树。两条分支都是「先清后写」，拿一棵没人维护的树算出来的结果去
-/// 改写归属，只会把上一次算对的边换成错的。
-pub async fn enqueue_room_recalc(
-    db_option: &aios_core::options::DbOption,
-    changes: &[AabbChange],
-) -> anyhow::Result<()> {
-    match room_enqueue_outcome(db_option.gen_spatial_tree, changes.is_empty()) {
-        RoomEnqueue::SpatialTreeDisabled => {
-            warn_spatial_tree_disabled_once();
-            return Ok(());
-        }
-        RoomEnqueue::NothingChanged => return Ok(()),
-        RoomEnqueue::Proceed => {}
+/// 的 id 本来就幂等，重复入队只是白跑一趟往返。没有变更时本来就无话可说。
+pub async fn enqueue_room_recalc(changes: &[AabbChange]) -> anyhow::Result<()> {
+    if changes.is_empty() {
+        return Ok(());
     }
     let mut items: std::collections::BTreeMap<String, ModelWorkItem> =
         std::collections::BTreeMap::new();
@@ -205,54 +192,6 @@ pub async fn enqueue_room_recalc(
         ..Default::default()
     })
     .await
-}
-
-/// 入队口的三种去向。判定**顺序**本身就是这里要钉住的东西。
-///
-/// 开关必须排在「没有变更」前面。变更集唯一的产地是
-/// [`update_inst_relate_aabbs_by_refnos_with_spatial_tree`]，而它在不维护空间树时
-/// 整段跳过变更判定——判定基线取的正是树上的旧值——于是**恒**返回空集。两个生产
-/// 调用点喂进来的都是它的返回值，且 `maintain_spatial_tree` 与这里读的是同一个
-/// `gen_spatial_tree`。顺序反过来的话，`gen_spatial_tree` 关着这件事在生产路径上
-/// 一次都说不出口：现场只剩「模型动了、房间号不动」，一行日志没有——正是 issue #7
-/// 的画面。
-///
-/// [`update_inst_relate_aabbs_by_refnos_with_spatial_tree`]:
-///     crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos_with_spatial_tree
-#[derive(Debug, PartialEq, Eq)]
-enum RoomEnqueue {
-    /// 开关关着：一条房间任务都不排，按进程说一次。
-    SpatialTreeDisabled,
-    /// 开关开着，这批确实没有变更：本来就无话可说。
-    NothingChanged,
-    Proceed,
-}
-
-fn room_enqueue_outcome(gen_spatial_tree: bool, changes_is_empty: bool) -> RoomEnqueue {
-    if !gen_spatial_tree {
-        RoomEnqueue::SpatialTreeDisabled
-    } else if changes_is_empty {
-        RoomEnqueue::NothingChanged
-    } else {
-        RoomEnqueue::Proceed
-    }
-}
-
-static SPATIAL_TREE_DISABLED_WARNED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// `gen_spatial_tree` 关着时一条房间任务都不排——按进程说一次。
-///
-/// 这是配置层面的事实，不必每批包围盒变更各说一遍。但**必须说**：这条路上队列里从此
-/// 不会出现任何 `room_recalc` 行，`room_round` 每轮早退、泳道空着，现场能看到的只有
-/// 「模型动了、房间号不动」，没有任何东西解释为什么。
-fn warn_spatial_tree_disabled_once() {
-    if !SPATIAL_TREE_DISABLED_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        println!(
-            "gen_spatial_tree 关闭：包围盒变更不排房间重算任务，room_relate 与材料表房间号\
-             将停在上一次全量重建的结果"
-        );
-    }
 }
 
 /// 这次入队要不要**无条件**把死信复活（清零 `attempts` / `last_error`）。
@@ -1058,7 +997,7 @@ pub(crate) async fn run_staged_room_work(
             .and_modify(|entry| entry.1 = true)
             .or_insert((refno, true));
     }
-    if targets.is_empty() || !db_option.gen_spatial_tree {
+    if targets.is_empty() {
         return Ok(StagedRoomReport::default());
     }
 
@@ -1784,8 +1723,7 @@ mod tests {
             .check()
             .expect("fixture statement");
 
-        let mut option = aios_core::options::DbOption::default();
-        option.gen_spatial_tree = true;
+        let option = aios_core::options::DbOption::default();
         let item = ModelWorkItem {
             dbnum: 7988,
             db_type: "DESI".into(),
@@ -1846,8 +1784,7 @@ mod tests {
             .expect("fixture")
             .check()
             .expect("fixture statement");
-        let mut option = aios_core::options::DbOption::default();
-        option.gen_spatial_tree = true;
+        let option = aios_core::options::DbOption::default();
         let item = ModelWorkItem {
             dbnum: 7988,
             db_type: "DESI".into(),
@@ -1926,8 +1863,7 @@ mod tests {
             .expect("fixture")
             .check()
             .expect("fixture statement");
-        let mut option = aios_core::options::DbOption::default();
-        option.gen_spatial_tree = true;
+        let option = aios_core::options::DbOption::default();
         let item = ModelWorkItem {
             dbnum: 7988,
             db_type: "DESI".into(),
@@ -2617,48 +2553,6 @@ mod tests {
             !render_drain_select("AND action = 'regen_root'", None).contains("LIMIT"),
             "explicit/manual drain keeps its drain-until-complete contract"
         );
-    }
-
-    /// `gen_spatial_tree` 关着是「一条房间任务都不排」，这件事必须留下痕迹。
-    ///
-    /// 静默返回 `Ok(())` 时现场只看得到「模型动了、房间号不动」：队列里没有 room_recalc
-    /// 行、房间轮每轮早退、泳道空着，没有任何一处解释原因。
-    #[test]
-    fn a_disabled_spatial_tree_says_so_before_dropping_room_work() {
-        // 生产上开关关着时这一格**恒**成立：变更判定的基线取自空间树，而不维护树的
-        // 那条路径整段跳过判定、只返回空集。它因此是唯一真正跑到的输入——先前把
-        // 「没有变更」的早退排在开关前面，等于让告警永远够不着。
-        assert_eq!(
-            room_enqueue_outcome(false, true),
-            RoomEnqueue::SpatialTreeDisabled,
-            "开关关着 + 空变更集正是生产输入，不能被当成「无话可说」咽掉"
-        );
-        assert_eq!(
-            room_enqueue_outcome(false, false),
-            RoomEnqueue::SpatialTreeDisabled
-        );
-        assert_eq!(
-            room_enqueue_outcome(true, true),
-            RoomEnqueue::NothingChanged
-        );
-        assert_eq!(room_enqueue_outcome(true, false), RoomEnqueue::Proceed);
-
-        // 真值表管不到 println 本身：那条分支还得真的去喊。
-        let body = include_str!("model_update_pending.rs")
-            .split_once("pub async fn enqueue_room_recalc(")
-            .expect("enqueue_room_recalc 必须存在")
-            .1
-            .split_once("\n}")
-            .expect("函数体到第一个顶格右花括号为止")
-            .0;
-        let arm_at = body.find("RoomEnqueue::SpatialTreeDisabled => {").expect(
-            "开关必须单独成一个分支，不能与 changes.is_empty() 并在一起——\
-                     没有变更要排本来就无话可说",
-        );
-        let warn_at = body
-            .find("warn_spatial_tree_disabled_once()")
-            .expect("关着时必须留下痕迹");
-        assert!(arm_at < warn_at, "{body}");
     }
 
     #[test]

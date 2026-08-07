@@ -45,9 +45,7 @@ fn resolve_identity<'a>(
 /// GET /api/v1/health
 ///
 /// `started_at` 是进程启动时刻——队列不持久，重启后由重扫重建（ADR-011 §4），
-/// 界面靠它说出「服务 xx:xx 重启过，这条队列是按水位重建的」；`gen_spatial_tree`
-/// 关着时房间增量一条不排，界面要说的是「房间增量没开」而不是画一条空泳道
-/// （ADR-011 §8 / rollout 服务端第 7 项）。
+/// 界面靠它说出「服务 xx:xx 重启过，这条队列是按水位重建的」。
 ///
 /// `worker_alive` / `worker_idle_secs` 回答的是「队列还有没有人在消费」。worker
 /// 由 `OnceLock` 只启动一次，死了就是永久死了、批次全停在 queued——而在此之前
@@ -111,7 +109,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "sync_live": state.sync_live,
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
-        "gen_spatial_tree": aios_core::get_db_option().gen_spatial_tree,
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
