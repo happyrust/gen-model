@@ -122,6 +122,11 @@ powershell -File scripts\Run-RoomE3DE2E.ps1 -SkipLegacyCases -ModelTypes BEND
 但该 noun 一旦真的出现实例就报 Contradicted），并修复 PS 5.1 管道 BOM 与
 ConvertFrom-Json 两代形状差异（本轮 5.1/7 双跑 exit 0）。
 
+**探针产物是易失的**：本轮结束后一次金基线恢复（ADR-018 剧本）就把 7999 的 57 条探针
+实例清回了 2 条——这正是设计行为。pending 用例执行时 harness 的 prepare 阶段会按需
+`ensure_model_generated` 重新生成，不依赖探针产物常驻；checker 的 stale 检查也因此只
+约束 verified 行。
+
 ## 3. 传统房间用例（5 / 5 通过，runner 默认集）
 
 | 用例 | 内容 | 验证时间 / 证据 |

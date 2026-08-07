@@ -27,16 +27,20 @@ if ($LASTEXITCODE) { throw 'Failed to query AMS model nouns' }
 # coverage 语义：verified = 增量验证跑绿；pending = 已注册待验证；
 # no_geometry = 探针证实该 noun 在 AMS 目录下不产出独立几何（不算欠账，但若它日后
 # 出现在 inst_relate 里就是矛盾，说明判定过时，必须报错重审）。
+# stale 只约束 verified 行：pending 行的实例可能来自探针的按需生成，金基线恢复
+# （ADR-018）会把它们抹掉，等用例跑绿并铸进基线才要求常驻（实测 2026-08-07：
+# 一次恢复把 7999 的探针产物 57 条清回 2 条）。
 $noGeometry = $manifest | Where-Object coverage -eq 'no_geometry'
 $expected = $manifest | Where-Object coverage -ne 'no_geometry'
+$verified = $expected | Where-Object coverage -eq 'verified'
 
 $duplicate = $manifest | Group-Object noun | Where-Object Count -ne 1 | ForEach-Object Name
 $missing = $actual | Where-Object { $_ -notin $manifest.noun }
-$stale = $expected.noun | Where-Object { $_ -notin $actual }
+$stale = $verified.noun | Where-Object { $_ -notin $actual }
 $contradicted = $noGeometry.noun | Where-Object { $_ -in $actual }
 $pending = $expected | Where-Object coverage -ne 'verified' | ForEach-Object noun
 
-Write-Host "AMS model nouns: actual=$($actual.Count) manifest=$($manifest.Count) verified=$(($expected | Where-Object coverage -eq 'verified').Count) pending=$($pending.Count) no_geometry=$($noGeometry.Count)"
+Write-Host "AMS model nouns: actual=$($actual.Count) manifest=$($manifest.Count) verified=$($verified.Count) pending=$($pending.Count) no_geometry=$($noGeometry.Count)"
 if ($missing) { Write-Host "Missing: $($missing -join ', ')" }
 if ($stale) { Write-Host "Stale: $($stale -join ', ')" }
 if ($duplicate) { Write-Host "Duplicate: $($duplicate -join ', ')" }
