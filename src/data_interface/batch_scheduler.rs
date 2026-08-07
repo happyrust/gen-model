@@ -102,6 +102,9 @@ pub struct ManualEnqueueReceipt {
     pub blocked: Vec<BlockedDbnum>,
     /// 水位已覆盖文件、无事可做的 dbnum 数。
     pub up_to_date: usize,
+    /// 本次请求带了 `dbnums` 子集（ADR-020）而**没被勾选**的库：不扫描、不入队、
+    /// 水位不动，等下一次执行。全范围请求时恒为空。
+    pub unselected: Vec<u32>,
     pub warnings: Vec<String>,
 }
 

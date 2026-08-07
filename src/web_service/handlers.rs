@@ -140,6 +140,18 @@ pub async fn update_preview(
         .map_err(|e| ApiError::from_domain(e.into()))
 }
 
+/// `POST /update/execute` 的请求体：范围三元组 + 可选的 dbnum 子集（ADR-020）。
+#[derive(Debug, Default, Deserialize)]
+pub struct ExecuteReq {
+    #[serde(flatten)]
+    pub base: ProjectReq,
+    /// ADR-020 第 3 项：**范围内的子集选择**（S2-G 勾选折算出的 `dbnums[]`）。
+    /// 缺省 = 全范围，行为与今天完全一致；带了名单则未勾选的库不入队、水位不动，
+    /// 范围外的请求直接拒（回执 warnings）。
+    #[serde(default)]
+    pub dbnums: Option<Vec<u32>>,
+}
+
 /// POST /api/v1/update/execute — 扫描 + 入队，202 返回入队回执（ADR-011 §12）。
 ///
 /// 单飞预检与 `sync_live` 拒绝都随合流退役：数据批次由单 worker 天然串行，
@@ -147,13 +159,13 @@ pub async fn update_preview(
 /// 时手动触发的意义是「别等下一个 30s 轮询，现在就扫一遍」。
 pub async fn update_execute(
     State(state): State<AppState>,
-    body: Option<Json<ProjectReq>>,
+    body: Option<Json<ExecuteReq>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
-    let identity = resolve_identity(&state, &req)?;
+    let identity = resolve_identity(&state, &req.base)?;
     let mut receipt = state
         .mgr
-        .enqueue_manual_update(&identity.project, Some(&identity.mdb))
+        .enqueue_manual_update(&identity.project, Some(&identity.mdb), req.dbnums.as_deref())
         .await;
     receipt.project.clone_from(&identity.project);
     receipt.mdb.clone_from(&identity.mdb);

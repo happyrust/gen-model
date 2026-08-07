@@ -68,7 +68,7 @@ use crate::data_interface::model_impact::{
 };
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::project_paths::resolve_project_root;
-use crate::data_interface::sesno_range::SesnoRangeResolver;
+use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
 
@@ -310,6 +310,28 @@ pub struct ZoneSummary {
     pub units: Vec<DeliveryUnitSummary>,
 }
 
+/// Net change statistics grouped by the nearest owning SITE（ADR-020 第 1 项，
+/// S2-G 预览树的顶层语言）。与 [`ZoneSummary`] 同一套分桶引擎：SITE 是选取入口
+/// 与报告口径，**不是执行范围**——执行边界仍是（dbnum, 会话号区间）。
+///
+/// 级联单元（`cascaded`）挂在**触发批次**的 `DbnumPreview` 下，按它自己的 SITE
+/// 祖先入桶——消费方要知道「SITE 桶是报告口径，选择的是批次」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SiteSummary {
+    /// Empty for the explicit "SITE 归属未知" bucket（解析不出 SITE 祖先的变化）.
+    pub site_refno: String,
+    pub name: String,
+    pub added: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    pub moved_in: u32,
+    pub moved_out: u32,
+    pub model_affecting: u32,
+    /// Affected model roots belonging to this SITE in either the pre- or
+    /// post-update ownership graph. A moved root may appear in both buckets.
+    pub units: Vec<DeliveryUnitSummary>,
+}
+
 /// One node of the ownership graph used for delivery-unit resolution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnerNode {
@@ -354,10 +376,12 @@ impl OwnershipSnapshot {
     }
 }
 
-fn resolve_zone(
+/// Nearest self-or-ancestor whose noun equals `noun`（报告分桶用，大小写不敏感）。
+fn resolve_report_ancestor(
     snap: &OwnershipSnapshot,
     refno: RefnoEnum,
     post: bool,
+    noun: &str,
 ) -> Option<(RefnoEnum, String)> {
     let mut cur = refno;
     let mut seen = HashSet::new();
@@ -366,7 +390,7 @@ fn resolve_zone(
             return None;
         }
         let node = snap.node(cur, post)?;
-        if node.noun.trim().eq_ignore_ascii_case("ZONE") {
+        if node.noun.trim().eq_ignore_ascii_case(noun) {
             return Some((cur, node.name.clone()));
         }
         match node.owner {
@@ -377,34 +401,118 @@ fn resolve_zone(
     None
 }
 
+/// 报告分桶的中间形态：ZONE 与 SITE 共用同一套引擎（ADR-020「`ZoneSummary`
+/// 同款做法」），出口各自映射成 [`ZoneSummary`] / [`SiteSummary`]。
 #[derive(Default)]
-struct ZoneAccumulator {
-    summary: ZoneSummary,
+struct ReportBucket {
+    refno: String,
+    name: String,
+    added: u32,
+    modified: u32,
+    deleted: u32,
+    moved_in: u32,
+    moved_out: u32,
+    model_affecting: u32,
+    units: Vec<DeliveryUnitSummary>,
     unit_roots: HashSet<String>,
 }
 
-fn zone_key(zone: &Option<(RefnoEnum, String)>) -> String {
-    zone.as_ref()
+fn bucket_key(bucket: &Option<(RefnoEnum, String)>) -> String {
+    bucket
+        .as_ref()
         .map(|(refno, _)| refno.to_pdms_str())
         .unwrap_or_default()
 }
 
-fn zone_accumulator<'a>(
-    zones: &'a mut BTreeMap<String, ZoneAccumulator>,
-    zone: Option<(RefnoEnum, String)>,
-) -> &'a mut ZoneAccumulator {
-    let key = zone_key(&zone);
-    zones.entry(key.clone()).or_insert_with(|| ZoneAccumulator {
-        summary: ZoneSummary {
-            zone_refno: key,
-            name: zone
-                .map(|(_, name)| name)
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "ZONE 归属未知".to_string()),
-            ..Default::default()
-        },
-        unit_roots: HashSet::new(),
+fn bucket_accumulator<'a>(
+    buckets: &'a mut BTreeMap<String, ReportBucket>,
+    bucket: Option<(RefnoEnum, String)>,
+    unknown_label: &str,
+) -> &'a mut ReportBucket {
+    let key = bucket_key(&bucket);
+    buckets.entry(key.clone()).or_insert_with(|| ReportBucket {
+        refno: key,
+        name: bucket
+            .map(|(_, name)| name)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| unknown_label.to_string()),
+        ..Default::default()
     })
+}
+
+/// Pure per-noun report rollup. Counts are deduplicated net changes over the
+/// fixed sesno window; moves affect both the source and destination buckets.
+/// Buckets are keyed / sorted by the ancestor's pdms refno string; the empty
+/// key is the explicit `unknown_label` bucket.
+fn build_report_rollup(
+    snap: &OwnershipSnapshot,
+    details: &[NetChangeDetail],
+    units: &[DeliveryUnitSummary],
+    noun: &str,
+    unknown_label: &str,
+) -> Vec<ReportBucket> {
+    let mut buckets: BTreeMap<String, ReportBucket> = BTreeMap::new();
+
+    for change in details {
+        if change.net == NetOp::Cancelled {
+            continue;
+        }
+        let old_bucket = resolve_report_ancestor(snap, change.refno, false, noun);
+        let new_bucket = resolve_report_ancestor(snap, change.refno, true, noun);
+        match change.net {
+            NetOp::Added => {
+                let acc = bucket_accumulator(&mut buckets, new_bucket, unknown_label);
+                acc.added += 1;
+                acc.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Deleted => {
+                let acc = bucket_accumulator(&mut buckets, old_bucket, unknown_label);
+                acc.deleted += 1;
+                acc.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Modified if bucket_key(&old_bucket) == bucket_key(&new_bucket) => {
+                let acc =
+                    bucket_accumulator(&mut buckets, new_bucket.or(old_bucket), unknown_label);
+                acc.modified += 1;
+                acc.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Modified => {
+                let old = bucket_accumulator(&mut buckets, old_bucket, unknown_label);
+                old.modified += 1;
+                old.moved_out += 1;
+                old.model_affecting += u32::from(change.model_affecting);
+                let new = bucket_accumulator(&mut buckets, new_bucket, unknown_label);
+                new.modified += 1;
+                new.moved_in += 1;
+                new.model_affecting += u32::from(change.model_affecting);
+            }
+            NetOp::Cancelled => {}
+        }
+    }
+
+    for unit in units {
+        let root = RefnoEnum::from(unit.root_refno.as_str());
+        let mut unit_buckets = vec![
+            resolve_report_ancestor(snap, root, false, noun),
+            resolve_report_ancestor(snap, root, true, noun),
+        ];
+        unit_buckets.sort_by_key(bucket_key);
+        unit_buckets.dedup_by_key(|bucket| bucket_key(bucket));
+        for bucket in unit_buckets {
+            let acc = bucket_accumulator(&mut buckets, bucket, unknown_label);
+            if acc.unit_roots.insert(unit.root_refno.clone()) {
+                acc.units.push(unit.clone());
+            }
+        }
+    }
+
+    buckets
+        .into_values()
+        .map(|mut acc| {
+            acc.units.sort_by(|a, b| a.root_refno.cmp(&b.root_refno));
+            acc
+        })
+        .collect()
 }
 
 /// Pure ZONE report rollup. Counts are deduplicated net changes over the fixed
@@ -414,67 +522,41 @@ pub fn build_zone_rollup(
     details: &[NetChangeDetail],
     units: &[DeliveryUnitSummary],
 ) -> Vec<ZoneSummary> {
-    let mut zones: BTreeMap<String, ZoneAccumulator> = BTreeMap::new();
+    build_report_rollup(snap, details, units, "ZONE", "ZONE 归属未知")
+        .into_iter()
+        .map(|bucket| ZoneSummary {
+            zone_refno: bucket.refno,
+            name: bucket.name,
+            added: bucket.added,
+            modified: bucket.modified,
+            deleted: bucket.deleted,
+            moved_in: bucket.moved_in,
+            moved_out: bucket.moved_out,
+            model_affecting: bucket.model_affecting,
+            units: bucket.units,
+        })
+        .collect()
+}
 
-    for change in details {
-        if change.net == NetOp::Cancelled {
-            continue;
-        }
-        let old_zone = resolve_zone(snap, change.refno, false);
-        let new_zone = resolve_zone(snap, change.refno, true);
-        match change.net {
-            NetOp::Added => {
-                let acc = zone_accumulator(&mut zones, new_zone);
-                acc.summary.added += 1;
-                acc.summary.model_affecting += u32::from(change.model_affecting);
-            }
-            NetOp::Deleted => {
-                let acc = zone_accumulator(&mut zones, old_zone);
-                acc.summary.deleted += 1;
-                acc.summary.model_affecting += u32::from(change.model_affecting);
-            }
-            NetOp::Modified if zone_key(&old_zone) == zone_key(&new_zone) => {
-                let acc = zone_accumulator(&mut zones, new_zone.or(old_zone));
-                acc.summary.modified += 1;
-                acc.summary.model_affecting += u32::from(change.model_affecting);
-            }
-            NetOp::Modified => {
-                let old = zone_accumulator(&mut zones, old_zone);
-                old.summary.modified += 1;
-                old.summary.moved_out += 1;
-                old.summary.model_affecting += u32::from(change.model_affecting);
-                let new = zone_accumulator(&mut zones, new_zone);
-                new.summary.modified += 1;
-                new.summary.moved_in += 1;
-                new.summary.model_affecting += u32::from(change.model_affecting);
-            }
-            NetOp::Cancelled => {}
-        }
-    }
-
-    for unit in units {
-        let root = RefnoEnum::from(unit.root_refno.as_str());
-        let mut unit_zones = vec![
-            resolve_zone(snap, root, false),
-            resolve_zone(snap, root, true),
-        ];
-        unit_zones.sort_by_key(zone_key);
-        unit_zones.dedup_by_key(|zone| zone_key(zone));
-        for zone in unit_zones {
-            let acc = zone_accumulator(&mut zones, zone);
-            if acc.unit_roots.insert(unit.root_refno.clone()) {
-                acc.summary.units.push(unit.clone());
-            }
-        }
-    }
-
-    zones
-        .into_values()
-        .map(|mut acc| {
-            acc.summary
-                .units
-                .sort_by(|a, b| a.root_refno.cmp(&b.root_refno));
-            acc.summary
+/// Pure SITE report rollup（ADR-020 第 1 项）——与 ZONE 同引擎，只换名词与
+/// 未知桶文案。所有权链不跨库，本库窗口内变更元素的 SITE 祖先必然在本库。
+pub fn build_site_rollup(
+    snap: &OwnershipSnapshot,
+    details: &[NetChangeDetail],
+    units: &[DeliveryUnitSummary],
+) -> Vec<SiteSummary> {
+    build_report_rollup(snap, details, units, "SITE", "SITE 归属未知")
+        .into_iter()
+        .map(|bucket| SiteSummary {
+            site_refno: bucket.refno,
+            name: bucket.name,
+            added: bucket.added,
+            modified: bucket.modified,
+            deleted: bucket.deleted,
+            moved_in: bucket.moved_in,
+            moved_out: bucket.moved_out,
+            model_affecting: bucket.model_affecting,
+            units: bucket.units,
         })
         .collect()
 }
@@ -1682,13 +1764,15 @@ async fn resolve_unit_rollup_with_ref_reversal(
     ))
 }
 
-async fn resolve_zone_rollup(
+/// ZONE 与 SITE 两份报告分桶共享同一张 pre/post 所有权快照（ADR-020：在既有
+/// 快照上加一遍 SITE 解析，成本是每个变更 refno 多走几步 owner 链）。
+async fn resolve_report_rollups(
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
     units: &[DeliveryUnitSummary],
-) -> anyhow::Result<Vec<ZoneSummary>> {
+) -> anyhow::Result<(Vec<ZoneSummary>, Vec<SiteSummary>)> {
     if details.iter().all(|detail| detail.net == NetOp::Cancelled) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let (overlay, deleted_post) = build_owner_overlay(range_eles);
     let mut seeds: HashSet<RefnoEnum> = details.iter().map(|detail| detail.refno).collect();
@@ -1699,7 +1783,10 @@ async fn resolve_zone_rollup(
         deleted_post,
         ref_reversal: HashMap::new(),
     };
-    Ok(build_zone_rollup(&snap, details, units))
+    Ok((
+        build_zone_rollup(&snap, details, units),
+        build_site_rollup(&snap, details, units),
+    ))
 }
 
 /// Registered dbnums whose db_type is known and is NOT `DESI` (CATA / SYST /
@@ -2373,6 +2460,17 @@ pub struct DbnumPreview {
     pub applied_sesno: i32,
     /// Observed latest sesno in the file.
     pub file_latest_sesno: i32,
+    /// `applied_sesno` 那个会话在 **E3D 里被写入的时刻**（RFC3339，会话页自带的
+    /// 年/月/时/秒），不是我们应用它的挂钟时刻（ADR-020 第 2 项）。从未应用
+    /// （`applied_sesno == 0`）或会话页读不到（文件被截断等）→ `None`，界面文案
+    /// 「从未应用」。
+    #[serde(default)]
+    pub applied_sesno_time: Option<String>,
+    /// `file_latest_sesno` 那个会话在 E3D 里被写入的时刻（RFC3339）。与
+    /// `applied_sesno_time` 同一把尺子，相减直接回答「文件里还有多大时间跨度的
+    /// 设计改动没被吸收」。
+    #[serde(default)]
+    pub file_latest_sesno_time: Option<String>,
     /// Raw per-session counts across the pending window.
     pub sessions: Vec<SessionPreview>,
     /// Net add/modify/delete counts after merging the whole window.
@@ -2388,6 +2486,11 @@ pub struct DbnumPreview {
     /// changes the `dbnum + sesno` execution boundary.
     #[serde(default)]
     pub zones: Vec<ZoneSummary>,
+    /// Net changes grouped by nearest SITE（ADR-020 第 1 项，S2-G 预览树的顶层
+    /// 语言）。与 `zones` 并存：前者是界面在用的报告口径，后者是契约兼容负担。
+    /// 同样只是报告口径，永不改变 `dbnum + sesno` 执行边界。
+    #[serde(default)]
+    pub sites: Vec<SiteSummary>,
     /// 纯位姿变更目标（执行口径，见 [`TransformTargetSummary`]）。与
     /// `units`/`no_generation` 同源于执行计划的分区
     /// （`model_update_plan::partition_operation_impacts`），保证预览说的就是
@@ -2667,6 +2770,38 @@ fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
         let dt: chrono::DateTime<chrono::Utc> = t.into();
         dt.to_rfc3339()
     })
+}
+
+/// ADR-020 第 3 项的子集判定（纯函数）：`None` = 全范围；`Some` 时只放行名单里的
+/// 常规库。SYS meta（SYST/DICT/GLB/GLOB）不是勾选对象——它们在范围门上就是无条件
+/// 放行的（[`UpdateScope::admits`]），承载着 MDB/CURD 等范围名单本身，漏掉一轮
+/// 会让后续每一轮的范围都陈旧——永远随批（S2-H「会一并处理」段）。
+fn subset_selects(
+    selection: Option<&std::collections::BTreeSet<u32>>,
+    db_type: &str,
+    dbnum: u32,
+) -> bool {
+    let Some(selection) = selection else {
+        return true;
+    };
+    if COLD_START_DB_TYPES.contains(&db_type) {
+        return true;
+    }
+    selection.contains(&dbnum)
+}
+
+/// 一个会话在 E3D 里被写入的时刻（RFC3339，`SessionPageData::get_dt`），
+/// ADR-020 第 2 项。读一页会话页；读不到（会话号缺失、文件被截断等）→ `None`，
+/// 界面按「从未应用」处理，不把一次 IO 失败升级成整行预览失败。
+fn session_time_rfc3339(project: &str, path: &std::path::Path, sesno: i32) -> Option<String> {
+    if sesno <= 0 {
+        return None;
+    }
+    let mut io = PdmsIO::new(project, path, true);
+    io.open().ok()?;
+    io.get_ses_data(sesno as u32)
+        .ok()
+        .map(|ses| ses.get_dt().to_rfc3339())
 }
 
 impl AiosDBManager {
@@ -3325,6 +3460,12 @@ impl AiosDBManager {
                 .await?
             {
                 Some(plan) => {
+                    // ADR-020 第 2 项：两个时间都是「那个会话在 E3D 里被写入的时刻」。
+                    // 文件最新会话的时间在解析头里现成就有（零额外 IO）；已应用会话的
+                    // 时间读一页会话页。
+                    preview.file_latest_sesno_time =
+                        Some(plan.basic_info.latest_ses_data.get_dt().to_rfc3339());
+                    preview.applied_sesno_time = session_time_rfc3339(project, &cand.path, applied);
                     let range_eles = IncrementPipeline::collect_changes(&cand.path, plan.range)?;
                     let details = fill_change_summary(&mut preview, &range_eles);
                     // Delivery units are a model-delivery concept: only DESI dbs
@@ -3367,8 +3508,10 @@ impl AiosDBManager {
                             &mut preview.units,
                             &reroute.descendant_units,
                         );
-                        preview.zones =
-                            resolve_zone_rollup(&range_eles, &details, &preview.units).await?;
+                        let (zones, sites) =
+                            resolve_report_rollups(&range_eles, &details, &preview.units).await?;
+                        preview.zones = zones;
+                        preview.sites = sites;
                         preview.transform_targets =
                             build_transform_target_summaries(&partition.transform_refnos).await;
                         preview.no_generation = rollup.no_generation;
@@ -3396,12 +3539,19 @@ impl AiosDBManager {
     /// 冻结语义）。手动触发不插队：对已在队里的库只是并入会话（ADR-011 §6），
     /// 它剩下的唯一新意义是「别等下一个 30s 轮询，现在就扫一遍」。
     ///
+    /// `selected_dbnums`（ADR-020 第 3 项）是**范围内的子集选择**：`None` = 全范围，
+    /// 行为与没有这个参数时完全一致；`Some` 时未勾选的常规库不入队、水位不动
+    /// （回执 `unselected`），不在当前 MDB 声明名单里的请求直接拒（回执 `warnings`，
+    /// 不给绕过 ADR-0013 统一范围门的第二条路）。SYS meta（SYST/DICT/GLB/GLOB）
+    /// 不是可勾选对象，永远随批——S2-H「会一并处理」段。
+    ///
     /// Never returns `Err`: precondition and per-dbnum problems land in the
     /// receipt so the frontend has one shape to render.
     pub async fn enqueue_manual_update(
         &self,
         project: &str,
         mdb: Option<&str>,
+        selected_dbnums: Option<&[u32]>,
     ) -> ManualEnqueueReceipt {
         use crate::data_interface::batch_queue::Enqueued;
         use crate::data_interface::batch_scheduler::{
@@ -3446,6 +3596,28 @@ impl AiosDBManager {
         let by_dbnum =
             self.scan_project_candidates(project, &project_dir, &scope, &mut receipt.warnings);
         receipt.scanned = by_dbnum.len();
+
+        // ADR-020 第 3 项：子集选择先过统一范围门。范围外的请求当场拒（警告 +
+        // 不入队），范围内但项目目录里没有文件的请求也要说出来——静默吞掉的话，
+        // 人对着预览勾了库、回执里却什么都没有，没人猜得到差在哪。
+        let selection: Option<std::collections::BTreeSet<u32>> =
+            selected_dbnums.map(|dbnums| dbnums.iter().copied().collect());
+        if let Some(selection) = &selection {
+            for &dbnum in selection {
+                if !scope.admits("DESI", dbnum) {
+                    receipt.warnings.push(format!(
+                        "dbnum={dbnum}: 不在当前 MDB 声明的执行范围内，已拒绝\
+                         （ADR-020：勾选是范围内的子集选择，不是第二条范围门）"
+                    ));
+                } else if !by_dbnum.contains_key(&dbnum) {
+                    receipt.warnings.push(format!(
+                        "dbnum={dbnum}: 在执行范围内，但本次扫描没有找到它的候选文件，\
+                         没有可入队的批次"
+                    ));
+                }
+            }
+        }
+
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
 
@@ -3453,6 +3625,12 @@ impl AiosDBManager {
         dbnums.sort_unstable();
         for dbnum in dbnums {
             let candidates = &by_dbnum[&dbnum];
+            // ADR-020：未勾选的库不扫描、不入队、水位不动——连观察落库与同号多文件
+            // 阻断都不做（那些是「参与本次执行」才有的动作，预览里已经报过一轮）。
+            if !subset_selects(selection.as_ref(), &candidates[0].db_type, dbnum) {
+                receipt.unselected.push(dbnum);
+                continue;
+            }
             // 阻断与排除的库压根不入队（ADR-011 结果段）：同号多文件先挡。
             //
             // 必须先于下面的观察落库（2026-07-26 审计 B3）：`Duplicate` 是扫描器
@@ -4422,6 +4600,82 @@ mod tests {
         assert!(zones[0].zone_refno.is_empty());
         assert_eq!(zones[0].name, "ZONE 归属未知");
         assert_eq!(zones[0].modified, 1);
+    }
+
+    /// ADR-020 第 1 项：SITE 桶与 ZONE 同引擎——跨 SITE 挪动两边都记，单元
+    /// 双侧解析（挪动的单元可以出现在两个桶里）。
+    #[test]
+    fn site_rollup_reports_both_sides_of_a_cross_site_move() {
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (20, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (5, Some(3), "EQUI"),
+            (6, Some(5), "BOX"),
+        ]);
+        // BOX 6 连同它的 EQUI 挪到另一个 SITE 下的新 ZONE。
+        snap.overlay.insert(r(31), owner_node(Some(r(20)), "ZONE"));
+        snap.overlay.insert(r(6), owner_node(Some(r(31)), "BOX"));
+        let details = [NetChangeDetail {
+            refno: r(6),
+            net: NetOp::Modified,
+            model_affecting: true,
+        }];
+
+        let sites = build_site_rollup(&snap, &details, &[]);
+        assert_eq!(sites.len(), 2);
+        let old = sites
+            .iter()
+            .find(|site| site.site_refno == r(2).to_pdms_str())
+            .expect("old site");
+        let new = sites
+            .iter()
+            .find(|site| site.site_refno == r(20).to_pdms_str())
+            .expect("new site");
+        assert_eq!((old.modified, old.moved_out), (1, 1));
+        assert_eq!((new.modified, new.moved_in), (1, 1));
+    }
+
+    /// 解析不出 SITE 祖先的变化进显式的「SITE 归属未知」桶，不静默丢弃。
+    #[test]
+    fn site_rollup_keeps_unknown_as_an_explicit_reporting_bucket() {
+        let snap = base_snap(&[(6, None, "BOX")]);
+        let sites = build_site_rollup(
+            &snap,
+            &[NetChangeDetail {
+                refno: r(6),
+                net: NetOp::Modified,
+                model_affecting: true,
+            }],
+            &[],
+        );
+        assert_eq!(sites.len(), 1);
+        assert!(sites[0].site_refno.is_empty());
+        assert_eq!(sites[0].name, "SITE 归属未知");
+        assert_eq!(sites[0].modified, 1);
+    }
+
+    /// ADR-020 第 3 项：`dbnums` 子集只约束可勾选的常规库；缺省 = 全范围；
+    /// SYS meta 永远随批（S2-H「会一并处理」段）。
+    #[test]
+    fn execute_subset_gates_regular_dbs_and_never_gates_sys_meta() {
+        use std::collections::BTreeSet;
+
+        // 缺省（不带字段）= 全范围，行为与今天完全一致。
+        assert!(subset_selects(None, "DESI", 8000));
+        assert!(subset_selects(None, "SYST", 7001));
+
+        let selection: BTreeSet<u32> = [8000].into_iter().collect();
+        // 勾选内的 DESI 放行，勾选外的 DESI 拦下（不入队、水位不动）。
+        assert!(subset_selects(Some(&selection), "DESI", 8000));
+        assert!(!subset_selects(Some(&selection), "DESI", 8005));
+        // SYS meta 不是勾选对象，子集再窄也随批。
+        for db_type in ["SYST", "DICT", "GLB", "GLOB"] {
+            assert!(subset_selects(Some(&selection), db_type, 7001));
+        }
+        // CATA 是常规库：不在名单里就不放行。
+        assert!(!subset_selects(Some(&selection), "CATA", 8191));
     }
 
     /// `base_snap` plus a reverse-reference index (ADR-003): each
@@ -6090,7 +6344,7 @@ mod live_tests {
             serde_json::to_string_pretty(&preview).expect("serialize preview")
         );
 
-        let receipt = mgr.enqueue_manual_update(&project, None).await;
+        let receipt = mgr.enqueue_manual_update(&project, None, None).await;
         println!(
             "receipt = {}",
             serde_json::to_string_pretty(&receipt).expect("serialize receipt")

@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let manager = Arc::new(AiosDBManager::init_form_config().await?);
 
     let receipt = manager
-        .enqueue_manual_update(&project, mdb.as_deref())
+        .enqueue_manual_update(&project, mdb.as_deref(), None)
         .await;
     println!("ENQUEUE-RECEIPT-JSON|{}", serde_json::to_string(&receipt)?);
 

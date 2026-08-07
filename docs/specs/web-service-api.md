@@ -104,8 +104,15 @@
   "dbnums": [{
     "dbnum": 7997, "db_type": "DESI", "file_name": "des000.db",
     "file_path": "...", "applied_sesno": 80, "file_latest_sesno": 82,
+    "applied_sesno_time": "2026-07-30T18:24:07+00:00",
+    "file_latest_sesno_time": "2026-08-07T14:10:33+00:00",
     "sessions": [], "net_added": 3, "net_modified": 5, "net_deleted": 1,
     "model_affecting": 6, "units": [], "zones": [],
+    "sites": [{
+      "site_refno": "24381/2", "name": "/1WCC-PIPE",
+      "added": 2, "modified": 3, "deleted": 1, "moved_in": 0, "moved_out": 0,
+      "model_affecting": 5, "units": []
+    }],
     "anomaly": null, "blocked": false
   }],
   "pending_model_retries": [{
@@ -120,11 +127,18 @@
 - 错误：500（项目目录不存在等）。`sync_live=true` 时同样可用（ADR-011 §12 合流：
   预览与数据批次并发时「待应用」可能偏大——正在被应用的会话也会算进去，界面按
   队列快照里的运行中批次数标注「N 个库正在应用，数字可能偏大」。
+- ADR-020（2026-08-07）新增三个字段，全部 `serde(default)` 向后兼容：
+  `sites[]`（净变化按最近 SITE 祖先分桶，`ZoneSummary` 同款做法；空 `site_refno` =
+  「SITE 归属未知」桶；S2-G 预览树的顶层语言）；`applied_sesno_time` /
+  `file_latest_sesno_time`（**那个会话在 E3D 里被写入的时刻**，RFC3339，同一把尺子，
+  相减 = 文件里没被吸收的时间跨度；从未应用 / 会话页读不到 → `null`）。
+  预览请求**不变**：预览永远全范围扫描，勾选是 execute 的事。
 
 ### 4.3 `POST /api/v1/update/execute` — 扫描 + 入队（ADR-011 合流后）
-- 映射：`AiosDBManager::enqueue_manual_update(project)`；执行由进程内唯一的数据批次
+- 映射：`AiosDBManager::enqueue_manual_update(project, mdb, dbnums)`；执行由进程内唯一的数据批次
   worker 从队列取走（`batch_worker`，与 `async_watch` 自动发现共用同一条队列与冻结语义）。
-- 请求：`{ "project": "HD" }`。
+- 请求：`{ "project": "HD" }`；可选 `"dbnums": [7997, 8000]`（ADR-020：**范围内的
+  子集选择**，S2-G 勾选折算出的库号名单）。缺省（不带字段）= 全范围，行为不变。
 - 响应 202（入队回执，rollout 第八节第 7 条）：
 
 ```json
@@ -137,6 +151,7 @@
   "already_covered": [],
   "blocked": [{ "dbnum": 8003, "reason": "文件回退或被替换（file_latest_sesno=812 < applied_sesno=1005），已阻断" }],
   "up_to_date": 2,
+  "unselected": [],
   "warnings": []
 }
 ```
@@ -144,6 +159,11 @@
 - 语义：手动触发**不插队**（ADR-011 §6）——对已在队里的库只是并入会话（`merged`），
   它剩下的唯一新意义是「别等下一个 30s 轮询」。阻断与排除的库压根不入队（`blocked`）。
   `sync_live=true` 时同样可用（422 已退役）。
+- `dbnums` 子集语义（ADR-020）：每个请求的 dbnum 先过 `UpdateScope::admits`，不在当前
+  MDB 声明名单里的**直接拒**（回执 `warnings`，不给绕过 ADR-0013 统一范围门的第二条路）；
+  未勾选的常规库不扫描、不入队、水位不动（回执 `unselected`），预览之后新产生的会话不会
+  被偷偷并入；SYS meta（SYST/DICT/GLB/GLOB）不是勾选对象，永远随批（S2-H「会一并处理」段）。
+  202 回执、排队中合并、运行中冻结全部照旧——过滤只决定谁入队。
 - 每个数据批次是一条 `kind = "data_batch"` 的任务：`queued -> running -> succeeded|partial|failed`；
   进度经 WebSocket 推送（第 5 节），终态 result 为 `{ project, status, batch: DataBatchResult,
   units: [ModelUnitResult], warnings }`（一行任务一个批次，「一次运行」的复数形态随 ADR-011 退役）。
