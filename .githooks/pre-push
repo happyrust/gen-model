@@ -1,0 +1,21 @@
+#!/bin/sh
+# Refuse to push a commit to main that still redirects the self-developed crates
+# to local clones. Enable with: git config core.hooksPath .githooks
+#
+# stdin gives one line per pushed ref: <local ref> <local sha> <remote ref> <remote sha>
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$remote_ref" = "refs/heads/main" ] || continue
+    [ "$local_sha" = "$zero" ] && continue
+
+    if ! powershell -NoProfile -ExecutionPolicy Bypass \
+        -File scripts/Assert-NoLocalPatch.ps1 -Ref "$local_sha"; then
+        echo "pre-push: refusing to push $local_ref -> $remote_ref" >&2
+        status=1
+    fi
+done
+
+exit $status
