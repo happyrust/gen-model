@@ -460,10 +460,7 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
     assert!(staged > 0, "解析必须检测到变化并进 journal");
 
     // 形态二 + 三：Transform 产物刷新与 regen 形态的产物写，全在窗口读写上下文内。
-    let db_option = DbOption {
-        gen_spatial_tree: true,
-        ..Default::default()
-    };
+    let db_option = DbOption::default();
     window
         .scope(async {
             refresh_world_transform_products(&db_option, &[equi]).await?;

@@ -349,7 +349,6 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     );
     let mut db_option = get_db_option().clone();
     db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
-    db_option.gen_spatial_tree = true;
     let mut baseline = vec![Edge {
         panel: PANEL.into(),
         part: case.element.clone(),

@@ -2477,10 +2477,7 @@ mod staged_transform_write_routing_tests {
             .check()
             .expect("staged fixture applied");
 
-        let db_option = DbOption {
-            gen_spatial_tree: true,
-            ..Default::default()
-        };
+        let db_option = DbOption::default();
 
         window
             .scope(refresh_world_transform_products(&db_option, &[equi]))
