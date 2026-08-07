@@ -5,6 +5,8 @@ param(
     [string[]]$Cases = @('same-room', 'element-out', 'room-rename', 'box-size', 'cyli-size'),
     [string[]]$ModelTypes = @(),
     [switch]$SkipLegacyCases,
+    [string]$TestExe = '',
+    [string]$L3Exe = '',
     [string]$Output = "output/room-e3d-e2e/$(Get-Date -Format yyyyMMdd-HHmmss)"
 )
 
@@ -13,6 +15,10 @@ $repo = Split-Path -Parent $PSScriptRoot
 $out = Join-Path $repo $Output
 New-Item -ItemType Directory -Force $out | Out-Null
 $startedSurreal = $null
+# 逐案结果（report.md 的数据源）。失败隔离纪律：断言失败只 FAIL 本案例，restore 照跑、
+# 整轮继续；restore 链路失败 = 库基线可疑 = FATAL，立即终止整轮（房间计划 RI-15）。
+$script:results = New-Object System.Collections.Generic.List[object]
+$script:fatal = ''
 
 function Invoke-Driver([string]$macro, [string]$dir, [string]$expected = '') {
     & $script:l3 --check-driver $macro --project-dir $ProjectDir --output (Join-Path $out $dir)
@@ -26,10 +32,94 @@ function Invoke-Driver([string]$macro, [string]$dir, [string]$expected = '') {
 }
 
 function Invoke-Increment([string]$dir) {
-    & cargo test --features http_api --test issue7_e2e_increment -j 1 `
-        issue7_e2e_room_comes_back_after_e3d_save -- --ignored --exact --nocapture 2>&1 |
-        Tee-Object -FilePath (Join-Path $out "$dir.log")
+    if ($TestExe) {
+        & $TestExe issue7_e2e_room_comes_back_after_e3d_save --ignored --exact --nocapture 2>&1 |
+            Tee-Object -FilePath (Join-Path $out "$dir.log")
+    } else {
+        & cargo test --features http_api --test issue7_e2e_increment -j 1 `
+            issue7_e2e_room_comes_back_after_e3d_save -- --ignored --exact --nocapture 2>&1 |
+            Tee-Object -FilePath (Join-Path $out "$dir.log")
+    }
     if ($LASTEXITCODE) { throw "Room increment test failed: $dir" }
+}
+
+function New-CaseRow([string]$name) {
+    [ordered]@{
+        name         = $name
+        status       = 'PASS'
+        failed_phase = ''
+        error        = ''
+        assertion    = ''
+        phases       = New-Object System.Collections.Generic.List[string]
+    }
+}
+
+function Invoke-Phase($row, [string]$phase, [scriptblock]$body) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        & $body
+        $row.phases.Add(('{0} {1:n0}s' -f $phase, $sw.Elapsed.TotalSeconds))
+    } catch {
+        $row.phases.Add(('{0} {1:n0}s FAIL' -f $phase, $sw.Elapsed.TotalSeconds))
+        if (-not $row.failed_phase) { $row.failed_phase = $phase }
+        throw
+    }
+}
+
+# 从增量测试日志里捞第一条失败断言（report 的「首个失败判据」列）。
+function Get-FirstAssertion([string]$dir) {
+    $log = Join-Path $out "$dir.log"
+    if (-not (Test-Path -LiteralPath $log)) { return '' }
+    $lines = @(Get-Content -LiteralPath $log)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match 'panicked at') {
+            $end = [Math]::Min($i + 2, $lines.Count - 1)
+            return (($lines[$i..$end] -join ' ').Trim())
+        }
+    }
+    return ''
+}
+
+function Format-Cell([string]$text) {
+    if (-not $text) { return '' }
+    $t = $text -replace '\r?\n', ' ' -replace '\|', '/'
+    if ($t.Length -gt 220) { $t = $t.Substring(0, 220) + [char]0x2026 }
+    return $t
+}
+
+function Write-Report {
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('# Room E3D E2E 轮次报告')
+        $lines.Add('')
+        $lines.Add('| 键 | 值 |')
+        $lines.Add('|---|---|')
+        $lines.Add("| 时间 | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') |")
+        $lines.Add("| 项目 | $ProjectDir |")
+        $lines.Add("| datastore | $Datastore |")
+        $lines.Add("| legacy 用例 | $(if ($SkipLegacyCases) { '(跳过)' } else { $Cases -join ', ' }) |")
+        $lines.Add("| 模型类型 | $(if ($ModelTypes) { $ModelTypes -join ', ' } else { '(无)' }) |")
+        $lines.Add('| 幂等步骤 | restore 收敛后每案例一次（AIOS_ROOM_IDEMPOTENT=1，T-OR-3） |')
+        if ($script:fatal) {
+            $lines.Add("| **FATAL** | 恢复链路失败终止整轮（RI-15）：$(Format-Cell $script:fatal) |")
+        }
+        $lines.Add('')
+        $pass = @($script:results | Where-Object status -eq 'PASS').Count
+        $lines.Add("**结果：$pass / $($script:results.Count) PASS**")
+        $lines.Add('')
+        $lines.Add('| 用例 | 结果 | 失败阶段 | 首个失败断言/错误 | 阶段耗时 | 日志 |')
+        $lines.Add('|---|---|---|---|---|---|')
+        foreach ($r in $script:results) {
+            $err = Format-Cell $(if ($r.assertion) { $r.assertion } else { $r.error })
+            $lines.Add("| $($r.name) | $($r.status) | $($r.failed_phase) | $err | $($r.phases -join ' / ') | ``$($r.name)-*`` |")
+        }
+        $lines.Add('')
+        $lines.Add("证据目录：``$out``")
+        Set-Content -LiteralPath (Join-Path $out 'report.md') -Value $lines -Encoding utf8
+        Write-Host "report: $(Join-Path $out 'report.md')"
+    } catch {
+        Write-Warning "写 report.md 失败: $_"
+    }
 }
 
 function Set-CaseEnv(
@@ -41,11 +131,15 @@ function Set-CaseEnv(
     [bool]$prepareBaseline,
     [bool]$deleteBaseline,
     [bool]$dynamicBaseline = $false,
-    [bool]$checkTopology = $true
+    [bool]$checkTopology = $true,
+    [string]$expectedEdges = '',
+    [bool]$expectGeometry = $true,
+    [string]$nounRefno = ''
 ) {
     $env:AIOS_ROOM_CHANGE = $change
     $env:AIOS_ROOM_ELEMENT = $element
     $env:AIOS_ROOM_EXPECT_NOUN = $noun
+    $env:AIOS_ROOM_EXPECT_NOUN_REFNO = if ($nounRefno) { $nounRefno } else { $element }
     $env:AIOS_ROOM_DBNUM = "$dbnum"
     $env:AIOS_ROOM_DB_FILE = Join-Path $ProjectDir "ams000\ams${dbnum}_0001"
     $env:AIOS_ROOM_EXPECT_ROOM = if ($expectRoom) { '1' } else { '0' }
@@ -54,6 +148,9 @@ function Set-CaseEnv(
     $env:AIOS_ROOM_DYNAMIC_BASELINE = if ($dynamicBaseline) { '1' } else { '0' }
     $env:AIOS_ROOM_CHECK_TOPOLOGY = if ($checkTopology) { '1' } else { '0' }
     $env:AIOS_ROOM_KEYWORD = if ($dynamicBaseline) { '-RM' } else { '-RM05-R512' }
+    if ($expectedEdges) { $env:AIOS_ROOM_EXPECT_EDGES = $expectedEdges }
+    else { Remove-Item Env:AIOS_ROOM_EXPECT_EDGES -ErrorAction SilentlyContinue }
+    $env:AIOS_ROOM_EXPECT_GEOMETRY = if ($expectGeometry) { '1' } else { '0' }
 }
 
 function Invoke-Case(
@@ -67,27 +164,102 @@ function Invoke-Case(
     [bool]$applyExpectsRoom,
     [bool]$deleteBaseline,
     [bool]$dynamicBaseline = $false,
-    [bool]$checkTopology = $true
+    [bool]$checkTopology = $true,
+    [string]$applyExpectedEdges = '',
+    [string]$restoreExpectedEdges = '',
+    [bool]$expectGeometry = $true,
+    [string]$nounRefno = '',
+    [string]$applySavedMarker = ''
 ) {
+    $row = New-CaseRow $name
     $restoreRequired = $false
+    $envReady = $false
+    $env:AIOS_ROOM_BASELINE_FILE = Join-Path $out "$name-baseline.json"
+    Remove-Item -LiteralPath $env:AIOS_ROOM_BASELINE_FILE -ErrorAction SilentlyContinue
+    if ($applySavedMarker) { Remove-Item -LiteralPath $applySavedMarker -ErrorAction SilentlyContinue }
     try {
-        Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology
-        # The macro may SAVEWORK before the driver reports a later cleanup error.
-        $restoreRequired = $true
-        Invoke-Driver $applyMacro "$name-apply-driver"
-        Invoke-Increment "$name-apply-increment"
-    }
-    finally {
+        try {
+            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno
+            $envReady = $true
+            # 旧宏没有 SAVEWORK 哨兵，沿用保守恢复；生成宏仅在确认 SAVEWORK 后恢复。
+            $restoreRequired = -not $applySavedMarker
+            try {
+                Invoke-Phase $row 'apply-driver' { Invoke-Driver $applyMacro "$name-apply-driver" }
+                $restoreRequired = $true
+            } finally {
+                if ($applySavedMarker -and (Test-Path -LiteralPath $applySavedMarker)) {
+                    $restoreRequired = $true
+                }
+            }
+            Invoke-Phase $row 'apply-increment' { Invoke-Increment "$name-apply-increment" }
+        } catch {
+            if (-not $envReady) {
+                # 环境都没设起来：配置级故障，不属于可隔离的场景失败。
+                $row.status = 'FATAL'
+                $row.error = "$_"
+                $script:fatal = "${name}: setup: $_"
+                throw
+            }
+            # T-OR-1：apply 侧失败只 FAIL 本案例；restore 照跑，整轮继续。
+            $row.status = 'FAIL'
+            $row.error = "$_"
+            $row.assertion = Get-FirstAssertion "$name-$($row.failed_phase)"
+            Write-Warning "case ${name} FAIL（已隔离，restore 照跑）: $_"
+        }
         if ($restoreRequired) {
             try {
-                Invoke-Driver $restoreMacro "$name-restore-driver"
-            }
-            finally {
+                $restoreDriverError = $null
+                try {
+                    Invoke-Phase $row 'restore-driver' { Invoke-Driver $restoreMacro "$name-restore-driver" }
+                } catch {
+                    # restore 宏可能在 driver 报清理错误前已 SAVEWORK：恢复增量照跑，
+                    # 由它判定库是否真的回到基线。
+                    $restoreDriverError = $_
+                }
                 $restoreExpectsRoom = if ($dynamicBaseline) { $applyExpectsRoom } else { $true }
-                Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology
-                Invoke-Increment "$name-restore-increment"
+                Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology $restoreExpectedEdges $expectGeometry $nounRefno
+                Invoke-Phase $row 'restore-increment' { Invoke-Increment "$name-restore-increment" }
+                # T-OR-3：restore 收敛后第二遍必须是无操作（零批次、水位/边/AABB 不动）。
+                $env:AIOS_ROOM_IDEMPOTENT = '1'
+                try {
+                    Invoke-Phase $row 'idempotent-increment' { Invoke-Increment "$name-idempotent-increment" }
+                }
+                finally {
+                    Remove-Item Env:AIOS_ROOM_IDEMPOTENT -ErrorAction SilentlyContinue
+                }
+                if ($restoreDriverError -and $row.status -eq 'PASS') {
+                    # 数据已验证回基线，但通道收尾不干净：记 FAIL，不升级 FATAL。
+                    $row.status = 'FAIL'
+                    $row.error = "restore driver: $restoreDriverError"
+                }
+            } catch {
+                # RI-15：恢复增量没收敛（或幂等轮发现库还在动）→ 基线可疑，终止整轮。
+                $row.status = 'FATAL'
+                if (-not $row.error) { $row.error = "$_" }
+                if (-not $row.assertion) { $row.assertion = Get-FirstAssertion "$name-$($row.failed_phase)" }
+                $script:fatal = "${name}: $($row.failed_phase): $_"
+                throw
             }
         }
+    }
+    finally {
+        $script:results.Add([pscustomobject]$row)
+    }
+}
+
+# 尺寸类用例的前置探针失败 → 记 FAIL 并跳过该用例，不中止整轮。
+function Invoke-Preflight([string]$name, [string]$macro, [string]$dir, [string]$expected) {
+    try {
+        Invoke-Driver $macro $dir $expected
+        return $true
+    } catch {
+        $row = New-CaseRow $name
+        $row.status = 'FAIL'
+        $row.failed_phase = 'preflight-driver'
+        $row.error = "$_"
+        $script:results.Add([pscustomobject]$row)
+        Write-Warning "case ${name} preflight FAIL（跳过该用例）: $_"
+        return $false
     }
 }
 
@@ -117,10 +289,14 @@ try {
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
     $env:GEN_MODEL_DIRECT_INCREMENT = '1'
 
-    & cargo build --bin l3_suite -j 1
-    if ($LASTEXITCODE) { throw 'l3_suite build failed' }
-    $target = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
-    $script:l3 = Join-Path $target 'debug\l3_suite.exe'
+    if ($L3Exe) {
+        $script:l3 = (Resolve-Path $L3Exe).Path
+    } else {
+        & cargo build --bin l3_suite -j 1
+        if ($LASTEXITCODE) { throw 'l3_suite build failed' }
+        $target = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+        $script:l3 = Join-Path $target 'debug\l3_suite.exe'
+    }
 
     if (-not $SkipLegacyCases) { foreach ($case in $Cases) {
         switch ($case) {
@@ -140,18 +316,20 @@ try {
                     'scripts/e3d/room_name_out_restore.mac' $false $false
             }
             'box-size' {
-                Invoke-Driver 'scripts/e3d/room_box_size_probe.mac' `
-                    'box-size-preflight-driver' 'Xlength 100mm'
-                Invoke-Case $case 'element' 7997 '24381_101446' 'BOX' `
-                    'scripts/e3d/room_box_size_apply.mac' `
-                    'scripts/e3d/room_box_size_restore.mac' $true $true
+                if (Invoke-Preflight $case 'scripts/e3d/room_box_size_probe.mac' `
+                        'box-size-preflight-driver' 'Xlength 100mm') {
+                    Invoke-Case $case 'element' 7997 '24381_101446' 'BOX' `
+                        'scripts/e3d/room_box_size_apply.mac' `
+                        'scripts/e3d/room_box_size_restore.mac' $true $true
+                }
             }
             'cyli-size' {
-                Invoke-Driver 'scripts/e3d/room_cyli_size_probe.mac' `
-                    'cyli-size-preflight-driver' 'Diameter 50mm'
-                Invoke-Case $case 'element' 7997 '24381_101426' 'CYLI' `
-                    'scripts/e3d/room_cyli_size_apply.mac' `
-                    'scripts/e3d/room_cyli_size_restore.mac' $true $true
+                if (Invoke-Preflight $case 'scripts/e3d/room_cyli_size_probe.mac' `
+                        'cyli-size-preflight-driver' 'Diameter 50mm') {
+                    Invoke-Case $case 'element' 7997 '24381_101426' 'CYLI' `
+                        'scripts/e3d/room_cyli_size_apply.mac' `
+                        'scripts/e3d/room_cyli_size_restore.mac' $true $true
+                }
             }
             default { throw "Unknown room E2E case: $case" }
         }
@@ -161,7 +339,7 @@ try {
         $manifest = Get-Content (Join-Path $repo 'scripts/e3d/ams_model_type_cases.json') -Raw |
             ConvertFrom-Json
         $selected = @(if ($ModelTypes -contains 'all') {
-            $manifest | Where-Object mode -eq 'relative_position'
+            $manifest
         } else {
             $manifest | Where-Object { $_.noun -in $ModelTypes }
         })
@@ -171,15 +349,40 @@ try {
         $generated = Join-Path $out 'generated-macros'
         New-Item -ItemType Directory -Force $generated | Out-Null
         foreach ($model in $selected) {
-            if ($model.mode -ne 'relative_position') { continue }
+            if ($model.mode -eq 'existing') {
+                switch ($model.noun) {
+                    'CAP' {
+                        Invoke-Case $model.id 'element' 7999 '24383_66460' 'CAP' `
+                            'scripts/e3d/issue7_cap_pos_apply.mac' 'scripts/e3d/issue7_cap_pos_restore.mac' $true $true
+                    }
+                    'BOX' {
+                        if (Invoke-Preflight $model.id 'scripts/e3d/room_box_size_probe.mac' "$($model.id)-preflight-driver" 'Xlength 100mm') {
+                            Invoke-Case $model.id 'element' 7997 '24381_101446' 'BOX' `
+                                'scripts/e3d/room_box_size_apply.mac' 'scripts/e3d/room_box_size_restore.mac' $true $true
+                        }
+                    }
+                    'CYLI' {
+                        if (Invoke-Preflight $model.id 'scripts/e3d/room_cyli_size_probe.mac' "$($model.id)-preflight-driver" 'Diameter 50mm') {
+                            Invoke-Case $model.id 'element' 7997 '24381_101426' 'CYLI' `
+                                'scripts/e3d/room_cyli_size_apply.mac' 'scripts/e3d/room_cyli_size_restore.mac' $true $true
+                        }
+                    }
+                    default { throw "Unsupported existing model type: $($model.noun)" }
+                }
+                continue
+            }
+            if ($model.mode -ne 'relative_position') { throw "Unknown model type mode: $($model.mode)" }
             $name = $model.id
             $refno = $model.refno -replace '_', '/'
-            $selectLine = if ($model.selector) { "CE $($model.selector)" } else { "=$refno" }
+            $elementRefno = if ($model.element_refno) { $model.element_refno } else { $model.refno }
+            $selectLine = if ($model.select_command) { $model.select_command } elseif ($model.selector) { "CE $($model.selector)" } else { "=$($elementRefno -replace '_', '/')" }
             $applyCommand = if ($model.apply_command) { $model.apply_command } else { 'BY U 10' }
             $restoreCommand = if ($model.restore_command) { $model.restore_command } else { 'BY D 10' }
             $macroLog = ((Resolve-Path $generated).Path -replace '\\', '/')
             $applyMacro = Join-Path $generated "$name-apply.mac"
             $restoreMacro = Join-Path $generated "$name-restore.mac"
+            $applySavedMarker = "$applyMacro.saved"
+            $applySavedMarkerE3d = ($applySavedMarker -replace '\\', '/')
             @"
 ALPHA LOG "$macroLog/$name-apply.log" OVER
 $selectLine
@@ -188,6 +391,9 @@ Q POS
 $applyCommand
 Q POS
 SAVEWORK 'CODEX $name relative position apply'
+ALPHA LOG END
+ALPHA LOG "$applySavedMarkerE3d" OVER
+Q CE
 ALPHA LOG END
 "@ | Set-Content $applyMacro -Encoding ascii
             @"
@@ -200,16 +406,34 @@ Q POS
 SAVEWORK 'CODEX $name relative position restore'
 ALPHA LOG END
 "@ | Set-Content $restoreMacro -Encoding ascii
-            Invoke-Case $name 'element' $model.dbnum $model.refno $model.noun `
-                $applyMacro $restoreMacro $model.expect_room $model.expect_room $true $false
+            $edgeJson = {
+                param($items)
+                if (-not $items) { return '' }
+                @(foreach ($edge in $items) {
+                    [ordered]@{ panel = $edge.panel; part = $elementRefno; room_num = $edge.room }
+                }) | ConvertTo-Json -Compress -AsArray
+            }
+            $applyExpectedEdges = & $edgeJson $model.apply_expected_edges
+            $restoreExpectedEdges = & $edgeJson $model.restore_expected_edges
+            $expectGeometry = if ($null -eq $model.expect_geometry) { $true } else { [bool]$model.expect_geometry }
+            $change = if ($model.noun -eq 'PANE') { 'room' } else { 'element' }
+            $checkTopology = $model.noun -eq 'PANE'
+            Invoke-Case $name $change $model.dbnum $elementRefno $model.noun `
+                $applyMacro $restoreMacro $model.expect_room $model.expect_room $true $checkTopology `
+                $applyExpectedEdges $restoreExpectedEdges $expectGeometry $model.refno $applySavedMarker
         }
     }
 }
 finally {
+    Write-Report
     if ($startedSurreal) {
         Stop-Process -Id $startedSurreal.Id -Force -ErrorAction SilentlyContinue
     }
     Pop-Location
 }
 
+$failed = @($script:results | Where-Object status -ne 'PASS')
+if ($failed.Count) {
+    throw "Room E3D E2E FAIL（$($failed.Count)/$($script:results.Count)），详见 $(Join-Path $out 'report.md')"
+}
 Write-Host "Room E3D E2E PASS: $out"

@@ -8,7 +8,8 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified",
+    "expect_geometry": false
   },
   {
     "id": "noun-atta",
@@ -30,7 +31,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-bend",
@@ -63,7 +64,9 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified",
+    "select_command": "=24384/23823",
+    "element_refno": "24384_23823"
   },
   {
     "id": "noun-cap",
@@ -86,18 +89,6 @@
     "panel": "24381_34921",
     "mode": "relative_position",
     "coverage": "verified"
-  },
-  {
-    "id": "noun-coup",
-    "noun": "COUP",
-    "refno": "24383_74127",
-    "dbnum": 7999,
-    "expect_room": true,
-    "room": "R420",
-    "panel": "24381_35475",
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：ensure 根 24383/74125 已生成，aabb 在 R420 面板包络内（output/t1-probe-3-coup.log）"
   },
   {
     "id": "noun-ctor",
@@ -130,7 +121,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-dish",
@@ -179,14 +170,14 @@
   {
     "id": "noun-fitt",
     "noun": "FITT",
-    "refno": "24384_19980",
-    "dbnum": 8000,
+    "refno": "24381_74145",
+    "dbnum": 7997,
     "expect_room": false,
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending",
-    "selector": "/-RX-CCV-S2020-V1/F1"
+    "coverage": "verified",
+    "select_command": "=24381/74144"
   },
   {
     "id": "noun-fixing",
@@ -197,19 +188,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
-  },
-  {
-    "id": "noun-flan",
-    "noun": "FLAN",
-    "refno": "24383_101",
-    "dbnum": 7999,
-    "expect_room": true,
-    "room": "R710",
-    "panel": "24381_36365",
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：ensure 根 24383/97 已生成 8 个 FLAN 实例，aabb 在 R710 面板包络内（output/t1-probe-2-flan-gask-olet.log）"
+    "coverage": "verified"
   },
   {
     "id": "noun-floor",
@@ -220,7 +199,7 @@
     "room": "R333",
     "panel": "24381_35155",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-ftub",
@@ -234,18 +213,6 @@
     "coverage": "verified"
   },
   {
-    "id": "noun-gask",
-    "noun": "GASK",
-    "refno": "24383_102",
-    "dbnum": 7999,
-    "expect_room": false,
-    "room": null,
-    "panel": null,
-    "mode": "no_geometry",
-    "coverage": "no_geometry",
-    "note": "T1 探针 2026-08-07：三根不同管线（/1WCC0198A/B1、/1WCC0092A、/1WCC0292/B2）ensure 后均无 GASK 实例，判定 AMS 目录下垫片无独立几何（output/t1-probe-2/4/6 日志）"
-  },
-  {
     "id": "noun-gensec",
     "noun": "GENSEC",
     "refno": "24384_25743",
@@ -254,7 +221,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-gwall",
@@ -265,19 +232,27 @@
     "room": "R361",
     "panel": "24381_35296",
     "mode": "relative_position",
-    "coverage": "pending"
-  },
-  {
-    "id": "noun-inst",
-    "noun": "INST",
-    "refno": "24383_1008",
-    "dbnum": 7999,
-    "expect_room": false,
-    "room": null,
-    "panel": null,
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：/1WCC0092A 支管 ensure 时顺带生成（output/t1-probe-4-gask-olet.log）；所在区域房间面板在 1112（无几何），预判无归属"
+    "coverage": "verified",
+    "apply_expected_edges": [
+      {
+        "panel": "24381_35762",
+        "room": "R462"
+      },
+      {
+        "panel": "24381_36035",
+        "room": "R562"
+      }
+    ],
+    "restore_expected_edges": [
+      {
+        "panel": "24381_35296",
+        "room": "R361"
+      },
+      {
+        "panel": "24381_35762",
+        "room": "R462"
+      }
+    ]
   },
   {
     "id": "noun-nbox",
@@ -343,7 +318,7 @@
     "room": "R512",
     "panel": "24381_35844",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-npyr",
@@ -390,27 +365,16 @@
     "coverage": "verified"
   },
   {
-    "id": "noun-olet",
-    "noun": "OLET",
-    "refno": "24383_1001",
-    "dbnum": 7999,
-    "expect_room": false,
-    "room": null,
-    "panel": null,
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：/1WCC0092A 支管 ensure 已生成（/1WCC0198A/B1 上的 110 未产出，OLET 几何依 spec 而定）；所在区域房间面板在 1112，预判无归属"
-  },
-  {
     "id": "noun-pane",
     "noun": "PANE",
-    "refno": "24381_16402",
+    "refno": "24381_35844",
     "dbnum": 7997,
     "expect_room": true,
-    "room": "R301",
-    "panel": "24381_34862",
+    "room": "R512",
+    "panel": "24381_35844",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified",
+    "select_command": "=24381/35844"
   },
   {
     "id": "noun-pyra",
@@ -443,7 +407,7 @@
     "room": "R345",
     "panel": "24381_35186",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-rtor",
@@ -459,24 +423,27 @@
   {
     "id": "noun-sctn",
     "noun": "SCTN",
-    "refno": "15516_102",
-    "dbnum": 7324,
-    "expect_room": true,
-    "room": "R301",
-    "panel": "24381_34862",
+    "refno": "24381_74144",
+    "dbnum": 7997,
+    "expect_room": false,
+    "room": null,
+    "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-sjoi",
     "noun": "SJOI",
-    "refno": "23708_28532",
-    "dbnum": 7324,
-    "expect_room": true,
-    "room": "R323",
-    "panel": "24381_35015",
+    "refno": "24381_177317",
+    "dbnum": 7997,
+    "expect_room": false,
+    "room": null,
+    "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified",
+    "expect_geometry": false,
+    "apply_command": "CUTBACK 10mm",
+    "restore_command": "CUTBACK 0mm"
   },
   {
     "id": "noun-snou",
@@ -498,31 +465,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
-  },
-  {
-    "id": "noun-tee",
-    "noun": "TEE",
-    "refno": "24383_114",
-    "dbnum": 7999,
-    "expect_room": false,
-    "room": null,
-    "panel": null,
-    "mode": "no_geometry",
-    "coverage": "no_geometry",
-    "note": "T1 探针 2026-08-07：三根不同管线（/1WCC0198A/B2、/1WCC0308A、/1WCC0292/B2）ensure 后均无 TEE 实例，判定 AMS 目录下三通无独立几何（output/t1-probe-1/5/6 日志）"
-  },
-  {
-    "id": "noun-valv",
-    "noun": "VALV",
-    "refno": "24383_112",
-    "dbnum": 7999,
-    "expect_room": true,
-    "room": "R710",
-    "panel": "24381_36365",
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：ensure 根 24383/111 已生成，aabb 在 R710 面板包络内（output/t1-probe-1-valv-tee.log）"
+    "coverage": "verified"
   },
   {
     "id": "noun-wall",
@@ -533,18 +476,6 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
-  },
-  {
-    "id": "noun-weld",
-    "noun": "WELD",
-    "refno": "24383_74126",
-    "dbnum": 7999,
-    "expect_room": true,
-    "room": "R420",
-    "panel": "24381_35475",
-    "mode": "relative_position",
-    "coverage": "pending",
-    "note": "T1 探针 2026-08-07：/1RCV0115A 支管 ensure 时顺带生成，aabb 与 COUP 同在 R420 面板包络内（output/t1-probe-3-coup.log）"
+    "coverage": "verified"
   }
 ]
