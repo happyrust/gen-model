@@ -192,6 +192,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Err(e) = crate::fast_model::pdms_inst::backfill_inst_relate_anc().await {
         eprintln!("inst_relate anc/dbnum 回填失败（下次启动重试）: {}", e);
     }
+    // 存量行平表副本清扫（P4 写时物化；幂等——pre-P4 库首轮付清，之后空转即返回。
+    // 崩溃在空闲轮清扫前留下的 NONE 行也在这里自愈）
+    if let Err(e) = crate::fast_model::pdms_inst::sweep_inst_relate_flat().await {
+        eprintln!("inst_relate 平表副本清扫失败（下次启动重试）: {}", e);
+    }
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let db_option = Arc::new(db_option.clone());

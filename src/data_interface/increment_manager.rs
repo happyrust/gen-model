@@ -2336,12 +2336,16 @@ pub(crate) async fn refresh_world_transform_products(
                 let json = serde_json::to_string(&world_transform)
                     .map_err(|e| anyhow::anyhow!("序列化Transform失败: {}", e))?;
                 let transform_hash = aios_core::gen_bytes_hash::<_, 64>(&world_transform);
-                transform_map.entry(transform_hash).or_insert(json);
+                // world_trans_d 与指针同语句原子写（P4 写时物化）：值在内存渲染
+                // 纯字面量，journal 维持纯数据；停留在旧值的行内副本会让读者
+                // 拿到旧位置的几何（与指针不同步 = 静默错值，比缺值更糟）。
                 update_sqls.push(format!(
-                    "UPDATE {} SET world_trans = trans:⟨{}⟩;",
+                    "UPDATE {} SET world_trans = trans:⟨{}⟩, world_trans_d = {};",
                     refno.to_inst_relate_key(),
-                    transform_hash
+                    transform_hash,
+                    json
                 ));
+                transform_map.entry(transform_hash).or_insert(json);
             } else {
                 anyhow::bail!("无法计算已有模型节点 {refno} 的 world transform");
             }

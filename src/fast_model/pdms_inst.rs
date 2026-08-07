@@ -121,6 +121,64 @@ pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
     Ok((inst, tubi))
 }
 
+/// P4 写时物化的脏位：本进程生成/刷新过 inst_relate 之后置位，worker 空闲轮
+/// 据此决定要不要跑一轮 [`sweep_inst_relate_flat`]（避免每个空闲轮白扫整表）。
+static INSTS_FLAT_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_insts_flat_dirty() {
+    INSTS_FLAT_DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 存量 `inst_relate` 行的平表副本清扫（P4 写时物化；幂等，自愈式）。
+///
+/// 圈 `insts_flat = NONE` 且对读者可见（`aabb.d != none`）的行，服务端一次性
+/// 物化三件：`insts_flat`（读投影 insts 子查询的派生缓存）、`aabb_d`、
+/// `world_trans_d`。**持久层非 journal 路径**（与 [`backfill_inst_relate_anc`]
+/// 同族）：建行/刷新语句只写纯字面量，唯一需要现场求值的 insts 子查询收口在
+/// 这里，不进 journal、不碰暂存窗口。
+///
+/// 挂两处：启动序列（存量回填 = 首轮全量，pre-P4 库一次付清）＋ worker 空闲轮
+/// （脏位门控）。行只会「缺」（NONE，读侧走 slim 兜底）不会「错」：置 meshed
+/// 的生成批与建行同任务同 refno 锚点，任务成功 ⇒ 可达 geo 全 meshed|bad。
+pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
+    const BATCH: usize = 500;
+    let mut total = 0usize;
+    loop {
+        let sql = format!(
+            "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT {BATCH};\n\
+             UPDATE $rows SET insts_flat = (SELECT trans.d AS transform, record::id(out) AS geo_hash \
+             FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos'), \
+             aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
+             RETURN array::len($rows);"
+        );
+        let mut response = SUL_DB.query(sql).await?.check()?;
+        let filled: Option<usize> = response.take(2)?;
+        let filled = filled.unwrap_or(0);
+        total += filled;
+        if filled < BATCH {
+            break;
+        }
+    }
+    if total > 0 {
+        println!("inst_relate 平表副本清扫完成：补 {total} 行");
+    }
+    Ok(total)
+}
+
+/// 空闲轮入口：脏位置位过才真的扫；失败把脏位放回去，下一轮重试。
+pub async fn sweep_inst_relate_flat_if_dirty() -> anyhow::Result<usize> {
+    if !INSTS_FLAT_DIRTY.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(0);
+    }
+    match sweep_inst_relate_flat().await {
+        Ok(total) => Ok(total),
+        Err(error) => {
+            mark_insts_flat_dirty();
+            Err(error)
+        }
+    }
+}
+
 
 /// 一个生成行（inst_relate / tubi_relate）的渲染期元数据（W4，决议 D6）。
 ///
@@ -533,10 +591,12 @@ pub async fn save_instance_data(
                 );
             }
 
-            // 为TUBI创建inst_relate记录（zone_refno/anc/dbnum 为渲染期已解值，W4）
+            // 为TUBI创建inst_relate记录（zone_refno/anc/dbnum 为渲染期已解值，W4）。
+            // aabb_d/world_trans_d 是指针目标 `d` 值的行内副本（P4 写时物化）：值
+            // 就在内存里，渲染成纯字面量与指针同语句落行，journal 维持纯数据。
             let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
             let tubi_relate_sql = format!(
-                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, aabb: aabb:⟨{4}⟩, generic: '{5}', zone_refno: {6}, anc: {7}, dbnum: {8}, has_cata_neg: {9}, solid: {10}}}",
+                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {11}, aabb: aabb:⟨{4}⟩, aabb_d: {12}, generic: '{5}', zone_refno: {6}, anc: {7}, dbnum: {8}, has_cata_neg: {9}, solid: {10}}}",
                 k.to_inst_relate_key(),
                 k.to_pe_key(),
                 v.id_str(),
@@ -548,6 +608,8 @@ pub async fn save_instance_data(
                 meta.dbnum_literal(),
                 v.has_cata_neg,
                 v.is_solid,
+                transform_map[&transform_hash],
+                aabb_map[&aabb_hash],
             );
 
             if let Some(t_refno) = test_refno {
@@ -629,9 +691,11 @@ pub async fn save_instance_data(
         }
 
         // zone_refno/anc/dbnum/dt 为渲染期已解值（W4）：journal 纯数据化。
+        // world_trans_d 为指针目标 `d` 值的行内副本（P4 写时物化，值在内存渲染
+        // 纯字面量）；aabb 建行时尚不存在，aabb_d 随 aabb 刷新同语句写入。
         let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, generic: '{4}', zone_refno: {5}, anc: {6}, dbnum: {7}, dt: {8}, has_cata_neg: {9}, solid: {10}}}",
+            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {11}, generic: '{4}', zone_refno: {5}, anc: {6}, dbnum: {7}, dt: {8}, has_cata_neg: {9}, solid: {10}}}",
             k.to_inst_relate_key(),
             k.to_pe_key(),
             v.id_str(),
@@ -643,6 +707,7 @@ pub async fn save_instance_data(
             meta.dt_literal(),
             v.has_cata_neg,
             v.is_solid,
+            transform_map[&transform_hash],
         );
         if let Some(t_refno) = test_refno {
             if *k == t_refno.into() {
@@ -742,6 +807,9 @@ pub async fn save_instance_data(
 
     finish_db_writes(db_futures).await?;
 
+    // 新行的 insts_flat 建行时留空（meshed 状态未知）：置脏，空闲轮清扫收口。
+    mark_insts_flat_dirty();
+
     Ok(())
 }
 
@@ -812,6 +880,38 @@ mod tests {
         assert_eq!(inst_none, 0, "inst_relate 不应残留 anc = NONE 行");
         assert_eq!(tubi_none, 0, "tubi_relate 不应残留 anc = NONE 行");
         println!("[live] 覆盖复核通过：两表 anc 无残留 NONE");
+    }
+
+    /// 手动 live（P4 写时物化部署步）：对**配置库**跑一轮平表副本清扫——
+    /// 等价于「新版 gen-model 启动一次」中 P4 相关的那部分（存量回填 = 首轮
+    /// 全量），供不重启服务先行验收读侧（plant-ui 对拍测试的 flat 路径）。
+    /// 幂等可重复跑：已清扫的库一轮空转即返回。
+    #[tokio::test]
+    #[ignore = "manual live: materializes insts_flat/aabb_d/world_trans_d on the configured Surreal"]
+    async fn live_sweep_inst_relate_flat_on_configured_db() {
+        aios_core::init_test_surreal().await.expect("连接配置库");
+
+        let started = std::time::Instant::now();
+        let swept = sweep_inst_relate_flat().await.expect("清扫");
+        println!("[live] 平表副本清扫完成：补 {swept} 行，耗时 {:?}", started.elapsed());
+
+        let mut response = SUL_DB
+            .query(
+                "RETURN [array::len((SELECT VALUE id FROM inst_relate WHERE insts_flat != NONE LIMIT 1)), \
+                         array::len((SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT 1))];",
+            )
+            .await
+            .expect("覆盖复核查询")
+            .check()
+            .expect("覆盖复核");
+        let [has_flat, residue]: [i64; 2] = response
+            .take::<Vec<i64>>(0)
+            .expect("take 覆盖复核")
+            .try_into()
+            .expect("二元组");
+        assert_eq!(has_flat, 1, "清扫后 inst_relate 应存在带 insts_flat 的行");
+        assert_eq!(residue, 0, "不应残留 insts_flat = NONE 且对读者可见的行");
+        println!("[live] 覆盖复核通过：可见行 insts_flat 无残留 NONE");
     }
 
     #[tokio::test]

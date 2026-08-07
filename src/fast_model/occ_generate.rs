@@ -837,13 +837,19 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                     }
                 }
             } else {
-                // 只有重算出来的值需要写库；指针回退的那条本来就是库里现值。
+                // 只有重算出来的值需要写库；指针回退的那条本来就是库里现值
+                // （TUBI 这类建行写死 aabb 的行，aabb_d 也在建行时一并写过）。
+                // aabb_d 与指针同语句原子写（P4 写时物化）：值在内存，渲染
+                // 纯字面量，journal 维持纯数据。
                 let aabb_hash = gen_bytes_hash::<_, 64>(&computed).to_string();
+                let aabb_json = serde_json::to_string(&computed)
+                    .map_err(|e| anyhow::anyhow!("序列化 Aabb 失败: {e}"))?;
                 chunk_aabbs.entry(aabb_hash.clone()).or_insert(computed);
                 update_sql.push_str(&format!(
-                    "update {} set aabb = aabb:⟨{}⟩;",
+                    "update {} set aabb = aabb:⟨{}⟩, aabb_d = {};",
                     r.refno.to_inst_relate_key(),
                     aabb_hash,
+                    aabb_json,
                 ));
                 computed
             };
@@ -919,6 +925,10 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             }
         }
     }
+
+    // aabb 一到位，行才够格进 insts_flat 清扫（谓词含 `aabb.d != none`）：置脏，
+    // 空闲轮收口（P4 写时物化）。
+    crate::fast_model::pdms_inst::mark_insts_flat_dirty();
 
     Ok(changes)
 }

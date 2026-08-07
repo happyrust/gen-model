@@ -126,6 +126,11 @@ SQL，收益配不上风险，另行立项评估。
       的定点重算（连 `zone_refno` 一起修——其陈旧是既有隐性 bug），语句并入
       finalize 事务 `window_statements`，与水位共命运；单测
       `owner_moves_render_anc_repair_statements_and_others_do_not` 钉住；
+      **2026-08-07 审核修复 P2**：重算语句只对 **DESI 窗口**渲染
+      （`anc_repair_statements_for_window`，与 datacenter 语句同门）——anc 只含
+      设计元素链，CATA/SYST 搬迁渲出的 UPDATE 全是收口事务里的空转子查询扫描
+      （目录重组一次搬上千元素会拖慢收口一个量级），且其 `fn::anc_u64` 依赖
+      只受 DESI 预检保护；钉子 `anc_repair_is_rendered_for_desi_windows_only`；
 - [x] schema DEFINE 落两处：`INST_RELATE_INDEX_SQL` 常量（zone_refno/anc/dbnum
       × inst_relate + anc/dbnum × tubi_relate 共 5 条索引）为唯一事实来源，
       生产启动（`init_inst_relate_indices`）与 `init_staging_schema` 共用。
@@ -215,15 +220,89 @@ vendor/rs-core 查询形态，逐根断言新旧 refno 集合完全一致（全�
       old_refno/pts/dt/has_neg 缺省；anc 路径切用。AMS 实测整场
       **16.8 s → 13.9 s**；对拍新增 owner 口径（anc[1] vs 实时 `in.owner`
       逐行相符——顺带证明存量 anc 链新鲜）。相对旧路径基线（151.9 s）**11×**。
-- [ ] **3 s 档 = 写时物化（P4 候选，暂缓）**：inst_relate 行内物化
-      `aabb_d(6)` / `wt_d(16)` / `insts_flat[{h,t}]`，读侧变纯平表扫描
-      （预计整场 ~2 s）。维护点五处：建行内联（d 值在内存）、
-      `gen_inst_meshes` 置 meshed 的同批语句反向刷 `insts_flat`
-      （需 `idx_inst_relate_out`）、transform 便宜路径换链接时同步刷、
-      `update_inst_relate_aabbs_by_refnos` 同步、存量回填。
-      **暂缓原因**：与并行推进的「暂存祖先解析式预载」W4（同在
-      `save_instance_data` 字面量上做 resolve-then-render）正面相撞，
-      须待其落地后实施或与之同批。
+### P4 写时物化（2026-08-07 设计定稿并落地，as-built 见节末）
+
+目标：读投影的两档解引用成本（aabb/trans +2.0s、insts 子查询 +8.7s）在写入时
+付掉，读侧变纯平表投影，整场 13.9s → ~2s。
+
+**行内新字段（inst_relate）**：
+
+| 字段 | 内容 | 维护纪律 |
+|---|---|---|
+| `aabb_d` | `aabb.d` 的行内副本（serde 同形 JSON） | 与 aabb 指针**同语句**写，永不分离 |
+| `world_trans_d` | `world_trans.d` 的行内副本 | 与 world_trans 指针**同语句**写 |
+| `insts_flat` | 读投影 insts 子查询结果的**派生缓存** `[{transform, geo_hash}]` | 不进 journal；持久层清扫维护；读侧兜底 |
+
+**写点与 journal 纯数据纪律（不破 W4）**：
+
+1. **建行**（`save_instance_data`）：普通行 +`world_trans_d`（值在内存渲染纯字
+   面量）；TUBI 行 +`aabb_d`+`world_trans_d`（建行即带 aabb）；`insts_flat`
+   不写（建行时 meshed 状态未知，宁缺毋错）。
+2. **aabb 刷新**（`update_inst_relate_aabbs_by_refnos`）：指针 UPDATE 同语句
+   追加 `aabb_d = <字面量>`（computed 在内存）。指针回退分支（TUBI 等）不写
+   ——值未变，建行时已置。
+3. **transform 便宜路径**（`refresh_world_transform_products`）：指针 UPDATE
+   同语句追加 `world_trans_d = <字面量>`（world_transform 在内存）；aabb_d
+   由该函数末尾的 aabb 刷新到位。
+4. **清扫**（`sweep_inst_relate_flat`，持久层非 journal，与
+   `backfill_inst_relate_anc` 同族）：批量圈 `insts_flat = NONE AND
+   aabb.d != none` → `SET insts_flat = (insts 子查询), aabb_d = aabb.d,
+   world_trans_d = world_trans.d`。挂两处：启动序列（anc 回填后；存量回填 =
+   首轮全量）+ 批次 worker 空闲轮（脏位门控，生成/刷新过才扫）。
+5. ~~`gen_inst_meshes` 置 meshed 反向刷 + `idx_inst_relate_out`~~（原草图项，
+   **取消**）：置 meshed 的生成批与建行同任务同 refno 锚点，任务成功 ⇒ 可达
+   geo 全部 meshed|bad，清扫按 refno 收口即可；「共享 geo 迟到 meshed 使他行
+   already-materialized 的 insts_flat 变旧」的路径不存在（他行成功过 ⇒ 其 geo
+   已 meshed|bad；失败过 ⇒ 行随重试重建回 NONE）。反向索引不再需要。
+
+**一致性论证**：`aabb_d`/`world_trans_d` 与指针同语句原子写 → 无「指针新副本
+旧」窗口；`insts_flat` 只会「缺」（NONE）不会「错」——缺由读侧兜底 + 清扫自愈
+（崩溃窗口同理）。journal 里只有渲染期纯字面量，写回重放零求值（W4 源码钉不受
+影响）。
+
+**读侧（plant-ui）两段式**：解析（`anc CONTAINS`，纯索引扫描）→ pass1 平表
+投影 `in as refno, anc, generic, aabb != NONE as has_aabb, aabb_d,
+world_trans_d, insts_flat`（零解引用零子查询）→ 客户端三分法：副本齐活直接
+成型；仅 aabb 链接在而副本缺（清扫未及/pre-P4 存量）聚拢 pass2 走
+`query_insts_slim` 现值兜底；连链接都没有的行丢弃。**正确性不依赖物化覆盖
+率**，覆盖率只买速度；不依赖 `??` 合并算子的短路语义（2.1.4 上未验证）。
+
+**验收判据**：双跑用例钉三条语句形态在 2.1.4 双引擎一致（建行字面量、指针+
+副本同语句 UPDATE、清扫语句含 UPDATE SET 里 `out->geo_relate` 遍历）；AMS
+清扫全表后 flat 读与 slim 读对拍（refno/owner/aabb/trans/insts 哈希五口径）
+一致，整场 ≤3s 判定达标。
+
+**落地情况（2026-08-07，as-built）**：
+
+- [x] gen-model 写侧五点全部落地；双跑新用例
+      `dual_inst_relate_flat_materialization_agrees` 一次通过（UPDATE SET 值位
+      里的 `out->geo_relate` 图遍历在 2.1.4 双引擎成立，平表投影 == 解引用投影
+      逐字段相等）；双跑 13/13、lib 498/498 全绿。
+- [x] AMS 存量清扫（`live_sweep_inst_relate_flat_on_configured_db`）：
+      53,582 行一次付清，51.4s，覆盖复核无残留。
+- [x] plant-ui 读侧两段式落地；**最终验收（release，AMS 41 根 / 51,423 行）：
+      旧路径 253.3s → 新路径 2.73s（93×，≤3s 达标）**，refno/owner/网格 hash
+      五口径完全一致（51,371 唯一实例）。
+- **as-built 偏差三处**：字段名 `wt_d` → `world_trans_d`（可读性）；解析查询
+  去掉 `and aabb.d != none`（原是每命中行一次点查，~2s——可见性判定挪进读侧
+  三分法，最终集合与旧口径逐行一致）；原草图的「置 meshed 反向刷 +
+  `idx_inst_relate_out`」取消（见上文第 5 点论证）。
+- **读侧压秒历程（release 口径，13.9s slim → 2.7s，四步各有教训）**：
+  1. 解析层零解引用（`in.id`→`in` 省每行 pe 点查、砍 `aabb.d != none` 谓词）
+     + 平表投影只取 `anc[1]`：5.4s → 3.9s；
+  2. 批大小 500→1500：往返省一半但**每行序列化成本不变**，收益有限；
+  3. **单条 WS 连接的响应流是串行管道**——根间 8 路"并发"下平表阶段 wall
+     几乎等于各批串行之和；加 4 条只读连接池（rs-core `flat_read_db`，惰性
+     并行握手 + `prewarm_flat_read_pool` 启动预热——signin 单条 ~2s，串行建
+     池曾造成首轮 12s 尖刺）；
+  4. **根偏斜让根级并发白并**——巨型 SITE 的十几个批在自己根的 future 里
+     串成尾巴；改全局块队列 + `tokio::spawn` 真任务（`buffered` 是单任务轮询，
+     51k 行反序列化 ~56µs/行 会挤在一个线程），并行地板实测 1.7s。
+- **成本剖面（AMS 实测）**：单根解析 2,035 行 43ms（EXPLAIN 走
+  `idx_inst_relate_anc`）；整表平表投影 count 口径 ~0.7s、全并行含载荷 1.7s。
+  `CONTAINSANY` 41 根实测 55.8s，再次证实逐根 CONTAINS 是唯一正解；整表单
+  响应投影再次撑爆 WS 单条消息（`receiving from an empty and closed
+  channel`），分块是硬约束。
 
 ### P3 清理与衔接（半天）
 

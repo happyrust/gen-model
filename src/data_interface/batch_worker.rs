@@ -1916,6 +1916,18 @@ async fn idle_round(
         Ok(false) => {}
         Err(error) => println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}"),
     }
+
+    // inst_relate 平表副本清扫（P4 写时物化）：生成/刷新过才扫（脏位门控），
+    // 唯一现场求值的 insts 子查询收口在持久层非 journal 路径。窗口写回在
+    // 本函数更早的 drain 里完成，此刻持久层已有新行。失败保留脏位下轮重试；
+    // 读侧对 NONE 行有 slim 兜底，清扫只买读速不背正确性。
+    match crate::fast_model::pdms_inst::sweep_inst_relate_flat_if_dirty().await {
+        Ok(0) => {}
+        Ok(swept) => println!("inst_relate 平表副本清扫：补 {swept} 行"),
+        Err(error) => {
+            println!("inst_relate 平表副本清扫失败（保留脏位，下一轮重试）: {error:#}")
+        }
+    }
 }
 
 /// 一个空闲轮消化完这一页之后的处置。

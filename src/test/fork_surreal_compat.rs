@@ -829,6 +829,137 @@ async fn dual_anc_u64_functions_execute_and_agree() {
     }
 }
 
+/// P4 判据（写时物化）：平表副本三件套在 2.1.4 上**写得进、扫得动、读得对**。
+///
+/// 三条生产语句形态逐一钉死：
+/// 1. 建行字面量带 `world_trans_d` / `aabb_d`（`save_instance_data` 普通行 /
+///    TUBI 行，serde 同形 JSON 纯字面量）；
+/// 2. 指针+副本**同语句** UPDATE（`update_inst_relate_aabbs_by_refnos` 的 aabb
+///    刷新、`refresh_world_transform_products` 的 transform 便宜路径）；
+/// 3. 清扫语句（`sweep_inst_relate_flat`）：LET 圈行 + UPDATE SET 值位里的
+///    `out->geo_relate` 图遍历子查询 + `aabb_d = aabb.d` 服务端拷贝——UPDATE
+///    记录上下文里的图遍历是全设计最险的构造，两引擎都必须真执行出对的产物。
+///
+/// 最后绝对断言「平表投影 == 解引用投影」（读侧两段式的等价性判据）与清扫
+/// 终止条件（第二轮圈不到行）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_inst_relate_flat_materialization_agrees() {
+    let Some((mem, fork, _guard)) = dual_dbs("flat_mat").await else {
+        return;
+    };
+
+    // 与生产同一 serde 形态渲染副本字面量（Transform: bevy、Aabb: parry3d）。
+    let wt_a = serde_json::to_string(&bevy_transform::prelude::Transform::IDENTITY).unwrap();
+    let wt_b =
+        serde_json::to_string(&bevy_transform::prelude::Transform::from_xyz(1.0, 2.0, 3.0))
+            .unwrap();
+    let aabb_a = serde_json::to_string(&parry3d::bounding_volume::Aabb::new(
+        parry3d::math::Point::new(0.0f32, 0.0, 0.0),
+        parry3d::math::Point::new(1.0f32, 1.0, 1.0),
+    ))
+    .unwrap();
+    let edge_t =
+        serde_json::to_string(&bevy_transform::prelude::Transform::from_xyz(9.0, 0.0, 0.0))
+            .unwrap();
+
+    // 图形：inst_info:i1 挂三条 geo_relate 边——g1（可见+meshed+Pos，唯一入选）、
+    // g2（未 meshed）、g3（Neg）；inst_info:i2 无边（insts_flat 应落空数组而非 NONE）。
+    let seed = format!(
+        "CREATE pe:24383_1 SET noun='SITE', dbnum=7997; \
+         CREATE inst_info:i1; CREATE inst_info:i2; \
+         CREATE inst_geo:g1 SET meshed = true; CREATE inst_geo:g2; \
+         CREATE inst_geo:g3 SET meshed = true; \
+         CREATE trans:t1 SET d = {wt_a}; CREATE trans:t2 SET d = {wt_b}; \
+         CREATE trans:te SET d = {edge_t}; \
+         CREATE aabb:a1 SET d = {aabb_a}; \
+         INSERT RELATION INTO geo_relate [\
+            {{ id: 'e1', in: inst_info:i1, out: inst_geo:g1, trans: trans:te, visible: true, geo_type: 'Pos' }}, \
+            {{ id: 'e2', in: inst_info:i1, out: inst_geo:g2, trans: trans:te, visible: true, geo_type: 'Pos' }}, \
+            {{ id: 'e3', in: inst_info:i1, out: inst_geo:g3, trans: trans:te, visible: true, geo_type: 'Neg' }}\
+         ];"
+    );
+    // 生产建行字面量：普通行 world_trans_d 建行即带（aabb 尚无）；TUBI 行双副本齐活。
+    let create_normal = format!(
+        "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_100⟩, in: pe:24383_1, \
+         out: inst_info:i1, world_trans: trans:t1, world_trans_d: {wt_a}, generic: 'BOX', \
+         zone_refno: NONE, anc: [42], dbnum: 7997, dt: NONE, has_cata_neg: false, solid: true}}];"
+    );
+    let create_tubi = format!(
+        "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_101⟩, in: pe:24383_1, \
+         out: inst_info:i2, world_trans: trans:t1, world_trans_d: {wt_a}, aabb: aabb:a1, \
+         aabb_d: {aabb_a}, generic: 'TUBI', zone_refno: NONE, anc: [42], dbnum: 7997, \
+         has_cata_neg: false, solid: true}}];"
+    );
+    // aabb 刷新与 transform 便宜路径：指针+副本同语句。
+    let refresh_aabb =
+        format!("UPDATE inst_relate:⟨24383_100⟩ SET aabb = aabb:a1, aabb_d = {aabb_a};");
+    let cheap_transform = format!(
+        "UPDATE inst_relate:⟨24383_100⟩ SET world_trans = trans:t2, world_trans_d = {wt_b};"
+    );
+    // 清扫（sweep_inst_relate_flat 同形，BATCH 缩到 10）。
+    let sweep = "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT 10;\n\
+         UPDATE $rows SET insts_flat = (SELECT trans.d AS transform, record::id(out) AS geo_hash \
+         FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos'), \
+         aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
+         RETURN array::len($rows);";
+    // 读侧两形态（FROM 显式记录列表定序，避开 2.1.4 `SELECT VALUE … ORDER BY` 的坑）。
+    let read_flat = "SELECT in AS refno, generic, aabb_d AS world_aabb, \
+         world_trans_d AS world_trans, insts_flat AS insts \
+         FROM [inst_relate:⟨24383_100⟩, inst_relate:⟨24383_101⟩];";
+    let read_slim = "SELECT in AS refno, generic, aabb.d AS world_aabb, \
+         world_trans.d AS world_trans, \
+         (SELECT trans.d AS transform, record::id(out) AS geo_hash FROM out->geo_relate \
+         WHERE visible && out.meshed && trans.d != none && geo_type='Pos') AS insts \
+         FROM [inst_relate:⟨24383_100⟩, inst_relate:⟨24383_101⟩];";
+
+    assert_dual_same(
+        "flat_mat",
+        &mem,
+        &fork,
+        &[
+            &seed,
+            &create_normal,
+            &create_tubi,
+            &refresh_aabb,
+            &cheap_transform,
+            sweep,
+            read_flat,
+            read_slim,
+            // 第二轮应圈不到行（insts_flat 已非 NONE，空边行落的是 [] 不是 NONE）
+            // ——sweep 循环的终止条件。
+            sweep,
+        ],
+    )
+    .await;
+
+    // 对拍只证两边一致——错得一样也对拍得过。等价性与清扫产物要绝对断言。
+    for (engine, db) in [("mem", &mem), ("fork", &fork)] {
+        let flat = exec_capture(db, read_flat).await;
+        let slim = exec_capture(db, read_slim).await;
+        assert_eq!(
+            flat[0], slim[0],
+            "[{engine}] 平表副本投影必须与解引用投影逐字段相等（读侧两段式的根据）"
+        );
+        let swept = exec_capture(db, sweep).await;
+        assert_eq!(
+            swept[2].as_deref(),
+            Ok(r#"{"Number":{"Int":0}}"#),
+            "[{engine}] 清扫后不应再有 insts_flat = NONE 且对读者可见的行"
+        );
+        let insts = exec_capture(
+            db,
+            "SELECT VALUE insts_flat.geo_hash \
+             FROM [inst_relate:⟨24383_100⟩, inst_relate:⟨24383_101⟩];",
+        )
+        .await;
+        assert_eq!(
+            insts[0].as_deref(),
+            Ok(r#"{"Array":[{"Array":[{"Strand":"g1"}]},{"Array":[]}]}"#),
+            "[{engine}] insts_flat 应只含可见+meshed+Pos 的边（g2 未 meshed、g3 是 Neg 都不得入选）"
+        );
+    }
+}
+
 /// P2 前置验证（手动 bench）：**旧读路径 vs 新读路径**在同一台 fork rocksdb
 /// 服务器、同一棵 AMS 量级合成树上的实测对比 + refno 集合对拍。
 ///
