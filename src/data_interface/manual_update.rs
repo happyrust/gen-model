@@ -3580,10 +3580,28 @@ impl AiosDBManager {
         // 执行侧的复核：入队与执行之间隔着一整个队列，期间文件可能被换掉。判据与
         // 入队、预览、自动路径同源，且阻断时不覆盖登记身份——否则这一次执行就把
         // 异常证据抹了，下一轮谁都拦不住它。
+        //
+        // 读**失败**必须计为 Failed 而不是 Skipped（2026-08-06 审计）：Skipped 在
+        // 聚合里等于「无可执行工作」→ 任务终态 succeeded/up_to_date，一次持久层
+        // 故障就把没应用的窗口伪装成已完成——水位不动、无人重试、面板全绿。
+        // Skipped 只留给判得出结论的主动裁决（阻断异常、排除）。
         let verdict = match DbnumState::classify_scan(&obs).await {
             Ok(verdict) => verdict,
             Err(error) => {
-                return skipped(format!("读取 DBNUM 状态失败，本批次跳过: {error:#}"));
+                return (
+                    Some(DataBatchResult {
+                        dbnum,
+                        db_type: cand.db_type.clone(),
+                        file_path: cand.path.display().to_string(),
+                        start_sesno: 0,
+                        end_sesno: 0,
+                        status: BatchStatus::Failed,
+                        message: Some(format!("读取 DBNUM 状态失败，本批次未执行: {error:#}")),
+                        merged_sesnos: Vec::new(),
+                        changed_elements: 0,
+                    }),
+                    Vec::new(),
+                );
             }
         };
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
@@ -5720,6 +5738,34 @@ mod tests {
         assert_eq!(
             aggregate_manual_status(&[], &[]),
             ManualUpdateStatus::UpToDate
+        );
+    }
+
+    /// 读状态失败必须计为 Failed，不得借 Skipped 伪装成 up_to_date（2026-08-06 审计）。
+    ///
+    /// Skipped 在上面的聚合口径里等于「无可执行工作」——这只配给判得出结论的主动
+    /// 裁决（阻断异常、排除）。7999@42 实测：一次持久层读错误走了 Skipped，任务
+    /// 终态 succeeded/up_to_date，水位没动也没人重试，故障完全不可见。
+    #[test]
+    fn a_state_read_error_fails_the_batch_instead_of_masking_as_skipped() {
+        let source = include_str!("manual_update.rs");
+        let match_block = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum 必须存在")
+            .1
+            .split_once("match DbnumState::classify_scan(&obs).await")
+            .expect("执行侧必须复核扫描裁决")
+            .1
+            .split_once("DbnumState::record_observation")
+            .expect("复核之后是扫描观察落库")
+            .0;
+        assert!(
+            match_block.contains("status: BatchStatus::Failed"),
+            "classify_scan 的 Err 分支必须产出 Failed 批次: {match_block}"
+        );
+        assert!(
+            !match_block.contains("skipped("),
+            "读失败不得复用 skipped 闭包: {match_block}"
         );
     }
 
