@@ -41,7 +41,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-box",
@@ -140,7 +140,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-elconn",
@@ -156,13 +156,13 @@
   {
     "id": "noun-extr",
     "noun": "EXTR",
-    "refno": "24384_19889",
-    "dbnum": 8000,
+    "refno": "24381_100008",
+    "dbnum": 7997,
     "expect_room": true,
-    "room": "R301",
-    "panel": "24381_34862",
+    "room": "R420",
+    "panel": "24381_35475",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-fitt",
@@ -173,7 +173,8 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "pending",
+    "selector": "/-RX-CCV-S2020-V1/F1"
   },
   {
     "id": "noun-fixing",
@@ -233,13 +234,13 @@
   {
     "id": "noun-nbox",
     "noun": "NBOX",
-    "refno": "15516_11",
-    "dbnum": 7324,
+    "refno": "24381_101895",
+    "dbnum": 7997,
     "expect_room": true,
-    "room": "R301",
-    "panel": "24381_34862",
+    "room": "R710",
+    "panel": "24381_36365",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-ncon",
@@ -250,7 +251,7 @@
     "room": "R301",
     "panel": "24381_34851",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-ncto",
@@ -261,7 +262,7 @@
     "room": "R301",
     "panel": "24381_34851",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-ncyl",
@@ -272,7 +273,7 @@
     "room": "R301",
     "panel": "24381_34851",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-ndis",
@@ -283,7 +284,7 @@
     "room": "R345",
     "panel": "24381_35186",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-nozz",
@@ -299,13 +300,13 @@
   {
     "id": "noun-npyr",
     "noun": "NPYR",
-    "refno": "23708_27263",
-    "dbnum": 7324,
+    "refno": "24381_110037",
+    "dbnum": 7997,
     "expect_room": true,
-    "room": "R301",
-    "panel": "24381_34862",
+    "room": "R412",
+    "panel": "24381_35447",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-nrev",
@@ -316,7 +317,7 @@
     "room": "R622",
     "panel": "24381_36155",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-nrto",
@@ -327,7 +328,7 @@
     "room": "R312",
     "panel": "24381_34921",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-nxtr",
@@ -338,7 +339,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-pane",
@@ -371,7 +372,7 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-revo",
@@ -393,7 +394,7 @@
     "room": "R311",
     "panel": "24381_34894",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-sctn",

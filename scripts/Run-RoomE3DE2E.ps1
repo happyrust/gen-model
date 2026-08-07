@@ -174,25 +174,28 @@ try {
             if ($model.mode -ne 'relative_position') { continue }
             $name = $model.id
             $refno = $model.refno -replace '_', '/'
+            $selectLine = if ($model.selector) { "CE $($model.selector)" } else { "=$refno" }
+            $applyCommand = if ($model.apply_command) { $model.apply_command } else { 'BY U 10' }
+            $restoreCommand = if ($model.restore_command) { $model.restore_command } else { 'BY D 10' }
             $macroLog = ((Resolve-Path $generated).Path -replace '\\', '/')
             $applyMacro = Join-Path $generated "$name-apply.mac"
             $restoreMacro = Join-Path $generated "$name-restore.mac"
             @"
 ALPHA LOG "$macroLog/$name-apply.log" OVER
-=$refno
+$selectLine
 Q CE
 Q POS
-BY U 10
+$applyCommand
 Q POS
 SAVEWORK 'CODEX $name relative position apply'
 ALPHA LOG END
 "@ | Set-Content $applyMacro -Encoding ascii
             @"
 ALPHA LOG "$macroLog/$name-restore.log" OVER
-=$refno
+$selectLine
 Q CE
 Q POS
-BY D 10
+$restoreCommand
 Q POS
 SAVEWORK 'CODEX $name relative position restore'
 ALPHA LOG END
