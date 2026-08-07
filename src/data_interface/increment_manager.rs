@@ -2195,9 +2195,6 @@ impl AiosDBManager {
         &self,
         refnos: &HashSet<RefnoEnum>,
     ) -> anyhow::Result<()> {
-        use crate::SUL_DB;
-        use aios_core::get_world_transform;
-
         // 如果没有需要更新的节点，直接返回
         if refnos.is_empty() {
             return Ok(());
@@ -2205,7 +2202,9 @@ impl AiosDBManager {
 
         println!("开始更新 {} 个元素及其子树的world transform", refnos.len());
 
-        // 第一步：智能筛选 - 获取子树中所有有inst_relate的几何节点
+        // 第一步：智能筛选 - 获取子树中所有有inst_relate的几何节点。子树按窗口前
+        // 持久态解析，与锁域解析同一纪律（mutation_roots_resolve_against_the_
+        // pre_window_persistent_state）。
         let refnos_with_inst_relate = self.get_inst_relate_nodes_in_subtree(refnos).await?;
 
         if refnos_with_inst_relate.is_empty() {
@@ -2218,76 +2217,9 @@ impl AiosDBManager {
             refnos_with_inst_relate.len()
         );
 
-        // 第二步：分批处理 - 避免单次处理过多数据
+        // 第二步：变换产物刷新走可路由的后半（写入全部经 execute_model_write）。
         let refnos_vec: Vec<RefnoEnum> = refnos_with_inst_relate.into_iter().collect();
-
-        for chunk in refnos_vec.chunks(TRANSFORM_BATCH_SIZE) {
-            let mut update_sqls = Vec::new();
-            let mut transform_map: HashMap<u64, String> = HashMap::new();
-
-            // 第三步：批量计算和更新
-            for &refno in chunk {
-                // 重新计算该节点的世界变换矩阵
-                if let Some(world_transform) = get_world_transform(refno).await? {
-                    // 必须写成 `trans:⟨hash⟩` 记录链接，不能直接塞裸对象：全部读者取的都是
-                    // `world_trans.d`（`query_insts`、`update_inst_relate_aabbs_by_refnos`…），
-                    // 而 inst_relate 是 schemaless 表，裸对象会被静默接受、`.d` 变成 none，
-                    // 于是该元素在几何查询里 world_trans 为空，在包围盒刷新的
-                    // `where world_trans.d != none` 处被整条过滤掉（ADR-010 D9）。
-                    let json = serde_json::to_string(&world_transform)
-                        .map_err(|e| anyhow::anyhow!("序列化Transform失败: {}", e))?;
-                    let transform_hash = aios_core::gen_bytes_hash::<_, 64>(&world_transform);
-                    transform_map.entry(transform_hash).or_insert(json);
-                    update_sqls.push(format!(
-                        "UPDATE {} SET world_trans = trans:⟨{}⟩;",
-                        refno.to_inst_relate_key(),
-                        transform_hash
-                    ));
-                } else {
-                    anyhow::bail!("无法计算已有模型节点 {refno} 的 world transform");
-                }
-            }
-
-            // trans 记录要先落库，否则 world_trans 会指向不存在的记录，`.d` 一样取不到。
-            crate::fast_model::utils::save_transforms_to_surreal(&transform_map).await?;
-
-            // 批量执行数据库更新
-            if !update_sqls.is_empty() {
-                let batch_sql = update_sqls.join("");
-                println!("执行world transform更新SQL，批次大小: {}", chunk.len());
-                SUL_DB
-                    .query(batch_sql)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("更新world transform失败: {}", e))?
-                    .check()
-                    .map_err(|e| anyhow::anyhow!("更新world transform语句失败: {}", e))?;
-            }
-        }
-
-        // world_trans 一变，inst_relate.aabb（由 world_trans * geo.trans 变换 geo.aabb 合并
-        // 而来）立即失效。这条便宜路径不重生成几何，永远进不了 process_meshes_update_db_deep，
-        // 不在这里显式刷新的话，包围盒与空间树会永久停在旧位置，房间归属随之算错（ADR-010 D1）。
-        //
-        // replace_exist 必须传 true：默认的 replace_mesh=false 会给 SQL 追加 `and aabb=none`，
-        // 而这条路径上的元素全都已经有包围盒，会被整批跳过。
-        let aabb_changes = update_inst_relate_aabbs_by_refnos_with_spatial_tree(
-            &refnos_vec,
-            true,
-            self.db_option.gen_spatial_tree,
-        )
-        .await?;
-
-        // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」，房间归属必须跟着重算
-        // （ADR-010 §4）。只有包围盒**确实变了**的才入队：这条路径上的元素常常是被
-        // 子树遍历顺带捞进来的，它们的世界变换重算后与原值一致，不该白算一遍房间。
-        crate::data_interface::model_update_pending::enqueue_room_recalc(
-            &self.db_option,
-            &aabb_changes,
-        )
-        .await?;
-
-        println!("world transform更新完成");
-        Ok(())
+        refresh_world_transform_products(&self.db_option, &refnos_vec).await
     }
 
     /// 获取指定参考号及其子树中所有有inst_relate数据的几何节点
@@ -2371,6 +2303,88 @@ impl AiosDBManager {
     }
 }
 
+/// 子树展开之后的变换产物刷新（`update_world_transforms` 的后半，独立成函数以便
+/// 在暂存窗口内单测）：重算世界变换 → trans 记录落库 → world_trans 指针改指 →
+/// AABB 刷新 → 房间触发。
+///
+/// 写入必须全部经 `execute_model_write` 路由：暂存窗口内进暂存库 + journal
+/// （ADR-017 I1 窗口计算期间持久层零写入），直写模式带写冲突重试。此前指针
+/// UPDATE 直打持久层，是 2026-08-07 审核的 P0：窗口执行中途持久层出现指向
+/// 暂存专属 trans 记录的悬空指针（窗口阻断则永久悬空、元素从一切
+/// `world_trans.d != none` 读者里消失，D9 形态）；同时暂存里的旧指针让窗口内
+/// AABB 刷新拿旧位置算包围盒，提交后模型画在新位置而空间树 / 房间归属停在
+/// 旧位置（D1 复活）。
+pub(crate) async fn refresh_world_transform_products(
+    db_option: &DbOption,
+    refnos_vec: &[RefnoEnum],
+) -> anyhow::Result<()> {
+    use aios_core::get_world_transform;
+
+    for chunk in refnos_vec.chunks(TRANSFORM_BATCH_SIZE) {
+        let mut update_sqls = Vec::new();
+        let mut transform_map: HashMap<u64, String> = HashMap::new();
+
+        // 批量计算和更新
+        for &refno in chunk {
+            // 重新计算该节点的世界变换矩阵
+            if let Some(world_transform) = get_world_transform(refno).await? {
+                // 必须写成 `trans:⟨hash⟩` 记录链接，不能直接塞裸对象：全部读者取的都是
+                // `world_trans.d`（`query_insts`、`update_inst_relate_aabbs_by_refnos`…），
+                // 而 inst_relate 是 schemaless 表，裸对象会被静默接受、`.d` 变成 none，
+                // 于是该元素在几何查询里 world_trans 为空，在包围盒刷新的
+                // `where world_trans.d != none` 处被整条过滤掉（ADR-010 D9）。
+                let json = serde_json::to_string(&world_transform)
+                    .map_err(|e| anyhow::anyhow!("序列化Transform失败: {}", e))?;
+                let transform_hash = aios_core::gen_bytes_hash::<_, 64>(&world_transform);
+                transform_map.entry(transform_hash).or_insert(json);
+                update_sqls.push(format!(
+                    "UPDATE {} SET world_trans = trans:⟨{}⟩;",
+                    refno.to_inst_relate_key(),
+                    transform_hash
+                ));
+            } else {
+                anyhow::bail!("无法计算已有模型节点 {refno} 的 world transform");
+            }
+        }
+
+        // trans 记录要先落库，否则 world_trans 会指向不存在的记录，`.d` 一样取不到。
+        crate::fast_model::utils::save_transforms_to_surreal(&transform_map).await?;
+
+        // 指针批量改指：与 trans 记录、AABB 指针同一条写路由——暂存窗口内进
+        // 暂存库 + journal，直写模式经 execute_surreal_checked 获得写冲突重试
+        // （此前的裸 query 连冲突重试都没有）。
+        if !update_sqls.is_empty() {
+            let batch_sql = update_sqls.join("");
+            println!("执行world transform更新SQL，批次大小: {}", chunk.len());
+            crate::surreal_retry::execute_model_write(&batch_sql, "更新 world_trans 指针")
+                .await?;
+        }
+    }
+
+    // world_trans 一变，inst_relate.aabb（由 world_trans * geo.trans 变换 geo.aabb 合并
+    // 而来）立即失效。这条便宜路径不重生成几何，永远进不了 process_meshes_update_db_deep，
+    // 不在这里显式刷新的话，包围盒与空间树会永久停在旧位置，房间归属随之算错（ADR-010 D1）。
+    //
+    // replace_exist 必须传 true：默认的 replace_mesh=false 会给 SQL 追加 `and aabb=none`，
+    // 而这条路径上的元素全都已经有包围盒，会被整批跳过。
+    let aabb_changes = update_inst_relate_aabbs_by_refnos_with_spatial_tree(
+        refnos_vec,
+        true,
+        db_option.gen_spatial_tree,
+    )
+    .await?;
+
+    // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」，房间归属必须跟着重算
+    // （ADR-010 §4）。只有包围盒**确实变了**的才入队：这条路径上的元素常常是被
+    // 子树遍历顺带捞进来的，它们的世界变换重算后与原值一致，不该白算一遍房间。
+    // 暂存窗口内变更集在刷新层就地寄存进窗口、这里恒为空集，入队自然无事发生。
+    crate::data_interface::model_update_pending::enqueue_room_recalc(db_option, &aabb_changes)
+        .await?;
+
+    println!("world transform更新完成");
+    Ok(())
+}
+
 #[cfg(test)]
 mod transform_subtree_tests {
     use super::*;
@@ -2395,5 +2409,163 @@ mod transform_subtree_tests {
             .update_world_transforms(&HashSet::from([branch]))
             .await
             .expect("refresh BRAN subtree transforms");
+    }
+}
+
+/// 2026-08-07 审核 P0 的回归：暂存窗口内纯位姿 Transform 的写路由。
+///
+/// 此前 `run_staged_non_regen_work` → `update_world_transforms` 的 world_trans
+/// 指针批量 UPDATE 用 `SUL_DB.query` 直写持久层——窗口计算期间持久层被写入
+/// 指向暂存专属 trans 记录的悬空指针，且暂存里的旧指针让窗口内 AABB 刷新拿
+/// 旧位置算包围盒、房间变更判定失灵。该路径此前没有任何测试覆盖。
+#[cfg(test)]
+mod staged_transform_write_routing_tests {
+    use super::*;
+    use crate::data_interface::staging::ResourceThresholds;
+    use crate::data_interface::staging::lifecycle::create_window_on;
+    use surrealdb::engine::any::connect;
+
+    /// 与仓内其它夹具同一保留段（4000000001），序号避开 issue10 与 room_fixture
+    /// 的 1..30 段——`GLOBAL_AABB_TREE` 是进程级共享，撞号会污染「树上首次见到」
+    /// 的判定基线。
+    fn refu(n: u64) -> RefU64 {
+        RefU64((4000000001u64 << 32) | n)
+    }
+
+    /// 暂存 Transform 的三条断言（修复前本用例必红）：
+    ///
+    /// 1. **journal**：trans 记录 INSERT 与 world_trans 指针 UPDATE 都必须进
+    ///    journal（`ExecMode::Both`），暂存行改指新 trans 记录且新指针可解引用
+    ///    （D9 不悬空）；
+    /// 2. **零落盘**：本用例刻意不连接 `SUL_DB`（与
+    ///    `staging_context_routes_reads_and_never_touches_sul_db` 同一负向对照）——
+    ///    修复前指针 UPDATE 直打未初始化的全局句柄、当场报错；函数成功本身就是
+    ///    「窗口计算期间持久层零写入」的证明；
+    /// 3. **房间触发**：位姿位移导致包围盒变化时，房间重算意图必须寄存进窗口
+    ///    （D1 不复活）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_transform_routes_pointer_updates_through_the_journal() {
+        let root = RefnoEnum::from(refu(777001));
+        let equi = RefnoEnum::from(refu(777002));
+        let root_pe = root.to_pe_key();
+        let equi_pe = equi.to_pe_key();
+        let equi_inst = equi.to_inst_relate_key();
+        let root_id = root_pe.trim_start_matches("pe:");
+        let equi_id = equi_pe.trim_start_matches("pe:");
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7986, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("create window");
+
+        // 窗口内已解析的暂存世界：EQUI 的名词表行带新 POS（解析写入后的形态），
+        // inst_relate 仍指旧 trans 记录——Transform 工作项拿到的正是这个状态。
+        // 几何侧一条 geo_relate → inst_geo（带 aabb 与 trans），让 AABB 刷新
+        // 有东西可算。
+        window
+            .staging_db()
+            .query(format!(
+                "UPSERT {root_pe} CONTENT {{ noun: 'SITE', deleted: false, refno: SITE:⟨{root_id}⟩ }};\
+                 UPSERT SITE:⟨{root_id}⟩ CONTENT {{ TYPE: 'SITE', NAME: '/ZZTR-ROOT' }};\
+                 UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: {root_pe}, refno: EQUI:⟨{equi_id}⟩ }};\
+                 UPSERT EQUI:⟨{equi_id}⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZTR-EQUI', POS: [1000.0, 0.0, 0.0] }};\
+                 CREATE trans:zztr_old SET d = {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }};\
+                 CREATE aabb:zztr_geo SET d = {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }};\
+                 CREATE inst_info:zztr_geo;\
+                 CREATE inst_geo:zztr_geo SET meshed = true, visible = true, aabb = aabb:zztr_geo;\
+                 RELATE inst_info:zztr_geo->geo_relate->inst_geo:zztr_geo \
+                     SET trans = trans:zztr_old, geo_type = 'Pos', visible = true;\
+                 RELATE {equi_pe}->{equi_inst}->inst_info:zztr_geo \
+                     SET world_trans = trans:zztr_old, aabb = aabb:zztr_geo, solid = true, generic = 'EQUI';"
+            ))
+            .await
+            .expect("plant staged fixture")
+            .check()
+            .expect("staged fixture applied");
+
+        let db_option = DbOption {
+            gen_spatial_tree: true,
+            ..Default::default()
+        };
+
+        window
+            .scope(refresh_world_transform_products(&db_option, &[equi]))
+            .await
+            .expect("暂存 Transform 必须全程只写暂存与 journal（SUL_DB 未连接，直写即错）");
+
+        // 1. journal：两笔写都在场。
+        let journal = window.journal().await;
+        let journal_sqls = journal.iter().map(|entry| &entry.sql).collect::<Vec<_>>();
+        assert!(
+            journal_sqls
+                .iter()
+                .any(|sql| sql.contains("INSERT IGNORE INTO trans")),
+            "trans 记录必须随 journal 写回: {journal_sqls:#?}"
+        );
+        let pointer_marker = format!("UPDATE {equi_inst} SET world_trans = trans:");
+        assert!(
+            journal_sqls.iter().any(|sql| sql.contains(&pointer_marker)),
+            "world_trans 指针 UPDATE 必须进 journal（修复前它直写持久层、journal 缺位）: \
+             {journal_sqls:#?}"
+        );
+
+        // 2. 暂存行改指新 trans 记录，且新指针在暂存世界可解引用。
+        let mut response = window
+            .staging_db()
+            .query(format!(
+                "RETURN record::id({equi_inst}.world_trans);\
+                 RETURN {equi_inst}.world_trans.d != NONE;"
+            ))
+            .await
+            .expect("read staged pointer")
+            .check()
+            .expect("valid staged pointer query");
+        let trans_id: Option<String> = response.take(0).expect("take trans id");
+        let resolvable: Option<bool> = response.take(1).expect("take resolvable");
+        let trans_id = trans_id.expect("staged inst_relate 必须有 world_trans 指针");
+        assert_ne!(trans_id, "zztr_old", "指针必须改指重算出的新 trans 记录");
+        assert_eq!(
+            resolvable,
+            Some(true),
+            "新指针必须指向暂存里存在的 trans 记录（D9 不悬空）"
+        );
+
+        // 3. 位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口。
+        let spatial = window.deferred_spatial().await;
+        assert_eq!(
+            spatial.room_changes.get(&equi),
+            Some(&"EQUI".to_string()),
+            "包围盒确实变了的位姿目标必须寄存房间变更: {:?}",
+            spatial.room_changes
+        );
+
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// 「回退即红」源码钉：变换产物刷新的函数体内不得出现 SUL_DB 直连，指针
+    /// 批量 UPDATE 必须经 execute_model_write 路由。函数嵌着窗口设施与实库
+    /// 查询、无法用纯函数钉住，与本文件其余源码钉同一手法（marker 用 `concat!`
+    /// 拼接，避免本测试自己的字面量先于真函数被命中）。
+    #[test]
+    fn transform_pointer_updates_route_through_execute_model_write() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!(
+                "pub(crate) async fn ",
+                "refresh_world_transform_products("
+            ))
+            .expect("refresh_world_transform_products 必须存在")
+            .1
+            .split_once(concat!("mod ", "transform_subtree_tests"))
+            .expect("函数体到下一个测试模块为止")
+            .0;
+        assert!(
+            !body.contains(concat!("SUL", "_DB")),
+            "变换产物刷新不得出现任何 SUL_DB 直连（2026-08-07 P0）"
+        );
+        assert!(
+            body.contains("execute_model_write"),
+            "world_trans 指针 UPDATE 必须经 execute_model_write 路由"
+        );
     }
 }
