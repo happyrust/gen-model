@@ -71,9 +71,6 @@ pub mod test;
 #[cfg(feature = "rvm_verify")]
 pub mod rvm_baseline;
 
-#[cfg(feature = "gui")]
-pub mod gui;
-
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 

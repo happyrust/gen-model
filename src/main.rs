@@ -12,8 +12,6 @@ extern crate nom;
 extern crate strum;
 
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-#[cfg(feature = "gui")]
-use aios_database::gui;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -53,14 +51,6 @@ use log::{LevelFilter, error};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
 
-#[cfg(feature = "gui")]
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    gui::run_gui();
-    Ok(())
-}
-
-#[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     run_app(None).await

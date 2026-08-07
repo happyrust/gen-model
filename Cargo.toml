@@ -10,7 +10,6 @@ path = "src/lib.rs"
 
 [features]
 default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
-gui = ["dep:gpui-component", "dep:gpui", "dep:story"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
 truck = []
 local = []
@@ -91,7 +90,6 @@ id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.29.3", features = ["serde", "rkyv"] }
 cached = "0.55.1"
 rkyv = { version = "0.7.45", features = ["hashbrown"] }
-rfd = { version = "0.15.1", features = ["async-std"] }
 
 
 #造型功能，先在database测试
@@ -127,11 +125,7 @@ simplelog = "0.12.2"
 downcast-rs = "1.2.0"
 flume = "0.11.0"
 rand = "0.9.0"
-rust-embed = "8"
 
-gpui = { git = "https://github.com/huacnlee/zed.git", branch = "webview", optional = true }
-story = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
-gpui-component = { git = "https://gitee.com/happydpc/gpui-compoents", optional = true }
 toml = "0.8.19"
 pollster = "0.4.0"
 async-std = "1.13.1"
