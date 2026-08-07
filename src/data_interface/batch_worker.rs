@@ -454,6 +454,22 @@ async fn execute_frozen_batch(
         cand.file_latest_sesno
     );
 
+    let state = crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await;
+    let preload_state = match state {
+        Ok(Some(state)) => {
+            window
+                .scope(crate::data_interface::staging::preload::preload_dbnum_state(&state))
+                .await
+        }
+        Ok(None) => Err(anyhow::anyhow!("dbnum={} 没有窗口前水位记录", job.dbnum)),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = preload_state {
+        warnings.push(format!("预载 DBNUM 水位失败: {error:#}"));
+        drop_window_and_sweep(window, "废弃暂存窗口失败", warnings).await;
+        return failed_window_result(job, warnings, "预载 DBNUM 水位失败");
+    }
+
     // 房间语义只属于「设计库 × 空间树开启」的窗口：SYST / CATA / DICT 是纯解析
     // 提交单元（ADR-017 §6），没有生成环节、不产出房间目标，面板映射的全表扫描
     // 与整张 `room_relate` 的工作集预载对它们是纯开销；`gen_spatial_tree` 关着时

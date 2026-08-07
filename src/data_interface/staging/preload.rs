@@ -35,6 +35,33 @@ impl ModelMutationPreload {
     }
 }
 
+/// Copy the authoritative state captured before entering the staged read context.
+pub(crate) async fn preload_dbnum_state(
+    state: &crate::data_interface::dbnum_state::DbnumState,
+) -> anyhow::Result<()> {
+    if super::active_staging_writes().is_none() {
+        return Ok(());
+    }
+    let string = |value: &str| serde_json::to_string(value).expect("DBNUM strings serialize");
+    crate::surreal_retry::execute_generation_preload(
+        &format!(
+            "CREATE dbnum_watermark:{dbnum} SET dbnum={dbnum}, owner_project={owner}, \
+             db_type={db_type}, file_name={file_name}, file_path={file_path}, file_size={file_size}, \
+             file_latest_sesno={file_latest}, applied_sesno={applied}, sesno={applied};",
+            dbnum = state.dbnum,
+            owner = string(&state.owner_project),
+            db_type = string(&state.db_type),
+            file_name = string(&state.file_name),
+            file_path = string(&state.file_path),
+            file_size = state.file_size,
+            file_latest = state.file_latest_sesno,
+            applied = state.applied_sesno,
+        ),
+        "preload dbnum_watermark",
+    )
+    .await
+}
+
 /// 只读地解析闭包：不碰暂存库，可以在持锁之前跑。
 pub(crate) async fn plan_model_mutation_preload(
     roots: &[RefnoEnum],
@@ -573,6 +600,36 @@ fn render_preload_value(value: &surrealdb::sql::Value) -> String {
 mod tests {
     use super::*;
     use crate::data_interface::staging::ResourceThresholds;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_window_sees_the_persistent_watermark() {
+        let instance = connect("mem://").await.expect("staging mem");
+        let window = create_window_on(&instance, 7999, 43, 43, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let state = crate::data_interface::dbnum_state::DbnumState {
+            dbnum: 7999,
+            applied_sesno: 42,
+            initialized: true,
+            ..Default::default()
+        };
+        window
+            .scope(preload_dbnum_state(&state))
+            .await
+            .expect("preload watermark");
+
+        let mut response = window
+            .staging_db()
+            .query("RETURN dbnum_watermark:7999.applied_sesno;")
+            .await
+            .expect("inspect watermark");
+        assert_eq!(
+            response.take::<Option<i32>>(0).expect("watermark"),
+            Some(42)
+        );
+        assert!(window.journal().await.is_empty());
+        window.drop_database().await.expect("cleanup");
+    }
     use crate::data_interface::staging::lifecycle::create_window_on;
     use surrealdb::engine::any::connect;
 
