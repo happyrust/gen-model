@@ -19,7 +19,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-batt",
@@ -151,7 +151,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-extr",
@@ -207,7 +207,7 @@
     "room": "R310",
     "panel": "24381_34871",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-gensec",
@@ -427,7 +427,7 @@
     "room": "R311",
     "panel": "24381_34894",
     "mode": "relative_position",
-    "coverage": "pending"
+    "coverage": "verified"
   },
   {
     "id": "noun-strt",
