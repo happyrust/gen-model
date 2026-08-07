@@ -299,10 +299,20 @@ async fn parse_ancestor_element(
 /// 把闭包装载进暂存（StagingOnly，不进 journal）。窗口外是无操作。
 ///
 /// 渲染与 `ensure_cata_refnos_parsed` 同一套函数（`att.pe().gen_sur_json` /
-/// `att.gen_sur_json` / `att.gen_sur_json_uda`），保证与解析层落库形状同构
-/// （R1 的对策）。链边只写「子 → owner」一条（owner 成员块里该子的真实槽位），
-/// `record::exists` 守卫幂等——**不做** OwnerReplace 整块替换：那会把本窗口
+/// `att.gen_sur_json_exclude` / `att.gen_sur_json_uda`），保证与解析层落库形状
+/// 同构（R1 的对策）。链边只写「子 → owner」一条（owner 成员块里该子的真实槽位），
+/// 守卫盖住边的两套身份（见下）——**不做** OwnerReplace 整块替换：那会把本窗口
 /// 解析已写的成员块回退成文件态之外的形状。
+///
+/// **名词表行用 `UPSERT … MERGE` 补齐，不用 `INSERT IGNORE`**（2026-08-08 实机
+/// 7997@194 复盘）：Modified 元素的窗口主数据落库是
+/// `UPSERT {noun}:{id} MERGE {只含本会话改动的属性}`——持久层上它合并进完整旧行，
+/// 而在空白暂存库里它**从无到有创建出残行**（只有改动属性，无 TYPE/NAME/未变属性）。
+/// `INSERT IGNORE` 会原样保留这条残行，窗口内的 ancestor/transform 读取把缺失的
+/// ORI/POS 当默认值——正是 W1 要治的静默错模型，只是从祖先挪到了目标自己。
+/// MERGE 补齐是安全的：预载属性表与窗口语句出自**同一份文件字节**（逐元素 sesno
+/// 封口保证快照不越过窗口终点），重叠字段的值恒等，被本会话删除的属性不在解析
+/// 属性表里、MERGE 不会碰它写下的 null——补的只有缺失字段，不回退任何窗口新态。
 pub(crate) async fn apply_ancestor_preload(
     closure: &AncestorClosure,
     dbnum: u32,
@@ -317,7 +327,7 @@ pub(crate) async fn apply_ancestor_preload(
         .collect();
 
     let mut pe_jsons = Vec::with_capacity(closure.elements.len());
-    let mut att_by_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut att_statements = Vec::with_capacity(closure.elements.len());
     let mut uda_jsons = Vec::new();
     let mut edge_statements = Vec::new();
     for element in &closure.elements {
@@ -330,10 +340,15 @@ pub(crate) async fn apply_ancestor_preload(
         );
         let pe_key = element.refno.to_pe_key();
         pe_jsons.push(att.pe(dbnum as i32).gen_sur_json(Some(pe_key.clone())));
-        let att_json = att.gen_sur_json().ok_or_else(|| {
+        // MERGE 目标不许带 id 字段；键形制与 pe.refno 链接同源（to_table_key），
+        // 保证补的就是链接指向的那一条。
+        let att_json = att.gen_sur_json_exclude(&["id"], None).ok_or_else(|| {
             anyhow::anyhow!("祖先 {} 的名词表行渲染失败", element.refno.to_pe_key())
         })?;
-        att_by_table.entry(noun.to_string()).or_default().push(att_json);
+        att_statements.push(format!(
+            "UPSERT {} MERGE {att_json};",
+            element.refno.to_table_key(noun)
+        ));
         if let Some(json) = att.gen_sur_json_uda(&[]) {
             uda_jsons.push(aios_core::helper::normalize_sql_string(&json));
         }
@@ -359,8 +374,18 @@ pub(crate) async fn apply_ancestor_preload(
                 })?;
             let owner_key = element.owner.to_pe_key();
             let edge_id = format!("pe_owner:[{owner_key}, {slot}]");
+            // 幂等守卫必须盖住这条边的**两套身份**（docs/2026-08-06_pe-owner-uniqueness-fix-audit.md）：
+            // 记录 id 是 `[owner, 槽位]`，唯一索引 `unique_pe_owner` 是 `(in, out)`。房间/
+            // 产物预载从持久层拷来的旧边可能停在**旧槽位**（成员表此后增删过），只查 id
+            // 会带着文件态的新槽位撞唯一索引——2026-08-08 实机 7997@194 的整批 fail-closed
+            // 即此。逻辑边已在（任意槽位）或目标槽位被别的成员占着（陈旧持久态）都跳过
+            // 不写：链的正确性押在 pe 行的 owner 字段上（[`validate_ancestor_preload`] 验的
+            // 正是它），这条边只是窗口内的一致性补充，且预载绝不改写窗口前旧态。
+            // `(in, out)` 探针走 `unique_pe_owner` 索引（同审计文档实测），不扫全表。
             edge_statements.push(format!(
-                "IF !record::exists({edge_id}) {{ RELATE {pe_key}->{edge_id}->{owner_key}; }};"
+                "IF !record::exists({edge_id}) AND array::len((SELECT VALUE id FROM pe_owner \
+                 WHERE in = {pe_key} AND out = {owner_key} LIMIT 1)) == 0 \
+                 {{ RELATE {pe_key}->{edge_id}->{owner_key}; }};"
             ));
         }
     }
@@ -374,15 +399,13 @@ pub(crate) async fn apply_ancestor_preload(
         .await?;
         written += chunk.len();
     }
-    for (table, jsons) in &att_by_table {
-        for chunk in jsons.chunks(INSERT_CHUNK) {
-            crate::surreal_retry::execute_generation_preload(
-                &format!("INSERT IGNORE INTO {table} [{}];", chunk.join(",")),
-                "preload ancestor attributes",
-            )
-            .await?;
-            written += chunk.len();
-        }
+    for chunk in att_statements.chunks(INSERT_CHUNK) {
+        crate::surreal_retry::execute_generation_preload(
+            &chunk.join("\n"),
+            "preload ancestor attributes",
+        )
+        .await?;
+        written += chunk.len();
     }
     for chunk in uda_jsons.chunks(INSERT_CHUNK) {
         crate::surreal_retry::execute_generation_preload(
@@ -405,7 +428,7 @@ pub(crate) async fn apply_ancestor_preload(
         closure.seed_hops.len(),
         closure.elements.len(),
         pe_jsons.len(),
-        att_by_table.values().map(Vec::len).sum::<usize>(),
+        att_statements.len(),
         uda_jsons.len(),
         edge_statements.len()
     );
@@ -688,6 +711,9 @@ mod tests {
                     && !entry.sql.contains("INSERT IGNORE INTO ZONE")
                     && !entry.sql.contains("INSERT IGNORE INTO SITE")
                     && !entry.sql.contains("INSERT IGNORE INTO WORL")
+                    && !entry.sql.contains("UPSERT ZONE:")
+                    && !entry.sql.contains("UPSERT SITE:")
+                    && !entry.sql.contains("UPSERT WORL:")
                     && !entry.sql.contains("RELATE pe:")
                     || entry.sql.contains("INSERT IGNORE INTO trans"),
                 "祖先预载行不得进 journal（StagingOnly）: {}",
@@ -881,6 +907,143 @@ mod tests {
             .await
             .expect_err("成员表不含子必须失败");
         assert!(error.to_string().contains("成员表不含"), "{error:#}");
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// 实机 7997@194 复盘钉（2026-08-08）：房间/产物预载会把持久层的旧链边
+    /// （**旧槽位**）拷进暂存，祖先预载随后按**文件**槽位渲染同一条逻辑边——守卫
+    /// 必须盖住 `(in, out)` 这套身份。只查记录 id 的旧守卫会带着新槽位撞
+    /// `unique_pe_owner`，整批 fail-closed（水位不动、窗口废弃，但这批模型工作
+    /// 永远开不了工）。修后：逻辑边已在（任意槽位）→ 跳过不写、不重槽、不报错；
+    /// 链上其余缺失的边照常补齐；owner 字段正确性验证不受影响。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_edge_parked_at_an_old_slot_is_skipped_not_a_unique_index_hit() {
+        let (map, worl, equi) = world_chain(786500);
+        let closure = resolve_ancestor_closure(&[equi], worl, 3, lookup_from(map))
+            .await
+            .expect("resolve ancestor closure");
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7976, 3, 3, ResourceThresholds::default())
+            .await
+            .expect("create window");
+
+        // 模拟房间/产物预载从持久层拷来的旧态：SITE→WORL 的逻辑边停在旧槽位 7
+        //（文件态里它在槽位 0——WORL 成员表只有这一个 SITE）。
+        let site_key = refu(786502).to_pe_key();
+        let worl_key = refu(786501).to_pe_key();
+        window
+            .staging_db()
+            .query(format!(
+                "INSERT RELATION INTO pe_owner [{{ id: pe_owner:[{worl_key}, 7], \
+                 in: {site_key}, out: {worl_key} }}];"
+            ))
+            .await
+            .expect("plant stale edge")
+            .check()
+            .expect("stale edge planted");
+
+        window
+            .scope(async {
+                apply_ancestor_preload(&closure, 7976).await?;
+                validate_ancestor_preload(&closure).await
+            })
+            .await
+            .expect("逻辑边已在（旧槽位）时预载必须跳过而不是撞 unique_pe_owner");
+
+        // 旧边原样保留在槽位 7、文件槽位 0 没被重写；(site, worl) 只此一条；
+        // 链上其余缺失的边（EQUI→ZONE、ZONE→SITE）照常补齐。
+        let mut response = window
+            .staging_db()
+            .query(format!("RETURN record::exists(pe_owner:[{worl_key}, 7]);"))
+            .query(format!("RETURN record::exists(pe_owner:[{worl_key}, 0]);"))
+            .query(format!(
+                "RETURN array::len((SELECT VALUE id FROM pe_owner \
+                 WHERE in = {site_key} AND out = {worl_key}));"
+            ))
+            .query("RETURN array::len((SELECT VALUE id FROM pe_owner));")
+            .await
+            .expect("probe edges")
+            .check()
+            .expect("valid edge probe");
+        let stale_kept: Option<bool> = response.take(0).expect("stale slot probe");
+        let file_slot_written: Option<bool> = response.take(1).expect("file slot probe");
+        let logical_edges: Option<i64> = response.take(2).expect("logical pair count");
+        let total_edges: Option<i64> = response.take(3).expect("total edge count");
+        assert_eq!(stale_kept, Some(true), "旧槽位边必须原样保留");
+        assert_eq!(
+            file_slot_written,
+            Some(false),
+            "文件槽位不得重写（预载不改写窗口前旧态）"
+        );
+        assert_eq!(logical_edges, Some(1), "(in, out) 这条逻辑边只许有一条");
+        assert_eq!(
+            total_edges,
+            Some(3),
+            "EQUI→ZONE、ZONE→SITE 两条缺边照常补齐 + 旧边一条 = 3"
+        );
+        window.drop_database().await.expect("cleanup");
+    }
+
+    /// 实机 7997@194 复盘钉（2026-08-08，第二层）：Modified 元素的窗口主数据落库
+    /// 是 `UPSERT {noun}:{id} MERGE {只含本会话改动的属性}`——持久层上它合并进完整
+    /// 旧行，在空白暂存库里它**从无到有创建出残行**（无 TYPE/NAME/未变属性）。
+    /// 预载必须 MERGE 补齐缺失字段而不是 INSERT IGNORE 跳过：跳过的话
+    /// `pe.refno.TYPE` 解引用为 NONE（完整性验证响亮失败、整批不开工），而未变的
+    /// ORI/POS 会被窗口内读取当默认值——静默错模型从祖先挪到目标自己。
+    /// 补齐同时不得动窗口写下的新值（同一份文件字节 + sesno 封口，值恒等）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partial_noun_row_from_the_window_merge_is_backfilled_not_ignored() {
+        let (map, worl, equi) = world_chain(787500);
+        let closure = resolve_ancestor_closure(&[equi], worl, 3, lookup_from(map))
+            .await
+            .expect("resolve ancestor closure");
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7974, 3, 3, ResourceThresholds::default())
+            .await
+            .expect("create window");
+
+        // 窗口主数据先落了 Modified 残行：只有本会话的新 POS，没有 TYPE/NAME
+        //（与 pdms_io `to_modify_surql` 的真实形状同构）。
+        let equi_key = refu(787504).to_table_key("EQUI");
+        window
+            .staging_db()
+            .query(format!(
+                "UPSERT {equi_key} MERGE {{ POS: [1000.0, 0.0, 0.0] }};"
+            ))
+            .await
+            .expect("plant partial noun row")
+            .check()
+            .expect("partial row planted");
+
+        window
+            .scope(async {
+                apply_ancestor_preload(&closure, 7974).await?;
+                validate_ancestor_preload(&closure).await
+            })
+            .await
+            .expect("残行必须被 MERGE 补齐，验证必须通过");
+
+        let mut response = window
+            .staging_db()
+            .query(format!("RETURN {equi_key}.TYPE;"))
+            .query(format!("RETURN {equi_key}.NAME;"))
+            .query(format!("RETURN {equi_key}.POS;"))
+            .await
+            .expect("probe backfilled row")
+            .check()
+            .expect("valid backfill probe");
+        let noun_type: Option<String> = response.take(0).expect("TYPE");
+        let name: Option<String> = response.take(1).expect("NAME");
+        let pos: Vec<f64> = response.take(2).expect("POS");
+        assert_eq!(noun_type.as_deref(), Some("EQUI"), "TYPE 必须被补齐");
+        assert_eq!(name.as_deref(), Some("/ZZAP-EQUI"), "NAME 必须被补齐");
+        assert_eq!(
+            pos,
+            vec![1000.0, 0.0, 0.0],
+            "窗口写下的 POS 新值必须原样在场"
+        );
         window.drop_database().await.expect("cleanup");
     }
 

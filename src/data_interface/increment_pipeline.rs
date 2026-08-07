@@ -745,14 +745,7 @@ impl IncrementPipeline {
         )
         .await?;
         // OWNER 搬迁的定点 anc/zone_refno 重算与水位共命运（窗口回滚则重放）。
-        let moved = Self::moved_refnos(&range_eles);
-        if !moved.is_empty() {
-            println!(
-                "IncrementPipeline: {} 个元素发生 OWNER 搬迁，提交尾重算其子树 anc/zone_refno",
-                moved.len()
-            );
-            window_statements.extend(Self::render_anc_repair_statements(&moved));
-        }
+        window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
 
         // One final transaction publishes this window's delivery-status updates,
         // establishes durable model work, advances the watermark and removes the
@@ -809,6 +802,33 @@ impl IncrementPipeline {
             },
             warnings,
         ))
+    }
+
+    /// 本窗口的 OWNER 搬迁 anc/zone_refno 定点重算语句（进收口尾事务）。
+    ///
+    /// **只对 DESI 窗口渲染**（与 [`Self::datacenter_statements`] 同门，
+    /// 2026-08-07 审核 P2）：`anc` 物化的是设计元素祖先链，CATA/SYST 元素的
+    /// refno 不会出现在任何 anc 里——对它们渲染出的每条 UPDATE 都是收口事务里
+    /// 的一次空转子查询扫描（目录重组一次搬上千元素时把收口拖慢一个量级）；
+    /// 且这些语句对 `fn::anc_u64` 的硬依赖只受 DESI 批次预检
+    /// （[`desi_finalize_preflight`]）保护，非 DESI 窗口渲染它们等于把
+    /// 「函数缺失不炸」押在「空集不求值」这个引擎细节上。
+    fn anc_repair_statements_for_window(
+        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+        db_type: &str,
+    ) -> Vec<String> {
+        if db_type != "DESI" {
+            return Vec::new();
+        }
+        let moved = Self::moved_refnos(range_eles);
+        if moved.is_empty() {
+            return Vec::new();
+        }
+        println!(
+            "IncrementPipeline: {} 个元素发生 OWNER 搬迁，提交尾重算其子树 anc/zone_refno",
+            moved.len()
+        );
+        Self::render_anc_repair_statements(&moved)
     }
 
     /// 本窗口里发生 OWNER 搬迁的元素（`ChangeBucket::Moved` 口径）。
@@ -2438,6 +2458,39 @@ mod datacenter_tests {
         )]);
         assert!(IncrementPipeline::moved_refnos(&range).is_empty());
         assert!(IncrementPipeline::render_anc_repair_statements(&[]).is_empty());
+    }
+
+    /// P2（2026-08-07 审核）：anc 修复只对 DESI 窗口渲染——CATA/SYST/DICT 元素的
+    /// refno 不会出现在任何 anc 里，渲出来的 UPDATE 全是收口事务里的空转子查询
+    /// 扫描（目录重组一次搬上千元素时把收口拖慢一个量级），且其 `fn::anc_u64`
+    /// 依赖只受 DESI 预检保护。回退（去掉 db_type 门）即红。
+    #[test]
+    fn anc_repair_is_rendered_for_desi_windows_only() {
+        use aios_core::NamedAttrValue;
+
+        let mut op = modified("PIPE");
+        if let EleOperationDetail::Modified(m) = &mut op.detail {
+            m.modified_attrs.insert(
+                "OWNER".into(),
+                (
+                    NamedAttrValue::RefU64Type(RefU64((7997u64 << 32) | 10)),
+                    NamedAttrValue::RefU64Type(RefU64((7997u64 << 32) | 20)),
+                ),
+            );
+        }
+        let range = BTreeMap::from([(1u32, vec![op])]);
+
+        assert_eq!(
+            IncrementPipeline::anc_repair_statements_for_window(&range, "DESI").len(),
+            2,
+            "DESI 窗口的搬迁必须渲出 inst_relate/tubi_relate 各一条重算"
+        );
+        for db_type in ["CATA", "SYST", "DICT"] {
+            assert!(
+                IncrementPipeline::anc_repair_statements_for_window(&range, db_type).is_empty(),
+                "{db_type} 窗口不得渲染 anc 修复语句（anc 只含 DESI 链）"
+            );
+        }
     }
 }
 

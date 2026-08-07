@@ -250,3 +250,10 @@ W1 与 W2 已落地（`staging/ancestor_preload.rs` + `preload.rs` 分桶改造 
    的待重试单元与级联派生根，其祖先仍由 CATA/DESI 惰性闭包顺带解析兜住
    （W2 原文「行为不变，职责声明变」的字面执行）；把它们也纳入显式预载 +
    验证属后续收紧项。
+4. **两桶重叠排除（2026-08-07 审核修复 P1）**：Transform 子树与 Delete 子树
+   **重叠**的节点不进祖先解析种子（`plan_model_mutation_preload` 按 delete
+   子树排除；产物仍留在锁范围/拷贝范围里由删除级联清理）。此前「挪容器 +
+   同窗删其下带产物构件」会让种子含已从文件索引消失的元素——解析断链整批
+   fail-closed，且重排**不自愈**（扩窗吸收不会让被删元素回到文件索引，该
+   dbnum 永久阻塞）。钉子：
+   `overlapping_delete_subtree_nodes_never_become_ancestor_seeds`。

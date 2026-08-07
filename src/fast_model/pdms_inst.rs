@@ -340,6 +340,13 @@ pub(crate) async fn resolve_inst_meta_on(
         let mut cursor = seed;
         loop {
             let Some(Some(meta)) = cache.get(&cursor).cloned() else {
+                // 全量入库刻意不保存 WORL 行（database.rs 的 ignore_world_refno），
+                // 但元素的 owner 仍指向 ref1=0 的 WORL；旧 fn::ancestor 会把这个
+                // record 链接保留在 anc 后自然到顶。这里保持同一语义。
+                if cursor.get_1() == 0 {
+                    chain.push(cursor.0);
+                    break;
+                }
                 // owner 字段指向的行不存在：这不是「到顶」，是断链。W1 之后暂存
                 // 里生成根的闭包与祖先都应在场，缺 = 预载被破坏；直写模式缺 =
                 // 持久层数据损坏。宁可响亮失败进重试，也不烘一个错值进 journal。
@@ -1169,6 +1176,30 @@ mod inst_meta_tests {
             .await
             .expect_err("断链必须失败");
         assert!(error.to_string().contains("断裂"), "{error:#}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_omitted_world_row_still_terminates_the_chain() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta")
+            .use_db("omitted_world")
+            .await
+            .expect("use db");
+        db.query(
+            "UPSERT pe:24384_23823 CONTENT { noun: 'BEND', owner: pe:16192_0, dbnum: 8000, sesno: 73 };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seeded");
+
+        let bend = RefnoEnum::from(RefU64((24384u64 << 32) | 23823));
+        let meta = resolve_inst_meta_on(&db, None, &[bend])
+            .await
+            .expect("省略的 WORL 行必须按全量入库契约到顶")
+            .remove(&bend.refno())
+            .expect("meta");
+        assert_eq!(meta.anc, vec![bend.refno().0, RefU64(16192u64 << 32).0]);
     }
 
     /// 与旧 fn:: 对缺行的语义一致：seed 自己的行不在 → 空态渲染

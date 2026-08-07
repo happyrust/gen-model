@@ -40,7 +40,7 @@
 |---|---|---|---|
 | `render_finalize_tail`（水位 / durable pending / attempts 清除 / 空间意图 / revision 收口） | 固定 id 语句 | 无 | — |
 | datacenter 状态语句（`resolve_datacenter_statements_with`） | **W3 起**固定目标 id 纯 UPDATE | 无（回退即红钉：`resolved_statements_carry_no_server_side_walks`） | — |
-| `render_anc_repair_statements`（OWNER 搬迁的 anc/zone_refno 子树定点重算，P1） | `UPDATE (SELECT … WHERE anc CONTAINS n) SET anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE')` | **`fn::anc_u64` + `fn::find_ancestor_type`** | **剩余唯一收口硬依赖**。提交时对持久层重算是它的设计选择（受影响行集只在重放后可枚举）；预检探针已对准它 |
+| `render_anc_repair_statements`（OWNER 搬迁的 anc/zone_refno 子树定点重算，P1） | `UPDATE (SELECT … WHERE anc CONTAINS n) SET anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE')` | **`fn::anc_u64` + `fn::find_ancestor_type`** | **剩余唯一收口硬依赖**。提交时对持久层重算是它的设计选择（受影响行集只在重放后可枚举）；预检探针已对准它。仅出现在含搬迁的 **DESI** 窗口（2026-08-07 审核修复 P2：非 DESI 窗口不再渲染，消费者范围与 DESI 预检的保护范围自此对齐） |
 
 ### 2.3 非收口路径（缺函数不卡水位）
 

@@ -47,8 +47,9 @@ impl ModelMutationPreload {
         &self.model_refnos
     }
 
-    /// Transform 子树里带模型产物的节点——祖先解析式预载的种子（删除子树的
-    /// 节点已从文件消失，解析必败，刻意不在此列）。
+    /// Transform 子树里带模型产物的节点——祖先解析式预载的种子。删除子树覆盖的
+    /// 节点（含两桶重叠的部分）刻意不在此列：被删元素已从文件消失，解析必败且
+    /// 重排不自愈；其产物由删除级联清理（2026-08-07 审核 P1）。
     pub(crate) fn transform_model_refnos(&self) -> &[RefnoEnum] {
         &self.transform_model_refnos
     }
@@ -118,19 +119,23 @@ async fn plan_model_mutation_preload_from(
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
+    let delete_scope = delete_subtree
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    // Transform 子树与 Delete 子树重叠的节点不进祖先解析种子（2026-08-07 审核 P1）：
+    // 被删元素已从文件 refno 索引消失，交给 ancestor_preload 解析必然「祖先链断裂」
+    // 整批 fail-closed，且重排不自愈——扩窗吸收不会让被删元素回到文件索引。
+    // 它们的产物仍在 model_refnos（锁范围与拷贝范围）里，由删除级联清理。
     let transform_model_refnos = model_refnos
         .iter()
         .copied()
-        .filter(|refno| transform_scope.contains(refno))
+        .filter(|refno| transform_scope.contains(refno) && !delete_scope.contains(refno))
         .collect::<Vec<_>>();
 
     let delete_hierarchy = if delete_targets.is_empty() {
         Vec::new()
     } else {
-        let delete_scope = delete_subtree
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
         let mut hierarchy_seeds = model_refnos
             .iter()
             .copied()
@@ -900,6 +905,60 @@ mod tests {
         );
         assert!(window.journal().await.is_empty());
         window.drop_database().await.expect("cleanup");
+    }
+
+    /// P1 修复钉（2026-08-07 审核）：Transform 子树与 Delete 子树**重叠**的节点
+    /// 不得进祖先解析种子桶。
+    ///
+    /// 场景：容器只有纯位姿变更（Transform 目标），其子树里某个带产物的后代在
+    /// 同一窗口被删（DeleteCleanup 目标）。子树按窗口前持久态遍历，被删节点
+    /// 仍在场且带产物——不排除的话它会进 `ancestor_seed_refnos`，而被删元素
+    /// 已从文件 refno 索引消失，`ancestor_preload` 解析必然「祖先链断裂」，
+    /// 整批 fail-closed；水位不动 → 重排同一窗口 → 同样失败，扩窗吸收也不会
+    /// 让被删元素回到文件索引——该 dbnum 永久阻塞。
+    ///
+    /// 重叠节点的产物本就由删除级联清理，Transform 刷它们无意义；但它必须留在
+    /// `model_refnos`（锁范围与产物拷贝范围）里——级联要清的正是它的产物。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_delete_subtree_nodes_never_become_ancestor_seeds() {
+        let source = connect("mem://").await.expect("source mem");
+        source
+            .use_ns("test")
+            .use_db("overlap_source")
+            .await
+            .expect("use source");
+        // 1 ← 2 ← 3（3 带产物）：1 是纯位姿 Transform 目标，2 在同窗被删。
+        source
+            .query(
+                "CREATE pe:⟨4000000001_1⟩ SET deleted=false; CREATE pe:⟨4000000001_2⟩ SET deleted=false;
+                 CREATE pe:⟨4000000001_3⟩ SET deleted=false;
+                 RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
+                 RELATE pe:⟨4000000001_3⟩->pe_owner->pe:⟨4000000001_2⟩;
+                 CREATE inst_info:i1; RELATE pe:⟨4000000001_3⟩->inst_relate->inst_info:i1;",
+            )
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture");
+
+        let plan = plan_model_mutation_preload_from(
+            &source,
+            &[RefnoEnum::from("4000000001/1")],
+            &[RefnoEnum::from("4000000001/2")],
+        )
+        .await
+        .expect("plan overlap preload");
+
+        assert_eq!(
+            plan.transform_model_refnos(),
+            &[] as &[RefnoEnum],
+            "Delete 子树覆盖的节点必须从祖先解析种子里排除（文件里已无从解析）"
+        );
+        assert_eq!(
+            plan.model_refnos(),
+            &[RefnoEnum::from("4000000001/3")],
+            "锁范围与产物拷贝仍要覆盖重叠节点——删除级联要清它的产物"
+        );
     }
 
     /// H-1 回归：改名「成为」合规房间的组不在窗口起点的预载范围里，结构触发预载要把

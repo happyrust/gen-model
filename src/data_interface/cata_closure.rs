@@ -213,19 +213,26 @@ impl InMemoryCataLocator {
     /// `ref0→dbnum` + `dbnum→(type, file)`。每个文件 index-only 解析（不解析属性）；
     /// 供离线校验 / 无库环境定位用。
     pub fn build_from_dir(project: &str, root_dir: &Path) -> Self {
-        Self::build_from_dir_matching(project, root_dir, |_| true)
+        Self::build_from_dir_matching(project, root_dir, |_| true, None)
     }
 
     fn build_cata_from_dir(project: &str, root_dir: &Path) -> Self {
-        Self::build_from_dir_matching(project, root_dir, |db_type| {
-            db_type.eq_ignore_ascii_case("CATA")
-        })
+        let mut cache = Ref0IndexCache::load(project);
+        let locator = Self::build_from_dir_matching(
+            project,
+            root_dir,
+            |db_type| db_type.eq_ignore_ascii_case("CATA"),
+            Some(&mut cache),
+        );
+        cache.save(project);
+        locator
     }
 
     fn build_from_dir_matching(
         project: &str,
         root_dir: &Path,
         include_type: impl Fn(&str) -> bool,
+        mut cache: Option<&mut Ref0IndexCache>,
     ) -> Self {
         let mut ref0_to_dbnum: HashMap<u32, u32> = HashMap::new();
         let mut dbnum_files: HashMap<u32, (String, String, PathBuf)> = HashMap::new();
@@ -255,16 +262,27 @@ impl InMemoryCataLocator {
             if !include_type(&header.db_type) {
                 continue;
             }
-            if let Some((dbnum, db_type, ref0s)) = scan_db_file(path, project) {
-                for r in ref0s {
-                    ref0_to_dbnum.insert(r, dbnum);
-                }
-                dbnum_files.entry(dbnum).or_insert((
-                    db_type,
-                    project.to_string(),
-                    path.to_path_buf(),
-                ));
+            let dbnum = header.db_no;
+            let fingerprint = file_fingerprint(path);
+            let ref0s = match cache.as_deref_mut() {
+                Some(cache) => match cache.get_if_fresh(dbnum, &fingerprint) {
+                    Some(ref0s) => ref0s.clone(),
+                    None => {
+                        let ref0s = scan_db_ref0s(path, project);
+                        cache.put(dbnum, fingerprint, ref0s.clone());
+                        ref0s
+                    }
+                },
+                None => scan_db_ref0s(path, project),
+            };
+            for ref0 in ref0s {
+                ref0_to_dbnum.insert(ref0, dbnum);
             }
+            dbnum_files.entry(dbnum).or_insert((
+                header.db_type,
+                project.to_string(),
+                path.to_path_buf(),
+            ));
         }
         Self::from_parts(ref0_to_dbnum, dbnum_files)
     }
@@ -358,33 +376,6 @@ fn scan_db_ref0s(path: &Path, project: &str) -> Vec<u32> {
         set.insert(entry.key().get_0());
     }
     set.into_iter().collect()
-}
-
-/// 读单个 db 文件一次，返回 `(dbnum, db_type, 该库 ref0 集)`；非 db 文件返回 `None`。
-fn scan_db_file(path: &Path, project: &str) -> Option<(u32, String, Vec<u32>)> {
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
-    let db_basic =
-        parse_pdms_db::parse::parse_file_db_basic_data(&path.to_path_buf(), &file_name, project)
-            .ok()?;
-    let info = parse_pdms_db::parse::parse_file_basic_info(&db_basic.bytes);
-    if info.db_no == 0 {
-        return None;
-    }
-    let mut set: HashSet<u32> = HashSet::new();
-    for (parent, children) in db_basic.children_map.iter() {
-        set.insert(parent.get_0());
-        for child in children.iter() {
-            set.insert(child.get_0());
-        }
-    }
-    for entry in db_basic.refno_table_map.iter() {
-        set.insert(entry.key().get_0());
-    }
-    Some((info.db_no, info.db_type, set.into_iter().collect()))
 }
 
 fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
@@ -1882,6 +1873,15 @@ mod tests {
         let loc = locator();
         assert_eq!(loc.ref0_count(), 3);
         assert_eq!(loc.dbnum_count(), 2);
+    }
+
+    #[test]
+    fn fallback_ref0_cache_reuses_only_an_unchanged_file() {
+        let mut cache = Ref0IndexCache::default();
+        cache.put(7320, "100:200".into(), vec![13244]);
+
+        assert_eq!(cache.get_if_fresh(7320, "100:200"), Some(&vec![13244]));
+        assert_eq!(cache.get_if_fresh(7320, "100:201"), None);
     }
 
     #[test]
