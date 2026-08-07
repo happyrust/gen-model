@@ -48,6 +48,64 @@ async fn apply_all(db: &Surreal<Any>, statements: &[String]) {
     }
 }
 
+/// 数据面逐表快照（T5.1 精简版探针的口径）：排除控制面白名单后，表名 → 该表
+/// 全部行的序列化文本。窗口计算**中途**对持久层做本快照的 diff，必须为空——
+/// 控制面（恢复记录、水位观察、队列控制、durable pending、side-effect pending）
+/// 是 I1 明文豁免的落库，不属于「窗口数据」。
+pub(crate) const CONTROL_PLANE_TABLES: [&str; 5] = [
+    "dbnum_watermark",
+    "increment_update_attempt",
+    "queue_control",
+    "model_update_pending",
+    "incr_side_effect_pending",
+];
+
+pub(crate) async fn snapshot_data_tables(
+    db: &Surreal<Any>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut response = db.query("INFO FOR DB").await.expect("info");
+    let info: surrealdb::Value = response.take(0).expect("take info");
+    let info_json = serde_json::to_value(&info).expect("serialize info");
+    let mut tables: Vec<String> = info_json
+        .pointer("/Object/tables/Object")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    tables.sort();
+
+    let mut out = std::collections::BTreeMap::new();
+    for table in tables {
+        if CONTROL_PLANE_TABLES.contains(&table.as_str()) {
+            continue;
+        }
+        let mut response = db
+            .query(format!("SELECT * FROM `{table}` ORDER BY id"))
+            .await
+            .expect("select table");
+        let rows: surrealdb::Value = response.take(0).expect("take rows");
+        out.insert(table, serde_json::to_string(&rows).expect("serialize rows"));
+    }
+    out
+}
+
+/// 两份数据面快照里内容不同（或只在一边存在）的表名集合。
+pub(crate) fn changed_data_tables(
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeSet<String> {
+    before
+        .iter()
+        .filter(|(table, rows)| after.get(*table) != Some(*rows))
+        .map(|(table, _)| table.clone())
+        .chain(
+            after
+                .keys()
+                .filter(|table| !before.contains_key(*table))
+                .cloned(),
+        )
+        .collect()
+}
+
 /// 逐表快照：INFO FOR DB 枚举表名，逐表 `SELECT * ORDER BY id` 后序列化拼接。
 /// 两个引擎、两条路径产出的文本相等 ⇔ 终态相等（serde 结构化序列化，F3 口径）。
 pub(crate) async fn snapshot_tables(db: &Surreal<Any>) -> String {
@@ -293,4 +351,172 @@ async fn mini_window_staged_write_back_equals_direct_write() {
         staged.contains("renamed") && staged.contains("R101") && staged.contains("applied_sesno"),
         "对拍对象不能是空集: {staged}"
     );
+}
+
+/// T5.1 精简版（2026-08-07 修复计划 W3）：**真实窗口设施**跑三种语句形态——
+/// 解析写（真实渲染 → journal）、Transform（`refresh_world_transform_products`）、
+/// regen 产物写（`execute_model_write`）——写回之前对「扮演持久层」的实例做
+/// 数据面快照 diff，必须为空；写回之后三种形态各自的见证表随 journal 一起收敛，
+/// 控制面水位不进数据面快照、但确实在尾事务里推进。
+///
+/// 与暂存 Transform 回归（`staged_transform_write_routing_tests`）互补：那条钉
+/// 单个函数的写路由；这条是机械防线——窗口调用树里**任何**函数漏接暂存路由，
+/// 要么打在刻意不连接的 `SUL_DB` 上当场报错，要么落在持久层实例上被中途 diff
+/// 抓住。live 版 T5.1（对真实 fork 服务器的执行中途快照）仍留在 P5。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
+    use super::lifecycle::create_window_on;
+    use super::resources::ResourceThresholds;
+    use super::{StagedFinalize, register_staged_finalize};
+    use crate::data_interface::increment_manager::refresh_world_transform_products;
+    use crate::data_interface::increment_pipeline::IncrementPipeline;
+    use aios_core::options::DbOption;
+    use aios_core::{NamedAttrValue, RefU64, RefnoEnum};
+    use parse_pdms_db::parse::EleData;
+    use pdms_io::io::{EleOperationData, EleOperationDetail};
+    use std::collections::BTreeMap;
+
+    const DBNUM: u32 = 7985;
+    // 保留段，序号避开其它夹具——GLOBAL_AABB_TREE 是进程级共享。
+    let refu = |n: u64| RefU64((4000000001u64 << 32) | n);
+    let root = RefnoEnum::from(refu(778001));
+    let equi = RefnoEnum::from(refu(778002));
+    let added = refu(778003);
+    let root_pe = root.to_pe_key();
+    let equi_pe = equi.to_pe_key();
+    let equi_inst = equi.to_inst_relate_key();
+    let root_id = root_pe.trim_start_matches("pe:").to_string();
+    let equi_id = equi_pe.trim_start_matches("pe:").to_string();
+
+    // 基线：设计行（owner 链 + 已带新 POS 的名词表行）+ 既有产物（旧 trans /
+    // aabb / inst_relate / geo）。target 与 staging 同源种入（T0.6 的 base /
+    // preload 纪律）。
+    let fixture = format!(
+        "UPSERT {root_pe} CONTENT {{ noun: 'SITE', deleted: false, refno: SITE:⟨{root_id}⟩ }};\
+         UPSERT SITE:⟨{root_id}⟩ CONTENT {{ TYPE: 'SITE', NAME: '/ZZPR-ROOT' }};\
+         UPSERT {equi_pe} CONTENT {{ noun: 'EQUI', deleted: false, owner: {root_pe}, refno: EQUI:⟨{equi_id}⟩ }};\
+         UPSERT EQUI:⟨{equi_id}⟩ CONTENT {{ TYPE: 'EQUI', NAME: '/ZZPR-EQUI', POS: [2000.0, 0.0, 0.0] }};\
+         UPSERT trans:zzpr_old CONTENT {{ d: {{ translation: [0.0, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0] }} }};\
+         UPSERT aabb:zzpr_geo CONTENT {{ d: {{ mins: [0.0, 0.0, 0.0], maxs: [100.0, 100.0, 100.0] }} }};\
+         UPSERT inst_info:zzpr_geo CONTENT {{ dbnum: {DBNUM} }};\
+         UPSERT inst_geo:zzpr_geo CONTENT {{ meshed: true, visible: true, aabb: aabb:zzpr_geo }};\
+         INSERT RELATION INTO geo_relate [{{ id: geo_relate:zzpr_geo, in: inst_info:zzpr_geo, out: inst_geo:zzpr_geo, trans: trans:zzpr_old, geo_type: 'Pos', visible: true }}];\
+         INSERT RELATION INTO inst_relate [{{ id: {equi_inst}, in: {equi_pe}, out: inst_info:zzpr_geo, world_trans: trans:zzpr_old, aabb: aabb:zzpr_geo, solid: true, generic: 'EQUI' }}];"
+    );
+
+    let target = fresh_db("probe", "probe_persistent").await;
+    init_staging_schema(&target).await.expect("target schema");
+    apply_all(
+        &target,
+        &[
+            fixture.clone(),
+            format!("UPSERT dbnum_watermark:{DBNUM} SET dbnum = {DBNUM}, applied_sesno = 1;"),
+        ],
+    )
+    .await;
+    let baseline = snapshot_data_tables(&target).await;
+
+    let instance = connect("mem://").await.expect("staging mem boots");
+    let mut window = create_window_on(&instance, DBNUM, 2, 2, ResourceThresholds::default())
+        .await
+        .expect("create window");
+    window
+        .staging_db()
+        .query(&fixture)
+        .await
+        .expect("preload transport")
+        .check()
+        .expect("preload applied");
+
+    // 形态一：解析写（真实渲染管线，进 journal）。
+    let mut ele = EleData::default();
+    ele.refno = added;
+    ele.owner = equi.refno();
+    let map = &mut ele.whole_attmap.attmap.map;
+    map.insert("REFNO".to_string(), NamedAttrValue::RefU64Type(added));
+    map.insert(
+        "OWNER".to_string(),
+        NamedAttrValue::RefU64Type(equi.refno()),
+    );
+    map.insert(
+        "TYPE".to_string(),
+        NamedAttrValue::StringType("BOX".to_string()),
+    );
+    map.insert(
+        "NAME".to_string(),
+        NamedAttrValue::StringType("/ZZPR-NEW-BOX".to_string()),
+    );
+    map.insert(
+        "DBNUM".to_string(),
+        NamedAttrValue::IntegerType(DBNUM as i32),
+    );
+    let range = BTreeMap::from([(
+        2u32,
+        vec![EleOperationData::new(added, 2, EleOperationDetail::Add(ele))],
+    )]);
+    let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, DBNUM)
+        .await
+        .expect("stage parsed window");
+    assert!(staged > 0, "解析必须检测到变化并进 journal");
+
+    // 形态二 + 三：Transform 产物刷新与 regen 形态的产物写，全在窗口读写上下文内。
+    let db_option = DbOption {
+        gen_spatial_tree: true,
+        ..Default::default()
+    };
+    window
+        .scope(async {
+            refresh_world_transform_products(&db_option, &[equi]).await?;
+            crate::surreal_retry::execute_model_write(
+                &format!("INSERT IGNORE INTO inst_info {{ id: inst_info:zzpr_new, dbnum: {DBNUM} }};"),
+                "probe regen product",
+            )
+            .await?;
+            register_staged_finalize(StagedFinalize {
+                dbnum: DBNUM,
+                end_sesno: 2,
+                plan: Default::default(),
+                window_statements: Vec::new(),
+                cache_refnos: Vec::new(),
+            })
+            .await
+        })
+        .await
+        .expect("窗口计算全程不得触碰持久层（SUL_DB 未连接，直写即错）");
+
+    // T5.1 探针本体：写回之前，持久层数据面与基线一字不差。
+    let mid = snapshot_data_tables(&target).await;
+    assert_eq!(
+        changed_data_tables(&baseline, &mid),
+        std::collections::BTreeSet::new(),
+        "I1 零落盘：窗口计算中途持久层数据面必须与基线一字不差"
+    );
+
+    window
+        .commit_registered_to(&target)
+        .await
+        .expect("staged write-back");
+    window.drop_database().await.expect("cleanup");
+
+    // 写回之后：三种形态各自的见证表随 journal 收敛。
+    let after = snapshot_data_tables(&target).await;
+    let changed = changed_data_tables(&baseline, &after);
+    for witness in ["pe", "trans", "aabb", "inst_relate", "inst_info"] {
+        assert!(
+            changed.contains(witness),
+            "{witness} 必须随写回收敛（解析 / Transform / regen 产物各留见证）: {changed:?}"
+        );
+    }
+    assert!(
+        !after.contains_key("dbnum_watermark"),
+        "控制面表不属于数据面快照"
+    );
+    // 水位收口发生在写回尾事务——白名单排除的是「中途 diff 的噪音」，不是
+    // 「不推进」，直接查证。
+    let mut response = target
+        .query(format!("RETURN dbnum_watermark:{DBNUM}.applied_sesno;"))
+        .await
+        .expect("watermark transport");
+    let applied: Option<i32> = response.take(0).expect("watermark value");
+    assert_eq!(applied, Some(2), "写回尾事务必须推进水位");
 }
