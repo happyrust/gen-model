@@ -377,7 +377,7 @@ fn log_page_summary(
     stats: PageReadStats,
     parsed_records: usize,
 ) {
-    log::info!(
+    println!(
         "[paged_db] path={} snapshot_sesno={} page_size={} physical_pages={} bytes_read={} cache_hits={} cache_misses={} prefetched_pages={} index_pages={} record_pages={} parsed_records={}",
         path.display(),
         sesno,
