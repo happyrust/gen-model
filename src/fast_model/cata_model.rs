@@ -19,7 +19,7 @@ use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::math_tool::to_pdms_vec_str;
 use aios_core::{
-    HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, SUL_DB, gen_bytes_hash,
+    HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, gen_bytes_hash,
 };
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
@@ -97,6 +97,113 @@ pub fn init_chrome_tracing() -> anyhow::Result<()> {
         trace_path
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod staged_write_routing_tests {
+    use crate::data_interface::staging::replay_safe;
+
+    #[test]
+    fn generated_tubi_relations_are_replay_safe_and_use_the_model_writer() {
+        replay_safe::validate_statement(
+            "INSERT RELATION INTO tubi_relate [{ \
+             id: tubi_relate:[pe:1_2, 0], in: pe:1_2, out: inst_geo:3, \
+             leave: pe:1_2, arrive: pe:1_3, aabb: aabb:4, world_trans: trans:5, \
+             bore_size: 10, anc: [1], dbnum: 7997 }];",
+        )
+        .expect("explicit tubi edge is ReplaySafe");
+
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .rsplit_once("pub async fn gen_cata_geos(")
+            .expect("gen_cata_geos exists")
+            .1
+            .split_once("pub async fn gen_cata_geos_with_tracing(")
+            .expect("tracing wrapper follows generator")
+            .0;
+        assert_eq!(
+            body.matches("INSERT RELATION INTO tubi_relate").count(),
+            3,
+            "all three TUBI paths must use explicit relation ids"
+        );
+        assert!(body.contains("execute_model_write("));
+        assert!(!body.contains("SUL_DB.query(tubi_relates"));
+    }
+
+    #[tokio::test]
+    async fn tubi_relation_stays_in_staging_until_commit() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("window mem boots");
+        let window = create_window_on(&instance, 7997, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let target = connect("mem://").await.expect("persistent mem boots");
+        target
+            .use_ns("tubi_route")
+            .use_db("persistent")
+            .await
+            .expect("persistent target");
+        let sql = "INSERT RELATION INTO tubi_relate [{ \
+                   id: tubi_relate:[pe:1_2, 0], in: pe:1_2, out: inst_geo:3, \
+                   leave: pe:1_2, arrive: pe:1_3, aabb: aabb:4, world_trans: trans:5, \
+                   bore_size: 10, anc: [1], dbnum: 7997 }];";
+
+        window
+            .scope(crate::surreal_retry::execute_model_write(
+                sql,
+                "test tubi route",
+            ))
+            .await
+            .expect("staged write");
+        let mut staged = window
+            .staging_db()
+            .query("SELECT VALUE id FROM tubi_relate")
+            .await
+            .expect("read staging")
+            .check()
+            .expect("staging query");
+        let mut before = target
+            .query("SELECT VALUE id FROM tubi_relate")
+            .await
+            .expect("read persistent before commit")
+            .check()
+            .expect("persistent query");
+        assert_eq!(
+            staged
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("staged ids")
+                .len(),
+            1
+        );
+        assert!(
+            before
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("persistent ids")
+                .is_empty()
+        );
+
+        window
+            .commit_to(&target, None)
+            .await
+            .expect("commit journal");
+        let mut after = target
+            .query("SELECT VALUE id FROM tubi_relate")
+            .await
+            .expect("read persistent after commit")
+            .check()
+            .expect("persistent query");
+        assert_eq!(
+            after
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("persistent ids")
+                .len(),
+            1
+        );
+        window.drop_database().await.expect("cleanup");
+    }
 }
 
 /// Creates a fresh trace file, removing the existing one if present
@@ -803,7 +910,10 @@ pub async fn gen_cata_geos(
     // W4（D6）：tubi_relate 的 anc/dbnum 在渲染时解一次、写死进字面量——
     // journal 纯数据化，写回重放不再对持久层求值 fn::anc_u64 / `.dbnum`。
     let branch_metas = crate::fast_model::pdms_inst::resolve_inst_meta(
-        &branch_map.iter().map(|entry| *entry.key()).collect::<Vec<_>>(),
+        &branch_map
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>(),
     )
     .await?;
     let missing_branch_meta = crate::fast_model::pdms_inst::ResolvedInstMeta::default();
@@ -907,11 +1017,11 @@ pub async fn gen_cata_geos(
                             },
                         );
                         tubi_relates.push(format!(
-                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
-                                branch_refno.to_pe_key(),
+                                "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
+                                 leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
+                                branch_refno.to_pe_key(),
                                 current_tubing.leave_refno.to_pe_key(),
                                 current_tubing.arrive_refno.to_pe_key(),
                                 gen_bytes_hash::<_, 64>(&aabb),
@@ -1053,11 +1163,11 @@ pub async fn gen_cata_geos(
                                             dist
                                         );
                                         let sql = format!(
-                                            "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                            set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
-                                            branch_refno.to_pe_key(),
+                                            "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
+                                             leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
                                             branch_refno.to_pe_key(),
                                             current_tubing.index,
+                                            branch_refno.to_pe_key(),
                                             current_tubing.leave_refno.to_pe_key(),
                                             current_tubing.arrive_refno.to_pe_key(),
                                             gen_bytes_hash::<_, 64>(&aabb),
@@ -1157,11 +1267,11 @@ pub async fn gen_cata_geos(
                                 },
                             );
                             tubi_relates.push(format!(
-                                "relate {}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                set leave={},arrive={},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}, anc={}, dbnum={};",
-                                branch_refno.to_pe_key(),
+                                "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
+                                 leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
                                 branch_refno.to_pe_key(),
                                 current_tubing.index,
+                                branch_refno.to_pe_key(),
                                 current_tubing.leave_refno.to_pe_key(),
                                 current_tubing.arrive_refno.to_pe_key(),
                                 gen_bytes_hash::<_, 64>(&aabb),
@@ -1198,7 +1308,11 @@ pub async fn gen_cata_geos(
     let mut tubi_query_time = 0;
     if !tubi_relates.is_empty() {
         let t_query = Instant::now();
-        SUL_DB.query(tubi_relates.join("")).await.unwrap();
+        crate::surreal_retry::execute_model_write(
+            &tubi_relates.join(""),
+            "persist generated tubi relations",
+        )
+        .await?;
         tubi_query_time = t_query.elapsed().as_millis();
     }
 
