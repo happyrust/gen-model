@@ -378,6 +378,41 @@ fn staged_window_has_room_semantics(db_type: &str) -> bool {
     db_type.eq_ignore_ascii_case("DESI")
 }
 
+/// The recovery row being extended with AABB-derived room targets must still
+/// describe the exact range that produced this staging journal. The queue's
+/// enqueue-time end may differ after a rescan or crash replay; the finalize end
+/// is authoritative. A row from another file/range must never be overwritten.
+fn validate_attempt_matches_staged_window(
+    attempt: &model_update_pending::IncrementUpdateAttempt,
+    job: &FrozenBatch,
+    actual_start_sesno: i32,
+    actual_end_sesno: i32,
+) -> anyhow::Result<()> {
+    let expected_path = job.path.to_string_lossy();
+    if attempt.dbnum != job.dbnum
+        || attempt.db_type != job.db_type
+        || attempt.file_path != expected_path.as_ref()
+        || attempt.start_sesno != actual_start_sesno
+        || attempt.end_sesno != actual_end_sesno
+    {
+        anyhow::bail!(
+            "增量恢复记录与冻结窗口不一致：attempt=(dbnum={}, type={}, path={}, {}..={}), \
+             staged=(dbnum={}, type={}, path={}, {}..={})",
+            attempt.dbnum,
+            attempt.db_type,
+            attempt.file_path,
+            attempt.start_sesno,
+            attempt.end_sesno,
+            job.dbnum,
+            job.db_type,
+            expected_path,
+            actual_start_sesno,
+            actual_end_sesno
+        );
+    }
+    Ok(())
+}
+
 /// 一次性锁住本窗口将要改动的**全部**生成根（ADR-017 I8；方案 W2.1/W2.2）。
 ///
 /// 位姿与删除改的是整棵子树的模型产物，所以锁范围不是目标本身，而是子树里带产物的
@@ -634,12 +669,7 @@ async fn execute_frozen_batch(
         return result;
     }
 
-    // finalize 按实际应用上界登记；与建窗时的 file_latest 可能因空隙/解析窗口不一致。
-    if let Some(batch) = &result.batch {
-        window.align_end_sesno(batch.end_sesno);
-    }
-
-    if window.staged_finalize().await.is_none() {
+    let Some(initial_finalize) = window.staged_finalize().await else {
         result
             .warnings
             .push("暂存窗口缺少 finalize 登记，拒绝写回（避免推进水位却无 journal）".into());
@@ -650,7 +680,12 @@ async fn execute_frozen_batch(
         result.status = ManualUpdateStatus::Failed;
         drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
-    }
+    };
+    // `FrozenBatch.end_sesno` is only the enqueue-time observation, and the
+    // result object can also originate from a newer rescan than a replayed
+    // durable attempt. The finalize record is the exact range that produced
+    // this journal; align the registered window to that range before commit.
+    window.align_end_sesno(initial_finalize.end_sesno);
 
     let spatial = window.deferred_spatial().await;
     // 暂存路径的入队口就是这次 merge：合并进 plan 等于随尾事务落成 durable pending，
@@ -662,6 +697,51 @@ async fn execute_frozen_batch(
         .staged_finalize()
         .await
         .expect("finalize presence checked above");
+    // The original prepared attempt is the crash-replay source of truth. The
+    // staged finalize plan has already settled successful in-memory model work,
+    // so replacing the attempt with it would lose those generators after a
+    // crash. Extend the original plan with only the newly discovered AABB room
+    // targets, then persist it before staged room writes or the first journal
+    // replay can happen.
+    let room_checkpoint = async {
+        let mut attempt = model_update_pending::load_attempt(job.dbnum)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("dbnum={} 缺少增量恢复记录，拒绝写回暂存窗口", job.dbnum)
+            })?;
+        validate_attempt_matches_staged_window(
+            &attempt,
+            job,
+            finalize.start_sesno,
+            finalize.end_sesno,
+        )?;
+        model_update_pending::merge_room_recalc_changes(
+            &mut attempt.plan,
+            job.dbnum,
+            finalize.end_sesno,
+            &spatial.room_changes,
+        );
+        model_update_pending::prepare_attempt(&attempt).await
+    }
+    .await;
+    if let Err(error) = room_checkpoint {
+        result.warnings.push(format!(
+            "房间恢复检查点持久化失败，暂存窗口未写回: {error:#}"
+        ));
+        for unit in &mut result.units {
+            if unit.status == UnitGenStatus::Generated {
+                unit.status = UnitGenStatus::Failed;
+                unit.message = Some("房间恢复检查点失败，暂存生成结果已废弃".into());
+            }
+        }
+        if let Some(batch) = &mut result.batch {
+            batch.status = BatchStatus::Failed;
+            batch.message = Some("房间恢复检查点持久化失败".into());
+        }
+        result.status = ManualUpdateStatus::Failed;
+        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
+        return result;
+    }
     let planned_room_targets = finalize
         .plan
         .work_items
@@ -1915,21 +1995,24 @@ async fn idle_round(
         drain_queue_until_empty(mgr).await
     };
 
-    let outcome = idle_outcome(failed, has_backlog, claimed_batches);
+    let data_outcome = idle_outcome(failed, has_backlog, claimed_batches);
     // 房间轮也是分页的（元素侧），一页吃不完就要立刻回来——否则积压会以每 30 秒
     // 一页的速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
-    let room_backlog = if room_round_is_due(outcome, since_last_room_round()) {
+    let room_outcome = if room_round_is_due(data_outcome, since_last_room_round()) {
         room_round(mgr, registry, after_batches).await
     } else {
-        false
+        IdleOutcome::Settled
     };
+    // 房间失败压过数据侧 MoreWork：失败行需要走 IDLE_WAKE 退避，不能因为另一侧还有
+    // 工作就留下一个 Notify permit，把五次 attempts 在热循环里瞬间烧完。
+    let outcome = combine_idle_outcomes(data_outcome, room_outcome);
     // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
     //
     // 失败时**不**唤醒：`notify_one` 在无等待者时会存下一个 permit，主循环的
     // `wait_for_work(IDLE_WAKE)` 于是立刻返回。持续性故障（SurrealDB 不可达之类）
     // 下这会退化成只受查询延迟限制的热循环，每圈还打一行同样的错。这条路的退避
     // 就是 `IDLE_WAKE` 那 30 秒。
-    if wakes_immediately(outcome, room_backlog) {
+    if wakes_immediately(outcome) {
         BatchScheduler::global().wake();
     }
 
@@ -1978,16 +2061,20 @@ fn idle_outcome(failed: bool, has_backlog: bool, claimed_batches: usize) -> Idle
     }
 }
 
+fn combine_idle_outcomes(data: IdleOutcome, room: IdleOutcome) -> IdleOutcome {
+    if data == IdleOutcome::Failed || room == IdleOutcome::Failed {
+        IdleOutcome::Failed
+    } else if data == IdleOutcome::MoreWork || room == IdleOutcome::MoreWork {
+        IdleOutcome::MoreWork
+    } else {
+        IdleOutcome::Settled
+    }
+}
+
 /// 只有「确实还有活要干」才立刻回来。失败必须退避，见 [`idle_round`] 的说明。
 ///
-/// `room_backlog`（房间轮那一页没吃完）同样算还有活干，但它**压不过失败**：那一轮
-/// 连积压清没清都没问出来，退避照旧。
-fn wakes_immediately(outcome: IdleOutcome, room_backlog: bool) -> bool {
-    match outcome {
-        IdleOutcome::Failed => false,
-        IdleOutcome::MoreWork => true,
-        IdleOutcome::Settled => room_backlog,
-    }
+fn wakes_immediately(outcome: IdleOutcome) -> bool {
+    outcome == IdleOutcome::MoreWork
 }
 
 /// 距上次收房间轮过了多久（本进程还没收过时为 `None`）。
@@ -2012,13 +2099,13 @@ fn room_round_is_due(outcome: IdleOutcome, since_last: Option<Duration>) -> bool
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
 ///
-/// 返回**这一页之后是否还有房间任务**：元素侧是分页的，剩货要靠调用方立刻再来一轮，
-/// 否则积压只能按 `IDLE_WAKE` 的节拍一页一页爬。
+/// 返回本轮处置：干净且有下一页是 `MoreWork`；任一目标/轮级失败是 `Failed`，必须
+/// 交给 `IDLE_WAKE` 退避；全部收敛是 `Settled`。
 async fn room_round(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
     after_batches: bool,
-) -> bool {
+) -> IdleOutcome {
     // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则没有目标时，
     // 每一个空闲轮都会判成到期。
     LAST_ROOM_ROUND.store(Local::now().timestamp_millis(), Ordering::Relaxed);
@@ -2030,23 +2117,23 @@ async fn room_round(
         Ok(false) => {}
         Ok(true) => {
             println!("提交后空间收敛未完成，本轮不收房间（陈旧空间树上算出的归属会覆盖对的边）");
-            return false;
+            return IdleOutcome::Settled;
         }
         Err(error) => {
             println!("检查提交后空间收敛状态失败（暂缓房间轮）: {error:#}");
-            return false;
+            return IdleOutcome::Failed;
         }
     }
     let counts = match model_update_pending::count_room_targets().await {
         Ok(counts) => counts,
         Err(error) => {
             println!("统计待重算房间目标失败: {error:#}");
-            return false;
+            return IdleOutcome::Failed;
         }
     };
     let live = counts.live();
     if live == 0 {
-        return false;
+        return IdleOutcome::Settled;
     }
 
     let task_id = TaskRegistry::new_task_id("room");
@@ -2078,31 +2165,26 @@ async fn room_round(
     );
 
     let room_started = std::time::Instant::now();
-    let (state, result_json) = match model_update_pending::drain_rooms(&mgr.db_option).await {
-        Ok(done) => {
-            for _ in 0..done {
-                registry.bump_units_done(&task_id);
+    let (done, failures, mut round_error) =
+        match model_update_pending::drain_rooms(&mgr.db_option).await {
+            Ok(report) => (report.done, report.failures, None),
+            Err(error) => {
+                println!(
+                    "房间归属重算轮级失败（耗时 {}ms，task {task_id}）: {error:#}",
+                    room_started.elapsed().as_millis()
+                );
+                (0, Vec::new(), Some(format!("{error:#}")))
             }
-            println!(
-                "房间归属重算完成 {done}/{live} 个目标（耗时 {}ms，task {task_id}）",
-                room_started.elapsed().as_millis()
-            );
-            (
-                TaskState::Succeeded,
-                serde_json::json!({ "done": done, "total": live }),
-            )
-        }
-        Err(error) => {
-            println!(
-                "房间归属重算失败（{live} 个目标保留 pending，耗时 {}ms，task {task_id}）: {error:#}",
-                room_started.elapsed().as_millis()
-            );
-            (
-                TaskState::Failed,
-                serde_json::json!({ "total": live, "error": format!("{error:#}") }),
-            )
-        }
-    };
+        };
+    for _ in 0..done {
+        registry.bump_units_done(&task_id);
+    }
+    let failed = failures.len();
+    println!(
+        "房间归属重算本轮完成 {done}、失败 {failed}（开跑前 {live} 个目标，耗时 {}ms，task {task_id}）",
+        room_started.elapsed().as_millis()
+    );
+
     // 收尾必须用收敛后的计数覆盖建行时那份 detail。客户端泳道读的是最近一条
     // room_recalc 的 detail（live = panels + elements），而收敛到 0 的下一空闲轮
     // 因本函数开头的早退不再建新行——不覆盖的话，房间全部收敛干净的那一刻起，
@@ -2110,14 +2192,56 @@ async fn room_round(
     // 统计失败时保留旧 detail：宁可显示旧数字，也别把分项计数抹成空。
     //
     // 这次重新统计顺带回答了「还剩不剩」——分页之后那是调用方要不要立刻再来一轮的
-    // 依据。统计失败时报 false：宁可等下一个 `IDLE_WAKE`，也不拿一个不知道的数去空转。
-    let mut room_backlog = false;
-    match model_update_pending::count_room_targets().await {
+    // 依据。统计失败归入 Failed：宁可等下一个 `IDLE_WAKE`，也不拿一个不知道的数去空转。
+    let (remaining, dead_letters) = match model_update_pending::count_room_targets().await {
         Ok(after) => {
-            room_backlog = after.live() > 0;
+            let remaining = after.live();
+            let dead_letters = after.dead_letters;
             registry.set_detail(&task_id, serde_json::to_value(after).unwrap_or_default());
+            (Some(remaining), Some(dead_letters))
         }
-        Err(error) => println!("收敛后统计房间目标失败（泳道将沿用开跑前的计数）: {error:#}"),
+        Err(error) => {
+            let message = format!("收敛后统计房间目标失败: {error:#}");
+            println!("{message}（泳道将沿用开跑前的计数）");
+            round_error = Some(match round_error {
+                Some(previous) => format!("{previous}; {message}"),
+                None => message,
+            });
+            (None, None)
+        }
+    };
+    let room_outcome = if round_error.is_some() || failed > 0 {
+        IdleOutcome::Failed
+    } else if remaining.is_some_and(|count| count > 0) {
+        IdleOutcome::MoreWork
+    } else {
+        IdleOutcome::Settled
+    };
+    let state = if room_outcome == IdleOutcome::Settled {
+        TaskState::Succeeded
+    } else if done > 0 {
+        TaskState::Partial
+    } else {
+        TaskState::Failed
+    };
+    let error_summary = match (round_error.as_deref(), failures.is_empty()) {
+        (None, true) => None,
+        (Some(error), true) => Some(error.to_string()),
+        (None, false) => Some(failures.join("; ")),
+        (Some(error), false) => Some(format!("{error}; {}", failures.join("; "))),
+    };
+    let mut result_json = serde_json::json!({
+        "total": live,
+        "done": done,
+        "remaining": remaining,
+        "dead_letters": dead_letters,
+        "failures": failures,
+        "round_error": round_error,
+    });
+    if let Some(error) = error_summary {
+        // Preserve the pre-existing task-result contract used by older clients;
+        // the structured fields above are the new inspection detail.
+        result_json["error"] = serde_json::json!(error);
     }
     registry.finish(&task_id, state, result_json.clone());
     #[cfg(feature = "http_api")]
@@ -2127,7 +2251,7 @@ async fn room_round(
         Some(task_id.clone()),
         serde_json::json!({ "task_id": task_id, "state": state.as_str(), "result": result_json }),
     );
-    room_backlog
+    room_outcome
 }
 
 /// 把领域进度事件接到任务注册表（计数）与 WS 广播（`http_api` 门内）。
@@ -2196,6 +2320,7 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, end_sesno: i3
     incr.successes.push(IncrFileSuccess {
         path: job.path.clone(),
         dbnum: job.dbnum,
+        start_sesno: job.start_sesno,
         end_sesno,
         db_type: job.db_type.clone(),
         changed_refnos: Vec::new(),
@@ -2535,6 +2660,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn room_checkpoint_only_extends_the_matching_staged_attempt() {
+        use crate::data_interface::batch_scheduler::FrozenBatch;
+        use crate::data_interface::model_update_pending::IncrementUpdateAttempt;
+        use std::path::PathBuf;
+
+        let job = FrozenBatch {
+            task_id: "t-room-checkpoint".into(),
+            project: "P".into(),
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            path: PathBuf::from("D:/project/desi"),
+            file_name: "desi".into(),
+            start_sesno: 40,
+            end_sesno: 45,
+        };
+        let attempt = IncrementUpdateAttempt {
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            file_path: "D:/project/desi".into(),
+            start_sesno: 40,
+            end_sesno: 42,
+            plan: Default::default(),
+        };
+        validate_attempt_matches_staged_window(&attempt, &job, 40, 42)
+            .expect("same staged window even when the enqueue-time end differs");
+
+        let mut wrong = attempt.clone();
+        wrong.end_sesno += 1;
+        assert!(
+            validate_attempt_matches_staged_window(&wrong, &job, 40, 42).is_err(),
+            "a different recovery range must not be overwritten"
+        );
+        wrong = attempt;
+        wrong.file_path = "D:/other/desi".into();
+        assert!(
+            validate_attempt_matches_staged_window(&wrong, &job, 40, 42).is_err(),
+            "a different file identity must not be overwritten"
+        );
+    }
+
     /// 房间语义只属于 DESI 窗口：SYST/CATA/DICT 批次不该付
     /// 面板映射全表扫描与 `room_relate` 整表预载（2026-08-06 审核 L2）。
     #[test]
@@ -2781,7 +2947,7 @@ mod tests {
             .expect("idle_round 之后是 IdleOutcome 的定义")
             .0;
         assert!(
-            idle_body.contains("if room_round_is_due(outcome, since_last_room_round()) {"),
+            idle_body.contains("if room_round_is_due(data_outcome, since_last_room_round()) {"),
             "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
         );
 
@@ -2806,14 +2972,24 @@ mod tests {
     /// 「空闲模型积压消化失败」，而 30 秒的 `IDLE_WAKE` 退避形同虚设。
     #[test]
     fn a_failed_idle_round_backs_off_instead_of_waking_itself() {
-        assert!(!wakes_immediately(idle_outcome(true, false, 0), false));
-        assert!(!wakes_immediately(idle_outcome(true, true, 3), false));
-        assert!(!wakes_immediately(IdleOutcome::Settled, false));
-        assert!(wakes_immediately(idle_outcome(false, true, 0), false));
+        assert!(!wakes_immediately(idle_outcome(true, false, 0)));
+        assert!(!wakes_immediately(idle_outcome(true, true, 3)));
+        assert!(!wakes_immediately(IdleOutcome::Settled));
+        assert!(wakes_immediately(idle_outcome(false, true, 0)));
 
-        // 房间那一页没吃完同样算还有活干，但压不过失败：那一轮连积压清没清都没问出来。
-        assert!(wakes_immediately(IdleOutcome::Settled, true));
-        assert!(!wakes_immediately(IdleOutcome::Failed, true));
+        // 房间失败压过数据侧 MoreWork；否则另一侧留下的 Notify permit 会绕开 30s 退避。
+        assert_eq!(
+            combine_idle_outcomes(IdleOutcome::MoreWork, IdleOutcome::Failed),
+            IdleOutcome::Failed
+        );
+        assert!(!wakes_immediately(combine_idle_outcomes(
+            IdleOutcome::MoreWork,
+            IdleOutcome::Failed
+        )));
+        assert!(wakes_immediately(combine_idle_outcomes(
+            IdleOutcome::Settled,
+            IdleOutcome::MoreWork
+        )));
 
         // 调用点也得守住：`wake()` 只能出现一次，且必须在 `wakes_immediately` 门后。
         let source = include_str!("batch_worker.rs");
@@ -2830,7 +3006,7 @@ mod tests {
             "空闲轮只该有一处唤醒，且归 wakes_immediately 管: {body}"
         );
         assert!(
-            body.contains("if wakes_immediately(outcome, room_backlog) {"),
+            body.contains("if wakes_immediately(outcome) {"),
             "唤醒必须由 wakes_immediately 把门: {body}"
         );
     }

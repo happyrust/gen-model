@@ -29,6 +29,7 @@ pub const SYS_META_DB_TYPES: &[&str] = COLD_START_DB_TYPES;
 pub struct IncrFileSuccess {
     pub path: PathBuf,
     pub dbnum: u32,
+    pub start_sesno: i32,
     pub end_sesno: i32,
     /// PDMS db type (`SYST` / `DESI` / …) for downstream side-effects.
     pub db_type: String,
@@ -639,6 +640,7 @@ impl IncrementPipeline {
             .await?;
             (requested_range, model_plan, Some(range_eles))
         };
+        let start_sesno = *sesno_range.start();
         let end_sesno = *sesno_range.end();
 
         println!(
@@ -758,6 +760,7 @@ impl IncrementPipeline {
                 crate::data_interface::staging::register_staged_finalize(
                     crate::data_interface::staging::StagedFinalize {
                         dbnum,
+                        start_sesno,
                         end_sesno,
                         plan: finalize_plan,
                         window_statements,
@@ -791,6 +794,7 @@ impl IncrementPipeline {
             IncrFileSuccess {
                 path: path.clone(),
                 dbnum,
+                start_sesno,
                 end_sesno,
                 db_type: db_type.to_string(),
                 changed_refnos,

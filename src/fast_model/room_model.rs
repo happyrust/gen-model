@@ -151,22 +151,12 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     // 于是 147 块在册面板逐块算出空集、逐块先清后写，`room_relate` 全库从上千条掉到 1
     // 条（仅剩的那条还是事后元素分支单独写回的）。所以改成覆盖率判据。
     if !room_panel_map.rooms.is_empty() {
-        let tree_entries = GLOBAL_AABB_TREE.read().await.tree.size();
-        let db_pointers = usable_aabb_pointer_count().await.unwrap_or_else(|error| {
-            println!("[房间全量] 读取可用包围盒指针数失败（本次跳过覆盖率判定）: {error:#}");
-            0
-        });
-        let short = db_pointers > 0 && tree_entries * 100 < db_pointers * MIN_TREE_COVERAGE_PERCENT;
-        if tree_entries == 0 || short {
-            anyhow::bail!(
-                "空间树只有 {tree_entries} 条，而库里可用的包围盒指针有 {db_pointers} 条\
-                 （下限 {MIN_TREE_COVERAGE_PERCENT}%）：{} 间在册房间的成员判不了，跳过本次\
-                 全量重建，不清掉存量归属边。先检查项目树文件的 epoch 校验\
-                 （load_project_tree_verified），或用 rebuild_tree_from_pointers 修复；\
-                 指针本身缺失（几何在而 aabb 从没算过）要走 sync_aabb_tree_with_db",
+        ensure_room_tree_coverage().await.map_err(|error| {
+            anyhow::anyhow!(
+                "{} 间在册房间的成员判不了，跳过本次全量重建，不清掉存量归属边: {error:#}",
                 room_panel_map.rooms.len()
-            );
-        }
+            )
+        })?;
     }
 
     // 重建前的存量成员数，一条查询查完。收尾时用它说出「哪几块面板从有成员变成了 0」
@@ -244,7 +234,10 @@ async fn usable_aabb_pointer_count() -> anyhow::Result<usize> {
     struct Row {
         count: usize,
     }
-    let mut response = crate::data_interface::staging::active_data_db()
+    // GLOBAL_AABB_TREE 是持久主库旧基线的索引，分母必须来自同一份主库。暂存窗口只预载
+    // 局部子树，用 active_data_db() 会把局部分母拿来对全局树，几乎总是假高覆盖；窗口内
+    // 新增/删除由 deferred spatial refresh/remove 与整间分支的 exclude 单独收口。
+    let mut response = SUL_DB
         .query(
             "SELECT count() FROM inst_relate \
              WHERE world_trans.d != none AND aabb.d != none GROUP ALL;",
@@ -259,6 +252,31 @@ async fn usable_aabb_pointer_count() -> anyhow::Result<usize> {
         .first()
         .map(|row| row.count)
         .unwrap_or(0))
+}
+
+/// 纯覆盖率判定，供全量与增量整间分支共用。
+///
+/// 这道门只拦「树空了 / 整库级缺失」；90% 的容差是既有策略，用来容纳 staged 窗口与
+/// 两次独立读取之间的少量漂移。查询失败不在这里折成 0：破坏性先清后写必须 fail-closed。
+fn validate_room_tree_coverage(tree_entries: usize, db_pointers: usize) -> anyhow::Result<()> {
+    let short = db_pointers > 0
+        && tree_entries.saturating_mul(100) < db_pointers.saturating_mul(MIN_TREE_COVERAGE_PERCENT);
+    anyhow::ensure!(
+        tree_entries > 0 && db_pointers > 0 && !short,
+        "空间树只有 {tree_entries} 条，而库里可用的包围盒指针有 {db_pointers} 条\
+         （下限 {MIN_TREE_COVERAGE_PERCENT}%）：不改写房间归属。先检查项目树文件的 epoch\
+         校验（load_project_tree_verified），或用 rebuild_tree_from_pointers /\
+         sync_aabb_tree_with_db 修复"
+    );
+    Ok(())
+}
+
+/// 读取当前树/库覆盖率并 fail-closed 校验。
+async fn ensure_room_tree_coverage() -> anyhow::Result<(usize, usize)> {
+    let tree_entries = GLOBAL_AABB_TREE.read().await.tree.size();
+    let db_pointers = usable_aabb_pointer_count().await?;
+    validate_room_tree_coverage(tree_entries, db_pointers)?;
+    Ok((tree_entries, db_pointers))
 }
 
 /// 每块面板当前收着多少个成员，一条查询查完。
@@ -337,6 +355,19 @@ fn render_room_relate_write(
     within_refnos: &HashMap<RefnoEnum, RoomMember>,
     room_num: &str,
 ) -> String {
+    wrap_in_transaction(&render_room_relate_statements(
+        panel_refno,
+        within_refnos,
+        room_num,
+    ))
+    .unwrap_or_default()
+}
+
+fn render_room_relate_statements(
+    panel_refno: RefnoEnum,
+    within_refnos: &HashMap<RefnoEnum, RoomMember>,
+    room_num: &str,
+) -> Vec<String> {
     let panel_key = panel_refno.to_pe_key();
     let mut statements = vec![format!("DELETE room_relate WHERE in = {panel_key}")];
 
@@ -360,8 +391,7 @@ fn render_room_relate_write(
             rows.join(",")
         ));
     }
-
-    wrap_in_transaction(&statements).unwrap_or_default()
+    statements
 }
 
 /// 一条 `room_relate` 边的载荷。两条重算分支共用，保证同一条边在两边渲染逐字一致。
@@ -549,6 +579,13 @@ fn render_room_panel_relate_write(
 }
 
 fn render_panel_room_topology_write(panel: RefnoEnum, room: Option<&RoomPanels>) -> String {
+    wrap_in_transaction(&render_panel_room_topology_statements(panel, room)).unwrap_or_default()
+}
+
+fn render_panel_room_topology_statements(
+    panel: RefnoEnum,
+    room: Option<&RoomPanels>,
+) -> Vec<String> {
     let panel_key = panel.to_pe_key();
     let mut statements = vec![format!("DELETE room_panel_relate WHERE out = {panel_key}")];
     if let Some(room) = room {
@@ -559,16 +596,29 @@ fn render_panel_room_topology_write(panel: RefnoEnum, room: Option<&RoomPanels>)
             escape_surql_str(&room.room_num),
         ));
     }
+    statements
+}
+
+/// 增量整间分支的唯一提交单元：成员边与 panel→room 拓扑同成同败。
+fn render_panel_state_write(
+    panel: RefnoEnum,
+    members: &HashMap<RefnoEnum, RoomMember>,
+    room: Option<&RoomPanels>,
+) -> String {
+    let room_num = room.map(|room| room.room_num.as_str()).unwrap_or("");
+    let mut statements = render_room_relate_statements(panel, members, room_num);
+    statements.extend(render_panel_room_topology_statements(panel, room));
     wrap_in_transaction(&statements).unwrap_or_default()
 }
 
-async fn save_panel_room_topology(
+async fn save_panel_state(
     panel: RefnoEnum,
+    members: &HashMap<RefnoEnum, RoomMember>,
     room: Option<&RoomPanels>,
 ) -> anyhow::Result<()> {
     crate::surreal_retry::execute_model_write(
-        &render_panel_room_topology_write(panel, room),
-        &format!("写入 {panel} 的房间面板拓扑"),
+        &render_panel_state_write(panel, members, room),
+        &format!("原子写入 {panel} 的房间成员与面板拓扑"),
     )
     .await
 }
@@ -950,14 +1000,13 @@ pub async fn recalc_panel_membership(
                 println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
                 HashSet::new()
             });
+        save_panel_state(panel, &HashMap::new(), None).await?;
         if !old_members.is_empty() {
             println!(
                 "[房间增量] 面板 {panel} 已不在册，清空其房间归属（原 {} 个成员掉出）",
                 old_members.len()
             );
         }
-        save_room_relate(panel, &HashMap::new(), "").await?;
-        save_panel_room_topology(panel, None).await?;
         return Ok(HashSet::new());
     };
     let room_num = room.room_num.clone();
@@ -967,13 +1016,9 @@ pub async fn recalc_panel_membership(
     // 影响：面板已不在册是与树无关的事实，它的边本来就该清掉。
     //
     // 判不了就不写：上抛让任务保留重试，存量边陈旧也比被清成空强。
-    if GLOBAL_AABB_TREE.read().await.is_empty() {
-        anyhow::bail!(
-            "空间树是空的，面板 {panel} 的成员判不了：不改写它的房间归属（任务保留重试）。\
-             先检查项目树文件的 epoch 校验（load_project_tree_verified），\
-             或用 rebuild_tree_from_pointers / sync_aabb_tree_with_db 修复"
-        );
-    }
+    ensure_room_tree_coverage().await.map_err(|error| {
+        anyhow::anyhow!("面板 {panel} 的成员判不了，不改写它的房间归属（任务保留重试）: {error:#}")
+    })?;
     // 候选取自空间树，而窗口内的删除是**推迟到提交后**才从树上摘的
     // （`defer_spatial_remove`）：此刻树上还留着这些构件的旧包围盒。不排除的话，
     // 同一个窗口里 DeleteCleanup 刚清掉的归属边，会被这块面板按旧位置原样写回，
@@ -999,9 +1044,8 @@ pub async fn recalc_panel_membership(
             println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
             HashSet::new()
         });
+    save_panel_state(panel, &members, Some(room)).await?;
     log_panel_membership_change(panel, &room_num, &old_members, &new_members);
-    save_room_relate(panel, &members, &room_num).await?;
-    save_panel_room_topology(panel, Some(room)).await?;
     Ok(new_members)
 }
 
@@ -1109,20 +1153,39 @@ impl PanelIndex {
     /// 在册且几何可用的面板块数。为 0 时元素分支算出来的必然是空集——那与全量重建
     /// 一致（那些面板在整间分支里同样一个成员都算不出来），但值得说一声。
     pub fn usable_panels(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .iter()
+            .map(|entry| entry.panel)
+            .unique()
+            .count()
     }
 
     /// 在册却没能进索引的那些面板。
     ///
-    /// 元素分支的候选只在进了索引的面板里选，所以这些面板对增量路径等于不存在——落在
-    /// 它们里面的构件会被收敛成「不属于任何房间」。这与全量重建**一致**（那边现在同样
-    /// 跳过它们），所以不是两条分支分歧，而是覆盖率问题：覆盖率低到什么程度算异常只有
-    /// 现场知道，所以如实报出来，别替它判。
-    ///
-    /// 此前这件事只有「一块都没有」时才说得出口，而 147 块里只有 12 块有几何这种状态
-    /// （issue #7 审核实测）一声不响。
+    /// 元素分支不能只在剩余面板上做破坏性替换；[`Self::ensure_complete`] 会把非空结果变成
+    /// 可重试错误。这里保留明细供 drain 的任务详情和日志展示。
     pub fn missing_panels(&self) -> &[RefnoEnum] {
         &self.missing
+    }
+
+    /// 元素分支是「先删该构件的全部入边，再写回」；少一块在册面板就不能安全替换。
+    ///
+    /// 因此完整性不是覆盖率告警，而是破坏性写入的前置条件。调用点上抛后任务会留待
+    /// 重试，存量边保持不动。
+    pub fn ensure_complete(&self) -> anyhow::Result<()> {
+        if self.missing.is_empty() {
+            return Ok(());
+        }
+        let sample = self
+            .missing
+            .iter()
+            .take(5)
+            .map(RefnoEnum::to_string)
+            .join(", ");
+        anyhow::bail!(
+            "在册面板索引不完整：{} 块面板缺少可用几何（例如 {sample}），不改写构件归属",
+            self.missing.len()
+        )
     }
 
     fn mesh_dir(&self) -> &Path {
@@ -1178,11 +1241,13 @@ pub async fn load_panel_index(
         })?;
 
     let mut indexed: HashSet<RefnoEnum> = HashSet::new();
+    let mut invalid: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
         let Some(room_num) = rooms.room_num_of(inst.refno) else {
             continue;
         };
         if !aabb_is_usable(&inst.world_aabb) {
+            invalid.insert(inst.refno);
             continue;
         }
         indexed.insert(inst.refno);
@@ -1197,7 +1262,7 @@ pub async fn load_panel_index(
     // 在册却没进索引的：查不到实例，或包围盒不可用。顺序固定，日志才对得上。
     index.missing = registered
         .into_iter()
-        .filter(|panel| !indexed.contains(panel))
+        .filter(|panel| !indexed.contains(panel) || invalid.contains(panel))
         .collect();
     index.missing.sort_by_key(RefnoEnum::to_string);
     Ok(index)
@@ -1294,19 +1359,29 @@ pub async fn element_candidate_panels(
     if elements.is_empty() {
         return Ok(out);
     }
+    // 吸收判定也会据此跳过元素任务；若索引不完整，返回部分候选会把本该失败重试的任务
+    // 错误吸收掉，后面的 recalc_element_membership 就再也没有机会挡住破坏性替换。
+    panels.ensure_complete()?;
     let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(elements)
         .await
         .map_err(|error| {
             anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
         })?;
+    let mut invalid: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
-        // 没有可用世界包围盒的构件：元素分支会把它收敛成空集，本身也不该有候选面板。
-        // 留空（不插入）而非插入空集——两者在 absorption_verdict 里含义不同：缺项＝
-        // 候选未知、保守不吸收。
+        // 任一实例不可用时整项候选未知：不能拿其余实例的部分候选去吸收该元素任务。
         if !aabb_is_usable(&inst.world_aabb) {
+            invalid.insert(inst.refno);
             continue;
         }
-        out.insert(inst.refno, panels.candidate_panel_refnos(&inst.world_aabb));
+        // 同一 refno 可以有多条 inst_relate。逐实例取候选再 union，不能先合成跨远距离的
+        // 总 AABB——后者会把两个实例之间整条走廊里的面板都误当候选。
+        out.entry(inst.refno)
+            .or_default()
+            .extend(panels.candidate_panel_refnos(&inst.world_aabb));
+    }
+    for refno in invalid {
+        out.remove(&refno);
     }
     Ok(out)
 }
@@ -1351,36 +1426,34 @@ pub async fn recalc_element_membership(
         return Ok(());
     }
 
+    // 这道门必须在读取旧边之后的任何替换写入之前；缺一块在册面板时，空/部分结果都不
+    // 可信。错误上抛会保留 pending，存量边原样留着。
+    panels.ensure_complete()?;
+
     // 归属变化日志用：这个构件此刻挂在哪些房间，收敛后与新结果对照打印「从哪到哪」。
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
     let old_rooms = history.room_nums_of(element);
 
-    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(&[element])
-        .await
-        .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
+    let element_insts: Vec<GeomInstQuery> =
+        crate::data_interface::staging::query_valid_insts(&[element])
+            .await
+            .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
     // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建
     // 也捞不到它（进不了空间树就不是任何面板的候选），空集才是与全量一致的结果。
     // 打一行日志是因为这条路本不该走到：元素任务的入队条件是「包围盒确实变了」，能变
     // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
-    let Some(element_inst) = insts.into_iter().next() else {
+    if element_insts.is_empty() {
         println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
         return write_element_room_relate_logged(element, &[], &old_rooms).await;
-    };
-    let element_aabb = element_inst.world_aabb;
-    if !aabb_is_usable(&element_aabb) {
-        println!("构件 {element} 的世界包围盒不可用，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate_logged(element, &[], &old_rooms).await;
     }
-
-    // 候选面板：在册面板里包围盒与本构件相交的那些，取自本轮加载好的库内几何
-    // （[`PanelIndex`]），不经过空间树。构件这一侧的包围盒同样取自库——本任务正是
-    // 「这个构件的包围盒变了」才入队的，而入队点就是刷新包围盒的那一处。
-    let candidates = panels.candidates(&element_aabb);
-    if candidates.is_empty() {
-        // 这里的空集是可信的：候选取自库，而整间分支对这批面板算成员用的是同一份
-        // 数据、同一个相交关系，它同样不会把这个构件收进去。真正「判不了」的情形
-        // ——候选面板的网格读不出来——在下面单独处置，不会走到这条清边路径上。
-        return write_element_room_relate_logged(element, &[], &old_rooms).await;
+    if let Some(invalid) = element_insts
+        .iter()
+        .find(|inst| !aabb_is_usable(&inst.world_aabb))
+    {
+        anyhow::bail!(
+            "构件 {element} 的一条实例（{}）世界包围盒不可用，本次不改写归属",
+            invalid.refno
+        );
     }
 
     let mesh_dir = panels.mesh_dir();
@@ -1388,38 +1461,49 @@ pub async fn recalc_element_membership(
     // 候选面板的网格读不出来时不能把「判不了」当「不在里面」：本函数是先删该构件
     // 全部入边再写回，静默跳过一块面板等于悄悄退掉该构件在这块面板的归属。
     // 任一网格失败或面板没有可用网格都中止写入并保留任务重试。
-    let mut undecidable_panels: Vec<String> = Vec::new();
-    // 第二轮逐点兜底的待办：(候选块下标, 该块内的网格下标, 第一轮的顶点计数)。
-    let mut pending_point_checks: Vec<(usize, usize, u8)> = Vec::new();
+    let mut undecidable_panels: BTreeSet<String> = BTreeSet::new();
+    // 第二轮逐点兜底的待办：(构件实例下标, 候选面板实例, 网格下标, 第一轮顶点计数)。
+    let mut pending_point_checks: Vec<(usize, &PanelEntry, usize, u8)> = Vec::new();
 
-    // 第一轮只问包围盒。三角网取自本轮加载的面板索引，同一块面板整轮只构建一次
-    // ——此前每个元素任务都要把候选面板的 `.mesh` 重读一遍并重新三角化。
-    for (slot, candidate) in candidates.iter().enumerate() {
-        let meshes = candidate.meshes(mesh_dir);
-        for (mesh_slot, tri_mesh) in meshes.tri_meshes.iter().enumerate() {
-            // element_aabb 上面已经过 aabb_is_usable，这条走不到；真走到了当
-            // 「不在里面」，与 element_in_panel 同口径。
-            let Some((verdict, inside_count)) = membership_by_aabb(tri_mesh, &element_aabb) else {
-                continue;
-            };
-            match verdict {
-                AabbVerdict::Inside => {
-                    merge_element_edge(&mut edges, candidate, element, &element_aabb, inside_count)
-                }
-                AabbVerdict::Outside => {}
-                AabbVerdict::NeedsPointCheck => {
-                    pending_point_checks.push((slot, mesh_slot, inside_count))
+    // 每条构件实例独立取候选、独立判定，最后按 panel union/stronger。不能把相隔很远的
+    // 实例先包成一个总 AABB，否则中间区域的面板会被误命中；也不能只取 `.next()`，否则
+    // 第二条及以后的实例归属会永久丢失。
+    for (element_slot, element_inst) in element_insts.iter().enumerate() {
+        let element_aabb = &element_inst.world_aabb;
+        let candidates = panels.candidates(element_aabb);
+        for candidate in candidates {
+            let meshes = candidate.meshes(mesh_dir);
+            for (mesh_slot, tri_mesh) in meshes.tri_meshes.iter().enumerate() {
+                let Some((verdict, inside_count)) = membership_by_aabb(tri_mesh, element_aabb)
+                else {
+                    continue;
+                };
+                match verdict {
+                    AabbVerdict::Inside => merge_element_edge(
+                        &mut edges,
+                        candidate,
+                        element,
+                        element_aabb,
+                        inside_count,
+                    ),
+                    AabbVerdict::Outside => {}
+                    AabbVerdict::NeedsPointCheck => pending_point_checks.push((
+                        element_slot,
+                        candidate,
+                        mesh_slot,
+                        inside_count,
+                    )),
                 }
             }
-        }
-        if !meshes.failures.is_empty() {
-            undecidable_panels.push(format!(
-                "{}({})",
-                candidate.panel,
-                meshes.failures.join("; ")
-            ));
-        } else if meshes.tri_meshes.is_empty() {
-            undecidable_panels.push(format!("{}(没有可用网格)", candidate.panel));
+            if !meshes.failures.is_empty() {
+                undecidable_panels.insert(format!(
+                    "{}({})",
+                    candidate.panel,
+                    meshes.failures.join("; ")
+                ));
+            } else if meshes.tri_meshes.is_empty() {
+                undecidable_panels.insert(format!("{}(没有可用网格)", candidate.panel));
+            }
         }
     }
 
@@ -1429,21 +1513,26 @@ pub async fn recalc_element_membership(
         anyhow::bail!(
             "构件 {element} 的 {} 块候选面板网格不可完整判定，本次不改写归属: {}",
             undecidable_panels.len(),
-            undecidable_panels.join(", ")
+            undecidable_panels.into_iter().join(", ")
         );
     }
 
     // 只有跨界构件才需要实际几何点，而取点是一次库往返。此前无论第一轮判成什么都先
     // 取一遍，八顶点全在内或全在外的构件（绝大多数）白付一次查询。
     if !pending_point_checks.is_empty() {
-        let world_pts = element_world_points(element)
+        let world_points = element_world_points(element)
             .await
             .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
-        for (slot, mesh_slot, inside_count) in pending_point_checks {
-            let candidate = candidates[slot];
+        for (element_slot, candidate, mesh_slot, inside_count) in pending_point_checks {
+            let element_aabb = &element_insts[element_slot].world_aabb;
             let tri_mesh = &candidate.meshes(mesh_dir).tri_meshes[mesh_slot];
-            if element_in_panel(tri_mesh, &element_aabb, || world_pts.iter().copied()) {
-                merge_element_edge(&mut edges, candidate, element, &element_aabb, inside_count);
+            if element_in_panel(tri_mesh, element_aabb, || {
+                world_points
+                    .iter()
+                    .filter(|row| same_world_aabb(&row.world_aabb, element_aabb))
+                    .flat_map(|row| row.points.iter().copied())
+            }) {
+                merge_element_edge(&mut edges, candidate, element, element_aabb, inside_count);
             }
         }
     }
@@ -1452,10 +1541,21 @@ pub async fn recalc_element_membership(
     write_element_room_relate_logged(element, &edges, &old_rooms).await
 }
 
-/// 构件在世界坐标系下的实际几何点，与正向第二轮取的是同一批。
-async fn element_world_points(element: RefnoEnum) -> anyhow::Result<Vec<Point<Real>>> {
-    let mut points = Vec::new();
+/// 构件在世界坐标系下的实际几何点，按实例保留，避免跨实例混用。
+struct ElementWorldPoints {
+    world_aabb: Aabb,
+    points: Vec<Point<Real>>,
+}
+
+fn same_world_aabb(left: &Aabb, right: &Aabb) -> bool {
+    left.mins == right.mins && left.maxs == right.maxs
+}
+
+/// 构件各实例在世界坐标系下的实际几何点，与正向第二轮取的是同一批。
+async fn element_world_points(element: RefnoEnum) -> anyhow::Result<Vec<ElementWorldPoints>> {
+    let mut rows = Vec::new();
     for geom_pts in query_geom_pts(&[element]).await? {
+        let mut points = Vec::new();
         for (trans, pts) in &geom_pts.pts_group {
             let Some(pts) = pts else {
                 continue;
@@ -1465,8 +1565,12 @@ async fn element_world_points(element: RefnoEnum) -> anyhow::Result<Vec<Point<Re
                 pt_trans.as_dmat4().transform_point3(*pt).as_vec3().into()
             }));
         }
+        rows.push(ElementWorldPoints {
+            world_aabb: geom_pts.world_aabb,
+            points,
+        });
     }
-    Ok(points)
+    Ok(rows)
 }
 
 /// 元素分支算出来的一条归属边。
@@ -1973,6 +2077,55 @@ mod tests {
         assert!(intersecting_panel_slots(&[], &box_of(0.0, 1.0)).is_empty());
     }
 
+    /// 多实例只能逐实例选候选再 union；跨远距离总 AABB 会误收中间整段面板。
+    #[test]
+    fn distant_instances_union_candidates_without_filling_the_gap() {
+        let box_of =
+            |min: f32, max: f32| Aabb::new(Point::new(min, 0.0, 0.0), Point::new(max, 10.0, 10.0));
+        let panels = [box_of(0.0, 10.0), box_of(45.0, 55.0), box_of(90.0, 100.0)];
+        let instances = [box_of(2.0, 4.0), box_of(96.0, 98.0)];
+
+        let per_instance: HashSet<usize> = instances
+            .iter()
+            .flat_map(|aabb| intersecting_panel_slots(&panels, aabb))
+            .collect();
+        assert_eq!(per_instance, HashSet::from([0, 2]));
+
+        let total = Aabb::new(instances[0].mins, instances[1].maxs);
+        assert_eq!(
+            intersecting_panel_slots(&panels, &total),
+            vec![0, 1, 2],
+            "该反例钉住不能改成总 AABB"
+        );
+    }
+
+    #[test]
+    fn repeated_instance_membership_keeps_the_stronger_panel_edge() {
+        let weak = member(20, 4, 5.0);
+        let stronger_by_count = member(20, 8, 100.0);
+        let selected = weak.stronger(stronger_by_count);
+        assert_eq!(selected.inside_count, 8);
+        assert_eq!(selected.center_dist, 100.0);
+
+        let closer = member(20, 8, 2.0);
+        let selected = selected.stronger(closer);
+        assert_eq!(selected.inside_count, 8);
+        assert_eq!(selected.center_dist, 2.0);
+    }
+
+    #[test]
+    fn an_incomplete_panel_index_is_not_safe_for_element_replacement() {
+        let index = PanelIndex {
+            missing: vec![panel()],
+            ..Default::default()
+        };
+        let error = index
+            .ensure_complete()
+            .expect_err("缺一块在册面板也必须 fail-closed")
+            .to_string();
+        assert!(error.contains("4000000001/10") || error.contains("4000000001_10"));
+    }
+
     /// 全量重建在**树装不下库**时必须拒跑，而不是把整库房间归属清成空。
     ///
     /// 它是先清后写的：树里捞不到候选时每块面板都算出 0 个成员，一次重建就抹平整库。
@@ -1981,38 +2134,12 @@ mod tests {
     /// `room_relate` 从上千条掉到 1 条。所以这里钉的是覆盖率判据。
     #[test]
     fn the_full_rebuild_refuses_to_run_against_a_tree_that_lags_the_database() {
-        let source = include_str!("room_model.rs");
-        let body = source
-            .split_once("pub async fn build_room_relations(")
-            .expect("build_room_relations 必须存在")
-            .1
-            .split_once("\n/// 空间树至少要装下库里可用包围盒指针的这个比例")
-            .expect("全量重建之后是覆盖率下限常量")
-            .0;
-
-        assert!(
-            body.contains("usable_aabb_pointer_count()")
-                && body.contains("MIN_TREE_COVERAGE_PERCENT"),
-            "判据必须是覆盖率：退回 is_empty() 会重新放行「树非空但缺了一个库」: {body}"
-        );
-        let guard_at = body
-            .find("usable_aabb_pointer_count()")
-            .expect("覆盖率判定必须挡在重建之前");
-        let bail_at = body[guard_at..]
-            .find("anyhow::bail!")
-            .map(|at| guard_at + at)
-            .expect("覆盖不够必须上抛，交给调用点降级为告警");
-        let recalc_at = body
-            .find("cal_room_refnos(")
-            .expect("重建必须调 cal_room_refnos");
-        let write_at = body
-            .find("save_room_relate(")
-            .expect("重建必须写 room_relate");
-
-        assert!(
-            bail_at < recalc_at && bail_at < write_at,
-            "覆盖率判定必须排在任何一次重算与写入之前: {body}"
-        );
+        assert!(validate_room_tree_coverage(0, 100).is_err());
+        assert!(validate_room_tree_coverage(89, 100).is_err());
+        assert!(validate_room_tree_coverage(90, 100).is_ok());
+        assert!(validate_room_tree_coverage(100, 100).is_ok());
+        // 计数查询失败不会再折成 0 后放行；0 个库指针同样没有正面证据可做破坏性重写。
+        assert!(validate_room_tree_coverage(100, 0).is_err());
     }
 
     /// 增量整间分支在空树上同样必须拒跑。
@@ -2025,7 +2152,7 @@ mod tests {
     /// 「面板已不在册」那条清边路径**不**受这道门管：它与树无关，面板不在册就是不在
     /// 册，边本来就该清掉。
     #[test]
-    fn the_panel_branch_refuses_to_recalc_against_an_empty_tree() {
+    fn the_panel_branch_uses_the_shared_tree_coverage_gate() {
         let source = include_str!("room_model.rs");
         let body = source
             .split_once("pub async fn recalc_panel_membership(")
@@ -2036,14 +2163,14 @@ mod tests {
             .0;
 
         let unregistered_at = body
-            .find("save_room_relate(panel, &HashMap::new(), \"\")")
+            .find("save_panel_state(panel, &HashMap::new(), None)")
             .expect("面板不在册时仍要清边");
         let guard_at = body
-            .find("GLOBAL_AABB_TREE.read().await.is_empty()")
-            .expect("空树必须挡在重算之前");
+            .find("ensure_room_tree_coverage().await")
+            .expect("共享覆盖率门必须挡在重算之前");
         let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
         let write_at = body
-            .find("save_room_relate(panel, &members")
+            .find("save_panel_state(panel, &members, Some(room))")
             .expect("整间分支必须写回成员");
 
         assert!(
@@ -2052,13 +2179,8 @@ mod tests {
         );
         assert!(
             guard_at < recalc_at && guard_at < write_at,
-            "空树判定必须排在重算与写入之前: {body}"
+            "覆盖率判定必须排在重算与写入之前: {body}"
         );
-        let bail_at = body[guard_at..]
-            .find("anyhow::bail!")
-            .map(|at| guard_at + at)
-            .expect("空树必须上抛，让任务保留重试而不是算成功");
-        assert!(bail_at < recalc_at, "{body}");
     }
 
     /// 窗口内被删掉的构件不得被整间分支按旧位置重新收编。
@@ -2136,7 +2258,7 @@ mod tests {
             .map(|at| arm_at + at)
             .expect("整间分支必须上抛，让任务保留重试而不是算成功");
         let write_at = panel_branch
-            .find("save_room_relate(panel, &members")
+            .find("save_panel_state(panel, &members, Some(room))")
             .expect("整间分支必须写回成员");
         assert!(bail_at < write_at, "{panel_branch}");
     }
@@ -2167,7 +2289,7 @@ mod tests {
             "元素分支的候选必须来自 PanelIndex，不能回到空间树: {body}"
         );
         assert!(
-            body.contains("panels.candidates(&element_aabb)"),
+            body.contains("panels.candidates(element_aabb)"),
             "候选必须走本轮加载的在册面板索引: {body}"
         );
     }
@@ -2202,7 +2324,7 @@ mod tests {
         let body = element_branch_source();
 
         let first_round_at = body
-            .find("membership_by_aabb(tri_mesh, &element_aabb)")
+            .find("membership_by_aabb(tri_mesh, element_aabb)")
             .expect("第一轮必须只问包围盒");
         let guard_at = body
             .find("if !pending_point_checks.is_empty()")
@@ -2266,7 +2388,7 @@ mod tests {
         assert!(!removed.contains("INSERT RELATION"));
     }
 
-    /// 两个 `room_panel_relate` 写入都必须进得了窗口 journal。
+    /// panel 成员边与 panel→room 拓扑必须作为**同一条事务**进窗口 journal。
     ///
     /// 这张表此前是裸 `RELATE`——边 id 无法显式指定，被 ReplaySafe R1 整类拒绝，于是
     /// 房间双表在暂存路径上根本对不上。改成 `DELETE + INSERT RELATION`（显式
@@ -2289,12 +2411,106 @@ mod tests {
             &room.room_num,
         ))
         .expect("整间重写必须过 ReplaySafe");
-        validate_statement(&render_panel_room_topology_write(
-            room.panels[0],
-            Some(&room),
-        ))
-        .expect("面板拓扑重写必须过 ReplaySafe");
-        validate_statement(&render_panel_room_topology_write(room.panels[0], None))
-            .expect("面板不在册时的清边同样要过 ReplaySafe");
+        let registered =
+            render_panel_state_write(room.panels[0], &members([member(20, 8, 12.5)]), Some(&room));
+        validate_statement(&registered).expect("panel 双表重写必须过 ReplaySafe");
+        assert_eq!(registered.matches("BEGIN TRANSACTION").count(), 1);
+        assert_eq!(registered.matches("COMMIT TRANSACTION").count(), 1);
+        assert!(registered.contains("DELETE room_relate"), "{registered}");
+        assert!(
+            registered.contains("DELETE room_panel_relate"),
+            "{registered}"
+        );
+
+        let removed = render_panel_state_write(room.panels[0], &HashMap::new(), None);
+        validate_statement(&removed).expect("面板不在册时的双向清边同样要过 ReplaySafe");
+        assert_eq!(removed.matches("BEGIN TRANSACTION").count(), 1);
+        assert!(removed.contains("DELETE room_relate"), "{removed}");
+        assert!(removed.contains("DELETE room_panel_relate"), "{removed}");
+    }
+
+    /// 真实 mem 暂存库故障注入：成员表已经执行 DELETE/INSERT 后、拓扑表写入前抛错，
+    /// 整条 panel state 事务必须回滚，两张表都保留旧边，不能出现半提交。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panel_state_transaction_rolls_back_both_tables_on_midway_failure() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+        use surrealdb::sql::Thing;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 9199, 61, 61, ResourceThresholds::default())
+            .await
+            .expect("staged window");
+        window
+            .staging_db()
+            .query(
+                "INSERT RELATION INTO room_relate [{ id: room_relate:old_member, \
+                 in: pe:4000000001_10, out: pe:4000000001_20, room_num: 'OLD', \
+                 inside_count: 8, center_dist: 0.0 }];\
+                 INSERT RELATION INTO room_panel_relate [{ id: room_panel_relate:old_topology, \
+                 in: pe:4000000001_1, out: pe:4000000001_10, room_num: 'OLD' }];",
+            )
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture statements");
+
+        let room = RoomPanels {
+            room: RefnoEnum::from("4000000001_2"),
+            room_num: "NEW".into(),
+            panels: vec![panel()],
+        };
+        let sql = render_panel_state_write(panel(), &members([member(21, 8, 1.0)]), Some(&room));
+        let injected = sql.replacen(
+            "DELETE room_panel_relate",
+            "THROW 'injected panel-state failure';\nDELETE room_panel_relate",
+            1,
+        );
+        assert_ne!(injected, sql, "故障点必须插在两张表之间");
+        surrealdb::sql::parse(&injected).expect("故障脚本必须先完整解析，不能靠语法错误假回滚");
+
+        let failed = window
+            .scope(async {
+                match crate::data_interface::staging::active_data_db()
+                    .query(injected)
+                    .await
+                {
+                    Ok(response) => response.check().is_err(),
+                    Err(_) => true,
+                }
+            })
+            .await;
+        assert!(failed, "注入的 THROW 必须让事务失败");
+
+        async fn ids(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+            table: &str,
+        ) -> Vec<String> {
+            let mut response = db
+                .query(format!("SELECT VALUE id FROM {table}"))
+                .await
+                .expect("inspect transport")
+                .check()
+                .expect("inspect statement");
+            let mut ids = response
+                .take::<Vec<Thing>>(0)
+                .expect("edge ids")
+                .into_iter()
+                .map(|thing| thing.to_string())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        }
+
+        assert_eq!(
+            ids(window.staging_db(), "room_relate").await,
+            vec!["room_relate:old_member".to_string()]
+        );
+        assert_eq!(
+            ids(window.staging_db(), "room_panel_relate").await,
+            vec!["room_panel_relate:old_topology".to_string()]
+        );
+        window.drop_database().await.expect("cleanup");
     }
 }

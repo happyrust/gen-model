@@ -746,6 +746,7 @@ mod tests {
         window
             .scope(register_staged_finalize(StagedFinalize {
                 dbnum,
+                start_sesno: end_sesno,
                 end_sesno,
                 plan: plan.clone(),
                 window_statements: Vec::new(),
@@ -1193,7 +1194,10 @@ mod tests {
         .await
         .expect("enqueue both room tasks");
 
-        let done = drain_rooms(&db_option).await.expect("drain room phase");
+        let done = drain_rooms(&db_option)
+            .await
+            .expect("drain room phase")
+            .done;
         let after = room_edges().await;
 
         let mut response = SUL_DB
@@ -1280,7 +1284,10 @@ mod tests {
             .await
             .expect("enqueue both room tasks");
 
-        let done = drain_rooms(&db_option).await.expect("drain room phase");
+        let done = drain_rooms(&db_option)
+            .await
+            .expect("drain room phase")
+            .done;
         let incremental = room_edges().await;
 
         build_room_relations(&db_option)
@@ -1599,7 +1606,7 @@ mod tests {
             .expect("enqueue room work");
 
         // 走生产上真正的消费路径，而不是直调元素分支。
-        let done = drain_rooms(&db_option).await.expect("drain room work");
+        let done = drain_rooms(&db_option).await.expect("drain room work").done;
         assert_eq!(done, 1, "那条元素任务必须被消费掉");
 
         let incremental = room_edges().await;

@@ -562,7 +562,10 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
             .expect("rebuild spatial tree before panel membership recalculation");
     }
 
-    let rooms_done = drain_rooms(&db_option).await.expect("drain room phase");
+    let rooms_done = drain_rooms(&db_option)
+        .await
+        .expect("drain room phase")
+        .done;
     println!("[e2e] 房间轮消化 {rooms_done} 条");
 
     snapshot("after", &case).await;

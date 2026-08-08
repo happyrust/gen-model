@@ -2360,8 +2360,7 @@ pub(crate) async fn refresh_world_transform_products(
         if !update_sqls.is_empty() {
             let batch_sql = update_sqls.join("");
             println!("执行world transform更新SQL，批次大小: {}", chunk.len());
-            crate::surreal_retry::execute_model_write(&batch_sql, "更新 world_trans 指针")
-                .await?;
+            crate::surreal_retry::execute_model_write(&batch_sql, "更新 world_trans 指针").await?;
         }
     }
 
@@ -2371,13 +2370,10 @@ pub(crate) async fn refresh_world_transform_products(
     //
     // replace_exist 必须传 true：默认的 replace_mesh=false 会给 SQL 追加 `and aabb=none`，
     // 而这条路径上的元素全都已经有包围盒，会被整批跳过。
-    let aabb_changes = update_inst_relate_aabbs_by_refnos(refnos_vec, true).await?;
-
-    // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」，房间归属必须跟着重算
-    // （ADR-010 §4）。只有包围盒**确实变了**的才入队：这条路径上的元素常常是被
-    // 子树遍历顺带捞进来的，它们的世界变换重算后与原值一致，不该白算一遍房间。
-    // 暂存窗口内变更集在刷新层就地寄存进窗口、这里恒为空集，入队自然无事发生。
-    crate::data_interface::model_update_pending::enqueue_room_recalc(&aabb_changes).await?;
+    // 纯 POS/ORI 移动正是「设备从 A 房挪到 B 房」。显式增量入口只为包围盒确实
+    // 变化的目标建任务：直写时 AABB 指针、room pending、spatial epoch 同事务，
+    // 暂存时把变化寄存进窗口并由尾事务收口，调用方不再做有崩溃窗口的后置入队。
+    update_inst_relate_aabbs_by_refnos_incremental(refnos_vec, true).await?;
 
     println!("world transform更新完成");
     Ok(())

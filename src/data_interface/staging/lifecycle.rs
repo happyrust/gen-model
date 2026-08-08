@@ -625,6 +625,7 @@ mod tests {
             .scope(super::super::register_staged_finalize(
                 super::super::StagedFinalize {
                     dbnum: 7905,
+                    start_sesno: 3,
                     end_sesno: 7,
                     plan: Default::default(),
                     window_statements: Vec::new(),

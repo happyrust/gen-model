@@ -786,15 +786,15 @@ pub(crate) async fn build_model_update_plan(
             .collect();
         let mut preload_panels = room_triggers.moved_panels.clone();
         if !room_triggers.renamed_rooms.is_empty() {
-            match panels_under_rooms(&room_triggers.renamed_rooms).await {
-                Ok(panels) => {
-                    panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
-                    preload_panels.extend(panels);
-                }
-                Err(error) => warnings.push(format!(
-                    "dbnum={dbnum}: 房间改名的面板枚举失败，房间号刷新延迟到下次全量重建: {error:#}"
-                )),
-            }
+            let panels = panels_under_rooms(&room_triggers.renamed_rooms)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "dbnum={dbnum}: 房间改名的面板枚举失败，拒绝推进窗口: {error:#}"
+                    )
+                })?;
+            panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
+            preload_panels.extend(panels);
         }
         // H-1：改名「成为」合规房间时，房间自己的 pe 行会被本窗口解析重写，但面板的
         // `pe_owner` 边不变、不进解析，也不在窗口起点的预载范围（那只 BFS 提交前已

@@ -471,6 +471,7 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
             .await?;
             register_staged_finalize(StagedFinalize {
                 dbnum: DBNUM,
+                start_sesno: 2,
                 end_sesno: 2,
                 plan: Default::default(),
                 window_statements: Vec::new(),
@@ -747,6 +748,7 @@ async fn staged_transform_with_a_pos_ancestor_writes_back_the_absolute_position(
             refresh_world_transform_products(&db_option, &[equi]).await?;
             register_staged_finalize(StagedFinalize {
                 dbnum: DBNUM,
+                start_sesno: 2,
                 end_sesno: 2,
                 plan: Default::default(),
                 window_statements: Vec::new(),

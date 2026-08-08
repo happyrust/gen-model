@@ -324,18 +324,14 @@ pub async fn process_meshes_update_db_deep(
                 // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
                 // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
                 // 是同一个理由（ADR-010 D2）。
-                let aabb_changes = update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
-                // 几何重生成后包围盒变了 → 房间归属可能变（ADR-010 §4）。房间任务是
-                // `drain` 的第三阶段，排在本轮 regen 之后，因此在这里入队正好被它捡起。
-                //
-                // 只在**定向**重生成时入队。`debug_root_refnos` 是 `gen_all_geos_data`
-                // 用来区分两条分支的同一个信号，定向那条由 `ModelRefreshPolicy` 独家设置。
-                // 全量生成会把整库元素都算成「包围盒从无到有」，逐个入队等于给每个元素
-                // 排一次房间重算；而全量生成本来就以 `build_room_relations` 的整体重建
-                // 收尾，那些任务纯属浪费。
+                // 只在**定向**重生成时建立 durable 房间触发。直写路径由增量入口把
+                // AABB 指针、room pending 与 spatial epoch 放进同一事务，事务成功后才
+                // 推进内存树；暂存路径仍只写 journal 并把变化寄存在窗口里。全量生成
+                // 本来就以 `build_room_relations` 的整体重建收尾，不逐元素排房间任务。
                 if dboption.debug_root_refnos.is_some() {
-                    crate::data_interface::model_update_pending::enqueue_room_recalc(&aabb_changes)
-                        .await?;
+                    update_inst_relate_aabbs_by_refnos_incremental(&update_refnos, true).await?;
+                } else {
+                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
                 }
                 aabb_ms += t_aabb.elapsed().as_millis();
             }
@@ -779,6 +775,26 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     refnos: &[RefnoEnum],
     replace_exist: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
+    update_inst_relate_aabbs_by_refnos_mode(refnos, replace_exist, false).await
+}
+
+/// 定向增量刷新入口。
+///
+/// 与普通刷新唯一的差别在直写路径：先以旧空间树判定房间目标，再把 AABB 指针、
+/// `model_update_pending` 房间任务和 spatial epoch 放进一个事务；事务成功后才推进
+/// `GLOBAL_AABB_TREE`。暂存路径不提前发布控制面任务，仍由窗口尾事务统一收口。
+pub async fn update_inst_relate_aabbs_by_refnos_incremental(
+    refnos: &[RefnoEnum],
+    replace_exist: bool,
+) -> anyhow::Result<Vec<AabbChange>> {
+    update_inst_relate_aabbs_by_refnos_mode(refnos, replace_exist, true).await
+}
+
+async fn update_inst_relate_aabbs_by_refnos_mode(
+    refnos: &[RefnoEnum],
+    replace_exist: bool,
+    durable_room_trigger: bool,
+) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
     let staged_writes = crate::data_interface::staging::active_staging_writes();
     let mut changes = Vec::new();
@@ -786,6 +802,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         if chunk.is_empty() {
             continue;
         }
+        // The durable direct path must serialize before it reads the geometry /
+        // transform inputs. Taking the lock only after `new_boxes` was computed
+        // allowed two refreshes of the same refno to calculate A then B, acquire
+        // the lock in reverse order, and publish stale A last.
+        let mut direct_tree = if staged_writes.is_none() && durable_room_trigger {
+            Some(GLOBAL_AABB_TREE.write().await)
+        } else {
+            None
+        };
         let mut rstar_objs = Vec::new();
         let inst_keys = get_inst_relate_keys(chunk);
         let mut sql = format!(
@@ -858,74 +883,103 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             rstar_objs.push(RStarBoundingBox::new(new_box, r.refno, r.noun.clone()));
             new_boxes.push((r.refno, r.noun, new_box));
         }
+        // 变更必须在任何指针写入、内存树推进之前按旧树判定。直写事务若随后失败，
+        // 指针和树都还留在旧基线，原模型任务重试时仍能再次得到同一批房间目标。
+        let target_refnos = new_boxes
+            .iter()
+            .map(|(refno, _, _)| refno.refno())
+            .collect::<HashSet<_>>();
+        // direct 增量从读取本块输入一直到事务提交、内存树同步都持有写锁。否则空闲轮
+        // 可能在「DB epoch 已递增、树尚未同步」的极窄窗口把旧树盖上新 epoch sidecar，
+        // 或并发刷新把较旧的输入快照后写覆盖掉较新的结果。
+        let stale_by_refno = if let Some(tree) = direct_tree.as_ref() {
+            let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
+            for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
+                stale.entry(old.refno).or_default().push(old.aabb);
+            }
+            stale
+        } else {
+            let tree = GLOBAL_AABB_TREE.read().await;
+            let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
+            for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
+                stale.entry(old.refno).or_default().push(old.aabb);
+            }
+            stale
+        };
+        let chunk_changes = new_boxes
+            .iter()
+            .filter_map(|(refno, noun, new_box)| {
+                let olds = stale_by_refno
+                    .get(&refno.refno())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                tree_box_changed(olds, new_box).then(|| AabbChange {
+                    refno: *refno,
+                    noun: noun.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
         // aabb 记录先落库、指针后落库（与 trans 记录同一条 D9 教训，方向不能反）：
         // 反过来的话，两条语句之间的并发读者与中途崩溃都会看到指向缺位记录的指针，
         // `aabb.d` 为 none，元素从 `where aabb.d != none` 的所有读者里整条消失。
         utils::save_aabb_to_surreal(&chunk_aabbs).await?;
-        if !update_sql.is_empty() {
+        if let Some(context) = &staged_writes {
+            if !update_sql.is_empty() {
+                crate::surreal_retry::execute_model_write(
+                    &update_sql,
+                    "update inst_relate aabb pointers",
+                )
+                .await?;
+            }
+            let refnos = new_boxes
+                .iter()
+                .map(|(refno, _, _)| *refno)
+                .collect::<Vec<_>>();
+            context.defer_spatial_refresh(&refnos).await;
+            context.defer_room_changes(&chunk_changes).await;
+            continue;
+        }
+
+        if durable_room_trigger && !chunk_changes.is_empty() {
+            let room_upserts =
+                crate::data_interface::model_update_pending::render_room_recalc_upserts(
+                    &chunk_changes,
+                );
+            let mut statements = Vec::with_capacity(3);
+            if !update_sql.is_empty() {
+                statements.push(update_sql.clone());
+            }
+            statements.push(room_upserts);
+            statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
+            let transaction =
+                crate::data_interface::increment_pipeline::wrap_in_transaction(&statements)
+                    .expect("增量 AABB 房间事务至少包含 pending 与 epoch");
+            crate::surreal_retry::execute_surreal_checked(
+                &transaction,
+                "update inst_relate aabb pointers with durable room triggers",
+            )
+            .await?;
+        } else if !update_sql.is_empty() {
             crate::surreal_retry::execute_model_write(
                 &update_sql,
                 "update inst_relate aabb pointers",
             )
             .await?;
         }
-        if let Some(context) = &staged_writes {
-            let refnos = new_boxes
-                .iter()
-                .map(|(refno, _, _)| *refno)
-                .collect::<Vec<_>>();
-            context.defer_spatial_refresh(&refnos).await;
-            let target_refnos = new_boxes
-                .iter()
-                .map(|(refno, _, _)| refno.refno())
-                .collect::<HashSet<_>>();
-            let stale_by_refno = {
-                let tree = GLOBAL_AABB_TREE.read().await;
-                let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
-                for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
-                    stale.entry(old.refno).or_default().push(old.aabb);
-                }
-                stale
-            };
-            let room_changes = new_boxes
-                .iter()
-                .filter_map(|(refno, noun, new_box)| {
-                    let olds = stale_by_refno
-                        .get(&refno.refno())
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    tree_box_changed(olds, new_box).then(|| AabbChange {
-                        refno: *refno,
-                        noun: noun.clone(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            context.defer_room_changes(&room_changes).await;
-            continue;
-        }
+
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
-        // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入
-        // 新值，返回的旧条目正是变更判定的基线。
-        let stale = {
+        // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入新值。
+        if let Some(tree) = direct_tree.as_mut() {
+            tree.sync_refnos(rstar_objs.clone());
+        } else {
             let mut tree = GLOBAL_AABB_TREE.write().await;
-            tree.sync_refnos(rstar_objs.clone())
-        };
-        if !rstar_objs.is_empty() || !stale.is_empty() {
+            tree.sync_refnos(rstar_objs.clone());
+        }
+        if !rstar_objs.is_empty() || !stale_by_refno.is_empty() {
             crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
         }
-        let mut stale_by_refno: HashMap<RefU64, Vec<Aabb>> = HashMap::new();
-        for old in stale {
-            stale_by_refno.entry(old.refno).or_default().push(old.aabb);
-        }
-        for (refno, noun, new_box) in new_boxes {
-            let olds = stale_by_refno
-                .get(&refno.refno())
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            if tree_box_changed(olds, &new_box) {
-                changes.push(AabbChange { refno, noun });
-            }
-        }
+        changes.extend(chunk_changes);
     }
 
     // aabb 一到位，行才够格进 insts_flat 清扫（谓词含 `aabb.d != none`）：置脏，
@@ -1432,8 +1486,8 @@ mod aabb_write_order_tests {
     fn aabb_records_persist_before_the_pointers_that_reference_them() {
         let source = include_str!("occ_generate.rs");
         let body = source
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
-            .expect("update_inst_relate_aabbs_by_refnos must exist")
+            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
+            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
             .1
             .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
             .map(|(body, _)| body)
@@ -1446,7 +1500,7 @@ mod aabb_write_order_tests {
             .find("update inst_relate aabb pointers")
             .expect("pointer update missing");
         let tree_at = body
-            .find("GLOBAL_AABB_TREE.write()")
+            .find("tree.sync_refnos(rstar_objs.clone())")
             .expect("tree update missing");
 
         assert!(
@@ -1456,6 +1510,101 @@ mod aabb_write_order_tests {
         assert!(
             pointers_at < tree_at,
             "内存树必须在本块 DB 写入全部成功之后才动，失败块不得留下树新库旧的半掺状态"
+        );
+    }
+
+    #[test]
+    fn direct_increment_publishes_pointer_room_trigger_and_epoch_before_tree_sync() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
+            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
+            .1
+            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        let classify_at = body
+            .find("let chunk_changes =")
+            .expect("old-tree change classification missing");
+        let lock_at = body
+            .find("Some(GLOBAL_AABB_TREE.write().await)")
+            .expect("direct tree lock missing");
+        let input_at = body
+            .find("查询 inst_relate 包围盒输入失败")
+            .expect("aabb input query missing");
+        let records_at = body
+            .find("save_aabb_to_surreal(&chunk_aabbs)")
+            .expect("aabb record insert missing");
+        let pointer_at = body
+            .find("statements.push(update_sql.clone())")
+            .expect("pointer statement is not part of the direct transaction");
+        assert!(
+            body.contains("render_room_recalc_upserts"),
+            "durable room upsert renderer missing"
+        );
+        let room_at = body
+            .find("statements.push(room_upserts)")
+            .expect("room upserts are not part of the direct transaction");
+        let epoch_at = body
+            .find("render_spatial_epoch_bump")
+            .expect("spatial epoch bump missing");
+        let commit_at = body
+            .find("execute_surreal_checked(")
+            .expect("direct transaction execution missing");
+        let tree_at = body
+            .find("tree.sync_refnos(rstar_objs.clone())")
+            .expect("tree sync missing");
+
+        assert!(
+            lock_at < input_at,
+            "直写锁必须先于本块输入查询，禁止提交陈旧快照"
+        );
+        assert!(classify_at < records_at, "变化判定必须发生在任何持久写之前");
+        assert!(records_at < pointer_at, "AABB 内容记录必须先于指针事务");
+        assert!(
+            pointer_at < room_at && room_at < epoch_at,
+            "指针、房间任务、epoch 顺序漂移"
+        );
+        assert!(
+            epoch_at < commit_at && commit_at < tree_at,
+            "事务成功之前不得推进内存树"
+        );
+        assert!(body.contains("wrap_in_transaction(&statements)"));
+    }
+
+    #[test]
+    fn targeted_regen_and_transform_use_the_incremental_aabb_entrypoint() {
+        let regen = include_str!("occ_generate.rs")
+            .split_once("pub async fn process_meshes_update_db_deep(")
+            .expect("process_meshes_update_db_deep exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("aabb refresh boundary")
+            .0;
+        assert!(
+            regen.contains("update_inst_relate_aabbs_by_refnos_incremental"),
+            "定向 regen 必须走 durable 增量入口"
+        );
+        assert!(
+            !regen.contains("enqueue_room_recalc"),
+            "regen 不得在指针提交后再单独入队"
+        );
+
+        let transform = include_str!("../data_interface/increment_manager.rs")
+            .split_once("pub(crate) async fn refresh_world_transform_products(")
+            .expect("refresh_world_transform_products exists")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .map(|(body, _)| body)
+            .unwrap_or_default();
+        assert!(
+            transform.contains("update_inst_relate_aabbs_by_refnos_incremental"),
+            "transform 必须走 durable 增量入口"
+        );
+        assert!(
+            !transform.contains("enqueue_room_recalc"),
+            "transform 不得在指针提交后再单独入队"
         );
     }
 }
