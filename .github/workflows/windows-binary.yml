@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: windows-binary-${{ github.ref }}
@@ -36,8 +37,12 @@ env:
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 180
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
 
     steps:
       - uses: actions/checkout@v6
@@ -87,35 +92,22 @@ jobs:
           Expand-Archive $archive $root
           "PROTOC=$root\bin\protoc.exe" >> $env:GITHUB_ENV
 
-      - name: Restore cargo cache
-        id: cargo-cache
-        uses: actions/cache/restore@v4
+      - name: Enable compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache Cargo sources
+        uses: actions/cache@v4
         with:
           path: |
             ~\.cargo\registry
             ~\.cargo\git
-            target
-          key: cargo-release-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            cargo-release-${{ hashFiles('Cargo.lock') }}-
-            cargo-release-
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build release binary
         run: >-
           cargo build --release --locked --bin aios-database
           --no-default-features
           --features ws,gen_model,manifold,occ,project_hd,http_api
-
-      # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
-      - name: Save cargo cache
-        if: always() && steps.cargo-cache.outcome == 'success'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~\.cargo\registry
-            ~\.cargo\git
-            target
-          key: cargo-release-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
       - name: Package binary
         shell: pwsh
@@ -139,14 +131,34 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Reuse successful main artifact
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Compress-Archive dist/aios-database-windows-x64 `
-            "dist/aios-database-windows-x64-$env:GITHUB_REF_NAME.zip"
-          gh release create $env:GITHUB_REF_NAME `
-            "dist/aios-database-windows-x64-$env:GITHUB_REF_NAME.zip" `
-            --generate-notes --verify-tag
+          for attempt in {1..20}; do
+            run_id=$(gh run list --workflow windows-binary.yml --branch main \
+              --commit "$GITHUB_SHA" --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty')
+            if [[ -n "$run_id" ]]; then break; fi
+            sleep 30
+          done
+          test -n "$run_id"
+          mkdir -p dist/aios-database-windows-x64
+          gh run download "$run_id" --name aios-database-windows-x64 \
+            --dir dist/aios-database-windows-x64
+          cd dist
+          zip -qr "aios-database-windows-x64-${GITHUB_REF_NAME}.zip" \
+            aios-database-windows-x64
+          asset="aios-database-windows-x64-${GITHUB_REF_NAME}.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$asset" \
+              --generate-notes --verify-tag
+          fi
