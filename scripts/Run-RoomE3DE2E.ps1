@@ -2,7 +2,7 @@
 param(
     [string]$ProjectDir = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample',
     [string]$Datastore = 'rocksdb:.surreal/ams-7997-e3d-test-20260805',
-    [string[]]$Cases = @('same-room', 'element-out', 'room-rename', 'box-size', 'cyli-size'),
+    [string[]]$Cases = @('same-room', 'element-out', 'cross-db-room', 'room-rename', 'box-size', 'cyli-size'),
     [string[]]$ModelTypes = @(),
     [switch]$SkipLegacyCases,
     [string]$TestExe = '',
@@ -309,6 +309,18 @@ try {
                 Invoke-Case $case 'element' 7999 '24383_66460' 'CAP' `
                     'scripts/e3d/room_cap_out_apply.mac' `
                     'scripts/e3d/room_cap_out_restore.mac' $false $false
+            }
+            'cross-db-room' {
+                # 跨库房间迁移：CAP（db7999）从 R512（房间 FRMW 与面板在 db7997）搬进
+                # /6KA-RM01-K101（房间树在 db1112，SITE /6KA-ARCH）。K170 公共区域体
+                # （/6KA-RM01-K170，面板 17496_230648）完全包含 K101，双归属是该区域
+                # 常态（定标证据：K101 现有成员 2/3 同时挂 K170 边），期望边按两条冻结。
+                # 动态基线 + '-RM' 关键字：房间图必须同时纳入 1RX（7997）与 6KA（1112）。
+                Invoke-Case $case 'element' 7999 '24383_66460' 'CAP' `
+                    'scripts/e3d/room_cap_cross_db_apply.mac' `
+                    'scripts/e3d/room_cap_cross_db_restore.mac' $true $true $true $false `
+                    '[{"panel":"17496_230552","part":"24383_66460","room_num":"K101"},{"panel":"17496_230648","part":"24383_66460","room_num":"K170"}]' `
+                    '[{"panel":"24381_35844","part":"24383_66460","room_num":"R512"}]'
             }
             'room-rename' {
                 Invoke-Case $case 'room' 7997 '24383_66460' 'CAP' `

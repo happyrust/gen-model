@@ -1,0 +1,9 @@
+-- Restore the CAP moved by room_cap_cross_db_apply.mac back to its golden position
+-- (same coordinates as issue7_cap_pos_restore.mac).
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cap_cross_db_restore.log" OVER
+=24383/66460
+Q CE
+POS E -5001.4501953125 N 10705.8095703125 U 5821.669921875
+Q POS
+SAVEWORK 'CODEX room cross-db: CAP restore'
+ALPHA LOG END

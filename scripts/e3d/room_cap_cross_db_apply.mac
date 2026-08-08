@@ -1,0 +1,12 @@
+-- cross-db room migration: move the issue #7 CAP out of R512 (room FRMW /1RX-RM05-R512,
+-- db 7997) into room /6KA-RM01-K101 (db 1112, panel =17496/230552).
+-- Target POS = K101 panel AABB center; the K170 umbrella volume (/6KA-RM01-K170,
+-- panel =17496/230648) contains K101, so dual membership K101+K170 is expected.
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cap_cross_db_apply.log" OVER
+=24383/66460
+Q CE
+Q POS
+POS E -18685 N -16426.047 U -7375
+Q POS
+SAVEWORK 'CODEX room cross-db: CAP into K101'
+ALPHA LOG END
