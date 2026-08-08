@@ -694,10 +694,9 @@ pub async fn gen_inst_meshes(
             tasks.push(task);
         }
 
-        let task_results = futures::future::try_join_all(tasks)
-            .await
-            .map_err(|error| anyhow!("mesh worker join failed: {error}"))?;
+        let task_results = futures::future::join_all(tasks).await;
         for result in task_results {
+            let result = result.map_err(|error| anyhow!("mesh worker join failed: {error}"))?;
             result?;
         }
 
@@ -1395,10 +1394,9 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
         );
         tasks.push(task);
     }
-    let task_results = futures::future::try_join_all(tasks)
-        .await
-        .map_err(|error| anyhow!("OCC boolean worker join failed: {error}"))?;
+    let task_results = futures::future::join_all(tasks).await;
     for result in task_results {
+        let result = result.map_err(|error| anyhow!("OCC boolean worker join failed: {error}"))?;
         result?;
     }
 
@@ -1423,7 +1421,8 @@ mod aabb_write_order_tests {
             body.contains("save_pts_to_surreal(&pts_json_map).await?"),
             "{body}"
         );
-        assert!(!body.contains("try_join_all(tasks).await {"), "{body}");
+        assert!(body.contains("join_all(tasks).await"), "{body}");
+        assert!(!body.contains("try_join_all(tasks)"), "{body}");
     }
 
     /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条

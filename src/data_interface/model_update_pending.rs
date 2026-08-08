@@ -2665,6 +2665,9 @@ mod tests {
 
     #[tokio::test]
     async fn committed_spatial_intent_survives_discarding_the_window_database() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::StagedFinalize;
+        use crate::data_interface::staging::lifecycle::create_window_on;
         use surrealdb::engine::any::connect;
 
         let persistent = connect("mem://").await.expect("persistent mem target");
@@ -2673,31 +2676,33 @@ mod tests {
             .use_db("persistent")
             .await
             .expect("select persistent target");
-        let window = connect("mem://").await.expect("window mem target");
+        let instance = connect("mem://").await.expect("window mem target");
+        let window = create_window_on(&instance, 8191, 2, 42, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let context = window.write_context();
+        context
+            .defer_spatial_refresh(&[RefnoEnum::from(
+                "16777216/2".parse::<RefU64>().expect("refresh refno"),
+            )])
+            .await;
+        context
+            .register_finalize(StagedFinalize {
+                dbnum: 8191,
+                end_sesno: 42,
+                plan: ModelUpdatePlan::default(),
+                window_statements: vec![],
+                cache_refnos: vec![],
+            })
+            .await
+            .expect("register finalize");
         window
-            .use_ns("spatial_finalize")
-            .use_db("window")
+            .commit_registered_to(&persistent)
             .await
-            .expect("select window target");
+            .expect("commit window");
 
-        let tail = render_finalize_tail_with_effects(
-            8191,
-            42,
-            &ModelUpdatePlan::default(),
-            &[],
-            &["16777216/2".to_string()],
-            &[],
-            &[],
-        )
-        .expect("finalize tail");
-        persistent
-            .query(format!("BEGIN TRANSACTION;\n{tail}\nCOMMIT TRANSACTION;"))
-            .await
-            .expect("execute finalize")
-            .check()
-            .expect("finalize statements");
-
-        drop(window);
+        drop(context);
+        window.drop_database().await.expect("discard window");
         let mut response = persistent
             .query(
                 "SELECT VALUE status FROM incr_side_effect_pending:spatial_reconcile_8191_42;\

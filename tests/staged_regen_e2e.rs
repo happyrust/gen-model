@@ -121,6 +121,11 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
     let task_id = outcome.info.task_id.clone();
     let commit_before = staged_commit_metrics();
+    assert_eq!(
+        commit_before["last_duration_ms"].as_u64(),
+        Some(0),
+        "a fresh release-gate process must not inherit a previous staged commit: {commit_before}"
+    );
     let manager = Arc::new(
         AiosDBManager::init_form_config()
             .await
@@ -141,6 +146,11 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
     let result = batch_result(&task_id);
     assert_eq!(result["status"], "success", "{result:#}");
     assert_eq!(result["batch"]["status"], "applied", "{result:#}");
+    assert_eq!(
+        result["warnings"].as_array().map(Vec::len),
+        Some(0),
+        "release gate must finish without warnings: {result:#}"
+    );
     assert!(
         result["units"].as_array().is_some_and(|units| units
             .iter()

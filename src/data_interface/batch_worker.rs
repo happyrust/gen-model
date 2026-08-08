@@ -358,11 +358,11 @@ pub(crate) fn direct_increment_enabled() -> bool {
 }
 
 pub(crate) fn increment_mode() -> &'static str {
-    if direct_increment_enabled() {
-        "direct_emergency"
-    } else {
-        "staged"
-    }
+    increment_mode_for(direct_increment_enabled())
+}
+
+fn increment_mode_for(direct: bool) -> &'static str {
+    if direct { "direct_emergency" } else { "staged" }
 }
 
 fn use_staged_increment_window(job: &FrozenBatch) -> bool {
@@ -2280,6 +2280,9 @@ mod tests {
 
     #[test]
     fn emergency_direct_mode_is_visible_and_does_not_warn_for_baselines() {
+        assert_eq!(increment_mode_for(false), "staged");
+        assert_eq!(increment_mode_for(true), "direct_emergency");
+
         let source = include_str!("batch_worker.rs");
         let mode = source
             .split_once("pub(crate) fn increment_mode()")

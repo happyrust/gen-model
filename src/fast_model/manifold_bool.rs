@@ -216,10 +216,10 @@ pub async fn apply_cata_neg_boolean_manifold(
         tasks.push(task);
     }
     // dbg!(tasks.len());
-    let task_results = futures::future::try_join_all(tasks)
-        .await
-        .map_err(|error| anyhow!("catalogue manifold worker join failed: {error}"))?;
+    let task_results = futures::future::join_all(tasks).await;
     for result in task_results {
+        let result =
+            result.map_err(|error| anyhow!("catalogue manifold worker join failed: {error}"))?;
         result?;
     }
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
@@ -488,6 +488,8 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
         .0;
     assert!(catalogue.contains("active_data_db()"), "{catalogue}");
     assert!(catalogue.contains("execute_model_write("), "{catalogue}");
+    assert!(catalogue.contains("join_all(tasks).await"), "{catalogue}");
+    assert!(!catalogue.contains("try_join_all(tasks)"), "{catalogue}");
     assert!(
         catalogue.contains("for result in task_results"),
         "{catalogue}"
