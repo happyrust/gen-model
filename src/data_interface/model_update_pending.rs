@@ -2663,6 +2663,56 @@ mod tests {
         assert!(settlement < watermark, "{sql}");
     }
 
+    #[tokio::test]
+    async fn committed_spatial_intent_survives_discarding_the_window_database() {
+        use surrealdb::engine::any::connect;
+
+        let persistent = connect("mem://").await.expect("persistent mem target");
+        persistent
+            .use_ns("spatial_finalize")
+            .use_db("persistent")
+            .await
+            .expect("select persistent target");
+        let window = connect("mem://").await.expect("window mem target");
+        window
+            .use_ns("spatial_finalize")
+            .use_db("window")
+            .await
+            .expect("select window target");
+
+        let tail = render_finalize_tail_with_effects(
+            8191,
+            42,
+            &ModelUpdatePlan::default(),
+            &[],
+            &["16777216/2".to_string()],
+            &[],
+            &[],
+        )
+        .expect("finalize tail");
+        persistent
+            .query(format!("BEGIN TRANSACTION;\n{tail}\nCOMMIT TRANSACTION;"))
+            .await
+            .expect("execute finalize")
+            .check()
+            .expect("finalize statements");
+
+        drop(window);
+        let mut response = persistent
+            .query(
+                "SELECT VALUE status FROM incr_side_effect_pending:spatial_reconcile_8191_42;\
+                 SELECT VALUE applied_sesno FROM dbnum_watermark:8191;",
+            )
+            .await
+            .expect("read persistent result")
+            .check()
+            .expect("read statements");
+        let pending: Vec<String> = response.take(0).expect("pending row");
+        let watermark: Option<i32> = response.take(1).expect("watermark row");
+        assert_eq!(pending, ["pending"], "spatial intent must be durable");
+        assert_eq!(watermark, Some(42));
+    }
+
     /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
     #[test]
     fn tail_without_spatial_effects_does_not_bump_the_epoch() {

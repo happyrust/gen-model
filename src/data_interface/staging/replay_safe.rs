@@ -335,6 +335,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rejects_targets_selected_by_runtime_queries() {
+        assert!(
+            validate_statement(
+                "UPDATE (SELECT VALUE id FROM pe WHERE noun = 'PIPE') SET deleted = true"
+            )
+            .is_err()
+        );
+        validate_statement("LET $target = pe:a; UPDATE $target SET deleted = true")
+            .expect("fixed-value variables remain ReplaySafe");
+    }
+
     /// `pe_owner` 的范围放行卡的是**形状**，不是表名。
     ///
     /// 只比表名的话，两种越界写法都能进 journal，而且执行时都不报错——写回照样
