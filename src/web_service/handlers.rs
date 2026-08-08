@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::data_interface::manual_update::load_pending_model_units;
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
@@ -28,6 +28,19 @@ pub struct ProjectReq {
     pub mdb: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub tool: String,
+    #[serde(default = "empty_arguments")]
+    pub arguments: Value,
+}
+
+fn empty_arguments() -> Value {
+    json!({})
 }
 
 fn resolve_identity<'a>(
@@ -122,6 +135,20 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,
     }))
+}
+
+/// POST /api/v1/query — the fixed read-only MCP query contract over HTTP.
+pub async fn query(
+    State(state): State<AppState>,
+    Json(request): Json<QueryReq>,
+) -> Result<Json<crate::query_service::QueryResponse>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    state
+        .queries
+        .execute(&request.tool, request.arguments)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_query)
 }
 
 /// POST /api/v1/update/preview — 映射 `preview_manual_update`（spec §4.2）。

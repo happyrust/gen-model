@@ -59,6 +59,7 @@ pub mod cata;
 pub mod consts;
 pub mod data_interface;
 pub mod e3d_query;
+pub mod query_service;
 pub mod tables;
 // pub mod ssc;
 pub mod defines;
