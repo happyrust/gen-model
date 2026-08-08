@@ -970,7 +970,7 @@ async fn collect_database_subtree_outbound_on(
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT VALUE refno.*[WHERE type::is::record($this)] \
+            "SELECT VALUE (refno.*[WHERE type::is::record($this)] ?? []) \
              FROM [{keys}];"
         );
         let mut response = db.query(sql).await?.check()?;
@@ -1590,7 +1590,7 @@ mod tests {
             .expect("window target");
         window
             .query(
-                "UPSERT pe:1_1 SET deleted = false, refno = {};\
+                "UPSERT pe:1_1 SET deleted = false, refno = NONE;\
                  UPSERT pe:1_2 SET deleted = false, refno = { spre: pe:9_9 };\
                  INSERT RELATION INTO pe_owner [{ \
                     id: pe_owner:[pe:1_2, 0], in: pe:1_2, out: pe:1_1 \
