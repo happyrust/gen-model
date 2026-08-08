@@ -17,6 +17,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # windows-latest 的内存扛不住仓库默认 8 个 Cargo 任务 × 每个 rustc 8 线程；
+  # sccache 冷启动时会让大 crate 的 rustc 直接被系统终止。
+  CARGO_BUILD_JOBS: "4"
+  CARGO_BUILD_RUSTFLAGS: -Z threads=2
   # .cargo/config.toml 把 target-dir 指到仓库外（../target）；CI 里收回工作区内，
   # 缓存与打包路径才能对上。环境变量优先级高于 config 文件。
   CARGO_TARGET_DIR: target
