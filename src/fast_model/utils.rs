@@ -1,4 +1,3 @@
-use aios_core::error::init_save_database_error;
 use dashmap::DashMap;
 use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
@@ -36,7 +35,7 @@ pub async fn save_aabb_to_surreal(aabb_map: &DashMap<String, Aabb>) -> anyhow::R
     Ok(())
 }
 
-pub async fn save_pts_to_surreal(vec3_map: &DashMap<u64, String>) {
+pub async fn save_pts_to_surreal(vec3_map: &DashMap<u64, String>) -> anyhow::Result<()> {
     if !vec3_map.is_empty() {
         let keys = vec3_map.iter().map(|kv| *kv.key()).collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
@@ -46,13 +45,33 @@ pub async fn save_pts_to_surreal(vec3_map: &DashMap<u64, String>) {
                 let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v.value());
                 sql.push_str(&format!("INSERT IGNORE INTO vec3 {};", json));
             }
-            match execute_model_write(&sql, "insert vec3 records").await {
-                Ok(()) => {}
-                Err(_) => {
-                    init_save_database_error(&sql, &std::panic::Location::caller().to_string());
-                }
-            };
+            execute_model_write(&sql, "insert vec3 records").await?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_interface::staging::ResourceThresholds;
+    use crate::data_interface::staging::lifecycle::create_window_on;
+    use crate::data_interface::staging::write_context::with_staging_writes;
+    use surrealdb::engine::any::connect;
+
+    #[tokio::test]
+    async fn vec3_statement_failure_reaches_the_mesh_caller() {
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7997, 2, 2, ResourceThresholds::default())
+            .await
+            .expect("window");
+        let points = DashMap::new();
+        points.insert(1, "{".to_string());
+
+        let result =
+            with_staging_writes(window.write_context(), save_pts_to_surreal(&points)).await;
+        assert!(result.is_err(), "malformed vec3 write must fail the caller");
+        window.drop_database().await.expect("cleanup");
     }
 }
 

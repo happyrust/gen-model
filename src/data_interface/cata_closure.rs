@@ -23,6 +23,7 @@ use aios_core::helper::normalize_sql_string;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, get_db_option};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use surrealdb::{Surreal, engine::any::Any};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::dbnum_state::WATERMARK_TABLE;
@@ -937,6 +938,14 @@ pub async fn collect_design_subtree_outbound<L: CataDbLocator>(
 /// already present in SurrealDB, and preserve references such as SPRE/HSTU/LSTU
 /// even when the partial binary parser cannot decode a design element.
 async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
+    let db = crate::data_interface::staging::active_data_db();
+    collect_database_subtree_outbound_on(&db, roots).await
+}
+
+async fn collect_database_subtree_outbound_on(
+    db: &Surreal<Any>,
+    roots: &[RefU64],
+) -> anyhow::Result<Vec<RefU64>> {
     let mut visited = HashSet::new();
     let mut scope = Vec::new();
     let mut frontier: Vec<RefnoEnum> = roots.iter().copied().map(RefnoEnum::from).collect();
@@ -945,9 +954,12 @@ async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<V
             continue;
         }
         scope.push(refno);
-        for child in aios_core::get_children_pes(refno).await.unwrap_or_default() {
-            frontier.push(child.refno);
-        }
+        let sql = format!(
+            "SELECT VALUE in FROM {}<-pe_owner WHERE record::exists(in.id) AND !in.deleted;",
+            refno.to_pe_key()
+        );
+        let mut response = db.query(sql).await?.check()?;
+        frontier.extend(response.take::<Vec<RefnoEnum>>(0)?);
     }
 
     let mut seeds = HashSet::new();
@@ -958,10 +970,10 @@ async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<V
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT VALUE object::values(refno.*)[WHERE type::is::record($this)] \
+            "SELECT VALUE refno.*[WHERE type::is::record($this)] \
              FROM [{keys}];"
         );
-        let mut response = SUL_DB.query(sql).await?;
+        let mut response = db.query(sql).await?.check()?;
         let refs: Vec<Vec<RefnoEnum>> = response.take(0)?;
         seeds.extend(refs.into_iter().flatten().map(|r| r.refno()));
     }
@@ -1228,7 +1240,7 @@ pub async fn ensure_cata_refnos_parsed(
 
 /// 主动预解析（Phase 4）：给定一组生成根，收集其子树出向引用 → 跑 CATA 闭包 → 批量落库。
 ///
-/// 与惰性兜底并存：主动保效率（每批根一次），惰性收漏边。受 env 开关门控（默认 Off）。
+/// 与惰性兜底并存：主动保效率（每批根一次），惰性收漏边。受 env 开关门控（默认 On）。
 pub async fn ensure_cata_parsed_for_roots(
     project: &str,
     roots: &[RefU64],
@@ -1247,7 +1259,7 @@ pub async fn ensure_cata_parsed_for_roots(
     ensure_cata_refnos_parsed(project, &seeds).await
 }
 
-/// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 Off 即直接返回 false，零回归）。
+/// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 On）。
 ///
 /// 命中未解析 CATA refno 时调用；返回 `true` 表示已补齐、值得重试原查询。
 pub async fn try_lazy_cata_fallback(cata_refno: RefnoEnum) -> bool {
@@ -1430,7 +1442,7 @@ impl CataDepCache {
 }
 
 /// 生成入口的**缓存感知预加载**（Phase 6）：按源 dbnum + 生成根读依赖缓存 → 命中即批量预加载；
-/// 未命中 / 过期则现算闭包、写缓存、再预加载。受 env 开关门控（默认 Off）。
+/// 未命中 / 过期则现算闭包、写缓存、再预加载。受 env 开关门控（默认 On）。
 ///
 /// 失效口径：源库 `applied_sesno`（权威数据版本）。CATA 定义变不改「依赖哪些 id」，
 /// 故仅由源库变更驱动重算。预加载复用 [`ensure_cata_refnos_parsed`]（幂等落库）。
@@ -1536,6 +1548,78 @@ pub async fn preload_cata_for_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_data_reads_use_the_active_window_but_locator_stays_persistent() {
+        let source = include_str!("cata_closure.rs");
+        let subtree = source
+            .split_once("async fn collect_database_subtree_outbound(")
+            .expect("subtree collector exists")
+            .1
+            .split_once("pub async fn run_cata_closure_pass_for_refnos")
+            .expect("subtree collector boundary")
+            .0;
+        assert_eq!(subtree.matches("active_data_db()").count(), 1, "{subtree}");
+        assert!(!subtree.contains("SUL_DB.query"), "{subtree}");
+
+        let locator = source
+            .split_once("async fn load_dbnum_files_from_watermark(")
+            .expect("watermark locator exists")
+            .1
+            .split_once("fn scan_db_ref0s(")
+            .expect("watermark locator boundary")
+            .0;
+        assert!(locator.contains("SUL_DB.query"), "{locator}");
+    }
+
+    #[tokio::test]
+    async fn staging_only_subtree_reference_is_collected() {
+        use surrealdb::engine::any::connect;
+
+        let persistent = connect("mem://").await.expect("persistent mem boots");
+        persistent
+            .use_ns("cata_closure")
+            .use_db("persistent")
+            .await
+            .expect("persistent target");
+        let window = connect("mem://").await.expect("window mem boots");
+        window
+            .use_ns("cata_closure")
+            .use_db("window")
+            .await
+            .expect("window target");
+        window
+            .query(
+                "UPSERT pe:1_1 SET deleted = false, refno = {};\
+                 UPSERT pe:1_2 SET deleted = false, refno = { spre: pe:9_9 };\
+                 INSERT RELATION INTO pe_owner [{ \
+                    id: pe_owner:[pe:1_2, 0], in: pe:1_2, out: pe:1_1 \
+                 }];",
+            )
+            .await
+            .expect("staging fixture")
+            .check()
+            .expect("fixture statements");
+
+        let root = "1/1".parse::<RefU64>().expect("root refno");
+        let referenced = "9/9".parse::<RefU64>().expect("CATA refno");
+        let seeds = collect_database_subtree_outbound_on(&window, &[root])
+            .await
+            .expect("collect staging subtree");
+        assert!(seeds.contains(&referenced), "{seeds:?}");
+
+        let mut response = persistent
+            .query("SELECT VALUE id FROM pe")
+            .await
+            .expect("persistent probe");
+        assert!(
+            response
+                .take::<Vec<surrealdb::sql::Thing>>(0)
+                .expect("persistent rows")
+                .is_empty(),
+            "fixture reference must exist only in the window"
+        );
+    }
 
     /// pe_owner owner 块替换契约：范围删除 + 完整重插必须是一个 ReplaySafe 事务。
     #[test]

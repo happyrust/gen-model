@@ -2,7 +2,7 @@ use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{RefnoEnum, SUL_DB, get_inst_relate_keys, init_test_surreal};
+use aios_core::{RefnoEnum, get_inst_relate_keys, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
@@ -76,7 +76,10 @@ pub async fn apply_cata_neg_boolean_manifold(
     }
 
     // println!("sql is {}", &sql);
-    let mut response = SUL_DB.query(sql).await?;
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(sql)
+        .await?
+        .check()?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
     // dbg!(&params);
     if params.is_empty() {
@@ -110,14 +113,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                         pes
                     );
                     // println!("geom sql is {}", &sql);
-                    let Ok(mut resp) = SUL_DB.query(&sql).await else {
-                        continue;
-                    };
-                    //
-                    let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
-                        dbg!(&sql);
-                        continue;
-                    };
+                    let mut resp = crate::data_interface::staging::active_data_db()
+                        .query(&sql)
+                        .await?
+                        .check()?;
+                    let gms = resp.take::<Vec<GmGeoData>>(0).map_err(|error| {
+                        anyhow!("decode catalogue manifold inputs failed: {error}")
+                    })?;
                     // dbg!(&gms);
 
                     let mut update_sql = String::new();
@@ -133,19 +135,15 @@ pub async fn apply_cata_neg_boolean_manifold(
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("正在负实体计算的mesh hash: {}", &pos.id);
 
-                        let Ok(mut pos_manifold) = load_manifold(
+                        let mut pos_manifold = load_manifold(
                             &dir_clone,
                             &pos.id,
                             pos.trans.compute_matrix().as_dmat4(),
                             false,
-                        ) else {
-                            println!("布尔运算失败: 无法加载正实体 manifold, refno: {}", &g.refno);
-                            update_sql.push_str(&format!(
-                                "update {}<-inst_relate set bad_bool=true;",
-                                &g.inst_info_id,
-                            ));
-                            continue;
-                        };
+                        )
+                        .map_err(|error| {
+                            anyhow!("load positive manifold for {} failed: {error}", g.refno)
+                        })?;
 
                         // dbg!(&update_sql);
                         let mut neg_manifolds = vec![];
@@ -155,9 +153,16 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 continue;
                             };
                             let m = neg_geo.trans.compute_matrix().as_dmat4();
-                            if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m, true) {
-                                neg_manifolds.push(manifold);
-                            }
+                            neg_manifolds.push(
+                                load_manifold(&dir_clone, &neg_geo.id, m, true).map_err(
+                                    |error| {
+                                        anyhow!(
+                                            "load negative manifold for {} failed: {error}",
+                                            g.refno
+                                        )
+                                    },
+                                )?,
+                            );
                         }
                         //没有负实体也要加上为_b后缀，表示已经进行过分析计算了。
                         // if !neg_manifolds.is_empty()
@@ -169,9 +174,10 @@ pub async fn apply_cata_neg_boolean_manifold(
                             #[cfg(feature = "debug_model")]
                             mesh.export_obj(false, &format!("{}.obj", g.refno));
                             //保存到文件到dir下
-                            if mesh
-                                .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
-                                .is_ok()
+                            mesh.ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
+                                .map_err(|error| {
+                                    anyhow!("save catalogue boolean mesh {new_id} failed: {error}")
+                                })?;
                             {
                                 update_sql.push_str(&format!(
                                     "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
@@ -179,7 +185,9 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 ));
                                 // 有索引的关系，所以geom_refno需要点变化
                                 let relate_sql = format!(
-                                    "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩, visible = true;",
+                                    "INSERT RELATION INTO geo_relate [{{ id: geo_relate:[{}, inst_geo:⟨{}⟩], in: {}, out: inst_geo:⟨{}⟩, geom_refno: pe:⟨{}⟩, geo_type: 'Pos', trans: trans:⟨0⟩, visible: true }}];",
+                                    &g.inst_info_id,
+                                    new_id,
                                     &g.inst_info_id,
                                     new_id,
                                     format!("{}_b", bg[0]),
@@ -195,19 +203,24 @@ pub async fn apply_cata_neg_boolean_manifold(
                         }
                     }
                     if !update_sql.is_empty() {
-                        SUL_DB.query(update_sql).await.unwrap();
+                        crate::surreal_retry::execute_model_write(
+                            &update_sql,
+                            "persist catalogue manifold result",
+                        )
+                        .await?;
                     }
                 }
+                Ok::<(), anyhow::Error>(())
             },
         );
         tasks.push(task);
     }
     // dbg!(tasks.len());
-    match futures::future::try_join_all(tasks).await {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(e);
-        }
+    let task_results = futures::future::join_all(tasks).await;
+    for result in task_results {
+        let result =
+            result.map_err(|error| anyhow!("catalogue manifold worker join failed: {error}"))?;
+        result?;
     }
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
     println!("元件库的负实体计算{:?}完成", refnos);
@@ -276,8 +289,12 @@ pub async fn apply_insts_boolean_manifold_single(
     // if !replace_exist {
     //     sql.push_str(" and booled_id != none");
     // }
-    match SUL_DB.query(&sql).await {
-        Ok(mut response) => {
+    match crate::data_interface::staging::active_data_db()
+        .query(&sql)
+        .await
+    {
+        Ok(response) => {
+            let mut response = response.check()?;
             match response.take::<Vec<ManiGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
                     // dbg!(&boolean_query);
@@ -296,14 +313,22 @@ pub async fn apply_insts_boolean_manifold_single(
                                         feature = "debug_model_no_obj"
                                     ))]
                                     println!("正在负实体计算的mesh hash: {}", &pos_id);
-                                    if let Ok(manifold) = load_manifold(
-                                        &dir_clone,
-                                        pos_id,
-                                        pos_t.compute_matrix().as_dmat4(),
-                                        false,
-                                    ) {
-                                        pos_manifolds.push(manifold);
-                                    }
+                                    pos_manifolds.push(
+                                        load_manifold(
+                                            &dir_clone,
+                                            pos_id,
+                                            pos_t.compute_matrix().as_dmat4(),
+                                            false,
+                                        )
+                                        .map_err(
+                                            |error| {
+                                                anyhow!(
+                                                    "load positive manifold for {} failed: {error}",
+                                                    b.refno
+                                                )
+                                            },
+                                        )?,
+                                    );
                                 }
                                 //没有实体的情况，下次就不要再继续计算布尔运算了
                                 let inst_relate_id = b.refno.to_table_key("inst_relate");
@@ -351,21 +376,21 @@ pub async fn apply_insts_boolean_manifold_single(
                                         let m = inverse_mat
                                             * neg_t.compute_matrix().as_dmat4()
                                             * trans.compute_matrix().as_dmat4();
-                                        if let Ok(manifold) =
-                                            load_manifold(&dir_clone, &id, m, true)
+                                        let manifold = load_manifold(&dir_clone, &id, m, true)
+                                            .map_err(|error| {
+                                                anyhow!(
+                                                    "load negative manifold for {} failed: {error}",
+                                                    b.refno
+                                                )
+                                            })?;
+                                        #[cfg(feature = "debug_model")]
                                         {
-                                            #[cfg(feature = "debug_model")]
-                                            {
-                                                let neg_mesh = PlantMesh::from(&manifold);
-                                                neg_mesh
-                                                    .export_obj(
-                                                        false,
-                                                        &format!("{}_t.obj", neg_refno),
-                                                    )
-                                                    .unwrap();
-                                            }
-                                            neg_manifolds.push(manifold);
+                                            let neg_mesh = PlantMesh::from(&manifold);
+                                            neg_mesh
+                                                .export_obj(false, &format!("{}_t.obj", neg_refno))
+                                                .unwrap();
                                         }
+                                        neg_manifolds.push(manifold);
                                     }
                                 }
                                 // dbg!(found_need_occ);
@@ -386,9 +411,13 @@ pub async fn apply_insts_boolean_manifold_single(
                                     let mesh_id = format!("{}_{}", b.refno.latest(), b.sesno);
                                     // dbg!(&mesh_id);
                                     //保存到文件到dir下
-                                    if mesh
-                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", mesh_id)))
-                                        .is_ok()
+                                    mesh.ser_to_file(&dir_clone.join(format!("{}.mesh", mesh_id)))
+                                        .map_err(|error| {
+                                            anyhow!(
+                                                "save design boolean mesh for {} failed: {error}",
+                                                b.refno
+                                            )
+                                        })?;
                                     {
                                         update_sql.push_str(&format!(
                                             "update {} set booled_id='{}';",
@@ -411,12 +440,11 @@ pub async fn apply_insts_boolean_manifold_single(
                                 // dbg!(&update_sql);
                             }
                             if !update_sql.is_empty() {
-                                match SUL_DB.query(update_sql).await {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        dbg!(e);
-                                    }
-                                }
+                                crate::surreal_retry::execute_model_write(
+                                    &update_sql,
+                                    "persist design manifold result",
+                                )
+                                .await?;
                             }
                         }
                     }
@@ -440,6 +468,44 @@ pub async fn apply_insts_boolean_manifold_single(
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
     println!("design的负实体计算{}完成", refno);
     Ok(())
+}
+
+#[test]
+fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
+    crate::data_interface::staging::replay_safe::validate_statement(
+        "INSERT RELATION INTO geo_relate [{ id: geo_relate:[inst_info:a, inst_geo:b], \
+         in: inst_info:a, out: inst_geo:b, geom_refno: pe:c, geo_type: 'Pos' }];",
+    )
+    .expect("deterministic manifold relation is ReplaySafe");
+
+    let source = include_str!("manifold_bool.rs");
+    let catalogue = source
+        .split_once("pub async fn apply_cata_neg_boolean_manifold(")
+        .expect("catalogue manifold function")
+        .1
+        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .expect("catalogue manifold boundary")
+        .0;
+    assert!(catalogue.contains("active_data_db()"), "{catalogue}");
+    assert!(catalogue.contains("execute_model_write("), "{catalogue}");
+    assert!(catalogue.contains("join_all(tasks).await"), "{catalogue}");
+    assert!(!catalogue.contains("try_join_all(tasks)"), "{catalogue}");
+    assert!(
+        catalogue.contains("for result in task_results"),
+        "{catalogue}"
+    );
+    assert!(!catalogue.contains("SUL_DB"), "{catalogue}");
+
+    let design = source
+        .split_once("pub async fn apply_insts_boolean_manifold_single(")
+        .expect("design manifold function")
+        .1
+        .split_once("fn manifold_io_uses_the_staged_router")
+        .expect("design manifold boundary")
+        .0;
+    assert!(design.contains("active_data_db()"), "{design}");
+    assert!(design.contains("execute_model_write("), "{design}");
+    assert!(!design.contains("SUL_DB"), "{design}");
 }
 
 #[test]

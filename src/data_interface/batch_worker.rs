@@ -353,8 +353,20 @@ async fn run_one_batch(
 ///
 /// - `start_sesno <= 1`：对应 `applied_sesno == 0` 的基线/冷启动，豁免暂存。
 /// - 环境变量 `GEN_MODEL_DIRECT_INCREMENT=1`：紧急回退到旧直写路径。
+pub(crate) fn direct_increment_enabled() -> bool {
+    std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").is_some()
+}
+
+pub(crate) fn increment_mode() -> &'static str {
+    increment_mode_for(direct_increment_enabled())
+}
+
+fn increment_mode_for(direct: bool) -> &'static str {
+    if direct { "direct_emergency" } else { "staged" }
+}
+
 fn use_staged_increment_window(job: &FrozenBatch) -> bool {
-    job.start_sesno > 1 && std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").is_none()
+    job.start_sesno > 1 && !direct_increment_enabled()
 }
 
 /// 这个暂存窗口有没有房间语义（要不要付面板映射加载 + 房间工作集预载 + 房间轮）。
@@ -445,7 +457,11 @@ async fn execute_frozen_batch(
                 log::error!("{message}");
                 eprintln!("{message}");
                 warnings.push(message);
-                return failed_window_result(job, warnings, "DESI 收口预检未通过：收口依赖的 SurrealDB 函数缺失");
+                return failed_window_result(
+                    job,
+                    warnings,
+                    "DESI 收口预检未通过：收口依赖的 SurrealDB 函数缺失",
+                );
             }
             FinalizePreflight::Unverified(reason) => {
                 warnings.push(format!("DESI 收口预检未能核实（不阻断执行）: {reason}"));
@@ -454,6 +470,15 @@ async fn execute_frozen_batch(
     }
 
     if !use_staged_increment_window(job) {
+        if job.start_sesno > 1 && direct_increment_enabled() {
+            let warning = format!(
+                "应急直写已启用：dbnum={} 将跳过 kv-mem staging 直接写入持久库",
+                job.dbnum
+            );
+            log::warn!("{warning}");
+            eprintln!("{warning}");
+            warnings.push(warning);
+        }
         return execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await;
     }
 
@@ -1064,16 +1089,18 @@ async fn execute_frozen_batch_body(
                     render_plan_summary(&plan.work_items)
                 );
                 let prereq_started = std::time::Instant::now();
-                let plan_targets = |action: crate::data_interface::model_update_plan::ModelWorkAction| {
-                    plan.work_items
-                        .iter()
-                        .filter(|item| item.action == action)
-                        .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
-                        .filter(|refno| refno.is_valid())
-                        .collect::<Vec<_>>()
-                };
-                let transform_targets =
-                    plan_targets(crate::data_interface::model_update_plan::ModelWorkAction::Transform);
+                let plan_targets =
+                    |action: crate::data_interface::model_update_plan::ModelWorkAction| {
+                        plan.work_items
+                            .iter()
+                            .filter(|item| item.action == action)
+                            .map(|item| aios_core::RefnoEnum::from(item.target_refno.as_str()))
+                            .filter(|refno| refno.is_valid())
+                            .collect::<Vec<_>>()
+                    };
+                let transform_targets = plan_targets(
+                    crate::data_interface::model_update_plan::ModelWorkAction::Transform,
+                );
                 let delete_targets = plan_targets(
                     crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup,
                 );
@@ -2249,6 +2276,43 @@ mod tests {
             reconcile < dequeue,
             "spatial convergence must precede dequeue"
         );
+    }
+
+    #[test]
+    fn emergency_direct_mode_is_visible_and_does_not_warn_for_baselines() {
+        assert_eq!(increment_mode_for(false), "staged");
+        assert_eq!(increment_mode_for(true), "direct_emergency");
+
+        let source = include_str!("batch_worker.rs");
+        let mode = source
+            .split_once("pub(crate) fn increment_mode()")
+            .expect("shared mode label")
+            .1
+            .split_once("fn use_staged_increment_window")
+            .expect("mode label boundary")
+            .0;
+        assert!(mode.contains("\"staged\"") && mode.contains("\"direct_emergency\""));
+
+        let dispatch = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("batch dispatcher")
+            .1
+            .split_once("async fn execute_frozen_batch_body(")
+            .expect("batch dispatcher boundary")
+            .0;
+        assert!(
+            dispatch.contains("job.start_sesno > 1 && direct_increment_enabled()"),
+            "baseline direct writes must not emit the emergency warning"
+        );
+
+        let health = include_str!("../web_service/handlers.rs");
+        assert!(
+            health.contains(
+                "\"increment_mode\": crate::data_interface::batch_worker::increment_mode()"
+            )
+        );
+        let spatial = include_str!("../fast_model/aabb_tree.rs");
+        assert!(spatial.contains("batch_worker::direct_increment_enabled()"));
     }
 
     /// 统一根锁必须夹在「只读解析（持久层闭包 + 文件祖先链）」与「写进暂存

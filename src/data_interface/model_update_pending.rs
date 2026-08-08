@@ -2663,6 +2663,61 @@ mod tests {
         assert!(settlement < watermark, "{sql}");
     }
 
+    #[tokio::test]
+    async fn committed_spatial_intent_survives_discarding_the_window_database() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::StagedFinalize;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use surrealdb::engine::any::connect;
+
+        let persistent = connect("mem://").await.expect("persistent mem target");
+        persistent
+            .use_ns("spatial_finalize")
+            .use_db("persistent")
+            .await
+            .expect("select persistent target");
+        let instance = connect("mem://").await.expect("window mem target");
+        let window = create_window_on(&instance, 8191, 2, 42, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let context = window.write_context();
+        context
+            .defer_spatial_refresh(&[RefnoEnum::from(
+                "16777216/2".parse::<RefU64>().expect("refresh refno"),
+            )])
+            .await;
+        context
+            .register_finalize(StagedFinalize {
+                dbnum: 8191,
+                end_sesno: 42,
+                plan: ModelUpdatePlan::default(),
+                window_statements: vec![],
+                cache_refnos: vec![],
+            })
+            .await
+            .expect("register finalize");
+        window
+            .commit_registered_to(&persistent)
+            .await
+            .expect("commit window");
+
+        drop(context);
+        window.drop_database().await.expect("discard window");
+        let mut response = persistent
+            .query(
+                "SELECT VALUE status FROM incr_side_effect_pending:spatial_reconcile_8191_42;\
+                 SELECT VALUE applied_sesno FROM dbnum_watermark:8191;",
+            )
+            .await
+            .expect("read persistent result")
+            .check()
+            .expect("read statements");
+        let pending: Vec<String> = response.take(0).expect("pending row");
+        let watermark: Option<i32> = response.take(1).expect("watermark row");
+        assert_eq!(pending, ["pending"], "spatial intent must be durable");
+        assert_eq!(watermark, Some(42));
+    }
+
     /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
     #[test]
     fn tail_without_spatial_effects_does_not_bump_the_epoch() {
