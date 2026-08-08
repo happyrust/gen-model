@@ -22,9 +22,9 @@ env:
   # 代码用了一批 #![feature(...)]，.cargo/config.toml 还带 -Z threads=8：必须 nightly。
   # 固定到与本地开发一致、已知可编译的版本；要升级只改这一行。
   RUST_TOOLCHAIN: nightly-2026-08-02
-  # occt-rs currently targets OCCT 7.x; the rolling runner catalog moved to
-  # OCCT 8 and removed compatibility typedefs used by its C++ bridge.
-  VCPKG_COMMIT: 1f4491421b15fc95aef0ba1df3410d2626edb62d
+  OCC_VERSION: 7.9.3
+  OCC_ARCHIVE_URL: https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_3/opencascade-7.9.3-vc14-64-combined.zip
+  OCC_ARCHIVE_SHA256: afbef3457fbc4a2bdca0608e0fe284392f51e4c2c42ccbfb9df7168d8e4eb9b3
   # manifold-sys 的 bindgen 要 libclang。不显式给，.cargo/config.toml 会填进
   # runner 上不存在的 D:\LLVM\bin，clang-sys 见到无效路径直接报错不再探测。
   LIBCLANG_PATH: C:\Program Files\LLVM\bin
@@ -48,40 +48,30 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Pin vcpkg catalog
+      - name: Download prebuilt OpenCASCADE
         shell: pwsh
         run: |
-          git -C $env:VCPKG_INSTALLATION_ROOT fetch origin $env:VCPKG_COMMIT --depth 1
-          git -C $env:VCPKG_INSTALLATION_ROOT checkout --force $env:VCPKG_COMMIT
-          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-
-      - name: Restore vcpkg cache
-        id: vcpkg-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            C:\vcpkg\installed
-            ~\AppData\Local\vcpkg\archives
-          key: vcpkg-occ-${{ env.VCPKG_COMMIT }}-${{ hashFiles('.github/vcpkg-triplets/**') }}
-          restore-keys: vcpkg-occ-${{ env.VCPKG_COMMIT }}-
-
-      - name: Install OpenCASCADE
-        shell: pwsh
-        run: |
-          vcpkg install opencascade:x64-windows-release `
-            --overlay-triplets="$env:GITHUB_WORKSPACE\.github\vcpkg-triplets"
-          "OCC_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-release" >> $env:GITHUB_ENV
-
-      # OCC 一次要编 ~50 分钟，而失败的 job 不会执行 actions/cache 的 post 保存。
-      # 装完立刻显式落缓存：后面 cargo 再失败，这 50 分钟也不用重来。
-      - name: Save vcpkg cache
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            C:\vcpkg\installed
-            ~\AppData\Local\vcpkg\archives
-          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+          $archive = "$env:RUNNER_TEMP\occt.zip"
+          $extract = "$env:RUNNER_TEMP\occt-extract"
+          $source = "$extract\opencascade-$env:OCC_VERSION-vc14-64"
+          $root = "$env:RUNNER_TEMP\occt"
+          Invoke-WebRequest $env:OCC_ARCHIVE_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:OCC_ARCHIVE_SHA256) {
+            throw 'OpenCASCADE archive checksum mismatch'
+          }
+          New-Item -ItemType Directory -Force $extract, "$root\include\opencascade", "$root\lib", "$root\bin" | Out-Null
+          tar -xf $archive -C $extract `
+            "opencascade-$env:OCC_VERSION-vc14-64/inc/*" `
+            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/lib/*" `
+            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/bin/*" `
+            '3rdparty-vc14-64/tbb-2021.13.0-x64/bin/tbb12.dll' `
+            '3rdparty-vc14-64/jemalloc-vc14-64/bin/jemalloc.dll'
+          Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
+          Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
+          Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
+          Copy-Item "$extract\3rdparty-vc14-64\tbb-2021.13.0-x64\bin\tbb12.dll" "$root\bin"
+          Copy-Item "$extract\3rdparty-vc14-64\jemalloc-vc14-64\bin\jemalloc.dll" "$root\bin"
+          "OCC_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: Restore cargo cache
         id: cargo-cache
