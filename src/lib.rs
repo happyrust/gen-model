@@ -156,9 +156,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // progress_sender.send(5).await?;
     // progress_sender.send(5)?;
 
-    aios_core::function::define_common_functions()
-        .await
-        .unwrap();
+    aios_core::function::define_common_functions().await?;
     // D11（ADR-010）：define_common_functions 按文件名顺序无条件加载 resource/surreal
     // 全目录，`fn_query_room_code_hh.surql` 排在 `_hd` 版之后，同名 fn::room_code 永远
     // 被 hh 版覆盖——与 Rust 侧编译的 project_hd feature 错位。加载顺序在 rs-core 里
@@ -175,6 +173,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             Err(e) => eprintln!("读取 {HD_ROOM_CODE} 失败（生效的仍是 hh 版 fn::room_code）: {e}"),
         }
     }
+    crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
     let migrated =
         crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage().await?;
     println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
@@ -331,10 +330,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         set_pbs_node(&mut handles).await?;
         futures::future::join_all(handles).await;
     }
-
-    // 收口事务依赖的 SurrealDB 自定义函数自检：缺了要在第一秒指名道姓说清楚，
-    // 而不是让每个 DESI 窗口在 finalize 处失败、报一个不指向 datacenter 的错误。
-    crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await;
 
     // 数据批次队列的唯一消费者：无条件启动、不分 sync_live（ADR-011；rollout
     // 第九节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，
