@@ -22,6 +22,9 @@ env:
   # 代码用了一批 #![feature(...)]，.cargo/config.toml 还带 -Z threads=8：必须 nightly。
   # 固定到与本地开发一致、已知可编译的版本；要升级只改这一行。
   RUST_TOOLCHAIN: nightly-2026-08-02
+  # occt-rs currently targets OCCT 7.x; the rolling runner catalog moved to
+  # OCCT 8 and removed compatibility typedefs used by its C++ bridge.
+  VCPKG_COMMIT: 1f4491421b15fc95aef0ba1df3410d2626edb62d
   # manifold-sys 的 bindgen 要 libclang。不显式给，.cargo/config.toml 会填进
   # runner 上不存在的 D:\LLVM\bin，clang-sys 见到无效路径直接报错不再探测。
   LIBCLANG_PATH: C:\Program Files\LLVM\bin
@@ -45,6 +48,13 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Pin vcpkg catalog
+        shell: pwsh
+        run: |
+          git -C $env:VCPKG_INSTALLATION_ROOT fetch origin $env:VCPKG_COMMIT --depth 1
+          git -C $env:VCPKG_INSTALLATION_ROOT checkout --force $env:VCPKG_COMMIT
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
       - name: Restore vcpkg cache
         id: vcpkg-cache
         uses: actions/cache/restore@v4
@@ -52,8 +62,8 @@ jobs:
           path: |
             C:\vcpkg\installed
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-occ-${{ hashFiles('.github/vcpkg-triplets/**') }}
-          restore-keys: vcpkg-occ-
+          key: vcpkg-occ-${{ env.VCPKG_COMMIT }}-${{ hashFiles('.github/vcpkg-triplets/**') }}
+          restore-keys: vcpkg-occ-${{ env.VCPKG_COMMIT }}-
 
       - name: Install OpenCASCADE
         shell: pwsh
