@@ -324,8 +324,7 @@ pub async fn process_meshes_update_db_deep(
                 // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
                 // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
                 // 是同一个理由（ADR-010 D2）。
-                let aabb_changes =
-                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
+                let aabb_changes = update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
                 // 几何重生成后包围盒变了 → 房间归属可能变（ADR-010 §4）。房间任务是
                 // `drain` 的第三阶段，排在本轮 regen 之后，因此在这里入队正好被它捡起。
                 //
@@ -335,10 +334,8 @@ pub async fn process_meshes_update_db_deep(
                 // 排一次房间重算；而全量生成本来就以 `build_room_relations` 的整体重建
                 // 收尾，那些任务纯属浪费。
                 if dboption.debug_root_refnos.is_some() {
-                    crate::data_interface::model_update_pending::enqueue_room_recalc(
-                        &aabb_changes,
-                    )
-                    .await?;
+                    crate::data_interface::model_update_pending::enqueue_room_recalc(&aabb_changes)
+                        .await?;
                 }
                 aabb_ms += t_aabb.elapsed().as_millis();
             }
@@ -411,7 +408,6 @@ pub async fn gen_inst_meshes(
     #[cfg(feature = "occ")]
     {
         const PAGE_NUM: usize = 100;
-        let mut i = 0;
         let inst_keys = get_inst_relate_keys(refnos);
         let sql = if replace_exist {
             format!(
@@ -428,7 +424,8 @@ pub async fn gen_inst_meshes(
         // println!("sql is {}", &sql);
         let mut response = crate::data_interface::staging::active_data_db()
             .query(sql)
-            .await?;
+            .await?
+            .check()?;
         let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0)?;
         //todo 排除已经生成了的模型
         // let mut update_geos_by_meshes = HashSet::default();
@@ -485,7 +482,10 @@ pub async fn gen_inst_meshes(
                         .query(&sql)
                         .await
                     {
-                        Ok(mut response) => {
+                        Ok(response) => {
+                            let mut response = response.check().map_err(|error| {
+                                anyhow!("query mesh parameters statement failed: {error}")
+                            })?;
                             let r = response.take::<Vec<QueryGeoParam>>(0);
                             if let Err(e) = &r {
                                 init_deserialize_error(
@@ -494,13 +494,12 @@ pub async fn gen_inst_meshes(
                                     &sql,
                                     &std::panic::Location::caller().to_string(),
                                 );
-                                return;
+                                return Err(anyhow!("decode mesh parameters failed: {e}"));
                             }
                             let result: Vec<QueryGeoParam> = r.unwrap();
                             if result.is_empty() {
-                                return;
+                                return Ok(());
                             }
-                            i += 1;
                             // dbg!(&result);
                             for g in result {
                                 //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
@@ -604,42 +603,44 @@ pub async fn gen_inst_meshes(
                                         mesh.export_obj(false, &format!("{}.obj", id));
                                         // dbg!((id, m_tol, mesh.vertices.len()));
                                         //保存到文件到dir下
-                                        if mesh
-                                            .ser_to_file(&dir.join(format!("{}.mesh", id)))
-                                            .is_ok()
-                                        {
-                                            #[cfg(feature = "debug_model")]
-                                            mesh.export_obj(false, &format!("{}.obj", id));
-                                            let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                                            let mut pt_hashes = HashSet::new();
-                                            for edge in s.edges() {
-                                                //TODO edge 这里取中点就可以了
-                                                // for point in edge.approximation_segments_custom(1.0, 1.0) {
-                                                for point in [edge.start_point(), edge.end_point()]
-                                                {
-                                                    let pts_hash =
-                                                        RsVec3(point.as_vec3()).gen_hash();
-                                                    pt_hashes
-                                                        .insert(format!("vec3:⟨{}⟩", pts_hash));
-                                                    if !pts_json_map.contains_key(&pts_hash) {
-                                                        pts_json_map.insert(
-                                                            pts_hash,
-                                                            serde_json::to_string(&point).unwrap(),
-                                                        );
-                                                    }
+                                        mesh.ser_to_file(&dir.join(format!("{}.mesh", id)))
+                                            .map_err(|error| {
+                                                anyhow!("save generated mesh {id} failed: {error}")
+                                            })?;
+                                        #[cfg(feature = "debug_model")]
+                                        mesh.export_obj(false, &format!("{}.obj", id));
+                                        let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+                                        let mut pt_hashes = HashSet::new();
+                                        for edge in s.edges() {
+                                            //TODO edge 这里取中点就可以了
+                                            // for point in edge.approximation_segments_custom(1.0, 1.0) {
+                                            for point in [edge.start_point(), edge.end_point()] {
+                                                let pts_hash = RsVec3(point.as_vec3()).gen_hash();
+                                                pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
+                                                if !pts_json_map.contains_key(&pts_hash) {
+                                                    pts_json_map.insert(
+                                                        pts_hash,
+                                                        serde_json::to_string(&point).map_err(
+                                                            |error| {
+                                                                anyhow!(
+                                                                    "serialize mesh point failed: {error}"
+                                                                )
+                                                            },
+                                                        )?,
+                                                    );
                                                 }
                                             }
-                                            update_sql.push_str(&format!(
+                                        }
+                                        update_sql.push_str(&format!(
                                         "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
                                         id,
                                         aabb_hash,
                                         pt_hashes.into_iter().join(","),
                                     ));
-                                            aabb_map
-                                                .entry(aabb_hash.to_string())
-                                                .or_insert(mesh.aabb.unwrap());
-                                            success = true;
-                                        }
+                                        aabb_map
+                                            .entry(aabb_hash.to_string())
+                                            .or_insert(mesh.aabb.unwrap());
+                                        success = true;
                                     }
                                     //显示哪些模型可能会受影响
                                     Err(e) => {
@@ -668,34 +669,36 @@ pub async fn gen_inst_meshes(
                             }
                             if !update_sql.is_empty() {
                                 //执行SUL_DB update,使用chunk 保存
-                                if crate::surreal_retry::execute_model_write(
+                                if let Err(error) = crate::surreal_retry::execute_model_write(
                                     &update_sql,
                                     "mark generated inst_geo state",
                                 )
                                 .await
-                                .is_err()
                                 {
                                     init_save_database_error(
                                         &update_sql,
                                         &std::panic::Location::caller().to_string(),
                                     );
+                                    return Err(error);
                                 }
                             }
                         }
                         Err(e) => {
-                            init_query_error(&sql, e, &std::panic::Location::caller().to_string());
+                            init_query_error(&sql, &e, &std::panic::Location::caller().to_string());
+                            return Err(anyhow!("query mesh parameters failed: {e}"));
                         }
                     }
+                    Ok::<(), anyhow::Error>(())
                 },
             );
             tasks.push(task);
         }
 
-        match futures::future::try_join_all(tasks).await {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(e);
-            }
+        let task_results = futures::future::try_join_all(tasks)
+            .await
+            .map_err(|error| anyhow!("mesh worker join failed: {error}"))?;
+        for result in task_results {
+            result?;
         }
 
         for (id, _) in inst_geo_ids {
@@ -709,7 +712,7 @@ pub async fn gen_inst_meshes(
             }
         }
 
-        utils::save_pts_to_surreal(&pts_json_map).await;
+        utils::save_pts_to_surreal(&pts_json_map).await?;
         // TODO(与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
         // 先落，这里才补 aabb 记录。彻底修复需要把记录写入挪进每个任务、先于其 update；
         // 本轮先保证失败不再被静默吞掉。
@@ -1239,8 +1242,9 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
     "#;
     let mut response = crate::data_interface::staging::active_data_db()
         .query(sql)
-        .await?;
-    let mut params: Vec<CataNegGroup> = response.take(0)?;
+        .await?
+        .check()?;
+    let params: Vec<CataNegGroup> = response.take(0)?;
     // dbg!(params.len());
     // dbg!(&params);
     if params.is_empty() {
@@ -1273,17 +1277,13 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                         pes
                     );
                     // dbg!(&sql);
-                    let Ok(mut resp) = crate::data_interface::staging::active_data_db()
+                    let mut resp = crate::data_interface::staging::active_data_db()
                         .query(&sql)
-                        .await
-                    else {
-                        continue;
-                    };
-                    // let gms: Vec<GmGeoData> = resp.take(0).unwrap();
-                    let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
-                        dbg!(&sql);
-                        continue;
-                    };
+                        .await?
+                        .check()?;
+                    let gms = resp
+                        .take::<Vec<GmGeoData>>(0)
+                        .map_err(|error| anyhow!("decode OCC boolean inputs failed: {error}"))?;
                     // dbg!(&gms);
 
                     let mut update_sql = String::new();
@@ -1350,33 +1350,30 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                                 // pos_shape
                                 //     .write_step(format!("{}.step", "final"))
                                 //     .unwrap();
-                                let mut success = false;
                                 if let Ok(mesh) = PlantMesh::gen_occ_mesh(&pos_shape, tol as _) {
-                                    //保存到文件到dir下
-                                    if mesh
-                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
-                                        .is_ok()
-                                    {
-                                        update_sql.push_str(&format!(
+                                    mesh.ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
+                                        .map_err(|error| {
+                                            anyhow!(
+                                                "save OCC boolean mesh {new_id} failed: {error}"
+                                            )
+                                        })?;
+                                    update_sql.push_str(&format!(
                                         "create inst_geo:⟨{}⟩ set meshed = true, aabb = {}, visible = true;",
                                         new_id, &pos.aabb_id
                                     ));
-                                        // 有索引的关系，所以geom_refno需要点变化
-                                        update_sql.push_str(&format!(
-                                        "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:{}, geo_type='Pos', trans=trans:⟨0⟩;",
+                                    update_sql.push_str(&format!(
+                                        "INSERT RELATION INTO geo_relate [{{ id: geo_relate:[{}, inst_geo:⟨{}⟩], in: {}, out: inst_geo:⟨{}⟩, geom_refno: pe:{}, geo_type: 'Pos', trans: trans:⟨0⟩ }}];",
+                                        &g.inst_info_id,
+                                        new_id,
                                         &g.inst_info_id,
                                         new_id,
                                         format!("{}_b", bg[0]),
                                     ));
-                                        update_sql.push_str(&format!(
-                                            "update {}<-inst_relate set booled=true;",
-                                            &g.inst_info_id,
-                                        ));
-                                        success = true;
-                                    }
-                                }
-
-                                if !success {
+                                    update_sql.push_str(&format!(
+                                        "update {}<-inst_relate set booled=true;",
+                                        &g.inst_info_id,
+                                    ));
+                                } else {
                                     update_sql.push_str(&format!(
                                         "update {}<-inst_relate set bad_bool=true;",
                                         &g.inst_info_id,
@@ -1390,20 +1387,19 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                             &update_sql,
                             "mark catalogue boolean model state",
                         )
-                        .await
-                        .unwrap();
+                        .await?;
                     }
                 }
+                Ok::<(), anyhow::Error>(())
             },
         );
         tasks.push(task);
     }
-    dbg!(tasks.len());
-    match futures::future::try_join_all(tasks).await {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(e);
-        }
+    let task_results = futures::future::try_join_all(tasks)
+        .await
+        .map_err(|error| anyhow!("OCC boolean worker join failed: {error}"))?;
+    for result in task_results {
+        result?;
     }
 
     Ok(())
@@ -1411,6 +1407,25 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod aabb_write_order_tests {
+    #[test]
+    fn mesh_workers_propagate_query_write_and_join_failures() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn gen_inst_meshes(")
+            .expect("gen_inst_meshes exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("gen_inst_meshes boundary")
+            .0;
+        assert!(body.contains(".check()?"), "{body}");
+        assert!(body.contains("for result in task_results"), "{body}");
+        assert!(
+            body.contains("save_pts_to_surreal(&pts_json_map).await?"),
+            "{body}"
+        );
+        assert!(!body.contains("try_join_all(tasks).await {"), "{body}");
+    }
+
     /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条
     /// D9 教训）。顺序一旦被整理代码时悄悄换回去，不会有任何编译或运行报错——只会在
     /// 崩溃/并发窗口里让 `aabb.d` 读者取到 none。这里把书写顺序钉成断言。
