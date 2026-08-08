@@ -2133,6 +2133,16 @@ async fn room_round(
     };
     let live = counts.live();
     if live == 0 {
+        if counts.blocked > 0 {
+            println!(
+                "房间覆盖屏障生效：{} 个房间目标等待缺失面板模型补偿，本轮仅刷新覆盖探针",
+                counts.blocked
+            );
+            if let Err(error) = model_update_pending::drain_rooms(&mgr.db_option).await {
+                println!("刷新房间面板覆盖屏障失败: {error:#}");
+                return IdleOutcome::Failed;
+            }
+        }
         return IdleOutcome::Settled;
     }
 

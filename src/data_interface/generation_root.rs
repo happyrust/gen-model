@@ -318,6 +318,24 @@ pub async fn resolve_generation_roots_on(
     refnos: &[RefnoEnum],
     unit_types: &[String],
 ) -> anyhow::Result<Vec<GenerationRoot>> {
+    Ok(
+        resolve_generation_roots_with_targets_on(db, refnos, unit_types)
+            .await?
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect(),
+    )
+}
+
+/// 与 [`resolve_generation_roots_on`] 相同，但保留“输入元素 → 生成根”配对。
+///
+/// 房间面板补偿需要把多个缺失 PANE 合并到同一个生成根，同时在生成完成后逐块验证；
+/// 只返回根会丢掉这层对应关系。
+pub async fn resolve_generation_roots_with_targets_on(
+    db: &Surreal<Any>,
+    refnos: &[RefnoEnum],
+    unit_types: &[String],
+) -> anyhow::Result<Vec<(RefnoEnum, GenerationRoot)>> {
     let mut nodes: HashMap<RefnoEnum, Option<GenerationNode>> = HashMap::new();
     let mut roots = Vec::new();
     for &refno in refnos {
@@ -326,7 +344,7 @@ pub async fn resolve_generation_roots_on(
             nodes.get(&candidate).cloned().flatten()
         });
         if let Some(root) = resolved {
-            roots.push(root);
+            roots.push((refno, root));
         }
     }
     Ok(roots)

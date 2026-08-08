@@ -1,6 +1,6 @@
 //! Durable, per-target model work queued before the incremental watermark.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
@@ -14,6 +14,7 @@ use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
+const ROOM_COVERAGE_BARRIER: &str = "room_panel_coverage_barrier:current";
 const QUERY_CHUNK: usize = 500;
 // ponytail: one bounded idle page may still delay a new batch; lower this if the
 // measured generation latency exceeds the queue SLA.
@@ -68,6 +69,16 @@ pub struct PendingModelWork {
     pub last_error: Option<String>,
     #[serde(default)]
     pub revision: u64,
+    /// 房间面板缺几何时，本生成根必须补出的 PANE。普通增量生成根为空。
+    #[serde(default)]
+    pub required_panels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PanelRepairGroup {
+    root_refno: String,
+    noun: String,
+    required_panels: Vec<String>,
 }
 
 /// 队列行的 id。同一个 `(action, target)` 只占一行，重复入队即幂等更新（ADR-015）。
@@ -90,6 +101,172 @@ pub(crate) fn record_id_of(action: ModelWorkAction, target_refno: &str) -> Strin
 
 fn record_id(item: &ModelWorkItem) -> String {
     record_id_of(item.action, &item.target_refno)
+}
+
+/// 把一组缺失 PANE 幂等地附着到它们的生成根任务上。
+///
+/// `required_panels CONTAINSALL ...` 必须在更新数组之前求值；SurrealDB 的 SET 子句按
+/// 顺序执行。相同缺口重复探测时保留 revision/attempts/status，只有出现新缺口时才
+/// 复活任务并递增 revision，既保护并发收口，也避免房间轮每十分钟制造一次新生成。
+fn render_missing_panel_repair_upsert(group: &PanelRepairGroup) -> String {
+    let id = record_id_of(ModelWorkAction::RegenRoot, &group.root_refno);
+    let root = escape_surql_str(&group.root_refno);
+    let noun = escape_surql_str(&group.noun);
+    let panels = group
+        .required_panels
+        .iter()
+        .map(|panel| format!("'{}'", escape_surql_str(panel)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let required = format!("[{panels}]");
+    let already_known = format!("(required_panels?:[]) CONTAINSALL {required}");
+    format!(
+        "UPSERT {id} SET \
+         dbnum = dbnum?:0, db_type = 'DESI', action = 'regen_root', \
+         target_refno = '{root}', noun = '{noun}', \
+         attempts = IF {already_known} THEN attempts?:0 ELSE 0 END, \
+         last_error = IF {already_known} THEN last_error ELSE NONE END, \
+         source_end_sesno = source_end_sesno?:0, \
+         revision = IF {already_known} THEN revision?:0 ELSE (revision?:0) + 1 END, \
+         status = IF {already_known} THEN status?:'pending' ELSE 'pending' END, \
+         updated_at = IF {already_known} THEN updated_at?:time::now() ELSE time::now() END, \
+         required_panels = array::union(required_panels?:[], {required});"
+    )
+}
+
+fn render_set_room_coverage_barrier(groups: &[PanelRepairGroup]) -> String {
+    let panels = groups
+        .iter()
+        .flat_map(|group| group.required_panels.iter())
+        .map(|panel| format!("'{}'", escape_surql_str(panel)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let roots = groups
+        .iter()
+        .map(|group| format!("'{}'", escape_surql_str(&group.root_refno)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "UPSERT {ROOM_COVERAGE_BARRIER} SET status = 'repairing', \
+         missing_panels = [{panels}], repair_roots = [{roots}], updated_at = time::now();"
+    )
+}
+
+fn render_clear_room_coverage_barrier() -> String {
+    format!("DELETE {ROOM_COVERAGE_BARRIER};")
+}
+
+async fn room_coverage_barrier_active() -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query(format!("RETURN record::exists({ROOM_COVERAGE_BARRIER});"))
+        .await?
+        .check()?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+}
+
+async fn clear_room_coverage_barrier() -> anyhow::Result<()> {
+    SUL_DB
+        .query(render_clear_room_coverage_barrier())
+        .await?
+        .check()?;
+    Ok(())
+}
+
+fn group_missing_panel_repairs(
+    resolved: Vec<(
+        RefnoEnum,
+        crate::data_interface::generation_root::GenerationRoot,
+    )>,
+) -> Vec<PanelRepairGroup> {
+    let mut groups = BTreeMap::<String, PanelRepairGroup>::new();
+    for (panel, root) in resolved {
+        let root_refno = root.root.to_pdms_str();
+        groups
+            .entry(root_refno.clone())
+            .or_insert_with(|| PanelRepairGroup {
+                root_refno,
+                noun: root.noun,
+                required_panels: Vec::new(),
+            })
+            .required_panels
+            .push(panel.to_pdms_str());
+    }
+    groups
+        .into_values()
+        .map(|mut group| {
+            group.required_panels.sort_unstable();
+            group.required_panels.dedup();
+            group
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct PanelRepairEnqueueReport {
+    roots: usize,
+    panels: usize,
+}
+
+/// 把缺几何的在册面板归一到生成根，并以带后置条件的 durable 工作入队。
+async fn enqueue_missing_panel_repairs(
+    missing_panels: &[RefnoEnum],
+) -> anyhow::Result<PanelRepairEnqueueReport> {
+    let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
+    let resolved =
+        crate::data_interface::generation_root::resolve_generation_roots_with_targets_on(
+            &SUL_DB,
+            missing_panels,
+            &unit_types,
+        )
+        .await?;
+    if resolved.len() != missing_panels.len() {
+        let resolved_panels = resolved
+            .iter()
+            .map(|(panel, _)| *panel)
+            .collect::<HashSet<_>>();
+        let unresolved = missing_panels
+            .iter()
+            .filter(|panel| !resolved_panels.contains(panel))
+            .take(8)
+            .map(RefnoEnum::to_pdms_str)
+            .collect::<Vec<_>>();
+        anyhow::bail!(
+            "{} 块缺失面板中有 {} 块无法解析生成根（例如 {}），未建立房间覆盖屏障",
+            missing_panels.len(),
+            missing_panels.len().saturating_sub(resolved.len()),
+            unresolved.join(", ")
+        );
+    }
+    let groups = group_missing_panel_repairs(resolved);
+    let panels = groups.iter().map(|group| group.required_panels.len()).sum();
+    for chunk in groups.chunks(QUERY_CHUNK) {
+        SUL_DB
+            .query(
+                chunk
+                    .iter()
+                    .map(render_missing_panel_repair_upsert)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("persist missing panel repairs failed: {error}"))?
+            .check()
+            .map_err(|error| {
+                anyhow::anyhow!("persist missing panel repair statements failed: {error}")
+            })?;
+    }
+    SUL_DB
+        .query(render_set_room_coverage_barrier(&groups))
+        .await
+        .map_err(|error| anyhow::anyhow!("persist room coverage barrier failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("persist room coverage barrier statement failed: {error}")
+        })?;
+    Ok(PanelRepairEnqueueReport {
+        roots: groups.len(),
+        panels,
+    })
 }
 
 /// Persist the exact model work before advancing `applied_sesno`.
@@ -841,11 +1018,27 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
     );
     match item.action {
         ModelWorkAction::RegenRoot => {
-            crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
-                mgr,
-                &[item.target_refno.clone()],
-            )
-            .await
+            if item.required_panels.is_empty() {
+                crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
+                    mgr,
+                    &[item.target_refno.clone()],
+                )
+                .await?;
+            } else {
+                // 修复排队后房间拓扑仍可能变化。先确认至少还有一块在册 PANE 需要这个根，
+                // 避免合法删除了面板/生成根之后，先生成一个已不存在的根而把修复任务打进死信。
+                let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
+                let registered = registered_required_panels(&rooms, &item.required_panels)?;
+                if !registered.is_empty() {
+                    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
+                        mgr,
+                        &[item.target_refno.clone()],
+                    )
+                    .await?;
+                }
+                verify_required_panel_geometry(mgr, &item.required_panels).await?;
+            }
+            Ok(())
         }
         ModelWorkAction::Transform => mgr.update_world_transforms(&HashSet::from([refno])).await,
         ModelWorkAction::DeleteCleanup => {
@@ -884,6 +1077,86 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
             .map(|_| ())
         }
     }
+}
+
+fn missing_required_panels(required: &[String], available: &HashSet<String>) -> Vec<String> {
+    required
+        .iter()
+        .filter(|panel| !available.contains(panel.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn registered_required_panels(
+    rooms: &room_model::RoomPanelMap,
+    required: &[String],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    required
+        .iter()
+        .map(|panel| {
+            RefU64::from_str(panel)
+                .map(RefnoEnum::from)
+                .map_err(|_| anyhow::anyhow!("invalid required panel refno {panel}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map(|panels| {
+            panels
+                .into_iter()
+                .filter(|panel| rooms.room_num_of(*panel).is_some())
+                .collect()
+        })
+}
+
+/// 面板补偿不是“生成调用返回 Ok”就算成功：房间计算真正依赖的是每块 PANE 都能从
+/// `inst_relate` 读到有效 AABB 与 world transform。后置条件不满足时保留同一生成根
+/// pending 并累计 attempts，最终进入可观测死信，而不是十分钟后重新造一条新任务。
+async fn verify_required_panel_geometry(
+    mgr: &AiosDBManager,
+    required: &[String],
+) -> anyhow::Result<()> {
+    let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
+    // 拓扑可能在补偿排队后继续变化。已经移出合规房间的旧 PANE 不再是房间覆盖条件，
+    // 否则一个合法删除会把生成根推入永远无法满足的死信。
+    let required_now = registered_required_panels(&rooms, required)?;
+    let available = crate::data_interface::staging::query_valid_insts(&required_now)
+        .await?
+        .into_iter()
+        .map(|inst| inst.refno.to_pdms_str())
+        .collect::<HashSet<_>>();
+    let required_now = required_now
+        .iter()
+        .map(RefnoEnum::to_pdms_str)
+        .collect::<Vec<_>>();
+    let missing = missing_required_panels(&required_now, &available);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "生成根执行完成后仍有 {} 块必需房间面板缺少有效 inst_relate/AABB/world_trans: {}",
+            missing.len(),
+            missing
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // 局部根满足后再看项目级屏障；只有 497 块在册面板全部可用才放行591个构件。
+    let panel_index = room_model::load_panel_index(&mgr.db_option, &rooms).await?;
+    if panel_index.ensure_complete().is_ok() {
+        clear_room_coverage_barrier().await?;
+        println!("[房间增量] 在册面板几何已完整，解除房间覆盖屏障");
+    } else {
+        // 修复波次执行期间可能又有 PANE 新增或丢失几何。把最新缺口并入 durable
+        // 根任务；若恰好落到当前根，revision 会递增，使下面的旧令牌收口命中零行。
+        // 这样原波次全部结束后仍有工作能够最终解除屏障。
+        let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
+        println!(
+            "[房间增量] 全局面板覆盖仍不完整：刷新 {} 块面板 / {} 个修复根",
+            repair.panels, repair.roots
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -1198,7 +1471,7 @@ pub(crate) fn root_joins_regen_batch(attempts: u32, target_refno: &str) -> bool 
 }
 
 fn joins_regen_batch(job: &PendingModelWork) -> bool {
-    root_joins_regen_batch(job.attempts, &job.target_refno)
+    job.required_panels.is_empty() && root_joins_regen_batch(job.attempts, &job.target_refno)
 }
 
 /// Drain pending work independently. Failures remain durable and are retried on
@@ -1403,6 +1676,8 @@ pub struct RoomTargetCounts {
     pub elements: usize,
     /// 已达重试上限的死信数——自动路径不会再碰它们，只有界面能把它们暴露出来。
     pub dead_letters: usize,
+    /// 面板几何补偿期间由项目级覆盖屏障暂缓的房间目标数。
+    pub blocked: usize,
 }
 
 impl RoomTargetCounts {
@@ -1452,6 +1727,11 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
             other => anyhow::bail!("房间目标计数遇到未知 action: {other}"),
         }
     }
+    if room_coverage_barrier_active().await? {
+        counts.blocked = counts.panels + counts.elements;
+        counts.panels = 0;
+        counts.elements = 0;
+    }
     Ok(counts)
 }
 
@@ -1468,6 +1748,24 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
 /// 能用它自己的房间关键字驱动整个阶段——`init_form_config()` 读的是项目配置，夹具那间
 /// `/ZZ-R-K100` 在默认关键字下根本匹配不到。
 pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<DrainReport> {
+    if room_coverage_barrier_active().await? {
+        // 屏障只禁止用不完整索引改写房间边，不能禁止覆盖探针本身。原修复波次执行期间
+        // 可能新增 PANE 或再次丢失几何；这里仍做只读探测并幂等补齐修复根，防止最后一条
+        // 旧修复任务收口后再也没有工作能够解除屏障。
+        let rooms = room_model::load_room_panel_map(db_option).await?;
+        let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
+        if panel_index.ensure_complete().is_ok() {
+            clear_room_coverage_barrier().await?;
+            println!("[房间增量] 覆盖探针确认在册面板几何完整，解除房间覆盖屏障");
+        } else {
+            let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
+            println!(
+                "[房间增量] 覆盖屏障刷新：{} 块缺失面板 / {} 个 durable 修复根",
+                repair.panels, repair.roots
+            );
+            return Ok(DrainReport::default());
+        }
+    }
     // 两侧分开取，整间在前、元素在后，且**只有元素侧分页**。
     //
     // 整间任务的行 id 是 `room_recalc_panel_{target}`，一块 PANE 最多占一行，所以这
@@ -1490,6 +1788,7 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
     // 候选面板从这里选，不再依赖空间树里有没有 PANE 条目。
     let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
+    let mut report = DrainReport::default();
     // 覆盖率如实报，而不是只在「一块都没有」时才出声。元素侧的破坏性替换会在面板
     // 阶段结束后统一 fail-closed；这里先给出可定位的缺失样本。
     let missing = panel_index.missing_panels();
@@ -1506,6 +1805,23 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        let message = match enqueue_missing_panel_repairs(missing).await {
+            Ok(repair) => {
+                let summary = format!(
+                    "已把 {} 块面板归并为 {} 个带几何后置条件的生成根并建立覆盖屏障",
+                    repair.panels, repair.roots
+                );
+                println!("[房间增量] {summary}");
+                summary
+            }
+            Err(error) => {
+                let summary = format!("缺失面板模型补偿入队失败: {error:#}");
+                println!("[房间增量] {summary}");
+                summary
+            }
+        };
+        report.record(0, message);
+        return Ok(report);
     }
 
     // 整页元素的现存归属一次查完（见 [`room_model::ElementRoomHistory`]）：归属变化
@@ -1531,7 +1847,6 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
     let empty_history = room_model::ElementRoomHistory::default();
     let history_ref = history.as_ref().unwrap_or(&empty_history);
 
-    let mut report = DrainReport::default();
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
 
@@ -1732,6 +2047,217 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    /// 缺失面板触发的模型补偿以“根 + 必需面板集合”为持久事实：同一缺口重复探测
+    /// 不应不断推高 revision；只有发现新的缺失面板才产生一个新收口版本。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_panel_repair_upsert_is_idempotent_and_revision_safe() {
+        use surrealdb::engine::any::connect;
+
+        #[derive(Debug, Deserialize)]
+        struct RepairRow {
+            revision: u64,
+            status: String,
+            attempts: u32,
+            required_panels: Vec<String>,
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("missing_panel_repair")
+            .await
+            .expect("select fixture db");
+        let mut group = PanelRepairGroup {
+            root_refno: "4000000001/10".into(),
+            noun: "CWALL".into(),
+            required_panels: vec!["4000000001/11".into()],
+        };
+
+        for _ in 0..2 {
+            db.query(render_missing_panel_repair_upsert(&group))
+                .await
+                .expect("upsert repair")
+                .check()
+                .expect("repair statement");
+        }
+        let mut response = db
+            .query("SELECT revision, status, attempts, required_panels FROM model_update_pending;")
+            .await
+            .expect("read repair")
+            .check()
+            .expect("read statement");
+        let rows: Vec<RepairRow> = response.take(0).expect("decode repair");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revision, 1, "相同缺口不得重复触发生成");
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].attempts, 0);
+        assert_eq!(rows[0].required_panels, ["4000000001/11"]);
+
+        group.required_panels.push("4000000001/12".into());
+        db.query(render_missing_panel_repair_upsert(&group))
+            .await
+            .expect("extend repair")
+            .check()
+            .expect("extend statement");
+        let mut response = db
+            .query("SELECT revision, status, attempts, required_panels FROM model_update_pending;")
+            .await
+            .expect("read extended repair")
+            .check()
+            .expect("read extended statement");
+        let rows: Vec<RepairRow> = response.take(0).expect("decode extended repair");
+        assert_eq!(rows[0].revision, 2, "新缺口必须保护正在执行的旧 revision");
+        assert_eq!(rows[0].required_panels, ["4000000001/11", "4000000001/12"]);
+    }
+
+    #[test]
+    fn panel_repair_regen_is_verified_before_settlement() {
+        let job = PendingModelWork {
+            dbnum: 0,
+            db_type: "DESI".into(),
+            source_end_sesno: 0,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "4000000001/10".into(),
+            noun: "CWALL".into(),
+            status: "pending".into(),
+            attempts: 0,
+            last_error: None,
+            revision: 1,
+            required_panels: vec!["4000000001/11".into(), "4000000001/12".into()],
+        };
+
+        assert!(
+            !joins_regen_batch(&job),
+            "带面板后置条件的根必须单独执行并逐项验收"
+        );
+        assert_eq!(
+            missing_required_panels(
+                &job.required_panels,
+                &HashSet::from(["4000000001/11".to_string()])
+            ),
+            ["4000000001/12"]
+        );
+    }
+
+    #[test]
+    fn removed_panels_are_filtered_before_the_repair_root_is_generated() {
+        let registered = RefnoEnum::from("4000000001/11");
+        let stale = RefnoEnum::from("4000000001/12");
+        let rooms = room_model::RoomPanelMap {
+            rooms: vec![room_model::RoomPanels {
+                room: RefnoEnum::from("4000000001/1"),
+                room_num: "R100".into(),
+                panels: vec![registered],
+            }],
+            all_panels: HashSet::from([registered, stale]),
+        };
+
+        assert_eq!(
+            registered_required_panels(&rooms, &[registered.to_pdms_str(), stale.to_pdms_str()])
+                .expect("valid required panel refnos"),
+            [registered]
+        );
+    }
+
+    #[test]
+    fn an_active_coverage_barrier_still_refreshes_new_panel_gaps() {
+        let source = include_str!("model_update_pending.rs");
+        let verify = source
+            .split_once("async fn verify_required_panel_geometry(")
+            .expect("verification helper")
+            .1
+            .split_once("#[derive(Debug, Default)]")
+            .expect("verification helper end")
+            .0;
+        let room_drain = source
+            .split_once("pub async fn drain_rooms(")
+            .expect("room drain")
+            .1
+            .split_once("// 两侧分开取")
+            .expect("barrier branch end")
+            .0;
+
+        assert!(
+            verify.contains("enqueue_missing_panel_repairs(panel_index.missing_panels()).await?"),
+            "完成旧修复根时必须把全局新缺口并入 durable 队列"
+        );
+        assert!(
+            room_drain
+                .contains("enqueue_missing_panel_repairs(panel_index.missing_panels()).await?"),
+            "屏障期间仍必须运行只修复、不改房间边的覆盖探针"
+        );
+    }
+
+    #[test]
+    fn missing_panels_share_one_repair_per_generation_root() {
+        use crate::data_interface::generation_root::{GenerationRoot, GenerationRootKind};
+
+        let root = GenerationRoot {
+            root: RefnoEnum::from("4000000001/10"),
+            noun: "CWALL".into(),
+            name: "/WALL".into(),
+            kind: GenerationRootKind::Normal,
+        };
+        let groups = group_missing_panel_repairs(vec![
+            (RefnoEnum::from("4000000001/12"), root.clone()),
+            (RefnoEnum::from("4000000001/11"), root),
+        ]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].root_refno, "4000000001/10");
+        assert_eq!(
+            groups[0].required_panels,
+            ["4000000001/11", "4000000001/12"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incomplete_panel_index_uses_a_durable_coverage_barrier() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("room_coverage_barrier")
+            .await
+            .expect("select fixture db");
+        let groups = vec![PanelRepairGroup {
+            root_refno: "4000000001/10".into(),
+            noun: "CWALL".into(),
+            required_panels: vec!["4000000001/11".into(), "4000000001/12".into()],
+        }];
+
+        db.query(render_set_room_coverage_barrier(&groups))
+            .await
+            .expect("set barrier")
+            .check()
+            .expect("set barrier statement");
+        let mut response = db
+            .query("SELECT status, missing_panels, repair_roots FROM room_panel_coverage_barrier:current;")
+            .await
+            .expect("read barrier")
+            .check()
+            .expect("read barrier statement");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode barrier");
+        assert_eq!(rows[0]["status"], "repairing");
+        assert_eq!(rows[0]["missing_panels"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            rows[0]["repair_roots"],
+            serde_json::json!(["4000000001/10"])
+        );
+
+        db.query(render_clear_room_coverage_barrier())
+            .await
+            .expect("clear barrier")
+            .check()
+            .expect("clear barrier statement");
+        let mut response = db
+            .query("RETURN record::exists(room_panel_coverage_barrier:current);")
+            .await
+            .expect("read cleared barrier")
+            .check()
+            .expect("read cleared statement");
+        assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(false));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_element_room_work_clears_edges_and_joins_the_journal() {
@@ -2057,6 +2583,7 @@ mod tests {
             attempts: 0,
             last_error: None,
             revision: 7,
+            required_panels: Vec::new(),
         };
         let item = ModelWorkItem {
             dbnum: work.dbnum,
@@ -2649,6 +3176,7 @@ mod tests {
             attempts: 0,
             last_error: None,
             revision: 1,
+            required_panels: Vec::new(),
         };
         assert!(joins_regen_batch(&fresh));
 
@@ -3373,6 +3901,41 @@ mod tests {
             .await
             .expect("connect surreal");
         assert_live_delivery_unit_regenerates(4_000_000_024, "24381/100817", "BRAN").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: probes incomplete room panel coverage and persists targeted repairs"]
+    async fn live_incomplete_room_panels_enqueue_targeted_repairs() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let report = drain_rooms(aios_core::get_db_option())
+            .await
+            .expect("room coverage probe must complete");
+        assert_eq!(
+            report.done, 0,
+            "incomplete coverage must not rewrite room edges"
+        );
+
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN record::exists({ROOM_COVERAGE_BARRIER}); \
+                 RETURN array::len(SELECT VALUE id FROM {TABLE} \
+                    WHERE action = 'regen_root' AND array::len(required_panels?:[]) > 0);"
+            ))
+            .await
+            .expect("query repair facts")
+            .check()
+            .expect("repair fact statements");
+        assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(true));
+        assert!(
+            response
+                .take::<Option<usize>>(1)
+                .unwrap()
+                .unwrap_or_default()
+                > 0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
