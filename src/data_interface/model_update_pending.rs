@@ -17,7 +17,7 @@ pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 const QUERY_CHUNK: usize = 500;
 // ponytail: one bounded idle page may still delay a new batch; lower this if the
 // measured generation latency exceeds the queue SLA.
-const DRAIN_PAGE_SIZE: usize = 64;
+const DRAIN_PAGE_SIZE: usize = 1;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
 /// that keeps failing stays in the table as an inspectable dead letter instead
@@ -2538,6 +2538,10 @@ mod tests {
 
     #[test]
     fn drain_select_leaves_dead_letters_in_the_table() {
+        assert_eq!(
+            DRAIN_PAGE_SIZE, 1,
+            "live geometry timing requires the idle recovery path to yield after every generated root"
+        );
         let sql = render_drain_select("AND action = 'regen_root'", Some(DRAIN_PAGE_SIZE));
         assert!(
             sql.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}")),
