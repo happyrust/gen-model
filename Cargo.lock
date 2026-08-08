@@ -4961,7 +4961,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
-source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=aa098bafc8543f699f9a2499fdd9841f1d20bd2b#aa098bafc8543f699f9a2499fdd9841f1d20bd2b"
+source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=03c1cdb35b24aa24e83ec8d072885cdc32d38ae3#03c1cdb35b24aa24e83ec8d072885cdc32d38ae3"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -5051,7 +5051,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=439a5458c10c1105ed87e04b221ad6ea13d42eb6#439a5458c10c1105ed87e04b221ad6ea13d42eb6"
+source = "git+https://github.com/happyrust/pdms-io.git?rev=2012610235d8a87d65ab4597cf795de2072a24a6#2012610235d8a87d65ab4597cf795de2072a24a6"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -5090,7 +5090,7 @@ dependencies = [
 [[package]]
 name = "pdmsdb_engine_v2"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=7262dc3630df12ed0731f62fc157bca7416e3585#7262dc3630df12ed0731f62fc157bca7416e3585"
+source = "git+https://github.com/happyrust/pdms-io.git?rev=13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb#13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb"
 dependencies = [
  "anyhow",
  "chrono",
