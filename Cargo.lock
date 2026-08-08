@@ -4961,7 +4961,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
-source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=d703f4a#d703f4a6dc5d7f59195129f3f7551e80f3e8d20b"
+source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=cc4cbca76f4691254ad9f26b4119d264ef871fe4#cc4cbca76f4691254ad9f26b4119d264ef871fe4"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4988,6 +4988,7 @@ dependencies = [
  "memchr",
  "nom 7.1.3",
  "once_cell",
+ "pdmsdb_engine_v2",
  "phf 0.11.3",
  "pretty-hex",
  "rayon",
@@ -4996,7 +4997,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "smol_str 0.3.2",
- "thiserror 2.0.19",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -5050,7 +5051,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=6abfe10b#6abfe10b18e010b3e3a0a97b5427555a2e5d3aff"
+source = "git+https://github.com/happyrust/pdms-io.git?rev=76b83ed064c0e7f0ef11497edd8002ed34a2bb97#76b83ed064c0e7f0ef11497edd8002ed34a2bb97"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -5084,6 +5085,17 @@ dependencies = [
  "tokio",
  "url",
  "walkdir",
+]
+
+[[package]]
+name = "pdmsdb_engine_v2"
+version = "0.1.0"
+source = "git+https://github.com/happyrust/pdms-io.git?rev=7262dc3630df12ed0731f62fc157bca7416e3585#7262dc3630df12ed0731f62fc157bca7416e3585"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

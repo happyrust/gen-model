@@ -8,7 +8,7 @@
 //! (0,0,0)——未变更祖先带真 POS 时窗口内算出的世界变换**丢位移且不报错**。
 //!
 //! 数据源是 **db 文件部分解析**（D3，ADR-017 读路由规则①），不从持久层拷贝：
-//! 索引定位（[`parse_file_db_index_data`]，不展开成员树）→ 沿元素自带的 owner
+//! 固定页式快照根并按 refno 索引定位（不展开成员树）→ 沿元素自带的 owner
 //! 迭代上溯到顶 → 复用 CATA 惰性兜底同一套渲染函数落 `pe`/`ATT_*`/`ATT_UDA`，
 //! 保证与解析层落库形状同构。写入走 [`execute_generation_preload`]
 //! （StagingOnly，不进 journal）：这些行是窗口前旧态，持久层本来就有，随
@@ -32,8 +32,10 @@ use std::path::Path;
 use aios_core::{NamedAttrMap, RefU64, RefnoEnum};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::cata_closure::{dedupe_members, is_valid_ref0};
+use crate::data_interface::on_demand_db::OnDemandDbSession;
 
 /// `fn::ancestor` 的手写 `owner.owner.…` 展开预算（`common.surql`，9 跳）。
 ///
@@ -138,6 +140,7 @@ where
     let mut owner_of: HashMap<RefU64, RefU64> = HashMap::new();
     let mut elements = Vec::new();
     let mut seed_hops = BTreeMap::new();
+    let mut resolved_world = is_valid_ref0(world_refno.get_0()).then_some(world_refno);
 
     let mut ordered_seeds = Vec::new();
     let mut seen_seeds = HashSet::new();
@@ -186,12 +189,22 @@ where
             owner_of.insert(current, owner);
             elements.push(element);
             if !is_valid_ref0(owner.get_0()) {
+                let terminal = elements.last().expect("terminal element just pushed");
+                let noun = terminal.att.get_type_str().trim().to_ascii_uppercase();
                 anyhow::ensure!(
-                    current == world_refno,
-                    "祖先链在 {} 处到顶，但它不是本库的 WORL（{}）——文件所有权数据异常",
-                    current.to_pe_key(),
-                    world_refno.to_pe_key()
+                    noun == "WORL",
+                    "祖先链在 {} 处到顶，但其 noun={noun:?} 不是 WORL——文件所有权数据异常",
+                    current.to_pe_key()
                 );
+                match resolved_world {
+                    Some(expected) => anyhow::ensure!(
+                        current == expected,
+                        "祖先链在 {} 处到顶，但它不是本库的 WORL（{}）——多个根或文件所有权数据异常",
+                        current.to_pe_key(),
+                        expected.to_pe_key()
+                    ),
+                    None => resolved_world = Some(current),
+                }
                 break;
             }
             walked += 1;
@@ -230,6 +243,8 @@ where
         seed_hops.insert(seed, hops);
     }
 
+    let world_refno = resolved_world
+        .ok_or_else(|| anyhow::anyhow!("祖先闭包没有解析出 WORL 根——种子为空或所有权链未收敛"))?;
     Ok(AncestorClosure {
         elements,
         seed_hops,
@@ -237,18 +252,23 @@ where
     })
 }
 
-/// 生产数据源：一次窗口打开一个文件索引会话（整文件字节快照 + refno 索引，
-/// **不展开成员树**——上溯只用元素自带的 owner 与成员块）。
+/// 生产数据源：一次窗口固定一个页式快照根并复用页缓存；legacy/compare 模式
+/// 由统一按需会话封装，均不在本层展开成员树。
 pub(crate) struct AncestorParseSession {
-    index: parse_pdms_db::parse::DbIndexData,
+    session: TokioMutex<OnDemandDbSession>,
+    legacy_world_refno: Option<RefU64>,
 }
 
 impl AncestorParseSession {
-    /// 读文件 + 建 refno 索引。快照时点 = 此刻；随后所有解析都出自这份字节，
-    /// 配合 [`resolve_ancestor_closure`] 的逐元素 sesno 封口构成 W1 的时点纪律。
+    /// 打开文件并固定快照根。随后所有定位与记录读取均基于该根，配合
+    /// [`resolve_ancestor_closure`] 的逐元素 sesno 封口构成 W1 的时点纪律。
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
-        let index = parse_pdms_db::parse::parse_file_db_index_data(&path.to_path_buf())?;
-        Ok(Self { index })
+        let session = OnDemandDbSession::open(path)?;
+        let legacy_world_refno = session.legacy_world_refno();
+        Ok(Self {
+            session: TokioMutex::new(session),
+            legacy_world_refno,
+        })
     }
 
     pub(crate) async fn resolve(
@@ -256,8 +276,12 @@ impl AncestorParseSession {
         seeds: &[RefU64],
         end_sesno: i32,
     ) -> anyhow::Result<AncestorClosure> {
-        resolve_ancestor_closure(seeds, self.index.world_refno, end_sesno, |refno| {
-            parse_ancestor_element(&self.index, refno)
+        // 页式快照不依赖文件级全量索引提供 WORL；首次走到 owner 无效的
+        // terminal 时校验 noun=WORL 并固定根，后续种子必须收敛到同一根。
+        let expected_world = self.legacy_world_refno.unwrap_or(RefU64(0));
+        resolve_ancestor_closure(seeds, expected_world, end_sesno, |refno| async move {
+            let mut session = self.session.lock().await;
+            parse_ancestor_element(&mut session, refno).await
         })
         .await
     }
@@ -267,25 +291,16 @@ impl AncestorParseSession {
 /// 解析路径，但定位失败/越界/解析失败都**上抛**而不是跳过——祖先数据直接决定
 /// 模型正确性，这里没有「按 cache-miss 处理」的余地）。
 async fn parse_ancestor_element(
-    index: &parse_pdms_db::parse::DbIndexData,
+    session: &mut OnDemandDbSession,
     refno: RefU64,
 ) -> anyhow::Result<Option<AncestorElement>> {
-    let pos = match index.refno_table_map.get(&refno) {
-        Some(entry) => entry.pos,
-        None => return Ok(None),
-    };
-    anyhow::ensure!(
-        pos >= 4 && pos <= index.bytes.len(),
-        "元素 {} 的索引位置 {pos} 越界（文件 {} 字节）——索引损坏",
-        refno.to_pe_key(),
-        index.bytes.len()
-    );
-    let db_info = aios_core::get_default_pdms_db_info();
-    let ele = parse_pdms_db::parse::parse_ele_data_with_info(&index.bytes[pos - 4..], &db_info)
+    let Some(ele) = session
+        .parse_element(refno)
         .await
-        .map_err(|error| {
-            anyhow::anyhow!("元素 {} 部分解析失败: {error:#}", refno.to_pe_key())
-        })?;
+        .map_err(|error| anyhow::anyhow!("元素 {} 部分解析失败: {error:#}", refno.to_pe_key()))?
+    else {
+        return Ok(None);
+    };
     let att = ele.whole_attmap.merge();
     let children = dedupe_members(refno, &ele.children);
     Ok(Some(AncestorElement {
@@ -464,10 +479,7 @@ pub(crate) async fn validate_ancestor_preload_on(
             })
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = db
-            .query(format!("RETURN [{probes}];"))
-            .await?
-            .check()?;
+        let mut response = db.query(format!("RETURN [{probes}];")).await?.check()?;
         let flags: Vec<Vec<bool>> = response.take(0)?;
         anyhow::ensure!(
             flags.len() == chunk.len(),
@@ -1115,11 +1127,15 @@ mod tests {
             );
         }
         assert!(
-            !seeds.iter().any(|seed| seed.to_pe_key().ends_with("784002")),
+            !seeds
+                .iter()
+                .any(|seed| seed.to_pe_key().ends_with("784002")),
             "删除目标已从文件消失，绝不进解析种子: {seeds:?}"
         );
         assert!(
-            !seeds.iter().any(|seed| seed.to_pe_key().ends_with("784004")),
+            !seeds
+                .iter()
+                .any(|seed| seed.to_pe_key().ends_with("784004")),
             "房间目标不进祖先种子: {seeds:?}"
         );
     }
