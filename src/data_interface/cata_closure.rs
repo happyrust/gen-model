@@ -945,9 +945,15 @@ async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<V
             continue;
         }
         scope.push(refno);
-        for child in aios_core::get_children_pes(refno).await.unwrap_or_default() {
-            frontier.push(child.refno);
-        }
+        let sql = format!(
+            "SELECT VALUE in FROM {}<-pe_owner WHERE record::exists(in.id) AND !in.deleted;",
+            refno.to_pe_key()
+        );
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(sql)
+            .await?
+            .check()?;
+        frontier.extend(response.take::<Vec<RefnoEnum>>(0)?);
     }
 
     let mut seeds = HashSet::new();
@@ -961,7 +967,10 @@ async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<V
             "SELECT VALUE object::values(refno.*)[WHERE type::is::record($this)] \
              FROM [{keys}];"
         );
-        let mut response = SUL_DB.query(sql).await?;
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(sql)
+            .await?
+            .check()?;
         let refs: Vec<Vec<RefnoEnum>> = response.take(0)?;
         seeds.extend(refs.into_iter().flatten().map(|r| r.refno()));
     }
@@ -1228,7 +1237,7 @@ pub async fn ensure_cata_refnos_parsed(
 
 /// 主动预解析（Phase 4）：给定一组生成根，收集其子树出向引用 → 跑 CATA 闭包 → 批量落库。
 ///
-/// 与惰性兜底并存：主动保效率（每批根一次），惰性收漏边。受 env 开关门控（默认 Off）。
+/// 与惰性兜底并存：主动保效率（每批根一次），惰性收漏边。受 env 开关门控（默认 On）。
 pub async fn ensure_cata_parsed_for_roots(
     project: &str,
     roots: &[RefU64],
@@ -1247,7 +1256,7 @@ pub async fn ensure_cata_parsed_for_roots(
     ensure_cata_refnos_parsed(project, &seeds).await
 }
 
-/// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 Off 即直接返回 false，零回归）。
+/// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 On）。
 ///
 /// 命中未解析 CATA refno 时调用；返回 `true` 表示已补齐、值得重试原查询。
 pub async fn try_lazy_cata_fallback(cata_refno: RefnoEnum) -> bool {
@@ -1430,7 +1439,7 @@ impl CataDepCache {
 }
 
 /// 生成入口的**缓存感知预加载**（Phase 6）：按源 dbnum + 生成根读依赖缓存 → 命中即批量预加载；
-/// 未命中 / 过期则现算闭包、写缓存、再预加载。受 env 开关门控（默认 Off）。
+/// 未命中 / 过期则现算闭包、写缓存、再预加载。受 env 开关门控（默认 On）。
 ///
 /// 失效口径：源库 `applied_sesno`（权威数据版本）。CATA 定义变不改「依赖哪些 id」，
 /// 故仅由源库变更驱动重算。预加载复用 [`ensure_cata_refnos_parsed`]（幂等落库）。
@@ -1536,6 +1545,29 @@ pub async fn preload_cata_for_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_data_reads_use_the_active_window_but_locator_stays_persistent() {
+        let source = include_str!("cata_closure.rs");
+        let subtree = source
+            .split_once("async fn collect_database_subtree_outbound(")
+            .expect("subtree collector exists")
+            .1
+            .split_once("pub async fn run_cata_closure_pass_for_refnos")
+            .expect("subtree collector boundary")
+            .0;
+        assert_eq!(subtree.matches("active_data_db()").count(), 2, "{subtree}");
+        assert!(!subtree.contains("SUL_DB.query"), "{subtree}");
+
+        let locator = source
+            .split_once("async fn load_dbnum_files_from_watermark(")
+            .expect("watermark locator exists")
+            .1
+            .split_once("fn scan_db_ref0s(")
+            .expect("watermark locator boundary")
+            .0;
+        assert!(locator.contains("SUL_DB.query"), "{locator}");
+    }
 
     /// pe_owner owner 块替换契约：范围删除 + 完整重插必须是一个 ReplaySafe 事务。
     #[test]
