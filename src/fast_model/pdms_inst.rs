@@ -836,27 +836,10 @@ mod tests {
     async fn live_backfill_anc_on_configured_db() {
         aios_core::init_test_surreal().await.expect("连接配置库");
 
-        // 从权威脚本原文抠出两个函数定义（refno_u64 起、到 anc_u64 的收尾 `};`），
-        // 避免测试里再抄一份出现两个事实来源。
-        let common = std::fs::read_to_string("resource/surreal/common.surql")
-            .expect("read resource/surreal/common.surql");
-        let start = common
-            .find("DEFINE FUNCTION OVERWRITE fn::refno_u64")
-            .expect("common.surql 里应有 fn::refno_u64 定义");
-        let anc_at = common[start..]
-            .find("DEFINE FUNCTION OVERWRITE fn::anc_u64")
-            .expect("common.surql 里应有 fn::anc_u64 定义");
-        let end = common[start + anc_at..]
-            .find("\n};")
-            .expect("anc_u64 定义应以 `};` 收尾");
-        let defines = &common[start..start + anc_at + end + 3];
-        SUL_DB
-            .query(defines)
+        aios_core::function::define_common_functions_on(&SUL_DB)
             .await
-            .expect("define fn::refno_u64 / fn::anc_u64")
-            .check()
-            .expect("define check");
-        println!("[live] fn::refno_u64 / fn::anc_u64 已灌入");
+            .expect("load common functions and inst_meta compatibility definitions");
+        println!("[live] fn::refno_u64 / fn::anc_u64 已通过 core 正式加载入口就绪");
 
         init_inst_relate_indices().await.expect("建索引");
         println!("[live] 索引就绪（IF NOT EXISTS）");

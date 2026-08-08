@@ -2161,6 +2161,33 @@ pub struct PendingModelUnit {
     pub revision: u64,
 }
 
+/// One persisted room-recalculation task exposed by the pending-units
+/// inspection endpoint. Room targets are not generation roots, so they keep
+/// their queue-native `(action, target_refno)` identity instead of overloading
+/// [`PendingModelUnit::root_refno`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRoomUnit {
+    #[serde(default)]
+    pub dbnum: u32,
+    pub action: ModelWorkAction,
+    /// `a/b` PDMS reference used together with `action` by the retry endpoint.
+    pub target_refno: String,
+    #[serde(default)]
+    pub noun: String,
+    #[serde(default)]
+    pub source_end_sesno: i32,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// Computed while reading; the retry ceiling remains the single source of
+    /// truth and is not duplicated in a stored column.
+    #[serde(default)]
+    pub dead: bool,
+}
+
 /// 待重试重生成根的 SELECT（纯函数）。
 ///
 /// `attempt_cap` 只在调用方打算**执行**这些任务时给；`None` 连死信一起返回，那是
@@ -2214,6 +2241,34 @@ pub fn is_dead_letter(attempts: u32) -> bool {
 /// [`load_pending_model_units_for_retry`] instead.
 pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
     load_pending_units_where(None, None).await
+}
+
+fn render_pending_room_units_sql() -> String {
+    "SELECT dbnum, action, target_refno, noun, source_end_sesno, status, attempts, \
+     last_error FROM model_update_pending WHERE action IN \
+     ['room_recalc_panel', 'room_recalc_element'] AND status IN ['pending', 'failed'] \
+     ORDER BY updated_at ASC;"
+        .to_string()
+}
+
+/// Every pending room-recalculation task, dead letters included (read-only).
+///
+/// This deliberately remains separate from [`load_pending_model_units`]: the
+/// latter is also consumed by preview/model worklist code whose rows must all
+/// be generation roots.
+pub async fn load_pending_room_units() -> anyhow::Result<Vec<PendingRoomUnit>> {
+    let mut response = SUL_DB
+        .query(render_pending_room_units_sql())
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("读取房间待重算语句失败: {error}"))?;
+    let mut units: Vec<PendingRoomUnit> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解码房间待重算失败: {error}"))?;
+    for unit in &mut units {
+        unit.dead = is_dead_letter(unit.attempts);
+    }
+    Ok(units)
 }
 
 /// 本批次可以顺带重试的模型任务——**只限本库**。
@@ -3948,6 +4003,19 @@ impl AiosDBManager {
             batch.message = Some(err.error.clone());
         } else {
             batch.status = BatchStatus::Applied;
+            // A crash replay may deliberately apply the older durable attempt
+            // even though the execution-time file rescan has already observed
+            // a newer right edge. Report the range that actually succeeded;
+            // the next queue pass will pick up the remaining sessions.
+            if let Some(success) = incr.successes.first() {
+                batch.start_sesno = success.start_sesno;
+                batch.end_sesno = success.end_sesno;
+                batch.merged_sesnos = sessions_merged_after(
+                    &success.range_eles.keys().copied().collect::<Vec<_>>(),
+                    previous_observed,
+                );
+                batch.changed_elements = success.range_eles.values().map(Vec::len).sum();
+            }
             // MySQL 可选同步（feature = "sql"）：从退役的 `execute_incr_update` 搬来。
             // 合流后不再分手动/自动，每个应用成功的批次都同步；失败只记警告，
             // 与旧口径一致（不回滚水位）。
@@ -3968,7 +4036,7 @@ impl AiosDBManager {
             // Only DESI batches carry a unit rollup (CATA / SYS meta: data only),
             // so this is empty for the others without a type check.
             if let Some(success) = incr.successes.first() {
-                units = collect_unit_tasks(&success.model_plan.units, dbnum, end_sesno);
+                units = collect_unit_tasks(&success.model_plan.units, dbnum, success.end_sesno);
             }
         }
 
@@ -4206,6 +4274,35 @@ mod tests {
         let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
         let retry = render_pending_units_sql(Some(cap), None);
         assert!(retry.contains(&format!("(attempts?:0) < {cap}")), "{retry}");
+    }
+
+    /// 房间检查视图与模型根检查视图一样必须把死信带出来；它只负责观测，不能复用
+    /// 自动 drain 的 attempts 上限。两种房间 action 都要保留原生身份，供既有 retry
+    /// 端点原样回传。
+    #[test]
+    fn room_pending_inspection_includes_both_actions_and_dead_letters() {
+        let sql = render_pending_room_units_sql();
+        assert!(sql.contains("'room_recalc_panel'"), "{sql}");
+        assert!(sql.contains("'room_recalc_element'"), "{sql}");
+        assert!(sql.contains("status IN ['pending', 'failed']"), "{sql}");
+        assert!(!sql.contains("attempts?:0) <"), "{sql}");
+
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let row = PendingRoomUnit {
+            dbnum: 7997,
+            action: ModelWorkAction::RoomRecalcPanel,
+            target_refno: "24381/100677".into(),
+            noun: "PANE".into(),
+            source_end_sesno: 42,
+            status: "failed".into(),
+            attempts: cap,
+            last_error: Some("boom".into()),
+            dead: is_dead_letter(cap),
+        };
+        let json = serde_json::to_value(row).expect("room pending contract serializes");
+        assert_eq!(json["action"], "room_recalc_panel");
+        assert_eq!(json["target_refno"], "24381/100677");
+        assert_eq!(json["dead"], true);
     }
 
     /// `/dbnums` 与预览对「够不着」必须给出同一档，否则两个界面讲反话。

@@ -208,17 +208,14 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
 
         // 收尾清理只在生成与写入都成功之后跑：这个差集分不清「真的不画了」与「本轮
         // 生成没做出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策，
-        // ADR-014 的保留旧显示因此收窄为「生成失败时」）。失败降级为告警——少清一轮
-        // 只是旧行多留一会儿，误清是模型凭空消失。
-        if let Err(error) = crate::data_interface::helper::prune_roots_stale_model_rows(
+        // ADR-014 的保留旧显示因此收窄为「生成失败时」）。收尾失败必须向上传播，让根
+        // pending 留待重试；否则 inst_relate 已删、房间/空间树未清的部分成功会永久残留。
+        crate::data_interface::helper::prune_roots_stale_model_rows(
             &target_root_refnos,
             &produced,
             300,
         )
-        .await
-        {
-            println!("清理本轮未产出几何的旧模型行失败（旧行保留，下次重生成再试）: {error:#}");
-        }
+        .await?;
 
         if db_option.gen_mesh {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
@@ -971,13 +968,13 @@ mod tests {
         assert!(gate_at < persist_at, "落盘必须待在 !targeted 分支里");
     }
 
-    /// 陈旧行清理必须排在「生成与写入都成功」之后，且它自己失败时只降级为告警。
+    /// 陈旧行清理必须排在「生成与写入都成功」之后，且它自己失败时向上传播。
     ///
     /// 排到前面、或者不看成败，就会在一次半途失败的生成之后把「本轮没做出来」的行当成
-    /// 「不再画了」删掉——正是 ADR-014 要挡的方向。反过来给它一个 `?`，则会让一次
-    /// **已经成功**的生成因为清理查询抖动而整根判失败、重来一遍。
+    /// 「不再画了」删掉——正是 ADR-014 要挡的方向。收尾部分成功时必须让整根重试，
+    /// 才能补完已删 inst_relate 之后失败的房间边/空间树清理。
     #[test]
-    fn stale_row_pruning_waits_for_success_and_never_fails_a_finished_run() {
+    fn stale_row_pruning_waits_for_success_and_propagates_cleanup_failure() {
         let source = include_str!("gen_model.rs");
         let body = source
             .split_once(concat!("pub async fn ", "gen_all_geos_data("))
@@ -995,13 +992,13 @@ mod tests {
             .expect("收尾之后才清理陈旧行");
         assert!(settle_at < prune_at, "清理必须排在收尾之后: {body}");
 
-        let warn_at = body
-            .find("清理本轮未产出几何的旧模型行失败")
-            .expect("清理失败必须降级为告警");
-        assert!(prune_at < warn_at, "{body}");
+        let mesh_at = body[prune_at..]
+            .find("if db_option.gen_mesh")
+            .map(|offset| prune_at + offset)
+            .expect("陈旧行清理之后必须仍是 mesh 阶段");
         assert!(
-            !body[prune_at..warn_at].contains("await?"),
-            "清理失败不得上抛，否则一次已经成功的生成会因为它整根重来: {body}"
+            body[prune_at..mesh_at].contains(".await?"),
+            "清理失败必须上抛，让根 pending 重试补完部分成功的收尾: {body}"
         );
     }
 

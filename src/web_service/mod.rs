@@ -22,6 +22,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::query_service::{QueryError, QueryService};
 
 /// The immutable project identity served by this process.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +85,7 @@ pub struct AppState {
     /// 启动时资源目录是否存在（spec §4.1 的 `static_assets`）。缺失不是故障：
     /// `/assets` 返回 404，REST/WS 照常，这个旗子让 `/health` 能把降级说出来。
     pub static_assets: bool,
+    pub queries: Arc<QueryService>,
 }
 
 /// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
@@ -155,6 +157,25 @@ impl ApiError {
         }
     }
 
+    pub fn from_query(error: QueryError) -> Self {
+        let (status, code) = match error.code {
+            "INVALID_ARGUMENT" => (StatusCode::BAD_REQUEST, "invalid_argument"),
+            "NOT_FOUND" => (StatusCode::NOT_FOUND, "not_found"),
+            "ATTR_NOT_APPLICABLE" => (StatusCode::UNPROCESSABLE_ENTITY, "attr_not_applicable"),
+            "CHAIN_INCOMPLETE" => (StatusCode::UNPROCESSABLE_ENTITY, "chain_incomplete"),
+            "DB_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "db_unavailable"),
+            "E3D_SESSION_FAILED" => (StatusCode::SERVICE_UNAVAILABLE, "e3d_session_failed"),
+            "TIMEOUT" => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
+            "PARSE_ERROR" => (StatusCode::INTERNAL_SERVER_ERROR, "parse_error"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        };
+        Self {
+            status,
+            code,
+            message: error.message,
+        }
+    }
+
     /// 领域层 `anyhow::Error` 的统一映射：`sync_live` 前置条件拒绝归为 422，其余 500。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
@@ -222,16 +243,23 @@ pub async fn serve(
         log::warn!("{message}");
         println!("[warn] {message}");
     }
+    let identity = ServiceIdentity::new(
+        db_option.project_name.clone(),
+        &db_option.mdb_name,
+        db_option.surreal_ns.clone(),
+    );
+    let queries = Arc::new(QueryService::for_identity(
+        &std::env::current_dir()?,
+        &identity.project,
+        &identity.mdb,
+    )?);
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
-        identity: ServiceIdentity::new(
-            db_option.project_name.clone(),
-            &db_option.mdb_name,
-            db_option.surreal_ns.clone(),
-        ),
+        identity,
         sync_live: db_option.sync_live.unwrap_or(false),
         static_assets,
+        queries,
     };
 
     let app = Router::new()
@@ -246,6 +274,7 @@ pub async fn serve(
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
+        .route("/api/v1/query", post(handlers::query))
         .route("/api/v1/dbnums", get(handlers::dbnums))
         .route("/api/v1/queue", get(handlers::queue_snapshot))
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
@@ -363,6 +392,27 @@ mod tests {
             let error = error.expect_err("explicit mismatch must be rejected");
             assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(error.code, "identity_mismatch");
+        }
+    }
+
+    #[test]
+    fn query_errors_have_stable_http_statuses() {
+        for (code, status) in [
+            ("INVALID_ARGUMENT", StatusCode::BAD_REQUEST),
+            ("NOT_FOUND", StatusCode::NOT_FOUND),
+            ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
+            ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
+            ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
+            ("E3D_SESSION_FAILED", StatusCode::SERVICE_UNAVAILABLE),
+            ("TIMEOUT", StatusCode::GATEWAY_TIMEOUT),
+            ("PARSE_ERROR", StatusCode::INTERNAL_SERVER_ERROR),
+            ("INTERNAL", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let error = ApiError::from_query(QueryError {
+                code,
+                message: "fixture".into(),
+            });
+            assert_eq!(error.status, status, "{code}");
         }
     }
 }

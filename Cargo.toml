@@ -75,11 +75,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "05aa073" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "463d4d56", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "d703f4a" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "777e238b", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "b043eb32" }
+pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "6abfe10b" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -151,9 +151,9 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
 #
 # 前提：下面三个目录必须存在，且停在与上面 rev 对应的分支上。
 #
-#   ../rs-core-adr017          codex/adr017-read-routing      = 463d4d56
-#   ../../dependency-pin-parse newrepo-main                   = 05aa073
-#   ../pdms-io                 codex/new-core-repos-20260807  = b043eb32
+#   ../rs-core-adr017          codex/adr017-read-routing      = 777e238b
+#   ../../dependency-pin-parse newrepo-main                   = d703f4a
+#   ../pdms-io                 codex/new-core-repos-20260807  = 6abfe10b
 #
 # 同名克隆有好几份，别接错：plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
 # 上（rkyv 0.8 那条线），plant-code/pdms-io 在 engine-v2-core-dll-aligned 上，

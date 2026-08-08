@@ -203,6 +203,7 @@ async fn staged_window_with(
     window
         .scope(register_staged_finalize(StagedFinalize {
             dbnum: DBNUM,
+            start_sesno,
             end_sesno,
             plan: Default::default(),
             window_statements: Vec::new(),

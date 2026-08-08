@@ -199,6 +199,56 @@ fn record_write_error(
     }
 }
 
+/// Keep the structural PE row when the full attribute decoder rejects one indexed element.
+///
+/// `parse_file_db_basic_data` has already validated the record index and extracted its noun plus
+/// record-level owner. Dropping the row here makes every live descendant's persisted `owner` chain
+/// dangle, so later incremental model generation cannot calculate `anc`. The fallback is
+/// deliberately PE-only: it supplies identity/topology metadata without pretending that the
+/// element's failed explicit attributes were decoded successfully.
+fn preserve_unparsed_pe_metadata(
+    db_basic: &aios_core::db::DbBasicData,
+    chunk_refnos: &[RefU64],
+    ses_range_map: &BTreeMap<i32, std::ops::Range<u32>>,
+    total_attr_map: &DashMap<RefU64, NamedAttrMap>,
+) -> Vec<RefU64> {
+    let mut preserved = Vec::new();
+    for &refno in chunk_refnos {
+        if total_attr_map.contains_key(&refno) {
+            continue;
+        }
+        let Some(entry) = db_basic.refno_table_map.get(&refno) else {
+            continue;
+        };
+        let pos = entry.pos;
+        if pos < 4 || pos + 20 > db_basic.bytes.len() {
+            continue;
+        }
+
+        let owner = RefU64::from(&db_basic.bytes[pos + 12..pos + 20]);
+        let noun = db_basic.get_type(refno);
+        let pgno = (pos / 0x800) as u32;
+        let sesno = ses_range_map
+            .iter()
+            .find_map(|(sesno, range)| range.contains(&pgno).then_some(*sesno))
+            .unwrap_or_default();
+        let mut attributes = NamedAttrMap::default();
+        attributes
+            .map
+            .insert("TYPE".to_string(), NamedAttrValue::StringType(noun));
+        attributes
+            .map
+            .insert("REFNO".to_string(), NamedAttrValue::RefU64Type(refno));
+        attributes
+            .map
+            .insert("OWNER".to_string(), NamedAttrValue::RefU64Type(owner));
+        attributes.set_sesno(sesno);
+        total_attr_map.insert(refno, attributes);
+        preserved.push(refno);
+    }
+    preserved
+}
+
 #[derive(Deserialize)]
 struct PeStatRow {
     key: String,
@@ -208,7 +258,11 @@ struct PeStatRow {
 
 #[cfg(test)]
 mod pe_stat_row_tests {
-    use super::PeStatRow;
+    use super::{PeStatRow, preserve_unparsed_pe_metadata};
+    use aios_core::db::{DbBasicData, EleDataEntry};
+    use aios_core::pdms_types::RefU64;
+    use dashmap::DashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn legacy_null_session_is_accepted() {
@@ -217,6 +271,93 @@ mod pe_stat_row_tests {
                 .unwrap();
 
         assert_eq!(row.sesno.unwrap_or_default(), 0);
+    }
+
+    #[test]
+    fn parse_failure_keeps_minimal_pe_metadata_for_owner_chain() {
+        let refno = RefU64::from(0x0000_0002_0000_0003_u64);
+        let owner = RefU64::from(0x0000_0001_0000_0009_u64);
+        let mut bytes = vec![0_u8; 64];
+        let pos = 8_usize;
+        bytes[pos + 12..pos + 20].copy_from_slice(&owner.0.to_be_bytes());
+
+        let refno_table_map = DashMap::new();
+        refno_table_map.insert(
+            refno,
+            EleDataEntry {
+                pos,
+                noun_hash: aios_core::tool::db_tool::db1_hash("STRU") as i32,
+            },
+        );
+        let db_basic = DbBasicData {
+            bytes,
+            refno_table_map,
+            ..Default::default()
+        };
+        let parsed = DashMap::new();
+        let sessions = BTreeMap::from([(17, 0_u32..1_u32)]);
+
+        let preserved = preserve_unparsed_pe_metadata(&db_basic, &[refno], &sessions, &parsed);
+
+        assert_eq!(preserved, vec![refno]);
+        let attributes = parsed.get(&refno).expect("minimal metadata row");
+        assert_eq!(attributes.get_type(), "STRU");
+        assert_eq!(attributes.get_refno_or_default().refno(), refno);
+        assert_eq!(
+            attributes.get_refno_by_att_or_default("OWNER").refno(),
+            owner
+        );
+        assert_eq!(attributes.sesno(), 17);
+    }
+
+    #[tokio::test]
+    #[ignore = "manual live: requires the AMS 7324 fixture"]
+    async fn live_7324_parse_failure_is_preserved_as_pe_metadata() {
+        use std::path::PathBuf;
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        let path = PathBuf::from(
+            std::env::var("GEN_MODEL_OWNER_FIXTURE")
+                .expect("GEN_MODEL_OWNER_FIXTURE points to ams7324_0001"),
+        );
+        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let required_owner = RefU64::from_str("23708_48798").unwrap();
+        let db_basic = Arc::new(
+            parse_pdms_db::parse::parse_file_db_basic_data(&path, &file_name, "AvevaMarineSample")
+                .unwrap(),
+        );
+        let parsed = parse_pdms_db::parse::parse_file_with_chunk(
+            db_basic.clone(),
+            &file_name,
+            "AvevaMarineSample",
+            &[required_owner],
+            &BTreeMap::new(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !parsed.total_attr_map.contains_key(&required_owner),
+            "fixture must continue to exercise the full-decoder failure"
+        );
+        let preserved = preserve_unparsed_pe_metadata(
+            &db_basic,
+            &[required_owner],
+            &BTreeMap::new(),
+            &parsed.total_attr_map,
+        );
+        assert_eq!(preserved, vec![required_owner]);
+        let metadata = parsed.total_attr_map.get(&required_owner).unwrap();
+        assert_eq!(metadata.get_refno_or_default().refno(), required_owner);
+        assert!(
+            metadata
+                .get_refno_by_att_or_default("OWNER")
+                .refno()
+                .is_valid()
+        );
+        assert_ne!(metadata.get_type(), "unset");
     }
 }
 
@@ -974,6 +1115,23 @@ pub async fn sync_total_async_threaded(
                             db_no,
                             ..
                         }) => {
+                            let preserved = preserve_unparsed_pe_metadata(
+                                &db_basic_clone,
+                                &chunk_refnos,
+                                &ses_range_map_clone,
+                                &total_attr_map,
+                            );
+                            if !preserved.is_empty() {
+                                let samples = preserved
+                                    .iter()
+                                    .take(5)
+                                    .map(ToString::to_string)
+                                    .join(", ");
+                                println!(
+                                    "{file_name_clone}: {} 个元素完整属性解析失败，已保留 PE 拓扑元数据（样例: {samples}）",
+                                    preserved.len()
+                                );
+                            }
                             //类型暂时不多线程
                             let total_attr_map_arc = Arc::new(total_attr_map);
                             total_cnt += total_attr_map_arc.len();

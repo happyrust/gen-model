@@ -9,9 +9,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
-use crate::data_interface::manual_update::load_pending_model_units;
+use crate::data_interface::manual_update::{
+    PendingModelUnit, PendingRoomUnit, load_pending_model_units, load_pending_room_units,
+};
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
@@ -28,6 +30,19 @@ pub struct ProjectReq {
     pub mdb: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub tool: String,
+    #[serde(default = "empty_arguments")]
+    pub arguments: Value,
+}
+
+fn empty_arguments() -> Value {
+    json!({})
 }
 
 fn resolve_identity<'a>(
@@ -124,6 +139,20 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// POST /api/v1/query — the fixed read-only MCP query contract over HTTP.
+pub async fn query(
+    State(state): State<AppState>,
+    Json(request): Json<QueryReq>,
+) -> Result<Json<crate::query_service::QueryResponse>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    state
+        .queries
+        .execute(&request.tool, request.arguments)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_query)
+}
+
 /// POST /api/v1/update/preview — 映射 `preview_manual_update`（spec §4.2）。
 pub async fn update_preview(
     State(state): State<AppState>,
@@ -166,7 +195,11 @@ pub async fn update_execute(
     let identity = resolve_identity(&state, &req.base)?;
     let mut receipt = state
         .mgr
-        .enqueue_manual_update(&identity.project, Some(&identity.mdb), req.dbnums.as_deref())
+        .enqueue_manual_update(
+            &identity.project,
+            Some(&identity.mdb),
+            req.dbnums.as_deref(),
+        )
         .await;
     receipt.project.clone_from(&identity.project);
     receipt.mdb.clone_from(&identity.mdb);
@@ -309,13 +342,26 @@ pub async fn pending_units(
     let units = load_pending_model_units()
         .await
         .map_err(ApiError::from_domain)?;
-    // 死信单独数一个出来。逐行的 `dead` 已经够界面区分文案，但「这个项目现在欠着
-    // 几个永远不会自愈的根」是状态栏那一格要的整数，而房间轮早就有同名的
-    // `dead_letters`（ADR-011 §10）——regen_root 这一侧一直没有对应的出口。
+    let room_units = load_pending_room_units()
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(pending_units_payload(units, room_units)))
+}
+
+fn pending_units_payload(
+    units: Vec<PendingModelUnit>,
+    room_units: Vec<PendingRoomUnit>,
+) -> serde_json::Value {
+    // `units` / `dead_letters` 保留原来只统计 regen_root 的契约；房间侧追加独立字段，
+    // 避免旧客户端把面板/构件误当生成根，也避免悄悄改变旧状态栏整数的含义。
     let dead_letters = units.iter().filter(|unit| unit.dead).count();
-    Ok(Json(
-        json!({ "units": units, "dead_letters": dead_letters }),
-    ))
+    let room_dead_letters = room_units.iter().filter(|unit| unit.dead).count();
+    json!({
+        "units": units,
+        "dead_letters": dead_letters,
+        "room_units": room_units,
+        "room_dead_letters": room_dead_letters,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,6 +497,33 @@ mod tests {
             .await
             .expect("background task should complete after caller timeout")
             .expect("background task should signal completion");
+    }
+
+    #[test]
+    fn pending_units_adds_room_rows_without_changing_legacy_counts() {
+        let units = vec![PendingModelUnit {
+            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+            dead: true,
+            ..Default::default()
+        }];
+        let room_units = vec![PendingRoomUnit {
+            dbnum: 7997,
+            action: crate::data_interface::model_update_plan::ModelWorkAction::RoomRecalcElement,
+            target_refno: "24381/100677".into(),
+            noun: "EQUI".into(),
+            source_end_sesno: 42,
+            status: "failed".into(),
+            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+            last_error: Some("boom".into()),
+            dead: true,
+        }];
+
+        let payload = pending_units_payload(units, room_units);
+        assert_eq!(payload["dead_letters"], 1, "旧口径仍只统计模型根");
+        assert_eq!(payload["room_dead_letters"], 1);
+        assert_eq!(payload["units"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["room_units"][0]["action"], "room_recalc_element");
+        assert_eq!(payload["room_units"][0]["target_refno"], "24381/100677");
     }
 
     /// `/health` 的 `sul_db` 字段：形状 + 探活纪律。

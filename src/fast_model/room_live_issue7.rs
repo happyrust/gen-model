@@ -316,7 +316,7 @@ mod tests {
             .expect("valid target room priority update");
         println!("[issue7] 移动后队列: {:?}", room_queue_rows().await);
         println!("[issue7] 移动后 aabb: {:?}", element_aabb_json().await);
-        let done = drain_rooms(&db_option).await.expect("drain room work");
+        let done = drain_rooms(&db_option).await.expect("drain room work").done;
         let after_move = edges_of_element().await;
 
         // 收尾：位置写回原值，并把归属收敛回基线状态。
@@ -388,7 +388,7 @@ mod tests {
             .expect("transform work item");
         println!("[issue13-c2] 移出后队列: {:?}", room_queue_rows().await);
         println!("[issue13-c2] 移出后 aabb: {:?}", element_aabb_json().await);
-        let done_out = drain_rooms(&db_option).await.expect("drain room work");
+        let done_out = drain_rooms(&db_option).await.expect("drain room work").done;
         let after_out = edges_of_element().await;
 
         // 收尾：写回原位，把归属收敛回基线。

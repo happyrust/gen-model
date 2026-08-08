@@ -365,7 +365,10 @@ async fn staged_transform_follows_a_pure_pose_move() {
 
     // 5. 房间归属收敛：暂存房间轮多数在窗口内就地收敛（durable pending 无残留），
     //    残余任务由 drain_rooms 兜底；终态必须回到基线（同房间位移）。
-    let rooms_done = drain_rooms(&db_option).await.expect("drain room phase");
+    let rooms_done = drain_rooms(&db_option)
+        .await
+        .expect("drain room phase")
+        .done;
     println!("[staged-e2e] 房间轮兜底消化 {rooms_done} 条");
     assert_eq!(
         edges(&element_id).await,

@@ -68,6 +68,15 @@ where
         return report;
     }
 
+    // Keep the pre-prune owner graph as metadata evidence. An authoritative member edge can
+    // make a child reachable through a different path while its record-level owner container is
+    // omitted higher up. The traversal edge must still be pruned, but dropping the owner's row
+    // would leave the live child's `owner` reference dangling.
+    let owner_links = children_map
+        .iter()
+        .map(|(owner, children)| (*owner, children.clone()))
+        .collect::<Vec<_>>();
+
     for (owner, children) in children_map.iter_mut() {
         let authoritative = members_of(*owner);
         if authoritative.is_empty() {
@@ -92,8 +101,24 @@ where
         }
     }
 
+    // Close the live set backwards over the pre-prune owner graph. This preserves metadata rows
+    // only when they are required by something already live; a wholly unreachable ghost subtree
+    // still has no bridge into `reached` and is removed exactly as before.
+    let mut required = reached;
+    loop {
+        let mut changed = false;
+        for (owner, children) in &owner_links {
+            if children.iter().any(|child| required.contains(child)) && required.insert(*owner) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let before = children_map.len();
-    children_map.retain(|refno, _| reached.contains(refno));
+    children_map.retain(|refno, _| required.contains(refno));
     report.dropped_elements = before - children_map.len();
 
     report
@@ -262,6 +287,71 @@ mod tests {
 
         assert!(report.is_empty());
         assert_eq!(parsed, before);
+    }
+
+    /// A live element can still be reachable through an authoritative member edge while its
+    /// record-level owner is a container that the higher-level member block omitted. Dropping
+    /// that owner row leaves the live element's persisted `owner` reference dangling and every
+    /// later model refresh fails while resolving `anc`.
+    #[test]
+    fn a_reachable_child_keeps_its_unreachable_owner_metadata_row() {
+        let owner = refu(200);
+        let child = refu(201);
+        let authoritative = HashMap::from([
+            (refu(WORLD), vec![child]),
+            (owner, vec![child]),
+            (child, Vec::new()),
+        ]);
+        let mut parsed = HashMap::from([
+            // relink_children_by_owner added WORLD -> owner even though the authoritative
+            // WORLD member block only names the live child directly.
+            (refu(WORLD), vec![child, owner]),
+            (owner, vec![child]),
+            (child, Vec::new()),
+        ]);
+
+        let report = prune_resurrected_members(refu(WORLD), &mut parsed, lookup(authoritative));
+
+        assert_eq!(parsed[&refu(WORLD)], vec![child]);
+        assert!(
+            parsed.contains_key(&owner),
+            "reachable descendants require their owner metadata row even when its member edge is pruned"
+        );
+        assert_eq!(report.dropped_elements, 0);
+    }
+
+    #[test]
+    #[ignore = "manual live: requires the AMS 7324 fixture"]
+    fn the_live_7324_owner_ancestor_survives_pruning() {
+        use std::path::PathBuf;
+        use std::str::FromStr;
+
+        let path = PathBuf::from(
+            std::env::var("GEN_MODEL_OWNER_FIXTURE")
+                .expect("GEN_MODEL_OWNER_FIXTURE points to ams7324_0001"),
+        );
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture file name")
+            .to_string();
+        let mut db_basic =
+            parse_pdms_db::parse::parse_file_db_basic_data(&path, &file_name, "AvevaMarineSample")
+                .expect("parse fixture");
+        let required_owner = RefU64::from_str("23708_48798").expect("owner refno");
+
+        assert!(db_basic.children_map.contains_key(&required_owner));
+        let world = db_basic.world_refno;
+        let bytes = &db_basic.bytes;
+        let refno_table_map = &db_basic.refno_table_map;
+        let report = prune_resurrected_members(world, &mut db_basic.children_map, |refno| {
+            authoritative_members(bytes, refno_table_map, refno)
+        });
+
+        assert!(
+            db_basic.children_map.contains_key(&required_owner),
+            "23708/48798 is required by live descendants and must remain available for anc resolution: {report:?}"
+        );
     }
 
     /// issue #10 的现场定靶，跑在真实工程文件上。

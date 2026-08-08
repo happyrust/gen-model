@@ -29,6 +29,7 @@ pub const SYS_META_DB_TYPES: &[&str] = COLD_START_DB_TYPES;
 pub struct IncrFileSuccess {
     pub path: PathBuf,
     pub dbnum: u32,
+    pub start_sesno: i32,
     pub end_sesno: i32,
     /// PDMS db type (`SYST` / `DESI` / …) for downstream side-effects.
     pub db_type: String,
@@ -403,20 +404,17 @@ fn validate_prepared_attempt(
 /// `finalize increment attempt dbnum=… statement failed: …`，排查的人会先去翻
 /// 水位和模型队列。
 ///
-/// 这里只探测，不再加载：启动加载已经跑过一次，自检再无条件重建只会把库里
-/// 手工调过的函数静默盖掉。缺失也不阻止启动——SYST / CATA / DICT 窗口不依赖它，
-/// 每个 DESI 批次执行前还会由 [`desi_finalize_preflight`] 再预检一次并拒绝执行。
-pub async fn selfcheck_surreal_functions() {
+/// `aios_core` 会在旧版部署脚本缺少 `fn::anc_u64` 时从二进制内置定义补装；这里紧接
+/// 加载阶段验证两个最终硬依赖。缺失或探针本身失败都阻止启动，避免服务看似健康、
+/// 第一个 DESI 窗口却在收口阶段确定性失败。
+pub async fn selfcheck_surreal_functions() -> anyhow::Result<()> {
     match desi_finalize_preflight().await {
-        FinalizePreflight::Ready => {}
+        FinalizePreflight::Ready => Ok(()),
         FinalizePreflight::Missing(reason) | FinalizePreflight::Unverified(reason) => {
-            let msg = format!(
-                "启动自检未通过：{reason}。\
-                 不灌的话每个 DESI 批次都会被执行前预检拒绝（issue #16 之前的形态是\
-                 整窗白跑后卡在写回无限重试、applied_sesno 永不推进）。"
-            );
-            log::error!("{msg}");
-            eprintln!("{msg}");
+            anyhow::bail!(
+                "SurrealDB 公共函数启动自检未通过：{reason}。服务未启动，避免 DESI 批次\
+                 在收口阶段失败或 applied_sesno 停滞"
+            )
         }
     }
 }
@@ -642,6 +640,7 @@ impl IncrementPipeline {
             .await?;
             (requested_range, model_plan, Some(range_eles))
         };
+        let start_sesno = *sesno_range.start();
         let end_sesno = *sesno_range.end();
 
         println!(
@@ -761,6 +760,7 @@ impl IncrementPipeline {
                 crate::data_interface::staging::register_staged_finalize(
                     crate::data_interface::staging::StagedFinalize {
                         dbnum,
+                        start_sesno,
                         end_sesno,
                         plan: finalize_plan,
                         window_statements,
@@ -794,6 +794,7 @@ impl IncrementPipeline {
             IncrFileSuccess {
                 path: path.clone(),
                 dbnum,
+                start_sesno,
                 end_sesno,
                 db_type: db_type.to_string(),
                 changed_refnos,

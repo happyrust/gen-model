@@ -38,10 +38,12 @@ use nom::combinator::map;
 use serde_json::from_str;
 use std::any::TypeId;
 use std::collections::BTreeSet;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use surrealdb::opt::auth::Root;
 use team_data::sync_team_data;
@@ -54,11 +56,110 @@ use versioned_db::database::{define_dbnum_event, sync_pdms};
 use log::{LevelFilter, error};
 use simplelog::*;
 
+#[cfg(windows)]
+struct ProcessInstanceLock {
+    /// Keeping this handle alive keeps Windows' deny-share lock alive.
+    _file: File,
+    path: PathBuf,
+    project: String,
+}
+
+#[cfg(windows)]
+static PROCESS_INSTANCE_LOCK: OnceLock<Result<ProcessInstanceLock, String>> = OnceLock::new();
+
+#[cfg(windows)]
+fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // No other process may open the same project lock while this handle
+        // lives. Windows releases it even after an ungraceful process exit.
+        .share_mode(0)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
+    let project = db_option.project_name.clone();
+    let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
+        let root = crate::data_interface::project_paths::resolve_project_root(db_option, &project)
+            .ok_or_else(|| format!("未解析到项目 {project} 的单实例锁目录"))?;
+        let path = root.join(".gen-model.instance.lock");
+        let mut file = open_process_instance_lock(&path).map_err(|error| {
+            format!(
+                "项目 {project} 已有 gen-model 实例，或单实例锁不可访问（{}）: {error}",
+                path.display()
+            )
+        })?;
+        file.set_len(0)
+            .map_err(|error| format!("清空单实例锁 {} 失败: {error}", path.display()))?;
+        let owner = format!(
+            "project={project}\npid={}\nstarted_at={}\n",
+            std::process::id(),
+            Local::now().to_rfc3339()
+        );
+        std::io::Write::write_all(&mut file, owner.as_bytes())
+            .map_err(|error| format!("写单实例锁 {} 失败: {error}", path.display()))?;
+        // ponytail: one deny-share handle held in OnceLock is the whole
+        // single-instance mechanism; no lease table or second lock layer.
+        Ok(ProcessInstanceLock {
+            _file: file,
+            path,
+            project: project.clone(),
+        })
+    });
+
+    match held {
+        Ok(lock) if lock.project == project => Ok(()),
+        Ok(lock) => anyhow::bail!(
+            "本进程已持有项目 {} 的单实例锁 {}，不能再启动项目 {project}",
+            lock.project,
+            lock.path.display()
+        ),
+        Err(error) => anyhow::bail!("{error}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod process_instance_lock_tests {
+    use super::open_process_instance_lock;
+
+    #[test]
+    fn deny_share_handle_blocks_a_second_process_style_open_until_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "gen-model-lock-test-{}-{}.lock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = open_process_instance_lock(&path).expect("first lock open");
+        assert!(
+            open_process_instance_lock(&path).is_err(),
+            "share_mode(0) must reject a concurrent opener"
+        );
+        drop(first);
+        let reopened = open_process_instance_lock(&path).expect("lock releases with handle");
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub mod api;
 pub mod cata;
 pub mod consts;
 pub mod data_interface;
 pub mod e3d_query;
+pub mod query_service;
 pub mod tables;
 // pub mod ssc;
 pub mod defines;
@@ -123,6 +224,10 @@ extern crate anyhow;
 // }
 
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
+    // Must precede logging, schema repair, watcher startup and every model/
+    // room write. A second process exits here instead of becoming another
+    // consumer of the same durable pending table.
+    acquire_process_instance_lock(&db_option)?;
     // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -155,9 +260,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // progress_sender.send(5).await?;
     // progress_sender.send(5)?;
 
-    aios_core::function::define_common_functions()
-        .await
-        .unwrap();
+    aios_core::function::define_common_functions().await?;
     // D11（ADR-010）：define_common_functions 按文件名顺序无条件加载 resource/surreal
     // 全目录，`fn_query_room_code_hh.surql` 排在 `_hd` 版之后，同名 fn::room_code 永远
     // 被 hh 版覆盖——与 Rust 侧编译的 project_hd feature 错位。加载顺序在 rs-core 里
@@ -174,6 +277,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             Err(e) => eprintln!("读取 {HD_ROOM_CODE} 失败（生效的仍是 hh 版 fn::room_code）: {e}"),
         }
     }
+    crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
     let migrated =
         crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage().await?;
     println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
@@ -331,10 +435,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         futures::future::join_all(handles).await;
     }
 
-    // 收口事务依赖的 SurrealDB 自定义函数自检：缺了要在第一秒指名道姓说清楚，
-    // 而不是让每个 DESI 窗口在 finalize 处失败、报一个不指向 datacenter 的错误。
-    crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await;
-
     // 数据批次队列的唯一消费者：无条件启动、不分 sync_live（ADR-011；rollout
     // 第九节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，
     // 手动模式的队列就没有消费者。刻意放在全量生成 / 房间重建**之后**：批次执行
@@ -398,6 +498,10 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
+    // Public entrypoint guard: take the deny-share handle before connecting a
+    // local store or loading mutable process-global spatial state. `run_cli`
+    // repeats this call deliberately; OnceLock makes that check idempotent.
+    acquire_process_instance_lock(&db_option)?;
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容

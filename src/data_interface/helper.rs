@@ -259,8 +259,8 @@ async fn existing_inst_relate_refnos(
 /// 出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策；ADR-014 的
 /// 「保留旧显示」因此收窄为「生成失败时保留」，生成成功时以产物为准）。
 ///
-/// 任何一步查询失败都**不删**并上抛：漏查一部分子树，就会把还在用的行当成陈旧行。
-/// 调用方把它降级为告警即可——少清一轮只是旧行多留一会儿，误清是模型凭空消失。
+/// 任何一步失败都上抛，让生成根保留 pending 并重试。尤其是 `inst_relate` 已删、房间边或
+/// 空间树清理失败时，下一轮仍须按原始候选补完收尾，不能因 stale 已空提前返回成功。
 pub async fn prune_roots_stale_model_rows(
     roots: &[RefnoEnum],
     produced: &HashSet<RefnoEnum>,
@@ -281,28 +281,30 @@ pub async fn prune_roots_stale_model_rows(
         return Ok(0);
     }
 
-    let candidates: Vec<RefnoEnum> = candidates.into_iter().collect();
+    // 原始候选是整套收尾的权威目标；排序固定，日志、分块和重放才对得上。
+    let mut candidates: Vec<RefnoEnum> = candidates.into_iter().collect();
+    candidates.sort_by_key(RefnoEnum::to_string);
     let mut stale = existing_inst_relate_refnos(&candidates, chunk_size).await?;
-    if stale.is_empty() {
-        return Ok(0);
-    }
     // 顺序固定，日志与重放才对得上。
     stale.sort_by_key(RefnoEnum::to_string);
 
-    println!(
-        "重生成收尾：清理 {} 行本轮未产出几何的旧模型关系（例如 {}）",
-        stale.len(),
-        stale
-            .iter()
-            .take(5)
-            .map(RefnoEnum::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    delete_inst_relate_cascade(&stale, chunk_size).await?;
+    if !stale.is_empty() {
+        println!(
+            "重生成收尾：清理 {} 行本轮未产出几何的旧模型关系（例如 {}）",
+            stale.len(),
+            stale
+                .iter()
+                .take(5)
+                .map(RefnoEnum::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        delete_inst_relate_cascade(&stale, chunk_size).await?;
+    }
     // 元素还在，只是不再有几何——那它也不再属于任何房间，空间树上同样不该留着它。
-    // 与删除路径同一套收尾（[`delete_room_membership`]）。
-    delete_room_membership(&stale, chunk_size).await?;
+    // 始终按原始候选清：若上次已删 inst_relate、却在这里失败，本轮 stale 会是空集，仍要
+    // 把未完成的房间边与空间树清理补上。
+    delete_room_membership(&candidates, chunk_size).await?;
     Ok(stale.len())
 }
 
@@ -361,6 +363,29 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 第一次尝试可能已经删掉 inst_relate、随后才在房间/空间树收尾失败。重试时 stale
+    /// 是空集，但原始 candidates 仍须继续清理，不能提前报成功。
+    #[test]
+    fn stale_empty_retry_still_cleans_room_and_tree_for_original_candidates() {
+        let source = include_str!("helper.rs");
+        let body = source
+            .split_once("pub async fn prune_roots_stale_model_rows(")
+            .expect("prune function")
+            .1
+            .split_once("/// 渲染一批被删元素的房间归属清理")
+            .expect("prune tail")
+            .0;
+
+        assert!(
+            !body.contains("if stale.is_empty()"),
+            "stale 空集不得跳过补偿收尾: {body}"
+        );
+        assert!(
+            body.contains("delete_room_membership(&candidates, chunk_size).await?"),
+            "房间/空间树必须始终按原始候选补完: {body}"
+        );
+    }
 
     #[test]
     fn cascade_delete_keeps_the_edge_delete_and_refcount_gc_in_one_transaction() {

@@ -32,6 +32,7 @@ pub(crate) struct DeferredSpatialMutations {
 #[derive(Clone, Debug)]
 pub(crate) struct StagedFinalize {
     pub dbnum: u32,
+    pub start_sesno: i32,
     pub end_sesno: i32,
     pub plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
     pub window_statements: Vec<String>,
@@ -389,6 +390,7 @@ mod tests {
                 };
                 register_staged_finalize(StagedFinalize {
                 dbnum: 7994,
+                start_sesno: 4,
                 end_sesno: 9,
                 plan,
                 window_statements: vec!["UPSERT datacenter_version:x SET ok = true;".into()],
