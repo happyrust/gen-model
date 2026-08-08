@@ -308,7 +308,7 @@ pub async fn load_project_tree_verified() -> anyhow::Result<()> {
     }
     let db_epoch = read_db_spatial_epoch().await?;
     let force_rebuild = std::env::var("AIOS_FORCE_SPATIAL_REBUILD").is_ok()
-        || std::env::var("GEN_MODEL_DIRECT_INCREMENT").is_ok();
+        || crate::data_interface::batch_worker::direct_increment_enabled();
     if force_rebuild {
         println!("按环境变量要求跳过空间树文件，从库指针重建");
     } else {

@@ -110,6 +110,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
+        "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
         "sul_db": sul_db,
