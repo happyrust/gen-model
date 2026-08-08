@@ -11,6 +11,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aios_database::e3d_query::E3dDriver;
+#[cfg(test)]
+use aios_database::e3d_query::e3d_path;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Local;
 use clap::Parser;
@@ -196,24 +199,6 @@ struct BaselineDbnum {
     dbnum: u32,
     file_latest_sesno: i64,
     applied_sesno: i64,
-}
-
-/// 「宏路径进、哨兵日志出」的 E3D 通道（测试计划 §3 的 `E3dDriver`）。
-///
-/// 通道整体可换：调用方只交出一个宏的仓内相对路径，拿回该宏自己的 ALPHA LOG。
-/// 登录目标（项目目录 / 项目代号 / 账号 / MDB）在这里收口，套件因此既能开在金基线
-/// 工作副本上，也能直接开在目标项目上。
-struct E3dDriver {
-    launcher: PathBuf,
-    projects_dir: PathBuf,
-    project_evar: PathBuf,
-    project: String,
-    login: String,
-    mdb: String,
-    /// 登录到命令循环（写出 `L3-ALIVE`）的上限。
-    alive_timeout: Duration,
-    /// 整个宏的上限。
-    timeout: Duration,
 }
 
 struct Paths {
@@ -877,126 +862,6 @@ fn first_rect_center(tree: &str) -> Option<(i32, i32)> {
     })
 }
 
-impl E3dDriver {
-    /// 跑一个宏，返回该宏自己的 ALPHA LOG 内容。
-    ///
-    /// 会话是一次性的：wrapper 写 `L3-ALIVE`、`$M` 场景宏、写 `L3-DONE`、`QUIT`
-    /// （ADR-019）。两级超时——登录没在 `alive_timeout` 内到达命令循环就立刻收摊，
-    /// 不把整轮的时间预算耗在一个连不上的会话上。
-    fn run(&self, repo: &Path, relative: &str) -> Result<String> {
-        let macro_path = repo.join(relative);
-        ensure!(
-            macro_path.is_file(),
-            "scenario macro is missing: {}",
-            macro_path.display()
-        );
-        let macro_source = fs::read_to_string(&macro_path)?;
-        ensure!(
-            !macro_source
-                .lines()
-                .any(|line| line.trim().eq_ignore_ascii_case("QUIT")),
-            "scenario macro must return to the wrapper; remove QUIT from {}",
-            macro_path.display()
-        );
-        let driver_dir = repo.join("output/l3-suite").join(format!(
-            "driver-{}-{}",
-            std::process::id(),
-            Local::now().format("%Y%m%d%H%M%S%6f")
-        ));
-        fs::create_dir_all(&driver_dir)?;
-        let wrapper_path = driver_dir.join("driver.mac");
-        let alive_log = driver_dir.join("driver-alive.log");
-        let done_log = driver_dir.join("driver-done.log");
-        let pid_file = driver_dir.join("driver.pid");
-        let driver_log = driver_dir.join("driver.log");
-        let scenario_log = macro_path.with_extension("log");
-        let _ = fs::remove_file(&alive_log);
-        let _ = fs::remove_file(&done_log);
-        let _ = fs::remove_file(&scenario_log);
-        let macro_arg = e3d_path(&macro_path);
-        let alive_arg = e3d_path(&alive_log);
-        let done_arg = e3d_path(&done_log);
-        fs::write(
-            &wrapper_path,
-            format!(
-                "ALPHA LOG \"{alive_arg}\" OVER\n$P L3-ALIVE\nALPHA LOG END\n$M \"{macro_arg}\"\nALPHA LOG \"{done_arg}\" OVER\n$P L3-DONE\nALPHA LOG END\nQUIT\n"
-            ),
-        )?;
-        let wrapper_arg = e3d_path(&wrapper_path);
-        let driver_stdout = File::create(&driver_log)?;
-        let driver_stderr = driver_stdout.try_clone()?;
-        let mut launcher = Command::new("cmd")
-            .args(["/d", "/c"])
-            .arg(e3d_path(&self.launcher))
-            .arg(&wrapper_arg)
-            .env("L3_E3D_PROJECTS_DIR", &self.projects_dir)
-            .env("L3_E3D_PROJECT_EVAR", &self.project_evar)
-            .env("L3_E3D_PROJECT", &self.project)
-            .env("L3_E3D_LOGIN", &self.login)
-            .env("L3_E3D_MDB", &self.mdb)
-            .env("L3_E3D_TIMEOUT_SECONDS", self.timeout.as_secs().to_string())
-            .env("L3_E3D_PID_FILE", &pid_file)
-            .stdout(Stdio::from(driver_stdout))
-            .stderr(Stdio::from(driver_stderr))
-            .spawn()?;
-        let started = Instant::now();
-        let deadline = started + self.timeout + Duration::from_secs(15);
-        let mut alive = false;
-        loop {
-            if let Some(status) = launcher.try_wait()? {
-                let log = fs::read_to_string(&driver_log).unwrap_or_default();
-                if !status.success() {
-                    terminate_pid_file(&pid_file).context("clean E3D after its launcher failed")?;
-                    bail!("E3D TTY driver failed for {relative}: {status}; log: {log}");
-                }
-                ensure!(
-                    fs::read_to_string(&alive_log)
-                        .unwrap_or_default()
-                        .contains("L3-ALIVE"),
-                    "E3D TTY logged in but did not start wrapper {relative}; log: {log}"
-                );
-                ensure!(
-                    fs::read_to_string(&done_log)
-                        .unwrap_or_default()
-                        .contains("L3-DONE"),
-                    "E3D TTY exited before wrapper completed {relative}; log: {log}"
-                );
-                return fs::read_to_string(&scenario_log)
-                    .with_context(|| format!("read E3D macro log {}", scenario_log.display()));
-            }
-            alive = alive
-                || fs::read_to_string(&alive_log)
-                    .unwrap_or_default()
-                    .contains("L3-ALIVE");
-            let stalled_login = !alive && started.elapsed() >= self.alive_timeout;
-            if stalled_login || Instant::now() >= deadline {
-                let launcher_cleanup = terminate_tree(launcher.id());
-                let e3d_cleanup = terminate_pid_file(&pid_file);
-                launcher_cleanup.context("stop timed-out E3D launcher")?;
-                e3d_cleanup.context("stop timed-out E3D session")?;
-                let log = fs::read_to_string(&driver_log).unwrap_or_default();
-                let phase = if stalled_login {
-                    format!(
-                        "never reached the command loop within {}s",
-                        self.alive_timeout.as_secs()
-                    )
-                } else {
-                    format!("ran past {}s", self.timeout.as_secs())
-                };
-                bail!("E3D TTY session {phase} for {relative}; log: {log}");
-            }
-            thread::sleep(Duration::from_secs(2));
-        }
-    }
-}
-
-fn e3d_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    path.strip_prefix(r"\\?\")
-        .unwrap_or(&path)
-        .replace('\\', "/")
-}
-
 fn execute_and_wait(
     dir: &Path,
     paths: &Paths,
@@ -1590,52 +1455,6 @@ fn kill_tree(pid: u32) {
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
-}
-
-fn pid_running(pid: u32) -> Result<bool> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "tasklist failed while checking pid {pid}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
-}
-
-fn terminate_tree(pid: u32) -> Result<()> {
-    if !pid_running(pid)? {
-        return Ok(());
-    }
-    let output = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .output()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if !pid_running(pid)? {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    bail!(
-        "pid {pid} survived taskkill {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    )
-}
-
-fn terminate_pid_file(path: &Path) -> Result<()> {
-    if !path.is_file() {
-        return Ok(());
-    }
-    let pid = fs::read_to_string(path)?
-        .trim()
-        .parse::<u32>()
-        .with_context(|| format!("invalid E3D pid file {}", path.display()))?;
-    terminate_tree(pid)?;
-    fs::remove_file(path)?;
-    Ok(())
 }
 
 fn sha256(path: &Path) -> Result<String> {

@@ -131,6 +131,7 @@ pollster = "0.4.0"
 async-std = "1.13.1"
 axum = { version = "0.8.9", features = ["ws"], optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
+rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 
 [patch."https://gitee.com/happydpc/occt-rs.git"]
 opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79" }
