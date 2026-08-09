@@ -553,20 +553,15 @@ mod tests {
         );
     }
 
-    /// H-1 的端到端回归：FRMW 在暂存窗口内改名「成为」合规房间时，窗口必须当场
-    /// 解析出面板并算出归属，而不是让整间目标走「已不在册」的清边成功路径静默吞掉。
+    /// H-1 的端到端回归：FRMW 在暂存窗口内改名「成为」合规房间时，提交后的
+    /// RocksDB 房间轮必须从新拓扑解析出面板并算出归属。
     ///
     /// 走与生产数据批次（`execute_frozen_batch` 的 staged 路径）同一套窗口设施、
-    /// 同一个顺序：窗口起点预载提交前合规房间工作集 → 窗口作用域内
-    /// `build_model_update_plan`（H-1 的结构触发预载在这里把改名房间的子树拓扑与
-    /// 面板产物补进暂存）→ `stage_parsed_window` 解析改名（渲染为 `UPDATE pe SET
-    /// name`，依赖预载先把旧 pe 行拷进暂存）→ 登记 finalize → `run_staged_room_work`
-    /// → `settle_staged_plan_items` → `commit_registered_to` 写回持久层。
+    /// 同一个顺序：窗口作用域内 `build_model_update_plan` → `stage_parsed_window`
+    /// 解析改名 → 登记 finalize → `commit_registered_to` 写回持久层和 durable room
+    /// pending → 释放窗口 → `drain_rooms_scoped` 从 RocksDB 计算本任务目标。
     ///
-    /// 修复的两半各有一道断言钉着：预载缺失时暂存映射解析出 0 块面板
-    /// （staged_map 断言直接红）；fail-closed 守卫兜底时目标记失败保留 pending
-    /// （report.failures 断言红）。修复在位时，提交后两张房间关系表都要带着新
-    /// 房间号收敛，且不留任何 durable pending 死信。
+    /// 提交后两张房间关系表都要带着新房间号收敛，且不留任何 durable pending。
     ///
     /// 跨界构件 _24 骑在两块面板的重叠区上，第二轮逐点判定要读它的
     /// `inst_geo.pts`——结构触发预载只拷面板产物、不拷成员几何，暂存读不回落，
@@ -584,16 +579,16 @@ mod tests {
     #[ignore = "manual live: writes fixture records, a watermark row and .mesh files"]
     async fn live_room_rename_into_compliance_recomputes_membership() {
         use crate::data_interface::increment_pipeline::IncrementPipeline;
-        use crate::data_interface::model_update_pending::run_staged_room_work;
+        use crate::data_interface::model_update_pending::{RoomDrainScope, drain_rooms_scoped};
         use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
         use crate::data_interface::staging::lifecycle::create_window_on;
         use crate::data_interface::staging::{
             ResourceThresholds, StagedFinalize, register_staged_finalize,
         };
-        use crate::fast_model::room_model::{load_room_panel_map, load_room_panel_map_from_pe};
+        use crate::fast_model::room_model::load_room_panel_map;
         use aios_core::NamedAttrValue;
         use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
-        use std::collections::{BTreeMap, HashMap};
+        use std::collections::BTreeMap;
         use surrealdb::engine::any::connect;
 
         // 两个名字都带 `-RM`：结构触发看的是**全局** DbOption 的关键字，映射加载
@@ -689,11 +684,6 @@ mod tests {
         )
         .await
         .expect("create staged window");
-        window
-            .scope(crate::data_interface::staging::preload::preload_room_working_set(&preloaded))
-            .await
-            .expect("preload room working set");
-
         // 与生产同序：先在窗口作用域内建计划——H-1 的结构触发预载在这里发生。
         let ops = BTreeMap::from([(
             end_sesno as u32,
@@ -727,22 +717,6 @@ mod tests {
             .expect("stage parsed rename");
         assert!(staged > 0, "改名会话必须进 journal");
 
-        // H-1 的机制断言：暂存映射现在必须解析出「面板属于这间房」。
-        let staged_map = window
-            .scope(load_room_panel_map_from_pe(&db_option))
-            .await
-            .expect("load staged room map");
-        assert_eq!(
-            staged_map.room_num_of(pane_a_refno),
-            Some(NEW_ROOM_NUM),
-            "结构触发预载 + 窗口解析之后，暂存映射必须解析出面板 A 属于这间房"
-        );
-        assert_eq!(
-            staged_map.room_num_of(pane_b_refno),
-            Some(NEW_ROOM_NUM),
-            "面板 B 同理"
-        );
-
         window
             .scope(register_staged_finalize(StagedFinalize {
                 dbnum,
@@ -755,35 +729,18 @@ mod tests {
             .await
             .expect("register finalize");
 
-        let report = window
-            .scope(run_staged_room_work(
-                &db_option,
-                &preloaded,
-                &plan.work_items,
-                &HashMap::new(),
-            ))
-            .await
-            .expect("staged room work");
-        assert!(
-            report.failures.is_empty(),
-            "H-1 预载在位时暂存房间轮不该再有盲区（fail-closed 只兜预载缺失）: {:?}",
-            report.failures
-        );
-        assert_eq!(
-            report.succeeded_plan_items.len(),
-            2,
-            "{:?}",
-            report.succeeded_plan_items
-        );
-        window
-            .settle_staged_plan_items(&report.succeeded_plan_items)
-            .await;
-
+        let room_scope = RoomDrainScope::from_plan(&plan);
         window
             .commit_registered_to(&SUL_DB)
             .await
             .expect("staged write-back");
         window.drop_database().await.expect("drop staging db");
+        let report = drain_rooms_scoped(&db_option, &room_scope)
+            .await
+            .expect("post-commit scoped room drain");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.requested, 2);
+        assert_eq!(report.done, 2);
 
         // ---- 提交后的持久层取证（先取数、后清理、再断言，与其余用例同一纪律）----
         let mut response = SUL_DB
@@ -857,7 +814,7 @@ mod tests {
         assert_eq!(applied, Some(end_sesno), "写回尾事务必须推进水位");
         assert!(
             pending.is_empty(),
-            "窗口内收敛的面板不得残留 durable pending 死信: {pending:?}"
+            "提交后收敛的面板不得残留 durable pending: {pending:?}"
         );
 
         let (in_a, in_b, straddler) = part_refnos();
@@ -1179,18 +1136,16 @@ mod tests {
         // 面板 A 与它名下的一个成员，同一轮一起入队。
         let panel = RefnoEnum::from(refno(10).as_str());
         let member = RefnoEnum::from(refno(21).as_str());
-        enqueue_room_recalc(
-            &[
-                AabbChange {
-                    refno: panel,
-                    noun: "PANE".into(),
-                },
-                AabbChange {
-                    refno: member,
-                    noun: "BOX".into(),
-                },
-            ],
-        )
+        enqueue_room_recalc(&[
+            AabbChange {
+                refno: panel,
+                noun: "PANE".into(),
+            },
+            AabbChange {
+                refno: member,
+                noun: "BOX".into(),
+            },
+        ])
         .await
         .expect("enqueue both room tasks");
 
@@ -1759,9 +1714,7 @@ mod tests {
             .await
             .expect("move-regen refresh");
         assert_eq!(changes.len(), 1, "搬家必须算变: {changes:?}");
-        enqueue_room_recalc(&changes)
-            .await
-            .expect("enqueue move");
+        enqueue_room_recalc(&changes).await.expect("enqueue move");
         drain_rooms(&db_option).await.expect("drain move");
         let incremental = room_edges().await;
 

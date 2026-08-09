@@ -111,12 +111,64 @@ pub fn enqueue(
 /// `paused` 只挡出队，**不碰正在跑的那条**：服务端没有中止接口，界面上那句
 /// 「不再出队，这一批会跑完为止」就是这条实现的兑现（ADR-011 §9）。
 pub fn freeze_next(queue: &mut [DataBatch], paused: bool) -> Option<usize> {
-    if paused {
-        return None;
+    match freeze_next_concurrent(queue, paused, true, |_| false) {
+        NextDispatch::Freeze(index) => Some(index),
+        NextDispatch::HeadNeedsExclusive | NextDispatch::Idle => None,
     }
-    let index = queue.iter().position(|b| b.state == BatchState::Queued)?;
-    queue[index].state = BatchState::Running;
-    Some(index)
+}
+
+/// 并发派发时一次出队判定的结果（ADR-011 2026-08-09 修订）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextDispatch {
+    /// 冻结了下标处的排队行，可以派发。
+    Freeze(usize),
+    /// FIFO 首个可跑行要求独占，但还有在飞批次：不越过它派发后面的行，
+    /// 等在飞批次收敛后它单独跑——独占批次的 FIFO 位置不因并发而被插队。
+    HeadNeedsExclusive,
+    /// 没有可派发的排队行（空队列 / 暂停 / 可跑行的 dbnum 都还在跑）。
+    Idle,
+}
+
+/// 并发口径的 FIFO 出队并冻结（ADR-011 2026-08-09 修订）。
+///
+/// 三条规则：
+/// 1. **同 dbnum 恒串行**：dbnum 已有运行中行的排队行（BehindRunning 排出来的）
+///    直接跳过——它不与自己并发，轮不到它时后面的行可以先走；
+/// 2. **独占批次不被插队**：FIFO 首个可跑行若 `is_exclusive`，只有在飞为空时才冻结它；
+///    否则返回 [`NextDispatch::HeadNeedsExclusive`]，不派发它后面的任何行；
+/// 3. `paused` 只挡出队，语义与 [`freeze_next`] 相同。
+///
+/// 单 worker（在飞恒空、无独占判定）下与 [`freeze_next`] 完全等价。
+pub fn freeze_next_concurrent(
+    queue: &mut [DataBatch],
+    paused: bool,
+    in_flight_empty: bool,
+    is_exclusive: impl Fn(&DataBatch) -> bool,
+) -> NextDispatch {
+    if paused {
+        return NextDispatch::Idle;
+    }
+    let running_dbnums: Vec<u32> = queue
+        .iter()
+        .filter(|b| b.state == BatchState::Running)
+        .map(|b| b.dbnum)
+        .collect();
+    for index in 0..queue.len() {
+        if queue[index].state != BatchState::Queued {
+            continue;
+        }
+        if running_dbnums.contains(&queue[index].dbnum) {
+            continue;
+        }
+        if is_exclusive(&queue[index]) {
+            if !in_flight_empty {
+                return NextDispatch::HeadNeedsExclusive;
+            }
+        }
+        queue[index].state = BatchState::Running;
+        return NextDispatch::Freeze(index);
+    }
+    NextDispatch::Idle
 }
 
 #[cfg(test)]
@@ -267,5 +319,70 @@ mod tests {
         enqueue(&mut queue, 7997, "DESI", 0, 10);
         assert_eq!(enqueue(&mut queue, 8000, "DESI", 0, 20), Enqueued::New);
         assert_eq!(queue.len(), 2);
+    }
+
+    /// 并发派发规则 1：同 dbnum 恒串行。7997 在跑时它的 BehindRunning 行必须被
+    /// 跳过，让 8000 先走；7997 收口后那行才轮得到。
+    #[test]
+    fn concurrent_dispatch_never_runs_one_dbnum_twice() {
+        let mut queue = vec![queued(7997, 1024, 1038), queued(8000, 812, 830)];
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Freeze(0)
+        );
+        // 7997 在跑期间新保存排出 BehindRunning 行。
+        enqueue(&mut queue, 7997, "DESI", 1023, 1041);
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, false, |_| false),
+            NextDispatch::Freeze(1),
+            "7997 的后继行必须被跳过，8000 先走"
+        );
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, false, |_| false),
+            NextDispatch::Idle,
+            "唯一剩下的排队行属于在跑的 dbnum，本轮无事可派"
+        );
+    }
+
+    /// 并发派发规则 2：独占批次保住 FIFO 位置。排在队首的独占行在飞非空时不冻结，
+    /// 也不放行它后面的行；在飞排空后单独跑。
+    #[test]
+    fn an_exclusive_head_waits_for_the_pool_and_is_never_overtaken() {
+        let is_syst = |b: &DataBatch| b.db_type == "SYST";
+        let mut queue = vec![
+            DataBatch {
+                dbnum: 8191,
+                db_type: "SYST".to_owned(),
+                start_sesno: 5,
+                end_sesno: 9,
+                state: BatchState::Queued,
+            },
+            queued(7997, 1024, 1038),
+        ];
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, false, is_syst),
+            NextDispatch::HeadNeedsExclusive,
+            "独占行在飞非空时既不冻结自己也不放行后面的 DESI 行"
+        );
+        assert_eq!(queue[0].state, BatchState::Queued, "独占行原地等待");
+        assert_eq!(queue[1].state, BatchState::Queued, "后面的行不得越过它");
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, is_syst),
+            NextDispatch::Freeze(0),
+            "在飞排空后独占行按原 FIFO 位置出队"
+        );
+    }
+
+    /// 单 worker 口径不变：`freeze_next` 与并发判定在「在飞恒空、无独占」下等价。
+    #[test]
+    fn serial_freeze_next_is_the_degenerate_case_of_concurrent_dispatch() {
+        let mut serial = vec![queued(7997, 1, 5), queued(8000, 1, 3)];
+        let mut concurrent = serial.clone();
+        assert_eq!(freeze_next(&mut serial, false), Some(0));
+        assert_eq!(
+            freeze_next_concurrent(&mut concurrent, false, true, |_| false),
+            NextDispatch::Freeze(0)
+        );
+        assert_eq!(serial, concurrent);
     }
 }

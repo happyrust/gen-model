@@ -77,6 +77,10 @@ pub struct ModelWorkItem {
 pub struct ModelUpdatePlan {
     pub work_items: Vec<ModelWorkItem>,
     pub warnings: Vec<String>,
+    /// Live design elements touched by the window.  Staged ATT rows are sparse;
+    /// these ids are file-parsed before model work to restore unchanged fields.
+    #[serde(default)]
+    pub design_refnos: Vec<String>,
     /// The delivery-unit rollup `work_items`' `RegenRoot` entries came from.
     ///
     /// Resolving it costs a reverse-index closure plus an owner-graph load, and
@@ -678,6 +682,7 @@ fn build_cata_cascade_plan(
     ModelUpdatePlan {
         work_items: items.into_values().collect(),
         warnings: Vec::new(),
+        design_refnos: Vec::new(),
         units: Vec::new(),
     }
 }
@@ -784,7 +789,6 @@ pub(crate) async fn build_model_update_plan(
             .iter()
             .map(|refno| refno.to_pdms_str())
             .collect();
-        let mut preload_panels = room_triggers.moved_panels.clone();
         if !room_triggers.renamed_rooms.is_empty() {
             let panels = panels_under_rooms(&room_triggers.renamed_rooms)
                 .await
@@ -794,29 +798,9 @@ pub(crate) async fn build_model_update_plan(
                     )
                 })?;
             panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
-            preload_panels.extend(panels);
         }
-        // H-1：改名「成为」合规房间时，房间自己的 pe 行会被本窗口解析重写，但面板的
-        // `pe_owner` 边不变、不进解析，也不在窗口起点的预载范围（那只 BFS 提交前已
-        // 合规的房间根）。结构触发在计划期已知，把这些根的子树拓扑与面板产物显式补进
-        // 暂存，暂存房间轮才能从暂存 PE 解析出「面板属于哪间房」。窗口外是无操作；
-        // 失败降级为告警——房间轮的 fail-closed 守卫会把受影响面板保留成 durable pending。
-        match crate::data_interface::staging::preload::preload_room_structural_targets(
-            &room_triggers.renamed_rooms,
-            &preload_panels,
-        )
-        .await
-        {
-            Ok(0) => {}
-            Ok(rows) => println!(
-                "房间结构触发预载 dbnum={dbnum}: 改名房间={} 相关面板={} 共 {rows} 行",
-                room_triggers.renamed_rooms.len(),
-                preload_panels.len(),
-            ),
-            Err(error) => warnings.push(format!(
-                "dbnum={dbnum}: 房间结构触发工作集预载失败，相关面板任务将保留 pending: {error:#}"
-            )),
-        }
+        // 面板目标从持久层拓扑枚举并随尾事务落 durable pending。房间拓扑、关系和
+        // 面板产物不复制进 kv-mem；提交后的 scoped drain 读取 RocksDB 新终态。
         if !panel_targets.is_empty() {
             work_items.extend(panel_targets.into_iter().map(|target| ModelWorkItem {
                 dbnum,
@@ -830,9 +814,17 @@ pub(crate) async fn build_model_update_plan(
             work_items.dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
         }
     }
+    let mut design_refnos = details
+        .iter()
+        .filter(|detail| matches!(detail.net, NetOp::Added | NetOp::Modified))
+        .map(|detail| detail.refno.to_pdms_str())
+        .collect::<Vec<_>>();
+    design_refnos.sort_unstable();
+    design_refnos.dedup();
     Ok(ModelUpdatePlan {
         work_items,
         warnings,
+        design_refnos,
         units,
     })
 }

@@ -18,7 +18,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use aios_core::SUL_DB;
-use aios_core::db::DbBasicData;
 use aios_core::helper::normalize_sql_string;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, get_db_option};
 use once_cell::sync::Lazy;
@@ -28,6 +27,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::dbnum_state::WATERMARK_TABLE;
 use crate::data_interface::increment_pipeline::wrap_in_transaction;
+use crate::data_interface::on_demand_db::OnDemandDbSession;
 
 /// B+树索引起始标记 / 无效 ref0（需跳过）。
 const INVALID_REF0_SENTINEL: u32 = 0x8000_0001;
@@ -112,7 +112,7 @@ impl InMemoryCataLocator {
 
     /// 端到端构建：读 `dbnum_watermark` 得各库文件身份 → 扫描各库 `ref0` 集（带磁盘指纹缓存）。
     ///
-    /// `project`：工程名（`parse_file_db_basic_data` 语义需要 + `file_of` 返回）。
+    /// `project`：工程名（legacy/compare 回读语义需要 + `file_of` 返回）。
     pub async fn build_for_project(project: &str) -> anyhow::Result<Self> {
         if let Some(locator) = LOCATOR_CACHE.lock().await.get(project).cloned() {
             return Ok(locator);
@@ -349,34 +349,19 @@ async fn load_dbnum_files_from_watermark(
 
 /// 扫描单个 db 文件的 `ref0` 集（供 `ref0→dbnum` 反查）。
 ///
-/// 复用 `parse_file_db_basic_data` 的 `children_map`（owner→children 树）派生涉及的
-/// 全部 refno，再取其 `ref0`。失败返回空集（该库暂不可定位，由上层惰性兜底/日志覆盖）。
+/// paged 模式流式遍历快照索引键并只保留去重后的 `ref0`；legacy/compare 保留旧
+/// `children_map` 基线作灰度与回滚。失败返回空集（该库暂不可定位，由上层日志覆盖）。
 fn scan_db_ref0s(path: &Path, project: &str) -> Vec<u32> {
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
-    let db_basic = match parse_pdms_db::parse::parse_file_db_basic_data(
-        &path.to_path_buf(),
-        &file_name,
-        project,
-    ) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut set: HashSet<u32> = HashSet::new();
-    for (parent, children) in db_basic.children_map.iter() {
-        set.insert(parent.get_0());
-        for child in children.iter() {
-            set.insert(child.get_0());
+    match crate::data_interface::on_demand_db::scan_ref0s(path, project) {
+        Ok(ref0s) => ref0s,
+        Err(error) => {
+            log::warn!(
+                "[paged_db] locator_scan_failed path={} error={error:#}",
+                path.display()
+            );
+            Vec::new()
         }
     }
-    for entry in db_basic.refno_table_map.iter() {
-        set.insert(entry.key().get_0());
-    }
-    set.into_iter().collect()
 }
 
 fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
@@ -498,9 +483,8 @@ pub fn outbound_refs_of(att: &NamedAttrMap) -> Vec<RefU64> {
 }
 
 /// 打开一个 db 读取会话（一次性读文件 + 建 refno 索引）；跨 BFS 轮复用。
-fn open_db_session(project: &str, path: &Path) -> anyhow::Result<DbBasicData> {
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    parse_pdms_db::parse::parse_file_db_basic_data(&path.to_path_buf(), file_name, project)
+fn open_db_session(_project: &str, path: &Path) -> anyhow::Result<OnDemandDbSession> {
+    OnDemandDbSession::open(path)
 }
 
 /// 成员表收敛成可落库的形态：滤掉无效 ref0，同一 child 只保留首个槽位。
@@ -534,26 +518,14 @@ pub(crate) fn dedupe_members(refno: RefU64, raw: &[RefU64]) -> Vec<RefU64> {
 ///
 /// `attmap_sink`：可选保留完整属性表（Phase 3 惰性兜底落库需要；闭包发现 pass 传 `None` 省内存）。
 async fn parse_refnos_with_session(
-    session: &DbBasicData,
+    session: &mut OnDemandDbSession,
     refnos: &[RefU64],
     mut attmap_sink: Option<&mut HashMap<RefU64, (NamedAttrMap, Vec<RefU64>)>>,
 ) -> anyhow::Result<HashMap<RefU64, ParsedCataEle>> {
-    let db_info = aios_core::get_default_pdms_db_info();
     let mut out = HashMap::with_capacity(refnos.len());
     for &refno in refnos {
-        let pos = {
-            let Some(entry) = session.refno_table_map.get(&refno) else {
-                continue; // 本库不含此 refno
-            };
-            entry.pos
-        };
-        if pos < 4 || pos > session.bytes.len() {
-            continue;
-        }
-        match parse_pdms_db::parse::parse_ele_data_with_info(&session.bytes[pos - 4..], &db_info)
-            .await
-        {
-            Ok(ele) => {
+        match session.parse_element(refno).await {
+            Ok(Some(ele)) => {
                 let merged = ele.whole_attmap.merge();
                 let outbound = outbound_refs_of(&merged);
                 let children = dedupe_members(refno, &ele.children);
@@ -573,8 +545,16 @@ async fn parse_refnos_with_session(
                     },
                 );
             }
-            Err(_) => {
+            Ok(None) => {}
+            Err(error) => {
+                if session.is_compare() {
+                    return Err(error);
+                }
                 // 解析失败：跳过，由调用方按 cache-miss 处理。
+                log::warn!(
+                    "[paged_db] element_parse_skipped refno={} error={error:#}",
+                    refno.to_pe_key()
+                );
             }
         }
     }
@@ -590,8 +570,8 @@ pub async fn parse_db_refnos(
     if refnos.is_empty() {
         return Ok(HashMap::new());
     }
-    let session = open_db_session(project, path)?;
-    parse_refnos_with_session(&session, refnos, None).await
+    let mut session = open_db_session(project, path)?;
+    parse_refnos_with_session(&mut session, refnos, None).await
 }
 
 /// 闭包行为配置。
@@ -689,7 +669,7 @@ pub struct CataClosureResolver<'a, L: CataDbLocator> {
     visited: HashSet<RefU64>,
     frontier: Vec<RefU64>,
     /// 每个 dbnum 的打开会话缓存（复用页缓存，跨 BFS 轮不重读文件 / 不重建索引）。
-    sessions: HashMap<u32, DbBasicData>,
+    sessions: HashMap<u32, OnDemandDbSession>,
     /// 是否保留完整属性表（Phase 3 惰性兜底落库用；闭包发现 pass 默认关省内存）。
     retain_attmaps: bool,
     /// `retain_attmaps` 开启时收集：refno -> (完整属性表, children)。
@@ -812,7 +792,7 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                 }
 
                 let parsed = {
-                    let session = self.sessions.get(&dbnum).expect("session just ensured");
+                    let session = self.sessions.get_mut(&dbnum).expect("session just ensured");
                     let attmap_sink = if self.retain_attmaps {
                         Some(&mut self.attmaps)
                     } else {
@@ -875,7 +855,7 @@ pub async fn collect_design_subtree_outbound<L: CataDbLocator>(
     locator: &L,
     roots: &[RefU64],
 ) -> anyhow::Result<(Vec<RefU64>, usize)> {
-    let mut sessions: HashMap<u32, DbBasicData> = HashMap::new();
+    let mut sessions: HashMap<u32, OnDemandDbSession> = HashMap::new();
     let mut visited: HashSet<RefU64> = HashSet::new();
     let mut seeds: HashSet<RefU64> = HashSet::new();
     let mut frontier: Vec<RefU64> = roots
@@ -920,7 +900,7 @@ pub async fn collect_design_subtree_outbound<L: CataDbLocator>(
                     }
                 }
             }
-            let session = sessions.get(&dbnum).expect("session 已插入");
+            let session = sessions.get_mut(&dbnum).expect("session 已插入");
             let parsed = parse_refnos_with_session(session, &refs, None).await?;
             parsed_count += parsed.len();
             for ele in parsed.values() {

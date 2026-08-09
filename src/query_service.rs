@@ -197,7 +197,14 @@ impl QueryService {
     async fn ensure_model_db() -> Result<(), QueryError> {
         MODEL_DB
             .get_or_try_init(|| async {
-                aios_core::init_surreal().await?;
+                // The HTTP service initializes the shared SUL_DB before it
+                // constructs QueryService. Probe that connection first so an
+                // in-process query does not try to connect the global client a
+                // second time and fail with `Already connected`. Standalone
+                // MCP/query binaries still fall through to normal init.
+                if SUL_DB.query("RETURN 1;").await.is_err() {
+                    aios_core::init_surreal().await?;
+                }
                 Ok::<(), anyhow::Error>(())
             })
             .await

@@ -1,10 +1,15 @@
 //! 数据批次的唯一消费者（ADR-011 §2/§6/§7/§8；rollout 第三节）。
 //!
-//! 一个进程有且只有一个 worker，**无条件 spawn、不分 sync_live**：合流之后手动
-//! 模式的执行同样走队列，worker 若只活在自动分支，手动模式的队列就没有消费者。
-//! 出队即冻结（区间定死），按 FIFO 逐批执行；队列跑空时先消化积压
-//! （副作用补偿 + 模型待重试），再收一轮房间（ADR-010 §7 / ADR-011 §8——房间
-//! 依赖「几何与 AABB 都已落定」，不跟在每个批次后面）。
+//! 一个进程有且只有一个 worker（派发器），**无条件 spawn、不分 sync_live**：合流
+//! 之后手动模式的执行同样走队列，worker 若只活在自动分支，手动模式的队列就没有
+//! 消费者。出队即冻结（区间定死）；队列跑空时先消化积压（副作用补偿 + 模型待
+//! 重试），再收一轮房间（ADR-010 §7 / ADR-011 §8——房间依赖「几何与 AABB 都已
+//! 落定」，不跟在每个批次后面）。
+//!
+//! ADR-011 2026-08-09 修订：`data_batch_workers > 1` 时派发器最多让 N 个批次在飞
+//! ——仅限稳态 DESI 暂存窗口，同 dbnum 恒串行，非 DESI / 基线 / 应急直写独占；
+//! journal 写回与提交后收敛仍经 [`STAGED_COMMIT_SERIAL`] 一次一个。默认 1 =
+//! 原单消费者行为。
 //!
 //! 执行体复用 [`AiosDBManager::execute_one_dbnum`]（rollout 第九节第 6 条）：
 //! 它自带回退阻断、基线补全、窗口冻结与崩溃重放，两条触发路径共用同一份语义。
@@ -18,7 +23,7 @@ use chrono::Local;
 use futures::FutureExt;
 use serde::Serialize;
 
-use crate::data_interface::batch_scheduler::{BatchScheduler, FrozenBatch};
+use crate::data_interface::batch_scheduler::{BatchScheduler, DispatchOutcome, FrozenBatch};
 use crate::data_interface::manual_update::{
     BatchStatus, DataBatchResult, FileCandidate, ManualUpdateEvent, ManualUpdateProgress,
     ManualUpdateStatus, ModelUnitResult, UnitGenStatus, aggregate_manual_status,
@@ -32,16 +37,14 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
 
-/// 房间轮的保底间隔。
+/// ADR-017 写回 + 提交后收敛的全局串行段（ADR-011 2026-08-09 修订）。
 ///
-/// ADR-011 §8 让房间轮等「队列跑空」，可持续入库的项目里那个条件可能一轮都不
-/// 成立：每个空闲轮不是还有 durable 积压，就是刚认领了新到的批次，房间归属于是
-/// 永远收不上，面板只看到待重算数一路涨。超过这个间隔就强收一轮。
-///
-/// 提前收一轮不会留下永久错误。房间任务的入队判据是「AABB 确实变了」
-/// （`enqueue_room_recalc`）：待办的重生成一旦真的改了包围盒，这些目标会被重新
-/// 排进来再算一次；没改包围盒的话，早算出来的归属本来就是对的。
-const ROOM_ROUND_FLOOR: Duration = Duration::from_secs(600);
+/// 并发窗口只并行「解析 + 暂存 + 生成」这段重活；journal 写回、水位尾事务、
+/// 空间收敛、本任务房间与全局补偿仍一次一个——两个窗口的全局 drain / 空间树
+/// 收敛交错在正确性上没有论证过，而串行的代价（秒级）远小于生成（分钟级）。
+/// 派发门的空间收敛也持同一把锁，保证收敛检查不与任何正在提交的窗口并发动树。
+pub(crate) static STAGED_COMMIT_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const STAGED_COMMIT_ATTEMPTS: u32 = 4;
 const STAGED_COMMIT_BACKOFF: Duration = Duration::from_millis(250);
 const STAGED_STALLED_RETRY_BACKOFF: Duration = Duration::from_secs(30);
@@ -70,9 +73,6 @@ static LAST_STAGED_COMMIT_RETRIES: AtomicU64 = AtomicU64::new(0);
 /// SYS meta，有人往 MDB 里加一个库也是同样的形状——那些刚进范围的设计库自己没有
 /// 文件变更事件，不重扫就得等下次重启才会被发现。
 static SCOPE_DIRTY: AtomicBool = AtomicBool::new(false);
-
-/// 最近一次收房间轮的时刻（epoch 毫秒，0 = 本进程还没收过）。见 [`ROOM_ROUND_FLOOR`]。
-static LAST_ROOM_ROUND: AtomicI64 = AtomicI64::new(0);
 
 fn beat() {
     WORKER_BEAT.store(Local::now().timestamp_millis(), Ordering::Relaxed);
@@ -145,7 +145,14 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
-    println!("数据批次 worker 已启动（单消费者，队列空时消化积压并收房间轮）");
+    let slots = crate::options::data_batch_workers();
+    if slots > 1 {
+        println!(
+            "数据批次 worker 已启动（并发在飞上限 {slots}，仅稳态 DESI 窗口共享、同 dbnum 串行；队列空时消化积压并收房间轮）"
+        );
+    } else {
+        println!("数据批次 worker 已启动（单消费者，队列空时消化积压并收房间轮）");
+    }
     loop {
         beat();
         let ran = drain_queue_until_empty(&mgr).await;
@@ -189,34 +196,91 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "panic 载荷不是字符串，详见 stderr".to_string())
 }
 
-/// 把当前排队中的批次全部消费掉（FIFO，逐个冻结执行），返回执行条数。
+/// 把当前排队中的批次全部消费掉（FIFO，逐批冻结执行），返回执行条数。
 ///
 /// worker 主循环的内圈；探针与 live 测试也用它做「入队后等队空」的有界消费
-/// （rollout 第九节第 6 条），不必拉起无限循环的 worker。暂停时立即返回。
+/// （rollout 第九节第 6 条），不必拉起无限循环的 worker。暂停时不再派发新批次，
+/// 在飞批次跑完为止。
+///
+/// ADR-011 2026-08-09 修订：`DbOption.toml` 的 `data_batch_workers > 1` 时最多
+/// 同时在飞 N 个批次——仅限稳态 DESI 暂存窗口（见 [`batch_needs_exclusive_lane`]）；
+/// 同 dbnum 恒串行；独占批次保住 FIFO 位置（轮到它时先排空在飞、再单独跑）。
+/// 默认 1 与旧的单消费者行为一致。
 pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let scheduler = BatchScheduler::global();
     let registry = TaskRegistry::global();
+    let slots = crate::options::data_batch_workers();
+    // 每个 future 把自己的车道类别带回。独占任务按规则只会在池空时启动，因而
+    // 理论上任何完成事件都足以放平旗子；仍按完成任务自己的类别收口，避免以后
+    // 调整派发循环时悄悄重新引入单 worker 假设。
+    let mut in_flight: tokio::task::JoinSet<bool> = tokio::task::JoinSet::new();
+    let mut exclusive_in_flight = false;
     let mut ran = 0usize;
     loop {
-        match SideEffectCompensator::reconcile_spatial_pending(mgr).await {
-            Ok(done) if done > 0 => {
-                println!("领取下一批前完成 {done} 个提交后空间收敛任务");
-                beat();
-            }
-            Ok(_) => {}
-            Err(error) => {
-                log::error!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
-                eprintln!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
-                break;
+        // 出队门（ADR-017 §9）：提交后空间状态未收敛时不派发新批次；在飞批次不受
+        // 影响（它们的提交尾自带收敛与重试）。持 STAGED_COMMIT_SERIAL 执行，
+        // 不与任何正在写回的窗口并发动空间树。
+        let mut dispatch_allowed = true;
+        {
+            let _serial = STAGED_COMMIT_SERIAL.lock().await;
+            match SideEffectCompensator::reconcile_spatial_pending(mgr).await {
+                Ok(done) if done > 0 => {
+                    println!("领取下一批前完成 {done} 个提交后空间收敛任务");
+                    beat();
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::error!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
+                    eprintln!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
+                    dispatch_allowed = false;
+                }
             }
         }
-        let Some(job) = scheduler.freeze_next(registry) else {
+        while dispatch_allowed && !exclusive_in_flight && in_flight.len() < slots {
+            match scheduler.next_dispatch(registry, in_flight.is_empty(), |batch| {
+                batch_needs_exclusive_lane(&batch.db_type, batch.start_sesno)
+            }) {
+                DispatchOutcome::Frozen { job, exclusive } => {
+                    exclusive_in_flight = exclusive;
+                    let mgr = mgr.clone();
+                    in_flight.spawn(async move {
+                        run_one_batch_isolated(&mgr, registry, scheduler, job).await;
+                        exclusive
+                    });
+                }
+                DispatchOutcome::HeadNeedsExclusive | DispatchOutcome::Idle => break,
+            }
+        }
+        if in_flight.is_empty() {
             break;
-        };
-        run_one_batch_isolated(mgr, registry, scheduler, job).await;
-        ran += 1;
+        }
+        if let Some(completed) = in_flight.join_next().await {
+            ran += 1;
+            match completed {
+                Ok(true) => exclusive_in_flight = false,
+                Ok(false) => {}
+                Err(error) => {
+                    // `run_one_batch_isolated` 已隔离执行体 panic；这里只会是任务层取消/
+                    // panic。池为空时外层会结束；池非空时保留独占旗，宁可停止派发也不
+                    // 让一个身份未知的完成事件破坏独占边界。
+                    log::error!("数据批次派发任务异常结束: {error}");
+                }
+            }
+            beat();
+        }
     }
     ran
+}
+
+/// 独占批次判定（ADR-011 2026-08-09 修订）：只有**稳态 DESI 暂存窗口**参与并发。
+///
+/// - 非 DESI：SYS meta 落库会改 MDB 执行范围（`SCOPE_DIRTY` 重扫）、CATA 走目录
+///   反向传播，跨库牵连面未论证为可并发；
+/// - 基线 / 冷启动（`start_sesno <= 1`）：豁免暂存、体量大，两个并发基线会把
+///   内存预算翻倍；
+/// - 应急直写（`GEN_MODEL_DIRECT_INCREMENT=1`）：绕过暂存直写持久层，保持串行。
+fn batch_needs_exclusive_lane(db_type: &str, start_sesno: i32) -> bool {
+    !db_type.eq_ignore_ascii_case("DESI") || start_sesno <= 1 || direct_increment_enabled()
 }
 
 /// [`run_one_batch`] 的隔离壳：一个批次 panic 只丢这一个批次。
@@ -367,15 +431,6 @@ fn increment_mode_for(direct: bool) -> &'static str {
 
 fn use_staged_increment_window(job: &FrozenBatch) -> bool {
     job.start_sesno > 1 && !direct_increment_enabled()
-}
-
-/// 这个暂存窗口有没有房间语义（要不要付面板映射加载 + 房间工作集预载 + 房间轮）。
-///
-/// 房间目标只从两处产生：DESI 解析计划的结构触发（`RoomRecalc*` plan 项）与 DESI
-/// 生成的包围盒变化——SYST / CATA / DICT 窗口两者皆无（ADR-017 §6 纯解析提交单元）。
-/// `db_type` 用冻结点重扫的现场值，与执行体同源。
-fn staged_window_has_room_semantics(db_type: &str) -> bool {
-    db_type.eq_ignore_ascii_case("DESI")
 }
 
 /// The recovery row being extended with AABB-derived room targets must still
@@ -540,6 +595,7 @@ async fn execute_frozen_batch(
         cand.file_latest_sesno
     );
 
+    println!("数据批次 dbnum={} 暂存准备: 读取水位", job.dbnum);
     let state = crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await;
     let preload_state = match state {
         Ok(Some(state)) => {
@@ -552,61 +608,13 @@ async fn execute_frozen_batch(
     };
     if let Err(error) = preload_state {
         warnings.push(format!("预载 DBNUM 水位失败: {error:#}"));
-        drop_window_and_sweep(window, "废弃暂存窗口失败", warnings).await;
+        drop_window(window, "废弃暂存窗口失败", warnings).await;
         return failed_window_result(job, warnings, "预载 DBNUM 水位失败");
     }
+    println!("数据批次 dbnum={} 暂存准备: 水位预载完成", job.dbnum);
 
-    // 房间语义只属于设计库窗口：SYST / CATA / DICT 是纯解析提交单元（ADR-017 §6），
-    // 没有生成环节、不产出房间目标，面板映射的全表扫描与整张 `room_relate` 的
-    // 工作集预载对它们是纯开销。万一将来有房间目标漏进这类窗口，
-    // 它们仍以 plan 项身份随尾事务落 durable pending，由空闲轮收敛，不会丢。
-    let room_semantics = staged_window_has_room_semantics(&cand.db_type);
-    let preload_started = std::time::Instant::now();
-    let mut room_map = if room_semantics {
-        match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
-            Ok(rooms) => Some(rooms),
-            Err(error) => {
-                warnings.push(format!(
-                    "读取提交前房间面板映射失败，本窗口房间任务将保留 pending: {error:#}"
-                ));
-                None
-            }
-        }
-    } else {
-        println!(
-            "房间预载 dbnum={} 跳过（db_type={}，本窗口没有房间语义）",
-            job.dbnum, cand.db_type
-        );
-        None
-    };
-    let mut room_preload_failed = false;
-    if let Some(rooms) = &room_map {
-        let load_ms = preload_started.elapsed().as_millis();
-        match window
-            .scope(crate::data_interface::staging::preload::preload_room_working_set(rooms))
-            .await
-        {
-            Ok(rows) => println!(
-                "房间预载 dbnum={} 在册房间={} 面板={} 工作集={rows} 行：映射加载={load_ms}ms 预载={}ms",
-                job.dbnum,
-                rooms.rooms.len(),
-                rooms.all_panels.len(),
-                preload_started
-                    .elapsed()
-                    .as_millis()
-                    .saturating_sub(load_ms)
-            ),
-            Err(error) => {
-                room_preload_failed = true;
-                warnings.push(format!(
-                    "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
-                ));
-            }
-        }
-    }
-    if room_preload_failed {
-        room_map = None;
-    }
+    // 房间拓扑、关系和几何不再复制进 kv-mem。窗口只生成数据、模型和 durable
+    // room pending；提交 RocksDB、收敛空间树并释放窗口后再按本批 scope 计算房间。
     let setup_ms = window_started.elapsed().as_millis();
 
     let body_started = std::time::Instant::now();
@@ -628,7 +636,7 @@ async fn execute_frozen_batch(
 
     // 无数据可提交（up_to_date / skipped / 应用失败）：丢掉暂存，保留 body 原状态。
     if !data_applied {
-        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
+        drop_window(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
 
@@ -665,7 +673,7 @@ async fn execute_frozen_batch(
             batch.message = Some("模型前置或生成未全部成功，暂存窗口未提交".into());
         }
         result.status = ManualUpdateStatus::Failed;
-        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
+        drop_window(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
 
@@ -678,7 +686,7 @@ async fn execute_frozen_batch(
             batch.message = Some("暂存窗口缺少 finalize 登记".into());
         }
         result.status = ManualUpdateStatus::Failed;
-        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
+        drop_window(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     };
     // `FrozenBatch.end_sesno` is only the enqueue-time observation, and the
@@ -701,8 +709,7 @@ async fn execute_frozen_batch(
     // staged finalize plan has already settled successful in-memory model work,
     // so replacing the attempt with it would lose those generators after a
     // crash. Extend the original plan with only the newly discovered AABB room
-    // targets, then persist it before staged room writes or the first journal
-    // replay can happen.
+    // targets, then persist it before the first journal replay can happen.
     let room_checkpoint = async {
         let mut attempt = model_update_pending::load_attempt(job.dbnum)
             .await?
@@ -739,64 +746,18 @@ async fn execute_frozen_batch(
             batch.message = Some("房间恢复检查点持久化失败".into());
         }
         result.status = ManualUpdateStatus::Failed;
-        drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
+        drop_window(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
-    let planned_room_targets = finalize
-        .plan
-        .work_items
-        .iter()
-        .filter(|item| item.action.is_room_recalc())
-        .count();
-    let room_started = std::time::Instant::now();
-    // 无房间语义的窗口不跑房间轮也不告警——空报告让后面的 aabb 目标兜底入队
-    // 路径（succeeded_aabb_targets 为空 → 全部保留）保持原语义。
-    let room_result = if !room_semantics {
-        Ok(model_update_pending::StagedRoomReport::default())
-    } else {
-        println!(
-            "窗口内房间计算开始 dbnum={} 计划触发={planned_room_targets} 包围盒变化={}",
-            job.dbnum,
-            spatial.room_changes.len()
-        );
-        match &room_map {
-            Some(rooms) => {
-                window
-                    .scope(model_update_pending::run_staged_room_work(
-                        &mgr.db_option,
-                        rooms,
-                        &finalize.plan.work_items,
-                        &spatial.room_changes,
-                    ))
-                    .await
-            }
-            None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
-        }
-    };
-    let room_ms = room_started.elapsed().as_millis();
-    match room_result {
-        Ok(report) => {
-            if room_semantics {
-                println!(
-                    "窗口内房间计算完成 dbnum={} 收敛={} 其中包围盒目标={} 失败={}（耗时 {room_ms}ms）",
-                    job.dbnum,
-                    report.succeeded_plan_items.len(),
-                    report.succeeded_aabb_targets.len(),
-                    report.failures.len()
-                );
-                for failure in &report.failures {
-                    println!("  房间目标未收敛，保留 pending: {failure}");
-                }
-            }
-            window
-                .settle_staged_plan_items(&report.succeeded_plan_items)
-                .await;
-            result.warnings.extend(report.failures.iter().cloned());
-        }
-        Err(error) => result.warnings.push(format!(
-            "暂存房间轮初始化失败，全部房间目标保留 pending: {error:#}"
-        )),
-    }
+    // Capture the exact durable room rows before the window is consumed. They
+    // are committed with the watermark, then drained from RocksDB only after
+    // spatial reconciliation and kv-mem teardown.
+    let room_scope = model_update_pending::RoomDrainScope::from_plan(&finalize.plan);
+
+    // 写回 + 提交后收敛全程独占（ADR-011 2026-08-09 修订，见 STAGED_COMMIT_SERIAL）：
+    // 从 journal 重放、水位尾事务，到空间收敛、本任务房间与全局补偿，期间不允许
+    // 第二个窗口提交，也不允许派发门并发跑空间收敛。锁持到本函数返回。
+    let _commit_serial = STAGED_COMMIT_SERIAL.lock().await;
 
     let gauge = window.gauge().snapshot();
     println!(
@@ -893,10 +854,63 @@ async fn execute_frozen_batch(
         );
     }
 
-    if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await
-    {
+    let window_dropped = drop_window(window, "清理已提交暂存窗口失败", &mut result.warnings).await;
+    if !window_dropped {
         postcommit_failed = true;
     }
+
+    let room_started = std::time::Instant::now();
+    let room_ms = if !window_dropped {
+        let room_ms = room_started.elapsed().as_millis();
+        println!(
+            "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded=0 \
+             room_done=0 room_failed=1 room_duration_ms={room_ms}",
+            job.dbnum,
+            room_scope.len()
+        );
+        result.warnings.push(
+            "已提交暂存窗口未成功释放，跳过本任务房间计算（全部目标保留 durable pending）"
+                .to_string(),
+        );
+        room_ms
+    } else {
+        let room_result = if job.db_type.eq_ignore_ascii_case("DESI") {
+            model_update_pending::drain_rooms_scoped(&mgr.db_option, &room_scope).await
+        } else {
+            Ok(model_update_pending::DrainReport::default())
+        };
+        let room_ms = room_started.elapsed().as_millis();
+        match room_result {
+            Ok(report) => {
+                let failed = report.failures.len();
+                println!(
+                    "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded={} \
+                     room_done={} room_failed={} room_duration_ms={room_ms}",
+                    job.dbnum, report.requested, report.loaded, report.done, failed
+                );
+                if failed > 0 {
+                    result.warnings.push(format!(
+                        "写回后本任务房间目标未全部收敛（保留 durable pending）: {}",
+                        report.failures.join("; ")
+                    ));
+                    postcommit_failed = true;
+                }
+            }
+            Err(error) => {
+                println!(
+                    "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded=0 \
+                     room_done=0 room_failed=1 room_duration_ms={room_ms}",
+                    job.dbnum,
+                    room_scope.len()
+                );
+                result.warnings.push(format!(
+                    "写回后本任务房间计算启动失败（全部目标保留 durable pending）: {error:#}"
+                ));
+                postcommit_failed = true;
+            }
+        }
+        room_ms
+    };
 
     // 窗口内跳过的持久层副作用与非 regen 工作，写回后再消费。
     match SideEffectCompensator::drain(mgr).await {
@@ -1044,12 +1058,8 @@ where
     }
 }
 
-/// 窗口终态收尾：DROP 本窗口的暂存库，随后清扫暂存实例上「不在册」的孤儿库。
-///
-/// 清扫是 T0.3 登记表的兜底半边——DROP 失败的窗口已经出册，残库若无人回收会
-/// 驻留 mem 实例直到进程退出。清扫自身的失败只打日志不折进任务终态：数据都在
-/// 进程内存里，最坏情况就是等进程重启。返回 DROP 本身是否成功。
-async fn drop_window_and_sweep(
+/// 窗口终态收尾：DROP 本窗口的暂存库并释放它的独立 mem:// 实例。
+async fn drop_window(
     window: crate::data_interface::staging::ActiveStagedWindow,
     drop_context: &str,
     warnings: &mut Vec<String>,
@@ -1059,13 +1069,8 @@ async fn drop_window_and_sweep(
         warnings.push(format!("{drop_context}: {error:#}"));
         dropped_ok = false;
     }
-    match crate::data_interface::staging::lifecycle::sweep_orphan_staging_databases().await {
-        Ok(swept) if !swept.is_empty() => {
-            println!("窗口终态清扫回收孤儿暂存库: {}", swept.join(", "));
-        }
-        Ok(_) => {}
-        Err(error) => println!("窗口终态清扫孤儿暂存库失败（进程重启兜底）: {error:#}"),
-    }
+    // 生产窗口各占一个独立 mem:// 实例；DROP 后窗口句柄随参数释放，实例本身也
+    // 一并回收，不再存在共享实例上的跨窗口孤儿库需要扫描。
     dropped_ok
 }
 
@@ -1208,13 +1213,68 @@ async fn execute_frozen_batch_body(
                     // 节点 + RegenRoot 根 + 本批新单元根；删除目标已从文件消失，其
                     // 拓扑走上面的持久层拷贝。解析（只读文件）在持锁之前，装载在
                     // 持锁与产物拷贝之后。
-                    let ancestor_seeds =
+                    let mut ancestor_seeds =
                         crate::data_interface::staging::ancestor_preload::ancestor_seed_refnos(
                             &plan.work_items,
                             &new_units,
                             &transform_targets,
                             mutation_preload.transform_model_refnos(),
                         );
+                    ancestor_seeds.extend(
+                        plan.design_refnos
+                            .iter()
+                            .map(|refno| aios_core::RefnoEnum::from(refno.as_str()))
+                            .filter(|refno| refno.is_valid())
+                            .map(|refno| refno.refno()),
+                    );
+                    // Regen reads every primitive below the delivery-unit root.  A modified
+                    // primitive's staged ATT_* row contains only the fields changed in this
+                    // window, so seeding just the root leaves descendants without TYPE and
+                    // other unchanged geometry attributes.  Resolve the live staged subtree
+                    // as file-backed ancestor seeds as well; apply_ancestor_preload MERGEs the
+                    // complete file row into those partial rows without rolling back changes.
+                    let regen_roots = plan_targets(
+                        crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
+                    );
+                    ancestor_seeds.extend(
+                        crate::data_interface::staging::preload::persistent_generation_subtree(
+                            &regen_roots,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("窗口前生成根子树解析失败: {error:#}")
+                        })?
+                        .into_iter()
+                        .map(|element| element.refno()),
+                    );
+                    ancestor_seeds.extend(
+                        crate::data_interface::staging::preload::active_generation_subtree_by_owner(
+                            &regen_roots,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("窗口内 owner 字段生成根子树解析失败: {error:#}")
+                        })?
+                        .into_iter()
+                        .map(|element| element.refno()),
+                    );
+                    for root in regen_roots {
+                        ancestor_seeds.push(root.refno());
+                        ancestor_seeds.extend(
+                            aios_core::query_deep_children_refnos(root)
+                                .await
+                                .map_err(|error| {
+                                    format!(
+                                        "窗口内生成根 {} 子树解析失败: {error:#}",
+                                        root.to_pdms_str()
+                                    )
+                                })?
+                                .into_iter()
+                                .map(|child| child.refno()),
+                        );
+                    }
+                    ancestor_seeds.sort_unstable();
+                    ancestor_seeds.dedup();
                     let ancestor_closure = if ancestor_seeds.is_empty() {
                         None
                     } else {
@@ -1998,7 +2058,7 @@ async fn idle_round(
     let data_outcome = idle_outcome(failed, has_backlog, claimed_batches);
     // 房间轮也是分页的（元素侧），一页吃不完就要立刻回来——否则积压会以每 30 秒
     // 一页的速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
-    let room_outcome = if room_round_is_due(data_outcome, since_last_room_round()) {
+    let room_outcome = if room_round_is_due(data_outcome) {
         room_round(mgr, registry, after_batches).await
     } else {
         IdleOutcome::Settled
@@ -2077,24 +2137,12 @@ fn wakes_immediately(outcome: IdleOutcome) -> bool {
     outcome == IdleOutcome::MoreWork
 }
 
-/// 距上次收房间轮过了多久（本进程还没收过时为 `None`）。
-fn since_last_room_round() -> Option<Duration> {
-    let millis = LAST_ROOM_ROUND.load(Ordering::Relaxed);
-    (millis > 0)
-        .then(|| Duration::from_millis((Local::now().timestamp_millis() - millis).max(0) as u64))
-}
-
 /// 房间轮该不该在这一轮收。
 ///
-/// `Settled` 是常规出口（ADR-011 §8：队列跑空才收）。`MoreWork` 本该让位，但持续
-/// 入库时它每一轮都成立，所以攒够 [`ROOM_ROUND_FLOOR`] 就强收一轮。`Failed` 任何
-/// 时候都不收——那一轮连积压清没清都没问出来。
-fn room_round_is_due(outcome: IdleOutcome, since_last: Option<Duration>) -> bool {
-    match outcome {
-        IdleOutcome::Settled => true,
-        IdleOutcome::MoreWork => since_last.is_none_or(|elapsed| elapsed >= ROOM_ROUND_FLOOR),
-        IdleOutcome::Failed => false,
-    }
+/// ADR-011 §8 明确接受持续密集保存导致的房间饥饿：只有数据队列与 durable 数据阶段
+/// 都跑空（`Settled`）才收房间，不能按时间越过仍未落定的几何/AABB。
+fn room_round_is_due(outcome: IdleOutcome) -> bool {
+    outcome == IdleOutcome::Settled
 }
 
 /// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
@@ -2106,9 +2154,6 @@ async fn room_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) -> IdleOutcome {
-    // 先记时刻再判早退：保底间隔量的是「上次考虑过房间」，否则没有目标时，
-    // 每一个空闲轮都会判成到期。
-    LAST_ROOM_ROUND.store(Local::now().timestamp_millis(), Ordering::Relaxed);
     // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
     // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
     // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
@@ -2133,6 +2178,12 @@ async fn room_round(
     };
     let live = counts.live();
     if live == 0 {
+        if counts.blocked > 0 {
+            println!(
+                "房间覆盖屏障生效：{} 个房间目标等待缺失面板模型补偿，保持 pending，不重复执行覆盖探针",
+                counts.blocked
+            );
+        }
         return IdleOutcome::Settled;
     }
 
@@ -2396,10 +2447,59 @@ mod tests {
         let reconcile = body
             .find("reconcile_spatial_pending(mgr)")
             .expect("spatial reconcile gate");
-        let dequeue = body.find("freeze_next(registry)").expect("dequeue call");
+        let dequeue = body.find("next_dispatch(registry").expect("dispatch call");
         assert!(
             reconcile < dequeue,
             "spatial convergence must precede dequeue"
+        );
+        // 并发派发（ADR-011 2026-08-09 修订）的两道硬约束也钉在这里：
+        // 派发门与写回临界段共锁；独占判定必须传给调度器而不是派发后再补救。
+        assert!(
+            body.contains("STAGED_COMMIT_SERIAL.lock().await"),
+            "派发门的空间收敛必须持提交串行锁: {body}"
+        );
+        assert!(
+            body.contains("batch_needs_exclusive_lane(&batch.db_type, batch.start_sesno)"),
+            "独占车道判定必须在出队时生效: {body}"
+        );
+    }
+
+    /// 只有稳态 DESI 暂存窗口参与并发；其余批次独占跑（ADR-011 2026-08-09 修订）。
+    #[test]
+    fn only_steady_state_desi_windows_share_the_dispatch_pool() {
+        assert!(!batch_needs_exclusive_lane("DESI", 42));
+        assert!(
+            !batch_needs_exclusive_lane("desi", 42),
+            "db_type 忽略大小写"
+        );
+        assert!(
+            batch_needs_exclusive_lane("DESI", 1),
+            "基线 / 冷启动（start<=1，豁免暂存）独占"
+        );
+        assert!(
+            batch_needs_exclusive_lane("SYST", 42),
+            "SYS meta 改执行范围"
+        );
+        assert!(batch_needs_exclusive_lane("CATA", 42), "目录反向传播");
+
+        // 写回临界段必须在 execute_frozen_batch 的提交路径上，且先于 journal 写回。
+        let source = include_str!("batch_worker.rs");
+        let staged = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("staged batch executor")
+            .1
+            .split_once("pub fn staged_commit_metrics()")
+            .expect("staged executor boundary")
+            .0;
+        let serial_at = staged
+            .find("STAGED_COMMIT_SERIAL.lock().await")
+            .expect("提交路径必须持提交串行锁");
+        let commit_at = staged
+            .find("window.commit_registered_to(")
+            .expect("journal 写回调用");
+        assert!(
+            serial_at < commit_at,
+            "提交串行锁必须先于 journal 写回获取: {staged}"
         );
     }
 
@@ -2436,8 +2536,10 @@ mod tests {
                 "\"increment_mode\": crate::data_interface::batch_worker::increment_mode()"
             )
         );
-        let spatial = include_str!("../fast_model/aabb_tree.rs");
-        assert!(spatial.contains("batch_worker::direct_increment_enabled()"));
+        // 曾钉「直写模式强制空间树重建」（aabb_tree.rs 引用本模块的
+        // direct_increment_enabled）。空间树启动策略改为「默认复用树文件、仅显式
+        // AIOS_FORCE_SPATIAL_REBUILD 重建」后该联动被移除，反向不变量由
+        // aabb_tree::tests::startup_reuses_project_tree_unless_rebuild_is_explicitly_requested 钉住。
     }
 
     /// 统一根锁必须夹在「只读解析（持久层闭包 + 文件祖先链）」与「写进暂存
@@ -2547,27 +2649,43 @@ mod tests {
     }
 
     #[test]
-    fn failed_room_preload_disables_the_staged_room_round() {
+    fn committed_room_scope_runs_after_spatial_reconcile_and_window_drop() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("async fn execute_frozen_batch(")
             .expect("staged batch must exist")
             .1
-            .split_once("async fn drop_window_and_sweep(")
+            .split_once("async fn drop_window(")
             .expect("staged batch body boundary")
             .0;
-        let failed = body
-            .find("room_preload_failed = true")
-            .expect("preload failure marker");
-        let fail_closed = body[failed..]
-            .find("room_map = None")
-            .expect("fail-closed room map");
-        let room_round = body[failed..]
-            .find("run_staged_room_work(")
-            .expect("staged room round");
         assert!(
-            fail_closed < room_round,
-            "preload failure must disable room work"
+            !body.contains("preload_room_working_set") && !body.contains("run_staged_room_work("),
+            "房间数据与计算都必须退出 kv-mem 窗口: {body}"
+        );
+
+        let commit_at = body
+            .find("commit_registered_to")
+            .expect("先把窗口写回 RocksDB");
+        let spatial_at = body[commit_at..]
+            .find("reconcile_spatial_pending")
+            .map(|at| commit_at + at)
+            .expect("面板分支前必须收敛空间树");
+        let drop_at = body[spatial_at..]
+            .find("drop_window")
+            .map(|at| spatial_at + at)
+            .expect("房间计算前必须释放 kv-mem 窗口");
+        let room_at = body[drop_at..]
+            .find("drain_rooms_scoped")
+            .map(|at| drop_at + at)
+            .expect("提交后必须精确消费本任务房间目标");
+        let drop_gate = &body[drop_at..room_at];
+        assert!(
+            drop_gate.contains("if !window_dropped") && drop_gate.contains("} else {"),
+            "DROP 失败必须跳过立即房间轮并保留 pending: {drop_gate}"
+        );
+        assert!(
+            commit_at < spatial_at && spatial_at < drop_at && drop_at < room_at,
+            "顺序必须是 commit → spatial → drop kv-mem → scoped room: {body}"
         );
     }
 
@@ -2699,20 +2817,6 @@ mod tests {
             validate_attempt_matches_staged_window(&wrong, &job, 40, 42).is_err(),
             "a different file identity must not be overwritten"
         );
-    }
-
-    /// 房间语义只属于 DESI 窗口：SYST/CATA/DICT 批次不该付
-    /// 面板映射全表扫描与 `room_relate` 整表预载（2026-08-06 审核 L2）。
-    #[test]
-    fn only_design_windows_pay_for_room_preload() {
-        assert!(staged_window_has_room_semantics("DESI"));
-        assert!(
-            staged_window_has_room_semantics("desi"),
-            "类型比较大小写不敏感"
-        );
-        assert!(!staged_window_has_room_semantics("SYST"));
-        assert!(!staged_window_has_room_semantics("CATA"));
-        assert!(!staged_window_has_room_semantics("DICT"));
     }
 
     /// 阶段日志要能一眼看出这批在做什么，而不是只报一个总数。
@@ -2876,6 +2980,29 @@ mod tests {
         );
     }
 
+    /// 覆盖屏障已经把房间目标转成 blocked 时，空闲轮只记录现状；缺失面板的
+    /// durable 生成根由数据阶段消费，不能每 30 秒再从房间分支刷新一次探针。
+    #[test]
+    fn a_blocked_room_round_logs_without_refreshing_the_probe() {
+        let source = include_str!("batch_worker.rs");
+        let blocked_branch = source
+            .split_once("if live == 0 {")
+            .expect("room_round 必须保留无 live 目标的早退分支")
+            .1
+            .split_once("let task_id")
+            .expect("早退分支必须在创建 room task 之前结束")
+            .0;
+
+        assert!(
+            blocked_branch.contains("保持 pending，不重复执行覆盖探针"),
+            "覆盖屏障分支必须留下可观测日志: {blocked_branch}"
+        );
+        assert!(
+            !blocked_branch.contains("drain_rooms"),
+            "覆盖屏障分支只记录日志，不得循环执行覆盖探针: {blocked_branch}"
+        );
+    }
+
     #[test]
     fn pending_data_pages_yield_to_new_batches_before_room_recalc() {
         let source = include_str!("batch_worker.rs");
@@ -2901,42 +3028,13 @@ mod tests {
         assert_eq!(idle_outcome(false, false, 1), IdleOutcome::MoreWork);
     }
 
-    /// 房间轮不能被持续到达的数据批次无限期挤掉。
-    ///
-    /// `MoreWork`（还有 durable 积压，或刚认领了新批次）本该给数据让位，但持续
-    /// 入库的项目里它每一轮都成立，而生产里 `drain_rooms` 的唯一消费者就是
-    /// `room_round`——没有保底的话房间归属永远收不上，泳道只会一路涨到误报饥饿。
+    /// ADR-011 §8 把房间放在数据队列与积压全部跑空之后；持续保存导致的饥饿是
+    /// 已接受代价，不能按时间越过仍未落定的几何/AABB。
     #[test]
-    fn a_starved_room_round_still_gets_its_turn() {
-        // 常规出口不变。
-        assert!(room_round_is_due(
-            IdleOutcome::Settled,
-            Some(Duration::ZERO)
-        ));
-        // 失败轮任何时候都不收：那一轮连积压清没清都没问出来。
-        assert!(!room_round_is_due(IdleOutcome::Failed, None));
-        assert!(!room_round_is_due(
-            IdleOutcome::Failed,
-            Some(ROOM_ROUND_FLOOR * 10)
-        ));
-        // 还有活干时让位……
-        assert!(!room_round_is_due(
-            IdleOutcome::MoreWork,
-            Some(Duration::ZERO)
-        ));
-        assert!(!room_round_is_due(
-            IdleOutcome::MoreWork,
-            Some(ROOM_ROUND_FLOOR - Duration::from_secs(1))
-        ));
-        // ……但让不过保底。
-        assert!(room_round_is_due(
-            IdleOutcome::MoreWork,
-            Some(ROOM_ROUND_FLOOR)
-        ));
-        assert!(
-            room_round_is_due(IdleOutcome::MoreWork, None),
-            "本进程还没收过房间轮时先收一轮"
-        );
+    fn room_round_waits_until_all_data_work_is_settled() {
+        assert!(room_round_is_due(IdleOutcome::Settled));
+        assert!(!room_round_is_due(IdleOutcome::Failed));
+        assert!(!room_round_is_due(IdleOutcome::MoreWork));
 
         let source = include_str!("batch_worker.rs");
         let idle_body = source
@@ -2947,20 +3045,8 @@ mod tests {
             .expect("idle_round 之后是 IdleOutcome 的定义")
             .0;
         assert!(
-            idle_body.contains("if room_round_is_due(data_outcome, since_last_room_round()) {"),
+            idle_body.contains("if room_round_is_due(data_outcome) {"),
             "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
-        );
-
-        let room_body = source
-            .split_once("async fn room_round(")
-            .expect("room_round 必须存在")
-            .1
-            .split_once("\nasync fn ")
-            .expect("room_round 之后还有别的函数")
-            .0;
-        assert!(
-            room_body.contains("LAST_ROOM_ROUND.store("),
-            "room_round 必须记下本轮时刻，否则保底要么永不到期要么每轮到期: {room_body}"
         );
     }
 
@@ -3070,7 +3156,7 @@ mod tests {
             .split_once("async fn execute_frozen_batch(")
             .expect("execute_frozen_batch 必须存在")
             .1
-            .split_once("async fn drop_window_and_sweep(")
+            .split_once("async fn drop_window(")
             .expect("staged batch body boundary")
             .0;
 

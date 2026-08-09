@@ -77,6 +77,17 @@ pub struct EnqueueOutcome {
     pub info: EnqueuedBatchInfo,
 }
 
+/// [`BatchScheduler::next_dispatch`] 的结果（ADR-011 2026-08-09 修订）。
+#[derive(Debug)]
+pub enum DispatchOutcome {
+    /// 冻结了一条批次；`exclusive` = 该批次要求独占（派发方在它收敛前不得再派发）。
+    Frozen { job: FrozenBatch, exclusive: bool },
+    /// FIFO 首个可跑行要求独占但在飞非空：等在飞收敛，不越过它派发。
+    HeadNeedsExclusive,
+    /// 无事可派（空队列 / 暂停 / 可跑行的 dbnum 都在跑）。
+    Idle,
+}
+
 /// 手动触发「扫描 + 入队”的整体回执（POST /update/execute 的 202 响应体）。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManualEnqueueReceipt {
@@ -280,29 +291,61 @@ impl BatchScheduler {
 
     /// FIFO 出队并冻结（暂停时恒 None）。注册表行随之转 running。
     pub fn freeze_next(&self, registry: &TaskRegistry) -> Option<FrozenBatch> {
+        match self.next_dispatch(registry, true, |_| false) {
+            DispatchOutcome::Frozen { job, .. } => Some(job),
+            DispatchOutcome::HeadNeedsExclusive | DispatchOutcome::Idle => None,
+        }
+    }
+
+    /// 并发口径的出队并冻结（ADR-011 2026-08-09 修订）。
+    ///
+    /// 规则在 [`batch_queue::freeze_next_concurrent`]：同 dbnum 恒串行、独占批次
+    /// 保住 FIFO 位置。`is_exclusive` 由调用方（batch_worker）按 db_type / 基线 /
+    /// 应急直写判定，队列层不掺业务口径。
+    pub fn next_dispatch(
+        &self,
+        registry: &TaskRegistry,
+        in_flight_empty: bool,
+        is_exclusive: impl Fn(&batch_queue::DataBatch) -> bool,
+    ) -> DispatchOutcome {
         let mut state = self.queue();
         let paused = self.paused.load(Ordering::SeqCst);
-        let index = batch_queue::freeze_next(&mut state.queue, paused)?;
+        let index = match batch_queue::freeze_next_concurrent(
+            &mut state.queue,
+            paused,
+            in_flight_empty,
+            &is_exclusive,
+        ) {
+            batch_queue::NextDispatch::Freeze(index) => index,
+            batch_queue::NextDispatch::HeadNeedsExclusive => {
+                return DispatchOutcome::HeadNeedsExclusive;
+            }
+            batch_queue::NextDispatch::Idle => return DispatchOutcome::Idle,
+        };
         let row = state.queue[index].clone();
+        let exclusive = is_exclusive(&row);
         // 元数据缺失说明队列失步。此处持着锁，panic 会毒掉锁把整条链连坐，
         // 而这一行既然没有文件路径也就无从执行——把它摘掉、报错、让下一条上。
         let Some(meta) = state.meta.remove(&(row.dbnum, false)) else {
             log::error!("dbnum={} 被冻结却没有排队元数据，丢弃该行", row.dbnum);
             state.queue.remove(index);
-            return None;
+            return DispatchOutcome::Idle;
         };
         state.meta.insert((row.dbnum, true), meta.clone());
         registry.mark_started(&meta.task_id);
-        Some(FrozenBatch {
-            task_id: meta.task_id,
-            project: meta.project,
-            dbnum: row.dbnum,
-            db_type: row.db_type,
-            path: meta.path,
-            file_name: meta.file_name,
-            start_sesno: row.start_sesno,
-            end_sesno: row.end_sesno,
-        })
+        DispatchOutcome::Frozen {
+            job: FrozenBatch {
+                task_id: meta.task_id,
+                project: meta.project,
+                dbnum: row.dbnum,
+                db_type: row.db_type,
+                path: meta.path,
+                file_name: meta.file_name,
+                start_sesno: row.start_sesno,
+                end_sesno: row.end_sesno,
+            },
+            exclusive,
+        }
     }
 
     /// 批次执行完毕：把运行中的那行从队列里摘掉（终态只留在注册表历史里）。

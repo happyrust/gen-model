@@ -28,6 +28,8 @@ pub mod update_scope;
 
 pub mod on_demand_model;
 
+pub(crate) mod on_demand_db;
+
 pub mod sync_publisher;
 
 pub mod side_effect_pending;

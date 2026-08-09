@@ -9,8 +9,24 @@ use glam::DMat4;
 use nalgebra::Isometry;
 use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn render_catalogue_manifold_result_write(
+    new_id: u64,
+    aabb_id: impl Display,
+    inst_info_id: impl Display,
+    geom_refno: impl Display,
+) -> String {
+    format!(
+        "upsert inst_geo:⟨{new_id}⟩ set meshed = true, aabb = {aabb_id};\
+         INSERT RELATION IGNORE INTO geo_relate [{{ id: geo_relate:[{inst_info_id}, inst_geo:⟨{new_id}⟩], \
+         in: {inst_info_id}, out: inst_geo:⟨{new_id}⟩, geom_refno: pe:⟨{geom_refno}⟩, \
+         geo_type: 'Pos', trans: trans:⟨0⟩, visible: true }}];\
+         update {inst_info_id}<-inst_relate set booled=true;"
+    )
+}
 
 /// 从文件加载网格数据
 ///
@@ -179,24 +195,15 @@ pub async fn apply_cata_neg_boolean_manifold(
                                     anyhow!("save catalogue boolean mesh {new_id} failed: {error}")
                                 })?;
                             {
-                                update_sql.push_str(&format!(
-                                    "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
-                                    new_id, &pos.aabb_id
-                                ));
-                                // 有索引的关系，所以geom_refno需要点变化
-                                let relate_sql = format!(
-                                    "INSERT RELATION INTO geo_relate [{{ id: geo_relate:[{}, inst_geo:⟨{}⟩], in: {}, out: inst_geo:⟨{}⟩, geom_refno: pe:⟨{}⟩, geo_type: 'Pos', trans: trans:⟨0⟩, visible: true }}];",
-                                    &g.inst_info_id,
+                                // `new_id` is deterministic. A previous attempt may have committed
+                                // this statement before a later statement in the batch failed, so a
+                                // durable pending retry must update the same row instead of failing
+                                // forever with "record already exists".
+                                update_sql.push_str(&render_catalogue_manifold_result_write(
                                     new_id,
+                                    &pos.aabb_id,
                                     &g.inst_info_id,
-                                    new_id,
                                     format!("{}_b", bg[0]),
-                                );
-                                // println!("cate neg relate sql is {}", &relate_sql);
-                                update_sql.push_str(relate_sql.as_str());
-                                update_sql.push_str(&format!(
-                                    "update {}<-inst_relate set booled=true;",
-                                    &g.inst_info_id,
                                 ));
                                 // dbg!(&update_sql);
                             }
@@ -468,6 +475,80 @@ pub async fn apply_insts_boolean_manifold_single(
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
     println!("design的负实体计算{}完成", refno);
     Ok(())
+}
+
+#[test]
+fn catalogue_manifold_inst_geo_write_is_idempotent() {
+    let source = include_str!("manifold_bool.rs");
+    let catalogue = source
+        .split_once("pub async fn apply_cata_neg_boolean_manifold(")
+        .expect("catalogue manifold function")
+        .1
+        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .expect("catalogue manifold boundary")
+        .0;
+
+    assert!(
+        catalogue.contains("render_catalogue_manifold_result_write("),
+        "{catalogue}"
+    );
+    assert!(!catalogue.contains("create inst_geo"), "{catalogue}");
+    assert!(
+        !catalogue.contains("INSERT RELATION INTO geo_relate"),
+        "{catalogue}"
+    );
+}
+
+#[tokio::test]
+async fn catalogue_manifold_inst_geo_upsert_replays_and_refreshes_aabb() {
+    use surrealdb::engine::any::connect;
+    use surrealdb::sql::Thing;
+
+    let db = connect("mem://").await.expect("mem boots");
+    db.use_ns("manifold_idempotency")
+        .use_db("model")
+        .await
+        .expect("select test database");
+
+    db.query(
+        "CREATE pe:root; CREATE inst_info:test; \
+         RELATE pe:root->inst_relate->inst_info:test SET booled = false;",
+    )
+    .await
+    .expect("seed manifold relation endpoints")
+    .check()
+    .expect("seed manifold relation statements");
+
+    for aabb in ["aabb:⟨first⟩", "aabb:⟨second⟩"] {
+        db.query(render_catalogue_manifold_result_write(
+            42,
+            aabb,
+            "inst_info:test",
+            "root_b",
+        ))
+        .await
+        .expect("execute catalogue manifold result write")
+        .check()
+        .expect("catalogue manifold result statements");
+    }
+
+    let mut response = db
+        .query(
+            "SELECT VALUE aabb FROM inst_geo:⟨42⟩; \
+             RETURN array::len(SELECT VALUE id FROM geo_relate); \
+             SELECT VALUE booled FROM inst_relate;",
+        )
+        .await
+        .expect("read replayed manifold row")
+        .check()
+        .expect("read replayed manifold statement");
+    let aabb: Option<Thing> = response.take(0).expect("decode aabb link");
+    assert_eq!(
+        aabb.map(|thing| thing.to_string()).as_deref(),
+        Some("aabb:second")
+    );
+    assert_eq!(response.take::<Option<usize>>(1).unwrap(), Some(1));
+    assert_eq!(response.take::<Option<bool>>(2).unwrap(), Some(true));
 }
 
 #[test]

@@ -6,13 +6,10 @@
 //!
 //! 生命周期：建库（初始化表定义与 fn::，与生产启动序列同一套）→ 窗口执行
 //! （跨重试保留，重试只重跑失败根）→ 提交 / 废弃后 DROP。进程内登记表记录
-//! 在册窗口，窗口终态清扫兜底孤儿库残留（DROP 失败、代码路径遗漏等）。
-//!
-//! 共享句柄纪律：ADR §2 是「一个常驻 mem 实例、每提交单元一个 database」。
-//! `Surreal<Any>` 的克隆共享同一会话，`use_db` 是会话级切换——所以**窗口每次
-//! (重)进入执行前必须 [`ActiveStagedWindow::activate`]**。数据批次队列是单 worker
-//! （ADR-011），任一时刻至多一个窗口在执行，阻断窗口的暂存库只是驻留、不被
-//! 查询，这条纪律因此够用。
+//! 在册窗口。生产窗口各占一个独立 `mem://` 实例：`Surreal<Any>` 的克隆共享会话，
+//! 并发窗口若只按 database 隔离，任一 `use_db` 都会把另一个窗口的现场切走。独立
+//! 实例把 ADR-011 的并发「解析 + 暂存 + 生成」隔离落实到连接层；窗口终态 DROP 后
+//! 句柄随窗口释放，整个内存实例一并回收。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use once_cell::sync::Lazy;
 use surrealdb::Surreal;
-use surrealdb::engine::any::Any;
+use surrealdb::engine::any::{Any, connect};
 
 use super::executor::{ExecMode, JournalEntry, StagedExecutor};
 use super::resources::{ResourceBand, ResourceGauge, ResourceThresholds};
@@ -44,23 +41,6 @@ struct RegisteredWindow {
 /// 进程内登记表：label → 窗口元数据与资源面板。终态清扫以它裁定孤儿。
 static REGISTRY: Lazy<Mutex<BTreeMap<String, RegisteredWindow>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
-
-/// 常驻暂存实例的一次性连接守卫。
-static STAGE_INSTANCE_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-/// 确保进程常驻的 `STAGE_DB`（`mem://`）已连接。幂等，可在任意入口调用。
-pub async fn ensure_stage_instance() -> anyhow::Result<()> {
-    STAGE_INSTANCE_READY
-        .get_or_try_init(|| async {
-            aios_core::staging::STAGE_DB
-                .connect("mem://")
-                .await
-                .context("连接常驻暂存实例（mem://）失败")?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await?;
-    Ok(())
-}
 
 /// 一个提交单元的窗口元数据（登记表内容）。
 #[derive(Clone, Debug)]
@@ -90,15 +70,20 @@ pub struct ActiveStagedWindow {
     root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
 }
 
-/// 在生产常驻实例上开一个新窗口。
+/// 在独立的生产内存实例上开一个新窗口。
+///
+/// 不能克隆全局 `STAGE_DB`：克隆共享 namespace/database 会话，并发窗口会通过
+/// `use_db` 相互切库。每窗口一实例既保留嵌入式内存介质，也让并发写入物理隔离。
 pub async fn create_window(
     dbnum: u32,
     start_sesno: i32,
     end_sesno: i32,
 ) -> anyhow::Result<ActiveStagedWindow> {
-    ensure_stage_instance().await?;
+    let instance = connect("mem://")
+        .await
+        .context("连接窗口独立暂存实例（mem://）失败")?;
     create_window_on(
-        &aios_core::staging::STAGE_DB,
+        &instance,
         dbnum,
         start_sesno,
         end_sesno,
@@ -107,7 +92,8 @@ pub async fn create_window(
     .await
 }
 
-/// 在显式实例上开窗口（测试与一致性套件用同一条生产路径）。
+/// 在显式实例上开窗口（测试与一致性套件用）。调用方若并发执行多个窗口，必须
+/// 为每个窗口传独立实例；同一实例的克隆共享会话选择。
 pub async fn create_window_on(
     instance: &Surreal<Any>,
     dbnum: u32,
@@ -564,12 +550,6 @@ pub async fn sweep_orphan_staging_databases_on(
     Ok(dropped)
 }
 
-/// 生产常驻实例上的终态清扫。
-pub async fn sweep_orphan_staging_databases() -> anyhow::Result<Vec<String>> {
-    ensure_stage_instance().await?;
-    sweep_orphan_staging_databases_on(&aios_core::staging::STAGE_DB).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +557,51 @@ mod tests {
 
     async fn own_instance() -> Surreal<Any> {
         connect("mem://").await.expect("mem boots")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn production_windows_have_independent_sessions() {
+        let mut first = create_window(7900, 2, 3).await.expect("first window");
+        let mut second = create_window(7901, 4, 5).await.expect("second window");
+
+        let (first_write, second_write) = tokio::join!(
+            first.execute(
+                "UPSERT marker:first SET owner = 'first'",
+                ExecMode::StagingOnly
+            ),
+            second.execute(
+                "UPSERT marker:second SET owner = 'second'",
+                ExecMode::StagingOnly
+            )
+        );
+        first_write.expect("write first window");
+        second_write.expect("write second window");
+
+        let mut first_rows = first
+            .staging_db()
+            .query("SELECT VALUE owner FROM marker ORDER BY owner")
+            .await
+            .expect("read first window")
+            .check()
+            .expect("check first window");
+        let mut second_rows = second
+            .staging_db()
+            .query("SELECT VALUE owner FROM marker ORDER BY owner")
+            .await
+            .expect("read second window")
+            .check()
+            .expect("check second window");
+        assert_eq!(
+            first_rows.take::<Vec<String>>(0).expect("decode first"),
+            ["first"]
+        );
+        assert_eq!(
+            second_rows.take::<Vec<String>>(0).expect("decode second"),
+            ["second"]
+        );
+
+        first.drop_database().await.expect("drop first");
+        second.drop_database().await.expect("drop second");
     }
 
     /// 命名单调、初始化落地、登记表在册。

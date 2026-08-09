@@ -2245,7 +2245,7 @@ pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>>
 
 fn render_pending_room_units_sql() -> String {
     "SELECT dbnum, action, target_refno, noun, source_end_sesno, status, attempts, \
-     last_error FROM model_update_pending WHERE action IN \
+     last_error, updated_at FROM model_update_pending WHERE action IN \
      ['room_recalc_panel', 'room_recalc_element'] AND status IN ['pending', 'failed'] \
      ORDER BY updated_at ASC;"
         .to_string()
@@ -4286,6 +4286,14 @@ mod tests {
         assert!(sql.contains("'room_recalc_element'"), "{sql}");
         assert!(sql.contains("status IN ['pending', 'failed']"), "{sql}");
         assert!(!sql.contains("attempts?:0) <"), "{sql}");
+        let projection = sql
+            .split_once(" FROM ")
+            .expect("pending room query must have a projection")
+            .0;
+        assert!(
+            projection.contains("updated_at"),
+            "SurrealDB 3 requires ORDER BY fields in the SELECT projection: {sql}"
+        );
 
         let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
         let row = PendingRoomUnit {
