@@ -265,115 +265,50 @@ pub(crate) async fn preload_generation_root_closure(
     Ok(outcome.parsed)
 }
 
-/// Preload the small, shared room-classification working set before parsing the window.
-/// Parsed room/panel edits then overwrite these pre-window rows inside staging.
-pub(crate) async fn preload_room_working_set(
-    rooms: &crate::fast_model::room_model::RoomPanelMap,
-) -> anyhow::Result<usize> {
-    if super::active_staging_writes().is_none() {
-        return Ok(0);
-    }
-    preload_room_working_set_from(&SUL_DB, rooms).await
+/// Persistent pre-window descendants of generation roots.  Staged modified
+/// rows may not carry an unchanged `pe_owner` edge, so the live window alone
+/// cannot enumerate all primitives whose partial ATT rows need file backfill.
+pub(crate) async fn persistent_generation_subtree(
+    roots: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    load_root_refnos(&SUL_DB, roots).await
 }
 
-async fn preload_room_working_set_from(
-    source: &Surreal<Any>,
-    rooms: &crate::fast_model::room_model::RoomPanelMap,
-) -> anyhow::Result<usize> {
-    let panels = rooms.all_panels.iter().copied().collect::<Vec<_>>();
-    let room_roots = rooms.rooms.iter().map(|room| room.room).collect::<Vec<_>>();
-    let mut topology =
-        crate::data_interface::helper::collect_pe_ancestor_refnos_from(source, &panels)
+/// Enumerate descendants from the authoritative `pe.owner` field in the
+/// active window.  This also finds modified/new rows when their unchanged
+/// `pe_owner` relation was not materialized into the staging database.
+pub(crate) async fn active_generation_subtree_by_owner(
+    roots: &[RefnoEnum],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let db = super::active_data_db();
+    let mut all = roots.to_vec();
+    let mut frontier = roots.to_vec();
+    for _ in 0..=SUBTREE_CLOSURE_DEPTH {
+        if frontier.is_empty() {
+            break;
+        }
+        let owners = frontier
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = db
+            .query(format!(
+                "SELECT VALUE id FROM pe WHERE owner IN [{owners}] AND deleted != true;"
+            ))
             .await?
-            .into_iter()
-            .collect::<Vec<_>>();
-    topology.extend(room_roots);
-    topology.sort_unstable();
-    topology.dedup();
-    let topology_keys = topology
-        .iter()
-        .map(RefnoEnum::to_pe_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut copied = if topology_keys.is_empty() {
-        0
-    } else {
-        let mut copied = copy_rows(
-            source,
-            "pe",
-            &format!("SELECT * FROM pe WHERE id IN [{topology_keys}]"),
-        )
-        .await?;
-        copied += copy_relations(
-            source,
-            "pe_owner",
-            &format!(
-                "SELECT * FROM pe_owner WHERE in IN [{topology_keys}] AND out IN [{topology_keys}]"
-            ),
-        )
-        .await?;
-        copied
-    };
-    copied += copy_relations(source, "room_relate", "SELECT * FROM room_relate").await?;
-    copied += copy_relations(
-        source,
-        "room_panel_relate",
-        "SELECT * FROM room_panel_relate",
-    )
-    .await?;
-    copied += preload_existing_generation_products_from(source, &panels).await?;
-    Ok(copied)
-}
-
-/// Copy the room subtrees named by structural triggers (renamed rooms / moved panels) into staging.
-///
-/// 窗口起点的 [`preload_room_working_set`] 只认「提交前已合规」的房间；本窗口内改名
-/// **成为**合规房间的组不在那份映射里，而面板的 `pe_owner` 边不随改名重写、也不会被
-/// 本窗口解析写进暂存——不补拷的话，暂存房间轮从暂存 PE 解析出的这间房永远是 0 块
-/// 面板，计划里的整间目标随即走「已不在册」的清边成功路径（H-1）。结构触发在计划期
-/// 已知，这里按触发种子把子树拓扑与面板产物补进暂存；`INSERT IGNORE` /
-/// `record::exists` 语义保证已被本窗口解析重写的行不被回退。
-pub(crate) async fn preload_room_structural_targets(
-    rooms: &[RefnoEnum],
-    panels: &[RefnoEnum],
-) -> anyhow::Result<usize> {
-    if super::active_staging_writes().is_none() || (rooms.is_empty() && panels.is_empty()) {
-        return Ok(0);
+            .check()?;
+        let mut next = response.take::<Vec<RefnoEnum>>(0)?;
+        next.retain(|refno| !all.contains(refno));
+        if next.is_empty() {
+            break;
+        }
+        all.extend(next.iter().copied());
+        frontier = next;
     }
-    preload_room_structural_targets_from(&SUL_DB, rooms, panels).await
-}
-
-async fn preload_room_structural_targets_from(
-    source: &Surreal<Any>,
-    rooms: &[RefnoEnum],
-    panels: &[RefnoEnum],
-) -> anyhow::Result<usize> {
-    let mut topology = load_root_refnos(source, rooms).await?;
-    topology.extend(panels.iter().copied());
-    topology.sort_unstable();
-    topology.dedup();
-    if topology.is_empty() {
-        return Ok(0);
-    }
-    let keys = topology
-        .iter()
-        .map(RefnoEnum::to_pe_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut copied = copy_rows(
-        source,
-        "pe",
-        &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
-    )
-    .await?;
-    copied += copy_relations(
-        source,
-        "pe_owner",
-        &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
-    )
-    .await?;
-    copied += preload_existing_generation_products_for_refnos(source, panels).await?;
-    Ok(copied)
+    all.sort_unstable();
+    all.dedup();
+    Ok(all)
 }
 
 async fn preload_existing_generation_products_from(
@@ -632,14 +567,61 @@ async fn copy_relations(source: &Surreal<Any>, table: &str, query: &str) -> anyh
             render_preload_value(&surrealdb::sql::Value::Object(row))
         ));
     }
-    if !statements.is_empty() {
+    let count = statements.len();
+    let batches = relation_statement_batches(&statements);
+    let batch_count = batches.len();
+    if batch_count > 1 {
+        println!(
+            "preload {table}: {count} 条关系拆为 {batch_count} 批（每批最多 {RELATION_PRELOAD_MAX_ROWS} 行 / {RELATION_PRELOAD_MAX_BYTES} 字节）"
+        );
+    }
+    for (index, sql) in batches.into_iter().enumerate() {
         crate::surreal_retry::execute_generation_preload(
-            &statements.join("\n"),
-            &format!("preload {table}"),
+            &sql,
+            &format!("preload {table} batch {}/{}", index + 1, batch_count),
         )
         .await?;
+        if batch_count > 1 && (index == 0 || index + 1 == batch_count || (index + 1) % 25 == 0) {
+            println!("preload {table}: 已完成 {}/{} 批", index + 1, batch_count);
+        }
     }
-    Ok(statements.len())
+    Ok(count)
+}
+
+/// kv-mem 会先解析完整的多语句请求；把整张 `room_relate`（AMS 已超过八万行）拼成
+/// 一条请求会长期占住暂存执行器，看起来像批次无响应。行数与字节数双限，既限制解析
+/// 峰值，也避免少量大 CONTENT 行重新制造同类问题。单条语句本身超过字节上限时仍单独
+/// 成批，保持数据完整性并让 SurrealDB 返回明确结果。
+const RELATION_PRELOAD_MAX_ROWS: usize = 500;
+const RELATION_PRELOAD_MAX_BYTES: usize = 256 * 1024;
+
+fn relation_statement_batches(statements: &[String]) -> Vec<String> {
+    let mut batches = Vec::new();
+    let mut current = String::new();
+    let mut rows = 0usize;
+
+    for statement in statements {
+        let separator_bytes = usize::from(!current.is_empty());
+        let would_exceed_bytes = !current.is_empty()
+            && current
+                .len()
+                .saturating_add(separator_bytes)
+                .saturating_add(statement.len())
+                > RELATION_PRELOAD_MAX_BYTES;
+        if !current.is_empty() && (rows >= RELATION_PRELOAD_MAX_ROWS || would_exceed_bytes) {
+            batches.push(std::mem::take(&mut current));
+            rows = 0;
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(statement);
+        rows += 1;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 /// 把一个 Surreal 值渲染成可嵌入语句的字面量（字符串走 JSON 转义，datetime →
@@ -677,6 +659,35 @@ pub(crate) fn render_preload_value(value: &surrealdb::sql::Value) -> String {
 mod tests {
     use super::*;
     use crate::data_interface::staging::ResourceThresholds;
+
+    #[test]
+    fn relation_preload_batches_bound_rows_and_bytes_without_loss() {
+        let statements = (0..1_201)
+            .map(|index| format!("RELATE pe:{index}->room_relate:r{index}->pe:{};", index + 1))
+            .collect::<Vec<_>>();
+        let batches = relation_statement_batches(&statements);
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].lines().count(), RELATION_PRELOAD_MAX_ROWS);
+        assert_eq!(batches[1].lines().count(), RELATION_PRELOAD_MAX_ROWS);
+        assert_eq!(batches[2].lines().count(), 201);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.lines().count())
+                .sum::<usize>(),
+            statements.len()
+        );
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.len() <= RELATION_PRELOAD_MAX_BYTES)
+        );
+
+        let large = vec!["X".repeat(140 * 1024), "Y".repeat(140 * 1024)];
+        let byte_batches = relation_statement_batches(&large);
+        assert_eq!(byte_batches.len(), 2, "字节上限也必须触发拆批");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_window_sees_the_persistent_watermark() {
@@ -959,147 +970,5 @@ mod tests {
             &[RefnoEnum::from("4000000001/3")],
             "锁范围与产物拷贝仍要覆盖重叠节点——删除级联要清它的产物"
         );
-    }
-
-    /// H-1 回归：改名「成为」合规房间的组不在窗口起点的预载范围里，结构触发预载要把
-    /// 子树拓扑与面板产物补进暂存、且不回退本窗口解析已写入的行——之后暂存映射才能
-    /// 解析出「面板属于这间房」。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn room_structural_targets_backfill_renamed_room_topology() {
-        let source = connect("mem://").await.expect("source mem");
-        source
-            .use_ns("test")
-            .use_db("source")
-            .await
-            .expect("source db");
-        source
-            .query(
-                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-BAD1', deleted=false;
-                 CREATE pe:⟨4000000001_2⟩ SET noun='PANE', deleted=false;
-                 CREATE pe:⟨4000000001_9⟩ SET noun='PANE', deleted=false;
-                 RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
-                 CREATE world_trans:w1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
-                 CREATE vec3:v1 SET d=[1,2,3]; CREATE inst_info:i1 SET noun='PANE';
-                 CREATE inst_geo:g1 SET aabb=aabb:a1, pts=[vec3:v1];
-                 RELATE pe:⟨4000000001_2⟩->inst_relate->inst_info:i1 SET world_trans=world_trans:w1, aabb=aabb:a1;
-                 RELATE inst_info:i1->geo_relate->inst_geo:g1 SET trans=trans:t1;",
-            )
-            .await
-            .expect("fixture transport")
-            .check()
-            .expect("fixture");
-
-        let instance = connect("mem://").await.expect("staging mem");
-        let window = create_window_on(&instance, 7987, 3, 3, ResourceThresholds::default())
-            .await
-            .expect("window");
-        // 模拟本窗口的解析：改名会话把房间自己的 pe 行写进暂存（新名字已合规）。
-        window
-            .staging_db()
-            .query("CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100', deleted=false;")
-            .await
-            .expect("parsed rename transport")
-            .check()
-            .expect("parsed rename");
-
-        let copied = window
-            .scope(preload_room_structural_targets_from(
-                &source,
-                &[RefnoEnum::from("4000000001/1")],
-                &[RefnoEnum::from("4000000001/2")],
-            ))
-            .await
-            .expect("preload structural targets");
-
-        assert_eq!(copied, 11);
-        assert!(window.journal().await.is_empty());
-        let mut response = window
-            .staging_db()
-            .query(
-                "RETURN [pe:⟨4000000001_1⟩.name = 'X-RM-R100', pe:⟨4000000001_2⟩.id != NONE,
-                 count(SELECT * FROM pe_owner) = 1, count(SELECT * FROM inst_relate) = 1,
-                 inst_geo:g1.id != NONE, vec3:v1.id != NONE, pe:⟨4000000001_9⟩.id = NONE];",
-            )
-            .await
-            .expect("inspect staging");
-        assert_eq!(response.take::<Vec<bool>>(0).expect("flags"), vec![true; 7]);
-
-        let map = window
-            .scope(crate::fast_model::room_model::load_room_panel_map_from_pe(
-                &aios_core::options::DbOption::default(),
-            ))
-            .await
-            .expect("load staged room map");
-        assert_eq!(
-            map.room_num_of(RefnoEnum::from("4000000001/2")),
-            Some("R100"),
-            "改名成为合规房间后，暂存映射必须解析出它名下的面板"
-        );
-        window.drop_database().await.expect("cleanup");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn room_working_set_is_staging_only() {
-        let source = connect("mem://").await.expect("source mem");
-        source
-            .use_ns("test")
-            .use_db("source")
-            .await
-            .expect("source db");
-        source
-            .query(
-                "CREATE pe:⟨4000000001_1⟩ SET noun='FRMW', name='X-RM-R100';
-                 CREATE pe:⟨4000000001_2⟩ SET noun='PANE';
-                 RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
-                 RELATE pe:⟨4000000001_1⟩->room_panel_relate:room_panel->pe:⟨4000000001_2⟩ SET room_num='R100';
-                 RELATE pe:⟨4000000001_2⟩->room_relate:panel_member->pe:⟨4000000001_3⟩ SET room_num='R100';",
-            )
-            .await
-            .expect("fixture transport")
-            .check()
-            .expect("fixture");
-
-        let instance = connect("mem://").await.expect("staging mem");
-        let window = create_window_on(&instance, 7989, 2, 2, ResourceThresholds::default())
-            .await
-            .expect("window");
-        let rooms = crate::fast_model::room_model::RoomPanelMap {
-            rooms: vec![crate::fast_model::room_model::RoomPanels {
-                room: RefnoEnum::from("4000000001/1"),
-                room_num: "R100".into(),
-                panels: vec![RefnoEnum::from("4000000001/2")],
-            }],
-            all_panels: std::collections::HashSet::from([RefnoEnum::from("4000000001/2")]),
-        };
-        let copied = window
-            .scope(preload_room_working_set_from(&source, &rooms))
-            .await
-            .expect("preload rooms");
-
-        assert_eq!(copied, 5);
-        assert!(window.journal().await.is_empty());
-        let mut response = window
-            .staging_db()
-            .query(
-                "RETURN [count(SELECT * FROM room_relate), count(SELECT * FROM room_panel_relate), count(SELECT * FROM pe),
-                 count(SELECT * FROM pe_owner)];",
-            )
-            .await
-            .expect("inspect");
-        assert_eq!(
-            response.take::<Vec<usize>>(0).expect("room rows"),
-            vec![1, 1, 2, 1]
-        );
-        let map = window
-            .scope(crate::fast_model::room_model::load_room_panel_map_from_pe(
-                &aios_core::options::DbOption::default(),
-            ))
-            .await
-            .expect("load staged room map");
-        assert_eq!(
-            map.room_num_of(RefnoEnum::from("4000000001/2")),
-            Some("R100")
-        );
-        window.drop_database().await.expect("cleanup");
     }
 }

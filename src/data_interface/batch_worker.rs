@@ -369,15 +369,6 @@ fn use_staged_increment_window(job: &FrozenBatch) -> bool {
     job.start_sesno > 1 && !direct_increment_enabled()
 }
 
-/// 这个暂存窗口有没有房间语义（要不要付面板映射加载 + 房间工作集预载 + 房间轮）。
-///
-/// 房间目标只从两处产生：DESI 解析计划的结构触发（`RoomRecalc*` plan 项）与 DESI
-/// 生成的包围盒变化——SYST / CATA / DICT 窗口两者皆无（ADR-017 §6 纯解析提交单元）。
-/// `db_type` 用冻结点重扫的现场值，与执行体同源。
-fn staged_window_has_room_semantics(db_type: &str) -> bool {
-    db_type.eq_ignore_ascii_case("DESI")
-}
-
 /// The recovery row being extended with AABB-derived room targets must still
 /// describe the exact range that produced this staging journal. The queue's
 /// enqueue-time end may differ after a rescan or crash replay; the finalize end
@@ -540,6 +531,7 @@ async fn execute_frozen_batch(
         cand.file_latest_sesno
     );
 
+    println!("数据批次 dbnum={} 暂存准备: 读取水位", job.dbnum);
     let state = crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await;
     let preload_state = match state {
         Ok(Some(state)) => {
@@ -555,58 +547,10 @@ async fn execute_frozen_batch(
         drop_window_and_sweep(window, "废弃暂存窗口失败", warnings).await;
         return failed_window_result(job, warnings, "预载 DBNUM 水位失败");
     }
+    println!("数据批次 dbnum={} 暂存准备: 水位预载完成", job.dbnum);
 
-    // 房间语义只属于设计库窗口：SYST / CATA / DICT 是纯解析提交单元（ADR-017 §6），
-    // 没有生成环节、不产出房间目标，面板映射的全表扫描与整张 `room_relate` 的
-    // 工作集预载对它们是纯开销。万一将来有房间目标漏进这类窗口，
-    // 它们仍以 plan 项身份随尾事务落 durable pending，由空闲轮收敛，不会丢。
-    let room_semantics = staged_window_has_room_semantics(&cand.db_type);
-    let preload_started = std::time::Instant::now();
-    let mut room_map = if room_semantics {
-        match crate::fast_model::room_model::load_room_panel_map(&mgr.db_option).await {
-            Ok(rooms) => Some(rooms),
-            Err(error) => {
-                warnings.push(format!(
-                    "读取提交前房间面板映射失败，本窗口房间任务将保留 pending: {error:#}"
-                ));
-                None
-            }
-        }
-    } else {
-        println!(
-            "房间预载 dbnum={} 跳过（db_type={}，本窗口没有房间语义）",
-            job.dbnum, cand.db_type
-        );
-        None
-    };
-    let mut room_preload_failed = false;
-    if let Some(rooms) = &room_map {
-        let load_ms = preload_started.elapsed().as_millis();
-        match window
-            .scope(crate::data_interface::staging::preload::preload_room_working_set(rooms))
-            .await
-        {
-            Ok(rows) => println!(
-                "房间预载 dbnum={} 在册房间={} 面板={} 工作集={rows} 行：映射加载={load_ms}ms 预载={}ms",
-                job.dbnum,
-                rooms.rooms.len(),
-                rooms.all_panels.len(),
-                preload_started
-                    .elapsed()
-                    .as_millis()
-                    .saturating_sub(load_ms)
-            ),
-            Err(error) => {
-                room_preload_failed = true;
-                warnings.push(format!(
-                    "房间工作集预载失败，本窗口房间任务将保留 pending: {error:#}"
-                ));
-            }
-        }
-    }
-    if room_preload_failed {
-        room_map = None;
-    }
+    // 房间拓扑、关系和几何不再复制进 kv-mem。窗口只生成数据、模型和 durable
+    // room pending；提交 RocksDB、收敛空间树并释放窗口后再按本批 scope 计算房间。
     let setup_ms = window_started.elapsed().as_millis();
 
     let body_started = std::time::Instant::now();
@@ -701,8 +645,7 @@ async fn execute_frozen_batch(
     // staged finalize plan has already settled successful in-memory model work,
     // so replacing the attempt with it would lose those generators after a
     // crash. Extend the original plan with only the newly discovered AABB room
-    // targets, then persist it before staged room writes or the first journal
-    // replay can happen.
+    // targets, then persist it before the first journal replay can happen.
     let room_checkpoint = async {
         let mut attempt = model_update_pending::load_attempt(job.dbnum)
             .await?
@@ -742,61 +685,10 @@ async fn execute_frozen_batch(
         drop_window_and_sweep(window, "废弃暂存窗口失败", &mut result.warnings).await;
         return result;
     }
-    let planned_room_targets = finalize
-        .plan
-        .work_items
-        .iter()
-        .filter(|item| item.action.is_room_recalc())
-        .count();
-    let room_started = std::time::Instant::now();
-    // 无房间语义的窗口不跑房间轮也不告警——空报告让后面的 aabb 目标兜底入队
-    // 路径（succeeded_aabb_targets 为空 → 全部保留）保持原语义。
-    let room_result = if !room_semantics {
-        Ok(model_update_pending::StagedRoomReport::default())
-    } else {
-        println!(
-            "窗口内房间计算开始 dbnum={} 计划触发={planned_room_targets} 包围盒变化={}",
-            job.dbnum,
-            spatial.room_changes.len()
-        );
-        match &room_map {
-            Some(rooms) => {
-                window
-                    .scope(model_update_pending::run_staged_room_work(
-                        &mgr.db_option,
-                        rooms,
-                        &finalize.plan.work_items,
-                        &spatial.room_changes,
-                    ))
-                    .await
-            }
-            None => Err(anyhow::anyhow!("提交前房间面板映射缺失")),
-        }
-    };
-    let room_ms = room_started.elapsed().as_millis();
-    match room_result {
-        Ok(report) => {
-            if room_semantics {
-                println!(
-                    "窗口内房间计算完成 dbnum={} 收敛={} 其中包围盒目标={} 失败={}（耗时 {room_ms}ms）",
-                    job.dbnum,
-                    report.succeeded_plan_items.len(),
-                    report.succeeded_aabb_targets.len(),
-                    report.failures.len()
-                );
-                for failure in &report.failures {
-                    println!("  房间目标未收敛，保留 pending: {failure}");
-                }
-            }
-            window
-                .settle_staged_plan_items(&report.succeeded_plan_items)
-                .await;
-            result.warnings.extend(report.failures.iter().cloned());
-        }
-        Err(error) => result.warnings.push(format!(
-            "暂存房间轮初始化失败，全部房间目标保留 pending: {error:#}"
-        )),
-    }
+    // Capture the exact durable room rows before the window is consumed. They
+    // are committed with the watermark, then drained from RocksDB only after
+    // spatial reconciliation and kv-mem teardown.
+    let room_scope = model_update_pending::RoomDrainScope::from_plan(&finalize.plan);
 
     let gauge = window.gauge().snapshot();
     println!(
@@ -893,10 +785,64 @@ async fn execute_frozen_batch(
         );
     }
 
-    if !drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await
-    {
+    let window_dropped =
+        drop_window_and_sweep(window, "清理已提交暂存窗口失败", &mut result.warnings).await;
+    if !window_dropped {
         postcommit_failed = true;
     }
+
+    let room_started = std::time::Instant::now();
+    let room_ms = if !window_dropped {
+        let room_ms = room_started.elapsed().as_millis();
+        println!(
+            "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded=0 \
+             room_done=0 room_failed=1 room_duration_ms={room_ms}",
+            job.dbnum,
+            room_scope.len()
+        );
+        result.warnings.push(
+            "已提交暂存窗口未成功释放，跳过本任务房间计算（全部目标保留 durable pending）"
+                .to_string(),
+        );
+        room_ms
+    } else {
+        let room_result = if job.db_type.eq_ignore_ascii_case("DESI") {
+            model_update_pending::drain_rooms_scoped(&mgr.db_option, &room_scope).await
+        } else {
+            Ok(model_update_pending::DrainReport::default())
+        };
+        let room_ms = room_started.elapsed().as_millis();
+        match room_result {
+            Ok(report) => {
+                let failed = report.failures.len();
+                println!(
+                    "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded={} \
+                     room_done={} room_failed={} room_duration_ms={room_ms}",
+                    job.dbnum, report.requested, report.loaded, report.done, failed
+                );
+                if failed > 0 {
+                    result.warnings.push(format!(
+                        "写回后本任务房间目标未全部收敛（保留 durable pending）: {}",
+                        report.failures.join("; ")
+                    ));
+                    postcommit_failed = true;
+                }
+            }
+            Err(error) => {
+                println!(
+                    "写回后房间计算 dbnum={} room_scope_requested={} room_scope_loaded=0 \
+                     room_done=0 room_failed=1 room_duration_ms={room_ms}",
+                    job.dbnum,
+                    room_scope.len()
+                );
+                result.warnings.push(format!(
+                    "写回后本任务房间计算启动失败（全部目标保留 durable pending）: {error:#}"
+                ));
+                postcommit_failed = true;
+            }
+        }
+        room_ms
+    };
 
     // 窗口内跳过的持久层副作用与非 regen 工作，写回后再消费。
     match SideEffectCompensator::drain(mgr).await {
@@ -1208,13 +1154,68 @@ async fn execute_frozen_batch_body(
                     // 节点 + RegenRoot 根 + 本批新单元根；删除目标已从文件消失，其
                     // 拓扑走上面的持久层拷贝。解析（只读文件）在持锁之前，装载在
                     // 持锁与产物拷贝之后。
-                    let ancestor_seeds =
+                    let mut ancestor_seeds =
                         crate::data_interface::staging::ancestor_preload::ancestor_seed_refnos(
                             &plan.work_items,
                             &new_units,
                             &transform_targets,
                             mutation_preload.transform_model_refnos(),
                         );
+                    ancestor_seeds.extend(
+                        plan.design_refnos
+                            .iter()
+                            .map(|refno| aios_core::RefnoEnum::from(refno.as_str()))
+                            .filter(|refno| refno.is_valid())
+                            .map(|refno| refno.refno()),
+                    );
+                    // Regen reads every primitive below the delivery-unit root.  A modified
+                    // primitive's staged ATT_* row contains only the fields changed in this
+                    // window, so seeding just the root leaves descendants without TYPE and
+                    // other unchanged geometry attributes.  Resolve the live staged subtree
+                    // as file-backed ancestor seeds as well; apply_ancestor_preload MERGEs the
+                    // complete file row into those partial rows without rolling back changes.
+                    let regen_roots = plan_targets(
+                        crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
+                    );
+                    ancestor_seeds.extend(
+                        crate::data_interface::staging::preload::persistent_generation_subtree(
+                            &regen_roots,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("窗口前生成根子树解析失败: {error:#}")
+                        })?
+                        .into_iter()
+                        .map(|element| element.refno()),
+                    );
+                    ancestor_seeds.extend(
+                        crate::data_interface::staging::preload::active_generation_subtree_by_owner(
+                            &regen_roots,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("窗口内 owner 字段生成根子树解析失败: {error:#}")
+                        })?
+                        .into_iter()
+                        .map(|element| element.refno()),
+                    );
+                    for root in regen_roots {
+                        ancestor_seeds.push(root.refno());
+                        ancestor_seeds.extend(
+                            aios_core::query_deep_children_refnos(root)
+                                .await
+                                .map_err(|error| {
+                                    format!(
+                                        "窗口内生成根 {} 子树解析失败: {error:#}",
+                                        root.to_pdms_str()
+                                    )
+                                })?
+                                .into_iter()
+                                .map(|child| child.refno()),
+                        );
+                    }
+                    ancestor_seeds.sort_unstable();
+                    ancestor_seeds.dedup();
                     let ancestor_closure = if ancestor_seeds.is_empty() {
                         None
                     } else {
@@ -2557,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_room_preload_disables_the_staged_room_round() {
+    fn committed_room_scope_runs_after_spatial_reconcile_and_window_drop() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("async fn execute_frozen_batch(")
@@ -2566,18 +2567,34 @@ mod tests {
             .split_once("async fn drop_window_and_sweep(")
             .expect("staged batch body boundary")
             .0;
-        let failed = body
-            .find("room_preload_failed = true")
-            .expect("preload failure marker");
-        let fail_closed = body[failed..]
-            .find("room_map = None")
-            .expect("fail-closed room map");
-        let room_round = body[failed..]
-            .find("run_staged_room_work(")
-            .expect("staged room round");
         assert!(
-            fail_closed < room_round,
-            "preload failure must disable room work"
+            !body.contains("preload_room_working_set") && !body.contains("run_staged_room_work("),
+            "房间数据与计算都必须退出 kv-mem 窗口: {body}"
+        );
+
+        let commit_at = body
+            .find("commit_registered_to")
+            .expect("先把窗口写回 RocksDB");
+        let spatial_at = body[commit_at..]
+            .find("reconcile_spatial_pending")
+            .map(|at| commit_at + at)
+            .expect("面板分支前必须收敛空间树");
+        let drop_at = body[spatial_at..]
+            .find("drop_window_and_sweep")
+            .map(|at| spatial_at + at)
+            .expect("房间计算前必须释放 kv-mem 窗口");
+        let room_at = body[drop_at..]
+            .find("drain_rooms_scoped")
+            .map(|at| drop_at + at)
+            .expect("提交后必须精确消费本任务房间目标");
+        let drop_gate = &body[drop_at..room_at];
+        assert!(
+            drop_gate.contains("if !window_dropped") && drop_gate.contains("} else {"),
+            "DROP 失败必须跳过立即房间轮并保留 pending: {drop_gate}"
+        );
+        assert!(
+            commit_at < spatial_at && spatial_at < drop_at && drop_at < room_at,
+            "顺序必须是 commit → spatial → drop kv-mem → scoped room: {body}"
         );
     }
 
@@ -2709,20 +2726,6 @@ mod tests {
             validate_attempt_matches_staged_window(&wrong, &job, 40, 42).is_err(),
             "a different file identity must not be overwritten"
         );
-    }
-
-    /// 房间语义只属于 DESI 窗口：SYST/CATA/DICT 批次不该付
-    /// 面板映射全表扫描与 `room_relate` 整表预载（2026-08-06 审核 L2）。
-    #[test]
-    fn only_design_windows_pay_for_room_preload() {
-        assert!(staged_window_has_room_semantics("DESI"));
-        assert!(
-            staged_window_has_room_semantics("desi"),
-            "类型比较大小写不敏感"
-        );
-        assert!(!staged_window_has_room_semantics("SYST"));
-        assert!(!staged_window_has_room_semantics("CATA"));
-        assert!(!staged_window_has_room_semantics("DICT"));
     }
 
     /// 阶段日志要能一眼看出这批在做什么，而不是只报一个总数。

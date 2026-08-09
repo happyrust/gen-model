@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
 use serde::{Deserialize, Serialize};
+use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
@@ -72,6 +73,58 @@ pub struct PendingModelWork {
     /// 房间面板缺几何时，本生成根必须补出的 PANE。普通增量生成根为空。
     #[serde(default)]
     pub required_panels: Vec<String>,
+}
+
+/// One durable room row addressed by the same `(action, target)` identity as
+/// [`record_id_of`].  A post-commit drain carries these keys across the RocksDB
+/// boundary instead of discovering work by scanning the global pending table.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RoomWorkKey {
+    pub action: ModelWorkAction,
+    pub target_refno: String,
+}
+
+/// Exact room work published by one committed increment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RoomDrainScope {
+    keys: BTreeSet<RoomWorkKey>,
+}
+
+impl RoomDrainScope {
+    pub(crate) fn from_plan(plan: &ModelUpdatePlan) -> Self {
+        Self {
+            keys: plan
+                .work_items
+                .iter()
+                .filter(|item| item.action.is_room_recalc())
+                .map(|item| RoomWorkKey {
+                    action: item.action,
+                    target_refno: item.target_refno.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn keys_for(&self, action: ModelWorkAction) -> Vec<RoomWorkKey> {
+        self.keys
+            .iter()
+            .filter(|key| key.action == action)
+            .cloned()
+            .collect()
+    }
+
+    fn pages_for(&self, action: ModelWorkAction, page_size: usize) -> Vec<Vec<RoomWorkKey>> {
+        let keys = self.keys_for(action);
+        keys.chunks(page_size.max(1)).map(<[_]>::to_vec).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,9 +805,12 @@ async fn delete_work(item: &PendingModelWork) -> anyhow::Result<()> {
         anyhow::bail!("injected queue cleanup failure");
     }
 
+    delete_work_on(&SUL_DB, item).await
+}
+
+async fn delete_work_on(db: &Surreal<Any>, item: &PendingModelWork) -> anyhow::Result<()> {
     let target = &item.target_refno;
-    SUL_DB
-        .query(render_delete_work(item))
+    db.query(render_delete_work(item))
         .await
         .map_err(|error| anyhow::anyhow!("delete completed model work {target} failed: {error}"))?
         .check()
@@ -1243,121 +1299,6 @@ async fn run_room_task(
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct StagedRoomReport {
-    pub succeeded_plan_items: std::collections::BTreeSet<(ModelWorkAction, String)>,
-    pub succeeded_aabb_targets: HashSet<RefnoEnum>,
-    pub failures: Vec<String>,
-}
-
-/// Run room work against the staged topology and geometry. Panel candidates still come from
-/// the pre-window global tree, minus what this window already deleted (`staged_spatial_removals`);
-/// elements that merely moved are corrected afterward by their own element tasks.
-pub(crate) async fn run_staged_room_work(
-    db_option: &aios_core::options::DbOption,
-    preloaded_rooms: &room_model::RoomPanelMap,
-    plan_items: &[ModelWorkItem],
-    aabb_changes: &HashMap<RefnoEnum, String>,
-) -> anyhow::Result<StagedRoomReport> {
-    let mut targets =
-        std::collections::BTreeMap::<(ModelWorkAction, String), (RefnoEnum, bool)>::new();
-    for item in plan_items
-        .iter()
-        .filter(|item| item.action.is_room_recalc())
-    {
-        let refno = RefU64::from_str(&item.target_refno)
-            .map(RefnoEnum::from)
-            .map_err(|_| anyhow::anyhow!("invalid staged room refno {}", item.target_refno))?;
-        targets.insert((item.action, item.target_refno.clone()), (refno, false));
-    }
-    for (&refno, noun) in aabb_changes {
-        let action = if noun == "PANE" {
-            ModelWorkAction::RoomRecalcPanel
-        } else {
-            ModelWorkAction::RoomRecalcElement
-        };
-        targets
-            .entry((action, refno.to_pdms_str()))
-            .and_modify(|entry| entry.1 = true)
-            .or_insert((refno, true));
-    }
-    if targets.is_empty() {
-        return Ok(StagedRoomReport::default());
-    }
-
-    let mut rooms = room_model::load_room_panel_map_from_pe(db_option).await?;
-    rooms
-        .all_panels
-        .extend(preloaded_rooms.all_panels.iter().copied());
-    let panels = room_model::load_panel_index(db_option, &rooms).await?;
-    let elements = targets
-        .iter()
-        .filter(|((action, _), _)| *action == ModelWorkAction::RoomRecalcElement)
-        .map(|(_, (refno, _))| *refno)
-        .collect::<Vec<_>>();
-    let history = room_model::ElementRoomHistory::load(&elements).await?;
-    let mut report = StagedRoomReport::default();
-
-    // 面板先、元素后：两条分支共用 `{panel}_{element}` 边 id 且都是先清后写，所以整间
-    // 分支按窗口内**尚未摘树**的旧包围盒收编的移动构件，会被随后的元素任务改正。
-    //
-    // 这条收敛论证的前提是本轮**逐个跑、一个不吸收**。`drain_rooms` 那套同轮吸收一旦
-    // 搬进来，被旧位置错误收编的移动构件恰好满足它的封闭性判据而跳过元素任务，那条按
-    // 旧位置写的边就永久留在库里——整间分支的排除集只兜得住本窗口的删除，兜不住移动。
-    let mut targets = targets.into_iter().collect::<Vec<_>>();
-    targets.sort_by_key(|((action, _), _)| *action != ModelWorkAction::RoomRecalcPanel);
-    let mut element_index_checked = false;
-    for ((action, target), (refno, from_aabb)) in targets {
-        if action == ModelWorkAction::RoomRecalcElement && !element_index_checked {
-            element_index_checked = true;
-            if let Err(error) = panels.ensure_complete() {
-                report.failures.push(format!(
-                    "暂存元素房间阶段因面板索引不完整而整体保留 pending: {error:#}"
-                ));
-                // Targets are sorted panel-first, so everything that follows is
-                // an element. Do not spend one failed attempt per target.
-                break;
-            }
-        }
-        // H-1（2026-08-06 审核）：整间目标在暂存映射与预载映射里都查不到时，分不清
-        // 「真的不在册」与「工作集预载不完整」——改名成为合规房间的面板正是后者：
-        // 面板的 pe_owner 边不随改名重写，暂存里这间房解析出来是 0 块面板。走清边
-        // 成功会静默丢归属且队列不留痕，宁可 fail-closed 保留 pending，提交后的
-        // durable 房间轮用持久层完整映射收敛。真正的注销（改名失规、面板挪出）在
-        // 预载映射里有正面证据（它提交前在册），不会走到这里。唯一放行的例外：纯
-        // AABB 触发且现存归属为空——清边是无害空操作，拦下反而让每块非房间 PANE
-        // 的几何变更都积一条 pending。
-        if action == ModelWorkAction::RoomRecalcPanel
-            && rooms.room_num_of(refno).is_none()
-            && preloaded_rooms.room_num_of(refno).is_none()
-        {
-            let harmless_noop = from_aabb
-                && room_model::existing_members_of_panel(refno)
-                    .await
-                    .is_ok_and(|members| members.is_empty());
-            if !harmless_noop {
-                report.failures.push(format!(
-                    "房间目标 {target} 在暂存与预载映射中都不可见（房间工作集预载可能不完整），\
-                     fail-closed 保留 pending"
-                ));
-                continue;
-            }
-        }
-        match run_room_task(db_option, &rooms, &panels, &history, action, refno).await {
-            Ok(_) => {
-                report.succeeded_plan_items.insert((action, target));
-                if from_aabb {
-                    report.succeeded_aabb_targets.insert(refno);
-                }
-            }
-            Err(error) => report.failures.push(format!(
-                "房间目标 {target} 暂存计算失败，已保留 pending: {error:#}"
-            )),
-        }
-    }
-    Ok(report)
-}
-
 /// 一轮 drain 的产出：完成数、逐条失败原因，以及失败牵涉到的 `dbnum`。
 ///
 /// 失败的 `dbnum` 要单独带出来，是因为非 regen 积压是**全局**的：批次执行前那次
@@ -1366,6 +1307,10 @@ pub(crate) async fn run_staged_room_work(
 /// 自己的模型生成——一条坏行于是停掉全线。
 #[derive(Debug, Default)]
 pub struct DrainReport {
+    /// Number of durable rows requested by the caller's selection.
+    pub requested: usize,
+    /// Number of live rows actually loaded from the durable queue.
+    pub loaded: usize,
     pub done: usize,
     pub failures: Vec<String>,
     pub failed_dbnums: BTreeSet<u32>,
@@ -1459,6 +1404,19 @@ fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
         "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} \
          ORDER BY updated_at ASC{limit};"
+    )
+}
+
+fn render_scoped_room_select(keys: &[RoomWorkKey]) -> String {
+    let ids = keys
+        .iter()
+        .map(|key| record_id_of(key.action, &key.target_refno))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT * FROM [{ids}] WHERE record::exists(id) \
+         AND status IN ['pending', 'failed'] \
+         AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC;"
     )
 }
 
@@ -1735,23 +1693,34 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
     Ok(counts)
 }
 
-/// 第三阶段：房间归属重算。
-///
-/// 不复用 [`drain_where`] 的原因有两个。其一，房间映射要按轮加载一次而不是按任务；
-/// 其二，整间分支必须先于元素分支跑完，才能把它已经写过的构件从元素任务里摘掉
-/// （ADR-010 §8 的冲突规则）——这两条 `drain_where` 的通用循环都表达不了。
-///
-/// 队列行级别的去重不需要在内存里再做一遍：房间任务的 record id 已经是
-/// `{action}_{target}`（不带 dbnum），同一个目标天然只占一行。
-///
-/// 取 `DbOption` 而不是 `AiosDBManager`：这一阶段只用得到配置，收窄参数也让合成夹具
-/// 能用它自己的房间关键字驱动整个阶段——`init_form_config()` 读的是项目配置，夹具那间
-/// `/ZZ-R-K100` 在默认关键字下根本匹配不到。
+/// Global idle-room drain. It keeps the historical backlog behavior while the
+/// post-commit worker uses [`drain_rooms_scoped`] to address only its own rows.
 pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<DrainReport> {
+    drain_rooms_selected(db_option, None).await
+}
+
+/// Drain exactly the durable room rows published by one committed increment.
+/// An empty scope is deliberately connection-free, so batches without room
+/// changes never load the room map, panel geometry, or the pending table.
+pub(crate) async fn drain_rooms_scoped(
+    db_option: &aios_core::options::DbOption,
+    scope: &RoomDrainScope,
+) -> anyhow::Result<DrainReport> {
+    if scope.is_empty() {
+        return Ok(DrainReport::default());
+    }
+    drain_rooms_selected(db_option, Some(scope)).await
+}
+
+async fn drain_rooms_selected(
+    db_option: &aios_core::options::DbOption,
+    scope: Option<&RoomDrainScope>,
+) -> anyhow::Result<DrainReport> {
+    let requested = scope.map_or(0, RoomDrainScope::len);
     if room_coverage_barrier_active().await? {
-        // 屏障只禁止用不完整索引改写房间边，不能禁止覆盖探针本身。原修复波次执行期间
-        // 可能新增 PANE 或再次丢失几何；这里仍做只读探测并幂等补齐修复根，防止最后一条
-        // 旧修复任务收口后再也没有工作能够解除屏障。
+        // The probe stays global because it decides whether any destructive room
+        // rewrite is safe. Scoped callers receive a failure summary while their
+        // exact queue rows remain durable for the idle recovery path.
         let rooms = room_model::load_room_panel_map(db_option).await?;
         let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
         if panel_index.ensure_complete().is_ok() {
@@ -1763,34 +1732,57 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
                 "[房间增量] 覆盖屏障刷新：{} 块缺失面板 / {} 个 durable 修复根",
                 repair.panels, repair.roots
             );
-            return Ok(DrainReport::default());
+            let mut report = DrainReport {
+                requested,
+                ..Default::default()
+            };
+            if scope.is_some() {
+                report.record(
+                    0,
+                    format!(
+                        "房间覆盖屏障生效，本任务 {requested} 个目标保留 pending，等待缺失面板模型补偿"
+                    ),
+                );
+            }
+            return Ok(report);
         }
     }
-    // 两侧分开取，整间在前、元素在后，且**只有元素侧分页**。
-    //
-    // 整间任务的行 id 是 `room_recalc_panel_{target}`，一块 PANE 最多占一行，所以这
-    // 一侧的上界就是项目里的面板数（本项目 147 块）——它不会长成需要分页的积压。
-    // 元素侧才是无界的那一头：每一个动过的构件一行。
-    //
-    // 分页只会让吸收更保守，不会让它出错。吸收的判据是「该构件的旧边面板 ∪ 当前候选
-    // 面板 ⊆ 本轮已重算面板」，落在下一页的整间任务不在 `claimed_panels` 里，于是那个
-    // 构件照跑元素分支——多一次网格判定，不会漏删陈旧边。跨页的先后同理：两条分支
-    // 共用判定、共用边 id、都是先清后写，在同一份数据上收敛到同一个边集，先后颠倒
-    // 只是多算一遍。
-    let panels: Vec<PendingModelWork> = load_room_jobs(ROOM_PANEL_ACTION_FILTER, None).await?;
-    let elements: Vec<PendingModelWork> =
-        load_room_jobs(ROOM_ELEMENT_ACTION_FILTER, Some(ROOM_DRAIN_PAGE_SIZE)).await?;
-    if panels.is_empty() && elements.is_empty() {
-        return Ok(DrainReport::default());
+
+    // Panels are always complete-before-elements. The scoped path selects exact
+    // record ids; element records themselves are not accumulated across pages.
+    let panels = match scope {
+        Some(scope) => {
+            load_scoped_room_jobs(&scope.keys_for(ModelWorkAction::RoomRecalcPanel)).await?
+        }
+        None => load_room_jobs(ROOM_PANEL_ACTION_FILTER, None).await?,
+    };
+    let global_elements = if scope.is_none() {
+        load_room_jobs(ROOM_ELEMENT_ACTION_FILTER, Some(ROOM_DRAIN_PAGE_SIZE)).await?
+    } else {
+        Vec::new()
+    };
+    let loaded = panels.len() + global_elements.len();
+    let requested = scope.map_or(loaded, RoomDrainScope::len);
+    let scoped_element_keys = scope
+        .map(|scope| scope.keys_for(ModelWorkAction::RoomRecalcElement))
+        .unwrap_or_default();
+    if loaded == 0 && scoped_element_keys.is_empty() {
+        return Ok(DrainReport {
+            requested,
+            loaded,
+            ..Default::default()
+        });
     }
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
-    // 在册面板的几何一轮查一次、整轮复用（见 [`room_model::PanelIndex`]）：元素分支的
-    // 候选面板从这里选，不再依赖空间树里有没有 PANE 条目。
+    // Panel geometry is loaded once for the complete scoped drain and reused by
+    // every 256-element history page.
     let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
-    let mut report = DrainReport::default();
-    // 覆盖率如实报，而不是只在「一块都没有」时才出声。元素侧的破坏性替换会在面板
-    // 阶段结束后统一 fail-closed；这里先给出可定位的缺失样本。
+    let mut report = DrainReport {
+        requested,
+        loaded,
+        ..Default::default()
+    };
     let missing = panel_index.missing_panels();
     if !missing.is_empty() {
         println!(
@@ -1824,34 +1816,11 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         return Ok(report);
     }
 
-    // 整页元素的现存归属一次查完（见 [`room_model::ElementRoomHistory`]）：归属变化
-    // 日志与同轮吸收的封闭性检查读的是同一份边。
-    //
-    // 加载失败时**一个都不吸收**：空快照会让「旧边 ⊆ 本轮已重算面板」凭空成立，
-    // 把本该照跑的元素任务错误吸收掉，而错吸收留下的陈旧边没有人会再来清。
-    let element_refnos: Vec<RefnoEnum> = elements
-        .iter()
-        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
-        .map(RefnoEnum::from)
-        .collect();
-    let history = match room_model::ElementRoomHistory::load(&element_refnos).await {
-        Ok(history) => Some(history),
-        Err(error) => {
-            println!(
-                "构件现存归属快照加载失败，本轮不吸收任何元素任务（归属变化日志会把旧房间\
-                 显示成「无房间」）: {error:#}"
-            );
-            None
-        }
-    };
     let empty_history = room_model::ElementRoomHistory::default();
-    let history_ref = history.as_ref().unwrap_or(&empty_history);
-
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
-
     for job in &panels {
-        match run_room_job(db_option, &rooms, &panel_index, history_ref, job).await {
+        match run_room_job(db_option, &rooms, &panel_index, &empty_history, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -1866,53 +1835,100 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
         }
     }
 
-    // A registered panel without geometry makes every negative element verdict
-    // unknowable: the element may have entered that missing panel. Keep the
-    // whole element page untouched instead of spending one retry attempt per
-    // row or replacing its old edges with an incomplete result. Panel work
-    // above is independent and remains valid partial progress.
-    if !elements.is_empty()
+    let element_targets = if scope.is_some() {
+        scoped_element_keys.len()
+    } else {
+        global_elements.len()
+    };
+    if element_targets > 0
         && let Err(error) = panel_index.ensure_complete()
     {
         report.record(
             0,
             format!(
                 "元素房间阶段因面板索引不完整而保留 {} 个 pending: {error:#}",
-                elements.len()
+                element_targets
             ),
         );
         return Ok(report);
     }
 
-    // 吸收的封闭性输入（ADR-010 §8，2026-07-28 修订）只为真正的候选加载一次；
-    // 加载失败不放大成整轮失败，但**一个都不吸收**——封闭性未知时把元素任务照跑
-    // 一遍只是多花一次网格判定，错吸收却会把陈旧边永久留在库里。
+    if let Some(scope) = scope {
+        for page in scope.pages_for(ModelWorkAction::RoomRecalcElement, ROOM_DRAIN_PAGE_SIZE) {
+            let elements = load_scoped_room_jobs(&page).await?;
+            report.loaded += elements.len();
+            drain_room_element_page(
+                db_option,
+                &rooms,
+                &panel_index,
+                &claimed_members,
+                &claimed_panels,
+                &elements,
+                &mut report,
+            )
+            .await;
+        }
+    } else if !global_elements.is_empty() {
+        drain_room_element_page(
+            db_option,
+            &rooms,
+            &panel_index,
+            &claimed_members,
+            &claimed_panels,
+            &global_elements,
+            &mut report,
+        )
+        .await;
+    }
+    Ok(report)
+}
+
+async fn drain_room_element_page(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    panel_index: &room_model::PanelIndex,
+    claimed_members: &HashSet<RefnoEnum>,
+    claimed_panels: &HashSet<RefnoEnum>,
+    elements: &[PendingModelWork],
+    report: &mut DrainReport,
+) {
+    let element_refnos: Vec<RefnoEnum> = elements
+        .iter()
+        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
+        .map(RefnoEnum::from)
+        .collect();
+    let history = match room_model::ElementRoomHistory::load(&element_refnos).await {
+        Ok(history) => Some(history),
+        Err(error) => {
+            println!(
+                "构件现存归属快照加载失败，本页不吸收任何元素任务（归属变化日志会把旧房间\
+                 显示成「无房间」）: {error:#}"
+            );
+            None
+        }
+    };
+    let empty_history = room_model::ElementRoomHistory::default();
+    let history_ref = history.as_ref().unwrap_or(&empty_history);
     let absorb_candidates: Vec<RefnoEnum> = element_refnos
         .iter()
         .copied()
         .filter(|refno| claimed_members.contains(refno))
         .collect();
     let closure_inputs = match history.as_ref() {
-        // 旧边快照都没拿到，封闭性无从谈起。
         None => None,
         Some(_) if absorb_candidates.is_empty() => None,
         Some(history) => {
-            match load_absorption_closure_inputs(&panel_index, history, &absorb_candidates).await {
+            match load_absorption_closure_inputs(panel_index, history, &absorb_candidates).await {
                 Ok(inputs) => Some(inputs),
                 Err(error) => {
-                    println!("吸收封闭性输入加载失败，本轮不吸收任何元素任务: {error:#}");
+                    println!("吸收封闭性输入加载失败，本页不吸收任何元素任务: {error:#}");
                     None
                 }
             }
         }
     };
 
-    for job in &elements {
-        // 整间分支刚把它写进某块面板的成员里，且它的旧归属面板与当前候选面板**全部**
-        // 落在本轮已重算面板集合之内时，元素任务才是重复劳动。封闭性不成立就照跑：
-        // 只有元素分支那条「删全部入边」能清掉本轮没重算的面板指向它的陈旧边、
-        // 写上它新进入的本轮外面板的边——构件与新面板同轮搬迁而旧面板不在本轮时，
-        // 无条件吸收会把旧面板的边永久留在库里。
+    for job in elements {
         let absorbed = RefU64::from_str(&job.target_refno)
             .ok()
             .map(RefnoEnum::from)
@@ -1920,23 +1936,21 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
                 claimed_members.contains(&refno)
                     && closure_inputs
                         .as_ref()
-                        .is_some_and(|inputs| absorption_verdict(inputs, refno, &claimed_panels))
+                        .is_some_and(|inputs| absorption_verdict(inputs, refno, claimed_panels))
             });
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, &rooms, &panel_index, history_ref, job).await {
+            match run_room_job(db_option, rooms, panel_index, history_ref, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
         };
         match outcome {
             Ok(()) => report.done += 1,
-            Err(error) => record_failure(job, &error, &mut report).await,
+            Err(error) => record_failure(job, &error, report).await,
         }
     }
-
-    Ok(report)
 }
 
 async fn load_room_jobs(
@@ -1951,6 +1965,33 @@ async fn load_room_jobs(
     response
         .take(0)
         .map_err(|error| anyhow::anyhow!("decode pending room work failed: {error}"))
+}
+
+async fn load_scoped_room_jobs(keys: &[RoomWorkKey]) -> anyhow::Result<Vec<PendingModelWork>> {
+    load_scoped_room_jobs_on(&SUL_DB, keys).await
+}
+
+async fn load_scoped_room_jobs_on(
+    db: &Surreal<Any>,
+    keys: &[RoomWorkKey],
+) -> anyhow::Result<Vec<PendingModelWork>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut jobs = Vec::new();
+    for chunk in keys.chunks(QUERY_CHUNK) {
+        let mut response = db
+            .query(render_scoped_room_select(chunk))
+            .await?
+            .check()
+            .map_err(|error| anyhow::anyhow!("load scoped room work statement failed: {error}"))?;
+        let mut page: Vec<PendingModelWork> = response
+            .take(0)
+            .map_err(|error| anyhow::anyhow!("decode scoped room work failed: {error}"))?;
+        jobs.append(&mut page);
+    }
+    jobs.sort_by(|left, right| left.target_refno.cmp(&right.target_refno));
+    Ok(jobs)
 }
 
 /// 同轮吸收的封闭性输入：候选元素的现存归属边与当前空间树候选面板。
@@ -2259,225 +2300,6 @@ mod tests {
         assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(false));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn staged_element_room_work_clears_edges_and_joins_the_journal() {
-        use crate::data_interface::staging::ResourceThresholds;
-        use crate::data_interface::staging::lifecycle::create_window_on;
-        use surrealdb::engine::any::connect;
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
-            .await
-            .expect("window");
-        window
-            .staging_db()
-            .query(
-                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';
-                 RELATE pe:4000000001_1->room_panel_relate:old->pe:4000000001_10 SET room_num='R100';",
-            )
-            .await
-            .expect("fixture")
-            .check()
-            .expect("fixture statement");
-
-        let option = aios_core::options::DbOption::default();
-        let item = ModelWorkItem {
-            dbnum: 7988,
-            db_type: "DESI".into(),
-            source_end_sesno: 2,
-            action: ModelWorkAction::RoomRecalcElement,
-            target_refno: "4000000001/20".into(),
-            noun: "EQUI".into(),
-        };
-        let report = window
-            .scope(run_staged_room_work(
-                &option,
-                &room_model::RoomPanelMap::default(),
-                &[item],
-                &HashMap::new(),
-            ))
-            .await
-            .expect("room work");
-
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(
-            report
-                .succeeded_plan_items
-                .contains(&(ModelWorkAction::RoomRecalcElement, "4000000001/20".into()))
-        );
-        assert_eq!(window.journal().await.len(), 1);
-        let mut response = window
-            .staging_db()
-            .query("SELECT VALUE id FROM room_relate")
-            .await
-            .expect("inspect");
-        assert!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("edges")
-                .is_empty()
-        );
-        window.drop_database().await.expect("cleanup");
-    }
-
-    /// 面板提交前在册（预载映射有正面证据）、暂存 PE 里已经解析不出——这是真正的
-    /// 注销（房间改名失规 / 面板挪出），清边成功是正确语义。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn staged_removed_panel_clears_its_old_relations() {
-        use crate::data_interface::staging::ResourceThresholds;
-        use crate::data_interface::staging::lifecycle::create_window_on;
-        use surrealdb::engine::any::connect;
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
-            .await
-            .expect("window");
-        window
-            .staging_db()
-            .query(
-                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
-            )
-            .await
-            .expect("fixture")
-            .check()
-            .expect("fixture statement");
-        let option = aios_core::options::DbOption::default();
-        let item = ModelWorkItem {
-            dbnum: 7988,
-            db_type: "DESI".into(),
-            source_end_sesno: 2,
-            action: ModelWorkAction::RoomRecalcPanel,
-            target_refno: "4000000001/10".into(),
-            noun: "PANE".into(),
-        };
-        let panel = RefnoEnum::from("4000000001/10".parse::<RefU64>().unwrap());
-        let preloaded = room_model::RoomPanelMap {
-            rooms: vec![room_model::RoomPanels {
-                room: RefnoEnum::from("4000000001/1".parse::<RefU64>().unwrap()),
-                room_num: "R100".into(),
-                panels: vec![panel],
-            }],
-            all_panels: std::collections::HashSet::from([panel]),
-        };
-
-        let report = window
-            .scope(run_staged_room_work(
-                &option,
-                &preloaded,
-                &[item],
-                &HashMap::new(),
-            ))
-            .await
-            .expect("removed panel work");
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(report.succeeded_plan_items.len(), 1);
-        let mut response = window
-            .staging_db()
-            .query("SELECT VALUE id FROM room_relate")
-            .await
-            .expect("inspect");
-        assert!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("edges")
-                .is_empty()
-        );
-        let mut response = window
-            .staging_db()
-            .query("SELECT VALUE id FROM room_panel_relate")
-            .await
-            .expect("inspect topology");
-        assert!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("topology edges")
-                .is_empty()
-        );
-        assert_eq!(
-            window.journal().await.len(),
-            1,
-            "面板成员边与房间拓扑边必须由同一事务 journal 原子收口"
-        );
-        window.drop_database().await.expect("cleanup");
-    }
-
-    /// H-1：整间目标在暂存映射与预载映射里都不可见时不许走清边成功——结构触发生的
-    /// 目标 fail-closed 保留 pending、存量边原封不动；纯 AABB 触发且现存归属为空的
-    /// 目标是无害空操作，放行且算成功。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn staged_blind_panel_is_fail_closed_instead_of_cleared() {
-        use crate::data_interface::staging::ResourceThresholds;
-        use crate::data_interface::staging::lifecycle::create_window_on;
-        use surrealdb::engine::any::connect;
-
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7988, 2, 2, ResourceThresholds::default())
-            .await
-            .expect("window");
-        // 面板 10：有存量归属边（改名成为合规房间前算过），双映射盲区 → 必须保留。
-        window
-            .staging_db()
-            .query(
-                "RELATE pe:4000000001_10->room_relate:old->pe:4000000001_20 SET room_num='R100';",
-            )
-            .await
-            .expect("fixture")
-            .check()
-            .expect("fixture statement");
-        let option = aios_core::options::DbOption::default();
-        let item = ModelWorkItem {
-            dbnum: 7988,
-            db_type: "DESI".into(),
-            source_end_sesno: 2,
-            action: ModelWorkAction::RoomRecalcPanel,
-            target_refno: "4000000001/10".into(),
-            noun: "PANE".into(),
-        };
-        // 面板 30：纯 AABB 触发、没有任何存量边 → 无害空操作，放行。
-        let aabb_changes = HashMap::from([(
-            RefnoEnum::from("4000000001/30".parse::<RefU64>().unwrap()),
-            "PANE".to_string(),
-        )]);
-
-        let report = window
-            .scope(run_staged_room_work(
-                &option,
-                &room_model::RoomPanelMap::default(),
-                &[item],
-                &aabb_changes,
-            ))
-            .await
-            .expect("blind panel work");
-
-        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
-        assert!(
-            report.failures[0].contains("fail-closed"),
-            "{:?}",
-            report.failures
-        );
-        assert!(
-            !report
-                .succeeded_plan_items
-                .contains(&(ModelWorkAction::RoomRecalcPanel, "4000000001/10".into()))
-        );
-        assert!(
-            report
-                .succeeded_plan_items
-                .contains(&(ModelWorkAction::RoomRecalcPanel, "4000000001/30".into()))
-        );
-        let mut response = window
-            .staging_db()
-            .query("RETURN [count(SELECT * FROM room_relate WHERE in = pe:4000000001_10) = 1];")
-            .await
-            .expect("inspect");
-        assert_eq!(
-            response.take::<Vec<bool>>(0).expect("edges"),
-            vec![true],
-            "存量归属边必须原封不动"
-        );
-        window.drop_database().await.expect("cleanup");
-    }
-
     #[test]
     fn pending_regeneration_holds_the_shared_root_lock_through_settlement() {
         let source = include_str!("model_update_pending.rs");
@@ -2752,6 +2574,172 @@ mod tests {
             target_refno: "24381/34303".into(),
             noun: "PANE".into(),
         }
+    }
+
+    #[test]
+    fn scoped_room_drain_addresses_only_the_current_plan_targets() {
+        let panel = room_item(ModelWorkAction::RoomRecalcPanel, 7999, 90);
+        let mut element = room_item(ModelWorkAction::RoomRecalcElement, 7999, 90);
+        element.target_refno = "24381/100677".into();
+        element.noun = "EQUI".into();
+        let mut unrelated = room_item(ModelWorkAction::RegenRoot, 7999, 90);
+        unrelated.target_refno = "24381/999999".into();
+        let plan = ModelUpdatePlan {
+            work_items: vec![panel.clone(), element.clone(), panel, unrelated],
+            ..Default::default()
+        };
+
+        let scope = RoomDrainScope::from_plan(&plan);
+        assert_eq!(scope.len(), 2, "重复目标要去重，非房间任务要排除");
+
+        let panel_sql =
+            render_scoped_room_select(&scope.keys_for(ModelWorkAction::RoomRecalcPanel));
+        assert!(
+            panel_sql.contains("model_update_pending:room_recalc_panel_24381_34303"),
+            "{panel_sql}"
+        );
+        assert!(!panel_sql.contains("24381_100677"), "{panel_sql}");
+        assert!(!panel_sql.contains("24381_999999"), "{panel_sql}");
+        assert!(panel_sql.contains("record::exists(id)"), "{panel_sql}");
+
+        let element_sql =
+            render_scoped_room_select(&scope.keys_for(ModelWorkAction::RoomRecalcElement));
+        assert!(
+            element_sql.contains("model_update_pending:room_recalc_element_24381_100677"),
+            "{element_sql}"
+        );
+        assert!(!element_sql.contains("24381_34303"), "{element_sql}");
+    }
+
+    #[tokio::test]
+    async fn scoped_room_selection_isolated_backlog_and_revision_safe_on_surreal() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("scoped_room_selection")
+            .await
+            .expect("select fixture db");
+        let mut current = room_item(ModelWorkAction::RoomRecalcElement, 7999, 90);
+        current.target_refno = "24381/100677".into();
+        current.noun = "EQUI".into();
+        let mut backlog = current.clone();
+        backlog.source_end_sesno = 80;
+        backlog.target_refno = "24381/999999".into();
+        db.query(format!(
+            "{}\n{}",
+            render_upsert(&current),
+            render_upsert(&backlog)
+        ))
+        .await
+        .expect("seed pending rows")
+        .check()
+        .expect("seed statements");
+
+        let plan = ModelUpdatePlan {
+            work_items: vec![current.clone()],
+            ..Default::default()
+        };
+        let keys = RoomDrainScope::from_plan(&plan).keys_for(ModelWorkAction::RoomRecalcElement);
+        let selected = load_scoped_room_jobs_on(&db, &keys)
+            .await
+            .expect("select exact current-task row");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].target_refno, current.target_refno);
+
+        let mut newer = current.clone();
+        newer.source_end_sesno = 91;
+        db.query(render_upsert(&newer))
+            .await
+            .expect("publish newer revision")
+            .check()
+            .expect("publish statement");
+        delete_work_on(&db, &selected[0])
+            .await
+            .expect("old settlement is a successful no-op");
+
+        let mut response = db
+            .query(format!("SELECT * FROM {} ORDER BY target_refno;", TABLE))
+            .await
+            .expect("read remaining pending")
+            .check()
+            .expect("read statement");
+        let remaining: Vec<PendingModelWork> = response.take(0).expect("decode pending");
+        assert_eq!(remaining.len(), 2, "历史 backlog 与新 revision 都必须保留");
+        let current_row = remaining
+            .iter()
+            .find(|row| row.target_refno == current.target_refno)
+            .expect("new revision survives old delete");
+        assert_eq!(current_row.revision, selected[0].revision + 1);
+        assert!(
+            remaining
+                .iter()
+                .any(|row| row.target_refno == backlog.target_refno),
+            "当前 scope 不得消费历史 backlog"
+        );
+    }
+
+    #[test]
+    fn scoped_element_targets_are_paginated_at_the_room_page_size() {
+        let plan = ModelUpdatePlan {
+            work_items: (0..(ROOM_DRAIN_PAGE_SIZE + 1))
+                .map(|seq| ModelWorkItem {
+                    dbnum: 7999,
+                    db_type: "DESI".into(),
+                    source_end_sesno: 90,
+                    action: ModelWorkAction::RoomRecalcElement,
+                    target_refno: format!("24381/{}", 100000 + seq),
+                    noun: "EQUI".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let pages = RoomDrainScope::from_plan(&plan)
+            .pages_for(ModelWorkAction::RoomRecalcElement, ROOM_DRAIN_PAGE_SIZE);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].len(), ROOM_DRAIN_PAGE_SIZE);
+        assert_eq!(pages[1].len(), 1);
+
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("scoped drain must exist")
+            .1
+            .split_once("async fn drain_room_element_page(")
+            .expect("element page boundary")
+            .0;
+        assert!(
+            !body.contains("elements.extend"),
+            "scoped 元素记录不得跨页累积: {body}"
+        );
+        let page_at = body
+            .find("for page in scope.pages_for")
+            .expect("scope must iterate pages");
+        let load_at = body[page_at..]
+            .find("load_scoped_room_jobs(&page)")
+            .map(|at| page_at + at)
+            .expect("each page must load exact pending rows");
+        let drain_at = body[load_at..]
+            .find("drain_room_element_page(")
+            .map(|at| load_at + at)
+            .expect("each loaded page must drain immediately");
+        assert!(page_at < load_at && load_at < drain_at, "{body}");
+    }
+
+    #[tokio::test]
+    async fn empty_scoped_room_drain_is_a_connection_free_noop() {
+        let report = drain_rooms_scoped(
+            &aios_core::options::DbOption::default(),
+            &RoomDrainScope::default(),
+        )
+        .await
+        .expect("empty scope must not touch SUL_DB");
+
+        assert_eq!(report.requested, 0);
+        assert_eq!(report.loaded, 0);
+        assert_eq!(report.done, 0);
+        assert!(report.failures.is_empty());
     }
 
     /// ADR-010 §7：房间任务的行不带 dbnum。一块面板天然跨库，带上 dbnum 会让同一间房
@@ -3046,42 +3034,6 @@ mod tests {
         );
     }
 
-    /// 暂存房间轮必须逐个跑，不得引入 `drain_rooms` 那套同轮吸收。
-    ///
-    /// 窗口内的整间分支按**尚未摘树**的旧包围盒取候选：删除已由排除集兜住
-    /// （`room_model::recalc_panel_membership` 并入 `staged_spatial_removals`），移动则
-    /// 只能靠随后的元素任务改正。而 `absorption_verdict` 的判据是「旧边 ∪ 候选 ⊆ 本轮
-    /// 已重算面板」——被整间分支按旧位置错误收编的移动构件恰好满足它，元素任务于是被
-    /// 跳过，那条按旧位置写的边随窗口提交并永久留在库里，没有任何人会再来清。吸收在
-    /// `drain_rooms` 里成立是因为那时空间树已经收敛；窗口内它还没有。
-    #[test]
-    fn the_staged_room_round_runs_panels_first_and_absorbs_nothing() {
-        let source = include_str!("model_update_pending.rs");
-        let body = source
-            .split_once("pub(crate) async fn run_staged_room_work(")
-            .expect("run_staged_room_work 必须存在")
-            .1
-            .split_once("pub struct DrainReport")
-            .expect("暂存房间轮之后是 DrainReport")
-            .0;
-
-        let sort_at = body.find("sort_by_key").expect("整间目标必须排在元素之前");
-        let run_at = body
-            .find("run_room_task(")
-            .expect("暂存房间轮必须逐个跑房间任务");
-        assert!(sort_at < run_at, "{body}");
-        assert!(
-            body.contains("*action != ModelWorkAction::RoomRecalcPanel"),
-            "排序键必须把整间目标排在前面: {body}"
-        );
-        // 按调用点形态（带左括号）断言，注释里提到这些名字不算数。
-        assert!(
-            !body.contains("absorption_verdict(")
-                && !body.contains("load_absorption_closure_inputs("),
-            "窗口内不得吸收元素任务：移动构件的陈旧边只有元素分支会清: {body}"
-        );
-    }
-
     /// 每一种 action 都必须被某个 drain 阶段消费，且只被一个消费。
     ///
     /// 漏掉一种，那种任务入队之后就永远躺在表里，不报错也不执行；被两个阶段同时选中，
@@ -3230,10 +3182,21 @@ mod tests {
 
     #[test]
     fn staged_tail_persists_spatial_intent_and_revision_guarded_settlement_before_watermark() {
+        let plan = ModelUpdatePlan {
+            work_items: vec![ModelWorkItem {
+                dbnum: 8191,
+                db_type: "DESI".into(),
+                source_end_sesno: 42,
+                action: ModelWorkAction::RoomRecalcPanel,
+                target_refno: "16777216/2".into(),
+                noun: "PANE".into(),
+            }],
+            ..Default::default()
+        };
         let sql = render_finalize_tail_with_effects(
             8191,
             42,
-            &ModelUpdatePlan::default(),
+            &plan,
             &[],
             &["16777216/2".to_string()],
             &["16777216/3".to_string()],
@@ -3244,6 +3207,9 @@ mod tests {
         let spatial = sql
             .find("spatial_reconcile_8191_42")
             .expect("spatial intent");
+        let room = sql
+            .find("model_update_pending:room_recalc_panel_16777216_2")
+            .expect("room pending must ride the same tail");
         let epoch = sql
             .find("UPSERT spatial_epoch:current")
             .expect("epoch bump must ride the same tail");
@@ -3251,6 +3217,10 @@ mod tests {
             .find("action = 'regen_root' AND target_refno = '16777216/5' AND (revision?:0) = 7")
             .expect("revision-guarded settlement");
         let watermark = sql.find("UPSERT dbnum_watermark:8191").expect("watermark");
+        assert!(
+            room < spatial,
+            "房间意图要与空间意图、水位同事务提交: {sql}"
+        );
         assert!(spatial < watermark, "{sql}");
         assert!(
             epoch < watermark,
