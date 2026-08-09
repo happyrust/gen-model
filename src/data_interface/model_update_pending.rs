@@ -17,9 +17,11 @@ pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 const ROOM_COVERAGE_BARRIER: &str = "room_panel_coverage_barrier:current";
 const QUERY_CHUNK: usize = 500;
-// ponytail: one bounded idle page may still delay a new batch; lower this if the
-// measured generation latency exceeds the queue SLA.
-const DRAIN_PAGE_SIZE: usize = 1;
+// 空闲轮一页的上界（ADR-011 2026-08-09 修订）。页内 fresh 根合并成**一次**
+// `generate_roots` 调用（ADR-012）：解析 → 实例 → 网格的启动开销按页付而不是按根付；
+// 页与页之间让位，新入队的数据批次最多等一页。此前是 1——每个根独占一轮空闲轮，
+// 138 个修复根的积压要连刷十几分钟，每轮还各付一遍房间映射 / 面板索引 / 空间树写盘。
+const DRAIN_PAGE_SIZE: usize = 16;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
 /// that keeps failing stays in the table as an inspectable dead letter instead
@@ -1215,6 +1217,89 @@ async fn verify_required_panel_geometry(
     Ok(())
 }
 
+/// 一页修复根的验收结论：通过的收口令牌 + 未通过的逐条失败（下标指回入参）。
+struct RepairVerifyPage {
+    passed: Vec<(String, u64)>,
+    failed: Vec<(usize, String)>,
+}
+
+/// 修复根的整页合并验收（ADR-011 2026-08-09 修订）。
+///
+/// 语义与单件路径 [`verify_required_panel_geometry`] 逐字对齐，但房间映射、有效
+/// 实例查询、在册面板索引与屏障维护**整页只做一次**——单件路径每个根各付一遍
+/// 这四样，正是空闲轮「一轮几秒、百余个修复根连刷十几分钟」的来源。
+///
+/// 屏障维护先于收口（与 `run_one` 的 execute→delete 顺序同构）：
+/// [`enqueue_missing_panel_repairs`] 若把本页某个根的 revision 推高，随后按旧令牌
+/// 的收口就命中零行，那行留给下一轮——不误删新工作。
+async fn verify_repair_jobs_page(
+    mgr: &AiosDBManager,
+    rooms: &room_model::RoomPanelMap,
+    jobs: &[&PendingModelWork],
+) -> anyhow::Result<RepairVerifyPage> {
+    let mut page = RepairVerifyPage {
+        passed: Vec::new(),
+        failed: Vec::new(),
+    };
+    let mut per_job: Vec<(usize, Vec<RefnoEnum>)> = Vec::with_capacity(jobs.len());
+    let mut union: Vec<RefnoEnum> = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        match registered_required_panels(rooms, &job.required_panels) {
+            Ok(registered) => {
+                union.extend(registered.iter().copied());
+                per_job.push((index, registered));
+            }
+            Err(error) => page.failed.push((index, format!("{error:#}"))),
+        }
+    }
+    union.sort_unstable();
+    union.dedup();
+    let available = crate::data_interface::staging::query_valid_insts(&union)
+        .await?
+        .into_iter()
+        .map(|inst| inst.refno.to_pdms_str())
+        .collect::<HashSet<_>>();
+
+    let panel_index = room_model::load_panel_index(&mgr.db_option, rooms).await?;
+    if panel_index.ensure_complete().is_ok() {
+        clear_room_coverage_barrier().await?;
+        println!("[房间增量] 在册面板几何已完整，解除房间覆盖屏障");
+    } else {
+        let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
+        println!(
+            "[房间增量] 全局面板覆盖仍不完整：刷新 {} 块面板 / {} 个修复根",
+            repair.panels, repair.roots
+        );
+    }
+
+    for (index, registered) in per_job {
+        let job = jobs[index];
+        let required_now = registered
+            .iter()
+            .map(RefnoEnum::to_pdms_str)
+            .collect::<Vec<_>>();
+        let missing = missing_required_panels(&required_now, &available);
+        if missing.is_empty() {
+            page.passed.push((job.target_refno.clone(), job.revision));
+        } else {
+            page.failed.push((
+                index,
+                format!(
+                    "生成根执行完成后仍有 {} 块必需房间面板缺少有效 inst_relate/AABB/world_trans: {}",
+                    missing.len(),
+                    missing
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(page)
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct StagedNonRegenReport {
     pub derived_roots: Vec<crate::data_interface::generation_root::GenerationRoot>,
@@ -1428,8 +1513,10 @@ pub(crate) fn root_joins_regen_batch(attempts: u32, target_refno: &str) -> bool 
     attempts == 0 && RefU64::from_str(target_refno).is_ok()
 }
 
+/// 修复根（带 `required_panels`）同样进合批（ADR-011 2026-08-09 修订）：生成合并
+/// 成一次调用，面板后置验收由 [`verify_repair_jobs_page`] 整页做一次、逐根定夺。
 fn joins_regen_batch(job: &PendingModelWork) -> bool {
-    job.required_panels.is_empty() && root_joins_regen_batch(job.attempts, &job.target_refno)
+    root_joins_regen_batch(job.attempts, &job.target_refno)
 }
 
 /// Drain pending work independently. Failures remain durable and are retried on
@@ -1469,20 +1556,63 @@ async fn drain_where_report(
     let (regen_jobs, other_jobs): (Vec<PendingModelWork>, Vec<PendingModelWork>) = jobs
         .into_iter()
         .partition(|job| job.action == ModelWorkAction::RegenRoot);
-    let (batchable, singles): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
+    let (batchable, mut singles): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
         regen_jobs.into_iter().partition(joins_regen_batch);
 
     let mut report = DrainReport::default();
 
     if !batchable.is_empty() {
-        let mut roots: Vec<String> = Vec::with_capacity(batchable.len());
-        for job in &batchable {
+        // 修复根（带 required_panels）也进合批（ADR-011 2026-08-09 修订）：生成一次、
+        // 整页验收一次。生成名单先过在册预检——面板全部出册的修复根跳过生成
+        // （拓扑合法变化，根可能已删除，硬生成会拖垮整批），但仍随本页验收与收口。
+        let (mut repair_jobs, plain_jobs): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
+            batchable
+                .into_iter()
+                .partition(|job| !job.required_panels.is_empty());
+        let mut skip_generation: HashSet<String> = HashSet::new();
+        let mut repair_rooms = None;
+        if !repair_jobs.is_empty() {
+            match room_model::load_room_panel_map(&mgr.db_option).await {
+                Ok(rooms) => {
+                    for job in &repair_jobs {
+                        if let Ok(registered) =
+                            registered_required_panels(&rooms, &job.required_panels)
+                            && registered.is_empty()
+                        {
+                            skip_generation.insert(job.target_refno.clone());
+                        }
+                    }
+                    repair_rooms = Some(rooms);
+                }
+                Err(error) => {
+                    // 预检读不到房间映射：本页修复根退回单件路径（各付各的加载），
+                    // 平根照常合批——一次读失败不该把整页拖成逐件全灭。
+                    println!(
+                        "修复根预检读取房间映射失败，本页 {} 个修复根退回单件执行: {error:#}",
+                        repair_jobs.len()
+                    );
+                    singles.extend(std::mem::take(&mut repair_jobs));
+                }
+            }
+        }
+
+        let mut roots: Vec<String> = Vec::new();
+        for job in plain_jobs.iter().chain(repair_jobs.iter()) {
+            if skip_generation.contains(&job.target_refno) {
+                continue;
+            }
             if !roots.contains(&job.target_refno) {
                 roots.push(job.target_refno.clone());
             }
         }
-        let mut lock_roots = roots.clone();
+        // 锁覆盖本页全部根（含跳过生成的修复根：验收与收口也在锁内，与 run_one 同构）。
+        let mut lock_roots: Vec<String> = plain_jobs
+            .iter()
+            .chain(repair_jobs.iter())
+            .map(|job| job.target_refno.clone())
+            .collect();
         lock_roots.sort_unstable();
+        lock_roots.dedup();
         let locks = lock_roots
             .iter()
             .map(|root| crate::data_interface::manual_update::generation_root_lock(root))
@@ -1496,12 +1626,51 @@ async fn drain_where_report(
                 .await;
         match batch_result {
             Ok(()) => {
-                let settlements = batchable
+                let mut settlements = plain_jobs
                     .iter()
                     .map(|job| (job.target_refno.clone(), job.revision))
                     .collect::<Vec<_>>();
+                if !repair_jobs.is_empty() {
+                    let job_refs = repair_jobs.iter().collect::<Vec<_>>();
+                    match verify_repair_jobs_page(
+                        mgr,
+                        repair_rooms
+                            .as_ref()
+                            .expect("repair jobs retain their page room map"),
+                        &job_refs,
+                    )
+                    .await
+                    {
+                        Ok(page) => {
+                            settlements.extend(page.passed);
+                            for (index, message) in page.failed {
+                                record_failure(
+                                    job_refs[index],
+                                    &anyhow::anyhow!("{message}"),
+                                    &mut report,
+                                )
+                                .await;
+                            }
+                        }
+                        Err(error) => {
+                            // 验收基础设施失败（读房间映射 / 实例 / 面板索引 / 屏障）：
+                            // 这页修复根刚刚全部生成成功，唯一没做完的是验收。与下面
+                            // 批量收口失败同一纪律（2026-07-30 审计 C2）：行原样留在
+                            // 表里（attempts 不涨），下一轮 drain 重跑幂等生成再验一次。
+                            let message = format!(
+                                "repair verification failed for {} generated root(s), \
+                                 rows stay pending for the next drain: {error:#}",
+                                repair_jobs.len()
+                            );
+                            for job in &repair_jobs {
+                                report.failed_dbnums.insert(job.dbnum);
+                            }
+                            report.failures.push(message);
+                        }
+                    }
+                }
                 match clear_regen_work_batch(&settlements).await {
-                    Ok(()) => report.done += batchable.len(),
+                    Ok(()) => report.done += settlements.len(),
                     Err(error) => {
                         // 收口失败不是生成失败（2026-07-30 审计 C2）：这批根刚刚全部
                         // 生成成功，唯一没做完的是把队列行删掉。给它们逐根 mark_failed
@@ -1515,7 +1684,7 @@ async fn drain_where_report(
                              rows stay pending for the next drain: {error:#}",
                             settlements.len()
                         );
-                        for job in &batchable {
+                        for job in plain_jobs.iter().chain(repair_jobs.iter()) {
                             report.failed_dbnums.insert(job.dbnum);
                         }
                         report.failures.push(message);
@@ -1530,7 +1699,7 @@ async fn drain_where_report(
                     "批量重生成 {} 个根失败，回退逐根重试以定位问题根: {error:#}",
                     roots.len()
                 );
-                for job in &batchable {
+                for job in plain_jobs.iter().chain(repair_jobs.iter()) {
                     run_one(mgr, job, &mut report).await;
                 }
             }
@@ -2168,8 +2337,8 @@ mod tests {
         };
 
         assert!(
-            !joins_regen_batch(&job),
-            "带面板后置条件的根必须单独执行并逐项验收"
+            joins_regen_batch(&job),
+            "修复根照样进合批（ADR-011 2026-08-09 修订）：生成一次、整页验收一次"
         );
         assert_eq!(
             missing_required_panels(
@@ -2178,6 +2347,25 @@ mod tests {
             ),
             ["4000000001/12"]
         );
+
+        // 验收必须先于收口：批量成功路径上 verify_repair_jobs_page 在
+        // clear_regen_work_batch 之前，屏障刷新推高的 revision 才能让旧令牌收口
+        // 命中零行（不误删新工作）。
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_where_report(")
+            .expect("drain_where_report 必须存在")
+            .1
+            .split_once("\n// 三个阶段的 action 白名单")
+            .expect("drain_where_report 之后是阶段白名单")
+            .0;
+        let verify_at = body
+            .find("verify_repair_jobs_page(")
+            .expect("修复根整页验收必须存在");
+        let settle_at = body
+            .find("clear_regen_work_batch(")
+            .expect("批量收口必须存在");
+        assert!(verify_at < settle_at, "修复根验收必须先于收口: {body}");
     }
 
     #[test]
@@ -3082,8 +3270,8 @@ mod tests {
     #[test]
     fn drain_select_leaves_dead_letters_in_the_table() {
         assert_eq!(
-            DRAIN_PAGE_SIZE, 1,
-            "live geometry timing requires the idle recovery path to yield after every generated root"
+            DRAIN_PAGE_SIZE, 16,
+            "空闲消化按有界页让位（页间可插入新批次），页内合批生成摊薄启动开销（ADR-011 2026-08-09 修订）"
         );
         let sql = render_drain_select("AND action = 'regen_root'", Some(DRAIN_PAGE_SIZE));
         assert!(

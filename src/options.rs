@@ -51,6 +51,14 @@ pub struct DbOptionExt {
     /// 未配置时默认放开。
     #[serde(default)]
     pub http_api_cors: Option<Vec<String>>,
+
+    /// 数据批次并发在飞数（ADR-011 2026-08-09 修订）。
+    ///
+    /// 默认 1 = 现行串行行为。大于 1 时最多同时执行 N 个**稳态 DESI 暂存窗口**
+    /// （同 dbnum 恒串行）；非 DESI、基线/冷启动与应急直写批次始终独占。
+    /// 上限 8：暂存内存与写回压力随在飞数线性放大。
+    #[serde(default)]
+    pub data_batch_workers: Option<usize>,
 }
 
 impl Deref for DbOptionExt {
@@ -79,6 +87,7 @@ impl From<DbOption> for DbOptionExt {
             append_delivery_unit_types: None,
             http_api_addr: None,
             http_api_cors: None,
+            data_batch_workers: None,
         }
     }
 }
@@ -105,18 +114,28 @@ struct DbOptionExtFields {
     http_api_addr: Option<String>,
     #[serde(default)]
     http_api_cors: Option<Vec<String>>,
+    #[serde(default)]
+    data_batch_workers: Option<usize>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
     static INSTANCE: OnceLock<DbOptionExtFields> = OnceLock::new();
     INSTANCE.get_or_init(|| {
+        let config_name = ext_config_name(std::env::var_os("DB_OPTION_FILE"));
         config::Config::builder()
-            .add_source(config::File::with_name("DbOption"))
+            .add_source(config::File::with_name(&config_name))
             .build()
             .ok()
             .and_then(|source| source.try_deserialize::<DbOptionExtFields>().ok())
             .unwrap_or_default()
     })
+}
+
+fn ext_config_name(configured: Option<OsString>) -> String {
+    configured
+        .filter(|name| !name.to_string_lossy().trim().is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "DbOption".to_string())
 }
 
 fn meshes_dir_from_asset_root(asset_root: Option<OsString>) -> Option<PathBuf> {
@@ -146,12 +165,34 @@ pub fn get_db_option_ext() -> DbOptionExt {
         append_delivery_unit_types: ext.append_delivery_unit_types.clone(),
         http_api_addr: ext.http_api_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
+        data_batch_workers: ext.data_batch_workers,
     }
+}
+
+/// 数据批次并发在飞数（`DbOption.toml` 的 `data_batch_workers`，默认 1 = 串行）。
+///
+/// 只读扩展字段、不触发 `aios_core::get_db_option()` 的完整配置装载，
+/// 因此在没有完整配置的单测环境里也能安全调用（缺文件时回默认值）。
+/// 夹到 `1..=8`：0 无意义，超过 8 时暂存内存与写回压力得不到额外吞吐。
+pub fn data_batch_workers() -> usize {
+    effective_data_batch_workers(load_ext_fields().data_batch_workers)
+}
+
+fn effective_data_batch_workers(configured: Option<usize>) -> usize {
+    configured.unwrap_or(1).clamp(1, 8)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_batch_worker_limit_defaults_and_clamps_to_supported_range() {
+        assert_eq!(effective_data_batch_workers(None), 1);
+        assert_eq!(effective_data_batch_workers(Some(0)), 1);
+        assert_eq!(effective_data_batch_workers(Some(4)), 4);
+        assert_eq!(effective_data_batch_workers(Some(32)), 8);
+    }
 
     #[test]
     fn resolves_windows_asset_root_and_ignores_empty_value() {
@@ -160,5 +201,15 @@ mod tests {
             Some(PathBuf::from(r"C:\Legacy Assets").join("meshes"))
         );
         assert_eq!(meshes_dir_from_asset_root(Some(OsString::from("  "))), None);
+    }
+
+    #[test]
+    fn extension_fields_follow_the_core_db_option_override() {
+        assert_eq!(
+            ext_config_name(Some(OsString::from(r"C:\runs\fixture\DbOption"))),
+            r"C:\runs\fixture\DbOption"
+        );
+        assert_eq!(ext_config_name(Some(OsString::from("  "))), "DbOption");
+        assert_eq!(ext_config_name(None), "DbOption");
     }
 }
