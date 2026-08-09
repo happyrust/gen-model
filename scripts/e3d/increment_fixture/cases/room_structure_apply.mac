@@ -1,0 +1,6 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:room_frame}}
+NAME /AIOS-INC-NOT-A-ROOM
+Q CE
+SAVEWORK 'AIOS fixture room structure apply'
+ALPHA LOG END

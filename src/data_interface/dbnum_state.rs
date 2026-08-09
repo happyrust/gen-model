@@ -29,6 +29,11 @@ pub const WATERMARK_TABLE: &str = "dbnum_watermark";
 /// Legacy per-`ref_0` element-statistics table, used only for one-time migration.
 pub const INFO_TABLE: &str = "dbnum_info_table";
 
+/// Serializes scan-observation writes against an in-process fast DBNUM delete.
+/// Reads remain unrestricted; normal scans share the read side.
+pub(crate) static DBNUM_STATE_WRITE_GATE: tokio::sync::RwLock<()> =
+    tokio::sync::RwLock::const_new(());
+
 const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
@@ -839,6 +844,7 @@ impl DbnumState {
             );
             return Ok(());
         }
+        let _write_guard = DBNUM_STATE_WRITE_GATE.read().await;
         if verdict.blocked() {
             Self::record_blocked_observation(obs).await
         } else {

@@ -205,17 +205,34 @@ impl BatchScheduler {
                 .map(|i| i + 1)
                 .unwrap_or(0);
 
-            // 三条规则保证此刻必有排队行；真没有就是队列失步了。这里持着锁，
-            // panic 会把锁毒掉、连累看门狗与面板，所以退回一条空回执并告警。
+            // 排队行缺席只有一条合法出口：`AlreadyCovered`——纯规则的 `covers` 守卫
+            // 拦下了运行中批次冻结区间（或水位）已覆盖的触发。批次运行期间的重复执行、
+            // 迟到的 watch 事件、只动 mtime 的重扫都落在这里，不是失步；回执带上
+            // 运行行的 task_id 供对账。其余判定此刻必有排队行，真没有才是队列失步。
+            // 这里持着锁，panic 会把锁毒掉、连累看门狗与面板，所以失步也只退回
+            // 空回执并告警。
             let info = match queued_row {
                 None => {
-                    log::error!(
-                        "dbnum={} 入队判定为 {:?} 却找不到排队行，队列已失步",
-                        found.dbnum,
-                        outcome
-                    );
+                    let task_id = if outcome == Enqueued::AlreadyCovered {
+                        let running_task_id = state
+                            .meta
+                            .get(&(found.dbnum, true))
+                            .map(|m| m.task_id.clone());
+                        log::debug!(
+                            "dbnum={} 的触发已被运行中批次冻结区间或水位覆盖，无需入队",
+                            found.dbnum
+                        );
+                        running_task_id.unwrap_or_default()
+                    } else {
+                        log::error!(
+                            "dbnum={} 入队判定为 {:?} 却找不到排队行，队列已失步",
+                            found.dbnum,
+                            outcome
+                        );
+                        String::new()
+                    };
                     EnqueuedBatchInfo {
-                        task_id: String::new(),
+                        task_id,
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
                         position,
@@ -595,6 +612,21 @@ mod tests {
         let rows = scheduler.snapshot();
         assert_eq!(rows.len(), 1, "终态行不留在队列里");
         assert_eq!(rows[0].state, "queued");
+    }
+
+    /// 批次运行中、无新保存时的重复触发（再点一次执行 / 迟到的 watch 事件 /
+    /// 只动 mtime 的重扫）：`covers` 守卫判 AlreadyCovered 且不产生排队行——
+    /// 这是纯规则的合法出口，不是失步；回执要对到运行中的任务行，且不多排行。
+    #[test]
+    fn a_trigger_covered_by_the_running_batch_maps_to_its_task_row() {
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue(&registry, &found(7997, 1023, 1038));
+        let job = scheduler.freeze_next(&registry).expect("有排队项");
+
+        let repeat = scheduler.enqueue(&registry, &found(7997, 1023, 1038));
+        assert_eq!(repeat.outcome, Enqueued::AlreadyCovered);
+        assert_eq!(repeat.info.task_id, job.task_id, "回执应对到运行中的任务行");
+        assert_eq!(scheduler.snapshot().len(), 1, "不该因重复触发多排一行");
     }
 
     #[test]

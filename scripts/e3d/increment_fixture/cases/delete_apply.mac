@@ -1,0 +1,6 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:delete_box}}
+Q CE
+DELETE BOX
+SAVEWORK 'AIOS fixture delete apply'
+ALPHA LOG END

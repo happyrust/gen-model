@@ -1,0 +1,9 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+VAR !added COLLECT ALL BOX WITH (NAME EQ '/AIOS-INC-ADD-BOX')
+DO !box VALUES !added
+  !!CE = !box.dbref()
+  Q CE
+  DELETE BOX
+ENDDO
+SAVEWORK 'AIOS fixture add restore'
+ALPHA LOG END

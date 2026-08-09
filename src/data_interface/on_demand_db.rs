@@ -16,6 +16,10 @@ use parse_pdms_db::parse::{DbIndexData, EleData};
 const READ_MODE_ENV: &str = "AIOS_PDMS_ON_DEMAND_READ_MODE";
 const INVALID_REF0_SENTINEL: u32 = 0x8000_0001;
 
+fn paged_snapshot_matches_file(paged_sesno: u32, file_sesno: u32) -> bool {
+    paged_sesno == file_sesno
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadMode {
     Legacy,
@@ -70,7 +74,7 @@ pub(crate) struct OnDemandDbSession {
 impl OnDemandDbSession {
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
         let configured = ReadMode::configured();
-        let (mode, fallback_reason) = if let Some(extent) = first_extra_extent(path) {
+        let (mut mode, mut fallback_reason) = if let Some(extent) = first_extra_extent(path) {
             (
                 ReadMode::Legacy,
                 Some(format!("multi_extent:{}", extent.display())),
@@ -78,16 +82,42 @@ impl OnDemandDbSession {
         } else {
             (configured, None)
         };
+        let mut opened_paged = None;
+        if mode == ReadMode::Paged {
+            let paged = PagedDbSession::open(path)?;
+            let paged_sesno = paged.snapshot().sesno;
+            let mut authoritative = pdms_io::io::PdmsIO::new("", path, true);
+            match authoritative.get_latest_sesno() {
+                Ok(file_sesno) if !paged_snapshot_matches_file(paged_sesno, file_sesno) => {
+                    mode = ReadMode::Legacy;
+                    fallback_reason = Some(format!(
+                        "snapshot_sesno_mismatch:paged={paged_sesno},file={file_sesno}"
+                    ));
+                }
+                Ok(_) => opened_paged = Some(paged),
+                Err(error) => {
+                    log::warn!(
+                        "[paged_db] snapshot verification unavailable path={} error={error:#}",
+                        path.display()
+                    );
+                    opened_paged = Some(paged);
+                }
+            }
+        }
         if let Some(reason) = fallback_reason {
-            log::warn!(
+            let message = format!(
                 "[paged_db] route=legacy path={} configured={configured:?} reason={reason}",
                 path.display()
             );
+            log::warn!("{message}");
+            eprintln!("{message}");
         }
 
         let source = match mode {
             ReadMode::Legacy => SessionSource::Legacy(open_legacy(path)?),
-            ReadMode::Paged => SessionSource::Paged(PagedDbSession::open(path)?),
+            ReadMode::Paged => SessionSource::Paged(
+                opened_paged.expect("paged mode always retains its verified open session"),
+            ),
             ReadMode::Compare => SessionSource::Compare {
                 legacy: open_legacy(path)?,
                 paged: PagedDbSession::open(path)?,
@@ -396,6 +426,12 @@ fn log_page_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgraded_file_snapshot_mismatch_routes_away_from_paged() {
+        assert!(paged_snapshot_matches_file(90, 90));
+        assert!(!paged_snapshot_matches_file(343_597_384, 90));
+    }
 
     #[test]
     fn detects_later_extent() {

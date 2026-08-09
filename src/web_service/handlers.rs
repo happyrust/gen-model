@@ -437,6 +437,72 @@ pub async fn dbnums(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct FastDeleteDbnumReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// Must equal the path DBNUM. This keeps an accidental DELETE issued by a
+    /// generic HTTP client from becoming a large data mutation.
+    #[serde(default)]
+    pub confirm: Option<u32>,
+}
+
+/// DELETE /api/v1/dbnums/{dbnum}/data — Ref0 record-id range fast delete.
+///
+/// Operational contract:
+/// 1. pause the queue;
+/// 2. wait until this DBNUM has no queued/running batch or staged window;
+/// 3. call with `?confirm={dbnum}`.
+///
+/// The queue remains paused after success. Reparse/resume is an explicit
+/// follow-up, matching the troubleshooting workflow this endpoint serves.
+pub async fn dbnum_fast_delete(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Query(query): Query<FastDeleteDbnumReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    if query.confirm != Some(dbnum) {
+        return Err(ApiError::bad_request(format!(
+            "confirm must equal path dbnum: confirm={:?}, dbnum={dbnum}",
+            query.confirm
+        )));
+    }
+
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    if !scheduler.is_paused() {
+        return Err(ApiError::conflict(
+            "queue must be paused before fast DBNUM delete; POST /api/v1/queue/pause first",
+        ));
+    }
+    if let Some(row) = scheduler
+        .snapshot()
+        .into_iter()
+        .find(|row| row.dbnum == dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} still has a {} batch (task_id={}); wait for/remove it before delete",
+            row.state, row.task_id
+        )));
+    }
+    if let Some(window) = crate::data_interface::staging::lifecycle::registered_windows()
+        .into_iter()
+        .find(|window| window.dbnum == dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} still has active staged window {}; wait for it before delete",
+            window.label
+        )));
+    }
+
+    let result = crate::data_interface::fast_delete::delete_dbnum_fast(dbnum)
+        .await
+        .map_err(ApiError::from_domain)?;
+    serde_json::to_value(&result)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
 ///
 /// 行按队列序（运行中在前），字段与任务行经 task_id 对得上；`paused` 是界面上

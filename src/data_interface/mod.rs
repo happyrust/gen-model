@@ -22,6 +22,8 @@ pub mod sesno_range;
 
 pub mod dbnum_state;
 
+pub mod fast_delete;
+
 pub mod manual_update;
 
 pub mod update_scope;

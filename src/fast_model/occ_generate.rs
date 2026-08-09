@@ -451,9 +451,8 @@ pub async fn gen_inst_meshes(
         let thing_has_neg_map_arc = Arc::new(thing_has_neg_map);
         // dbg!(&thing_map);
         let mut tasks = vec![];
-        //: DashMap<u64, String>
+        // 跨任务共享只为收尾回填 `EXIST_MESH_GEO_HASHES`；库内记录由各任务自己写。
         let aabb_map = Arc::new(DashMap::new());
-        let pts_json_map = Arc::new(DashMap::new());
         for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
             let ids = chunk
                 .into_iter()
@@ -462,13 +461,18 @@ pub async fn gen_inst_meshes(
             let thing_neg_map = thing_has_neg_map_arc.clone();
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
-            let pts_json_map = pts_json_map.clone();
             let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
                 async move {
                     let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
                     // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
                     // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
                     let mut unbuildable: Vec<String> = Vec::new();
+                    // 本任务 update_sql 引用到的 aabb / vec3 记录（D9 顺序）：记录
+                    // 必须先于指针在**本任务内**落库，跨任务去重靠 INSERT IGNORE
+                    // 幂等，不能靠共享 map——别的任务替你去了重，不等于替你把记录
+                    // 写进了库。
+                    let chunk_aabbs = DashMap::new();
+                    let chunk_pts = DashMap::new();
                     let sql = format!(
                         "select <string> record::id(id) as id, param from [{}] where param != NONE",
                         ids
@@ -613,8 +617,8 @@ pub async fn gen_inst_meshes(
                                             for point in [edge.start_point(), edge.end_point()] {
                                                 let pts_hash = RsVec3(point.as_vec3()).gen_hash();
                                                 pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
-                                                if !pts_json_map.contains_key(&pts_hash) {
-                                                    pts_json_map.insert(
+                                                if !chunk_pts.contains_key(&pts_hash) {
+                                                    chunk_pts.insert(
                                                         pts_hash,
                                                         serde_json::to_string(&point).map_err(
                                                             |error| {
@@ -634,6 +638,9 @@ pub async fn gen_inst_meshes(
                                         pt_hashes.into_iter().join(","),
                                     ));
                                         aabb_map
+                                            .entry(aabb_hash.to_string())
+                                            .or_insert(mesh.aabb.unwrap());
+                                        chunk_aabbs
                                             .entry(aabb_hash.to_string())
                                             .or_insert(mesh.aabb.unwrap());
                                         success = true;
@@ -664,6 +671,12 @@ pub async fn gen_inst_meshes(
                                 }
                             }
                             if !update_sql.is_empty() {
+                                // D9 顺序（与 inst_relate 指针同一条教训）：先把本任务
+                                // 引用的 vec3 / aabb 记录写进库，再落 `inst_geo` 指针。
+                                // 反过来的话，两步之间的崩溃或并发读者会拿到悬空指针，
+                                // `aabb.d` 为 none 的读者把几何整条漏掉。
+                                utils::save_pts_to_surreal(&chunk_pts).await?;
+                                utils::save_aabb_to_surreal(&chunk_aabbs).await?;
                                 //执行SUL_DB update,使用chunk 保存
                                 if let Err(error) = crate::surreal_retry::execute_model_write(
                                     &update_sql,
@@ -707,11 +720,8 @@ pub async fn gen_inst_meshes(
             }
         }
 
-        utils::save_pts_to_surreal(&pts_json_map).await?;
-        // TODO(与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
-        // 先落，这里才补 aabb 记录。彻底修复需要把记录写入挪进每个任务、先于其 update；
-        // 本轮先保证失败不再被静默吞掉。
-        utils::save_aabb_to_surreal(&aabb_map).await?;
+        // vec3 / aabb 记录已在每个任务内先于 `inst_geo` 指针落库（D9 顺序），
+        // 这里不再有 join 之后的全局补写——那正是崩溃时留下悬空指针的窗口。
 
         Ok(())
     } // cfg(feature = "occ")
@@ -1472,11 +1482,46 @@ mod aabb_write_order_tests {
         assert!(body.contains(".check()?"), "{body}");
         assert!(body.contains("for result in task_results"), "{body}");
         assert!(
-            body.contains("save_pts_to_surreal(&pts_json_map).await?"),
+            body.contains("save_pts_to_surreal(&chunk_pts).await?"),
             "{body}"
         );
         assert!(body.contains("join_all(tasks).await"), "{body}");
         assert!(!body.contains("try_join_all(tasks)"), "{body}");
+    }
+
+    /// `gen_inst_meshes` 的任务体内，vec3 / aabb 记录必须先于 `inst_geo` 指针
+    /// update 落库（与 `inst_relate` 指针同一条 D9 教训），且 join 之后不得再有
+    /// 全局记录补写——「任务里先落指针、join 后统一补记录」正是修掉的悬空指针
+    /// 窗口：两步之间崩溃或并发读，`aabb.d` 读者会把几何整条漏掉。
+    #[test]
+    fn mesh_records_land_before_inst_geo_pointers_inside_each_task() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn gen_inst_meshes(")
+            .expect("gen_inst_meshes exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("gen_inst_meshes boundary")
+            .0;
+
+        let pts_at = body
+            .find("save_pts_to_surreal(&chunk_pts)")
+            .expect("任务体内必须先写 vec3 记录");
+        let aabb_at = body
+            .find("save_aabb_to_surreal(&chunk_aabbs)")
+            .expect("任务体内必须先写 aabb 记录");
+        let pointers_at = body
+            .find("mark generated inst_geo state")
+            .expect("任务体内的 inst_geo 指针 update 必须存在");
+        assert!(
+            pts_at < pointers_at && aabb_at < pointers_at,
+            "记录必须在任务体内先于 inst_geo 指针落库"
+        );
+        assert!(
+            !body.contains("save_aabb_to_surreal(&aabb_map)")
+                && !body.contains("save_pts_to_surreal(&pts_json_map)"),
+            "join 之后不得再有全局记录补写"
+        );
     }
 
     /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条

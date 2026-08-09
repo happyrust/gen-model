@@ -32,15 +32,28 @@ function Invoke-Driver([string]$macro, [string]$dir, [string]$expected = '') {
 }
 
 function Invoke-Increment([string]$dir) {
-    if ($TestExe) {
-        & $TestExe issue7_e2e_room_comes_back_after_e3d_save --ignored --exact --nocapture 2>&1 |
-            Tee-Object -FilePath (Join-Path $out "$dir.log")
-    } else {
-        & cargo test --features http_api --test issue7_e2e_increment -j 1 `
-            issue7_e2e_room_comes_back_after_e3d_save -- --ignored --exact --nocapture 2>&1 |
-            Tee-Object -FilePath (Join-Path $out "$dir.log")
+    # Windows PowerShell 5.1 wraps every native stderr line as a
+    # RemoteException. With this script's global ErrorActionPreference=Stop,
+    # harmless Rust eprintln!/dbg! diagnostics used to abort the pipeline before
+    # the test process returned an exit code. Keep streaming both handles into
+    # the evidence log, but decide success exclusively from LASTEXITCODE.
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($TestExe) {
+            & $TestExe issue7_e2e_room_comes_back_after_e3d_save --ignored --exact --nocapture 2>&1 |
+                Tee-Object -FilePath (Join-Path $out "$dir.log")
+        } else {
+            & cargo test --features http_api --test issue7_e2e_increment -j 1 `
+                issue7_e2e_room_comes_back_after_e3d_save -- --ignored --exact --nocapture 2>&1 |
+                Tee-Object -FilePath (Join-Path $out "$dir.log")
+        }
+        $testExitCode = $LASTEXITCODE
     }
-    if ($LASTEXITCODE) { throw "Room increment test failed: $dir" }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($testExitCode) { throw "Room increment test failed: $dir (exit $testExitCode)" }
 }
 
 function New-CaseRow([string]$name) {
@@ -134,7 +147,8 @@ function Set-CaseEnv(
     [bool]$checkTopology = $true,
     [string]$expectedEdges = '',
     [bool]$expectGeometry = $true,
-    [string]$nounRefno = ''
+    [string]$nounRefno = '',
+    [bool]$checkMembership = $true
 ) {
     $env:AIOS_ROOM_CHANGE = $change
     $env:AIOS_ROOM_ELEMENT = $element
@@ -147,6 +161,7 @@ function Set-CaseEnv(
     $env:AIOS_ROOM_DELETE_BASELINE = if ($deleteBaseline) { '1' } else { '0' }
     $env:AIOS_ROOM_DYNAMIC_BASELINE = if ($dynamicBaseline) { '1' } else { '0' }
     $env:AIOS_ROOM_CHECK_TOPOLOGY = if ($checkTopology) { '1' } else { '0' }
+    $env:AIOS_ROOM_CHECK_MEMBERSHIP = if ($checkMembership) { '1' } else { '0' }
     $env:AIOS_ROOM_KEYWORD = if ($dynamicBaseline) { '-RM' } else { '-RM05-R512' }
     if ($expectedEdges) { $env:AIOS_ROOM_EXPECT_EDGES = $expectedEdges }
     else { Remove-Item Env:AIOS_ROOM_EXPECT_EDGES -ErrorAction SilentlyContinue }
@@ -169,7 +184,8 @@ function Invoke-Case(
     [string]$restoreExpectedEdges = '',
     [bool]$expectGeometry = $true,
     [string]$nounRefno = '',
-    [string]$applySavedMarker = ''
+    [string]$applySavedMarker = '',
+    [bool]$checkMembership = $true
 ) {
     $row = New-CaseRow $name
     $restoreRequired = $false
@@ -179,7 +195,7 @@ function Invoke-Case(
     if ($applySavedMarker) { Remove-Item -LiteralPath $applySavedMarker -ErrorAction SilentlyContinue }
     try {
         try {
-            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno
+            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno $checkMembership
             $envReady = $true
             # 旧宏没有 SAVEWORK 哨兵，沿用保守恢复；生成宏仅在确认 SAVEWORK 后恢复。
             $restoreRequired = -not $applySavedMarker
@@ -217,7 +233,7 @@ function Invoke-Case(
                     $restoreDriverError = $_
                 }
                 $restoreExpectsRoom = if ($dynamicBaseline) { $applyExpectsRoom } else { $true }
-                Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology $restoreExpectedEdges $expectGeometry $nounRefno
+                Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology $restoreExpectedEdges $expectGeometry $nounRefno $checkMembership
                 Invoke-Phase $row 'restore-increment' { Invoke-Increment "$name-restore-increment" }
                 # T-OR-3：restore 收敛后第二遍必须是无操作（零批次、水位/边/AABB 不动）。
                 $env:AIOS_ROOM_IDEMPOTENT = '1'
@@ -432,7 +448,7 @@ ALPHA LOG END
             $checkTopology = $model.noun -eq 'PANE'
             Invoke-Case $name $change $model.dbnum $elementRefno $model.noun `
                 $applyMacro $restoreMacro $model.expect_room $model.expect_room $true $checkTopology `
-                $applyExpectedEdges $restoreExpectedEdges $expectGeometry $model.refno $applySavedMarker
+                $applyExpectedEdges $restoreExpectedEdges $expectGeometry $model.refno $applySavedMarker $false
         }
     }
 }

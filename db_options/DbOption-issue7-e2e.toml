@@ -21,7 +21,7 @@
 total_sync = false
 incr_sync = false
 sync_history = false
-enable_log = false
+enable_log = true
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false

@@ -659,7 +659,12 @@ impl IncrementPipeline {
                 range_eles
             }
         };
-        let cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
+        let mut cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
+        // 生成根级失效（ADR-010 残余关闭）：`QUERY_DEEP_CHILDREN_REFNOS` 按子树根
+        // 为键，「变更元素 + 属主」的失效集够不着深层后代之上的高层根，同根下一次
+        // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐；暂存路径
+        // 同一份集合随提交 / 废弃时机清（`commit_registered_to` / `drop_database`）。
+        cache_refnos.extend(model_plan.regen_root_refnos());
         warnings.extend(model_plan.warnings.iter().cloned());
         let staged = crate::data_interface::staging::active_staging_writes();
         let staged_cache_refnos = staged
@@ -1120,11 +1125,7 @@ impl IncrementPipeline {
                 let fetched = load_pe(vec![refno]).await?;
                 cache.insert(refno, fetched.get(&refno).cloned());
             }
-            let stored = cache
-                .get(&refno)
-                .cloned()
-                .flatten()
-                .unwrap_or((None, None));
+            let stored = cache.get(&refno).cloned().flatten().unwrap_or((None, None));
             Ok((
                 overlay_entry.0.or(stored.0),
                 overlay_entry
@@ -1178,9 +1179,13 @@ impl IncrementPipeline {
                             let mut current = d.refno;
                             let mut target = None;
                             for _ in 0..ROLLUP_WALK_CAP {
-                                let (noun, owner) =
-                                    effective_view(&overlay, &mut persistent, &mut load_pe, current)
-                                        .await?;
+                                let (noun, owner) = effective_view(
+                                    &overlay,
+                                    &mut persistent,
+                                    &mut load_pe,
+                                    current,
+                                )
+                                .await?;
                                 let Some(noun) = noun else {
                                     break; // 链断：行不在（老形态同样解析不出）
                                 };
@@ -1318,6 +1323,28 @@ impl IncrementPipeline {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    /// 失效集必须在「元素 + 属主」之外并入计划层算出的生成根（ADR-010 残余）：
+    /// `QUERY_DEEP_CHILDREN_REFNOS` 按子树根为键，漏掉根键的失效等于同根下一次
+    /// 重生成拿旧成员表静默漏算。钉住书写顺序：collect → extend(regen roots) →
+    /// 才轮到暂存快照捕获与直写失效。
+    #[test]
+    fn cache_invalidation_extends_to_the_plans_regen_roots() {
+        let source = include_str!("increment_pipeline.rs");
+        let collect_at = source
+            .find("Self::collect_cache_invalidation_refnos(&range_eles)")
+            .expect("元素级失效集必须存在");
+        let extend_at = source
+            .find("cache_refnos.extend(model_plan.regen_root_refnos())")
+            .expect("失效集必须并入生成根");
+        let staged_capture_at = source
+            .find("let staged_cache_refnos")
+            .expect("暂存路径的失效快照必须存在");
+        assert!(
+            collect_at < extend_at && extend_at < staged_capture_at,
+            "顺序必须是 collect → extend(regen roots) → 暂存快照捕获"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_parse_keeps_one_journal_and_does_not_finalize() {
@@ -2194,8 +2221,7 @@ mod datacenter_tests {
 
         let statement = render_with(vec![op], chain).await.remove(0);
         assert_eq!(
-            statement,
-            "update datacenter_version:7997_7 set status = 'Modify';",
+            statement, "update datacenter_version:7997_7 set status = 'Modify';",
             "rollup 必须走窗口内的新 OWNER，而不是窗口前持久态"
         );
     }
@@ -2204,7 +2230,11 @@ mod datacenter_tests {
     async fn deletions_record_the_owning_zone_and_no_ops_render_nothing() {
         // 非 BRAN：belong_zone = owner。
         let deleted = render_with(
-            vec![EleOperationData::new(refu(2), 1, EleOperationDetail::Deleted)],
+            vec![EleOperationData::new(
+                refu(2),
+                1,
+                EleOperationDetail::Deleted,
+            )],
             pre_window_chain(),
         )
         .await
@@ -2218,7 +2248,11 @@ mod datacenter_tests {
         let mut chain = pre_window_chain();
         chain.insert(refu(3), (Some("BRAN".into()), Some(refu(6))));
         let deleted_bran = render_with(
-            vec![EleOperationData::new(refu(3), 1, EleOperationDetail::Deleted)],
+            vec![EleOperationData::new(
+                refu(3),
+                1,
+                EleOperationDetail::Deleted,
+            )],
             chain,
         )
         .await
@@ -2230,7 +2264,11 @@ mod datacenter_tests {
 
         // 链解不出（行不在持久层也不在窗口里）：belong_zone 显式 NONE。
         let orphan = render_with(
-            vec![EleOperationData::new(refu(9), 1, EleOperationDetail::Deleted)],
+            vec![EleOperationData::new(
+                refu(9),
+                1,
+                EleOperationDetail::Deleted,
+            )],
             ChainMap::new(),
         )
         .await
@@ -2375,9 +2413,7 @@ mod datacenter_tests {
                     let rows: Vec<Row> = response.take(0)?;
                     Ok(rows
                         .into_iter()
-                        .map(|row| {
-                            (row.id.refno(), (row.noun, row.owner.map(|o| o.refno())))
-                        })
+                        .map(|row| (row.id.refno(), (row.noun, row.owner.map(|o| o.refno()))))
                         .collect())
                 }
             },
@@ -2446,7 +2482,10 @@ mod datacenter_tests {
                     && statement.contains("zone_refno = fn::find_ancestor_type(in, 'ZONE')"),
                 "anc 与 zone_refno 必须一起重算（zone_refno 的陈旧是既有隐性 bug）: {statement}"
             );
-            assert!(statement.ends_with(';'), "chunk 拼接依赖自终止: {statement}");
+            assert!(
+                statement.ends_with(';'),
+                "chunk 拼接依赖自终止: {statement}"
+            );
         }
 
         // 非搬家操作：普通属性变化 / 新建 / 删除 → 无修补语句。

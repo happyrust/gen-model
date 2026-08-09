@@ -234,14 +234,19 @@ impl SideEffectCompensator {
     /// Spatial jobs deliberately ignore [`MAX_ATTEMPTS`]: abandoning one would publish a
     /// watermark whose global spatial state can never catch up.
     pub async fn reconcile_spatial_pending(_mgr: &AiosDBManager) -> anyhow::Result<usize> {
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
-                 AND status IN ['pending', 'failed'] ORDER BY updated_at ASC;"
-            ))
-            .await?
-            .check()?;
-        let jobs: Vec<PendingJob> = response.take(0)?;
+        let query = format!(
+            "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+             AND status IN ['pending', 'failed'] ORDER BY updated_at ASC;"
+        );
+        let jobs: Vec<PendingJob> =
+            crate::surreal_retry::retry_sul_db_transport("读取待收敛空间任务", || {
+                let query = query.clone();
+                async move {
+                    let mut response = SUL_DB.query(query).await?.check()?;
+                    Ok(response.take(0)?)
+                }
+            })
+            .await?;
         if jobs.is_empty() {
             return Ok(0);
         }
@@ -292,7 +297,10 @@ impl SideEffectCompensator {
         }
 
         for job in &jobs {
-            Self::mark_done(SideEffectKind::SpatialReconcile, job.dbnum, job.end_sesno).await?;
+            crate::surreal_retry::retry_sul_db_transport("确认空间收敛任务完成", || {
+                Self::mark_done(SideEffectKind::SpatialReconcile, job.dbnum, job.end_sesno)
+            })
+            .await?;
         }
         Ok(jobs.len())
     }

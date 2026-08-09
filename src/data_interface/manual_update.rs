@@ -2312,7 +2312,9 @@ pub struct UnitTask {
 }
 
 /// Derive the generation worklist of one applied DESI batch from its delivery-
-/// unit rollup: every unit with `will_generate`, deduped by root.
+/// unit rollup: every live unit with `will_generate`, deduped by root. A delivery root that is
+/// absent in the post-state (`deleted > 0 && new_owner == None`) is cleanup-only: attempting to
+/// regenerate it reintroduces a deleted BRAN into the staged generation worklist.
 pub fn collect_unit_tasks(
     units: &[DeliveryUnitSummary],
     dbnum: u32,
@@ -2321,7 +2323,8 @@ pub fn collect_unit_tasks(
     let mut seen: HashSet<&str> = HashSet::new();
     let mut tasks = Vec::new();
     for unit in units {
-        if !unit.will_generate || !seen.insert(unit.root_refno.as_str()) {
+        let root_deleted = unit.deleted > 0 && unit.new_owner.is_none();
+        if !unit.will_generate || root_deleted || !seen.insert(unit.root_refno.as_str()) {
             continue;
         }
         tasks.push(UnitTask {
@@ -3818,6 +3821,7 @@ impl AiosDBManager {
         // 聚合里等于「无可执行工作」→ 任务终态 succeeded/up_to_date，一次持久层
         // 故障就把没应用的窗口伪装成已完成——水位不动、无人重试、面板全绿。
         // Skipped 只留给判得出结论的主动裁决（阻断异常、排除）。
+        println!("dbnum={dbnum} 执行阶段: 复核文件身份与水位");
         let verdict = match DbnumState::classify_scan(&obs).await {
             Ok(verdict) => verdict,
             Err(error) => {
@@ -3837,6 +3841,7 @@ impl AiosDBManager {
                 );
             }
         };
+        println!("dbnum={dbnum} 执行阶段: 文件身份复核完成");
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
@@ -3892,6 +3897,7 @@ impl AiosDBManager {
 
         // Resolve and FIX this batch's window now (sessions arriving during
         // execution stay out of the range and wait for the next run).
+        println!("dbnum={dbnum} 执行阶段: 解析固定会话窗口");
         let plan = match SesnoRangeResolver::new()
             .resolve(
                 &cand.path,
@@ -3948,6 +3954,10 @@ impl AiosDBManager {
             changed_elements: 0,
         };
 
+        println!(
+            "dbnum={dbnum} 执行阶段: 收集增量 {}..={}",
+            start_sesno, end_sesno
+        );
         let collected = match IncrementPipeline::collect_changes(&cand.path, plan.range.clone()) {
             Ok(range_eles) => range_eles,
             Err(e) => {
@@ -3992,9 +4002,11 @@ impl AiosDBManager {
         );
         let mut precollected = IndexMap::new();
         precollected.insert(cand.path.clone(), (plan.range.clone(), collected));
+        println!("dbnum={dbnum} 执行阶段: 增量收集完成，开始暂存应用");
         let incr = IncrementPipeline::new()
             .apply_with_precollected(apply_map, precollected)
             .await;
+        println!("dbnum={dbnum} 执行阶段: 暂存应用返回");
         warnings.extend(incr.warnings.iter().map(|w| format!("dbnum={dbnum}: {w}")));
 
         let mut units = Vec::new();
@@ -6230,6 +6242,23 @@ mod tests {
             &default_unit_types(),
         );
         assert!(collect_unit_tasks(&units, 1, 42).is_empty());
+
+        // Issue #18: deleting the delivery root itself is handled by DeleteCleanup. The preview
+        // rollup may still mark the old BRAN model-affecting, but it no longer exists post-save.
+        let deleted_root = DeliveryUnitSummary {
+            root_refno: r(5).to_pdms_str(),
+            noun: "BRAN".into(),
+            deleted: 1,
+            model_affecting: 1,
+            will_generate: true,
+            old_owner: Some(r(3).to_pdms_str()),
+            new_owner: None,
+            ..Default::default()
+        };
+        assert!(
+            collect_unit_tasks(&[deleted_root], 1, 42).is_empty(),
+            "a deleted delivery root must not be regenerated"
+        );
     }
 
     #[test]

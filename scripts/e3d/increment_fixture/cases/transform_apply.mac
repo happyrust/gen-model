@@ -1,0 +1,9 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:xform_eq}}
+POS E 1000 N 5000 U 500
+ORI Y IS N AND Z IS U
+Q CE
+Q POS
+Q ORI
+SAVEWORK 'AIOS fixture transform apply'
+ALPHA LOG END

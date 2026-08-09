@@ -15,7 +15,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -276,6 +276,10 @@ pub async fn serve(
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
         .route("/api/v1/query", post(handlers::query))
         .route("/api/v1/dbnums", get(handlers::dbnums))
+        .route(
+            "/api/v1/dbnums/{dbnum}/data",
+            delete(handlers::dbnum_fast_delete),
+        )
         .route("/api/v1/queue", get(handlers::queue_snapshot))
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))

@@ -95,6 +95,25 @@ pub struct ModelUpdatePlan {
     pub units: Vec<DeliveryUnitSummary>,
 }
 
+impl ModelUpdatePlan {
+    /// 本计划要重生成的根（`RegenRoot` 工作项的目标）。
+    ///
+    /// 供缓存失效按根补齐（ADR-010 残余关闭）：`QUERY_DEEP_CHILDREN_REFNOS`
+    /// 按子树根为键，而增量失效集此前只到「变更元素 + 属主」。深层后代变更时，
+    /// 高层生成根（ZONE 级正常颗粒）的子树快照不会被命中——同根下一次重生成
+    /// 拿旧成员表跑，新构件 mesh 不生成、aabb 不落库、房间不触发且无报错。
+    /// 计划层是唯一算得出生成根的地方，失效按根在这里补。
+    pub fn regen_root_refnos(&self) -> Vec<RefnoEnum> {
+        use std::str::FromStr;
+        self.work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .filter_map(|item| aios_core::RefU64::from_str(&item.target_refno).ok())
+            .map(RefnoEnum::from)
+            .collect()
+    }
+}
+
 fn insert_item(
     items: &mut BTreeMap<(ModelWorkAction, String), ModelWorkItem>,
     item: ModelWorkItem,
@@ -883,6 +902,35 @@ mod tests {
         assert_eq!(items[0].action, ModelWorkAction::RegenRoot);
         assert_eq!(items[1].action, ModelWorkAction::Transform);
         assert_eq!(items[2].action, ModelWorkAction::DeleteCleanup);
+    }
+
+    /// 缓存失效按根补齐（ADR-010 残余）：只取 `RegenRoot` 的目标，其余 action
+    /// 的目标要么本来就在「变更元素 + 属主」失效集里，要么与子树快照无关；
+    /// 解析不了的根字符串跳过而不是拖垮整批。
+    #[test]
+    fn regen_root_refnos_extract_only_parseable_regen_targets() {
+        let item = |action: ModelWorkAction, target: &str| ModelWorkItem {
+            dbnum: 1,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action,
+            target_refno: target.into(),
+            noun: "ZONE".into(),
+        };
+        let plan = ModelUpdatePlan {
+            work_items: vec![
+                item(ModelWorkAction::RegenRoot, "1/5"),
+                item(ModelWorkAction::Transform, "1/9"),
+                item(ModelWorkAction::RoomRecalcPanel, "1/7"),
+                item(ModelWorkAction::RegenRoot, "not-a-refno"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            plan.regen_root_refnos(),
+            vec![RefnoEnum::from(aios_core::RefU64((1u64 << 32) | 5))]
+        );
     }
 
     #[test]

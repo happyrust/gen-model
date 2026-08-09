@@ -668,9 +668,7 @@ async fn dual_inst_relate_anc_u64_contains_index_agrees() {
         "CREATE pe:bmax SET noun = 'BOX'; CREATE inst_info:hmax; \
          INSERT RELATION INTO inst_relate [{{ id: inst_relate:rmax, in: pe:bmax, out: inst_info:hmax, dbnum: 1, anc: [{boundary}], aabb: {{ d: [0,0,0,1,1,1] }} }}];"
     );
-    let q_boundary = format!(
-        "SELECT VALUE anc FROM inst_relate WHERE anc CONTAINS {boundary};"
-    );
+    let q_boundary = format!("SELECT VALUE anc FROM inst_relate WHERE anc CONTAINS {boundary};");
 
     assert_dual_same(
         "anc_u64_index",
@@ -693,11 +691,7 @@ async fn dual_inst_relate_anc_u64_contains_index_agrees() {
     // 对拍只证两边一致，走没走索引要绝对断言。先钉标量（备选路线的地板），
     // 再钉数组 CONTAINS（主路线 Go/No-Go）——数组失败时标量结论已经在手。
     for (engine, db) in [("mem", &mem), ("fork", &fork)] {
-        let plan = exec_capture(
-            db,
-            "SELECT * FROM inst_relate WHERE dbnum = 7999 EXPLAIN;",
-        )
-        .await;
+        let plan = exec_capture(db, "SELECT * FROM inst_relate WHERE dbnum = 7999 EXPLAIN;").await;
         let text = plan[0].as_ref().expect("dbnum EXPLAIN 应可执行");
         assert!(
             text.contains("idx_ir_dbnum"),
@@ -850,9 +844,8 @@ async fn dual_inst_relate_flat_materialization_agrees() {
 
     // 与生产同一 serde 形态渲染副本字面量（Transform: bevy、Aabb: parry3d）。
     let wt_a = serde_json::to_string(&bevy_transform::prelude::Transform::IDENTITY).unwrap();
-    let wt_b =
-        serde_json::to_string(&bevy_transform::prelude::Transform::from_xyz(1.0, 2.0, 3.0))
-            .unwrap();
+    let wt_b = serde_json::to_string(&bevy_transform::prelude::Transform::from_xyz(1.0, 2.0, 3.0))
+        .unwrap();
     let aabb_a = serde_json::to_string(&parry3d::bounding_volume::Aabb::new(
         parry3d::math::Point::new(0.0f32, 0.0, 0.0),
         parry3d::math::Point::new(1.0f32, 1.0, 1.0),
@@ -1085,7 +1078,11 @@ async fn bench_anc_contains_vs_deep_traversal() {
     let exec = |sql: String| {
         let db = db.clone();
         async move {
-            db.query(sql).await.expect("bench exec").check().expect("bench check");
+            db.query(sql)
+                .await
+                .expect("bench exec")
+                .check()
+                .expect("bench check");
         }
     };
     exec(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL.to_string()).await;
@@ -1203,8 +1200,12 @@ async fn bench_anc_contains_vs_deep_traversal() {
 
     let mut old_total = Duration::ZERO;
     let mut new_total = Duration::ZERO;
-    let (mut t_trav, mut t_filter, mut t_children, mut t_insts) =
-        (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let (mut t_trav, mut t_filter, mut t_children, mut t_insts) = (
+        Duration::ZERO,
+        Duration::ZERO,
+        Duration::ZERO,
+        Duration::ZERO,
+    );
     let mut max_inline_sql_bytes = 0usize;
 
     for (i, &root) in site_roots.iter().enumerate() {
@@ -1254,8 +1255,7 @@ async fn bench_anc_contains_vs_deep_traversal() {
         let mut old_rows: Vec<String> = Vec::new();
         for chunk in union.chunks(500) {
             let inst_keys = chunk.iter().map(|x| x.to_inst_relate_key()).join(",");
-            let sql =
-                format!("select {INST_PROJECTION} from {inst_keys} where aabb.d != none");
+            let sql = format!("select {INST_PROJECTION} from {inst_keys} where aabb.d != none");
             let rows = take_rows(&db, &sql, 0).await;
             old_rows.extend(refno_set(&rows));
         }
@@ -1274,10 +1274,7 @@ async fn bench_anc_contains_vs_deep_traversal() {
         let new_elapsed = new_started.elapsed();
         new_total += new_elapsed;
 
-        assert_eq!(
-            old_rows, new_rows,
-            "root #{i} 新旧路径 refno 集合必须一致"
-        );
+        assert_eq!(old_rows, new_rows, "root #{i} 新旧路径 refno 集合必须一致");
         if i == 0 {
             println!(
                 "[bench] root #0：{} 实例；旧 {old_elapsed:?} → 新 {new_elapsed:?}",

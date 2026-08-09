@@ -1,0 +1,7 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:room_member_eq}}
+POS E 0 N 0 U 1000
+Q CE
+Q POS
+SAVEWORK 'AIOS fixture room member restore'
+ALPHA LOG END

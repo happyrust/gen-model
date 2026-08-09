@@ -21,6 +21,16 @@ pub fn is_sul_db_transport_error(message: &str) -> bool {
     message.contains(TRANSPORT_FAILURE_MARKER)
 }
 
+/// 这条错误是不是 SDK 自动重连边界留下的瞬时传输失败。
+///
+/// SurrealDB WS router 重连时会清空尚未完成的 `pending_requests`；恰好在途的
+/// 查询因此收到一个已关闭的响应 channel。连接本身通常已经恢复，紧接着重试即可。
+/// 匹配必须保持窄：不能用泛化的 `closed`，否则业务语句错误也可能被误重试。
+pub fn is_retryable_sul_db_transport_error(message: &str) -> bool {
+    is_sul_db_transport_error(message)
+        || message.contains("receiving from an empty and closed channel")
+}
+
 /// SUL_DB 传输层故障账本（`/health` 的「刚才断过一次」）。
 ///
 /// 记录点有两类：写路径的 [`execute_surreal_checked`]（生产写入几乎都经它），
@@ -51,6 +61,58 @@ pub fn sul_db_disconnect_snapshot() -> (u64, Option<String>, Option<String>) {
     }
 }
 
+/// 在 SDK 自动重连边界上短促重试一个 `SUL_DB` 操作。
+///
+/// 这里只处理明确的传输错误；语法、约束和反序列化错误原样立即返回。次数有界，
+/// 持续性断连会交还给 worker 的 30 秒退避，避免形成热循环。
+pub async fn retry_sul_db_transport<T, F, Fut>(context: &str, mut operation: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    retry_sul_db_transport_inner(context, &mut operation, true).await
+}
+
+async fn retry_sul_db_transport_inner<T, F, Fut>(
+    context: &str,
+    mut operation: F,
+    record_disconnect: bool,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    const MAX_ATTEMPTS: usize = 3;
+    const BASE_DELAY_MS: u64 = 50;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if !is_retryable_sul_db_transport_error(&message) {
+                    return Err(anyhow::anyhow!("{context}: {message}"));
+                }
+
+                if record_disconnect {
+                    record_sul_db_disconnect(&format!("{context}: {message}"));
+                }
+                if attempt == MAX_ATTEMPTS {
+                    return Err(anyhow::anyhow!(
+                        "{context}: transport recovery exhausted after {MAX_ATTEMPTS} attempts: {message}"
+                    ));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    BASE_DELAY_MS * attempt as u64,
+                ))
+                .await;
+            }
+        }
+    }
+    unreachable!("bounded transport retry loop always returns")
+}
+
 /// 冲突重试的等待时长。
 ///
 /// 多个写入器争同一批 key 时冲突是持续的：固定或线性退避会让几个批次同步重试、
@@ -65,6 +127,36 @@ fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
         .unwrap_or_default()
         % backoff_ms;
     std::time::Duration::from_millis(backoff_ms + jitter_ms)
+}
+
+/// 对不能直接交给 [`execute_surreal_checked`] 的幂等 SurrealDB 控制面操作做冲突重试。
+///
+/// `aios_core` 的索引定义入口自己封装了 SQL，只向调用方暴露 async `Result`。初始化时
+/// worker 或另一个建索引事务可能同时提交，单次写冲突不应让基线进程 panic。非冲突
+/// 错误立即返回；重试次数与普通写执行器一致且有界。
+pub async fn retry_surreal_write_operation<T, E, F, Fut>(
+    context: &str,
+    mut operation: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    const MAX_ATTEMPTS: usize = 16;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let message = error.to_string();
+                if attempt == MAX_ATTEMPTS || !is_retryable_surreal_write_error(&message) {
+                    return Err(anyhow::anyhow!("{context}: {message}"));
+                }
+                tokio::time::sleep(conflict_retry_backoff(attempt)).await;
+            }
+        }
+    }
+    unreachable!("bounded retry loop always returns")
 }
 
 /// 执行一段 SQL 并逐条检查结果，遇到写冲突按指数退避重试。
@@ -161,26 +253,137 @@ fn surreal_write_conflicts_are_retryable_but_syntax_errors_are_not() {
     ));
 }
 
-/// 断连账本只认传输层失败；语句错误（语法、约束）不是断连，不许污染
-/// `/health` 的「最近断连」。标记常量由执行器渲染、由分类器识别，两边共用
-/// 同一个 `TRANSPORT_FAILURE_MARKER`，这里钉住渲染出的文本确实能被认出来。
+#[tokio::test]
+async fn opaque_control_operation_recovers_from_one_write_conflict() {
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let value = retry_surreal_write_operation("define test index", || async {
+        if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            anyhow::bail!(
+                "Failed to commit transaction due to a read or write conflict. This transaction can be retried"
+            );
+        }
+        Ok::<_, anyhow::Error>(42)
+    })
+    .await
+    .expect("transient conflict must retry");
+    assert_eq!(value, 42);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn opaque_control_operation_does_not_retry_a_non_conflict() {
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let error = retry_surreal_write_operation("define test index", || async {
+        attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err::<(), _>(anyhow::anyhow!("parse error"))
+    })
+    .await
+    .expect_err("syntax failure must be returned");
+    assert!(error.to_string().contains("parse error"));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// 断连分类只认传输层失败；语句错误（语法、约束）不是断连。
+/// 标记常量由执行器渲染、由分类器识别，两边共用同一个常量。
 #[test]
-fn only_transport_failures_enter_the_disconnect_ledger() {
+fn only_transport_failures_match_the_disconnect_classifier() {
     let rendered = format!("save pe {TRANSPORT_FAILURE_MARKER}: connection reset (os error 10054)");
     assert!(is_sul_db_transport_error(&rendered));
     assert!(!is_sul_db_transport_error(
         "save pe statement failed: Parse error: unexpected token"
     ));
+}
 
-    let (before, _, _) = sul_db_disconnect_snapshot();
-    record_sul_db_disconnect(&rendered);
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_response_channel_is_retried_and_recorded() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let before = sul_db_disconnect_snapshot().0;
+    let result = retry_sul_db_transport("spatial pending SELECT", {
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt == 1 {
+                    anyhow::bail!(
+                        "Internal error: receiving from an empty and closed channel: \
+                         Internal error: receiving from an empty and closed channel"
+                    );
+                }
+                Ok(7usize)
+            }
+        }
+    })
+    .await
+    .expect("second attempt should cross the reconnect boundary");
+
+    assert_eq!(result, 7);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let (after, at, error) = sul_db_disconnect_snapshot();
-    assert_eq!(after, before + 1, "计数必须单调递增");
+    assert_eq!(after, before + 1);
     assert!(at.is_some(), "最近一次断连必须带时刻");
     assert!(
-        error.is_some_and(|text| text.contains("10054")),
-        "最近一次断连必须带错误文本"
+        error.is_some_and(|text| text.contains("empty and closed channel")),
+        "最近一次断连必须带原始传输错误"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persistent_transport_failure_is_bounded() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let error = retry_sul_db_transport_inner(
+        "spatial pending SELECT",
+        {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(anyhow::anyhow!(
+                        "Internal error: receiving from an empty and closed channel"
+                    ))
+                }
+            }
+        },
+        false,
+    )
+    .await
+    .expect_err("persistent outage must return to the worker backoff");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert!(error.to_string().contains("recovery exhausted"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn statement_error_is_not_retried_as_transport() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let error = retry_sul_db_transport_inner(
+        "spatial pending SELECT",
+        {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(anyhow::anyhow!(
+                        "statement failed: Parse error: unexpected token"
+                    ))
+                }
+            }
+        },
+        false,
+    )
+    .await
+    .expect_err("statement errors must surface immediately");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(error.to_string().contains("Parse error"));
 }
 
 #[test]

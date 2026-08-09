@@ -91,6 +91,11 @@ pub(crate) fn ancestor_seed_refnos(
     transform_model_refnos: &[RefnoEnum],
 ) -> Vec<RefU64> {
     use crate::data_interface::model_update_plan::ModelWorkAction;
+    let deleted_targets = plan_items
+        .iter()
+        .filter(|item| item.action == ModelWorkAction::DeleteCleanup)
+        .map(|item| RefnoEnum::from(item.target_refno.as_str()).refno())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut seeds = std::collections::BTreeSet::new();
     seeds.extend(
         transform_targets
@@ -107,7 +112,12 @@ pub(crate) fn ancestor_seed_refnos(
     seeds.extend(
         new_units
             .iter()
-            .map(|unit| RefnoEnum::from(unit.root_refno.as_str()).refno()),
+            .map(|unit| RefnoEnum::from(unit.root_refno.as_str()).refno())
+            // A fully deleted delivery-unit root can still be present in the preview-derived
+            // `new_units` list even though the final plan correctly replaced RegenRoot with
+            // DeleteCleanup. The post-save file has already removed it from its owner's member
+            // block, so reintroducing it here violates the deletion invariant above.
+            .filter(|refno| !deleted_targets.contains(refno)),
     );
     seeds
         .into_iter()
@@ -1099,16 +1109,22 @@ mod tests {
             item(ModelWorkAction::RegenRoot, "4000000001/784003"),
             item(ModelWorkAction::RoomRecalcElement, "4000000001/784004"),
         ];
-        let new_units = vec![crate::data_interface::manual_update::UnitTask {
+        let unit = |root_refno: &str| crate::data_interface::manual_update::UnitTask {
             dbnum: 7997,
-            root_refno: "4000000001/784005".into(),
+            root_refno: root_refno.into(),
             noun: "BRAN".into(),
             source_end_sesno: 3,
             attempts: 0,
             revision: None,
             old_owner: None,
             new_owner: None,
-        }];
+        };
+        let new_units = vec![
+            unit("4000000001/784005"),
+            // Issue #18: preview-derived units may still contain the delivery root that the
+            // final plan marks DeleteCleanup. It must not sneak back into file-backed seeds.
+            unit("4000000001/784002"),
+        ];
         let transform_targets = vec![RefnoEnum::from("4000000001/784001")];
         let transform_models = vec![RefnoEnum::from("4000000001/784006")];
 

@@ -41,6 +41,7 @@ use tokio::time::Instant;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
+use crate::surreal_retry::retry_surreal_write_operation;
 use crate::tables::*;
 use crate::versioned_db::member_prune;
 use crate::versioned_db::pe::*;
@@ -48,7 +49,11 @@ use crate::versioned_db::task::get_global_db_sender;
 
 const BASELINE_QUEUE_CAPACITY: usize = 100;
 const BASELINE_WRITE_WINDOW: usize = 20;
-const BASELINE_WRITE_WORKERS: usize = 4;
+// SurrealDB 2.1/RocksDB uses optimistic transactions for these multi-row
+// INSERTs. Even disjoint PE ids update shared table/index state, so concurrent
+// baseline writers can keep colliding until the bounded retry budget expires.
+// Keep parsing concurrent and the channel bounded, but serialize persistence.
+const BASELINE_WRITE_WORKERS: usize = 1;
 
 pub enum SenderJsonsData {
     PEJson(Vec<String>),
@@ -551,13 +556,14 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     //只有重新同步时，才需要定义index
     let enable_index = db_option.total_sync || db_option.enable_index.unwrap_or(true);
     if enable_index {
-        aios_core::define_owner_index().await.unwrap();
-        aios_core::create_geom_index().await.unwrap();
+        retry_surreal_write_operation("define owner index", aios_core::define_owner_index).await?;
+        retry_surreal_write_operation("define geometry index", aios_core::create_geom_index)
+            .await?;
         // aios_core::define_fullname_index().await.unwrap();
-        aios_core::define_pe_index().await.unwrap();
+        retry_surreal_write_operation("define pe index", aios_core::define_pe_index).await?;
     }
     if db_option.is_sync_history() {
-        aios_core::define_ses_index().await.unwrap();
+        retry_surreal_write_operation("define session index", aios_core::define_ses_index).await?;
     }
 
     let mut dbno_set = Arc::new(DashSet::new());
@@ -758,24 +764,17 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
 }
 
 pub async fn check_and_clear_db(db_no: u32) -> anyhow::Result<()> {
-    let sql = format!(
-        "SELECT value id FROM only pe WHERE dbnum = {} limit 1",
-        db_no
-    );
-    let mut response = SUL_DB.query(&sql).await.expect("check db exists failed");
-    use surrealdb::sql::Thing;
-    let db_exists: Option<Thing> = response.take(0).unwrap();
-    if db_exists.is_some() {
+    let result = crate::data_interface::fast_delete::delete_dbnum_fast(db_no).await?;
+    if result.pe_rows > 0 {
         println!(
-            "Database with dbnum {} already exists in pe table. Will override with new data.",
-            db_no
+            "dbnum={} 快速删除完成：PE={}，Ref0={:?}，noun 表={}，区间语句={}，耗时={}ms",
+            result.dbnum,
+            result.pe_rows,
+            result.ref0s,
+            result.noun_tables,
+            result.range_statements,
+            result.elapsed_ms
         );
-        println!("开始删除已有的dbnum {db_no} 的数据");
-        let sql = format!("delete array::flatten(select value ->pe_owner from pe where dbnum = {db_no});
-                                    delete array::flatten(select value [refno, id] from pe where dbnum = {db_no});
-                                   delete array::flatten(select value ->inst_relate from pe where dbnum = {db_no});
-                                    ");
-        SUL_DB.query(&sql).await.expect("clear db failed");
     }
     Ok(())
 }
@@ -831,9 +830,11 @@ pub async fn sync_total_async_threaded(
     let (sender, receiver) = flume::bounded(BASELINE_QUEUE_CAPACITY);
 
     let mut insert_handles = FuturesUnordered::new();
-    // SurrealDB 2.1 uses optimistic transactions. Unbounded same-table
-    // concurrency caused silent write loss; one global writer was correct but
-    // too slow for 7997. Use bounded concurrency plus checked conflict retries.
+    // SurrealDB 2.1 uses optimistic transactions. Concurrent multi-row writes
+    // to disjoint PE ids still contend on shared table/index state and a real
+    // 7997 baseline exhausted the conflict retry budget. Parsing remains
+    // parallel; persistence is deliberately single-writer and still retains
+    // checked conflict retries for interference from other processes.
     for _ in 0..BASELINE_WRITE_WORKERS {
         let receiver: flume::Receiver<SenderJsonsData> = receiver.clone();
         #[cfg(feature = "sql")]

@@ -131,7 +131,10 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         file_latest_sesno > applied_sesno,
         "水位必须先回拨出一个待重放窗口 file={file_latest_sesno} applied={applied_sesno}"
     );
-    println!("[pane-replay] 窗口 {}..={file_latest_sesno}", applied_sesno + 1);
+    println!(
+        "[pane-replay] 窗口 {}..={file_latest_sesno}",
+        applied_sesno + 1
+    );
 
     let before_trans = world_trans_id().await.expect("基线必须有 world_trans 指针");
     let before_aabb = aabb_string().await.expect("基线必须有 AABB");
@@ -213,7 +216,9 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         "批次成功后水位必须推进到文件最新会话"
     );
 
-    let after_trans = world_trans_id().await.expect("重放后 world_trans 指针必须在场");
+    let after_trans = world_trans_id()
+        .await
+        .expect("重放后 world_trans 指针必须在场");
     assert_ne!(
         after_trans, before_trans,
         "Transform 刷新必须改指新 trans 记录（重放也一样）"
