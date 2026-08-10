@@ -1,0 +1,15 @@
+-- Remove the named EQUI clone created by db8000_equi_copy_apply.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_restore.log" OVER
+$P CODEX-DB8000-EQUI-COPY-RESTORE-ALIVE
+=/CODEX_DB8000_EQ_COPY
+Q CE
+Q REF
+Q TYPE
+Q NAME
+Q OWNE
+DELETE EQUIPMENT
+SAVEWORK 'CODEX db8000 remove cloned EQUI 24384/24776'
+$P CODEX-DB8000-EQUI-COPY-RESTORE-DONE
+ALPHA LOG END
+FINISH

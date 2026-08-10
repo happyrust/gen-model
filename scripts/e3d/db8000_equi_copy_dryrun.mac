@@ -1,0 +1,38 @@
+-- Validate the EQUI creation/copy commands without SAVEWORK.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_1.log" OVER
+$P CODEX-DB8000-EQUI-DRYRUN-START
+ALPHA LOG END
+
+=24384/24775
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_2.log" OVER
+$P CODEX-DB8000-EQUI-DRYRUN-OWNER-SELECTED
+Q CE
+Q REF
+Q TYPE
+Q NAME
+Q OWNE
+ALPHA LOG END
+
+NEW EQUI /CODEX_DB8000_EQ_DRYRUN
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_3.log" OVER
+$P CODEX-DB8000-EQUI-DRYRUN-CREATED
+Q CE
+Q REF
+Q TYPE
+Q NAME
+Q OWNE
+ALPHA LOG END
+
+COPY =24384/24776
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_4.log" OVER
+$P CODEX-DB8000-EQUI-DRYRUN-COPIED
+Q CE
+Q REF
+Q TYPE
+Q NAME
+Q OWNE
+ALPHA LOG END
+
+DELETE EQUI
+FINISH

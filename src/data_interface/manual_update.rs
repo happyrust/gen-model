@@ -2529,6 +2529,14 @@ pub struct DbnumPreview {
     /// 设计改动没被吸收」。
     #[serde(default)]
     pub file_latest_sesno_time: Option<String>,
+    /// **第一条待应用保存**（窗口左端，`applied_sesno + 1`）的写入时刻（RFC3339）。
+    ///
+    /// 与 `applied_sesno_time` 不是同一个时刻，别混：那个是「上次应用的是哪一条」，
+    /// 这个是「这批要应用的第一条」，两者之间的空档正是上次应用之后隔了多久才又存盘。
+    /// 界面的保存窗口时间对取的是**窗口自身两端**（plant-ui ADR-0019 Q3），左端就是它。
+    /// 阻断 / 需初始化 / 无待应用窗口时为 `None`。
+    #[serde(default)]
+    pub first_pending_sesno_time: Option<String>,
     /// Raw per-session counts across the pending window.
     pub sessions: Vec<SessionPreview>,
     /// Net add/modify/delete counts after merging the whole window.
@@ -2851,7 +2859,11 @@ fn subset_selects(
 /// 一个会话在 E3D 里被写入的时刻（RFC3339，`SessionPageData::get_dt`），
 /// ADR-020 第 2 项。读一页会话页；读不到（会话号缺失、文件被截断等）→ `None`，
 /// 界面按「从未应用」处理，不把一次 IO 失败升级成整行预览失败。
-fn session_time_rfc3339(project: &str, path: &std::path::Path, sesno: i32) -> Option<String> {
+pub(crate) fn session_time_rfc3339(
+    project: &str,
+    path: &std::path::Path,
+    sesno: i32,
+) -> Option<String> {
     if sesno <= 0 {
         return None;
     }
@@ -2860,6 +2872,33 @@ fn session_time_rfc3339(project: &str, path: &std::path::Path, sesno: i32) -> Op
     io.get_ses_data(sesno as u32)
         .ok()
         .map(|ses| ses.get_dt().to_rfc3339())
+}
+
+/// 一个保存窗口两端的写入时刻，一次开文件读两页（plant-ui ADR-0019 Q3 的时间对）。
+///
+/// 与 [`session_time_rfc3339`] 同一把尺子。两端各自降级：任一端读不到就只是那一端
+/// `None`，界面把整格留空——**绝不回落成 sesno，也绝不拿挂钟时刻顶替**。
+pub(crate) fn window_times_rfc3339(
+    project: &str,
+    path: &std::path::Path,
+    start_sesno: i32,
+    end_sesno: i32,
+) -> (Option<String>, Option<String>) {
+    let mut io = PdmsIO::new(project, path, true);
+    if io.open().is_err() {
+        return (None, None);
+    }
+    let mut read = |sesno: i32| {
+        if sesno <= 0 {
+            return None;
+        }
+        io.get_ses_data(sesno as u32)
+            .ok()
+            .map(|ses| ses.get_dt().to_rfc3339())
+    };
+    let start = read(start_sesno);
+    let end = read(end_sesno);
+    (start, end)
 }
 
 impl AiosDBManager {
@@ -2938,7 +2977,7 @@ impl AiosDBManager {
             .await?;
             let root_count = scalar_count(format!(
                 "SELECT count() AS count FROM pe \
-                 WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
+                 WHERE dbnum = {dbnum} AND string::uppercase(noun) = 'WORL' GROUP ALL"
             ))
             .await?;
             Ok((pe_count, info_count, root_count))
@@ -3524,6 +3563,11 @@ impl AiosDBManager {
                     preview.file_latest_sesno_time =
                         Some(plan.basic_info.latest_ses_data.get_dt().to_rfc3339());
                     preview.applied_sesno_time = session_time_rfc3339(project, &cand.path, applied);
+                    // plant-ui ADR-0019 Q3：确认页的保存窗口取窗口自身两端，左端是
+                    // 第一条待应用保存——取 `plan.range` 的左端而不是 `applied + 1`，
+                    // 解析器定下的窗口才是执行真正会走的那个。同样读一页会话页。
+                    preview.first_pending_sesno_time =
+                        session_time_rfc3339(project, &cand.path, *plan.range.start());
                     let range_eles = IncrementPipeline::collect_changes(&cand.path, plan.range)?;
                     let details = fill_change_summary(&mut preview, &range_eles);
                     // Delivery units are a model-delivery concept: only DESI dbs
@@ -3748,6 +3792,8 @@ impl AiosDBManager {
 
             // 从未解析（applied=0）与增量窗口在这里不分家：worker 执行体里的
             // `needs_initial_load` 会把基线接管过去，两条路径同口径。
+            let (first_pending_sesno_time, file_latest_sesno_time) =
+                window_times_rfc3339(project, &cand.path, applied + 1, cand.file_latest_sesno);
             let outcome = scheduler.enqueue(
                 registry,
                 &DiscoveredBatch {
@@ -3758,6 +3804,8 @@ impl AiosDBManager {
                     file_name: cand.file_name.clone(),
                     applied_sesno: applied,
                     file_latest_sesno: cand.file_latest_sesno,
+                    first_pending_sesno_time,
+                    file_latest_sesno_time,
                 },
             );
             match outcome.outcome {

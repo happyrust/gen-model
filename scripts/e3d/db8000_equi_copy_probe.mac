@@ -1,0 +1,18 @@
+-- Read-only TTY probe for the source EQUI used by the copy/paste regression.
+-- This macro opens AMS /ALL, records the authoritative E3D identity/owner,
+-- performs no mutation and creates no SAVEWORK session.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_probe.log" OVER
+$P CODEX-DB8000-EQUI-PROBE-ALIVE
+Q PROJ
+Q MDB
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+Q ORI
+$P CODEX-DB8000-EQUI-PROBE-DONE
+ALPHA LOG END
+FINISH

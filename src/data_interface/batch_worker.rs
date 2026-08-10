@@ -359,7 +359,19 @@ async fn run_one_batch(
     // 左端（running_end + 1）也建在一个过时的数上。
     let result = match refresh_candidate(&job) {
         Ok(cand) => {
-            scheduler.record_frozen_end(registry, job.dbnum, cand.file_latest_sesno);
+            // 序号与时刻一起回写：冻结改了右端，入队时那个时刻立刻就是错的
+            // （plant-ui ADR-0019）。读一页会话页，读不到就让那一格空着。
+            let end_sesno_time = crate::data_interface::manual_update::session_time_rfc3339(
+                &job.project,
+                &cand.path,
+                cand.file_latest_sesno,
+            );
+            scheduler.record_frozen_end(
+                registry,
+                job.dbnum,
+                cand.file_latest_sesno,
+                end_sesno_time,
+            );
             beat();
             execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await
         }

@@ -117,6 +117,9 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
             .into_owned(),
         applied_sesno,
         file_latest_sesno,
+        // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
     };
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
     let task_id = outcome.info.task_id.clone();

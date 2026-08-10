@@ -153,6 +153,9 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
             .into_owned(),
         applied_sesno,
         file_latest_sesno,
+        // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
     };
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
     println!("[pane-replay] 入队: {outcome:?}");

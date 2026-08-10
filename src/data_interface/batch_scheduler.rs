@@ -33,6 +33,25 @@ pub struct DiscoveredBatch {
     /// 当前水位（入队时定左端用；执行时 worker 会重新读）。
     pub applied_sesno: i32,
     pub file_latest_sesno: i32,
+    /// 第一条待应用保存（`applied_sesno + 1`）的 E3D 写入时刻（RFC3339）。
+    /// 队列「保存窗口」列的左端（plant-ui ADR-0019）；读不到就是 `None`，那一格留空。
+    pub first_pending_sesno_time: Option<String>,
+    /// `file_latest_sesno` 那条保存的 E3D 写入时刻，窗口右端。
+    pub file_latest_sesno_time: Option<String>,
+}
+
+/// 端点对得上才把时刻贴上去。
+///
+/// 队列行的端点未必等于这次发现的端点：排在运行批次之后的那条左端是
+/// `running_end + 1`，右端也可能已经被别的触发推得更高。时刻只有在端点对得上时
+/// 才是**那条保存**的时刻，对不上就空着——ADR-0019 的降级规则是缺席不摆假数据，
+/// 一个贴错行的时刻比没有时刻更糟。
+fn time_for(row_sesno: i32, observed_sesno: i32, observed_time: &Option<String>) -> Option<String> {
+    if row_sesno == observed_sesno {
+        observed_time.clone()
+    } else {
+        None
+    }
 }
 
 /// 队列行的执行侧信息：`batch_queue::DataBatch` 只有纯粹的区间语义，
@@ -258,7 +277,15 @@ impl BatchScheduler {
                                 meta.file_name = found.file_name.clone();
                             }
                             if outcome == Enqueued::Merged {
-                                registry.update_queued_range(&task_id, row.end_sesno);
+                                registry.update_queued_range(
+                                    &task_id,
+                                    row.end_sesno,
+                                    time_for(
+                                        row.end_sesno,
+                                        found.file_latest_sesno,
+                                        &found.file_latest_sesno_time,
+                                    ),
+                                );
                             }
                             task_id
                         }
@@ -276,7 +303,17 @@ impl BatchScheduler {
                                 found.dbnum,
                                 &found.db_type,
                                 row.start_sesno,
+                                time_for(
+                                    row.start_sesno,
+                                    found.applied_sesno + 1,
+                                    &found.first_pending_sesno_time,
+                                ),
                                 row.end_sesno,
+                                time_for(
+                                    row.end_sesno,
+                                    found.file_latest_sesno,
+                                    &found.file_latest_sesno_time,
+                                ),
                             );
                             state.meta.insert(
                                 (found.dbnum, false),
@@ -380,7 +417,15 @@ impl BatchScheduler {
     /// 右端只是**入队时观察到的预期上界**——两次触发之间文件还在长。不回写会有两个
     /// 后果：面板上显示的区间比实际应用的窄；以及紧接着排在后面那条的左端
     /// （`running_end + 1`）建在一个过时的数上。
-    pub fn record_frozen_end(&self, registry: &TaskRegistry, dbnum: u32, end_sesno: i32) {
+    /// `end_sesno_time` 是这个真实上界那条保存的 E3D 写入时刻；读不到就传 `None`，
+    /// 那一格会空着——冻结把序号改了，入队时那个旧时刻立刻就是错的，不能留着。
+    pub fn record_frozen_end(
+        &self,
+        registry: &TaskRegistry,
+        dbnum: u32,
+        end_sesno: i32,
+        end_sesno_time: Option<String>,
+    ) {
         let (task_id, absorbed_task_id, shifted_task_id) = {
             let mut state = self.queue();
             let changed = match state
@@ -416,10 +461,12 @@ impl BatchScheduler {
             (task_id, absorbed_task_id, shifted_task_id)
         };
         if let Some(task_id) = task_id {
-            registry.set_frozen_range(&task_id, end_sesno);
+            registry.set_frozen_range(&task_id, end_sesno, end_sesno_time);
         }
         if let Some(task_id) = shifted_task_id {
-            registry.set_queued_start(&task_id, end_sesno + 1);
+            // 后继行的左端变成 `end_sesno + 1`，那条保存的时刻这里读不到（要开文件），
+            // 而它下一轮被并入时会连同时刻一起刷新。空着比留一个上一任左端的时刻好。
+            registry.set_queued_start(&task_id, end_sesno + 1, None);
         }
         if let Some(task_id) = absorbed_task_id {
             let result = serde_json::json!({ "status": "absorbed_by_running" });
@@ -537,6 +584,8 @@ mod tests {
     use super::*;
 
     fn found(dbnum: u32, applied: i32, latest: i32) -> DiscoveredBatch {
+        // 时刻用「sesno 的分钟数」编出来，好在断言里一眼认出它贴到了哪条保存上。
+        let at = |sesno: i32| Some(format!("2026-08-07T10:{:02}:00+08:00", sesno % 60));
         DiscoveredBatch {
             project: "P".into(),
             dbnum,
@@ -545,6 +594,8 @@ mod tests {
             file_name: format!("db{dbnum}"),
             applied_sesno: applied,
             file_latest_sesno: latest,
+            first_pending_sesno_time: at(applied + 1),
+            file_latest_sesno_time: at(latest),
         }
     }
 
@@ -658,7 +709,7 @@ mod tests {
         scheduler.enqueue(&registry, &found(7997, 0, 10));
         scheduler.freeze_next(&registry).unwrap();
         let absorbed = scheduler.enqueue(&registry, &found(7997, 0, 12));
-        scheduler.record_frozen_end(&registry, 7997, 12);
+        scheduler.record_frozen_end(&registry, 7997, 12, None);
         assert_eq!(scheduler.snapshot().len(), 1);
         let entry = registry.get(&absorbed.info.task_id).unwrap();
         assert_eq!(entry.state, TaskState::Succeeded);
@@ -668,12 +719,46 @@ mod tests {
         scheduler.enqueue(&registry, &found(7997, 0, 10));
         scheduler.freeze_next(&registry).unwrap();
         let shifted = scheduler.enqueue(&registry, &found(7997, 0, 15));
-        scheduler.record_frozen_end(&registry, 7997, 12);
+        scheduler.record_frozen_end(&registry, 7997, 12, None);
         let rows = scheduler.snapshot();
         assert_eq!((rows[1].start_sesno, rows[1].end_sesno), (13, 15));
+        let shifted_entry = registry.get(&shifted.info.task_id).unwrap();
+        assert_eq!(shifted_entry.start_sesno, Some(13));
+        assert!(
+            shifted_entry.start_sesno_time.is_none(),
+            "后继行的左端被推到 13，原来那个属于 sesno 1 的时刻必须一起清掉"
+        );
+    }
+
+    /// 入队时贴上去的时刻必须真的属于队列行的那两个端点。
+    ///
+    /// 排在运行批次之后的那条，左端是 `running_end + 1` 而不是这次发现的水位 + 1——
+    /// 照着 `found` 里的时刻直接贴，就会把一条别的保存的时刻写在这一行上。
+    #[test]
+    fn a_window_time_is_only_attached_when_the_endpoint_matches() {
+        let (scheduler, registry) = fresh();
+        let first = scheduler.enqueue(&registry, &found(7997, 0, 10));
+        let entry = registry.get(&first.info.task_id).unwrap();
         assert_eq!(
-            registry.get(&shifted.info.task_id).unwrap().start_sesno,
-            Some(13)
+            (entry.start_sesno, entry.end_sesno),
+            (Some(1), Some(10)),
+            "第一条的两端就是这次发现的两端"
+        );
+        assert!(entry.start_sesno_time.is_some() && entry.end_sesno_time.is_some());
+
+        // 冻结之后再触发：新行排在运行批次后面，左端是 11，而 `found` 手里的左端
+        // 时刻描述的是 sesno 1 那条保存——端点对不上，这一格只能空着。
+        scheduler.freeze_next(&registry).unwrap();
+        let behind = scheduler.enqueue(&registry, &found(7997, 0, 15));
+        let entry = registry.get(&behind.info.task_id).unwrap();
+        assert_eq!((entry.start_sesno, entry.end_sesno), (Some(11), Some(15)));
+        assert!(
+            entry.start_sesno_time.is_none(),
+            "左端是 11 而手里的时刻属于 sesno 1，不许贴上去"
+        );
+        assert!(
+            entry.end_sesno_time.is_some(),
+            "右端 15 与发现的右端一致，时刻照贴"
         );
     }
 }

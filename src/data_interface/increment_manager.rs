@@ -1431,6 +1431,16 @@ impl AiosDBManager {
                 "发现需要增量更新的文件: {file_name}, 当前数据库最大sesno: {applied}, 文件最新sesno: {file_latest_sesno}"
             );
         }
+        // 队列「保存窗口」列显示的是两端保存的写入时刻（plant-ui ADR-0019），
+        // 在这里一次开文件读两页。放在上面那两个早退之后：只有真的有活要干的库
+        // 才付这个 IO，水位已覆盖的一律不读。
+        let (first_pending_sesno_time, file_latest_sesno_time) =
+            crate::data_interface::manual_update::window_times_rfc3339(
+                project,
+                path,
+                applied + 1,
+                file_latest_sesno,
+            );
         Some(crate::data_interface::batch_scheduler::DiscoveredBatch {
             project: project.to_string(),
             dbnum: db_num,
@@ -1439,6 +1449,8 @@ impl AiosDBManager {
             file_name: file_name.to_string(),
             applied_sesno: applied,
             file_latest_sesno,
+            first_pending_sesno_time,
+            file_latest_sesno_time,
         })
     }
 
