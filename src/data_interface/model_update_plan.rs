@@ -21,6 +21,8 @@ pub enum ModelWorkAction {
     Transform,
     DeleteCleanup,
     CascadeExpand,
+    /// BRAN/HANG 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链。
+    PostRegenAabb,
     /// 一个构件的几何动了 → 反向定位它落在哪些面板里（ADR-010 §2）。
     RoomRecalcElement,
     /// 一块 PANE 或房间节点本身动了 → 整块面板重算（面板一动，成员全变，
@@ -35,6 +37,7 @@ impl ModelWorkAction {
             Self::Transform => "transform",
             Self::DeleteCleanup => "delete_cleanup",
             Self::CascadeExpand => "cascade_expand",
+            Self::PostRegenAabb => "post_regen_aabb",
             Self::RoomRecalcElement => "room_recalc_element",
             Self::RoomRecalcPanel => "room_recalc_panel",
         }
@@ -54,6 +57,7 @@ impl ModelWorkAction {
             "transform" => Self::Transform,
             "delete_cleanup" => Self::DeleteCleanup,
             "cascade_expand" => Self::CascadeExpand,
+            "post_regen_aabb" => Self::PostRegenAabb,
             "room_recalc_element" => Self::RoomRecalcElement,
             "room_recalc_panel" => Self::RoomRecalcPanel,
             _ => return None,
@@ -306,6 +310,8 @@ fn unit_derives_geometry_from_member_positions(noun: &str) -> bool {
 pub(crate) struct DerivedGeometryReroute {
     /// 子树里必须整根重生成的派生几何单元：`a/b` → noun，按 refno 串有序。
     pub(crate) descendant_units: BTreeMap<String, String>,
+    /// 从便宜位姿路径摘走的原始目标。根生成成功后必须再走统一 AABB 刷新，不能只刷根。
+    pub(crate) rerouted_refnos: Vec<RefnoEnum>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -443,7 +449,10 @@ pub(crate) async fn reroute_derived_geometry_units(
             for refno in rerouted {
                 partition.transform_refnos.remove(&refno);
                 partition.regen_refnos.insert(refno);
+                out.rerouted_refnos.push(refno);
             }
+            out.rerouted_refnos.sort_unstable();
+            out.rerouted_refnos.dedup();
         }
         Err(error) => out.warnings.push(format!(
             "位姿目标的持久前态 owner 图读取失败，保持便宜路径: {error:#}"
@@ -487,6 +496,16 @@ pub(crate) fn append_derived_geometry_units(
                 ..Default::default()
             }),
     );
+}
+
+fn durable_post_regen_aabb_refnos(rerouted: &[RefnoEnum]) -> Vec<String> {
+    let mut targets = rerouted
+        .iter()
+        .map(RefnoEnum::to_pdms_str)
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    targets.dedup();
+    targets
 }
 
 /// 交付单元 rollup 眼中的净变更：只有重建类变更保留 `model_affecting`。
@@ -797,6 +816,7 @@ pub(crate) async fn build_model_update_plan(
     // 否则改判过去的目标会被掩成非 model_affecting，rollup 看不到它，既不重生成也不再
     // 有 Transform 工作项，这一次移动就凭空消失了。
     let reroute = reroute_derived_geometry_units(&mut partition).await;
+    let post_regen_aabb_refnos = durable_post_regen_aabb_refnos(&reroute.rerouted_refnos);
     baseline_warnings.extend(reroute.warnings);
     let OperationImpactPartition {
         regen_refnos,
@@ -828,6 +848,20 @@ pub(crate) async fn build_model_update_plan(
         &transform_refnos,
         &deleted_refnos,
     );
+    work_items.extend(
+        post_regen_aabb_refnos
+            .iter()
+            .map(|target_refno| ModelWorkItem {
+                dbnum,
+                db_type: db_type.to_string(),
+                source_end_sesno: end_sesno,
+                action: ModelWorkAction::PostRegenAabb,
+                target_refno: target_refno.clone(),
+                noun: String::new(),
+            }),
+    );
+    work_items.sort_by_key(|item| (item.action, item.target_refno.clone()));
+    work_items.dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
     if rollup.cascade_deferred {
         let mut deferred: BTreeMap<String, ModelWorkItem> = BTreeMap::new();
         for detail in regen_details.iter().filter(|detail| detail.model_affecting) {
@@ -911,11 +945,12 @@ mod tests {
     /// 送进来会被当成非法参数拒绝——表里躺着行，接口却说没有这种东西。
     #[test]
     fn action_names_roundtrip_through_parse() {
-        const ALL_ACTIONS: [ModelWorkAction; 6] = [
+        const ALL_ACTIONS: [ModelWorkAction; 7] = [
             ModelWorkAction::RegenRoot,
             ModelWorkAction::Transform,
             ModelWorkAction::DeleteCleanup,
             ModelWorkAction::CascadeExpand,
+            ModelWorkAction::PostRegenAabb,
             ModelWorkAction::RoomRecalcElement,
             ModelWorkAction::RoomRecalcPanel,
         ];
@@ -1296,6 +1331,16 @@ mod tests {
             pose_targets_regenerating_themselves(&[broken], &graph, &unit_types);
         assert!(rerouted.is_empty());
         assert_eq!(warnings.len(), 1, "owner 链断了要喊一声: {warnings:?}");
+    }
+
+    #[test]
+    fn rerouted_pose_targets_are_kept_as_a_deterministic_post_regen_aabb_set() {
+        let first = node_refno(12);
+        let second = node_refno(13);
+        assert_eq!(
+            durable_post_regen_aabb_refnos(&[second, first, second]),
+            vec![first.to_pdms_str(), second.to_pdms_str()]
+        );
     }
 
     /// 第 2 条判据：子树扫描只挑派生几何单元，一个不多一个不少。

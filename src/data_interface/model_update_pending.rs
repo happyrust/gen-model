@@ -523,6 +523,23 @@ pub async fn enqueue_room_recalc(changes: &[AabbChange]) -> anyhow::Result<()> {
     .await
 }
 
+/// Refresh targets omitted by a derived-geometry root's final node set, then force one
+/// idempotent room invalidation for each target that currently has an AABB.
+pub(crate) async fn refresh_post_regen_aabbs(refnos: &[RefnoEnum]) -> anyhow::Result<usize> {
+    if refnos.is_empty() {
+        return Ok(0);
+    }
+    crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos_incremental(refnos, true)
+        .await?;
+    let changes = crate::fast_model::occ_generate::existing_geometric_aabb_changes(refnos).await?;
+    if let Some(context) = crate::data_interface::staging::active_staging_writes() {
+        context.defer_room_changes(&changes).await;
+    } else {
+        enqueue_room_recalc(&changes).await?;
+    }
+    Ok(changes.len())
+}
+
 /// 这次入队要不要**无条件**把死信复活（清零 `attempts` / `last_error`）。
 ///
 /// 两类任务的会话号不能拿来比大小，因此不能用「来了更新的会话」当复活理由：
@@ -1356,6 +1373,7 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
             })
             .await
         }
+        ModelWorkAction::PostRegenAabb => refresh_post_regen_aabbs(&[refno]).await.map(|_| ()),
         // 单件执行路径：自己加载一次房间映射。批量消费走 [`drain_rooms`]，它按轮加载
         // 一次并在整轮复用——房间映射是一次房间类型表全表扫描加逐行图遍历，几十个任务
         // 各扫一遍是承受不起的。
@@ -1993,8 +2011,8 @@ async fn drain_where_report(
 const NON_REGEN_ACTION_FILTER: &str =
     "AND action IN ['transform', 'delete_cleanup', 'cascade_expand']";
 const REGEN_ACTION_FILTER: &str = "AND action = 'regen_root'";
-const DATA_ACTION_FILTER: &str =
-    "AND action IN ['transform', 'delete_cleanup', 'cascade_expand', 'regen_root']";
+const POST_REGEN_AABB_ACTION_FILTER: &str = "AND action = 'post_regen_aabb'";
+const DATA_ACTION_FILTER: &str = "AND action IN ['transform', 'delete_cleanup', 'cascade_expand', 'regen_root', 'post_regen_aabb']";
 const ROOM_ACTION_FILTER: &str = "AND action IN ['room_recalc_panel', 'room_recalc_element']";
 const ROOM_PANEL_ACTION_FILTER: &str = "AND action = 'room_recalc_panel'";
 const ROOM_ELEMENT_ACTION_FILTER: &str = "AND action = 'room_recalc_element'";
@@ -2009,12 +2027,14 @@ fn data_phase_is_clear(succeeded: bool, has_more: bool) -> bool {
 }
 
 pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
-    // 三个阶段的先后是硬约束，不是习惯：
+    // 四个阶段的先后是硬约束，不是习惯：
     // 1. 非 regen 先跑——`cascade_expand` 会反过来入队 regen 工作；
     // 2. regen 次之——房间归属要读几何与包围盒，在重生成之前算出来的结果本身就是错的；
-    // 3. 房间最后（ADR-010 §7）。
+    // 3. 被改判的原始位姿目标补刷 AABB；
+    // 4. 房间最后（ADR-010 §7）。
     let mut done = drain_non_regen(mgr).await?;
     done += drain_where(mgr, REGEN_ACTION_FILTER, None).await?;
+    done += drain_where(mgr, POST_REGEN_AABB_ACTION_FILTER, None).await?;
     done += drain_rooms(&mgr.db_option).await?.into_result()?;
     Ok(done)
 }
@@ -2029,6 +2049,18 @@ pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 /// 前置失败才该拦下本批的模型生成。
 pub async fn drain_non_regen_report(mgr: &AiosDBManager) -> anyhow::Result<DrainReport> {
     drain_where_report(mgr, NON_REGEN_ACTION_FILTER, None).await
+}
+
+pub async fn drain_post_regen_aabb_report(
+    mgr: &AiosDBManager,
+    dbnum: u32,
+) -> anyhow::Result<DrainReport> {
+    drain_where_report(
+        mgr,
+        &format!("{POST_REGEN_AABB_ACTION_FILTER} AND dbnum = {dbnum}"),
+        None,
+    )
+    .await
 }
 
 /// 前两个阶段（非 regen → regen），不含房间。
@@ -2049,6 +2081,7 @@ pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 
     let mut done = non_regen?;
     done += drain_where(mgr, REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await?;
+    done += drain_where(mgr, POST_REGEN_AABB_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await?;
     Ok(done)
 }
 
@@ -3757,11 +3790,12 @@ mod tests {
     /// 它归哪个阶段。
     #[test]
     fn every_action_is_consumed_by_exactly_one_drain_phase() {
-        const ALL_ACTIONS: [ModelWorkAction; 6] = [
+        const ALL_ACTIONS: [ModelWorkAction; 7] = [
             ModelWorkAction::RegenRoot,
             ModelWorkAction::Transform,
             ModelWorkAction::DeleteCleanup,
             ModelWorkAction::CascadeExpand,
+            ModelWorkAction::PostRegenAabb,
             ModelWorkAction::RoomRecalcElement,
             ModelWorkAction::RoomRecalcPanel,
         ];
@@ -3770,6 +3804,7 @@ mod tests {
             ModelWorkAction::Transform
             | ModelWorkAction::DeleteCleanup
             | ModelWorkAction::CascadeExpand => NON_REGEN_ACTION_FILTER,
+            ModelWorkAction::PostRegenAabb => POST_REGEN_AABB_ACTION_FILTER,
             ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
                 ROOM_ACTION_FILTER
             }
@@ -3785,6 +3820,7 @@ mod tests {
             for other in [
                 NON_REGEN_ACTION_FILTER,
                 REGEN_ACTION_FILTER,
+                POST_REGEN_AABB_ACTION_FILTER,
                 ROOM_ACTION_FILTER,
             ] {
                 assert!(

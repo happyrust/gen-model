@@ -1324,6 +1324,7 @@ async fn execute_frozen_batch_body(
 
     let staged = crate::data_interface::staging::active_staging_writes().is_some();
     let mut non_regen_failed = false;
+    let mut post_regen_aabb_targets = Vec::new();
     if staged && applied {
         match crate::data_interface::staging::active_staged_finalize_plan().await {
             Some(plan) => {
@@ -1348,6 +1349,9 @@ async fn execute_frozen_batch_body(
                 );
                 let delete_targets = plan_targets(
                     crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup,
+                );
+                post_regen_aabb_targets = plan_targets(
+                    crate::data_interface::model_update_plan::ModelWorkAction::PostRegenAabb,
                 );
                 let mut mutation_targets = transform_targets.clone();
                 mutation_targets.extend_from_slice(&delete_targets);
@@ -1575,7 +1579,7 @@ async fn execute_frozen_batch_body(
 
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
-    let (units, settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
+    let (units, mut settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
         if staged {
             let pending = match load_pending_model_units_for_retry(job.dbnum).await {
                 Ok(pending) => pending,
@@ -1676,6 +1680,70 @@ async fn execute_frozen_batch_body(
         registry.set_unit_totals(&job.task_id, 0);
         (Vec::new(), true)
     };
+
+    // A pose target inside BRAN/HANG is deliberately removed from the cheap Transform
+    // worklist and promoted to root regeneration.  Some root generators replace the
+    // member's inst_relate/AABB directly but omit that original member from their final
+    // AABB refresh set.  Re-run only those preserved targets through the canonical path:
+    // no-geometry nouns are naturally skipped, while real changes feed both the staged
+    // spatial refresh and durable room_recalc_element merge.
+    if staged
+        && !settlement_failed
+        && units
+            .iter()
+            .all(|unit| unit.status == UnitGenStatus::Generated)
+        && !post_regen_aabb_targets.is_empty()
+    {
+        match model_update_pending::refresh_post_regen_aabbs(&post_regen_aabb_targets).await {
+            Ok(geometric) => {
+                println!(
+                    "根生成后补刷原始位姿目标 AABB：候选 {} 个 / 有几何 {} 个",
+                    post_regen_aabb_targets.len(),
+                    geometric
+                );
+                let settled = post_regen_aabb_targets
+                    .iter()
+                    .map(|refno| {
+                        (
+                            crate::data_interface::model_update_plan::ModelWorkAction::PostRegenAabb,
+                            refno.to_pdms_str(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                crate::data_interface::staging::settle_staged_plan_items(&settled).await;
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "根生成后补刷原始位姿目标 AABB 失败，暂存窗口拒绝提交: {error:#}"
+                ));
+                settlement_failed = true;
+            }
+        }
+    }
+    if !staged
+        && !settlement_failed
+        && units
+            .iter()
+            .all(|unit| unit.status == UnitGenStatus::Generated)
+    {
+        match model_update_pending::drain_post_regen_aabb_report(mgr, job.dbnum).await {
+            Ok(report) => {
+                if !report.failures.is_empty() {
+                    warnings.push(format!(
+                        "根生成后补刷原始位姿目标 AABB 失败（已保留待重试）: {}",
+                        report.failures.join("; ")
+                    ));
+                    settlement_failed = report.blocks(job.dbnum);
+                }
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "读取根生成后 AABB 补刷任务失败（本批拒绝成功）: {error:#}"
+                ));
+                settlement_failed = true;
+            }
+        }
+    }
     side_effect_failed |= settlement_failed;
 
     // 异地同步发布（与旧自动路径对齐：数据批次成功才发布该文件）。

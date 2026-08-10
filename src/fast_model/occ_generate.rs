@@ -756,6 +756,48 @@ pub struct AabbChange {
     pub noun: String,
 }
 
+/// Return explicit targets that currently have a usable AABB.
+///
+/// A post-regeneration action cannot use `GLOBAL_AABB_TREE` as its old baseline:
+/// the root generator may already have synchronized the new box into that tree. The
+/// action itself proves a pose changed in this window, so geometry existence is the
+/// final gate that excludes ANCI and other no-geometry nouns.
+pub async fn existing_geometric_aabb_changes(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<AabbChange>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        refno: RefnoEnum,
+        noun: String,
+    }
+
+    let mut changes = Vec::new();
+    for chunk in refnos.chunks(100) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let keys = get_inst_relate_keys(chunk);
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(format!(
+                "SELECT in AS refno, in.noun AS noun FROM {keys} WHERE aabb.d != NONE;"
+            ))
+            .await?
+            .check()?;
+        changes.extend(
+            response
+                .take::<Vec<Row>>(0)?
+                .into_iter()
+                .map(|row| AabbChange {
+                    refno: row.refno,
+                    noun: row.noun,
+                }),
+        );
+    }
+    changes.sort_by_key(|change| change.refno);
+    changes.dedup_by_key(|change| change.refno);
+    Ok(changes)
+}
+
 ///刷新inst_relate 的 aabb
 /// 更新实例关联的包围盒数据
 ///
