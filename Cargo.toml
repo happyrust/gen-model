@@ -82,7 +82,7 @@ parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", re
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "777e238b", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "5c9e00e3c46f7d6f7c548583020b66e0ad23368a" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "5c9e00e3c46f7d6f7c548583020b66e0ad23368a" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -174,7 +174,7 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
 # [patch."https://github.com/happyrust/old-parse-pdms-db.git"]
 # parse_pdms_db = { path = "../../old-parse-pdms-db-paged" }
 #
-# [patch."https://github.com/happyrust/pdms-io.git"]
+# [patch."https://github.com/happyrust/old-pdms-io.git"]
 # pdms_io = { path = "../../old-pdms-io-record-boundary" }
 # LOCAL-DEPS PATCH END
 
