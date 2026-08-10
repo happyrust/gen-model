@@ -1,0 +1,81 @@
+name: Windows tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_TARGET_DIR: target
+  RUST_TOOLCHAIN: nightly-2026-08-02
+  LIBCLANG_PATH: C:\Program Files\LLVM\bin
+  CXXFLAGS: /std:c++17
+  PROTOC_ARCHIVE_URL: https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-win64.zip
+  PROTOC_ARCHIVE_SHA256: 5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082
+
+jobs:
+  db8000-model-increment:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
+          cargo --version
+
+      - name: Download protoc
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP\protoc.zip"
+          $root = "$env:RUNNER_TEMP\protoc"
+          Invoke-WebRequest $env:PROTOC_ARCHIVE_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:PROTOC_ARCHIVE_SHA256) {
+            throw 'protoc archive checksum mismatch'
+          }
+          Expand-Archive $archive $root
+          "PROTOC=$root\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: cargo-windows-tests-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-windows-tests-
+
+      - name: Run portable db8000 model-increment cases
+        shell: pwsh
+        run: >-
+          cargo test --locked
+          --test db8000_two_delete_fixture
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
+
+      - name: Verify topmost model delete cleanup
+        shell: pwsh
+        run: >-
+          cargo test --locked --lib
+          child_delete_then_parent_delete_across_sessions_schedules_only_the_parent
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture

@@ -30,7 +30,7 @@ Input: the `parent_deleted` file extracted from `db8000-sesno24-26.zip`.
 Command:
 
 ```powershell
-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
+cargo test --test db8000_two_delete_fixture -- --nocapture
 ```
 
 Exit status: `0`
@@ -38,12 +38,17 @@ Exit status: `0`
 Literal output:
 
 ```text
-running 1 test
+running 6 tests
+test archive::tests::archive_paths_must_stay_relative_and_normal ... ok
+test archive_contains_the_three_declared_db8000_sessions ... ok
 collect sesno: 25
 collect sesno: 26
 test final_file_window_preserves_child_then_parent_delete_sessions ... ok
+test final_history_matches_the_session_25_point_in_time_snapshot ... ok
+test combined_window_equals_the_union_of_its_session_slices ... ok
+test window_folds_to_box_and_equi_deleted_with_zone_modified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 The test asserts the exact four operations:

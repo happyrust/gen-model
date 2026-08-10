@@ -1520,6 +1520,12 @@ mod tests {
         let owners = HashMap::from([(child, equi), (equi, zone)]);
         let topmost = topmost_deleted_refnos(&deleted, |refno| owners.get(&refno).copied());
         assert_eq!(topmost, HashSet::from([equi]));
+
+        let work = work_items_from_units(8000, 26, "DESI", &[], &HashSet::new(), &topmost);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, ModelWorkAction::DeleteCleanup);
+        assert_eq!(work[0].target_refno, equi.to_pdms_str());
+        assert_eq!(work[0].source_end_sesno, 26);
     }
 
     /// owner 解不出来时保留：宁可多排一条幂等的清理，也不能因为链断了漏掉它。

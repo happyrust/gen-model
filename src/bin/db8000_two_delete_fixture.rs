@@ -179,10 +179,11 @@ fn write_text_assets(root: &Path, manifest: &FixtureManifest) -> anyhow::Result<
 运行回归：
 
 ```powershell
-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
+cargo test --test db8000_two_delete_fixture -- --nocapture
 ```
 
-测试会验证 ZIP 与三个文件的 SHA256、安全解压，然后只使用 sesno 26 最终文件直接采集 `25..=26`。
+测试会验证 ZIP 与三个文件的 SHA256、安全解压、会话切片一致性，并使用 sesno 26
+最终文件直接采集 `25..=26` 后校验原始操作与净模型变化。
 "#,
     )?;
 

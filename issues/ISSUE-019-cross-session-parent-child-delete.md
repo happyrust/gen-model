@@ -66,10 +66,13 @@ tests/fixtures/issues/issue-019-cross-session-parent-child-delete/
 ## 验证
 
 ```powershell
-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
+cargo test --test db8000_two_delete_fixture -- --nocapture
 cargo test --lib child_delete_then_parent_delete_across_sessions_schedules_only_the_parent -- --nocapture
 sigmap validate
 ```
+
+GitHub Actions 通过 `.github/workflows/windows-tests.yml` 在 pull request 和 `main`
+分支自动执行同一组可移植案例。
 
 验收标准：
 
