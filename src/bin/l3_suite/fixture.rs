@@ -306,6 +306,18 @@ fn run_fixture_cases(
         .collect::<BTreeMap<_, _>>();
     seed_fixture_models(manifest, &map, project, &driver.mdb, namespace, run_dir)?;
     wait_fixture_pending(run_dir, namespace, project, target_dbnum, "baseline")?;
+    prime_room_structure_baselines(
+        repo,
+        run_dir,
+        namespace,
+        project,
+        target_dbnum,
+        target_db_file,
+        &mirror_target_db,
+        driver,
+        manifest,
+        &map,
+    )?;
 
     let mut reports = Vec::new();
     let mut restore_failed = false;
@@ -944,10 +956,54 @@ fn run_case(
 fn fixture_restorable_payload(value: &Value) -> Value {
     let mut payload = restorable_payload(value);
     strip_fixture_volatile(&mut payload);
+    let mut tombstoned = BTreeSet::new();
     if let Some(rows) = payload.get_mut("pe").and_then(Value::as_array_mut) {
+        tombstoned.extend(rows.iter().filter_map(|row| {
+            (row.get("deleted").and_then(Value::as_bool) == Some(true))
+                .then(|| row.get("id").and_then(Value::as_str).map(str::to_owned))
+                .flatten()
+        }));
         rows.retain(|row| row.get("deleted").and_then(Value::as_bool) != Some(true));
     }
+    // A deleted fixture PE remains as an intentional tombstone. The snapshot
+    // queries every selected id across every relation table, so Surreal returns
+    // one empty `{id,incoming:[],outgoing:[]}` shell even though no relation or
+    // model survives. Treat only those empty shells as baseline-equivalent; a
+    // non-empty edge or extra model field remains visible and still fails the
+    // restore assertion.
+    for key in ["owner", "inst", "geo", "room", "room_panel"] {
+        if let Some(rows) = payload.get_mut(key).and_then(Value::as_array_mut) {
+            rows.retain(|row| {
+                let is_tombstoned = row
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| tombstoned.contains(id));
+                !is_tombstoned || !is_empty_fixture_relation_shell(row)
+            });
+        }
+    }
     payload
+}
+
+fn is_empty_fixture_relation_shell(row: &Value) -> bool {
+    let Some(object) = row.as_object() else {
+        return false;
+    };
+    object.iter().all(|(key, value)| match key.as_str() {
+        "id" => value.is_string(),
+        "incoming" | "outgoing" => value.as_array().is_some_and(Vec::is_empty),
+        _ => false,
+    })
+}
+
+fn fixture_plane(snapshot: &Value, path: &str) -> Value {
+    let mut value = snapshot.pointer(path).cloned().unwrap_or(Value::Null);
+    if path != "/payload/pe"
+        && let Some(rows) = value.as_array_mut()
+    {
+        rows.retain(|row| !is_empty_fixture_relation_shell(row));
+    }
+    value
 }
 
 fn strip_fixture_volatile(value: &mut Value) {
@@ -1115,6 +1171,74 @@ fn seed_fixture_models(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prime_room_structure_baselines(
+    repo: &Path,
+    run_dir: &Path,
+    ns: &str,
+    project: &str,
+    dbnum: u32,
+    live_target_db: &Path,
+    mirror_target_db: &Path,
+    driver: &E3dDriver,
+    manifest: &FixtureManifest,
+    map: &BTreeMap<String, ResolvedFixture>,
+) -> Result<()> {
+    for scenario in manifest
+        .scenarios
+        .iter()
+        .filter(|scenario| scenario.change == ChangeKind::RoomStructure)
+    {
+        let restore_template = scenario
+            .restore_macro
+            .as_ref()
+            .context("room_structure fixture requires a restore macro")?;
+        let dir = run_dir.join("baseline-room").join(&scenario.id);
+        fs::create_dir_all(&dir)?;
+        // Setup creates the room-shaped PANEs but an untouched baseline has no
+        // room graph yet. Exercise invalid→valid once before taking scenario
+        // snapshots so the baseline represents the real valid room state. The
+        // scenario then verifies the same transition and its rollback again.
+        for (phase, template) in [
+            ("invalidate", &scenario.apply_macro),
+            ("restore", restore_template),
+        ] {
+            let rendered = render_case_macro(
+                repo,
+                template,
+                &dir.join(format!("{phase}.mac")),
+                &manifest.prefix,
+                map,
+            )?;
+            let log = run_macro_with_startup_retry(
+                driver,
+                repo,
+                &rendered,
+                &format!("fixture-{}-baseline-{phase}", scenario.id),
+            )?;
+            fs::write(dir.join(format!("{phase}.log")), log)?;
+            copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
+            execute_fixture_and_wait(&dir.join(phase), project, &driver.mdb, ns, dbnum)?;
+            wait_fixture_pending(&dir, ns, project, dbnum, phase)?;
+        }
+        let snapshot = fixture_snapshot(ns, project, dbnum, scenario, map)?;
+        fs::write(
+            dir.join("primed.json"),
+            serde_json::to_vec_pretty(&snapshot)?,
+        )?;
+        ensure!(
+            !fixture_plane(&snapshot, "/payload/room")
+                .as_array()
+                .is_none_or(Vec::is_empty)
+                || !fixture_plane(&snapshot, "/payload/room_panel")
+                    .as_array()
+                    .is_none_or(Vec::is_empty),
+            "room_structure baseline priming produced no room relations"
+        );
+    }
+    Ok(())
+}
+
 fn fixture_snapshot(
     ns: &str,
     project: &str,
@@ -1254,7 +1378,7 @@ fn assert_case(
     ] {
         let changed = paths
             .iter()
-            .any(|path| before.pointer(path) != after.pointer(path));
+            .any(|path| fixture_plane(before, path) != fixture_plane(after, path));
         ensure!(
             changed == expected,
             "{plane} change mismatch: expected changed={expected}, actual={changed}"
@@ -1334,18 +1458,17 @@ fn assert_case(
     );
     match s.change {
         ChangeKind::Data => ensure!(
-            before.pointer("/payload/inst") == after.pointer("/payload/inst")
-                && before.pointer("/payload/geo") == after.pointer("/payload/geo"),
+            fixture_plane(before, "/payload/inst") == fixture_plane(after, "/payload/inst")
+                && fixture_plane(before, "/payload/geo") == fixture_plane(after, "/payload/geo"),
             "data-only change mutated model relations"
         ),
         ChangeKind::Transform | ChangeKind::RoomMember => ensure!(
-            before.pointer("/payload/geo") == after.pointer("/payload/geo"),
+            fixture_plane(before, "/payload/geo") == fixture_plane(after, "/payload/geo"),
             "transform-only change replaced local geometry"
         ),
         ChangeKind::Delete => ensure!(
-            after
-                .pointer("/payload/inst")
-                .and_then(Value::as_array)
+            fixture_plane(after, "/payload/inst")
+                .as_array()
                 .is_some_and(Vec::is_empty),
             "deleted target retained model instances"
         ),
@@ -1798,6 +1921,38 @@ mod tests {
         let before = json!({"payload":{"pe":[{"id":"pe:1_2","sesno":10,"name":"/A"}]}});
         let restored = json!({"payload":{"pe":[{"id":"pe:1_2","sesno":12,"name":"/A"}]}});
         assert_eq!(
+            fixture_restorable_payload(&before),
+            fixture_restorable_payload(&restored)
+        );
+    }
+
+    #[test]
+    fn fixture_restore_treats_clean_tombstone_shells_as_baseline_absent() {
+        let before = json!({"payload":{
+            "pe":[], "owner":[], "inst":[], "geo":[], "room":[], "room_panel":[]
+        }});
+        let restored = json!({"payload":{
+            "pe":[{"id":"pe:1_2","deleted":true,"sesno":12}],
+            "owner":[{"id":"pe:1_2","incoming":[],"outgoing":[]}],
+            "inst":[{"id":"pe:1_2","incoming":[],"outgoing":[]}],
+            "geo":[{"id":"pe:1_2","incoming":[],"outgoing":[]}],
+            "room":[{"id":"pe:1_2","incoming":[],"outgoing":[]}],
+            "room_panel":[{"id":"pe:1_2","incoming":[],"outgoing":[]}]
+        }});
+        assert_eq!(
+            fixture_restorable_payload(&before),
+            fixture_restorable_payload(&restored)
+        );
+    }
+
+    #[test]
+    fn fixture_restore_keeps_nonempty_edges_on_a_tombstone_visible() {
+        let before = json!({"payload":{"pe":[],"owner":[]}});
+        let restored = json!({"payload":{
+            "pe":[{"id":"pe:1_2","deleted":true}],
+            "owner":[{"id":"pe:1_2","incoming":[],"outgoing":[{"id":"pe_owner:1"}]}]
+        }});
+        assert_ne!(
             fixture_restorable_payload(&before),
             fixture_restorable_payload(&restored)
         );

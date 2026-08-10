@@ -548,6 +548,61 @@ fn retain_finally_live_adds(
     before - range_eles.values().map(Vec::len).sum::<usize>()
 }
 
+/// A PDMS owner move can leave a `Deleted` entry in the session stream even
+/// though the same refno is present in the Save Work final index.  Persisting
+/// that provisional delete marks the live element deleted and loses its final
+/// OWNER.  Replace only those exact-window, finally-live deletes with a full
+/// final-record upsert; genuine deletes (absent from the final index) remain
+/// untouched.
+fn restore_finally_live_deletes(
+    range_eles: &mut BTreeMap<u32, Vec<EleOperationData>>,
+    final_elements: &HashMap<RefU64, parse_pdms_db::parse::EleData>,
+) -> usize {
+    let mut restored = 0;
+    for operations in range_eles.values_mut() {
+        for operation in operations {
+            if !matches!(operation.detail, EleOperationDetail::Deleted) {
+                continue;
+            }
+            let Some(element) = final_elements.get(&operation.refno) else {
+                continue;
+            };
+            operation.detail = EleOperationDetail::Add(element.clone());
+            restored += 1;
+        }
+    }
+    restored
+}
+
+/// `PagedDbSession::read_raw_records` returns the physical record, which may
+/// start with page padding/continuation words.  The element parser expects the
+/// declared implicit-length word.  Keep this boundary check equivalent to the
+/// paged parser instead of handing it an unbounded file tail.
+fn final_record_payload(raw: &[u8]) -> anyhow::Result<&[u8]> {
+    let mut prefix = 0usize;
+    while prefix + 4 <= raw.len() {
+        let word = &raw[prefix..prefix + 4];
+        if word == [0, 0, 0, 0] || word == [0, 0, 0, 7] {
+            prefix += 4;
+        } else {
+            break;
+        }
+    }
+    anyhow::ensure!(raw.len().saturating_sub(prefix) >= 24, "元素记录长度不足");
+    let impl_words = i32::from_be_bytes(
+        raw[prefix..prefix + 4]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("读取 impl_len 失败"))?,
+    );
+    anyhow::ensure!(impl_words > 0, "impl_len 非法: {impl_words}");
+    anyhow::ensure!(
+        (impl_words as usize).saturating_mul(4) <= raw.len() - prefix,
+        "impl_len 超出记录边界: words={impl_words}, bytes={}",
+        raw.len() - prefix
+    );
+    Ok(&raw[prefix..])
+}
+
 fn retain_finally_live_design_refnos(
     plan: &mut crate::data_interface::model_update_plan::ModelUpdatePlan,
     mut is_live: impl FnMut(RefU64) -> bool,
@@ -690,32 +745,115 @@ impl IncrementPipeline {
             .filter(|op| matches!(&op.detail, EleOperationDetail::Add(_)))
             .map(|op| op.refno)
             .collect::<Vec<_>>();
-        let live_adds = if add_refnos.is_empty() {
-            std::collections::HashSet::new()
+        let deleted_refnos = range_eles
+            .values()
+            .flatten()
+            .filter(|op| matches!(&op.detail, EleOperationDetail::Deleted))
+            .map(|op| op.refno)
+            .collect::<Vec<_>>();
+        let mut final_candidates = add_refnos.clone();
+        final_candidates.extend(deleted_refnos.iter().copied());
+        final_candidates.sort_unstable();
+        final_candidates.dedup();
+
+        let final_state = if final_candidates.is_empty() {
+            None
         } else {
-            let mut final_file = parse_pdms_db::paged::PagedDbSession::open(path)
-                .map_err(|error| anyhow::anyhow!("打开 Save Work 最终页式索引失败: {error:#}"))?;
-            if final_file.snapshot().sesno == fixed_end_sesno as u32 {
-                final_file
-                    .read_raw_records(&add_refnos)
-                    .map_err(|error| {
-                        anyhow::anyhow!("读取 Save Work 最终记录存在性失败: {error:#}")
-                    })?
-                    .into_keys()
-                    .collect()
+            let authoritative_sesno = io
+                .get_latest_sesno()
+                .map_err(|error| anyhow::anyhow!("读取 Save Work 最终会话号失败: {error:#}"))?;
+            if authoritative_sesno != fixed_end_sesno as u32 {
+                println!(
+                    "增量最终文件对账跳过：窗口末 sesno={fixed_end_sesno}，最终文件 sesno={authoritative_sesno}，path={}",
+                    path.display()
+                );
+                None
             } else {
-                // A newer Save Work can legitimately delete an element which was live at this
-                // fixed window's right edge. Without a historical index root, current absence is
-                // not evidence that the older Add was provisional, so preserve the durable range.
-                add_refnos.iter().copied().collect()
+                let mut final_file =
+                    parse_pdms_db::paged::PagedDbSession::open(path).map_err(|error| {
+                        anyhow::anyhow!("打开 Save Work 最终页式索引失败: {error:#}")
+                    })?;
+                let final_snapshot_sesno = final_file.snapshot().sesno;
+                if final_snapshot_sesno == fixed_end_sesno as u32 {
+                    let final_records =
+                        final_file
+                            .read_raw_records(&final_candidates)
+                            .map_err(|error| {
+                                anyhow::anyhow!("读取 Save Work 最终记录存在性失败: {error:#}")
+                            })?;
+                    let live_refnos = final_records.keys().copied().collect::<HashSet<_>>();
+                    let mut final_deleted_elements = HashMap::new();
+                    for refno in &deleted_refnos {
+                        let Some(raw) = final_records.get(refno) else {
+                            continue;
+                        };
+                        let payload = final_record_payload(raw).map_err(|error| {
+                            anyhow::anyhow!(
+                                "读取 Save Work 最终存活记录 {} 边界失败: {error:#}",
+                                RefnoEnum::from(*refno).to_pdms_str()
+                            )
+                        })?;
+                        let element =
+                            parse_pdms_db::parse::parse_raw_ele_data(payload).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "解析 Save Work 最终存活记录 {} 失败: {error:#}",
+                                    RefnoEnum::from(*refno).to_pdms_str()
+                                )
+                            })?;
+                        anyhow::ensure!(
+                            element.refno == *refno,
+                            "Save Work 最终记录 refno 不匹配: 期望 {}, 实际 {}",
+                            RefnoEnum::from(*refno).to_pdms_str(),
+                            RefnoEnum::from(element.refno).to_pdms_str()
+                        );
+                        final_deleted_elements.insert(*refno, element);
+                    }
+                    Some((live_refnos, final_deleted_elements))
+                } else {
+                    println!(
+                        "增量最终页式索引失配，回退 legacy 最终索引：窗口末 sesno={fixed_end_sesno}，paged sesno={final_snapshot_sesno}，path={}",
+                        path.display()
+                    );
+                    let live_refnos = final_candidates
+                        .iter()
+                        .copied()
+                        .filter(|refno| io.search_latest_refno(*refno, None).is_some())
+                        .collect::<HashSet<_>>();
+                    let mut final_deleted_elements = HashMap::new();
+                    for refno in deleted_refnos.iter().copied() {
+                        if !live_refnos.contains(&refno) {
+                            continue;
+                        }
+                        let element = io.auto_get_raw_element(refno).map_err(|error| {
+                            anyhow::anyhow!(
+                                "legacy 解析 Save Work 最终存活记录 {} 失败: {error:#}",
+                                RefnoEnum::from(refno).to_pdms_str()
+                            )
+                        })?;
+                        final_deleted_elements.insert(refno, element);
+                    }
+                    Some((live_refnos, final_deleted_elements))
+                }
             }
         };
-        let removed = retain_finally_live_adds(&mut range_eles, |refno| live_adds.contains(&refno));
-        if removed > 0 {
-            println!(
-                "增量窗口剔除 {removed} 条 Save Work 后无最终记录的临时 Add: {}",
-                path.display()
-            );
+
+        if let Some((live_refnos, final_deleted_elements)) = final_state {
+            let removed =
+                retain_finally_live_adds(&mut range_eles, |refno| live_refnos.contains(&refno));
+            if removed > 0 {
+                println!(
+                    "增量窗口剔除 {removed} 条 Save Work 后无最终记录的临时 Add: {}",
+                    path.display()
+                );
+            }
+
+            let restored = restore_finally_live_deletes(&mut range_eles, &final_deleted_elements);
+            if restored > 0 {
+                println!(
+                    "增量窗口恢复 {restored} 条 Save Work 后仍存活的临时 Deleted: {}",
+                    path.display()
+                );
+            }
         }
         Ok(range_eles)
     }
@@ -2021,6 +2159,83 @@ mod fold_tests {
         assert!(!ops.iter().any(|op| op.refno == refno(1)));
         assert!(ops.iter().any(|op| op.refno == refno(2)));
         assert!(ops.iter().any(|op| op.refno == refno(3)));
+    }
+
+    #[test]
+    fn finally_live_deleted_record_is_replaced_with_final_state_upsert() {
+        let child = refno(11);
+        let final_owner = refno(22);
+        let mut final_element = parse_pdms_db::parse::EleData {
+            refno: child,
+            owner: final_owner,
+            noun: 123,
+            ..Default::default()
+        };
+        final_element
+            .whole_attmap
+            .attmap
+            .insert("OWNER".into(), NamedAttrValue::RefU64Type(final_owner));
+        final_element
+            .whole_attmap
+            .attmap
+            .insert("REFNO".into(), NamedAttrValue::RefU64Type(child));
+        final_element
+            .whole_attmap
+            .attmap
+            .insert("TYPE".into(), NamedAttrValue::StringType("BOX".into()));
+        let mut changes = window(vec![EleOperationData::new(
+            child,
+            47,
+            EleOperationDetail::Deleted,
+        )]);
+        let final_elements = HashMap::from([(child, final_element)]);
+
+        assert_eq!(
+            restore_finally_live_deletes(&mut changes, &final_elements),
+            1
+        );
+        let operation = &changes[&47][0];
+        let EleOperationDetail::Add(restored) = &operation.detail else {
+            panic!("finally-live delete must become a full final-state upsert");
+        };
+        assert_eq!(restored.refno, child);
+        assert_eq!(restored.owner, final_owner);
+        let sql = operation.to_surql("7997_11", 7997, 47);
+        assert!(
+            sql.contains("\"deleted\": false"),
+            "final-state upsert must clear a previous tombstone: {sql}"
+        );
+    }
+
+    #[test]
+    fn finally_absent_deleted_record_remains_a_true_delete() {
+        let child = refno(11);
+        let mut changes = window(vec![EleOperationData::new(
+            child,
+            47,
+            EleOperationDetail::Deleted,
+        )]);
+
+        assert_eq!(
+            restore_finally_live_deletes(&mut changes, &HashMap::new()),
+            0
+        );
+        assert!(matches!(
+            changes[&47][0].detail,
+            EleOperationDetail::Deleted
+        ));
+    }
+
+    #[test]
+    fn final_record_payload_strips_page_markers_and_checks_declared_boundary() {
+        let mut raw = vec![0, 0, 0, 7, 0, 0, 0, 0];
+        raw.extend_from_slice(&6i32.to_be_bytes());
+        raw.extend_from_slice(&[0; 20]);
+        assert_eq!(final_record_payload(&raw).unwrap(), &raw[8..]);
+
+        let mut truncated = vec![0, 0, 0, 8];
+        truncated.extend_from_slice(&[0; 20]);
+        assert!(final_record_payload(&truncated).is_err());
     }
 
     #[test]
