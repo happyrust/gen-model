@@ -117,6 +117,46 @@ fn note_success(key: Key) {
     }
 }
 
+/// 已在册、但这一轮的范围里压根没出现的同类目标。
+fn missing_from_scope(known: &HashSet<Key>, kind: &str, seen: &HashSet<String>) -> Vec<Key> {
+    known
+        .iter()
+        .filter(|(row_kind, target)| *row_kind == kind && !seen.contains(target))
+        .cloned()
+        .collect()
+}
+
+/// 按一个**权威范围**销账：这一类里，范围外的在册目标一律清掉。
+///
+/// 逐目标的成功销账管不了目标**整个消失**的情况——项目从配置里删掉之后，它再也不会
+/// 被 note 到，那一行就永远留在清单上。现场实测就是这么发现的：造了一个不存在的项目
+/// 拿到 `dir` 行，把它从配置里去掉再启动，行还在。一条永远解不开的记录正是这本账最
+/// 该避免的东西。
+///
+/// 只有调用方能说出「这一批就是全部」时才用得上。项目名单来自配置、就是全集；而
+/// `element` / `attrs` / `file` 每轮只覆盖一个子集，对它们用这个会误删。
+async fn note_scope(kind: &'static str, seen: &HashSet<String>) {
+    if let Err(error) = seed_known_failed().await {
+        log::warn!("[parse_error] 已有解析错误行播种失败（本轮不做范围销账）: {error:#}");
+        return;
+    }
+    let retire = match known_failed().as_ref() {
+        Some(known) => missing_from_scope(known, kind, seen),
+        None => Vec::new(),
+    };
+    let mut buffer = pending();
+    for key in retire {
+        if !matches!(buffer.get(&key), Some(Pending::Failed { .. })) {
+            buffer.insert(key, Pending::Cleared);
+        }
+    }
+}
+
+/// 这一轮解析到的项目就是全部项目：不在名单里的在册项目一律销账。
+pub(crate) async fn note_dir_scope(projects: &HashSet<String>) {
+    note_scope(DIR, projects).await;
+}
+
 /// 一个元素解析不出来（`element_parse_skipped`）。
 pub(crate) fn note_element_failure(target: &str, error: &str) {
     note_failure((ELEMENT, target.to_string()), error);
@@ -412,6 +452,26 @@ mod tests {
             pending().get(&(ELEMENT, "4000000001/11".to_string())),
             Some(Pending::Failed { .. })
         ));
+    }
+
+    /// 目标从输入里整个消失时，靠逐目标的成功销账是清不掉的——只能按范围销账。
+    ///
+    /// 现场实测发现的：造一个不存在的项目拿到 `dir` 行，把它从配置里去掉再启动，
+    /// 那一行还在。因为它已经不在 `plan.projects` 里，`note_dir_success` 永远轮不到
+    /// 它，于是清单上留下一条永远解不开的记录。
+    #[test]
+    fn a_target_that_left_the_scope_is_retired() {
+        let known = HashSet::from([
+            (DIR, "AvevaMarineSample".to_string()),
+            (DIR, "NoSuchProject".to_string()),
+            // 别的类别不归这个范围管，一个都不许动。
+            (ELEMENT, "4000000001/11".to_string()),
+        ]);
+        let seen = HashSet::from(["AvevaMarineSample".to_string(), "ZDJ".to_string()]);
+
+        let retire = missing_from_scope(&known, DIR, &seen);
+
+        assert_eq!(retire, vec![(DIR, "NoSuchProject".to_string())]);
     }
 
     /// 属性解析失败按**受影响的元素个数**记，不是按「报了几次」记。

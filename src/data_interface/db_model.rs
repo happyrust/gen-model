@@ -403,6 +403,16 @@ impl AiosDBManager {
                 None => crate::data_interface::parse_error::note_dir_success(&project.project),
             }
         }
+        // 这份名单来自配置、就是全集，所以不在名单里的在册项目一律销账：从配置里
+        // 删掉一个项目之后它再也不会被 note 到，逐目标的成功销账永远够不着它。
+        crate::data_interface::parse_error::note_dir_scope(
+            &plan
+                .projects
+                .iter()
+                .map(|project| project.project.clone())
+                .collect(),
+        )
+        .await;
         if let Err(error) = crate::data_interface::parse_error::flush().await {
             log::warn!("{error:#}");
         }
