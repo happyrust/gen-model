@@ -19,6 +19,8 @@
 //! cargo test --features http_api --test staged_pane_replay_probe -- --ignored --exact --nocapture
 //! ```
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,9 +32,13 @@ use aios_database::data_interface::tidb_manager::AiosDBManager;
 use pdms_io::io::PdmsIO;
 use surrealdb::opt::{Config, auth::Root};
 
+use common::child_of;
+
 const PROJECT: &str = "AvevaMarineSample";
 const DBNUM: u32 = 7997;
-const PANE: &str = "24381_35844";
+/// PANE 在 PDMS 里无名，只能借带名的属主定位；refno 随增删漂移，名字不会。
+const PANE_OWNER: &str = "/1RX-RM05-R512-VOLU";
+const PANE_NOUN: &str = "PANE";
 
 async fn connect_live() {
     let endpoint = std::env::var("AIOS_LIVE_WS").unwrap_or_else(|_| "ws://localhost:8009".into());
@@ -66,10 +72,10 @@ async fn scalar_i32(sql: &str) -> i32 {
         .expect("scalar exists")
 }
 
-async fn world_trans_id() -> Option<String> {
+async fn world_trans_id(pane: &str) -> Option<String> {
     let mut response = SUL_DB
         .query(format!(
-            "RETURN record::id(inst_relate:{PANE}.world_trans);"
+            "RETURN record::id(inst_relate:{pane}.world_trans);"
         ))
         .await
         .expect("query world_trans id")
@@ -78,9 +84,9 @@ async fn world_trans_id() -> Option<String> {
     response.take(0).expect("decode world_trans id")
 }
 
-async fn world_trans_resolvable() -> bool {
+async fn world_trans_resolvable(pane: &str) -> bool {
     let mut response = SUL_DB
-        .query(format!("RETURN inst_relate:{PANE}.world_trans.d != NONE;"))
+        .query(format!("RETURN inst_relate:{pane}.world_trans.d != NONE;"))
         .await
         .expect("query world_trans deref")
         .check()
@@ -91,9 +97,9 @@ async fn world_trans_resolvable() -> bool {
         .unwrap_or(false)
 }
 
-async fn aabb_string() -> Option<String> {
+async fn aabb_string(pane: &str) -> Option<String> {
     let mut response = SUL_DB
-        .query(format!("RETURN <string>inst_relate:{PANE}.aabb.d;"))
+        .query(format!("RETURN <string>inst_relate:{pane}.aabb.d;"))
         .await
         .expect("query aabb")
         .check()
@@ -109,6 +115,7 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         "本探针针对暂存路径：不要设置 GEN_MODEL_DIRECT_INCREMENT"
     );
     connect_live().await;
+    let pane = child_of(PANE_OWNER, PANE_NOUN, Some(DBNUM)).await;
 
     let db_file = std::env::var("AIOS_STAGED_E2E_DB_FILE").unwrap_or_else(|_| {
         format!("D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams{DBNUM}_0001")
@@ -136,8 +143,10 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         applied_sesno + 1
     );
 
-    let before_trans = world_trans_id().await.expect("基线必须有 world_trans 指针");
-    let before_aabb = aabb_string().await.expect("基线必须有 AABB");
+    let before_trans = world_trans_id(&pane)
+        .await
+        .expect("基线必须有 world_trans 指针");
+    let before_aabb = aabb_string(&pane).await.expect("基线必须有 AABB");
     println!("[pane-replay] 基线 world_trans={before_trans}");
     println!("[pane-replay] 基线 aabb={before_aabb}");
 
@@ -157,7 +166,9 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
     };
-    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
+    // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
+    // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。
+    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found, false);
     println!("[pane-replay] 入队: {outcome:?}");
     let task_id = outcome.info.task_id.clone();
 
@@ -219,7 +230,7 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         "批次成功后水位必须推进到文件最新会话"
     );
 
-    let after_trans = world_trans_id()
+    let after_trans = world_trans_id(&pane)
         .await
         .expect("重放后 world_trans 指针必须在场");
     assert_ne!(
@@ -227,11 +238,11 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         "Transform 刷新必须改指新 trans 记录（重放也一样）"
     );
     assert!(
-        world_trans_resolvable().await,
+        world_trans_resolvable(&pane).await,
         "world_trans 必须指向持久层里存在的 trans 记录（不悬空）"
     );
 
-    let after_aabb = aabb_string().await.expect("重放后 AABB 必须在场");
+    let after_aabb = aabb_string(&pane).await.expect("重放后 AABB 必须在场");
     assert_eq!(
         after_aabb, before_aabb,
         "重放收敛：AABB 值必须与重放前逐字节一致（文件态没变，只是指针翻新）"

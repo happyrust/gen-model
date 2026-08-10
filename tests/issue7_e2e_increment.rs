@@ -13,6 +13,8 @@
 //! 水位守卫成立（file == applied）、队列消费为零、水位/归属边/AABB/拓扑原地不动
 //! （无人值守回归的幂等检查）。
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,11 +33,23 @@ use pdms_io::io::PdmsIO;
 use serde::{Deserialize, Serialize};
 use surrealdb::opt::{Config, auth::Root};
 
-const ELEMENT: &str = "24383_66460";
-const PANEL: &str = "24381_35844";
-const ROOM_REF: &str = "24381_35842";
+use common::{by_name, child_of};
+
+// Targets are addressed by name; the refno each one resolves to is still what
+// the watermark / edge / AABB / topology assertions below track on. The CAP and
+// the PANE have no name of their own, so they go through their named owner.
+const ELEMENT_OWNER: &str = "/1WCC1135/B1";
+const ELEMENT_NOUN: &str = "CAP";
+const PANEL_OWNER: &str = "/1RX-RM05-R512-VOLU";
+const PANEL_NOUN: &str = "PANE";
+const ROOM_FRAME: &str = "/1RX-RM05-R512";
 const ROOM: &str = "R512";
 const PROJECT: &str = "AvevaMarineSample";
+/// 元素场景的库；`/1WCC1135/B1` 名下那颗 CAP 住在这儿。
+const ELEMENT_DBNUM: u32 = 7999;
+/// 房间场景的库；R512 那一套 PANE 与房间框都住在这儿，元素场景下的房间断言
+/// 也照样落在它上面。
+const ROOM_DBNUM: u32 = 7997;
 
 struct Case {
     dbnum: u32,
@@ -55,18 +69,35 @@ struct Case {
     expected_edges: Option<Vec<Edge>>,
     expect_geometry: bool,
     baseline_file: Option<std::path::PathBuf>,
+    panel: String,
+    room_ref: String,
 }
 
 impl Case {
-    fn from_env() -> Self {
+    /// Resolves the named targets against the live store, so it has to run
+    /// after `connect_live`.
+    ///
+    /// 按名解析是**兜底**，不是前置：显式给了 `AIOS_ROOM_*` 就不再查名字。
+    /// 无条件解析等于把这个逃生口堵死——`by_name` / `child_of` 在 0 命中或多命中
+    /// 时直接 panic，换项目、换库、靶子被改名的场合，原本正是靠显式 refno 绕过去，
+    /// 却会先死在一句与本次靶子无关的「名字找不到」上。
+    async fn from_env() -> Self {
+        let element = match std::env::var("AIOS_ROOM_ELEMENT") {
+            Ok(explicit) => explicit,
+            Err(_) => child_of(ELEMENT_OWNER, ELEMENT_NOUN, Some(ELEMENT_DBNUM)).await,
+        };
+        let panel = match std::env::var("AIOS_ROOM_PANEL") {
+            Ok(explicit) => explicit,
+            Err(_) => child_of(PANEL_OWNER, PANEL_NOUN, Some(ROOM_DBNUM)).await,
+        };
+        let room_ref = match std::env::var("AIOS_ROOM_ROOM_REF") {
+            Ok(explicit) => explicit,
+            Err(_) => by_name(ROOM_FRAME, Some(ROOM_DBNUM)).await,
+        };
         let change = std::env::var("AIOS_ROOM_CHANGE").unwrap_or_else(|_| "element".into());
         let (default_dbnum, action, target) = match change.as_str() {
-            "element" => (
-                7999,
-                "room_recalc_element",
-                std::env::var("AIOS_ROOM_ELEMENT").unwrap_or_else(|_| ELEMENT.into()),
-            ),
-            "room" => (7997, "room_recalc_panel", PANEL.into()),
+            "element" => (ELEMENT_DBNUM, "room_recalc_element", element.clone()),
+            "room" => (ROOM_DBNUM, "room_recalc_panel", panel.clone()),
             other => panic!("unknown AIOS_ROOM_CHANGE={other}"),
         };
         let dbnum = std::env::var("AIOS_ROOM_DBNUM")
@@ -80,10 +111,9 @@ impl Case {
             db_file: std::env::var("AIOS_ROOM_DB_FILE").unwrap_or(default_file),
             action,
             target,
-            element: std::env::var("AIOS_ROOM_ELEMENT").unwrap_or_else(|_| ELEMENT.into()),
-            noun_refno: std::env::var("AIOS_ROOM_EXPECT_NOUN_REFNO").unwrap_or_else(|_| {
-                std::env::var("AIOS_ROOM_ELEMENT").unwrap_or_else(|_| ELEMENT.into())
-            }),
+            element: element.clone(),
+            noun_refno: std::env::var("AIOS_ROOM_EXPECT_NOUN_REFNO")
+                .unwrap_or_else(|_| element.clone()),
             expected_noun: std::env::var("AIOS_ROOM_EXPECT_NOUN").unwrap_or_else(|_| "CAP".into()),
             expect_room: env_flag("AIOS_ROOM_EXPECT_ROOM", true),
             prepare_baseline: env_flag("AIOS_ROOM_PREPARE_BASELINE", true),
@@ -98,6 +128,8 @@ impl Case {
                 .map(|value| serde_json::from_str(&value).expect("AIOS_ROOM_EXPECT_EDGES JSON")),
             expect_geometry: env_flag("AIOS_ROOM_EXPECT_GEOMETRY", true),
             baseline_file: std::env::var_os("AIOS_ROOM_BASELINE_FILE").map(Into::into),
+            panel,
+            room_ref,
         }
     }
 }
@@ -185,11 +217,11 @@ async fn edges(element: &str) -> Vec<Edge> {
     response.take(0).expect("decode room edges")
 }
 
-async fn topology() -> Vec<Topology> {
+async fn topology(panel: &str) -> Vec<Topology> {
     let mut response = SUL_DB
         .query(format!(
             "SELECT record::id(in) AS room, record::id(out) AS panel, room_num \
-             FROM room_panel_relate WHERE out = pe:{PANEL} ORDER BY room;"
+             FROM room_panel_relate WHERE out = pe:{panel} ORDER BY room;"
         ))
         .await
         .expect("query room topology")
@@ -232,7 +264,7 @@ async fn snapshot(tag: &str, case: &Case) {
     println!(
         "[e2e/{tag}] 归属边={:?} 房间拓扑={:?} room_relate={total:?} 水位={watermark:?}",
         edges(&case.element).await,
-        topology().await
+        topology(&case.panel).await
     );
     println!("[e2e/{tag}] 模型={model:?}");
 }
@@ -265,7 +297,7 @@ async fn assert_second_pass_is_a_no_op(mgr: &Arc<AiosDBManager>, case: &Case) {
     );
     let edges_before = edges(&case.element).await;
     let aabb_before = aabb(&case.element).await;
-    let topology_before = topology().await;
+    let topology_before = topology(&case.panel).await;
     let ran = drain_queue_until_empty(mgr).await;
     assert_eq!(ran, 0, "幂等轮不得消费任何数据批次");
     assert_eq!(
@@ -288,7 +320,11 @@ async fn assert_second_pass_is_a_no_op(mgr: &Arc<AiosDBManager>, case: &Case) {
         "幂等轮 AABB 不得变化"
     );
     if case.check_topology {
-        assert_eq!(topology().await, topology_before, "幂等轮房间拓扑不得变化");
+        assert_eq!(
+            topology(&case.panel).await,
+            topology_before,
+            "幂等轮房间拓扑不得变化"
+        );
     }
     assert!(
         rows(&format!(
@@ -309,7 +345,7 @@ async fn assert_second_pass_is_a_no_op(mgr: &Arc<AiosDBManager>, case: &Case) {
 #[ignore = "manual live: applies one pending E3D room increment to the real project db"]
 async fn issue7_e2e_room_comes_back_after_e3d_save() {
     connect_live().await;
-    let case = Case::from_env();
+    let case = Case::from_env().await;
     let mgr = Arc::new(
         AiosDBManager::init_form_config()
             .await
@@ -353,20 +389,20 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     let mut db_option = get_db_option().clone();
     db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
     let mut baseline = vec![Edge {
-        panel: PANEL.into(),
+        panel: case.panel.clone(),
         part: case.element.clone(),
         room_num: ROOM.into(),
     }];
     let baseline_topology = vec![Topology {
-        room: ROOM_REF.into(),
-        panel: PANEL.into(),
+        room: case.room_ref.clone(),
+        panel: case.panel.clone(),
         room_num: ROOM.into(),
     }];
     if case.prepare_baseline {
         let prepare_targets = if case.dynamic_baseline {
             vec![case.element.as_str()]
         } else {
-            vec![PANEL, case.element.as_str()]
+            vec![case.panel.as_str(), case.element.as_str()]
         };
         for target in prepare_targets {
             mgr.ensure_model_generated(RefnoEnum::from(target), false)
@@ -414,7 +450,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         }
         if case.check_topology {
             assert_eq!(
-                topology().await,
+                topology(&case.panel).await,
                 baseline_topology,
                 "apply 前房间拓扑基线漂移"
             );
@@ -504,7 +540,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
     };
-    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
+    // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
+    // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。
+    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found, false);
     println!("[e2e] 入队 {}: {outcome:?}", case.dbnum);
 
     let started = Instant::now();
@@ -625,7 +663,11 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         baseline_topology
     };
     if case.check_topology {
-        assert_eq!(topology().await, expected_topology, "房间拓扑未按场景收敛");
+        assert_eq!(
+            topology(&case.panel).await,
+            expected_topology,
+            "房间拓扑未按场景收敛"
+        );
     }
     if case.action == "room_recalc_panel"
         && case.prepare_baseline

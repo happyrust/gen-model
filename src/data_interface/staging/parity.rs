@@ -159,7 +159,7 @@ pub(crate) async fn run_both_paths(script: &MiniWindowScript) -> (String, String
     // I1 探针：写回之前，持久层与基态一字不差（零落盘）。
     let before_commit = snapshot_tables(&staged_target).await;
     executor
-        .commit_to(&staged_target, script.tail.as_deref())
+        .commit_to(&staged_target, &[], script.tail.as_deref())
         .await
         .expect("commit");
     let staged_final = snapshot_tables(&staged_target).await;
@@ -242,6 +242,7 @@ async fn staged_parse_window_with_real_rendering_matches_direct_write() {
     );
     // 两条路径不是同一时刻执行；信息性时间戳不属于终态等价判据。
     let tail = render_finalize_tail(7997, 43, None, &ModelUpdatePlan::default(), &[])
+        .tail
         .replace("time::now()", "NONE");
 
     // 暂存路径。
@@ -257,7 +258,7 @@ async fn staged_parse_window_with_real_rendering_matches_direct_write() {
     }
     let staged_target = fresh_db("parity", "real_staged_target").await;
     executor
-        .commit_to(&staged_target, Some(&tail))
+        .commit_to(&staged_target, &[], Some(&tail))
         .await
         .expect("staged commit");
 

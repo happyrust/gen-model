@@ -1068,17 +1068,9 @@ async fn execute_frozen_batch(
         room_ms
     };
 
-    // 窗口内跳过的持久层副作用与非 regen 工作，写回后再消费。
-    match SideEffectCompensator::drain(mgr).await {
-        Ok(n) if n > 0 => println!("写回后副作用补偿完成 {n} 个任务"),
-        Ok(_) => {}
-        Err(error) => {
-            result
-                .warnings
-                .push(format!("写回后副作用补偿失败（保留待重试）: {error:#}"));
-            postcommit_failed = true;
-        }
-    }
+    // 窗口内跳过的非 regen 模型工作，写回后再消费；持久层副作用补偿放在 SYST
+    // 派生入账**之后**只收一次（2026-08-10 审核 P2-3：此前这里还有一轮一模一样
+    // 的 drain，对非 SYST 批次是纯重复往返——两轮之间没有任何新入队）。
     match model_update_pending::drain_non_regen_report(mgr).await {
         Ok(report) if !report.failures.is_empty() => {
             result.warnings.push(format!(

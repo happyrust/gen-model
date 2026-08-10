@@ -9,7 +9,7 @@ rem   L3_E3D_PROJECTS_DIR  parent directory of the selected E3D project
 rem   L3_E3D_PROJECT       project code (default: AMS)
 rem   L3_E3D_LOGIN         USER/PASSWORD (default: SYSTEM/XXXXXX)
 rem   L3_E3D_MDB           MDB name (default: /ALL)
-rem   L3_E3D_INSTALL_DIR   E3D install (default: C: stock 3.1)
+rem   L3_E3D_INSTALL_DIR   E3D install (default: known-good L3 shadow 3.1)
 rem   L3_E3D_PROJECT_EVAR  project evars batch (default: AMS under project root)
 rem   L3_E3D_TIMEOUT_SECONDS / L3_E3D_PID_FILE
 rem
@@ -20,9 +20,12 @@ rem has failed with ERROR_INVALID_HANDLE. AVEVA_DESIGN_ENTRYMACRO is read by
 rem Startup.dll, which queues the macro once the event loop is up - so the macro
 rem is part of TTY session startup rather than something injected into it.
 rem
-rem The C: install is the one to use: its assemblies are stock, while D:'s
-rem Startup.dll has been patched and its sessions come up with no command loop.
-rem C:'s custom_evars.bat already points projects_dir at D:\AVEVA\Projects\E3D3.1.
+rem The gen_model_test shadow is the verified unattended runtime.  The aps_all
+rem analysis copy currently exits before the L3-ALIVE marker, while the stock C:
+rem install no longer has des.exe at its root.  The install choice does not move
+rem the project: projects_dir is bound from L3_E3D_PROJECTS_DIR before evars.bat
+rem runs, and evars.bat keeps a preset one.  Set L3_E3D_INSTALL_DIR explicitly to
+rem compare another runtime without changing this default.
 rem
 rem The launch is detached because des.exe is a GUI-subsystem binary: started
 rem from a console it inherits one, and core.dll then skips spawning its own
@@ -39,7 +42,7 @@ echo E3D macro does not exist: %E3D_MACRO% 1>&2
 exit /b 2
 :macro_ok
 
-if not defined L3_E3D_INSTALL_DIR set "L3_E3D_INSTALL_DIR=C:\Program Files (x86)\AVEVA\Everything3D3.1"
+if not defined L3_E3D_INSTALL_DIR set "L3_E3D_INSTALL_DIR=E:\reverse\e3d\shadow_e3d31_gen_model_test"
 if not defined L3_E3D_PROJECTS_DIR set "L3_E3D_PROJECTS_DIR=D:\AVEVA\Projects\E3D3.1"
 if not defined L3_E3D_PROJECT set "L3_E3D_PROJECT=AMS"
 if not defined L3_E3D_LOGIN set "L3_E3D_LOGIN=SYSTEM/XXXXXX"

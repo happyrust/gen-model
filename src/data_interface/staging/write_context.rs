@@ -420,8 +420,21 @@ mod tests {
             finalize.plan.work_items[0].action,
             crate::data_interface::model_update_plan::ModelWorkAction::CascadeExpand
         );
-        let tail = window.render_finalize_tail().await.expect("render tail");
-        assert!(tail.contains("datacenter_version:x"), "{tail}");
+        let render = window.render_finalize_tail().await.expect("render tail");
+        // 窗口语句走前置语句批（2026-08-10 审核 P1），尾事务不再夹带。
+        assert_eq!(
+            render.window_batches.len(),
+            1,
+            "{:?}",
+            render.window_batches
+        );
+        assert!(
+            render.window_batches[0].contains("datacenter_version:x"),
+            "{}",
+            render.window_batches[0]
+        );
+        let tail = render.tail;
+        assert!(!tail.contains("datacenter_version:x"), "{tail}");
         assert!(tail.contains("dbnum_watermark:7994"), "{tail}");
         // 登记时带的右端时刻必须一路走到收口语句里（plant-ui ADR-0019 Q6）：
         // 暂存路径的水位是在写回那一刻推的，那时文件早已不在手上。

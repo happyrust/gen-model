@@ -16,14 +16,19 @@
 //! cargo test --features http_api --test gen_one_root_probe -- --ignored --nocapture
 //! ```
 
+mod common;
+
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::aabb_tree::load_project_tree_verified;
 use surrealdb::opt::{Config, auth::Root};
 
-/// `/1-LNR-Q005-PJ`，8000 里的一台设备。EQUI 本身就是交付单元类型，自成一个生成根。
-const DEFAULT_ROOT: &str = "24384/24776";
+use common::by_name;
+
+/// 8000 里的一台设备。EQUI 本身就是交付单元类型，自成一个生成根。按名寻址：
+/// refno 会随增删漂移，名字不会。
+const DEFAULT_ROOT_NAME: &str = "/1-LNR-Q005-PJ";
 
 async fn connect_live() {
     let endpoint = std::env::var("AIOS_LIVE_WS").unwrap_or_else(|_| "ws://localhost:8009".into());
@@ -85,12 +90,15 @@ async fn chain_counts(dbnum: u32) -> (i64, i64, i64) {
 async fn generating_one_root_fills_geometry_aabb_and_tree() {
     connect_live().await;
 
-    let root_refno = std::env::var("AIOS_PROBE_ROOT").unwrap_or_else(|_| DEFAULT_ROOT.into());
-    let root = RefnoEnum::from(root_refno.as_str());
     let dbnum: u32 = std::env::var("AIOS_PROBE_DBNUM")
         .ok()
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(8000);
+    let root_refno = match std::env::var("AIOS_PROBE_ROOT") {
+        Ok(explicit) => explicit,
+        Err(_) => by_name(DEFAULT_ROOT_NAME, Some(dbnum)).await,
+    };
+    let root = RefnoEnum::from(root_refno.as_str());
     println!("[probe] 靶子生成根 {root_refno}（按 dbnum={dbnum} 统计链路）");
 
     load_project_tree_verified()

@@ -22,7 +22,7 @@
 //!    `drain_rooms` 兜底）。同房位移下它抓的是「归属被错误清空/搬错房间」，
 //!    抓不到「压根没重算」——判别性要靠跨房搬迁靶子。
 //!
-//! 默认靶子：CONE =24381/110021（dbnum 7997，R312）——EQUI 名下的几何体，
+//! 默认靶子：`/Copy-of-第五层` 名下唯一的 CONE（dbnum 7997，R312）——EQUI 名下的几何体，
 //! 纯位姿变更在计划层保持 Transform 工作项（不像 BRAN/HANG 成员会改判重生成）。
 //! 这个「保持」由断言 0 当场判定，不靠注释保证。
 //!
@@ -30,6 +30,8 @@
 //! $env:RUST_MIN_STACK = "134217728"
 //! cargo test --features http_api --test staged_transform_e2e -- --ignored --exact --nocapture
 //! ```
+
+mod common;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -50,7 +52,12 @@ use pdms_io::io::PdmsIO;
 use serde::Deserialize;
 use surrealdb::opt::{Config, auth::Root};
 
+use common::child_of;
+
 const PROJECT: &str = "AvevaMarineSample";
+/// 靶子按名寻址。CONE 这类几何体在 PDMS 里本就无名，只能借带名的属主定位。
+const ELEMENT_OWNER: &str = "/Copy-of-第五层";
+const ELEMENT_NOUN: &str = "CONE";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct Edge {
@@ -180,12 +187,14 @@ async fn staged_transform_follows_a_pure_pose_move() {
     );
     connect_live().await;
 
-    let element_id =
-        std::env::var("AIOS_STAGED_E2E_ELEMENT").unwrap_or_else(|_| "24381_110021".into());
     let dbnum: u32 = std::env::var("AIOS_STAGED_E2E_DBNUM")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(7997);
+    let element_id = match std::env::var("AIOS_STAGED_E2E_ELEMENT") {
+        Ok(explicit) => explicit,
+        Err(_) => child_of(ELEMENT_OWNER, ELEMENT_NOUN, Some(dbnum)).await,
+    };
     let db_file = std::env::var("AIOS_STAGED_E2E_DB_FILE").unwrap_or_else(|_| {
         format!("D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams{dbnum}_0001")
     });
@@ -272,7 +281,9 @@ async fn staged_transform_follows_a_pure_pose_move() {
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
     };
-    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
+    // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
+    // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。
+    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found, false);
     println!("[staged-e2e] 入队 dbnum={dbnum}: {outcome:?}");
     let task_id = outcome.info.task_id.clone();
     let commit_before = staged_commit_metrics();

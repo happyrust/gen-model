@@ -499,6 +499,40 @@ pub async fn desi_finalize_preflight() -> FinalizePreflight {
     }
 }
 
+/// 逐条语句的保尾去重：同一条语句被渲染多次时只保留**最后一次出现**，其余全是
+/// 纯重复（2026-08-10 审核 P1）。
+///
+/// datacenter 语句按窗口内的**原始 op** 逐条渲染：一个元素在窗口里被改 N 次就
+/// 渲染 N 条一模一样的 `update datacenter_version:… set status = 'Modify';`——
+/// 主数据那侧有 `fold_window` 折叠，这一侧没有，于是收口体积 ∝ 操作数而不是
+/// ∝ 元素数。这些语句都是自含的单行赋值：删掉一条较早的重复，不改变它那一行
+/// 的终值（终值由保留下来的最后一次出现决定），也碰不到别的行。
+///
+/// **必须保尾而不是保头**：同一目标行上可能交错出现两种不同语句（改 → 删 →
+/// 重建再改，渲成 M、D、M），保头会把最后那条 M 去掉、终态错成 Delete；保尾
+/// 得到 D、M，与逐条重放同一个终态。
+fn dedup_statements_keep_last(statements: Vec<String>) -> Vec<String> {
+    let mut remaining: HashMap<&str, usize> = HashMap::new();
+    for statement in &statements {
+        *remaining.entry(statement.as_str()).or_default() += 1;
+    }
+    let keep = statements
+        .iter()
+        .map(|statement| {
+            let count = remaining
+                .get_mut(statement.as_str())
+                .expect("counted above");
+            *count -= 1;
+            *count == 0
+        })
+        .collect::<Vec<_>>();
+    statements
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(statement, keep)| keep.then_some(statement))
+        .collect()
+}
+
 /// PDMS session logs may contain provisional `Add` operations whose records are
 /// no longer present when Save Work publishes the final file. Treating those
 /// entries as live creates phantom PE rows and makes file-backed ancestor
@@ -958,13 +992,16 @@ impl IncrementPipeline {
             Self::datacenter_statements(&range_eles, db_type),
         )
         .await?;
-        // OWNER 搬迁的定点 anc/zone_refno 重算与水位共命运（窗口回滚则重放）。
+        // OWNER 搬迁的定点 anc/zone_refno 重算先于水位提交、失败即拦住水位
+        // （窗口重放时随窗口语句批重算，幂等收敛）。
         window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
 
-        // One final transaction publishes this window's delivery-status updates,
-        // establishes durable model work, advances the watermark and removes the
-        // short-lived recovery record. If it fails, the attempt remains and the
-        // whole fixed range is safe to replay.
+        // Finalization publishes this window's delivery-status updates as ordered
+        // chunked batches, then one tail transaction establishes durable model
+        // work, advances the watermark and removes the short-lived recovery
+        // record. If any step fails, the watermark is untouched, the attempt
+        // remains, and the whole fixed range is safe to replay (the idempotent
+        // fixed-target updates converge on re-application).
         // 水位推进要顺手存下右端那条保存的写入时刻（plant-ui ADR-0019 Q6）：文件被换回
         // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
         let end_sesno_time =
@@ -1027,7 +1064,7 @@ impl IncrementPipeline {
         ))
     }
 
-    /// 本窗口的 OWNER 搬迁 anc/zone_refno 定点重算语句（进收口尾事务）。
+    /// 本窗口的 OWNER 搬迁 anc/zone_refno 定点重算语句（随收口窗口语句批提交）。
     ///
     /// **只对 DESI 窗口渲染**（与 [`Self::datacenter_statements`] 同门，
     /// 2026-08-07 审核 P2）：`anc` 物化的是设计元素祖先链，CATA/SYST 元素的
@@ -1073,24 +1110,37 @@ impl IncrementPipeline {
             .collect()
     }
 
-    /// 渲染搬家元素子树的 `anc`/`zone_refno` 定点重算语句（进 finalize 事务，
-    /// 与水位共命运；层级查询优化方案 P1 的搬家维护）。
+    /// 单条 CONTAINSANY 语句最多携带的搬家元素数（语句体积上界 ~几 KB）。
+    const ANC_REPAIR_CHUNK: usize = 200;
+
+    /// 渲染搬家元素子树的 `anc`/`zone_refno` 定点重算语句（随收口窗口语句批
+    /// 提交、先于水位；层级查询优化方案 P1 的搬家维护）。
     ///
-    /// `anc CONTAINS 搬家元素`：搬家把整棵子树一起带走，受影响行的 anc 无论
-    /// 新旧算法都含着这个元素，所以这一个条件恰好圈出全部受影响行；重算发生在
-    /// 数据落库之后，走的是提交后的活 owner 链。
+    /// `anc CONTAINSANY [搬家元素…]`：搬家把整棵子树一起带走，受影响行的 anc
+    /// 无论新旧算法都含着搬家元素，所以这一个条件恰好圈出全部受影响行；重算
+    /// 发生在数据落库之后，走的是提交后的活 owner 链。
+    ///
+    /// 整批搬家元素合并成每表**一条**语句（按 [`Self::ANC_REPAIR_CHUNK`] 分块）：
+    /// 逐元素渲染的老形态是每个搬家元素两次 `WHERE anc CONTAINS` 子查询扫描，
+    /// 一次容器大搬移（上千元素）就是收口路径上的数千次扫描；CONTAINSANY 是同
+    /// 一批行的并集，且同一行只重算一次——重算本身幂等，语义不变（2026-08-10
+    /// 审核 P1）。
     fn render_anc_repair_statements(moved: &[RefU64]) -> Vec<String> {
         moved
-            .iter()
-            .flat_map(|refno| {
-                let n = refno.0;
+            .chunks(Self::ANC_REPAIR_CHUNK)
+            .flat_map(|chunk| {
+                let list = chunk
+                    .iter()
+                    .map(|refno| refno.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 [
                     format!(
-                        "UPDATE (SELECT VALUE id FROM inst_relate WHERE anc CONTAINS {n}) SET \
+                        "UPDATE (SELECT VALUE id FROM inst_relate WHERE anc CONTAINSANY [{list}]) SET \
                          anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
                     ),
                     format!(
-                        "UPDATE (SELECT VALUE id FROM tubi_relate WHERE anc CONTAINS {n}) SET \
+                        "UPDATE (SELECT VALUE id FROM tubi_relate WHERE anc CONTAINSANY [{list}]) SET \
                          anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
                     ),
                 ]
@@ -1434,7 +1484,7 @@ impl IncrementPipeline {
                 }
             }
         }
-        Ok(statements)
+        Ok(dedup_statements_keep_last(statements))
     }
 
     /// 窗口前持久态的 pe 点查（noun + owner），显式 `SUL_DB` 不经读路由——
@@ -1488,8 +1538,11 @@ impl IncrementPipeline {
     /// transaction, with the error downgraded to a caller warning. A failed
     /// status write was then lost for good: the watermark still advanced past
     /// the one window that carried it, and no later window revisits an element
-    /// that did not change again. They are now handed to `finalize_attempt`, so
-    /// they commit with the watermark or roll back and replay with it.
+    /// that did not change again. They are now handed to `finalize_attempt` /
+    /// the staged commit, which execute them as ordered batches **before** the
+    /// watermark-advancing tail transaction — a failure keeps the watermark
+    /// unmoved so the window replays and the idempotent updates converge
+    /// (`model_update_pending::FinalizeRender` has the full argument).
     async fn datacenter_statements(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
@@ -2601,7 +2654,14 @@ mod datacenter_tests {
         let statements = render_with(
             vec![
                 modified("FTUB"),
-                modified("BRAN"),
+                // BRAN 放在独立 refno 上：`modified()` 的缺省 refno 与 FTUB 撞在
+                // 一起时，两个 op 会渲出两条一模一样的语句——老断言把那对纯重复
+                // 数成 3，恰是保尾去重要消灭的形态（2026-08-10 审核 P1）。
+                {
+                    let mut op = modified("BRAN");
+                    op.refno = refu(10);
+                    op
+                },
                 EleOperationData::new(refu(2), 1, EleOperationDetail::Deleted),
                 EleOperationData::new(refu(3), 1, EleOperationDetail::None),
                 {
@@ -2778,7 +2838,7 @@ mod datacenter_tests {
         for (statement, table) in statements.iter().zip(["inst_relate", "tubi_relate"]) {
             assert!(statement.contains(table), "{statement}");
             assert!(
-                statement.contains(&format!("anc CONTAINS {}", moved_elem.0)),
+                statement.contains(&format!("anc CONTAINSANY [{}]", moved_elem.0)),
                 "受影响行由旧 anc 含搬家元素这一个条件圈出: {statement}"
             );
             assert!(
@@ -2802,6 +2862,79 @@ mod datacenter_tests {
         )]);
         assert!(IncrementPipeline::moved_refnos(&range).is_empty());
         assert!(IncrementPipeline::render_anc_repair_statements(&[]).is_empty());
+    }
+
+    /// 2026-08-10 审核 P1：整批搬家元素必须合并进 CONTAINSANY——逐元素渲染是
+    /// 每个元素两次子查询扫描，容器大搬移一次上千元素就是收口路径上的数千次
+    /// 扫描。分块上界之内每表恰好一条语句；越界按块翻倍。
+    #[test]
+    fn a_batch_of_moves_merges_into_one_containsany_statement_per_table() {
+        let moved = (1..=3)
+            .map(|n| RefU64((7997u64 << 32) | n))
+            .collect::<Vec<_>>();
+        let statements = IncrementPipeline::render_anc_repair_statements(&moved);
+        assert_eq!(
+            statements.len(),
+            2,
+            "块内的搬家元素合并为每表一条: {statements:?}"
+        );
+        let list = moved
+            .iter()
+            .map(|refno| refno.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for statement in &statements {
+            assert!(
+                statement.contains(&format!("anc CONTAINSANY [{list}]")),
+                "{statement}"
+            );
+        }
+
+        let oversized = (1..=(IncrementPipeline::ANC_REPAIR_CHUNK as u64 + 1))
+            .map(|n| RefU64((7997u64 << 32) | n))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            IncrementPipeline::render_anc_repair_statements(&oversized).len(),
+            4,
+            "超过分块上界后按块翻倍（语句体积有界）"
+        );
+    }
+
+    /// 2026-08-10 审核 P1：同一元素在窗口里被改 N 次，datacenter 语句只留一条
+    /// ——收口体积必须 ∝ 元素数而不是 ∝ 操作数（主数据那侧的 fold 早已如此）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_modifies_of_one_target_render_one_statement() {
+        let statements = render_with(
+            vec![modified("BRAN"), modified("BRAN"), modified("BRAN")],
+            ChainMap::new(),
+        )
+        .await;
+        assert_eq!(
+            statements,
+            vec!["update datacenter_version:7997_1 set status = 'Modify';".to_string()],
+            "重复触发同一目标的语句是纯重复，必须收敛成一条"
+        );
+    }
+
+    /// 去重必须**保尾**：改 → 删 → 重建再改（M、D、M）里保头会把最后那条 M
+    /// 丢掉、终态错成 Delete；保尾得到 D、M，与逐条重放同一个终态。
+    #[test]
+    fn dedup_keeps_the_last_occurrence_so_replay_order_survives() {
+        let modify = "update datacenter_version:7997_1 set status = 'Modify';".to_string();
+        let delete = "update datacenter_version:7997_1 set status = 'Delete', belong_zone = NONE;"
+            .to_string();
+
+        let deduped =
+            dedup_statements_keep_last(vec![modify.clone(), delete.clone(), modify.clone()]);
+        assert_eq!(deduped, vec![delete, modify], "最后写入者必须活下来");
+
+        assert!(dedup_statements_keep_last(Vec::new()).is_empty());
+        let distinct = vec!["a;".to_string(), "b;".to_string()];
+        assert_eq!(
+            dedup_statements_keep_last(distinct.clone()),
+            distinct,
+            "无重复时原序原样"
+        );
     }
 
     /// P2（2026-08-07 审核）：anc 修复只对 DESI 窗口渲染——CATA/SYST/DICT 元素的

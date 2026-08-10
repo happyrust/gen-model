@@ -186,7 +186,7 @@ mod staged_write_routing_tests {
         );
 
         window
-            .commit_to(&target, None)
+            .commit_to(&target, &[], None)
             .await
             .expect("commit journal");
         let mut after = target

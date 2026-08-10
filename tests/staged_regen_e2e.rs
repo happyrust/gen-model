@@ -121,7 +121,9 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
     };
-    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
+    // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
+    // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。
+    let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found, false);
     let task_id = outcome.info.task_id.clone();
     let commit_before = staged_commit_metrics();
     assert_eq!(

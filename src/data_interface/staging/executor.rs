@@ -168,17 +168,29 @@ impl StagedExecutor {
         Ok(())
     }
 
-    /// 写回：日志按原序分块事务重放到 `target`，随后执行调用方渲染的尾事务。
+    /// 写回：日志按原序分块事务重放到 `target`，随后按序执行调用方渲染的窗口
+    /// 语句批（各自已是独立事务），最后执行尾事务。
     ///
     /// 任何一块失败即上抛——日志与暂存原样保留，调用方可整体重试（T4.1 的
-    /// 退避与「写回滞留」告警在上层）。尾事务自身单独一个事务，収口条件
-    /// （水位、revision 判真）在持久层判定。
+    /// 退避与「写回滞留」告警在上层）。窗口语句批失败同样发生在尾事务之前：
+    /// 水位不动，重试或整窗口重算都会幂等收敛（2026-08-10 审核 P1 的拆块论证
+    /// 见 `model_update_pending::FinalizeRender`）。尾事务自身单独一个事务，
+    /// 收口条件（水位、revision 判真）在持久层判定。
     pub async fn commit_to(
         &self,
         target: &Surreal<Any>,
+        pre_tail_transactions: &[String],
         tail_transaction: Option<&str>,
     ) -> anyhow::Result<()> {
         self.replay_journal_to(target, TX_CHUNK, None).await?;
+        for (index, transaction) in pre_tail_transactions.iter().enumerate() {
+            execute_surreal_checked_on(
+                target,
+                transaction,
+                &format!("[{}] 写回窗口语句批 {index}", self.label),
+            )
+            .await?;
+        }
         if let Some(tail) = tail_transaction {
             let tail_tx = wrap_in_transaction(&[tail.to_string()]).expect("非空尾事务必然可包装");
             execute_surreal_checked_on(target, &tail_tx, &format!("[{}] 写回尾事务", self.label))
@@ -188,8 +200,13 @@ impl StagedExecutor {
     }
 
     /// 写回到生产持久层（`SUL_DB`）。
-    pub async fn commit(&self, tail_transaction: Option<&str>) -> anyhow::Result<()> {
-        self.commit_to(&aios_core::SUL_DB, tail_transaction).await
+    pub async fn commit(
+        &self,
+        pre_tail_transactions: &[String],
+        tail_transaction: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.commit_to(&aios_core::SUL_DB, pre_tail_transactions, tail_transaction)
+            .await
     }
 
     /// 按 `chunk_size` 分块重放日志；`max_chunks` 限制本次重放的块数
@@ -401,6 +418,7 @@ mod tests {
         executor
             .commit_to(
                 &target,
+                &[],
                 Some("UPSERT dbnum_watermark:7997 SET applied_sesno = 42"),
             )
             .await
@@ -449,14 +467,14 @@ mod tests {
             .expect("partial replay");
         assert_eq!(replayed, 1);
         executor
-            .commit_to(&interrupted, None)
+            .commit_to(&interrupted, &[], None)
             .await
             .expect("full retry after interruption");
 
         // 对照路径：一次成功写回。
         let clean = persistent_handle().await;
         executor
-            .commit_to(&clean, None)
+            .commit_to(&clean, &[], None)
             .await
             .expect("clean commit");
 
@@ -479,10 +497,74 @@ mod tests {
 
         let target = persistent_handle().await;
         executor
-            .commit_to(&target, None)
+            .commit_to(&target, &[], None)
             .await
             .expect("replay transaction");
         let rows = select_values(&target, "SELECT VALUE id FROM pe ORDER BY id").await;
         assert!(rows.contains("a") && rows.contains("b"), "{rows}");
+    }
+
+    /// 窗口语句批的执行位置（2026-08-10 审核 P1）：journal 之后、尾事务之前，
+    /// 且按原序生效——后写覆盖先写跨越三段成立。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pre_tail_batches_run_after_journal_and_before_tail() {
+        let staging = staging_handle("staging_7997_pre_tail").await;
+        let mut executor = StagedExecutor::new(staging, "staging_7997_pre_tail");
+        executor
+            .execute("UPSERT marker:m SET phase = 'journal'", ExecMode::Both)
+            .await
+            .expect("journal write");
+
+        let target = persistent_handle().await;
+        executor
+            .commit_to(
+                &target,
+                &[
+                    "BEGIN TRANSACTION;\nUPSERT marker:m SET phase = 'window_batch_0';\nCOMMIT TRANSACTION;".to_string(),
+                    "BEGIN TRANSACTION;\nUPSERT marker:m SET phase = 'window_batch_1';\nCOMMIT TRANSACTION;".to_string(),
+                ],
+                Some("UPSERT marker:m SET phase = 'tail'; UPSERT dbnum_watermark:7997 SET applied_sesno = 42"),
+            )
+            .await
+            .expect("commit with pre-tail batches");
+
+        let phase = select_values(&target, "SELECT VALUE phase FROM marker").await;
+        assert_eq!(
+            phase, "{\"Array\":[{\"Strand\":\"tail\"}]}",
+            "尾事务最后生效"
+        );
+        let watermark =
+            select_values(&target, "SELECT VALUE applied_sesno FROM dbnum_watermark").await;
+        assert_eq!(watermark, "{\"Array\":[{\"Number\":{\"Int\":42}}]}");
+    }
+
+    /// 窗口语句批失败必须把整次写回按失败上抛：尾事务（水位）不得执行。
+    /// 这是拆块安全性的另一半——「任何一块失败都发生在水位推进之前」。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_pre_tail_batch_gates_the_tail_transaction() {
+        let staging = staging_handle("staging_7997_pre_tail_gate").await;
+        let mut executor = StagedExecutor::new(staging, "staging_7997_pre_tail_gate");
+        executor
+            .execute("UPSERT marker:m SET phase = 'journal'", ExecMode::Both)
+            .await
+            .expect("journal write");
+
+        let target = persistent_handle().await;
+        let error = executor
+            .commit_to(
+                &target,
+                &["BEGIN TRANSACTION;\nUPSERT marker:m SET phase = math::nonexistent(1);\nCOMMIT TRANSACTION;".to_string()],
+                Some("UPSERT dbnum_watermark:7997 SET applied_sesno = 42"),
+            )
+            .await
+            .expect_err("坏窗口语句批必须让写回失败");
+        assert!(
+            format!("{error:#}").contains("写回窗口语句批 0"),
+            "{error:#}"
+        );
+
+        let watermark =
+            select_values(&target, "SELECT VALUE applied_sesno FROM dbnum_watermark").await;
+        assert_eq!(watermark, "{\"Array\":[]}", "窗口语句批失败后水位不得推进");
     }
 }

@@ -223,12 +223,13 @@ impl ActiveStagedWindow {
     pub(crate) async fn commit_to(
         &self,
         target: &Surreal<Any>,
+        pre_tail_transactions: &[String],
         tail_transaction: Option<&str>,
     ) -> anyhow::Result<()> {
         self.executor
             .lock()
             .await
-            .commit_to(target, tail_transaction)
+            .commit_to(target, pre_tail_transactions, tail_transaction)
             .await
     }
 
@@ -298,7 +299,9 @@ impl ActiveStagedWindow {
         self.mysql_changes.lock().await.take()
     }
 
-    pub(crate) async fn render_finalize_tail(&self) -> anyhow::Result<String> {
+    pub(crate) async fn render_finalize_tail(
+        &self,
+    ) -> anyhow::Result<crate::data_interface::model_update_pending::FinalizeRender> {
         let finalize = self
             .staged_finalize()
             .await
@@ -347,8 +350,9 @@ impl ActiveStagedWindow {
             .staged_finalize()
             .await
             .context("staged window has no registered finalize state")?;
-        let tail = self.render_finalize_tail().await?;
-        self.commit_to(target, Some(&tail)).await?;
+        let render = self.render_finalize_tail().await?;
+        self.commit_to(target, &render.window_batches, Some(&render.tail))
+            .await?;
         if !finalize.cache_refnos.is_empty() {
             aios_core::clear_all_caches_batch(&finalize.cache_refnos).await;
         }

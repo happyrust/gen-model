@@ -64,8 +64,10 @@ impl SesnoRangeResolver {
 
     /// Build an update plan when `file_latest_sesno > watermark`, or SYS-meta cold start.
     ///
-    /// Cheap watermark pre-check first (no file open when nothing to do),
-    /// then delegates to [`Self::resolve_with_header`] for the shared logic.
+    /// Cheap watermark pre-check first (no file open when nothing to do), then
+    /// one open serves both the header read and the nearest-session jump
+    /// （2026-08-10 审核 P2-2：此前这里开一次读 header、`resolve_with_header`
+    /// 又开一次跳会话号——watcher 热路径每个文件白开一遍）。
     pub async fn resolve(
         &self,
         path: &Path,
@@ -93,8 +95,13 @@ impl SesnoRangeResolver {
         io.open()?;
         let basic_info = io.get_page_basic_info()?;
 
-        self.resolve_with_header(path, project, basic_info, skip_cata, db_type)
-            .await
+        Ok(Self::build_plan(
+            &mut io,
+            path,
+            basic_info,
+            db_type,
+            db_latest_sesno,
+        ))
     }
 
     /// Convenience when caller already has `DbPageBasicInfo` (watch path).
@@ -113,18 +120,44 @@ impl SesnoRangeResolver {
         }
 
         let db_latest_sesno = Self::query_watermark(dbnum).await?;
-
-        // --- SYS meta cold start: no watermark yet, ingest from first sesno ---
         if db_latest_sesno == 0 {
             if !Self::allows_cold_start(db_type) || file_latest_sesno <= 0 {
                 return Ok(None);
             }
+        } else if (file_latest_sesno as u32) <= db_latest_sesno {
+            return Ok(None);
+        }
 
-            let mut io = PdmsIO::new(project, path, true);
-            io.open()?;
+        let mut io = PdmsIO::new(project, path, true);
+        io.open()?;
+        Ok(Self::build_plan(
+            &mut io,
+            path,
+            basic_info,
+            db_type,
+            db_latest_sesno,
+        ))
+    }
+
+    /// 在**已打开**的文件上跳最近会话号并组装计划。水位、CATA 门与冷启动资格
+    /// 都已由调用方判定；这里用 header 的 `file_latest_sesno` 复核右端——
+    /// 文件在预检与打开之间被换过时，跳出来的 `nearest` 超过右端即安静放弃，
+    /// 与老形态的双重守卫同一结局。
+    fn build_plan(
+        io: &mut PdmsIO,
+        path: &Path,
+        basic_info: DbPageBasicInfo,
+        db_type: &str,
+        db_latest_sesno: u32,
+    ) -> Option<SesnoUpdatePlan> {
+        let dbnum = basic_info.pdms_header.db_num as u32;
+        let file_latest_sesno = basic_info.latest_ses_data.sesno;
+
+        // --- SYS meta cold start: no watermark yet, ingest from first sesno ---
+        if db_latest_sesno == 0 {
             let nearest = io.get_nearest_large_sesno(1).unwrap_or(1);
             if nearest > file_latest_sesno {
-                return Ok(None);
+                return None;
             }
 
             println!(
@@ -132,7 +165,7 @@ impl SesnoRangeResolver {
                 db_type, dbnum, nearest, file_latest_sesno
             );
 
-            return Ok(Some(SesnoUpdatePlan {
+            return Some(SesnoUpdatePlan {
                 path: path.to_path_buf(),
                 basic_info,
                 db_type: db_type.to_string(),
@@ -140,24 +173,18 @@ impl SesnoRangeResolver {
                 db_latest_sesno: 0,
                 file_latest_sesno,
                 cold_start: true,
-            }));
+            });
         }
 
-        if (file_latest_sesno as u32) <= db_latest_sesno {
-            return Ok(None);
-        }
-
-        let mut io = PdmsIO::new(project, path, true);
-        io.open()?;
         let nearest = io
             .get_nearest_large_sesno(db_latest_sesno as i32 + 1)
             .unwrap_or(db_latest_sesno as i32 + 1);
 
         if nearest > file_latest_sesno {
-            return Ok(None);
+            return None;
         }
 
-        Ok(Some(SesnoUpdatePlan {
+        Some(SesnoUpdatePlan {
             path: path.to_path_buf(),
             basic_info,
             db_type: db_type.to_string(),
@@ -165,6 +192,6 @@ impl SesnoRangeResolver {
             db_latest_sesno,
             file_latest_sesno,
             cold_start: false,
-        }))
+        })
     }
 }

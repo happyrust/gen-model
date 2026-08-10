@@ -571,8 +571,17 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
     //
     // 常规任务按会话号比——同库内 sesno 单调，「来了更新的会话」就是重试的正当理由。
     // 不能这么比的那两类见 [`revives_unconditionally`]。
+    // status 与 attempts / last_error 走同一个复活判据：没复活就保持原状态
+    // （新行缺省 'pending'）。此前 status 无条件写 'pending'，死信行（attempts
+    // 已到上限）被一次旧会话的 upsert 摸过之后，面板上是 pending、drain 却永远
+    // 不取——状态在撒谎。drain 的候选集本来就按 attempts 挡，这里只修观感与
+    // 一致性，不改消费语义。
     let revival_clauses = if revives_unconditionally(item) {
-        vec!["attempts = 0".to_string(), "last_error = NONE".to_string()]
+        vec![
+            "attempts = 0".to_string(),
+            "last_error = NONE".to_string(),
+            "status = 'pending'".to_string(),
+        ]
     } else {
         vec![
             format!(
@@ -580,6 +589,10 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
             ),
             format!(
                 "last_error = IF {end_sesno} > (source_end_sesno?:0) THEN NONE ELSE last_error END"
+            ),
+            format!(
+                "status = IF {end_sesno} > (source_end_sesno?:0) THEN 'pending' \
+                 ELSE status?:'pending' END"
             ),
         ]
     };
@@ -619,7 +632,6 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
         "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
     ));
     clauses.push("revision = (revision?:0) + 1".to_string());
-    clauses.push("status = 'pending'".to_string());
     clauses.push("updated_at = time::now()".to_string());
 
     format!("UPSERT {id} SET {};", clauses.join(", "))
@@ -736,20 +748,57 @@ pub(crate) fn render_watermark_advance(
     )
 }
 
-/// ADR-017 T1.3：窗口收口尾事务的语句序列（**不含**事务包装）。
+/// 窗口语句批的分块大小。与主数据落库的 `TX_CHUNK` 同一纪律（`increment_pipeline::
+/// persist_latest_main_data`）：整窗口单事务撑爆 SurrealDB ws 通道是已记录事故。
+pub(crate) const FINALIZE_WINDOW_TX_CHUNK: usize = 500;
+
+/// 一次收口的两段渲染产物（2026-08-10 审核 P1）。
 ///
-/// 暂存路径由 `StagedExecutor::commit` 把它包装成写回的最后一个事务；直写路径
-/// 由 [`render_finalize_transaction`] 原样包装——两条路径共用同一份渲染，收口
-/// 内容不可能漂移。顺序：窗口语句（datacenter 交付状态，本就是 commit-time
-/// 语义）→ durable 模型工作 → 水位推进 → 恢复记录删除。
-/// 收口条件（水位单调、revision 判真）全部在持久层事务内判定。
+/// `window_batches`：本窗口的 datacenter 交付状态与 anc 定点重算语句，按
+/// [`FINALIZE_WINDOW_TX_CHUNK`] 分块、每块各自包装成独立事务，**先于尾事务**按
+/// 原序执行。它们曾整段塞进尾事务：正确性要求其实只有「不得在水位推进之后丢失」，
+/// 而语句数 ∝ 窗口内的操作数——宽 DESI 窗口会把尾事务推到当年撑爆 ws 通道的量级，
+/// 且尾事务确定性失败 = 写回无限重试 + 重启重放同一窗口再失败的跨重启活锁。
+/// 拆块之后不变量依然成立：任何一块失败都发生在水位推进**之前**——水位不动、
+/// 恢复记录还在，整窗口按同一区间重放，幂等的固定目标 UPDATE 重复应用只是空转。
+///
+/// `tail`：收口尾事务体（未包装）——durable 模型工作、空间意图、revision 收口、
+/// 水位推进、attempts 清除、恢复记录删除。行数有界（∝ 工作项数），保持单个原子
+/// 事务：这一段才是「要么全部成立、要么整体重放」的收口本体。
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeRender {
+    /// 已各自包装成 `BEGIN…COMMIT` 的窗口语句批，按原序执行。
+    pub window_batches: Vec<String>,
+    /// 尾事务体（未包装），由执行方套上唯一的事务包装。
+    pub tail: String,
+}
+
+fn render_window_statement_batches(window_statements: &[String]) -> Vec<String> {
+    window_statements
+        .chunks(FINALIZE_WINDOW_TX_CHUNK)
+        .map(|chunk| {
+            format!(
+                "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+                chunk.join("\n")
+            )
+        })
+        .collect()
+}
+
+/// ADR-017 T1.3：窗口收口的渲染（窗口语句批 + 尾事务体）。
+///
+/// 暂存路径由 `StagedExecutor::commit_to` 在 journal 重放之后、尾事务之前逐批
+/// 执行 `window_batches`；直写路径由 [`finalize_attempt_on`] 同序执行——两条
+/// 路径共用同一份渲染，收口内容不可能漂移。顺序：窗口语句批（datacenter 交付
+/// 状态 + anc 重算，commit-time 语义）→ 尾事务（durable 模型工作 → 水位推进 →
+/// 恢复记录删除）。收口条件（水位单调、revision 判真）全部在持久层事务内判定。
 pub(crate) fn render_finalize_tail(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
-) -> String {
+) -> FinalizeRender {
     render_finalize_tail_with_effects(
         dbnum,
         end_sesno,
@@ -800,13 +849,12 @@ pub(crate) fn render_finalize_tail_with_effects(
     refresh_refnos: &[String],
     remove_refnos: &[String],
     settled_regen: &[(String, u64)],
-) -> anyhow::Result<String> {
-    let mut statements = window_statements.to_vec();
-    statements.extend(
-        plan.work_items
-            .iter()
-            .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time))),
-    );
+) -> anyhow::Result<FinalizeRender> {
+    let mut statements: Vec<String> = plan
+        .work_items
+        .iter()
+        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
+        .collect();
     if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
         statements.push(
             crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
@@ -827,24 +875,10 @@ pub(crate) fn render_finalize_tail_with_effects(
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
-    Ok(statements.join("\n"))
-}
-
-/// Render the single transaction that closes a window: first the caller's
-/// `window_statements` (side effects that must share this watermark's fate),
-/// then the durable model work, the watermark advance and the recovery-record
-/// removal.
-fn render_finalize_transaction(
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
-    window_statements: &[String],
-) -> String {
-    format!(
-        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements)
-    )
+    Ok(FinalizeRender {
+        window_batches: render_window_statement_batches(window_statements),
+        tail: statements.join("\n"),
+    })
 }
 
 /// Render the transaction that closes a freshly parsed baseline.
@@ -871,14 +905,18 @@ fn render_baseline_transaction(
     )
 }
 
-/// Atomically establish durable model work, advance the authoritative
-/// watermark, and remove the recovery record.
+/// Establish durable model work, advance the authoritative watermark, and
+/// remove the recovery record — the last three atomically.
 ///
-/// `window_statements` carries writes that must not outlive a rolled-back
-/// window nor be lost under an advancing watermark — currently this window's
-/// `datacenter_version` status updates. Committing those separately would let a
-/// delivery-status write fail while the watermark still moved past it, and no
-/// later window would ever repair the miss.
+/// `window_statements` carries writes that must never be lost under an
+/// advancing watermark — this window's `datacenter_version` status updates and
+/// the OWNER-move `anc` repairs. They execute as ordered [`FinalizeRender::
+/// window_batches`] **before** the tail transaction: any batch failure returns
+/// before the watermark moves, so the whole fixed range replays and the
+/// idempotent fixed-target UPDATEs converge. Executing them after (or without
+/// gating) the watermark was the historical bug this ordering exists to
+/// prevent — a lost status write was unrepairable because no later window
+/// revisits an element that did not change again.
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
@@ -886,22 +924,52 @@ pub async fn finalize_attempt(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> anyhow::Result<()> {
-    SUL_DB
-        .query(render_finalize_transaction(
-            dbnum,
-            end_sesno,
-            end_sesno_time,
-            plan,
-            window_statements,
-        ))
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}")
-        })?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
-        })?;
+    finalize_attempt_on(
+        &SUL_DB,
+        dbnum,
+        end_sesno,
+        end_sesno_time,
+        plan,
+        window_statements,
+    )
+    .await
+}
+
+pub(crate) async fn finalize_attempt_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+    plan: &ModelUpdatePlan,
+    window_statements: &[String],
+) -> anyhow::Result<()> {
+    let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
+    for (index, batch) in render.window_batches.iter().enumerate() {
+        db.query(batch)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "finalize increment attempt dbnum={dbnum} window batch {index} failed: {error}"
+                )
+            })?
+            .check()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "finalize increment attempt dbnum={dbnum} window batch {index} \
+                     statement failed: {error}"
+                )
+            })?;
+    }
+    db.query(format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render.tail
+    ))
+    .await
+    .map_err(|error| anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}"))?
+    .check()
+    .map_err(|error| {
+        anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
+    })?;
     Ok(())
 }
 
@@ -2090,8 +2158,6 @@ async fn drain_rooms_selected(
     db_option: &aios_core::options::DbOption,
     scope: Option<&RoomDrainScope>,
 ) -> anyhow::Result<DrainReport> {
-    let requested = scope.map_or(0, RoomDrainScope::len);
-
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
     let panels = match scope {
@@ -2910,6 +2976,9 @@ mod tests {
         let last_error_at = sql
             .find("last_error = IF")
             .unwrap_or_else(|| panic!("last_error revival clause missing: {sql}"));
+        let status_at = sql
+            .find("status = IF")
+            .unwrap_or_else(|| panic!("status revival clause missing: {sql}"));
         let sesno_write_at = sql
             .find("source_end_sesno = math::max")
             .unwrap_or_else(|| panic!("source_end_sesno write missing: {sql}"));
@@ -2920,6 +2989,98 @@ mod tests {
         assert!(
             last_error_at < sesno_write_at,
             "last_error reset must be evaluated before source_end_sesno is overwritten: {sql}"
+        );
+        assert!(
+            status_at < sesno_write_at,
+            "status revival must be evaluated before source_end_sesno is overwritten: {sql}"
+        );
+    }
+
+    /// 2026-08-10 审核 P2-1：status 与 attempts / last_error 同一个复活判据。
+    ///
+    /// 此前 status 无条件写 'pending'：一条死信（attempts 已到上限）被旧会话的
+    /// upsert 摸过之后，面板上显示 pending、drain 却永远不取——状态在撒谎。
+    /// 现在：旧会话保持原状态，新会话才连同 attempts 一起复活。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_trigger_keeps_a_dead_letters_status_and_a_newer_one_revives_it() {
+        use surrealdb::engine::any::connect;
+
+        let item = |sesno: i32| ModelWorkItem {
+            dbnum: 8191,
+            db_type: "DESI".into(),
+            source_end_sesno: sesno,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "16777216/5".into(),
+            noun: "BRAN".into(),
+        };
+        // 字符串层面：非无条件复活的任务，status 必须是条件子句。
+        let sql = render_upsert_no_time(&item(42));
+        assert!(
+            sql.contains(
+                "status = IF 42 > (source_end_sesno?:0) THEN 'pending' ELSE status?:'pending' END"
+            ),
+            "{sql}"
+        );
+
+        // 持久层层面：入队 → 打成死信 → 旧会话摸一把 → 状态不变；新会话 → 复活。
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("upsert_status")
+            .use_db("main")
+            .await
+            .expect("use db");
+        #[derive(serde::Deserialize)]
+        struct Row {
+            status: String,
+            attempts: u32,
+        }
+        let read = |db: surrealdb::Surreal<surrealdb::engine::any::Any>| async move {
+            let mut response = db
+                .query(format!(
+                    "SELECT status, attempts FROM {TABLE} WHERE target_refno = '16777216/5';"
+                ))
+                .await
+                .expect("read transport")
+                .check()
+                .expect("read");
+            let rows: Vec<Row> = response.take(0).expect("decode");
+            let row = rows.into_iter().next().expect("row exists");
+            (row.status, row.attempts)
+        };
+
+        db.query(render_upsert_no_time(&item(42)))
+            .await
+            .expect("enqueue transport")
+            .check()
+            .expect("enqueue");
+        db.query(format!(
+            "UPDATE {TABLE} SET status = 'failed', attempts = {MAX_ATTEMPTS} \
+             WHERE target_refno = '16777216/5';"
+        ))
+        .await
+        .expect("dead-letter transport")
+        .check()
+        .expect("dead-letter");
+
+        db.query(render_upsert_no_time(&item(41)))
+            .await
+            .expect("stale transport")
+            .check()
+            .expect("stale upsert");
+        assert_eq!(
+            read(db.clone()).await,
+            ("failed".to_string(), MAX_ATTEMPTS),
+            "旧会话不构成复活理由，状态与 attempts 都不许动"
+        );
+
+        db.query(render_upsert_no_time(&item(43)))
+            .await
+            .expect("newer transport")
+            .check()
+            .expect("newer upsert");
+        assert_eq!(
+            read(db.clone()).await,
+            ("pending".to_string(), 0),
+            "新会话把死信整体复活"
         );
     }
 
@@ -3703,8 +3864,13 @@ mod tests {
         assert!(!joins_regen_batch(&unparsable));
     }
 
+    /// 2026-08-10 审核 P1：收口拆成「窗口语句批（分块、先行）+ 原子尾事务」。
+    ///
+    /// 交付状态写不许在水位推进之后丢失——保障方式从「同一个事务」改为「先于
+    /// 尾事务执行、失败即拦住水位」：任何一批失败都发生在水位推进之前，整窗口
+    /// 按同一区间重放、幂等收敛。尾事务保持原子：durable 工作 + 水位 + 清理。
     #[test]
-    fn finalization_is_one_transaction_with_delivery_status_work_watermark_and_cleanup() {
+    fn finalization_batches_window_statements_before_an_atomic_tail() {
         let plan = ModelUpdatePlan {
             work_items: vec![ModelWorkItem {
                 dbnum: 8191,
@@ -3718,28 +3884,143 @@ mod tests {
         };
 
         let delivery_status = "update datacenter_version:16777216_5 set status = 'Modify';";
-        let sql = render_finalize_transaction(
+        let render = render_finalize_tail(
             8191,
             42,
             Some("2026-08-05T18:24:00+08:00"),
             &plan,
             &[delivery_status.to_string()],
         );
-        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
-        assert!(sql.contains("UPSERT model_update_pending:regen_root_16777216_5"));
-        assert!(sql.contains("applied_sesno = math::max([applied_sesno?:0, 42])"));
-        assert!(sql.contains("DELETE increment_update_attempt:8191"));
-        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
 
-        // A delivery-status write must share the watermark's fate, so it belongs
-        // inside this transaction and ahead of the advance that publishes it.
-        let status_at = sql
-            .find(delivery_status)
-            .unwrap_or_else(|| panic!("delivery status must ride the finalize transaction: {sql}"));
-        let watermark_at = sql
-            .find("UPSERT dbnum_watermark:8191")
-            .unwrap_or_else(|| panic!("{sql}"));
-        assert!(status_at < watermark_at, "{sql}");
+        // 窗口语句批：自成事务、按序先行。
+        assert_eq!(
+            render.window_batches.len(),
+            1,
+            "{:?}",
+            render.window_batches
+        );
+        let batch = &render.window_batches[0];
+        assert!(batch.starts_with("BEGIN TRANSACTION;\n"), "{batch}");
+        assert!(batch.contains(delivery_status), "{batch}");
+        assert!(batch.ends_with("COMMIT TRANSACTION;"), "{batch}");
+
+        // 尾事务体：durable 工作 + 水位 + 恢复记录清理，且不再夹带窗口语句。
+        let tail = &render.tail;
+        assert!(
+            tail.contains("UPSERT model_update_pending:regen_root_16777216_5"),
+            "{tail}"
+        );
+        assert!(
+            tail.contains("applied_sesno = math::max([applied_sesno?:0, 42])"),
+            "{tail}"
+        );
+        assert!(
+            tail.contains("DELETE increment_update_attempt:8191"),
+            "{tail}"
+        );
+        assert!(
+            !tail.contains(delivery_status),
+            "窗口语句不得再进尾事务（体积 ∝ 操作数，是撑爆 ws 通道的老路）: {tail}"
+        );
+    }
+
+    /// 窗口语句批按 [`FINALIZE_WINDOW_TX_CHUNK`] 分块：块内原序、块间原序，
+    /// 空窗口不产批。
+    #[test]
+    fn window_statement_batches_chunk_and_preserve_order() {
+        let statements = (0..FINALIZE_WINDOW_TX_CHUNK + 1)
+            .map(|index| format!("update datacenter_version:x_{index} set status = 'Modify';"))
+            .collect::<Vec<_>>();
+        let render = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &statements);
+        assert_eq!(render.window_batches.len(), 2, "501 条按 500 分块应是 2 批");
+        assert!(
+            render.window_batches[0].contains("x_0 ")
+                && render.window_batches[0]
+                    .contains(&format!("x_{} ", FINALIZE_WINDOW_TX_CHUNK - 1)),
+            "第一批装满一个块"
+        );
+        assert!(
+            render.window_batches[1].contains(&format!("x_{FINALIZE_WINDOW_TX_CHUNK} ")),
+            "溢出的语句进第二批"
+        );
+
+        let empty = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &[]);
+        assert!(empty.window_batches.is_empty(), "空窗口不产批");
+    }
+
+    /// 拆块安全性的持久层验证：窗口语句批失败 → 尾事务不执行 → 水位不推进、
+    /// 恢复记录保留；成功路径则三样各就各位。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_window_batch_gates_the_watermark_and_keeps_the_attempt() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("finalize_split")
+            .use_db("gate")
+            .await
+            .expect("use db");
+        db.query(format!(
+            "UPSERT {ATTEMPT_TABLE}:8191 SET dbnum = 8191, status = 'prepared';"
+        ))
+        .await
+        .expect("seed attempt transport")
+        .check()
+        .expect("seed attempt");
+
+        let error = finalize_attempt_on(
+            &db,
+            8191,
+            42,
+            None,
+            &ModelUpdatePlan::default(),
+            &["UPDATE datacenter_version:x SET status = math::nonexistent(1);".to_string()],
+        )
+        .await
+        .expect_err("坏窗口语句批必须让收口失败");
+        assert!(format!("{error:#}").contains("window batch 0"), "{error:#}");
+
+        let mut response = db
+            .query(format!(
+                "SELECT VALUE applied_sesno FROM dbnum_watermark:8191;\
+                 SELECT VALUE status FROM {ATTEMPT_TABLE}:8191;"
+            ))
+            .await
+            .expect("read transport")
+            .check()
+            .expect("read");
+        let watermark: Option<i32> = response.take(0).expect("watermark");
+        let attempt: Option<String> = response.take(1).expect("attempt");
+        assert_eq!(watermark, None, "窗口语句批失败后水位不得推进");
+        assert_eq!(
+            attempt.as_deref(),
+            Some("prepared"),
+            "恢复记录必须原样保留，等待整窗口重放"
+        );
+
+        // 成功路径：窗口语句应用、水位推进、恢复记录删除。
+        finalize_attempt_on(
+            &db,
+            8191,
+            42,
+            None,
+            &ModelUpdatePlan::default(),
+            &["UPDATE datacenter_version:x SET status = 'Modify';".to_string()],
+        )
+        .await
+        .expect("healthy finalize");
+        let mut response = db
+            .query(format!(
+                "SELECT VALUE applied_sesno FROM dbnum_watermark:8191;\
+                 SELECT VALUE id FROM {ATTEMPT_TABLE}:8191;"
+            ))
+            .await
+            .expect("read transport")
+            .check()
+            .expect("read");
+        let watermark: Option<i32> = response.take(0).expect("watermark");
+        let attempt_rows: Vec<surrealdb::RecordId> = response.take(1).expect("attempt rows");
+        assert_eq!(watermark, Some(42));
+        assert!(attempt_rows.is_empty(), "收口成功后恢复记录必须删除");
     }
 
     #[test]
@@ -3765,7 +4046,8 @@ mod tests {
             &["16777216/3".to_string()],
             &[("16777216/5".to_string(), 7)],
         )
-        .expect("staged finalize tail");
+        .expect("staged finalize tail")
+        .tail;
 
         let spatial = sql
             .find("spatial_reconcile_8191_42")
@@ -3852,7 +4134,7 @@ mod tests {
     /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
     #[test]
     fn tail_without_spatial_effects_does_not_bump_the_epoch() {
-        let sql = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &[]);
+        let sql = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &[]).tail;
         assert!(
             !sql.contains("spatial_epoch"),
             "无空间意图时不得 bump: {sql}"

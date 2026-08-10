@@ -8,9 +8,9 @@
 # batch file that has already sourced evars.bat.
 
 param(
-    [string]$Exe = 'C:\Program Files (x86)\AVEVA\Everything3D3.1\des.exe',
+    [string]$Exe = 'E:\reverse\e3d\shadow_e3d31_gen_model_test\des.exe',
     [string]$Arguments = 'ams SYSTEM/XXXXXX /ALL',
-    [string]$WorkingDirectory = 'C:\Program Files (x86)\AVEVA\Everything3D3.1',
+    [string]$WorkingDirectory = 'E:\reverse\e3d\shadow_e3d31_gen_model_test',
     [switch]$Wait,
     [ValidateRange(0, 86400)]
     [int]$TimeoutSeconds = 0,
