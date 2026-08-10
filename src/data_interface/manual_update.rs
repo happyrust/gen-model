@@ -2044,14 +2044,56 @@ pub struct DataBatchResult {
     /// Executed sesno window (both 0 for skipped batches).
     pub start_sesno: i32,
     pub end_sesno: i32,
+    /// 窗口两端那两条保存在 E3D 里的写入时刻（RFC3339，ADR-020 第 2 项那把尺子）。
+    ///
+    /// 终态行内明细显示的是这一对时刻而不是 sesno（plant-ui ADR-0019 Q3）；序号仍是
+    /// 执行边界，时刻只是显示代理。读不到 → `None` → 那一格**留空**，不许回落成
+    /// sesno，也不许拿挂钟时刻顶替。阻断 / 首次初始化 / 没解析出窗口的批次两端都是
+    /// `None`——那些批次本来就没有保存窗口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_sesno_time: Option<String>,
+    /// 窗口右端那条保存的写入时刻。水位推进落点报的也是它（T4 从这里取，
+    /// 不再为同一条保存多读一次文件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_sesno_time: Option<String>,
     pub status: BatchStatus,
     /// Error (Failed) or skip reason (Skipped).
     pub message: Option<String>,
     /// Sessions merged into this run AFTER the last preview scan observation
     /// (spec §确认与合并: 结果摘要必须列出相对预览新增合并的会话).
     pub merged_sesnos: Vec<u32>,
+    /// 与 `merged_sesnos` **一一对应**的写入时刻（plant-ui ADR-0019 Q5：并入的那几条
+    /// 逐条列出，列的是时刻不是会话号）。
+    ///
+    /// 平行数组，长度恒等于 `merged_sesnos`，读不到的那条填 `None` 而不是缩短数组——
+    /// 错位比缺席更糟，界面会把 A 的时刻挂在 B 上。两者只能经
+    /// [`fill_batch_session_times`] 一起写，不变量由 [`DataBatchResult::merged_times_aligned`]
+    /// 守着。
+    #[serde(default)]
+    pub merged_sesno_times: Vec<Option<String>>,
     /// Raw changed-element operation count in the window.
     pub changed_elements: usize,
+}
+
+impl DataBatchResult {
+    /// 并入名单与它的平行时刻数组是否自洽（plant-ui ADR-0019 Q5 的两条硬约束）。
+    ///
+    /// ① 两者等长；② 末条并入正好落在窗口右端时，两处说的是同一页会话，时刻必须
+    /// 是同一个值。
+    ///
+    /// ②**只在末条等于右端时才要求**：窗口右端那次保存未必改了元素，没改就不进
+    /// `merged_sesnos`，此时末条比右端早是正常的，不是错位。
+    pub fn merged_times_aligned(&self) -> bool {
+        if self.merged_sesno_times.len() != self.merged_sesnos.len() {
+            return false;
+        }
+        match (self.merged_sesnos.last(), self.merged_sesno_times.last()) {
+            (Some(&last), Some(last_time)) if i64::from(last) == i64::from(self.end_sesno) => {
+                *last_time == self.end_sesno_time
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Outcome of one model delivery-unit generation.
@@ -2143,6 +2185,14 @@ pub struct PendingModelUnit {
     #[serde(default)]
     pub noun: String,
     pub source_end_sesno: i32,
+    /// 来源那条保存在 E3D 里的写入时刻（RFC3339）——待重试卡上的
+    /// `来源保存 08-05 18:24`（plant-ui ADR-0019 Q7）。
+    ///
+    /// 会话号仍是内部口径，时刻只是显示代理。旧行没有这一列、以及**不认领会话号的
+    /// 行**（房间任务、反向级联派生根，`source_end_sesno == 0`）都是 `None`，
+    /// 界面规则是**来源段整个不摆**——不许回落成会话号，也不许拿挂钟时刻顶替。
+    #[serde(default)]
+    pub source_end_sesno_time: Option<String>,
     #[serde(default)]
     pub attempts: u32,
     #[serde(default)]
@@ -2204,8 +2254,9 @@ fn render_pending_units_sql(attempt_cap: Option<u32>, dbnum: Option<u32>) -> Str
         filters.push(format!("dbnum = {dbnum}"));
     }
     format!(
-        "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, attempts, \
-         last_error, revision FROM model_update_pending WHERE {};",
+        "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, \
+         source_end_sesno_time, attempts, last_error, revision \
+         FROM model_update_pending WHERE {};",
         filters.join(" AND ")
     )
 }
@@ -2901,6 +2952,50 @@ pub(crate) fn window_times_rfc3339(
     (start, end)
 }
 
+/// 一个数据批次露给人看的**全部**保存时刻，一次开文件读完（plant-ui ADR-0019 Q3 的
+/// 窗口时间对 + Q5 的并入逐条）。
+///
+/// 号与时刻只能经这一个入口一起写：`merged_sesno_times` 是 `merged_sesnos` 的平行
+/// 数组，分开赋值迟早漏掉一处，界面就会把 A 的时刻挂在 B 上。窗口两端也在这里一并
+/// 覆盖——批次的两端在崩溃重放时会改，改了还留着上一次的时刻同样是错位。
+///
+/// 同一个会话号常常出现两次（末条并入往往就是右端），一次读、一处缓存：分两次读
+/// 会在一次 IO 失败时让同一条保存出现两种说法。读不到就是 `None`（界面留空，绝不
+/// 回落成 sesno）。
+pub(crate) fn fill_batch_session_times(
+    batch: &mut DataBatchResult,
+    project: &str,
+    path: &std::path::Path,
+    merged_sesnos: Vec<u32>,
+) {
+    let mut io = PdmsIO::new(project, path, true);
+    let opened = io.open().is_ok();
+    let mut seen: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
+    let mut read = |sesno: i32| -> Option<String> {
+        if !opened || sesno <= 0 {
+            return None;
+        }
+        if let Some(hit) = seen.get(&sesno) {
+            return hit.clone();
+        }
+        let time = io
+            .get_ses_data(sesno as u32)
+            .ok()
+            .map(|ses| ses.get_dt().to_rfc3339());
+        seen.insert(sesno, time.clone());
+        time
+    };
+
+    batch.start_sesno_time = read(batch.start_sesno);
+    batch.end_sesno_time = read(batch.end_sesno);
+    batch.merged_sesno_times = merged_sesnos.iter().map(|&s| read(s as i32)).collect();
+    batch.merged_sesnos = merged_sesnos;
+    debug_assert!(
+        batch.merged_times_aligned(),
+        "并入名单与它的平行时刻数组必须严格对齐"
+    );
+}
+
 impl AiosDBManager {
     /// Idempotently establish the current-file baseline for one project dbnum.
     ///
@@ -2936,6 +3031,7 @@ impl AiosDBManager {
             project,
             cand.db_num,
             &cand.file_name,
+            &cand.path,
             &cand.db_type,
             cand.file_latest_sesno,
         )
@@ -2944,14 +3040,17 @@ impl AiosDBManager {
 
     /// 给一个从未解析过的 dbnum 补一次全量基线，并把水位与生成工作原子收口。
     ///
-    /// 只吃四个标量而不是 `FileCandidate`：自动 watcher 那侧手里没有候选结构，而两条路径
+    /// 只吃标量而不是 `FileCandidate`：自动 watcher 那侧手里没有候选结构，而两条路径
     /// 对「从未解析过」必须给出同一种处置（见 [`needs_initial_load`]），共用这一个入口
-    /// 才不会各自长出一套。
+    /// 才不会各自长出一套。`file_path` 单独传是为了读那一页会话页——基线也要把
+    /// 「已应用保存的写入时刻」存进水位表（plant-ui ADR-0019 Q6），否则一个刚建基线
+    /// 就被换回旧文件的库，阻断卡上永远只有「应用时刻无记录」。
     pub(crate) async fn initialize_dbnum_baseline(
         &self,
         project: &str,
         dbnum: u32,
         file_name: &str,
+        file_path: &std::path::Path,
         db_type: &str,
         file_latest_sesno: i32,
     ) -> anyhow::Result<usize> {
@@ -3016,11 +3115,14 @@ impl AiosDBManager {
                 info_count
             );
         }
+        // 与增量收口同一把尺子：水位落在 `file_latest_sesno` 上，就存那一条保存的写入时刻。
+        let applied_sesno_time = session_time_rfc3339(project, file_path, file_latest_sesno);
         if baseline_parse_confirmed_empty(parsed_count, count, root_count) {
             // 空库（无 PE 或仅 WORL 根）：全量解析成功但确实没有业务元素。
             crate::data_interface::model_update_pending::finalize_baseline(
                 dbnum,
                 file_latest_sesno,
+                applied_sesno_time.as_deref(),
                 &ModelUpdatePlan::default(),
             )
             .await?;
@@ -3049,6 +3151,7 @@ impl AiosDBManager {
         crate::data_interface::model_update_pending::finalize_baseline(
             dbnum,
             file_latest_sesno,
+            applied_sesno_time.as_deref(),
             &plan,
         )
         .await?;
@@ -3852,9 +3955,12 @@ impl AiosDBManager {
                     file_path: cand.path.display().to_string(),
                     start_sesno: 0,
                     end_sesno: 0,
+                    start_sesno_time: None,
+                    end_sesno_time: None,
                     status: BatchStatus::Skipped,
                     message: Some(message),
                     merged_sesnos: Vec::new(),
+                    merged_sesno_times: Vec::new(),
                     changed_elements: 0,
                 }),
                 Vec::new(),
@@ -3880,9 +3986,12 @@ impl AiosDBManager {
                         file_path: cand.path.display().to_string(),
                         start_sesno: 0,
                         end_sesno: 0,
+                        start_sesno_time: None,
+                        end_sesno_time: None,
                         status: BatchStatus::Failed,
                         message: Some(format!("读取 DBNUM 状态失败，本批次未执行: {error:#}")),
                         merged_sesnos: Vec::new(),
+                        merged_sesno_times: Vec::new(),
                         changed_elements: 0,
                     }),
                     Vec::new(),
@@ -3905,6 +4014,7 @@ impl AiosDBManager {
                     project,
                     dbnum,
                     &cand.file_name,
+                    &cand.path,
                     &cand.db_type,
                     cand.file_latest_sesno,
                 )
@@ -3917,11 +4027,16 @@ impl AiosDBManager {
                         file_path: cand.path.display().to_string(),
                         start_sesno: 0,
                         end_sesno: cand.file_latest_sesno,
+                        // 首次初始化没有保存窗口（左端为 0），两端都不摆：只有右端
+                        // 的一格时刻更像半个窗口，比留空更容易被误读。
+                        start_sesno_time: None,
+                        end_sesno_time: None,
                         status: BatchStatus::Applied,
                         message: Some(format!(
                             "首次按需初始化完成：解析 {count} 个元素、建立增量水位并排入全量生成"
                         )),
                         merged_sesnos: Vec::new(),
+                        merged_sesno_times: Vec::new(),
                         changed_elements: count,
                     }),
                     Vec::new(),
@@ -3933,9 +4048,12 @@ impl AiosDBManager {
                         file_path: cand.path.display().to_string(),
                         start_sesno: 0,
                         end_sesno: cand.file_latest_sesno,
+                        start_sesno_time: None,
+                        end_sesno_time: None,
                         status: BatchStatus::Failed,
                         message: Some(format!("首次按需初始化失败: {error:#}")),
                         merged_sesnos: Vec::new(),
+                        merged_sesno_times: Vec::new(),
                         changed_elements: 0,
                     }),
                     Vec::new(),
@@ -3967,9 +4085,12 @@ impl AiosDBManager {
                         file_path: cand.path.display().to_string(),
                         start_sesno: 0,
                         end_sesno: 0,
+                        start_sesno_time: None,
+                        end_sesno_time: None,
                         status: BatchStatus::Failed,
                         message: Some(format!("解析增量范围失败: {e}")),
                         merged_sesnos: Vec::new(),
+                        merged_sesno_times: Vec::new(),
                         changed_elements: 0,
                     }),
                     Vec::new(),
@@ -3990,15 +4111,24 @@ impl AiosDBManager {
 
         // Collect the window ONCE and hand it to the pipeline so the file is not
         // parsed twice; snapshot the OLD ownership graph BEFORE anything persists.
+        //
+        // 两端时刻在这里就读，是为了让**收集失败**那条早退路径上的终态行也有窗口
+        // 时间对可显示——那一行报的窗口是真的，只是没跑成。并入名单要等收集完才
+        // 知道，那一步会把这两格连同并入时刻一起重算（`fill_batch_session_times`）。
+        let (start_sesno_time, end_sesno_time) =
+            window_times_rfc3339(project, &cand.path, start_sesno, end_sesno);
         let mut batch = DataBatchResult {
             dbnum,
             db_type: cand.db_type.clone(),
             file_path: cand.path.display().to_string(),
             start_sesno,
             end_sesno,
+            start_sesno_time,
+            end_sesno_time,
             status: BatchStatus::Failed,
             message: None,
             merged_sesnos: Vec::new(),
+            merged_sesno_times: Vec::new(),
             changed_elements: 0,
         };
 
@@ -4022,9 +4152,14 @@ impl AiosDBManager {
             }
         };
 
-        batch.merged_sesnos = sessions_merged_after(
-            &collected.keys().copied().collect::<Vec<_>>(),
-            previous_observed,
+        fill_batch_session_times(
+            &mut batch,
+            project,
+            &cand.path,
+            sessions_merged_after(
+                &collected.keys().copied().collect::<Vec<_>>(),
+                previous_observed,
+            ),
         );
         batch.changed_elements = collected.values().map(|v| v.len()).sum();
 
@@ -4068,12 +4203,21 @@ impl AiosDBManager {
             // a newer right edge. Report the range that actually succeeded;
             // the next queue pass will pick up the remaining sessions.
             if let Some(success) = incr.successes.first() {
-                batch.start_sesno = success.start_sesno;
-                batch.end_sesno = success.end_sesno;
-                batch.merged_sesnos = sessions_merged_after(
+                let merged = sessions_merged_after(
                     &success.range_eles.keys().copied().collect::<Vec<_>>(),
                     previous_observed,
                 );
+                // 报的窗口一旦不是收集时那个，时刻必须跟着重读：重放把窗口挪回
+                // 更早的一段，留着原来那对时刻等于把另一段保存的时刻贴在这一行上。
+                // 没挪动就不再开一次文件——号和名单都没变，时刻自然也没变。
+                if success.start_sesno != batch.start_sesno
+                    || success.end_sesno != batch.end_sesno
+                    || merged != batch.merged_sesnos
+                {
+                    batch.start_sesno = success.start_sesno;
+                    batch.end_sesno = success.end_sesno;
+                    fill_batch_session_times(&mut batch, project, &cand.path, merged);
+                }
                 batch.changed_elements = success.range_eles.values().map(Vec::len).sum();
             }
             // MySQL 可选同步（feature = "sql"）：从退役的 `execute_incr_update` 搬来。
@@ -6075,9 +6219,12 @@ mod tests {
             file_path: String::new(),
             start_sesno: 1,
             end_sesno: 2,
+            start_sesno_time: None,
+            end_sesno_time: None,
             status,
             message: None,
             merged_sesnos: Vec::new(),
+            merged_sesno_times: Vec::new(),
             changed_elements: 0,
         }
     }
@@ -6114,6 +6261,7 @@ mod tests {
             root_refno: r(root).to_pdms_str(),
             noun: "BRAN".into(),
             source_end_sesno: end_sesno,
+            source_end_sesno_time: None,
             attempts,
             last_error: Some("boom".into()),
             dead: is_dead_letter(attempts),
@@ -6366,6 +6514,66 @@ mod tests {
         assert_eq!(sessions_merged_after(&[4, 5], 0), vec![4, 5]);
         // 无新增。
         assert!(sessions_merged_after(&[4, 5], 7).is_empty());
+    }
+
+    /// 并入名单与它的平行时刻数组的两条硬约束（plant-ui ADR-0019 Q5）。
+    #[test]
+    fn merged_times_must_stay_parallel_to_the_merged_sesnos() {
+        let mut result = batch(8000, BatchStatus::Applied);
+        result.end_sesno = 1031;
+        result.end_sesno_time = Some("2026-08-07T14:10:00+08:00".into());
+        result.merged_sesnos = vec![1029, 1030, 1031];
+
+        // 长度对不上：界面会把 1029 的时刻挂到 1030 上，比整格空着还糟。
+        result.merged_sesno_times = vec![Some("2026-08-07T09:26:00+08:00".into())];
+        assert!(!result.merged_times_aligned(), "长度不等必须判为错位");
+
+        // 读不到的那条填 None 占位，长度仍然相等 → 合法。
+        result.merged_sesno_times = vec![
+            Some("2026-08-07T09:26:00+08:00".into()),
+            None,
+            Some("2026-08-07T14:10:00+08:00".into()),
+        ];
+        assert!(result.merged_times_aligned());
+
+        // 末条并入正好是窗口右端：两处说的是同一页会话，时刻不许有两种说法。
+        result.merged_sesno_times[2] = Some("2026-08-07T15:42:00+08:00".into());
+        assert!(
+            !result.merged_times_aligned(),
+            "末条并入就是右端时，两处时刻必须一致"
+        );
+
+        // 右端那次保存没改元素就不进并入名单，此时末条比右端早是正常的。
+        result.merged_sesnos = vec![1029, 1030];
+        result.merged_sesno_times = vec![Some("2026-08-07T09:26:00+08:00".into()), None];
+        assert!(
+            result.merged_times_aligned(),
+            "末条不是右端时不该要求两者相等"
+        );
+    }
+
+    /// 文件打不开时的降级：时刻全空，但平行数组的长度一格不少。
+    #[test]
+    fn unreadable_file_leaves_empty_times_without_breaking_the_parallel_array() {
+        let mut result = batch(8000, BatchStatus::Applied);
+        result.start_sesno = 1024;
+        result.end_sesno = 1031;
+        result.start_sesno_time = Some("陈旧".into());
+        result.end_sesno_time = Some("陈旧".into());
+
+        let missing = std::env::temp_dir().join("plant-3-no-such-e3d-file.dbf");
+        fill_batch_session_times(&mut result, "TEST", &missing, vec![1029, 1030, 1031]);
+
+        assert_eq!(result.merged_sesnos, vec![1029, 1030, 1031]);
+        assert_eq!(
+            result.merged_sesno_times,
+            vec![None, None, None],
+            "读不到就是三个 None 占位，不许把数组缩短"
+        );
+        // 上一轮留下的时刻必须被覆盖掉：号和时刻只能一起说话。
+        assert!(result.start_sesno_time.is_none());
+        assert!(result.end_sesno_time.is_none());
+        assert!(result.merged_times_aligned());
     }
 
     // `pending_record_id_is_stable_per_dbnum_and_root` 随 `manual_model_pending`

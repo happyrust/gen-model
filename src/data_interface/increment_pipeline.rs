@@ -906,6 +906,11 @@ impl IncrementPipeline {
         // establishes durable model work, advances the watermark and removes the
         // short-lived recovery record. If it fails, the attempt remains and the
         // whole fixed range is safe to replay.
+        // 水位推进要顺手存下右端那条保存的写入时刻（plant-ui ADR-0019 Q6）：文件被换回
+        // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
+        let end_sesno_time =
+            crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
+
         if staged.is_some() {
             let mut finalize_plan = model_plan.clone();
             finalize_plan.work_items.retain(|item| {
@@ -918,6 +923,7 @@ impl IncrementPipeline {
                         dbnum,
                         start_sesno,
                         end_sesno,
+                        end_sesno_time,
                         plan: finalize_plan,
                         window_statements,
                         cache_refnos: staged_cache_refnos.unwrap_or_default(),
@@ -931,6 +937,7 @@ impl IncrementPipeline {
                 crate::data_interface::model_update_pending::finalize_attempt(
                     dbnum,
                     end_sesno,
+                    end_sesno_time.as_deref(),
                     &model_plan,
                     &window_statements,
                 ),
@@ -3495,6 +3502,7 @@ mod live_tests {
         crate::data_interface::model_update_pending::finalize_attempt(
             8000,
             current_sesno + 2,
+            None,
             &reorder_plan,
             &[],
         )

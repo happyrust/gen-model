@@ -1159,6 +1159,15 @@ fn failed_window_result(
     warnings: &mut Vec<String>,
     message: &str,
 ) -> DataBatchTaskResult {
+    // 这条路径上窗口是确定的（预检 / 建窗 / 预载失败，都发生在执行之前），
+    // 终态行照样该显示保存窗口——读两页会话页，读不到就让那一格空着。
+    let (start_sesno_time, end_sesno_time) =
+        crate::data_interface::manual_update::window_times_rfc3339(
+            &job.project,
+            &job.path,
+            job.start_sesno,
+            job.end_sesno,
+        );
     DataBatchTaskResult {
         project: job.project.clone(),
         status: ManualUpdateStatus::Failed,
@@ -1168,9 +1177,12 @@ fn failed_window_result(
             file_path: job.path.display().to_string(),
             start_sesno: job.start_sesno,
             end_sesno: job.end_sesno,
+            start_sesno_time,
+            end_sesno_time,
             status: BatchStatus::Failed,
             message: Some(message.into()),
             merged_sesnos: Vec::new(),
+            merged_sesno_times: Vec::new(),
             changed_elements: 0,
         }),
         units: Vec::new(),

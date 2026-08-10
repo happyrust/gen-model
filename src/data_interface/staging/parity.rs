@@ -241,7 +241,7 @@ async fn staged_parse_window_with_real_rendering_matches_direct_write() {
         "真实渲染必须产出语句，否则对拍对象是空集"
     );
     // 两条路径不是同一时刻执行；信息性时间戳不属于终态等价判据。
-    let tail = render_finalize_tail(7997, 43, &ModelUpdatePlan::default(), &[])
+    let tail = render_finalize_tail(7997, 43, None, &ModelUpdatePlan::default(), &[])
         .replace("time::now()", "NONE");
 
     // 暂存路径。
@@ -479,6 +479,7 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
                 dbnum: DBNUM,
                 start_sesno: 2,
                 end_sesno: 2,
+                end_sesno_time: None,
                 plan: Default::default(),
                 window_statements: Vec::new(),
                 cache_refnos: Vec::new(),
@@ -756,6 +757,7 @@ async fn staged_transform_with_a_pos_ancestor_writes_back_the_absolute_position(
                 dbnum: DBNUM,
                 start_sesno: 2,
                 end_sesno: 2,
+                end_sesno_time: None,
                 plan: Default::default(),
                 window_statements: Vec::new(),
                 cache_refnos: Vec::new(),

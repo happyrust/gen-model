@@ -1084,6 +1084,7 @@ impl AiosDBManager {
             Some(FileAnomaly::Rollback {
                 file_latest_sesno: f,
                 applied_sesno: a,
+                ..
             }) => println!(
                 "F6 文件回退/替换，阻断 dbnum={db_num}（file_latest={f} < applied={a}），水位不回退"
             ),

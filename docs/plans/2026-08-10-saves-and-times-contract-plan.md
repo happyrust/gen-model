@@ -1,8 +1,15 @@
 # 界面改说「保存」与时刻 · gen-model 侧实施任务单
 
-> **进度（2026-08-10）：T1 / T2 已实现并通过测试**（`cargo check --all-targets` 干净，
-> `cargo test --lib -- data_interface` 436 passed / 0 failed，含两条新加的不变量测试）。
-> T3-T6 未开始，T7-a 等 T6，T7-b 待决策。逐项状态见各节标题。
+> **进度（2026-08-10）：T1–T6 全部实现并通过测试**（`cargo check --all-targets` 干净，
+> `cargo fmt --check` 干净，`cargo test --lib` 576 passed / 0 failed，含八条新加的不变量
+> 测试）。**T7-a 已随 T6 定案**（`block_reason()` 不动，界面改用结构化时刻自己组句）。
+> **实施项到此清零，只剩 T7-b 待决策**（那一项本来就建议另开一次决策，不在本轮）。
+> 逐项状态见各节标题。
+>
+> 六项写下来有一条共同的形状，后来者照抄这一条即可：**时刻永远跟着它那个序号的写入条件走，
+> 端点对不上就不贴，拿不到就整条子句都不写**——`applied_sesno_time`（T4）、
+> `source_end_sesno_time`（T5）、`TaskEntry` 两端（T2）、`DataBatchResult` 的平行数组（T3）
+> 都是同一种写法。
 >
 > 需求出处：plant-ui `docs/adr/0019-ui-speaks-saves-and-times-not-sesno.md`（设计层已人工验收放行）。
 > 那边把界面语言从 sesno 换成**保存的写入时刻**，执行边界（dbnum, 会话号区间）一个字没改。
@@ -35,6 +42,9 @@
 
 「只渲染一处」那句话在这两个函数之间已经不成立了。加时刻字段时**要么两处一起改，要么顺手
 把 `advance_applied` 改成调用 `render_watermark_advance`**（推荐后者，一次把漂移源头掐掉）。
+
+> **已处置（2026-08-10，随 T4）**：走了后者。`advance_applied` 现在只是那一处渲染的调用外壳，
+> 全仓只剩一份水位推进 SQL，那句注释重新成立。
 
 **三、时刻字段不能无条件写，会被回退的批次污染。** 现在的语句是
 `applied_sesno = math::max([applied_sesno?:0, {end_sesno}])`——刻意单调。若时刻写成
@@ -141,7 +151,7 @@ ADR-020 第 2 项已经写明「预览扫描本来就逐页解析待应用窗口
 > 完全等价，但顺带保证了没抬高的那次并入不会把时刻换成更早的值。测试
 > `the_window_time_moves_with_the_end_sesno_and_only_with_it` 钉住这三种情形。
 
-### T3 · `DataBatchResult` 两端时刻 + merged 逐条时刻
+### T3 · `DataBatchResult` 两端时刻 + merged 逐条时刻 ✅ 已实现
 
 | | |
 |---|---|
@@ -162,7 +172,34 @@ ADR-020 第 2 项已经写明「预览扫描本来就逐页解析待应用窗口
 **测试**：断言 `merged_sesno_times.len() == merged_sesnos.len()`（这一条要作为硬断言，
 否则平行数组迟早错位）；断言 `end_sesno_time` 等于 merged 里最后一条的时刻。
 
-### T4 · 水位表补「已应用保存的写入时刻」
+> **落地记录（2026-08-10）**：`DataBatchResult.start_sesno_time` / `end_sesno_time` /
+> `merged_sesno_times`。号与时刻只能经 `fill_batch_session_times(batch, project, path, merged)`
+> **一起写**——它一次开文件、一处缓存，把窗口两端与并入逐条一趟读完。分开赋值迟早漏掉一处，
+> 而且同一条保存（末条并入常常就是右端）分两次读会在一次 IO 失败时出现两种说法。
+> 不变量 `DataBatchResult::merged_times_aligned()` 由该函数末尾的 `debug_assert!` 守着。
+>
+> 计划里没写、实现时冒出来的三件事：
+>
+> 1. **「`end_sesno_time` 等于 merged 末条」这条测试口径要加限定，否则是错的。**
+>    窗口右端那次保存**未必改了元素**——没改就不进 `range_eles`，也就不进 `merged_sesnos`，
+>    此时末条比右端早是正常的。落地的断言因此写成「**末条正好是右端时**两处必须一致」，
+>    测试 `merged_times_must_stay_parallel_to_the_merged_sesnos` 把四种情形（长度不等 /
+>    中间缺一条填 `None` / 末条即右端而时刻打架 / 末条不是右端）都钉住。
+> 2. **崩溃重放会把报的窗口挪回更早的一段**（`incr.successes` 的 `start/end` 覆盖计划窗口，
+>    原本就有的逻辑）。挪了不重读时刻，等于把另一段保存的时刻贴在这一行上，所以那里
+>    加了「窗口或并入名单变了才重读」的条件；没挪动就不再开一次文件。
+> 3. **`merged_sesnos` 要在收集完才知道，但两端时刻在构造 `DataBatchResult` 时就读一次**
+>    （复用 T1 的 `window_times_rfc3339`）——为的是让「读取增量数据失败」那条早退路径上的
+>    终态行也有窗口时间对：那一行报的窗口是真的，只是没跑成。收集成功后
+>    `fill_batch_session_times` 会把这两格连同并入时刻一起重算，最终值必然出自同一趟读。
+>
+> 顺带把 `batch_worker::failed_window_result`（预检 / 建窗 / 预载失败，都发生在执行之前）
+> 也补上了两端时刻——窗口在那里是确定的，终态行没理由空着。
+>
+> 首次按需初始化那条批次**两端仍留空**：它的左端是 0，没有窗口可言，只摆右端一格更像
+> 半个窗口，比留空更容易被误读。
+
+### T4 · 水位表补「已应用保存的写入时刻」 ✅ 已实现
 
 | | |
 |---|---|
@@ -186,7 +223,33 @@ ADR-020 第 2 项已经写明「预览扫描本来就逐页解析待应用窗口
 再推一次，断言**序号与时刻都没动**（这就是「事实三」那个坑，照 `model_update_pending.rs:2696`
 那个子句顺序测试的样子写）；③ 读一行没有该字段的旧记录，断言解析成 `None` 而不是报错。
 
-### T5 · `model_update_pending` 补「来源保存时刻」
+> **落地记录（2026-08-10）**：字段名 `applied_sesno_time`，读侧
+> `DbnumState.applied_sesno_time` / `StateRow.applied_sesno_time`。两份 UPSERT 拷贝**已合并**：
+> `DbnumState::advance_applied` 现在只是 `render_watermark_advance` 的调用外壳，「只渲染一处」
+> 那句注释重新成立。时刻子句排在 `applied_sesno = math::max(…)` **之前**（读的是旧值），
+> 测试 `the_applied_time_rides_the_same_monotonic_condition_as_the_watermark` 把顺序钉死，
+> 落库那一半由 mem:// 上的 `a_batch_below_the_watermark_moves_neither_the_sesno_nor_its_time`
+> 跑完 ①②③ 三条。
+>
+> 计划里没写、实现时冒出来的四件事：
+>
+> 1. **存 RFC3339 字符串，不存 `type::datetime`**（与计划里的 SQL 片段不同）。本表其余时间列
+>    （`applied_at` / `scanned_at` / `file_modified_at`）都是 datetime，但**没有一个读回 Rust**
+>    ——`StateRow` 的注释「只选非 datetime 字段」说的就是这件事。这一列要原样露给界面，走
+>    datetime 读回来会被规范化成 UTC，同一张阻断卡上「文件端」（现读，带 `+08:00`）与
+>    「已应用端」就差八个小时。一把尺子只能有一种写法。
+> 2. **生效水位不是取自这一列时，时刻不许露出来**（`applied_time_of`）。读取顺序里水位可能
+>    来自旧的 `sesno` 字段或 `dbnum_info_table`，那两条路解析出来的是**另一个会话号**，把这
+>    一列贴上去就是拿 A 的时刻标注 B。宁可降级成「应用时刻无记录」。这是 T2 那条
+>    `time_for` 端点守卫在读侧的同一个道理。
+> 3. **时刻在收口点之前就得读出来带走**。暂存路径的水位是在**写回那一刻**推的，那时文件
+>    早已不在手上，所以 `StagedFinalize` 多带一个 `end_sesno_time`，在 `apply_one` 解析窗口
+>    时读一次（一页会话页，每批一次）。直写路径同一处解析、直接传给 `finalize_attempt`。
+> 4. **基线收口也存**。`initialize_dbnum_baseline` 多收一个 `file_path`（两个调用点手上都有
+>    `cand.path`）：不存的话，一个刚建完基线就被换回旧文件的库，阻断卡上永远只有
+>    「应用时刻无记录」——而那一页当时明明读得到。
+
+### T5 · `model_update_pending` 补「来源保存时刻」 ✅ 已实现
 
 | | |
 |---|---|
@@ -205,7 +268,28 @@ ADR-020 第 2 项已经写明「预览扫描本来就逐页解析待应用窗口
 
 **降级**：旧行没有这一列 → `None` → 来源段不画。
 
-### T6 · 回退异常带两端时刻 + 阻断分支现读文件端
+> **落地记录（2026-08-10）**：字段名 `source_end_sesno_time`，读侧
+> `PendingModelUnit.source_end_sesno_time`（API/待重试卡）与 `PendingModelWork`
+> 同名字段（`render_drain_select` 走 `SELECT *`，自动带出来）。
+>
+> **`ModelWorkItem` 没有加字段**，`render_upsert` 多收一个 `Option<&str>`。给计划项加
+> 字段要动它全部构造点（几乎全是 `None`），而时刻本来就属于**这一次收口的窗口**，不属于
+> 工作项自身；收口渲染那里正好有窗口右端与它的时刻。
+>
+> **端点守卫 `source_time_for`**（同 T2 的做法）：一份收口里的任务并非都来自同一条保存
+> ——房间任务与反向级联派生根 `source_end_sesno == 0`，如实不认领来源。号对不上就不贴
+> 时刻。`0 == 0` 那种误伤也堵掉了：不认领的行**永远**拿不到时刻，即便窗口右端恰好是 0。
+>
+> **子句排在覆盖之前**（计划说排在之后也行，但那要靠「`end >= max(old, end)` ⟺ `end >= old`」
+> 这个恒等式，读的人看不出来）：和复活子句、和 T4 的水位时刻**三处同一种写法**，
+> 一眼就知道读的是旧值。`the_source_save_time_is_written_with_its_own_sesno_and_only_for_that_endpoint`
+> 把顺序、单调条件、端点守卫、缺席降级四条一起钉住。
+>
+> 另外两条 `render_upsert` 路径（`enqueue_plan` 入队、`render_room_recalc_upserts` 房间）
+> 手上没有窗口时刻，一律传 `None`：同一行的时刻由收口那一份 upsert 补，同一条单调条件，
+> 不会互相覆盖。
+
+### T6 · 回退异常带两端时刻 + 阻断分支现读文件端 ✅ 已实现
 
 | | |
 |---|---|
@@ -222,11 +306,35 @@ ADR-020 第 2 项已经写明「预览扫描本来就逐页解析待应用窗口
 
 **这一项是整个 Q6 的兑现，也是唯一"能读而没读"的一处**——别把它跟 T4 混成一件事报完成。
 
+> **落地记录（2026-08-10）**：`FileAnomaly::Rollback` 多带 `file_latest_sesno_time` /
+> `applied_sesno_time`（都 `skip_serializing_if`，旧消费者不受影响）。
+>
+> **补齐的地方不是计划写的那个 `if`，是 `DbnumState::classify_scan`。** 计划把落点定在
+> 预览侧那个 `!blocked && …` 分支上，但 `check_file_against_state` 是**纯函数**——手上
+> 既没有文件也没有存量水位，给不出任何一个时刻。真正同时握着这两样的是 `classify_scan`：
+> 它有 `obs.file_path`（现读文件端一页）和 `prior.applied_sesno_time`（T4 存量）。补在
+> 那里的好处是**三条路径一次全覆盖**：预览、手动入队、worker 执行体走的都是它，而只补
+> 预览那个 `if` 的话，另外两条路上的回退仍然两端皆空。纯函数保持纯，两个时刻一律 `None`，
+> 由 `classify_scan` 覆写；`the_pure_verdict_leaves_both_rollback_times_to_the_caller`
+> 钉住这个分工。
+>
+> **IO 只在真判成回退时才付**（`match` 到 Rollback 才读那一页），正常扫描一次也不多读。
+>
+> `DbnumPreview` 自己那两个时间字段**对阻断行仍然留空**，没有去镜像一份：字段映射里
+> 阻断卡读的就是 `anomaly`，同一个值摆两处、两处文档口径还不同，迟早分叉——这正是这轮
+> 改造要消灭的「同一条保存两种说法」。
+>
+> **T7-a 顺带钉死了**：`block_reason()` 一个字没改，并加了断言「有没有时刻都不改变这句话」
+> ——诊断串进日志与规格样例，界面拿结构化时刻自己组句，两个身份就此分开。
+
 ### T7 · 服务端文案：先裁「诊断证据」与「给人看的话」
 
 ADR-0019 那句「服务端文案改词」在代码里落成两件不同的事，工作量与风险都不一样。
 
 **T7-a 回退那句 `block_reason()`（`dbnum_state.rs:183`）——建议不动措辞，但界面的用法必须改。**
+✅ **已定案并落地（2026-08-10，随 T6）**：措辞一个字没动，规格样例不用改；`FileAnomaly::Rollback`
+多带的那两个时刻就是界面自己组句的材料。测试 `the_rollback_reason_matches_the_published_receipt_wording`
+额外断言「有没有时刻都不改变这句话」，把「诊断证据」与「给人看的话」这两个身份分开钉住。
 
 那句话被规格样例逐字钉着：`dbnum_state.rs:176` 的注释 + `docs/specs/web-service-api.md:152`
 那条 `"blocked": [{ "dbnum": 8003, "reason": "文件回退或被替换（file_latest_sesno=812 <

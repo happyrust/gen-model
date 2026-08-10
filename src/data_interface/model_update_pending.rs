@@ -61,6 +61,10 @@ pub struct PendingModelWork {
     pub dbnum: u32,
     pub db_type: String,
     pub source_end_sesno: i32,
+    /// 来源那条保存的写入时刻（RFC3339）。旧行、以及不认领会话号的行
+    /// （房间任务、反向级联派生根）都是 `None`。
+    #[serde(default)]
+    pub source_end_sesno_time: Option<String>,
     pub action: ModelWorkAction,
     pub target_refno: String,
     #[serde(default)]
@@ -331,7 +335,9 @@ pub async fn enqueue_plan(plan: &ModelUpdatePlan) -> anyhow::Result<()> {
             .query(
                 chunk
                     .iter()
-                    .map(render_upsert)
+                    // 这条路只入队工作项，手上没有窗口右端的时刻——来源时刻由收口
+                    // 事务那一份 upsert 补（同一行、同一条单调条件，不会互相覆盖）。
+                    .map(|item| render_upsert(item, None))
                     .collect::<Vec<_>>()
                     .join("\n"),
             )
@@ -429,7 +435,8 @@ fn room_recalc_items(changes: &[AabbChange]) -> Vec<ModelWorkItem> {
 pub(crate) fn render_room_recalc_upserts(changes: &[AabbChange]) -> String {
     room_recalc_items(changes)
         .iter()
-        .map(render_upsert)
+        // 房间任务不认领来源保存（同一块面板被不同库轮流触发），来源段整个不摆。
+        .map(|item| render_upsert(item, None))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -466,7 +473,26 @@ fn revives_unconditionally(item: &ModelWorkItem) -> bool {
     item.action.is_room_recalc() || item.source_end_sesno == 0
 }
 
-fn render_upsert(item: &ModelWorkItem) -> String {
+/// 窗口右端那条保存的时刻只属于**认领了这个右端**的任务（同 T2 的端点守卫）。
+///
+/// 一份收口里的任务并非都来自同一条保存：房间任务与反向级联派生根
+/// （[`revives_unconditionally`] 那两类）`source_end_sesno` 是 0，如实不认领来源；
+/// 号对不上就不贴时刻，宁可让待重试卡的来源段整个不摆，也不能把 A 的时刻标在 B 上。
+fn source_time_for<'a>(
+    item: &ModelWorkItem,
+    window_end_sesno: i32,
+    window_end_time: Option<&'a str>,
+) -> Option<&'a str> {
+    if item.source_end_sesno == 0 || item.source_end_sesno != window_end_sesno {
+        return None;
+    }
+    window_end_time
+}
+
+/// `source_end_sesno_time` 是**那条来源保存的写入时刻**（RFC3339），待重试卡上的
+/// `来源保存 08-05 18:24`（plant-ui ADR-0019 Q7）。与水位那一列同一把尺子、同一种
+/// 写法：跟着 `source_end_sesno` 的单调条件走，读不到就整条子句都不写。
+fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> String {
     let id = record_id(item);
     let db_type = escape_surql_str(&item.db_type);
     let target = escape_surql_str(&item.target_refno);
@@ -511,6 +537,16 @@ fn render_upsert(item: &ModelWorkItem) -> String {
         format!("noun = '{noun}'"),
     ];
     clauses.extend(revival_clauses);
+    // 时刻跟着序号那条单调写入走：本次来源没有比行上已知的更新时，时刻不许退回去
+    // （与水位那一列同一个坑）。它读的同样是 `source_end_sesno` 的**旧值**，所以
+    // 和复活子句一样排在覆盖之前。
+    if let Some(time) = source_end_sesno_time {
+        clauses.push(format!(
+            "source_end_sesno_time = IF {end_sesno} >= (source_end_sesno?:0) \
+             THEN '{}' ELSE source_end_sesno_time END",
+            escape_surql_str(time)
+        ));
+    }
     // 复活子句读的是 `source_end_sesno` 的**旧值**，所以必须排在它被覆盖之前。
     clauses.push(format!(
         "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
@@ -590,9 +626,43 @@ pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result
 
 /// The monotonic watermark advance for one `dbnum`. Rendered in one place so
 /// the window and baseline transactions cannot drift apart.
-fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
+///
+/// `end_sesno_time` 是右端那条保存在 E3D 里的**写入时刻**（RFC3339，ADR-020 那把尺子）。
+/// 存它的唯一理由是回退阻断卡（plant-ui ADR-0019 Q6）：文件被换回旧版本之后，
+/// `applied_sesno` 那一页在当前文件里读不到了，它的写入时刻现读不出来——水位推进的
+/// 这一刻是唯一能顺手存下来的时机。
+///
+/// 两条硬规矩：
+///
+/// 1. **时刻跟着序号那条单调条件走。** 序号是 `math::max`，刻意不回退；时刻若无条件
+///    赋值，一个 `end_sesno` 低于存量水位的批次会让序号不动、时刻却退回去，而阻断卡
+///    恰好靠这一对说话。条件子句必须排在 `applied_sesno` 被覆盖**之前**——SurrealDB
+///    的 `SET` 顺序求值，排在后面读到的就是刚写完的新值（同 `render_upsert` 的复活子句）。
+/// 2. **拿不到时刻就整条子句都不写**（不是写 `NONE`），让旧行与读不到时刻的新行走同一
+///    条降级路径：界面说「应用时刻无记录」，**绝不拿挂钟 `applied_at` 兜底**——回退本来
+///    就是时间倒挂场景，两把尺子混用最容易骗人。
+///
+/// 存的是 RFC3339 **字符串**而不是 `type::datetime`，与本表其余时间列（`applied_at` /
+/// `scanned_at` / `file_modified_at`）不同：那些没人读回 Rust，而这一列要原样露给界面。
+/// 走 datetime 读回来会被规范化成 UTC，同一张阻断卡上「文件端」（现读，带 +08:00）与
+/// 「已应用端」就会差八个小时——同一条保存两种说法，正是这轮改造要消灭的东西。
+pub(crate) fn render_watermark_advance(
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+) -> String {
+    let time_clause = end_sesno_time
+        .map(|time| {
+            format!(
+                "applied_sesno_time = IF {end_sesno} >= (applied_sesno ?: 0) \
+                 THEN '{}' ELSE applied_sesno_time END, ",
+                escape_surql_str(time)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum}, \
+         {time_clause}\
          applied_sesno = math::max([applied_sesno?:0, {end_sesno}]), \
          sesno = math::max([sesno?:0, {end_sesno}]), \
          applied_at = time::now(), updated_at = time::now();"
@@ -609,11 +679,21 @@ fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
 pub(crate) fn render_finalize_tail(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
-    render_finalize_tail_with_effects(dbnum, end_sesno, plan, window_statements, &[], &[], &[])
-        .expect("empty finalize effects are valid")
+    render_finalize_tail_with_effects(
+        dbnum,
+        end_sesno,
+        end_sesno_time,
+        plan,
+        window_statements,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("empty finalize effects are valid")
 }
 
 /// Make AABB-derived room work part of the same durable plan that advances the watermark.
@@ -641,6 +721,7 @@ pub(crate) fn merge_room_recalc_changes(
 pub(crate) fn render_finalize_tail_with_effects(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
     refresh_refnos: &[String],
@@ -648,7 +729,11 @@ pub(crate) fn render_finalize_tail_with_effects(
     settled_regen: &[(String, u64)],
 ) -> anyhow::Result<String> {
     let mut statements = window_statements.to_vec();
-    statements.extend(plan.work_items.iter().map(render_upsert));
+    statements.extend(
+        plan.work_items
+            .iter()
+            .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time))),
+    );
     if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
         statements.push(
             crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
@@ -666,7 +751,7 @@ pub(crate) fn render_finalize_tail_with_effects(
     statements.extend(settled_regen.iter().map(|(root, revision)| {
         render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
     }));
-    statements.push(render_watermark_advance(dbnum, end_sesno));
+    statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
     Ok(statements.join("\n"))
@@ -679,12 +764,13 @@ pub(crate) fn render_finalize_tail_with_effects(
 fn render_finalize_transaction(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        render_finalize_tail(dbnum, end_sesno, plan, window_statements)
+        render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements)
     )
 }
 
@@ -694,9 +780,18 @@ fn render_finalize_transaction(
 /// removal: a baseline is not a replayable window, so it never has an
 /// `increment_update_attempt` row, and deleting one here could only discard
 /// another path's crash-recovery state.
-fn render_baseline_transaction(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan) -> String {
-    let mut statements: Vec<String> = plan.work_items.iter().map(render_upsert).collect();
-    statements.push(render_watermark_advance(dbnum, end_sesno));
+fn render_baseline_transaction(
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+    plan: &ModelUpdatePlan,
+) -> String {
+    let mut statements: Vec<String> = plan
+        .work_items
+        .iter()
+        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
+        .collect();
+    statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
         statements.join("\n")
@@ -714,6 +809,7 @@ fn render_baseline_transaction(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePla
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> anyhow::Result<()> {
@@ -721,6 +817,7 @@ pub async fn finalize_attempt(
         .query(render_finalize_transaction(
             dbnum,
             end_sesno,
+            end_sesno_time,
             plan,
             window_statements,
         ))
@@ -746,10 +843,16 @@ pub async fn finalize_attempt(
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
 ) -> anyhow::Result<()> {
     SUL_DB
-        .query(render_baseline_transaction(dbnum, end_sesno, plan))
+        .query(render_baseline_transaction(
+            dbnum,
+            end_sesno,
+            end_sesno_time,
+            plan,
+        ))
         .await
         .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
         .check()
@@ -873,7 +976,8 @@ pub async fn ensure_regen_pending(root_refno: &str, noun: &str) -> anyhow::Resul
         noun: noun.to_string(),
     };
     SUL_DB
-        .query(render_upsert(&item))
+        // 不认领会话号的行本来就没有来源保存可说，来源段整个不摆。
+        .query(render_upsert(&item, None))
         .await
         .map_err(|error| anyhow::anyhow!("persist ensure pending {root_refno} failed: {error}"))?
         .check()
@@ -2258,6 +2362,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    /// 多数用例只关心复活 / 覆盖那几条子句，与来源保存时刻无关。
+    fn render_upsert_no_time(item: &ModelWorkItem) -> String {
+        render_upsert(item, None)
+    }
+
     /// 缺失面板触发的模型补偿以“根 + 必需面板集合”为持久事实：同一缺口重复探测
     /// 不应不断推高 revision；只有发现新的缺失面板才产生一个新收口版本。
     #[tokio::test(flavor = "multi_thread")]
@@ -2326,6 +2435,7 @@ mod tests {
             dbnum: 0,
             db_type: "DESI".into(),
             source_end_sesno: 0,
+            source_end_sesno_time: None,
             action: ModelWorkAction::RegenRoot,
             target_refno: "4000000001/10".into(),
             noun: "CWALL".into(),
@@ -2586,6 +2696,7 @@ mod tests {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
+            source_end_sesno_time: Some("2026-08-05T18:24:00+08:00".into()),
             action: ModelWorkAction::RegenRoot,
             target_refno: "16777216/5".into(),
             noun: "BRAN".into(),
@@ -2605,7 +2716,7 @@ mod tests {
         };
 
         assert!(
-            render_upsert(&item).contains("revision = (revision?:0) + 1"),
+            render_upsert_no_time(&item).contains("revision = (revision?:0) + 1"),
             "every trigger must create a new settlement revision"
         );
         let expected = "WHERE action = 'regen_root' AND target_refno = '16777216/5' \
@@ -2698,7 +2809,7 @@ mod tests {
     /// 顺序钉成断言，防止一次字段排序整理静默毁掉复活语义。
     #[test]
     fn revival_clauses_run_before_the_watermark_field_they_read() {
-        let sql = render_upsert(&ModelWorkItem {
+        let sql = render_upsert_no_time(&ModelWorkItem {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -2722,6 +2833,175 @@ mod tests {
         assert!(
             last_error_at < sesno_write_at,
             "last_error reset must be evaluated before source_end_sesno is overwritten: {sql}"
+        );
+    }
+
+    /// T5（plant-ui ADR-0019 Q7）：来源保存时刻与 `source_end_sesno` 同生共死。
+    ///
+    /// 三条：① 时刻子句读的是旧值，必须排在覆盖之前（与上面的复活子句同一个道理）；
+    /// ② 单调条件与序号那条一致，来源没变新时不许把时刻换成更早的；
+    /// ③ **端点对不上就不贴**——一份收口里的任务并非都来自同一条保存。
+    #[test]
+    fn the_source_save_time_is_written_with_its_own_sesno_and_only_for_that_endpoint() {
+        let claiming = ModelWorkItem {
+            dbnum: 8191,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "16777216/5".into(),
+            noun: "BRAN".into(),
+        };
+
+        let sql = render_upsert(&claiming, Some("2026-08-05T18:24:00+08:00"));
+        let time_at = sql
+            .find("source_end_sesno_time = IF 42 >= (source_end_sesno?:0)")
+            .unwrap_or_else(|| panic!("时刻子句必须带单调条件: {sql}"));
+        let sesno_write_at = sql
+            .find("source_end_sesno = math::max")
+            .unwrap_or_else(|| panic!("source_end_sesno write missing: {sql}"));
+        assert!(
+            time_at < sesno_write_at,
+            "时刻子句读的是旧值，必须排在覆盖之前: {sql}"
+        );
+        assert!(
+            sql.contains("THEN '2026-08-05T18:24:00+08:00' ELSE"),
+            "{sql}"
+        );
+
+        // 读不到时刻 → 整条子句都不写，旧行与新行走同一条降级路径（来源段不摆）。
+        assert!(
+            !render_upsert_no_time(&claiming).contains("source_end_sesno_time"),
+            "没有时刻时不该出现这条子句"
+        );
+
+        // 端点守卫：本次收口的右端是 43，这一行认领的却是 42——不许把 43 的时刻贴上去。
+        assert_eq!(
+            source_time_for(&claiming, 43, Some("2026-08-07T14:10:00+08:00")),
+            None,
+            "号对不上就不贴时刻"
+        );
+        assert_eq!(
+            source_time_for(&claiming, 42, Some("2026-08-05T18:24:00+08:00")),
+            Some("2026-08-05T18:24:00+08:00")
+        );
+
+        // 不认领会话号的行（房间任务 / 派生根）永远拿不到时刻，即便右端恰好是 0。
+        let room = room_item(ModelWorkAction::RoomRecalcPanel, 24381, 0);
+        assert_eq!(room.source_end_sesno, 0, "前提：房间任务不认领会话号");
+        assert_eq!(
+            source_time_for(&room, 0, Some("2026-08-07T14:10:00+08:00")),
+            None,
+            "不认领来源的行不许被 0 == 0 误伤"
+        );
+    }
+
+    /// 同一个坑的第二处（plant-ui ADR-0019 Q6）：水位的时刻列若无条件赋值，一个
+    /// `end_sesno` 低于存量水位的批次会让**序号不动、时刻却退回去**，而回退阻断卡
+    /// 恰好靠这一对说话。时刻必须跟着序号那条单调条件走，且读的是 `applied_sesno`
+    /// 的**旧值**——因此子句要排在它被覆盖之前，与上面那条复活子句同一个道理。
+    #[test]
+    fn the_applied_time_rides_the_same_monotonic_condition_as_the_watermark() {
+        let sql = render_watermark_advance(8000, 1031, Some("2026-08-07T14:10:00+08:00"));
+        let time_at = sql
+            .find("applied_sesno_time = IF 1031 >= (applied_sesno ?: 0)")
+            .unwrap_or_else(|| panic!("时刻子句必须带单调条件: {sql}"));
+        let sesno_write_at = sql
+            .find("applied_sesno = math::max")
+            .unwrap_or_else(|| panic!("watermark write missing: {sql}"));
+        assert!(
+            time_at < sesno_write_at,
+            "时刻子句读的是 applied_sesno 的旧值，必须排在它被覆盖之前: {sql}"
+        );
+        // 存字符串而不是 datetime：读回来不能被规范化成 UTC，否则同一张阻断卡上
+        // 「文件端」（现读，带本地时区）与「已应用端」会差八个小时。
+        assert!(
+            sql.contains("THEN '2026-08-07T14:10:00+08:00' ELSE"),
+            "{sql}"
+        );
+        assert!(!sql.contains("type::datetime"), "{sql}");
+
+        // 读不到时刻 → 整条子句都不写（不是写 NONE）：旧行与拿不到时刻的新行走
+        // 同一条降级路径，界面说「应用时刻无记录」。
+        let without_time = render_watermark_advance(8000, 1031, None);
+        assert!(
+            !without_time.contains("applied_sesno_time"),
+            "{without_time}"
+        );
+        assert!(
+            without_time.contains("applied_sesno = math::max([applied_sesno?:0, 1031])"),
+            "{without_time}"
+        );
+    }
+
+    /// 落库那一半：序号与时刻同生共死，且旧行读出来是缺席而不是报错。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_below_the_watermark_moves_neither_the_sesno_nor_its_time() {
+        use surrealdb::engine::any::connect;
+
+        #[derive(Debug, Deserialize)]
+        struct WatermarkRow {
+            applied_sesno: i32,
+            #[serde(default)]
+            applied_sesno_time: Option<String>,
+        }
+
+        async fn row_of(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        ) -> (i32, Option<String>) {
+            let mut response = db
+                .query("SELECT applied_sesno, applied_sesno_time FROM dbnum_watermark:8000;")
+                .await
+                .expect("read watermark")
+                .check()
+                .expect("read statement");
+            let rows: Vec<WatermarkRow> = response.take(0).expect("decode watermark");
+            let row = rows.into_iter().next().expect("watermark row exists");
+            (row.applied_sesno, row.applied_sesno_time)
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("watermark_applied_time")
+            .await
+            .expect("select fixture db");
+
+        // ① 旧行：本字段引入之前写的那种，读出来必须是缺席而不是解码失败。
+        db.query(render_watermark_advance(8000, 1024, None))
+            .await
+            .expect("legacy advance")
+            .check()
+            .expect("legacy statement");
+        assert_eq!(row_of(&db).await, (1024, None));
+
+        // ② 正常推进：序号与时刻一起落库。
+        db.query(render_watermark_advance(
+            8000,
+            1031,
+            Some("2026-08-07T14:10:00+08:00"),
+        ))
+        .await
+        .expect("advance")
+        .check()
+        .expect("advance statement");
+        assert_eq!(
+            row_of(&db).await,
+            (1031, Some("2026-08-07T14:10:00+08:00".into()))
+        );
+
+        // ③ 一个右端低于存量水位的批次（崩溃重放会真的产生它）：两个都不许动。
+        db.query(render_watermark_advance(
+            8000,
+            1029,
+            Some("2026-08-06T09:15:00+08:00"),
+        ))
+        .await
+        .expect("stale advance")
+        .check()
+        .expect("stale statement");
+        assert_eq!(
+            row_of(&db).await,
+            (1031, Some("2026-08-07T14:10:00+08:00".into())),
+            "序号没退，时刻更不许退——阻断卡靠这一对说话"
         );
     }
 
@@ -2816,8 +3096,8 @@ mod tests {
         backlog.target_refno = "24381/999999".into();
         db.query(format!(
             "{}\n{}",
-            render_upsert(&current),
-            render_upsert(&backlog)
+            render_upsert_no_time(&current),
+            render_upsert_no_time(&backlog)
         ))
         .await
         .expect("seed pending rows")
@@ -2837,7 +3117,7 @@ mod tests {
 
         let mut newer = current.clone();
         newer.source_end_sesno = 91;
-        db.query(render_upsert(&newer))
+        db.query(render_upsert_no_time(&newer))
             .await
             .expect("publish newer revision")
             .check()
@@ -3093,7 +3373,7 @@ mod tests {
     /// 入队条件本身就是「AABB 真的变了」，每一次入队都是全新的重算理由。
     #[test]
     fn a_room_task_revives_on_any_new_trigger_not_on_a_newer_session() {
-        let sql = render_upsert(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
+        let sql = render_upsert_no_time(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
         assert!(sql.contains("attempts = 0"), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
         assert!(
@@ -3130,7 +3410,7 @@ mod tests {
         });
         assert_eq!(derived.source_end_sesno, 0, "前提：派生根不认领会话号");
 
-        let sql = render_upsert(&derived);
+        let sql = render_upsert_no_time(&derived);
         assert!(sql.contains("attempts = 0"), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
         assert!(
@@ -3153,14 +3433,14 @@ mod tests {
             kind: GenerationRootKind::DeliveryUnit,
         });
         assert_eq!(derived.dbnum, 0, "前提：派生根不认领来源库");
-        let sql = render_upsert(&derived);
+        let sql = render_upsert_no_time(&derived);
         assert!(
             sql.contains("dbnum = dbnum?:0"),
             "不认领的入队必须保留行上已存的库号: {sql}"
         );
 
         // 认领了库号的常规入队照写本次来源，行为不变。
-        let claiming = render_upsert(&ModelWorkItem {
+        let claiming = render_upsert_no_time(&ModelWorkItem {
             dbnum: 7997,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -3174,7 +3454,7 @@ mod tests {
     /// 反过来：认领了会话号的常规任务仍按会话号比，旧会话不构成复活理由。
     #[test]
     fn a_task_that_claims_a_session_still_revives_only_on_a_newer_one() {
-        let sql = render_upsert(&ModelWorkItem {
+        let sql = render_upsert_no_time(&ModelWorkItem {
             dbnum: 7997,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -3309,6 +3589,7 @@ mod tests {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
+            source_end_sesno_time: None,
             action: ModelWorkAction::RegenRoot,
             target_refno: "16777216/5".into(),
             noun: "BRAN".into(),
@@ -3350,7 +3631,13 @@ mod tests {
         };
 
         let delivery_status = "update datacenter_version:16777216_5 set status = 'Modify';";
-        let sql = render_finalize_transaction(8191, 42, &plan, &[delivery_status.to_string()]);
+        let sql = render_finalize_transaction(
+            8191,
+            42,
+            Some("2026-08-05T18:24:00+08:00"),
+            &plan,
+            &[delivery_status.to_string()],
+        );
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.contains("UPSERT model_update_pending:regen_root_16777216_5"));
         assert!(sql.contains("applied_sesno = math::max([applied_sesno?:0, 42])"));
@@ -3384,6 +3671,7 @@ mod tests {
         let sql = render_finalize_tail_with_effects(
             8191,
             42,
+            None,
             &plan,
             &[],
             &["16777216/2".to_string()],
@@ -3445,6 +3733,7 @@ mod tests {
                 dbnum: 8191,
                 start_sesno: 2,
                 end_sesno: 42,
+                end_sesno_time: None,
                 plan: ModelUpdatePlan::default(),
                 window_statements: vec![],
                 cache_refnos: vec![],
@@ -3476,7 +3765,7 @@ mod tests {
     /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
     #[test]
     fn tail_without_spatial_effects_does_not_bump_the_epoch() {
-        let sql = render_finalize_tail(8191, 42, &ModelUpdatePlan::default(), &[]);
+        let sql = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &[]);
         assert!(
             !sql.contains("spatial_epoch"),
             "无空间意图时不得 bump: {sql}"
@@ -3532,7 +3821,7 @@ mod tests {
             ..Default::default()
         };
 
-        let sql = render_baseline_transaction(7997, 76, &plan);
+        let sql = render_baseline_transaction(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan);
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
         let work_at = sql
@@ -3618,14 +3907,14 @@ mod tests {
             Some(attempt)
         );
 
-        finalize_attempt(DBNUM, 42, &plan, &[])
+        finalize_attempt(DBNUM, 42, None, &plan, &[])
             .await
             .expect("first finalize");
         assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
 
         // Replay the post-crash finalization: stable work id + max watermark
         // must keep exactly one task and the same applied sesno.
-        finalize_attempt(DBNUM, 42, &plan, &[])
+        finalize_attempt(DBNUM, 42, None, &plan, &[])
             .await
             .expect("idempotent finalize replay");
         let mut response = SUL_DB
@@ -3759,7 +4048,7 @@ mod tests {
             load_attempt(DBNUM).await.expect("load after OS kill"),
             Some(attempt)
         );
-        finalize_attempt(DBNUM, 52, &plan, &[])
+        finalize_attempt(DBNUM, 52, None, &plan, &[])
             .await
             .expect("recover killed attempt");
         assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
@@ -3937,7 +4226,7 @@ mod tests {
             .expect("pre-clean failure fixture")
             .check()
             .expect("pre-clean statements");
-        finalize_attempt(DBNUM, END_SESNO, &plan, &[])
+        finalize_attempt(DBNUM, END_SESNO, None, &plan, &[])
             .await
             .expect("persist work and watermark");
 
@@ -4339,7 +4628,7 @@ mod tests {
             prepare_attempt(&attempt)
                 .await
                 .expect("prepare capacity attempt");
-            finalize_attempt(DBNUM, 42, &plan, &delivery)
+            finalize_attempt(DBNUM, 42, None, &plan, &delivery)
                 .await
                 .expect("finalize 5k delivery + 5k model work");
         }

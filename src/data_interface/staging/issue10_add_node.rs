@@ -205,6 +205,7 @@ async fn staged_window_with(
             dbnum: DBNUM,
             start_sesno,
             end_sesno,
+            end_sesno_time: None,
             plan: Default::default(),
             window_statements: Vec::new(),
             cache_refnos: Vec::new(),

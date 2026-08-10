@@ -330,6 +330,7 @@ impl ActiveStagedWindow {
         crate::data_interface::model_update_pending::render_finalize_tail_with_effects(
             finalize.dbnum,
             finalize.end_sesno,
+            finalize.end_sesno_time.as_deref(),
             &finalize.plan,
             &finalize.window_statements,
             &refresh,
@@ -652,6 +653,7 @@ mod tests {
                     dbnum: 7905,
                     start_sesno: 3,
                     end_sesno: 7,
+                    end_sesno_time: None,
                     plan: Default::default(),
                     window_statements: Vec::new(),
                     cache_refnos: Vec::new(),

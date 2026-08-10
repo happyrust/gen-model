@@ -84,6 +84,14 @@ pub struct DbnumState {
     pub file_latest_sesno: i32,
     /// Effective applied watermark (migrated when necessary); 0 when uninitialized.
     pub applied_sesno: i32,
+    /// `applied_sesno` 那条保存在 E3D 里的写入时刻（RFC3339），水位推进时顺手存下来的。
+    ///
+    /// 回退阻断卡的「已应用」那一端只能从这里取（plant-ui ADR-0019 Q6）：文件被换回
+    /// 旧版本之后，那一页在当前文件里读不到了，现读读不出来。旧行没有这一列、或推进
+    /// 时读不到时刻 → `None` → 界面降级成「应用时刻无记录」，**不许拿挂钟 `applied_at`
+    /// 兜底**。它跟着 `applied_sesno` 同一条单调条件走，两者永远指同一条保存。
+    #[serde(default)]
+    pub applied_sesno_time: Option<String>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
@@ -111,6 +119,10 @@ struct StateRow {
     /// New authoritative field; `None` when not yet established (pre-migration).
     #[serde(default)]
     applied_sesno: Option<i32>,
+    /// 已应用那条保存的写入时刻。存的是 RFC3339 **字符串**（不是 datetime），所以
+    /// 与本结构「只选非 datetime 字段」的前提一致；旧行没有这一列，读出来就是 `None`。
+    #[serde(default)]
+    applied_sesno_time: Option<String>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -120,6 +132,19 @@ struct StateRow {
 struct DatabaseWatermark {
     dbnum: u32,
     sesno: i32,
+}
+
+/// 存下来的那个时刻**只描述 `applied_sesno` 那一条保存**，所以只有生效水位确实
+/// 取自这一列时才许露出来。
+///
+/// 生效水位可能来自旧的 `sesno` 字段或 `dbnum_info_table`（见模块头的读取顺序）——
+/// 那两条路解析出来的是另一个会话号，把这一列贴上去就是拿 A 的时刻标注 B。宁可
+/// 让界面走「应用时刻无记录」的降级，也不能摆一个对不上的时刻。
+fn applied_time_of(row: &StateRow, effective_applied: Option<i32>) -> Option<String> {
+    if effective_applied.is_none() || effective_applied != row.applied_sesno {
+        return None;
+    }
+    row.applied_sesno_time.clone()
 }
 
 /// A file-identity anomaly for one `dbnum` (see spec §文件异常).
@@ -132,9 +157,26 @@ struct DatabaseWatermark {
 pub enum FileAnomaly {
     /// `file_latest_sesno < applied_sesno`: the file rolled back or was replaced.
     /// The `dbnum` must be blocked; the watermark must NOT regress.
+    ///
+    /// 两个序号是**判据**（比大小的那一对，也是日志与规格样例里的诊断证据）；
+    /// 两个时刻是**给人看的那一对**（plant-ui ADR-0019 Q6：`最新保存 07-01 10:00
+    /// 早于已应用 08-05 18:24`）。判据函数 [`check_file_against_state`] 是纯的，
+    /// 手上既没有文件也没有存量时刻，所以它一律填 `None`，由
+    /// [`DbnumState::classify_scan`] 在有上下文的地方补齐。
     Rollback {
         file_latest_sesno: i32,
         applied_sesno: i32,
+        /// 文件里最新那条保存的写入时刻。**现读得到**——文件就在那儿，只是
+        /// 阻断分支过去从不走解析那条路，所以这一格一直空着。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_latest_sesno_time: Option<String>,
+        /// 已应用那条保存的写入时刻，取自水位表存下来的那一列。
+        ///
+        /// **只能从存量取**：回退之后 `applied_sesno` 那一页在当前文件里已经读不到了。
+        /// 没有存量 → `None` → 界面降级成 `早于已应用水位（应用时刻无记录）`，
+        /// 不许拿挂钟 `applied_at` 兜底。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        applied_sesno_time: Option<String>,
     },
     /// Same `dbnum` and `db_type`, path changed, watermark did not regress:
     /// a unique file was moved and the stored path may be auto-updated.
@@ -180,6 +222,7 @@ impl FileAnomaly {
             FileAnomaly::Rollback {
                 file_latest_sesno,
                 applied_sesno,
+                ..
             } => Some(format!(
                 "文件回退或被替换（file_latest_sesno={file_latest_sesno} < \
                  applied_sesno={applied_sesno}），已阻断"
@@ -293,6 +336,9 @@ pub fn check_file_against_state(
         return Some(FileAnomaly::Rollback {
             file_latest_sesno: observed_file_latest_sesno,
             applied_sesno,
+            // 纯函数给不出时刻（既没有文件也没有存量），交给 `classify_scan` 补。
+            file_latest_sesno_time: None,
+            applied_sesno_time: None,
         });
     }
     if let (Some(stored_path), Some(stored_db_type)) = (stored_path, stored_db_type) {
@@ -676,7 +722,7 @@ impl DbnumState {
     pub async fn list_registered() -> anyhow::Result<Vec<DbnumState>> {
         let sql = format!(
             "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, sesno FROM {WATERMARK_TABLE};"
+             applied_sesno, applied_sesno_time, sesno FROM {WATERMARK_TABLE};"
         );
         let mut response = SUL_DB
             .query(sql)
@@ -692,6 +738,7 @@ impl DbnumState {
             .filter_map(|row| {
                 let dbnum = row.dbnum?;
                 let effective = resolve_migrated_applied_sesno(row.applied_sesno, row.sesno, None);
+                let applied_sesno_time = applied_time_of(&row, effective);
                 Some(DbnumState {
                     dbnum,
                     owner_project: row.owner_project.unwrap_or_default(),
@@ -701,6 +748,7 @@ impl DbnumState {
                     file_size: row.file_size.unwrap_or_default(),
                     file_latest_sesno: row.file_latest_sesno.unwrap_or_default(),
                     applied_sesno: effective.unwrap_or_default(),
+                    applied_sesno_time,
                     initialized: effective.is_some(),
                 })
             })
@@ -714,7 +762,7 @@ impl DbnumState {
         // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
         let sql = format!(
             "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, sesno FROM {WATERMARK_TABLE}:{dbnum};\
+             applied_sesno, applied_sesno_time, sesno FROM {WATERMARK_TABLE}:{dbnum};\
              RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} \
              WHERE dbnum = {dbnum} AND sesno != NONE));"
         );
@@ -750,6 +798,7 @@ impl DbnumState {
         };
 
         let applied = resolve_read_applied(Some((row.applied_sesno, row.sesno)), info_max);
+        let applied_sesno_time = applied_time_of(&row, applied);
         Ok(Some(DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
             owner_project: row.owner_project.unwrap_or_default(),
@@ -759,6 +808,7 @@ impl DbnumState {
             file_size: row.file_size.unwrap_or_default(),
             file_latest_sesno: row.file_latest_sesno.unwrap_or_default(),
             applied_sesno: applied.unwrap_or_default(),
+            applied_sesno_time,
             initialized: applied.is_some(),
         }))
     }
@@ -816,6 +866,29 @@ impl DbnumState {
             &obs.file_path,
             obs.file_latest_sesno,
         );
+        // 回退卡要说的是两条保存的时刻（plant-ui ADR-0019 Q6）。判据函数给不出它们，
+        // 这里补：文件端**现读一页**——文件就在那儿，过去空着只是因为阻断分支从不走
+        // 解析那条路；已应用端只能取水位表存量，回退之后那一页在当前文件里已经没了。
+        // 只有真判成回退才付这一页 IO，正常扫描一次也不多读。
+        let anomaly = match anomaly {
+            Some(FileAnomaly::Rollback {
+                file_latest_sesno,
+                applied_sesno,
+                ..
+            }) => Some(FileAnomaly::Rollback {
+                file_latest_sesno,
+                applied_sesno,
+                file_latest_sesno_time: crate::data_interface::manual_update::session_time_rfc3339(
+                    &obs.project,
+                    std::path::Path::new(&obs.file_path),
+                    file_latest_sesno,
+                ),
+                applied_sesno_time: prior
+                    .as_ref()
+                    .and_then(|state| state.applied_sesno_time.clone()),
+            }),
+            other => other,
+        };
         Ok(ScanVerdict { prior, anomaly })
     }
 
@@ -938,12 +1011,20 @@ impl DbnumState {
     ///
     /// Monotonic (`math::max`, never regresses) and only ever called on the success
     /// path. Mirrors the legacy `sesno` field for backward compatibility.
-    pub async fn advance_applied(dbnum: u32, end_sesno: i32) -> anyhow::Result<()> {
-        let sql = format!(
-            "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
-             applied_sesno = math::max([applied_sesno?:0, {end_sesno}]), \
-             sesno = math::max([sesno?:0, {end_sesno}]), \
-             applied_at = time::now(), updated_at = time::now();"
+    ///
+    /// 语句本身**不在这里渲染**：生产路径（窗口收口 / 基线事务）走的是
+    /// `model_update_pending::render_watermark_advance`，那句注释写着「只渲染一处，
+    /// 窗口与基线事务不可能漂移」——这个函数曾经是同一条 SQL 的第二份拷贝，
+    /// 那句话在两者之间早就不成立了。现在它只是那一处的独立调用外壳。
+    pub async fn advance_applied(
+        dbnum: u32,
+        end_sesno: i32,
+        end_sesno_time: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let sql = crate::data_interface::model_update_pending::render_watermark_advance(
+            dbnum,
+            end_sesno,
+            end_sesno_time,
         );
         SUL_DB
             .query(sql)
@@ -1174,6 +1255,8 @@ mod tests {
             FileAnomaly::Rollback {
                 file_latest_sesno: 80,
                 applied_sesno: 120,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
             },
             FileAnomaly::PathMigrated {
                 old_path: "/old".into(),
@@ -1224,6 +1307,8 @@ mod tests {
             Some(FileAnomaly::Rollback {
                 file_latest_sesno: 80,
                 applied_sesno: 120,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
             })
         );
     }
@@ -1325,7 +1410,7 @@ mod tests {
             .expect("valid pre-cleanup");
 
         // 先把水位建立在 50——模拟这个 dbnum 已经成功应用到第 50 个会话。
-        DbnumState::advance_applied(dbnum, 50)
+        DbnumState::advance_applied(dbnum, 50, None)
             .await
             .expect("establish watermark");
 
@@ -1427,7 +1512,7 @@ mod tests {
             .expect("valid pre-cleanup");
 
         // 建立登记身份：DESI，某个路径，水位 50。
-        DbnumState::advance_applied(dbnum, 50)
+        DbnumState::advance_applied(dbnum, 50, None)
             .await
             .expect("establish watermark");
         DbnumState::record_scan(&FileObservation {
@@ -1522,6 +1607,8 @@ mod tests {
             FileAnomaly::Rollback {
                 file_latest_sesno: 80,
                 applied_sesno: 120,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
             },
             FileAnomaly::PathMigrated {
                 old_path: "/old".into(),
@@ -1548,17 +1635,58 @@ mod tests {
     }
 
     /// 回退那句的措辞被 `docs/specs/web-service-api.md` 的回执样例钉着。
+    ///
+    /// 2026-08-10 起这个变体多带两个时刻（plant-ui ADR-0019 Q6），这条测试因此
+    /// 顺带钉住 T7-a 的分工：**`reason` 是诊断串，一个字都不动**——它进日志、进
+    /// 规格样例，sesno 本来就该活在那里；界面改用结构化的那两个时刻自己组句，
+    /// 不再当 `reason` 的传声筒。时刻有没有，都不许改变这句话。
     #[test]
     fn the_rollback_reason_matches_the_published_receipt_wording() {
-        let reason = FileAnomaly::Rollback {
+        let with_times = FileAnomaly::Rollback {
             file_latest_sesno: 812,
             applied_sesno: 1005,
+            file_latest_sesno_time: Some("2026-07-01T10:00:00+08:00".into()),
+            applied_sesno_time: Some("2026-08-05T18:24:00+08:00".into()),
         }
         .block_reason()
         .expect("回退是阻断类异常");
         assert_eq!(
-            reason,
+            with_times,
             "文件回退或被替换（file_latest_sesno=812 < applied_sesno=1005），已阻断"
+        );
+
+        let without_times = FileAnomaly::Rollback {
+            file_latest_sesno: 812,
+            applied_sesno: 1005,
+            file_latest_sesno_time: None,
+            applied_sesno_time: None,
+        }
+        .block_reason()
+        .expect("回退是阻断类异常");
+        assert_eq!(with_times, without_times, "诊断串与时刻无关");
+    }
+
+    /// T6（plant-ui ADR-0019 Q6）：判据函数是纯的，两个时刻一律留空——它手上既
+    /// 没有文件也没有存量水位，猜一个出来比空着糟得多。补齐发生在
+    /// [`DbnumState::classify_scan`]：文件端现读一页，已应用端取水位表存量。
+    #[test]
+    fn the_pure_verdict_leaves_both_rollback_times_to_the_caller() {
+        let anomaly = check_file_against_state(
+            Some("DESI"),
+            Some("/p/desi_1"),
+            1005,
+            "DESI",
+            "/p/desi_1",
+            812,
+        );
+        assert_eq!(
+            anomaly,
+            Some(FileAnomaly::Rollback {
+                file_latest_sesno: 812,
+                applied_sesno: 1005,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
+            })
         );
     }
 
