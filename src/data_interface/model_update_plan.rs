@@ -1474,17 +1474,51 @@ mod tests {
         let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
         let grandchild = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24780));
         let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
-        let owners = HashMap::from([
-            (equi, zone),
-            (child, equi),
-            (grandchild, child),
+        let owners = HashMap::from([(equi, zone), (child, equi), (grandchild, child)]);
+
+        let topmost = topmost_deleted_refnos(&HashSet::from([equi, child, grandchild]), |refno| {
+            owners.get(&refno).copied()
+        });
+
+        assert_eq!(topmost, HashSet::from([equi]));
+    }
+
+    /// dbnum=8000 的可重复夹具口径：sesno 25 先删 EQUI 下的节点，sesno 26 再删
+    /// EQUI。会话合并必须保留两个墓碑，而调度收敛只留下父 EQUI 的一条递归清理。
+    #[test]
+    fn child_delete_then_parent_delete_across_sessions_schedules_only_the_parent() {
+        let equi = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24778));
+        let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
+        let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
+        let range = BTreeMap::from([
+            (
+                25,
+                vec![EleOperationData::new(
+                    child.refno(),
+                    25,
+                    EleOperationDetail::Deleted,
+                )],
+            ),
+            (
+                26,
+                vec![EleOperationData::new(
+                    equi.refno(),
+                    26,
+                    EleOperationDetail::Deleted,
+                )],
+            ),
         ]);
 
-        let topmost = topmost_deleted_refnos(
-            &HashSet::from([equi, child, grandchild]),
-            |refno| owners.get(&refno).copied(),
-        );
+        let merged = crate::data_interface::manual_update::merge_net_change_details(&range);
+        let deleted = merged
+            .iter()
+            .filter(|detail| detail.net == NetOp::Deleted)
+            .map(|detail| detail.refno)
+            .collect::<HashSet<_>>();
+        assert_eq!(deleted, HashSet::from([child, equi]));
 
+        let owners = HashMap::from([(child, equi), (equi, zone)]);
+        let topmost = topmost_deleted_refnos(&deleted, |refno| owners.get(&refno).copied());
         assert_eq!(topmost, HashSet::from([equi]));
     }
 

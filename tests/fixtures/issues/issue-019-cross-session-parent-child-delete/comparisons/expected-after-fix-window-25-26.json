@@ -1,0 +1,33 @@
+{
+  "issue": 19,
+  "window": [
+    25,
+    26
+  ],
+  "status": "expected_after_fix",
+  "operation_count": 4,
+  "operations": [
+    {
+      "sesno": 25,
+      "refno": "24384_24778",
+      "operation": "modified",
+      "noun": "EQUI"
+    },
+    {
+      "sesno": 25,
+      "refno": "24384_24779",
+      "operation": "deleted"
+    },
+    {
+      "sesno": 26,
+      "refno": "24384_24775",
+      "operation": "modified",
+      "noun": "ZONE"
+    },
+    {
+      "sesno": 26,
+      "refno": "24384_24778",
+      "operation": "deleted"
+    }
+  ]
+}

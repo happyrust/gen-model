@@ -1,0 +1,18 @@
+{
+  "sesno": 25,
+  "expected": [
+    {
+      "refno": "24384_24778",
+      "operation": "modified",
+      "noun": "EQUI",
+      "attributes": [
+        "CACHID"
+      ],
+      "children": "member_changed"
+    },
+    {
+      "refno": "24384_24779",
+      "operation": "deleted"
+    }
+  ]
+}

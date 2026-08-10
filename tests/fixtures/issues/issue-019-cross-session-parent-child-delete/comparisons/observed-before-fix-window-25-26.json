@@ -1,0 +1,33 @@
+{
+  "issue": 19,
+  "window": [
+    25,
+    26
+  ],
+  "status": "before_fix",
+  "operation_count": 3,
+  "operations": [
+    {
+      "sesno": 25,
+      "refno": "24384_24778",
+      "operation": "deleted",
+      "incorrect": true
+    },
+    {
+      "sesno": 26,
+      "refno": "24384_24775",
+      "operation": "modified",
+      "noun": "ZONE"
+    },
+    {
+      "sesno": 26,
+      "refno": "24384_24778",
+      "operation": "deleted"
+    }
+  ],
+  "missing": {
+    "sesno": 25,
+    "refno": "24384_24779",
+    "operation": "deleted"
+  }
+}

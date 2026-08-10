@@ -1,0 +1,1282 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 08a9ff32..03c03de9 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -132,12 +132,14 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "serde_with",
++ "sha2",
+  "simplelog",
+  "smol_str 0.3.2",
+  "sqlx",
+  "strum 0.27.2",
+  "strum_macros 0.27.2",
+  "surrealdb",
++ "tempfile",
+  "tokio",
+  "toml",
+  "tower-http",
+@@ -146,6 +148,7 @@ dependencies = [
+  "tracing-subscriber",
+  "urlencoding",
+  "walkdir",
++ "zip",
+ ]
+ 
+ [[package]]
+@@ -5051,7 +5054,7 @@ dependencies = [
+ [[package]]
+ name = "pdms_io"
+ version = "0.1.0"
+-source = "git+https://github.com/happyrust/pdms-io.git?rev=e2c2636c940c9a12aebe2741f7e9851d89b4e85a#e2c2636c940c9a12aebe2741f7e9851d89b4e85a"
++source = "git+https://github.com/happyrust/pdms-io.git?rev=5c9e00e3c46f7d6f7c548583020b66e0ad23368a#5c9e00e3c46f7d6f7c548583020b66e0ad23368a"
+ dependencies = [
+  "aios_core",
+  "anyhow",
+diff --git a/Cargo.toml b/Cargo.toml
+index 7a4b6553..9e11e04d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -45,6 +45,9 @@ rvm-rs = { git = "https://github.com/happyrust/rvm-rs", optional = true }
+ anyhow = "1.0.57"
+ serde_json = "1.0.81"
+ hex = "0.4.3"
++sha2 = "0.10.9"
++tempfile = "3.27.0"
++zip = { version = "4.0.0", default-features = false, features = ["deflate"] }
+ once_cell = "1.12.0"
+ futures = "^0.3"
+ smol_str = "0.3.2"
+@@ -79,7 +82,7 @@ parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", re
+ aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "777e238b", default-features = false }
+ bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
+ bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
+-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "e2c2636c940c9a12aebe2741f7e9851d89b4e85a" }
++pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "5c9e00e3c46f7d6f7c548583020b66e0ad23368a" }
+ dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
+ 
+ clap = { version = "4.3.5", features = ["derive"] }
+@@ -151,13 +154,15 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
+ #
+ # 前提：下面三个目录必须存在，且停在与上面 rev 对应的分支上。
+ #
+-#   ../rs-core-adr017          codex/adr017-read-routing      = 777e238b
+-#   ../../dependency-pin-parse newrepo-main                   = cc4cbca
+-#   ../pdms-io-integration     codex/paged-session-integration = 76b83ed
++#   ../rs-core-adr017                 codex/adr017-read-routing  = 777e238b
++#   ../../old-parse-pdms-db-paged     codex/record-boundary-scan = 4bf26ec6
++#   ../../old-pdms-io-record-boundary codex/record-boundary-pin  = 5c9e00e3
+ #
+-# 同名克隆有好几份，别接错：plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
+-# 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io；`pdms_io` 兼容包的
+-# revision 则来自 plant-code/pdms-io-integration。
++# 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
++# 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。
++# 还有个「看着像但落后」的诱饵：plant-code/dependency-pin-parse 停在
++# newrepo-main = 03c1cdb，接上去能编过，但会把上面 rev 才有的 record-boundary
++# 修复悄悄退掉。
+ #
+ # 打开状态下 Cargo.lock 里这三个包的 `source` 行会消失，所以**不能带着它推 main**。
+ # pre-push 守卫（.githooks/pre-push）会挡住，不必靠记性。
+@@ -167,10 +172,10 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
+ # aios_core = { path = "../rs-core-adr017" }
+ #
+ # [patch."https://github.com/happyrust/old-parse-pdms-db.git"]
+-# parse_pdms_db = { path = "../../dependency-pin-parse" }
++# parse_pdms_db = { path = "../../old-parse-pdms-db-paged" }
+ #
+ # [patch."https://github.com/happyrust/pdms-io.git"]
+-# pdms_io = { path = "../pdms-io-integration" }
++# pdms_io = { path = "../../old-pdms-io-record-boundary" }
+ # LOCAL-DEPS PATCH END
+ 
+ [build-dependencies]
+diff --git a/issues/ISSUE-019-cross-session-parent-child-delete.md b/issues/ISSUE-019-cross-session-parent-child-delete.md
+new file mode 100644
+index 00000000..43b32605
+--- /dev/null
++++ b/issues/ISSUE-019-cross-session-parent-child-delete.md
+@@ -0,0 +1,89 @@
++# Issue #19：跨会话父子删除被最终 OWNER 状态误判
++
++## Issue 信息
++
++- **类型**：Bug
++- **优先级**：High
++- **状态**：Fixed / Testing
++- **创建日期**：2026-08-10
++- **相关模块**：`pdms_io` 历史版本解析、增量采集、删除模型计划
++- **测试库**：dbnum 8000，sesno `24 → 25 → 26`
++
++## 问题描述
++
++同一增量窗口内，sesno 25 先删除 EQUI `24384/24778` 下的 BOX
++`24384/24779`，sesno 26 再删除该 EQUI。直接从 sesno 26 最终文件采集
++`25..=26` 时，旧实现使用最终 OWNER 状态判断历史元素是否存在，导致父 EQUI
++在 sesno 25 被提前判为 Deleted，同时丢失 BOX 的真实删除操作。
++
++### 修复前
++
++```text
++sesno 25: 24384_24778 Deleted       # 错误提前删除
++sesno 26: 24384_24775 Modified
++sesno 26: 24384_24778 Deleted
++missing : 24384_24779 Deleted @ 25
++```
++
++### 预期结果
++
++```text
++sesno 25: 24384_24778 EQUI Modified(CACHID, children)
++sesno 25: 24384_24779 BOX Deleted
++sesno 26: 24384_24775 ZONE Modified(children)
++sesno 26: 24384_24778 EQUI Deleted
++```
++
++## 根本原因与修复
++
++`pdms_io::PdmsIO::get_refno_operation_status` 原先通过
++`auto_get_raw_element(owner)` 读取文件最终索引中的 OWNER。历史会话的存在性因此被
++后续会话覆盖。
++
++修复提交 `pdms_io@5c9e00e3c46f7d6f7c548583020b66e0ad23368a`：
++
++- 新增按会话边界读取的内部方法 `raw_element_at_or_before`；
++- OWNER 成员判断读取目标 sesno 可见的最新版本；
++- 以 `(sesno, refno)` 缓存历史原始元素，避免窗口内重复解析；
++- 保持 `EleOperationData` 与 `IncrementPipeline::collect_changes` 接口不变。
++
++## 测试夹具
++
++权威夹具位于：
++
++```text
++tests/fixtures/issues/issue-019-cross-session-parent-child-delete/
++```
++
++`db8000-sesno24-26.zip` 包含三个真实 session-chain 快照。原始数据共
++32,397,312 bytes，ZIP 为 4,497,104 bytes。`manifest.json` 和
++`SHA256SUMS` 固化文件大小、SHA256、会话号和元素存在状态；`comparisons/` 保存修复
++前后可审查的 JSON 对比。
++
++测试只依赖 ZIP：运行时校验归档哈希、拒绝未声明或不安全路径、解压到唯一临时目录，
++并再次校验三个原始文件的大小和 SHA256。
++
++## 验证
++
++```powershell
++cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++cargo test --lib child_delete_then_parent_delete_across_sessions_schedules_only_the_parent -- --nocapture
++sigmap validate
++```
++
++验收标准：
++
++- 最终文件 `collect_changes(25..=26)` 精确返回四条操作；
++- 合并净变化为 BOX Deleted、EQUI Deleted、ZONE Modified；
++- 删除调度仅保留父 EQUI 的一次递归 `DeleteCleanup`；
++- ZIP 小于 6 MiB，且删除旧原始工作目录后仍能独立回放。
++
++## 风险与回滚
++
++- 风险集中在历史 OWNER 查询次数；会话级缓存限制了额外 I/O。
++- 回滚 `gen-model` 的 `pdms_io` rev 和锁文件即可恢复旧解析器；夹具与对比证据继续保留，
++  用于确认回滚后问题重新出现。
++
++## 标签
++
++`bug` `incremental-update` `pdms-io` `deletion` `regression-fixture` `dbnum-8000`
+diff --git a/src/bin/db8000_two_delete_fixture.rs b/src/bin/db8000_two_delete_fixture.rs
+new file mode 100644
+index 00000000..6879f5e7
+--- /dev/null
++++ b/src/bin/db8000_two_delete_fixture.rs
+@@ -0,0 +1,407 @@
++//! Build the portable Issue #19 fixture from a real dbnum=8000 session chain.
++
++#[path = "db8000_two_delete_fixture/archive.rs"]
++mod archive;
++
++use aios_core::pdms_types::RefU64;
++use anyhow::{Context, ensure};
++use archive::{
++    ARCHIVE_NAME, ArchiveSpec, ElementState, FixtureManifest, IssueSpec, MAX_ARCHIVE_BYTES,
++    RefSpec, SnapshotSpec, WindowSpec, sha256_file, verify_and_extract, write_archive,
++};
++use clap::Parser;
++use parse_pdms_db::paged::PagedDbSession;
++use pdms_io::io::PdmsIO;
++use serde_json::json;
++use std::collections::{HashMap, HashSet};
++use std::fs;
++use std::path::{Path, PathBuf};
++use std::str::FromStr;
++
++const PAGE_SIZE: usize = 0x800;
++const HEADER_SESSION_PAGE_OFFSET: usize = 40;
++const ISSUE_TITLE: &str = "跨会话父子删除被最终 OWNER 状态误判";
++const ISSUE_SLUG: &str = "cross-session-parent-child-delete";
++const BASELINE_SESNO: u32 = 24;
++const CHILD_DELETE_SESNO: u32 = 25;
++const PARENT_DELETE_SESNO: u32 = 26;
++const ZONE_REFNO: &str = "24384/24775";
++const PARENT_REFNO: &str = "24384/24778";
++const CHILD_REFNO: &str = "24384/24779";
++
++#[derive(Parser, Debug)]
++#[command(about = "Build the compressed Issue #19 dbnum=8000 regression fixture")]
++struct Args {
++    #[arg(
++        long,
++        default_value = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001"
++    )]
++    source: PathBuf,
++    #[arg(
++        long,
++        default_value = r"tests\fixtures\issues\issue-019-cross-session-parent-child-delete"
++    )]
++    out: PathBuf,
++    #[arg(long, default_value_t = false)]
++    force: bool,
++}
++
++#[derive(Debug, Clone, Copy)]
++struct SessionCut {
++    session_page: u32,
++    latest_page: u32,
++}
++
++fn be_u32(bytes: &[u8]) -> u32 {
++    u32::from_be_bytes(bytes.try_into().expect("four bytes"))
++}
++
++fn session_chain(bytes: &[u8]) -> anyhow::Result<HashMap<u32, SessionCut>> {
++    ensure!(
++        bytes.len() >= PAGE_SIZE,
++        "PDMS file is smaller than one page"
++    );
++    ensure!(
++        bytes.len().is_multiple_of(PAGE_SIZE),
++        "PDMS file size is not page aligned: {}",
++        bytes.len()
++    );
++    let mut page = be_u32(&bytes[HEADER_SESSION_PAGE_OFFSET..HEADER_SESSION_PAGE_OFFSET + 4]);
++    let mut cuts = HashMap::new();
++    let mut seen = HashSet::new();
++    while page != 0 && page != u32::MAX && seen.insert(page) {
++        let start = page as usize * PAGE_SIZE;
++        ensure!(
++            start + PAGE_SIZE <= bytes.len(),
++            "session page {page} is outside the file"
++        );
++        let data = &bytes[start..start + PAGE_SIZE];
++        let previous = be_u32(&data[4..8]);
++        let sesno = be_u32(&data[12..16]);
++        cuts.insert(
++            sesno,
++            SessionCut {
++                session_page: page,
++                latest_page: be_u32(&data[20..24]),
++            },
++        );
++        page = previous;
++    }
++    Ok(cuts)
++}
++
++fn write_snapshot(source: &[u8], cut: SessionCut, path: &Path) -> anyhow::Result<()> {
++    let end = (cut.latest_page as usize + 1) * PAGE_SIZE;
++    ensure!(
++        end <= source.len(),
++        "snapshot end {end} exceeds source size {}",
++        source.len()
++    );
++    let mut snapshot = source[..end].to_vec();
++    snapshot[HEADER_SESSION_PAGE_OFFSET..HEADER_SESSION_PAGE_OFFSET + 4]
++        .copy_from_slice(&cut.session_page.to_be_bytes());
++    if let Some(parent) = path.parent() {
++        fs::create_dir_all(parent)?;
++    }
++    fs::write(path, snapshot)?;
++    Ok(())
++}
++
++fn require_presence(path: &Path, present: &[RefU64], absent: &[RefU64]) -> anyhow::Result<u32> {
++    let mut db = PagedDbSession::open(path)
++        .with_context(|| format!("open paged snapshot {}", path.display()))?;
++    let sesno = db.snapshot().sesno;
++    let mut all = Vec::with_capacity(present.len() + absent.len());
++    all.extend_from_slice(present);
++    all.extend_from_slice(absent);
++    let found = db.read_raw_records(&all)?;
++    for refno in present {
++        ensure!(
++            found.contains_key(refno),
++            "{refno} must exist in {}",
++            path.display()
++        );
++    }
++    for refno in absent {
++        ensure!(
++            !found.contains_key(refno),
++            "{refno} must be absent in {}",
++            path.display()
++        );
++    }
++    Ok(sesno)
++}
++
++fn snapshot_spec(
++    role: &str,
++    sesno: u32,
++    archive_path: &str,
++    file: &Path,
++    elements: Vec<ElementState>,
++) -> anyhow::Result<SnapshotSpec> {
++    Ok(SnapshotSpec {
++        role: role.to_owned(),
++        sesno,
++        path: archive_path.to_owned(),
++        bytes: fs::metadata(file)?.len(),
++        sha256: sha256_file(file)?,
++        elements,
++    })
++}
++
++fn element(refno: RefU64, noun: &str, present: bool) -> ElementState {
++    ElementState {
++        refno: refno.to_string(),
++        noun: noun.to_owned(),
++        present,
++    }
++}
++
++fn noun_at(path: &Path, refno: RefU64) -> anyhow::Result<String> {
++    let mut io = PdmsIO::new("issue019", path, true);
++    io.open()?;
++    Ok(io.auto_get_raw_element(refno)?.att_map().get_type())
++}
++
++fn write_text_assets(root: &Path, manifest: &FixtureManifest) -> anyhow::Result<()> {
++    fs::write(
++        root.join("README.md"),
++        r#"# Issue #19：跨会话父子删除被最终 OWNER 状态误判
++
++`db8000-sesno24-26.zip` 保存 dbnum 8000 的三个真实 session-chain 快照：
++
++| 快照 | sesno | EQUI `24384/24778` | 子节点 `24384/24779` |
++|---|---:|---|---|
++| baseline | 24 | 存在 | 存在 |
++| child-deleted | 25 | 存在 | 已删除 |
++| parent-deleted | 26 | 已删除 | 已删除 |
++
++运行回归：
++
++```powershell
++cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++```
++
++测试会验证 ZIP 与三个文件的 SHA256、安全解压，然后只使用 sesno 26 最终文件直接采集 `25..=26`。
++"#,
++    )?;
++
++    let comparisons = root.join("comparisons");
++    fs::create_dir_all(&comparisons)?;
++    let session_25 = json!({
++        "sesno": 25,
++        "expected": [
++            {"refno": "24384_24778", "operation": "modified", "noun": "EQUI", "attributes": ["CACHID"], "children": "member_changed"},
++            {"refno": "24384_24779", "operation": "deleted"}
++        ]
++    });
++    let session_26 = json!({
++        "sesno": 26,
++        "expected": [
++            {"refno": "24384_24775", "operation": "modified", "noun": "ZONE", "attributes": [], "children": "member_changed"},
++            {"refno": "24384_24778", "operation": "deleted"}
++        ]
++    });
++    let before = json!({
++        "issue": 19,
++        "window": [25, 26],
++        "status": "before_fix",
++        "operation_count": 3,
++        "operations": [
++            {"sesno": 25, "refno": "24384_24778", "operation": "deleted", "incorrect": true},
++            {"sesno": 26, "refno": "24384_24775", "operation": "modified", "noun": "ZONE"},
++            {"sesno": 26, "refno": "24384_24778", "operation": "deleted"}
++        ],
++        "missing": {"sesno": 25, "refno": "24384_24779", "operation": "deleted"}
++    });
++    let after = json!({
++        "issue": 19,
++        "window": [25, 26],
++        "status": "expected_after_fix",
++        "operation_count": 4,
++        "operations": [
++            {"sesno": 25, "refno": "24384_24778", "operation": "modified", "noun": "EQUI"},
++            {"sesno": 25, "refno": "24384_24779", "operation": "deleted"},
++            {"sesno": 26, "refno": "24384_24775", "operation": "modified", "noun": "ZONE"},
++            {"sesno": 26, "refno": "24384_24778", "operation": "deleted"}
++        ]
++    });
++    for (name, value) in [
++        ("expected-session-25.json", session_25),
++        ("expected-session-26.json", session_26),
++        ("observed-before-fix-window-25-26.json", before),
++        ("expected-after-fix-window-25-26.json", after),
++    ] {
++        fs::write(comparisons.join(name), serde_json::to_vec_pretty(&value)?)?;
++    }
++
++    fs::write(
++        root.join("manifest.json"),
++        serde_json::to_vec_pretty(manifest)?,
++    )?;
++    let mut sums = format!("{}  {}\n", manifest.archive.sha256, manifest.archive.path);
++    for snapshot in &manifest.snapshots {
++        sums.push_str(&format!("{}  {}\n", snapshot.sha256, snapshot.path));
++    }
++    fs::write(root.join("SHA256SUMS"), sums)?;
++    Ok(())
++}
++
++fn main() -> anyhow::Result<()> {
++    let args = Args::parse();
++    if args.out.exists() {
++        ensure!(
++            args.force,
++            "{} already exists; pass --force to replace it",
++            args.out.display()
++        );
++    }
++
++    let zone = RefU64::from_str(ZONE_REFNO).expect("valid Issue #19 ZONE refno");
++    let parent = RefU64::from_str(PARENT_REFNO).expect("valid Issue #19 EQUI refno");
++    let child = RefU64::from_str(CHILD_REFNO).expect("valid Issue #19 BOX refno");
++    let source =
++        fs::read(&args.source).with_context(|| format!("read source {}", args.source.display()))?;
++    let cuts = session_chain(&source)?;
++    let cut = |sesno| {
++        cuts.get(&sesno)
++            .copied()
++            .with_context(|| format!("session {sesno} is missing"))
++    };
++
++    let raw = tempfile::Builder::new()
++        .prefix("aios-issue019-raw-")
++        .tempdir()?;
++    let baseline_rel = "sesno-024-baseline/ams8000_0001";
++    let child_rel = "sesno-025-child-deleted/ams8000_0001";
++    let final_rel = "sesno-026-parent-deleted/ams8000_0001";
++    let baseline_file = raw.path().join(baseline_rel);
++    let child_file = raw.path().join(child_rel);
++    let final_file = raw.path().join(final_rel);
++    write_snapshot(&source, cut(BASELINE_SESNO)?, &baseline_file)?;
++    write_snapshot(&source, cut(CHILD_DELETE_SESNO)?, &child_file)?;
++    write_snapshot(&source, cut(PARENT_DELETE_SESNO)?, &final_file)?;
++
++    ensure!(require_presence(&baseline_file, &[parent, child], &[])? == BASELINE_SESNO);
++    ensure!(require_presence(&child_file, &[parent], &[child])? == CHILD_DELETE_SESNO);
++    ensure!(require_presence(&final_file, &[], &[parent, child])? == PARENT_DELETE_SESNO);
++    let zone_noun = noun_at(&baseline_file, zone)?;
++    let parent_noun = noun_at(&baseline_file, parent)?;
++    let child_noun = noun_at(&baseline_file, child)?;
++    ensure!(zone_noun == "ZONE");
++    ensure!(parent_noun == "EQUI");
++
++    let parent_dir = args.out.parent().unwrap_or_else(|| Path::new("."));
++    fs::create_dir_all(parent_dir)?;
++    let stage = tempfile::Builder::new()
++        .prefix(".issue019-stage-")
++        .tempdir_in(parent_dir)?;
++    let archive_path = stage.path().join(ARCHIVE_NAME);
++    write_archive(
++        &archive_path,
++        &[
++            (baseline_rel, baseline_file.as_path()),
++            (child_rel, child_file.as_path()),
++            (final_rel, final_file.as_path()),
++        ],
++    )?;
++    let archive_bytes = fs::metadata(&archive_path)?.len();
++    ensure!(archive_bytes < MAX_ARCHIVE_BYTES);
++
++    let manifest = FixtureManifest {
++        format: "aios-issue-fixture-v1".to_owned(),
++        issue: IssueSpec {
++            id: 19,
++            title: ISSUE_TITLE.to_owned(),
++            slug: ISSUE_SLUG.to_owned(),
++        },
++        dbnum: 8000,
++        window: WindowSpec {
++            baseline_sesno: BASELINE_SESNO,
++            start_sesno: CHILD_DELETE_SESNO,
++            end_sesno: PARENT_DELETE_SESNO,
++        },
++        refs: RefSpec {
++            zone: zone.to_string(),
++            parent_equi: parent.to_string(),
++            child: child.to_string(),
++        },
++        archive: ArchiveSpec {
++            path: ARCHIVE_NAME.to_owned(),
++            bytes: archive_bytes,
++            sha256: sha256_file(&archive_path)?,
++            compression: "zip-deflate-level-9".to_owned(),
++            max_bytes: MAX_ARCHIVE_BYTES,
++        },
++        snapshots: vec![
++            snapshot_spec(
++                "baseline",
++                BASELINE_SESNO,
++                baseline_rel,
++                &baseline_file,
++                vec![
++                    element(zone, &zone_noun, true),
++                    element(parent, &parent_noun, true),
++                    element(child, &child_noun, true),
++                ],
++            )?,
++            snapshot_spec(
++                "child_deleted",
++                CHILD_DELETE_SESNO,
++                child_rel,
++                &child_file,
++                vec![
++                    element(zone, &zone_noun, true),
++                    element(parent, &parent_noun, true),
++                    element(child, &child_noun, false),
++                ],
++            )?,
++            snapshot_spec(
++                "parent_deleted",
++                PARENT_DELETE_SESNO,
++                final_rel,
++                &final_file,
++                vec![
++                    element(zone, &zone_noun, true),
++                    element(parent, &parent_noun, false),
++                    element(child, &child_noun, false),
++                ],
++            )?,
++        ],
++    };
++    write_text_assets(stage.path(), &manifest)?;
++    let verified = verify_and_extract(stage.path())?;
++    ensure!(verified.path_for_role("baseline")?.is_file());
++    ensure!(verified.path_for_role("child_deleted")?.is_file());
++    ensure!(verified.path_for_role("parent_deleted")?.is_file());
++
++    if args.out.exists() {
++        let resolved_parent = fs::canonicalize(parent_dir)?;
++        let resolved_output = fs::canonicalize(&args.out)?;
++        ensure!(resolved_output.starts_with(&resolved_parent));
++        for name in [ARCHIVE_NAME, "README.md", "SHA256SUMS", "manifest.json"] {
++            let current = args.out.join(name);
++            if current.exists() {
++                fs::remove_file(&current)?;
++            }
++            fs::rename(stage.path().join(name), current)?;
++        }
++        let comparisons = args.out.join("comparisons");
++        if comparisons.exists() {
++            fs::remove_dir_all(&comparisons)?;
++        }
++        fs::rename(stage.path().join("comparisons"), comparisons)?;
++    } else {
++        let staged_path = stage.keep();
++        fs::rename(&staged_path, &args.out)?;
++    }
++
++    println!("fixture={}", args.out.display());
++    println!(
++        "archive={} bytes={archive_bytes}",
++        args.out.join(ARCHIVE_NAME).display()
++    );
++    println!("window={CHILD_DELETE_SESNO}..={PARENT_DELETE_SESNO}");
++    println!("operations: {} Deleted -> {} Deleted", child, parent);
++    Ok(())
++}
+diff --git a/src/bin/db8000_two_delete_fixture/archive.rs b/src/bin/db8000_two_delete_fixture/archive.rs
+new file mode 100644
+index 00000000..09bb4501
+--- /dev/null
++++ b/src/bin/db8000_two_delete_fixture/archive.rs
+@@ -0,0 +1,238 @@
++use anyhow::{Context, ensure};
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use std::collections::{BTreeSet, HashMap};
++use std::fs::{self, File};
++use std::io::{Read, Write};
++use std::path::{Component, Path, PathBuf};
++use tempfile::TempDir;
++use zip::write::SimpleFileOptions;
++use zip::{CompressionMethod, ZipArchive, ZipWriter};
++
++pub const ARCHIVE_NAME: &str = "db8000-sesno24-26.zip";
++pub const MAX_ARCHIVE_BYTES: u64 = 6 * 1024 * 1024;
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct FixtureManifest {
++    pub format: String,
++    pub issue: IssueSpec,
++    pub dbnum: u32,
++    pub window: WindowSpec,
++    pub refs: RefSpec,
++    pub archive: ArchiveSpec,
++    pub snapshots: Vec<SnapshotSpec>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct IssueSpec {
++    pub id: u32,
++    pub title: String,
++    pub slug: String,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct WindowSpec {
++    pub baseline_sesno: u32,
++    pub start_sesno: u32,
++    pub end_sesno: u32,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct RefSpec {
++    pub zone: String,
++    pub parent_equi: String,
++    pub child: String,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct ArchiveSpec {
++    pub path: String,
++    pub bytes: u64,
++    pub sha256: String,
++    pub compression: String,
++    pub max_bytes: u64,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct SnapshotSpec {
++    pub role: String,
++    pub sesno: u32,
++    pub path: String,
++    pub bytes: u64,
++    pub sha256: String,
++    pub elements: Vec<ElementState>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct ElementState {
++    pub refno: String,
++    pub noun: String,
++    pub present: bool,
++}
++
++pub struct ExtractedFixture {
++    _temp: TempDir,
++    pub root: PathBuf,
++    pub manifest: FixtureManifest,
++}
++
++impl ExtractedFixture {
++    pub fn path_for_role(&self, role: &str) -> anyhow::Result<PathBuf> {
++        let snapshot = self
++            .manifest
++            .snapshots
++            .iter()
++            .find(|snapshot| snapshot.role == role)
++            .with_context(|| format!("manifest is missing snapshot role {role}"))?;
++        Ok(self.root.join(&snapshot.path))
++    }
++}
++
++pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
++    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
++    let mut hasher = Sha256::new();
++    let mut buffer = [0u8; 128 * 1024];
++    loop {
++        let read = file.read(&mut buffer)?;
++        if read == 0 {
++            break;
++        }
++        hasher.update(&buffer[..read]);
++    }
++    Ok(hex::encode(hasher.finalize()))
++}
++
++pub fn write_archive(path: &Path, entries: &[(&str, &Path)]) -> anyhow::Result<()> {
++    if let Some(parent) = path.parent() {
++        fs::create_dir_all(parent)?;
++    }
++    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
++    let mut writer = ZipWriter::new(file);
++    let options = SimpleFileOptions::default()
++        .compression_method(CompressionMethod::Deflated)
++        .compression_level(Some(9));
++    let mut buffer = [0u8; 128 * 1024];
++
++    for (archive_path, source_path) in entries {
++        validate_relative_path(archive_path)?;
++        writer.start_file(*archive_path, options)?;
++        let mut source =
++            File::open(source_path).with_context(|| format!("open {}", source_path.display()))?;
++        loop {
++            let read = source.read(&mut buffer)?;
++            if read == 0 {
++                break;
++            }
++            writer.write_all(&buffer[..read])?;
++        }
++    }
++    writer.finish()?.sync_all()?;
++    Ok(())
++}
++
++pub fn verify_and_extract(fixture_root: &Path) -> anyhow::Result<ExtractedFixture> {
++    let manifest_path = fixture_root.join("manifest.json");
++    let manifest: FixtureManifest = serde_json::from_slice(
++        &fs::read(&manifest_path)
++            .with_context(|| format!("read manifest {}", manifest_path.display()))?,
++    )?;
++    ensure!(manifest.format == "aios-issue-fixture-v1");
++    ensure!(manifest.issue.id == 19);
++    ensure!(manifest.dbnum == 8000);
++    ensure!(manifest.archive.max_bytes == MAX_ARCHIVE_BYTES);
++    validate_relative_path(&manifest.archive.path)?;
++
++    let archive_path = fixture_root.join(&manifest.archive.path);
++    let metadata = fs::metadata(&archive_path)
++        .with_context(|| format!("stat archive {}", archive_path.display()))?;
++    ensure!(metadata.len() == manifest.archive.bytes);
++    ensure!(metadata.len() < manifest.archive.max_bytes);
++    ensure!(sha256_file(&archive_path)? == manifest.archive.sha256);
++
++    let expected: HashMap<&str, &SnapshotSpec> = manifest
++        .snapshots
++        .iter()
++        .map(|snapshot| (snapshot.path.as_str(), snapshot))
++        .collect();
++    ensure!(expected.len() == manifest.snapshots.len());
++    ensure!(expected.len() == 3);
++    for path in expected.keys() {
++        validate_relative_path(path)?;
++    }
++
++    let temp = tempfile::Builder::new()
++        .prefix("aios-issue019-")
++        .tempdir()?;
++    let root = temp.path().to_path_buf();
++    let file = File::open(&archive_path)?;
++    let mut archive = ZipArchive::new(file)?;
++    ensure!(archive.len() == expected.len());
++    let mut seen = BTreeSet::new();
++
++    for index in 0..archive.len() {
++        let mut entry = archive.by_index(index)?;
++        let name = entry.name().replace('\\', "/");
++        validate_relative_path(&name)?;
++        ensure!(!entry.is_dir(), "unexpected directory entry {name}");
++        let spec = expected
++            .get(name.as_str())
++            .with_context(|| format!("undeclared archive entry {name}"))?;
++        ensure!(seen.insert(name.clone()), "duplicate archive entry {name}");
++        ensure!(entry.size() == spec.bytes, "size mismatch for {name}");
++
++        let output = root.join(&name);
++        if let Some(parent) = output.parent() {
++            fs::create_dir_all(parent)?;
++        }
++        let mut target = File::create(&output)?;
++        std::io::copy(&mut entry, &mut target)?;
++        target.sync_all()?;
++        ensure!(
++            sha256_file(&output)? == spec.sha256,
++            "hash mismatch for {name}"
++        );
++    }
++
++    ensure!(seen.len() == expected.len());
++    Ok(ExtractedFixture {
++        _temp: temp,
++        root,
++        manifest,
++    })
++}
++
++fn validate_relative_path(path: &str) -> anyhow::Result<()> {
++    ensure!(!path.is_empty(), "empty archive path");
++    let path = Path::new(path);
++    ensure!(
++        !path.is_absolute(),
++        "absolute archive path: {}",
++        path.display()
++    );
++    for component in path.components() {
++        ensure!(
++            matches!(component, Component::Normal(_)),
++            "unsafe archive path: {}",
++            path.display()
++        );
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::validate_relative_path;
++
++    #[test]
++    fn archive_paths_must_stay_relative_and_normal() {
++        assert!(validate_relative_path("sesno-024-baseline/ams8000_0001").is_ok());
++        for unsafe_path in ["", "../escape", "safe/../../escape", "/absolute"] {
++            assert!(
++                validate_relative_path(unsafe_path).is_err(),
++                "accepted unsafe path {unsafe_path}"
++            );
++        }
++        #[cfg(windows)]
++        assert!(validate_relative_path(r"C:\escape").is_err());
++    }
++}
+diff --git a/src/data_interface/model_update_plan.rs b/src/data_interface/model_update_plan.rs
+index e14fb8d1..b07a4e62 100644
+--- a/src/data_interface/model_update_plan.rs
++++ b/src/data_interface/model_update_plan.rs
+@@ -1474,17 +1474,51 @@ mod tests {
+         let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
+         let grandchild = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24780));
+         let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
+-        let owners = HashMap::from([
+-            (equi, zone),
+-            (child, equi),
+-            (grandchild, child),
++        let owners = HashMap::from([(equi, zone), (child, equi), (grandchild, child)]);
++
++        let topmost = topmost_deleted_refnos(&HashSet::from([equi, child, grandchild]), |refno| {
++            owners.get(&refno).copied()
++        });
++
++        assert_eq!(topmost, HashSet::from([equi]));
++    }
++
++    /// dbnum=8000 的可重复夹具口径：sesno 25 先删 EQUI 下的节点，sesno 26 再删
++    /// EQUI。会话合并必须保留两个墓碑，而调度收敛只留下父 EQUI 的一条递归清理。
++    #[test]
++    fn child_delete_then_parent_delete_across_sessions_schedules_only_the_parent() {
++        let equi = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24778));
++        let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
++        let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
++        let range = BTreeMap::from([
++            (
++                25,
++                vec![EleOperationData::new(
++                    child.refno(),
++                    25,
++                    EleOperationDetail::Deleted,
++                )],
++            ),
++            (
++                26,
++                vec![EleOperationData::new(
++                    equi.refno(),
++                    26,
++                    EleOperationDetail::Deleted,
++                )],
++            ),
+         ]);
+ 
+-        let topmost = topmost_deleted_refnos(
+-            &HashSet::from([equi, child, grandchild]),
+-            |refno| owners.get(&refno).copied(),
+-        );
++        let merged = crate::data_interface::manual_update::merge_net_change_details(&range);
++        let deleted = merged
++            .iter()
++            .filter(|detail| detail.net == NetOp::Deleted)
++            .map(|detail| detail.refno)
++            .collect::<HashSet<_>>();
++        assert_eq!(deleted, HashSet::from([child, equi]));
+ 
++        let owners = HashMap::from([(child, equi), (equi, zone)]);
++        let topmost = topmost_deleted_refnos(&deleted, |refno| owners.get(&refno).copied());
+         assert_eq!(topmost, HashSet::from([equi]));
+     }
+ 
+diff --git a/tests/db8000_two_delete_fixture.rs b/tests/db8000_two_delete_fixture.rs
+new file mode 100644
+index 00000000..b09335fa
+--- /dev/null
++++ b/tests/db8000_two_delete_fixture.rs
+@@ -0,0 +1,98 @@
++//! Portable Issue #19 regression over the real dbnum=8000 session chain.
++//!
++//! Run:
++//! `cargo test --test db8000_two_delete_fixture -- --ignored --nocapture`
++
++#[path = "../src/bin/db8000_two_delete_fixture/archive.rs"]
++#[allow(dead_code)]
++mod archive;
++
++use aios_core::RefnoEnum;
++use aios_core::pdms_types::RefU64;
++use aios_database::data_interface::increment_pipeline::IncrementPipeline;
++use aios_database::data_interface::manual_update::{NetOp, merge_net_changes};
++use archive::verify_and_extract;
++use parse_pdms_db::paged::PagedDbSession;
++use pdms_io::io::EleOperationDetail;
++use std::collections::HashMap;
++use std::path::{Path, PathBuf};
++use std::str::FromStr;
++
++fn fixture_root() -> PathBuf {
++    std::env::var_os("AIOS_DB8000_TWO_DELETE_FIXTURE")
++        .map(PathBuf::from)
++        .unwrap_or_else(|| {
++            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
++                .join("tests/fixtures/issues/issue-019-cross-session-parent-child-delete")
++        })
++}
++
++fn assert_session(path: &Path, expected: u32) {
++    let session = PagedDbSession::open(path).expect("open extracted snapshot");
++    assert_eq!(session.snapshot().sesno, expected, "{}", path.display());
++}
++
++#[test]
++#[ignore = "real-file regression fixture; opt in explicitly"]
++fn final_file_window_preserves_child_then_parent_delete_sessions() {
++    let fixture =
++        verify_and_extract(&fixture_root()).expect("verify and extract Issue #19 fixture");
++    let baseline = fixture.path_for_role("baseline").unwrap();
++    let child_deleted = fixture.path_for_role("child_deleted").unwrap();
++    let final_file = fixture.path_for_role("parent_deleted").unwrap();
++    assert_session(&baseline, 24);
++    assert_session(&child_deleted, 25);
++    assert_session(&final_file, 26);
++
++    let child = RefU64::from_str("24384/24779").unwrap();
++    let parent = RefU64::from_str("24384/24778").unwrap();
++    let zone = RefU64::from_str("24384/24775").unwrap();
++    let collected = IncrementPipeline::collect_changes(&final_file, 25..=26).unwrap();
++
++    assert_eq!(collected.keys().copied().collect::<Vec<_>>(), vec![25, 26]);
++    assert_eq!(collected[&25].len(), 2, "session 25: {:?}", collected[&25]);
++    assert_eq!(collected[&26].len(), 2, "session 26: {:?}", collected[&26]);
++    assert!(
++        collected[&25]
++            .iter()
++            .any(|op| { op.refno == child && matches!(op.detail, EleOperationDetail::Deleted) })
++    );
++    assert!(collected[&25].iter().any(|op| {
++        op.refno == parent
++            && matches!(
++                &op.detail,
++                EleOperationDetail::Modified(modified)
++                    if modified.noun == "EQUI" && modified.children_changed.is_some()
++            )
++    }));
++    assert!(
++        collected[&26]
++            .iter()
++            .any(|op| { op.refno == parent && matches!(op.detail, EleOperationDetail::Deleted) })
++    );
++    assert!(collected[&26].iter().any(|op| {
++        op.refno == zone
++            && matches!(
++                &op.detail,
++                EleOperationDetail::Modified(modified)
++                    if modified.noun == "ZONE" && modified.children_changed.is_some()
++            )
++    }));
++
++    let by_refno = merge_net_changes(&collected)
++        .into_iter()
++        .map(|change| (change.refno, change.net))
++        .collect::<HashMap<_, _>>();
++    assert_eq!(
++        by_refno[&RefnoEnum::from(child).to_pdms_str()],
++        NetOp::Deleted
++    );
++    assert_eq!(
++        by_refno[&RefnoEnum::from(parent).to_pdms_str()],
++        NetOp::Deleted
++    );
++    assert_eq!(
++        by_refno[&RefnoEnum::from(zone).to_pdms_str()],
++        NetOp::Modified
++    );
++}
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md
+new file mode 100644
+index 00000000..53bc46bb
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md
+@@ -0,0 +1,17 @@
++# Issue #19：跨会话父子删除被最终 OWNER 状态误判
++
++`db8000-sesno24-26.zip` 保存 dbnum 8000 的三个真实 session-chain 快照：
++
++| 快照 | sesno | EQUI `24384/24778` | 子节点 `24384/24779` |
++|---|---:|---|---|
++| baseline | 24 | 存在 | 存在 |
++| child-deleted | 25 | 存在 | 已删除 |
++| parent-deleted | 26 | 已删除 | 已删除 |
++
++运行回归：
++
++```powershell
++cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++```
++
++测试会验证 ZIP 与三个文件的 SHA256、安全解压，然后只使用 sesno 26 最终文件直接采集 `25..=26`。
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/SHA256SUMS b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/SHA256SUMS
+new file mode 100644
+index 00000000..fd49184a
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/SHA256SUMS
+@@ -0,0 +1,4 @@
++6f7abbf548b37d8c016d2b8a2b52f3eddb1610fce1a00eca85fe71c9aa23f871  db8000-sesno24-26.zip
++aa199e88d6f962027bb8bbcb39a11ace78847866acace9d132eb460167aae2d0  sesno-024-baseline/ams8000_0001
++c3e5ecc2f388a4059adc90536d3bc782fc369ce456e8ac408c4b1a78f3334cd0  sesno-025-child-deleted/ams8000_0001
++84b0040fdbc242d406540eab3d511d41a44aac899f55106821a93f5e419e6454  sesno-026-parent-deleted/ams8000_0001
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-after-fix-window-25-26.json b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-after-fix-window-25-26.json
+new file mode 100644
+index 00000000..9b75ece4
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-after-fix-window-25-26.json
+@@ -0,0 +1,33 @@
++{
++  "issue": 19,
++  "window": [
++    25,
++    26
++  ],
++  "status": "expected_after_fix",
++  "operation_count": 4,
++  "operations": [
++    {
++      "sesno": 25,
++      "refno": "24384_24778",
++      "operation": "modified",
++      "noun": "EQUI"
++    },
++    {
++      "sesno": 25,
++      "refno": "24384_24779",
++      "operation": "deleted"
++    },
++    {
++      "sesno": 26,
++      "refno": "24384_24775",
++      "operation": "modified",
++      "noun": "ZONE"
++    },
++    {
++      "sesno": 26,
++      "refno": "24384_24778",
++      "operation": "deleted"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-25.json b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-25.json
+new file mode 100644
+index 00000000..d1ff86ca
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-25.json
+@@ -0,0 +1,18 @@
++{
++  "sesno": 25,
++  "expected": [
++    {
++      "refno": "24384_24778",
++      "operation": "modified",
++      "noun": "EQUI",
++      "attributes": [
++        "CACHID"
++      ],
++      "children": "member_changed"
++    },
++    {
++      "refno": "24384_24779",
++      "operation": "deleted"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-26.json b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-26.json
+new file mode 100644
+index 00000000..f33eaad1
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/expected-session-26.json
+@@ -0,0 +1,16 @@
++{
++  "sesno": 26,
++  "expected": [
++    {
++      "refno": "24384_24775",
++      "operation": "modified",
++      "noun": "ZONE",
++      "attributes": [],
++      "children": "member_changed"
++    },
++    {
++      "refno": "24384_24778",
++      "operation": "deleted"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/observed-before-fix-window-25-26.json b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/observed-before-fix-window-25-26.json
+new file mode 100644
+index 00000000..9ac72ace
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/comparisons/observed-before-fix-window-25-26.json
+@@ -0,0 +1,33 @@
++{
++  "issue": 19,
++  "window": [
++    25,
++    26
++  ],
++  "status": "before_fix",
++  "operation_count": 3,
++  "operations": [
++    {
++      "sesno": 25,
++      "refno": "24384_24778",
++      "operation": "deleted",
++      "incorrect": true
++    },
++    {
++      "sesno": 26,
++      "refno": "24384_24775",
++      "operation": "modified",
++      "noun": "ZONE"
++    },
++    {
++      "sesno": 26,
++      "refno": "24384_24778",
++      "operation": "deleted"
++    }
++  ],
++  "missing": {
++    "sesno": 25,
++    "refno": "24384_24779",
++    "operation": "deleted"
++  }
++}
+\ No newline at end of file
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/manifest.json b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/manifest.json
+new file mode 100644
+index 00000000..053b6922
+--- /dev/null
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/manifest.json
+@@ -0,0 +1,100 @@
++{
++  "format": "aios-issue-fixture-v1",
++  "issue": {
++    "id": 19,
++    "title": "跨会话父子删除被最终 OWNER 状态误判",
++    "slug": "cross-session-parent-child-delete"
++  },
++  "dbnum": 8000,
++  "window": {
++    "baseline_sesno": 24,
++    "start_sesno": 25,
++    "end_sesno": 26
++  },
++  "refs": {
++    "zone": "24384_24775",
++    "parent_equi": "24384_24778",
++    "child": "24384_24779"
++  },
++  "archive": {
++    "path": "db8000-sesno24-26.zip",
++    "bytes": 4497104,
++    "sha256": "6f7abbf548b37d8c016d2b8a2b52f3eddb1610fce1a00eca85fe71c9aa23f871",
++    "compression": "zip-deflate-level-9",
++    "max_bytes": 6291456
++  },
++  "snapshots": [
++    {
++      "role": "baseline",
++      "sesno": 24,
++      "path": "sesno-024-baseline/ams8000_0001",
++      "bytes": 10776576,
++      "sha256": "aa199e88d6f962027bb8bbcb39a11ace78847866acace9d132eb460167aae2d0",
++      "elements": [
++        {
++          "refno": "24384_24775",
++          "noun": "ZONE",
++          "present": true
++        },
++        {
++          "refno": "24384_24778",
++          "noun": "EQUI",
++          "present": true
++        },
++        {
++          "refno": "24384_24779",
++          "noun": "BOX",
++          "present": true
++        }
++      ]
++    },
++    {
++      "role": "child_deleted",
++      "sesno": 25,
++      "path": "sesno-025-child-deleted/ams8000_0001",
++      "bytes": 10797056,
++      "sha256": "c3e5ecc2f388a4059adc90536d3bc782fc369ce456e8ac408c4b1a78f3334cd0",
++      "elements": [
++        {
++          "refno": "24384_24775",
++          "noun": "ZONE",
++          "present": true
++        },
++        {
++          "refno": "24384_24778",
++          "noun": "EQUI",
++          "present": true
++        },
++        {
++          "refno": "24384_24779",
++          "noun": "BOX",
++          "present": false
++        }
++      ]
++    },
++    {
++      "role": "parent_deleted",
++      "sesno": 26,
++      "path": "sesno-026-parent-deleted/ams8000_0001",
++      "bytes": 10823680,
++      "sha256": "84b0040fdbc242d406540eab3d511d41a44aac899f55106821a93f5e419e6454",
++      "elements": [
++        {
++          "refno": "24384_24775",
++          "noun": "ZONE",
++          "present": true
++        },
++        {
++          "refno": "24384_24778",
++          "noun": "EQUI",
++          "present": false
++        },
++        {
++          "refno": "24384_24779",
++          "noun": "BOX",
++          "present": false
++        }
++      ]
++    }
++  ]
++}
+\ No newline at end of file
