@@ -293,22 +293,28 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // progress_sender.send(5).await?;
     // progress_sender.send(5)?;
 
-    aios_core::function::define_common_functions().await?;
-    // D11（ADR-010）：define_common_functions 按文件名顺序无条件加载 resource/surreal
-    // 全目录，`fn_query_room_code_hh.surql` 排在 `_hd` 版之后，同名 fn::room_code 永远
-    // 被 hh 版覆盖——与 Rust 侧编译的 project_hd feature 错位。加载顺序在 rs-core 里
-    // 改不到，这里在加载完成后按 feature 重放正确版本，把覆盖再覆盖回来。
-    // project_hh 构建无需处理：hh 版本来就是最后加载的那份。
-    #[cfg(feature = "project_hd")]
-    {
-        const HD_ROOM_CODE: &str = "resource/surreal/fn_query_room_code.surql";
-        match std::fs::read_to_string(HD_ROOM_CODE) {
-            Ok(text) => match SUL_DB.query(text).await {
-                Ok(_) => println!("已按 project_hd 重放 fn::room_code（矫正 _hh 文件的覆盖）"),
-                Err(e) => eprintln!("重放 hd 版 fn::room_code 失败（生效的仍是 hh 版）: {e}"),
-            },
-            Err(e) => eprintln!("读取 {HD_ROOM_CODE} 失败（生效的仍是 hh 版 fn::room_code）: {e}"),
+    // 磁盘脚本先加载：站点自有的额外 surql 继续生效。目录不存在不再是致命错——
+    // 下面的内置快照兜底，部署包可以不带 resource/surreal。
+    if std::path::Path::new("resource/surreal").is_dir() {
+        aios_core::function::define_common_functions().await?;
+    } else {
+        println!("resource/surreal 不存在：磁盘脚本跳过，函数集完全来自二进制内置快照");
+        if aios_core::function::ensure_inst_meta_functions_on(&SUL_DB).await? {
+            println!("已从二进制内置定义补装缺失的 inst_meta 兼容函数");
         }
+    }
+    // 内置快照收尾（含 D11 的 hd/hh 矫正，见模块 doc）：部署包的 resource/surreal
+    // 会漂移——现场 bin 停在 2025-06、整个缺 gen_root.surql——磁盘加载之后再灌一遍
+    // 编译期快照，同名函数以内置版为准，旧运行环境被抬到当前函数集。
+    crate::data_interface::embedded_surql::define_embedded_functions().await?;
+    match crate::data_interface::embedded_surql::missing_embedded_functions().await {
+        Ok(missing) if missing.is_empty() => {}
+        Ok(missing) => eprintln!(
+            "内置函数集灌入后仍缺 fn::{}——引擎可能拒绝了新脚本（语句错误按惯例吞掉），\
+             房间语义与 gen-root 巡检将退化",
+            missing.join(" / fn::")
+        ),
+        Err(e) => eprintln!("内置函数集核验未跑成（{e}），不据此定罪"),
     }
     crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
     let migrated =

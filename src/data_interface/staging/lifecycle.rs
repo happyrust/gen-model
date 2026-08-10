@@ -159,17 +159,15 @@ pub async fn create_window_on(
 /// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修：
 /// 生产与这里共用 `INST_RELATE_ZONE_INDEX_SQL` 一条合法语句，错误显式上抛。
 pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
-    aios_core::function::define_common_functions_on(db).await?;
-    // run_cli 的 D11 矫正：project_hd 下 hh 文件按目录序后加载覆盖了 hd 版，
-    // 加载完成后重放 hd 版把覆盖再覆盖回来。
-    #[cfg(feature = "project_hd")]
-    {
-        let hd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resource/surreal/fn_query_room_code.surql");
-        let text =
-            std::fs::read_to_string(&hd).with_context(|| format!("读取 {} 失败", hd.display()))?;
-        db.query(text).await?;
+    // 磁盘脚本（CWD 的 resource/surreal，站点扩展）＋内置快照收尾——与 run_cli
+    // 同一顺序，同名函数以内置版为准。内置序列自带 D11 的 hd/hh 矫正；这里原先
+    // 按 CARGO_MANIFEST_DIR 读 hd 文件，那是编译机路径，部署机上一开窗口就会失败。
+    if std::path::Path::new("resource/surreal").is_dir() {
+        aios_core::function::define_common_functions_on(db).await?;
+    } else {
+        aios_core::function::ensure_inst_meta_functions_on(db).await?;
     }
+    crate::data_interface::embedded_surql::define_embedded_functions_on(db).await?;
     // 刻意不装 update_dbnum_event（F4，见 findings 文档）：该事件体假定 pe 的
     // record id 是数组（历史行形制），对字符串 id 的最新行（`pe:24381_100677`，
     // fork 解析为字符串）任何 UPSERT/UPDATE 都会因 `array::at` 类型错误而**整条
