@@ -885,12 +885,61 @@ fn run_scenario(
 }
 
 fn focus_target(paths: &Paths, target: &str, dir: &Path, phase: &str) -> Result<()> {
-    let output = inspect(paths, &["tree", target])?;
-    fs::write(dir.join(format!("inspect-tree-{phase}.txt")), &output)?;
-    let (x, y) = first_rect_center(&output)
-        .ok_or_else(|| anyhow!("inspect tree could not locate {phase} target {target}"))?;
+    let evidence = dir.join(format!("inspect-tree-{phase}.txt"));
+    let mut output = inspect(paths, &["tree", target])?;
+    fs::write(&evidence, &output)?;
+    let mut center = first_rect_center(&output);
+
+    // The model tree is lazy: a deep EQUI is absent from AccessKit until its
+    // SITE/ZONE ancestors have been loaded and expanded.  Drive plant-ui's own
+    // command-line locator instead of guessing which disclosure triangles to
+    // click.  `App::locate` loads the ancestor chain and sets `tree_reveal`;
+    // polling the inspection tree then proves that the requested row actually
+    // became visible before we click it.
+    if center.is_none() {
+        let input = inspect(paths, &["tree"])?;
+        fs::write(
+            dir.join(format!("inspect-command-input-{phase}.txt")),
+            &input,
+        )?;
+        let (input_x, input_y) = role_rect_center(&input, "TextInput").ok_or_else(|| {
+            anyhow!("plant-ui command input is not visible while locating {target}")
+        })?;
+        inspect(
+            paths,
+            &["click", &input_x.to_string(), &input_y.to_string()],
+        )?;
+        inspect(paths, &["key", "ctrl+a"])?;
+        let command = locate_command(target);
+        inspect(paths, &["type", &command])?;
+        inspect(paths, &["key", "enter"])?;
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            output = inspect(paths, &["tree", target])?;
+            fs::write(&evidence, &output)?;
+            center = first_rect_center(&output);
+            if center.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    let (x, y) = center.ok_or_else(|| {
+        anyhow!("inspect tree could not locate {phase} target {target} after command-line locate")
+    })?;
     inspect(paths, &["click", &x.to_string(), &y.to_string()])?;
     Ok(())
+}
+
+fn locate_command(target: &str) -> String {
+    let target = target.trim();
+    if target.starts_with(['/', '=']) {
+        target.to_owned()
+    } else {
+        format!("/{target}")
+    }
 }
 
 /// 树上还找不找得到这个节点。删除场景的 V 级判据靠它。
@@ -899,16 +948,30 @@ fn tree_locates(paths: &Paths, target: &str) -> Result<bool> {
 }
 
 fn first_rect_center(tree: &str) -> Option<(i32, i32)> {
+    tree.lines()
+        .skip(1)
+        .filter_map(accesskit_rect)
+        .min_by_key(|(_, y)| *y)
+}
+
+fn role_rect_center(tree: &str, role: &str) -> Option<(i32, i32)> {
     tree.lines().skip(1).find_map(|line| {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        let (xy, wh) = (*fields.get(2)?, *fields.get(3)?);
-        let (x, y) = xy.split_once(',')?;
-        let (w, h) = wh.split_once('x')?;
-        Some((
-            x.parse::<i32>().ok()? + w.parse::<i32>().ok()? / 2,
-            y.parse::<i32>().ok()? + h.parse::<i32>().ok()? / 2,
-        ))
+        (fields.get(1).copied() == Some(role))
+            .then(|| accesskit_rect(line))
+            .flatten()
     })
+}
+
+fn accesskit_rect(line: &str) -> Option<(i32, i32)> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let (xy, wh) = (*fields.get(2)?, *fields.get(3)?);
+    let (x, y) = xy.split_once(',')?;
+    let (w, h) = wh.split_once('x')?;
+    Some((
+        x.parse::<i32>().ok()? + w.parse::<i32>().ok()? / 2,
+        y.parse::<i32>().ok()? + h.parse::<i32>().ok()? / 2,
+    ))
 }
 
 fn execute_and_wait(
@@ -1662,5 +1725,30 @@ mod tests {
         let tree =
             "step=1 ppp=1 nodes=2\n       123 Button           10,20 30x40 target\nmatched 1\n";
         assert_eq!(first_rect_center(tree), Some((25, 40)));
+    }
+
+    #[test]
+    fn inspect_tree_finds_command_input_by_accesskit_role() {
+        let tree = "step=1 ppp=1 nodes=3\n\
+                    123 Button           10,120 30x40 target\n\
+                    456 TextInput        20,300 300x30\n\
+                    matched 2\n";
+        assert_eq!(role_rect_center(tree, "TextInput"), Some((170, 315)));
+    }
+
+    #[test]
+    fn inspect_tree_prefers_topmost_matching_row_over_command_history() {
+        let tree = "step=1 ppp=1 nodes=2\n\
+                    123 TreeItem         10,120 30x40 AIOS-INC-DATA-EQ\n\
+                    456 Label            20,500 300x30 /AIOS-INC-DATA-EQ\n\
+                    matched 2\n";
+        assert_eq!(first_rect_center(tree), Some((25, 140)));
+    }
+
+    #[test]
+    fn plant_ui_locator_uses_name_or_refno_command_syntax() {
+        assert_eq!(locate_command("AIOS-INC-DATA-EQ"), "/AIOS-INC-DATA-EQ");
+        assert_eq!(locate_command("/AIOS-INC-DATA-EQ"), "/AIOS-INC-DATA-EQ");
+        assert_eq!(locate_command("=24384/25734"), "=24384/25734");
     }
 }

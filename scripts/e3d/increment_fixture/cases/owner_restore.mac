@@ -1,7 +1,7 @@
 ALPHA LOG "{{LOG_PATH}}" OVER
-=/AIOS-INC-OWNER-A
-INCLUDE =/AIOS-INC-OWNER-BOX
-=/AIOS-INC-OWNER-BOX
+={{REF:owner_eq_a}}
+INCLUDE ={{REF:owner_box}}
+={{REF:owner_box}}
 Q CE
 Q REF
 Q OWNE
