@@ -637,6 +637,10 @@ fn write_runtime_config(
         ("gen_model", "false".into()),
         ("gen_mesh", "false".into()),
         ("gen_spatial_tree", "true".into()),
+        // `room-member` asserts that a transform recomputes room membership.
+        // The production default is deliberately off, so fixture mode must opt
+        // in instead of silently running that scenario with room work disabled.
+        ("room_incremental", "true".into()),
         ("load_spatial_tree", "false".into()),
         ("save_spatial_tree_to_db", "false".into()),
     ]);
@@ -1968,6 +1972,48 @@ mod tests {
             surreal_last_result(&response).unwrap(),
             &json!({"watermark":93})
         );
+    }
+
+    #[test]
+    fn fixture_runtime_config_enables_room_incremental_work() {
+        let dir = std::env::temp_dir().join(format!("e3d-fixture-config-{}", std::process::id()));
+        let project = dir.join("AvevaMarineSample");
+        let db_dir = project.join("ams000");
+        fs::create_dir_all(&db_dir).unwrap();
+        let base = dir.join("base.toml");
+        let output = dir.join("runtime.toml");
+        let target = db_dir.join("ams8000_0001");
+        fs::write(
+            &base,
+            "room_incremental = false\ngen_spatial_tree = false\n",
+        )
+        .unwrap();
+        fs::write(&target, []).unwrap();
+
+        write_runtime_config(
+            &base,
+            &output,
+            &project,
+            &target,
+            8000,
+            "AvevaMarineSample",
+            "1516",
+            "/ALL",
+        )
+        .unwrap();
+
+        let rendered = fs::read_to_string(output).unwrap();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == "room_incremental = true")
+        );
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == "gen_spatial_tree = true")
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
