@@ -19,6 +19,8 @@
 | `http_api_cors` | `["*"]` | 2026-07-27 | Web 服务 CORS 允许来源列表，`["*"]` 全放行（局域网前端联调）。与 `http_api_addr` 同批引入 |
 | `delivery_unit_types` | 未启用（注释） | 2026-07-25 | 最小交付单元类型——增量 / 手动 / 按需生成共用的“生成根”口径；配置后**完全取代**默认集合 `["BRAN","HANG","SUPPO","EQUI"]`，`[]` 表示不使用交付单元。trim + 大写 + 去重，拒绝 WORL/WORLD/SITE/ZONE 与 FTUB。随批量根重生成能力引入（ADR-012、`docs/specs/manual-model-update.md`）。消费方：`data_interface/generation_root.rs` |
 | `append_delivery_unit_types` | 未启用（注释） | 2026-07-25 | 在默认交付单元集合之外**追加**类型，仅当未配置 `delivery_unit_types` 时生效。规则同上 |
+| `startup_autorun` | `false` | 2026-08-10 | 启动是否自动干活。`false`（默认）时启动重扫照常发现并入队，但排出来的行**挂起**（`/queue` 上状态为 `held`）不派发，持久积压也不消化，启动全量房间重建不跑；某个 dbnum 真的来了增量（watch 事件 / 人工执行）才放行它那一条，并与新会话合并成一条一起跑。`true` 是历史行为。环境变量 `AIOS_STARTUP_AUTORUN` 压过本键（认 `1/true/yes/on` 与 `0/false/no/off`，认不出的值退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），非 rs-core `DbOption` 字段，缺键不会起不来。消费方：`options.rs::startup_autorun`、`lib.rs::skip_startup_room_build`、`batch_queue.rs::DataBatch::held`、`batch_scheduler.rs::arm_auto_work` |
+| `room_incremental` | `false` | 2026-08-10 | 房间归属的**增量**重算开不开。`false`（默认）时两个写入点都不再排 `room_recalc` 目标（位姿/删除刷新包围盒后的直写事务、暂存窗口收口的 `merge_room_recalc_changes`），空闲轮也不再收房间轮；已排在 `model_update_pending` 里的目标原样留着，开关一开照常收。只管增量这一条链——启动全量重建、人工重建、`drain_rooms` 直调（房间对拍夹具走的就是它）都不看本键。环境变量 `AIOS_ROOM_INCREMENTAL` 压过本键（取值规则同 `AIOS_STARTUP_AUTORUN`）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::room_incremental`、`batch_worker.rs::room_round`、`model_update_pending.rs::merge_room_recalc_changes`、`occ_generate.rs` 直写事务 |
 | `room_key_word` | `["-RM"]` | 2026-07-29 | 房间名关键词**列表**，用于房间-面板关系匹配（`fast_model/room_model.rs::get_room_key_word`）。**替代旧键 `room_keyword`（单字符串，已废弃删除）**：一次支持多关键词，且 AMS 房间名（如 `/1RX-RM03-R301`）末段由 `project_hd` 规则校验 |
 
 ## 二、取值变更（键在基线中已存在）
@@ -49,6 +51,26 @@
 - **2026-08-06（`gen_spatial_tree` 开关治理）**：结论钉死——开关保留，但角色从「功能形态开关」转为**运维开关**（止血降级 / 演练隔离），所有配置的默认姿态为 `true`。备用配置 `DbOption-ams.toml` / `DbOption-zsy.toml` / `DbOption_text.toml` 残留的 `false` 一并翻正，消除「整份拷回把 false 带回来」的 issue #7 复发路径。`load_spatial_tree` / `save_spatial_tree_to_db` 确认为**死键**（rs-core 仅定义、本仓与 rs-core 均零读取），但它们是必填 bool 字段，从 toml 删键会让 config 反序列化报 missing field 起不来——因此只就地标注、不删，待 rs-core 删除字段后随之移除。同批记录默认值改进方向：rs-core `DbOption` 的 bool 缺省为 false，「缺键=关」与「默认需要空间/房间计算」相悖，下次动 rs-core 时应将 `gen_spatial_tree` 缺省翻为 true（或连带清理死字段）。
 - **2026-08-07（`gen_spatial_tree` 使用移除）**：推翻 08-06「保留为运维开关」的结论——空间/房间计算恒开启，代码不再读这个键。拆掉的门：启动树加载与启动全量房间重建（`lib.rs` 两处 + `run_app` 一处）、AABB 刷新的 `maintain_spatial_tree` 快速路径（`update_inst_relate_aabbs_by_refnos` 收并为单函数）、房间入队口（`enqueue_room_recalc` 不再收 `DbOption`）、暂存窗口房间语义/merge 门与房间轮早退（`batch_worker`）、暂存房间报告早退（`model_update_pending`）、`/health` 的 `gen_spatial_tree` 字段。相应的四条「回退即红」源码钉子一并退役。键本身降级为**死键**（与上一条的两个键同款处理）：必填 bool、删键起不来，待 rs-core 删字段后随之移除；运维止血从此只能靠 `AIOS_SKIP_STARTUP_ROOM_BUILD`（只跳启动全量重建，不冻结增量）。
 
+- **2026-08-10（启动默认不自动干活 + 房间重建改为有状态对账）**：新增扩展键 `startup_autorun`，**默认 `false`**——启动只做「让库能用」的那些幂等自愈，不执行任何增量、不做全量房间重建。
+
+  语义刻意**不是**全局暂停：那会把后来真正的实时增量也一起挡死，而这个默认要挡的只是「停机期间攒下、此刻谁都没要求处理」的积压。实现落在队列行上——`DataBatch` 新增 `held`，重扫（`init` / `scope-refresh` / `share-remount` 三个来源）排出来的行挂起，`freeze_next_concurrent` 跳过它们且**不算队首**（与独占行刻意相反：独占要保住 FIFO 位置，挂起是「这个库压根不参与本轮」，否则一条挂起行能把它后面所有真实增量堵死）。一次真实触发（watch 文件事件 / `POST /update/execute`）不挂起，并把同 dbnum 那条挂起行放行——合并本来就是既有语义，于是启动排的 `103..=132` 与新存的 `133` 合成 `103..=133` 一次跑完，积压不会被跳过。放行写在 `Merged` / `AlreadyCovered` 两条分支**之前**：一个新会话都没带来的迟到事件同样证明有人在动这个库。放行是单向的，后续重扫不会把已放行的行重新挂起（否则一次范围刷新就能把人工刚点下去的执行按回去）。
+
+  worker 空闲轮那侧的持久积压（房间重算目标、模型单元）不按 dbnum 分，没法逐行挂起，改用一个进程级「上弦」旗标：`startup_autorun=false` 时启动为 false，第一次真实触发扳成 true 且只进不退、不落库（它描述的是本进程这一趟，不是需要跨重启保留的操作意图——那是 `queue_control:main` 的暂停）。空闲轮的门因此是 `!paused && armed`。
+
+  同批把启动全量房间重建从**无条件**改成**有状态对账**：库侧 `room_build:main` 记下上次成功重建时的 `spatial_epoch` 与 `tree_entries`，与当前一致就跳过。两个字段各补一个盲区（epoch 认得出走意图队列的变更，条数认得出直写/全量生成那两条不递增 epoch 的路径），都对不上或从没建过才重建；被覆盖率闸门拦下、或逐面板有失败的那一轮**不盖章**，免得把一次失败永久固化成成功。三道门的优先级是 `AIOS_SKIP_STARTUP_ROOM_BUILD` → `startup_autorun` → 库侧对账，止血口排最前是因为「跑增量」与「跑 2 万面板级全量重建」是两件事（L3 夹具正是要前者不要后者，其两个 spawn 点已显式加上 `AIOS_STARTUP_AUTORUN=1`）。
+
+  `/health` 新增 `startup_autorun` 与 `auto_work_armed`：「服务活着、队列有货、就是不动」有三种完全不同的成因（运维按了暂停 / 冷启动还没被真实增量上弦 / worker 死了），少了中间这个字段在接口上分不出前两种。`/queue` 的行状态相应多了 `held`——显示成 `queued` 的话，一条永远不动的行与「消费者卡住了」长得一模一样。
+
+  起因是现场每次启动都为房间重建付 14~15 秒，且那 15 秒因空间树只有 22056 条（库里 105536 条，低于 90% 下限）被闸门整轮拒绝，一条边都没写；同时库里还压着 2580 个房间重算目标，按旧默认每次重启 worker 都会直接开始啃。
+
+- **2026-08-10（房间增量默认关闭）**：新增扩展键 `room_incremental`，**默认 `false`**。
+
+  上一条把 2580 个房间目标从「启动就啃」改成了「等上弦」，但上弦之后它照样要啃。现场实测那 2580 个目标全是构件、无一块面板，且**每一个都查不到几何实例**，于是每个都走「按空集收敛」——`room_model.rs` 在那行日志上方自己写着「这条路本不该走到」，因为元素任务的入队条件就是「包围盒确实变了」。一轮 256 个目标付两次全量查询、耗时约 88 秒，四轮下来刷了 768 行同样的日志，把同期那条真正失败的增量整个埋掉了。
+
+  根因不在房间侧：数据批次因祖先链断裂反复失败 → 暂存窗口提交不了 → `batch_regen_is_allowed` 为假 → 交付单元一个都不生成 → 几何永远不出现 → 房间轮每页继续写空集。两件事互为因果，而房间那半边的噪音让模型侧的问题看不见。先把它关掉，让模型增量的正确性能被单独看清楚。
+
+  三个门：两个写入点（直写事务只摘 `room_recalc` 那一条语句，指针写与 epoch bump 照旧——空间树确实动了，少 bump 一次会让重启后「文件之后还有空间提交」的判定看错）、一个消费点（`room_round` 早退，用 `Once` 只播报一次，空闲轮 30 秒一趟，每趟复述同一个配置项就是把日志刷成噪音）。`/health` 相应新增 `room_incremental`：关着时房间泳道永远是空的，而「没活」与「开关关着」在外面长得一模一样。
+
 ## 四、注意事项
 
 - 本文件描述的是 **AMS 本地站点工作区**的配置状态，多数取值属于实测窗口调参（如
@@ -58,3 +80,15 @@
 - `gen_spatial_tree` 自 2026-08-07 起为**死键**：代码零读取，空间/房间计算恒开启。
   键仍必须留在 toml（必填 bool，删键起不来），取值不再有任何效果；快速重启可用
   `AIOS_SKIP_STARTUP_ROOM_BUILD` 环境变量跳过启动全量房间重建（增量照常）。
+- 自 2026-08-10 起，**服务默认起来什么都不执行**（`startup_autorun = false`）。升级后若
+  发现「服务活着、队列里有货、就是不动」，先看 `/health` 的 `startup_autorun` 与
+  `auto_work_armed`，以及 `/queue` 里那些行是不是 `held`：都对上就是这个默认在起作用，
+  不是故障。正常用法是**什么都不用做**——在 E3D 里存一次盘，那个 dbnum 的挂起行会连同
+  积压一起跑掉。要它启动就自动干活，把键置 `true` 或设 `AIOS_STARTUP_AUTORUN=1`；
+  要立刻推一把而不改配置，`POST /api/v1/update/execute`（人工触发同样放行挂起行）。
+- `POST /api/v1/queue/resume` 解的是**持久化暂停**，不是冷启动挂起：挂起行由各自 dbnum
+  的真实增量放行，resume 放不动它们。两者是正交的两道门，排查时别混。
+- 三个启动开关各管一段，别混用：`startup_autorun` 管「这次启动要不要自动干活」，
+  `AIOS_SKIP_STARTUP_ROOM_BUILD` 管「要不要做启动全量房间重建」（前者开着时仍可单独
+  关掉后者），`AIOS_FORCE_SPATIAL_REBUILD` 管「要不要丢掉落盘的空间树、从库指针重建」
+  ——空间树残缺（房间重建被 90% 覆盖率闸门拒绝）时要用的是最后这一个。

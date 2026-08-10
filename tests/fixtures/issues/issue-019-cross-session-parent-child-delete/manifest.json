@@ -1,0 +1,100 @@
+{
+  "format": "aios-issue-fixture-v1",
+  "issue": {
+    "id": 19,
+    "title": "跨会话父子删除被最终 OWNER 状态误判",
+    "slug": "cross-session-parent-child-delete"
+  },
+  "dbnum": 8000,
+  "window": {
+    "baseline_sesno": 24,
+    "start_sesno": 25,
+    "end_sesno": 26
+  },
+  "refs": {
+    "zone": "24384_24775",
+    "parent_equi": "24384_24778",
+    "child": "24384_24779"
+  },
+  "archive": {
+    "path": "db8000-sesno24-26.zip",
+    "bytes": 4497104,
+    "sha256": "6f7abbf548b37d8c016d2b8a2b52f3eddb1610fce1a00eca85fe71c9aa23f871",
+    "compression": "zip-deflate-level-9",
+    "max_bytes": 6291456
+  },
+  "snapshots": [
+    {
+      "role": "baseline",
+      "sesno": 24,
+      "path": "sesno-024-baseline/ams8000_0001",
+      "bytes": 10776576,
+      "sha256": "aa199e88d6f962027bb8bbcb39a11ace78847866acace9d132eb460167aae2d0",
+      "elements": [
+        {
+          "refno": "24384_24775",
+          "noun": "ZONE",
+          "present": true
+        },
+        {
+          "refno": "24384_24778",
+          "noun": "EQUI",
+          "present": true
+        },
+        {
+          "refno": "24384_24779",
+          "noun": "BOX",
+          "present": true
+        }
+      ]
+    },
+    {
+      "role": "child_deleted",
+      "sesno": 25,
+      "path": "sesno-025-child-deleted/ams8000_0001",
+      "bytes": 10797056,
+      "sha256": "c3e5ecc2f388a4059adc90536d3bc782fc369ce456e8ac408c4b1a78f3334cd0",
+      "elements": [
+        {
+          "refno": "24384_24775",
+          "noun": "ZONE",
+          "present": true
+        },
+        {
+          "refno": "24384_24778",
+          "noun": "EQUI",
+          "present": true
+        },
+        {
+          "refno": "24384_24779",
+          "noun": "BOX",
+          "present": false
+        }
+      ]
+    },
+    {
+      "role": "parent_deleted",
+      "sesno": 26,
+      "path": "sesno-026-parent-deleted/ams8000_0001",
+      "bytes": 10823680,
+      "sha256": "84b0040fdbc242d406540eab3d511d41a44aac899f55106821a93f5e419e6454",
+      "elements": [
+        {
+          "refno": "24384_24775",
+          "noun": "ZONE",
+          "present": true
+        },
+        {
+          "refno": "24384_24778",
+          "noun": "EQUI",
+          "present": false
+        },
+        {
+          "refno": "24384_24779",
+          "noun": "BOX",
+          "present": false
+        }
+      ]
+    }
+  ]
+}

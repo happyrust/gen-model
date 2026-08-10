@@ -150,6 +150,8 @@ pub struct QueueRow {
     pub task_id: String,
     pub dbnum: u32,
     pub db_type: String,
+    /// `running` / `queued` / `held`。`held` = 重扫排出来的积压，等这个 dbnum
+    /// 真的来一次增量才会被派发（见 [`batch_queue::DataBatch::held`]）。
     pub state: &'static str,
     pub start_sesno: i32,
     pub end_sesno: i32,
@@ -162,6 +164,13 @@ pub struct BatchScheduler {
     inner: Mutex<QueueState>,
     /// 暂停只挡出队，不碰正在跑的那条（ADR-011 §9）。
     paused: AtomicBool,
+    /// 本进程是否已经被「真实触发」上过弦。
+    ///
+    /// `startup_autorun` 关着时启动为 false，第一次非重扫入队（watch 事件 / 人工
+    /// 执行）把它扳成 true 且不再落回。它管的是 worker 空闲轮那侧的持久积压
+    /// （房间重算目标、模型单元）——那些行不按 dbnum 分，没法像队列行那样逐条挂起，
+    /// 只能整体等一个「有人在干活了」的信号。批次侧的挂起是逐行的，两者互不替代。
+    auto_work_armed: AtomicBool,
     /// 入队 / 恢复时唤醒 worker。
     notify: Notify,
 }
@@ -179,6 +188,8 @@ impl BatchScheduler {
         SCHEDULER.get_or_init(|| BatchScheduler {
             inner: Mutex::new(QueueState::default()),
             paused: AtomicBool::new(false),
+            // `startup_autorun=true` 就是历史行为：一上来就是上过弦的。
+            auto_work_armed: AtomicBool::new(crate::options::startup_autorun()),
             notify: Notify::new(),
         })
     }
@@ -200,7 +211,19 @@ impl BatchScheduler {
     ///
     /// 三种落点都会唤醒 worker：即便 `AlreadyCovered`，manual 触发的语义也是
     /// 「别等下一个 30s 轮询」——worker 醒来发现队列没变化也只亏一次空转。
-    pub fn enqueue(&self, registry: &TaskRegistry, found: &DiscoveredBatch) -> EnqueueOutcome {
+    ///
+    /// `hold` 见 [`batch_queue::DataBatch::held`]：重扫发现的行挂起，真实触发的
+    /// 不挂起并顺带放行同 dbnum 的积压。真实触发同时给整个进程上弦
+    /// （[`Self::arm_auto_work`]），空闲轮的持久积压也从那一刻起开始消化。
+    pub fn enqueue(
+        &self,
+        registry: &TaskRegistry,
+        found: &DiscoveredBatch,
+        hold: bool,
+    ) -> EnqueueOutcome {
+        if !hold {
+            self.arm_auto_work();
+        }
         let outcome = {
             let mut state = self.queue();
             let outcome = batch_queue::enqueue(
@@ -209,6 +232,7 @@ impl BatchScheduler {
                 &found.db_type,
                 found.applied_sesno,
                 found.file_latest_sesno,
+                hold,
             );
 
             let queued_row = state
@@ -548,6 +572,23 @@ impl BatchScheduler {
         Ok(paused)
     }
 
+    /// 本进程是否已被真实触发上过弦（见 [`Self::auto_work_armed`] 字段说明）。
+    pub fn is_auto_work_armed(&self) -> bool {
+        self.auto_work_armed.load(Ordering::SeqCst)
+    }
+
+    /// 上弦并唤醒 worker：有人真的动了数据，空闲轮那侧的积压可以开始收了。
+    ///
+    /// 只进不退，且不落库。它描述的是「本进程这一趟里发生过真实增量」，重启后
+    /// 本来就该回到「等下一次触发」——这正是 `startup_autorun=false` 的用意，
+    /// 不是需要跨重启保留的操作意图（那是 `queue_control:main` 管的暂停）。
+    pub fn arm_auto_work(&self) {
+        if !self.auto_work_armed.swap(true, Ordering::SeqCst) {
+            println!("检测到真实增量触发：本进程开始消化持久积压（房间重算 / 模型单元）");
+            self.notify.notify_one();
+        }
+    }
+
     /// 等新工作（入队 / 恢复）或超时。超时兜底轮询：唤醒丢失也只是晚一拍。
     pub async fn wait_for_work(&self, timeout: Duration) {
         let _ = tokio::time::timeout(timeout, self.notify.notified()).await;
@@ -570,12 +611,26 @@ impl BatchScheduler {
                     task_id,
                     dbnum: b.dbnum,
                     db_type: b.db_type.clone(),
-                    state: if running { "running" } else { "queued" },
+                    // 挂起行单列一个状态，不混进 queued：它不会自己往前走，
+                    // 显示成排队会让人以为消费者卡住了，而那是完全不同的故障。
+                    state: match (running, b.held) {
+                        (true, _) => "running",
+                        (false, true) => "held",
+                        (false, false) => "queued",
+                    },
                     start_sesno: b.start_sesno,
                     end_sesno: b.end_sesno,
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+impl BatchScheduler {
+    /// 测试里的「真实触发」入队：不挂起，与 watch 事件 / 人工执行同口径。
+    fn enqueue_live(&self, registry: &TaskRegistry, found: &DiscoveredBatch) -> EnqueueOutcome {
+        self.enqueue(registry, found, false)
     }
 }
 
@@ -604,6 +659,9 @@ mod tests {
             BatchScheduler {
                 inner: Mutex::new(QueueState::default()),
                 paused: AtomicBool::new(false),
+                // 下面的性质与冷启动挂起无关，起手就当作已上弦；挂起那条路径由
+                // `batch_queue` 的纯规则测试与本模块末尾几条单独覆盖。
+                auto_work_armed: AtomicBool::new(true),
                 notify: Notify::new(),
             },
             TaskRegistry::default(),
@@ -613,7 +671,7 @@ mod tests {
     #[test]
     fn enqueue_creates_a_queued_task_row_linked_to_the_batch() {
         let (scheduler, registry) = fresh();
-        let outcome = scheduler.enqueue(&registry, &found(7997, 1023, 1034));
+        let outcome = scheduler.enqueue_live(&registry, &found(7997, 1023, 1034));
         assert_eq!(outcome.outcome, Enqueued::New);
         assert_eq!(outcome.info.position, 1);
         assert_eq!(outcome.info.start_sesno, 1024);
@@ -627,8 +685,8 @@ mod tests {
     #[test]
     fn merge_updates_the_same_task_row_instead_of_adding_one() {
         let (scheduler, registry) = fresh();
-        let first = scheduler.enqueue(&registry, &found(7997, 1023, 1034));
-        let second = scheduler.enqueue(&registry, &found(7997, 1023, 1041));
+        let first = scheduler.enqueue_live(&registry, &found(7997, 1023, 1034));
+        let second = scheduler.enqueue_live(&registry, &found(7997, 1023, 1041));
         assert_eq!(second.outcome, Enqueued::Merged);
         assert_eq!(
             second.info.task_id, first.info.task_id,
@@ -644,7 +702,7 @@ mod tests {
     #[test]
     fn freeze_marks_the_task_running_and_finish_removes_the_row() {
         let (scheduler, registry) = fresh();
-        let queued = scheduler.enqueue(&registry, &found(7997, 1023, 1038));
+        let queued = scheduler.enqueue_live(&registry, &found(7997, 1023, 1038));
         let job = scheduler.freeze_next(&registry).expect("有排队项");
         assert_eq!(job.task_id, queued.info.task_id);
         assert_eq!(job.end_sesno, 1038, "冻结时区间已定死");
@@ -654,7 +712,7 @@ mod tests {
         );
 
         // 运行期间新保存：另起一行接在右端之后（同 dbnum 两行）。
-        let behind = scheduler.enqueue(&registry, &found(7997, 1023, 1041));
+        let behind = scheduler.enqueue_live(&registry, &found(7997, 1023, 1041));
         assert_eq!(behind.outcome, Enqueued::BehindRunning);
         assert_eq!(behind.info.start_sesno, 1039);
         assert_eq!(scheduler.snapshot().len(), 2);
@@ -671,22 +729,56 @@ mod tests {
     #[test]
     fn a_trigger_covered_by_the_running_batch_maps_to_its_task_row() {
         let (scheduler, registry) = fresh();
-        scheduler.enqueue(&registry, &found(7997, 1023, 1038));
+        scheduler.enqueue_live(&registry, &found(7997, 1023, 1038));
         let job = scheduler.freeze_next(&registry).expect("有排队项");
 
-        let repeat = scheduler.enqueue(&registry, &found(7997, 1023, 1038));
+        let repeat = scheduler.enqueue_live(&registry, &found(7997, 1023, 1038));
         assert_eq!(repeat.outcome, Enqueued::AlreadyCovered);
         assert_eq!(repeat.info.task_id, job.task_id, "回执应对到运行中的任务行");
         assert_eq!(scheduler.snapshot().len(), 1, "不该因重复触发多排一行");
     }
 
+    /// 挂起行在 `/queue` 上必须是 `held` 而不是 `queued`，被放行后才转回 `queued`。
+    ///
+    /// 界面读的就是这个字段。显示成 `queued` 的话，一条永远不动的行与「消费者卡住了」
+    /// 长得一模一样——而后者是要立刻叫人的故障，前者是本来就该这样。
+    #[test]
+    fn a_held_row_says_so_in_the_queue_snapshot() {
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue(&registry, &found(7997, 102, 132), true);
+        let rows = scheduler.snapshot();
+        assert_eq!(rows.len(), 1, "挂起行照样入队占位");
+        assert_eq!(rows[0].state, "held");
+        assert!(scheduler.freeze_next(&registry).is_none(), "挂起行不出队");
+
+        scheduler.enqueue_live(&registry, &found(7997, 102, 133));
+        assert_eq!(scheduler.snapshot()[0].state, "queued", "真实触发放行了它");
+        let job = scheduler.freeze_next(&registry).expect("放行后可出队");
+        assert_eq!(
+            (job.start_sesno, job.end_sesno),
+            (103, 133),
+            "积压与新会话合成一条一起跑"
+        );
+    }
+
+    /// 上弦只由真实触发扳动，重扫入队多少行都不算。
+    #[test]
+    fn only_a_real_trigger_arms_the_process() {
+        let (scheduler, registry) = fresh();
+        scheduler.auto_work_armed.store(false, Ordering::SeqCst);
+        scheduler.enqueue(&registry, &found(7997, 102, 132), true);
+        assert!(!scheduler.is_auto_work_armed(), "重扫不上弦");
+        scheduler.enqueue_live(&registry, &found(8000, 34, 40));
+        assert!(scheduler.is_auto_work_armed(), "真实触发上弦");
+    }
+
     #[test]
     fn pausing_blocks_freeze_but_not_enqueue() {
         let (scheduler, registry) = fresh();
-        scheduler.enqueue(&registry, &found(7997, 0, 10));
+        scheduler.enqueue_live(&registry, &found(7997, 0, 10));
         scheduler.pause();
         assert!(scheduler.freeze_next(&registry).is_none(), "暂停期间不出队");
-        let outcome = scheduler.enqueue(&registry, &found(7997, 0, 12));
+        let outcome = scheduler.enqueue_live(&registry, &found(7997, 0, 12));
         assert_eq!(outcome.outcome, Enqueued::Merged, "暂停挡的是出队不是入队");
         scheduler.resume();
         assert!(scheduler.freeze_next(&registry).is_some());
@@ -695,10 +787,10 @@ mod tests {
     #[test]
     fn positions_count_queued_rows_only() {
         let (scheduler, registry) = fresh();
-        scheduler.enqueue(&registry, &found(1, 0, 5));
+        scheduler.enqueue_live(&registry, &found(1, 0, 5));
         scheduler.freeze_next(&registry).unwrap();
-        let second = scheduler.enqueue(&registry, &found(2, 0, 5));
-        let third = scheduler.enqueue(&registry, &found(3, 0, 5));
+        let second = scheduler.enqueue_live(&registry, &found(2, 0, 5));
+        let third = scheduler.enqueue_live(&registry, &found(3, 0, 5));
         assert_eq!(second.info.position, 1, "运行中的行不占排队位置");
         assert_eq!(third.info.position, 2);
     }
@@ -706,9 +798,9 @@ mod tests {
     #[test]
     fn frozen_rescan_recomputes_the_successor_under_the_scheduler_lock() {
         let (scheduler, registry) = fresh();
-        scheduler.enqueue(&registry, &found(7997, 0, 10));
+        scheduler.enqueue_live(&registry, &found(7997, 0, 10));
         scheduler.freeze_next(&registry).unwrap();
-        let absorbed = scheduler.enqueue(&registry, &found(7997, 0, 12));
+        let absorbed = scheduler.enqueue_live(&registry, &found(7997, 0, 12));
         scheduler.record_frozen_end(&registry, 7997, 12, None);
         assert_eq!(scheduler.snapshot().len(), 1);
         let entry = registry.get(&absorbed.info.task_id).unwrap();
@@ -716,9 +808,9 @@ mod tests {
         assert_eq!(entry.result.unwrap()["status"], "absorbed_by_running");
 
         let (scheduler, registry) = fresh();
-        scheduler.enqueue(&registry, &found(7997, 0, 10));
+        scheduler.enqueue_live(&registry, &found(7997, 0, 10));
         scheduler.freeze_next(&registry).unwrap();
-        let shifted = scheduler.enqueue(&registry, &found(7997, 0, 15));
+        let shifted = scheduler.enqueue_live(&registry, &found(7997, 0, 15));
         scheduler.record_frozen_end(&registry, 7997, 12, None);
         let rows = scheduler.snapshot();
         assert_eq!((rows[1].start_sesno, rows[1].end_sesno), (13, 15));
@@ -737,7 +829,7 @@ mod tests {
     #[test]
     fn a_window_time_is_only_attached_when_the_endpoint_matches() {
         let (scheduler, registry) = fresh();
-        let first = scheduler.enqueue(&registry, &found(7997, 0, 10));
+        let first = scheduler.enqueue_live(&registry, &found(7997, 0, 10));
         let entry = registry.get(&first.info.task_id).unwrap();
         assert_eq!(
             (entry.start_sesno, entry.end_sesno),
@@ -749,7 +841,7 @@ mod tests {
         // 冻结之后再触发：新行排在运行批次后面，左端是 11，而 `found` 手里的左端
         // 时刻描述的是 sesno 1 那条保存——端点对不上，这一格只能空着。
         scheduler.freeze_next(&registry).unwrap();
-        let behind = scheduler.enqueue(&registry, &found(7997, 0, 15));
+        let behind = scheduler.enqueue_live(&registry, &found(7997, 0, 15));
         let entry = registry.get(&behind.info.task_id).unwrap();
         assert_eq!((entry.start_sesno, entry.end_sesno), (Some(11), Some(15)));
         assert!(

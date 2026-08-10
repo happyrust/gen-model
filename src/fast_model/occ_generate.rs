@@ -952,15 +952,21 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         }
 
         if durable_room_trigger && !chunk_changes.is_empty() {
-            let room_upserts =
+            // 关掉房间增量只摘掉 room_recalc 这一条语句，指针写与 epoch bump 照旧：
+            // 空间树确实动了，少 bump 一次会让重启后「文件之后还有空间提交」的判定
+            // 看错，而那与房间开不开无关。
+            let room_upserts = crate::options::room_incremental().then(|| {
                 crate::data_interface::model_update_pending::render_room_recalc_upserts(
                     &chunk_changes,
-                );
+                )
+            });
             let mut statements = Vec::with_capacity(3);
             if !update_sql.is_empty() {
                 statements.push(update_sql.clone());
             }
-            statements.push(room_upserts);
+            if let Some(room_upserts) = room_upserts {
+                statements.push(room_upserts);
+            }
             statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
             let transaction =
                 crate::data_interface::increment_pipeline::wrap_in_transaction(&statements)

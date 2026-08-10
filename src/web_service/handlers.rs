@@ -125,9 +125,26 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
+        // 冷启动开关（默认 false）与它此刻的姿态。「服务活着、队列有货、就是不动」
+        // 有三种完全不同的成因：运维按了暂停（queue_paused）、冷启动还没被真实增量
+        // 上弦（auto_work_armed=false，队列里那些行在 /queue 上是 held）、或者 worker
+        // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
+        "startup_autorun": crate::options::startup_autorun(),
+        // 房间增量的总开关（默认 false）。关着时房间泳道永远是空的，而「没活」与
+        // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
+        "room_incremental": crate::options::room_incremental(),
+        "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
+        // 解析错误清单（表空是 null）。模型生成侧的失败有 pending 行的 last_error
+        // 与死信计数，解析侧此前只有一句会滚走的 warn——`element_parse_skipped` 之后
+        // 元素按 cache-miss 静默跳过，事后没有任何查询能说出它是谁。
+        "parse_errors": crate::data_interface::parse_error::snapshot().await,
+        // 空闲轮 panic 账本（从没 panic 过是 null）。`parked: true` = 同一句 panic
+        // 连撞到上限、空闲轮已停跑，房间收敛与范围重扫一并暂停——旗子还立着、心跳
+        // 也在跳，少了这个字段，外面看到的是一个「健康但什么都不收敛」的服务。
+        "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
         "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         "staging_window_blocks": window_blocks,

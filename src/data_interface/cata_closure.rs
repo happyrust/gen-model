@@ -144,6 +144,11 @@ impl InMemoryCataLocator {
             cache.save(project);
         }
 
+        // 扫库是同步的，攒下的扫描失败在这里落库（见 `scan_db_ref0s`）。
+        if let Err(error) = crate::data_interface::parse_error::flush().await {
+            log::warn!("{error:#}");
+        }
+
         let mut locator = Self::from_parts(
             ref0_to_dbnum,
             dbnum_files
@@ -351,14 +356,20 @@ async fn load_dbnum_files_from_watermark(
 ///
 /// paged 模式流式遍历快照索引键并只保留去重后的 `ref0`；legacy/compare 保留旧
 /// `children_map` 基线作灰度与回滚。失败返回空集（该库暂不可定位，由上层日志覆盖）。
+/// 失败只攒进解析错误账本、不落库：本函数是同步的，而三个调用点里有一个也在
+/// 同步路径上。落库交给 [`CataLocator::build_for_project`] 那个 async 收口点。
 fn scan_db_ref0s(path: &Path, project: &str) -> Vec<u32> {
     match crate::data_interface::on_demand_db::scan_ref0s(path, project) {
-        Ok(ref0s) => ref0s,
+        Ok(ref0s) => {
+            crate::data_interface::parse_error::note_file_success(path);
+            ref0s
+        }
         Err(error) => {
             log::warn!(
                 "[paged_db] locator_scan_failed path={} error={error:#}",
                 path.display()
             );
+            crate::data_interface::parse_error::note_file_failure(path, &format!("{error:#}"));
             Vec::new()
         }
     }
@@ -544,19 +555,28 @@ async fn parse_refnos_with_session(
                         children,
                     },
                 );
+                crate::data_interface::parse_error::note_element_success(&refno.to_pe_key());
             }
             Ok(None) => {}
             Err(error) => {
                 if session.is_compare() {
                     return Err(error);
                 }
-                // 解析失败：跳过，由调用方按 cache-miss 处理。
-                log::warn!(
-                    "[paged_db] element_parse_skipped refno={} error={error:#}",
-                    refno.to_pe_key()
+                // 解析失败：跳过，由调用方按 cache-miss 处理。日志之外还要留痕——
+                // 跳过是静默降级，事后没有任何查询能说出「哪些元素解析不出来」。
+                let target = refno.to_pe_key();
+                log::warn!("[paged_db] element_parse_skipped refno={target} error={error:#}");
+                crate::data_interface::parse_error::note_element_failure(
+                    &target,
+                    &format!("{error:#}"),
                 );
             }
         }
+    }
+    // 攒在进程内的这一批在这里落库：本函数是逐元素循环最近的 async 收口点，
+    // 循环里逐条 UPSERT 会把「一个坏文件」变成「解析卡死」。
+    if let Err(error) = crate::data_interface::parse_error::flush().await {
+        log::warn!("{error:#}");
     }
     Ok(out)
 }

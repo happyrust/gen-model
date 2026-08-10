@@ -393,6 +393,29 @@ impl AiosDBManager {
             log::warn!("监控目录解析失败: {problem}");
             eprintln!("监控目录解析失败: {problem}");
         }
+        // 逐项目归档：一个项目解析不出库目录，外在表现就是「服务在跑但这个项目什么都
+        // 不更新」，而启动时那两行早就滚走了。按项目名归行，修好之后下次启动自动销账。
+        for project in &plan.projects {
+            match project.problem.as_deref() {
+                Some(problem) => {
+                    crate::data_interface::parse_error::note_dir_failure(&project.project, problem)
+                }
+                None => crate::data_interface::parse_error::note_dir_success(&project.project),
+            }
+        }
+        // 这份名单来自配置、就是全集，所以不在名单里的在册项目一律销账：从配置里
+        // 删掉一个项目之后它再也不会被 note 到，逐目标的成功销账永远够不着它。
+        crate::data_interface::parse_error::note_dir_scope(
+            &plan
+                .projects
+                .iter()
+                .map(|project| project.project.clone())
+                .collect(),
+        )
+        .await;
+        if let Err(error) = crate::data_interface::parse_error::flush().await {
+            log::warn!("{error:#}");
+        }
         let mut watcher = PdmsWatcher::new(db_paths);
         #[cfg(feature = "debug_watch")]
         {

@@ -45,6 +45,9 @@ rvm-rs = { git = "https://github.com/happyrust/rvm-rs", optional = true }
 anyhow = "1.0.57"
 serde_json = "1.0.81"
 hex = "0.4.3"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+zip = { version = "4.0.0", default-features = false, features = ["deflate"] }
 once_cell = "1.12.0"
 futures = "^0.3"
 smol_str = "0.3.2"
@@ -79,7 +82,7 @@ parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", re
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "777e238b", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/pdms-io.git", rev = "e2c2636c940c9a12aebe2741f7e9851d89b4e85a" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "5c9e00e3c46f7d6f7c548583020b66e0ad23368a" }
 dpcsync = { git = "https://gitee.com/happydpc/dpc-sync.git" }
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -151,13 +154,15 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
 #
 # 前提：下面三个目录必须存在，且停在与上面 rev 对应的分支上。
 #
-#   ../rs-core-adr017          codex/adr017-read-routing      = 777e238b
-#   ../../dependency-pin-parse newrepo-main                   = cc4cbca
-#   ../pdms-io-integration     codex/paged-session-integration = 76b83ed
+#   ../rs-core-adr017                 codex/adr017-read-routing  = 777e238b
+#   ../../old-parse-pdms-db-paged     codex/record-boundary-scan = 4bf26ec6
+#   ../../old-pdms-io-record-boundary codex/record-boundary-pin  = 5c9e00e3
 #
-# 同名克隆有好几份，别接错：plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
-# 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io；`pdms_io` 兼容包的
-# revision 则来自 plant-code/pdms-io-integration。
+# 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
+# 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。
+# 还有个「看着像但落后」的诱饵：plant-code/dependency-pin-parse 停在
+# newrepo-main = 03c1cdb，接上去能编过，但会把上面 rev 才有的 record-boundary
+# 修复悄悄退掉。
 #
 # 打开状态下 Cargo.lock 里这三个包的 `source` 行会消失，所以**不能带着它推 main**。
 # pre-push 守卫（.githooks/pre-push）会挡住，不必靠记性。
@@ -167,10 +172,10 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
 # aios_core = { path = "../rs-core-adr017" }
 #
 # [patch."https://github.com/happyrust/old-parse-pdms-db.git"]
-# parse_pdms_db = { path = "../../dependency-pin-parse" }
+# parse_pdms_db = { path = "../../old-parse-pdms-db-paged" }
 #
-# [patch."https://github.com/happyrust/pdms-io.git"]
-# pdms_io = { path = "../pdms-io-integration" }
+# [patch."https://github.com/happyrust/old-pdms-io.git"]
+# pdms_io = { path = "../../old-pdms-io-record-boundary" }
 # LOCAL-DEPS PATCH END
 
 [build-dependencies]

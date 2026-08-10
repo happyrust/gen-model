@@ -722,6 +722,7 @@ mod tests {
                 dbnum,
                 start_sesno: end_sesno,
                 end_sesno,
+                end_sesno_time: None,
                 plan: plan.clone(),
                 window_statements: Vec::new(),
                 cache_refnos: Vec::new(),

@@ -648,6 +648,10 @@ fn start_stack(paths: &Paths, out: &Path, keep: bool) -> Result<Stack> {
                 .current_dir(&paths.repo)
                 .env("DB_OPTION_FILE", config_no_ext)
                 .env("RUST_MIN_STACK", "67108864")
+                // 服务默认冷启动（startup_autorun=false，一条增量都不消费），
+                // 而本套件整套断言都建立在「批次真的被执行」之上，必须显式打开。
+                // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
+                .env("AIOS_STARTUP_AUTORUN", "1")
                 .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
             &out.join("stack-service.log"),
         )?,

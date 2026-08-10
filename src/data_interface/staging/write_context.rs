@@ -34,6 +34,9 @@ pub(crate) struct StagedFinalize {
     pub dbnum: u32,
     pub start_sesno: i32,
     pub end_sesno: i32,
+    /// 右端那条保存的写入时刻（RFC3339），随水位一起落库（plant-ui ADR-0019 Q6）。
+    /// 在解析窗口时读一次带过来——收口发生在写回时刻，那时再开文件已是另一件事了。
+    pub end_sesno_time: Option<String>,
     pub plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
     pub window_statements: Vec<String>,
     pub cache_refnos: Vec<aios_core::RefnoEnum>,
@@ -392,6 +395,7 @@ mod tests {
                 dbnum: 7994,
                 start_sesno: 4,
                 end_sesno: 9,
+                end_sesno_time: Some("2026-08-07T14:10:00+08:00".into()),
                 plan,
                 window_statements: vec!["UPSERT datacenter_version:x SET ok = true;".into()],
                 cache_refnos: Vec::new(),
@@ -419,6 +423,13 @@ mod tests {
         let tail = window.render_finalize_tail().await.expect("render tail");
         assert!(tail.contains("datacenter_version:x"), "{tail}");
         assert!(tail.contains("dbnum_watermark:7994"), "{tail}");
+        // 登记时带的右端时刻必须一路走到收口语句里（plant-ui ADR-0019 Q6）：
+        // 暂存路径的水位是在写回那一刻推的，那时文件早已不在手上。
+        assert!(
+            tail.contains("applied_sesno_time = IF 9 >= (applied_sesno ?: 0)"),
+            "{tail}"
+        );
+        assert!(tail.contains("2026-08-07T14:10:00+08:00"), "{tail}");
         window.drop_database().await.expect("cleanup");
     }
 

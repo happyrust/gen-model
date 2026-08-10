@@ -28,9 +28,11 @@ pub struct E3dDriver {
 
 impl E3dDriver {
     pub fn from_env(repo: &Path) -> Result<Self> {
+        // The E3D31-L3 work copy no longer exists on this host, so the default is
+        // the live 3.1 project root the launcher also defaults to.
         let project_work = env_path(
             "L3_PROJECT_WORK",
-            r"D:\AVEVA\Projects\E3D31-L3\AvevaMarineSample",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample",
         );
         Ok(Self {
             launcher: env_path(
@@ -165,18 +167,23 @@ impl E3dDriver {
         loop {
             if let Some(status) = launcher.try_wait()? {
                 let log = fs::read_to_string(&driver_log).unwrap_or_default();
-                if !status.success() {
+                // The wrapper's own markers are the verdict, not the exit code:
+                // the shadow install reliably dies during DLL_PROCESS_DETACH,
+                // long after L3-DONE is on disk, so a dirty exit says nothing
+                // about the macro.  A macro that died mid-run still fails here,
+                // because it never gets to write L3-DONE.
+                let reached_command_loop = contains(&alive_log, "L3-ALIVE");
+                let finished_macro = contains(&done_log, "L3-DONE");
+                if !reached_command_loop || !finished_macro {
                     terminate_pid_file(&pid_file).context("clean E3D after launcher failure")?;
-                    bail!("E3D TTY driver failed for {label}: {status}; log: {log}");
+                    bail!(
+                        "E3D TTY driver failed for {label}: {status}; reached command loop: \
+                         {reached_command_loop}, finished macro: {finished_macro}; log: {log}"
+                    );
                 }
-                ensure!(
-                    contains(&alive_log, "L3-ALIVE"),
-                    "E3D wrapper did not start {label}; log: {log}"
-                );
-                ensure!(
-                    contains(&done_log, "L3-DONE"),
-                    "E3D wrapper did not finish {label}; log: {log}"
-                );
+                if !status.success() {
+                    eprintln!("E3D TTY {label} completed, then exited dirty: {status}");
+                }
                 // QUIT can let the launcher process exit a few seconds before
                 // E3D's console companion has released the project claim.
                 // Starting the next single-purpose session in that window

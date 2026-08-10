@@ -314,10 +314,16 @@ pub async fn prune_roots_stale_model_rows(
 /// 它还是某间房的面板，另有 `room_relate` 出边与 `room_panel_relate` 入边。这里不按
 /// noun 分情况：`pe.noun` 此刻可能已随软删一起不可靠，而对非面板元素那两条子句本来
 /// 就是空操作。
+/// 走图遍历取边、再按 id 整批删，**不要**写成 `WHERE in IN [..] OR out IN [..]`：
+/// 那个 `OR` 会让 `(in, out)` 复合索引整个失效，退化成边表全扫。同一个构件的 2 条边，
+/// 全扫写法实测 558.8ms，图遍历 2.1ms（`room_relate` 现有 6.6 万条边，全扫成本还随
+/// 边数线性涨）。`->room_relate` 与 `<-room_relate` 合起来正好等价于那两个方向。
 fn render_room_membership_delete(pe_keys: &str) -> String {
     format!(
-        "DELETE room_relate WHERE in IN [{pe_keys}] OR out IN [{pe_keys}];\n\
-         DELETE room_panel_relate WHERE in IN [{pe_keys}] OR out IN [{pe_keys}];"
+        "DELETE array::flatten(SELECT VALUE array::concat(->room_relate, <-room_relate) \
+         FROM [{pe_keys}]);\n\
+         DELETE array::flatten(SELECT VALUE array::concat(->room_panel_relate, \
+         <-room_panel_relate) FROM [{pe_keys}]);"
     )
 }
 
@@ -472,12 +478,13 @@ mod tests {
         for table in ["room_relate", "room_panel_relate"] {
             assert!(
                 sql.contains(&format!(
-                    "DELETE {table} WHERE in IN [pe:7997_1, pe:7997_2] \
-                     OR out IN [pe:7997_1, pe:7997_2]"
+                    "array::concat(->{table}, <-{table}) FROM [pe:7997_1, pe:7997_2]"
                 )),
-                "{sql}"
+                "{table} 的两个方向都要取到: {sql}"
             );
         }
+        // 边表全扫会让删除随边数线性变慢，回退即红。
+        assert!(!sql.contains(" OR out IN ["), "{sql}");
     }
 
     #[tokio::test]

@@ -15,7 +15,13 @@ use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
-const ROOM_COVERAGE_BARRIER: &str = "room_panel_coverage_barrier:current";
+/// 判不了的在册面板登记表。
+///
+/// 曾经它是项目级**屏障**：只要有一块面板缺几何，全库房间重算整个停摆（本项目现场
+/// 一度是 2 块面板压住 2580 个房间目标，而那两块的修复根早已进死信，屏障永远解不开）。
+/// 现在它只是一份**缺陷清单**——替换范围的排除由元素分支按面板逐块处理，这里只负责
+/// 记账、驱动修复、以及在清单变化时说一声。
+const ROOM_PANEL_DEFECTS: &str = "room_panel_coverage_barrier:current";
 const QUERY_CHUNK: usize = 500;
 // 空闲轮一页的上界（ADR-011 2026-08-09 修订）。页内 fresh 根合并成**一次**
 // `generate_roots` 调用（ADR-012）：解析 → 实例 → 网格的启动开销按页付而不是按根付；
@@ -61,6 +67,10 @@ pub struct PendingModelWork {
     pub dbnum: u32,
     pub db_type: String,
     pub source_end_sesno: i32,
+    /// 来源那条保存的写入时刻（RFC3339）。旧行、以及不认领会话号的行
+    /// （房间任务、反向级联派生根）都是 `None`。
+    #[serde(default)]
+    pub source_end_sesno_time: Option<String>,
     pub action: ModelWorkAction,
     pub target_refno: String,
     #[serde(default)]
@@ -189,7 +199,7 @@ fn render_missing_panel_repair_upsert(group: &PanelRepairGroup) -> String {
     )
 }
 
-fn render_set_room_coverage_barrier(groups: &[PanelRepairGroup]) -> String {
+fn render_set_room_panel_defects(groups: &[PanelRepairGroup]) -> String {
     let panels = groups
         .iter()
         .flat_map(|group| group.required_panels.iter())
@@ -202,29 +212,92 @@ fn render_set_room_coverage_barrier(groups: &[PanelRepairGroup]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "UPSERT {ROOM_COVERAGE_BARRIER} SET status = 'repairing', \
+        "UPSERT {ROOM_PANEL_DEFECTS} SET status = 'repairing', \
          missing_panels = [{panels}], repair_roots = [{roots}], updated_at = time::now();"
     )
 }
 
-fn render_clear_room_coverage_barrier() -> String {
-    format!("DELETE {ROOM_COVERAGE_BARRIER};")
+fn render_clear_room_panel_defects() -> String {
+    format!("DELETE {ROOM_PANEL_DEFECTS};")
 }
 
-async fn room_coverage_barrier_active() -> anyhow::Result<bool> {
-    let mut response = SUL_DB
-        .query(format!("RETURN record::exists({ROOM_COVERAGE_BARRIER});"))
-        .await?
-        .check()?;
-    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+/// 当前登记在案的缺陷面板，已排序——只用来判断这一轮要不要再说一遍。
+///
+/// 读不出来时当作「和上次不一样」：宁可多打一行，也别让一次查询抖动把真正的缺陷
+/// 变化吞掉。
+async fn read_room_panel_defects() -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        missing_panels: Vec<String>,
+    }
+    let query = format!("SELECT missing_panels FROM {ROOM_PANEL_DEFECTS};");
+    let Ok(mut response) = SUL_DB.query(query).await.and_then(|r| r.check()) else {
+        return Vec::new();
+    };
+    let mut panels = response
+        .take::<Vec<Row>>(0)
+        .map(|rows| {
+            rows.into_iter()
+                .next()
+                .map(|row| row.missing_panels)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    panels.sort_unstable();
+    panels
 }
 
-async fn clear_room_coverage_barrier() -> anyhow::Result<()> {
+async fn clear_room_panel_defects() -> anyhow::Result<()> {
     SUL_DB
-        .query(render_clear_room_coverage_barrier())
+        .query(render_clear_room_panel_defects())
         .await?
         .check()?;
     Ok(())
+}
+
+/// 登记这一轮判不了的在册面板，并把它们的生成根推进 durable 修复队列。
+///
+/// 这里**不**再阻断任何房间重算：元素分支已改为在 DELETE 上按面板让开
+/// （`room_model::render_element_relate_write`），一块缺几何的面板只影响它自己的
+/// 那几条边。所以本函数的职责退化为「记账 + 尝试修」，失败也只是记一笔。
+///
+/// 只在缺陷集合**变化时**打印。它每 30 秒被空闲轮碰一次，逐轮打印会把一个静态
+/// 事实刷成噪音，真正该被看见的「又多了一块」反而淹掉。
+async fn record_room_panel_defects(registered_rooms: usize, missing: &[RefnoEnum]) {
+    let previous = read_room_panel_defects().await;
+    let mut current = missing
+        .iter()
+        .map(RefnoEnum::to_pdms_str)
+        .collect::<Vec<_>>();
+    current.sort_unstable();
+    let changed = previous != current;
+
+    if changed {
+        println!(
+            "[房间缺陷] {registered_rooms} 间在册房间的面板里有 {} 块没有可用几何（{}）：\
+             指向它们的存量归属边本轮不改写，其余房间目标照常重算",
+            current.len(),
+            current
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    match enqueue_missing_panel_repairs(missing).await {
+        Ok(repair) if changed => println!(
+            "[房间缺陷] 已登记并归并为 {} 个带几何后置条件的生成根（{} 块面板）",
+            repair.roots, repair.panels
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            if changed {
+                println!("[房间缺陷] 缺失面板模型补偿入队失败: {error:#}");
+            }
+        }
+    }
 }
 
 fn group_missing_panel_repairs(
@@ -286,7 +359,7 @@ async fn enqueue_missing_panel_repairs(
             .map(RefnoEnum::to_pdms_str)
             .collect::<Vec<_>>();
         anyhow::bail!(
-            "{} 块缺失面板中有 {} 块无法解析生成根（例如 {}），未建立房间覆盖屏障",
+            "{} 块缺失面板中有 {} 块无法解析生成根（例如 {}），未登记为房间面板缺陷",
             missing_panels.len(),
             missing_panels.len().saturating_sub(resolved.len()),
             unresolved.join(", ")
@@ -311,13 +384,11 @@ async fn enqueue_missing_panel_repairs(
             })?;
     }
     SUL_DB
-        .query(render_set_room_coverage_barrier(&groups))
+        .query(render_set_room_panel_defects(&groups))
         .await
-        .map_err(|error| anyhow::anyhow!("persist room coverage barrier failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("persist room panel defects failed: {error}"))?
         .check()
-        .map_err(|error| {
-            anyhow::anyhow!("persist room coverage barrier statement failed: {error}")
-        })?;
+        .map_err(|error| anyhow::anyhow!("persist room panel defect statement failed: {error}"))?;
     Ok(PanelRepairEnqueueReport {
         roots: groups.len(),
         panels,
@@ -331,7 +402,9 @@ pub async fn enqueue_plan(plan: &ModelUpdatePlan) -> anyhow::Result<()> {
             .query(
                 chunk
                     .iter()
-                    .map(render_upsert)
+                    // 这条路只入队工作项，手上没有窗口右端的时刻——来源时刻由收口
+                    // 事务那一份 upsert 补（同一行、同一条单调条件，不会互相覆盖）。
+                    .map(|item| render_upsert(item, None))
                     .collect::<Vec<_>>()
                     .join("\n"),
             )
@@ -429,7 +502,8 @@ fn room_recalc_items(changes: &[AabbChange]) -> Vec<ModelWorkItem> {
 pub(crate) fn render_room_recalc_upserts(changes: &[AabbChange]) -> String {
     room_recalc_items(changes)
         .iter()
-        .map(render_upsert)
+        // 房间任务不认领来源保存（同一块面板被不同库轮流触发），来源段整个不摆。
+        .map(|item| render_upsert(item, None))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -466,7 +540,26 @@ fn revives_unconditionally(item: &ModelWorkItem) -> bool {
     item.action.is_room_recalc() || item.source_end_sesno == 0
 }
 
-fn render_upsert(item: &ModelWorkItem) -> String {
+/// 窗口右端那条保存的时刻只属于**认领了这个右端**的任务（同 T2 的端点守卫）。
+///
+/// 一份收口里的任务并非都来自同一条保存：房间任务与反向级联派生根
+/// （[`revives_unconditionally`] 那两类）`source_end_sesno` 是 0，如实不认领来源；
+/// 号对不上就不贴时刻，宁可让待重试卡的来源段整个不摆，也不能把 A 的时刻标在 B 上。
+fn source_time_for<'a>(
+    item: &ModelWorkItem,
+    window_end_sesno: i32,
+    window_end_time: Option<&'a str>,
+) -> Option<&'a str> {
+    if item.source_end_sesno == 0 || item.source_end_sesno != window_end_sesno {
+        return None;
+    }
+    window_end_time
+}
+
+/// `source_end_sesno_time` 是**那条来源保存的写入时刻**（RFC3339），待重试卡上的
+/// `来源保存 08-05 18:24`（plant-ui ADR-0019 Q7）。与水位那一列同一把尺子、同一种
+/// 写法：跟着 `source_end_sesno` 的单调条件走，读不到就整条子句都不写。
+fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> String {
     let id = record_id(item);
     let db_type = escape_surql_str(&item.db_type);
     let target = escape_surql_str(&item.target_refno);
@@ -511,6 +604,16 @@ fn render_upsert(item: &ModelWorkItem) -> String {
         format!("noun = '{noun}'"),
     ];
     clauses.extend(revival_clauses);
+    // 时刻跟着序号那条单调写入走：本次来源没有比行上已知的更新时，时刻不许退回去
+    // （与水位那一列同一个坑）。它读的同样是 `source_end_sesno` 的**旧值**，所以
+    // 和复活子句一样排在覆盖之前。
+    if let Some(time) = source_end_sesno_time {
+        clauses.push(format!(
+            "source_end_sesno_time = IF {end_sesno} >= (source_end_sesno?:0) \
+             THEN '{}' ELSE source_end_sesno_time END",
+            escape_surql_str(time)
+        ));
+    }
     // 复活子句读的是 `source_end_sesno` 的**旧值**，所以必须排在它被覆盖之前。
     clauses.push(format!(
         "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
@@ -590,9 +693,43 @@ pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result
 
 /// The monotonic watermark advance for one `dbnum`. Rendered in one place so
 /// the window and baseline transactions cannot drift apart.
-fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
+///
+/// `end_sesno_time` 是右端那条保存在 E3D 里的**写入时刻**（RFC3339，ADR-020 那把尺子）。
+/// 存它的唯一理由是回退阻断卡（plant-ui ADR-0019 Q6）：文件被换回旧版本之后，
+/// `applied_sesno` 那一页在当前文件里读不到了，它的写入时刻现读不出来——水位推进的
+/// 这一刻是唯一能顺手存下来的时机。
+///
+/// 两条硬规矩：
+///
+/// 1. **时刻跟着序号那条单调条件走。** 序号是 `math::max`，刻意不回退；时刻若无条件
+///    赋值，一个 `end_sesno` 低于存量水位的批次会让序号不动、时刻却退回去，而阻断卡
+///    恰好靠这一对说话。条件子句必须排在 `applied_sesno` 被覆盖**之前**——SurrealDB
+///    的 `SET` 顺序求值，排在后面读到的就是刚写完的新值（同 `render_upsert` 的复活子句）。
+/// 2. **拿不到时刻就整条子句都不写**（不是写 `NONE`），让旧行与读不到时刻的新行走同一
+///    条降级路径：界面说「应用时刻无记录」，**绝不拿挂钟 `applied_at` 兜底**——回退本来
+///    就是时间倒挂场景，两把尺子混用最容易骗人。
+///
+/// 存的是 RFC3339 **字符串**而不是 `type::datetime`，与本表其余时间列（`applied_at` /
+/// `scanned_at` / `file_modified_at`）不同：那些没人读回 Rust，而这一列要原样露给界面。
+/// 走 datetime 读回来会被规范化成 UTC，同一张阻断卡上「文件端」（现读，带 +08:00）与
+/// 「已应用端」就会差八个小时——同一条保存两种说法，正是这轮改造要消灭的东西。
+pub(crate) fn render_watermark_advance(
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+) -> String {
+    let time_clause = end_sesno_time
+        .map(|time| {
+            format!(
+                "applied_sesno_time = IF {end_sesno} >= (applied_sesno ?: 0) \
+                 THEN '{}' ELSE applied_sesno_time END, ",
+                escape_surql_str(time)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum}, \
+         {time_clause}\
          applied_sesno = math::max([applied_sesno?:0, {end_sesno}]), \
          sesno = math::max([sesno?:0, {end_sesno}]), \
          applied_at = time::now(), updated_at = time::now();"
@@ -609,11 +746,21 @@ fn render_watermark_advance(dbnum: u32, end_sesno: i32) -> String {
 pub(crate) fn render_finalize_tail(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
-    render_finalize_tail_with_effects(dbnum, end_sesno, plan, window_statements, &[], &[], &[])
-        .expect("empty finalize effects are valid")
+    render_finalize_tail_with_effects(
+        dbnum,
+        end_sesno,
+        end_sesno_time,
+        plan,
+        window_statements,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("empty finalize effects are valid")
 }
 
 /// Make AABB-derived room work part of the same durable plan that advances the watermark.
@@ -623,6 +770,12 @@ pub(crate) fn merge_room_recalc_changes(
     end_sesno: i32,
     changes: &HashMap<RefnoEnum, String>,
 ) {
+    // 暂存链上房间目标真正变成 durable pending 行的唯一入口（窗口收口与崩溃重放
+    // 检查点都经这里），所以房间增量的开关也钉在这里，而不是更早的
+    // `defer_room_changes`——包围盒变了这件事照旧记进窗口意图，只是不落成队列行。
+    if !crate::options::room_incremental() {
+        return;
+    }
     let mut existing = plan
         .work_items
         .iter()
@@ -641,6 +794,7 @@ pub(crate) fn merge_room_recalc_changes(
 pub(crate) fn render_finalize_tail_with_effects(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
     refresh_refnos: &[String],
@@ -648,7 +802,11 @@ pub(crate) fn render_finalize_tail_with_effects(
     settled_regen: &[(String, u64)],
 ) -> anyhow::Result<String> {
     let mut statements = window_statements.to_vec();
-    statements.extend(plan.work_items.iter().map(render_upsert));
+    statements.extend(
+        plan.work_items
+            .iter()
+            .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time))),
+    );
     if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
         statements.push(
             crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
@@ -666,7 +824,7 @@ pub(crate) fn render_finalize_tail_with_effects(
     statements.extend(settled_regen.iter().map(|(root, revision)| {
         render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
     }));
-    statements.push(render_watermark_advance(dbnum, end_sesno));
+    statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
     statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
     Ok(statements.join("\n"))
@@ -679,12 +837,13 @@ pub(crate) fn render_finalize_tail_with_effects(
 fn render_finalize_transaction(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> String {
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        render_finalize_tail(dbnum, end_sesno, plan, window_statements)
+        render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements)
     )
 }
 
@@ -694,9 +853,18 @@ fn render_finalize_transaction(
 /// removal: a baseline is not a replayable window, so it never has an
 /// `increment_update_attempt` row, and deleting one here could only discard
 /// another path's crash-recovery state.
-fn render_baseline_transaction(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePlan) -> String {
-    let mut statements: Vec<String> = plan.work_items.iter().map(render_upsert).collect();
-    statements.push(render_watermark_advance(dbnum, end_sesno));
+fn render_baseline_transaction(
+    dbnum: u32,
+    end_sesno: i32,
+    end_sesno_time: Option<&str>,
+    plan: &ModelUpdatePlan,
+) -> String {
+    let mut statements: Vec<String> = plan
+        .work_items
+        .iter()
+        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
+        .collect();
+    statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
         statements.join("\n")
@@ -714,6 +882,7 @@ fn render_baseline_transaction(dbnum: u32, end_sesno: i32, plan: &ModelUpdatePla
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> anyhow::Result<()> {
@@ -721,6 +890,7 @@ pub async fn finalize_attempt(
         .query(render_finalize_transaction(
             dbnum,
             end_sesno,
+            end_sesno_time,
             plan,
             window_statements,
         ))
@@ -746,10 +916,16 @@ pub async fn finalize_attempt(
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,
+    end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
 ) -> anyhow::Result<()> {
     SUL_DB
-        .query(render_baseline_transaction(dbnum, end_sesno, plan))
+        .query(render_baseline_transaction(
+            dbnum,
+            end_sesno,
+            end_sesno_time,
+            plan,
+        ))
         .await
         .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
         .check()
@@ -873,7 +1049,8 @@ pub async fn ensure_regen_pending(root_refno: &str, noun: &str) -> anyhow::Resul
         noun: noun.to_string(),
     };
     SUL_DB
-        .query(render_upsert(&item))
+        // 不认领会话号的行本来就没有来源保存可说，来源段整个不摆。
+        .query(render_upsert(&item, None))
         .await
         .map_err(|error| anyhow::anyhow!("persist ensure pending {root_refno} failed: {error}"))?
         .check()
@@ -1199,20 +1376,16 @@ async fn verify_required_panel_geometry(
         );
     }
 
-    // 局部根满足后再看项目级屏障；只有 497 块在册面板全部可用才放行591个构件。
+    // 局部根满足后再对一次全局缺陷清单：全齐了就销账，没齐就把最新缺口记上。
     let panel_index = room_model::load_panel_index(&mgr.db_option, &rooms).await?;
     if panel_index.ensure_complete().is_ok() {
-        clear_room_coverage_barrier().await?;
-        println!("[房间增量] 在册面板几何已完整，解除房间覆盖屏障");
+        clear_room_panel_defects().await?;
+        println!("[房间缺陷] 在册面板几何已完整，缺陷登记已销账");
     } else {
         // 修复波次执行期间可能又有 PANE 新增或丢失几何。把最新缺口并入 durable
         // 根任务；若恰好落到当前根，revision 会递增，使下面的旧令牌收口命中零行。
-        // 这样原波次全部结束后仍有工作能够最终解除屏障。
-        let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
-        println!(
-            "[房间增量] 全局面板覆盖仍不完整：刷新 {} 块面板 / {} 个修复根",
-            repair.panels, repair.roots
-        );
+        // 这样原波次全部结束后仍有工作能够最终把清单清空。
+        record_room_panel_defects(rooms.rooms.len(), panel_index.missing_panels()).await;
     }
     Ok(())
 }
@@ -1262,14 +1435,10 @@ async fn verify_repair_jobs_page(
 
     let panel_index = room_model::load_panel_index(&mgr.db_option, rooms).await?;
     if panel_index.ensure_complete().is_ok() {
-        clear_room_coverage_barrier().await?;
-        println!("[房间增量] 在册面板几何已完整，解除房间覆盖屏障");
+        clear_room_panel_defects().await?;
+        println!("[房间缺陷] 在册面板几何已完整，缺陷登记已销账");
     } else {
-        let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
-        println!(
-            "[房间增量] 全局面板覆盖仍不完整：刷新 {} 块面板 / {} 个修复根",
-            repair.panels, repair.roots
-        );
+        record_room_panel_defects(rooms.rooms.len(), panel_index.missing_panels()).await;
     }
 
     for (index, registered) in per_job {
@@ -1460,6 +1629,43 @@ async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &
 /// used to — aborted the whole round on one flaky `DELETE`, so every other
 /// `dbnum` queued behind it was skipped and the target that had just generated
 /// successfully paid for a second full `gen_all_geos_data` on the next round.
+/// 跑一件活，**panic 与 Err 走同一条记账路径**。
+///
+/// panic 过去是漏网的那一类：`execute_item` 里炸开会一路展开出 drain、出空闲轮，
+/// 被 `batch_worker::isolate_panic` 在最外面接住。于是这一行的 `last_error` 没写、
+/// `attempts` 没涨、[`MAX_ATTEMPTS`] 那道死信门永远轮不到它，而下一个 `IDLE_WAKE`
+/// 又把同一件活原样重演一遍——现场 2026-08-08 的日志里，同一句
+/// `range end index 172 out of range for slice of length 168` 就这么每 30 秒刷一次、
+/// 刷了 46 次。
+///
+/// panic 只是这件活失败的一种形式，账要记在它自己那一行上：错误文本进
+/// `last_error`，次数进 `attempts`，连撞 [`MAX_ATTEMPTS`] 就和别的失败一样变成
+/// 可查的死信，而不是变成一个没人负责的循环。
+async fn execute_item_isolated(mgr: &AiosDBManager, job: &PendingModelWork) -> anyhow::Result<()> {
+    match crate::data_interface::batch_worker::isolate_panic(execute_item(mgr, job)).await {
+        Ok(result) => result,
+        Err(reason) => anyhow::bail!("panic: {reason}"),
+    }
+}
+
+/// 房间任务同理：panic 记进这一行的 `last_error`，不再展开出整轮 drain。
+async fn run_room_job_isolated(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    panels: &room_model::PanelIndex,
+    history: &room_model::ElementRoomHistory,
+    job: &PendingModelWork,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    match crate::data_interface::batch_worker::isolate_panic(run_room_job(
+        db_option, rooms, panels, history, job,
+    ))
+    .await
+    {
+        Ok(result) => result,
+        Err(reason) => anyhow::bail!("panic: {reason}"),
+    }
+}
+
 async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut DrainReport) {
     let root_lock = (job.action == ModelWorkAction::RegenRoot)
         .then(|| crate::data_interface::manual_update::generation_root_lock(&job.target_refno));
@@ -1467,7 +1673,7 @@ async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut Drain
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
-    let outcome = match execute_item(mgr, job).await {
+    let outcome = match execute_item_isolated(mgr, job).await {
         Ok(()) => delete_work(job).await,
         Err(error) => Err(error),
     };
@@ -1803,7 +2009,11 @@ pub struct RoomTargetCounts {
     pub elements: usize,
     /// 已达重试上限的死信数——自动路径不会再碰它们，只有界面能把它们暴露出来。
     pub dead_letters: usize,
-    /// 面板几何补偿期间由项目级覆盖屏障暂缓的房间目标数。
+    /// 项目级覆盖屏障暂缓的房间目标数。
+    ///
+    /// 屏障已经撤掉（缺几何的面板改为按块让开替换范围，不再冻结全库），所以这个数
+    /// 恒为 0。字段保留是因为它进了 `room_recalc` 任务详情的 JSON，删掉会让既有看板
+    /// 少一个键；留着并说明白，比让消费者去猜一个消失的字段强。
     pub blocked: usize,
 }
 
@@ -1854,11 +2064,6 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
             other => anyhow::bail!("房间目标计数遇到未知 action: {other}"),
         }
     }
-    if room_coverage_barrier_active().await? {
-        counts.blocked = counts.panels + counts.elements;
-        counts.panels = 0;
-        counts.elements = 0;
-    }
     Ok(counts)
 }
 
@@ -1886,36 +2091,6 @@ async fn drain_rooms_selected(
     scope: Option<&RoomDrainScope>,
 ) -> anyhow::Result<DrainReport> {
     let requested = scope.map_or(0, RoomDrainScope::len);
-    if room_coverage_barrier_active().await? {
-        // The probe stays global because it decides whether any destructive room
-        // rewrite is safe. Scoped callers receive a failure summary while their
-        // exact queue rows remain durable for the idle recovery path.
-        let rooms = room_model::load_room_panel_map(db_option).await?;
-        let panel_index = room_model::load_panel_index(db_option, &rooms).await?;
-        if panel_index.ensure_complete().is_ok() {
-            clear_room_coverage_barrier().await?;
-            println!("[房间增量] 覆盖探针确认在册面板几何完整，解除房间覆盖屏障");
-        } else {
-            let repair = enqueue_missing_panel_repairs(panel_index.missing_panels()).await?;
-            println!(
-                "[房间增量] 覆盖屏障刷新：{} 块缺失面板 / {} 个 durable 修复根",
-                repair.panels, repair.roots
-            );
-            let mut report = DrainReport {
-                requested,
-                ..Default::default()
-            };
-            if scope.is_some() {
-                report.record(
-                    0,
-                    format!(
-                        "房间覆盖屏障生效，本任务 {requested} 个目标保留 pending，等待缺失面板模型补偿"
-                    ),
-                );
-            }
-            return Ok(report);
-        }
-    }
 
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
@@ -1952,44 +2127,23 @@ async fn drain_rooms_selected(
         loaded,
         ..Default::default()
     };
+    // 判不了的面板只记账、不阻断：替换范围的排除交给元素分支按面板处理
+    // （`room_model::render_element_relate_write` 的 `in NOT IN`）。此前这里是整轮
+    // 早退，于是一块缺几何的面板就能让全库房间重算无限期停摆。
     let missing = panel_index.missing_panels();
-    if !missing.is_empty() {
-        println!(
-            "{} 间在册房间的面板里有 {} 块没有可用几何（例如 {}）：元素房间任务将保留\
-             pending，避免用不完整索引清除旧归属",
-            rooms.rooms.len(),
-            missing.len(),
-            missing
-                .iter()
-                .take(5)
-                .map(RefnoEnum::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let message = match enqueue_missing_panel_repairs(missing).await {
-            Ok(repair) => {
-                let summary = format!(
-                    "已把 {} 块面板归并为 {} 个带几何后置条件的生成根并建立覆盖屏障",
-                    repair.panels, repair.roots
-                );
-                println!("[房间增量] {summary}");
-                summary
-            }
-            Err(error) => {
-                let summary = format!("缺失面板模型补偿入队失败: {error:#}");
-                println!("[房间增量] {summary}");
-                summary
-            }
-        };
-        report.record(0, message);
-        return Ok(report);
+    if missing.is_empty() {
+        if let Err(error) = clear_room_panel_defects().await {
+            println!("[房间缺陷] 面板几何已完整但缺陷登记没销掉: {error:#}");
+        }
+    } else {
+        record_room_panel_defects(rooms.rooms.len(), missing).await;
     }
 
     let empty_history = room_model::ElementRoomHistory::default();
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
     for job in &panels {
-        match run_room_job(db_option, &rooms, &panel_index, &empty_history, job).await {
+        match run_room_job_isolated(db_option, &rooms, &panel_index, &empty_history, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -2002,24 +2156,6 @@ async fn drain_rooms_selected(
             }
             Err(error) => record_failure(job, &error, &mut report).await,
         }
-    }
-
-    let element_targets = if scope.is_some() {
-        scoped_element_keys.len()
-    } else {
-        global_elements.len()
-    };
-    if element_targets > 0
-        && let Err(error) = panel_index.ensure_complete()
-    {
-        report.record(
-            0,
-            format!(
-                "元素房间阶段因面板索引不完整而保留 {} 个 pending: {error:#}",
-                element_targets
-            ),
-        );
-        return Ok(report);
     }
 
     if let Some(scope) = scope {
@@ -2110,7 +2246,7 @@ async fn drain_room_element_page(
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, rooms, panel_index, history_ref, job).await {
+            match run_room_job_isolated(db_option, rooms, panel_index, history_ref, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
@@ -2258,6 +2394,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    /// 多数用例只关心复活 / 覆盖那几条子句，与来源保存时刻无关。
+    fn render_upsert_no_time(item: &ModelWorkItem) -> String {
+        render_upsert(item, None)
+    }
+
     /// 缺失面板触发的模型补偿以“根 + 必需面板集合”为持久事实：同一缺口重复探测
     /// 不应不断推高 revision；只有发现新的缺失面板才产生一个新收口版本。
     #[tokio::test(flavor = "multi_thread")]
@@ -2326,6 +2467,7 @@ mod tests {
             dbnum: 0,
             db_type: "DESI".into(),
             source_end_sesno: 0,
+            source_end_sesno_time: None,
             action: ModelWorkAction::RegenRoot,
             target_refno: "4000000001/10".into(),
             noun: "CWALL".into(),
@@ -2388,32 +2530,40 @@ mod tests {
         );
     }
 
+    /// 缺陷面板要一直被记账和驱动修复，但**不得**再让整轮 drain 早退。
+    ///
+    /// 早退曾经是这里的处置，代价是 2 块缺几何的面板把 2580 个房间目标冻了 5 个多
+    /// 小时——而它们的修复根早就撞满 `MAX_ATTEMPTS` 进了死信，屏障永远解不开。现在
+    /// 排除替换范围由元素分支按面板做，drain 只管记账、修、然后继续往下跑。
     #[test]
-    fn an_active_coverage_barrier_still_refreshes_new_panel_gaps() {
+    fn panel_defects_are_recorded_without_halting_the_room_drain() {
         let source = include_str!("model_update_pending.rs");
         let verify = source
             .split_once("async fn verify_required_panel_geometry(")
             .expect("verification helper")
             .1
-            .split_once("#[derive(Debug, Default)]")
+            .split_once("/// 一页修复根的验收结论")
             .expect("verification helper end")
             .0;
         let room_drain = source
-            .split_once("pub async fn drain_rooms(")
+            .split_once("async fn drain_rooms_selected(")
             .expect("room drain")
             .1
-            .split_once("// 两侧分开取")
-            .expect("barrier branch end")
+            .split_once("let empty_history")
+            .expect("drain 的缺陷分支必须在元素历史加载之前结束")
             .0;
 
         assert!(
-            verify.contains("enqueue_missing_panel_repairs(panel_index.missing_panels()).await?"),
+            verify.contains("record_room_panel_defects("),
             "完成旧修复根时必须把全局新缺口并入 durable 队列"
         );
         assert!(
-            room_drain
-                .contains("enqueue_missing_panel_repairs(panel_index.missing_panels()).await?"),
-            "屏障期间仍必须运行只修复、不改房间边的覆盖探针"
+            room_drain.contains("record_room_panel_defects("),
+            "drain 仍必须登记缺陷面板并驱动修复: {room_drain}"
+        );
+        assert!(
+            !room_drain.contains("return Ok(report);"),
+            "缺陷面板不得让整轮 drain 早退: {room_drain}"
         );
     }
 
@@ -2441,12 +2591,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn incomplete_panel_index_uses_a_durable_coverage_barrier() {
+    async fn incomplete_panel_index_is_recorded_as_a_durable_defect_list() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
         db.use_ns("test")
-            .use_db("room_coverage_barrier")
+            .use_db("room_panel_defects")
             .await
             .expect("select fixture db");
         let groups = vec![PanelRepairGroup {
@@ -2455,18 +2605,18 @@ mod tests {
             required_panels: vec!["4000000001/11".into(), "4000000001/12".into()],
         }];
 
-        db.query(render_set_room_coverage_barrier(&groups))
+        db.query(render_set_room_panel_defects(&groups))
             .await
-            .expect("set barrier")
+            .expect("set defects")
             .check()
-            .expect("set barrier statement");
+            .expect("set defects statement");
         let mut response = db
             .query("SELECT status, missing_panels, repair_roots FROM room_panel_coverage_barrier:current;")
             .await
-            .expect("read barrier")
+            .expect("read defects")
             .check()
-            .expect("read barrier statement");
-        let rows: Vec<serde_json::Value> = response.take(0).expect("decode barrier");
+            .expect("read defects statement");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode defects");
         assert_eq!(rows[0]["status"], "repairing");
         assert_eq!(rows[0]["missing_panels"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -2474,18 +2624,65 @@ mod tests {
             serde_json::json!(["4000000001/10"])
         );
 
-        db.query(render_clear_room_coverage_barrier())
+        db.query(render_clear_room_panel_defects())
             .await
-            .expect("clear barrier")
+            .expect("clear defects")
             .check()
-            .expect("clear barrier statement");
+            .expect("clear defects statement");
         let mut response = db
             .query("RETURN record::exists(room_panel_coverage_barrier:current);")
             .await
-            .expect("read cleared barrier")
+            .expect("read cleared defects")
             .check()
             .expect("read cleared statement");
         assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(false));
+    }
+
+    /// 一件活 panic 了，账要记在它自己那一行上，而不是展开出去变成空闲轮的事。
+    ///
+    /// 漏这一层的代价在现场量过：`range end index 172 out of range for slice of
+    /// length 168` 每 30 秒一次、连刷 46 次，因为 panic 一路展开到空闲轮的
+    /// `isolate_panic` 才被接住——那一行的 `last_error` 始终是空的，`attempts` 始终
+    /// 是 0，`MAX_ATTEMPTS` 那道死信门永远轮不到它。
+    #[test]
+    fn a_panicking_job_lands_in_its_own_error_ledger() {
+        let source = include_str!("model_update_pending.rs");
+        let run_one = source
+            .split_once("async fn run_one(")
+            .expect("run_one must exist")
+            .1
+            .split_once("fn render_drain_select")
+            .expect("run_one must end before render_drain_select")
+            .0;
+
+        assert!(
+            run_one.contains("execute_item_isolated(mgr, job)"),
+            "run_one 必须走隔离版执行，否则 panic 绕开 record_failure: {run_one}"
+        );
+        assert!(
+            !run_one.contains("execute_item(mgr, job)"),
+            "裸 execute_item 会让 panic 展开出整轮 drain: {run_one}"
+        );
+
+        // 两条房间路径（面板与元素）也都必须走隔离版。切片而不是全文搜索：
+        // 断言字符串自己也含这个名字，全文计数会把测试本身数进去。
+        let room_drains = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("drain_rooms_selected must exist")
+            .1
+            .split_once("async fn load_room_jobs(")
+            .expect("两个房间执行点都在 load_room_jobs 之前")
+            .0;
+        assert_eq!(
+            room_drains.matches("run_room_job").count(),
+            room_drains.matches("run_room_job_isolated").count(),
+            "房间执行点里不许有裸调用: {room_drains}"
+        );
+        assert_eq!(
+            room_drains.matches("run_room_job_isolated").count(),
+            2,
+            "面板与元素两条路径都要走隔离版: {room_drains}"
+        );
     }
 
     #[test]
@@ -2586,6 +2783,7 @@ mod tests {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
+            source_end_sesno_time: Some("2026-08-05T18:24:00+08:00".into()),
             action: ModelWorkAction::RegenRoot,
             target_refno: "16777216/5".into(),
             noun: "BRAN".into(),
@@ -2605,7 +2803,7 @@ mod tests {
         };
 
         assert!(
-            render_upsert(&item).contains("revision = (revision?:0) + 1"),
+            render_upsert_no_time(&item).contains("revision = (revision?:0) + 1"),
             "every trigger must create a new settlement revision"
         );
         let expected = "WHERE action = 'regen_root' AND target_refno = '16777216/5' \
@@ -2698,7 +2896,7 @@ mod tests {
     /// 顺序钉成断言，防止一次字段排序整理静默毁掉复活语义。
     #[test]
     fn revival_clauses_run_before_the_watermark_field_they_read() {
-        let sql = render_upsert(&ModelWorkItem {
+        let sql = render_upsert_no_time(&ModelWorkItem {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -2722,6 +2920,175 @@ mod tests {
         assert!(
             last_error_at < sesno_write_at,
             "last_error reset must be evaluated before source_end_sesno is overwritten: {sql}"
+        );
+    }
+
+    /// T5（plant-ui ADR-0019 Q7）：来源保存时刻与 `source_end_sesno` 同生共死。
+    ///
+    /// 三条：① 时刻子句读的是旧值，必须排在覆盖之前（与上面的复活子句同一个道理）；
+    /// ② 单调条件与序号那条一致，来源没变新时不许把时刻换成更早的；
+    /// ③ **端点对不上就不贴**——一份收口里的任务并非都来自同一条保存。
+    #[test]
+    fn the_source_save_time_is_written_with_its_own_sesno_and_only_for_that_endpoint() {
+        let claiming = ModelWorkItem {
+            dbnum: 8191,
+            db_type: "DESI".into(),
+            source_end_sesno: 42,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "16777216/5".into(),
+            noun: "BRAN".into(),
+        };
+
+        let sql = render_upsert(&claiming, Some("2026-08-05T18:24:00+08:00"));
+        let time_at = sql
+            .find("source_end_sesno_time = IF 42 >= (source_end_sesno?:0)")
+            .unwrap_or_else(|| panic!("时刻子句必须带单调条件: {sql}"));
+        let sesno_write_at = sql
+            .find("source_end_sesno = math::max")
+            .unwrap_or_else(|| panic!("source_end_sesno write missing: {sql}"));
+        assert!(
+            time_at < sesno_write_at,
+            "时刻子句读的是旧值，必须排在覆盖之前: {sql}"
+        );
+        assert!(
+            sql.contains("THEN '2026-08-05T18:24:00+08:00' ELSE"),
+            "{sql}"
+        );
+
+        // 读不到时刻 → 整条子句都不写，旧行与新行走同一条降级路径（来源段不摆）。
+        assert!(
+            !render_upsert_no_time(&claiming).contains("source_end_sesno_time"),
+            "没有时刻时不该出现这条子句"
+        );
+
+        // 端点守卫：本次收口的右端是 43，这一行认领的却是 42——不许把 43 的时刻贴上去。
+        assert_eq!(
+            source_time_for(&claiming, 43, Some("2026-08-07T14:10:00+08:00")),
+            None,
+            "号对不上就不贴时刻"
+        );
+        assert_eq!(
+            source_time_for(&claiming, 42, Some("2026-08-05T18:24:00+08:00")),
+            Some("2026-08-05T18:24:00+08:00")
+        );
+
+        // 不认领会话号的行（房间任务 / 派生根）永远拿不到时刻，即便右端恰好是 0。
+        let room = room_item(ModelWorkAction::RoomRecalcPanel, 24381, 0);
+        assert_eq!(room.source_end_sesno, 0, "前提：房间任务不认领会话号");
+        assert_eq!(
+            source_time_for(&room, 0, Some("2026-08-07T14:10:00+08:00")),
+            None,
+            "不认领来源的行不许被 0 == 0 误伤"
+        );
+    }
+
+    /// 同一个坑的第二处（plant-ui ADR-0019 Q6）：水位的时刻列若无条件赋值，一个
+    /// `end_sesno` 低于存量水位的批次会让**序号不动、时刻却退回去**，而回退阻断卡
+    /// 恰好靠这一对说话。时刻必须跟着序号那条单调条件走，且读的是 `applied_sesno`
+    /// 的**旧值**——因此子句要排在它被覆盖之前，与上面那条复活子句同一个道理。
+    #[test]
+    fn the_applied_time_rides_the_same_monotonic_condition_as_the_watermark() {
+        let sql = render_watermark_advance(8000, 1031, Some("2026-08-07T14:10:00+08:00"));
+        let time_at = sql
+            .find("applied_sesno_time = IF 1031 >= (applied_sesno ?: 0)")
+            .unwrap_or_else(|| panic!("时刻子句必须带单调条件: {sql}"));
+        let sesno_write_at = sql
+            .find("applied_sesno = math::max")
+            .unwrap_or_else(|| panic!("watermark write missing: {sql}"));
+        assert!(
+            time_at < sesno_write_at,
+            "时刻子句读的是 applied_sesno 的旧值，必须排在它被覆盖之前: {sql}"
+        );
+        // 存字符串而不是 datetime：读回来不能被规范化成 UTC，否则同一张阻断卡上
+        // 「文件端」（现读，带本地时区）与「已应用端」会差八个小时。
+        assert!(
+            sql.contains("THEN '2026-08-07T14:10:00+08:00' ELSE"),
+            "{sql}"
+        );
+        assert!(!sql.contains("type::datetime"), "{sql}");
+
+        // 读不到时刻 → 整条子句都不写（不是写 NONE）：旧行与拿不到时刻的新行走
+        // 同一条降级路径，界面说「应用时刻无记录」。
+        let without_time = render_watermark_advance(8000, 1031, None);
+        assert!(
+            !without_time.contains("applied_sesno_time"),
+            "{without_time}"
+        );
+        assert!(
+            without_time.contains("applied_sesno = math::max([applied_sesno?:0, 1031])"),
+            "{without_time}"
+        );
+    }
+
+    /// 落库那一半：序号与时刻同生共死，且旧行读出来是缺席而不是报错。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_below_the_watermark_moves_neither_the_sesno_nor_its_time() {
+        use surrealdb::engine::any::connect;
+
+        #[derive(Debug, Deserialize)]
+        struct WatermarkRow {
+            applied_sesno: i32,
+            #[serde(default)]
+            applied_sesno_time: Option<String>,
+        }
+
+        async fn row_of(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        ) -> (i32, Option<String>) {
+            let mut response = db
+                .query("SELECT applied_sesno, applied_sesno_time FROM dbnum_watermark:8000;")
+                .await
+                .expect("read watermark")
+                .check()
+                .expect("read statement");
+            let rows: Vec<WatermarkRow> = response.take(0).expect("decode watermark");
+            let row = rows.into_iter().next().expect("watermark row exists");
+            (row.applied_sesno, row.applied_sesno_time)
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("watermark_applied_time")
+            .await
+            .expect("select fixture db");
+
+        // ① 旧行：本字段引入之前写的那种，读出来必须是缺席而不是解码失败。
+        db.query(render_watermark_advance(8000, 1024, None))
+            .await
+            .expect("legacy advance")
+            .check()
+            .expect("legacy statement");
+        assert_eq!(row_of(&db).await, (1024, None));
+
+        // ② 正常推进：序号与时刻一起落库。
+        db.query(render_watermark_advance(
+            8000,
+            1031,
+            Some("2026-08-07T14:10:00+08:00"),
+        ))
+        .await
+        .expect("advance")
+        .check()
+        .expect("advance statement");
+        assert_eq!(
+            row_of(&db).await,
+            (1031, Some("2026-08-07T14:10:00+08:00".into()))
+        );
+
+        // ③ 一个右端低于存量水位的批次（崩溃重放会真的产生它）：两个都不许动。
+        db.query(render_watermark_advance(
+            8000,
+            1029,
+            Some("2026-08-06T09:15:00+08:00"),
+        ))
+        .await
+        .expect("stale advance")
+        .check()
+        .expect("stale statement");
+        assert_eq!(
+            row_of(&db).await,
+            (1031, Some("2026-08-07T14:10:00+08:00".into())),
+            "序号没退，时刻更不许退——阻断卡靠这一对说话"
         );
     }
 
@@ -2816,8 +3183,8 @@ mod tests {
         backlog.target_refno = "24381/999999".into();
         db.query(format!(
             "{}\n{}",
-            render_upsert(&current),
-            render_upsert(&backlog)
+            render_upsert_no_time(&current),
+            render_upsert_no_time(&backlog)
         ))
         .await
         .expect("seed pending rows")
@@ -2837,7 +3204,7 @@ mod tests {
 
         let mut newer = current.clone();
         newer.source_end_sesno = 91;
-        db.query(render_upsert(&newer))
+        db.query(render_upsert_no_time(&newer))
             .await
             .expect("publish newer revision")
             .check()
@@ -3093,7 +3460,7 @@ mod tests {
     /// 入队条件本身就是「AABB 真的变了」，每一次入队都是全新的重算理由。
     #[test]
     fn a_room_task_revives_on_any_new_trigger_not_on_a_newer_session() {
-        let sql = render_upsert(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
+        let sql = render_upsert_no_time(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
         assert!(sql.contains("attempts = 0"), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
         assert!(
@@ -3130,7 +3497,7 @@ mod tests {
         });
         assert_eq!(derived.source_end_sesno, 0, "前提：派生根不认领会话号");
 
-        let sql = render_upsert(&derived);
+        let sql = render_upsert_no_time(&derived);
         assert!(sql.contains("attempts = 0"), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
         assert!(
@@ -3153,14 +3520,14 @@ mod tests {
             kind: GenerationRootKind::DeliveryUnit,
         });
         assert_eq!(derived.dbnum, 0, "前提：派生根不认领来源库");
-        let sql = render_upsert(&derived);
+        let sql = render_upsert_no_time(&derived);
         assert!(
             sql.contains("dbnum = dbnum?:0"),
             "不认领的入队必须保留行上已存的库号: {sql}"
         );
 
         // 认领了库号的常规入队照写本次来源，行为不变。
-        let claiming = render_upsert(&ModelWorkItem {
+        let claiming = render_upsert_no_time(&ModelWorkItem {
             dbnum: 7997,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -3174,7 +3541,7 @@ mod tests {
     /// 反过来：认领了会话号的常规任务仍按会话号比，旧会话不构成复活理由。
     #[test]
     fn a_task_that_claims_a_session_still_revives_only_on_a_newer_one() {
-        let sql = render_upsert(&ModelWorkItem {
+        let sql = render_upsert_no_time(&ModelWorkItem {
             dbnum: 7997,
             db_type: "DESI".into(),
             source_end_sesno: 42,
@@ -3309,6 +3676,7 @@ mod tests {
             dbnum: 8191,
             db_type: "DESI".into(),
             source_end_sesno: 42,
+            source_end_sesno_time: None,
             action: ModelWorkAction::RegenRoot,
             target_refno: "16777216/5".into(),
             noun: "BRAN".into(),
@@ -3350,7 +3718,13 @@ mod tests {
         };
 
         let delivery_status = "update datacenter_version:16777216_5 set status = 'Modify';";
-        let sql = render_finalize_transaction(8191, 42, &plan, &[delivery_status.to_string()]);
+        let sql = render_finalize_transaction(
+            8191,
+            42,
+            Some("2026-08-05T18:24:00+08:00"),
+            &plan,
+            &[delivery_status.to_string()],
+        );
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.contains("UPSERT model_update_pending:regen_root_16777216_5"));
         assert!(sql.contains("applied_sesno = math::max([applied_sesno?:0, 42])"));
@@ -3384,6 +3758,7 @@ mod tests {
         let sql = render_finalize_tail_with_effects(
             8191,
             42,
+            None,
             &plan,
             &[],
             &["16777216/2".to_string()],
@@ -3445,6 +3820,7 @@ mod tests {
                 dbnum: 8191,
                 start_sesno: 2,
                 end_sesno: 42,
+                end_sesno_time: None,
                 plan: ModelUpdatePlan::default(),
                 window_statements: vec![],
                 cache_refnos: vec![],
@@ -3476,17 +3852,15 @@ mod tests {
     /// 没动树的提交不得作废别人的树文件：无空间意图的尾事务不递增版本号。
     #[test]
     fn tail_without_spatial_effects_does_not_bump_the_epoch() {
-        let sql = render_finalize_tail(8191, 42, &ModelUpdatePlan::default(), &[]);
+        let sql = render_finalize_tail(8191, 42, None, &ModelUpdatePlan::default(), &[]);
         assert!(
             !sql.contains("spatial_epoch"),
             "无空间意图时不得 bump: {sql}"
         );
     }
 
-    #[test]
-    fn aabb_room_changes_are_part_of_the_finalize_plan_before_room_settlement() {
-        let mut plan = ModelUpdatePlan::default();
-        let changes = HashMap::from([
+    fn room_change_fixture() -> HashMap<RefnoEnum, String> {
+        HashMap::from([
             (
                 RefnoEnum::from("16777216/2".parse::<RefU64>().unwrap()),
                 "PANE".to_string(),
@@ -3495,7 +3869,14 @@ mod tests {
                 RefnoEnum::from("16777216/3".parse::<RefU64>().unwrap()),
                 "EQUI".to_string(),
             ),
-        ]);
+        ])
+    }
+
+    #[test]
+    fn aabb_room_changes_are_part_of_the_finalize_plan_before_room_settlement() {
+        let _room = crate::options::RoomIncrementalOverride::set(true);
+        let mut plan = ModelUpdatePlan::default();
+        let changes = room_change_fixture();
         merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
         merge_room_recalc_changes(&mut plan, 8191, 42, &changes);
 
@@ -3511,6 +3892,19 @@ mod tests {
                 .iter()
                 .all(|item| item.dbnum == 8191 && item.source_end_sesno == 42)
         );
+    }
+
+    /// 房间增量关掉之后，收口计划里一条房间行都不许出现。
+    ///
+    /// 钉在这一层而不是更上游：暂存链上房间目标变成 durable pending 行只有这一个
+    /// 入口，它漏了，开关就只剩「不消费」那半边——表照样攒，开关一开当场涌出一
+    /// 整批积压。
+    #[test]
+    fn a_disabled_room_increment_contributes_nothing_to_the_finalize_plan() {
+        let _room = crate::options::RoomIncrementalOverride::set(false);
+        let mut plan = ModelUpdatePlan::default();
+        merge_room_recalc_changes(&mut plan, 8191, 42, &room_change_fixture());
+        assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
     }
 
     /// A baseline that advanced its watermark without queueing generation work
@@ -3532,7 +3926,7 @@ mod tests {
             ..Default::default()
         };
 
-        let sql = render_baseline_transaction(7997, 76, &plan);
+        let sql = render_baseline_transaction(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan);
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
         let work_at = sql
@@ -3618,14 +4012,14 @@ mod tests {
             Some(attempt)
         );
 
-        finalize_attempt(DBNUM, 42, &plan, &[])
+        finalize_attempt(DBNUM, 42, None, &plan, &[])
             .await
             .expect("first finalize");
         assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
 
         // Replay the post-crash finalization: stable work id + max watermark
         // must keep exactly one task and the same applied sesno.
-        finalize_attempt(DBNUM, 42, &plan, &[])
+        finalize_attempt(DBNUM, 42, None, &plan, &[])
             .await
             .expect("idempotent finalize replay");
         let mut response = SUL_DB
@@ -3759,7 +4153,7 @@ mod tests {
             load_attempt(DBNUM).await.expect("load after OS kill"),
             Some(attempt)
         );
-        finalize_attempt(DBNUM, 52, &plan, &[])
+        finalize_attempt(DBNUM, 52, None, &plan, &[])
             .await
             .expect("recover killed attempt");
         assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
@@ -3937,7 +4331,7 @@ mod tests {
             .expect("pre-clean failure fixture")
             .check()
             .expect("pre-clean statements");
-        finalize_attempt(DBNUM, END_SESNO, &plan, &[])
+        finalize_attempt(DBNUM, END_SESNO, None, &plan, &[])
             .await
             .expect("persist work and watermark");
 
@@ -4068,17 +4462,15 @@ mod tests {
             .await
             .expect("connect surreal");
 
-        let report = drain_rooms(aios_core::get_db_option())
+        // 缺陷面板不再阻断整轮，所以这里不再断言 `done == 0`：其余目标本就该跑完。
+        // 要钉的是「缺陷被登记下来，且修复根真的进了 durable 队列」。
+        drain_rooms(aios_core::get_db_option())
             .await
             .expect("room coverage probe must complete");
-        assert_eq!(
-            report.done, 0,
-            "incomplete coverage must not rewrite room edges"
-        );
 
         let mut response = SUL_DB
             .query(format!(
-                "RETURN record::exists({ROOM_COVERAGE_BARRIER}); \
+                "RETURN record::exists({ROOM_PANEL_DEFECTS}); \
                  RETURN array::len(SELECT VALUE id FROM {TABLE} \
                     WHERE action = 'regen_root' AND array::len(required_panels?:[]) > 0);"
             ))
@@ -4339,7 +4731,7 @@ mod tests {
             prepare_attempt(&attempt)
                 .await
                 .expect("prepare capacity attempt");
-            finalize_attempt(DBNUM, 42, &plan, &delivery)
+            finalize_attempt(DBNUM, 42, None, &plan, &delivery)
                 .await
                 .expect("finalize 5k delivery + 5k model work");
         }

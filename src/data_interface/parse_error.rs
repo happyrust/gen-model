@@ -1,0 +1,609 @@
+//! 解析错误账本。
+//!
+//! 起因：解析这一侧的失败在此之前**没有任何落地的地方**。模型生成失败有
+//! [`model_update_pending`](crate::data_interface::model_update_pending) 那一行的
+//! `last_error` + `attempts` + 死信，窗口失败有 `increment_update_attempt`，唯独
+//! 解析失败是一句 `log::warn!` 就没了：`element_parse_skipped` 之后这个元素按
+//! cache-miss 处理照常往下走，`locator_scan_failed` 之后这个库当轮不可定位——两条
+//! 都是「降级继续跑」，不报错、不阻断、也**不留痕**。事后想知道哪些元素解析不出来，
+//! 只能去翻当时的控制台。
+//!
+//! 所以这里只做一件事：把解析失败按目标归行，记下次数、首末时刻与最近一句错误，
+//! 并在同一个目标下次解析成功时销账。它**不是工作队列**——没有人重试这些行，重试
+//! 由上层各自的路径决定；它是一份「现在有哪些东西解析不出来」的可查清单。
+//!
+//! ## 为什么先攒后写
+//!
+//! 记录点在热路径上：`element_parse_skipped` 位于逐元素的解析循环里，一个坏文件
+//! 能在一轮里刷出成千上万条。每条一次 UPSERT 会把「解析慢」变成「解析卡死」。
+//! 因此同步侧只往进程内缓冲区里攒（同一目标合并计数），由调用链上最近的 async
+//! 收口点 [`flush`] 一次性落库。
+//!
+//! ## 销账
+//!
+//! 只对**本进程见过它失败**的目标发 DELETE（[`KNOWN_FAILED`]，首次 flush 时从表里
+//! 播种）。否则每一轮成功解析的几万个元素都要陪跑一条 DELETE，而其中绝大多数
+//! 本来就不在表里。
+
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
+use std::sync::Mutex;
+
+use aios_core::SUL_DB;
+
+use crate::data_interface::dbnum_state::escape_surql_str;
+
+pub const TABLE: &str = "parse_error";
+
+/// 一个目标在缓冲区里的待写状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    /// 失败了 `count` 次，最近一句是 `error`。
+    Failed { count: u64, error: String },
+    /// 解析成功，销账。
+    Cleared,
+}
+
+/// `(kind, target)`：与记录 id `parse_error:[kind, target]` 一一对应。
+type Key = (&'static str, String);
+
+static PENDING: Mutex<BTreeMap<Key, Pending>> = Mutex::new(BTreeMap::new());
+/// 本进程已知在表里有行的目标；决定一次成功要不要发 DELETE。
+static KNOWN_FAILED: Mutex<Option<HashSet<Key>>> = Mutex::new(None);
+
+/// 一个元素整个解析不出来，按 cache-miss 跳过。
+const ELEMENT: &str = "element";
+/// 一个库文件扫不动，当轮不可定位。
+const FILE: &str = "file";
+/// 库读得动，但里面若干元素的**完整属性**解析不出来，只保住了 PE 拓扑。
+///
+/// 按文件归行而不是按元素：这个失败本来就是整块报的（「N 个元素…」），一个坏文件
+/// 能一次带出几万个 refno，逐个成行会让这本账比它要记录的问题还大。次数记的是受
+/// 影响的元素个数，样例进错误文本。
+const ATTRS: &str = "attrs";
+/// 一个项目的监控目录解析不出任何库目录。
+const DIR: &str = "dir";
+/// 一个项目的目录依赖缓存预加载失败，退回惰性兜底。
+const PRELOAD: &str = "preload";
+
+const KINDS: [&str; 5] = [ELEMENT, FILE, ATTRS, DIR, PRELOAD];
+
+fn pending() -> std::sync::MutexGuard<'static, BTreeMap<Key, Pending>> {
+    PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn known_failed() -> std::sync::MutexGuard<'static, Option<HashSet<Key>>> {
+    KNOWN_FAILED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 攒一次失败。同一目标在一轮里失败多次只占一行，计数累加，错误取最后一句。
+fn note_failure(key: Key, error: &str) {
+    let mut buffer = pending();
+    match buffer.get_mut(&key) {
+        Some(Pending::Failed { count, error: last }) => {
+            *count += 1;
+            last.clear();
+            last.push_str(error);
+        }
+        // 同一轮里先成功后失败：以失败为准，销账作废。
+        _ => {
+            buffer.insert(
+                key,
+                Pending::Failed {
+                    count: 1,
+                    error: error.to_string(),
+                },
+            );
+        }
+    }
+}
+
+/// 攒一次销账。只对本进程见过失败的目标记——见 [`KNOWN_FAILED`]。
+fn note_success(key: Key) {
+    if !known_failed()
+        .as_ref()
+        .is_some_and(|set| set.contains(&key))
+    {
+        return;
+    }
+    let mut buffer = pending();
+    // 同一轮里已经记了失败就不销账：坏的那次更值得留下。
+    if !matches!(buffer.get(&key), Some(Pending::Failed { .. })) {
+        buffer.insert(key, Pending::Cleared);
+    }
+}
+
+/// 已在册、但这一轮的范围里压根没出现的同类目标。
+fn missing_from_scope(known: &HashSet<Key>, kind: &str, seen: &HashSet<String>) -> Vec<Key> {
+    known
+        .iter()
+        .filter(|(row_kind, target)| *row_kind == kind && !seen.contains(target))
+        .cloned()
+        .collect()
+}
+
+/// 按一个**权威范围**销账：这一类里，范围外的在册目标一律清掉。
+///
+/// 逐目标的成功销账管不了目标**整个消失**的情况——项目从配置里删掉之后，它再也不会
+/// 被 note 到，那一行就永远留在清单上。现场实测就是这么发现的：造了一个不存在的项目
+/// 拿到 `dir` 行，把它从配置里去掉再启动，行还在。一条永远解不开的记录正是这本账最
+/// 该避免的东西。
+///
+/// 只有调用方能说出「这一批就是全部」时才用得上。项目名单来自配置、就是全集；而
+/// `element` / `attrs` / `file` 每轮只覆盖一个子集，对它们用这个会误删。
+async fn note_scope(kind: &'static str, seen: &HashSet<String>) {
+    if let Err(error) = seed_known_failed().await {
+        log::warn!("[parse_error] 已有解析错误行播种失败（本轮不做范围销账）: {error:#}");
+        return;
+    }
+    let retire = match known_failed().as_ref() {
+        Some(known) => missing_from_scope(known, kind, seen),
+        None => Vec::new(),
+    };
+    let mut buffer = pending();
+    for key in retire {
+        if !matches!(buffer.get(&key), Some(Pending::Failed { .. })) {
+            buffer.insert(key, Pending::Cleared);
+        }
+    }
+}
+
+/// 这一轮解析到的项目就是全部项目：不在名单里的在册项目一律销账。
+pub(crate) async fn note_dir_scope(projects: &HashSet<String>) {
+    note_scope(DIR, projects).await;
+}
+
+/// 一个元素解析不出来（`element_parse_skipped`）。
+pub(crate) fn note_element_failure(target: &str, error: &str) {
+    note_failure((ELEMENT, target.to_string()), error);
+}
+
+/// 这个元素这一轮解析成功了。
+pub(crate) fn note_element_success(target: &str) {
+    note_success((ELEMENT, target.to_string()));
+}
+
+/// 一个库文件扫不动（`locator_scan_failed`）。
+pub(crate) fn note_file_failure(path: &Path, error: &str) {
+    note_failure((FILE, path.display().to_string()), error);
+}
+
+/// 这个库文件这一轮扫通了。
+pub(crate) fn note_file_success(path: &Path) {
+    note_success((FILE, path.display().to_string()));
+}
+
+/// 一个文件里有 `count` 个元素的完整属性解析不出来（只保住了 PE 拓扑）。
+///
+/// 次数按受影响的元素个数记，而不是按「报了几次」——这本账要回答的是规模。
+pub(crate) fn note_attrs_failure(file: &str, count: u64, samples: &str) {
+    if count == 0 {
+        return;
+    }
+    let key = (ATTRS, file.to_string());
+    let error = format!("{count} 个元素完整属性解析失败，已保留 PE 拓扑元数据（样例: {samples}）");
+    let mut buffer = pending();
+    match buffer.get_mut(&key) {
+        Some(Pending::Failed {
+            count: total,
+            error: last,
+        }) => {
+            *total += count;
+            *last = error;
+        }
+        _ => {
+            buffer.insert(key, Pending::Failed { count, error });
+        }
+    }
+}
+
+/// 这个文件这一轮所有元素的完整属性都解析出来了。
+pub(crate) fn note_attrs_success(file: &str) {
+    note_success((ATTRS, file.to_string()));
+}
+
+/// 一个项目的监控目录解析不出任何库目录。
+pub(crate) fn note_dir_failure(project: &str, error: &str) {
+    note_failure((DIR, project.to_string()), error);
+}
+
+/// 这个项目这一轮解析出了库目录。
+pub(crate) fn note_dir_success(project: &str) {
+    note_success((DIR, project.to_string()));
+}
+
+/// 一个项目的目录依赖缓存预加载失败，退回惰性兜底。
+pub(crate) fn note_preload_failure(project: &str, error: &str) {
+    note_failure((PRELOAD, project.to_string()), error);
+}
+
+/// 这个项目这一轮预加载成功了。
+pub(crate) fn note_preload_success(project: &str) {
+    note_success((PRELOAD, project.to_string()));
+}
+
+fn record_id(kind: &str, target: &str) -> String {
+    format!("{TABLE}:['{kind}', '{}']", escape_surql_str(target))
+}
+
+/// 累计计数只涨不覆盖，首见时刻只写一次——两条都要经得起同一目标反复失败。
+fn render_upsert(kind: &str, target: &str, count: u64, error: &str) -> String {
+    format!(
+        "UPSERT {id} SET kind = '{kind}', target = '{target_text}', \
+         occurrences = (occurrences?:0) + {count}, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{error_text}';",
+        id = record_id(kind, target),
+        target_text = escape_surql_str(target),
+        error_text = escape_surql_str(error),
+    )
+}
+
+fn render_delete(kind: &str, target: &str) -> String {
+    format!("DELETE {};", record_id(kind, target))
+}
+
+/// 把表里现有的行播种进 [`KNOWN_FAILED`]。
+///
+/// 不播种的话，上一个进程记下的行永远等不到销账——它这一轮解析成功，而本进程
+/// 「没见过它失败」，于是 DELETE 发不出去，一条已经修好的记录会一直挂在清单上。
+async fn seed_known_failed() -> anyhow::Result<()> {
+    if known_failed().is_some() {
+        return Ok(());
+    }
+    let mut response = SUL_DB
+        .query(format!("SELECT kind, target FROM {TABLE};"))
+        .await?
+        .check()?;
+    #[derive(serde::Deserialize)]
+    struct Row {
+        kind: String,
+        target: String,
+    }
+    let rows: Vec<Row> = response.take(0)?;
+    let seeded = rows
+        .into_iter()
+        .filter_map(|row| {
+            let kind = KINDS.iter().find(|kind| **kind == row.kind)?;
+            Some((*kind, row.target))
+        })
+        .collect::<HashSet<_>>();
+    *known_failed() = Some(seeded);
+    Ok(())
+}
+
+/// 把攒下的解析结果落库，返回写了几行。
+///
+/// 播种失败不能连累落库：账本读不出来最多让销账晚一轮，而丢掉这一批失败记录
+/// 等于这一轮解析问题彻底没留痕——那正是这张表要解决的事。
+pub async fn flush() -> anyhow::Result<usize> {
+    if pending().is_empty() {
+        return Ok(0);
+    }
+    if let Err(error) = seed_known_failed().await {
+        log::warn!("[parse_error] 已有解析错误行播种失败（本轮只写不销账）: {error:#}");
+    }
+    let batch = std::mem::take(&mut *pending());
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    let mut statements = Vec::with_capacity(batch.len());
+    {
+        let mut known = known_failed();
+        for ((kind, target), entry) in &batch {
+            match entry {
+                Pending::Failed { count, error } => {
+                    statements.push(render_upsert(kind, target, *count, error));
+                    if let Some(set) = known.as_mut() {
+                        set.insert((kind, target.clone()));
+                    }
+                }
+                Pending::Cleared => {
+                    statements.push(render_delete(kind, target));
+                    if let Some(set) = known.as_mut() {
+                        set.remove(&(*kind, target.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    let written = statements.len();
+    let sql = statements.join("\n");
+    // 失败就把这批放回缓冲区：解析侧没有重试通道，这里丢了就是永久丢了。
+    if let Err(error) = SUL_DB
+        .query(sql)
+        .await
+        .and_then(|response| response.check())
+    {
+        let mut buffer = pending();
+        for (key, entry) in batch {
+            buffer.entry(key).or_insert(entry);
+        }
+        anyhow::bail!("[parse_error] 解析错误账本落库失败（已退回缓冲区）: {error}");
+    }
+    Ok(written)
+}
+
+/// `/health` 用：现在有多少东西解析不出来、最近一条长什么样。
+///
+/// 表为空就是 `null`——和 `idle_round_panic` 同一个约定：没有问题时不占版面。
+pub async fn snapshot() -> Option<serde_json::Value> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        kind: String,
+        target: String,
+        #[serde(default)]
+        occurrences: u64,
+        #[serde(default)]
+        last_error: Option<String>,
+        #[serde(default)]
+        last_seen_at: Option<String>,
+    }
+    let query = format!(
+        "SELECT kind, target, occurrences, last_error, \
+         type::string(last_seen_at) AS last_seen_at \
+         FROM {TABLE} ORDER BY last_seen_at DESC;"
+    );
+    let rows: Vec<Row> = SUL_DB
+        .query(query)
+        .await
+        .and_then(|response| response.check())
+        .and_then(|mut response| response.take(0))
+        .unwrap_or_default();
+    let latest = rows.first()?;
+    // 按类别拆开：一个「解析不出来」的总数说明不了要去修什么——扫不动整个库、
+    // 元素属性缺一半、项目目录压根没解析出来，是三件不同的事。
+    let by_kind = KINDS
+        .iter()
+        .filter_map(|kind| {
+            let count = rows.iter().filter(|row| row.kind == *kind).count();
+            (count > 0).then(|| (kind.to_string(), serde_json::json!(count)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Some(serde_json::json!({
+        "total": rows.len(),
+        "by_kind": by_kind,
+        "occurrences": rows.iter().map(|row| row.occurrences).sum::<u64>(),
+        "last_kind": latest.kind,
+        "last_target": latest.target,
+        "last_error": latest.last_error,
+        "last_seen_at": latest.last_seen_at,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个用例自己的缓冲区状态：静态是全局的，用完必须还原，否则并行跑互相踩。
+    fn reset() {
+        pending().clear();
+        *known_failed() = Some(HashSet::new());
+    }
+
+    /// 同一目标一轮里失败多次只占一行，计数累加、错误取最后一句。
+    ///
+    /// 这是「先攒后写」的全部意义：`element_parse_skipped` 在逐元素循环里，一个
+    /// 坏文件一轮能刷上万条，逐条 UPSERT 会把解析慢变成解析卡死。
+    #[test]
+    fn repeated_failures_of_one_target_collapse_into_one_row() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+
+        note_element_failure("4000000001/11", "APPDAR not exist in attr_in");
+        note_element_failure("4000000001/11", "页式元素解析失败");
+        note_element_failure("4000000001/12", "APPDAR not exist in attr_in");
+
+        let buffer = pending();
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(
+            buffer.get(&(ELEMENT, "4000000001/11".to_string())),
+            Some(&Pending::Failed {
+                count: 2,
+                error: "页式元素解析失败".to_string(),
+            })
+        );
+    }
+
+    /// 没见过它失败就不为一次成功发 DELETE。
+    ///
+    /// 否则每轮成功解析的几万个元素都要陪跑一条 DELETE，而其中绝大多数根本不在表里。
+    #[test]
+    fn success_of_a_never_failed_target_writes_nothing() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+
+        note_element_success("4000000001/11");
+
+        assert!(pending().is_empty());
+    }
+
+    /// 见过它失败，这次成功了：销账。同一轮里又失败的话以失败为准。
+    #[test]
+    fn a_repaired_target_is_cleared_but_a_fresh_failure_wins() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        known_failed()
+            .as_mut()
+            .unwrap()
+            .insert((ELEMENT, "4000000001/11".to_string()));
+
+        note_element_success("4000000001/11");
+        assert_eq!(
+            pending().get(&(ELEMENT, "4000000001/11".to_string())),
+            Some(&Pending::Cleared)
+        );
+
+        note_element_failure("4000000001/11", "又炸了");
+        assert!(matches!(
+            pending().get(&(ELEMENT, "4000000001/11".to_string())),
+            Some(Pending::Failed { count: 1, .. })
+        ));
+
+        // 失败之后再来一次成功不覆盖它：坏的那次更值得留下。
+        note_element_success("4000000001/11");
+        assert!(matches!(
+            pending().get(&(ELEMENT, "4000000001/11".to_string())),
+            Some(Pending::Failed { .. })
+        ));
+    }
+
+    /// 目标从输入里整个消失时，靠逐目标的成功销账是清不掉的——只能按范围销账。
+    ///
+    /// 现场实测发现的：造一个不存在的项目拿到 `dir` 行，把它从配置里去掉再启动，
+    /// 那一行还在。因为它已经不在 `plan.projects` 里，`note_dir_success` 永远轮不到
+    /// 它，于是清单上留下一条永远解不开的记录。
+    #[test]
+    fn a_target_that_left_the_scope_is_retired() {
+        let known = HashSet::from([
+            (DIR, "AvevaMarineSample".to_string()),
+            (DIR, "NoSuchProject".to_string()),
+            // 别的类别不归这个范围管，一个都不许动。
+            (ELEMENT, "4000000001/11".to_string()),
+        ]);
+        let seen = HashSet::from(["AvevaMarineSample".to_string(), "ZDJ".to_string()]);
+
+        let retire = missing_from_scope(&known, DIR, &seen);
+
+        assert_eq!(retire, vec![(DIR, "NoSuchProject".to_string())]);
+    }
+
+    /// 属性解析失败按**受影响的元素个数**记，不是按「报了几次」记。
+    ///
+    /// 一次同步会分块报好几轮，每轮各带自己的元素数；这本账要回答的是规模——
+    /// 「这个库有 3 个元素属性残了」和「有 30000 个」是完全不同的两件事。
+    #[test]
+    fn attribute_failures_count_elements_not_reports() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+
+        note_attrs_failure("ams1_2", 3, "1/2, 1/3, 1/4");
+        note_attrs_failure("ams1_2", 30, "1/9");
+        // 一个元素都没坏的那一块不该把这一行变成 0 次。
+        note_attrs_failure("ams1_2", 0, "");
+
+        let buffer = pending();
+        let Some(Pending::Failed { count, error }) = buffer.get(&(ATTRS, "ams1_2".to_string()))
+        else {
+            panic!("属性解析失败必须归行: {buffer:?}");
+        };
+        assert_eq!(*count, 33);
+        assert!(error.contains("30 个元素"), "{error}");
+    }
+
+    /// 累计计数只涨不覆盖、首见时刻只写一次——同一目标反复失败时这两条是账的全部价值。
+    #[test]
+    fn the_upsert_accumulates_instead_of_overwriting() {
+        let sql = render_upsert(ELEMENT, "4000000001/11", 3, "APPDAR not exist");
+        assert!(sql.contains("occurrences = (occurrences?:0) + 3"), "{sql}");
+        assert!(
+            sql.contains("first_seen_at = first_seen_at?:time::now()"),
+            "{sql}"
+        );
+        assert!(sql.contains("last_seen_at = time::now()"), "{sql}");
+        assert!(
+            sql.starts_with("UPSERT parse_error:['element', '4000000001/11']"),
+            "{sql}"
+        );
+    }
+
+    /// 目标文本进的是记录 id 与字段，路径里的单引号必须逃逸，否则一条 Windows 路径
+    /// 就能让整批语句解析失败——而这批语句正是「解析失败」的唯一记录。
+    #[test]
+    fn quotes_in_a_target_cannot_break_the_statement() {
+        let sql = render_upsert(
+            FILE,
+            "D:\\proj\\o'brien\\ams1",
+            "boom".len() as u64,
+            "o'boom",
+        );
+        assert!(!sql.contains("o'brien\\"), "{sql}");
+        assert!(sql.contains("o\\'brien"), "{sql}");
+        assert!(sql.contains("o\\'boom"), "{sql}");
+    }
+
+    /// 语句得真能在 SurrealDB 上跑：数组记录 id、计数累加、首见时刻不被覆盖、销账。
+    ///
+    /// 纯字符串断言查不出 `parse_error:['element', '…']` 这种 id 写法是不是合法
+    /// SurrealQL——而这批语句一旦解析失败，「解析失败」这件事本身就没了记录。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ledger_statements_round_trip_on_surreal() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("parse_error")
+            .await
+            .expect("select fixture db");
+
+        db.query(render_upsert(
+            ELEMENT,
+            "4000000001/11",
+            2,
+            "APPDAR not exist",
+        ))
+        .await
+        .expect("first upsert")
+        .check()
+        .expect("first upsert statement");
+        let mut response = db
+            .query(format!(
+                "SELECT type::string(first_seen_at) AS first_seen_at FROM {TABLE};"
+            ))
+            .await
+            .expect("read first_seen_at")
+            .check()
+            .expect("read first_seen_at statement");
+        let first: Vec<serde_json::Value> = response.take(0).expect("decode first_seen_at");
+        let first_seen = first[0]["first_seen_at"].clone();
+
+        db.query(render_upsert(
+            ELEMENT,
+            "4000000001/11",
+            3,
+            "页式元素解析失败",
+        ))
+        .await
+        .expect("second upsert")
+        .check()
+        .expect("second upsert statement");
+
+        let mut response = db
+            .query(format!(
+                "SELECT kind, target, occurrences, last_error, \
+                 type::string(first_seen_at) AS first_seen_at FROM {TABLE};"
+            ))
+            .await
+            .expect("read")
+            .check()
+            .expect("read statement");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode");
+        assert_eq!(rows.len(), 1, "同一目标只占一行: {rows:?}");
+        assert_eq!(rows[0]["occurrences"], 5, "计数必须累加而不是覆盖");
+        assert_eq!(rows[0]["last_error"], "页式元素解析失败");
+        assert_eq!(rows[0]["target"], "4000000001/11");
+        assert_eq!(rows[0]["first_seen_at"], first_seen, "首见时刻只写一次");
+
+        db.query(render_delete(ELEMENT, "4000000001/11"))
+            .await
+            .expect("clear")
+            .check()
+            .expect("clear statement");
+        let mut response = db
+            .query(format!("SELECT target FROM {TABLE};"))
+            .await
+            .expect("recount")
+            .check()
+            .expect("recount statement");
+        let remaining: Vec<serde_json::Value> = response.take(0).expect("decode remaining");
+        assert!(remaining.is_empty(), "销账之后不该还有行: {remaining:?}");
+    }
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+}

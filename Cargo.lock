@@ -132,12 +132,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2",
  "simplelog",
  "smol_str 0.3.2",
  "sqlx",
  "strum 0.27.2",
  "strum_macros 0.27.2",
  "surrealdb",
+ "tempfile",
  "tokio",
  "toml",
  "tower-http",
@@ -146,6 +148,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "walkdir",
+ "zip",
 ]
 
 [[package]]
@@ -5051,7 +5054,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=e2c2636c940c9a12aebe2741f7e9851d89b4e85a#e2c2636c940c9a12aebe2741f7e9851d89b4e85a"
+source = "git+https://github.com/happyrust/old-pdms-io.git?rev=5c9e00e3c46f7d6f7c548583020b66e0ad23368a#5c9e00e3c46f7d6f7c548583020b66e0ad23368a"
 dependencies = [
  "aios_core",
  "anyhow",

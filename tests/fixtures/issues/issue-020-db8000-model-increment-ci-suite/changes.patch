@@ -1,0 +1,1199 @@
+diff --git a/.github/workflows/windows-tests.yml b/.github/workflows/windows-tests.yml
+new file mode 100644
+index 00000000..61c49899
+--- /dev/null
++++ b/.github/workflows/windows-tests.yml
+@@ -0,0 +1,85 @@
++name: Windows tests
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++concurrency:
++  group: windows-tests-${{ github.ref }}
++  cancel-in-progress: true
++
++env:
++  CARGO_TERM_COLOR: always
++  CARGO_INCREMENTAL: "0"
++  CARGO_TARGET_DIR: target
++  # Integration-test builds also compile every binary target. Keep the hosted
++  # runner below its paging/commit-memory limit (the repository default is 8x8).
++  CARGO_BUILD_JOBS: "2"
++  RUSTFLAGS: -Z threads=2 -C link-arg=/DEBUG:NONE
++  RUST_TOOLCHAIN: nightly-2026-08-02
++  LIBCLANG_PATH: C:\Program Files\LLVM\bin
++  CXXFLAGS: /std:c++17
++  PROTOC_ARCHIVE_URL: https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-win64.zip
++  PROTOC_ARCHIVE_SHA256: 5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082
++
++jobs:
++  db8000-model-increment:
++    runs-on: windows-latest
++    timeout-minutes: 120
++
++    steps:
++      - uses: actions/checkout@v6
++
++      - name: Install Rust nightly
++        shell: pwsh
++        run: |
++          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
++          rustup default $env:RUST_TOOLCHAIN
++          rustc --version
++          cargo --version
++
++      - name: Download protoc
++        shell: pwsh
++        run: |
++          $archive = "$env:RUNNER_TEMP\protoc.zip"
++          $root = "$env:RUNNER_TEMP\protoc"
++          Invoke-WebRequest $env:PROTOC_ARCHIVE_URL -OutFile $archive
++          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:PROTOC_ARCHIVE_SHA256) {
++            throw 'protoc archive checksum mismatch'
++          }
++          Expand-Archive $archive $root
++          "PROTOC=$root\bin\protoc.exe" >> $env:GITHUB_ENV
++
++      - name: Restore cargo cache
++        uses: actions/cache@v4
++        with:
++          path: |
++            ~\.cargo\registry
++            ~\.cargo\git
++            target
++          key: cargo-windows-tests-${{ hashFiles('Cargo.lock') }}
++          restore-keys: |
++            cargo-windows-tests-
++
++      - name: Run portable db8000 model-increment cases
++        shell: pwsh
++        run: >-
++          cargo test --locked
++          --test db8000_two_delete_fixture
++          --no-default-features
++          --features ws,gen_model,manifold,project_hd
++          -- --nocapture
++
++      - name: Verify topmost model delete cleanup
++        shell: pwsh
++        run: >-
++          cargo test --locked --lib
++          child_delete_then_parent_delete_across_sessions_schedules_only_the_parent
++          --no-default-features
++          --features ws,gen_model,manifold,project_hd
++          -- --nocapture
+diff --git a/issues/ISSUE-019-cross-session-parent-child-delete.md b/issues/ISSUE-019-cross-session-parent-child-delete.md
+index 43b32605..1375f0df 100644
+--- a/issues/ISSUE-019-cross-session-parent-child-delete.md
++++ b/issues/ISSUE-019-cross-session-parent-child-delete.md
+@@ -66,11 +66,14 @@ tests/fixtures/issues/issue-019-cross-session-parent-child-delete/
+ ## 验证
+ 
+ ```powershell
+-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++cargo test --test db8000_two_delete_fixture -- --nocapture
+ cargo test --lib child_delete_then_parent_delete_across_sessions_schedules_only_the_parent -- --nocapture
+ sigmap validate
+ ```
+ 
++GitHub Actions 通过 `.github/workflows/windows-tests.yml` 在 pull request 和 `main`
++分支自动执行同一组可移植案例。
++
+ 验收标准：
+ 
+ - 最终文件 `collect_changes(25..=26)` 精确返回四条操作；
+diff --git a/issues/ISSUE-020-db8000-model-increment-ci-suite.md b/issues/ISSUE-020-db8000-model-increment-ci-suite.md
+new file mode 100644
+index 00000000..5e77fb78
+--- /dev/null
++++ b/issues/ISSUE-020-db8000-model-increment-ci-suite.md
+@@ -0,0 +1,45 @@
++# Issue #20：db8000 可移植模型增量回归与 CI 门禁
++
++## 目标
++
++复用 Issue #19 已入库的 dbnum 8000、sesno `24 → 25 → 26` ZIP，建立一组在本地与
++GitHub Actions 都可直接执行的模型增量案例。首批案例不依赖 AVEVA、SurrealDB、Git
++LFS 或外部解压程序。
++
++## Oracle 评审结论
++
++Oracle 会话 `db8000-model-increment-suite` 建议首批只覆盖现有 ZIP 能证明的行为：
++
++1. ZIP 安全与三个快照会话号；
++2. `collect_changes(25..=26)` 的四条原始操作；
++3. 最终文件中的 sesno 25 历史与 sesno 25 点时快照一致；
++4. 整窗采集与两个单会话切片的并集一致；
++5. 净变化收敛为 BOX Deleted、EQUI Deleted、ZONE Modified；
++6. 删除模型计划只保留父 EQUI 的一次递归清理。
++
++测试经过生产入口 `IncrementPipeline::collect_changes` 与 `merge_net_changes`；对比 JSON
++只作为人工证据，不作为测试输入。
++
++## 入口
++
++本地：
++
++```powershell
++cargo test --locked --test db8000_two_delete_fixture `
++  --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
++
++cargo test --locked --lib `
++  child_delete_then_parent_delete_across_sessions_schedules_only_the_parent `
++  --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
++```
++
++CI：`.github/workflows/windows-tests.yml`，在 pull request、`main` push 和手工触发时运行。
++
++## 后续需要新快照的案例
++
++- 纯 `POS`/`ORI` 变化 → `Transform`；
++- BRAN/HANG 派生几何变化 → `RegenRoot`；
++- 反向引用或目录变化 → `CascadeExpand`；
++- PANE 移动或 ROOM 改名 → `RoomRecalcPanel/Element`。
++
++这些场景应分别建立新的会话快照，不能从当前删除夹具推断预期结果。
+diff --git a/src/bin/db8000_two_delete_fixture.rs b/src/bin/db8000_two_delete_fixture.rs
+index 6879f5e7..3c0aa623 100644
+--- a/src/bin/db8000_two_delete_fixture.rs
++++ b/src/bin/db8000_two_delete_fixture.rs
+@@ -179,10 +179,11 @@ fn write_text_assets(root: &Path, manifest: &FixtureManifest) -> anyhow::Result<
+ 运行回归：
+ 
+ ```powershell
+-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++cargo test --test db8000_two_delete_fixture -- --nocapture
+ ```
+ 
+-测试会验证 ZIP 与三个文件的 SHA256、安全解压，然后只使用 sesno 26 最终文件直接采集 `25..=26`。
++测试会验证 ZIP 与三个文件的 SHA256、安全解压、会话切片一致性，并使用 sesno 26
++最终文件直接采集 `25..=26` 后校验原始操作与净模型变化。
+ "#,
+     )?;
+ 
+diff --git a/src/data_interface/model_update_plan.rs b/src/data_interface/model_update_plan.rs
+index b07a4e62..d77ede20 100644
+--- a/src/data_interface/model_update_plan.rs
++++ b/src/data_interface/model_update_plan.rs
+@@ -1520,6 +1520,12 @@ mod tests {
+         let owners = HashMap::from([(child, equi), (equi, zone)]);
+         let topmost = topmost_deleted_refnos(&deleted, |refno| owners.get(&refno).copied());
+         assert_eq!(topmost, HashSet::from([equi]));
++
++        let work = work_items_from_units(8000, 26, "DESI", &[], &HashSet::new(), &topmost);
++        assert_eq!(work.len(), 1);
++        assert_eq!(work[0].action, ModelWorkAction::DeleteCleanup);
++        assert_eq!(work[0].target_refno, equi.to_pdms_str());
++        assert_eq!(work[0].source_end_sesno, 26);
+     }
+ 
+     /// owner 解不出来时保留：宁可多排一条幂等的清理，也不能因为链断了漏掉它。
+diff --git a/tests/db8000_two_delete_fixture.rs b/tests/db8000_two_delete_fixture.rs
+index b09335fa..4399e727 100644
+--- a/tests/db8000_two_delete_fixture.rs
++++ b/tests/db8000_two_delete_fixture.rs
+@@ -1,7 +1,7 @@
+ //! Portable Issue #19 regression over the real dbnum=8000 session chain.
+ //!
+ //! Run:
+-//! `cargo test --test db8000_two_delete_fixture -- --ignored --nocapture`
++//! `cargo test --test db8000_two_delete_fixture -- --nocapture`
+ 
+ #[path = "../src/bin/db8000_two_delete_fixture/archive.rs"]
+ #[allow(dead_code)]
+@@ -11,13 +11,45 @@ use aios_core::RefnoEnum;
+ use aios_core::pdms_types::RefU64;
+ use aios_database::data_interface::increment_pipeline::IncrementPipeline;
+ use aios_database::data_interface::manual_update::{NetOp, merge_net_changes};
+-use archive::verify_and_extract;
++use archive::{ExtractedFixture, verify_and_extract};
+ use parse_pdms_db::paged::PagedDbSession;
+-use pdms_io::io::EleOperationDetail;
+-use std::collections::HashMap;
++use pdms_io::io::{EleOperationData, EleOperationDetail};
++use std::collections::{BTreeMap, HashMap};
+ use std::path::{Path, PathBuf};
+ use std::str::FromStr;
+ 
++const BASELINE_SESNO: u32 = 24;
++const CHILD_DELETE_SESNO: u32 = 25;
++const PARENT_DELETE_SESNO: u32 = 26;
++
++struct Db8000Fixture {
++    _extracted: ExtractedFixture,
++    baseline: PathBuf,
++    child_deleted: PathBuf,
++    parent_deleted: PathBuf,
++}
++
++impl Db8000Fixture {
++    fn load() -> Self {
++        let extracted =
++            verify_and_extract(&fixture_root()).expect("verify and extract Issue #19 fixture");
++        let baseline = extracted.path_for_role("baseline").unwrap();
++        let child_deleted = extracted.path_for_role("child_deleted").unwrap();
++        let parent_deleted = extracted.path_for_role("parent_deleted").unwrap();
++        Self {
++            _extracted: extracted,
++            baseline,
++            child_deleted,
++            parent_deleted,
++        }
++    }
++
++    fn collect(&self, start: u32, end: u32) -> BTreeMap<u32, Vec<EleOperationData>> {
++        IncrementPipeline::collect_changes(&self.parent_deleted, start as i32..=end as i32)
++            .expect("collect db8000 increment window")
++    }
++}
++
+ fn fixture_root() -> PathBuf {
+     std::env::var_os("AIOS_DB8000_TWO_DELETE_FIXTURE")
+         .map(PathBuf::from)
+@@ -32,23 +64,61 @@ fn assert_session(path: &Path, expected: u32) {
+     assert_eq!(session.snapshot().sesno, expected, "{}", path.display());
+ }
+ 
++fn refs() -> (RefU64, RefU64, RefU64) {
++    (
++        RefU64::from_str("24384/24775").unwrap(),
++        RefU64::from_str("24384/24778").unwrap(),
++        RefU64::from_str("24384/24779").unwrap(),
++    )
++}
++
++fn operation_signatures(changes: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<String> {
++    let mut signatures = changes
++        .iter()
++        .flat_map(|(sesno, operations)| {
++            operations.iter().map(move |operation| {
++                let detail = match &operation.detail {
++                    EleOperationDetail::Add(element) => format!("Add:{}", element.noun),
++                    EleOperationDetail::Deleted => "Deleted".to_string(),
++                    EleOperationDetail::Modified(modified) => format!(
++                        "Modified:{}:children={}",
++                        modified.noun,
++                        modified.children_changed.is_some()
++                    ),
++                    EleOperationDetail::None => "None".to_string(),
++                };
++                format!("{sesno}:{}:{detail}", operation.refno)
++            })
++        })
++        .collect::<Vec<_>>();
++    signatures.sort_unstable();
++    signatures
++}
++
++fn assert_operation_sessions(changes: &BTreeMap<u32, Vec<EleOperationData>>) {
++    for (sesno, operations) in changes {
++        assert!(
++            operations.iter().all(|operation| operation.sesno == *sesno),
++            "operation session must match its map partition: {sesno} -> {operations:?}"
++        );
++    }
++}
++
++#[test]
++fn archive_contains_the_three_declared_db8000_sessions() {
++    let fixture = Db8000Fixture::load();
++    assert_session(&fixture.baseline, BASELINE_SESNO);
++    assert_session(&fixture.child_deleted, CHILD_DELETE_SESNO);
++    assert_session(&fixture.parent_deleted, PARENT_DELETE_SESNO);
++}
++
+ #[test]
+-#[ignore = "real-file regression fixture; opt in explicitly"]
+ fn final_file_window_preserves_child_then_parent_delete_sessions() {
+-    let fixture =
+-        verify_and_extract(&fixture_root()).expect("verify and extract Issue #19 fixture");
+-    let baseline = fixture.path_for_role("baseline").unwrap();
+-    let child_deleted = fixture.path_for_role("child_deleted").unwrap();
+-    let final_file = fixture.path_for_role("parent_deleted").unwrap();
+-    assert_session(&baseline, 24);
+-    assert_session(&child_deleted, 25);
+-    assert_session(&final_file, 26);
+-
+-    let child = RefU64::from_str("24384/24779").unwrap();
+-    let parent = RefU64::from_str("24384/24778").unwrap();
+-    let zone = RefU64::from_str("24384/24775").unwrap();
+-    let collected = IncrementPipeline::collect_changes(&final_file, 25..=26).unwrap();
++    let fixture = Db8000Fixture::load();
++    let collected = fixture.collect(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
++    let (zone, parent, child) = refs();
+ 
++    assert_operation_sessions(&collected);
+     assert_eq!(collected.keys().copied().collect::<Vec<_>>(), vec![25, 26]);
+     assert_eq!(collected[&25].len(), 2, "session 25: {:?}", collected[&25]);
+     assert_eq!(collected[&26].len(), 2, "session 26: {:?}", collected[&26]);
+@@ -78,6 +148,43 @@ fn final_file_window_preserves_child_then_parent_delete_sessions() {
+                     if modified.noun == "ZONE" && modified.children_changed.is_some()
+             )
+     }));
++}
++
++#[test]
++fn final_history_matches_the_session_25_point_in_time_snapshot() {
++    let fixture = Db8000Fixture::load();
++    let from_session_25_file = IncrementPipeline::collect_changes(
++        &fixture.child_deleted,
++        CHILD_DELETE_SESNO as i32..=CHILD_DELETE_SESNO as i32,
++    )
++    .expect("collect session 25 snapshot");
++    let from_final_history = fixture.collect(CHILD_DELETE_SESNO, CHILD_DELETE_SESNO);
++
++    assert_eq!(
++        operation_signatures(&from_final_history),
++        operation_signatures(&from_session_25_file),
++        "later parent deletion must not rewrite session 25 history"
++    );
++}
++
++#[test]
++fn combined_window_equals_the_union_of_its_session_slices() {
++    let fixture = Db8000Fixture::load();
++    let combined = fixture.collect(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
++    let mut slices = fixture.collect(CHILD_DELETE_SESNO, CHILD_DELETE_SESNO);
++    slices.extend(fixture.collect(PARENT_DELETE_SESNO, PARENT_DELETE_SESNO));
++
++    assert_eq!(
++        operation_signatures(&combined),
++        operation_signatures(&slices)
++    );
++}
++
++#[test]
++fn window_folds_to_box_and_equi_deleted_with_zone_modified() {
++    let fixture = Db8000Fixture::load();
++    let collected = fixture.collect(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
++    let (zone, parent, child) = refs();
+ 
+     let by_refno = merge_net_changes(&collected)
+         .into_iter()
+@@ -95,4 +202,5 @@ fn final_file_window_preserves_child_then_parent_delete_sessions() {
+         by_refno[&RefnoEnum::from(zone).to_pdms_str()],
+         NetOp::Modified
+     );
++    assert_eq!(by_refno.len(), 3, "unexpected extra model net changes");
+ }
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md
+index 53bc46bb..3954453e 100644
+--- a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/README.md
+@@ -11,7 +11,8 @@
+ 运行回归：
+ 
+ ```powershell
+-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++cargo test --test db8000_two_delete_fixture -- --nocapture
+ ```
+ 
+-测试会验证 ZIP 与三个文件的 SHA256、安全解压，然后只使用 sesno 26 最终文件直接采集 `25..=26`。
++测试会验证 ZIP 与三个文件的 SHA256、安全解压、会话切片一致性，并使用 sesno 26
++最终文件直接采集 `25..=26` 后校验原始操作与净模型变化。
+diff --git a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/verification.md b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/verification.md
+index d973b9e0..592caade 100644
+--- a/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/verification.md
++++ b/tests/fixtures/issues/issue-019-cross-session-parent-child-delete/verification.md
+@@ -30,7 +30,7 @@ Input: the `parent_deleted` file extracted from `db8000-sesno24-26.zip`.
+ Command:
+ 
+ ```powershell
+-cargo test --test db8000_two_delete_fixture -- --ignored --nocapture
++cargo test --test db8000_two_delete_fixture -- --nocapture
+ ```
+ 
+ Exit status: `0`
+@@ -38,12 +38,17 @@ Exit status: `0`
+ Literal output:
+ 
+ ```text
+-running 1 test
++running 6 tests
++test archive::tests::archive_paths_must_stay_relative_and_normal ... ok
++test archive_contains_the_three_declared_db8000_sessions ... ok
+ collect sesno: 25
+ collect sesno: 26
+ test final_file_window_preserves_child_then_parent_delete_sessions ... ok
++test final_history_matches_the_session_25_point_in_time_snapshot ... ok
++test combined_window_equals_the_union_of_its_session_slices ... ok
++test window_folds_to_box_and_equi_deleted_with_zone_modified ... ok
+ 
+-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+ ```
+ 
+ The test asserts the exact four operations:
+diff --git a/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/README.md b/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/README.md
+new file mode 100644
+index 00000000..167a0ddf
+--- /dev/null
++++ b/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/README.md
+@@ -0,0 +1,13 @@
++# Issue #20：db8000 模型增量 CI 案例
++
++本目录记录 Issue #20 的 Oracle 设计评审、验证结果与可逆补丁。实际数据库 ZIP 继续
++复用相邻的 `issue-019-cross-session-parent-child-delete`，避免重复存储 4.49 MiB 数据。
++
++权威执行入口：
++
++```powershell
++cargo test --locked --test db8000_two_delete_fixture `
++  --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
++```
++
++GitHub Actions 入口：`.github/workflows/windows-tests.yml`。
+diff --git a/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/oracle-review.md b/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/oracle-review.md
+new file mode 100644
+index 00000000..8ce19059
+--- /dev/null
++++ b/tests/fixtures/issues/issue-020-db8000-model-increment-ci-suite/oracle-review.md
+@@ -0,0 +1,741 @@
++# db8000 model-increment regression suite design
++
++## 1. Prioritized regression matrix
++
++### Scope assumption
++
++The first deliverable must stay strictly inside the existing Issue #19 fixture:
++
++* real dbnum: **8000**
++* snapshots:
++
++  * sesno 24 baseline
++  * sesno 25 child deleted
++  * sesno 26 parent deleted
++* archive:
++
++  * `tests/fixtures/issues/issue-019-cross-session-parent-child-delete/db8000-sesno24-26.zip`
++  * 4.49 MB ZIP, no LFS requirement
++* no AVEVA runtime, no SurrealDB, no external tools.
++
++The fixture manifest already fixes the window as `24 → 25 → 26`, refs:
++
++* ZONE `24384_24775`
++* parent EQUI `24384_24778`
++* child BOX `24384_24779`
++
++
++---
++
++## Priority matrix
++
++| Priority | Case                                       | Source                     | Range      | Purpose                                                | New snapshot required? |
++| -------- | ------------------------------------------ | -------------------------- | ---------- | ------------------------------------------------------ | ---------------------- |
++| P0       | Cross-session child delete + parent delete | Existing Issue #19         | `25..=26`  | Protect fixed bug: historical OWNER lookup             | No                     |
++| P0       | Per-session extraction correctness         | Existing ZIP               | `25`, `26` | Ensure collector does not move events between sessions | No                     |
++| P0       | Net-change fold correctness                | Existing ZIP               | `25..=26`  | Verify Delete/Delete/Modified folding                  | No                     |
++| P0       | Delete scheduling collapse                 | Existing ZIP + pure helper | `25..=26`  | Ensure only topmost recursive cleanup is scheduled     | No                     |
++| P1       | Transform-only regression                  | None                       | TBD        | Validate `Transform` path                              | Yes                    |
++| P1       | Cascade/reverse-reference regression       | None                       | TBD        | Validate `CascadeExpand`                               | Yes                    |
++| P2       | Room recalculation regression              | None                       | TBD        | Validate `RoomRecalcPanel/Element`                     | Yes                    |
++
++The first release should ship only the four P0 cases. The remaining cases require intentionally-created PDMS histories because the current ZIP does not contain those semantics.
++
++---
++
++# 2. Exact cases and expected assertions
++
++## Case P0-1: collect_changes preserves historical session ownership
++
++### Input
++
++```
++fixture: db8000-sesno24-26.zip
++dbnum: 8000
++file: sesno-026-parent-deleted/ams8000_0001
++range: 25..=26
++```
++
++Production API:
++
++```rust
++IncrementPipeline::collect_changes(&final_file, 25..=26)
++```
++
++The existing test already uses this production path.
++
++
++### Expected raw operations
++
++Total operations:
++
++```
++4
++```
++
++Expected:
++
++| sesno | refno       | operation | noun |
++| ----- | ----------- | --------- | ---- |
++| 25    | 24384_24778 | Modified  | EQUI |
++| 25    | 24384_24779 | Deleted   | BOX  |
++| 26    | 24384_24775 | Modified  | ZONE |
++| 26    | 24384_24778 | Deleted   | EQUI |
++
++
++
++Failure signature to prevent:
++
++```
++sesno25:
++    EQUI Deleted  ❌
++
++missing:
++    BOX Deleted @25 ❌
++```
++
++The old behavior produced exactly that false result.
++
++
++---
++
++## Case P0-2: session partition integrity
++
++Input:
++
++```
++range: 25..=26
++```
++
++Expected map:
++
++```rust
++changes.keys()
++==
++vec![25,26]
++```
++
++Assertions:
++
++```rust
++changes[&25].len() == 2
++changes[&26].len() == 2
++```
++
++Expected session 25:
++
++```
++24384_24778 Modified
++24384_24779 Deleted
++```
++
++Expected session 26:
++
++```
++24384_24775 Modified
++24384_24778 Deleted
++```
++
++The expected session snapshots already encode this split.
++
++
++
++---
++
++## Case P0-3: merge_net_changes regression
++
++Input:
++
++```rust
++merge_net_changes(&collected)
++```
++
++Expected:
++
++```text
++24384_24779 -> Deleted
++24384_24778 -> Deleted
++24384_24775 -> Modified
++```
++
++Reason:
++
++The collector returns session events; the planner must merge them into final semantic changes.
++
++Existing merge logic:
++
++```rust
++fold_net_op()
++merge_net_change_details()
++```
++
++already defines:
++
++```
++Modify + Delete = Deleted
++Add + Delete = Cancelled
++multiple Modify = Modified
++```
++
++
++
++---
++
++## Case P0-4: model work plan only deletes topmost subtree
++
++Input:
++
++Synthetic ownership graph from real refs:
++
++```
++ZONE
++ |
++ EQUI 24384_24778
++ |
++ BOX 24384_24779
++```
++
++Expected:
++
++Net changes:
++
++```
++BOX Deleted
++EQUI Deleted
++ZONE Modified
++```
++
++But model work:
++
++```
++DeleteCleanup(24384_24778)
++```
++
++Only parent cleanup.
++
++Reason:
++
++`delete_inst_relate_subtree` already recursively removes children. Child cleanup duplicates work.
++
++
++Existing pure regression:
++
++```
++child_delete_then_parent_delete_across_sessions_schedules_only_the_parent
++```
++
++uses exactly this db8000 topology.
++
++
++---
++
++# 3. Rust test/helper structure
++
++Avoid comparison JSON as the oracle.
++
++JSON may remain as documentation, but tests should execute production code.
++
++Recommended layout:
++
++```
++tests/
++├── db8000_model_increment.rs
++├── fixtures/
++│   └── issues/
++│       └── issue-019-cross-session-parent-child-delete/
++│           ├── manifest.json
++│           └── db8000-sesno24-26.zip
++
++src/
++└── data_interface/
++    ├── increment_pipeline.rs
++    ├── manual_update.rs
++    └── model_update_plan.rs
++```
++
++---
++
++## Fixture helper
++
++Reuse:
++
++```rust
++archive::verify_and_extract()
++```
++
++It already:
++
++* validates manifest
++* validates SHA256
++* checks archive size
++* extracts into temporary directory
++* verifies extracted snapshots
++
++
++
++---
++
++## Integration test
++
++Example:
++
++```rust
++#[test]
++fn db8000_issue19_window_25_26_regression()
++{
++    let fixture = verify_and_extract(...)?;
++
++    let final_file =
++        fixture.path_for_role("parent_deleted")?;
++
++    let changes =
++        IncrementPipeline::collect_changes(
++            &final_file,
++            25..=26
++        )?;
++
++    assert_raw_operations(&changes);
++
++    let merged =
++        merge_net_changes(&changes);
++
++    assert_net_changes(&merged);
++
++    let plan =
++        build_model_update_plan(...);
++
++    assert_delete_cleanup(plan);
++}
++```
++
++Important:
++
++Do not deserialize:
++
++```
++expected-after-fix-window-25-26.json
++```
++
++inside tests.
++
++That only checks that JSON matches JSON.
++
++The real contract is:
++
++```
++PDMS snapshot
++    ↓
++PdmsIO
++    ↓
++collect_changes()
++    ↓
++merge_net_change_details()
++    ↓
++build_model_update_plan()
++    ↓
++ModelWorkItem
++```
++
++---
++
++# 4. GitHub Actions design
++
++## Current problem
++
++Existing workflow only:
++
++```
++cargo build --release
++```
++
++and does not execute tests.
++
++It already has the correct build feature set:
++
++```yaml
++--features ws,gen_model,manifold,occ,project_hd,http_api
++```
++
++
++
++However:
++
++```
++ws,project_hd
++```
++
++alone currently fails because `fast_model` imports are unconditional.
++
++Therefore CI should not use arbitrary feature combinations.
++
++---
++
++# Proposed workflows
++
++## PR workflow
++
++New:
++
++```
++.github/workflows/windows-test.yml
++```
++
++Trigger:
++
++```yaml
++on:
++  pull_request:
++  workflow_dispatch:
++```
++
++Steps:
++
++```
++checkout
++
++install nightly-2026-08-02
++
++restore cargo cache
++
++cargo test
++    --locked
++    --no-default-features
++    --features ws,gen_model,manifold,project_hd,http_api
++    --tests
++```
++
++Do not run:
++
++```
++--ignored
++```
++
++for normal PR.
++
++The first fixture test should become non-ignored because:
++
++* ZIP is only 4.49 MB
++* extraction is local
++* no external dependency
++
++---
++
++## Main workflow
++
++Keep current binary workflow.
++
++Add:
++
++```
++needs: regression-test
++```
++
++before release packaging.
++
++Pipeline:
++
++```
++PR:
++    compile
++    regression
++
++main:
++    regression
++       |
++    release build
++       |
++    package
++```
++
++---
++
++## Cache
++
++Reuse:
++
++```
++~/.cargo/registry
++~/.cargo/git
++target
++```
++
++The existing workflow already caches those paths.
++
++
++Recommended key:
++
++```
++cargo-test-${{ hashFiles('Cargo.lock') }}
++```
++
++separate from release cache.
++
++---
++
++# 5. False-positive risks
++
++## 1. Overfitting to refnos
++
++Risk:
++
++```
++24384_24778
++```
++
++only protects one model.
++
++Mitigation:
++
++Keep fixture test for regression, but add generated synthetic topology tests later.
++
++---
++
++## 2. Testing JSON instead of behavior
++
++Risk:
++
++A broken parser can still produce the expected JSON if test bypasses production.
++
++Mitigation:
++
++Never load:
++
++```
++expected-after-fix-window-25-26.json
++```
++
++as assertion source.
++
++Use it only as review evidence.
++
++---
++
++## 3. ZIP integrity mistaken for model correctness
++
++Current archive verification proves:
++
++```
++correct bytes
++correct snapshot
++```
++
++but not:
++
++```
++correct incremental semantics
++```
++
++Need both:
++
++```
++archive verification
+++
++production pipeline assertion
++```
++
++---
++
++## 4. Planner test hiding collector regression
++
++Risk:
++
++Synthetic `EleOperationData` tests pass while PDMS parsing breaks.
++
++Mitigation:
++
++Maintain two layers:
++
++```
++Layer A:
++real ZIP → collect_changes()
++
++Layer B:
++pure operations → planner logic
++```
++
++---
++
++## 5. Feature drift in CI
++
++Risk:
++
++A future Cargo feature change makes regression unavailable.
++
++Mitigation:
++
++Pin CI feature list explicitly:
++
++```yaml
++ws,gen_model,manifold,project_hd,http_api
++```
++
++and add a compile-only smoke test.
++
++---
++
++# 6. Staged implementation plan
++
++## Stage 0 — first deliverable (only existing ZIP)
++
++Goal:
++
++Portable regression.
++
++Changes:
++
++1. Add:
++
++```
++tests/db8000_model_increment.rs
++```
++
++2. Move fixture from ignored-only test to normal integration test.
++
++3. Add assertions:
++
++```
++collect_changes()
++    ↓
++4 operations
++
++merge_net_changes()
++    ↓
++3 net changes
++
++model plan
++    ↓
++1 parent cleanup
++```
++
++No:
++
++* SurrealDB
++* AVEVA
++* RVM
++* Git LFS
++* external tools
++
++---
++
++## Stage 1 — CI integration
++
++Add:
++
++```
++windows-test.yml
++```
++
++Run:
++
++```
++cargo test --tests
++```
++
++on PR.
++
++---
++
++## Stage 2 — broaden model regression
++
++Need new snapshots:
++
++### Transform case
++
++Example history:
++
++```
++sesno 40
++    POS change
++
++expected:
++Transform
++```
++
++Tests:
++
++```
++ModelWorkAction::Transform
++```
++
++---
++
++### Geometry regeneration case
++
++Need:
++
++```
++BRAN/HANG member movement
++```
++
++Expected:
++
++```
++RegenRoot
++```
++
++because BRAN/HANG geometry depends on member positions.
++
++
++---
++
++### Cascade case
++
++Need:
++
++```
++CATA/spec/reference change
++```
++
++Expected:
++
++```
++CascadeExpand
++```
++
++---
++
++### Room case
++
++Need:
++
++```
++PANE move
++ROOM rename
++```
++
++Expected:
++
++```
++RoomRecalcPanel
++RoomRecalcElement
++```
++
++The model work enum already contains these actions.
++
++
++---
++
++## Final recommended first PR scope
++
++Keep it narrow:
++
++```
++PR #1
++========
++
+++ db8000 fixture test
+++ remove ignored requirement
+++ Windows PR CI test job
+++ cargo cache split
+++ assertions on:
++    - raw operations
++    - net changes
++    - delete cleanup plan
++
++No new fixtures.
++No SurrealDB.
++No UI.
++No AVEVA.
++```
++
++This gives a high-value regression gate around the exact historical OWNER bug fixed in `pdms_io@5c9e00e3c46f7d6f7c548583020b66e0ad23368a`, whose purpose was to read OWNER membership at the requested session boundary rather than the final file state.

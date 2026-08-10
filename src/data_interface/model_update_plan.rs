@@ -169,7 +169,41 @@ fn work_items_from_units(
             },
         );
     }
+    // 注：删除集在调用方已按「最顶端那个」收敛过（见 `topmost_deleted_refnos`）。
+    // 执行侧 `delete_inst_relate_subtree` 本来就沿 pe_owner 递归整棵子树，子节点
+    // 再单排一条只是把同一棵子树走两遍。
     items.into_values().collect()
+}
+
+/// 删除集收敛到每棵子树最顶端的那一个。
+///
+/// `delete_inst_relate_subtree` 沿 `pe_owner` 递归整棵子树，所以父子同时被删时，
+/// 子的那条 `DeleteCleanup` 是纯重复劳动——同一棵子树被收集、级联、清房间边两遍。
+/// 一次删掉一个几百件的 EQUI，队列里就会多出几百条互相覆盖的行。
+///
+/// owner 解不出来时保留该项：宁可多排一条幂等的清理，也不能因为链断了把它漏掉。
+fn topmost_deleted_refnos(
+    deleted: &HashSet<RefnoEnum>,
+    owner_of: impl Fn(RefnoEnum) -> Option<RefnoEnum>,
+) -> HashSet<RefnoEnum> {
+    const HOP_CAP: usize = 32;
+    deleted
+        .iter()
+        .copied()
+        .filter(|&refno| {
+            let mut cursor = refno;
+            for _ in 0..HOP_CAP {
+                let Some(owner) = owner_of(cursor) else {
+                    return true;
+                };
+                if deleted.contains(&owner) {
+                    return false;
+                }
+                cursor = owner;
+            }
+            true
+        })
+        .collect()
 }
 
 fn discard_cancelled(refnos: &mut HashSet<RefnoEnum>, details: &[NetChangeDetail]) {
@@ -741,6 +775,22 @@ pub(crate) async fn build_model_update_plan(
             ));
         }
     }
+    // 删除往下传（见 `propagate_deletes_to_descendants`）。放在基线删除还原之后：
+    // 「窗口内建了又删、而基线里本来就有」那种会先被还原成 `Deleted`，它名下的子孙
+    // 同样要跟着走。放在 `partition_operation_impacts` 之前：分区读的就是这里的 net，
+    // 晚一步的话被改判的子节点已经进了 regen/transform 集合。
+    //
+    // 后态 owner 取自窗口操作自己的 overlay；`build_owner_overlay` 是纯函数，不打库。
+    let (post_owners, _) = crate::data_interface::manual_update::build_owner_overlay(range_eles);
+    let folded = crate::data_interface::manual_update::propagate_deletes_to_descendants(
+        &mut details,
+        |refno| post_owners.get(&refno).and_then(|node| node.owner),
+    );
+    if folded > 0 {
+        baseline_warnings.push(format!(
+            "dbnum={dbnum}: {folded} 个变更的 owner 已在本窗口内被删除，随父改判为删除，不再排更新"
+        ));
+    }
     let mut partition = partition_operation_impacts(range_eles, &details);
     // issue #5：生成根从成员位置派生几何（BRAN/HANG 的隐含直管段）时，纯位姿变更也得
     // 整根重生成——便宜路径结构上算不出管段。必须排在 `mask_details_to_regen` 之前，
@@ -757,6 +807,9 @@ pub(crate) async fn build_model_update_plan(
         .filter(|detail| detail.net == NetOp::Deleted)
         .map(|detail| detail.refno)
         .collect();
+    let deleted_refnos = topmost_deleted_refnos(&deleted_refnos, |refno| {
+        post_owners.get(&refno).and_then(|node| node.owner)
+    });
     let regen_details = mask_details_to_regen(&details, &regen_refnos);
 
     let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details).await?;
@@ -1409,6 +1462,78 @@ mod tests {
                 .unwrap()
                 .model_affecting
         );
+    }
+
+    /// 父被删时，子不该再单排一条 `DeleteCleanup`：执行侧本来就递归整棵子树。
+    ///
+    /// 一次删掉一个几百件的 EQUI，不收敛的话队列里会多出几百条互相覆盖的行，
+    /// 每一条都把同一棵子树重新收集、级联、清一遍房间边。
+    #[test]
+    fn a_deleted_subtree_collapses_to_its_topmost_element() {
+        let equi = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24778));
+        let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
+        let grandchild = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24780));
+        let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
+        let owners = HashMap::from([(equi, zone), (child, equi), (grandchild, child)]);
+
+        let topmost = topmost_deleted_refnos(&HashSet::from([equi, child, grandchild]), |refno| {
+            owners.get(&refno).copied()
+        });
+
+        assert_eq!(topmost, HashSet::from([equi]));
+    }
+
+    /// dbnum=8000 的可重复夹具口径：sesno 25 先删 EQUI 下的节点，sesno 26 再删
+    /// EQUI。会话合并必须保留两个墓碑，而调度收敛只留下父 EQUI 的一条递归清理。
+    #[test]
+    fn child_delete_then_parent_delete_across_sessions_schedules_only_the_parent() {
+        let equi = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24778));
+        let child = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24779));
+        let zone = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 24775));
+        let range = BTreeMap::from([
+            (
+                25,
+                vec![EleOperationData::new(
+                    child.refno(),
+                    25,
+                    EleOperationDetail::Deleted,
+                )],
+            ),
+            (
+                26,
+                vec![EleOperationData::new(
+                    equi.refno(),
+                    26,
+                    EleOperationDetail::Deleted,
+                )],
+            ),
+        ]);
+
+        let merged = crate::data_interface::manual_update::merge_net_change_details(&range);
+        let deleted = merged
+            .iter()
+            .filter(|detail| detail.net == NetOp::Deleted)
+            .map(|detail| detail.refno)
+            .collect::<HashSet<_>>();
+        assert_eq!(deleted, HashSet::from([child, equi]));
+
+        let owners = HashMap::from([(child, equi), (equi, zone)]);
+        let topmost = topmost_deleted_refnos(&deleted, |refno| owners.get(&refno).copied());
+        assert_eq!(topmost, HashSet::from([equi]));
+
+        let work = work_items_from_units(8000, 26, "DESI", &[], &HashSet::new(), &topmost);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, ModelWorkAction::DeleteCleanup);
+        assert_eq!(work[0].target_refno, equi.to_pdms_str());
+        assert_eq!(work[0].source_end_sesno, 26);
+    }
+
+    /// owner 解不出来时保留：宁可多排一条幂等的清理，也不能因为链断了漏掉它。
+    #[test]
+    fn a_delete_with_an_unresolvable_owner_is_kept() {
+        let orphan = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 9));
+        let topmost = topmost_deleted_refnos(&HashSet::from([orphan]), |_| None);
+        assert_eq!(topmost, HashSet::from([orphan]));
     }
 
     #[test]

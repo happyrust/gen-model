@@ -1084,6 +1084,7 @@ impl AiosDBManager {
             Some(FileAnomaly::Rollback {
                 file_latest_sesno: f,
                 applied_sesno: a,
+                ..
             }) => println!(
                 "F6 文件回退/替换，阻断 dbnum={db_num}（file_latest={f} < applied={a}），水位不回退"
             ),
@@ -1379,7 +1380,7 @@ impl AiosDBManager {
         if !params.is_empty() {
             log::info!("[{origin}] 重扫待入队批次数: {}", params.len());
         }
-        self.enqueue_discovered(origin, params);
+        self.enqueue_discovered(origin, Self::sweep_holds_rows(), params);
 
         println!(
             "[{origin}] 重扫（重建队列）总耗时: {} 秒",
@@ -1455,9 +1456,15 @@ impl AiosDBManager {
     }
 
     /// 把一批发现逐条入队并打日志（init 重扫与 watch 事件两条路径共用）。
+    ///
+    /// `hold` 分开重扫与真实触发：重扫看到的是**已经躺在那儿**的会话，谁都没要求
+    /// 现在处理；文件事件与人工执行才是「有人正在这个库上干活」。判据用参数传而
+    /// 不是在这里认 `origin` 字符串——重扫的来源有三个（init / scope-refresh /
+    /// share-remount），漏认一个就是一次意外的自动开工。
     fn enqueue_discovered(
         &self,
         origin: &str,
+        hold: bool,
         params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch>,
     ) {
         use crate::data_interface::batch_queue::Enqueued;
@@ -1467,15 +1474,16 @@ impl AiosDBManager {
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
         for (_path, found) in params {
-            let outcome = scheduler.enqueue(registry, &found);
+            let outcome = scheduler.enqueue(registry, &found, hold);
             let verb = match outcome.outcome {
                 Enqueued::New => "新排",
                 Enqueued::Merged => "并入会话",
                 Enqueued::AlreadyCovered => "已覆盖",
                 Enqueued::BehindRunning => "接在运行批次之后",
             };
+            let posture = if hold { "，挂起待增量触发" } else { "" };
             println!(
-                "[{origin}] dbnum={} {verb}：sesno {}..={}（task {}，排在第 {} 位）",
+                "[{origin}] dbnum={} {verb}：sesno {}..={}（task {}，排在第 {} 位{posture}）",
                 found.dbnum,
                 outcome.info.start_sesno,
                 outcome.info.end_sesno,
@@ -1483,6 +1491,11 @@ impl AiosDBManager {
                 outcome.info.position
             );
         }
+    }
+
+    /// 重扫排出来的行要不要挂起：`startup_autorun` 开着就是历史行为（不挂起）。
+    fn sweep_holds_rows() -> bool {
+        !crate::options::startup_autorun()
     }
 
     /// 重挂轮：重新解析配置、补挂缺席的目录，挂上了就补一次重扫。
@@ -1894,7 +1907,9 @@ impl AiosDBManager {
 
                         // 发现即入队（ADR-011 §2）：执行、发布与补偿都归数据批次
                         // worker，事件回调从此不再被一轮增量执行堵住。
-                        self.enqueue_discovered("watch", params);
+                        // 文件真的变了 = 有人在这个库上干活：不挂起，并放行该
+                        // dbnum 启动时挂起的积压，两段合成一条一起跑。
+                        self.enqueue_discovered("watch", false, params);
                     } else {
                         println!("扫描数据库头部信息失败，路径: {:?}", &event.paths);
                     }

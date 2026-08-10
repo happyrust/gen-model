@@ -1,0 +1,16 @@
+{
+  "sesno": 26,
+  "expected": [
+    {
+      "refno": "24384_24775",
+      "operation": "modified",
+      "noun": "ZONE",
+      "attributes": [],
+      "children": "member_changed"
+    },
+    {
+      "refno": "24384_24778",
+      "operation": "deleted"
+    }
+  ]
+}

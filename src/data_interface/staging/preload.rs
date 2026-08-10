@@ -191,12 +191,11 @@ async fn apply_model_mutation_preload_from(
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
-        copied += copy_rows(
-            source,
-            "pe",
-            &format!("SELECT * FROM pe WHERE id IN [{keys}]"),
-        )
-        .await?;
+        // 按记录 id 直接寻址，**不要**写成 `WHERE id IN [...]`：那是全表扫描加过滤，
+        // 不走主键。本项目 `pe` 有 895 万行，取这 4 条实测 64.4 秒，直接寻址 0.5 毫秒
+        // ——一次删除子树的窗口有 96% 的时间耗在这一句上。
+        // 键本身已经是 `pe:xxx` 的完整形态，表名在 FROM 里是多余的。
+        copied += copy_rows(source, "pe", &format!("SELECT * FROM {keys}")).await?;
         copied += copy_relations(
             source,
             "pe_owner",
@@ -332,22 +331,21 @@ async fn preload_existing_generation_products_for_refnos(
         .map(RefnoEnum::to_pe_key)
         .collect::<Vec<_>>()
         .join(",");
-    let inst_query = format!("SELECT * FROM inst_relate WHERE in IN [{pe_keys}]");
-    let info_keys = select_record_keys(
-        source,
-        &format!("SELECT VALUE out FROM inst_relate WHERE in IN [{pe_keys}]"),
-    )
-    .await?;
+    // 边从起点走图拿，**不要**写成 `WHERE in IN [...]`：`inst_relate` 上没有 `in` 的
+    // 索引（只有 anc / dbnum / zone_refno），那个谓词是 11.3 万行的全表扫，取 1 条边
+    // 实测 1.57s，走 `->inst_relate` 是 3.1ms。`geo_relate` 更彻底——它一个索引都没有。
+    let inst_edges = format!("array::flatten(SELECT VALUE ->inst_relate FROM [{pe_keys}])");
+    let inst_query = format!("SELECT * FROM {inst_edges}");
+    let info_keys =
+        select_record_keys(source, &format!("SELECT VALUE out FROM {inst_edges}")).await?;
     let world_keys = select_record_keys(
         source,
-        &format!(
-            "SELECT VALUE world_trans FROM inst_relate WHERE in IN [{pe_keys}] AND world_trans != NONE"
-        ),
+        &format!("SELECT VALUE world_trans FROM {inst_edges} WHERE world_trans != NONE"),
     )
     .await?;
     let mut aabb_keys = select_record_keys(
         source,
-        &format!("SELECT VALUE aabb FROM inst_relate WHERE in IN [{pe_keys}] AND aabb != NONE"),
+        &format!("SELECT VALUE aabb FROM {inst_edges} WHERE aabb != NONE"),
     )
     .await?;
     let mut copied = copy_relations(source, "inst_relate", &inst_query).await?;
@@ -356,15 +354,13 @@ async fn preload_existing_generation_products_for_refnos(
     }
 
     let info_scope = info_keys.join(",");
-    let geo_query = format!("SELECT * FROM geo_relate WHERE in IN [{info_scope}]");
-    let inst_geo_keys = select_record_keys(
-        source,
-        &format!("SELECT VALUE out FROM geo_relate WHERE in IN [{info_scope}]"),
-    )
-    .await?;
+    let geo_edges = format!("array::flatten(SELECT VALUE ->geo_relate FROM [{info_scope}])");
+    let geo_query = format!("SELECT * FROM {geo_edges}");
+    let inst_geo_keys =
+        select_record_keys(source, &format!("SELECT VALUE out FROM {geo_edges}")).await?;
     let mut trans_keys = select_record_keys(
         source,
-        &format!("SELECT VALUE trans FROM geo_relate WHERE in IN [{info_scope}] AND trans != NONE"),
+        &format!("SELECT VALUE trans FROM {geo_edges} WHERE trans != NONE"),
     )
     .await?;
     // 真实库的 `inst_relate.world_trans` 指向 `trans:*`；旧夹具也出现过
@@ -375,12 +371,8 @@ async fn preload_existing_generation_products_for_refnos(
     trans_keys.extend(world_keys);
     trans_keys.sort_unstable();
     trans_keys.dedup();
-    copied += copy_rows(
-        source,
-        "inst_info",
-        &format!("SELECT * FROM inst_info WHERE id IN [{info_scope}]"),
-    )
-    .await?;
+    // 直接寻址，理由同 `apply_model_mutation_preload_from` 里那条注释。
+    copied += copy_rows(source, "inst_info", &format!("SELECT * FROM {info_scope}")).await?;
     copied += copy_relations(source, "geo_relate", &geo_query).await?;
 
     let mut vec_keys = Vec::new();
@@ -388,17 +380,13 @@ async fn preload_existing_generation_products_for_refnos(
         let inst_geo_scope = inst_geo_keys.join(",");
         vec_keys = select_record_keys(
             source,
-            &format!(
-                "RETURN array::flatten(SELECT VALUE pts FROM inst_geo WHERE id IN [{inst_geo_scope}]);"
-            ),
+            &format!("RETURN array::flatten(SELECT VALUE pts FROM {inst_geo_scope});"),
         )
         .await?;
         aabb_keys.extend(
             select_record_keys(
                 source,
-                &format!(
-                    "SELECT VALUE aabb FROM inst_geo WHERE id IN [{inst_geo_scope}] AND aabb != NONE"
-                ),
+                &format!("SELECT VALUE aabb FROM {inst_geo_scope} WHERE aabb != NONE"),
             )
             .await?,
         );
@@ -407,7 +395,7 @@ async fn preload_existing_generation_products_for_refnos(
         copied += copy_rows(
             source,
             "inst_geo",
-            &format!("SELECT * FROM inst_geo WHERE id IN [{inst_geo_scope}]"),
+            &format!("SELECT * FROM {inst_geo_scope}"),
         )
         .await?;
     }
@@ -419,12 +407,8 @@ async fn preload_existing_generation_products_for_refnos(
         ("aabb", aabb_keys),
     ] {
         if !keys.is_empty() {
-            copied += copy_rows(
-                source,
-                table,
-                &format!("SELECT * FROM {table} WHERE id IN [{}]", keys.join(",")),
-            )
-            .await?;
+            copied +=
+                copy_rows(source, table, &format!("SELECT * FROM {}", keys.join(","))).await?;
         }
     }
     Ok(copied)
