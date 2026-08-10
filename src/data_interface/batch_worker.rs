@@ -78,6 +78,87 @@ fn beat() {
     WORKER_BEAT.store(Local::now().timestamp_millis(), Ordering::Relaxed);
 }
 
+/// 空闲轮 panic 账本：同一句话连撞了几轮、一共几次、最近一次长什么样。
+///
+/// 为什么需要它：现场 2026-08-08 那份日志里，`range end index 172 out of range for
+/// slice of length 168` 逐字相同地刷了 46 次，间隔正好一个 [`IDLE_WAKE`]——一个确定
+/// 性 panic 每 30 秒重演一次，把真正该被看见的东西全顶出了屏幕。而这条路上**一个
+/// 计数都没有**：panic 被 [`isolate_panic`] 接住就回主循环，走不到
+/// `model_update_pending::record_failure`，所以队列行那套 `MAX_ATTEMPTS` → 死信
+/// 压根盖不到它。重试第 2 轮和第 46 轮是同一件事，只是没人喊停。
+///
+/// 上限语义与队列行对齐：同一句话连撞 [`MAX_ATTEMPTS`] 轮就不再跑空闲轮。复活条件
+/// 也对齐「来了新东西就归零」——真跑过一个批次就重新开始；换了一句 panic 是另一个
+/// 故障，计数从头算。
+///
+/// 停跑是有代价的（房间收敛与范围重扫都在空闲轮里），所以它必须在外面看得见，
+/// 而不是只留一行滚走的日志：账本随 `/health` 的 `idle_round_panic` 一起摆出去。
+struct IdlePanicLedger {
+    total: u64,
+    streak: u32,
+    reason: Option<String>,
+    first_at: Option<String>,
+    last_at: Option<String>,
+}
+
+impl IdlePanicLedger {
+    const fn new() -> Self {
+        Self {
+            total: 0,
+            streak: 0,
+            reason: None,
+            first_at: None,
+            last_at: None,
+        }
+    }
+
+    /// 记一次 panic，返回这句话连续第几轮。换了一句就从 1 重新数。
+    fn record(&mut self, reason: &str, now: &str) -> u32 {
+        self.total += 1;
+        if self.reason.as_deref() == Some(reason) {
+            self.streak += 1;
+        } else {
+            self.streak = 1;
+            self.reason = Some(reason.to_string());
+            self.first_at = Some(now.to_string());
+        }
+        self.last_at = Some(now.to_string());
+        self.streak
+    }
+
+    /// 真跑过活就归零连撞计数；累计数与最近一次原样留着，那是给人看的账。
+    fn clear_streak(&mut self) {
+        self.streak = 0;
+    }
+
+    fn parked(&self) -> bool {
+        self.streak >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
+    }
+}
+
+static IDLE_PANIC: std::sync::Mutex<IdlePanicLedger> =
+    std::sync::Mutex::new(IdlePanicLedger::new());
+
+fn idle_panic_ledger() -> std::sync::MutexGuard<'static, IdlePanicLedger> {
+    IDLE_PANIC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `/health` 用：从没 panic 过是 `null`，否则是这本账。
+pub fn idle_round_panic_snapshot() -> Option<serde_json::Value> {
+    let ledger = idle_panic_ledger();
+    let reason = ledger.reason.clone()?;
+    Some(serde_json::json!({
+        "total": ledger.total,
+        "streak": ledger.streak,
+        "parked": ledger.parked(),
+        "reason": reason,
+        "first_at": ledger.first_at,
+        "last_at": ledger.last_at,
+    }))
+}
+
 struct WorkerLiveGuard;
 
 impl Drop for WorkerLiveGuard {
@@ -162,14 +243,30 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     loop {
         beat();
         let ran = drain_queue_until_empty(&mgr).await;
+        // 真跑过活 = 系统在往前走，那句连撞的 panic 未必还成立：归零重来。
+        if ran > 0 {
+            idle_panic_ledger().clear_streak();
+        }
         // spatial 收敛已在 drain 的出队门前执行；暂停只挡新批次与普通积压。
         // 上弦门（`startup_autorun=false` 且本进程还没见过真实增量）挡的是同一
         // 侧：持久积压不按 dbnum 分，没法像队列行那样逐条挂起，只能整体等信号。
-        if !scheduler.is_paused() && scheduler.is_auto_work_armed() {
+        let parked = idle_panic_ledger().parked();
+        if !scheduler.is_paused() && scheduler.is_auto_work_armed() && !parked {
             // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
             // 一样会把唯一的消费者带走。
             if let Err(reason) = isolate_panic(idle_round(&mgr, registry, ran > 0)).await {
-                let msg = format!("空闲轮 panic，已隔离，worker 继续: {reason}");
+                let streak = idle_panic_ledger().record(&reason, &Local::now().to_rfc3339());
+                let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+                let msg = if streak >= cap {
+                    format!(
+                        "空闲轮 panic 连续第 {streak} 轮同因，已停跑空闲轮（房间收敛与范围重扫一并暂停）；\
+                         跑过一个真实批次即自动恢复，账本见 /health 的 idle_round_panic: {reason}"
+                    )
+                } else {
+                    format!(
+                        "空闲轮 panic，已隔离，worker 继续（同因第 {streak}/{cap} 轮）: {reason}"
+                    )
+                };
                 log::error!("{msg}");
                 eprintln!("{msg}");
             }
@@ -184,7 +281,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
 ///
 /// **前提是 unwind**：profile 里一旦打开 `panic = "abort"`，这层壳什么都接不住，
 /// 队列就退回「一次 panic 永久停摆」。
-async fn isolate_panic<T>(work: impl std::future::Future<Output = T>) -> Result<T, String> {
+pub(crate) async fn isolate_panic<T>(
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
     AssertUnwindSafe(work)
         .catch_unwind()
         .await
@@ -3186,6 +3285,9 @@ mod tests {
     /// `startup_autorun=false` 下「还没人动过这个项目」。只判 `paused` 的话，
     /// 冷启动的服务照样会在启动后第一个空闲轮里开始啃持久积压（现场是 2580 个
     /// 房间重算目标），而那恰恰是这个默认要避免的事。
+    ///
+    /// 第三道门是连撞 panic 的停跑（[`IdlePanicLedger`]），它必须**带着复活路径**
+    /// 一起待在这段循环里：只停不复活的话，一次确定性 panic 就等于永久停摆。
     #[test]
     fn the_idle_round_needs_both_the_pause_and_the_arming_gate() {
         let source = include_str!("batch_worker.rs");
@@ -3198,8 +3300,16 @@ mod tests {
             .0;
 
         assert!(
-            body.contains("if !scheduler.is_paused() && scheduler.is_auto_work_armed() {"),
+            body.contains("!scheduler.is_paused() && scheduler.is_auto_work_armed()"),
             "空闲轮的门必须同时判暂停与上弦: {body}"
+        );
+        assert!(
+            body.contains("&& !parked"),
+            "同一句 panic 连撞到上限必须停跑空闲轮: {body}"
+        );
+        assert!(
+            body.contains("idle_panic_ledger().clear_streak()"),
+            "停跑必须带复活路径，否则一次确定性 panic 就是永久停摆: {body}"
         );
     }
 
@@ -3354,5 +3464,67 @@ mod tests {
 
         // 接住之后本任务还活着：worker 主循环正是靠这一点继续取下一条。
         assert_eq!(isolate_panic(async { 8 }).await, Ok(8));
+    }
+
+    /// 同一句 panic 连撞到上限就停跑空闲轮。
+    ///
+    /// 现场 2026-08-08 那份日志里同一句越界刷了 46 次、间隔正好一个 `IDLE_WAKE`：
+    /// 确定性 panic 每 30 秒重演一次，而这条路上没有任何计数——队列行那套
+    /// `MAX_ATTEMPTS` → 死信管不到被 `isolate_panic` 接住的 panic。
+    #[test]
+    fn the_same_idle_panic_parks_the_round_at_the_cap() {
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let mut ledger = IdlePanicLedger::new();
+
+        for round in 1..cap {
+            assert_eq!(ledger.record("index 172 out of range", "t"), round);
+            assert!(!ledger.parked(), "第 {round} 轮还不该停跑");
+        }
+        assert_eq!(ledger.record("index 172 out of range", "t"), cap);
+        assert!(ledger.parked(), "连撞 {cap} 轮必须停跑空闲轮");
+        assert_eq!(ledger.total, u64::from(cap));
+    }
+
+    /// 换一句 panic 是另一个故障，连撞计数从头算；累计数照涨。
+    #[test]
+    fn a_different_idle_panic_restarts_the_streak() {
+        let mut ledger = IdlePanicLedger::new();
+        for _ in 0..crate::data_interface::model_update_pending::MAX_ATTEMPTS {
+            ledger.record("index 172 out of range", "t1");
+        }
+        assert!(ledger.parked());
+
+        assert_eq!(ledger.record("sending into a closed channel", "t2"), 1);
+        assert!(!ledger.parked(), "新故障不该继承上一个的连撞计数");
+        assert_eq!(
+            ledger.first_at.as_deref(),
+            Some("t2"),
+            "首次时刻跟着新故障走"
+        );
+    }
+
+    /// 跑过一个真实批次就复活，但账本上的累计数与最近一次要留着给人看。
+    ///
+    /// 对齐队列行「来了更新的会话就归零」：停跑的代价是房间收敛与范围重扫一起停，
+    /// 没有复活路径的话，一次确定性 panic 就等于永久停摆——那正是这个提交在别处
+    /// 刚拆掉的屏障形状。
+    #[test]
+    fn real_work_revives_a_parked_idle_round() {
+        let mut ledger = IdlePanicLedger::new();
+        for _ in 0..crate::data_interface::model_update_pending::MAX_ATTEMPTS {
+            ledger.record("index 172 out of range", "t");
+        }
+        assert!(ledger.parked());
+
+        ledger.clear_streak();
+
+        assert!(!ledger.parked(), "跑过真实批次后必须恢复空闲轮");
+        assert_eq!(ledger.streak, 0);
+        assert_eq!(
+            ledger.total,
+            u64::from(crate::data_interface::model_update_pending::MAX_ATTEMPTS),
+            "累计数是给人看的账，不能被复活抹掉"
+        );
+        assert_eq!(ledger.last_at.as_deref(), Some("t"));
     }
 }
