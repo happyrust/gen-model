@@ -314,16 +314,27 @@ pub async fn prune_roots_stale_model_rows(
 /// 它还是某间房的面板，另有 `room_relate` 出边与 `room_panel_relate` 入边。这里不按
 /// noun 分情况：`pe.noun` 此刻可能已随软删一起不可靠，而对非面板元素那两条子句本来
 /// 就是空操作。
-/// 走图遍历取边、再按 id 整批删，**不要**写成 `WHERE in IN [..] OR out IN [..]`：
-/// 那个 `OR` 会让 `(in, out)` 复合索引整个失效，退化成边表全扫。同一个构件的 2 条边，
-/// 全扫写法实测 558.8ms，图遍历 2.1ms（`room_relate` 现有 6.6 万条边，全扫成本还随
-/// 边数线性涨）。`->room_relate` 与 `<-room_relate` 合起来正好等价于那两个方向。
-fn render_room_membership_delete(pe_keys: &str) -> String {
+/// 走图遍历，**不要**写成 `WHERE in IN [..] OR out IN [..]`：那个 `OR` 会让
+/// `(in, out)` 复合索引整个失效，退化成边表全扫。同一个构件的 2 条边，全扫写法实测
+/// 558.8ms，图遍历 2.1ms（`room_relate` 现有 6.6 万条边，全扫成本还随边数线性涨）。
+///
+/// 图遍历要写成 DELETE 的**边目标**（`{pe_key}<->{table}`），不能塞进目标表达式
+/// （`DELETE array::flatten(SELECT ... FROM [..])`）：后者的目标由执行时刻的查询结果
+/// 决定，ReplaySafe R1 整类拒绝，而暂存窗口里这道校验在执行之前——语句连跑都不会跑，
+/// 于是 staged 模式下**每一次**删除清理都必然失败、整窗口零落盘（2026-08-11 现场）。
+/// `<->` 与 `array::concat(->, <-)` 覆盖的方向完全相同。
+fn render_room_membership_delete(pe_keys: &[String]) -> String {
+    let targets = |table: &str| {
+        pe_keys
+            .iter()
+            .map(|key| format!("{key}<->{table}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        "DELETE array::flatten(SELECT VALUE array::concat(->room_relate, <-room_relate) \
-         FROM [{pe_keys}]);\n\
-         DELETE array::flatten(SELECT VALUE array::concat(->room_panel_relate, \
-         <-room_panel_relate) FROM [{pe_keys}]);"
+        "DELETE {};\nDELETE {};",
+        targets("room_relate"),
+        targets("room_panel_relate")
     )
 }
 
@@ -338,11 +349,7 @@ fn render_room_membership_delete(pe_keys: &str) -> String {
 /// 中间崩了 `DeleteCleanup` 任务会重试，从头再走一遍即可收敛。
 async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyhow::Result<()> {
     for chunk in refnos.chunks(chunk_size) {
-        let pe_keys = chunk
-            .iter()
-            .map(RefnoEnum::to_pe_key)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
         execute_model_write(
             &render_room_membership_delete(&pe_keys),
             "delete room membership",
@@ -473,18 +480,23 @@ mod tests {
     /// 房间归属就会留下指向已删元素的悬空边，而 `fn::room_relate_of` 照样会把它取出来。
     #[test]
     fn deleting_an_element_clears_room_membership_in_both_directions() {
-        let sql = render_room_membership_delete("pe:7997_1, pe:7997_2");
+        let sql =
+            render_room_membership_delete(&["pe:7997_1".to_string(), "pe:7997_2".to_string()]);
 
         for table in ["room_relate", "room_panel_relate"] {
-            assert!(
-                sql.contains(&format!(
-                    "array::concat(->{table}, <-{table}) FROM [pe:7997_1, pe:7997_2]"
-                )),
-                "{table} 的两个方向都要取到: {sql}"
-            );
+            for key in ["pe:7997_1", "pe:7997_2"] {
+                assert!(
+                    sql.contains(&format!("{key}<->{table}")),
+                    "{table} 的两个方向都要取到: {sql}"
+                );
+            }
         }
         // 边表全扫会让删除随边数线性变慢，回退即红。
         assert!(!sql.contains(" OR out IN ["), "{sql}");
+        // 被 validator 拒的语句连执行都到不了，而拒绝是静默的：准入本身必须有断言，
+        // 否则 staged 模式下每一次删除清理都失败、窗口零落盘，外面只看到「没反应」。
+        crate::data_interface::staging::replay_safe::validate_statement(&sql)
+            .unwrap_or_else(|error| panic!("房间归属清理必须能进 journal：{error}\n{sql}"));
     }
 
     #[tokio::test]

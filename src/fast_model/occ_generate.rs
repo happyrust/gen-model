@@ -1426,12 +1426,16 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                                                 "save OCC boolean mesh {new_id} failed: {error}"
                                             )
                                         })?;
+                                    // `new_id` 是确定性的：上一次尝试可能已经把这条提交进
+                                    // 持久层、批里后面的语句才失败，重试重放必须落到同一行
+                                    // 上而不是永远卡在 record already exists（manifold 侧
+                                    // `render_catalogue_manifold_result_write` 同款）。
                                     update_sql.push_str(&format!(
-                                        "create inst_geo:⟨{}⟩ set meshed = true, aabb = {}, visible = true;",
+                                        "upsert inst_geo:⟨{}⟩ set meshed = true, aabb = {}, visible = true;",
                                         new_id, &pos.aabb_id
                                     ));
                                     update_sql.push_str(&format!(
-                                        "INSERT RELATION INTO geo_relate [{{ id: geo_relate:[{}, inst_geo:⟨{}⟩], in: {}, out: inst_geo:⟨{}⟩, geom_refno: pe:{}, geo_type: 'Pos', trans: trans:⟨0⟩ }}];",
+                                        "INSERT RELATION IGNORE INTO geo_relate [{{ id: geo_relate:[{}, inst_geo:⟨{}⟩], in: {}, out: inst_geo:⟨{}⟩, geom_refno: pe:{}, geo_type: 'Pos', trans: trans:⟨0⟩ }}];",
                                         &g.inst_info_id,
                                         new_id,
                                         &g.inst_info_id,
