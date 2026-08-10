@@ -40,6 +40,8 @@ pub mod helper;
 
 pub mod cata_closure;
 
+pub mod parse_error;
+
 pub mod generation_root;
 
 pub mod model_update_plan;
