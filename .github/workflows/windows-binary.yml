@@ -148,6 +148,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           for attempt in {1..20}; do
             run_id=$(gh run list --workflow windows-binary.yml --branch main \
