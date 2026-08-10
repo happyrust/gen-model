@@ -123,6 +123,7 @@ jobs:
           $out = "dist/aios-database-windows-x64"
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item target/release/aios-database.exe $out
+          Copy-Item DbOption.toml $out
           Get-ChildItem "$env:OCC_ROOT/bin/*.dll" | Copy-Item -Destination $out
           @"
           commit=$env:GITHUB_SHA
