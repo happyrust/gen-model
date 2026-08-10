@@ -452,7 +452,11 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
     );
     let range = BTreeMap::from([(
         2u32,
-        vec![EleOperationData::new(added, 2, EleOperationDetail::Add(ele))],
+        vec![EleOperationData::new(
+            added,
+            2,
+            EleOperationDetail::Add(ele),
+        )],
     )]);
     let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, DBNUM)
         .await
@@ -465,7 +469,9 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
         .scope(async {
             refresh_world_transform_products(&db_option, &[equi]).await?;
             crate::surreal_retry::execute_model_write(
-                &format!("INSERT IGNORE INTO inst_info {{ id: inst_info:zzpr_new, dbnum: {DBNUM} }};"),
+                &format!(
+                    "INSERT IGNORE INTO inst_info {{ id: inst_info:zzpr_new, dbnum: {DBNUM} }};"
+                ),
                 "probe regen product",
             )
             .await?;

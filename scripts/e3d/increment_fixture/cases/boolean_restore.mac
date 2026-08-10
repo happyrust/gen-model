@@ -1,0 +1,10 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:bool_nbox}}
+XLEN 500
+Q CE
+Q XLEN
+SAVEWORK 'AIOS fixture boolean restore'
+ALPHA LOG END
+
+
+

@@ -268,6 +268,9 @@ async fn staged_transform_follows_a_pure_pose_move() {
             .into_owned(),
         applied_sesno,
         file_latest_sesno,
+        // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
     };
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
     println!("[staged-e2e] 入队 dbnum={dbnum}: {outcome:?}");

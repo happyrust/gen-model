@@ -25,6 +25,7 @@ use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::aabb_tree::rebuild_tree_from_pointers;
 use aios_database::fast_model::room_model::{
     ElementRoomHistory, load_panel_index, load_room_panel_map, recalc_element_membership,
+    recalc_panel_membership,
 };
 use pdms_io::io::PdmsIO;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,7 @@ struct Case {
     delete_baseline: bool,
     dynamic_baseline: bool,
     check_topology: bool,
+    check_membership: bool,
     room_keyword: String,
     expected_edges: Option<Vec<Edge>>,
     expect_geometry: bool,
@@ -88,6 +90,7 @@ impl Case {
             delete_baseline: env_flag("AIOS_ROOM_DELETE_BASELINE", true),
             dynamic_baseline: env_flag("AIOS_ROOM_DYNAMIC_BASELINE", false),
             check_topology: env_flag("AIOS_ROOM_CHECK_TOPOLOGY", true),
+            check_membership: env_flag("AIOS_ROOM_CHECK_MEMBERSHIP", true),
             room_keyword: std::env::var("AIOS_ROOM_KEYWORD")
                 .unwrap_or_else(|_| "-RM05-R512".into()),
             expected_edges: std::env::var("AIOS_ROOM_EXPECT_EDGES")
@@ -370,21 +373,32 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
                 .await
                 .unwrap_or_else(|error| panic!("prepare model {target}: {error:#}"));
         }
-        let rooms = load_room_panel_map(&db_option)
-            .await
-            .expect("load target room");
-        let panels = load_panel_index(&db_option, &rooms)
-            .await
-            .expect("load target panel geometry");
-        let history = ElementRoomHistory::load(&[element])
-            .await
-            .expect("load target room history");
-        recalc_element_membership(&rooms, &panels, &history, element)
-            .await
-            .expect("prepare exact room baseline");
+        if case.check_membership {
+            let rooms = load_room_panel_map(&db_option)
+                .await
+                .expect("load target room");
+            if case.action == "room_recalc_panel" {
+                rebuild_tree_from_pointers()
+                    .await
+                    .expect("rebuild spatial tree before panel baseline");
+                recalc_panel_membership(&db_option, &rooms, RefnoEnum::from(case.target.as_str()))
+                    .await
+                    .expect("prepare exact panel membership baseline");
+            } else {
+                let panels = load_panel_index(&db_option, &rooms)
+                    .await
+                    .expect("load target panel geometry");
+                let history = ElementRoomHistory::load(&[element])
+                    .await
+                    .expect("load target room history");
+                recalc_element_membership(&rooms, &panels, &history, element)
+                    .await
+                    .expect("prepare exact room baseline");
+            }
+        }
         if case.dynamic_baseline {
             baseline = edges(&case.element).await;
-            if case.action == "room_recalc_element" {
+            if case.action == "room_recalc_element" && case.check_membership {
                 assert_eq!(
                     !baseline.is_empty(),
                     case.expect_room,
@@ -486,6 +500,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
             .into_owned(),
         applied_sesno,
         file_latest_sesno,
+        // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
     };
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found);
     println!("[e2e] 入队 {}: {outcome:?}", case.dbnum);
@@ -541,6 +558,30 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "{} 的 {} 排队状态与几何声明不符",
         case.target, case.action
     );
+
+    // Model-type coverage is deliberately orthogonal to the project-wide room
+    // panel barrier. It still proves that a geometry change durably enqueues
+    // the expected room target, then removes only that test-owned row so an
+    // incomplete unrelated panel index cannot turn every noun case into the
+    // same room-fixture failure. Dedicated room cases keep this flag enabled.
+    if !case.check_membership {
+        if has_room_task {
+            SUL_DB
+                .query(format!(
+                    "DELETE model_update_pending:{0}_{1};",
+                    case.action, case.target
+                ))
+                .await
+                .expect("delete model-only room target")
+                .check()
+                .expect("valid model-only room target cleanup");
+        }
+        println!(
+            "[e2e] 模型类型 {} 已通过；房间任务已验证入队，房间归属留给专用用例",
+            case.expected_noun
+        );
+        return;
+    }
 
     // 共享实库可能已有超过一页的房间积压；只把本案例自己的确定性任务提到首页。
     if has_room_task {

@@ -179,7 +179,6 @@ pub async fn sweep_inst_relate_flat_if_dirty() -> anyhow::Result<usize> {
     }
 }
 
-
 /// 一个生成行（inst_relate / tubi_relate）的渲染期元数据（W4，决议 D6）。
 ///
 /// 这些值从前以 `fn::find_ancestor_type` / `fn::anc_u64` / `{pe}.dbnum` /
@@ -209,7 +208,11 @@ impl ResolvedInstMeta {
     pub(crate) fn anc_literal(&self) -> String {
         format!(
             "[{}]",
-            self.anc.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            self.anc
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         )
     }
 
@@ -406,7 +409,10 @@ pub(crate) async fn resolve_inst_meta_on(
             anyhow::bail!("会话日期探针返回了非数组结果");
         };
         for (pair, value) in chunk.iter().zip(values.iter()) {
-            if !matches!(value, surrealdb::sql::Value::None | surrealdb::sql::Value::Null) {
+            if !matches!(
+                value,
+                surrealdb::sql::Value::None | surrealdb::sql::Value::Null
+            ) {
                 ses_dates.insert(
                     *pair,
                     crate::data_interface::staging::preload::render_preload_value(value),
@@ -438,7 +444,10 @@ pub(crate) async fn resolve_inst_meta_on(
                 anyhow::bail!("会话日期回落探针返回了非数组结果");
             };
             for (pair, value) in chunk.iter().zip(values.iter()) {
-                if !matches!(value, surrealdb::sql::Value::None | surrealdb::sql::Value::Null) {
+                if !matches!(
+                    value,
+                    surrealdb::sql::Value::None | surrealdb::sql::Value::Null
+                ) {
                     ses_dates.insert(
                         *pair,
                         crate::data_interface::staging::preload::render_preload_value(value),
@@ -883,7 +892,10 @@ mod tests {
 
         let started = std::time::Instant::now();
         let swept = sweep_inst_relate_flat().await.expect("清扫");
-        println!("[live] 平表副本清扫完成：补 {swept} 行，耗时 {:?}", started.elapsed());
+        println!(
+            "[live] 平表副本清扫完成：补 {swept} 行，耗时 {:?}",
+            started.elapsed()
+        );
 
         let mut response = SUL_DB
             .query(

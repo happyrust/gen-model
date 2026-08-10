@@ -26,6 +26,7 @@ pub async fn gen_prim_geos(
     prim_refnos: &[RefnoEnum],
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
+    let targeted = db_option.debug_root_refnos.is_some();
     let t = Instant::now();
     let batch_size = db_option.gen_model_batch_size;
     let prim_cnt = prim_refnos.len();
@@ -45,8 +46,8 @@ pub async fn gen_prim_geos(
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
         let sender = sender.clone();
-        let handle =
-            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+        let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(
+            async move {
                 let negative_nouns = shared::negative_noun_refs();
                 let mut shape_insts_data = ShapeInstancesData::default();
                 let start_idx = i * batch_size;
@@ -64,14 +65,26 @@ pub async fn gen_prim_geos(
                     //     processed_cnt.lock().await.to_owned()
                     // );
                     *processed_cnt.lock().await -= 1;
-                    let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(refno).await
-                    else {
-                        continue;
+                    let mut trans_origin = match aios_core::get_world_transform(refno).await {
+                        Ok(Some(transform)) => transform,
+                        Ok(None) if targeted => {
+                            anyhow::bail!("targeted primitive {refno} has no world transform")
+                        }
+                        Err(error) if targeted => anyhow::bail!(
+                            "query targeted primitive {refno} world transform failed: {error:#}"
+                        ),
+                        _ => continue,
                     };
                     let mut geo_insts = vec![];
                     let mut transform = Transform::IDENTITY;
 
-                    let attr = aios_core::get_named_attmap(refno).await.unwrap_or_default();
+                    let attr = match aios_core::get_named_attmap(refno).await {
+                        Ok(attr) => attr,
+                        Err(error) if targeted => anyhow::bail!(
+                            "query targeted primitive {refno} attributes failed: {error:#}"
+                        ),
+                        Err(_) => Default::default(),
+                    };
                     let visible = attr.is_visible_by_level(None).unwrap_or(true);
                     let mut geos_info = EleGeosInfo {
                         refno,
@@ -199,14 +212,29 @@ pub async fn gen_prim_geos(
                         attr.create_brep_shape(neg_limit_size)
                     };
                     let Some(brep_shape) = brep_shape else {
+                        if targeted {
+                            anyhow::bail!(
+                                "targeted primitive {refno} ({cur_type}) produced no BREP shape"
+                            );
+                        }
                         continue;
                     };
                     if !brep_shape.check_valid() {
+                        if targeted {
+                            anyhow::bail!(
+                                "targeted primitive {refno} ({cur_type}) produced an invalid BREP shape"
+                            );
+                        }
                         continue;
                     }
 
                     transform = brep_shape.get_trans();
                     if transform.is_nan() {
+                        if targeted {
+                            anyhow::bail!(
+                                "targeted primitive {refno} ({cur_type}) produced a NaN transform"
+                            );
+                        }
                         continue;
                     }
                     geo_param = brep_shape
@@ -270,7 +298,8 @@ pub async fn gen_prim_geos(
                     // dbg!("Send last prim insts data");
                 }
                 Ok::<_, anyhow::Error>(())
-            });
+            },
+        );
 
         handles.push(handle);
     }

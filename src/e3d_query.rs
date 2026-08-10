@@ -1,5 +1,6 @@
 //! Read-only E3D TTY queries shared by the L3 runner and the MCP server.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,6 +57,12 @@ impl E3dDriver {
 
     pub fn run(&self, repo: &Path, relative: &str) -> Result<String> {
         self.run_file(repo, &repo.join(relative), relative)
+    }
+
+    /// Run a stateful macro from an explicit path. The driver still owns the
+    /// session wrapper and rejects macros that terminate the session themselves.
+    pub fn run_macro_file(&self, repo: &Path, macro_path: &Path, label: &str) -> Result<String> {
+        self.run_file(repo, macro_path, label)
     }
 
     pub fn run_source(&self, repo: &Path, label: &str, body: &str) -> Result<String> {
@@ -134,6 +141,10 @@ impl E3dDriver {
         )?;
         let stdout = File::create(&driver_log)?;
         let stderr = stdout.try_clone()?;
+        // Other projects may already have a user-owned E3D session.  Remember
+        // those processes so this single-purpose driver waits only for the
+        // session it is about to create.
+        let baseline_sessions = e3d_session_processes()?.into_iter().collect();
         let mut launcher = Command::new("cmd")
             .args(["/d", "/c"])
             .arg(e3d_path(&self.launcher))
@@ -166,6 +177,14 @@ impl E3dDriver {
                     contains(&done_log, "L3-DONE"),
                     "E3D wrapper did not finish {label}; log: {log}"
                 );
+                // QUIT can let the launcher process exit a few seconds before
+                // E3D's console companion has released the project claim.
+                // Starting the next single-purpose session in that window
+                // produces a false "session is still running" failure.  The
+                // process-wide lock must therefore cover the whole shutdown,
+                // not just the launcher process lifetime.
+                wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
+                    .with_context(|| format!("wait for E3D session shutdown after {label}"))?;
                 return fs::read_to_string(&scenario_log)
                     .with_context(|| format!("read E3D query log {}", scenario_log.display()));
             }
@@ -450,6 +469,51 @@ fn pid_running(pid: u32) -> Result<bool> {
         .output()?;
     ensure!(output.status.success(), "tasklist failed for pid {pid}");
     Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+}
+
+fn e3d_session_processes() -> Result<Vec<String>> {
+    let output = Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "tasklist failed while checking E3D shutdown"
+    );
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("\"des.exe\"") || lower.starts_with("\"pdmsconsole.exe\"")
+        })
+        .map(|line| {
+            line.split(',')
+                .take(2)
+                .map(|field| field.trim_matches('"'))
+                .collect::<Vec<_>>()
+                .join(" pid=")
+        })
+        .collect())
+}
+
+fn wait_for_e3d_session_exit(baseline: &HashSet<String>, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let sessions = e3d_session_processes()?
+            .into_iter()
+            .filter(|session| !baseline.contains(session))
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "E3D session did not exit within {}s: {}",
+                timeout.as_secs(),
+                sessions.join(", ")
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn terminate_tree(pid: u32) -> Result<()> {

@@ -1,0 +1,17 @@
+-- Reproduce the dbnum 8000 copy/paste increment with the exact source EQUI.
+-- The stable name makes the fixture independently removable after verification.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_apply.log" OVER
+$P CODEX-DB8000-EQUI-COPY-APPLY-ALIVE
+=24384/24775
+NEW EQUIPMENT /CODEX_DB8000_EQ_COPY
+COPY =24384/24776
+Q CE
+Q REF
+Q TYPE
+Q NAME
+Q OWNE
+SAVEWORK 'CODEX db8000 clone EQUI 24384/24776'
+$P CODEX-DB8000-EQUI-COPY-APPLY-DONE
+ALPHA LOG END
+FINISH

@@ -437,6 +437,127 @@ pub async fn dbnums(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct FastDeleteDbnumReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// Must equal the path DBNUM. This keeps an accidental DELETE issued by a
+    /// generic HTTP client from becoming a large data mutation.
+    #[serde(default)]
+    pub confirm: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PruneAboveWatermarkReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// Must equal `{dbnum}:{watermark}` for the DELETE request.
+    #[serde(default)]
+    pub confirm: Option<String>,
+}
+
+fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    if !scheduler.is_paused() {
+        return Err(ApiError::conflict(
+            "queue must be paused before DBNUM data cleanup; POST /api/v1/queue/pause first",
+        ));
+    }
+    if let Some(row) = scheduler
+        .snapshot()
+        .into_iter()
+        .find(|row| row.dbnum == dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} still has a {} batch (task_id={}); wait for/remove it before cleanup",
+            row.state, row.task_id
+        )));
+    }
+    if let Some(window) = crate::data_interface::staging::lifecycle::registered_windows()
+        .into_iter()
+        .find(|window| window.dbnum == dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} still has active staged window {}; wait for it before cleanup",
+            window.label
+        )));
+    }
+    Ok(())
+}
+
+/// DELETE /api/v1/dbnums/{dbnum}/data — Ref0 record-id range fast delete.
+///
+/// Operational contract:
+/// 1. pause the queue;
+/// 2. wait until this DBNUM has no queued/running batch or staged window;
+/// 3. call with `?confirm={dbnum}`.
+///
+/// The queue remains paused after success. Reparse/resume is an explicit
+/// follow-up, matching the troubleshooting workflow this endpoint serves.
+pub async fn dbnum_fast_delete(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Query(query): Query<FastDeleteDbnumReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    if query.confirm != Some(dbnum) {
+        return Err(ApiError::bad_request(format!(
+            "confirm must equal path dbnum: confirm={:?}, dbnum={dbnum}",
+            query.confirm
+        )));
+    }
+
+    ensure_dbnum_mutation_idle(dbnum)?;
+
+    let result = crate::data_interface::fast_delete::delete_dbnum_fast(dbnum)
+        .await
+        .map_err(ApiError::from_domain)?;
+    serde_json::to_value(&result)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
+/// GET /api/v1/dbnums/{dbnum}/data/above/{watermark} — preview residue rows.
+pub async fn dbnum_prune_above_preview(
+    State(state): State<AppState>,
+    Path((dbnum, watermark)): Path<(u32, i32)>,
+    Query(query): Query<PruneAboveWatermarkReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    let preview =
+        crate::data_interface::fast_delete::preview_prune_above_watermark(dbnum, watermark)
+            .await
+            .map_err(ApiError::from_domain)?;
+    serde_json::to_value(preview)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
+/// DELETE /api/v1/dbnums/{dbnum}/data/above/{watermark}
+///
+/// Queue pause and an exact `confirm={dbnum}:{watermark}` are mandatory. The
+/// queue stays paused so the caller can inspect the result before replay.
+pub async fn dbnum_prune_above(
+    State(state): State<AppState>,
+    Path((dbnum, watermark)): Path<(u32, i32)>,
+    Query(query): Query<PruneAboveWatermarkReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    let expected = format!("{dbnum}:{watermark}");
+    if query.confirm.as_deref() != Some(expected.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "confirm must equal {expected}"
+        )));
+    }
+    ensure_dbnum_mutation_idle(dbnum)?;
+    let result = crate::data_interface::fast_delete::prune_above_watermark(dbnum, watermark)
+        .await
+        .map_err(ApiError::from_domain)?;
+    serde_json::to_value(result)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
 ///
 /// 行按队列序（运行中在前），字段与任务行经 task_id 对得上；`paused` 是界面上

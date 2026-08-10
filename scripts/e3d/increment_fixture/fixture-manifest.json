@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "prefix": "/AIOS-INC-",
+  "setup_macro": "scripts/e3d/increment_fixture/setup.mac",
+  "teardown_macro": "scripts/e3d/increment_fixture/teardown.mac",
+  "objects": {
+    "data_site": {
+      "name": "/AIOS-INC-DATA",
+      "noun": "SITE"
+    },
+    "data_zone": {
+      "name": "/AIOS-INC-DATA-Z",
+      "noun": "ZONE",
+      "owner": "data_site"
+    },
+    "data_eq": {
+      "name": "/AIOS-INC-DATA-EQ",
+      "noun": "EQUI",
+      "owner": "data_zone",
+      "geometry": true
+    },
+    "data_box": {
+      "name": "/AIOS-INC-DATA-BOX",
+      "noun": "BOX",
+      "owner": "data_eq",
+      "geometry": true
+    },
+    "xform_site": {
+      "name": "/AIOS-INC-XFORM",
+      "noun": "SITE"
+    },
+    "xform_zone": {
+      "name": "/AIOS-INC-XFORM-Z",
+      "noun": "ZONE",
+      "owner": "xform_site"
+    },
+    "xform_eq": {
+      "name": "/AIOS-INC-XFORM-EQ",
+      "noun": "EQUI",
+      "owner": "xform_zone",
+      "geometry": true
+    },
+    "xform_box": {
+      "name": "/AIOS-INC-XFORM-BOX",
+      "noun": "BOX",
+      "owner": "xform_eq",
+      "geometry": true
+    },
+    "geom_site": {
+      "name": "/AIOS-INC-GEOM",
+      "noun": "SITE"
+    },
+    "geom_zone": {
+      "name": "/AIOS-INC-GEOM-Z",
+      "noun": "ZONE",
+      "owner": "geom_site"
+    },
+    "geom_eq": {
+      "name": "/AIOS-INC-GEOM-EQ",
+      "noun": "EQUI",
+      "owner": "geom_zone",
+      "geometry": true
+    },
+    "geom_box": {
+      "name": "/AIOS-INC-GEOM-BOX",
+      "noun": "BOX",
+      "owner": "geom_eq",
+      "geometry": true
+    },
+    "bool_site": {
+      "name": "/AIOS-INC-BOOL",
+      "noun": "SITE"
+    },
+    "bool_zone": {
+      "name": "/AIOS-INC-BOOL-Z",
+      "noun": "ZONE",
+      "owner": "bool_site"
+    },
+    "bool_eq": {
+      "name": "/AIOS-INC-BOOL-EQ",
+      "noun": "EQUI",
+      "owner": "bool_zone",
+      "geometry": true
+    },
+    "bool_base": {
+      "name": "/AIOS-INC-BOOL-BASE",
+      "noun": "BOX",
+      "owner": "bool_eq",
+      "geometry": true
+    },
+    "bool_nbox": {
+      "name": "/AIOS-INC-BOOL-NBOX",
+      "noun": "NBOX",
+      "owner": "bool_base",
+      "geometry": true
+    },
+    "owner_site": {
+      "name": "/AIOS-INC-OWNER",
+      "noun": "SITE"
+    },
+    "owner_zone": {
+      "name": "/AIOS-INC-OWNER-Z",
+      "noun": "ZONE",
+      "owner": "owner_site"
+    },
+    "owner_eq_a": {
+      "name": "/AIOS-INC-OWNER-A",
+      "noun": "EQUI",
+      "owner": "owner_zone",
+      "geometry": true
+    },
+    "owner_eq_b": {
+      "name": "/AIOS-INC-OWNER-B",
+      "noun": "EQUI",
+      "owner": "owner_zone",
+      "geometry": true
+    },
+    "owner_box": {
+      "name": "/AIOS-INC-OWNER-BOX",
+      "noun": "BOX",
+      "owner": "owner_eq_a",
+      "geometry": true
+    },
+    "add_site": {
+      "name": "/AIOS-INC-ADD",
+      "noun": "SITE"
+    },
+    "add_zone": {
+      "name": "/AIOS-INC-ADD-Z",
+      "noun": "ZONE",
+      "owner": "add_site"
+    },
+    "add_eq": {
+      "name": "/AIOS-INC-ADD-EQ",
+      "noun": "EQUI",
+      "owner": "add_zone",
+      "geometry": true
+    },
+    "add_box": {
+      "name": "/AIOS-INC-ADD-BOX",
+      "noun": "BOX",
+      "owner": "add_eq",
+      "geometry": true,
+      "baseline_absent": true
+    },
+    "delete_site": {
+      "name": "/AIOS-INC-DELETE",
+      "noun": "SITE"
+    },
+    "delete_zone": {
+      "name": "/AIOS-INC-DELETE-Z",
+      "noun": "ZONE",
+      "owner": "delete_site"
+    },
+    "delete_eq": {
+      "name": "/AIOS-INC-DELETE-EQ",
+      "noun": "EQUI",
+      "owner": "delete_zone",
+      "geometry": true
+    },
+    "delete_box": {
+      "name": "/AIOS-INC-DELETE-BOX",
+      "noun": "BOX",
+      "owner": "delete_eq",
+      "geometry": true
+    },
+    "room_member_site": {
+      "name": "/AIOS-INC-ROOM-MEMBER",
+      "noun": "SITE"
+    },
+    "room_member_zone": {
+      "name": "/AIOS-INC-ROOM-MEMBER-Z",
+      "noun": "ZONE",
+      "owner": "room_member_site"
+    },
+    "room_member_eq": {
+      "name": "/AIOS-INC-ROOM-MEMBER-EQ",
+      "noun": "EQUI",
+      "owner": "room_member_zone",
+      "geometry": true
+    },
+    "room_member_box": {
+      "name": "/AIOS-INC-ROOM-MEMBER-BOX",
+      "noun": "BOX",
+      "owner": "room_member_eq",
+      "geometry": true
+    },
+    "room_struct_site": {
+      "name": "/AIOS-INC-ROOM-STRUCT",
+      "noun": "SITE"
+    },
+    "room_struct_zone": {
+      "name": "/AIOS-INC-ROOM-STRUCT-Z",
+      "noun": "ZONE",
+      "owner": "room_struct_site"
+    },
+    "room_stru": {
+      "name": "/AIOS-INC-ROOM-STRU",
+      "noun": "STRU",
+      "owner": "room_struct_zone"
+    },
+    "room_frame": {
+      "name": "/AIOS-INC-RM-R101",
+      "noun": "FRMW",
+      "owner": "room_stru"
+    },
+    "room_panel": {
+      "name": "/AIOS-INC-RM-R101-P1",
+      "noun": "PANE",
+      "owner": "room_frame",
+      "geometry": true
+    },
+    "room_frame_b": {
+      "name": "/AIOS-INC-RM-R102",
+      "noun": "FRMW",
+      "owner": "room_stru"
+    },
+    "room_panel_b": {
+      "name": "/AIOS-INC-RM-R102-P1",
+      "noun": "PANE",
+      "owner": "room_frame_b",
+      "geometry": true
+    }
+  },
+  "scenarios": [
+    {
+      "id": "data",
+      "site": "data_site",
+      "target": "data_eq",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/data_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/data_restore.mac",
+      "change": "data",
+      "ui_smoke": true,
+      "ui_target_before": "AIOS-INC-DATA-EQ",
+      "ui_target_after": "AIOS-INC-DATA-EQ-CHANGED",
+      "expected": {
+        "attributes": true,
+        "after_contains": [
+          "/AIOS-INC-DATA-EQ-CHANGED"
+        ]
+      }
+    },
+    {
+      "id": "transform",
+      "site": "xform_site",
+      "target": "xform_eq",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/transform_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/transform_restore.mac",
+      "change": "transform",
+      "roots": [
+        "xform_eq",
+        "xform_box"
+      ],
+      "expected": {
+        "attributes": true,
+        "model": true,
+        "after_numbers": [
+          1000.0,
+          500.0
+        ]
+      }
+    },
+    {
+      "id": "geometry",
+      "site": "geom_site",
+      "target": "geom_box",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/geometry_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/geometry_restore.mac",
+      "change": "geometry",
+      "roots": [
+        "geom_eq"
+      ],
+      "expected": {
+        "attributes": true,
+        "model": true,
+        "after_numbers": [
+          1600.0,
+          1200.0,
+          800.0
+        ]
+      }
+    },
+    {
+      "id": "boolean",
+      "site": "bool_site",
+      "target": "bool_nbox",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/boolean_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/boolean_restore.mac",
+      "change": "boolean",
+      "roots": [
+        "bool_eq"
+      ],
+      "expected": {
+        "attributes": true,
+        "model": true,
+        "after_numbers": [
+          900.0
+        ]
+      }
+    },
+    {
+      "id": "owner",
+      "site": "owner_site",
+      "target": "owner_box",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/owner_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/owner_restore.mac",
+      "change": "owner",
+      "roots": [
+        "owner_eq_a",
+        "owner_eq_b"
+      ],
+      "expected": {
+        "tree": true,
+        "attributes": true,
+        "model": true,
+        "owner_after": "owner_eq_b"
+      }
+    },
+    {
+      "id": "add",
+      "site": "add_site",
+      "target": "add_box",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/add_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/add_restore.mac",
+      "change": "add",
+      "roots": [
+        "add_eq"
+      ],
+      "expected": {
+        "tree": true,
+        "attributes": true,
+        "model": true,
+        "after_contains": [
+          "/AIOS-INC-ADD-BOX"
+        ]
+      }
+    },
+    {
+      "id": "room-structure",
+      "site": "room_struct_site",
+      "target": "room_frame",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/room_structure_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/room_structure_restore.mac",
+      "change": "room_structure",
+      "roots": [
+        "room_panel",
+        "room_panel_b",
+        "room_member_box"
+      ],
+      "expected": {
+        "attributes": true,
+        "room": true,
+        "after_contains": [
+          "/AIOS-INC-NOT-A-ROOM"
+        ]
+      }
+    },
+    {
+      "id": "room-member",
+      "site": "room_member_site",
+      "target": "room_member_box",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/room_member_apply.mac",
+      "restore_macro": "scripts/e3d/increment_fixture/cases/room_member_restore.mac",
+      "change": "room_member",
+      "roots": [
+        "room_member_eq",
+        "room_panel",
+        "room_panel_b"
+      ],
+      "ui_smoke": true,
+      "ui_target_before": "AIOS-INC-ROOM-MEMBER-EQ",
+      "ui_target_after": "AIOS-INC-ROOM-MEMBER-EQ",
+      "expected": {
+        "attributes": true,
+        "model": true,
+        "room": true,
+        "after_numbers": [
+          10000.0
+        ],
+        "room_before": [
+          "R101"
+        ],
+        "room_after": [
+          "R102"
+        ]
+      }
+    },
+    {
+      "id": "delete",
+      "site": "delete_site",
+      "target": "delete_box",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/delete_apply.mac",
+      "change": "delete",
+      "roots": [
+        "delete_eq"
+      ],
+      "destructive_last": true,
+      "expected": {
+        "tree": true,
+        "attributes": true,
+        "model": true
+      }
+    }
+  ]
+}

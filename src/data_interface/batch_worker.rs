@@ -359,7 +359,19 @@ async fn run_one_batch(
     // 左端（running_end + 1）也建在一个过时的数上。
     let result = match refresh_candidate(&job) {
         Ok(cand) => {
-            scheduler.record_frozen_end(registry, job.dbnum, cand.file_latest_sesno);
+            // 序号与时刻一起回写：冻结改了右端，入队时那个时刻立刻就是错的
+            // （plant-ui ADR-0019）。读一页会话页，读不到就让那一格空着。
+            let end_sesno_time = crate::data_interface::manual_update::session_time_rfc3339(
+                &job.project,
+                &cand.path,
+                cand.file_latest_sesno,
+            );
+            scheduler.record_frozen_end(
+                registry,
+                job.dbnum,
+                cand.file_latest_sesno,
+                end_sesno_time,
+            );
             beat();
             execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await
         }
@@ -416,9 +428,46 @@ async fn run_one_batch(
 /// 稳态增量默认走 ADR-017 kv-mem 暂存窗口。
 ///
 /// - `start_sesno <= 1`：对应 `applied_sesno == 0` 的基线/冷启动，豁免暂存。
-/// - 环境变量 `GEN_MODEL_DIRECT_INCREMENT=1`：紧急回退到旧直写路径。
+/// - 环境变量 `GEN_MODEL_DIRECT_INCREMENT=1`（或 true/yes/on）：紧急回退到旧直写路径。
 pub(crate) fn direct_increment_enabled() -> bool {
-    std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").is_some()
+    direct_increment_flag(std::env::var_os("GEN_MODEL_DIRECT_INCREMENT").as_deref())
+}
+
+/// 只有明确真值才打开应急直写（2026-08-08 审核 P2-1）。
+///
+/// 旧实现判 `is_some()`：部署模板显式注入 `GEN_MODEL_DIRECT_INCREMENT=0` 想关闭
+/// 开关，反而会静默绕过整个 kv-mem 暂存方案、回到旧直写语义。unset、空串与明确
+/// 假值（0/false/no/off）都是关闭；认不出的值按关闭处理并告警一次——宁可少开
+/// 紧急通道，也不能让「写 0」变成「打开」。
+fn direct_increment_flag(value: Option<&std::ffi::OsStr>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let Some(text) = value.to_str() else {
+        warn_unrecognized_direct_increment_once(&value.to_string_lossy());
+        return false;
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "" | "0" | "false" | "no" | "off" => false,
+        _ => {
+            warn_unrecognized_direct_increment_once(text);
+            false
+        }
+    }
+}
+
+/// 非法值只在进程内喊一次：这个判定每个批次、每次 /health 都会走到，逐次告警
+/// 会把日志刷成噪音。
+fn warn_unrecognized_direct_increment_once(value: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        let message = format!(
+            "GEN_MODEL_DIRECT_INCREMENT={value:?} 不是可识别的开关值（真值只认 1/true/yes/on），按关闭处理，继续走 kv-mem 暂存窗口"
+        );
+        log::warn!("{message}");
+        eprintln!("{message}");
+    });
 }
 
 pub(crate) fn increment_mode() -> &'static str {
@@ -2540,6 +2589,50 @@ mod tests {
         // direct_increment_enabled）。空间树启动策略改为「默认复用树文件、仅显式
         // AIOS_FORCE_SPATIAL_REBUILD 重建」后该联动被移除，反向不变量由
         // aabb_tree::tests::startup_reuses_project_tree_unless_rebuild_is_explicitly_requested 钉住。
+    }
+
+    /// 应急直写只认明确真值（2026-08-08 审核 P2-1）。
+    ///
+    /// 旧实现判 `is_some()`，部署模板里写 `GEN_MODEL_DIRECT_INCREMENT=0` 想关闭
+    /// 开关，实际反而绕过整个 kv-mem 暂存方案。这里把三类输入逐一钉死：明确假值
+    /// 与 unset 同义、真值忽略大小写与首尾空白、认不出的值一律按关闭处理。
+    #[test]
+    fn only_explicit_truthy_values_enable_direct_increment() {
+        use std::ffi::OsStr;
+
+        assert!(!direct_increment_flag(None), "unset 必须关闭");
+        for off in ["", "  ", "0", "false", "no", "off", "FALSE", " Off "] {
+            assert!(
+                !direct_increment_flag(Some(OsStr::new(off))),
+                "明确假值必须关闭: {off:?}"
+            );
+        }
+        for on in ["1", "true", "yes", "on", "TRUE", " On ", "Yes"] {
+            assert!(
+                direct_increment_flag(Some(OsStr::new(on))),
+                "明确真值必须打开: {on:?}"
+            );
+        }
+        for junk in ["2", "enable", "开", "yes!"] {
+            assert!(
+                !direct_increment_flag(Some(OsStr::new(junk))),
+                "认不出的值必须按关闭处理: {junk:?}"
+            );
+        }
+
+        // 环境入口必须走这一个判定，不许再出现裸 `is_some()`。
+        let source = include_str!("batch_worker.rs");
+        let entry = source
+            .split_once("pub(crate) fn direct_increment_enabled()")
+            .expect("环境入口必须存在")
+            .1
+            .split_once("\nfn ")
+            .expect("入口之后还有别的函数")
+            .0;
+        assert!(
+            entry.contains("direct_increment_flag(") && !entry.contains(".is_some()"),
+            "GEN_MODEL_DIRECT_INCREMENT 的判定必须收口在 direct_increment_flag: {entry}"
+        );
     }
 
     /// 统一根锁必须夹在「只读解析（持久层闭包 + 文件祖先链）」与「写进暂存

@@ -1,0 +1,9 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:data_eq}}
+NAME /AIOS-INC-DATA-EQ-CHANGED
+Q CE
+SAVEWORK 'AIOS fixture data apply'
+ALPHA LOG END
+
+
+

@@ -153,8 +153,7 @@ fn project_tree_meta_file() -> String {
 
 /// sidecar 内容：树文件对应的库侧空间版本号与条目数。
 ///
-/// `epoch` 是启动信任判据：与库侧 [`SPATIAL_EPOCH_ID`] 相等才信文件（见
-/// [`load_project_tree_verified`]）；`entries` 与 `saved_at_unix` 仅作诊断。
+/// 启动默认直接复用树文件，不再因 epoch 不一致自动重建；这些字段只作诊断。
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TreeFileMeta {
     epoch: u64,
@@ -290,55 +289,39 @@ pub async fn persist_aabb_tree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 启动加载：sidecar 的 epoch 与库一致才信项目树文件，否则从库指针分页重建。
+/// 启动加载：默认直接复用本项目已经落盘的空间树，不做 epoch 对账，也不自动重建。
 ///
-/// 取代旧的「裸文件搬运 + `load_aabb_tree` + 条数对账」三件套：
-/// - 条数对账辨认不出「搬动」——同数漂移直接放行（ADR-010 落盘时机一节记的
-///   回退隐患，这类漂移正是重启回退 `room_relate` 的根源）；
-/// - 旧的兜底重建 `manual_update_aabbs(true)` 全库重算几何并回写整个
-///   `inst_relate.aabb` 列，启动又慢又重；指针重建只读不写。
-///
-/// 已在内存里的树保持不动（live 夹具先填树再启动的场景），与 `load_aabb_tree`
-/// 同一幂等口径。`GEN_MODEL_DIRECT_INCREMENT` / `AIOS_FORCE_SPATIAL_REBUILD`
-/// 设置时无条件重建：直写路径不产生空间意图也不递增 epoch，崩溃丢掉的树变更
-/// sidecar 认不出来，宁可重建。
+/// 只有显式设置 `AIOS_FORCE_SPATIAL_REBUILD` 时才从库指针分页重建。树文件缺失或
+/// 损坏时保持空树启动并打印操作提示，避免一次启动隐式触发耗时的全库读取。
+/// 已在内存里的树保持不动（live 夹具先填树再启动的场景）。
 pub async fn load_project_tree_verified() -> anyhow::Result<()> {
     if !GLOBAL_AABB_TREE.read().await.is_empty() {
         return Ok(());
     }
-    let db_epoch = read_db_spatial_epoch().await?;
-    let force_rebuild = std::env::var("AIOS_FORCE_SPATIAL_REBUILD").is_ok()
-        || crate::data_interface::batch_worker::direct_increment_enabled();
-    if force_rebuild {
+    if std::env::var("AIOS_FORCE_SPATIAL_REBUILD").is_ok() {
         println!("按环境变量要求跳过空间树文件，从库指针重建");
-    } else {
-        match read_tree_meta() {
-            Ok(meta) if meta.epoch == db_epoch => match read_project_tree_file() {
-                Ok(tree) => {
-                    let entries = tree.size();
-                    *GLOBAL_AABB_TREE.write().await = tree;
-                    println!(
-                        "空间树使用项目文件 {}（{entries} 条，epoch {db_epoch}）",
-                        project_tree_file()
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    eprintln!("空间树文件不可用（{error:#}），改从库指针重建");
-                }
-            },
-            Ok(meta) => {
-                println!(
-                    "空间树文件 epoch {} 落后库侧 {db_epoch}，改从库指针重建",
-                    meta.epoch
-                );
-            }
-            Err(error) => {
-                println!("空间树 sidecar 不可用（{error:#}），改从库指针重建");
-            }
+        return rebuild_tree_from_pointers().await;
+    }
+
+    match read_project_tree_file() {
+        Ok(tree) => {
+            let entries = tree.size();
+            *GLOBAL_AABB_TREE.write().await = tree;
+            let epoch = read_tree_meta()
+                .map(|meta| meta.epoch.to_string())
+                .unwrap_or_else(|_| "未知".to_string());
+            println!(
+                "空间树直接复用项目文件 {}（{entries} 条，记录 epoch {epoch}；未触发重建）",
+                project_tree_file()
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "空间树文件不可用（{error:#}），默认保持空树且不重建；如需重建请设置 AIOS_FORCE_SPATIAL_REBUILD=1"
+            );
         }
     }
-    rebuild_tree_from_pointers().await
+    Ok(())
 }
 
 /// 从库指针整树重建：分页读 `inst_relate` 的 `(refno, noun, aabb.d)`，bulk-load
@@ -592,10 +575,9 @@ mod tests {
         );
     }
 
-    /// 启动信任判据必须是「sidecar epoch == 库侧 epoch」，且失配时落到指针重建。
-    /// 退回条数对账（`sync_aabb_tree_with_db`）会重新放行同数漂移。
+    /// 默认启动必须直接复用项目树；只有显式环境变量才能进入指针重建。
     #[test]
-    fn verified_load_gates_on_epoch_and_falls_back_to_pointer_rebuild() {
+    fn startup_reuses_project_tree_unless_rebuild_is_explicitly_requested() {
         let source = include_str!("aabb_tree.rs");
         let body = source
             .split_once(concat!("pub async fn ", "load_project_tree_verified("))
@@ -605,16 +587,19 @@ mod tests {
             .expect("rebuild must follow")
             .0;
         assert!(
-            body.contains("meta.epoch == db_epoch"),
-            "信任文件必须以 epoch 相等为前提: {body}"
+            body.contains("read_project_tree_file()"),
+            "默认启动必须读取并复用项目树文件: {body}"
         );
         assert!(
-            body.contains("rebuild_tree_from_pointers().await"),
-            "失配路径必须收敛到指针重建: {body}"
+            body.contains("std::env::var(\"AIOS_FORCE_SPATIAL_REBUILD\")")
+                && body.contains("return rebuild_tree_from_pointers().await"),
+            "指针重建必须只由显式环境变量触发: {body}"
         );
         assert!(
-            !body.contains("sync_aabb_tree_with_db"),
-            "启动路径不得退回条数对账: {body}"
+            !body.contains("read_db_spatial_epoch")
+                && !body.contains("direct_increment_enabled")
+                && !body.contains("sync_aabb_tree_with_db"),
+            "默认启动不得因 epoch、直写模式或条数对账触发重建: {body}"
         );
     }
 

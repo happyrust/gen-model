@@ -11,14 +11,15 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aios_database::e3d_query::E3dDriver;
-#[cfg(test)]
-use aios_database::e3d_query::e3d_path;
+use aios_database::e3d_query::{E3dDriver, e3d_path};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Local;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[path = "l3_suite/fixture.rs"]
+mod fixture;
 
 const API: &str = "http://127.0.0.1:8028/api/v1";
 const SURREAL_SQL: &str = "http://127.0.0.1:8048/sql";
@@ -187,6 +188,39 @@ struct Cli {
     /// project and execute at all?
     #[arg(long)]
     check_driver: Option<String>,
+    /// Run the portable, manifest-driven fixture suite instead of the AMS golden suite.
+    #[arg(long)]
+    fixture_manifest: Option<PathBuf>,
+    /// Explicit writable DESI database file used by fixture mode.
+    #[arg(long)]
+    target_db_file: Option<PathBuf>,
+    /// Database number expected in `target-db-file`.
+    #[arg(long)]
+    target_dbnum: Option<u32>,
+    /// Surreal database / aios project identity used by fixture mode.
+    #[arg(long)]
+    aios_project: Option<String>,
+    /// Surreal namespace used by fixture mode.
+    #[arg(long)]
+    aios_namespace: Option<String>,
+    /// E3D project environment batch file; defaults to the project directory's evars file.
+    #[arg(long)]
+    project_evar: Option<PathBuf>,
+    /// Start plant-ui for cases marked `ui_smoke`.
+    #[arg(long)]
+    fixture_ui: bool,
+    /// Skip fixture setup. Intended for resuming a failed run against an existing baseline.
+    #[arg(long)]
+    fixture_skip_setup: bool,
+    /// Keep the PML-created fixture SITEs after the run.
+    #[arg(long)]
+    fixture_keep_sites: bool,
+    /// Base DbOption TOML copied and narrowed for the isolated fixture stack.
+    #[arg(long, default_value = "DbOption.toml")]
+    fixture_base_config: PathBuf,
+    /// Validate the manifest and target DB header/WORLD, write preflight.json, then stop.
+    #[arg(long)]
+    fixture_check_only: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -337,7 +371,11 @@ struct RunHeader {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let repo = std::env::current_dir()?.canonicalize()?;
+    let repo = std::env::current_dir()?;
+    if cli.fixture_manifest.is_some() {
+        return fixture::run(&cli, &repo);
+    }
+    let repo = repo.canonicalize()?;
     ensure!(
         cli.project_dir.is_none() || cli.check_driver.is_some(),
         "--project-dir is only supported by --check-driver; the full suite uses its fixed L3 work-copy"
@@ -376,7 +414,9 @@ fn main() -> Result<()> {
             "E3D launcher is missing: {}",
             driver.launcher.display()
         );
-        assert_no_e3d_session()?;
+        if std::env::var("L3_ALLOW_EXISTING_E3D_SESSION").as_deref() != Ok("1") {
+            assert_no_e3d_session()?;
+        }
         let log = driver.run(&paths.repo, probe)?;
         fs::write(run_dir.join("check-driver.log"), &log)?;
         println!(
@@ -504,8 +544,13 @@ fn assert_clean_host() -> Result<()> {
     assert_no_e3d_session()
 }
 
-/// 两个会话开同一个项目会互相抢 claim。宁可拒跑，也不让套件与人手上那个会话打架。
+/// 两个会话开同一个项目通常会互相抢 claim。默认拒跑；显式设置
+/// `L3_ALLOW_EXISTING_E3D_SESSION=1` 时，驱动会把启动前已有进程当作基线，只等待并
+/// 清理本次启动的 TTY 会话。这样可以在用户保留另一个项目会话时运行隔离夹具。
 fn assert_no_e3d_session() -> Result<()> {
+    if std::env::var("L3_ALLOW_EXISTING_E3D_SESSION").as_deref() == Ok("1") {
+        return Ok(());
+    }
     let tasks = command_output(Command::new("tasklist").args(["/FO", "CSV", "/NH"]))?;
     // 说清楚是谁占着。无人值守跑的时候，「an E3D session is still running」这句话
     // 对着一台没人看的机器等于什么都没说。

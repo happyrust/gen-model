@@ -136,7 +136,10 @@
     `gen_meshes_in_db` / `process_meshes_update_db` 的同类 `.unwrap()` 一并清除。
     写入顺序有源码钉住测试（`aabb_write_order_records_before_pointers`）。
     注：`gen_inst_meshes` 里 `inst_geo.aabb` 指针有同构的顺序问题，本轮未动，记为
-    后续项。
+    后续项。**（2026-08-09 已修：vec3/aabb 记录写入挪进每个 mesh 任务、先于其
+    `inst_geo` 指针 update；join 之后的全局补写删除。跨任务重复由 INSERT IGNORE
+    幂等吸收，不再依赖共享 map 去重——别的任务替你去了重不等于替你把记录写进了库。
+    源码钉 `mesh_records_land_before_inst_geo_pointers_inside_each_task`。）**
   - **落盘时机（第 7 条挂起项，已决）**：空间树新增脏标记 `AABB_TREE_DIRTY`，
     两处树变更（AABB 刷新、`remove_by_refnos` 删除清理）后置位；`batch_worker`
     空闲轮收尾（room_round 之后）若脏则 `serialize_to_bin_file`，成功清位、失败
@@ -225,7 +228,10 @@
     **残余**：`QUERY_DEEP_CHILDREN_REFNOS` 按子树根为键，失效集只到变更元素的
     直接属主——深层后代变更时高层根（ZONE 级正常颗粒根）的子树快照仍会陈旧；
     正确的修法是在 `build_model_update_plan` 算出生成根后按根失效，属计划层
-    接线，记为后续项。
+    接线，记为后续项。**（2026-08-09 已接线：`ModelUpdatePlan::regen_root_refnos`
+    并入增量失效集（`increment_pipeline.rs` 的 collect → extend 顺序有源码钉
+    `cache_invalidation_extends_to_the_plans_regen_roots`）；直写路径在生成前
+    失效，暂存路径同一份集合随提交 / 废弃清除。）**
   - 验证：gen-model `cargo test --lib` 266 通过；rs-core-pin `accel_tree` 4 条新
     单测通过；七条 live 夹具用例（含新增的管段用例）在一次性内存实例上逐个实跑
     全部通过。

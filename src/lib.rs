@@ -342,8 +342,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         mgr.init_watcher().await?;
     }
 
-    // 启动加载：sidecar epoch 与库一致才信项目树文件，否则从库指针重建
-    // （ADR-010 §6 修订：裸文件搬运与条数对账一并退役）。
+    // 启动默认直接复用已有项目树；只有 AIOS_FORCE_SPATIAL_REBUILD 才显式重建。
     // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
     // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
     if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
@@ -405,7 +404,16 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         update_cal_bran_component().await?;
     }
 
-    let aios_mgr = AiosDBMgr::init_from_db_option().await?;
+    // `run_app` has already connected the process-global `SUL_DB`.  Calling
+    // `AiosDBMgr::init_from_db_option()` here tries to connect that same
+    // singleton a second time.  Recent SurrealDB clients reject the second
+    // connect with `Already connected` and, worse, leave the original router
+    // channel closed.  This legacy manager is only a thin option holder for
+    // the material/SYS/PBS calls below, so construct it over the established
+    // connection instead of reconnecting.
+    let aios_mgr = AiosDBMgr {
+        db_option: db_option.as_ref().clone(),
+    };
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
@@ -527,8 +535,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         }
     }
 
-    // epoch 校验通过才信项目树文件，失配从库指针重建；条数对账
-    // （sync_aabb_tree_with_db）退役为手工诊断工具（ADR-010 §6 修订）。
+    // 默认直接复用已有项目树；AIOS_FORCE_SPATIAL_REBUILD=1 时才从库指针重建。
     crate::fast_model::aabb_tree::load_project_tree_verified().await?;
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await

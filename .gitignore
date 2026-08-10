@@ -92,3 +92,9 @@ __pycache__/
 /output/increment-test/*
 !/output/increment-test/README.md
 !/output/increment-test/rs-plant3-d-*.png
+
+# KC-Chat 运行时产物（插件自动生成，请勿入库）
+.cursor/mcp.json
+.cursor/kc-mcp/
+.cursor/kc-mcp-messages/
+.cursor/kc-chat-exports/

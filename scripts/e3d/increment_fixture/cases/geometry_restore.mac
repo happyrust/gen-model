@@ -1,0 +1,12 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:geom_box}}
+XLEN 1000
+YLEN 1000
+ZLEN 1000
+Q CE
+Q XLEN
+SAVEWORK 'AIOS fixture geometry restore'
+ALPHA LOG END
+
+
+

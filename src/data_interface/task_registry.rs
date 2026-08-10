@@ -80,6 +80,20 @@ pub struct TaskEntry {
     /// 会话区间右端。排队中会被后来的触发推高（并入会话），冻结后不再变。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_sesno: Option<i32>,
+    /// 区间左端那条保存在 E3D 里的写入时刻（RFC3339，ADR-020 第 2 项那把尺子）。
+    ///
+    /// 界面的「保存窗口」列显示的是这一对时刻而不是 sesno（plant-ui ADR-0019）；
+    /// 序号仍是执行边界，时刻只是显示代理。读不到 → `None` → 那一格**留空**，
+    /// 不许回落成 sesno，也不许拿挂钟时刻顶替。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_sesno_time: Option<String>,
+    /// 区间右端那条保存的写入时刻。
+    ///
+    /// **它必须与 `end_sesno` 同生共死**：排队中被并入推高右端时一起刷新，冻结点重扫
+    /// 定下真实上界时一起改写。只推序号不刷时刻的话，窗口会停在入队观察到的那一刻——
+    /// 并入得越多，界面上这个时刻越骗人。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_sesno_time: Option<String>,
     /// 阶段二进度：本批次已生成的交付单元数（口径按数据批次，ADR-0007 迁移）。
     /// 房间轮任务复用同一对字段记 done/total。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +172,8 @@ impl TaskRegistry {
     }
 
     /// 新排一条数据批次（state = queued）。返回该行 task_id。
+    ///
+    /// 两个时刻参数各自紧跟自己的 sesno：类型不同，写反了编译期就挡住。
     pub fn insert_queued_batch(
         &self,
         task_id: &str,
@@ -165,7 +181,9 @@ impl TaskRegistry {
         dbnum: u32,
         db_type: &str,
         start_sesno: i32,
+        start_sesno_time: Option<String>,
         end_sesno: i32,
+        end_sesno_time: Option<String>,
     ) {
         self.insert_entry(TaskEntry {
             task_id: task_id.to_string(),
@@ -179,6 +197,8 @@ impl TaskRegistry {
             db_type: Some(db_type.to_string()),
             start_sesno: Some(start_sesno),
             end_sesno: Some(end_sesno),
+            start_sesno_time,
+            end_sesno_time,
             units_done: None,
             total_units: None,
             events_seen: 0,
@@ -210,6 +230,8 @@ impl TaskRegistry {
             db_type: None,
             start_sesno: None,
             end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
             units_done: Some(0),
             total_units: Some(total),
             events_seen: 0,
@@ -271,20 +293,35 @@ impl TaskRegistry {
     }
 
     /// 排队中的行被后来的触发并入会话：只推高右端（ADR-011 §5）。
-    pub fn update_queued_range(&self, task_id: &str, end_sesno: i32) {
+    ///
+    /// 时刻跟着序号一起动，且**只在序号真的抬高时才动**：否则一次没抬高的并入会把
+    /// 右端时刻换成一个更早的值，序号与时刻当场对不上。
+    pub fn update_queued_range(
+        &self,
+        task_id: &str,
+        end_sesno: i32,
+        end_sesno_time: Option<String>,
+    ) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
-            if entry.state == TaskState::Queued {
-                entry.end_sesno = Some(entry.end_sesno.unwrap_or(0).max(end_sesno));
+            if entry.state == TaskState::Queued && end_sesno > entry.end_sesno.unwrap_or(0) {
+                entry.end_sesno = Some(end_sesno);
+                entry.end_sesno_time = end_sesno_time;
             }
         }
     }
 
-    pub fn set_queued_start(&self, task_id: &str, start_sesno: i32) {
+    pub fn set_queued_start(
+        &self,
+        task_id: &str,
+        start_sesno: i32,
+        start_sesno_time: Option<String>,
+    ) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             if entry.state == TaskState::Queued {
                 entry.start_sesno = Some(start_sesno);
+                entry.start_sesno_time = start_sesno_time;
             }
         }
     }
@@ -294,11 +331,15 @@ impl TaskRegistry {
     /// 与 `update_queued_range` 相反：那个只推高排队行、开跑后一概不动；这个只作用
     /// 于已经开跑的行，且直接赋值不取 max——冻结点看到什么就是什么，界面显示的
     /// 区间必须是真正要应用的那个。
-    pub fn set_frozen_range(&self, task_id: &str, end_sesno: i32) {
+    ///
+    /// 时刻同样直接赋值，**包括赋成 `None`**：冻结把序号改了，旧时刻立刻就是错的，
+    /// 读不到新时刻时宁可让那一格空着，也不能留一个对不上的时刻在上面。
+    pub fn set_frozen_range(&self, task_id: &str, end_sesno: i32, end_sesno_time: Option<String>) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             if entry.state == TaskState::Running {
                 entry.end_sesno = Some(end_sesno);
+                entry.end_sesno_time = end_sesno_time;
             }
         }
     }
@@ -390,6 +431,8 @@ mod tests {
             db_type: Some("DESI".into()),
             start_sesno: Some(1),
             end_sesno: Some(2),
+            start_sesno_time: None,
+            end_sesno_time: None,
             units_done: None,
             total_units: None,
             events_seen: 0,
@@ -398,9 +441,14 @@ mod tests {
         });
     }
 
+    /// 只关心区间的用例走这个；关心时刻的用例直接调 `insert_queued_batch`。
+    fn queue_row(registry: &TaskRegistry, task_id: &str, dbnum: u32, start: i32, end: i32) {
+        registry.insert_queued_batch(task_id, "P", dbnum, "DESI", start, None, end, None);
+    }
+
     fn fill_to_capacity_with_queued(registry: &TaskRegistry, count: usize) {
         for i in 0..count {
-            registry.insert_queued_batch(&format!("q-{i}"), "P", 90_000 + i as u32, "DESI", 1, 2);
+            queue_row(registry, &format!("q-{i}"), 90_000 + i as u32, 1, 2);
         }
     }
 
@@ -411,7 +459,7 @@ mod tests {
         registry.mark_started("q-0");
 
         // 满容之后再插入：没有终态可剔，queued/running 一条都不能丢。
-        registry.insert_queued_batch("overflow", "P", 1, "DESI", 1, 2);
+        queue_row(&registry, "overflow", 1, 1, 2);
         assert!(registry.get("q-0").is_some(), "running 行被剔除");
         assert!(registry.get("q-1").is_some(), "queued 行被剔除");
         assert!(registry.get("overflow").is_some());
@@ -432,7 +480,7 @@ mod tests {
             );
         }
 
-        registry.insert_queued_batch("trigger", "P", 7997, "DESI", 3, 4);
+        queue_row(&registry, "trigger", 7997, 3, 4);
         assert!(
             registry.get("old-7997").is_none(),
             "同 dbnum 的旧终态应最先让位"
@@ -455,7 +503,7 @@ mod tests {
                 "2026-07-27T10:00:00+08:00",
             );
         }
-        registry.insert_queued_batch("trigger", "P", 7997, "DESI", 1, 2);
+        queue_row(&registry, "trigger", 7997, 1, 2);
         assert!(registry.get("oldest").is_none(), "全局最老的终态先走");
         assert!(registry.get("trigger").is_some());
     }
@@ -463,10 +511,10 @@ mod tests {
     #[test]
     fn merge_only_raises_the_queued_end_sesno() {
         let registry = TaskRegistry::default();
-        registry.insert_queued_batch("row", "P", 7997, "DESI", 1024, 1034);
-        registry.update_queued_range("row", 1041);
+        queue_row(&registry, "row", 7997, 1024, 1034);
+        registry.update_queued_range("row", 1041, None);
         assert_eq!(registry.get("row").unwrap().end_sesno, Some(1041));
-        registry.update_queued_range("row", 1030);
+        registry.update_queued_range("row", 1030, None);
         assert_eq!(
             registry.get("row").unwrap().end_sesno,
             Some(1041),
@@ -474,11 +522,64 @@ mod tests {
         );
 
         registry.mark_started("row");
-        registry.update_queued_range("row", 2000);
+        registry.update_queued_range("row", 2000, None);
         assert_eq!(
             registry.get("row").unwrap().end_sesno,
             Some(1041),
             "冻结之后区间不再变"
+        );
+    }
+
+    /// 保存窗口那一列显示的是时刻，所以时刻必须与右端序号同生共死：并入推高了就
+    /// 跟着换，没推高就一个字都不许动。只推序号不刷时刻的话，窗口会停在入队观察到
+    /// 的那一刻，并入得越多界面上越骗人；反过来在没推高时也跟着换，就会出现
+    /// 「序号是新的、时刻是旧的」这种自相矛盾的一行。
+    #[test]
+    fn the_window_time_moves_with_the_end_sesno_and_only_with_it() {
+        let registry = TaskRegistry::default();
+        registry.insert_queued_batch(
+            "row",
+            "P",
+            7997,
+            "DESI",
+            1024,
+            Some("2026-08-01T09:12:00+08:00".into()),
+            1034,
+            Some("2026-08-07T14:33:00+08:00".into()),
+        );
+
+        registry.update_queued_range("row", 1041, Some("2026-08-07T15:42:00+08:00".into()));
+        let entry = registry.get("row").unwrap();
+        assert_eq!(entry.end_sesno, Some(1041));
+        assert_eq!(
+            entry.end_sesno_time.as_deref(),
+            Some("2026-08-07T15:42:00+08:00"),
+            "并入推高了右端，时刻必须跟着走"
+        );
+
+        // 一次没推高的并入：序号不动，时刻也不许被换成更早的那个。
+        registry.update_queued_range("row", 1030, Some("2026-08-02T08:00:00+08:00".into()));
+        let entry = registry.get("row").unwrap();
+        assert_eq!(entry.end_sesno, Some(1041));
+        assert_eq!(
+            entry.end_sesno_time.as_deref(),
+            Some("2026-08-07T15:42:00+08:00"),
+            "右端没抬高，时刻不能退回去"
+        );
+        assert_eq!(
+            entry.start_sesno_time.as_deref(),
+            Some("2026-08-01T09:12:00+08:00"),
+            "左端与并入无关，全程不动"
+        );
+
+        // 冻结点直接赋值：读不到新时刻时宁可空着，也不能留一个对不上的旧时刻。
+        registry.mark_started("row");
+        registry.set_frozen_range("row", 1038, None);
+        let entry = registry.get("row").unwrap();
+        assert_eq!(entry.end_sesno, Some(1038));
+        assert!(
+            entry.end_sesno_time.is_none(),
+            "冻结改了序号，旧时刻立刻就是错的，必须清掉"
         );
     }
 
@@ -537,7 +638,7 @@ mod tests {
     #[test]
     fn started_at_is_set_on_freeze_not_on_enqueue() {
         let registry = TaskRegistry::default();
-        registry.insert_queued_batch("row", "P", 7997, "DESI", 1, 2);
+        queue_row(&registry, "row", 7997, 1, 2);
         assert!(registry.get("row").unwrap().started_at.is_none());
         registry.mark_started("row");
         let entry = registry.get("row").unwrap();
