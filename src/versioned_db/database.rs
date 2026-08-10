@@ -1122,7 +1122,11 @@ pub async fn sync_total_async_threaded(
                                 &ses_range_map_clone,
                                 &total_attr_map,
                             );
-                            if !preserved.is_empty() {
+                            if preserved.is_empty() {
+                                crate::data_interface::parse_error::note_attrs_success(
+                                    &file_name_clone,
+                                );
+                            } else {
                                 let samples = preserved
                                     .iter()
                                     .take(5)
@@ -1131,6 +1135,13 @@ pub async fn sync_total_async_threaded(
                                 println!(
                                     "{file_name_clone}: {} 个元素完整属性解析失败，已保留 PE 拓扑元数据（样例: {samples}）",
                                     preserved.len()
+                                );
+                                // 只打一行的话，这批元素属性缺失事后无从查起：拓扑还在，
+                                // 所以它们照常出现在树上、照常被引用，只是属性是残的。
+                                crate::data_interface::parse_error::note_attrs_failure(
+                                    &file_name_clone,
+                                    preserved.len() as u64,
+                                    &samples,
                                 );
                             }
                             //类型暂时不多线程
@@ -1260,6 +1271,11 @@ pub async fn sync_total_async_threaded(
     .await
     .map_err(|error| anyhow::anyhow!("baseline parser task failed: {error}"))
     .and_then(|inner| inner);
+    // 解析任务是 spawn 出去的，攒下的属性解析失败在这里落库（见 `note_attrs_failure`）。
+    // 排在 `?` 之前：解析失败恰恰是最需要留痕的那一次。
+    if let Err(error) = crate::data_interface::parse_error::flush().await {
+        log::warn!("{error:#}");
+    }
     finish_write_pipeline(sender, insert_handles, parser_outcome).await?;
     if is_total_sync && is_save_db {
         for entry in parsed_db_infos.iter() {

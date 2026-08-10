@@ -83,14 +83,28 @@ impl ModelRefreshPolicy {
             )
             .await
             {
-                Ok(outcome) => println!(
-                    "[cata_closure] 按需预加载完成: parsed={} missing={}",
-                    outcome.parsed, outcome.missing
-                ),
+                Ok(outcome) => {
+                    println!(
+                        "[cata_closure] 按需预加载完成: parsed={} missing={}",
+                        outcome.parsed, outcome.missing
+                    );
+                    crate::data_interface::parse_error::note_preload_success(
+                        &db_option.project_name,
+                    );
+                }
                 Err(e) => {
                     eprintln!("[cata_closure] 按需预加载失败: {e:#}");
                     log::warn!("[cata_closure] 依赖缓存预加载失败（回退惰性兜底）: {}", e);
+                    // 回退惰性兜底不报错、不阻断，于是这条在现场刷了 788 次也没人知道
+                    // 它一直在失败。按项目归行，次数就是它退了多少次兜底。
+                    crate::data_interface::parse_error::note_preload_failure(
+                        &db_option.project_name,
+                        &format!("{e:#}"),
+                    );
                 }
+            }
+            if let Err(error) = crate::data_interface::parse_error::flush().await {
+                log::warn!("{error:#}");
             }
         }
         crate::data_interface::staging::preload::preload_existing_generation_products(&root_refnos)

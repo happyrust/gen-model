@@ -51,8 +51,22 @@ static PENDING: Mutex<BTreeMap<Key, Pending>> = Mutex::new(BTreeMap::new());
 /// 本进程已知在表里有行的目标；决定一次成功要不要发 DELETE。
 static KNOWN_FAILED: Mutex<Option<HashSet<Key>>> = Mutex::new(None);
 
+/// 一个元素整个解析不出来，按 cache-miss 跳过。
 const ELEMENT: &str = "element";
+/// 一个库文件扫不动，当轮不可定位。
 const FILE: &str = "file";
+/// 库读得动，但里面若干元素的**完整属性**解析不出来，只保住了 PE 拓扑。
+///
+/// 按文件归行而不是按元素：这个失败本来就是整块报的（「N 个元素…」），一个坏文件
+/// 能一次带出几万个 refno，逐个成行会让这本账比它要记录的问题还大。次数记的是受
+/// 影响的元素个数，样例进错误文本。
+const ATTRS: &str = "attrs";
+/// 一个项目的监控目录解析不出任何库目录。
+const DIR: &str = "dir";
+/// 一个项目的目录依赖缓存预加载失败，退回惰性兜底。
+const PRELOAD: &str = "preload";
+
+const KINDS: [&str; 5] = [ELEMENT, FILE, ATTRS, DIR, PRELOAD];
 
 fn pending() -> std::sync::MutexGuard<'static, BTreeMap<Key, Pending>> {
     PENDING
@@ -123,6 +137,55 @@ pub(crate) fn note_file_success(path: &Path) {
     note_success((FILE, path.display().to_string()));
 }
 
+/// 一个文件里有 `count` 个元素的完整属性解析不出来（只保住了 PE 拓扑）。
+///
+/// 次数按受影响的元素个数记，而不是按「报了几次」——这本账要回答的是规模。
+pub(crate) fn note_attrs_failure(file: &str, count: u64, samples: &str) {
+    if count == 0 {
+        return;
+    }
+    let key = (ATTRS, file.to_string());
+    let error = format!("{count} 个元素完整属性解析失败，已保留 PE 拓扑元数据（样例: {samples}）");
+    let mut buffer = pending();
+    match buffer.get_mut(&key) {
+        Some(Pending::Failed {
+            count: total,
+            error: last,
+        }) => {
+            *total += count;
+            *last = error;
+        }
+        _ => {
+            buffer.insert(key, Pending::Failed { count, error });
+        }
+    }
+}
+
+/// 这个文件这一轮所有元素的完整属性都解析出来了。
+pub(crate) fn note_attrs_success(file: &str) {
+    note_success((ATTRS, file.to_string()));
+}
+
+/// 一个项目的监控目录解析不出任何库目录。
+pub(crate) fn note_dir_failure(project: &str, error: &str) {
+    note_failure((DIR, project.to_string()), error);
+}
+
+/// 这个项目这一轮解析出了库目录。
+pub(crate) fn note_dir_success(project: &str) {
+    note_success((DIR, project.to_string()));
+}
+
+/// 一个项目的目录依赖缓存预加载失败，退回惰性兜底。
+pub(crate) fn note_preload_failure(project: &str, error: &str) {
+    note_failure((PRELOAD, project.to_string()), error);
+}
+
+/// 这个项目这一轮预加载成功了。
+pub(crate) fn note_preload_success(project: &str) {
+    note_success((PRELOAD, project.to_string()));
+}
+
 fn record_id(kind: &str, target: &str) -> String {
     format!("{TABLE}:['{kind}', '{}']", escape_surql_str(target))
 }
@@ -164,10 +227,9 @@ async fn seed_known_failed() -> anyhow::Result<()> {
     let rows: Vec<Row> = response.take(0)?;
     let seeded = rows
         .into_iter()
-        .filter_map(|row| match row.kind.as_str() {
-            ELEMENT => Some((ELEMENT, row.target)),
-            FILE => Some((FILE, row.target)),
-            _ => None,
+        .filter_map(|row| {
+            let kind = KINDS.iter().find(|kind| **kind == row.kind)?;
+            Some((*kind, row.target))
         })
         .collect::<HashSet<_>>();
     *known_failed() = Some(seeded);
@@ -255,11 +317,20 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         .and_then(|mut response| response.take(0))
         .unwrap_or_default();
     let latest = rows.first()?;
+    // 按类别拆开：一个「解析不出来」的总数说明不了要去修什么——扫不动整个库、
+    // 元素属性缺一半、项目目录压根没解析出来，是三件不同的事。
+    let by_kind = KINDS
+        .iter()
+        .filter_map(|kind| {
+            let count = rows.iter().filter(|row| row.kind == *kind).count();
+            (count > 0).then(|| (kind.to_string(), serde_json::json!(count)))
+        })
+        .collect::<serde_json::Map<_, _>>();
     Some(serde_json::json!({
         "total": rows.len(),
-        "elements": rows.iter().filter(|row| row.kind == ELEMENT).count(),
-        "files": rows.iter().filter(|row| row.kind == FILE).count(),
+        "by_kind": by_kind,
         "occurrences": rows.iter().map(|row| row.occurrences).sum::<u64>(),
+        "last_kind": latest.kind,
         "last_target": latest.target,
         "last_error": latest.last_error,
         "last_seen_at": latest.last_seen_at,
@@ -341,6 +412,29 @@ mod tests {
             pending().get(&(ELEMENT, "4000000001/11".to_string())),
             Some(Pending::Failed { .. })
         ));
+    }
+
+    /// 属性解析失败按**受影响的元素个数**记，不是按「报了几次」记。
+    ///
+    /// 一次同步会分块报好几轮，每轮各带自己的元素数；这本账要回答的是规模——
+    /// 「这个库有 3 个元素属性残了」和「有 30000 个」是完全不同的两件事。
+    #[test]
+    fn attribute_failures_count_elements_not_reports() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+
+        note_attrs_failure("ams1_2", 3, "1/2, 1/3, 1/4");
+        note_attrs_failure("ams1_2", 30, "1/9");
+        // 一个元素都没坏的那一块不该把这一行变成 0 次。
+        note_attrs_failure("ams1_2", 0, "");
+
+        let buffer = pending();
+        let Some(Pending::Failed { count, error }) = buffer.get(&(ATTRS, "ams1_2".to_string()))
+        else {
+            panic!("属性解析失败必须归行: {buffer:?}");
+        };
+        assert_eq!(*count, 33);
+        assert!(error.contains("30 个元素"), "{error}");
     }
 
     /// 累计计数只涨不覆盖、首见时刻只写一次——同一目标反复失败时这两条是账的全部价值。
