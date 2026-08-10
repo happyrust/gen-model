@@ -4444,7 +4444,10 @@ mod delete_propagation_tests {
     #[test]
     fn the_delete_reaches_grandchildren() {
         let owners = HashMap::from([(refno(3), refno(2)), (refno(2), refno(1))]);
-        let mut details = vec![detail(3, NetOp::Modified, true), detail(1, NetOp::Deleted, true)];
+        let mut details = vec![
+            detail(3, NetOp::Modified, true),
+            detail(1, NetOp::Deleted, true),
+        ];
 
         propagate_deletes_to_descendants(&mut details, |r| owners.get(&r).copied());
 
@@ -4454,7 +4457,10 @@ mod delete_propagation_tests {
     /// owner 链解不出来就停手：拿一条断链把活元素判成删除，比多做一次更新坏得多。
     #[test]
     fn an_unresolvable_owner_chain_leaves_the_change_alone() {
-        let mut details = vec![detail(3, NetOp::Modified, true), detail(1, NetOp::Deleted, true)];
+        let mut details = vec![
+            detail(3, NetOp::Modified, true),
+            detail(1, NetOp::Deleted, true),
+        ];
 
         let folded = propagate_deletes_to_descendants(&mut details, |_| None);
 
