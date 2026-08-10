@@ -12,7 +12,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use crate::fast_model::gen_all_geos_data;
-use crate::fast_model::room_model::build_room_relations;
+use crate::fast_model::room_model::{
+    StartupRoomBuild, build_room_relations, reconcile_startup_room_build,
+};
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
@@ -151,6 +153,37 @@ mod process_instance_lock_tests {
         let reopened = open_process_instance_lock(&path).expect("lock releases with handle");
         drop(reopened);
         let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 环境变量名：无论如何都不跑启动全量房间重建（既有运维止血口，语义不变）。
+pub const SKIP_STARTUP_ROOM_BUILD_ENV: &str = "AIOS_SKIP_STARTUP_ROOM_BUILD";
+
+/// 本次启动要不要跳过全量房间重建；跳过时返回那句给人看的理由。
+///
+/// 三道门按优先级排：
+/// 1. [`SKIP_STARTUP_ROOM_BUILD_ENV`] —— 永不重建。它比自动执行开关更强，因为
+///    「跑增量」与「跑 2 万面板级的全量重建」是两件事：L3 夹具、增量演练这类
+///    场景要前者不要后者。
+/// 2. `startup_autorun`（默认 false）—— 本次启动不自动干活。
+/// 3. 两道门都放行，才与库侧凭据对账：只有空间状态真的变过才重建。
+///
+/// 第三道门是这次改动的要点。此前这一步是无条件的，于是每次重启都要为一件
+/// 多半无事可做的事付上十几秒——而它真正的兜底价值只在「空间状态变了、增量
+/// 房间队列又没收干净」时才兑现。
+async fn skip_startup_room_build() -> Option<String> {
+    if std::env::var(SKIP_STARTUP_ROOM_BUILD_ENV).is_ok() {
+        return Some(format!("{SKIP_STARTUP_ROOM_BUILD_ENV} 已设置"));
+    }
+    if !crate::options::startup_autorun() {
+        return Some("startup_autorun=false".to_string());
+    }
+    match reconcile_startup_room_build().await {
+        StartupRoomBuild::Skip(reason) => Some(reason),
+        StartupRoomBuild::Run(reason) => {
+            println!("启动全量房间重建：{reason}");
+            None
+        }
     }
 }
 
@@ -330,13 +363,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     /// 创建db manager
-    match crate::data_interface::batch_scheduler::BatchScheduler::global()
-        .restore_persisted_pause()
-        .await
-    {
+    let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    match scheduler.restore_persisted_pause().await {
         Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
         Ok(false) => {}
         Err(error) => println!("启动时恢复队列暂停标志失败（worker 启动前会重试）: {error:#}"),
+    }
+    if !scheduler.is_auto_work_armed() {
+        println!(
+            "startup_autorun=false：本次启动不执行任何增量与全量房间重建；\
+             重扫照常发现并入队，但排出来的行挂起，等各自的 dbnum 真的来增量再跑"
+        );
     }
     if sync_live {
         mgr.init_watcher().await?;
@@ -379,20 +416,14 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
-    // 快速重启 / 仅靠增量收敛时可跳过启动全量房间重建（本项目 2 万面板级、很重）。
-    // 增量队列照常入队与消费，房间归属靠增量收敛。
-    if std::env::var("AIOS_SKIP_STARTUP_ROOM_BUILD").is_ok() {
-        println!(
-            "AIOS_SKIP_STARTUP_ROOM_BUILD 已设置：跳过启动全量房间重建，房间归属仅靠增量队列收敛"
-        );
+    if let Some(reason) = skip_startup_room_build().await {
+        println!("跳过启动全量房间重建（{reason}）：房间归属由增量队列收敛");
     } else {
-        println!("正在生成空间树");
-        println!("正在计算房间");
         println!(
-            "房间空间数的数量为: {}",
+            "正在计算房间（空间树 {} 条）",
             GLOBAL_AABB_TREE.read().await.tree.size()
         );
-        let mut time = Instant::now();
+        let time = Instant::now();
         // 单块面板算不出来不该拦住启动：这里在 `async_watch` 之前，panic 等于整个服务
         // 起不来，而房间归属是可以事后重建的派生数据。函数内已按面板逐条聚合失败原因，
         // 打出来即可定位——此前那些失败是被 `unwrap_or_default()` 吞成「这间房 0 个成员」的。
@@ -551,3 +582,67 @@ pub mod data_state;
 // pub mod rvm;
 // pub mod ssc;
 pub mod version_management;
+
+/// 启动全量房间重建那道门的源码钉子。
+///
+/// 刻意放在文件末尾：这两个测试用源码里的字面量当分隔符，而 `split_once` 取的是
+/// **首次**出现。写在被测代码前面的话，分隔符会先匹配到测试自己那份拷贝，测的就
+/// 成了测试自身。
+#[cfg(test)]
+mod startup_room_build_gate_tests {
+    /// 启动路径必须**问**这道门，而不是自己判环境变量。
+    ///
+    /// 反向不变量：那一段里不许再直接出现旧的环境变量名。它此前是唯一的出口，
+    /// 谁顺手在这里加回一个 `env::var` 分支，三道门的优先级就散了。
+    #[test]
+    fn the_startup_path_asks_the_gate_before_rebuilding_rooms() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once(r#"println!("房间关键字为: {:?}""#)
+            .expect("启动房间段必须存在")
+            .1
+            .split_once("let aios_mgr = AiosDBMgr {")
+            .expect("房间段之后是 aios_mgr")
+            .0;
+
+        assert!(
+            body.contains("skip_startup_room_build().await"),
+            "启动全量房间重建必须经这道门: {body}"
+        );
+        assert!(
+            !body.contains("AIOS_SKIP_STARTUP_ROOM_BUILD"),
+            "环境变量只在门里判一次，启动段不许再判: {body}"
+        );
+    }
+
+    /// 三道门的优先级：止血口 > 冷启动开关 > 库侧对账。
+    ///
+    /// 顺序不能乱。`AIOS_SKIP_STARTUP_ROOM_BUILD` 排在最前是因为「跑增量」与
+    /// 「跑 2 万面板级全量重建」是两件事——L3 夹具正是要前者不要后者；而对账
+    /// 排在最后是因为它要读库，前两道门放行之前不该为它付这次查询。
+    #[test]
+    fn the_three_gates_keep_their_precedence() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("async fn skip_startup_room_build()")
+            .expect("门必须存在")
+            .1
+            .split_once("\npub mod api;")
+            .expect("门之后是模块声明")
+            .0;
+
+        let env_at = body
+            .find("SKIP_STARTUP_ROOM_BUILD_ENV")
+            .expect("止血口必须还在");
+        let autorun_at = body
+            .find("crate::options::startup_autorun()")
+            .expect("冷启动开关必须把门");
+        let reconcile_at = body
+            .find("reconcile_startup_room_build().await")
+            .expect("放行后必须与库侧凭据对账");
+        assert!(
+            env_at < autorun_at && autorun_at < reconcile_at,
+            "三道门的优先级是 止血口 → 冷启动开关 → 库侧对账: {body}"
+        );
+    }
+}

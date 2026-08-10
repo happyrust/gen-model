@@ -228,6 +228,69 @@ pub fn merge_net_change_details(
         .collect()
 }
 
+/// owner 链上溯的跳数上限。数据异常造出环时靠它收敛，取值与祖先预载的 9 跳预算
+/// 同量级再留一倍余量——真实模型的 WORL→图元最深也远不到这个数。
+const DELETE_PROPAGATION_HOP_CAP: usize = 32;
+
+/// 把删除沿 owner 链**往下**传：父没了，整支就是删除，历史会话里对子节点的修改
+/// 不再是「更新」。
+///
+/// [`merge_net_change_details`] 是严格逐 refno 折叠的，元素之间没有任何传播：
+/// 「子在 25 被改、父在 26 被删」折出来是一个 `Modified` 的子 + 一个 `Deleted` 的父，
+/// 于是那个子照样进计划、照样被当成活目标去文件里解析祖先链——而它此刻已经随父
+/// 一起从文件里消失了。这一步就是把那半边补上。
+///
+/// 传播用的是**同一张优先级表**（`fold_net_op(prev, Delete)`），不另立语义，两种
+/// 子节点因此自动分开：本来就存在的（`Modified`）落到 `Deleted`，该清的持久行会被
+/// 清；本窗口内新建的（`Added`）落到 `Cancelled`，它压根没落过库，不用清。
+///
+/// `owner_of` 给的是**后态** owner（窗口内改过 OWNER 的以新值为准）。解不出 owner
+/// 就在那里停下，不再上溯——保守地维持现状，宁可多做一次更新，也不能凭一条断掉的
+/// 链把活元素判成删除。
+///
+/// 返回被改判的条数，供调用方决定要不要在告警里说一声。
+pub fn propagate_deletes_to_descendants(
+    details: &mut [NetChangeDetail],
+    owner_of: impl Fn(RefnoEnum) -> Option<RefnoEnum>,
+) -> usize {
+    // 后态里已经不存在的那些：`Deleted` 是删掉的，`Cancelled` 是窗口内建了又删的，
+    // 两种都不存在，名下的子孙同样不存在。
+    let gone: HashSet<RefnoEnum> = details
+        .iter()
+        .filter(|detail| matches!(detail.net, NetOp::Deleted | NetOp::Cancelled))
+        .map(|detail| detail.refno)
+        .collect();
+    if gone.is_empty() {
+        return 0;
+    }
+
+    let mut changed = 0;
+    for detail in details.iter_mut() {
+        if gone.contains(&detail.refno) {
+            continue;
+        }
+        let mut cursor = detail.refno;
+        for _ in 0..DELETE_PROPAGATION_HOP_CAP {
+            let Some(owner) = owner_of(cursor) else {
+                break;
+            };
+            if gone.contains(&owner) {
+                let folded = fold_net_op(Some(detail.net), IncomingKind::Delete);
+                if folded != detail.net {
+                    detail.net = folded;
+                    // 删除不需要「这次改动影响不影响模型」那套判断：要做的事情是
+                    // 清掉它的持久行，而那件事与它改了什么无关。
+                    detail.model_affecting = folded == NetOp::Deleted;
+                    changed += 1;
+                }
+                break;
+            }
+            cursor = owner;
+        }
+    }
+    changed
+}
+
 /// Serializable form of [`merge_net_change_details`] (kept for API stability).
 pub fn merge_net_changes(
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
@@ -3910,6 +3973,9 @@ impl AiosDBManager {
                     first_pending_sesno_time,
                     file_latest_sesno_time,
                 },
+                // 人按下的执行永不挂起：回执刚告诉他「已入队」，行却不动，是
+                // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。
+                false,
             );
             match outcome.outcome {
                 Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
@@ -4321,6 +4387,91 @@ fn fill_change_summary(
         }
     }
     details
+}
+
+#[cfg(test)]
+mod delete_propagation_tests {
+    use super::*;
+
+    fn refno(id: u64) -> RefnoEnum {
+        RefnoEnum::from(RefU64((24384u64 << 32) | id))
+    }
+
+    fn detail(id: u64, net: NetOp, model_affecting: bool) -> NetChangeDetail {
+        NetChangeDetail {
+            refno: refno(id),
+            net,
+            model_affecting,
+        }
+    }
+
+    /// 现场那一幕：子在 25 被改、父在 26 被删。不传播的话那个子会以「活的更新目标」
+    /// 身份进计划，再被拿去文件里解祖先链——而它此刻已经随父一起消失了。
+    #[test]
+    fn a_child_modified_before_its_owner_was_deleted_becomes_a_delete() {
+        let owners = HashMap::from([(refno(24779), refno(24778)), (refno(24778), refno(24775))]);
+        let mut details = vec![
+            detail(24779, NetOp::Modified, true),
+            detail(24778, NetOp::Deleted, true),
+        ];
+
+        let folded = propagate_deletes_to_descendants(&mut details, |r| owners.get(&r).copied());
+
+        assert_eq!(folded, 1);
+        assert_eq!(details[0].net, NetOp::Deleted);
+        assert!(details[0].model_affecting, "被删的子仍要清它的持久行");
+        assert_eq!(details[1].net, NetOp::Deleted, "父自己不受影响");
+    }
+
+    /// 窗口内新建、又随父一起没了的子节点落到 `Cancelled`：它压根没落过库，
+    /// 排一条清理是让下游去删一个从来不存在的东西。这一条靠的是既有的
+    /// `(Added, Delete) => Cancelled`，不是新语义。
+    #[test]
+    fn a_child_added_inside_the_window_is_cancelled_with_its_owner() {
+        let owners = HashMap::from([(refno(24779), refno(24778))]);
+        let mut details = vec![
+            detail(24779, NetOp::Added, true),
+            detail(24778, NetOp::Deleted, true),
+        ];
+
+        propagate_deletes_to_descendants(&mut details, |r| owners.get(&r).copied());
+
+        assert_eq!(details[0].net, NetOp::Cancelled);
+        assert!(!details[0].model_affecting);
+    }
+
+    /// 隔代也要传：中间那层未必在本窗口里有任何操作。
+    #[test]
+    fn the_delete_reaches_grandchildren() {
+        let owners = HashMap::from([(refno(3), refno(2)), (refno(2), refno(1))]);
+        let mut details = vec![detail(3, NetOp::Modified, true), detail(1, NetOp::Deleted, true)];
+
+        propagate_deletes_to_descendants(&mut details, |r| owners.get(&r).copied());
+
+        assert_eq!(details[0].net, NetOp::Deleted);
+    }
+
+    /// owner 链解不出来就停手：拿一条断链把活元素判成删除，比多做一次更新坏得多。
+    #[test]
+    fn an_unresolvable_owner_chain_leaves_the_change_alone() {
+        let mut details = vec![detail(3, NetOp::Modified, true), detail(1, NetOp::Deleted, true)];
+
+        let folded = propagate_deletes_to_descendants(&mut details, |_| None);
+
+        assert_eq!(folded, 0);
+        assert_eq!(details[0].net, NetOp::Modified);
+    }
+
+    /// 数据异常造出环时必须收敛，不能挂住整条增量。
+    #[test]
+    fn an_owner_cycle_terminates() {
+        let owners = HashMap::from([(refno(1), refno(2)), (refno(2), refno(1))]);
+        let mut details = vec![detail(1, NetOp::Modified, true)];
+
+        propagate_deletes_to_descendants(&mut details, |r| owners.get(&r).copied());
+
+        assert_eq!(details[0].net, NetOp::Modified);
+    }
 }
 
 #[cfg(test)]

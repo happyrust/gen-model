@@ -738,6 +738,34 @@ impl IncrementPipeline {
         // no longer trustworthy, so reuse the durable fixed range + model plan
         // prepared before the first write.
         let prepared = crate::data_interface::model_update_pending::load_attempt(dbnum).await?;
+        // 文件已经走在这条恢复记录前面时，暂存模式下要**并掉新会话重建计划**，
+        // 而不是原样重放。
+        //
+        // 原样重放在直写模式下是对的：那条路上 PE 块可能已经写了一半而水位故意
+        // 没动，更新前的 OWNER 图不再可信，只能照先前备好的计划走。暂存模式没有
+        // 这个半写态——收口是单事务，`prepared` 就等于「持久层一个字都没落」，
+        // 更新前的图完好无损，重建是安全的。
+        //
+        // 不并的代价是死循环：窗口停在 25、文件已到 26，25 里还活着的元素被 26
+        // 删掉之后，祖先解析必然断在它身上，而每次重试都在重演同一幕——现场
+        // dbnum=8000 就这么卡了三轮，直到人手工删掉这条记录才过去。
+        // 判据取「**这一次**是不是跑在暂存窗口里」，而不是进程级的 increment_mode：
+        // 基线（start_sesno == 1）即便进程是 staged 也走直写，问的是进程就会答错。
+        let merge_newer_sessions = prepared.as_ref().is_some_and(|attempt| {
+            attempt.end_sesno < *requested_range.end()
+                && crate::data_interface::staging::active_staging_writes().is_some()
+        });
+        if merge_newer_sessions {
+            let attempt = prepared.as_ref().expect("guarded above");
+            warnings.push(format!(
+                "dbnum={dbnum}: 恢复记录停在 {}..={}，文件已到 {}；暂存窗口未提交过任何持久写，\
+                 本次并入新会话重建计划",
+                attempt.start_sesno,
+                attempt.end_sesno,
+                *requested_range.end()
+            ));
+        }
+        let prepared = prepared.filter(|_| !merge_newer_sessions);
         let (sesno_range, mut model_plan, collected) = if let Some(attempt) = prepared {
             validate_prepared_attempt(&attempt, db_type, &path_text, *requested_range.end())?;
             warnings.push(format!(

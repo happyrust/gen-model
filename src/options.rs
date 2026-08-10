@@ -59,6 +59,20 @@ pub struct DbOptionExt {
     /// 上限 8：暂存内存与写回压力随在飞数线性放大。
     #[serde(default)]
     pub data_batch_workers: Option<usize>,
+
+    /// 启动即自动干活（默认 `false` = 起来先什么都不执行）。
+    ///
+    /// 关着时：启动重扫照常发现并入队，但队列消费者启动即暂停，启动全量房间
+    /// 重建也不跑。开着时才是历史行为。详见 [`startup_autorun`]。
+    #[serde(default)]
+    pub startup_autorun: Option<bool>,
+
+    /// 房间归属的**增量**重算（默认 `false` = 不排、不收）。
+    ///
+    /// 只管增量这一条链，启动全量重建与人工重建不受它影响。详见
+    /// [`room_incremental`]。
+    #[serde(default)]
+    pub room_incremental: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -88,6 +102,8 @@ impl From<DbOption> for DbOptionExt {
             http_api_addr: None,
             http_api_cors: None,
             data_batch_workers: None,
+            startup_autorun: None,
+            room_incremental: None,
         }
     }
 }
@@ -116,6 +132,10 @@ struct DbOptionExtFields {
     http_api_cors: Option<Vec<String>>,
     #[serde(default)]
     data_batch_workers: Option<usize>,
+    #[serde(default)]
+    startup_autorun: Option<bool>,
+    #[serde(default)]
+    room_incremental: Option<bool>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
@@ -166,6 +186,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_api_addr: ext.http_api_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
+        startup_autorun: ext.startup_autorun,
+        room_incremental: ext.room_incremental,
     }
 }
 
@@ -182,6 +204,109 @@ fn effective_data_batch_workers(configured: Option<usize>) -> usize {
     configured.unwrap_or(1).clamp(1, 8)
 }
 
+/// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
+pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
+
+/// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 false**）。
+///
+/// 关着时启动只做「让库能用」的那些幂等自愈，不消费队列、不做全量房间重建：
+/// 发现照常（重扫入队，队列是准的），执行等人点头。开着时是历史行为。
+///
+/// 默认取假是刻意的：这套服务的两条重活（增量执行、2 万面板级的房间全量重建）
+/// 都是分钟级且会改数据，而重启的常见动机恰恰是「先别动，我要看看」。想自动
+/// 干活的部署把配置写成 `true` 即可，运行中随时可 `POST /queue/resume` 放开。
+///
+/// 环境变量 [`STARTUP_AUTORUN_ENV`] 压过配置，认 `1/true/yes/on` 与
+/// `0/false/no/off`（大小写不敏感）；认不出的值一律当没设，退回配置值——
+/// 拼错一个单词就静默改变启动行为是更坏的结果。
+pub fn startup_autorun() -> bool {
+    effective_startup_autorun(
+        load_ext_fields().startup_autorun,
+        std::env::var(STARTUP_AUTORUN_ENV).ok().as_deref(),
+    )
+}
+
+fn effective_startup_autorun(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
+}
+
+/// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
+pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
+
+/// 房间归属的**增量**重算开不开（`DbOption.toml` 的 `room_incremental`，**默认 false**）。
+///
+/// 关着时增量链的两个写入点都不再排房间目标（位姿/删除刷新包围盒之后的直写事务、
+/// 暂存窗口的收口计划），空闲轮也不再收房间轮。**已经排在 `model_update_pending`
+/// 里的目标原样留着**——开关一开就照常收，关掉不等于把那些活丢了。
+///
+/// 管的只有增量这一条链：启动全量重建、人工重建、以及 `drain_rooms` 直调（房间
+/// 对拍夹具走的就是它）都不看这个开关。
+///
+/// 默认取假是刻意的：增量房间与增量模型生成共用同一条空间树与同一批包围盒变更，
+/// 而房间那半边一旦在缺几何的构件上空转，每一页都要付两次全量查询、把空闲轮变成
+/// 它的节拍器，模型生成侧的问题反倒被日志淹掉。先关掉它，让模型增量的正确性能被
+/// 单独看清楚。
+///
+/// 环境变量 [`ROOM_INCREMENTAL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn room_incremental() -> bool {
+    #[cfg(test)]
+    match ROOM_INCREMENTAL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_room_incremental(
+        load_ext_fields().room_incremental,
+        std::env::var(ROOM_INCREMENTAL_ENV).ok().as_deref(),
+    )
+}
+
+/// 单测里把 [`room_incremental`] 摁成某个取值的进程内覆盖（0 = 按配置来）。
+///
+/// 为什么不用环境变量：这个开关的**两条分支都得有用例走到**，而 lib 测试是一个
+/// 多线程进程，`std::env::set_var` 在 2024 edition 起就是 unsafe 的（并发读环境
+/// 是数据竞争）。覆盖整段挂在 `cfg(test)` 下，发布二进制里连这几行都不存在。
+#[cfg(test)]
+static ROOM_INCREMENTAL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 覆盖的作用域守卫：离开作用域即恢复「按配置来」，用例之间不会互相串。
+#[cfg(test)]
+pub(crate) struct RoomIncrementalOverride;
+
+#[cfg(test)]
+impl RoomIncrementalOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        ROOM_INCREMENTAL_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RoomIncrementalOverride {
+    fn drop(&mut self) {
+        ROOM_INCREMENTAL_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn effective_room_incremental(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
+}
+
+fn parse_bool_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +317,55 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(0)), 1);
         assert_eq!(effective_data_batch_workers(Some(4)), 4);
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
+    }
+
+    /// 缺配置就是「不自动干活」——这条默认值是本开关的全部意义所在。
+    #[test]
+    fn startup_autorun_is_off_unless_someone_asks_for_it() {
+        assert!(!effective_startup_autorun(None, None));
+        assert!(!effective_startup_autorun(Some(false), None));
+        assert!(effective_startup_autorun(Some(true), None));
+    }
+
+    /// 环境变量压过配置，两个方向都要能压——只认「设了就是开」的话，配置里
+    /// 写死 `true` 的部署就没有一次性冷启动的办法了。
+    #[test]
+    fn the_startup_autorun_env_override_wins_in_both_directions() {
+        assert!(effective_startup_autorun(Some(false), Some("1")));
+        assert!(effective_startup_autorun(None, Some("TRUE")));
+        assert!(!effective_startup_autorun(Some(true), Some("off")));
+        assert!(!effective_startup_autorun(Some(true), Some(" no ")));
+    }
+
+    /// 认不出的值退回配置值，而不是当成开或关：`AIOS_STARTUP_AUTORUN=ture`
+    /// 这种拼错要么被当成开（悄悄自动跑起来）、要么被当成关（悄悄什么都不干），
+    /// 两种静默都比「按配置来」坏。
+    #[test]
+    fn an_unrecognised_env_value_falls_back_to_the_configured_value() {
+        assert!(effective_startup_autorun(Some(true), Some("ture")));
+        assert!(!effective_startup_autorun(Some(false), Some("ture")));
+        assert!(!effective_startup_autorun(None, Some("")));
+    }
+
+    /// 缺配置就是「不算增量房间」——与 `startup_autorun` 同一条纪律：这类会自己
+    /// 跑起来、又会改数据的链路，默认必须是关的。
+    #[test]
+    fn room_incremental_is_off_unless_someone_asks_for_it() {
+        assert!(!effective_room_incremental(None, None));
+        assert!(!effective_room_incremental(Some(false), None));
+        assert!(effective_room_incremental(Some(true), None));
+    }
+
+    /// 两个方向都要能被环境变量压住：配置里写死 `true` 的部署也得有办法临时关掉，
+    /// 反过来排查房间问题时也得能临时开一次而不改文件。拼错的值退回配置值，
+    /// 理由同 [`effective_startup_autorun`]。
+    #[test]
+    fn the_room_incremental_env_override_wins_in_both_directions() {
+        assert!(effective_room_incremental(Some(false), Some("on")));
+        assert!(!effective_room_incremental(Some(true), Some("0")));
+        assert!(effective_room_incremental(None, Some("yes")));
+        assert!(effective_room_incremental(Some(true), Some("ture")));
+        assert!(!effective_room_incremental(Some(false), Some("ture")));
     }
 
     #[test]

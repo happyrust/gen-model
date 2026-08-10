@@ -159,6 +159,18 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         })?;
     }
 
+    // 开跑前先取凭据，收尾成功才盖上去（见 [`stamp_room_build`]）。取不到不拦重建：
+    // 凭据只决定「下次启动要不要再来一遍」，本轮该做的事一件不少。
+    let stamp = match current_room_build_stamp().await {
+        Ok(stamp) => Some(stamp),
+        Err(error) => {
+            println!(
+                "[房间全量] 读取本轮空间凭据失败（本次不盖章，下次启动会再重建一次）: {error:#}"
+            );
+            None
+        }
+    };
+
     // 重建前的存量成员数，一条查询查完。收尾时用它说出「哪几块面板从有成员变成了 0」
     // ——先清后写这条路上唯一会造成数据损失的转变就是它，而此前全量重建这一侧一行日志
     // 都没有（增量两条分支反倒都有）。查不到就不报这一项，不影响重建本身。
@@ -214,6 +226,14 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
             failures.len(),
             failures.join("; ")
         );
+    }
+
+    // 只有走到这里才算「这一轮全做完了」。盖章失败不算重建失败——白盖不上章的
+    // 后果只是下次启动多重建一次，而把已经成功的重建报成失败会误导排查。
+    if let Some(stamp) = stamp
+        && let Err(error) = stamp_room_build(stamp).await
+    {
+        println!("[房间全量] 重建成功但凭据没盖上（下次启动会再重建一次）: {error:#}");
     }
     Ok(())
 }
@@ -277,6 +297,102 @@ async fn ensure_room_tree_coverage() -> anyhow::Result<(usize, usize)> {
     let db_pointers = usable_aabb_pointer_count().await?;
     validate_room_tree_coverage(tree_entries, db_pointers)?;
     Ok((tree_entries, db_pointers))
+}
+
+/// 上一次**成功**的全量房间重建当时看到的世界，存在 `room_build:main`。
+///
+/// 两个字段各补一个盲区：`spatial_epoch` 认得出经过意图队列的空间变更，但直写与
+/// 全量生成两条路不递增 epoch（见 `aabb_tree::persist_project_tree_now`）；
+/// `tree_entries` 认得出那些路径造成的条数变化，但认不出「同数漂移」。合起来
+/// 拦得住绝大多数「库变了而房间没跟上」，拦不住的那部分本来就归增量房间队列收，
+/// 全量重建只是双保险——这也是它值得被跳过的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct RoomBuildStamp {
+    spatial_epoch: u64,
+    tree_entries: u64,
+}
+
+/// 启动该不该跑全量房间重建，以及那句要打给人看的理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupRoomBuild {
+    Skip(String),
+    Run(String),
+}
+
+/// 现在这一刻的对账凭据。
+async fn current_room_build_stamp() -> anyhow::Result<RoomBuildStamp> {
+    Ok(RoomBuildStamp {
+        spatial_epoch: crate::fast_model::aabb_tree::read_db_spatial_epoch().await?,
+        tree_entries: GLOBAL_AABB_TREE.read().await.tree.size() as u64,
+    })
+}
+
+async fn read_room_build_stamp() -> anyhow::Result<Option<RoomBuildStamp>> {
+    let mut response = SUL_DB
+        .query("SELECT spatial_epoch, tree_entries FROM room_build:main;")
+        .await
+        .map_err(|error| anyhow::anyhow!("读取房间重建凭据失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("读取房间重建凭据语句失败: {error}"))?;
+    Ok(response
+        .take::<Vec<RoomBuildStamp>>(0)
+        .map_err(|error| anyhow::anyhow!("解析房间重建凭据失败: {error}"))?
+        .into_iter()
+        .next())
+}
+
+/// 盖章：本次全量重建**完全成功**才调用。
+///
+/// 盖的是重建**开跑前**读到的那份凭据，不是收尾时重读的：重建途中树若被动过，
+/// 收尾值会把「我用的是混合状态」记成「我与现在一致」，下次启动就此不再重建。
+/// 记开跑值时这种情况表现为下次启动凭据对不上、再重建一次——多跑一次远好过
+/// 永久跳过。
+async fn stamp_room_build(stamp: RoomBuildStamp) -> anyhow::Result<()> {
+    let RoomBuildStamp {
+        spatial_epoch,
+        tree_entries,
+    } = stamp;
+    SUL_DB
+        .query(format!(
+            "UPSERT room_build:main SET spatial_epoch = {spatial_epoch}, \
+             tree_entries = {tree_entries}, built_at = time::now();"
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("写入房间重建凭据失败: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("写入房间重建凭据语句失败: {error}"))?;
+    Ok(())
+}
+
+/// 启动全量房间重建的对账：与上次成功重建时的凭据一致就跳过。
+///
+/// 读不到凭据（库刚建、或查询本身出错）一律判「跑」：这是历史行为，而破坏性的
+/// 先清后写另有 [`ensure_room_tree_coverage`] 那道 fail-closed 门把着，多跑一次
+/// 的代价只是时间。反过来「读不出就跳过」会让一个查询故障静默变成房间永不重建。
+pub async fn reconcile_startup_room_build() -> StartupRoomBuild {
+    let current = match current_room_build_stamp().await {
+        Ok(current) => current,
+        Err(error) => return StartupRoomBuild::Run(format!("读不到当前空间状态（{error:#}）")),
+    };
+    match read_room_build_stamp().await {
+        Ok(last) => room_build_verdict(last, current),
+        Err(error) => StartupRoomBuild::Run(format!("读不到上次重建凭据（{error:#}）")),
+    }
+}
+
+/// 对账本身：两份凭据一比。抽出来是为了能在没有库的地方钉住这几条分支。
+fn room_build_verdict(last: Option<RoomBuildStamp>, current: RoomBuildStamp) -> StartupRoomBuild {
+    match last {
+        None => StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string()),
+        Some(last) if last == current => StartupRoomBuild::Skip(format!(
+            "与上次成功全量重建一致（空间 epoch {}、树 {} 条）",
+            current.spatial_epoch, current.tree_entries
+        )),
+        Some(last) => StartupRoomBuild::Run(format!(
+            "空间状态已变（epoch {} → {}，树 {} → {} 条）",
+            last.spatial_epoch, current.spatial_epoch, last.tree_entries, current.tree_entries
+        )),
+    }
 }
 
 /// 每块面板当前收着多少个成员，一条查询查完。
@@ -1160,18 +1276,18 @@ impl PanelIndex {
             .count()
     }
 
-    /// 在册却没能进索引的那些面板。
+    /// 在册却没能进索引的那些面板：`query_insts` 没返回行，或世界包围盒不可用。
     ///
-    /// 元素分支不能只在剩余面板上做破坏性替换；[`Self::ensure_complete`] 会把非空结果变成
-    /// 可重试错误。这里保留明细供 drain 的任务详情和日志展示。
+    /// 元素分支拿它当**替换范围的排除集**——指向这些面板的存量边本次不算、也不删
+    /// （见 [`render_element_relate_write`]）。同一份明细还供缺陷登记与任务详情展示。
     pub fn missing_panels(&self) -> &[RefnoEnum] {
         &self.missing
     }
 
-    /// 元素分支是「先删该构件的全部入边，再写回」；少一块在册面板就不能安全替换。
+    /// 在册面板几何是否已经齐了。
     ///
-    /// 因此完整性不是覆盖率告警，而是破坏性写入的前置条件。调用点上抛后任务会留待
-    /// 重试，存量边保持不动。
+    /// 这不再是破坏性写入的前置条件——元素分支改为按面板让开替换范围，一块缺几何的
+    /// 面板只影响它自己的边。这里只用来判断缺陷登记该不该销账。
     pub fn ensure_complete(&self) -> anyhow::Result<()> {
         if self.missing.is_empty() {
             return Ok(());
@@ -1342,6 +1458,23 @@ impl ElementRoomHistory {
             .map(|(panel, _)| *panel)
             .collect()
     }
+
+    /// 该构件现存边中、指向 `panels` 里那些面板的房间号。
+    ///
+    /// 元素分支的 DELETE 会绕开判不了的面板，于是这部分边原样留在库里。归属变化日志
+    /// 要拿它补进新集合，否则会播报一次并未发生的「退出房间」。
+    pub fn room_nums_on(&self, element: RefnoEnum, panels: &[RefnoEnum]) -> BTreeSet<String> {
+        if panels.is_empty() {
+            return BTreeSet::new();
+        }
+        self.edges
+            .get(&element)
+            .into_iter()
+            .flatten()
+            .filter(|(panel, _)| panels.contains(panel))
+            .filter_map(|(_, room_num)| room_num.clone())
+            .collect()
+    }
 }
 
 /// 一批构件各自与在册面板相交的候选面板集合，候选面板取自 [`PanelIndex`]、构件包围盒
@@ -1359,9 +1492,13 @@ pub async fn element_candidate_panels(
     if elements.is_empty() {
         return Ok(out);
     }
-    // 吸收判定也会据此跳过元素任务；若索引不完整，返回部分候选会把本该失败重试的任务
-    // 错误吸收掉，后面的 recalc_element_membership 就再也没有机会挡住破坏性替换。
-    panels.ensure_complete()?;
+    // 吸收判定会据此跳过元素任务，而索引缺面板时候选集合是不完整的：拿它判「同轮已
+    // 覆盖」会把元素分支本该写的边永久跳过，且写入侧的保护也救不回来——那条边压根
+    // 没被算过。所以一块都不能缺，缺了就整批留空。`absorption_verdict` 把缺项读作
+    // 「候选未知」、一律不吸收，元素任务照跑，写入侧再按面板逐块让开。
+    if !panels.missing_panels().is_empty() {
+        return Ok(out);
+    }
     let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(elements)
         .await
         .map_err(|error| {
@@ -1426,9 +1563,11 @@ pub async fn recalc_element_membership(
         return Ok(());
     }
 
-    // 这道门必须在读取旧边之后的任何替换写入之前；缺一块在册面板时，空/部分结果都不
-    // 可信。错误上抛会保留 pending，存量边原样留着。
-    panels.ensure_complete()?;
+    // 判不了的在册面板不再阻断整轮，改为把替换范围让开：它们不在索引里、本次必然
+    // 算不出边，DELETE 也就不该碰指向它们的存量边（见 [`render_element_relate_write`]）。
+    // 这样一块缺几何的面板只影响它自己的那几条边，而不是让全库房间重算停摆。
+    let protected_panels = panels.missing_panels();
+    let preserved_rooms = history.room_nums_on(element, protected_panels);
 
     // 归属变化日志用：这个构件此刻挂在哪些房间，收敛后与新结果对照打印「从哪到哪」。
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
@@ -1444,7 +1583,14 @@ pub async fn recalc_element_membership(
     // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
     if element_insts.is_empty() {
         println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate_logged(element, &[], &old_rooms).await;
+        return write_element_room_relate_logged(
+            element,
+            &[],
+            &old_rooms,
+            protected_panels,
+            &preserved_rooms,
+        )
+        .await;
     }
     if let Some(invalid) = element_insts
         .iter()
@@ -1538,7 +1684,14 @@ pub async fn recalc_element_membership(
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();
-    write_element_room_relate_logged(element, &edges, &old_rooms).await
+    write_element_room_relate_logged(
+        element,
+        &edges,
+        &old_rooms,
+        protected_panels,
+        &preserved_rooms,
+    )
+    .await
 }
 
 /// 构件在世界坐标系下的实际几何点，按实例保留，避免跨实例混用。
@@ -1581,15 +1734,35 @@ struct ElementRoomEdge {
     member: RoomMember,
 }
 
-/// 元素分支的写入：删掉指向该构件的**所有** `room_relate` 入边，再写回本次算出的边
+/// 元素分支的写入：删掉指向该构件的 `room_relate` 入边，再写回本次算出的边
 /// （ADR-010 §8）。
+///
+/// `protected_panels` 是本轮**判不了**的在册面板。指向它们的边不参与这次替换：
+/// 它们不在 [`PanelIndex`] 里，本次必然算不出来，而 DELETE 若照样把它们清掉，就是
+/// 拿「没算」当「算出来是空的」——那正是先清后写唯一会造成数据损失的转变。留着的边
+/// 会陈旧到该面板重新拿到几何为止，而陈旧可恢复、抹平不可。
 ///
 /// 边 id 与整间分支逐字一致（`{panel}_{element}`）。这不是巧合而是必要条件：两条
 /// 分支迟早会在同一条边上相遇，id 不同就会各写一行，`fn::room_relate_of` 取到哪条
 /// 全看存储顺序——正是排序键要消灭的那种不确定性。
-fn render_element_relate_write(element: RefnoEnum, edges: &[ElementRoomEdge]) -> String {
+fn render_element_relate_write(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    protected_panels: &[RefnoEnum],
+) -> String {
     let element_key = element.to_pe_key();
-    let mut statements = vec![format!("DELETE room_relate WHERE out = {element_key}")];
+    let mut delete = format!("DELETE room_relate WHERE out = {element_key}");
+    if !protected_panels.is_empty() {
+        // 排序是为了让同一份缺陷面板集合每次渲染出逐字相同的语句——journal 重放与
+        // 对拍都押在这上面。
+        let keys = protected_panels
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .sorted()
+            .join(", ");
+        delete.push_str(&format!(" AND in NOT IN [{keys}]"));
+    }
+    let mut statements = vec![delete];
 
     let mut edges: Vec<&ElementRoomEdge> = edges.iter().collect();
     edges.sort_by_key(|edge| edge.panel.to_string());
@@ -1618,21 +1791,29 @@ fn render_element_relate_write(element: RefnoEnum, edges: &[ElementRoomEdge]) ->
 async fn write_element_room_relate(
     element: RefnoEnum,
     edges: &[ElementRoomEdge],
+    protected_panels: &[RefnoEnum],
 ) -> anyhow::Result<()> {
-    let sql = render_element_relate_write(element, edges);
+    let sql = render_element_relate_write(element, edges, protected_panels);
     crate::surreal_retry::execute_model_write(&sql, &format!("写入 {element} 的房间归属")).await
 }
 
 /// 元素分支写入 + 归属变化日志：先算本次收敛出的房间集合，与旧集合对照打印
 /// 「从哪到哪」，再落库。日志只在真的变了时说话（见 [`log_room_membership_change`]）。
+///
+/// `preserved_rooms` 是被 `protected_panels` 保住的那些边所属的房间。它们没被删、
+/// 也没被重写，所以必须并进新集合——否则日志会把「这次没碰」播报成「已经退出」，
+/// 而库里那条边其实还在。
 async fn write_element_room_relate_logged(
     element: RefnoEnum,
     edges: &[ElementRoomEdge],
     old_rooms: &BTreeSet<String>,
+    protected_panels: &[RefnoEnum],
+    preserved_rooms: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    let new_rooms: BTreeSet<String> = edges.iter().map(|edge| edge.room_num.clone()).collect();
+    let mut new_rooms: BTreeSet<String> = edges.iter().map(|edge| edge.room_num.clone()).collect();
+    new_rooms.extend(preserved_rooms.iter().cloned());
     log_room_membership_change("构件", element, old_rooms, &new_rooms);
-    write_element_room_relate(element, edges).await
+    write_element_room_relate(element, edges, protected_panels).await
 }
 
 /// 增量房间归属变化的控制台日志：只在归属真的变了时说一句，把「从哪到哪」讲清楚
@@ -1902,6 +2083,7 @@ mod tests {
                 room_num: "K100".into(),
                 member: member(20, 8, 12.5),
             }],
+            &[],
         );
         replay_safe::validate_statement(&element_sql)
             .unwrap_or_else(|error| panic!("元素分支必须可进 journal：{error}\n{element_sql}"));
@@ -1979,6 +2161,7 @@ mod tests {
                 room_num: "K100".into(),
                 member,
             }],
+            &[],
         );
 
         let edge_id = "room_relate:4000000001_10_4000000001_20";
@@ -1991,7 +2174,7 @@ mod tests {
     #[test]
     fn the_element_branch_clears_the_edges_pointing_at_it() {
         let element = RefnoEnum::from("4000000001_20");
-        let sql = render_element_relate_write(element, &[]);
+        let sql = render_element_relate_write(element, &[], &[]);
         assert!(
             sql.contains("DELETE room_relate WHERE out = pe:4000000001_20"),
             "{sql}"
@@ -2015,8 +2198,8 @@ mod tests {
             member: member(24, 4, 450.0),
         };
         assert_eq!(
-            render_element_relate_write(element, &[edge(10), edge(11)]),
-            render_element_relate_write(element, &[edge(11), edge(10)]),
+            render_element_relate_write(element, &[edge(10), edge(11)], &[]),
+            render_element_relate_write(element, &[edge(11), edge(10)], &[]),
         );
     }
 
@@ -2113,17 +2296,30 @@ mod tests {
         assert_eq!(selected.center_dist, 2.0);
     }
 
+    /// 判不了的面板必须被排除在替换范围之外，而不是阻断整轮。
+    ///
+    /// 元素分支是「先删该构件的全部入边，再写回」。缺几何的面板不在索引里，本次必然
+    /// 算不出指向它的边——DELETE 若照样清掉，就是拿「没算」当「算出来是空的」，静默
+    /// 丢归属。此前的处置是让整轮 fail-closed，代价是一块坏面板冻结全库房间重算；现在
+    /// 改为在 DELETE 上让开这些面板，坏面板只影响它自己的那几条边。
     #[test]
-    fn an_incomplete_panel_index_is_not_safe_for_element_replacement() {
-        let index = PanelIndex {
-            missing: vec![panel()],
-            ..Default::default()
-        };
-        let error = index
-            .ensure_complete()
-            .expect_err("缺一块在册面板也必须 fail-closed")
-            .to_string();
-        assert!(error.contains("4000000001/10") || error.contains("4000000001_10"));
+    fn an_undecidable_panel_is_excluded_from_the_delete_not_blocking_the_round() {
+        let element = RefnoEnum::from("4000000002_20");
+        let sql = render_element_relate_write(element, &[], &[panel()]);
+        assert!(
+            sql.contains("AND in NOT IN ["),
+            "判不了的面板必须从替换范围里排除: {sql}"
+        );
+        assert!(
+            sql.contains(&panel().to_pe_key()),
+            "排除集里必须点名那块面板: {sql}"
+        );
+        // 没有缺陷面板时语句要与历史逐字一致，不能凭空多出一个恒真条件。
+        let clean = render_element_relate_write(element, &[], &[]);
+        assert!(
+            !clean.contains("NOT IN"),
+            "面板齐备时不该出现排除子句: {clean}"
+        );
     }
 
     /// 全量重建在**树装不下库**时必须拒跑，而不是把整库房间归属清成空。
@@ -2140,6 +2336,87 @@ mod tests {
         assert!(validate_room_tree_coverage(100, 100).is_ok());
         // 计数查询失败不会再折成 0 后放行；0 个库指针同样没有正面证据可做破坏性重写。
         assert!(validate_room_tree_coverage(100, 0).is_err());
+    }
+
+    fn stamp(spatial_epoch: u64, tree_entries: u64) -> RoomBuildStamp {
+        RoomBuildStamp {
+            spatial_epoch,
+            tree_entries,
+        }
+    }
+
+    /// 对账的正例：空间状态与上次成功重建时一模一样，这一轮就该省掉。
+    ///
+    /// 省掉的是十几秒的全库枚举 + 逐面板先清后写，而这一轮多半一条边都不会变——
+    /// 真有变化的那部分归增量房间队列收，全量重建只是双保险。
+    #[test]
+    fn an_unchanged_spatial_state_skips_the_startup_rebuild() {
+        assert_eq!(
+            room_build_verdict(Some(stamp(292, 22056)), stamp(292, 22056)),
+            StartupRoomBuild::Skip(
+                "与上次成功全量重建一致（空间 epoch 292、树 22056 条）".to_string()
+            )
+        );
+    }
+
+    /// 两个字段各自都要能触发重建：epoch 认得出走意图队列的变更，条数认得出
+    /// 直写与全量生成那两条不递增 epoch 的路径。只看其中一个就会漏掉另一半。
+    #[test]
+    fn either_field_moving_brings_the_rebuild_back() {
+        assert!(matches!(
+            room_build_verdict(Some(stamp(292, 22056)), stamp(293, 22056)),
+            StartupRoomBuild::Run(_)
+        ));
+        assert!(matches!(
+            room_build_verdict(Some(stamp(292, 22056)), stamp(292, 105536)),
+            StartupRoomBuild::Run(_)
+        ));
+    }
+
+    /// 没有凭据 = 从没成功建过，必须建。
+    ///
+    /// 方向不能反：这条分支同时兜着「库刚建」「上一次重建被覆盖率闸门拦下」
+    /// 「盖章那步失败」三种情况，判成跳过就等于让房间归属永远停在空白。
+    #[test]
+    fn a_missing_stamp_means_it_has_never_been_built() {
+        assert_eq!(
+            room_build_verdict(None, stamp(0, 0)),
+            StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string())
+        );
+    }
+
+    /// 被覆盖率闸门拦下的那一轮**不许**盖章。
+    ///
+    /// 盖了的话，2026-08-10 现场那种「树 22056 条、库 105536 条」的残缺状态会被
+    /// 记成「已建好」，于是闸门修好之后启动也不再重建——一次失败被永久固化成成功。
+    #[test]
+    fn a_gated_rebuild_leaves_no_stamp_behind() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("pub async fn build_room_relations(")
+            .expect("build_room_relations 必须存在")
+            .1
+            .split_once("/// 空间树至少要装下库里可用包围盒指针的这个比例")
+            .expect("全量重建之后是覆盖率常量")
+            .0;
+
+        let gate_at = body
+            .find("ensure_room_tree_coverage().await")
+            .expect("覆盖率闸门必须在全量重建里");
+        let stamp_at = body
+            .find("stamp_room_build(stamp).await")
+            .expect("成功收尾必须盖章");
+        let failures_at = body
+            .find("if !failures.is_empty()")
+            .expect("逐面板失败必须汇总上抛");
+        assert!(
+            gate_at < stamp_at,
+            "盖章必须排在覆盖率闸门之后，否则被拦下的那一轮也会留下凭据: {body}"
+        );
+        assert!(
+            failures_at < stamp_at,
+            "盖章必须排在逐面板失败汇总之后，否则半成功的一轮也会被记成建好了: {body}"
+        );
     }
 
     /// 增量整间分支在空树上同样必须拒跑。

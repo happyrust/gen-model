@@ -27,6 +27,16 @@ pub struct DataBatch {
     /// `BatchScheduler::record_frozen_end` 回写到这里。
     pub end_sesno: i32,
     pub state: BatchState,
+    /// 挂起：入了队、占着位、但**不派发**，等这个 dbnum 真的来一次增量再放行。
+    ///
+    /// 只有重扫（启动重建队列、范围刷新、共享盘补挂）排出来的行会挂起，而且只在
+    /// `startup_autorun` 关着时。它兑现的是「启动不自动跑积压，增量触发了再跑」：
+    /// 重扫看到的是**停机期间攒下的**会话，没有任何人在此刻要求处理它们；而一次
+    /// 真实的文件事件说明有人正在这个库上干活，那才是执行的信号。
+    ///
+    /// 放行不需要单独一步：同 dbnum 的下一次真实触发会并进这一行（见
+    /// [`enqueue`]），顺带把标记清掉，于是积压与新会话**合成一条**一次跑完。
+    pub held: bool,
 }
 
 /// 一次入队的落点。调用方拿它写日志或发事件，不必自己再判一遍。
@@ -63,17 +73,27 @@ fn covers(start_sesno: i32, end_sesno: i32) -> bool {
 ///
 /// 因此同一个 dbnum 在队列里**最多占两行**（一行运行中、一行排队中），
 /// 界面上要把这件事说清楚，不能让人以为是重复项。
+///
+/// `hold` = 这次发现只是「扫出来的」而不是「有人动了这个库」，排出来的新行挂起
+/// （见 [`DataBatch::held`]）。反过来，`hold == false` 的触发落在一条挂起行上时
+/// **一定要把它放行**——那正是「增量触发了再执行」，而合并已经让新会话与积压
+/// 变成同一条区间。放行写在 `Merged` / `AlreadyCovered` 两条分支之前：迟到的
+/// 事件可能一个新会话都没带来（`AlreadyCovered`），但它同样证明有人在动这个库。
 pub fn enqueue(
     queue: &mut Vec<DataBatch>,
     dbnum: u32,
     db_type: &str,
     applied_sesno: i32,
     file_latest_sesno: i32,
+    hold: bool,
 ) -> Enqueued {
     if let Some(queued) = queue
         .iter_mut()
         .find(|b| b.dbnum == dbnum && b.state == BatchState::Queued)
     {
+        if !hold {
+            queued.held = false;
+        }
         if file_latest_sesno > queued.end_sesno {
             queued.end_sesno = file_latest_sesno;
             return Enqueued::Merged;
@@ -99,6 +119,7 @@ pub fn enqueue(
         start_sesno,
         end_sesno: file_latest_sesno,
         state: BatchState::Queued,
+        held: hold,
     });
     outcome
 }
@@ -131,12 +152,15 @@ pub enum NextDispatch {
 
 /// 并发口径的 FIFO 出队并冻结（ADR-011 2026-08-09 修订）。
 ///
-/// 三条规则：
+/// 四条规则：
 /// 1. **同 dbnum 恒串行**：dbnum 已有运行中行的排队行（BehindRunning 排出来的）
 ///    直接跳过——它不与自己并发，轮不到它时后面的行可以先走；
-/// 2. **独占批次不被插队**：FIFO 首个可跑行若 `is_exclusive`，只有在飞为空时才冻结它；
+/// 2. **挂起行不派发**：跳过，而且**不算队首**——挂起的语义是「这个库没人动，先
+///    别管它」，让它挡住后面真有人在动的库就本末倒置了（对比规则 3 的独占，那才
+///    是「必须保住 FIFO 位置」）；
+/// 3. **独占批次不被插队**：FIFO 首个可跑行若 `is_exclusive`，只有在飞为空时才冻结它；
 ///    否则返回 [`NextDispatch::HeadNeedsExclusive`]，不派发它后面的任何行；
-/// 3. `paused` 只挡出队，语义与 [`freeze_next`] 相同。
+/// 4. `paused` 只挡出队，语义与 [`freeze_next`] 相同。
 ///
 /// 单 worker（在飞恒空、无独占判定）下与 [`freeze_next`] 完全等价。
 pub fn freeze_next_concurrent(
@@ -155,6 +179,9 @@ pub fn freeze_next_concurrent(
         .collect();
     for index in 0..queue.len() {
         if queue[index].state != BatchState::Queued {
+            continue;
+        }
+        if queue[index].held {
             continue;
         }
         if running_dbnums.contains(&queue[index].dbnum) {
@@ -182,13 +209,62 @@ mod tests {
             start_sesno: start,
             end_sesno: end,
             state: BatchState::Queued,
+            held: false,
         }
+    }
+
+    fn held(dbnum: u32, start: i32, end: i32) -> DataBatch {
+        DataBatch {
+            held: true,
+            ..queued(dbnum, start, end)
+        }
+    }
+
+    /// 「有人真的动了这个库」那种触发：watch 事件与人工执行都走这条口径，
+    /// 下面绝大多数性质与挂起无关，用它免得每处都拖一个 `false`。
+    /// 重扫那条（挂起）由本模块末尾几个专门的测试覆盖。
+    fn live_trigger(
+        queue: &mut Vec<DataBatch>,
+        dbnum: u32,
+        db_type: &str,
+        applied_sesno: i32,
+        file_latest_sesno: i32,
+    ) -> Enqueued {
+        enqueue(
+            queue,
+            dbnum,
+            db_type,
+            applied_sesno,
+            file_latest_sesno,
+            false,
+        )
+    }
+
+    /// 重扫发现：入队但挂起。
+    fn sweep(
+        queue: &mut Vec<DataBatch>,
+        dbnum: u32,
+        db_type: &str,
+        applied_sesno: i32,
+        file_latest_sesno: i32,
+    ) -> Enqueued {
+        enqueue(
+            queue,
+            dbnum,
+            db_type,
+            applied_sesno,
+            file_latest_sesno,
+            true,
+        )
     }
 
     #[test]
     fn a_new_dbnum_starts_one_row_from_the_watermark() {
         let mut queue = Vec::new();
-        assert_eq!(enqueue(&mut queue, 7997, "DESI", 1023, 1034), Enqueued::New);
+        assert_eq!(
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1034),
+            Enqueued::New
+        );
         assert_eq!(queue, vec![queued(7997, 1024, 1034)]);
     }
 
@@ -196,7 +272,7 @@ mod tests {
     fn repeated_saves_merge_into_the_queued_row() {
         let mut queue = vec![queued(7997, 1024, 1034)];
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1023, 1041),
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1041),
             Enqueued::Merged
         );
         assert_eq!(queue.len(), 1, "合并不该多排一行");
@@ -208,7 +284,7 @@ mod tests {
     fn merging_never_lowers_the_target() {
         let mut queue = vec![queued(7997, 1024, 1041)];
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1023, 1030),
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1030),
             Enqueued::AlreadyCovered
         );
         assert_eq!(queue[0].end_sesno, 1041, "水位只前进不后退，目标也一样");
@@ -219,7 +295,7 @@ mod tests {
         let mut queue = vec![queued(7997, 1024, 1038)];
         freeze_next(&mut queue, false).expect("有一条排队项");
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1023, 1041),
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1041),
             Enqueued::BehindRunning
         );
         assert_eq!(queue.len(), 2);
@@ -241,7 +317,7 @@ mod tests {
         let mut queue = vec![queued(7997, 1024, 1038)];
         freeze_next(&mut queue, false).expect("有一条排队项");
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1023, 1030),
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1030),
             Enqueued::AlreadyCovered
         );
         assert_eq!(queue.len(), 1, "不该多排一条读不通的幽灵行");
@@ -251,7 +327,7 @@ mod tests {
     fn a_watermark_already_covering_the_file_never_queues_an_empty_row() {
         let mut queue = Vec::new();
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1034, 1034),
+            live_trigger(&mut queue, 7997, "DESI", 1034, 1034),
             Enqueued::AlreadyCovered
         );
         assert!(queue.is_empty(), "start=1035 > end=1034，空区间不入队");
@@ -261,9 +337,9 @@ mod tests {
     fn one_dbnum_occupies_at_most_two_rows() {
         let mut queue = vec![queued(7997, 1024, 1038)];
         freeze_next(&mut queue, false).unwrap();
-        enqueue(&mut queue, 7997, "DESI", 1023, 1041);
+        live_trigger(&mut queue, 7997, "DESI", 1023, 1041);
         for target in [1044, 1050, 1051] {
-            enqueue(&mut queue, 7997, "DESI", 1023, target);
+            live_trigger(&mut queue, 7997, "DESI", 1023, target);
         }
         assert_eq!(queue.len(), 2, "再密集的保存也只塌成运行中 + 排队中两行");
         assert_eq!(queue[1].end_sesno, 1051);
@@ -307,7 +383,7 @@ mod tests {
     fn a_paused_queue_still_accepts_new_work() {
         let mut queue = vec![queued(7997, 1024, 1038)];
         assert_eq!(
-            enqueue(&mut queue, 7997, "DESI", 1023, 1041),
+            live_trigger(&mut queue, 7997, "DESI", 1023, 1041),
             Enqueued::Merged,
             "暂停挡的是出队，不是入队；水位差摆在那儿，活迟早要干"
         );
@@ -316,8 +392,8 @@ mod tests {
     #[test]
     fn different_dbnums_never_merge() {
         let mut queue = Vec::new();
-        enqueue(&mut queue, 7997, "DESI", 0, 10);
-        assert_eq!(enqueue(&mut queue, 8000, "DESI", 0, 20), Enqueued::New);
+        live_trigger(&mut queue, 7997, "DESI", 0, 10);
+        assert_eq!(live_trigger(&mut queue, 8000, "DESI", 0, 20), Enqueued::New);
         assert_eq!(queue.len(), 2);
     }
 
@@ -331,7 +407,7 @@ mod tests {
             NextDispatch::Freeze(0)
         );
         // 7997 在跑期间新保存排出 BehindRunning 行。
-        enqueue(&mut queue, 7997, "DESI", 1023, 1041);
+        live_trigger(&mut queue, 7997, "DESI", 1023, 1041);
         assert_eq!(
             freeze_next_concurrent(&mut queue, false, false, |_| false),
             NextDispatch::Freeze(1),
@@ -356,6 +432,7 @@ mod tests {
                 start_sesno: 5,
                 end_sesno: 9,
                 state: BatchState::Queued,
+                held: false,
             },
             queued(7997, 1024, 1038),
         ];
@@ -384,5 +461,107 @@ mod tests {
             NextDispatch::Freeze(0)
         );
         assert_eq!(serial, concurrent);
+    }
+
+    /// 重扫排出来的行入队、占位、可见，但不派发。
+    ///
+    /// 「入队」这半边不能省：队列是重启后从水位重建出来的那份账，人要能看见
+    /// 停机期间攒了多少活；不派发的只是执行。
+    #[test]
+    fn a_swept_row_is_queued_but_never_dispatched() {
+        let mut queue = Vec::new();
+        assert_eq!(sweep(&mut queue, 7997, "DESI", 102, 132), Enqueued::New);
+        assert_eq!(queue, vec![held(7997, 103, 132)]);
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Idle,
+            "挂起行不出队"
+        );
+        assert_eq!(queue[0].state, BatchState::Queued, "也不该被改成运行中");
+    }
+
+    /// 这一条就是「增量触发了再去执行」：真实触发把积压放行，并与新会话合成一条。
+    ///
+    /// 端点必须是 `103..=133` 而不是 `133..=133`——积压不能被跳过，否则水位与
+    /// 文件之间那 30 个会话就永远没人应用。
+    #[test]
+    fn a_real_trigger_releases_the_backlog_and_merges_it_into_one_run() {
+        let mut queue = Vec::new();
+        sweep(&mut queue, 7997, "DESI", 102, 132);
+        assert_eq!(
+            live_trigger(&mut queue, 7997, "DESI", 102, 133),
+            Enqueued::Merged
+        );
+        assert_eq!(queue, vec![queued(7997, 103, 133)]);
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Freeze(0)
+        );
+    }
+
+    /// 一个新会话都没带来的真实触发（迟到的事件、只动 mtime 的保存）同样放行。
+    ///
+    /// 判据是「有没有人在动这个库」，不是「这次带没带新会话」。写成只有 `Merged`
+    /// 才放行的话，一次 `AlreadyCovered` 事件会让积压继续挂着，而现场看到的是
+    /// 「我明明保存了，它还是不动」。
+    #[test]
+    fn a_trigger_without_new_sessions_still_releases_the_hold() {
+        let mut queue = Vec::new();
+        sweep(&mut queue, 7997, "DESI", 102, 132);
+        assert_eq!(
+            live_trigger(&mut queue, 7997, "DESI", 102, 132),
+            Enqueued::AlreadyCovered
+        );
+        assert!(!queue[0].held, "迟到的事件也证明有人在动这个库");
+    }
+
+    /// 放行是**按 dbnum**的：一个库被动了，不代表其余的库该跟着开跑。
+    #[test]
+    fn releasing_one_dbnum_leaves_the_others_held() {
+        let mut queue = Vec::new();
+        sweep(&mut queue, 7997, "DESI", 102, 132);
+        sweep(&mut queue, 8000, "DESI", 34, 35);
+        live_trigger(&mut queue, 7997, "DESI", 102, 133);
+        assert_eq!(queue[1], held(8000, 35, 35), "8000 没人动，继续挂着");
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Freeze(0),
+            "被放行的 7997 出队"
+        );
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Idle,
+            "只剩挂起的 8000，无事可派"
+        );
+    }
+
+    /// 挂起行不占队首：它不许挡住后面真有人在动的库。
+    ///
+    /// 与独占行（规则 3）刻意相反——独占要保住 FIFO 位置，挂起则是「这个库压根
+    /// 不参与本轮排队」。写成 `HeadNeedsExclusive` 那种「停在这里」的语义，一个
+    /// 启动挂起的 7997 就能把之后所有真实增量全堵死。
+    #[test]
+    fn a_held_head_never_blocks_the_live_rows_behind_it() {
+        let mut queue = Vec::new();
+        sweep(&mut queue, 7997, "DESI", 102, 132);
+        live_trigger(&mut queue, 8000, "DESI", 34, 40);
+        assert_eq!(
+            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            NextDispatch::Freeze(1),
+            "队首挂着的 7997 要被跳过，8000 直接走"
+        );
+    }
+
+    /// 反方向不成立：重扫不会把一条已经放行的行重新挂起。
+    ///
+    /// 否则一次范围刷新重扫（每次 SYS meta 落库都会来一发）就能把人工刚点下去的
+    /// 执行按回去，而回执已经告诉人「已入队」。
+    #[test]
+    fn a_later_sweep_cannot_re_hold_a_released_row() {
+        let mut queue = Vec::new();
+        live_trigger(&mut queue, 7997, "DESI", 102, 132);
+        sweep(&mut queue, 7997, "DESI", 102, 140);
+        assert!(!queue[0].held, "放行是单向的");
+        assert_eq!(queue[0].end_sesno, 140, "但目标照样被推高");
     }
 }

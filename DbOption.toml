@@ -124,6 +124,36 @@ http_api_addr = "0.0.0.0:8022"
 # CORS 允许来源列表，["*"] 为全放行（局域网前端联调用）。
 http_api_cors = ["*"]
 
+#【新增 2026-08-10】startup_autorun
+# 启动即自动干活；默认 false = 起来先什么都不执行。
+#   false：启动重扫照常发现并入队（队列是准的、看得见停机期间攒了多少活），
+#          但排出来的行「挂起」（/queue 上状态是 held）不派发，持久积压也不消化，
+#          启动全量房间重建不跑。某个 dbnum 真的来了增量（在 E3D 里存一次盘，
+#          或 POST /api/v1/update/execute）才放行它那一条，并把积压与新会话
+#          合并成一条一起跑。别的库继续挂着。
+#   true ：历史行为——起来就消费队列，并在库侧凭据对不上时做一次全量房间重建。
+# 环境变量 AIOS_STARTUP_AUTORUN 压过本键（认 1/true/yes/on 与 0/false/no/off），
+# 用于「这一次想让它自己跑」而不改文件。
+# 注意 POST /api/v1/queue/resume 解的是持久化暂停，不是这里的挂起，两者正交。
+# 另有 AIOS_SKIP_STARTUP_ROOM_BUILD：无论本键取值都不做启动全量房间重建，
+# 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
+startup_autorun = false
+
+#【新增 2026-08-10】room_incremental
+# 房间归属的「增量」重算；默认 false = 不排、不收。
+#   false：位姿/删除刷新包围盒之后不再排 room_recalc 目标（直写事务与暂存窗口
+#          收口两个写入点都不排），空闲轮也不再收房间轮。已经排在
+#          model_update_pending 里的目标原样留着，开关一开照常收——关掉不等于
+#          把那些活丢了。
+#   true ：历史行为。
+# 管的只有增量这一条链：启动全量重建、人工重建、以及 drain_rooms 直调（房间对拍
+# 夹具走的就是它）都不看本键。
+# 环境变量 AIOS_ROOM_INCREMENTAL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+# 默认取假的理由：增量房间与增量模型生成共用同一条空间树和同一批包围盒变更，
+# 房间那半边一旦在缺几何的构件上空转，每页要付两次全量查询、把空闲轮变成它的
+# 节拍器，模型生成侧的问题反倒被日志淹掉。
+room_incremental = false
+
 
 #调试选项
 save_model_mesh_to_graph_db = true

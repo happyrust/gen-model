@@ -51,9 +51,22 @@ use log::{LevelFilter, error};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    run_app(None).await
+/// 增量批次把 `execute_frozen_batch_body` 连同两层 `task_local` scope 一起内联
+/// await（`batch_worker.rs` 的 `window.scope(...)`）。debug 版不做 async 状态机
+/// 布局优化，这条复合 future 加上各层 poll 帧超过 std 默认的 2MB 线程栈，表现为
+/// `thread 'tokio-rt-worker' has overflowed its stack`——服务能起、/health 全绿，
+/// 直到真有增量要应用才当场死。release 压得下，所以 `#[tokio::main]` 一直没出事。
+///
+/// 取值对齐 `fast_model/occ_generate.rs` 给 `gensec-occ-regression` 线程的 64MB：
+/// 栈是保留地址空间、按页提交，多留不花实际内存。
+const RUNTIME_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(RUNTIME_STACK_SIZE)
+        .build()?
+        .block_on(run_app(None))
 }
 
 #[test]

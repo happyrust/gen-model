@@ -125,6 +125,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
+        // 冷启动开关（默认 false）与它此刻的姿态。「服务活着、队列有货、就是不动」
+        // 有三种完全不同的成因：运维按了暂停（queue_paused）、冷启动还没被真实增量
+        // 上弦（auto_work_armed=false，队列里那些行在 /queue 上是 held）、或者 worker
+        // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
+        "startup_autorun": crate::options::startup_autorun(),
+        // 房间增量的总开关（默认 false）。关着时房间泳道永远是空的，而「没活」与
+        // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
+        "room_incremental": crate::options::room_incremental(),
+        "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,

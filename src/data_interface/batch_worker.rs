@@ -145,6 +145,12 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         Ok(false) => {}
         Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
     }
+    if !scheduler.is_auto_work_armed() {
+        println!(
+            "startup_autorun=false：重扫排出的批次一律挂起，持久积压也先不消化；\
+             某个 dbnum 真的来了增量（文件事件 / 人工执行）就放行它那一条并合并执行"
+        );
+    }
     let slots = crate::options::data_batch_workers();
     if slots > 1 {
         println!(
@@ -157,7 +163,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         beat();
         let ran = drain_queue_until_empty(&mgr).await;
         // spatial 收敛已在 drain 的出队门前执行；暂停只挡新批次与普通积压。
-        if !scheduler.is_paused() {
+        // 上弦门（`startup_autorun=false` 且本进程还没见过真实增量）挡的是同一
+        // 侧：持久积压不按 dbnum 分，没法像队列行那样逐条挂起，只能整体等信号。
+        if !scheduler.is_paused() && scheduler.is_auto_work_armed() {
             // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
             // 一样会把唯一的消费者带走。
             if let Err(reason) = isolate_panic(idle_round(&mgr, registry, ran > 0)).await {
@@ -2215,6 +2223,22 @@ async fn room_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) -> IdleOutcome {
+    // 房间增量的总开关（`crate::options::room_incremental`，默认关）。关着时这一轮
+    // 不建任务行、不消费任何目标——已经排在表里的原样留着，开关一开照常收。
+    //
+    // 只说一次：空闲轮每 30 秒来一趟，每趟复述同一个配置项就是把日志刷成噪音
+    // （`live == 0` 那条播报当年正是这么退役的）。
+    if !crate::options::room_incremental() {
+        static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+        ANNOUNCED.call_once(|| {
+            println!(
+                "房间增量重算已关闭（DbOption.toml 的 room_incremental / 环境变量 {}）：\
+                 本进程不再收房间轮，已排队的目标留在表里等开关打开",
+                crate::options::ROOM_INCREMENTAL_ENV
+            );
+        });
+        return IdleOutcome::Settled;
+    }
     // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
     // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
     // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
@@ -2239,12 +2263,10 @@ async fn room_round(
     };
     let live = counts.live();
     if live == 0 {
-        if counts.blocked > 0 {
-            println!(
-                "房间覆盖屏障生效：{} 个房间目标等待缺失面板模型补偿，保持 pending，不重复执行覆盖探针",
-                counts.blocked
-            );
-        }
+        // 没有活就安静收工。这里曾经有一条「覆盖屏障生效，N 个目标保持 pending」的
+        // 播报：屏障是永久态（缺几何的面板不会自己长出几何），于是它每 30 秒复述一次
+        // 同一个事实，把日志刷成噪音。缺陷面板现在由 `record_room_panel_defects` 在
+        // **清单变化时**说一次，而房间目标不再被它冻结。
         return IdleOutcome::Settled;
     }
 
@@ -3085,12 +3107,15 @@ mod tests {
         );
     }
 
-    /// 覆盖屏障已经把房间目标转成 blocked 时，空闲轮只记录现状；缺失面板的
-    /// durable 生成根由数据阶段消费，不能每 30 秒再从房间分支刷新一次探针。
+    /// 无 live 目标的早退分支必须保持安静，也不得在这里跑探针。
+    ///
+    /// 它每 `IDLE_WAKE`（30 秒）被碰一次，所以任何无条件 `println!` 都会把一个静态
+    /// 事实刷成噪音——覆盖屏障时代就是这么刷了 5 个多小时。缺陷面板改由
+    /// `record_room_panel_defects` 在清单**变化时**说一次；这里既不播报也不 drain。
     #[test]
-    fn a_blocked_room_round_logs_without_refreshing_the_probe() {
+    fn an_empty_room_round_stays_quiet_and_runs_no_probe() {
         let source = include_str!("batch_worker.rs");
-        let blocked_branch = source
+        let early_exit = source
             .split_once("if live == 0 {")
             .expect("room_round 必须保留无 live 目标的早退分支")
             .1
@@ -3099,12 +3124,12 @@ mod tests {
             .0;
 
         assert!(
-            blocked_branch.contains("保持 pending，不重复执行覆盖探针"),
-            "覆盖屏障分支必须留下可观测日志: {blocked_branch}"
+            !early_exit.contains("println!"),
+            "每 30 秒走一次的早退分支不得打印: {early_exit}"
         );
         assert!(
-            !blocked_branch.contains("drain_rooms"),
-            "覆盖屏障分支只记录日志，不得循环执行覆盖探针: {blocked_branch}"
+            !early_exit.contains("drain_rooms"),
+            "早退分支不得循环执行覆盖探针: {early_exit}"
         );
     }
 
@@ -3152,6 +3177,29 @@ mod tests {
         assert!(
             idle_body.contains("if room_round_is_due(data_outcome) {"),
             "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
+        );
+    }
+
+    /// 空闲轮必须同时受暂停与上弦两道门管。
+    ///
+    /// 它们挡的是同一侧但理由不同：`paused` 是运维说「别动数据」，上弦门是
+    /// `startup_autorun=false` 下「还没人动过这个项目」。只判 `paused` 的话，
+    /// 冷启动的服务照样会在启动后第一个空闲轮里开始啃持久积压（现场是 2580 个
+    /// 房间重算目标），而那恰恰是这个默认要避免的事。
+    #[test]
+    fn the_idle_round_needs_both_the_pause_and_the_arming_gate() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_batch_worker(")
+            .expect("run_batch_worker 必须存在")
+            .1
+            .split_once("/// 跑一个可能 panic 的阶段")
+            .expect("worker 主循环之后是 isolate_panic")
+            .0;
+
+        assert!(
+            body.contains("if !scheduler.is_paused() && scheduler.is_auto_work_armed() {"),
+            "空闲轮的门必须同时判暂停与上弦: {body}"
         );
     }
 
