@@ -388,6 +388,43 @@ fn validate_prepared_attempt(
     Ok(())
 }
 
+/// 过时的暂存恢复记录要不要并入新会话、按全区间重建计划（而不是原样重放）？
+///
+/// 文件已经走在恢复记录前面（`attempt_end_sesno < requested_end_sesno`）时，暂存
+/// 模式下必须重建。不并的代价是死循环——窗口停在 25、文件已到 26，25 里还活着的
+/// 元素被 26 删掉之后，祖先解析必然断在它身上，每次重试都在重演同一幕；现场
+/// dbnum=8000 就这么卡了三轮，直到人手工删掉记录才过去。
+///
+/// **重建安全不是因为「持久层一个字都没落」**——写回并非单事务：
+/// `staging::executor::StagedExecutor::commit_to` 先按 `TX_CHUNK` 分块重放
+/// journal（每块各自一个事务），之后才跑尾事务，所以崩在某一块之后、尾事务之前
+/// 会留下半提交行。安全的真正来源是写回计划 T4.1
+/// （`docs/plans/2026-08-05-staged-increment-kvmem-write-back-plan.md`）：journal
+/// 只活在内存，进程一崩它就没了，唯一恢复路径是整窗口重算，重算的 regen 删除集
+/// 覆盖先前的半提交行、幂等收敛。
+///
+/// 「整窗口」这件事是结构上成立的，不是巧合：请求区间左端取 `applied_sesno + 1`，
+/// 而水位推进与恢复记录的删除同在一条尾事务里（`render_finalize_tail_with_effects`）。
+/// 记录还在 ⇒ 水位一定没动过 ⇒ 重建出来的区间必然从老记录那个 `start_sesno` 起步，
+/// 半提交的那几个会话一个都跑不掉。
+///
+/// 原样重放在直写模式下是对的：那条路上 PE 块可能已经写了一半而水位故意没动，
+/// 而它没有 journal、也没有「整窗口重算」这条退路，只能照先前备好的计划走。
+///
+/// 判据取「**这一次**是不是跑在暂存窗口里」（`in_staged_window`），而不是进程级的
+/// increment_mode：基线（start_sesno == 1）即便进程是 staged 也走直写，问的是进程
+/// 就会答错。
+///
+/// 恢复记录**超前**于文件（回退/换文件）不归它管：返回 false 落回重放分支，由
+/// [`validate_prepared_attempt`] 拒绝并给出人话诊断。
+fn should_rebuild_stale_staged_attempt(
+    attempt_end_sesno: Option<i32>,
+    requested_end_sesno: i32,
+    in_staged_window: bool,
+) -> bool {
+    in_staged_window && attempt_end_sesno.is_some_and(|end| end < requested_end_sesno)
+}
+
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
 ///
 /// 历史背景：datacenter 语句曾渲出 `fn::find_ancestor_types(...)` 在收口事务里
@@ -738,28 +775,22 @@ impl IncrementPipeline {
         // no longer trustworthy, so reuse the durable fixed range + model plan
         // prepared before the first write.
         let prepared = crate::data_interface::model_update_pending::load_attempt(dbnum).await?;
-        // 文件已经走在这条恢复记录前面时，暂存模式下要**并掉新会话重建计划**，
-        // 而不是原样重放。
+        // 文件已经走在这条恢复记录前面时，暂存模式下要**并掉新会话重建计划**，而
+        // 不是原样重放；判据与它为什么安全见 `should_rebuild_stale_staged_attempt`。
         //
-        // 原样重放在直写模式下是对的：那条路上 PE 块可能已经写了一半而水位故意
-        // 没动，更新前的 OWNER 图不再可信，只能照先前备好的计划走。暂存模式没有
-        // 这个半写态——收口是单事务，`prepared` 就等于「持久层一个字都没落」，
-        // 更新前的图完好无损，重建是安全的。
-        //
-        // 不并的代价是死循环：窗口停在 25、文件已到 26，25 里还活着的元素被 26
-        // 删掉之后，祖先解析必然断在它身上，而每次重试都在重演同一幕——现场
-        // dbnum=8000 就这么卡了三轮，直到人手工删掉这条记录才过去。
-        // 判据取「**这一次**是不是跑在暂存窗口里」，而不是进程级的 increment_mode：
-        // 基线（start_sesno == 1）即便进程是 staged 也走直写，问的是进程就会答错。
-        let merge_newer_sessions = prepared.as_ref().is_some_and(|attempt| {
-            attempt.end_sesno < *requested_range.end()
-                && crate::data_interface::staging::active_staging_writes().is_some()
-        });
+        // 判据问的是「**这一次**是不是跑在暂存窗口里」，而不是进程级的
+        // increment_mode：基线（start_sesno == 1）即便进程是 staged 也走直写，
+        // 问的是进程就会答错。
+        let merge_newer_sessions = should_rebuild_stale_staged_attempt(
+            prepared.as_ref().map(|attempt| attempt.end_sesno),
+            *requested_range.end(),
+            crate::data_interface::staging::active_staging_writes().is_some(),
+        );
         if merge_newer_sessions {
             let attempt = prepared.as_ref().expect("guarded above");
             warnings.push(format!(
-                "dbnum={dbnum}: 恢复记录停在 {}..={}，文件已到 {}；暂存窗口未提交过任何持久写，\
-                 本次并入新会话重建计划",
+                "dbnum={dbnum}: 恢复记录停在 {}..={}，文件已到 {}；本次按整窗口重算并入新会话，\
+                 上一轮写回若留下半提交行由本次的删除集覆盖",
                 attempt.start_sesno,
                 attempt.end_sesno,
                 *requested_range.end()
@@ -1733,6 +1764,30 @@ mod cache_tests {
         assert!(error.to_string().contains("only covers through 41"));
         validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 42)
             .expect("complete fixed range is replayable");
+    }
+
+    /// 暂存窗口里碰上落后于文件的恢复记录：重建，不重放。
+    ///
+    /// 这是 dbnum=8000 那一幕的唯一出口——照旧重放的话，窗口停在 25 而 26 已经把 25
+    /// 里还活着的元素删掉，祖先解析每一轮都断在同一个元素上，永不自愈。
+    #[test]
+    fn a_stale_staged_attempt_is_rebuilt_into_the_newer_sessions() {
+        assert!(should_rebuild_stale_staged_attempt(Some(25), 26, true));
+    }
+
+    /// 其余三种情形一律不许丢弃这份持久化计划。
+    #[test]
+    fn nothing_else_discards_a_prepared_attempt() {
+        // 直写模式：PE 块可能已写了一半而水位故意没动，更新前的 OWNER 图不再可信，
+        // 而这条路上没有 journal、也没有整窗口重算那条退路。
+        assert!(!should_rebuild_stale_staged_attempt(Some(25), 26, false));
+        // 记录与文件持平：本来就是原样重放那条路。
+        assert!(!should_rebuild_stale_staged_attempt(Some(26), 26, true));
+        // 记录超前于文件（回退 / 换文件）：落回重放分支，让
+        // `validate_prepared_attempt` 出人话诊断，不在这里悄悄吞掉。
+        assert!(!should_rebuild_stale_staged_attempt(Some(27), 26, true));
+        // 压根没有恢复记录：这是一次全新的窗口。
+        assert!(!should_rebuild_stale_staged_attempt(None, 26, true));
     }
 }
 
