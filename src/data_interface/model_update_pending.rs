@@ -1629,6 +1629,43 @@ async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &
 /// used to — aborted the whole round on one flaky `DELETE`, so every other
 /// `dbnum` queued behind it was skipped and the target that had just generated
 /// successfully paid for a second full `gen_all_geos_data` on the next round.
+/// 跑一件活，**panic 与 Err 走同一条记账路径**。
+///
+/// panic 过去是漏网的那一类：`execute_item` 里炸开会一路展开出 drain、出空闲轮，
+/// 被 `batch_worker::isolate_panic` 在最外面接住。于是这一行的 `last_error` 没写、
+/// `attempts` 没涨、[`MAX_ATTEMPTS`] 那道死信门永远轮不到它，而下一个 `IDLE_WAKE`
+/// 又把同一件活原样重演一遍——现场 2026-08-08 的日志里，同一句
+/// `range end index 172 out of range for slice of length 168` 就这么每 30 秒刷一次、
+/// 刷了 46 次。
+///
+/// panic 只是这件活失败的一种形式，账要记在它自己那一行上：错误文本进
+/// `last_error`，次数进 `attempts`，连撞 [`MAX_ATTEMPTS`] 就和别的失败一样变成
+/// 可查的死信，而不是变成一个没人负责的循环。
+async fn execute_item_isolated(mgr: &AiosDBManager, job: &PendingModelWork) -> anyhow::Result<()> {
+    match crate::data_interface::batch_worker::isolate_panic(execute_item(mgr, job)).await {
+        Ok(result) => result,
+        Err(reason) => anyhow::bail!("panic: {reason}"),
+    }
+}
+
+/// 房间任务同理：panic 记进这一行的 `last_error`，不再展开出整轮 drain。
+async fn run_room_job_isolated(
+    db_option: &aios_core::options::DbOption,
+    rooms: &room_model::RoomPanelMap,
+    panels: &room_model::PanelIndex,
+    history: &room_model::ElementRoomHistory,
+    job: &PendingModelWork,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    match crate::data_interface::batch_worker::isolate_panic(run_room_job(
+        db_option, rooms, panels, history, job,
+    ))
+    .await
+    {
+        Ok(result) => result,
+        Err(reason) => anyhow::bail!("panic: {reason}"),
+    }
+}
+
 async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut DrainReport) {
     let root_lock = (job.action == ModelWorkAction::RegenRoot)
         .then(|| crate::data_interface::manual_update::generation_root_lock(&job.target_refno));
@@ -1636,7 +1673,7 @@ async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut Drain
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
-    let outcome = match execute_item(mgr, job).await {
+    let outcome = match execute_item_isolated(mgr, job).await {
         Ok(()) => delete_work(job).await,
         Err(error) => Err(error),
     };
@@ -2106,7 +2143,7 @@ async fn drain_rooms_selected(
     let mut claimed_members: HashSet<RefnoEnum> = HashSet::new();
     let mut claimed_panels: HashSet<RefnoEnum> = HashSet::new();
     for job in &panels {
-        match run_room_job(db_option, &rooms, &panel_index, &empty_history, job).await {
+        match run_room_job_isolated(db_option, &rooms, &panel_index, &empty_history, job).await {
             Ok(members) => {
                 claimed_members.extend(members);
                 if let Ok(refno) = RefU64::from_str(&job.target_refno) {
@@ -2209,7 +2246,7 @@ async fn drain_room_element_page(
         let outcome = if absorbed {
             delete_work(job).await
         } else {
-            match run_room_job(db_option, rooms, panel_index, history_ref, job).await {
+            match run_room_job_isolated(db_option, rooms, panel_index, history_ref, job).await {
                 Ok(_) => delete_work(job).await,
                 Err(error) => Err(error),
             }
@@ -2599,6 +2636,53 @@ mod tests {
             .check()
             .expect("read cleared statement");
         assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(false));
+    }
+
+    /// 一件活 panic 了，账要记在它自己那一行上，而不是展开出去变成空闲轮的事。
+    ///
+    /// 漏这一层的代价在现场量过：`range end index 172 out of range for slice of
+    /// length 168` 每 30 秒一次、连刷 46 次，因为 panic 一路展开到空闲轮的
+    /// `isolate_panic` 才被接住——那一行的 `last_error` 始终是空的，`attempts` 始终
+    /// 是 0，`MAX_ATTEMPTS` 那道死信门永远轮不到它。
+    #[test]
+    fn a_panicking_job_lands_in_its_own_error_ledger() {
+        let source = include_str!("model_update_pending.rs");
+        let run_one = source
+            .split_once("async fn run_one(")
+            .expect("run_one must exist")
+            .1
+            .split_once("fn render_drain_select")
+            .expect("run_one must end before render_drain_select")
+            .0;
+
+        assert!(
+            run_one.contains("execute_item_isolated(mgr, job)"),
+            "run_one 必须走隔离版执行，否则 panic 绕开 record_failure: {run_one}"
+        );
+        assert!(
+            !run_one.contains("execute_item(mgr, job)"),
+            "裸 execute_item 会让 panic 展开出整轮 drain: {run_one}"
+        );
+
+        // 两条房间路径（面板与元素）也都必须走隔离版。切片而不是全文搜索：
+        // 断言字符串自己也含这个名字，全文计数会把测试本身数进去。
+        let room_drains = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("drain_rooms_selected must exist")
+            .1
+            .split_once("async fn load_room_jobs(")
+            .expect("两个房间执行点都在 load_room_jobs 之前")
+            .0;
+        assert_eq!(
+            room_drains.matches("run_room_job").count(),
+            room_drains.matches("run_room_job_isolated").count(),
+            "房间执行点里不许有裸调用: {room_drains}"
+        );
+        assert_eq!(
+            room_drains.matches("run_room_job_isolated").count(),
+            2,
+            "面板与元素两条路径都要走隔离版: {room_drains}"
+        );
     }
 
     #[test]
