@@ -17,6 +17,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_TARGET_DIR: target
+  # Integration-test builds also compile every binary target. Keep the hosted
+  # runner below its paging/commit-memory limit (the repository default is 8x8).
+  CARGO_BUILD_JOBS: "2"
+  RUSTFLAGS: -Z threads=2 -C link-arg=/DEBUG:NONE
   RUST_TOOLCHAIN: nightly-2026-08-02
   LIBCLANG_PATH: C:\Program Files\LLVM\bin
   CXXFLAGS: /std:c++17

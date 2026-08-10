@@ -105,3 +105,28 @@ Detached-worktree smoke output:
 Issue #20 rollback complete.
 ISSUE20_FINAL_ROLLBACK_SMOKE=PASS
 ```
+
+## GitHub Actions execution
+
+Pull request: `https://github.com/happyrust/gen-model/pull/21`
+
+First run `31404807625` reached the real Rust compilation path and exposed Windows hosted-runner
+commit-memory exhaustion:
+
+```text
+failed to mmap ... rlib: The paging file is too small for this operation to complete. (os error 1455)
+```
+
+The workflow now overrides the repository's `8 jobs × 8 frontend threads` defaults with:
+
+```text
+CARGO_BUILD_JOBS=2
+RUSTFLAGS=-Z threads=2 -C link-arg=/DEBUG:NONE
+```
+
+The exact constrained command was then rerun locally from a fresh flag-specific build cache:
+
+```text
+Finished test profile in 6m 39s
+test result: ok. 6 passed; 0 failed; 0 ignored
+```
