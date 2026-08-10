@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - tests/pdms_record_boundary.rs
+      - .github/workflows/windows-binary.yml
   workflow_dispatch:
 
 permissions:
@@ -37,7 +44,7 @@ env:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -106,6 +113,16 @@ jobs:
           cargo build --release --locked --bin aios-database
           --no-default-features
           --features ws,gen_model,manifold,occ,project_hd,http_api
+
+      # Reuse the release-profile dependency graph above. A separate lightweight
+      # feature set is not viable because gen-model imports the parser through
+      # its production model-generation path.
+      - name: Test PDMS record boundary regression (#19)
+        run: >-
+          cargo test --release --locked --test pdms_record_boundary
+          --no-default-features
+          --features ws,gen_model,manifold,occ,project_hd,http_api
+          -- --nocapture
 
       - name: Save Cargo cache
         if: always() && steps.cargo-cache.outcome == 'success'
