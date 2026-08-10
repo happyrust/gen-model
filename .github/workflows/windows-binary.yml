@@ -166,9 +166,11 @@ jobs:
           zip -qr "aios-database-windows-x64-${GITHUB_REF_NAME}.zip" \
             aios-database-windows-x64
           asset="aios-database-windows-x64-${GITHUB_REF_NAME}.zip"
+          exe="aios-database-windows-x64-${GITHUB_REF_NAME}.exe"
+          cp aios-database-windows-x64/aios-database.exe "$exe"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$asset" "$exe" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$asset" \
+            gh release create "$GITHUB_REF_NAME" "$asset" "$exe" \
               --generate-notes --verify-tag
           fi
