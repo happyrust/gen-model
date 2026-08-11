@@ -360,13 +360,33 @@ impl StageTimings {
 #[derive(Debug, Default, Clone)]
 pub struct IncrementPipeline;
 
+fn same_attempt_file_path(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        let normalize = |path: &str| path.replace('/', "\\").to_ascii_lowercase();
+        normalize(left) == normalize(right)
+    }
+
+    #[cfg(not(windows))]
+    {
+        match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 fn validate_prepared_attempt(
     attempt: &crate::data_interface::model_update_pending::IncrementUpdateAttempt,
     db_type: &str,
     file_path: &str,
     current_file_latest_sesno: i32,
 ) -> anyhow::Result<()> {
-    if attempt.db_type != db_type || attempt.file_path != file_path {
+    if attempt.db_type != db_type || !same_attempt_file_path(&attempt.file_path, file_path) {
         anyhow::bail!(
             "unfinished increment attempt dbnum={} belongs to type={} path={}, \
              current type={db_type} path={file_path}",
@@ -1955,6 +1975,28 @@ mod cache_tests {
         assert!(error.to_string().contains("only covers through 41"));
         validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 42)
             .expect("complete fixed range is replayable");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_attempt_accepts_equivalent_windows_path_spelling() {
+        let attempt = crate::data_interface::model_update_pending::IncrementUpdateAttempt {
+            dbnum: 8000,
+            db_type: "DESI".to_string(),
+            file_path: "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001"
+                .to_string(),
+            start_sesno: 196,
+            end_sesno: 196,
+            plan: Default::default(),
+        };
+
+        validate_prepared_attempt(
+            &attempt,
+            "DESI",
+            "d:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001",
+            196,
+        )
+        .expect("separator and drive-letter casing must not change file identity");
     }
 
     /// 暂存窗口里碰上落后于文件的恢复记录：重建，不重放。
