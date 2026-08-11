@@ -104,6 +104,47 @@ pub async fn record_root_failure_on(
     attempts.context("根 attempts 读回为空")
 }
 
+/// 确定性失败（journal 准入拒绝一类：同一输入重试必然再失败）直接判死：
+/// attempts 一步置到阻断门槛，不再烧生成重试。取 `max(自增, 门槛)` 保持单调
+/// ——已经越过门槛的行不会被拉回来。
+pub async fn record_root_dead_letter(
+    dbnum: u32,
+    root_refno: &str,
+    error: &str,
+) -> anyhow::Result<u32> {
+    record_root_dead_letter_on(&aios_core::SUL_DB, dbnum, root_refno, error).await
+}
+
+pub async fn record_root_dead_letter_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    root_refno: &str,
+    error: &str,
+) -> anyhow::Result<u32> {
+    let id = root_id(dbnum, root_refno);
+    let sql = format!(
+        "UPSERT {id} SET dbnum = {dbnum}, root_refno = '{root}', kind = 'root_attempt', \
+         attempts = math::max([(attempts?:0) + 1, {max}]), \
+         first_failed_at = first_failed_at?:time::now(), \
+         last_failed_at = time::now(), \
+         last_error = '{error}';\n\
+         SELECT VALUE attempts FROM ONLY {id};",
+        root = escape_surql_str(root_refno),
+        max = MAX_ATTEMPTS,
+        error = escape_surql_str(error),
+    );
+    let mut response = db
+        .query(sql)
+        .await
+        .with_context(|| format!("判死根 dbnum={dbnum} root={root_refno} 传输失败"))?
+        .check()
+        .with_context(|| format!("判死根 dbnum={dbnum} root={root_refno} 语句失败"))?;
+    let attempts: Option<u32> = response
+        .take(1)
+        .with_context(|| format!("读回根 attempts dbnum={dbnum} root={root_refno} 失败"))?;
+    attempts.context("根 attempts 读回为空")
+}
+
 /// 该 dbnum 全部生成根的失败记录（root_refno → 记录）。
 pub async fn load_root_attempts(dbnum: u32) -> anyhow::Result<BTreeMap<String, RootAttempt>> {
     load_root_attempts_on(&aios_core::SUL_DB, dbnum).await
@@ -348,6 +389,33 @@ mod tests {
                 .await
                 .expect("load")
                 .is_empty()
+        );
+    }
+
+    /// 确定性失败判死：一步到阻断门槛、不烧重试；已越过门槛的行保持单调不回落。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dead_letter_jumps_to_the_block_threshold_in_one_step() {
+        let db = control_plane().await;
+        let root = "4000000003_5".to_string();
+
+        // 先有一次普通失败，判死叠加在其上。
+        record_root_failure_on(&db, 7996, &root, "transient")
+            .await
+            .expect("record transient");
+        let dead = record_root_dead_letter_on(&db, 7996, &root, "journal 准入拒绝")
+            .await
+            .expect("dead letter");
+        assert!(reaches_block_threshold(dead), "判死后必须直接到达阻断门槛");
+
+        // 再判死一次不回落（max 单调），错误文本刷新。
+        let again = record_root_dead_letter_on(&db, 7996, &root, "journal 准入拒绝 again")
+            .await
+            .expect("dead letter again");
+        assert!(again >= dead);
+        let rows = load_root_attempts_on(&db, 7996).await.expect("load");
+        assert_eq!(
+            rows[&root].last_error.as_deref(),
+            Some("journal 准入拒绝 again")
         );
     }
 

@@ -26,11 +26,52 @@ use anyhow::bail;
 use serde_json::Value as JsonValue;
 use surrealdb::sql::{Array, Data, Id, Operator, Statement, Thing, Value, Values};
 
+/// journal 准入拒绝：**确定性失败**——同一条语句重放多少次都会再次被拒，
+/// 与瞬时故障（断连、锁冲突）本质不同，重试没有意义。
+///
+/// 生成路径捕获到链上有它时直接判死（attempts 置顶、立即阻断），不再烧
+/// 昂贵的生成重试（2026-08-11 现场：删除清理被拒 → 5 次生成全跑完才阻断）。
+/// 依赖错误**链**传递：中途把错误 `format!` 成字符串会弄丢类型，包装一律用
+/// `.context()`。
+#[derive(Debug)]
+pub struct ReplayUnsafeRejection {
+    detail: String,
+}
+
+impl std::fmt::Display for ReplayUnsafeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "journal 准入拒绝（确定性失败，重试无意义）：{}",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for ReplayUnsafeRejection {}
+
+/// 错误链上是否有 journal 准入拒绝（确定性失败）。
+pub fn is_replay_unsafe(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<ReplayUnsafeRejection>().is_some())
+}
+
+fn reject(detail: String) -> anyhow::Error {
+    anyhow::Error::new(ReplayUnsafeRejection { detail })
+}
+
 /// 校验一段将进入语句日志的 SQL（可含多条语句）。
 ///
 /// 拒绝即整段拒绝：不合规语句不进暂存、不进日志。解析、注释和字符串边界全部
 /// 交给与执行端相同的 SurrealQL parser，validator 不再维护第二套 lexer。
+/// 拒绝错误带 [`ReplayUnsafeRejection`] 类型标记，调用链用 [`is_replay_unsafe`]
+/// 区分「确定性拒绝」与瞬时失败。
 pub fn validate_statement(sql: &str) -> anyhow::Result<()> {
+    validate_statement_inner(sql).map_err(|error| reject(format!("{error:#}")))
+}
+
+fn validate_statement_inner(sql: &str) -> anyhow::Result<()> {
     let query = surrealdb::sql::parse(sql)
         .map_err(|error| anyhow::anyhow!("journal SurrealQL 解析失败：{error}"))?;
     let statements = query.iter().collect::<Vec<_>>();
@@ -67,7 +108,12 @@ pub(crate) fn is_explicit_transaction(sql: &str) -> bool {
 }
 
 /// 已审计的生成级联删除形态：完整事务，顶层只含 LET、DELETE 与条件删除块。
+/// 拒绝同样带 [`ReplayUnsafeRejection`] 标记。
 pub(crate) fn validate_scoped_delete_transaction(sql: &str) -> anyhow::Result<()> {
+    validate_scoped_delete_inner(sql).map_err(|error| reject(format!("{error:#}")))
+}
+
+fn validate_scoped_delete_inner(sql: &str) -> anyhow::Result<()> {
     let query = surrealdb::sql::parse(sql)
         .map_err(|error| anyhow::anyhow!("级联删除 SurrealQL 解析失败：{error}"))?;
     let statements = query.iter().collect::<Vec<_>>();
@@ -288,7 +334,41 @@ fn visit_ast(node: &JsonValue) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_statement;
+    use super::{is_replay_unsafe, validate_statement};
+
+    /// 准入拒绝必须能沿错误链被认出来（生成路径据此判死而不是烧重试）。
+    /// 特意穿过两层 `.context()`：中途任何一层把错误 format 成字符串都会让
+    /// 这条测试变红——那正是要防的链断。
+    #[test]
+    fn a_rejection_is_recognizable_through_context_layers() {
+        use anyhow::Context;
+
+        let rejection = validate_statement("CREATE pe SET noun = 'PIPE'")
+            .context("save instance data")
+            .context("生成根 24384/25728 写入失败")
+            .expect_err("裸表 CREATE 必须被拒");
+        assert!(is_replay_unsafe(&rejection), "{rejection:#}");
+        assert!(
+            format!("{rejection:#}").contains("确定性失败"),
+            "{rejection:#}"
+        );
+
+        let transient = anyhow::anyhow!("ws 连接中断").context("save instance data");
+        assert!(!is_replay_unsafe(&transient));
+
+        // 拍平成字符串会弄丢类型——钉住「不能这么包」这件事本身。
+        let flattened = anyhow::anyhow!(
+            "{}",
+            format!(
+                "{:#}",
+                validate_statement("CREATE pe SET x = 1").unwrap_err()
+            )
+        );
+        assert!(
+            !is_replay_unsafe(&flattened),
+            "字符串化的错误认不出类型是预期行为"
+        );
+    }
 
     #[test]
     fn accepts_the_persist_path_statement_shapes() {

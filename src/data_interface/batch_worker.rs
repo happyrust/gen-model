@@ -1880,13 +1880,27 @@ async fn run_single_unit(
             match generate_unit_model(mgr, &task.root_refno).await {
                 Ok(()) => break Ok(()),
                 Err(error) => {
-                    match crate::data_interface::staging::attempts::record_root_failure(
-                        task.dbnum,
-                        &task.root_refno,
-                        &format!("{error:#}"),
-                    )
-                    .await
-                    {
+                    // journal 准入拒绝是确定性失败：同一语句重试必然再被拒。
+                    // 直接判死（attempts 一步置顶），不烧昂贵的生成重试——
+                    // 2026-08-11 现场同类缺陷白跑了 5 轮生成才阻断。
+                    let deterministic =
+                        crate::data_interface::staging::replay_safe::is_replay_unsafe(&error);
+                    let recorded = if deterministic {
+                        crate::data_interface::staging::attempts::record_root_dead_letter(
+                            task.dbnum,
+                            &task.root_refno,
+                            &format!("{error:#}"),
+                        )
+                        .await
+                    } else {
+                        crate::data_interface::staging::attempts::record_root_failure(
+                            task.dbnum,
+                            &task.root_refno,
+                            &format!("{error:#}"),
+                        )
+                        .await
+                    };
+                    match recorded {
                         Ok(value) => attempts = value,
                         Err(record_error) => {
                             control_failed = true;
@@ -1897,7 +1911,11 @@ async fn run_single_unit(
                             break Err(error);
                         }
                     }
-                    if crate::data_interface::staging::attempts::reaches_block_threshold(attempts) {
+                    if deterministic
+                        || crate::data_interface::staging::attempts::reaches_block_threshold(
+                            attempts,
+                        )
+                    {
                         break Err(error);
                     }
                     tokio::time::sleep(delay).await;
