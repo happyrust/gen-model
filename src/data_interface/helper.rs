@@ -424,6 +424,89 @@ mod tests {
         );
     }
 
+    /// Issue #27 的执行侧回归：同一 refno 先指向历史 GENSEC 产物，清理可重放，
+    /// 随后的 EQUI 重生成必须能用全新的 transform/AABB 关系占据同一条边。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reused_refno_cleanup_is_idempotent_and_accepts_new_model_relation() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("issue27")
+            .use_db("refno_reuse")
+            .await
+            .expect("use db");
+        db.query(
+            "CREATE pe:24384_26186 SET noun = 'GENSEC';
+             CREATE trans:old SET d = [-16315, -48900, -1640.3];
+             CREATE aabb:old SET d = { mins: [-16390, -48900.023, -1640.3] };
+             CREATE inst_info:old SET noun = 'GENSEC';
+             CREATE inst_geo:old SET kind = 'old';
+             RELATE pe:24384_26186->inst_relate:24384_26186->inst_info:old
+                 SET world_trans = trans:old, aabb = aabb:old;
+             RELATE inst_info:old->geo_relate:old->inst_geo:old;",
+        )
+        .await
+        .expect("seed stale model")
+        .check()
+        .expect("valid stale model");
+
+        let cleanup = render_cascade_delete("inst_relate:24384_26186");
+        for _ in 0..2 {
+            db.query(&cleanup)
+                .await
+                .expect("cleanup transport")
+                .check()
+                .expect("cleanup is replay-safe");
+        }
+
+        let mut response = db
+            .query(
+                "RETURN [
+                    inst_relate:24384_26186.id = NONE,
+                    inst_info:old.id = NONE,
+                    geo_relate:old.id = NONE
+                ];",
+            )
+            .await
+            .expect("inspect cleanup")
+            .check()
+            .expect("valid cleanup inspection");
+        assert_eq!(
+            response.take::<Vec<bool>>(0).expect("cleanup flags"),
+            vec![true; 3]
+        );
+
+        db.query(
+            "UPDATE pe:24384_26186 SET noun = 'EQUI';
+             CREATE trans:new SET d = [-2821.27, 8003.96, 1400];
+             CREATE aabb:new SET d = { mins: [-2900, 7900, 1300] };
+             CREATE inst_info:new SET noun = 'EQUI';
+             RELATE pe:24384_26186->inst_relate:24384_26186->inst_info:new
+                 SET world_trans = trans:new, aabb = aabb:new;",
+        )
+        .await
+        .expect("write regenerated EQUI")
+        .check()
+        .expect("valid regenerated EQUI");
+
+        let mut response = db
+            .query(
+                "RETURN [
+                    inst_relate:24384_26186.out = inst_info:new,
+                    inst_relate:24384_26186.world_trans = trans:new,
+                    inst_relate:24384_26186.aabb = aabb:new
+                ];",
+            )
+            .await
+            .expect("inspect replacement")
+            .check()
+            .expect("valid replacement inspection");
+        assert_eq!(
+            response.take::<Vec<bool>>(0).expect("replacement flags"),
+            vec![true; 3]
+        );
+    }
+
     /// B2（2026-07-26 审计 round2）：`inst_info` 必须被显式删除。若只靠
     /// `geo_relate` 三元组的 `in` 端顺带删除，一个没有任何 `geo_relate` 边的
     /// `inst_info`（几何生成半途失败的残留）将永远不被回收。

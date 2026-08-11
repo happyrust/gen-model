@@ -131,7 +131,7 @@ fn work_items_from_units(
     db_type: &str,
     units: &[DeliveryUnitSummary],
     transform_refnos: &HashSet<RefnoEnum>,
-    deleted_refnos: &HashSet<RefnoEnum>,
+    cleanup_refnos: &HashSet<RefnoEnum>,
 ) -> Vec<ModelWorkItem> {
     let mut items = BTreeMap::new();
     for unit in units.iter().filter(|unit| unit.will_generate) {
@@ -160,7 +160,7 @@ fn work_items_from_units(
             },
         );
     }
-    for &refno in deleted_refnos {
+    for &refno in cleanup_refnos {
         insert_item(
             &mut items,
             ModelWorkItem {
@@ -177,6 +177,24 @@ fn work_items_from_units(
     // 执行侧 `delete_inst_relate_subtree` 本来就沿 pe_owner 递归整棵子树，子节点
     // 再单排一条只是把同一棵子树走两遍。
     items.into_values().collect()
+}
+
+/// 派生模型清理目标：删除节点，以及复用 refno 的新增节点。
+///
+/// PDMS 会重复利用历史删除留下的 refno。此时 `Add` 的 PE 主数据会覆盖旧 noun/owner，
+/// 但旧 `inst_relate` 仍然存在；若本轮生成没有为该元素产出新实例，那条旧位姿/AABB 会
+/// 原样留下。把 Added 与 Deleted 一样放进 regen 前的 `DeleteCleanup` 阶段：全新 refno
+/// 是幂等空操作，复用 refno 则先清旧派生闭包，再由随后的 `RegenRoot` 写当前模型。
+fn cleanup_refnos_for_net_changes(
+    details: &[NetChangeDetail],
+    owner_of: impl Fn(RefnoEnum) -> Option<RefnoEnum>,
+) -> HashSet<RefnoEnum> {
+    let candidates = details
+        .iter()
+        .filter(|detail| matches!(detail.net, NetOp::Added | NetOp::Deleted))
+        .map(|detail| detail.refno)
+        .collect::<HashSet<_>>();
+    topmost_deleted_refnos(&candidates, owner_of)
 }
 
 /// 删除集收敛到每棵子树最顶端的那一个。
@@ -822,12 +840,7 @@ pub(crate) async fn build_model_update_plan(
         regen_refnos,
         transform_refnos,
     } = partition;
-    let deleted_refnos: HashSet<RefnoEnum> = details
-        .iter()
-        .filter(|detail| detail.net == NetOp::Deleted)
-        .map(|detail| detail.refno)
-        .collect();
-    let deleted_refnos = topmost_deleted_refnos(&deleted_refnos, |refno| {
+    let cleanup_refnos = cleanup_refnos_for_net_changes(&details, |refno| {
         post_owners.get(&refno).and_then(|node| node.owner)
     });
     let regen_details = mask_details_to_regen(&details, &regen_refnos);
@@ -846,7 +859,7 @@ pub(crate) async fn build_model_update_plan(
         db_type,
         &units,
         &transform_refnos,
-        &deleted_refnos,
+        &cleanup_refnos,
     );
     work_items.extend(
         post_regen_aabb_refnos
@@ -1579,6 +1592,26 @@ mod tests {
         let orphan = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 9));
         let topmost = topmost_deleted_refnos(&HashSet::from([orphan]), |_| None);
         assert_eq!(topmost, HashSet::from([orphan]));
+    }
+
+    /// Issue #27：E3D 新增元素可能复用历史已删除元素的 refno。新增主数据写入后，
+    /// 旧 inst_relate/world_trans/AABB 必须在重生成前清掉，不能等下一次 Transform 自愈。
+    #[test]
+    fn an_added_refno_is_scheduled_for_pre_regen_model_cleanup() {
+        let reused = RefnoEnum::from(aios_core::RefU64((24384u64 << 32) | 26186));
+        let details = [NetChangeDetail {
+            refno: reused,
+            net: NetOp::Added,
+            model_affecting: true,
+        }];
+
+        let cleanup = cleanup_refnos_for_net_changes(&details, |_| None);
+        let work = work_items_from_units(8000, 195, "DESI", &[], &HashSet::new(), &cleanup);
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, ModelWorkAction::DeleteCleanup);
+        assert_eq!(work[0].target_refno, "24384/26186");
+        assert_eq!(work[0].source_end_sesno, 195);
     }
 
     #[test]
