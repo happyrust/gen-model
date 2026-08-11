@@ -193,7 +193,7 @@ async fn staged_window_with(
     )
     .await
     .expect("create staged window");
-    let staged = IncrementPipeline::stage_parsed_window(&mut window, range, DBNUM)
+    let staged = IncrementPipeline::stage_parsed_window(&mut window, range, DBNUM, &instance)
         .await
         .expect("stage parsed window");
     assert!(

@@ -24,6 +24,8 @@ pub mod dbnum_state;
 
 pub mod fast_delete;
 
+pub(crate) mod delete_residue;
+
 pub mod manual_update;
 
 pub mod update_scope;

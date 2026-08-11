@@ -459,7 +459,7 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
             EleOperationDetail::Add(ele),
         )],
     )]);
-    let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, DBNUM)
+    let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, DBNUM, &target)
         .await
         .expect("stage parsed window");
     assert!(staged > 0, "解析必须检测到变化并进 journal");

@@ -726,16 +726,27 @@ impl IncrementPipeline {
 
     /// 把解析产物写进活动窗口，并把同一批主数据/ref_rev语句收入唯一 journal。
     /// 此阶段刻意不生成收口语句：水位与 pending 只能在模型生成也成功后提交。
+    ///
+    /// `persistent` 是窗口前状态的持久层读取端（生产传 `SUL_DB`；mem 窗口的测试
+    /// 传各自的实例）——删除残留清理要在这里枚举被删元素的窗口前子树。
     pub(crate) async fn stage_parsed_window(
         window: &mut crate::data_interface::staging::ActiveStagedWindow,
         range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
         dbnum: u32,
+        persistent: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     ) -> anyhow::Result<usize> {
         use crate::data_interface::staging::ExecMode;
 
         window.activate().await?;
+        // 删除残留清理(#30):在主数据语句后补子树 tombstone / 名词行 / 属主边
+        // 的清理语句。子树取自窗口前持久层,渲染失败上抛让窗口整体重试。
+        let residue = crate::data_interface::delete_residue::render_delete_residue_statements(
+            range_eles, persistent,
+        )
+        .await?;
         let statements = Self::render_persist_statements(range_eles, dbnum as i32)
             .into_iter()
+            .chain(residue)
             .chain(crate::data_interface::manual_update::build_reverse_index_statements(range_eles))
             .collect::<Vec<_>>();
         for sql in &statements {
@@ -1079,8 +1090,15 @@ impl IncrementPipeline {
         // partially failed batch: earlier Surreal statements may already have
         // changed data even though the watermark must remain unchanged.
         let persist_result = if let Some(context) = staged.as_ref() {
+            // 删除残留清理(#30),语义同 stage_parsed_window 处的注释。
+            let residue = crate::data_interface::delete_residue::render_delete_residue_statements(
+                &range_eles,
+                &SUL_DB,
+            )
+            .await?;
             let statements = Self::render_persist_statements(&range_eles, dbnum as i32)
                 .into_iter()
+                .chain(residue)
                 .chain(
                     crate::data_interface::manual_update::build_reverse_index_statements(
                         &range_eles,
@@ -1393,7 +1411,14 @@ impl IncrementPipeline {
         // ADR-001「失败批次不推进水位、按同一窗口重试」的安全性并不依赖「整窗口一个
         // 事务」，而是靠 Add 改用幂等 UPSERT：重试撞上上一轮已写入的记录也能覆盖收敛，
         // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
-        let statements = Self::render_persist_statements(range_eles, dbnum);
+        let mut statements = Self::render_persist_statements(range_eles, dbnum);
+        // 删除残留清理(#30):与主数据同批分块事务提交,幂等可重试。
+        statements.extend(
+            crate::data_interface::delete_residue::render_delete_residue_statements(
+                range_eles, &SUL_DB,
+            )
+            .await?,
+        );
         let total = statements.len();
         // 分块事务提交：原实现把整窗口拼成「单个事务」，大型系统库（如 amssys 冷启动
         // 168 会话 ~4000+ 元素）会撑爆 SurrealDB ws 通道上限，报「receiving from an
@@ -1803,11 +1828,13 @@ mod cache_tests {
             )],
         );
 
-        let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, 7996)
+        let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, 7996, &instance)
             .await
             .expect("stage parsed window");
-        assert_eq!(staged, 2, "主数据删除 + ref_rev 清理");
-        assert_eq!(window.journal().await.len(), 2, "必须沿用同一 journal");
+        // 5 = 主数据删除 + ref_rev 清理 + 删除残留清理 3 条(#30:子树 tombstone /
+        // 名词行 / 属主边——本用例的"持久层"即窗口实例,种子行可见,渲染整套)。
+        assert_eq!(staged, 5, "主数据删除 + ref_rev 清理 + 删除残留清理");
+        assert_eq!(window.journal().await.len(), 5, "必须沿用同一 journal");
 
         let db = window.staging_db().clone();
         let mut response = db
@@ -1868,7 +1895,7 @@ mod cache_tests {
             ],
         );
 
-        IncrementPipeline::stage_parsed_window(&mut window, &range, 7995)
+        IncrementPipeline::stage_parsed_window(&mut window, &range, 7995, &instance)
             .await
             .expect("stage parsed window");
 

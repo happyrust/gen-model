@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
 
         // 再解析入暂存：改名渲染为 `UPDATE pe SET name`，更新的正是预载拷进来的旧行。
-        let staged = IncrementPipeline::stage_parsed_window(&mut window, &ops, dbnum)
+        let staged = IncrementPipeline::stage_parsed_window(&mut window, &ops, dbnum, &SUL_DB)
             .await
             .expect("stage parsed rename");
         assert!(staged > 0, "改名会话必须进 journal");
