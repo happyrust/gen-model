@@ -70,7 +70,13 @@ async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::R
 /// `zone_refno` 过滤一直全表扫。现在用合法语法建普通索引并显式上抛错误；
 /// `IF NOT EXISTS` 保证每次启动重放幂等。
 pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
+    println!("正在初始化 inst_relate/tubi_relate 索引（首次构建需全表扫描，可能较久）...");
+    let started = std::time::Instant::now();
     SUL_DB.query(INST_RELATE_INDEX_SQL).await?.check()?;
+    println!(
+        "inst_relate/tubi_relate 索引就绪，耗时 {}",
+        crate::fmt_elapsed(started.elapsed())
+    );
     Ok(())
 }
 
@@ -96,6 +102,8 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
 pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
     async fn drain_table(table: &str) -> anyhow::Result<usize> {
         const BATCH: usize = 2000;
+        println!("正在回填 {table} 的存量 anc/dbnum（老库首次启动需全表回填）...");
+        let started = std::time::Instant::now();
         let mut total = 0usize;
         loop {
             let sql = format!(
@@ -111,13 +119,20 @@ pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
             if filled < BATCH {
                 return Ok(total);
             }
+            // 还有下一批才报进度：已收敛的常态启动只有开始/完成两行。
+            println!(
+                "  anc/dbnum 回填中（{table}）：累计 {total} 行，耗时 {}",
+                crate::fmt_elapsed(started.elapsed())
+            );
         }
     }
+    let started = std::time::Instant::now();
     let inst = drain_table("inst_relate").await?;
     let tubi = drain_table("tubi_relate").await?;
-    if inst > 0 || tubi > 0 {
-        println!("anc/dbnum 回填完成：inst_relate {inst} 行，tubi_relate {tubi} 行");
-    }
+    println!(
+        "anc/dbnum 回填完成：inst_relate {inst} 行，tubi_relate {tubi} 行，耗时 {}",
+        crate::fmt_elapsed(started.elapsed())
+    );
     Ok((inst, tubi))
 }
 
@@ -142,6 +157,8 @@ pub fn mark_insts_flat_dirty() {
 /// 的生成批与建行同任务同 refno 锚点，任务成功 ⇒ 可达 geo 全 meshed|bad。
 pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
     const BATCH: usize = 500;
+    println!("正在清扫 inst_relate 平表副本（insts_flat 物化；pre-P4 存量库首轮为全表）...");
+    let started = std::time::Instant::now();
     let mut total = 0usize;
     loop {
         let sql = format!(
@@ -158,10 +175,16 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
         if filled < BATCH {
             break;
         }
+        // 还有下一批才报进度：已收敛的常态启动只有开始/完成两行。
+        println!(
+            "  inst_relate 平表清扫中：累计 {total} 行，耗时 {}",
+            crate::fmt_elapsed(started.elapsed())
+        );
     }
-    if total > 0 {
-        println!("inst_relate 平表副本清扫完成：补 {total} 行");
-    }
+    println!(
+        "inst_relate 平表副本清扫完成：补 {total} 行，耗时 {}",
+        crate::fmt_elapsed(started.elapsed())
+    );
     Ok(total)
 }
 

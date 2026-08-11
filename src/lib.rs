@@ -258,6 +258,23 @@ extern crate anyhow;
 //     Ok(())
 // }
 
+/// 启动步骤耗时的人类可读渲染："0.42s" / "3m07.3s" / "1h23m45s"。
+pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs < 60.0 {
+        format!("{secs:.2}s")
+    } else if secs < 3600.0 {
+        format!("{}m{:04.1}s", (secs / 60.0) as u64, secs % 60.0)
+    } else {
+        format!(
+            "{}h{}m{:.0}s",
+            (secs / 3600.0) as u64,
+            ((secs % 3600.0) / 60.0) as u64,
+            secs % 60.0
+        )
+    }
+}
+
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // Must precede logging, schema repair, watcher startup and every model/
     // room write. A second process exits here instead of becoming another
@@ -297,8 +314,14 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     // 磁盘脚本先加载：站点自有的额外 surql 继续生效。目录不存在不再是致命错——
     // 下面的内置快照兜底，部署包可以不带 resource/surreal。
+    let preload_started = Instant::now();
+    let step_started = Instant::now();
     if std::path::Path::new("resource/surreal").is_dir() {
         aios_core::function::define_common_functions().await?;
+        println!(
+            "磁盘 surql 函数脚本加载完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        );
     } else {
         println!("resource/surreal 不存在：磁盘脚本跳过，函数集完全来自二进制内置快照");
         if aios_core::function::ensure_inst_meta_functions_on(&SUL_DB).await? {
@@ -308,6 +331,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 内置快照收尾（含 D11 的 hd/hh 矫正，见模块 doc）：部署包的 resource/surreal
     // 会漂移——现场 bin 停在 2025-06、整个缺 gen_root.surql——磁盘加载之后再灌一遍
     // 编译期快照，同名函数以内置版为准，旧运行环境被抬到当前函数集。
+    let step_started = Instant::now();
     crate::data_interface::embedded_surql::define_embedded_functions().await?;
     match crate::data_interface::embedded_surql::missing_embedded_functions().await {
         Ok(missing) if missing.is_empty() => {}
@@ -318,19 +342,36 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         ),
         Err(e) => eprintln!("内置函数集核验未跑成（{e}），不据此定罪"),
     }
+    println!(
+        "内置函数快照灌入并核验完成，耗时 {}",
+        fmt_elapsed(step_started.elapsed())
+    );
+    let step_started = Instant::now();
     crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
+    println!(
+        "surreal 函数自检完成，耗时 {}",
+        fmt_elapsed(step_started.elapsed())
+    );
+    let step_started = Instant::now();
     let migrated =
         crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage().await?;
-    println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
+    println!(
+        "增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位），耗时 {}",
+        fmt_elapsed(step_started.elapsed())
+    );
     // 解析完成后重新定义EVENT
     println!("正在重新定义dbnum_event...");
+    let step_started = Instant::now();
     match define_dbnum_event().await {
-        Ok(_) => println!("成功重新定义update_dbnum_event"),
+        Ok(_) => println!(
+            "成功重新定义update_dbnum_event，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        ),
         Err(e) => println!("重新定义update_dbnum_event失败: {:?}", e),
     }
     println!("预加载方法完成。");
 
-    // 初始化数据库索引
+    // 初始化数据库索引（开始/完成与耗时日志在函数内部，python full_init 同样受益）
     if let Err(e) = crate::fast_model::pdms_inst::init_inst_relate_indices().await {
         eprintln!("初始化inst_relate索引失败: {}", e);
     }
@@ -343,6 +384,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Err(e) = crate::fast_model::pdms_inst::sweep_inst_relate_flat().await {
         eprintln!("inst_relate 平表副本清扫失败（下次启动重试）: {}", e);
     }
+    println!(
+        "启动预加载与自愈维护全部完成，总耗时 {}",
+        fmt_elapsed(preload_started.elapsed())
+    );
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let db_option = Arc::new(db_option.clone());
@@ -355,28 +400,49 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         || db_option.only_sync_sys
         || db_option.is_sync_history()
     {
+        let step_started = Instant::now();
         // println!("开始同步解析数据。");
         // tokio::spawn(async move {
         if let Err(e) = sync_pdms(&db_option).await {
             eprintln!("同步PDMS数据失败: {}", e);
         }
+        println!(
+            "PDMS 数据同步解析阶段完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        );
         //记录进度
         // progress_sender.send(90)?;
         if db_option.build_cate_relate() {
             println!("初始化创建Cate relate关系");
+            let step_started = Instant::now();
             build_cate_relate(false).await?;
+            println!(
+                "Cate relate 关系创建完成，耗时 {}",
+                fmt_elapsed(step_started.elapsed())
+            );
         }
         // progress_sender.send(100)?;
     }
 
+    println!("正在初始化 db manager（解析监控目录配置）...");
+    let step_started = Instant::now();
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    println!(
+        "db manager 初始化完成，耗时 {}",
+        fmt_elapsed(step_started.elapsed())
+    );
     /// 创建db manager
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    let step_started = Instant::now();
     match scheduler.restore_persisted_pause().await {
         Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
         Ok(false) => {}
         Err(error) => println!("启动时恢复队列暂停标志失败（worker 启动前会重试）: {error:#}"),
     }
+    println!(
+        "队列暂停标志恢复完成，耗时 {}",
+        fmt_elapsed(step_started.elapsed())
+    );
     if !scheduler.is_auto_work_armed() {
         println!(
             "startup_autorun=false：本次启动不执行任何增量与全量房间重建；\
@@ -384,14 +450,28 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         );
     }
     if sync_live {
+        println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
+        let step_started = Instant::now();
         mgr.init_watcher().await?;
+        println!(
+            "监控目录 watcher 启动完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        );
     }
 
     // 启动默认直接复用已有项目树；只有 AIOS_FORCE_SPATIAL_REBUILD 才显式重建。
     // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
     // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
-    if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
-        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+    println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
+    let step_started = Instant::now();
+    match crate::fast_model::aabb_tree::load_project_tree_verified().await {
+        Ok(_) => println!(
+            "空间树装载完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        ),
+        Err(error) => {
+            eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+        }
     }
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
