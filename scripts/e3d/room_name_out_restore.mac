@@ -1,6 +1,9 @@
 -- Restore the RL3 room name.
+-- Addressed by the name apply left behind, not the one being restored: at this
+-- point the FRMW is still called /1RX-CODEX-NOROOM. If apply did not run, this
+-- macro finds nothing — which is the correct outcome, there is nothing to undo.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_name_out_restore.log" OVER
-=24381/35842
+/1RX-CODEX-NOROOM
 Q CE
 NAME /1RX-RM05-R512
 Q NAME

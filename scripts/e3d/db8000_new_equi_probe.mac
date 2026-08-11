@@ -1,0 +1,18 @@
+-- 只读探针：按 refno 定位 sesno 27 新建出来的那个 EQUI，报出它在 E3D 侧的
+-- 权威身份。库里 pe:24384_25728 的 name 是空串，需要确认那是忠实反映还是
+-- 增量路径漏写。
+--
+-- 刻意只用导航 + Q：ALPHA LOG 到 ALPHA LOG END 之间任何一条语句失败，整个
+-- 日志文件都不会落盘，所以探针里不放任何可能报错的 PML（COLLECT 之类）。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_new_equi_probe.log" OVER
+$P CODEX-DB8000-NEWEQUI-PROBE-ALIVE
+=24384/25728
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q POS
+$P CODEX-DB8000-NEWEQUI-PROBE-DONE
+ALPHA LOG END
+FINISH

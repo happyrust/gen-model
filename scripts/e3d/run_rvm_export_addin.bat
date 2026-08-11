@@ -2,7 +2,7 @@
 rem 无人值守 RVM 基准导出：靠 GenModelRvmExport CAF addin 自己在启动后触发。
 rem 不加载 appware（addin 不需要命令窗口），会话更轻、起得更快。
 rem 用法：run_rvm_export_addin.bat <MDB>   例如 run_rvm_export_addin.bat /ALL
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

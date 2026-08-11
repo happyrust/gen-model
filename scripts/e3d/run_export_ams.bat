@@ -6,7 +6,7 @@ rem AVEVA_DESIGN_ENTRYMACRO is deliberately NOT set: the literal appears in no
 rem shipped E3D binary (only Startup.dll), and a direct des.exe launch ignores it,
 rem which is why the entry-macro route silently produced nothing. Registration is
 rem instead a "GenModelNounLayout" line in DesignAddins.xml.
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

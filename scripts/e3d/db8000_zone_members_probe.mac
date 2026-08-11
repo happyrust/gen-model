@@ -1,0 +1,19 @@
+-- 列出 ZONE /1RX03-CASE-DQ 的成员，找出 sesno 27 新建的那个 EQUI 在 E3D 侧
+-- 到底叫什么。
+--
+-- 两件事此前踩过，写在这里免得再踩：
+-- 1. ALPHA LOG 的内容到 ALPHA LOG END 才落盘，中途任一语句报错整段日志都没有，
+--    所以这里只开一个日志块、且只放最稳的语句；
+-- 2. `=24384/24776` 这种按 refno 导航在本 TTY 会话里不成立（连确定存在的元素
+--    都失败），只能按名字导航。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_zone_probe_1.log" OVER
+$P ZONE-PROBE-1-ALIVE
+/1RX03-CASE-DQ
+Q CE
+Q TYPE
+Q NAME
+Q MEMB
+$P ZONE-PROBE-1-DONE
+ALPHA LOG END
+FINISH

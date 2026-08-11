@@ -1,6 +1,8 @@
 -- Restore the CYLI baseline dimensions.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cyli_size_restore.log" OVER
-=24381/101426
+/Copy-of-RCS601MT
+VAR !CYLIS COLLECT ALL CYLI FOR CE
+$!CYLIS[1]
 Q CE
 DIAM 50
 Q DIAM

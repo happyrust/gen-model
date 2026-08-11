@@ -1,0 +1,15 @@
+-- 语法探针：本 TTY 会话里按名字导航 ZONE 能不能用。
+--
+-- 已知约束（踩过）：一个宏里只能有**一个** ALPHA LOG 块——第二个 ALPHA LOG
+-- 会让整个宏中止，连第一段的日志都不落盘；日志本身也要到 ALPHA LOG END 才落盘。
+-- 所以每次只验一件事。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_syn_1_zone.log" OVER
+$P SYN-1-ALIVE
+/1RX03-CASE-DQ
+Q CE
+Q TYPE
+Q NAME
+$P SYN-1-DONE
+ALPHA LOG END
+FINISH

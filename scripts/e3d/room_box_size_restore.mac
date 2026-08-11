@@ -1,6 +1,8 @@
 -- Restore the BOX baseline dimensions.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_box_size_restore.log" OVER
-=24381/101446
+/Copy-of-RCS106MV
+VAR !BOXES COLLECT ALL BOX FOR CE
+$!BOXES[1]
 Q CE
 XLEN 100
 Q XLEN

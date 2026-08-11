@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'SilentlyContinue'
-$a = [Reflection.Assembly]::ReflectionOnlyLoadFrom('C:\Program Files (x86)\AVEVA\Everything3D3.1\Aveva.Core.Utilities.dll')
+$a = [Reflection.Assembly]::ReflectionOnlyLoadFrom('E:\reverse\e3d\shadow_e3d31_aps_all\Aveva.Core.Utilities.dll')
 $t = $a.GetType('Aveva.Core.Utilities.CommandLine.Command')
 Write-Output ("type: {0}  abstract={1} sealed={2}" -f $t.FullName, $t.IsAbstract, $t.IsSealed)
 foreach ($m in ($t.GetMethods('Public,Static,Instance,DeclaredOnly') | Sort-Object Name)) {

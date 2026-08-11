@@ -1,7 +1,7 @@
 # 反射 E3D 3.1 的 .NET 程序集，找出可从 C# 执行 PDMS 命令的入口。
 # 必须用 Windows PowerShell 5.1（.NET Framework）跑：ReflectionOnlyLoadFrom 在 pwsh 7 上不可用。
 $ErrorActionPreference = 'SilentlyContinue'
-$root = 'C:\Program Files (x86)\AVEVA\Everything3D3.1'
+$root = 'E:\reverse\e3d\shadow_e3d31_aps_all'
 $pattern = if ($args.Count -gt 0) { $args[0] } else { 'Command' }
 
 $dlls = @(

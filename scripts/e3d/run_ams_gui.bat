@@ -11,13 +11,14 @@ rem is the loudest: it runs !!runSynonym('CALLG MSAVEW'), runsynonym.pmlmac line
 rem 44 is a bare $1, so CALLG reaches the parser undefined and the session
 rem answers "(47,15) CP: Syntax error".
 rem
-rem The C: install is the only one. D:\AVEVA\Everything3D3.1 is an IDA workspace
-rem now - a copy of core.dll plus its .i64/.id0/.id1 databases, no des.exe and no
-rem evars.bat - so the entry macro this script used to point at never existed.
-rem C:'s custom_evars.bat already points projects_dir at D:\AVEVA\Projects\E3D3.1.
+rem The E: shadow install is the one to use. C:'s install no longer has a des.exe
+rem at its root, and D:\AVEVA\Everything3D3.1 is an IDA workspace - a copy of
+rem core.dll plus its .i64/.id0/.id1 databases, no des.exe and no evars.bat - so
+rem the entry macro this script used to point at never existed. projects_dir comes
+rem from custom_evars.bat under D:\AVEVA\Projects\E3D3.1.
 rem
-rem The entry macro goes through the 8.3 short path: $M takes the string as-is and
-rem "Program Files (x86)" would put a space in the middle of a macro path.
+rem The entry macro goes through the 8.3 short path: $M takes the string as-is, so
+rem any space in the install path would cut the macro path in half.
 rem
 rem Detached because des.exe is GUI-subsystem: started from a console it inherits
 rem one and core.dll then skips spawning its own console host.
@@ -27,7 +28,7 @@ setlocal
 set MDB=%1
 if "%MDB%"=="" set MDB=/ALL
 
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D
@@ -41,7 +42,7 @@ set E3DMAC=%E3DSHORT:\=/%
 set AVEVA_DESIGN_ENTRYMACRO=$M "%E3DMAC%/PMLUI/DES/admin/start"
 
 echo === ENTRYMACRO: %AVEVA_DESIGN_ENTRYMACRO% ===
-echo === STARTING (detached) C: des.exe ams SYSTEM/XXXXXX %MDB% ===
+echo === STARTING (detached) des.exe ams SYSTEM/XXXXXX %MDB% ===
 powershell -NoProfile -ExecutionPolicy Bypass -File "D:\work\plant-code\old\gen-model\scripts\e3d\launch_detached.ps1" -Exe "%E3DC%\des.exe" -WorkingDirectory "%E3DC%" -Arguments "ams SYSTEM/XXXXXX %MDB%"
 echo === LAUNCHER EXIT CODE: %ERRORLEVEL% ===
 

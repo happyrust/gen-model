@@ -4,7 +4,7 @@ ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_1.log
 $P CODEX-DB8000-EQUI-DRYRUN-START
 ALPHA LOG END
 
-=24384/24775
+/1RX03-CASE-DQ
 ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_2.log" OVER
 $P CODEX-DB8000-EQUI-DRYRUN-OWNER-SELECTED
 Q CE
@@ -24,7 +24,7 @@ Q NAME
 Q OWNE
 ALPHA LOG END
 
-COPY =24384/24776
+COPY /1-LNR-Q005-PJ
 ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_equi_copy_dryrun_4.log" OVER
 $P CODEX-DB8000-EQUI-DRYRUN-COPIED
 Q CE

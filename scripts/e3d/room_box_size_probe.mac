@@ -1,6 +1,8 @@
 -- Read-only guard: the paired restore macro is valid only from this baseline.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_box_size_probe.log" OVER
-=24381/101446
+/Copy-of-RCS106MV
+VAR !BOXES COLLECT ALL BOX FOR CE
+$!BOXES[1]
 Q CE
 Q XLEN
 ALPHA LOG END

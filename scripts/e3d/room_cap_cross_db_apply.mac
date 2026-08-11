@@ -3,7 +3,9 @@
 -- Target POS = K101 panel AABB center; the K170 umbrella volume (/6KA-RM01-K170,
 -- panel =17496/230648) contains K101, so dual membership K101+K170 is expected.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cap_cross_db_apply.log" OVER
-=24383/66460
+/1WCC1135/B1
+VAR !CAPS COLLECT ALL CAP FOR CE
+$!CAPS[1]
 Q CE
 Q POS
 POS E -18685 N -16426.047 U -7375

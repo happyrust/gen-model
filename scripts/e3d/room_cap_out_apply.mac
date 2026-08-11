@@ -1,6 +1,11 @@
 -- RL2: move the issue #7 CAP far outside R512.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cap_out_apply.log" OVER
-=24383/66460
+-- The CAP has no name of its own, so it is reached through its named BRAN:
+-- refnos churn as elements come and go, the branch name does not. Note
+-- $!CAPS[1] already expands to "=24383/66460" — do not prepend another "=".
+/1WCC1135/B1
+VAR !CAPS COLLECT ALL CAP FOR CE
+$!CAPS[1]
 Q CE
 POS E -5001.4501953125 N 10705.8095703125 U 105821.669921875
 Q POS

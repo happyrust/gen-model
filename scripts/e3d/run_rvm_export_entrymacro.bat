@@ -2,7 +2,7 @@
 rem 用启动入口宏跑 RVM 导出。
 rem 导出宏只用原生 export/repre 命令，不依赖 appware 表单，所以不加载
 rem PMLUI/DES/admin/start 也能跑完。
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

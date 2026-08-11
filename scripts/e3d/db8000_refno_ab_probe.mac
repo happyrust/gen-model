@@ -1,0 +1,26 @@
+-- A/B 对照探针：分辨「refno 导航语法不对」与「这个 refno 在 E3D 里不存在」。
+--
+-- ALPHA LOG 的内容要到 ALPHA LOG END 才落盘，所以两段各开各的日志：
+-- A 段导航一个确定存在的 refno（源 EQUI /1-LNR-Q005-PJ = 24384/24776），
+-- B 段导航 sesno 27 新建出来的那个（24384/25728）。
+-- 只有 A 落盘 → 语法没问题，B 那个元素不在库里。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_refno_probe_a.log" OVER
+$P PROBE-A-ALIVE
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+$P PROBE-A-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/db8000_refno_probe_b.log" OVER
+$P PROBE-B-ALIVE
+=24384/25728
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+$P PROBE-B-DONE
+ALPHA LOG END
+FINISH

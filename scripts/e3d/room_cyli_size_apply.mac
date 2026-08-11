@@ -1,6 +1,11 @@
 -- Enlarge a CYLI inside R512 so model regeneration must recalculate its room edge.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_cyli_size_apply.log" OVER
-=24381/101426
+-- The CYLI has no name of its own, so it is reached through its named owner:
+-- refnos churn as elements come and go, the owner name does not. Note
+-- $!CYLIS[1] already expands to "=24381/101426" — do not prepend another "=".
+/Copy-of-RCS601MT
+VAR !CYLIS COLLECT ALL CYLI FOR CE
+$!CYLIS[1]
 Q CE
 DIAM 80
 Q DIAM

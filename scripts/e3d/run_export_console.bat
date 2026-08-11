@@ -5,7 +5,7 @@ rem des.exe's stdin from a file is ignored. The switches core.dll actually reads
 rem are PDMS_SHOWCONSOLE / PDMS_HIDECONSOLE / PDMS_GRAPHICS / PDMS_NOGRAPHICS;
 rem AVEVA_DESIGN_CONSOLE_WINDOW only becomes pdms_console_window, which appears
 rem in no shipped binary.
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

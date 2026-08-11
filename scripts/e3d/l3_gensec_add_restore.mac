@@ -2,7 +2,9 @@
 
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_gensec_add_restore.log" OVER
 $P L3-F5-RESTORE-ALIVE
-=/CODEX_L3_GENSEC
+-- Plain /NAME, not =/NAME: the latter is not a valid navigation form and aborts
+-- the macro (verified against a live TTY session).
+/CODEX_L3_GENSEC
 Q CE
 Q OWNE
 DELETE GENSEC

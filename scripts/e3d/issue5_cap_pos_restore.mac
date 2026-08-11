@@ -2,7 +2,9 @@
 --   $M "D:/work/plant-code/old/gen-model/scripts/e3d/issue5_cap_pos_restore.mac"
 
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/issue5_cap_pos_restore.log" OVER
-=24383/66460
+/1WCC1135/B1
+VAR !CAPS COLLECT ALL CAP FOR CE
+$!CAPS[1]
 Q CE
 POS E -5001.4501953125 N 10705.8095703125 U 5821.669921875
 Q POS

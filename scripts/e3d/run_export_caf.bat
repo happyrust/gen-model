@@ -3,7 +3,7 @@ rem Probe: does the "graphics" keyword (the only argument launch.bat passes for 
 rem Design start) bring up the CAF layer? Without CAF there is no addin host, and
 rem the GenModelNounLayout addin registered in DesignAddins.xml cannot fire.
 rem Pass the extra keyword as %2, e.g.  run_export_caf.bat /ALL graphics
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

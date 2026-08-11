@@ -4,7 +4,7 @@ rem core.dll 只认 PDMS_SHOWCONSOLE / PDMS_HIDECONSOLE / PDMS_GRAPHICS / PDMS_N
 rem 这四个开关（见 run_export_console.bat 的考据）。带图形的 GUI 会话会让 core.dll
 rem 另起 pdmsconsole.exe 并把自己的 std 句柄重定向过去，所以文件喂 stdin 被无视；
 rem 关掉图形后本进程自己读 stdin，宏就能直接灌进去。
-set E3DC=C:\Program Files (x86)\AVEVA\Everything3D3.1
+set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
 cd /d "%E3DC%"
 call evars.bat "%E3DC%\"
 set AVEVA_PRODUCT=3D

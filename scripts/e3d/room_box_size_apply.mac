@@ -1,6 +1,11 @@
 -- Enlarge a BOX inside R512 so model regeneration must recalculate its room edge.
 ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_box_size_apply.log" OVER
-=24381/101446
+-- The BOX has no name of its own, so it is reached through its named owner:
+-- refnos churn as elements come and go, the owner name does not. Note
+-- $!BOXES[1] already expands to "=24381/101446" — do not prepend another "=".
+/Copy-of-RCS106MV
+VAR !BOXES COLLECT ALL BOX FOR CE
+$!BOXES[1]
 Q CE
 XLEN 140
 Q XLEN
