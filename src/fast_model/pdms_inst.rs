@@ -48,6 +48,22 @@ fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
     )
 }
 
+/// 刷新确定性 `inst_geo` 的几何参数，同时保留已经生成的 mesh 派生字段。
+///
+/// `geo_hash` 相同意味着记录 id 相同。旧实现用 `INSERT IGNORE`，若一次中断留下了
+/// 只有 id 的半成品，重放会把新 `param` 静默丢掉，后续 `gen_inst_meshes` 的
+/// `WHERE param != NONE` 就永远选不中它。`UPSERT ... MERGE` 既能补齐半成品，也不会
+/// 清掉既有的 `meshed` / `aabb` / `pts`。
+fn render_inst_geo_merge(geo_hash: u64, unit_geo: &str, reset_bad: bool) -> String {
+    let mut sql = format!("UPSERT inst_geo:⟨{geo_hash}⟩ MERGE {unit_geo};");
+    // 强制再生成代表调用方明确要求用当前解析/网格代码重试。旧 `bad=true` 若不清，
+    // gen_inst_meshes 的入口过滤会在真正构形之前永久跳过这条记录。
+    if reset_bad {
+        sql.push_str(&format!("\nUPDATE inst_geo:⟨{geo_hash}⟩ SET bad = false;"));
+    }
+    sql
+}
+
 async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::Result<()> {
     let mut first_error = None;
     while let Some(result) = tasks.next().await {
@@ -584,18 +600,19 @@ pub async fn save_instance_data(
             let final_json = format!("{{ {relate_json}, id: '{id}' }}");
             geo_relate_vec.push(final_json);
             //保存 unit shape 的几何参数
-            inst_geo_vec.push(inst.gen_unit_geo_sur_json());
+            inst_geo_vec.push((inst.geo_hash, inst.gen_unit_geo_sur_json()));
         }
     }
 
     // 并发保存inst_geo数据
     if !inst_geo_vec.is_empty() {
         for chunk in inst_geo_vec.chunks(chunk_size) {
-            let sql_string = format!(
-                "insert ignore into {} [{}];",
-                stringify!(inst_geo),
-                chunk.join(",")
-            );
+            let sql_string = chunk
+                .iter()
+                .map(|(geo_hash, unit_geo)| {
+                    render_inst_geo_merge(*geo_hash, unit_geo, replace_exist)
+                })
+                .join("\n");
             db_futures.push(spawn_db_write(sql_string));
         }
     }
@@ -857,6 +874,69 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 中断留下的半成品必须能被同一批生成重放修好；已有 mesh 派生字段不能被参数
+    /// 刷新抹掉。执行两次还钉住了 journal/直写两条路径共同需要的幂等性。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inst_geo_merge_repairs_partial_rows_and_preserves_mesh_fields() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("pdms_inst")
+            .use_db("inst_geo_replay")
+            .await
+            .expect("use db");
+        db.query(
+            "UPSERT inst_geo:⟨42⟩ CONTENT { meshed: true, bad: true, aabb: aabb:keep, pts: [vec3:keep] };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seed partial row");
+
+        let statement = render_inst_geo_merge(
+            42,
+            "{'id': inst_geo:⟨42⟩, 'param': { kind: 'box', size: [1, 2, 3] }}",
+            true,
+        );
+        db.query(format!("{statement}\n{statement}"))
+            .await
+            .expect("replay transport")
+            .check()
+            .expect("replay twice");
+
+        let mut response = db
+            .query(
+                "RETURN [inst_geo:⟨42⟩.param.kind = 'box', \
+                         inst_geo:⟨42⟩.bad = false, \
+                         inst_geo:⟨42⟩.meshed = true, \
+                         inst_geo:⟨42⟩.aabb = aabb:keep, \
+                         inst_geo:⟨42⟩.pts = [vec3:keep]];",
+            )
+            .await
+            .expect("verify transport")
+            .check()
+            .expect("verify query");
+        let flags: Vec<bool> = response.take(0).expect("take flags");
+        assert_eq!(flags, vec![true, true, true, true, true]);
+    }
+
+    #[test]
+    fn production_inst_geo_writes_are_replay_merges() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn save_instance_data(")
+            .expect("save_instance_data 必须存在")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .map(|(head, _)| head)
+            .expect("函数体到测试模块为止");
+        assert!(!body.contains("insert ignore into inst_geo"), "{body}");
+        assert!(
+            body.contains("render_inst_geo_merge(*geo_hash, unit_geo, replace_exist)"),
+            "{body}"
+        );
+    }
 
     /// 手动 live（层级查询优化 P1→P2 部署步）：对**配置库**执行 anc/dbnum
     /// 部署三件套——灌 `fn::refno_u64` / `fn::anc_u64`（只抠 common.surql 里这
