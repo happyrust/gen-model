@@ -60,6 +60,7 @@ struct Case {
     noun_refno: String,
     expected_noun: String,
     expect_room: bool,
+    restore_phase: bool,
     prepare_baseline: bool,
     delete_baseline: bool,
     dynamic_baseline: bool,
@@ -116,6 +117,7 @@ impl Case {
                 .unwrap_or_else(|_| element.clone()),
             expected_noun: std::env::var("AIOS_ROOM_EXPECT_NOUN").unwrap_or_else(|_| "CAP".into()),
             expect_room: env_flag("AIOS_ROOM_EXPECT_ROOM", true),
+            restore_phase: env_flag("AIOS_ROOM_RESTORE_PHASE", false),
             prepare_baseline: env_flag("AIOS_ROOM_PREPARE_BASELINE", true),
             delete_baseline: env_flag("AIOS_ROOM_DELETE_BASELINE", true),
             dynamic_baseline: env_flag("AIOS_ROOM_DYNAMIC_BASELINE", false),
@@ -367,25 +369,6 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "E3D 模型类型基线漂移"
     );
 
-    // 只清本案例靶子的陈旧房间任务，避免共享实库里的旧任务制造假通过。
-    SUL_DB
-        .query(format!(
-            "DELETE model_update_pending:{0}_{1};",
-            case.action, case.target
-        ))
-        .await
-        .expect("clear stale target regen work")
-        .check()
-        .expect("valid target regen cleanup");
-    assert!(
-        rows(&format!(
-            "SELECT VALUE <string>id FROM model_update_pending:{0}_{1};",
-            case.action, case.target
-        ))
-        .await
-        .is_empty(),
-        "目标房间任务清理失败"
-    );
     let mut db_option = get_db_option().clone();
     db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
     let mut baseline = vec![Edge {
@@ -405,7 +388,10 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
             vec![case.panel.as_str(), case.element.as_str()]
         };
         for target in prepare_targets {
-            mgr.ensure_model_generated(RefnoEnum::from(target), false)
+            // 共享实库里“已有实例”不等于模型与当前 E3D 属性一致。这里是在建立
+            // restore 比较基线，必须强制按生成根刷新；否则 REDU 这类存量旧 AABB
+            // 会被保存成基线，apply/restore 都正确重生成后反而被误判为未恢复。
+            mgr.ensure_model_generated(RefnoEnum::from(target), true)
                 .await
                 .unwrap_or_else(|error| panic!("prepare model {target}: {error:#}"));
         }
@@ -511,6 +497,36 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         );
     }
 
+    // prepare 会按需重生成模型，而重生成本身也可能排房间任务。必须在 prepare
+    // 完成后再清本案例靶子的 pending，才能证明下面这条真实 E3D 增量重新入队；
+    // 放在 prepare 前会让 RegenRoot 类型拿遗留行假通过，只有 Transform 类型暴露失败。
+    SUL_DB
+        .query(format!(
+            "DELETE model_update_pending:{0}_{1};",
+            case.action, case.target
+        ))
+        .await
+        .expect("clear baseline-generated room work")
+        .check()
+        .expect("valid baseline-generated room cleanup");
+    assert!(
+        rows(&format!(
+            "SELECT VALUE <string>id FROM model_update_pending:{0}_{1};",
+            case.action, case.target
+        ))
+        .await
+        .is_empty(),
+        "增量前目标房间任务清理失败"
+    );
+
+    // 由 Run-RoomE3DE2E 在 apply 宏之前单独调用：此刻文件与水位仍是同一
+    // session，只负责强制刷新并保存权威基线。真正 apply 轮会关闭本标志、复用
+    // baseline_file，然后才消费 E3D 新会话。
+    if env_flag("AIOS_ROOM_PREPARE_ONLY", false) {
+        println!("[e2e/baseline] apply 前权威基线已写入");
+        return;
+    }
+
     // 只把宏命中的这一批放进队列。不能把现场会话号写死：每次 E3D SAVEWORK 都会递增。
     let file_latest_sesno = PdmsIO::new(PROJECT, &case.db_file, true)
         .get_latest_sesno()
@@ -566,15 +582,16 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     snapshot("after-batch", &case).await;
     if !before_aabb.is_empty() {
         let after_aabb = aabb(&case.element).await;
-        if case.prepare_baseline {
-            assert_ne!(
-                after_aabb, before_aabb,
-                "模型属性变化后 AABB 必须由增量更新"
-            );
-        } else if let Some(saved) = &saved_baseline {
+        if case.restore_phase {
+            let saved = saved_baseline.as_ref().expect("restore baseline exists");
             assert_eq!(
                 after_aabb, saved.aabb,
                 "restore 后 AABB 必须回到 apply 前基线"
+            );
+        } else {
+            assert_ne!(
+                after_aabb, before_aabb,
+                "模型属性变化后 AABB 必须由增量更新"
             );
         }
     }
@@ -670,7 +687,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         );
     }
     if case.action == "room_recalc_panel"
-        && case.prepare_baseline
+        && !case.restore_phase
         && let Some(expected) = saved_baseline
             .as_ref()
             .and_then(|saved| saved.panel_members.as_ref())
@@ -682,7 +699,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         );
     }
     if case.action == "room_recalc_panel"
-        && !case.prepare_baseline
+        && case.restore_phase
         && let Some(expected) = saved_baseline.and_then(|saved| saved.panel_members)
     {
         assert_eq!(

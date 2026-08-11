@@ -150,6 +150,10 @@ function Set-CaseEnv(
     [string]$nounRefno = '',
     [bool]$checkMembership = $true
 ) {
+    # 本套件验证的就是增量房间触发链；仓库默认配置刻意关闭该功能，若不在
+    # 测试进程显式打开，prepare 阶段遗留的 pending 行会让部分案例假通过，
+    # 而纯 Transform 案例则报“未排队”。
+    $env:AIOS_ROOM_INCREMENTAL = '1'
     $env:AIOS_ROOM_CHANGE = $change
     $env:AIOS_ROOM_ELEMENT = $element
     $env:AIOS_ROOM_EXPECT_NOUN = $noun
@@ -195,8 +199,18 @@ function Invoke-Case(
     if ($applySavedMarker) { Remove-Item -LiteralPath $applySavedMarker -ErrorAction SilentlyContinue }
     try {
         try {
-            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $deleteBaseline $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno $checkMembership
+            # 基线必须在 E3D apply 宏之前建立。宏 SAVEWORK 后文件已是新状态、而
+            # Surreal 水位仍是旧状态；此时再强制生成会把两个 session 混成一份模型。
+            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $true $false $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno $checkMembership
             $envReady = $true
+            $env:AIOS_ROOM_PREPARE_ONLY = '1'
+            Remove-Item Env:AIOS_ROOM_RESTORE_PHASE -ErrorAction SilentlyContinue
+            try {
+                Invoke-Phase $row 'baseline-increment' { Invoke-Increment "$name-baseline-increment" }
+            }
+            finally {
+                Remove-Item Env:AIOS_ROOM_PREPARE_ONLY -ErrorAction SilentlyContinue
+            }
             # 旧宏没有 SAVEWORK 哨兵，沿用保守恢复；生成宏仅在确认 SAVEWORK 后恢复。
             $restoreRequired = -not $applySavedMarker
             try {
@@ -207,6 +221,8 @@ function Invoke-Case(
                     $restoreRequired = $true
                 }
             }
+            Set-CaseEnv $change $dbnum $element $noun $applyExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology $applyExpectedEdges $expectGeometry $nounRefno $checkMembership
+            Remove-Item Env:AIOS_ROOM_RESTORE_PHASE -ErrorAction SilentlyContinue
             Invoke-Phase $row 'apply-increment' { Invoke-Increment "$name-apply-increment" }
         } catch {
             if (-not $envReady) {
@@ -234,6 +250,7 @@ function Invoke-Case(
                 }
                 $restoreExpectsRoom = if ($dynamicBaseline) { $applyExpectsRoom } else { $true }
                 Set-CaseEnv $change $dbnum $element $noun $restoreExpectsRoom $false $deleteBaseline $dynamicBaseline $checkTopology $restoreExpectedEdges $expectGeometry $nounRefno $checkMembership
+                $env:AIOS_ROOM_RESTORE_PHASE = '1'
                 Invoke-Phase $row 'restore-increment' { Invoke-Increment "$name-restore-increment" }
                 # T-OR-3：restore 收敛后第二遍必须是无操作（零批次、水位/边/AABB 不动）。
                 $env:AIOS_ROOM_IDEMPOTENT = '1'
