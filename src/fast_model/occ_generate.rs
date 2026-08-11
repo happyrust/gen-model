@@ -24,7 +24,7 @@ use itertools::Itertools;
 #[cfg(feature = "occ")]
 use opencascade::primitives::IntoShape;
 use parry3d::bounding_volume::*;
-use parry3d::math::Isometry;
+use parry3d::math::{Isometry, Point};
 use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -747,17 +747,135 @@ struct QueryAabbParam {
     pub refno: RefnoEnum,
     pub noun: String,
     pub geo_aabbs: Vec<GeoAabbTrans>,
+    #[serde(deserialize_with = "deserialize_transform_flexible")]
     pub world_trans: Transform,
     /// 更新前已存在的包围盒。`rstar` 的 `remove` 按整值相等匹配，拿新值删不掉旧条目，
     /// 只有带上它才能把 R 树里的旧条目清干净（ADR-010 D3）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_aabb_flexible")]
     pub old_aabb: Option<Aabb>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct GeoAabbTrans {
+    #[serde(deserialize_with = "deserialize_transform_flexible")]
     pub trans: Transform,
+    #[serde(deserialize_with = "deserialize_aabb_flexible")]
     pub aabb: Aabb,
+}
+
+/// SurrealDB preserves the numeric kind of stored array members. Geometry
+/// records written with an integral coordinate therefore come back as `i64`,
+/// while Bevy/glam and parry derive strict `f32` deserializers. Accept every
+/// finite JSON/Surreal numeric representation at this database boundary and
+/// normalize it to the engine's `f32` scalar.
+#[derive(Debug, Clone, Copy)]
+struct FlexibleF32(f32);
+
+impl<'de> serde::Deserialize<'de> for FlexibleF32 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = FlexibleF32;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an integer or floating-point coordinate")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(FlexibleF32(value as f32))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(FlexibleF32(value as f32))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(FlexibleF32(value as f32))
+            }
+
+            fn visit_f32<E>(self, value: f32) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(FlexibleF32(value))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AabbWire {
+    mins: [FlexibleF32; 3],
+    maxs: [FlexibleF32; 3],
+}
+
+impl AabbWire {
+    fn into_aabb(self) -> Aabb {
+        let [min_x, min_y, min_z] = self.mins;
+        let [max_x, max_y, max_z] = self.maxs;
+        Aabb::new(
+            Point::new(min_x.0, min_y.0, min_z.0),
+            Point::new(max_x.0, max_y.0, max_z.0),
+        )
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TransformWire {
+    translation: [FlexibleF32; 3],
+    rotation: [FlexibleF32; 4],
+    scale: [FlexibleF32; 3],
+}
+
+impl TransformWire {
+    fn into_transform(self) -> Transform {
+        let [tx, ty, tz] = self.translation;
+        let [rx, ry, rz, rw] = self.rotation;
+        let [sx, sy, sz] = self.scale;
+        Transform {
+            translation: glam::Vec3::new(tx.0, ty.0, tz.0),
+            rotation: glam::Quat::from_array([rx.0, ry.0, rz.0, rw.0]),
+            scale: glam::Vec3::new(sx.0, sy.0, sz.0),
+        }
+    }
+}
+
+fn deserialize_aabb_flexible<'de, D>(deserializer: D) -> Result<Aabb, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <AabbWire as serde::Deserialize>::deserialize(deserializer).map(AabbWire::into_aabb)
+}
+
+fn deserialize_optional_aabb_flexible<'de, D>(deserializer: D) -> Result<Option<Aabb>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<AabbWire> as serde::Deserialize>::deserialize(deserializer)
+        .map(|value| value.map(AabbWire::into_aabb))
+}
+
+fn deserialize_transform_flexible<'de, D>(deserializer: D) -> Result<Transform, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <TransformWire as serde::Deserialize>::deserialize(deserializer)
+        .map(TransformWire::into_transform)
 }
 
 /// 一个元素的包围盒确实变了。
@@ -1777,5 +1895,44 @@ mod aabb_change_tests {
     fn historic_duplicates_force_a_recalc() {
         let stacked = [cube(0.0, 10.0), cube(5.0, 15.0)];
         assert!(tree_box_changed(&stacked, &cube(0.0, 10.0)));
+    }
+}
+
+#[cfg(test)]
+mod flexible_geometry_deserialize_tests {
+    use super::{deserialize_aabb_flexible, deserialize_transform_flexible};
+    use bevy_transform::prelude::Transform;
+    use parry3d::bounding_volume::Aabb;
+
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(deserialize_with = "deserialize_aabb_flexible")]
+        aabb: Aabb,
+        #[serde(deserialize_with = "deserialize_transform_flexible")]
+        transform: Transform,
+    }
+
+    /// Surreal keeps mathematically integral coordinates as `i64` even when
+    /// neighboring coordinates are floats. The EQUI move regression contained
+    /// exactly `-48340i64` inside an otherwise floating-point AABB.
+    #[test]
+    fn aabb_and_transform_accept_mixed_integer_and_float_coordinates() {
+        let row: Row = serde_json::from_value(serde_json::json!({
+            "aabb": {
+                "mins": [-16390, -48900.023, -1640.3],
+                "maxs": [-16240.0, -48340, -1600.0002]
+            },
+            "transform": {
+                "translation": [-16315, -48900, -1640.3],
+                "rotation": [0, 0.0, -0.70710677, 0.70710677],
+                "scale": [1, 1.0, 1]
+            }
+        }))
+        .expect("mixed Surreal numeric kinds must deserialize");
+
+        assert_eq!(row.aabb.mins.y, -48900.023);
+        assert_eq!(row.aabb.maxs.y, -48340.0);
+        assert_eq!(row.transform.translation.x, -16315.0);
+        assert_eq!(row.transform.scale, glam::Vec3::ONE);
     }
 }
