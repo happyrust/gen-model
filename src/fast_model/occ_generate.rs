@@ -353,6 +353,20 @@ pub async fn process_meshes_update_db_deep(
                 //生成负实体的布尔运算
                 // apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;
                 boolean_ms += t_bool.elapsed().as_millis();
+
+                // 布尔阶段会新增/改指最终可见几何（例如 REDU 的 booled 关系）。上面的
+                // 第一次 AABB 刷新发生在布尔之前，只能描述原始正实体；若不在这里按
+                // 最终关系再刷一次，同一 session 会出现两种稳定结果：增量队列随后有
+                // post_regen_aabb 时得到布尔后包围盒，而按需 ensure 直接返回布尔前包围盒。
+                // 2026-08-11 AMS db8000 / 24384/24682 实证为 maxZ 3400 vs 3340。
+                let t_aabb = std::time::Instant::now();
+                if dboption.debug_root_refnos.is_some() {
+                    update_inst_relate_aabbs_by_refnos_incremental(&target_visible_refnos, true)
+                        .await?;
+                } else {
+                    update_inst_relate_aabbs_by_refnos(&target_visible_refnos, true).await?;
+                }
+                aabb_ms += t_aabb.elapsed().as_millis();
             }
         }
         println!(
@@ -1703,6 +1717,27 @@ mod aabb_write_order_tests {
             !transform.contains("enqueue_room_recalc"),
             "transform 不得在指针提交后再单独入队"
         );
+    }
+
+    /// 最终 AABB 必须在布尔关系落库之后再刷新。只保留布尔前那一次，会让按需生成
+    /// 返回原始正实体包围盒，而增量链因后续 post_regen_aabb 偶然得到另一结果。
+    #[test]
+    fn boolean_generation_refreshes_aabb_after_final_relations_exist() {
+        let body = include_str!("occ_generate.rs")
+            .split_once("pub async fn process_meshes_update_db_deep(")
+            .expect("process_meshes_update_db_deep exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("aabb refresh boundary")
+            .0;
+        let boolean_at = body
+            .find("apply_insts_boolean_manifold(&target_visible_refnos")
+            .expect("final boolean stage exists");
+        let final_refresh_at = body[boolean_at..]
+            .find("update_inst_relate_aabbs_by_refnos_incremental")
+            .map(|offset| boolean_at + offset)
+            .expect("targeted generation must refresh after boolean relations");
+        assert!(boolean_at < final_refresh_at, "{body}");
     }
 }
 
