@@ -123,7 +123,16 @@ jobs:
           $out = "dist/aios-database-windows-x64"
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item target/release/aios-database.exe $out
+          New-Item -ItemType Directory -Force "$out/scripts/e3d" | Out-Null
+          Copy-Item scripts/e3d/run_ams_c_entrymacro.bat "$out/scripts/e3d"
+          Copy-Item scripts/e3d/launch_detached.ps1 "$out/scripts/e3d"
           Get-ChildItem "$env:OCC_ROOT/bin/*.dll" | Copy-Item -Destination $out
+          if (!(Test-Path "$out/scripts/e3d/run_ams_c_entrymacro.bat" -PathType Leaf)) {
+            throw "packaged E3D launcher missing"
+          }
+          if (!(Test-Path "$out/scripts/e3d/launch_detached.ps1" -PathType Leaf)) {
+            throw "packaged E3D detached launcher missing"
+          }
           @"
           commit=$env:GITHUB_SHA
           ref=$env:GITHUB_REF

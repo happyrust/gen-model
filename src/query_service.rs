@@ -620,7 +620,9 @@ fn db_error(error: impl ToString) -> QueryError {
 fn e3d_error(error: anyhow::Error) -> QueryError {
     let message = format!("{error:#}");
     let lower = message.to_ascii_lowercase();
-    let code = if message.starts_with("NOT_FOUND:") {
+    let code = if message.contains("E3D_DRIVER_UNAVAILABLE:") {
+        "E3D_DRIVER_UNAVAILABLE"
+    } else if message.starts_with("NOT_FOUND:") {
         "NOT_FOUND"
     } else if lower.contains("timeout") || lower.contains("timed-out") {
         "TIMEOUT"
@@ -679,5 +681,13 @@ mod tests {
         let service = QueryService::for_identity(&repo, "AvevaMarineSample", "/ALL").unwrap();
         assert_eq!(service.driver.project, configured);
         assert_eq!(service.driver.mdb, "/ALL");
+    }
+
+    #[test]
+    fn missing_tty_launcher_has_a_configuration_error_code() {
+        let error = e3d_error(anyhow::anyhow!(
+            "E3D_DRIVER_UNAVAILABLE: E3D launcher is missing: X:/missing.bat"
+        ));
+        assert_eq!(error.code, "E3D_DRIVER_UNAVAILABLE");
     }
 }

@@ -13,6 +13,7 @@ use chrono::Local;
 use serde::Serialize;
 
 static E3D_SESSION: OnceLock<Mutex<()>> = OnceLock::new();
+const E3D_LAUNCHER_RELATIVE: &str = "scripts/e3d/run_ams_c_entrymacro.bat";
 
 #[derive(Clone, Debug)]
 pub struct E3dDriver {
@@ -35,10 +36,10 @@ impl E3dDriver {
             r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample",
         );
         Ok(Self {
-            launcher: env_path(
-                "L3_E3D_DRIVER",
-                repo.join("scripts/e3d/run_ams_c_entrymacro.bat"),
-            ),
+            launcher: std::env::var_os("L3_E3D_DRIVER")
+                .map(PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(|| default_launcher(repo))?,
             projects_dir: env_path(
                 "L3_E3D_PROJECTS_DIR",
                 project_work
@@ -106,6 +107,12 @@ impl E3dDriver {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .map_err(|_| anyhow::anyhow!("E3D session lock poisoned"))?;
+        ensure!(
+            self.launcher.is_file(),
+            "E3D_DRIVER_UNAVAILABLE: E3D launcher is missing: {} (set L3_E3D_DRIVER or install {})",
+            self.launcher.display(),
+            E3D_LAUNCHER_RELATIVE
+        );
         ensure!(
             macro_path.is_file(),
             "E3D macro is missing: {}",
@@ -450,6 +457,41 @@ fn env_path(name: &str, default: impl Into<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| default.into())
 }
 
+/// Resolve the launcher from the installed bundle. Debug builds may fall back
+/// to the source repository for developer convenience; release builds never
+/// infer an installation path from cwd.
+fn default_launcher(repo: &Path) -> Result<PathBuf> {
+    let executable = std::env::current_exe()
+        .context("E3D_DRIVER_UNAVAILABLE: cannot resolve the aios-database executable path")?;
+    let executable_dir = executable
+        .parent()
+        .context("E3D_DRIVER_UNAVAILABLE: aios-database executable has no parent directory")?;
+    Ok(launcher_for_layout(
+        repo,
+        executable_dir,
+        cfg!(debug_assertions),
+    ))
+}
+
+fn launcher_for_layout(
+    repo: &Path,
+    executable_dir: &Path,
+    allow_development_fallback: bool,
+) -> PathBuf {
+    let bundled = executable_dir.join(E3D_LAUNCHER_RELATIVE);
+    if bundled.is_file() {
+        return bundled;
+    }
+    if allow_development_fallback {
+        let development = repo.join(E3D_LAUNCHER_RELATIVE);
+        if development.is_file() {
+            return development;
+        }
+    }
+    // Keep the absent bundle candidate for an actionable deferred query error.
+    bundled
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -598,5 +640,49 @@ mod tests {
         let raw = "MCP-ORI-BEGIN\nMCP-ORI-UNSUPPORTED\nMCP-NAME-BEGIN\nName /A\nMCP-NAME-END";
         assert_eq!(section(raw, "ORI"), None);
         assert_eq!(scalar(raw, "NAME").as_deref(), Some("/A"));
+    }
+
+    #[test]
+    fn installed_launcher_wins_over_the_process_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("cwd");
+        let bundle = temp.path().join("bundle");
+        let repo_launcher = repo.join(E3D_LAUNCHER_RELATIVE);
+        let bundled_launcher = bundle.join(E3D_LAUNCHER_RELATIVE);
+        fs::create_dir_all(repo_launcher.parent().unwrap()).unwrap();
+        fs::create_dir_all(bundled_launcher.parent().unwrap()).unwrap();
+        fs::write(&repo_launcher, "cwd").unwrap();
+        fs::write(&bundled_launcher, "bundle").unwrap();
+
+        assert_eq!(launcher_for_layout(&repo, &bundle, true), bundled_launcher);
+    }
+
+    #[test]
+    fn development_layout_falls_back_to_the_repository_launcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let repo_launcher = repo.join(E3D_LAUNCHER_RELATIVE);
+        fs::create_dir_all(repo_launcher.parent().unwrap()).unwrap();
+        fs::write(&repo_launcher, "repo").unwrap();
+
+        assert_eq!(
+            launcher_for_layout(&repo, &temp.path().join("target/release"), true),
+            repo_launcher
+        );
+    }
+
+    #[test]
+    fn release_layout_never_falls_back_to_the_process_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("cwd");
+        let bundle = temp.path().join("bundle");
+        let repo_launcher = repo.join(E3D_LAUNCHER_RELATIVE);
+        fs::create_dir_all(repo_launcher.parent().unwrap()).unwrap();
+        fs::write(&repo_launcher, "stale development launcher").unwrap();
+
+        assert_eq!(
+            launcher_for_layout(&repo, &bundle, false),
+            bundle.join(E3D_LAUNCHER_RELATIVE)
+        );
     }
 }
