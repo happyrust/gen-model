@@ -1,6 +1,6 @@
 # 变更记录
 
-## 2026-08-11
+## 0.1.18 - 2026-08-11
 
 ### 变更
 
@@ -21,6 +21,18 @@
     reused_degraded）。
 
 ### 修复
+
+- AMS/8000 房间增量灰度闭环：
+  - `inst_geo` 的确定性落库从忽略重复改为 `UPSERT ... MERGE`，保留已有 mesh/AABB，
+    同时补齐缺失参数并在显式重生成时清除 `bad`；重复执行同一生成批次可收敛。
+  - 无圆角、共线回折的房间面板不再走一次性删点失败分支，统一使用逐交点修复器；
+    加入 AMS 真实 PLOOP 参数回归。
+  - `startup_autorun=false` 时，显式 `POST /update/execute` 即使所选 dbnum 已追平，
+    也会为本进程上弦并放行 durable 模型/房间积压，避免人工 canary 永久停在
+    `up_to_date`。
+  - `Run-RoomE3DE2E.ps1` 新增复用现有 9099 服务的 `db8000-equi-copy` 案例；
+    TTY 宏对 `=24384/24776` 执行 probe/apply/restore，并核对水位、新 EQUI、
+    `inst_relate`、pending/dead-letter 与空间补偿。
 
 - `AIOS_FORCE_SPATIAL_REBUILD` 只认明确真值（1/true/yes/on）：旧实现判
   `is_ok()`，部署模板写 `=0` 想关闭，实际每次启动都强制全量指针重建。三态解析
