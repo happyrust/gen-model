@@ -81,6 +81,8 @@ __pycache__/
 *.pyc
 # maturin develop 会把编译好的扩展拷进包目录（python/pysrc/aios_db/_aios_db.pyd）
 *.pyd
+# uv venv 自带内部 .gitignore 自忽略，这里再显式钉一条兜底
+/python/.venv/
 
 # 会话草稿工作区（仓库根与 python/ 下都会出现，只在本机有意义）
 .scratch/
