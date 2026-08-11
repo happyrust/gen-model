@@ -25,6 +25,11 @@ rustflags = ["-Z", "threads=8"]
 # 触发 "could not create 8 threads (os error 1450)" 并留下半成品 rlib（表现为 std/Vec 找不到）。
 jobs = 8
 
+# target.<triple>.rustflags 会整体顶掉 build.rustflags，所以 -Z threads=8 必须在这里重复一次。
+# /DEBUG:NONE 让 link.exe 不产出 PDB（rustc 自带的 /DEBUG 在前，链接器取最后一个）。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Z", "threads=8", "-C", "link-arg=/DEBUG:NONE"]
+
 #[target.x86_64-unknown-linux-musl]
 #linker = "x86_64-linux-musl-gcc"
 #[target.x86_64-pc-windows-gnu]
