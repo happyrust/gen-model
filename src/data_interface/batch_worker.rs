@@ -532,6 +532,31 @@ async fn run_one_batch(
     );
 }
 
+/// 显式布尔环境变量的三态解析（2026-08-08 审核 P2-1 确立的纪律，供所有
+/// 「只认明确真值」的开关复用；`AIOS_FORCE_SPATIAL_REBUILD` 亦走这里）：
+/// unset / 空串 / 0 / false / no / off → `Off`；1 / true / yes / on
+/// （忽略大小写与首尾空白）→ `On`；其余 → `Unrecognized`，由调用方决定
+/// 告警文案，语义上一律按关闭处理。
+pub(crate) enum ExplicitFlag {
+    On,
+    Off,
+    Unrecognized(String),
+}
+
+pub(crate) fn parse_explicit_flag(value: Option<&std::ffi::OsStr>) -> ExplicitFlag {
+    let Some(value) = value else {
+        return ExplicitFlag::Off;
+    };
+    let Some(text) = value.to_str() else {
+        return ExplicitFlag::Unrecognized(value.to_string_lossy().into_owned());
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => ExplicitFlag::On,
+        "" | "0" | "false" | "no" | "off" => ExplicitFlag::Off,
+        _ => ExplicitFlag::Unrecognized(text.to_string()),
+    }
+}
+
 /// 稳态增量默认走 ADR-017 kv-mem 暂存窗口。
 ///
 /// - `start_sesno <= 1`：对应 `applied_sesno == 0` 的基线/冷启动，豁免暂存。
@@ -543,22 +568,14 @@ pub(crate) fn direct_increment_enabled() -> bool {
 /// 只有明确真值才打开应急直写（2026-08-08 审核 P2-1）。
 ///
 /// 旧实现判 `is_some()`：部署模板显式注入 `GEN_MODEL_DIRECT_INCREMENT=0` 想关闭
-/// 开关，反而会静默绕过整个 kv-mem 暂存方案、回到旧直写语义。unset、空串与明确
-/// 假值（0/false/no/off）都是关闭；认不出的值按关闭处理并告警一次——宁可少开
+/// 开关，反而会静默绕过整个 kv-mem 暂存方案、回到旧直写语义。宁可少开
 /// 紧急通道，也不能让「写 0」变成「打开」。
 fn direct_increment_flag(value: Option<&std::ffi::OsStr>) -> bool {
-    let Some(value) = value else {
-        return false;
-    };
-    let Some(text) = value.to_str() else {
-        warn_unrecognized_direct_increment_once(&value.to_string_lossy());
-        return false;
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "" | "0" | "false" | "no" | "off" => false,
-        _ => {
-            warn_unrecognized_direct_increment_once(text);
+    match parse_explicit_flag(value) {
+        ExplicitFlag::On => true,
+        ExplicitFlag::Off => false,
+        ExplicitFlag::Unrecognized(text) => {
+            warn_unrecognized_direct_increment_once(&text);
             false
         }
     }
@@ -2797,9 +2814,9 @@ mod tests {
             )
         );
         // 曾钉「直写模式强制空间树重建」（aabb_tree.rs 引用本模块的
-        // direct_increment_enabled）。空间树启动策略改为「默认复用树文件、仅显式
-        // AIOS_FORCE_SPATIAL_REBUILD 重建」后该联动被移除，反向不变量由
-        // aabb_tree::tests::startup_reuses_project_tree_unless_rebuild_is_explicitly_requested 钉住。
+        // direct_increment_enabled）。启动改走分层指纹判据（2026-08-11 方案）后
+        // 该联动不再需要：直写崩溃丢失落入「指纹失配且无待重放意图」自动重建，
+        // 由 aabb_tree::tests::startup_layers_fingerprint_replay_then_rebuild 钉住。
     }
 
     /// 应急直写只认明确真值（2026-08-08 审核 P2-1）。

@@ -395,11 +395,45 @@
     空间意图也不递增 epoch，崩溃丢掉的内存树变更 sidecar 认不出来——该环境变量
     存在时启动无条件走指针重建；另备 `AIOS_FORCE_SPATIAL_REBUILD=1` 作运维强制
     重建开关。树内 `mesh_cache` 不随 regen 失效的问题只影响交互拾取，本轮未动。
+    **（后续演进：直写事务已随增量加固补上 epoch bump；启动判据的摇摆与定案见
+    2026-08-11 增补。）**
   - 回退即红的测试：收敛路径不得出现 `update_inst_relate_aabbs_by_refnos`、指针
     重建只读不写、启动信任判据必须是 epoch 相等且失配收敛到指针重建、epoch bump
     与意图同事务先于水位、无空间意图不 bump、反序列化后索引自愈（防同 refno 堆叠）。
+- 2026-08-11 增补（**启动信任判据定案：双字段指纹 + 意图重放优先 + 兜底指针重建**，
+  方案与决策记录见 `docs/2026-08-11_spatial-tree-startup-init-plan.md`）——
+  - 背景：v0.1.7（提交 `cd3ea9e9`）曾把启动改成「无条件复用树文件、仅显式
+    `AIOS_FORCE_SPATIAL_REBUILD` 重建」，动机是旧 epoch 校验在「崩溃后带着待重放
+    空间意图启动」时必然失配、每次都触发全量指针重建，而其实意图重放就能便宜自愈。
+    但一并丢掉的是三道在编的防线：静默陈旧树 + 启动全量房间重建（= 历史「重启回退
+    room_relate」的复发向量）、直写崩溃检测、文件缺失/损坏自愈。
+  - 定案为分层判据（`load_project_tree_verified`）：内存树非空保持不动 → 强制
+    重建环境变量（改真值解析）→ 文件缺失/损坏**自动**指针重建 → 指纹
+    `(epoch 值, 库侧该 epoch 的 updated_at)` 双字段与库相等才直接复用；失配但
+    `has_pending_spatial_work` 为真 → 复用文件交给意图重放自愈（不再重建，消除
+    v0.1.7 要解的那个痛点）；失配且无意图 → 只读指针重建（直写崩溃 / 换文件 /
+    回滚库）。完备性依据：`reconcile_spatial_pending` 是「树同步 → 落盘 → 才销账」，
+    「文件 + 待重放意图」对暂存路径无遗漏。
+  - 指纹从单一 epoch 数值扩成双字段（评审反馈：**要与数据库对时间戳**）：时间戳与
+    计数由 `render_spatial_epoch_bump` 同一事务写入、同源于库端时钟，库快照回滚
+    恰好撞回同一计数的边界也认得出来。sidecar `TreeFileMeta` 新增
+    `db_epoch_updated_at`（serde 缺省空串，旧版文件自动按失配走一次自愈补齐）。
+  - 决策（决策卡确认）：D1 文件缺失/损坏自动重建；D2 库侧诊断查询失败降级复用
+    文件 + 告警；D3 两处启动调用点统一「告警降级空树、不阻断启动」；D4 不加
+    「回到盲信」逃生舱。
+  - 修复 `AIOS_FORCE_SPATIAL_REBUILD` 的 `is_ok()` 判定（部署模板写 `=0` 想关闭，
+    实际每次启动都强制全量重建）：与 `GEN_MODEL_DIRECT_INCREMENT` 的 P2-1 同款
+    三态真值解析，收口在 `batch_worker::parse_explicit_flag`。
+  - 可观测性：/health 新增 `spatial_tree`（文件/库两侧指纹现读现比、drift、
+    entries、本次启动裁决 reused / healed_by_replay / rebuilt / empty /
+    preloaded / reused_degraded）。
+  - 回退即红的测试：快路径必须比双字段指纹、失配必须先问意图重放且意图查询先于
+    裁决、文件缺失必须自动重建、强制重建不得回到 `is_ok`、默认路径仍禁条数对账与
+    几何重算重写、盖章指纹必须在写文件之前读、判据真值表（含快照回滚撞计数与
+    旧版 sidecar 两个边界）、旧格式 sidecar 解析缺省空串。
 
-日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 三轮增补，2026-08-06 一轮增补）
+日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 三轮增补，2026-08-06 一轮增补，
+2026-08-11 一轮增补）
 关联：`docs/2026-07-27_room-incremental-audit-report.md`（缺陷取证 D1–D7）；
 `docs/2026-07-27_room-incremental-implementation-report.md`（变更清单、验证证据、残留风险）；
 `src/fast_model/room_model.rs`；`src/data_interface/model_update_pending.rs`；

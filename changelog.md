@@ -1,5 +1,32 @@
 # 变更记录
 
+## 2026-08-11
+
+### 变更
+
+- **空间树启动初始化改为分层判据**（方案与决策记录
+  `docs/2026-08-11_spatial-tree-startup-init-plan.md`，ADR-010 2026-08-11 增补）：
+  - sidecar 指纹从单一 epoch 数值扩成 **(epoch 值, 库侧 bump 时刻 `updated_at`)**
+    双字段，两个字段都与库相等才直接复用树文件（评审要求：与数据库对时间戳；
+    库快照回滚恰好撞回同一计数也认得出来）。旧版 sidecar 缺新字段按失配走，
+    一次自愈后补齐。
+  - 指纹失配但库里还有待重放空间意图 → 复用文件、交给 worker 出队前的意图重放
+    自愈（不再像旧 epoch 校验那样每次崩溃重启都全量重建）；失配且无意图 →
+    只读指针重建（直写崩溃 / 换文件 / 回滚库）。
+  - 树文件缺失/损坏从「空树等人工」改为**自动指针重建**（决策 D1）；库侧诊断
+    查询失败降级复用文件 + 告警（D2）；两处启动调用点统一为「告警降级空树、
+    不阻断启动」（D3）。
+  - /health 新增 `spatial_tree`：文件/库两侧指纹现读现比、`drift`、条目数与
+    本次启动裁决（reused / healed_by_replay / rebuilt / empty / preloaded /
+    reused_degraded）。
+
+### 修复
+
+- `AIOS_FORCE_SPATIAL_REBUILD` 只认明确真值（1/true/yes/on）：旧实现判
+  `is_ok()`，部署模板写 `=0` 想关闭，实际每次启动都强制全量指针重建。三态解析
+  收口在 `batch_worker::parse_explicit_flag`，与 `GEN_MODEL_DIRECT_INCREMENT`
+  的 P2-1 纪律同款。
+
 ## 2026-08-06
 
 ### 新增

@@ -459,7 +459,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         );
     }
 
-    // 启动默认直接复用已有项目树；只有 AIOS_FORCE_SPATIAL_REBUILD 才显式重建。
+    // 启动分层判据装载空间树（docs/2026-08-11_spatial-tree-startup-init-plan.md）：
+    // 指纹（epoch 值 + 库侧时间戳）一致 → 直接复用；失配但有待重放空间意图 →
+    // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
     // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
     // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
     println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
@@ -654,8 +656,11 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         }
     }
 
-    // 默认直接复用已有项目树；AIOS_FORCE_SPATIAL_REBUILD=1 时才从库指针重建。
-    crate::fast_model::aabb_tree::load_project_tree_verified().await?;
+    // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
+    // 重建的派生数据，加载失败告警降级空树，不阻断启动。
+    if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
+        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+    }
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await
 }

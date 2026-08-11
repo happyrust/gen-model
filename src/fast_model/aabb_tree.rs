@@ -151,12 +151,20 @@ fn project_tree_meta_file() -> String {
     )
 }
 
-/// sidecar 内容：树文件对应的库侧空间版本号与条目数。
+/// sidecar 内容：树文件对应的库侧空间指纹与条目数。
 ///
-/// 启动默认直接复用树文件，不再因 epoch 不一致自动重建；这些字段只作诊断。
+/// `(epoch, db_epoch_updated_at)` 合成启动信任指纹（方案
+/// `docs/2026-08-11_spatial-tree-startup-init-plan.md` §3）：单靠计数在
+/// 「库快照回滚恰好回到同一计数」时会撞值，时间戳与计数同一事务写入、同源于
+/// 库端时钟，双字段都相等才信文件。
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TreeFileMeta {
     epoch: u64,
+    /// 库侧该 epoch 的 `updated_at`（字符串化 datetime，与 epoch 同一事务落库）。
+    /// 旧版 sidecar 没有此字段：serde 缺省空串，而空串永不等于库侧真实时刻，
+    /// 于是老文件自动落入失配分支、一次自愈后补齐。
+    #[serde(default)]
+    db_epoch_updated_at: String,
     entries: u64,
     saved_at_unix: u64,
 }
@@ -224,33 +232,47 @@ pub(crate) fn render_spatial_epoch_bump() -> String {
 struct EpochRow {
     #[serde(default)]
     value: u64,
+    #[serde(default)]
+    updated_at: Option<String>,
 }
 
-/// 读库侧当前空间版本号（记录不存在按 0）。
-pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
+/// 读库侧当前空间指纹 `(epoch 值, 该 epoch 的 updated_at)`。
+///
+/// 记录不存在按 `(0, "")`——全新库 / 从未有过空间提交。`updated_at` 铸成字符串
+/// 取回，跳过 datetime 在 serde 两侧的形状差异；它与计数由
+/// [`render_spatial_epoch_bump`] 同一事务写入，合成的指纹见 [`TreeFileMeta`]。
+pub(crate) async fn read_db_spatial_epoch_stamp() -> anyhow::Result<(u64, String)> {
     let mut response = SUL_DB
         // `value` 是 SurrealQL 的保留字（`SELECT VALUE …` 的投影修饰符）：不加反引号
         // 整条语句在 parse 阶段就失败，而启动路径上的 `?` 会把整个进程带下去。
-        .query(format!("SELECT `value` FROM {SPATIAL_EPOCH_ID};"))
+        .query(format!(
+            "SELECT `value`, <string> updated_at AS updated_at FROM {SPATIAL_EPOCH_ID};"
+        ))
         .await
         .map_err(|e| anyhow::anyhow!("读取空间版本号失败: {e}"))?
         .check()
         .map_err(|e| anyhow::anyhow!("读取空间版本号语句失败: {e}"))?;
     Ok(response
         .take::<Vec<EpochRow>>(0)?
-        .first()
-        .map(|row| row.value)
-        .unwrap_or(0))
+        .into_iter()
+        .next()
+        .map(|row| (row.value, row.updated_at.unwrap_or_default()))
+        .unwrap_or((0, String::new())))
+}
+
+/// 只要数值的旧口径（`room_build:main` 对账凭据等消费方）。
+pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
+    Ok(read_db_spatial_epoch_stamp().await?.0)
 }
 
 /// 序列化当前内存树到项目文件并盖 sidecar 章。
 ///
-/// epoch 在写文件**之前**读：并发的尾事务若在读章与写盘之间又推高了版本号，
-/// sidecar 只会偏旧 → 下次启动宁可多做一次指针重建，方向安全；反过来先写后读
-/// 会把新章盖在旧内容上。直写 / 全量路径不递增 epoch，但它们改完树都会走到
-/// 这里落盘，章一样盖得上。
+/// 指纹（epoch 值 + 库侧 updated_at）在写文件**之前**读：并发的尾事务若在读章与
+/// 写盘之间又推高了版本号，sidecar 只会偏旧 → 下次启动宁可多做一次指针重建，
+/// 方向安全；反过来先写后读会把新章盖在旧内容上。全量生成路径不递增 epoch，
+/// 但它改完树同样走到这里落盘，章一样盖得上。
 async fn persist_project_tree_now() -> anyhow::Result<()> {
-    let epoch = read_db_spatial_epoch().await?;
+    let (epoch, db_epoch_updated_at) = read_db_spatial_epoch_stamp().await?;
     let entries = {
         let tree = GLOBAL_AABB_TREE.read().await;
         write_project_tree_file(&tree)?;
@@ -258,6 +280,7 @@ async fn persist_project_tree_now() -> anyhow::Result<()> {
     };
     write_tree_meta(&TreeFileMeta {
         epoch,
+        db_epoch_updated_at,
         entries,
         saved_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -289,39 +312,214 @@ pub async fn persist_aabb_tree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 启动加载：默认直接复用本项目已经落盘的空间树，不做 epoch 对账，也不自动重建。
+/// `AIOS_FORCE_SPATIAL_REBUILD` 只认明确真值（与 `GEN_MODEL_DIRECT_INCREMENT`
+/// 的 P2-1 同款纪律）。旧实现判 `std::env::var(..).is_ok()`：部署模板写 `=0`
+/// 想关闭，实际**每次启动都强制全量指针重建**——方向与当年直写开关那只脚枪
+/// 相反，根子相同。
+fn force_spatial_rebuild_enabled() -> bool {
+    force_spatial_rebuild_flag(std::env::var_os("AIOS_FORCE_SPATIAL_REBUILD").as_deref())
+}
+
+fn force_spatial_rebuild_flag(value: Option<&std::ffi::OsStr>) -> bool {
+    use crate::data_interface::batch_worker::ExplicitFlag;
+    match crate::data_interface::batch_worker::parse_explicit_flag(value) {
+        ExplicitFlag::On => true,
+        ExplicitFlag::Off => false,
+        ExplicitFlag::Unrecognized(text) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                let message = format!(
+                    "AIOS_FORCE_SPATIAL_REBUILD={text:?} 不是可识别的开关值（真值只认 1/true/yes/on），按关闭处理，走常规启动判据"
+                );
+                log::warn!("{message}");
+                eprintln!("{message}");
+            });
+            false
+        }
+    }
+}
+
+/// 启动分层判据的裁决（方案 `docs/2026-08-11_spatial-tree-startup-init-plan.md` §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupVerdict {
+    /// 指纹（epoch 值 + 库侧 bump 时刻）与库完全一致：文件新鲜，直接复用。
+    Reuse,
+    /// 指纹失配但库里还有待重放的空间意图：意图行只在树落盘之后才销账
+    /// （`reconcile_spatial_pending` 的顺序），「文件 + 待重放意图」对暂存路径
+    /// 是完备集——复用文件，交给 worker 出队前的重放闸门自愈，不做全量重建。
+    HealByReplay,
+    /// 指纹失配且无意图可解释：直写崩溃 / 换文件 / 回滚库。只读指针重建。
+    Rebuild,
+}
+
+/// 纯判据：文件 sidecar 指纹 vs 库侧指纹 vs 待重放意图。IO 全在调用方。
+fn startup_verdict(
+    meta: Option<&TreeFileMeta>,
+    db_epoch: u64,
+    db_epoch_updated_at: &str,
+    has_pending_spatial_work: bool,
+) -> StartupVerdict {
+    let fingerprint_matches = meta.is_some_and(|meta| {
+        meta.epoch == db_epoch && meta.db_epoch_updated_at == db_epoch_updated_at
+    });
+    if fingerprint_matches {
+        StartupVerdict::Reuse
+    } else if has_pending_spatial_work {
+        StartupVerdict::HealByReplay
+    } else {
+        StartupVerdict::Rebuild
+    }
+}
+
+/// 日志里描述 sidecar 指纹的那一侧。
+fn describe_meta(meta: Option<&TreeFileMeta>) -> String {
+    match meta {
+        None => "sidecar 缺失/损坏".to_string(),
+        Some(meta) if meta.db_epoch_updated_at.is_empty() => {
+            format!("epoch {}（旧版 sidecar 无时间戳）", meta.epoch)
+        }
+        Some(meta) => format!("epoch {} @ {}", meta.epoch, meta.db_epoch_updated_at),
+    }
+}
+
+/// 本进程启动加载的最终裁决，/health 的 `spatial_tree.startup_verdict` 曝光用。
+static STARTUP_VERDICT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+fn record_startup_verdict(verdict: &'static str) {
+    let _ = STARTUP_VERDICT.set(verdict);
+}
+
+/// 启动加载（方案 2026-08-11 分层判据，决策 D1/D2 已定）：
 ///
-/// 只有显式设置 `AIOS_FORCE_SPATIAL_REBUILD` 时才从库指针分页重建。树文件缺失或
-/// 损坏时保持空树启动并打印操作提示，避免一次启动隐式触发耗时的全库读取。
-/// 已在内存里的树保持不动（live 夹具先填树再启动的场景）。
+/// 0. 内存树非空 → 保持不动（live 夹具先填树再启动的场景）；
+/// 1. `AIOS_FORCE_SPATIAL_REBUILD` 为真值 → 指针重建；
+/// 2. 树文件缺失/损坏 → 指针重建自愈（D1：只读且量级已实测，等人工期间的
+///    房间队列积压更贵）；
+/// 3. 文件可读 → 与库比指纹 `(epoch, updated_at)`：相等 → 复用（快路径）；
+///    失配但有待重放空间意图 → 复用文件交给重放自愈；失配且无意图 → 指针重建；
+/// 4. 库侧诊断查询失败 → 降级复用文件 + 告警（D2：文件好过空树，worker 出队前
+///    的意图闸门后续兜底）。
 pub async fn load_project_tree_verified() -> anyhow::Result<()> {
     if !GLOBAL_AABB_TREE.read().await.is_empty() {
+        record_startup_verdict("preloaded");
         return Ok(());
     }
-    if std::env::var("AIOS_FORCE_SPATIAL_REBUILD").is_ok() {
+    if force_spatial_rebuild_enabled() {
         println!("按环境变量要求跳过空间树文件，从库指针重建");
-        return rebuild_tree_from_pointers().await;
+        return rebuild_at_startup().await;
     }
 
-    match read_project_tree_file() {
-        Ok(tree) => {
-            let entries = tree.size();
+    let tree = match read_project_tree_file() {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("空间树文件不可用（{error:#}），从库指针自动重建");
+            return rebuild_at_startup().await;
+        }
+    };
+    let entries = tree.size();
+
+    let (db_epoch, db_epoch_updated_at) = match read_db_spatial_epoch_stamp().await {
+        Ok(stamp) => stamp,
+        Err(error) => {
             *GLOBAL_AABB_TREE.write().await = tree;
-            let epoch = read_tree_meta()
-                .map(|meta| meta.epoch.to_string())
-                .unwrap_or_else(|_| "未知".to_string());
+            record_startup_verdict("reused_degraded");
+            eprintln!(
+                "读取库侧空间指纹失败（{error:#}），降级复用项目树文件 {}（{entries} 条）；\
+                 worker 出队前的意图闸门后续兜底",
+                project_tree_file()
+            );
+            return Ok(());
+        }
+    };
+    let has_pending = match crate::data_interface::side_effect_pending::SideEffectCompensator::
+        has_pending_spatial_work()
+    .await
+    {
+        Ok(pending) => pending,
+        Err(error) => {
+            // 判不了就按「可能有意图」处理：方向与 D2 相同——复用文件比把一次
+            // 诊断抖动放大成全量重建更稳。
+            eprintln!("读取待重放空间意图失败（{error:#}），按存在意图的方向降级复用文件");
+            true
+        }
+    };
+    let meta = read_tree_meta().ok();
+
+    match startup_verdict(meta.as_ref(), db_epoch, &db_epoch_updated_at, has_pending) {
+        StartupVerdict::Reuse => {
+            *GLOBAL_AABB_TREE.write().await = tree;
+            record_startup_verdict("reused");
             println!(
-                "空间树直接复用项目文件 {}（{entries} 条，记录 epoch {epoch}；未触发重建）",
+                "空间树复用项目文件 {}（{entries} 条，指纹 epoch {db_epoch} @ {db_epoch_updated_at} 与库一致）",
                 project_tree_file()
             );
         }
-        Err(error) => {
-            eprintln!(
-                "空间树文件不可用（{error:#}），默认保持空树且不重建；如需重建请设置 AIOS_FORCE_SPATIAL_REBUILD=1"
+        StartupVerdict::HealByReplay => {
+            *GLOBAL_AABB_TREE.write().await = tree;
+            record_startup_verdict("healed_by_replay");
+            println!(
+                "空间树文件指纹与库不一致（文件 {}，库 epoch {db_epoch} @ {db_epoch_updated_at}），\
+                 但存在待重放空间意图：复用文件（{entries} 条），交给 worker 出队前的意图重放自愈",
+                describe_meta(meta.as_ref())
             );
+        }
+        StartupVerdict::Rebuild => {
+            println!(
+                "空间树文件指纹与库不一致且无待重放意图（文件 {}，库 epoch {db_epoch} @ {db_epoch_updated_at}）：\
+                 无法解释的漂移（直写崩溃 / 换文件 / 回滚库），从库指针重建",
+                describe_meta(meta.as_ref())
+            );
+            return rebuild_at_startup().await;
         }
     }
     Ok(())
+}
+
+/// 启动路径的指针重建外壳：成功才记 `rebuilt`，失败记 `empty` 并原样上抛
+/// （调用点按 D3 告警降级空树继续启动）。
+async fn rebuild_at_startup() -> anyhow::Result<()> {
+    match rebuild_tree_from_pointers().await {
+        Ok(()) => {
+            record_startup_verdict("rebuilt");
+            Ok(())
+        }
+        Err(error) => {
+            record_startup_verdict("empty");
+            Err(error)
+        }
+    }
+}
+
+/// /health 的 `spatial_tree` 字段：树文件指纹、库侧指纹、漂移与启动裁决。
+///
+/// 指纹现读现比（不是启动时的快照），运行中出现的漂移也看得见；启动裁决是进程内
+/// 一次性记录。任何一侧读不出来都如实报 null、`drift` 置 true 并单列 error——
+/// 健康端点不许因诊断失败而挂。
+pub async fn spatial_tree_status() -> serde_json::Value {
+    let entries = GLOBAL_AABB_TREE.read().await.size();
+    let meta = read_tree_meta();
+    let db = read_db_spatial_epoch_stamp().await;
+    let drift = !matches!(
+        (&meta, &db),
+        (Ok(meta), Ok((db_epoch, db_updated_at)))
+            if meta.epoch == *db_epoch && meta.db_epoch_updated_at == *db_updated_at
+    );
+    let error = match (&meta, &db) {
+        (Err(error), _) => Some(format!("{error:#}")),
+        (_, Err(error)) => Some(format!("{error:#}")),
+        _ => None,
+    };
+    serde_json::json!({
+        "entries": entries,
+        "file_epoch": meta.as_ref().ok().map(|meta| meta.epoch),
+        "file_epoch_updated_at": meta.as_ref().ok().map(|meta| meta.db_epoch_updated_at.clone()),
+        "file_saved_at_unix": meta.as_ref().ok().map(|meta| meta.saved_at_unix),
+        "db_epoch": db.as_ref().ok().map(|(epoch, _)| *epoch),
+        "db_epoch_updated_at": db.as_ref().ok().map(|(_, updated_at)| updated_at.clone()),
+        "drift": drift,
+        "startup_verdict": STARTUP_VERDICT.get().copied().unwrap_or("unknown"),
+        "error": error,
+    })
 }
 
 /// 从库指针整树重建：分页读 `inst_relate` 的 `(refno, noun, aabb.d)`，bulk-load
@@ -575,32 +773,155 @@ mod tests {
         );
     }
 
-    /// 默认启动必须直接复用项目树；只有显式环境变量才能进入指针重建。
+    /// 启动分层判据（方案 2026-08-11）：快路径必须比双字段指纹；失配后必须先问
+    /// 待重放意图（能重放就不重建）；文件缺失/损坏必须自动重建；强制重建只认
+    /// 真值解析；默认路径仍不得触发条数对账或几何重算重写。
     #[test]
-    fn startup_reuses_project_tree_unless_rebuild_is_explicitly_requested() {
+    fn startup_layers_fingerprint_replay_then_rebuild() {
         let source = include_str!("aabb_tree.rs");
         let body = source
             .split_once(concat!("pub async fn ", "load_project_tree_verified("))
             .expect("load_project_tree_verified must exist")
             .1
-            .split_once(concat!("pub async fn ", "rebuild_tree_from_pointers("))
-            .expect("rebuild must follow")
+            .split_once(concat!("async fn ", "rebuild_at_startup("))
+            .expect("startup rebuild shell must follow")
             .0;
         assert!(
             body.contains("read_project_tree_file()"),
-            "默认启动必须读取并复用项目树文件: {body}"
+            "默认启动必须先尝试项目树文件: {body}"
         );
         assert!(
-            body.contains("std::env::var(\"AIOS_FORCE_SPATIAL_REBUILD\")")
-                && body.contains("return rebuild_tree_from_pointers().await"),
-            "指针重建必须只由显式环境变量触发: {body}"
+            body.contains("read_db_spatial_epoch_stamp()"),
+            "启动必须读库侧指纹（epoch 值 + updated_at）: {body}"
         );
         assert!(
-            !body.contains("read_db_spatial_epoch")
-                && !body.contains("direct_increment_enabled")
-                && !body.contains("sync_aabb_tree_with_db"),
-            "默认启动不得因 epoch、直写模式或条数对账触发重建: {body}"
+            body.contains("has_pending_spatial_work()"),
+            "指纹失配必须先问待重放意图，能重放就不重建: {body}"
         );
+        assert!(
+            body.contains("force_spatial_rebuild_enabled()")
+                && !body.contains(".is_ok()"),
+            "强制重建必须走真值解析，不得回到 is_ok 判定: {body}"
+        );
+        let pending_at = body
+            .find("has_pending_spatial_work()")
+            .expect("checked above");
+        // `record_startup_verdict(` 含同名子串，钉「裁决调用」要带 match 前缀。
+        let verdict_at = body
+            .find("match startup_verdict(")
+            .expect("裁决必须由纯判据函数给出");
+        assert!(
+            pending_at < verdict_at,
+            "意图查询必须发生在裁决之前: {body}"
+        );
+        assert!(
+            !body.contains("sync_aabb_tree_with_db") && !body.contains("manual_update_aabbs"),
+            "默认启动不得触发条数对账或几何重算重写: {body}"
+        );
+
+        // 文件缺失/损坏分支必须走自动重建（决策 D1），不再空树等人工。
+        let missing_branch = body
+            .split_once("read_project_tree_file()")
+            .expect("checked above")
+            .1;
+        assert!(
+            missing_branch.contains("return rebuild_at_startup().await"),
+            "文件不可用必须自动指针重建: {body}"
+        );
+    }
+
+    /// 分层判据的真值表（纯函数，方案 §3）。
+    #[test]
+    fn startup_verdict_truth_table() {
+        let meta = |epoch: u64, at: &str| TreeFileMeta {
+            epoch,
+            db_epoch_updated_at: at.to_string(),
+            entries: 1,
+            saved_at_unix: 0,
+        };
+        // 双字段都相等 → 复用。
+        assert_eq!(
+            startup_verdict(Some(&meta(3, "t3")), 3, "t3", false),
+            StartupVerdict::Reuse
+        );
+        // 数值相等、时间戳不等（库快照回滚恰好撞回同一计数）→ 不放行。
+        assert_eq!(
+            startup_verdict(Some(&meta(3, "t-old")), 3, "t3", false),
+            StartupVerdict::Rebuild
+        );
+        // 失配 + 有待重放意图 → 复用文件交给重放，不做全量重建。
+        assert_eq!(
+            startup_verdict(Some(&meta(2, "t2")), 3, "t3", true),
+            StartupVerdict::HealByReplay
+        );
+        // 失配 + 无意图 → 指针重建。
+        assert_eq!(
+            startup_verdict(Some(&meta(2, "t2")), 3, "t3", false),
+            StartupVerdict::Rebuild
+        );
+        // 旧版 sidecar（无时间戳字段，缺省空串）→ 一律按失配。
+        assert_eq!(
+            startup_verdict(Some(&meta(3, "")), 3, "t3", false),
+            StartupVerdict::Rebuild
+        );
+        // sidecar 缺失/损坏 → 按失配走。
+        assert_eq!(
+            startup_verdict(None, 3, "t3", true),
+            StartupVerdict::HealByReplay
+        );
+        // 全新库（无 epoch 记录 → (0, "")）+ 与之匹配的 sidecar → 复用。
+        assert_eq!(
+            startup_verdict(Some(&meta(0, "")), 0, "", false),
+            StartupVerdict::Reuse
+        );
+    }
+
+    /// `AIOS_FORCE_SPATIAL_REBUILD` 只认明确真值：旧的 `is_ok()` 判定下，部署
+    /// 模板写 `=0` 想关闭，实际每次启动都强制全量重建。
+    #[test]
+    fn force_rebuild_only_accepts_truthy_values() {
+        use std::ffi::OsStr;
+
+        assert!(!force_spatial_rebuild_flag(None), "unset 必须关闭");
+        for off in ["", "  ", "0", "false", "no", "off", "FALSE", " Off "] {
+            assert!(
+                !force_spatial_rebuild_flag(Some(OsStr::new(off))),
+                "明确假值必须关闭: {off:?}"
+            );
+        }
+        for on in ["1", "true", "yes", "on", "TRUE", " On "] {
+            assert!(
+                force_spatial_rebuild_flag(Some(OsStr::new(on))),
+                "明确真值必须打开: {on:?}"
+            );
+        }
+        for junk in ["2", "rebuild", "开"] {
+            assert!(
+                !force_spatial_rebuild_flag(Some(OsStr::new(junk))),
+                "认不出的值必须按关闭处理: {junk:?}"
+            );
+        }
+    }
+
+    /// 盖章指纹必须在写文件之前读：并发 bump 只许把 sidecar 盖旧（下次多做一次
+    /// 重建，方向保守），不许把新章盖在旧内容上。
+    #[test]
+    fn fingerprint_is_read_before_the_file_is_written() {
+        let source = include_str!("aabb_tree.rs");
+        let body = source
+            .split_once(concat!("async fn ", "persist_project_tree_now("))
+            .expect("persist_project_tree_now must exist")
+            .1
+            .split_once(concat!("pub async fn ", "persist_aabb_tree_if_dirty("))
+            .expect("dirty persist must follow")
+            .0;
+        let stamp_at = body
+            .find("read_db_spatial_epoch_stamp()")
+            .expect("盖章前必须读库侧指纹");
+        let write_at = body
+            .find("write_project_tree_file(")
+            .expect("必须写树文件");
+        assert!(stamp_at < write_at, "指纹必须在写文件之前读: {body}");
     }
 
     /// 树的口径是「镜像已提交指针」：指针已消失的 refresh 目标必须摘除树条目，
@@ -646,18 +967,36 @@ mod tests {
         assert_eq!(restored.size(), 2, "同一 refno 不允许堆叠历史包围盒");
     }
 
-    /// sidecar 元数据的编解码往返。
+    /// sidecar 元数据的编解码往返（含指纹时间戳字段）。
     #[test]
     fn tree_meta_roundtrip() {
         let meta = TreeFileMeta {
             epoch: 42,
+            db_epoch_updated_at: "2026-08-11T07:00:00Z".into(),
             entries: 906,
             saved_at_unix: 1_754_000_000,
         };
         let bytes = serde_json::to_vec(&meta).expect("encode");
         let back: TreeFileMeta = serde_json::from_slice(&bytes).expect("decode");
         assert_eq!(back.epoch, 42);
+        assert_eq!(back.db_epoch_updated_at, "2026-08-11T07:00:00Z");
         assert_eq!(back.entries, 906);
+    }
+
+    /// 旧版 sidecar（无 `db_epoch_updated_at` 字段）必须能解析且缺省空串——
+    /// 空串永不等于库侧真实时刻，于是老文件自动落入失配分支、一次自愈后补齐。
+    #[test]
+    fn legacy_tree_meta_without_timestamp_parses_as_mismatch() {
+        let back: TreeFileMeta =
+            serde_json::from_slice(br#"{"epoch":42,"entries":906,"saved_at_unix":1}"#)
+                .expect("decode legacy sidecar");
+        assert_eq!(back.epoch, 42);
+        assert_eq!(back.db_epoch_updated_at, "");
+        assert_eq!(
+            startup_verdict(Some(&back), 42, "2026-08-11T00:00:00Z", false),
+            StartupVerdict::Rebuild,
+            "旧版 sidecar 不得凭数值相等直接放行"
+        );
     }
 
     /// 版本号递增语句：固定记录、自增一、缺省从 0 起。

@@ -150,6 +150,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "staging_window_blocks": window_blocks,
         "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
         "spatial_reconcile": spatial_reconcile,
+        // 空间树文件指纹 vs 库侧指纹（现读现比）+ 本次启动的装载裁决
+        // （reused / healed_by_replay / rebuilt / empty / preloaded / reused_degraded）。
+        // drift=true 而 spatial_reconcile 又无 pending，说明树在静默漂移——正是
+        // 启动分层判据要在下次重启拦下的那类状态，这里让它运行中就可见。
+        "spatial_tree": crate::fast_model::aabb_tree::spatial_tree_status().await,
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,
