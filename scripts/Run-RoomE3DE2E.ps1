@@ -8,6 +8,8 @@ param(
     [switch]$DirectIncrement,
     [int]$SurrealPort = 8009,
     [switch]$ReuseExistingDatabase,
+    [switch]$ReuseExistingService,
+    [string]$ServiceBase = 'http://127.0.0.1:9099/api/v1',
     [string]$TestExe = '',
     [string]$L3Exe = '',
     [string]$Output = "output/room-e3d-e2e/$(Get-Date -Format yyyyMMdd-HHmmss)"
@@ -307,6 +309,115 @@ function Invoke-Preflight([string]$name, [string]$macro, [string]$dir, [string]$
     }
 }
 
+function Invoke-SurrealSql([string]$sql) {
+    $headers = @{
+        Accept = 'application/json'
+        'surreal-ns' = '1516'
+        'surreal-db' = 'AvevaMarineSample'
+        Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('root:root'))
+    }
+    return @(Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$SurrealPort/sql" `
+        -Headers $headers -ContentType 'application/surrealql' -Body $sql)
+}
+
+function Get-Db8000Status {
+    $status = Invoke-RestMethod "$ServiceBase/dbnums"
+    return @($status.dbnums | Where-Object dbnum -eq 8000)[0]
+}
+
+function Wait-Db8000Converged([int]$minimumSesno, [string]$phase) {
+    $deadline = (Get-Date).AddMinutes(30)
+    do {
+        $db = Get-Db8000Status
+        $pending = Invoke-RestMethod "$ServiceBase/update/pending-units"
+        $health = Invoke-RestMethod "$ServiceBase/health"
+        if ($db.file_latest_sesno -ge $minimumSesno -and
+            $db.applied_sesno -eq $db.file_latest_sesno -and
+            @($pending.room_units).Count -eq 0 -and
+            @($pending.units).Count -eq 0 -and
+            [int]$pending.room_dead_letters -eq 0 -and
+            [int]$pending.dead_letters -eq 0 -and
+            [int]$health.spatial_reconcile.pending -eq 0) {
+            return [ordered]@{dbnum=$db;pending=$pending;health=$health;at=(Get-Date).ToString('o')}
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    throw "$phase did not converge: file=$($db.file_latest_sesno), applied=$($db.applied_sesno), room=$(@($pending.room_units).Count), model=$(@($pending.units).Count)"
+}
+
+function Invoke-Db8000EquiCopyCase {
+    if (-not $ReuseExistingService) {
+        throw 'db8000-equi-copy requires -ReuseExistingService'
+    }
+    $name = 'db8000-equi-copy'
+    $row = New-CaseRow $name
+    $restoreRequired = $false
+    $caseDir = Join-Path $out $name
+    New-Item -ItemType Directory -Force $caseDir | Out-Null
+    try {
+        Invoke-Phase $row 'probe-driver' {
+            Invoke-Driver 'scripts/e3d/db8000_equi_copy_probe.mac' "$name-probe-driver" 'CODEX-DB8000-EQUI-PROBE-DONE'
+        }
+        $before = Get-Db8000Status
+        $pendingBefore = Invoke-RestMethod "$ServiceBase/update/pending-units"
+        if (@($pendingBefore.room_units).Count -ne 0 -or @($pendingBefore.units).Count -ne 0) {
+            throw "canary requires an empty backlog: room=$(@($pendingBefore.room_units).Count), model=$(@($pendingBefore.units).Count)"
+        }
+        $pre = Invoke-SurrealSql @'
+SELECT *, id AS rid FROM pe:24384_24776;
+SELECT *, id AS rid FROM pe WHERE name = '/CODEX_DB8000_EQ_COPY';
+'@
+        if (@($pre[0].result).Count -ne 1) { throw 'source pe:24384_24776 is missing' }
+        if (@($pre[1].result).Count -ne 0) { throw '/CODEX_DB8000_EQ_COPY already exists' }
+        [ordered]@{dbnum=$before;source=$pre[0].result;pending=$pendingBefore} |
+            ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path $caseDir 'before.json')
+
+        Invoke-Phase $row 'apply-driver' {
+            Invoke-Driver 'scripts/e3d/db8000_equi_copy_apply.mac' "$name-apply-driver" 'CODEX-DB8000-EQUI-COPY-APPLY-DONE'
+        }
+        $restoreRequired = $true
+        $after = Wait-Db8000Converged ($before.file_latest_sesno + 1) 'copy apply'
+        $post = Invoke-SurrealSql @'
+SELECT *, id AS rid FROM pe WHERE name = '/CODEX_DB8000_EQ_COPY';
+SELECT *, id AS rid FROM pe:24384_24776;
+'@
+        $created = @($post[0].result)
+        if ($created.Count -ne 1) { throw "expected one new EQUI, got $($created.Count)" }
+        if ([string]$created[0].noun -ne 'EQUI' -or [int]$created[0].dbnum -ne 8000) {
+            throw "created node is not db8000 EQUI: $($created[0] | ConvertTo-Json -Compress)"
+        }
+        if (@($post[1].result).Count -ne 1) { throw 'source 24384/24776 changed or disappeared' }
+        $newKey = [string]$created[0].rid
+        $relations = Invoke-SurrealSql "SELECT *, id AS rid FROM inst_relate WHERE in = $newKey OR in.owner = $newKey; SELECT count() AS count FROM pe WHERE owner = $newKey GROUP ALL;"
+        if (@($relations[0].result).Count -eq 0) { throw "new EQUI has no inst_relate coverage: $newKey" }
+        [ordered]@{convergence=$after;created=$created[0];source=$post[1].result;relations=$relations} |
+            ConvertTo-Json -Depth 30 | Set-Content -Encoding utf8 (Join-Path $caseDir 'after.json')
+    } catch {
+        $row.status = 'FAIL'
+        $row.failed_phase = if ($row.failed_phase) { $row.failed_phase } else { 'assert' }
+        $row.error = "$_"
+        throw
+    } finally {
+        if ($restoreRequired) {
+            try {
+                Invoke-Phase $row 'restore-driver' {
+                    Invoke-Driver 'scripts/e3d/db8000_equi_copy_restore.mac' "$name-restore-driver" 'CODEX-DB8000-EQUI-COPY-RESTORE-DONE'
+                }
+                $restore = Wait-Db8000Converged ($before.file_latest_sesno + 2) 'copy restore'
+                $left = Invoke-SurrealSql "SELECT *, id AS rid FROM pe WHERE name = '/CODEX_DB8000_EQ_COPY';"
+                if (@($left[0].result).Count -ne 0) { throw 'test EQUI remains after restore' }
+                $restore | ConvertTo-Json -Depth 30 | Set-Content -Encoding utf8 (Join-Path $caseDir 'restore.json')
+            } catch {
+                $row.status = 'FATAL'
+                $row.error = "restore: $_"
+                $script:fatal = "${name}: restore: $_"
+            }
+        }
+        $script:results.Add([pscustomobject]$row)
+    }
+    if ($row.status -ne 'PASS') { throw $row.error }
+}
+
 Push-Location $repo
 try {
     $portOpen = Test-NetConnection 127.0.0.1 -Port $SurrealPort -InformationLevel Quiet -WarningAction SilentlyContinue
@@ -316,7 +427,7 @@ try {
         }
         $script:databaseSource = "existing ws://127.0.0.1:$SurrealPort (1516/AvevaMarineSample)"
         $consumers = @(Get-Process -Name 'aios-database' -ErrorAction SilentlyContinue)
-        if ($consumers.Count) {
+        if ($consumers.Count -and -not $ReuseExistingService) {
             $consumerPids = ($consumers | ForEach-Object Id) -join ', '
             throw "Concurrent aios-database consumer detected (PID $consumerPids). Stop it before reusing the current 1516 database; otherwise it can steal the E3D session before this test."
         }
@@ -396,6 +507,9 @@ try {
                         'scripts/e3d/room_cyli_size_apply.mac' `
                         'scripts/e3d/room_cyli_size_restore.mac' $true $true
                 }
+            }
+            'db8000-equi-copy' {
+                Invoke-Db8000EquiCopyCase
             }
             default { throw "Unknown room E2E case: $case" }
         }
