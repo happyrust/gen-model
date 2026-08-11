@@ -79,6 +79,11 @@ rustc-ice-*.txt
 
 __pycache__/
 *.pyc
+# maturin develop 会把编译好的扩展拷进包目录（python/pysrc/aios_db/_aios_db.pyd）
+*.pyd
+
+# 会话草稿工作区（仓库根与 python/ 下都会出现，只在本机有意义）
+.scratch/
 
 # output/ 是运行产物目录（截图、跑批日志、控制台抓取、E3D 插件 DLL、一次性 SurrealQL、
 # 逆向中间快照、按场次归档的演练目录），默认全忽略；只放行下列仓库资产：

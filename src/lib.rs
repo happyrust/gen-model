@@ -83,8 +83,10 @@ fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// pub：Python 调试绑定（python/aios-py）的 `full_init` 与 `run_app`/`run_cli`
+/// 共用同一把单实例锁——mutating 管线不允许有第二个进程并发驱动。
 #[cfg(windows)]
-fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
+pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
     let project = db_option.project_name.clone();
     let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
         let root = crate::data_interface::project_paths::resolve_project_root(db_option, &project)
@@ -126,7 +128,7 @@ fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()> {
+pub fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 

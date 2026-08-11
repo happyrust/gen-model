@@ -1,0 +1,30 @@
+# aios-py：aios-database 的 Python 调试绑定（maturin 构建，产物模块名 aios_db）。
+#
+# 三个自研 git 依赖必须与主 crate 的声明逐字一致（同 URL + 同 rev），根 Cargo.toml
+# 的 [patch]（vendor 本地重定向）才能把整张图收敛到同一份源码。
+[package]
+name = "aios-py"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+# 内部扩展模块名；对外的 Python 包是 pysrc/aios_db（先注册 OCCT DLL 目录再导入本模块）。
+name = "_aios_db"
+crate-type = ["cdylib"]
+
+[dependencies]
+aios-database = { path = ".." }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "777e238b", default-features = false }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "5c9e00e3c46f7d6f7c548583020b66e0ad23368a" }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "4bf26ec65909bc42ab2ef903a9edec3596ec9840" }
+
+anyhow = "1.0.57"
+serde_json = "1.0.81"
+tokio = { version = "1.37.0", features = ["rt-multi-thread"] }
+# 只为了 db.query 直通里的 surrealdb::Value 类型；与主 crate 同源（Cargo.lock 锁同一 rev）。
+surrealdb = { git = "https://gitee.com/happydpc/surrealdb.git", default-features = false }
+pyo3 = { version = "0.29.2", features = ["abi3-py310", "anyhow"] }
+pythonize = "0.29.0"
+serde = "1.0.229"
+indexmap = "2.14.0"

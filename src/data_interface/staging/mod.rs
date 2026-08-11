@@ -45,7 +45,9 @@ pub(crate) fn active_data_db() -> surrealdb::Surreal<surrealdb::engine::any::Any
 /// `aios_core::query_insts` 只过滤空 AABB；一条悬空的 `world_trans` 会让整批
 /// `GeomInstQuery` 反序列化失败。这里把两个必需字段的口径收齐，缺几何的行由调用方按
 /// “不可用/待重试”处理，而不是拖垮同批所有正常实例。
-pub(crate) async fn query_valid_insts(
+///
+/// `pub`：Python 调试绑定（`aios_db.model.export_obj`）复用同一口径取实例集。
+pub async fn query_valid_insts(
     refnos: &[aios_core::RefnoEnum],
 ) -> anyhow::Result<Vec<aios_core::GeomInstQuery>> {
     if refnos.is_empty() {

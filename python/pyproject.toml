@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "aios-db"
+version = "0.1.0"
+description = "aios-database 调试绑定：解析 / 模型生成 / 增量计算的 Python 接口"
+requires-python = ">=3.10"
+
+[tool.maturin]
+# 混合工程：Rust 扩展是 aios_db._aios_db，外层 Python 包（pysrc/aios_db）负责
+# 在导入扩展前 os.add_dll_directory 注册 OCCT 运行时目录——Python 3.8+ 加载扩展
+# 不再查 PATH，而 OCCT 是动态链接（TK*.dll 在 C:\tools\occt-7.8.0\bin 一类目录）。
+module-name = "aios_db._aios_db"
+python-source = "pysrc"
+# 与服务同一套默认 feature（Q7 决策：单一全量构建形态）；
+# extension-module 由 maturin 注入，避免影响 cargo test 链接。
+features = ["pyo3/extension-module"]

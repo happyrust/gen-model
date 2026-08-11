@@ -1,0 +1,580 @@
+//! 执行层（`aios_db.incr` / `aios_db.model` / `aios_db.room`）：mutating 管线。
+//!
+//! 三层守护的最后一层：这些函数在 `full_init` 之前一律报错。`full_init` 拿的是
+//! 与 `run_app`/`run_cli` 同一把项目单实例锁——服务在跑时 `full_init` 直接失败，
+//! 这不是缺陷而是防线（两个进程并发驱动同一批 staging 窗口 / 队列 / pending
+//! 表会互踩）。初始化序列严格对齐 `run_cli` 前置段，不自创第二套。
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use aios_core::RefnoEnum;
+use anyhow::Context;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use serde_json::json;
+
+use crate::{CONNECTED, anyhow_to_py, ensure_connected, pythonized, runtime};
+
+static FULL_INIT: AtomicBool = AtomicBool::new(false);
+
+fn ensure_full() -> PyResult<()> {
+    if FULL_INIT.load(Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Err(PyRuntimeError::new_err(
+            "执行层未初始化：先停掉 gen-model 服务，再调用 aios_db.full_init(config, cwd=仓库根)。\
+             （mutating 管线与在跑服务并发会互踩暂存窗口/队列/pending 表，单实例锁就是防这个的）",
+        ))
+    }
+}
+
+fn parse_refno(refno: &str) -> RefnoEnum {
+    RefnoEnum::from(refno.trim())
+}
+
+fn parse_refnos(refnos: Vec<String>) -> Vec<RefnoEnum> {
+    refnos.iter().map(|refno| parse_refno(refno)).collect()
+}
+
+async fn db_option() -> anyhow::Result<aios_core::options::DbOption> {
+    Ok(crate::db_api::manager().await?.db_option.clone())
+}
+
+/// 完整初始化：拿单实例锁 + `run_cli` 前置段（schema/函数自检、增量状态表、
+/// 索引回填、空间树加载），**不**启动 watcher / 批次 worker / Web 服务。
+///
+/// `config` / `cwd` 语义同 [`crate::connect`]；`cwd` 通常必须是 gen-model 仓库根
+/// （`resource/surreal/` 按 CWD 找）。幂等：重复调用是空操作。
+#[pyfunction]
+#[pyo3(signature = (config=None, cwd=None))]
+pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -> PyResult<()> {
+    if FULL_INIT.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if let Some(cwd) = cwd {
+        std::env::set_current_dir(&cwd).map_err(|error| {
+            PyRuntimeError::new_err(format!("切换工作目录到 {} 失败: {error}", cwd.display()))
+        })?;
+    }
+    if let Some(config) = config {
+        unsafe { std::env::set_var("DB_OPTION_FILE", &config) };
+    }
+    py.detach(|| {
+        runtime().block_on(async {
+            // 1. 单实例锁：必须先于一切连接与状态加载（与 run_cli 同序）。
+            let db_option = aios_core::get_db_option().clone();
+            aios_database::acquire_process_instance_lock(&db_option)
+                .context("获取项目单实例锁失败（服务是不是还在跑？）")?;
+
+            // 2. 连接 + define_common_functions（幂等；connect 层可能已做过）。
+            if !CONNECTED.load(Ordering::SeqCst) {
+                aios_core::init_surreal().await?;
+                CONNECTED.store(true, Ordering::SeqCst);
+            }
+
+            // 3. project_hd 的 fn::room_code 矫正重放（run_cli 同款：hh 文件按文件名
+            //    顺序后加载会盖掉 hd 版；本绑定固定以默认 feature（含 project_hd）构建）。
+            const HD_ROOM_CODE: &str = "resource/surreal/fn_query_room_code.surql";
+            match std::fs::read_to_string(HD_ROOM_CODE) {
+                Ok(text) => {
+                    aios_core::SUL_DB
+                        .query(text)
+                        .await
+                        .context("重放 hd 版 fn::room_code 失败")?;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "读取 {HD_ROOM_CODE} 失败（生效的可能是 hh 版 fn::room_code）: {error}"
+                    );
+                }
+            }
+
+            // 4. 收口事务依赖的自定义函数自检 + 增量状态表兼容检查 + dbnum 事件。
+            aios_database::data_interface::increment_pipeline::selfcheck_surreal_functions().await;
+            let migrated = aios_database::data_interface::dbnum_state::DbnumState::
+                ensure_increment_state_storage()
+            .await?;
+            println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
+            aios_database::versioned_db::database::define_dbnum_event()
+                .await
+                .context("重新定义 update_dbnum_event 失败")?;
+
+            // 5. inst_relate 索引 + 自愈回填/清扫（run_cli 同款：失败不阻断，出声）。
+            if let Err(error) =
+                aios_database::fast_model::pdms_inst::init_inst_relate_indices().await
+            {
+                eprintln!("初始化 inst_relate 索引失败: {error}");
+            }
+            if let Err(error) =
+                aios_database::fast_model::pdms_inst::backfill_inst_relate_anc().await
+            {
+                eprintln!("inst_relate anc/dbnum 回填失败: {error}");
+            }
+            if let Err(error) = aios_database::fast_model::pdms_inst::sweep_inst_relate_flat().await
+            {
+                eprintln!("inst_relate 平表副本清扫失败: {error}");
+            }
+
+            // 6. 空间树（可重建的派生数据；加载失败以空树继续，与 run_cli 一致）。
+            if let Err(error) =
+                aios_database::fast_model::aabb_tree::load_project_tree_verified().await
+            {
+                eprintln!("空间树加载失败（{error:#}），以空树继续");
+            }
+
+            // 7. manager（监控目录解析；后续 enqueue / drain / 生成都用它）。
+            crate::db_api::manager().await?;
+            anyhow::Ok(())
+        })
+    })
+    .map_err(anyhow_to_py)?;
+    FULL_INIT.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+// ── incr ────────────────────────────────────────────────────────────────────
+
+/// 对单个库文件执行一个增量窗口（默认窗口 = 水位+1 ..= 文件最新会话）。
+///
+/// 走与服务完全相同的 `IncrementPipeline::apply`（暂存窗口 → 校验 → 提交 →
+/// 水位推进 → durable 模型工作登记）；不含模型生成本身（那是 `incr.drain_data`
+/// 或 `model.*` 的事）。
+#[pyfunction]
+#[pyo3(signature = (path, start=None, end=None))]
+pub fn apply_file(
+    py: Python<'_>,
+    path: PathBuf,
+    start: Option<i32>,
+    end: Option<i32>,
+) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                use std::io::Read;
+                let mut file = std::fs::File::open(&path)
+                    .with_context(|| format!("打开 {} 失败", path.display()))?;
+                let mut head = [0u8; 60];
+                file.read_exact(&mut head).context("读取文件头失败")?;
+                let basic = parse_pdms_db::parse::parse_file_basic_info(&head);
+
+                let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
+                io.open()
+                    .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
+                let info = io
+                    .get_page_basic_info()
+                    .map_err(|error| anyhow::anyhow!("读取页级基础信息失败: {error}"))?;
+                let latest = info.latest_ses_data.sesno;
+
+                let watermark =
+                    aios_database::data_interface::sesno_range::SesnoRangeResolver::query_watermark(
+                        basic.db_no,
+                    )
+                    .await? as i32;
+                let start = start.unwrap_or(watermark + 1);
+                let end = end.unwrap_or(latest);
+                if start > end {
+                    return anyhow::Ok(json!({
+                        "up_to_date": true,
+                        "dbnum": basic.db_no,
+                        "applied_sesno": watermark,
+                        "file_latest_sesno": latest,
+                    }));
+                }
+
+                let mut ranges = indexmap::IndexMap::new();
+                ranges.insert(path.clone(), (info, start..=end, basic.db_type.clone()));
+                let result =
+                    aios_database::data_interface::increment_pipeline::IncrementPipeline::new()
+                        .apply(ranges)
+                        .await;
+
+                let successes = result
+                    .successes
+                    .iter()
+                    .map(|success| {
+                        json!({
+                            "dbnum": success.dbnum,
+                            "db_type": success.db_type,
+                            "path": success.path.display().to_string(),
+                            "start_sesno": success.start_sesno,
+                            "end_sesno": success.end_sesno,
+                            "changed_refnos": success.changed_refnos.len(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let errors = result
+                    .errors
+                    .iter()
+                    .map(|error| {
+                        json!({
+                            "path": error.path.display().to_string(),
+                            "error": error.error.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                anyhow::Ok(json!({
+                    "up_to_date": false,
+                    "window": [start, end],
+                    "successes": successes,
+                    "errors": errors,
+                }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 扫描 + 入队 + **当场消费到队列为空**（等价一次手动更新执行）。
+///
+/// 返回 `{ receipt: 入队回执, drained: 消费的批次数 }`。队列处于持久化暂停时
+/// 会先报错（用 `incr.queue_resume()` 解除）。
+#[pyfunction]
+#[pyo3(signature = (project=None, mdb=None, dbnums=None))]
+pub fn execute_manual(
+    py: Python<'_>,
+    project: Option<String>,
+    mdb: Option<String>,
+    dbnums: Option<Vec<u32>>,
+) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let mgr = crate::db_api::manager().await?;
+                let scheduler =
+                    aios_database::data_interface::batch_scheduler::BatchScheduler::global();
+                if scheduler.is_paused() {
+                    anyhow::bail!(
+                        "队列处于持久化暂停状态，先调用 aios_db.incr.queue_resume() 解除"
+                    );
+                }
+                let project = project.unwrap_or_else(|| mgr.db_option.project_name.clone());
+                let receipt = mgr
+                    .enqueue_manual_update(&project, mdb.as_deref(), dbnums.as_deref())
+                    .await;
+                let drained =
+                    aios_database::data_interface::batch_worker::drain_queue_until_empty(mgr).await;
+                anyhow::Ok(json!({
+                    "receipt": serde_json::to_value(&receipt)?,
+                    "drained": drained,
+                }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 消化 durable pending 的前两个数据阶段（非 regen → regen），不含房间。
+#[pyfunction]
+pub fn drain_data(py: Python<'_>) -> PyResult<usize> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let mgr = crate::db_api::manager().await?;
+            aios_database::data_interface::model_update_pending::drain_data_phases(mgr).await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 解除队列的持久化暂停（等价 `POST /queue/resume`：持久化标志 + 内存标志一起清）。
+#[pyfunction]
+pub fn queue_resume(py: Python<'_>) -> PyResult<bool> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            aios_database::data_interface::batch_scheduler::BatchScheduler::global()
+                .set_paused_persistent(false)
+                .await
+        })
+    })
+    .map_err(anyhow_to_py)?;
+    Ok(false)
+}
+
+/// 暂停队列出队（等价 `POST /queue/pause`；只挡出队，正在跑的批次跑完为止）。
+#[pyfunction]
+pub fn queue_pause(py: Python<'_>) -> PyResult<bool> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            aios_database::data_interface::batch_scheduler::BatchScheduler::global()
+                .set_paused_persistent(true)
+                .await
+        })
+    })
+    .map_err(anyhow_to_py)?;
+    Ok(true)
+}
+
+// ── model ───────────────────────────────────────────────────────────────────
+
+/// 按需生成单个构件的模型（与 `POST /model/ensure` 同源；幂等，`force` 才重生成）。
+#[pyfunction]
+#[pyo3(signature = (refno, force=false))]
+pub fn ensure(py: Python<'_>, refno: String, force: bool) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let result = py
+        .detach(|| {
+            runtime().block_on(async {
+                let mgr = crate::db_api::manager().await?;
+                mgr.ensure_model_generated(parse_refno(&refno), force).await
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &result)
+}
+
+/// 对指定 refno 集重建深层网格数据（`process_meshes_update_db_deep`）。
+#[pyfunction]
+#[pyo3(name = "gen")]
+pub fn gen_models(py: Python<'_>, refnos: Vec<String>) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let db_option = db_option().await?;
+            aios_database::fast_model::occ_generate::process_meshes_update_db_deep(
+                &db_option,
+                &parse_refnos(refnos),
+            )
+            .await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 整库模型生成（`process_meshes_by_dbnos`）。
+#[pyfunction]
+pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let db_option = db_option().await?;
+            aios_database::fast_model::gen_model::process_meshes_by_dbnos(&[dbnum], &db_option)
+                .await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 刷新指定 refno 集的 `inst_relate` aabb，返回真发生变化的元素列表。
+#[pyfunction]
+#[pyo3(signature = (refnos, replace=false))]
+pub fn update_aabbs(py: Python<'_>, refnos: Vec<String>, replace: bool) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let changes =
+                    aios_database::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos(
+                        &parse_refnos(refnos),
+                        replace,
+                    )
+                    .await?;
+                anyhow::Ok(serde_json::Value::Array(
+                    changes
+                        .iter()
+                        .map(|change| json!({ "refno": change.refno.to_string() }))
+                        .collect(),
+                ))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 把一个元素（含子树）的已生成网格导出为 OBJ 目视检查。
+///
+/// 顶点/法线用 `world_trans × inst.transform` 变换到世界坐标，每个交付单元
+/// 一个 `{refno}.obj`（内部按 geo_hash 分 `o` 组）。**连接层即可用**（读库 +
+/// 读 mesh 文件 + 写 `dir`，不碰模型/增量数据）——刻意不设 full_init 门，
+/// 服务在跑时也能导出。前提是模型已生成过（`.mesh` 文件在 meshes 目录里）。
+#[pyfunction]
+#[pyo3(signature = (refno, dir))]
+pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let refno_enum = parse_refno(&refno);
+                let insts =
+                    aios_database::data_interface::staging::query_valid_insts(&[refno_enum])
+                        .await?;
+                if insts.is_empty() {
+                    anyhow::bail!(
+                        "元素 {refno} 没有可用几何实例（模型没生成过，或 aabb/world_trans 缺失；\
+                         先 model.ensure 再导）"
+                    );
+                }
+                let mesh_dir = db_option().await?.get_meshes_path();
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("创建输出目录 {} 失败", dir.display()))?;
+
+                let mut files = Vec::new();
+                let mut missing = Vec::new();
+                for geom_inst in &insts {
+                    let mut obj = String::new();
+                    let mut vertex_base = 1usize;
+                    let mut triangles = 0usize;
+                    let mut exported = 0usize;
+                    for inst in &geom_inst.insts {
+                        let mesh_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
+                        let Ok(mesh) =
+                            aios_core::shape::pdms_shape::PlantMesh::des_mesh_file(&mesh_path)
+                        else {
+                            missing.push(inst.geo_hash.clone());
+                            continue;
+                        };
+                        let matrix = (geom_inst.world_trans * inst.transform).compute_matrix();
+                        let with_normals = mesh.normals.len() == mesh.vertices.len();
+                        obj.push_str(&format!("o {}\n", inst.geo_hash));
+                        for vertex in &mesh.vertices {
+                            let p = matrix.transform_point3(*vertex);
+                            obj.push_str(&format!("v {} {} {}\n", p.x, p.y, p.z));
+                        }
+                        if with_normals {
+                            for normal in &mesh.normals {
+                                let d = matrix.transform_vector3(*normal).normalize_or_zero();
+                                obj.push_str(&format!("vn {} {} {}\n", d.x, d.y, d.z));
+                            }
+                        }
+                        for tri in mesh.indices.chunks_exact(3) {
+                            let (a, b, c) = (
+                                tri[0] as usize + vertex_base,
+                                tri[1] as usize + vertex_base,
+                                tri[2] as usize + vertex_base,
+                            );
+                            if with_normals {
+                                obj.push_str(&format!("f {a}//{a} {b}//{b} {c}//{c}\n"));
+                            } else {
+                                obj.push_str(&format!("f {a} {b} {c}\n"));
+                            }
+                            triangles += 1;
+                        }
+                        vertex_base += mesh.vertices.len();
+                        exported += 1;
+                    }
+                    let file = dir.join(format!("{}.obj", geom_inst.refno));
+                    std::fs::write(&file, obj)
+                        .with_context(|| format!("写 {} 失败", file.display()))?;
+                    files.push(json!({
+                        "refno": geom_inst.refno.to_string(),
+                        "path": file.display().to_string(),
+                        "insts": geom_inst.insts.len(),
+                        "exported_insts": exported,
+                        "triangles": triangles,
+                    }));
+                }
+                anyhow::Ok(json!({ "files": files, "missing_meshes": missing }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+// ── sync ────────────────────────────────────────────────────────────────────
+
+/// 给一个从未解析过的 dbnum 补一次全量基线（首次入库），幂等收口水位与生成工作。
+///
+/// 与自动 watcher / 手动更新走同一入口（`initialize_project_dbnum_baseline`）：
+/// 全量解析 → PE/dbnum_info 一致性校验 → 登记模型生成工作 → 水位推进原子收口。
+/// 返回 `{dbnum, planned_roots}`（空库 planned_roots=0）。注意：对已入库的
+/// dbnum 调用会重走收口（重登记生成工作、水位落到文件最新会话），谨慎使用。
+#[pyfunction]
+#[pyo3(signature = (dbnum, project=None))]
+pub fn baseline(py: Python<'_>, dbnum: u32, project: Option<String>) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let mgr = crate::db_api::manager().await?;
+                let project = project.unwrap_or_else(|| mgr.db_option.project_name.clone());
+                let planned_roots = mgr
+                    .initialize_project_dbnum_baseline(&project, dbnum)
+                    .await?;
+                anyhow::Ok(json!({ "dbnum": dbnum, "planned_roots": planned_roots }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+// ── room ────────────────────────────────────────────────────────────────────
+
+/// 房间归属全量重建（`build_room_relations`）。
+#[pyfunction]
+pub fn build_all(py: Python<'_>) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let db_option = db_option().await?;
+            aios_database::fast_model::room_model::build_room_relations(&db_option).await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 消化待重算的房间归属目标（第三阶段），返回 `DrainReport` 的 JSON 形态
+/// （requested/loaded/done + 逐条失败 + 失败牵涉的 dbnum）。
+#[pyfunction]
+pub fn drain(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    ensure_full()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let db_option = db_option().await?;
+                let report =
+                    aios_database::data_interface::model_update_pending::drain_rooms(&db_option)
+                        .await?;
+                anyhow::Ok(json!({
+                    "requested": report.requested,
+                    "loaded": report.loaded,
+                    "done": report.done,
+                    "failures": report.failures,
+                    "failed_dbnums": report.failed_dbnums,
+                }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+// ── 注册 ────────────────────────────────────────────────────────────────────
+
+pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(full_init, m)?)?;
+
+    let incr = PyModule::new(py, "incr")?;
+    incr.add_function(wrap_pyfunction!(apply_file, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(execute_manual, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(drain_data, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(queue_pause, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(queue_resume, &incr)?)?;
+    m.add_submodule(&incr)?;
+
+    let model = PyModule::new(py, "model")?;
+    model.add_function(wrap_pyfunction!(ensure, &model)?)?;
+    model.add_function(wrap_pyfunction!(gen_models, &model)?)?;
+    model.add_function(wrap_pyfunction!(gen_dbnum, &model)?)?;
+    model.add_function(wrap_pyfunction!(update_aabbs, &model)?)?;
+    model.add_function(wrap_pyfunction!(export_obj, &model)?)?;
+    m.add_submodule(&model)?;
+
+    let room = PyModule::new(py, "room")?;
+    room.add_function(wrap_pyfunction!(build_all, &room)?)?;
+    room.add_function(wrap_pyfunction!(drain, &room)?)?;
+    m.add_submodule(&room)?;
+
+    let sync = PyModule::new(py, "sync")?;
+    sync.add_function(wrap_pyfunction!(baseline, &sync)?)?;
+    m.add_submodule(&sync)?;
+
+    let modules = py.import("sys")?.getattr("modules")?;
+    modules.set_item("aios_db.incr", &incr)?;
+    modules.set_item("aios_db.model", &model)?;
+    modules.set_item("aios_db.room", &room)?;
+    modules.set_item("aios_db.sync", &sync)?;
+    Ok(())
+}
