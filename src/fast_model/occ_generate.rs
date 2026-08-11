@@ -42,6 +42,25 @@ pub async fn test_gen_geos() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// AMS 库里 5 块必需房间面板实际只对应 3 份共享挤出参数。轮廓含重复点、
+/// 共线回折和一个小自交环；这些都应当被保守地收口成可用边界，而不是把
+/// `inst_geo` 永久标成 `bad`。
+#[cfg(feature = "occ")]
+#[test]
+fn ams_room_panel_self_intersections_are_repaired_for_occ() {
+    let params: Vec<PdmsGeoParam> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/room_panel_self_intersecting_extrusions.json"
+    ))
+    .expect("fixture parses");
+
+    for (index, param) in params.into_iter().enumerate() {
+        let shape = param
+            .gen_occ_shape()
+            .unwrap_or_else(|error| panic!("panel fixture {index} must build: {error}"));
+        assert!(shape.edges().next().is_some(), "panel fixture {index}");
+    }
+}
+
 /// Real GENSEC `/6KA02-MSUP-E0090-V1` (24384/25743) from dbnum 8000.
 ///
 /// Its straight SPINE uses outward end normals (-Z at the start, +Z at the
