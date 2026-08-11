@@ -35,6 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Test Python interfaces
+        shell: pwsh
+        run: python -m unittest discover -s tests/python -p "test_*.py" -v
+
       - name: Install Rust nightly
         shell: pwsh
         run: |
