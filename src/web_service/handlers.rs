@@ -223,6 +223,12 @@ pub async fn update_execute(
             req.dbnums.as_deref(),
         )
         .await;
+    // `/update/execute` is an explicit operator trigger, not a passive startup
+    // rescan.  Even when every selected dbnum is already at its watermark, the
+    // request must release durable model/room backlog for this process.  Without
+    // this arm an `AIOS_STARTUP_AUTORUN=0` canary returns `up_to_date` forever
+    // while its pre-existing room work remains stranded.
+    crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
     receipt.project.clone_from(&identity.project);
     receipt.mdb.clone_from(&identity.mdb);
     receipt.namespace.clone_from(&identity.namespace);
@@ -702,5 +708,27 @@ mod tests {
         ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
+    }
+
+    #[test]
+    fn explicit_execute_arms_backlog_even_when_scan_is_up_to_date() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn update_execute(")
+            .expect("update_execute handler must exist")
+            .1
+            .split_once("pub struct TaskListQuery")
+            .expect("task list must follow update_execute")
+            .0;
+        let scan = body
+            .find(".enqueue_manual_update(")
+            .expect("manual execute must scan/enqueue first");
+        let arm = body
+            .find(".arm_auto_work()")
+            .expect("explicit execute must release durable backlog");
+        assert!(
+            scan < arm,
+            "only a completed explicit scan may arm backlog: {body}"
+        );
     }
 }
