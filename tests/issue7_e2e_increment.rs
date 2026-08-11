@@ -567,6 +567,11 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "[e2e] 消费了 {ran} 个批次，耗时 {} ms",
         started.elapsed().as_millis()
     );
+    println!(
+        "[e2e/tasks] {}",
+        serde_json::to_string(&TaskRegistry::global().list(None, None, 10))
+            .expect("serialize task diagnostics")
+    );
     let applied_after = scalar_i32(&format!(
         "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
         case.dbnum
