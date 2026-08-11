@@ -18,11 +18,11 @@ mod common;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aios_core::{RefnoEnum, SUL_DB, get_db_option};
+use aios_core::{RefnoEnum, SUL_DB};
 use aios_database::data_interface::batch_scheduler::{BatchScheduler, DiscoveredBatch};
 use aios_database::data_interface::batch_worker::drain_queue_until_empty;
 use aios_database::data_interface::model_update_pending::drain_rooms;
-use aios_database::data_interface::task_registry::TaskRegistry;
+use aios_database::data_interface::task_registry::{TaskRegistry, TaskState};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::aabb_tree::rebuild_tree_from_pointers;
 use aios_database::fast_model::room_model::{
@@ -69,6 +69,7 @@ struct Case {
     room_keyword: String,
     expected_edges: Option<Vec<Edge>>,
     expect_geometry: bool,
+    expect_postcommit_drain: bool,
     baseline_file: Option<std::path::PathBuf>,
     panel: String,
     room_ref: String,
@@ -96,6 +97,7 @@ impl Case {
             Err(_) => by_name(ROOM_FRAME, Some(ROOM_DBNUM)).await,
         };
         let change = std::env::var("AIOS_ROOM_CHANGE").unwrap_or_else(|_| "element".into());
+        let direct_increment = env_flag("GEN_MODEL_DIRECT_INCREMENT", false);
         let (default_dbnum, action, target) = match change.as_str() {
             "element" => (ELEMENT_DBNUM, "room_recalc_element", element.clone()),
             "room" => (ROOM_DBNUM, "room_recalc_panel", panel.clone()),
@@ -129,6 +131,10 @@ impl Case {
                 .ok()
                 .map(|value| serde_json::from_str(&value).expect("AIOS_ROOM_EXPECT_EDGES JSON")),
             expect_geometry: env_flag("AIOS_ROOM_EXPECT_GEOMETRY", true),
+            expect_postcommit_drain: env_flag(
+                "AIOS_ROOM_EXPECT_POSTCOMMIT_DRAIN",
+                !direct_increment,
+            ),
             baseline_file: std::env::var_os("AIOS_ROOM_BASELINE_FILE").map(Into::into),
             panel,
             room_ref,
@@ -348,11 +354,15 @@ async fn assert_second_pass_is_a_no_op(mgr: &Arc<AiosDBManager>, case: &Case) {
 async fn issue7_e2e_room_comes_back_after_e3d_save() {
     connect_live().await;
     let case = Case::from_env().await;
-    let mgr = Arc::new(
-        AiosDBManager::init_form_config()
-            .await
-            .expect("init db manager"),
-    );
+    let mut manager = AiosDBManager::init_form_config()
+        .await
+        .expect("init db manager");
+    // staged 提交后的 scoped room drain 读 `mgr.db_option`；直写时的手工
+    // drain 也必须用同一份范围。只改下面那个局部 DbOption 会让两条路径
+    // 实际计算不同的房间集，应急直写通过也不能证明生产路径正确。
+    manager.db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
+    let db_option = manager.db_option.clone();
+    let mgr = Arc::new(manager);
     if env_flag("AIOS_ROOM_IDEMPOTENT", false) {
         assert_second_pass_is_a_no_op(&mgr, &case).await;
         return;
@@ -369,8 +379,6 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "E3D 模型类型基线漂移"
     );
 
-    let mut db_option = get_db_option().clone();
-    db_option.room_key_word = Some(vec![case.room_keyword.clone()]);
     let mut baseline = vec![Edge {
         panel: case.panel.clone(),
         part: case.element.clone(),
@@ -523,6 +531,18 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     // session，只负责强制刷新并保存权威基线。真正 apply 轮会关闭本标志、复用
     // baseline_file，然后才消费 E3D 新会话。
     if env_flag("AIOS_ROOM_PREPARE_ONLY", false) {
+        let file_latest_sesno = PdmsIO::new(PROJECT, &case.db_file, true)
+            .get_latest_sesno()
+            .expect("read live file sesno before E3D apply") as i32;
+        let applied_sesno = scalar_i32(&format!(
+            "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
+            case.dbnum
+        ))
+        .await;
+        assert_eq!(
+            file_latest_sesno, applied_sesno,
+            "apply 前 1516 数据库必须与 AMS E3D 文件处在同一会话，拒绝在错配基线上执行宏: file={file_latest_sesno} applied={applied_sesno}"
+        );
         println!("[e2e/baseline] apply 前权威基线已写入");
         return;
     }
@@ -559,10 +579,12 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
     // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。
     let outcome = BatchScheduler::global().enqueue(TaskRegistry::global(), &found, false);
+    let task_id = outcome.info.task_id.clone();
     println!("[e2e] 入队 {}: {outcome:?}", case.dbnum);
 
     let started = Instant::now();
     let ran = drain_queue_until_empty(&mgr).await;
+    assert_eq!(ran, 1, "本案例必须精确消费一个数据批次");
     println!(
         "[e2e] 消费了 {ran} 个批次，耗时 {} ms",
         started.elapsed().as_millis()
@@ -571,6 +593,42 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "[e2e/tasks] {}",
         serde_json::to_string(&TaskRegistry::global().list(None, None, 10))
             .expect("serialize task diagnostics")
+    );
+    let task = TaskRegistry::global()
+        .get(&task_id)
+        .expect("入队数据批次必须留下任务终态");
+    assert_eq!(
+        task.state,
+        TaskState::Succeeded,
+        "数据批次不得用 partial/failed 掩盖提交后房间收敛失败: {:?}",
+        task.result
+    );
+    let task_result = task.result.as_ref().expect("数据批次必须留下结果");
+    assert_eq!(
+        task_result
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("success"),
+        "真实 SAVEWORK 不得以 succeeded/up_to_date 假完成: {task_result}"
+    );
+    let batch_result = task_result
+        .get("batch")
+        .filter(|value| !value.is_null())
+        .expect("真实 SAVEWORK 必须产生 applied 数据批次");
+    assert_eq!(
+        batch_result
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("applied"),
+        "真实 SAVEWORK 的数据批次必须实际落库: {batch_result}"
+    );
+    let batch_end_sesno = batch_result
+        .get("end_sesno")
+        .and_then(serde_json::Value::as_i64)
+        .expect("applied batch must report end_sesno");
+    assert!(
+        batch_end_sesno >= i64::from(file_latest_sesno),
+        "批次必须覆盖宏产生的会话: captured={file_latest_sesno} batch_end={batch_end_sesno}"
     );
     let applied_after = scalar_i32(&format!(
         "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
@@ -613,11 +671,19 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     ))
     .await
     .is_empty();
-    assert_eq!(
-        has_room_task, case.expect_geometry,
-        "{} 的 {} 排队状态与几何声明不符",
-        case.target, case.action
-    );
+    if case.expect_postcommit_drain {
+        assert!(
+            !has_room_task,
+            "staged 提交返回前必须自动消化本窗口的房间任务: {}_{}",
+            case.action, case.target
+        );
+    } else {
+        assert_eq!(
+            has_room_task, case.expect_geometry,
+            "{} 的 {} 排队状态与几何声明不符",
+            case.target, case.action
+        );
+    }
 
     // Model-type coverage is deliberately orthogonal to the project-wide room
     // panel barrier. It still proves that a geometry change durably enqueues
@@ -643,30 +709,37 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         return;
     }
 
-    // 共享实库可能已有超过一页的房间积压；只把本案例自己的确定性任务提到首页。
-    if has_room_task {
-        SUL_DB
-            .query(format!(
-                "UPDATE model_update_pending:{0}_{1} \
-                 SET updated_at = d'1970-01-01T00:00:00Z';",
-                case.action, case.target
-            ))
-            .await
-            .expect("prioritize target room task")
-            .check()
-            .expect("valid target room priority update");
-    }
+    let rooms_done = if case.expect_postcommit_drain {
+        // ADR-017 默认路径在数据批次返回前已完成 scoped room drain。
+        // 不再调全局 drain：否则测试会用第二条路径「补对」本该在提交后收敛的错误。
+        0
+    } else {
+        // 应急直写路径只发布 durable room work；共享实库可能已有超过
+        // 一页的房间积压，只把本案例自己的确定性任务提到首页。
+        if has_room_task {
+            SUL_DB
+                .query(format!(
+                    "UPDATE model_update_pending:{0}_{1} \
+                     SET updated_at = d'1970-01-01T00:00:00Z';",
+                    case.action, case.target
+                ))
+                .await
+                .expect("prioritize target room task")
+                .check()
+                .expect("valid target room priority update");
+        }
 
-    if case.action == "room_recalc_panel" {
-        rebuild_tree_from_pointers()
-            .await
-            .expect("rebuild spatial tree before panel membership recalculation");
-    }
+        if case.action == "room_recalc_panel" {
+            rebuild_tree_from_pointers()
+                .await
+                .expect("rebuild spatial tree before panel membership recalculation");
+        }
 
-    let rooms_done = drain_rooms(&db_option)
-        .await
-        .expect("drain room phase")
-        .done;
+        drain_rooms(&db_option)
+            .await
+            .expect("drain room phase")
+            .done
+    };
     println!("[e2e] 房间轮消化 {rooms_done} 条");
 
     snapshot("after", &case).await;

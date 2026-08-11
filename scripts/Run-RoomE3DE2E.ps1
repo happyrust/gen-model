@@ -5,6 +5,9 @@ param(
     [string[]]$Cases = @('same-room', 'element-out', 'cross-db-room', 'room-rename', 'box-size', 'cyli-size'),
     [string[]]$ModelTypes = @(),
     [switch]$SkipLegacyCases,
+    [switch]$DirectIncrement,
+    [int]$SurrealPort = 8009,
+    [switch]$ReuseExistingDatabase,
     [string]$TestExe = '',
     [string]$L3Exe = '',
     [string]$Output = "output/room-e3d-e2e/$(Get-Date -Format yyyyMMdd-HHmmss)"
@@ -15,6 +18,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $out = Join-Path $repo $Output
 New-Item -ItemType Directory -Force $out | Out-Null
 $startedSurreal = $null
+$script:databaseSource = $Datastore
 # 逐案结果（report.md 的数据源）。失败隔离纪律：断言失败只 FAIL 本案例，restore 照跑、
 # 整轮继续；restore 链路失败 = 库基线可疑 = FATAL，立即终止整轮（房间计划 RI-15）。
 $script:results = New-Object System.Collections.Generic.List[object]
@@ -109,9 +113,10 @@ function Write-Report {
         $lines.Add('|---|---|')
         $lines.Add("| 时间 | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') |")
         $lines.Add("| 项目 | $ProjectDir |")
-        $lines.Add("| datastore | $Datastore |")
+        $lines.Add("| database | $script:databaseSource |")
         $lines.Add("| legacy 用例 | $(if ($SkipLegacyCases) { '(跳过)' } else { $Cases -join ', ' }) |")
         $lines.Add("| 模型类型 | $(if ($ModelTypes) { $ModelTypes -join ', ' } else { '(无)' }) |")
+        $lines.Add("| 增量路径 | $(if ($DirectIncrement) { '应急直写 + 手工 room drain' } else { 'ADR-017 staged + 提交后 scoped room drain' }) |")
         $lines.Add('| 幂等步骤 | restore 收敛后每案例一次（AIOS_ROOM_IDEMPOTENT=1，T-OR-3） |')
         if ($script:fatal) {
             $lines.Add("| **FATAL** | 恢复链路失败终止整轮（RI-15）：$(Format-Cell $script:fatal) |")
@@ -154,6 +159,12 @@ function Set-CaseEnv(
     # 测试进程显式打开，prepare 阶段遗留的 pending 行会让部分案例假通过，
     # 而纯 Transform 案例则报“未排队”。
     $env:AIOS_ROOM_INCREMENTAL = '1'
+    # 专用房间用例默认走生产的 ADR-017 staged 路径，并要求数据批次
+    # 返回前已 scoped 消化本窗口 room work。只有显式 -DirectIncrement，或纯
+    # 模型类型覆盖（故意不验房间归属），才使用应急直写。
+    $useDirectIncrement = $DirectIncrement -or (-not $checkMembership)
+    $env:GEN_MODEL_DIRECT_INCREMENT = if ($useDirectIncrement) { '1' } else { '0' }
+    $env:AIOS_ROOM_EXPECT_POSTCOMMIT_DRAIN = if ($useDirectIncrement) { '0' } else { '1' }
     $env:AIOS_ROOM_CHANGE = $change
     $env:AIOS_ROOM_ELEMENT = $element
     $env:AIOS_ROOM_EXPECT_NOUN = $noun
@@ -298,29 +309,39 @@ function Invoke-Preflight([string]$name, [string]$macro, [string]$dir, [string]$
 
 Push-Location $repo
 try {
-    if (-not (Test-NetConnection 127.0.0.1 -Port 8009 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+    $portOpen = Test-NetConnection 127.0.0.1 -Port $SurrealPort -InformationLevel Quiet -WarningAction SilentlyContinue
+    if ($portOpen) {
+        if (-not $ReuseExistingDatabase) {
+            throw "SurrealDB port $SurrealPort is already occupied. Pass -ReuseExistingDatabase to use the current 1516 database explicitly."
+        }
+        $script:databaseSource = "existing ws://127.0.0.1:$SurrealPort (1516/AvevaMarineSample)"
+        $consumers = @(Get-Process -Name 'aios-database' -ErrorAction SilentlyContinue)
+        if ($consumers.Count) {
+            $consumerPids = ($consumers | ForEach-Object Id) -join ', '
+            throw "Concurrent aios-database consumer detected (PID $consumerPids). Stop it before reusing the current 1516 database; otherwise it can steal the E3D session before this test."
+        }
+    } else {
         $startedSurreal = Start-Process (Join-Path $repo 'bin/surreal.exe') -WindowStyle Hidden -PassThru `
             -WorkingDirectory $repo -ArgumentList @('start', '--user', 'root', '--pass', 'root',
-                '--bind', '127.0.0.1:8009', $Datastore) `
+                '--bind', "127.0.0.1:$SurrealPort", $Datastore) `
             -RedirectStandardOutput (Join-Path $out 'surreal.stdout.log') `
             -RedirectStandardError (Join-Path $out 'surreal.stderr.log')
         foreach ($null in 1..90) {
-            if (Test-NetConnection 127.0.0.1 -Port 8009 -InformationLevel Quiet -WarningAction SilentlyContinue) { break }
+            if (Test-NetConnection 127.0.0.1 -Port $SurrealPort -InformationLevel Quiet -WarningAction SilentlyContinue) { break }
             Start-Sleep 1
         }
-        if (-not (Test-NetConnection 127.0.0.1 -Port 8009 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-            throw 'SurrealDB did not open port 8009'
+        if (-not (Test-NetConnection 127.0.0.1 -Port $SurrealPort -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+            throw "SurrealDB did not open port $SurrealPort"
         }
     }
 
     $env:CARGO_BUILD_JOBS = '1'
     $env:RUSTFLAGS = '-Z threads=1'
     $env:RUST_MIN_STACK = '134217728'
-    $env:AIOS_LIVE_WS = 'ws://127.0.0.1:8009'
+    $env:AIOS_LIVE_WS = "ws://127.0.0.1:$SurrealPort"
     $env:AIOS_LIVE_NS = '1516'
     $env:AIOS_LIVE_DB = 'AvevaMarineSample'
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
-    $env:GEN_MODEL_DIRECT_INCREMENT = '1'
 
     if ($L3Exe) {
         $script:l3 = (Resolve-Path $L3Exe).Path
