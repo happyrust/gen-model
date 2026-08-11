@@ -83,12 +83,31 @@ V1（M1–M4）已交付三层初始化 + 三链路全函数清单 + HTTP 客户
   不一致打 warning（不报错）。回应本次实测：0.1.13 绑定 vs 0.1.16 在跑服务。
 - 验收：对 9099（0.1.16）连接打出 warning；对本仓库自建服务无告警。
 
+### P0-3 纯 Python 闭环缺口补齐（已落地，2026-08-11 追加）
+
+用户目标「纯 Python 跑通解析→生成→房间」核查后新增的工作项（缺口分析与
+决策见会话 gen-model-1）：
+
+- **落地内容**：新 `spatial` 子模块（`status` / `reconcile` / `persist` /
+  `rebuild`）+ `incr.resolve_window`（V1 计划遗漏项）/ `incr.drain_side_effects` /
+  `incr.queue_status` + `room.code` / `nodes` / `names`（fn:: 直通）。
+- **动机**：提交后副作用三件套（SystDerived / RefRevMaintain / SpatialReconcile）
+  只活在 batch worker 出队门里——`execute_manual` 队列闭环自动收尾，但零售组合
+  （`apply_file` → `drain_data` → `room.drain`）会把副作用滞留 pending 表、
+  内存空间树不落盘。
+- **附带修正**：`connect` 补灌编译期内置函数快照（与 `run_cli` 同款，D11/ADR-010
+  的 hd/hh 矫正——否则连接层 `fn::room_code` 停在 hh 语义）；`full_init` 的
+  hd 重放改走同一内置入口；`selfcheck_surreal_functions` 失败改为中止初始化
+  （对齐 `run_cli` 的 `?` 传播）。
+- **验收**：`scripts/smoke_m5.py` 连接层段全绿（守护 8 项 + 只读 5 项，
+  房间穿越实测 R304/R346）；执行层段（`--full`）待停服后随 P1-1 一起跑。
+
 ## 3. 里程碑
 
 | 阶段 | 内容 | 预估 | 备注 |
 |---|---|---|---|
-| M5 资产与环境 | P0-1 + P0-2 | 2–3 天 | P0-1 立即可做；P0-2 需先定恢复策略 |
-| M6 验证补齐 | P1-1 + P1-2 + P1-3 | 2 天 | P1-2 提前起编译与 P1-1 并行 |
+| M5 资产与环境 | P0-1 + P0-2 + P0-3 | 2–3 天 | P0-1 ✔ / P0-3 ✔（2026-08-11）；P0-2 需先定恢复策略 |
+| M6 验证补齐 | P1-1 + P1-2 + P1-3 | 2 天 | P1-2 提前起编译与 P1-1 并行；P1-1 顺带跑 smoke_m5 --full |
 | M7 可维护性 | P2-1 + P2-2 + P2-3 | 2–3 天 | 可按需裁剪，P2-1 优先级最低 |
 
 ## 4. 不做什么（明确出界）

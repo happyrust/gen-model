@@ -1,4 +1,6 @@
-//! 执行层（`aios_db.incr` / `aios_db.model` / `aios_db.room`）：mutating 管线。
+//! 执行层（`aios_db.incr` / `aios_db.model` / `aios_db.room` / `aios_db.spatial`）：
+//! mutating 管线（部分只读观察函数如 `resolve_window` / `queue_status` /
+//! `room.code` / `spatial.status` 放宽为连接层可用）。
 //!
 //! 三层守护的最后一层：这些函数在 `full_init` 之前一律报错。`full_init` 拿的是
 //! 与 `run_app`/`run_cli` 同一把项目单实例锁——服务在跑时 `full_init` 直接失败，
@@ -67,31 +69,20 @@ pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -
             aios_database::acquire_process_instance_lock(&db_option)
                 .context("获取项目单实例锁失败（服务是不是还在跑？）")?;
 
-            // 2. 连接 + define_common_functions（幂等；connect 层可能已做过）。
+            // 2. 连接 + define_common_functions + 编译期内置函数快照（含 D11 的
+            //    hd/hh 矫正；与 connect / run_cli 同款）。幂等；connect 层可能已做过。
             if !CONNECTED.load(Ordering::SeqCst) {
                 aios_core::init_surreal().await?;
+                aios_database::data_interface::embedded_surql::define_embedded_functions()
+                    .await?;
                 CONNECTED.store(true, Ordering::SeqCst);
             }
 
-            // 3. project_hd 的 fn::room_code 矫正重放（run_cli 同款：hh 文件按文件名
-            //    顺序后加载会盖掉 hd 版；本绑定固定以默认 feature（含 project_hd）构建）。
-            const HD_ROOM_CODE: &str = "resource/surreal/fn_query_room_code.surql";
-            match std::fs::read_to_string(HD_ROOM_CODE) {
-                Ok(text) => {
-                    aios_core::SUL_DB
-                        .query(text)
-                        .await
-                        .context("重放 hd 版 fn::room_code 失败")?;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "读取 {HD_ROOM_CODE} 失败（生效的可能是 hh 版 fn::room_code）: {error}"
-                    );
-                }
-            }
-
-            // 4. 收口事务依赖的自定义函数自检 + 增量状态表兼容检查 + dbnum 事件。
-            aios_database::data_interface::increment_pipeline::selfcheck_surreal_functions().await;
+            // 3. 收口事务依赖的自定义函数自检 + 增量状态表兼容检查 + dbnum 事件。
+            //    与 run_cli 同款：自检失败中止初始化（函数缺失时跑 mutating 必炸）。
+            aios_database::data_interface::increment_pipeline::selfcheck_surreal_functions()
+                .await
+                .context("SurrealDB 自定义函数自检失败")?;
             let migrated = aios_database::data_interface::dbnum_state::DbnumState::
                 ensure_increment_state_storage()
             .await?;
@@ -100,7 +91,7 @@ pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -
                 .await
                 .context("重新定义 update_dbnum_event 失败")?;
 
-            // 5. inst_relate 索引 + 自愈回填/清扫（run_cli 同款：失败不阻断，出声）。
+            // 4. inst_relate 索引 + 自愈回填/清扫（run_cli 同款：失败不阻断，出声）。
             if let Err(error) =
                 aios_database::fast_model::pdms_inst::init_inst_relate_indices().await
             {
@@ -116,14 +107,14 @@ pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -
                 eprintln!("inst_relate 平表副本清扫失败: {error}");
             }
 
-            // 6. 空间树（可重建的派生数据；加载失败以空树继续，与 run_cli 一致）。
+            // 5. 空间树（可重建的派生数据；加载失败以空树继续，与 run_cli 一致）。
             if let Err(error) =
                 aios_database::fast_model::aabb_tree::load_project_tree_verified().await
             {
                 eprintln!("空间树加载失败（{error:#}），以空树继续");
             }
 
-            // 7. manager（监控目录解析；后续 enqueue / drain / 生成都用它）。
+            // 6. manager（监控目录解析；后续 enqueue / drain / 生成都用它）。
             crate::db_api::manager().await?;
             anyhow::Ok(())
         })
@@ -277,6 +268,111 @@ pub fn drain_data(py: Python<'_>) -> PyResult<usize> {
         })
     })
     .map_err(anyhow_to_py)
+}
+
+/// 只读预览下一增量窗口（不执行、不动水位；连接层即可用）。
+///
+/// 返回 `{dbnum, db_type, window: [start, end], cold_start, db_latest_sesno,
+/// file_latest_sesno}`；已到最新时返回 `{up_to_date: true, ...}`。与 watcher /
+/// 手动更新同一套窗口决策（`SesnoRangeResolver::resolve`）。
+#[pyfunction]
+#[pyo3(signature = (path, skip_cata=false))]
+pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                use std::io::Read;
+                let mut file = std::fs::File::open(&path)
+                    .with_context(|| format!("打开 {} 失败", path.display()))?;
+                let mut head = [0u8; 60];
+                file.read_exact(&mut head).context("读取文件头失败")?;
+                let basic = parse_pdms_db::parse::parse_file_basic_info(&head);
+
+                let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
+                io.open()
+                    .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
+                let latest = io
+                    .get_page_basic_info()
+                    .map_err(|error| anyhow::anyhow!("读取页级基础信息失败: {error}"))?
+                    .latest_ses_data
+                    .sesno;
+
+                let mgr = crate::db_api::manager().await?;
+                let project = mgr.db_option.project_name.clone();
+                let plan = aios_database::data_interface::sesno_range::SesnoRangeResolver::new()
+                    .resolve(
+                        &path,
+                        &project,
+                        basic.db_no,
+                        latest,
+                        skip_cata,
+                        &basic.db_type,
+                    )
+                    .await?;
+                anyhow::Ok(match plan {
+                    Some(plan) => json!({
+                        "up_to_date": false,
+                        "dbnum": basic.db_no,
+                        "db_type": plan.db_type,
+                        "window": [*plan.range.start(), *plan.range.end()],
+                        "cold_start": plan.cold_start,
+                        "db_latest_sesno": plan.db_latest_sesno,
+                        "file_latest_sesno": plan.file_latest_sesno,
+                    }),
+                    None => json!({
+                        "up_to_date": true,
+                        "dbnum": basic.db_no,
+                        "db_type": basic.db_type,
+                        "file_latest_sesno": latest,
+                    }),
+                })
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 消化 SystDerived / RefRevMaintain 两类提交后副作用（**不含**空间收敛——那
+/// 是 `spatial.reconcile()` 的事），返回本轮完成的作业数。
+///
+/// 零售组合（`apply_file` → `drain_data` → `room.drain`）不会像批次闭环那样
+/// 自动收尾副作用，脚本收工前应依次调本函数与 `spatial.reconcile()`。
+#[pyfunction]
+pub fn drain_side_effects(py: Python<'_>) -> PyResult<usize> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let mgr = crate::db_api::manager().await?;
+            aios_database::data_interface::side_effect_pending::SideEffectCompensator::drain(mgr)
+                .await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 队列状态快照（连接层只读）：先从库同步持久化暂停位，再报进程内调度器状态。
+///
+/// 返回 `{paused, rows: [{task_id, dbnum, db_type, state, start_sesno,
+/// end_sesno}]}`。注意 `rows` 是**本进程**调度器的队列（服务进程的队列要走
+/// `aios_client.queue()` 问在跑服务）。
+#[pyfunction]
+pub fn queue_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let scheduler =
+                    aios_database::data_interface::batch_scheduler::BatchScheduler::global();
+                scheduler.restore_persisted_pause().await?;
+                anyhow::Ok(json!({
+                    "paused": scheduler.is_paused(),
+                    "rows": serde_json::to_value(scheduler.snapshot())?,
+                }))
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
 }
 
 /// 解除队列的持久化暂停（等价 `POST /queue/resume`：持久化标志 + 内存标志一起清）。
@@ -541,6 +637,119 @@ pub fn drain(py: Python<'_>) -> PyResult<Py<PyAny>> {
     pythonized(py, &value)
 }
 
+/// 元素的房间编码（`fn::room_code` 直通，连接层只读；无归属返回 None）。
+#[pyfunction]
+pub fn code(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let refno = crate::db_api::normalize_refno(&refno);
+    let value = py
+        .detach(|| {
+            runtime().block_on(crate::db_api::take_json(
+                "RETURN fn::room_code(type::thing('pe', $refno));".into(),
+                vec![("refno", json!(refno))],
+            ))
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 元素（BRAN 等）穿过的房间 PANE refno 列表（`fn::get_room_nodes` 直通）。
+#[pyfunction]
+pub fn nodes(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let refno = crate::db_api::normalize_refno(&refno);
+    let value = py
+        .detach(|| {
+            runtime().block_on(crate::db_api::take_json(
+                "RETURN fn::get_room_nodes(type::thing('pe', $refno));".into(),
+                vec![("refno", json!(refno))],
+            ))
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 元素穿过的房间号列表（`fn::get_room_names` 直通）。
+#[pyfunction]
+pub fn names(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let refno = crate::db_api::normalize_refno(&refno);
+    let value = py
+        .detach(|| {
+            runtime().block_on(crate::db_api::take_json(
+                "RETURN fn::get_room_names(type::thing('pe', $refno));".into(),
+                vec![("refno", json!(refno))],
+            ))
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+// ── spatial ─────────────────────────────────────────────────────────────────
+
+/// 空间收敛积压状态（连接层只读）：`{pending, retries, last_error, stalled}`。
+#[pyfunction]
+pub fn status(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value = py
+        .detach(|| {
+            runtime().block_on(
+                aios_database::data_interface::side_effect_pending::SideEffectCompensator::
+                    spatial_reconcile_status(),
+            )
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+/// 消化待收敛的空间意图（树刷新/删除 + 文件持久化），返回收敛条数。
+///
+/// 与 batch worker 出队门同一实现——零售组合（`apply_file` / `drain_data` /
+/// `room.drain` / `model.gen*`）收工前必须调，否则空间意图滞留 pending 表、
+/// 内存树不落盘（要等下次服务启动重放自愈）。
+#[pyfunction]
+pub fn reconcile(py: Python<'_>) -> PyResult<usize> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let mgr = crate::db_api::manager().await?;
+            aios_database::data_interface::side_effect_pending::SideEffectCompensator::
+                reconcile_spatial_pending(mgr)
+            .await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 把内存空间树落盘。`force=False` 只在脏时写（返回是否真的写了）；
+/// `force=True` 无条件写回并清脏标记。
+#[pyfunction]
+#[pyo3(signature = (force=false))]
+pub fn persist(py: Python<'_>, force: bool) -> PyResult<bool> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            if force {
+                aios_database::fast_model::aabb_tree::persist_aabb_tree().await?;
+                anyhow::Ok(true)
+            } else {
+                aios_database::fast_model::aabb_tree::persist_aabb_tree_if_dirty().await
+            }
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 从库内包围盒指针全量重建空间树并立即落盘（树损坏/陈旧时的兜底）。
+#[pyfunction]
+pub fn rebuild(py: Python<'_>) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(aios_database::fast_model::aabb_tree::rebuild_tree_from_pointers())
+    })
+    .map_err(anyhow_to_py)
+}
+
 // ── 注册 ────────────────────────────────────────────────────────────────────
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -550,8 +759,11 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     incr.add_function(wrap_pyfunction!(apply_file, &incr)?)?;
     incr.add_function(wrap_pyfunction!(execute_manual, &incr)?)?;
     incr.add_function(wrap_pyfunction!(drain_data, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(resolve_window, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(drain_side_effects, &incr)?)?;
     incr.add_function(wrap_pyfunction!(queue_pause, &incr)?)?;
     incr.add_function(wrap_pyfunction!(queue_resume, &incr)?)?;
+    incr.add_function(wrap_pyfunction!(queue_status, &incr)?)?;
     m.add_submodule(&incr)?;
 
     let model = PyModule::new(py, "model")?;
@@ -565,7 +777,17 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let room = PyModule::new(py, "room")?;
     room.add_function(wrap_pyfunction!(build_all, &room)?)?;
     room.add_function(wrap_pyfunction!(drain, &room)?)?;
+    room.add_function(wrap_pyfunction!(code, &room)?)?;
+    room.add_function(wrap_pyfunction!(nodes, &room)?)?;
+    room.add_function(wrap_pyfunction!(names, &room)?)?;
     m.add_submodule(&room)?;
+
+    let spatial = PyModule::new(py, "spatial")?;
+    spatial.add_function(wrap_pyfunction!(status, &spatial)?)?;
+    spatial.add_function(wrap_pyfunction!(reconcile, &spatial)?)?;
+    spatial.add_function(wrap_pyfunction!(persist, &spatial)?)?;
+    spatial.add_function(wrap_pyfunction!(rebuild, &spatial)?)?;
+    m.add_submodule(&spatial)?;
 
     let sync = PyModule::new(py, "sync")?;
     sync.add_function(wrap_pyfunction!(baseline, &sync)?)?;
@@ -575,6 +797,7 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("aios_db.incr", &incr)?;
     modules.set_item("aios_db.model", &model)?;
     modules.set_item("aios_db.room", &room)?;
+    modules.set_item("aios_db.spatial", &spatial)?;
     modules.set_item("aios_db.sync", &sync)?;
     Ok(())
 }

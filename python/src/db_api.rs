@@ -29,12 +29,12 @@ pub(crate) async fn manager() -> anyhow::Result<&'static Arc<AiosDBManager>> {
 }
 
 /// refno 输入宽容两种形态：`a/b`（web 形态）与 `a_b`（record id 形态）。
-fn normalize_refno(refno: &str) -> String {
+pub(crate) fn normalize_refno(refno: &str) -> String {
     refno.trim().trim_start_matches('=').replace('/', "_")
 }
 
 /// 跑一条只读 SQL，取第 0 条语句的干净 JSON。
-async fn take_json(
+pub(crate) async fn take_json(
     sql: String,
     binds: Vec<(&'static str, serde_json::Value)>,
 ) -> anyhow::Result<serde_json::Value> {

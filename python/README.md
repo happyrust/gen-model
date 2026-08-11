@@ -26,8 +26,8 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 | 层 | 入口 | 能做什么 | 锁 | 与在跑服务共存 |
 |---|---|---|---|---|
 | 解析层 | `aios_db.parse.*` | 纯文件解析 | 无 | ✔ 完全共存 |
-| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` | 无 | ✔ 可边跑边查 |
-| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线 | 拿单实例锁 | ✖ 必须先停服务 |
+| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.status` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
+| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线 / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`） | 拿单实例锁 | ✖ 必须先停服务 |
 
 - **`aios_db.set_config(path)` 必须最先调用**（解析层深处也读全局 DbOption，
   配置是进程级 OnceCell，第一次被读走后不可更换）。
@@ -68,6 +68,18 @@ aios_db.incr.apply_file(f)                     # 增量窗口（默认水位+1..
 aios_db.model.ensure("24381_100677", force=True)   # 单根重生成
 aios_db.room.drain()                           # 消化房间重算积压
 aios_db.sync.baseline(7999)                    # 从未解析过的库补全量基线
+
+# 零售组合收工前的收尾三件套（批次闭环 execute_manual 内置这些，不用手调）：
+aios_db.incr.drain_side_effects()              # SystDerived / RefRevMaintain
+aios_db.spatial.reconcile()                    # 空间意图收敛 + 树落盘
+aios_db.spatial.persist()                      # 兜底：树脏了但没意图时落盘
+
+# 观察面（连接层即可，服务在跑也能用）：
+aios_db.incr.resolve_window(f)                 # 预览下一增量窗口（不执行）
+aios_db.incr.queue_status()                    # 本进程队列 {paused, rows}
+aios_db.spatial.status()                       # 空间收敛积压 {pending, stalled}
+aios_db.room.code("24381_100677")              # 房间编码（无归属 None）
+aios_db.room.names("24381_100677")             # 穿越的房间号列表
 ```
 
 在跑服务的任务/队列/进度要用 HTTP 客户端问（`aios_client.py`，零依赖）：
@@ -87,6 +99,7 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 | 脚本 | 用途 |
 |---|---|
 | `scripts/smoke_m1..m4.py` | 各里程碑验收冒烟（M4 覆盖 4 个★新入口） |
+| `scripts/smoke_m5.py` | 纯 Python 闭环缺口补齐冒烟（spatial / 副作用 / 窗口 / 房间查询；`--full` 跑执行层段） |
 | `scripts/demo_noun_caps.py` | 示范：noun 能力矩阵（替代 `gm_noun_caps_probe.py`） |
 | `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 历史回放 |
 | `scripts/demo_export_obj.py` | 示范：按名字定位构件并导出 OBJ 目视 |
@@ -94,6 +107,9 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 ## 已知代价与坑
 
 - 长任务（整库生成等）期间 Ctrl+C 不能立刻中断 Rust 侧，只能等当前调用返回。
+- 零售组合（`apply_file` / `drain_data` / `room.drain` / `model.gen*`）**不会**像
+  批次闭环那样自动收尾提交后副作用——收工前依次调 `incr.drain_side_effects()`
+  与 `spatial.reconcile()`（`execute_manual` 的队列闭环内置这些，无需手调）。
 - `db.query` 返回干净 JSON（`Thing` 转简单形态），与 HTTP API 字段同源。
 - `parse.element` 是原始解析（不处理 UDA）；`name` 字段以文件内记录为准，可能为空。
 - SurrealDB 服务端必须用仓库自带的 fork 2.1.4（`scripts/Start-Surreal8009.ps1`），

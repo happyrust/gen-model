@@ -3,6 +3,7 @@ from . import incr as incr
 from . import model as model
 from . import parse as parse
 from . import room as room
+from . import spatial as spatial
 from . import sync as sync
 
 def set_config(path: str) -> None:

@@ -86,8 +86,16 @@ fn connect(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -> PyRe
         // 必须在第一次读配置之前写入。
         unsafe { std::env::set_var("DB_OPTION_FILE", &config) };
     }
-    py.detach(|| runtime().block_on(aios_core::init_surreal()))
-        .map_err(anyhow_to_py)?;
+    py.detach(|| {
+        runtime().block_on(async {
+            aios_core::init_surreal().await?;
+            // 与 run_cli 同款（D11/ADR-010）：磁盘脚本之后再灌一遍编译期内置
+            // 函数快照——目录序里 hh 排在 hd 之后，不矫正的话连接层的
+            // fn::room_code 停在 hh 语义，与服务行为漂移。
+            aios_database::data_interface::embedded_surql::define_embedded_functions().await
+        })
+    })
+    .map_err(anyhow_to_py)?;
     CONNECTED.store(true, Ordering::SeqCst);
     Ok(())
 }

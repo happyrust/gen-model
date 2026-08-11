@@ -36,6 +36,7 @@ from ._aios_db import (  # noqa: E402
     parse,
     room,
     set_config,
+    spatial,
     sync,
 )
 
@@ -48,5 +49,6 @@ __all__ = [
     "parse",
     "room",
     "set_config",
+    "spatial",
     "sync",
 ]
