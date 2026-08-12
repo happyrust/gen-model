@@ -4,6 +4,13 @@
 会真实写库（AMS 测试工程）：model.ensure 会为目标 EQUI 生成模型实例。
 前提：gen-model 服务已停止（full_init 要拿同一把单实例锁）。
 积压的 195 条 pending 不在这里消化（incr.drain_data 会全量跑生成，跑不跑由人决定）。
+
+**历史验收记录，不可原样复跑**（2026-08-12 起）：本脚本钉在 M3 当时的环境上
+——仓库根 `DbOption` + 8009 正式库 + 真实 AMS 工程目录。8009 的数据目录已被
+SurrealDB 3.x 写坏且决定不修（见 `python/testbed/README.md`），照原样跑必失败；
+何况它会真实写库，别拿它去试新环境。
+等价物：真数据全链路用 `python/testbed/run_full_loop.py`（8019 沙箱 + 项目副本，
+不用停任何服务）；执行层的行为断言用 `pytest -m "not offline"`（一次性内存库）。
 """
 
 import json

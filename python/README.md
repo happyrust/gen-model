@@ -108,8 +108,7 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 
 | 脚本 | 用途 |
 |---|---|
-| `scripts/smoke_m1..m4.py` | 各里程碑验收冒烟（M4 覆盖 4 个★新入口） |
-| `scripts/smoke_m5.py` | 纯 Python 闭环缺口补齐冒烟（spatial / 副作用 / 窗口 / 房间查询；`--full` 跑执行层段） |
+| `scripts/smoke_m1..m5.py` | **历史验收记录，不可复跑**——钉在 8009 正式库 + `D:/AVEVA/...` 真实工程上，那个数据目录已退役不修。等价物见各脚本头注（多数已被 `pytest` 两档覆盖；`parse.noun_dict` 例外，仍需手跑 m4） |
 | `scripts/demo_noun_caps.py` | 示范：noun 能力矩阵（替代 `gm_noun_caps_probe.py`） |
 | `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 历史回放 |
 | `scripts/demo_export_obj.py` | 示范：按名字定位构件并导出 OBJ 目视 |

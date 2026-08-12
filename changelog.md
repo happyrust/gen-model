@@ -123,6 +123,19 @@
   - 新增连接层行为用例（`test_connection_layer.py`）：`db.inst` 三段式的每一段、
     `owner_chain` 的自 own 终止、`members`、`spatial.tree_status` 十五键形状钉。
 
+- **版本护栏自锁**：`aios_client.EXPECTED_SERVER_VERSION` 是手抄常量，此前
+  `chore(release)` 升 `Cargo.toml` 时没有任何东西提醒同步它——护栏自己先漂移，
+  从「提醒你版本不一致」退化成「对着新服务端瞎报警、对着老服务端不报警」。
+  离线档新增一条对表用例，bump 忘改常量时 CI 立刻红，红处文案直接写修法。
+  `sul_db.endpoint` 恰好是 0.1.19 起才有的键，这条对表马上就有实际意义。
+
+- **`scripts/smoke_m1..m5.py` 标注退役**：五个脚本全部钉在仓库根 `DbOption` +
+  8009 正式库 + `D:/AVEVA/...` 真实工程上，而 8009 的数据目录已决定不修，照原样
+  跑必失败。不删（它们是 M1–M5 的验收口径记录），改为每个脚本头注写明「历史
+  验收记录 / 为何跑不了 / 等价物在哪」，README 脚本表合并成一行同款提示。
+  多数段落已被两档 pytest 覆盖；`parse.noun_dict` 依赖 E3D 装机的 `attlib.dat`，
+  没有自动化等价物，头注里点名说清。
+
 - **`aios_client` 版本漂移护栏**：`health()` 比对服务端 `version` 与内置
   `EXPECTED_SERVER_VERSION`（现 0.1.18），不一致抛一次 `AiosVersionWarning`
   （同一个 client 不刷屏），`AiosClient(..., expected_version=None)` 关掉。

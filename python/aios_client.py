@@ -29,6 +29,10 @@ from typing import Any, Iterator
 # docs/specs/web-service-api.md 演进，客户端与在跑服务不同版时先打个招呼——实测
 # 踩过 0.1.13 的绑定对着 0.1.16 的部署包查半天的坑。只 warning 不报错：跨版本
 # 多数字段仍然通用，硬拦会把「凑合能用」变成「完全不能用」。
+#
+# 手抄常量，靠测试自锁：`python/tests/test_client_offline.py::
+# test_expected_version_tracks_the_crate_version` 会拿它跟 Cargo.toml 对表，
+# release bump 忘了同步这里，CI 的离线档立刻红。
 EXPECTED_SERVER_VERSION = "0.1.18"
 
 

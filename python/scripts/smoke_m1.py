@@ -7,6 +7,12 @@
 库文件缺省取 AMS 样例工程的 ams7997_0001。连接层验收需要 SurrealDB fork
 服务在跑（DbOption.toml 的 v_ip:v_port）；连不上时只降级提示，不算失败——
 M1 的硬验收是解析层。
+
+**历史验收记录，不可原样复跑**（2026-08-12 起）：本脚本钉在 M1 当时的环境上
+——仓库根 `DbOption` + 8009 正式库 + `D:/AVEVA/...` 真实工程。8009 的数据目录
+已被 SurrealDB 3.x 写坏且决定不修（见 `python/testbed/README.md`），照原样跑
+必失败；保留它是为了留住当时的验收口径。
+等价物：`pytest -m offline`（解析层四个函数全覆盖，跑仓内 issue-019 夹具）。
 """
 
 import json

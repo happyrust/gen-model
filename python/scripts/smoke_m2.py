@@ -3,6 +3,13 @@
 
 前提：SurrealDB fork 服务在跑（DbOption.toml 的 v_ip:v_port）。
 gen-model Web 服务（8022）不在跑时，HTTP 客户端部分降级提示。
+
+**历史验收记录，不可原样复跑**（2026-08-12 起）：本脚本钉在 M2 当时的环境上
+——仓库根 `DbOption` + 8009 正式库。8009 的数据目录已被 SurrealDB 3.x 写坏且
+决定不修（见 `python/testbed/README.md`），照原样跑必失败。
+等价物：HTTP 客户端见 `pytest -m offline`（`test_client_offline.py`，对打桩
+服务验全部 REST 路由）；连接层观察面见 `pytest -m "not offline"`
+（`test_connection_layer.py`，对一次性内存库）。
 """
 
 import json

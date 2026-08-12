@@ -9,6 +9,15 @@ drain_side_effects / queue_status + room.code / nodes / names。
   spatial.reconcile → spatial.persist，验证零售组合的收尾三件套。
 
 从 python/ 目录运行：.venv\\Scripts\\python.exe scripts\\smoke_m5.py [--full]
+
+**历史验收记录，不可原样复跑**（2026-08-12 起）：本脚本钉在 M5 当时的环境上
+——仓库根 `DbOption` + 8009 正式库 + `D:/AVEVA/...` 真实工程。8009 的数据目录
+已被 SurrealDB 3.x 写坏且决定不修（见 `python/testbed/README.md`），照原样跑
+必失败。
+等价物：硬守护见 `pytest -m offline`（`test_guards_offline.py`，33 个入口逐条
+验，且在干净子解释器里跑）；spatial / room / queue 的只读面见
+`pytest -m "not offline"`（`test_connection_layer.py`）；收尾三件套见
+`python/testbed/run_full_loop.py`。
 """
 
 import sys

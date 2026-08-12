@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,22 @@ from aios_client import (
 )
 
 pytestmark = pytest.mark.offline
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _crate_version() -> str:
+    """仓库根 `Cargo.toml` 的 `package.version`——就是 /health 报的那个 version。"""
+    text = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    try:
+        import tomllib  # 3.11+
+    except ImportError:
+        # abi3 wheel 支持到 3.10，那边没有 tomllib：退回只扫 [package] 段。
+        section = text.split("[package]", 1)[1].split("\n[", 1)[0]
+        match = re.search(r'^version\s*=\s*"([^"]+)"', section, re.MULTILINE)
+        assert match, "Cargo.toml 的 [package] 段里找不到 version"
+        return match.group(1)
+    return tomllib.loads(text)["package"]["version"]
 
 
 class _StubHandler(BaseHTTPRequestHandler):
@@ -180,3 +198,18 @@ def test_version_check_can_be_disabled(stub):
         warnings.simplefilter("always")
         client.health()
     assert [w for w in caught if issubclass(w.category, AiosVersionWarning)] == []
+
+
+def test_expected_version_tracks_the_crate_version():
+    """护栏自己不许漂。
+
+    `EXPECTED_SERVER_VERSION` 是手抄常量：`chore(release)` 把 `Cargo.toml` 升上去
+    而没人同步它的话，护栏会拿旧版本号去对表，从「提醒你版本不一致」退化成
+    「对着新服务端瞎报警 / 对着老服务端不报警」。让 CI 在 bump 那一刻就红，
+    比事后对着 0.1.13 的部署包查半天便宜得多（那正是加这条护栏的起因）。
+    """
+    crate = _crate_version()
+    assert EXPECTED_SERVER_VERSION == crate, (
+        f"aios_client.EXPECTED_SERVER_VERSION={EXPECTED_SERVER_VERSION!r} 与 "
+        f"Cargo.toml 的 {crate!r} 对不上——升版本时同步改 python/aios_client.py 的常量"
+    )

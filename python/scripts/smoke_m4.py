@@ -4,6 +4,15 @@ model.export_obj / sync.baseline（守护与错误路径）。
 
 前置：SurrealDB fork server 在跑；gen-model 服务停着（本脚本不 full_init，
 export_obj 走连接层）。从 python/ 目录运行：.venv\\Scripts\\python.exe scripts\\smoke_m4.py
+
+**历史验收记录，不可原样复跑**（2026-08-12 起）：本脚本钉在 M4 当时的环境上
+——仓库根 `DbOption` + 8009 正式库 + `D:/AVEVA/...` 真实工程。8009 的数据目录
+已被 SurrealDB 3.x 写坏且决定不修（见 `python/testbed/README.md`），照原样跑
+必失败。
+等价物：`parse.element` 见 `pytest -m offline`（`test_parse_offline.py`，含
+删元素读历史版本那条坑）；`export_obj` / `sync.baseline` 见
+`python/testbed/run_full_loop.py`。`parse.noun_dict` 依赖 E3D 装机的
+`attlib.dat`，**没有**自动化等价物，要验只能手跑本脚本对应段落。
 """
 
 import json
