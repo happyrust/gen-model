@@ -43,14 +43,87 @@ async fn db_option() -> anyhow::Result<aios_core::options::DbOption> {
     Ok(crate::db_api::manager().await?.db_option.clone())
 }
 
+/// 问一个本地端口的 `/api/v1/health` 要 `project`；不是活的 gen-model 服务就
+/// 返回 None（连不上、超时、不是 JSON、没有 project 字段，一律不算数）。
+///
+/// 刻意用裸 TCP 而不是引第三方 HTTP 客户端：绑定 crate 的依赖与主 crate 逐字
+/// 对齐才能共享 `[patch]` 与 Cargo.lock，为一次探测加一棵 reqwest 依赖树不值。
+/// `Connection: close` 让服务端答完即关，`read_to_end` 自然收尾。
+fn health_project(port: u16, timeout: std::time::Duration) -> Option<String> {
+    use std::io::{Read, Write};
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    stream
+        .write_all(
+            b"GET /api/v1/health HTTP/1.1\r\n\
+              Host: 127.0.0.1\r\n\
+              Accept: application/json\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .ok()?;
+    let mut raw = Vec::new();
+    // 上限兜住「端口上蹲着个会一直吐字节的东西」这种情况。
+    stream.take(256 * 1024).read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let body = text.split("\r\n\r\n").nth(1)?;
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    value.get("project")?.as_str().map(str::to_string)
+}
+
+/// 找出正在伺候**同一个工程**的活服务，返回 `(端口, 工程名)`。
+///
+/// 存在的理由：单实例锁按「项目根」隔离，而两个部署包（各自的仓库/发布目录）
+/// 各持各的锁，却可以写同一个 SurrealDB、同一个工程——锁根本挡不住这种互踩。
+/// 实测踩过：`test-worklspace` 的部署包在 9099，本仓库在 8022，两把锁互不相干。
+///
+/// 判据严格：响应必须是合法 health JSON **且** `project` 与本配置一致。端口被
+/// 别的程序占用不算冲突——误伤比漏报更烦人。
+fn conflicting_services(db_option: &aios_core::options::DbOption) -> Vec<(u16, String)> {
+    let mut ports: Vec<u16> = Vec::new();
+    // 本配置声明的端口优先，再加两个常用部署口。`http_api_addr` 挂在扩展配置上
+    // （异地部署那几个键与 DbOption 分开），走 get_db_option_ext 取。
+    if let Some(port) = aios_database::get_db_option_ext()
+        .http_api_addr
+        .as_deref()
+        .and_then(|addr| addr.rsplit(':').next())
+        .and_then(|port| port.parse::<u16>().ok())
+    {
+        ports.push(port);
+    }
+    for port in [8022u16, 9099] {
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    let timeout = std::time::Duration::from_millis(400);
+    ports
+        .into_iter()
+        .filter_map(|port| {
+            let project = health_project(port, timeout)?;
+            (project == db_option.project_name).then_some((port, project))
+        })
+        .collect()
+}
+
 /// 完整初始化：拿单实例锁 + `run_cli` 前置段（schema/函数自检、增量状态表、
 /// 索引回填、空间树加载），**不**启动 watcher / 批次 worker / Web 服务。
 ///
 /// `config` / `cwd` 语义同 [`crate::connect`]；`cwd` 通常必须是 gen-model 仓库根
 /// （`resource/surreal/` 按 CWD 找）。幂等：重复调用是空操作。
+///
+/// 拿锁之后还会探一次「有没有别的活服务在伺候同一个工程」（见
+/// [`conflicting_services`]），发现就拒绝；`force=True` 显式跳过这道探测。
 #[pyfunction]
-#[pyo3(signature = (config=None, cwd=None))]
-pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -> PyResult<()> {
+#[pyo3(signature = (config=None, cwd=None, force=false))]
+pub fn full_init(
+    py: Python<'_>,
+    config: Option<String>,
+    cwd: Option<PathBuf>,
+    force: bool,
+) -> PyResult<()> {
     if FULL_INIT.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -68,6 +141,26 @@ pub fn full_init(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -
             let db_option = aios_core::get_db_option().clone();
             aios_database::acquire_process_instance_lock(&db_option)
                 .context("获取项目单实例锁失败（服务是不是还在跑？）")?;
+
+            // 1b. 锁挡不住跨部署互踩（锁按项目根隔离，两个部署包各持各的锁却写
+            //     同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡的
+            //     场景不必付探测的几百毫秒。锁是 OnceLock 且同工程幂等，这里报错
+            //     退出不影响修好后在同进程里重试。
+            if !force {
+                let conflicts = conflicting_services(&db_option);
+                if !conflicts.is_empty() {
+                    let who = conflicts
+                        .iter()
+                        .map(|(port, project)| format!("127.0.0.1:{port}（工程 {project}）"))
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    anyhow::bail!(
+                        "检测到还有服务在伺候同一个工程：{who}。执行层与它并发会互踩\
+                         暂存窗口/队列/pending 表——先停掉那个服务，或确认无害后用 \
+                         aios_db.full_init(..., force=True) 跳过本检查"
+                    );
+                }
+            }
 
             // 2. 连接 + define_common_functions + 编译期内置函数快照（含 D11 的
             //    hd/hh 矫正；与 connect / run_cli 同款）。幂等；connect 层可能已做过。
@@ -455,30 +548,74 @@ pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
     .map_err(anyhow_to_py)
 }
 
-/// 刷新指定 refno 集的 `inst_relate` aabb，返回真发生变化的元素列表。
+/// 刷新指定 refno 集的 `inst_relate` aabb，返回真发生变化的元素列表
+/// `[{refno, noun}, ...]`——形态与 `room.enqueue` 的入参一致，noun 决定房间
+/// 分支（PANE → 整间，其它 → 元素）。
+///
+/// `durable=True` 走定向增量入口（`update_inst_relate_aabbs_by_refnos_incremental`，
+/// 生产上 TransformOnly / 定向 regen 用的就是它）：直写时把 AABB 指针、
+/// `room_recalc` 任务与 spatial epoch 放进同一个事务。注意其中 room 任务的发布
+/// 还受 `room_incremental` 开关（配置键或 AIOS_ROOM_INCREMENTAL）门控，指针与
+/// epoch 不受。默认 False 走普通刷新——包围盒确有变化时同样带 epoch bump，
+/// 但不发布房间任务（要排队用 `room.enqueue`）。
 #[pyfunction]
-#[pyo3(signature = (refnos, replace=false))]
-pub fn update_aabbs(py: Python<'_>, refnos: Vec<String>, replace: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (refnos, replace=false, durable=false))]
+pub fn update_aabbs(
+    py: Python<'_>,
+    refnos: Vec<String>,
+    replace: bool,
+    durable: bool,
+) -> PyResult<Py<PyAny>> {
     ensure_full()?;
     let value = py
         .detach(|| {
             runtime().block_on(async {
-                let changes =
+                let refnos = parse_refnos(refnos);
+                let changes = if durable {
+                    aios_database::fast_model::occ_generate::
+                        update_inst_relate_aabbs_by_refnos_incremental(&refnos, replace)
+                    .await?
+                } else {
                     aios_database::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos(
-                        &parse_refnos(refnos),
-                        replace,
+                        &refnos, replace,
                     )
-                    .await?;
+                    .await?
+                };
                 anyhow::Ok(serde_json::Value::Array(
                     changes
                         .iter()
-                        .map(|change| json!({ "refno": change.refno.to_string() }))
+                        .map(|change| {
+                            json!({
+                                "refno": change.refno.to_string(),
+                                "noun": change.noun,
+                            })
+                        })
                         .collect(),
                 ))
             })
         })
         .map_err(anyhow_to_py)?;
     pythonized(py, &value)
+}
+
+/// 删除元素（含其 pe 子树）的全部模型数据：级联删 `inst_relate` / `inst_info` /
+/// 几何边，清房间归属两个方向的边，并把包围盒从空间树上摘掉
+/// （`delete_inst_relate_subtree`，与 DeleteCleanup 补偿任务同一入口、幂等）。
+/// 直写时房间边删除与 spatial epoch bump 同事务提交。
+#[pyfunction]
+#[pyo3(signature = (refnos, chunk_size=100))]
+pub fn delete_subtree(py: Python<'_>, refnos: Vec<String>, chunk_size: usize) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            aios_database::data_interface::helper::delete_inst_relate_subtree(
+                &parse_refnos(refnos),
+                chunk_size,
+            )
+            .await
+        })
+    })
+    .map_err(anyhow_to_py)
 }
 
 /// 把一个元素（含子树）的已生成网格导出为 OBJ 目视检查。
@@ -703,6 +840,40 @@ pub fn drain(py: Python<'_>) -> PyResult<Py<PyAny>> {
     pythonized(py, &value)
 }
 
+/// 把「包围盒确实变了」的元素排进房间重算队列（`enqueue_room_recalc`），
+/// 返回入队条数。
+///
+/// 入参就是 `model.update_aabbs` 的返回形态 `[{refno, noun}, ...]`，按 noun
+/// 分流（PANE → `room_recalc_panel` 整间分支，其它 → `room_recalc_element`）。
+/// 与 Rust 夹具对拍测试同一触发方式，**不受** `room_incremental` 开关影响；
+/// 消费用 `room.drain()`。同 target 只占一行（record id 不带 dbnum，UPSERT 递增
+/// revision），重复入队幂等。
+#[pyfunction]
+pub fn enqueue(py: Python<'_>, changes: Bound<'_, PyAny>) -> PyResult<usize> {
+    ensure_full()?;
+    #[derive(serde::Deserialize)]
+    struct ChangeIn {
+        refno: String,
+        noun: String,
+    }
+    let changes: Vec<ChangeIn> = pythonize::depythonize(&changes)?;
+    let changes: Vec<aios_database::fast_model::occ_generate::AabbChange> = changes
+        .into_iter()
+        .map(|change| aios_database::fast_model::occ_generate::AabbChange {
+            refno: parse_refno(&change.refno),
+            noun: change.noun,
+        })
+        .collect();
+    let count = changes.len();
+    py.detach(|| {
+        runtime().block_on(
+            aios_database::data_interface::model_update_pending::enqueue_room_recalc(&changes),
+        )
+    })
+    .map_err(anyhow_to_py)?;
+    Ok(count)
+}
+
 /// 元素的房间编码（`fn::room_code` 直通，连接层只读；无归属返回 None）。
 #[pyfunction]
 pub fn code(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
@@ -768,6 +939,23 @@ pub fn status(py: Python<'_>) -> PyResult<Py<PyAny>> {
     pythonized(py, &value)
 }
 
+/// 空间树状态（连接层只读）：原样透出 /health `spatial_tree` 那份渲染。
+///
+/// 键面以渲染半边（`aabb_tree::render_spatial_tree_status`）为唯一权威，形状钉
+/// 也在那边——这里不复述全集，免得两处各说一套（G-02 契约迁移期间它正从九键
+/// 走向十五键，复述必然过期）。稳定核：`entries`（当前内存树条目数）、
+/// `file_epoch` / `db_epoch`、`drift`、`startup_verdict`。
+///
+/// 指纹现读现比（不是启动快照）：`drift=true` 而空间收敛又没有积压
+/// （`spatial.status()`），说明树相对库在静默漂移。
+#[pyfunction]
+pub fn tree_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value =
+        py.detach(|| runtime().block_on(aios_database::fast_model::aabb_tree::spatial_tree_status()));
+    pythonized(py, &value)
+}
+
 /// 消化待收敛的空间意图（树刷新/删除 + 文件持久化），返回收敛条数。
 ///
 /// 与 batch worker 出队门同一实现——零售组合（`apply_file` / `drain_data` /
@@ -789,6 +977,10 @@ pub fn reconcile(py: Python<'_>) -> PyResult<usize> {
 
 /// 把内存空间树落盘。`force=False` 只在脏时写（返回是否真的写了）；
 /// `force=True` 无条件写回并清脏标记。
+///
+/// `force=True` 只在 Ready/ReadyEmpty 放行（一致性闭环方案 §7）：重放/重建/降级
+/// 中的树无条件覆盖快照，会把中间态或不可信内容写过好文件。脏位路径自带发布门，
+/// 不额外拦。
 #[pyfunction]
 #[pyo3(signature = (force=false))]
 pub fn persist(py: Python<'_>, force: bool) -> PyResult<bool> {
@@ -796,6 +988,7 @@ pub fn persist(py: Python<'_>, force: bool) -> PyResult<bool> {
     py.detach(|| {
         runtime().block_on(async {
             if force {
+                aios_database::fast_model::spatial_state::ensure_spatial_ready()?;
                 aios_database::fast_model::aabb_tree::persist_aabb_tree().await?;
                 anyhow::Ok(true)
             } else {
@@ -814,6 +1007,118 @@ pub fn rebuild(py: Python<'_>) -> PyResult<()> {
         runtime().block_on(aios_database::fast_model::aabb_tree::rebuild_tree_from_pointers())
     })
     .map_err(anyhow_to_py)
+}
+
+// ── fixture（测试支撑：合成房间夹具）────────────────────────────────────────
+//
+// 与 Rust 侧 `room_fixture` live 测试**同一套**夹具：1 间房 `/ZZ-R-K100` +
+// 2 块 PANE（A: 0..1000 / B: 900..1900，重叠区 900..1000）+ 5 个盒形构件
+// （2 个在 A、2 个在 B、1 个骑在重叠区上），保留 refno 段 4000000001。
+// **只对一次性测试库使用**：create 会写 pe / FRMW / inst_* / geo_relate /
+// aabb / vec3 多张表并在 mesh 目录落 `zzfx_*.mesh`；drop 按固定 id 清理。
+// 配置的 `room_key_word` 需含 "ZZ-R-" 才能让 build_all / drain 只圈住夹具房。
+
+async fn fixture_mesh_dir(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match explicit {
+        Some(dir) => Ok(dir),
+        None => Ok(db_option().await?.get_meshes_path()),
+    }
+}
+
+/// 建房间夹具（幂等：内部先 drop 再建）。`mesh_dir` 缺省用配置的 meshes 目录。
+#[pyfunction]
+#[pyo3(name = "create", signature = (mesh_dir=None))]
+pub fn fixture_create(py: Python<'_>, mesh_dir: Option<PathBuf>) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let dir = fixture_mesh_dir(mesh_dir).await?;
+            aios_database::fast_model::room_fixture::create_room_fixture(&dir).await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 清夹具（库内记录 + `.mesh` 文件），幂等。
+#[pyfunction]
+#[pyo3(name = "drop", signature = (mesh_dir=None))]
+pub fn fixture_drop(py: Python<'_>, mesh_dir: Option<PathBuf>) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let dir = fixture_mesh_dir(mesh_dir).await?;
+            aios_database::fast_model::room_fixture::drop_room_fixture(&dir).await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 把一个夹具几何体搬到新包围盒（`min` / `max` 为世界坐标三元组）。
+///
+/// 只动几何侧（`aabb:zzfx_*` 记录、`vec3` 顶点、面板还重写 `.mesh`），**不碰**
+/// `inst_relate.aabb`——那要靠 `model.update_aabbs` 从 geo 侧重算，走的正是
+/// 「包围盒真的变了」的触发源；直接改指针等于绕过被测对象。
+#[pyfunction]
+#[pyo3(name = "move_body", signature = (seq, min, max, mesh_dir=None))]
+pub fn fixture_move_body(
+    py: Python<'_>,
+    seq: u64,
+    min: Vec<f32>,
+    max: Vec<f32>,
+    mesh_dir: Option<PathBuf>,
+) -> PyResult<()> {
+    ensure_full()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            anyhow::ensure!(
+                min.len() == 3 && max.len() == 3,
+                "min/max 需为三元组 [x, y, z]（收到 {} / {} 个分量）",
+                min.len(),
+                max.len()
+            );
+            let dir = fixture_mesh_dir(mesh_dir).await?;
+            aios_database::fast_model::room_fixture::move_fixture_body(
+                &dir,
+                seq,
+                glam::Vec3::new(min[0], min[1], min[2]),
+                glam::Vec3::new(max[0], max[1], max[2]),
+            )
+            .await
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// 夹具清单：面板/构件的 refno（`a_b` 形态）、`move_body` 用的 seq、房间号。
+#[pyfunction]
+#[pyo3(name = "refnos")]
+pub fn fixture_refnos(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn seq_of(refno: &str) -> u64 {
+        refno
+            .rsplit('_')
+            .next()
+            .and_then(|tail| tail.parse().ok())
+            .unwrap_or(0)
+    }
+    let (pane_a, pane_b) = aios_database::fast_model::room_fixture::panel_refnos();
+    let (in_a, in_b, straddler) = aios_database::fast_model::room_fixture::part_refnos();
+    let value = json!({
+        // 与夹具源常量一致（room_fixture.rs 的 ROOM_NUM）；边表断言用。
+        "room_num": "K100",
+        "pane_a": pane_a,
+        "pane_b": pane_b,
+        "in_a": in_a,
+        "in_b": in_b,
+        "straddler": straddler,
+        "seqs": {
+            "pane_a": seq_of(&pane_a),
+            "pane_b": seq_of(&pane_b),
+            "in_a": in_a.iter().map(|r| seq_of(r)).collect::<Vec<_>>(),
+            "in_b": in_b.iter().map(|r| seq_of(r)).collect::<Vec<_>>(),
+            "straddler": seq_of(&straddler),
+        },
+    });
+    pythonized(py, &value)
 }
 
 // ── 注册 ────────────────────────────────────────────────────────────────────
@@ -837,12 +1142,14 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     model.add_function(wrap_pyfunction!(gen_models, &model)?)?;
     model.add_function(wrap_pyfunction!(gen_dbnum, &model)?)?;
     model.add_function(wrap_pyfunction!(update_aabbs, &model)?)?;
+    model.add_function(wrap_pyfunction!(delete_subtree, &model)?)?;
     model.add_function(wrap_pyfunction!(export_obj, &model)?)?;
     m.add_submodule(&model)?;
 
     let room = PyModule::new(py, "room")?;
     room.add_function(wrap_pyfunction!(build_all, &room)?)?;
     room.add_function(wrap_pyfunction!(drain, &room)?)?;
+    room.add_function(wrap_pyfunction!(enqueue, &room)?)?;
     room.add_function(wrap_pyfunction!(code, &room)?)?;
     room.add_function(wrap_pyfunction!(nodes, &room)?)?;
     room.add_function(wrap_pyfunction!(names, &room)?)?;
@@ -850,10 +1157,18 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let spatial = PyModule::new(py, "spatial")?;
     spatial.add_function(wrap_pyfunction!(status, &spatial)?)?;
+    spatial.add_function(wrap_pyfunction!(tree_status, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(reconcile, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(persist, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(rebuild, &spatial)?)?;
     m.add_submodule(&spatial)?;
+
+    let fixture = PyModule::new(py, "fixture")?;
+    fixture.add_function(wrap_pyfunction!(fixture_create, &fixture)?)?;
+    fixture.add_function(wrap_pyfunction!(fixture_drop, &fixture)?)?;
+    fixture.add_function(wrap_pyfunction!(fixture_move_body, &fixture)?)?;
+    fixture.add_function(wrap_pyfunction!(fixture_refnos, &fixture)?)?;
+    m.add_submodule(&fixture)?;
 
     let sync = PyModule::new(py, "sync")?;
     sync.add_function(wrap_pyfunction!(baseline, &sync)?)?;
@@ -864,6 +1179,7 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("aios_db.model", &model)?;
     modules.set_item("aios_db.room", &room)?;
     modules.set_item("aios_db.spatial", &spatial)?;
+    modules.set_item("aios_db.fixture", &fixture)?;
     modules.set_item("aios_db.sync", &sync)?;
     Ok(())
 }

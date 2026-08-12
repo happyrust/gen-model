@@ -30,6 +30,7 @@ _add_native_dll_dirs()
 from ._aios_db import (  # noqa: E402
     connect,
     db,
+    fixture,
     full_init,
     incr,
     model,
@@ -43,6 +44,7 @@ from ._aios_db import (  # noqa: E402
 __all__ = [
     "connect",
     "db",
+    "fixture",
     "full_init",
     "incr",
     "model",

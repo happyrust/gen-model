@@ -48,6 +48,74 @@
   - testbed 全链路（`python/testbed/run_full_loop.py`）导出步骤补形状断言：
     单文件、`o` 组数 == 导出实例数、triangles > 0、无缺失 mesh。
 
+- **`aios_db.full_init` 增加同工程活服务探测**（行为变化：以前能起的场景现在
+  可能被拒）：拿锁之后探本机 `http_api_addr` / 8022 / 9099 的 `/api/v1/health`，
+  响应是合法 health JSON **且** `project` 与本配置一致就报错退出，
+  `full_init(..., force=True)` 显式跳过。动机是单实例锁按「项目根」隔离，两个
+  部署包各持各的锁却写同一个工程时锁根本不挡（实测踩过：`test-worklspace`
+  的包在 9099、本仓库在 8022）。判据只认 project 名——`/health` 不报「它连的是
+  哪个 SurrealDB」，所以隔离沙箱若与生产**重名**会被误伤，用 `force=True` 放行
+  （`python/tests/conftest.py` 就是这么做的，并在注释里写明三条资源如何独立）。
+
+- **`aios_db.spatial.tree_status` 的文档与存根不再复述键面**：改为「原样透出
+  /health `spatial_tree` 那份渲染，键面以 Rust 侧渲染半边为唯一权威」。此前注释
+  与 `.pyi` 各抄了一份九键清单，而 G-02 契约迁移正把它往十五键上带——两处各说
+  一套，过期是必然。Python 面只钉判漂移要用的稳定核（`entries` / `file_epoch` /
+  `db_epoch` / `drift` / `startup_verdict`），全集的形状钉留在 Rust 侧一处。
+
+- **`aios_db.db.inst` 去掉全表扫，改三段式取边**：① `anc CONTAINS`
+  （`idx_inst_relate_anc` 索引查询，anc 含自身故一跳圈住整棵子树）；② 空结果
+  回落 `array::flatten(SELECT VALUE ->inst_relate FROM [pe:…])` 图跳，只取元素
+  自己那一跳（preload.rs 的实测账：`in` 谓词全表扫 1.57s vs 图跳 3.1ms），兜住
+  `anc` 未回填的存量库与直接 `RELATE` 出来的测试夹具；③ 两条都空且库里还有
+  `anc = NONE` 行时响亮报错——「查不全」不能被读成「没有」。refno 解析失败也
+  改为直接报错（此前 `unwrap_or_default()` 静默成 0，谓词永不命中）。与
+  `export_obj` 的差别是多了第 ② 段：那边空结果本就是错误条件，这边空是合法答案。
+
+### 新增
+
+- **`aios_db` 补齐测试支撑面导出，并新开房间增量 pytest 轨**：
+  - 新增 `aios_db.fixture`（`create` / `drop` / `move_body` / `refnos`），直通
+    `src/fast_model/room_fixture.rs` 的合成房间夹具（1 间 `/ZZ-R-K100` + 2 块
+    PANE + 5 个盒形构件，其一骑在重叠区，保留 refno 段 4000000001）——与 Rust
+    `room_fixture` live 轨共用同一套数据，两侧断言可互相印证。会写 pe/FRMW/
+    inst_*/geo_relate/aabb/vec3 多张表并落 `zzfx_*.mesh`，**只对一次性测试库使用**。
+  - 新增 `room.enqueue(changes)`（按 `model.update_aabbs` 的返回形态入队房间
+    重算，PANE 走整间分支、其它走元素分支，不受 `room_incremental` 开关门控）、
+    `model.delete_subtree(refnos)`（DeleteCleanup 补偿任务同一入口的级联删除）、
+    `spatial.tree_status()`（空间树九键指纹，与 /health `spatial_tree` 同源、
+    现读现比）、`model.update_aabbs(..., durable=True)`（生产 TransformOnly /
+    定向 regen 走的直写事务路径：AABB 指针、`room_recalc` 任务与 spatial epoch
+    同事务提交）。
+  - 新增 `python/tests/`：对 conftest 自起的一次性内存 SurrealDB
+    （`bin/surreal.exe` @8071，进程退出零残留）跑「房间增量收敛 == 全量重建」
+    的**逐边**对拍，覆盖构件搬家、面板整间、空刷负例、删除清边留痕、durable
+    直写五条；配置 `tests/DbOption-roomtest.toml`（`room_key_word=["ZZ-R-"]`
+    只圈夹具房）。conftest 会把仓库根同名空间树文件挪开再还原，不毁真项目产物。
+  - 类型存根补齐（新增 `fixture.pyi`，`model` / `room` / `spatial` /
+    `__init__` 同步新入口），`py.typed` 对外契约不再漂移。
+
+- **绑定的离线测试档进 CI**（`python/tests -m offline`，60 条）：解析层对着仓内
+  `issue-019` 的 db8000 会话快照（与 Rust `db8000_two_delete_fixture` 同一份
+  数据、同一串删除序列）、三层硬守护在干净子解释器里逐条验、`.pyi` 与运行时的
+  名字集合逐模块对齐、HTTP 客户端对着打桩服务验 12 条 REST 路由与报文形状。
+  这一档不连 SurrealDB、不碰 E3D 装机、不扫项目目录，秒级跑完。
+  - `.github/workflows/windows-tests.yml` 新增 `python-bindings` job：复用
+    `windows-binary.yml` 的 OCCT / protoc provisioning（绑定按 Q7 钉死「与服务
+    同一套默认 feature」，必须有 OCCT）→ `maturin build` → 装 wheel → 跑离线档
+    → wheel 作 artifact 上传。原 `db8000-model-increment` job 不动。
+  - conftest 按选中集合裁定本进程那一份 DbOption（进程级 OnceCell，换库只能换
+    进程）：有房间档用例就用 `DbOption-roomtest`，纯离线档用新增的
+    `DbOption-ci`。离线用例在任一配置下都成立，两档同跑不冲突。
+  - 新增连接层行为用例（`test_connection_layer.py`）：`db.inst` 三段式的每一段、
+    `owner_chain` 的自 own 终止、`members`、`spatial.tree_status` 十五键形状钉。
+
+- **`aios_client` 版本漂移护栏**：`health()` 比对服务端 `version` 与内置
+  `EXPECTED_SERVER_VERSION`（现 0.1.18），不一致抛一次 `AiosVersionWarning`
+  （同一个 client 不刷屏），`AiosClient(..., expected_version=None)` 关掉。
+  回应实测踩过的 0.1.13 绑定对着 0.1.16 部署包查半天的坑——只告警不报错，跨版本
+  多数字段仍通用，硬拦会把「凑合能用」变成「完全不能用」。
+
 ## 2026-08-11
 
 ### 变更

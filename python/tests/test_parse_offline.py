@@ -1,0 +1,145 @@
+# -*- coding: utf-8 -*-
+"""解析层离线用例：只吃仓内 issue-019 会话快照夹具。
+
+这是 CI 唯一跑得动的一档——解析层不连 SurrealDB、不碰 E3D 装机、不扫项目目录，
+夹具（db8000 的 sesno 24 / 25 / 26 三份快照）就躺在 `tests/fixtures/issues` 里。
+断言与 Rust 侧 `tests/db8000_two_delete_fixture.rs` 同源：同一份数据，两条链路
+必须读出同一串删除序列，谁漂移了都会在这里红。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.offline
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_DIR = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "issues"
+    / "issue-019-cross-session-parent-child-delete"
+)
+
+
+@pytest.fixture(scope="session")
+def manifest() -> dict:
+    if not FIXTURE_DIR.exists():
+        pytest.skip(f"缺 issue-019 夹具目录: {FIXTURE_DIR}")
+    return json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="session")
+def snapshots(manifest, tmp_path_factory) -> dict[str, Path]:
+    """解压三份快照，返回 role -> 文件路径（session 内解一次）。"""
+    archive = FIXTURE_DIR / manifest["archive"]["path"]
+    out = tmp_path_factory.mktemp("issue019")
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(out)
+    return {snap["role"]: out / snap["path"] for snap in manifest["snapshots"]}
+
+
+@pytest.fixture(scope="session")
+def by_role(manifest) -> dict[str, dict]:
+    return {snap["role"]: snap for snap in manifest["snapshots"]}
+
+
+def test_archive_integrity(manifest):
+    """夹具没被换行转换 / LFS 占位符弄坏——后面全部断言以此为前提。"""
+    archive = FIXTURE_DIR / manifest["archive"]["path"]
+    assert archive.stat().st_size == manifest["archive"]["bytes"]
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert digest == manifest["archive"]["sha256"]
+
+
+def test_snapshots_recognized_as_db_files(configured, snapshots):
+    for role, path in snapshots.items():
+        assert configured.parse.is_db_file(str(path)), f"{role} 应被认成候选库文件"
+
+
+def test_header_matches_manifest(configured, snapshots, by_role, manifest):
+    for role, path in snapshots.items():
+        header = configured.parse.header(str(path))
+        assert header["dbnum"] == manifest["dbnum"], role
+        assert header["latest_sesno"] == by_role[role]["sesno"], role
+        assert header["file_size"] > 0, role
+        assert path.stat().st_size == by_role[role]["bytes"], role
+
+
+def test_sessions_ascend_to_snapshot_sesno(configured, snapshots, by_role):
+    """会话页升序且末位 == 该快照被切到的会话（切割正确性的最小证据）。"""
+    for role, path in snapshots.items():
+        sesnos = [row["sesno"] for row in configured.parse.sessions(str(path))]
+        assert sesnos, role
+        assert sesnos == sorted(sesnos), f"{role} 会话页应升序: {sesnos}"
+        assert sesnos[-1] == by_role[role]["sesno"], role
+
+
+def test_collect_changes_reports_both_deletes(configured, snapshots, manifest):
+    """窗口 25..26：子件在 25 删、父件在 26 删——issue-019 的病灶序列本体。"""
+    window = manifest["window"]
+    start, end = window["start_sesno"], window["end_sesno"]
+    changes = configured.parse.collect_changes(
+        str(snapshots["parent_deleted"]), start, end
+    )
+    assert set(changes) == {str(start), str(end)}, changes.keys()
+
+    deleted_at = {
+        sesno: {op["refno"] for op in ops if op["op"] == "deleted"}
+        for sesno, ops in changes.items()
+    }
+    assert manifest["refs"]["child"] in deleted_at[str(start)]
+    assert manifest["refs"]["parent_equi"] in deleted_at[str(end)]
+
+    for sesno, ops in changes.items():
+        for op in ops:
+            assert op["sesno"] == int(sesno), f"操作要落在自己的会话分区: {op}"
+
+
+def test_collect_changes_detail_expands_attributes(configured, snapshots, manifest):
+    """detail=False 只给属性名列表，detail=True 给具体值——两种形态都得成立。"""
+    window = manifest["window"]
+    path = str(snapshots["parent_deleted"])
+    brief = configured.parse.collect_changes(path, window["start_sesno"], window["end_sesno"])
+    full = configured.parse.collect_changes(
+        path, window["start_sesno"], window["end_sesno"], detail=True
+    )
+    assert set(brief) == set(full)
+    for sesno in brief:
+        assert len(brief[sesno]) == len(full[sesno])
+    modified = [
+        op for ops in full.values() for op in ops if op["op"] == "modified"
+    ]
+    for op in modified:
+        assert isinstance(op["added"], dict), "detail=True 的 added 应是 {名: 值}"
+
+
+def test_element_dump_and_history_replay(configured, snapshots, manifest):
+    """被删元素在最新索引里读不到，但给 sesno 能读回历史版本（M4 记过的坑：
+    「最新索引里没有」不等于「从未存在」）。"""
+    child = manifest["refs"]["child"]
+    baseline_sesno = manifest["window"]["baseline_sesno"]
+
+    dump = configured.parse.element(str(snapshots["baseline"]), child)
+    assert dump["refno"] == child
+    assert dump["noun"].strip().upper() == "BOX"
+    assert dump["found_sesno"] <= baseline_sesno
+    assert dump["owner"] == manifest["refs"]["parent_equi"]
+
+    final = str(snapshots["parent_deleted"])
+    with pytest.raises(RuntimeError):
+        configured.parse.element(final, child)
+    revived = configured.parse.element(final, child, sesno=baseline_sesno)
+    assert revived["refno"] == child
+    assert revived["noun"].strip().upper() == "BOX"
+
+
+def test_element_rejects_unparsable_refno(configured, snapshots):
+    with pytest.raises(RuntimeError):
+        configured.parse.element(str(snapshots["baseline"]), "not-a-refno")

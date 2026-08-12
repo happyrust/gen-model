@@ -1,0 +1,132 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 房间增量 pytest 专用配置（python/tests/）
+#
+# 从 testbed/DbOption-pytest.toml 拷贝（2026-08-12），差异只有四处：
+#   1. v_port=8071：conftest 自起的一次性内存 SurrealDB（bin/surreal.exe），
+#      进程退出即全部丢弃——不碰 8009 正式库、也不碰 8019 testbed 库；
+#   2. room_key_word=["ZZ-R-"]：只匹配合成夹具那一间房（/ZZ-R-K100），
+#      room.build_all / room.drain 用的是本配置值，不能像 Rust 测试那样
+#      进程内 clone 覆盖，所以必须钉在这里；
+#   3. meshes_path 指向 tests/.meshes（.gitignore 排除），夹具 zzfx_*.mesh
+#      不混入 testbed/仓库 assets；
+#   4. room_incremental=true：让 update_aabbs(durable=True) 的直写事务发布
+#      room_recalc 任务（epoch bump 不受此键影响，但那条用例要看 pending 行）。
+#
+# project_path 沿用 testbed 项目副本：full_init 的单实例锁与 manager 目录解析
+# 需要它（已被 run_full_loop.py 验证可用）。测试期间勿并行跑 testbed 脚本。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#同步文件配置
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_live = false
+replace_dbs = true
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置：testbed 项目副本（Sync-TestbedProjects.ps1 维护）
+project_path = "D:/work/plant-code/old/gen-model/python/testbed/projects"
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+surreal_ns = 1516
+module = "DESI"
+#是否生成模型数据（测试显式驱动；增量/按需路径内部自行强制打开）
+gen_model = false
+gen_mesh = false
+replace_mesh = false
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#【死键】rs-core 仅定义未消费，字段必填删不得（与根配置同步）
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+gen_model_batch_size = 4
+
+build_cate_relate = false
+
+#mesh 文件产物隔离到 tests 内
+meshes_path = "D:/work/plant-code/old/gen-model/python/tests/.meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置（默认 feature 不消费）
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置（默认 feature 不消费）
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100
+
+#版本数据库服务配置：conftest 自起的一次性内存实例
+v_ip = "localhost"
+v_port = 8071
+v_user = "root"
+v_password = "root"
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+#mqtt 事件 ip（默认 feature 不消费）
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+# 测试不起 Web 服务
+# http_api_addr = "0.0.0.0:8122"
+http_api_cors = ["*"]
+
+startup_autorun = false
+room_incremental = true
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false
+reset_mdb_project = false
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["LOOP", "PRIM"]
+# 全量模型生成与按需基线解析的库号窗口（增量范围只认 mdb_name 的 MDB 声明）
+manual_db_nums = [7997, 7998, 7999, 8000]
+plat_url = ""
+
+#puhua（默认 feature 不消费）
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+# 房间名关键词：只圈住合成夹具那一间（/ZZ-R-K100）
+room_key_word = ["ZZ-R-"]
+
+gen_history_model = false

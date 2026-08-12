@@ -6,6 +6,10 @@ def build_all() -> None:
 def drain() -> dict[str, Any]:
     """消化待重算的房间归属目标，返回 DrainReport 的 JSON 形态。"""
 
+def enqueue(changes: list[dict[str, Any]]) -> int:
+    """按 [{refno, noun}, ...]（model.update_aabbs 的返回形态）入队房间重算，
+    PANE 走整间分支、其它走元素分支；返回入队条数。不受 room_incremental 开关影响。"""
+
 def code(refno: str) -> str | None:
     """元素的房间编码（fn::room_code 直通，连接层只读；无归属返回 None）。"""
 

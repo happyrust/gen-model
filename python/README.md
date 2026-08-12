@@ -18,6 +18,10 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 - 绑定 crate 是仓内 workspace 成员，与主 crate 共享 `Cargo.lock` / `target/` /
   `[patch]` vendor 重定向（`Toggle-LocalDeps.ps1` 同样生效），OCC 只编一次。
 - abi3 wheel：一个 pyd 通吃 Python ≥ 3.10，升 Python 不用重编。
+- 实测（2026-08-12，共享 `D:\Rust\target` 缓存已热）：`develop --release` 从改动
+  绑定源到装好 1m59s，产物 ~76 MB；两档 pytest 在 release 与 debug 上结果一致、
+  耗时也几乎一样（12.4s vs 12.9s）——这套用例是进程启动与建库主导的，OCC 布尔
+  运算的 debug/release 差距要跑真实生成（`model.gen*` / 整库）才看得出来。
 - OCCT 是动态链接：包装层（`pysrc/aios_db/__init__.py`）在导入扩展前把 PATH
   上所有目录注册进 DLL 搜索路径，正常情况无需手工干预。
 
@@ -26,13 +30,17 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 | 层 | 入口 | 能做什么 | 锁 | 与在跑服务共存 |
 |---|---|---|---|---|
 | 解析层 | `aios_db.parse.*` | 纯文件解析 | 无 | ✔ 完全共存 |
-| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.status` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
-| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线 / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`） | 拿单实例锁 | ✖ 必须先停服务 |
+| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.status|tree_status` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
+| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线 / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `room.enqueue` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
 
 - **`aios_db.set_config(path)` 必须最先调用**（解析层深处也读全局 DbOption，
   配置是进程级 OnceCell，第一次被读走后不可更换）。
 - mutating 函数在未 `full_init` 时直接抛 `RuntimeError`（硬守护）；`full_init`
   拿的是与服务同一把项目锁，服务在跑时会直接失败——这是防线不是缺陷。
+- 锁只按「项目根」隔离，**挡不住两个部署包写同一个工程**（各持各的锁）。所以
+  `full_init` 拿锁后还会探本机 `http_api_addr` / 8022 / 9099 的
+  `/api/v1/health`，响应是合法 health JSON 且 `project` 与本配置一致就拒绝；
+  确认无害时用 `full_init(..., force=True)` 跳过。
 - refno 输出统一 `a_b` 形态（与库内 `pe:` record id 一致，拿到即可拼 SurrealQL）；
   输入宽容 `a/b` / `a_b` / `pe:a_b` / `=a/b`。
 
@@ -103,6 +111,47 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 | `scripts/demo_noun_caps.py` | 示范：noun 能力矩阵（替代 `gm_noun_caps_probe.py`） |
 | `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 历史回放 |
 | `scripts/demo_export_obj.py` | 示范：按名字定位构件并导出 OBJ 目视 |
+| `scripts/baseline_with_cata.py` | 基线一个 DESI 库；CATA 默认按需读取，`--eager` 才整库预热 |
+| `testbed/run_full_loop.py` | 沙箱全链路：解析 → 基线 → 生成 → 导出 → 房间收尾（见 `testbed/README.md`） |
+
+## 测试（`tests/`，两条轨）
+
+| 轨 | 选择器 | 需要什么 | 盯什么 |
+|---|---|---|---|
+| 离线档 | `-m offline` | 只要装好的扩展 | 解析层（仓内 issue-019 会话快照）、三层硬守护、`.pyi` 与运行时一致性、HTTP 客户端路由 |
+| 房间增量档 | `-m "not offline"` | `bin/surreal.exe` + testbed 项目副本 | 「增量收敛 == 全量重建」逐边对拍、删除留痕、durable 直写；连接层只读入口 |
+
+```powershell
+cd python
+uv pip install pytest --python .venv     # 首次
+.venv\Scripts\python.exe -m pytest -m offline -q        # 秒级，CI 跑的就是这档
+.venv\Scripts\python.exe -m pytest -q                   # 两档全跑（要 surreal.exe）
+```
+
+离线档不连 SurrealDB、不碰 E3D 装机、不扫项目目录，数据全来自
+`tests/fixtures/issues/issue-019-*` 的 db8000 快照——所以它进得了 CI
+（`.github/workflows/windows-tests.yml` 的 `python-bindings` job：备 OCCT →
+`maturin build` → 装 wheel → 跑这一档 → 传 wheel artifact）。
+
+房间增量档对一次性内存 SurrealDB（conftest 自起 `bin/surreal.exe` @8071，进程
+退出即全丢）跑对拍，与 Rust 侧 `room_fixture` live 测试共用同一套合成夹具
+（`aios_db.fixture` 直通 `src/fast_model/room_fixture.rs`）。
+
+DbOption 是进程级 OnceCell，一个进程只能有一份配置：conftest 按选中集合裁定
+——有房间档用例就用 `DbOption-roomtest`，纯离线档用 `DbOption-ci`。离线用例在
+任一配置下都成立，所以两档同跑不冲突，不必分两次。
+
+专为测试补的导出（生产脚本一般用不到）：
+
+- `fixture.create/drop/move_body/refnos`——合成房间夹具（只对一次性测试库使用）；
+- `room.enqueue(changes)`——按 `update_aabbs` 返回形态入队房间重算；
+- `model.delete_subtree(refnos)`——DeleteCleanup 同一入口的级联删除；
+- `model.update_aabbs(..., durable=True)`——生产直写事务路径（指针 + 房间任务 + epoch 同事务）；
+- `spatial.tree_status()`——空间树九键指纹（/health `spatial_tree` 同源）。
+
+conftest 用 `tests/DbOption-roomtest`（`room_key_word=["ZZ-R-"]` 只圈夹具房、
+v_port=8071）；`full_init` 拿的是 testbed 项目副本的锁，测试期间别并行跑
+`testbed/run_full_loop.py`。
 
 ## 已知代价与坑
 

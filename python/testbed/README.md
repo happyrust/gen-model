@@ -51,6 +51,11 @@ cd python
 
 - SurrealDB 必须用仓库自带 fork 2.1.x（`Start-TestSurreal.ps1` 已带版本守卫），
   PATH 上的 3.x 会把 RocksDB 数据目录写坏（见 `Start-Surreal8009.ps1` 头注释）。
+- **`.surreal/ams-8009`（正式库）已被 3.x 写坏，且决定不修**：测试一律用新建的
+  独立数据目录——本沙箱的 8019，或房间增量 pytest 那个进程退出即丢的内存实例
+  （`python/tests/`，8071）。真要恢复正式库，用 `sync.baseline` 重建基线即可，
+  但那是另一件事，不该挡住测试。历史验收脚本 `scripts/smoke_m1..m5.py` 里还写着
+  8009 与真实项目路径，在沙箱里复跑要先把 `set_config` 指到 `DbOption-pytest`。
 - 沙箱数据目录若被写坏：停库 → 删 `testbed/.surreal` → 重起重基线，几分钟的事。
 - `DbOption-pytest.toml` 的键面与仓库根 `DbOption.toml` 保持同步（差异只有
   project_path / v_port / meshes_path / http_api_addr 四处），根配置增删必填键

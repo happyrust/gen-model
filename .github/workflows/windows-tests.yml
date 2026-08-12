@@ -92,3 +92,132 @@ jobs:
           --no-default-features
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
+
+  # PyO3 绑定（python/）：建 abi3 wheel + 跑离线档 pytest。
+  #
+  # 只跑 `-m offline` 那一档——它不连 SurrealDB、不碰 E3D 装机、不扫项目目录，
+  # 数据全来自仓内 issue-019 会话快照夹具。房间增量档要 bin/surreal.exe 与
+  # testbed 项目副本，留在本地跑（见 python/README.md）。
+  #
+  # 绑定按 Q7 决策钉死「与服务同一套默认 feature」的单一构建形态，所以这里必须
+  # 备齐 OCCT——provisioning 与 windows-binary.yml 逐字同款，那边升级版本时这边
+  # 跟着改（两处 OCC_* 环境变量）。
+  python-bindings:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    env:
+      # 绑定的 cdylib 与主 crate 共享编译产物；给绝对路径，免得 maturin 在
+      # python/ 目录下跑时把 target 落到 python/target 而错过缓存。
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target
+      OCC_VERSION: 7.9.3
+      OCC_ARCHIVE_URL: https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_3/opencascade-7.9.3-vc14-64-combined.zip
+      OCC_ARCHIVE_SHA256: afbef3457fbc4a2bdca0608e0fe284392f51e4c2c42ccbfb9df7168d8e4eb9b3
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust nightly
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
+
+      - name: Download prebuilt OpenCASCADE
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP\occt.zip"
+          $extract = "$env:RUNNER_TEMP\occt-extract"
+          $source = "$extract\opencascade-$env:OCC_VERSION-vc14-64"
+          $root = "$env:RUNNER_TEMP\occt"
+          Invoke-WebRequest $env:OCC_ARCHIVE_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:OCC_ARCHIVE_SHA256) {
+            throw 'OpenCASCADE archive checksum mismatch'
+          }
+          New-Item -ItemType Directory -Force $extract, "$root\include\opencascade", "$root\lib", "$root\bin" | Out-Null
+          tar -xf $archive -C $extract `
+            "opencascade-$env:OCC_VERSION-vc14-64/inc/*" `
+            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/lib/*" `
+            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/bin/*" `
+            '3rdparty-vc14-64/tbb-2021.13.0-x64/bin/tbb12.dll' `
+            '3rdparty-vc14-64/jemalloc-vc14-64/bin/jemalloc.dll'
+          Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
+          Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
+          Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
+          Copy-Item "$extract\3rdparty-vc14-64\tbb-2021.13.0-x64\bin\tbb12.dll" "$root\bin"
+          Copy-Item "$extract\3rdparty-vc14-64\jemalloc-vc14-64\bin\jemalloc.dll" "$root\bin"
+          "OCC_ROOT=$root" >> $env:GITHUB_ENV
+          # 运行期也要找得到 TK*.dll：包装层按 PATH 逐目录 os.add_dll_directory。
+          "$root\bin" >> $env:GITHUB_PATH
+
+      - name: Download protoc
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP\protoc.zip"
+          $root = "$env:RUNNER_TEMP\protoc"
+          Invoke-WebRequest $env:PROTOC_ARCHIVE_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:PROTOC_ARCHIVE_SHA256) {
+            throw 'protoc archive checksum mismatch'
+          }
+          Expand-Archive $archive $root
+          "PROTOC=$root\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-
+            cargo-python-bindings-
+
+      - name: Install maturin and pytest
+        shell: pwsh
+        run: python -m pip install --upgrade "maturin>=1.7,<2" "pytest>=8"
+
+      - name: Build abi3 wheel
+        shell: pwsh
+        working-directory: python
+        run: maturin build --locked --out "$env:CARGO_TARGET_DIR\wheels"
+
+      # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
+      - name: Save cargo cache
+        if: always() && steps.cargo-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+
+      - name: Install wheel
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem "$env:CARGO_TARGET_DIR\wheels\*.whl" | Select-Object -First 1
+          if (-not $wheel) { throw 'maturin 没有产出 wheel' }
+          python -m pip install --force-reinstall $wheel.FullName
+
+      - name: Run offline binding tests
+        shell: pwsh
+        working-directory: python
+        run: python -m pytest -m offline -q
+
+      - name: Upload wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aios-db-wheel
+          path: ${{ github.workspace }}\target\wheels\*.whl
+          if-no-files-found: warn
+          retention-days: 30

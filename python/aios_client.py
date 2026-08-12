@@ -22,7 +22,18 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from typing import Any, Iterator
+
+# 本文件跟着走的服务端版本（= 仓库根 Cargo.toml 的 package.version）。字段面按
+# docs/specs/web-service-api.md 演进，客户端与在跑服务不同版时先打个招呼——实测
+# 踩过 0.1.13 的绑定对着 0.1.16 的部署包查半天的坑。只 warning 不报错：跨版本
+# 多数字段仍然通用，硬拦会把「凑合能用」变成「完全不能用」。
+EXPECTED_SERVER_VERSION = "0.1.18"
+
+
+class AiosVersionWarning(UserWarning):
+    """在跑服务的版本与 `EXPECTED_SERVER_VERSION` 不一致。"""
 
 
 class AiosApiError(RuntimeError):
@@ -37,10 +48,14 @@ class AiosApiError(RuntimeError):
 
 
 class AiosClient:
-    def __init__(self, base: str = "http://127.0.0.1:8022", timeout: float = 130.0):
+    def __init__(self, base: str = "http://127.0.0.1:8022", timeout: float = 130.0,
+                 expected_version: str | None = EXPECTED_SERVER_VERSION):
         # timeout 默认 130s：/model/ensure 的服务端等待预算是 120s，客户端不能更短。
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # 传 None 关掉版本告警（明知在连老部署包时用）。
+        self.expected_version = expected_version
+        self._version_warned = False
 
     # ── 基础设施 ────────────────────────────────────────────────────────────
 
@@ -71,7 +86,23 @@ class AiosClient:
     # ── REST 端点（§4）──────────────────────────────────────────────────────
 
     def health(self) -> dict:
-        return self._request("GET", "/health")
+        payload = self._request("GET", "/health")
+        self._check_version(payload)
+        return payload
+
+    def _check_version(self, health: Any) -> None:
+        """版本漂移只告警一次（同一 client 反复 health 不刷屏）。"""
+        if self._version_warned or not self.expected_version:
+            return
+        actual = health.get("version") if isinstance(health, dict) else None
+        if actual and actual != self.expected_version:
+            self._version_warned = True
+            warnings.warn(
+                f"{self.base} 在跑的是 {actual}，本客户端跟的是 "
+                f"{EXPECTED_SERVER_VERSION}——字段面可能有出入，对不上时先核版本",
+                AiosVersionWarning,
+                stacklevel=3,
+            )
 
     def update_preview(self, project: str | None = None) -> dict:
         return self._request("POST", "/update/preview",

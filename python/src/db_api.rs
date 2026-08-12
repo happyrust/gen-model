@@ -205,26 +205,72 @@ pub fn owner_chain(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
 /// 一个元素**及其子树**的几何实例边（`inst_relate`），FETCH 展开 aabb 与 world_trans。
 ///
 /// 实例边挂在具体图元上；交付单元根（EQUI/BRAN…）自身通常没有直接实例，靠
-/// `anc`（祖先链的 RefU64 u64 数组）把整棵子树的实例收进来。
+/// `anc`（祖先链的 RefU64 u64 数组，含自身）把整棵子树的实例收进来。只走
+/// `idx_inst_relate_anc`，不 OR 无索引的 `in = …` 臂——那会把整条谓词退化成
+/// 全表扫（`model.export_obj` 同款账，preload.rs 实测 1.57s vs 3.1ms）。
 #[pyfunction]
 pub fn inst(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
     ensure_connected()?;
-    let refno = normalize_refno(&refno);
+    let normalized = normalize_refno(&refno);
     let refno_u64 = {
         use std::str::FromStr;
-        aios_core::RefU64::from_str(&refno)
-            .map(|refno| ((refno.get_0() as u64) << 32) | refno.get_1() as u64)
-            .unwrap_or_default()
+        aios_core::RefU64::from_str(&normalized)
+            .map(|parsed| ((parsed.get_0() as u64) << 32) | parsed.get_1() as u64)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "refno {refno} 解析失败（{error}）——期待 =a/b、a/b 或 a_b 形制。\
+                     解析不出来时 anc 谓词永不命中，宁可报错也不静默返回空集"
+                )
+            })
+            .map_err(anyhow_to_py)?
     };
     let value = py
         .detach(|| {
-            runtime().block_on(take_json(
-                "SELECT * FROM inst_relate \
-                 WHERE in = type::thing('pe', $refno) OR anc CONTAINS $refno_u64 \
-                 FETCH aabb, world_trans;"
-                    .into(),
-                vec![("refno", json!(refno)), ("refno_u64", json!(refno_u64))],
-            ))
+            runtime().block_on(async {
+                // ① 子树：走 idx_inst_relate_anc（anc 含自身，一跳圈住整棵）。
+                let subtree = take_json(
+                    "SELECT * FROM inst_relate WHERE anc CONTAINS $refno_u64 \
+                     FETCH aabb, world_trans;"
+                        .into(),
+                    vec![("refno_u64", json!(refno_u64))],
+                )
+                .await?;
+                if subtree.as_array().is_some_and(|rows| !rows.is_empty()) {
+                    return anyhow::Ok(subtree);
+                }
+                // ② 回落图跳：只拿元素**自己**那一跳的实例边（生产同款形态，
+                //    preload.rs 的实测账 3.1ms）。anc 未回填的存量库、以及测试
+                //    夹具那种直接 RELATE 出来的数据都靠这条兜住。
+                let own = take_json(
+                    "SELECT * FROM array::flatten(\
+                       SELECT VALUE ->inst_relate FROM [type::thing('pe', $refno)]) \
+                     FETCH aabb, world_trans;"
+                        .into(),
+                    vec![("refno", json!(normalized))],
+                )
+                .await?;
+                if own.as_array().is_some_and(|rows| !rows.is_empty()) {
+                    return anyhow::Ok(own);
+                }
+                // ③ 两条都空：可能真没几何，也可能 anc 没回填——图跳只看自己那
+                //    一跳，看不到后代。后者必须响亮说出来，不能让调用方把「查不
+                //    全」读成「没有」。探针与 export_obj / rs-core
+                //    `inst_relate_anc_ready` 同口径（LIMIT 1，只在空结果分支付）。
+                let unfilled = take_json(
+                    "SELECT VALUE record::id(id) FROM inst_relate WHERE anc = NONE LIMIT 1;"
+                        .into(),
+                    vec![],
+                )
+                .await?;
+                if unfilled.as_array().is_some_and(|rows| !rows.is_empty()) {
+                    anyhow::bail!(
+                        "元素 {refno} 自己没有实例边，而库里还有 anc 未回填的 \
+                         inst_relate 行——子树收集不可信，先启动一次 gen-model\
+                         （启动回填幂等自愈）再查"
+                    );
+                }
+                anyhow::Ok(own)
+            })
         })
         .map_err(anyhow_to_py)?;
     pythonized(py, &value)

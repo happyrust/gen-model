@@ -1,0 +1,118 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 离线用例（`-m offline`）专用配置：解析层深处会读全局 DbOption（debug 选项），
+# 配置不可达直接 panic，所以离线也得有一份——但它**只需要能反序列化**：
+# 这一档用例不连库、不扫项目目录、不落 mesh，下面的路径与端口全程不会被解析。
+#
+# 因此路径一律用仓库相对形态（CI runner 上没有 D:/work/... 与 D:/AVEVA/...），
+# v_port 也挑一个测试从不连的号，防手滑连到 8009/8019/8071 上去。
+#
+# 键面与 DbOption-roomtest.toml 保持一致：config 反序列化缺字段会直接报
+# missing field，根配置增删必填键时三份测试配置要一起改。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#同步文件配置
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_live = false
+replace_dbs = true
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置：离线档不扫目录，指向一个不存在也无所谓的相对路径
+project_path = "./python/tests/.ci-scratch/projects"
+included_projects = ["AvevaMarineSample"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+surreal_ns = 1516
+module = "DESI"
+gen_model = false
+gen_mesh = false
+replace_mesh = false
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#【死键】rs-core 仅定义未消费，字段必填删不得（与根配置同步）
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+gen_model_batch_size = 4
+
+build_cate_relate = false
+
+meshes_path = "./python/tests/.ci-scratch/meshes"
+
+gen_noun_graph = false
+
+#arangodb 配置（默认 feature 不消费）
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置（默认 feature 不消费）
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100
+
+#版本数据库服务：离线档从不连接，端口刻意避开 8009/8019/8071
+v_ip = "localhost"
+v_port = 8079
+v_user = "root"
+v_password = "root"
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+#mqtt 事件 ip（默认 feature 不消费）
+mqtt_host = "127.0.0.1"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+server_release_ip = "127.0.0.1:9099"
+
+remote_file_server_hosts = []
+file_server_host = "http://127.0.0.1:8000/assets/archives"
+
+# 离线档不起 Web 服务
+http_api_cors = ["*"]
+
+startup_autorun = false
+room_incremental = false
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false
+reset_mdb_project = false
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["LOOP", "PRIM"]
+manual_db_nums = [8000]
+plat_url = ""
+
+#puhua（默认 feature 不消费）
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+room_key_word = ["ZZ-R-"]
+
+gen_history_model = false
