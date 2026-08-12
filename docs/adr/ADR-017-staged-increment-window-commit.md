@@ -49,6 +49,7 @@
 - on-demand 生成与窗口并发：窗口在任何模型修改前，对 RegenRoot、Transform 覆盖的根及 DeleteCleanup 覆盖的旧根统一排序持锁，直到写回及提交后空间收敛完成，避免旧数据生成结果在窗口提交后落库覆盖。**on-demand 命中这些根时立即拒绝，不排队等待**：`model/ensure` 用 `try_lock`，拿不到锁就回 409 conflict（`ModelGenerationInProgress`），由调用方稍后重试，而不是把一个 HTTP 请求挂住整个窗口的时长。代价是拒绝面积不小——它等于「本窗口触碰的全部生成根」×「解析 + 生成 + 提交 + 空间收敛的总时长」，而不再是从前的单根、单次生成。模型浏览端必须把这个 409 当作「稍后重试」而非错误。
 - 本 ADR 经外部对抗式审核（GPT-5.5 Pro，2026-08-05，session `kvmem-staged-increment-review`）；采纳与驳回记录见 `docs/2026-08-05_kvmem-staged-increment-oracle-review.md`。
 - phase-1 落地口径（2026-08-06 实现审核后）：§2 的同窗吸收扩窗未启用——冻结点重扫并窗 + 失败窗口废弃重建替代之，「重试只重跑失败根」只在批内成立，跨批按窗口重算；§8 的 attempts 重置按「新会话触及的根」判定。窗口内 fresh 根恢复 ADR-012 合批，批失败逐根回退；成功根不得再次进入 durable pending。2026-08-09 起房间工作集预载退役，增量重算在提交后从 RocksDB 同时维护 `room_relate` 与 `room_panel_relate`。
+- **（2026-08-12 补记）§5 的本任务 scoped room drain 与 journal 写回、水位尾事务、空间收敛同处 `STAGED_COMMIT_SERIAL` 临界段**（锁持到批次执行函数返回，派发门共锁）。房间重算读 mesh 做逐点判定，其时长直接顶住下一窗口的写回与派发——ADR-010 第 1 条「不进水位事务」挡掉的秒级拖累在锁维度回来了一半，容器搬迁牵出上百分支重生成时元素目标可上千、临界段分钟级拉长。这是自觉权衡：锁内跑在「空间收敛刚完成、无第二窗口并发动树/动库」的世界里，整间分支读树、元素分支读库的基线才不混层（房间是非水位读者，phase-1「写回一半可见」的残余靠锁没有伤到它）。观测：批次日志 `room_duration_ms` 与阶段耗时行。若成瓶颈，第一杠杆是给 inline scope 加时间/条数预算、余量原样留 durable pending 交空闲房间轮（语义现成），而不是先解锁；解锁所需的三道等价闸门与收益边界见 `docs/2026-08-12_room-scoped-drain-commit-lock-assessment.md`。
 
 ## 2026-08-06 实现审核修订
 

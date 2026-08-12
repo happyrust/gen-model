@@ -3,20 +3,30 @@
 日期：2026-08-06  
 状态：实施草案（承接 `2026-08-06_e3d-l3-automation-test-plan.md` 的 F8）
 
+> **2026-08-12 修订**：对齐 ADR-010 2026-08-09 修订与 ADR-017 §5 的现行实现。
+> 本文初稿基于 2026-08-05 的暂存房间方案（「窗口提交前内联重算、room_relate 与
+> 水位一起收口」），该方案已被取代——现行方案是：尾事务只把房间目标（durable
+> pending）与空间意图、水位一起持久化；**提交成功后**在同一提交串行段内按
+> 「空间树收敛 → 释放 kv-mem 窗口 → 本任务精确 scope 从 RocksDB 重算房间」的
+> 固定顺序执行（`batch_worker::execute_staged_batch` →
+> `model_update_pending::drain_rooms_scoped`）。本次修订只改 §0 流程、§1.2 缺口
+> 4、RF12 期望、RI-2/RI-5 与 §5.1 观测字段的口径，场景矩阵与门禁结构不动。
+
 ## 0. 定位
 
 本计划只补房间增量链路：
 
 ```text
 数据/结构变化
-→ 暂存窗内完成数据/regen 并产生 room_recalc_element / room_recalc_panel 目标
-→ 正常 DESI 路径在窗口提交前内联重算房间
-→ room_relate + room_panel_relate 与水位一起收口
-→ 失败时水位仍推进，durable room pending 留给空闲房间轮重试
+→ 暂存窗内完成数据/regen 并归并 room_recalc_element / room_recalc_panel 目标
+→ 尾事务把房间目标（durable pending）、空间意图与水位一起持久化
+→ 提交成功后：空间树收敛 → 释放 kv-mem 窗口 → 本任务精确 scope 从 RocksDB 重算房间
+→ 单目标失败保留 durable pending，数据批次记 partial，空闲房间轮继续恢复
 ```
 
 不重写已有几何、队列和水位测试；底层语义以
-`docs/adr/ADR-010-room-membership-incremental-update.md` 为准。测试分两条轨：
+`docs/adr/ADR-010-room-membership-incremental-update.md`（含 2026-08-09 修订：
+房间后置到提交后 scoped drain）与 ADR-017 §5 为准。测试分两条轨：
 
 1. **合成轨（L1/L2）**：内存 Surreal + `room_fixture`，无 E3D license，负责完整语义矩阵；
 2. **实机轨（L3/V）**：E3D 宏 + 服务 HTTP + plant-ui，只保留用户可见的关键闭环。
@@ -48,7 +58,7 @@
 1. 合成 live 测试各自靠人工起 8071、逐条运行，尚无一键编排与统一报告；
 2. F8 只判断 `room_relate` 载荷“有变化”，没有断言**准确 membership、排序载荷、拓扑表和恢复结果**；
 3. 实机只测“仍在同一房间”，缺“移出房间后边消失、恢复后精确回基线”；
-4. 正常暂存路径没有独立 `room_recalc` task，也没有随 data task 返回房间 planned/succeeded/failed/targets 摘要；fallback task 又缺来源窗口，当前不能可靠关联本轮工作；
+4. 正常暂存路径没有独立 `room_recalc` task（房间在提交后按本任务 scope 内联于数据批次执行），scoped `DrainReport`（requested/loaded/done/failures）目前只落在「写回后房间计算 …」日志行、warnings 与 partial 状态里，没有随 data task 结构化返回；durable pending 行虽带来源 `(dbnum, source_end_sesno)` 追踪字段，但 data task 侧缺结构化摘要，当前不能只靠 task JSON 可靠关联本轮房间工作；
 5. `gen_spatial_tree=false`、房间预载失败、死信复活、房间轮饥饿等门控/故障语义只有散落单测；
 6. plant-ui 当前只有房间任务泳道，没有可 inspect 的房间号/房间树 surface；截图只能证明几何和队列，不能证明 membership；
 7. 正式 L3 manifest、E3D/Surreal 金基线尚未铸造，RL1–RL4 的水位、完整 target 集和结构 refno 仍待定标。
@@ -80,7 +90,7 @@
 | RF9 | TUBI 首次进树→未动重生成→搬家 | 回填与幂等混淆 | 首次 1 条、未动 0 条、搬家 1 条；最终与全量一致 |
 | RF10 | `gen_spatial_tree=false` | 静默丢工作 | 零房间 pending；health 明示关闭；数据/模型批次照常成功 |
 | RF11 | 面板工作集预载失败 | 空集覆盖真边 | fail-closed：关系表不变、水位推进、目标保留 durable pending；去故障后原目标重试成功 |
-| RF12 | 数据批次持续到达且 fallback 房间任务已有积压 | 饥饿或抢跑 | 正常暂存房间仍内联；durable backlog 数据优先，到饥饿阈值后获得一次执行 |
+| RF12 | 数据批次持续到达且 fallback 房间任务已有积压 | 饥饿或抢跑 | 正常暂存房间仍在提交后立即按本任务 scope 收敛（历史积压不搭车）；durable backlog 数据优先，到饥饿阈值后获得一次执行 |
 | RF13 | 同 target 跨 dbnum/多次触发 | 重复整间重算 | record id 只按 action+target；revision 增长但仅一行 |
 | RF14 | 房间任务失败到死信后人工 retry | 无恢复出口 | retry 复活原行、attempts 清零、revision 递增、worker 被唤醒；去故障后成功删除 |
 
@@ -107,10 +117,10 @@ RL1/RL2 当前 CAP 会规划所属 BRAN 的 `RegenRoot`，所以场景断言的�
 | 编号 | 不变量 |
 |---|---|
 | RI-1 | 数据解析/提交硬失败时水位不动；仅房间计算失败时数据窗口和水位仍提交，同时留下 durable pending |
-| RI-2 | 正常 DESI 房间工作在暂存窗数据/regen 后、窗口提交前内联执行；fallback 才由后续空闲房间轮处理 |
+| RI-2 | 正常 DESI 房间工作在写回成功后、同一提交串行段内按本任务精确 scope 执行（顺序固定：空间树收敛 → 释放 kv-mem 窗口 → scoped room drain）；fallback 才由后续空闲房间轮处理 |
 | RI-3 | AABB 变化按 noun 分发：PANE→panel，其它→element；AABB 未变的普通重生成当前不入队，实体 hash 触发另立产品改造 |
 | RI-4 | pending record id 为 `room_recalc_{panel|element}_{target}`；同 target 只有一行 |
-| RI-5 | 正常路径的 data task 必须带 `room:{planned,succeeded,failed,targets}`；fallback task 必须带来源 `{dbnum,end_sesno}`，禁止用“最新 task_id”猜关联 |
+| RI-5 | 正常路径的 data task 必须带 `room:{requested,loaded,done,failures,duration_ms}`（写回后 scoped `DrainReport` 的结构化摘要；字段落地前以「写回后房间计算」日志行 + warnings + partial 状态为临时证据）；fallback 关联用 durable pending 行自带的 `(dbnum, source_end_sesno)` 与 `(action,target)`，禁止用“最新 task_id”猜关联 |
 | RI-6 | 正常路径 room summary 零失败；fallback 逐轮 `done <= total`，允许分页 backlog，只要求最终一轮 succeeded 且 live=0；故障用例允许 failed |
 | RI-7 | 本轮涉及的 room pending 收敛为 0；非本轮死信不得被误删或误判成功 |
 | RI-8 | `room_relate` 使用规范化边：`panel, element, room_num, inside_count, center_dist`，排序后精确比较 |
@@ -167,8 +177,11 @@ RoomExpect {
 
 执行 L3 前先补最小观测字段：
 
-- `DataBatchTaskResult.room = { planned, succeeded, failed, targets }`，承载正常暂存内联结果；
-- fallback `room_recalc` task detail 增加 `sources:[{dbnum,end_sesno}]`，承载 durable pending 来源。
+- `DataBatchTaskResult.room = { requested, loaded, done, failures, duration_ms }`
+  （即写回后 scoped drain 的 `DrainReport`），承载提交后本任务房间收敛结果；
+- fallback `room_recalc` task detail 增加 `sources:[{dbnum,end_sesno}]`（映射
+  durable pending 行已有的 `dbnum` / `source_end_sesno` 追踪字段），承载
+  durable pending 来源。
 
 没有这两个字段时测试报告“证据不足”，不再用“本轮后新出现的 task id”猜关联。
 
