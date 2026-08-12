@@ -43,6 +43,30 @@
       「给同事用」承诺只有这样才算验过。
 - 验收：Actions 绿一次；wheel 在非开发机可用；首跑耗时记录回填本文档。
 
+> **W1 as-built（2026-08-12）**：`python-bindings` 已在
+> [run 31577643936](https://github.com/happyrust/gen-model/actions/runs/31577643936)
+> 全绿（离线档 62 条），wheel artifact 24 MB 可下载。整分支推 + `workflow_dispatch`，
+> 单 job 约 6 分钟（热缓存）。
+>
+> 首跑到绿走了四轮，两个真问题都值得记下来：
+>
+> 1. **`ImportError: DLL load failed`（三轮）**。OCCT provisioning 是照抄
+>    `windows-binary.yml` 的，只点名拷了 tbb12 与 jemalloc——那边够用是因为它
+>    **只编译打包、从不加载**，少一个传递依赖永远暴露不了；这个 job 要 import
+>    就炸。而这条错误既不说缺哪个模块、也不说是谁要的，靠猜没有尽头，所以加了
+>    一步探针：读 pyd 的 PE 导入表**递归**遍历依赖图，报出定位不到的模块及其
+>    引用者。一轮就指名了 `openvr_api.dll ← TKService.dll`——它装在
+>    `openvr-*/bin/win64/`，而拷贝条件写的是「直接位于 bin 下」，正好漏掉。
+>    探针留在 job 里不删（成功时只多 8 行输出），下次缺别的一眼可见。
+>    - 中途还自摆过一次乌龙：第一版探针只注册 OCC bin 就裸名加载 TK*.dll，
+>      在**能正常 import 的本机上也误报** TKernel 失败——TK 自己的三方依赖散在
+>      别的目录。诊断工具本身也得先在已知good的环境上验一遍。
+> 2. **存根守卫抓到真漏**：`648e46b7` 加了 `spatial.tree_dump` 的运行时侧、漏了
+>    `.pyi`，CI 当场红。这正是 W2/M6-1 那批守卫存在的理由——运行时能用、静态面
+>    报「没有这个属性」，不看 CI 就得等人在 IDE 里撞上。
+>
+> 待办：wheel 在**无 Rust 工具链的机器**上装一次的验收还没做（artifact 已可下载）。
+
 ### W2 版本护栏自锁（0.25 天，无依赖，建议最先做）
 
 `aios_client.EXPECTED_SERVER_VERSION`（现 `"0.1.18"`）是手抄常量——下次

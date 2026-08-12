@@ -240,6 +240,11 @@ zip ≤ 6 MiB。
 
 **验收**：GitHub Actions 上该 job 全绿一次；人为破坏 zip 的 PR 能红。
 
+> **远程验收（2026-08-12）**：`offline-increment-regression` 在
+> [run 31572427572](https://github.com/happyrust/gen-model/actions/runs/31572427572)
+> **首跑即绿**，其后每一轮都绿（冷缓存约 30 分钟，热缓存约 7 分钟）。
+> 同轮的 `python-bindings` 是另一条线的 job，见下。
+
 > **提前落地的一部分（2026-08-12）**：阶段一的自检
 > （`--test db_session_fixture_selfcheck`）已按第 1 条同款参数接进
 > `db8000-model-increment` job，排在 issue-019 步骤之后——两者共用同一份夹具，
