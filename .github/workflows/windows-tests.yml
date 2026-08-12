@@ -348,14 +348,38 @@ jobs:
                       pass
           search += [os.path.dirname(sys.executable), os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")]
 
+          def locate(dll):
+              for directory in search:
+                  candidate = os.path.join(directory, dll)
+                  if os.path.isfile(candidate):
+                      return candidate
+              return None
+
+
           if os.path.isfile(pyd):
-              missing = []
-              for dll in pe_imports(pyd):
-                  if dll.lower().startswith("api-ms-win"):
-                      continue  # API set，由系统转发，不落地成文件
-                  if not any(os.path.isfile(os.path.join(d, dll)) for d in search):
-                      missing.append(dll)
-              print("direct imports:", len(pe_imports(pyd)))
+              # 必须递归：上一轮实测「38 个直接依赖全部就位、import 依然失败」，
+              # 说明缺口在传递层（TK*.dll 自己的依赖），只查一层看不见。
+              seen, missing, walked = set(), [], 0
+              stack = [(pyd, "<pyd>")]
+              while stack:
+                  current, why = stack.pop()
+                  walked += 1
+                  try:
+                      deps = pe_imports(current)
+                  except Exception as error:
+                      print("  (无法解析", current, "->", error, ")")
+                      continue
+                  for dll in deps:
+                      key = dll.lower()
+                      if key.startswith("api-ms-win") or key in seen:
+                          continue  # API set 由系统转发，不落地成文件
+                      seen.add(key)
+                      found = locate(dll)
+                      if found is None:
+                          missing.append((dll, os.path.basename(current)))
+                      else:
+                          stack.append((found, dll))
+              print("modules walked:", walked, "| distinct deps:", len(seen))
               print("NOT FOUND     :", missing or "<none>")
 
           try:
