@@ -1,0 +1,37 @@
+-- Create the scratch BOX that data/transform/geometry cases mutate, then
+-- db8000_scratch_delete.mac removes at the end of the recording.
+--
+-- Why a scratch element instead of mutating /1-LNR-Q005-PJ directly: a correct
+-- restore leg has to put the element back to its *exact* prior values, and we
+-- cannot know a production element's current POS/XLEN offline. Creating our own
+-- element makes every before/after value self-determined, so the whole macro set
+-- is writable (and reviewable) without an E3D probe run first.
+--
+-- Baseline it establishes, relied on by the restore legs downstream:
+--   POS  E 0 N 0 U 0  (default for a fresh BOX under its owner)
+--   XLEN 1000  YLEN 1000  ZLEN 1000
+--
+-- Destructive-by-design case: no restore leg (net = added). The element lives
+-- until db8000_scratch_delete.mac, which is the last case in the manifest.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_create.log" OVER
+$P CODEX-DB8000-SCRATCH-CREATE-ALIVE
+/1-LNR-Q005-PJ
+Q CE
+Q REF
+Q NAME
+NEW BOX /CODEX_DB8000_SCRATCH
+XLEN 1000
+YLEN 1000
+ZLEN 1000
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+Q XLEN
+Q YLEN
+Q ZLEN
+SAVEWORK 'CODEX db8000 create scratch BOX /CODEX_DB8000_SCRATCH'
+$P CODEX-DB8000-SCRATCH-CREATE-DONE
+ALPHA LOG END

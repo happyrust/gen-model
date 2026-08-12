@@ -1,0 +1,26 @@
+-- data-rename apply: pure attribute change (NAME) on the scratch BOX.
+-- Ported from increment_fixture/cases/data_apply.mac; the reference navigates by
+-- refno (`={{REF:...}}`), which does NOT work on this db8000 TTY session — see the
+-- head note of db8000_zone_members_probe.mac. Navigate by name instead.
+--
+-- Q REF / Q NAME is emitted twice on purpose: once before the rename and once
+-- after. The recorder reads name -> refno from the *apply* log only, so having
+-- both names map to the same refno lets the manifest declare the element by
+-- either one (it declares the pre-rename name, which reads better).
+--
+-- restore partner: db8000_scratch_rename_restore.mac (renames it back).
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_rename_apply.log" OVER
+$P CODEX-DB8000-SCRATCH-RENAME-APPLY-ALIVE
+/CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+NAME /CODEX_DB8000_SCRATCH_RENAMED
+Q CE
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'CODEX db8000 rename scratch BOX to /CODEX_DB8000_SCRATCH_RENAMED'
+$P CODEX-DB8000-SCRATCH-RENAME-APPLY-DONE
+ALPHA LOG END

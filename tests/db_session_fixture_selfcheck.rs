@@ -32,14 +32,15 @@ mod session_cut;
 #[allow(dead_code)]
 mod pipeline;
 
+// 合成录制单与夹具根，与阶段三回归（db8000_session_pairs）共用一份。
+#[path = "common/issue019_recording.rs"]
+#[allow(dead_code)]
+mod issue019_recording;
+
+use issue019_recording::{issue019_fixture_root as fixture_root, issue019_recording};
 use parse_pdms_db::paged::PagedDbSession;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/issues/issue-019-cross-session-parent-child-delete")
-}
+use std::path::Path;
 
 /// 从 final 现切 24/25/26：字节散列与 issue-019 台账逐一相等（26 顺带证明
 /// 「切到头指针会话」等于原文件本身），每一切都过 sesno + 存在性验证闸。
@@ -110,39 +111,6 @@ fn generic_cutter_replays_issue019_snapshots_byte_for_byte() {
     }
     // 反空转：三份快照各带 3 条元素声明，探针必须真的跑过。
     assert!(probes_checked >= 9, "存在性探针只跑了 {probes_checked} 条");
-}
-
-/// issue-019 的真实删除序列改写成 `aios-session-fixture-v1` 录制单：
-/// 25 删子件（BOX）、26 删父件（EQUI），两个案例都无 restore 腿。
-/// 推导出的台账应为 {24, 25, 26}，final = 26。
-fn issue019_recording() -> String {
-    serde_json::json!({
-        "dbnum": 8000,
-        "baseline_sesno": 24,
-        "cases": [
-            {
-                "id": "child-delete",
-                "apply_sesno": 25,
-                "refs": { "target": "24384/24779", "owner": "24384/24778" },
-                "elements": [
-                    { "refno": "24384/24779", "noun": "BOX",
-                      "before_apply": true, "after_apply": false }
-                ],
-                "expected": { "net_window": [ { "refno": "24384/24779", "net": "deleted" } ] }
-            },
-            {
-                "id": "parent-delete",
-                "apply_sesno": 26,
-                "refs": { "target": "24384/24778", "owner": "24384/24775" },
-                "elements": [
-                    { "refno": "24384/24778", "noun": "EQUI",
-                      "before_apply": true, "after_apply": false }
-                ],
-                "expected": { "net_window": [ { "refno": "24384/24778", "net": "deleted" } ] }
-            }
-        ]
-    })
-    .to_string()
 }
 
 /// `pack` 的端到端覆盖：真实源文件 → 夹具目录 → 复验全绿，且台账散列与
@@ -246,6 +214,111 @@ fn inspect_reports_the_whole_session_chain() {
             .expect("inspect baseline")
             .latest_sesno,
         24
+    );
+}
+
+/// 录制清单的**形状预演**：按录制脚本的 sesno 分配规则（baseline 之后逐腿 +1）
+/// 给 `scripts/e3d/db8000_recording_cases.json` 的案例编号，`plan_cases` 必须接受。
+///
+/// 为什么单独钉这一条：`plan_cases` 是在 `pack` 里跑的，而 pack 发生在**录制之后**。
+/// 清单里案例顺序写错、漏了 elements、或 `expected_net.element` 指了个没声明的
+/// 名字（录制脚本会把它解析成 null refno），全都要等占完生产空窗、录完一整轮才在
+/// 打包时炸——那时只能重录。这条把这类错提前到 `cargo test`。
+///
+/// 它验的是**形状**，不是数据：refno 用占位值（录制时才知道真值），
+/// 验的是顺序、窗口不重叠、探针齐备、交叉引用对得上、宏文件在场。
+#[test]
+fn recording_manifest_survives_the_sesno_assignment_it_will_get() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(repo.join("scripts/e3d/db8000_recording_cases.json"))
+            .expect("read db8000_recording_cases.json"),
+    )
+    .expect("parse recording case manifest");
+
+    let cases = manifest["cases"].as_array().expect("cases array");
+    assert!(!cases.is_empty(), "清单里没有案例");
+
+    // 与 Record-Db8000SessionChain.ps1 同一套分配：每条腿推进一个会话。
+    let baseline = 210u32;
+    let mut next = baseline;
+    let mut planned = Vec::new();
+
+    for case in cases {
+        let id = case["id"].as_str().expect("案例缺 id").to_owned();
+        for key in ["apply_macro", "restore_macro"] {
+            if let Some(path) = case[key].as_str() {
+                assert!(
+                    repo.join(path).is_file(),
+                    "案例 {id} 的 {key} 指向不存在的宏: {path}"
+                );
+            }
+        }
+
+        next += 1;
+        let apply_sesno = next;
+        let restore_sesno = case["restore_macro"].as_str().map(|_| {
+            next += 1;
+            next
+        });
+
+        let declared: std::collections::BTreeSet<&str> = case["elements"]
+            .as_array()
+            .expect("elements array")
+            .iter()
+            .map(|element| element["name"].as_str().expect("元素缺 name"))
+            .collect();
+        assert!(!declared.is_empty(), "案例 {id} 没有声明任何元素");
+
+        // 录制脚本按名字把 expected_net 映射成 refno；名字对不上会写出 null refno，
+        // 直到 pack 解析 refno 时才失败。
+        let mut expected = Vec::new();
+        for net in case["expected_net"].as_array().into_iter().flatten() {
+            let element = net["element"].as_str().expect("expected_net 缺 element");
+            assert!(
+                declared.contains(element),
+                "案例 {id} 的 expected_net 指向未声明的元素 {element}（声明的是 {declared:?}）"
+            );
+            expected.push(format::NetExpectation {
+                refno: "24384/1".to_owned(), // 占位：真值录制时回读
+                net: net["net"].as_str().expect("expected_net 缺 net").to_owned(),
+            });
+        }
+
+        planned.push(format::CaseSpec {
+            id,
+            apply_sesno,
+            restore_sesno,
+            refs: Default::default(),
+            elements: case["elements"]
+                .as_array()
+                .expect("elements array")
+                .iter()
+                .map(|element| format::CaseElementState {
+                    refno: "24384/1".to_owned(), // 同上，占位
+                    noun: element["noun"].as_str().expect("元素缺 noun").to_owned(),
+                    before_apply: element["before_apply"].as_bool().expect("缺 before_apply"),
+                    after_apply: element["after_apply"].as_bool().expect("缺 after_apply"),
+                    after_restore: element["after_restore"].as_bool(),
+                })
+                .collect(),
+            expected: (!expected.is_empty()).then(|| format::CaseExpected {
+                net_window: expected,
+            }),
+        });
+    }
+
+    let plan = format::plan_cases(baseline, &planned)
+        .expect("清单按录制时的 sesno 分配必须能推出合法执行计划");
+    assert_eq!(
+        plan.final_sesno, next,
+        "推导出的 final 应当是最后一条腿的会话"
+    );
+    // 反空转：台账至少覆盖 baseline 与每个案例的三个时点之一。
+    assert!(
+        plan.ledger.len() >= planned.len(),
+        "台账 {:?} 比案例数还少",
+        plan.ledger
     );
 }
 

@@ -1,0 +1,16 @@
+-- data-rename restore: put the scratch BOX's name back.
+-- Navigates by the post-apply name; downstream cases expect /CODEX_DB8000_SCRATCH.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_rename_restore.log" OVER
+$P CODEX-DB8000-SCRATCH-RENAME-RESTORE-ALIVE
+/CODEX_DB8000_SCRATCH_RENAMED
+Q CE
+Q REF
+Q NAME
+NAME /CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 rename scratch BOX back to /CODEX_DB8000_SCRATCH'
+$P CODEX-DB8000-SCRATCH-RENAME-RESTORE-DONE
+ALPHA LOG END

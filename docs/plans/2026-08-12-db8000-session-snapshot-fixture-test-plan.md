@@ -137,11 +137,39 @@ zip ≤ 6 MiB。
 > 首批案例将落在 211 起）。检查器的拒绝面也验过：故意塞两个 `SAVEWORK` 的宏
 > 会在 cargo build 之前就整轮中止。
 >
-> 待补：清单目前只含已有的 `equi-add-box` / `equi-copy` 两对宏；
-> `data-rename` / `transform-move` / `geometry-resize` / `delete-box` 四对需从
-> `increment_fixture/cases/*.mac` 移植到 db8000 靶元素（ZONE `/1RX03-CASE-DQ`、
-> EQUI `/1-LNR-Q005-PJ`）。移植时注意该 TTY 会话**按 refno 导航不成立，只能按
-> 名字**（`db8000_zone_members_probe.mac` 头注记录了这条实测结论）。
+> **宏已补齐（2026-08-12），仍只差生产空窗**：清单现有 7 个案例 / 12 条腿，
+> `-CheckOnly` 全过（`baseline_sesno` 复测仍是 210）。
+>
+> **与本节原设计的偏差：四个新案例不动生产元素，改为自建 scratch 元素。**
+> 原文写的是「移植到 db8000 靶元素（ZONE `/1RX03-CASE-DQ`、EQUI
+> `/1-LNR-Q005-PJ`）」，但那样写不出正确的 restore 腿——restore 必须把值放回
+> **原状**，而生产元素当前的 POS / XLEN 离线不可知，只能先占一次空窗做探针run。
+> 改成一条自足的链后，每个 before/after 值都是自己定的，整套宏离线可写、可评审：
+>
+> | 案例 | 腿 | 净变化 | 说明 |
+> |---|---|---|---|
+> | `scratch-create` | apply | added | 在 EQUI 下建 `/CODEX_DB8000_SCRATCH`（1000 立方、POS 原点）|
+> | `data-rename` | apply+restore | modified | 改名再改回（纯属性）|
+> | `transform-move` | apply+restore | modified | 移到 E/N/U 1000 再回原点 |
+> | `geometry-resize` | apply+restore | modified | 1600×1200×800 再回 1000 立方 |
+> | `delete-box` | apply | deleted | 删掉 scratch，收尾后库在逻辑上回到原样 |
+>
+> 副产品：`added` 净形态本来在原案例表里**一个都没有**（原表全是 cancelled /
+> deleted），这条链顺带补上了它，加上 `modified` ×3，阶段三 e) 断言的形态覆盖
+> 从 1 种变成 4 种。
+>
+> 宏一律按名字导航（该 TTY 会话按 refno 导航不成立，见
+> `db8000_zone_members_probe.mac` 头注）。改名案例的 `Q REF`/`Q NAME` 在改名
+> 前后各发一次：录制脚本只从 **apply** 腿的日志回读 name→refno，两个名字都映到
+> 同一个 refno，清单就能用可读性更好的原名声明。
+>
+> **另补一道离线闸**（`db_session_fixture_selfcheck` 的
+> `recording_manifest_survives_the_sesno_assignment_it_will_get`）：按录制脚本的
+> sesno 分配规则给清单案例编号，`plan_cases` 必须接受，且 `expected_net.element`
+> 必须在该案例声明的元素里、宏文件必须在场。动机很实在——`plan_cases` 跑在 pack
+> 里，而 pack 在**录制之后**；清单顺序写错或名字打错，原本要等占完空窗、录完
+> 一整轮才在打包时炸。防伪已验：把一个 `expected_net.element` 改成不存在的名字，
+> `cargo test` 立刻红。
 
 ## 3. 阶段三 · 离线回归测试（`tests/db8000_session_pairs.rs`，CI 主体）
 
@@ -167,6 +195,42 @@ zip ≤ 6 MiB。
 `cargo test --locked --test db8000_session_pairs --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture`
 全绿；故意翻转一个 expected 能红（防伪通过）。
 
+> **阶段三 as-built（2026-08-12）**：已落地，`tests/db8000_session_pairs.rs`
+> 18 passed / 0 failed。
+>
+> **关键偏差（好的那种）：阶段三没有等阶段二。** 夹具来源做成两条——
+> `AIOS_SESSION_FIXTURE` 指向现成夹具目录（真实录制到货后走这条），缺省则在
+> 临时目录里从 issue-019 的 final 现场 `pack` 一份。第二条不是权宜：阶段一自检
+> 已证明 pack 从 final 切出的台账与当年独立录制的逐字节相等，所以它是**真实
+> db8000 会话链**上的真数据，只是案例集小（两个无 restore 腿的删除）。
+> 于是七类断言现在就全部写完并验证，真实录制到货后只换数据、不改一行测试代码
+> ——这也是这套设计成不成立的最终判据。
+>
+> 断言落地形态与方案原文的三处出入：
+>
+> 1. **a) 与 g) 合并成一次 `pipeline::verify_fixture` 调用**。它本来就在做
+>    「zip 尺寸/SHA256 对账 → 受控解出最终文件 → 逐台账 sesno 现切 → 大小/散列
+>    与台账相等 → sesno + 存在性验证闸」，即 a) 与 g) 的全部内容。重写一遍就会
+>    有两套口径，而它们必须永远一致。
+> 2. **f) 的比对口径必须含 children，方案原文只提了「存在性/属性/children」的
+>    属性部分容易被读漏**。实测：issue-019 删除序列里，父件 EQUI 与祖父 ZONE 的
+>    `att_map()` 差异是 **0 条**，Modified 的信号全在 children 列表上
+>    （父件 1→0、祖父 26→25）。只比属性会把这两个元素误判成「增量说变了但文件
+>    没变」。已用防伪证明这条承重：临时去掉 children 比对，oracle 立刻红在
+>    `24384/24778 的净变化是 Modified，但文件差分是 Unchanged`。
+> 3. **噪声白名单是空的**，而且这是实测结论不是省事：方案 §6 预判的 CACHID 类
+>    派生属性漂移在这条会话链上没有出现（两个会话边界、受影响元素的属性差异
+>    全为 0）。常量留着是机制——真实录制的 data/transform 案例若引入噪声，加在
+>    那里即可，不必改 oracle 结构。
+>
+> 覆盖面的诚实边界（已写进测试文件头注）：合成夹具的净变化只覆盖到 `deleted`，
+> `cancelled`（add+restore）与 `modified`（data/transform）要等阶段二。
+> 另外 f) 只能核对「已知 refno」（净结果 + 案例声明的元素）——`read_raw_records`
+> 按显式清单读，做不到全库枚举，所以反方向（文件变了但增量没报）不在覆盖内。
+>
+> 防伪两处均通过：翻转 `expected.net_window` 取值 → e) 红且指名案例；
+> 去掉 children 比对 → f) 红。
+
 ## 4. 阶段四 · CI 接入
 
 1. `windows-tests.yml` 的 `db8000-model-increment` job 增加一步，跑
@@ -185,6 +249,23 @@ zip ≤ 6 MiB。
 > 半格，等 `db8000_session_pairs` 进来后一并考虑更名）。
 > 第 2 条 upload-artifact 仍留给 `db8000_session_pairs`：自检的失败信息就是断言
 > 文本，日志里看得全，没有值得上传的产物。
+
+> **阶段四 as-built（2026-08-12）**：三条全部落地。
+>
+> 1. `db8000_session_pairs` 已接进同一 job，feature 与 `--locked` 与既有步骤逐字
+>    一致。
+> 2. upload-artifact 按第 2 条接了，`if: failure()`：传 `session-pairs.log`
+>    （完整断言输出）与夹具的 `manifest.json` / `SHA256SUMS`。为此给测试加了
+>    `AIOS_SESSION_FIXTURE_KEEP` 环境变量——合成夹具默认落临时目录，跑完就没了，
+>    远程红了以后光看断言文本还原不出「当时那份台账长什么样」，而台账正是历史
+>    还原对账的对照物。CI 设它把夹具留在 `artifacts/`（已进 .gitignore）。
+> 3. issue-019 两步原样保留。
+>
+> **job 更名**：`db8000-model-increment` → `offline-increment-regression`。
+> as-built 上一段自记的「名字比实际范围窄半格」到此收口——它现在跑五步：
+> issue-019 增量夹具、通用切割自检、会话对回归、PDMS 记录边界解析、删除清理
+> lib 用例，早就不止 db8000 一个库的模型增量。**注意**：若仓库配了分支保护的
+> 必需检查项，改名会让旧名字的检查项悬空，需要在设置里同步。
 
 ## 5. 阶段五 · 滚动扩展（常态机制）
 

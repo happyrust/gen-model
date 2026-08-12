@@ -6,7 +6,11 @@
     "宏纪律：每条腿恰好一个 SAVEWORK、不得自带 QUIT/FINISH（会话由 driver 拥有）、",
     "对每个要登记的元素先 Q REF 再 Q NAME（脚本按这对相邻输出把名字解析成 refno）。",
     "elements 的 present 三态是给阶段一 pack 的验证闸用的，录完原样进 recording.json。",
-    "db8000 的 TTY 会话里按 refno 导航不成立，宏一律按名字导航（见 db8000_zone_members_probe.mac 头注）。"
+    "db8000 的 TTY 会话里按 refno 导航不成立，宏一律按名字导航（见 db8000_zone_members_probe.mac 头注）。",
+    "案例按顺序录，窗口不得重叠——scratch-* 五个案例是一条链：create 建元素，",
+    "rename/move/resize 依次改它（各自 restore 回原值），delete 收尾把它删掉，",
+    "录完这一轮库在逻辑上回到原样。它们刻意不动生产元素：restore 要把值放回原状，",
+    "而生产元素的当前 POS/XLEN 离线不可知，自建元素才能让 before/after 全部自决。"
   ],
   "cases": [
     {
@@ -46,6 +50,102 @@
         {
           "element": "/CODEX_DB8000_EQ_COPY",
           "net": "cancelled"
+        }
+      ]
+    },
+    {
+      "id": "scratch-create",
+      "apply_macro": "scripts/e3d/db8000_scratch_create.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_SCRATCH",
+          "noun": "BOX",
+          "before_apply": false,
+          "after_apply": true
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_SCRATCH",
+          "net": "added"
+        }
+      ]
+    },
+    {
+      "id": "data-rename",
+      "apply_macro": "scripts/e3d/db8000_scratch_rename_apply.mac",
+      "restore_macro": "scripts/e3d/db8000_scratch_rename_restore.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_SCRATCH",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_SCRATCH",
+          "net": "modified"
+        }
+      ]
+    },
+    {
+      "id": "transform-move",
+      "apply_macro": "scripts/e3d/db8000_scratch_move_apply.mac",
+      "restore_macro": "scripts/e3d/db8000_scratch_move_restore.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_SCRATCH",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_SCRATCH",
+          "net": "modified"
+        }
+      ]
+    },
+    {
+      "id": "geometry-resize",
+      "apply_macro": "scripts/e3d/db8000_scratch_resize_apply.mac",
+      "restore_macro": "scripts/e3d/db8000_scratch_resize_restore.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_SCRATCH",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_SCRATCH",
+          "net": "modified"
+        }
+      ]
+    },
+    {
+      "id": "delete-box",
+      "apply_macro": "scripts/e3d/db8000_scratch_delete.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_SCRATCH",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": false
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_SCRATCH",
+          "net": "deleted"
         }
       ]
     }

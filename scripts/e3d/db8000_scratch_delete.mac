@@ -1,0 +1,20 @@
+-- delete-box: remove the scratch BOX. Last case in the manifest, so the library
+-- ends the recording logically where it started.
+-- Ported from increment_fixture/cases/delete_apply.mac (navigate by name).
+--
+-- Destructive-by-design case: no restore leg (net = deleted). Q REF / Q NAME runs
+-- BEFORE the delete — after it the element is gone and the recorder could not
+-- resolve its refno from the log.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_delete.log" OVER
+$P CODEX-DB8000-SCRATCH-DELETE-ALIVE
+/CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+Q OWNE
+DELETE BOX
+Q CE
+SAVEWORK 'CODEX db8000 delete scratch BOX /CODEX_DB8000_SCRATCH'
+$P CODEX-DB8000-SCRATCH-DELETE-DONE
+ALPHA LOG END

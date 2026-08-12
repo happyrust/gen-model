@@ -1,0 +1,25 @@
+-- geometry-resize apply: change the scratch BOX's dimensions.
+-- Ported from increment_fixture/cases/geometry_apply.mac (navigate by name).
+--
+-- Restore targets 1000/1000/1000, the values db8000_scratch_create.mac set.
+--
+-- restore partner: db8000_scratch_resize_restore.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_resize_apply.log" OVER
+$P CODEX-DB8000-SCRATCH-RESIZE-APPLY-ALIVE
+/CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+XLEN 1600
+YLEN 1200
+ZLEN 800
+Q CE
+Q XLEN
+Q YLEN
+Q ZLEN
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 resize scratch BOX to 1600x1200x800'
+$P CODEX-DB8000-SCRATCH-RESIZE-APPLY-DONE
+ALPHA LOG END

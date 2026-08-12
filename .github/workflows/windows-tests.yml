@@ -28,7 +28,11 @@ env:
   PROTOC_ARCHIVE_SHA256: 5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082
 
 jobs:
-  db8000-model-increment:
+  # 离线回归总闸：不需要 E3D、SurrealDB 或任何外部服务的那一档。
+  # 现含 issue-019 增量夹具、通用会话切割自检、db8000 会话对回归、
+  # PDMS 记录边界解析、以及删除清理的 lib 用例。
+  # （原名 db8000-model-increment，范围早已超出 db8000 一个库。）
+  offline-increment-regression:
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -95,6 +99,37 @@ jobs:
           --no-default-features
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
+
+      # 阶段三（方案 §3）：数据驱动的会话对回归。夹具来源是运行时从 issue-019
+      # 的 final 现场 pack 出来的那一份——真实录制到货后改指 AIOS_SESSION_FIXTURE
+      # 即可，断言不动。KEEP 让台账落在工作区，失败时随 artifact 传出来比对。
+      - name: Run db8000 session-pair regression
+        shell: pwsh
+        env:
+          AIOS_SESSION_FIXTURE_KEEP: ${{ github.workspace }}\artifacts\session-fixture
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
+          cargo test --locked `
+            --test db8000_session_pairs `
+            --no-default-features `
+            --features ws,gen_model,manifold,project_hd `
+            -- --nocapture 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\artifacts\session-pairs.log"
+          if ($LASTEXITCODE -ne 0) { throw "db8000_session_pairs failed ($LASTEXITCODE)" }
+
+      # 远程红了以后，光看断言文本还原不出当时那份台账；把 manifest / SHA256SUMS
+      # 与完整输出一起带出来，才能在本地拿同一批散列对账。
+      - name: Upload session-pair diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db8000-session-pairs-diagnostics
+          path: |
+            artifacts/session-pairs.log
+            artifacts/session-fixture/manifest.json
+            artifacts/session-fixture/SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check PDMS record-boundary parsing
         shell: pwsh

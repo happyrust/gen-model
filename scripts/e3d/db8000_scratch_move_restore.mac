@@ -1,0 +1,14 @@
+-- transform-move restore: back to the creation position (E 0 N 0 U 0).
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_move_restore.log" OVER
+$P CODEX-DB8000-SCRATCH-MOVE-RESTORE-ALIVE
+/CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+POS E 0 N 0 U 0
+Q CE
+Q POS
+SAVEWORK 'CODEX db8000 move scratch BOX back to origin'
+$P CODEX-DB8000-SCRATCH-MOVE-RESTORE-DONE
+ALPHA LOG END

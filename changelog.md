@@ -4,6 +4,45 @@
 
 ### 新增
 
+- **db8000 会话对回归进 CI：夹具格式的七类性质断言，数据驱动**（方案
+  `docs/plans/2026-08-12-db8000-session-snapshot-fixture-test-plan.md` 阶段三 + 四）：
+  - 新增 `tests/db8000_session_pairs.rs`（18 passed）：对 `aios-session-fixture-v1`
+    夹具里的**每个案例**跑七类断言——档案完整性、窗口切片、时点一致性、并集律、
+    净变化折叠、快照差分对账、历史还原。不硬编码任何 sesno 或 refno。
+  - **不等真实录制**：夹具来源两条，`AIOS_SESSION_FIXTURE` 指现成目录，缺省则
+    从 issue-019 的 final 现场 `pack` 一份。后者是真实 db8000 会话链上的真数据
+    （阶段一自检已证明现切台账与当年独立录制逐字节相等），只是案例集小。真实
+    录制到货后改指环境变量即可，断言不动。
+  - a) 与 g) 直接复用 `pipeline::verify_fixture`——它本就在做那两件事，重写会
+    产生两套必须永远一致的口径。
+  - f) 快照差分是新增的通用 oracle：`read_raw_records` + `parse_raw_ele_data`
+    在 before/after 两份现切快照间逐元素比对（存在性 + noun/name/owner +
+    **children** + 属性表），与净结果互证。**children 必须进比对**：实测
+    issue-019 的删除序列里，父件与祖父的属性表一个字节都没动，Modified 的信号
+    全在 children 列表上；只比属性会把它们误判成「增量说变了但文件没变」。
+    噪声属性白名单目前为空——方案预判的 CACHID 类漂移在这条链上没有出现，
+    常量留着是机制不是占位。
+  - CI：`db8000_session_pairs` 接进同一 job；失败时 upload-artifact 传完整断言
+    输出与夹具台账（新增 `AIOS_SESSION_FIXTURE_KEEP` 让合成夹具落在工作区，
+    否则临时目录跑完就没了、远程红了无从对账）。
+  - job 更名 `db8000-model-increment` → `offline-increment-regression`：它现在
+    跑五步离线回归，早已不止 db8000 的模型增量。**配了分支保护必需检查项的话
+    需要同步旧名字。**
+
+- **db8000 录制清单补齐到 6 类变更形态，并加了一道离线闸**（方案阶段二的离线前置；
+  录制本身仍等生产空窗）：
+  - 新增 8 个宏、5 个案例：`scratch-create`（added）→ `data-rename` /
+    `transform-move` / `geometry-resize`（各 modified，apply+restore）→
+    `delete-box`（deleted）。`-CheckOnly` 静态审查 12 条腿 / 7 案例全过。
+  - **不动生产元素，改为自建 scratch 元素**：restore 腿必须把值放回原状，而
+    生产元素当前的 POS / XLEN 离线不可知，照方案原文写就得先占一次空窗做探针。
+    自建元素让每个 before/after 值都自决，整套宏离线可写可评审；末位 delete
+    收尾后库在逻辑上回到原样。副产品是 `added` 净形态——原案例表里一个都没有。
+  - 新增 `recording_manifest_survives_the_sesno_assignment_it_will_get`：按录制
+    脚本的 sesno 分配规则预演清单，`plan_cases` 必须接受，`expected_net.element`
+    必须已声明、宏文件必须在场。这类错原本要等占完空窗、录完一整轮才在打包时
+    炸，现在 `cargo test` 就拦（防伪已验）。
+
 - **空间树一致性闭环：V2 单文件快照、进程状态机、空间串行锁与降级自愈**（方案
   `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md`，D1–D8 已定；
   ADR-010 2026-08-12 增补（二）、ADR-017 2026-08-12 补记）：

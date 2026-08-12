@@ -112,6 +112,10 @@ __pycache__/
 !/output/increment-test/README.md
 !/output/increment-test/rs-plant3-d-*.png
 
+# CI 诊断产物落脚处（windows-tests 的会话对回归把台账与完整输出留在这里，
+# 失败时当 artifact 传出来）。本地照 CI 那段命令演练时同样会生成。
+/artifacts/
+
 # KC-Chat 运行时产物（插件自动生成，请勿入库）
 .cursor/mcp.json
 .cursor/kc-mcp/

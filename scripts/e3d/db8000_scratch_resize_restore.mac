@@ -1,0 +1,16 @@
+-- geometry-resize restore: back to the creation dimensions (1000 cubed).
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_scratch_resize_restore.log" OVER
+$P CODEX-DB8000-SCRATCH-RESIZE-RESTORE-ALIVE
+/CODEX_DB8000_SCRATCH
+Q CE
+Q REF
+Q NAME
+XLEN 1000
+YLEN 1000
+ZLEN 1000
+Q CE
+Q XLEN
+SAVEWORK 'CODEX db8000 resize scratch BOX back to 1000 cubed'
+$P CODEX-DB8000-SCRATCH-RESIZE-RESTORE-DONE
+ALPHA LOG END
