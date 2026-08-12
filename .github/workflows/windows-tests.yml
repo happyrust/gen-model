@@ -209,8 +209,11 @@ jobs:
           Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
           Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
           Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
+          # 匹配 bin 及其子目录：OpenVR 装在 `openvr-*/bin/win64/openvr_api.dll`，
+          # 只认「直接位于 bin 下」会把它漏掉——而 TKService.dll 正依赖它，
+          # 缺了就是 import 时那句不说名字的 "DLL load failed"（实测踩到）。
           Get-ChildItem "$extract\3rdparty-vc14-64" -Recurse -Filter *.dll |
-            Where-Object { $_.DirectoryName -like '*\bin' } |
+            Where-Object { $_.DirectoryName -match '\\bin(\\|$)' } |
             Copy-Item -Destination "$root\bin" -Force
           "OCC_ROOT=$root" >> $env:GITHUB_ENV
           # 运行期也要找得到 TK*.dll：包装层按 PATH 逐目录 os.add_dll_directory。
