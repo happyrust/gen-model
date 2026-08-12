@@ -330,9 +330,9 @@ async fn mini_window_staged_write_back_equals_direct_write() {
                 "UPSERT report:r1 SET room = fn::room_num_of(pe:e1);".into(),
                 ExecMode::Both,
             ),
-            // commit-time-only：全局修补（zone_refno 回填的缩影）
+            // commit-time-only：全局修补（anc 回填的缩影）
             (
-                "UPDATE inst_relate SET zone_refno = pe:z1 WHERE zone_refno = NONE;".into(),
+                "UPDATE inst_relate SET anc = [1] WHERE anc = NONE;".into(),
                 ExecMode::CommitOnly,
             ),
         ],

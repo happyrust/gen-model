@@ -376,7 +376,7 @@ mod tests {
         for sql in [
             "UPSERT pe:⟨4000000001_10⟩ CONTENT { noun: 'PIPE', dbnum: 7997 }",
             "UPSERT type::thing('pe', $refno) SET noun = 'PIPE'",
-            "DELETE inst_relate WHERE zone_refno = pe:⟨1_2⟩",
+            "DELETE inst_relate WHERE dbnum = 7997",
             "DELETE pe_owner:[pe:a, NONE]..=[pe:a, ..]",
             "DELETE pe:⟨1_2⟩->ref_rev",
             "UPDATE pe:a SET deleted = true",

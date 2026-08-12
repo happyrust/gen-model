@@ -156,8 +156,9 @@ pub async fn create_window_on(
 ///
 /// 注意继承的既有行为（见 `docs/2026-08-05_fork-surreal-compat-findings.md`）：
 /// `define_common_functions` 静默吞逐语句错误（全新库上 REMOVE 不存在的函数）。
-/// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修：
-/// 生产与这里共用 `INST_RELATE_ZONE_INDEX_SQL` 一条合法语句，错误显式上抛。
+/// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修，且
+/// 该索引已随 P3 退役——生产与这里共用 `INST_RELATE_INDEX_SQL`（含摘除它的
+/// 迁移语句），错误显式上抛。
 pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
     // 磁盘脚本（CWD 的 resource/surreal，站点扩展）＋内置快照收尾——与 run_cli
     // 同一顺序，同名函数以内置版为准。内置序列自带 D11 的 hd/hh 矫正；这里原先

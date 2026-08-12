@@ -575,6 +575,28 @@ DEFINE FUNCTION OVERWRITE fn::anc_u64($r: record) {
     RETURN array::map($chain, |$a| fn::refno_u64($a));
 };
 
+-- anc 尾部定位（层级查询优化 P3 的读侧便捷层）：anc = 自身→顶（含自身），
+-- SITE/ZONE 是最上面的两个业务层级，从链尾取即为 O(1)，与元素深度无关。
+-- 链尾有两种真实形态（生产以 1 为准）：
+--   1. 顶是 ref1=0 的 WORL——全量入库刻意不存 WORL 行（database.rs 的
+--      ignore_world_refno），元素 owner 仍指向它，两个生产者（Rust 的
+--      resolve_inst_meta_on / 本文件的 fn::anc_u64）都把它收在链尾；
+--   2. owner 是 pe:0_0 之类空哨兵、被 anc_u64 滤掉，链止于 SITE（防御形态）。
+-- 判据与 Rust 解析器同源：打包值 ref1==0（% 2^32 == 0）即 WORL，据此定偏移。
+-- 短链/空链由 array::at 越界返回 NONE；ZONE/SITE 自身的链按「含自身」语义
+-- 返回自己（与退役的 fn::find_ancestor_type 口径一致）。
+-- 反向圈行（某 ZONE 下全部实例）不要用它：那是 `anc CONTAINS $u64` 的索引查询。
+DEFINE FUNCTION OVERWRITE fn::site_u64($anc: array) {
+    if array::len($anc) == 0 { return NONE; };
+    LET $off = if array::at($anc, -1) % 4294967296 == 0 { 1 } else { 0 };
+    RETURN array::at($anc, -1 - $off);
+};
+DEFINE FUNCTION OVERWRITE fn::zone_u64($anc: array) {
+    if array::len($anc) == 0 { return NONE; };
+    LET $off = if array::at($anc, -1) % 4294967296 == 0 { 1 } else { 0 };
+    RETURN array::at($anc, -2 - $off);
+};
+
 // 根据类型返回子节点
 remove function fn::find_deep_children_type;
 define function fn::find_deep_children_type($pe:record,$t:string) {

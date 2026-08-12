@@ -451,8 +451,9 @@ fn should_rebuild_stale_staged_attempt(
 /// 现场上溯，而 A3 把它并进了收口——「可失败的副作用」变成「水位推进的必要
 /// 条件」，函数漏灌 = 每个 DESI 窗口收口必败（issue #16）。W3/W4 之后 journal
 /// 已纯数据化、datacenter 语句是固定目标 UPDATE；收口里剩余的 `fn::` 硬依赖只有
-/// OWNER 搬迁重算的 `fn::anc_u64` + `fn::find_ancestor_type`，探针已对准它们
-/// （W6 审计：`docs/2026-08-07_journal-fn-dependency-audit.md`）。
+/// OWNER 搬迁重算的 `fn::anc_u64`，探针已对准它
+/// （W6 审计：`docs/2026-08-07_journal-fn-dependency-audit.md`；P3 退役
+/// `zone_refno` 后 `fn::find_ancestor_type` 已彻底离开收口链）。
 ///
 /// 这些函数定义在 `resource/surreal/common.surql`；启动序列会从 **exe 工作
 /// 目录**的 `resource/surreal/` 整目录灌一遍（`define_common_functions`，日志
@@ -462,7 +463,7 @@ fn should_rebuild_stale_staged_attempt(
 /// 水位和模型队列。
 ///
 /// `aios_core` 会在旧版部署脚本缺少 `fn::anc_u64` 时从二进制内置定义补装；这里紧接
-/// 加载阶段验证两个最终硬依赖。缺失或探针本身失败都阻止启动，避免服务看似健康、
+/// 加载阶段验证这个最终硬依赖。缺失或探针本身失败都阻止启动，避免服务看似健康、
 /// 第一个 DESI 窗口却在收口阶段确定性失败。
 pub async fn selfcheck_surreal_functions() -> anyhow::Result<()> {
     match desi_finalize_preflight().await {
@@ -499,20 +500,20 @@ pub enum FinalizePreflight {
 /// 探针对象随 W6 审计（`docs/2026-08-07_journal-fn-dependency-audit.md`）对准
 /// **剩余的收口硬依赖**：W3/W4 之后 journal 已纯数据化、datacenter 语句是固定
 /// 目标 UPDATE，收口里唯一还对持久层求值 `fn::` 的是 OWNER 搬迁的
-/// anc/zone_refno 定点重算（`render_anc_repair_statements`）——用的是
-/// `fn::anc_u64` 与 `fn::find_ancestor_type`。两个函数同出
-/// `resource/surreal/common.surql`；旧版脚本（没有 P1 新增的 `fn::anc_u64`）
-/// 现在会被正确拒绝，而不是等到含搬迁的窗口在写回里无限重试。
+/// anc 定点重算（`render_anc_repair_statements`）——用的是 `fn::anc_u64`，
+/// 定义在 `resource/surreal/common.surql`；旧版脚本（没有 P1 新增的
+/// `fn::anc_u64`）现在会被正确拒绝，而不是等到含搬迁的窗口在写回里无限重试。
+/// （`fn::find_ancestor_type` 曾同为硬前置，P3 退役 `zone_refno` 后离开收口链，
+/// 探针随之收窄。）
 pub async fn desi_finalize_preflight() -> FinalizePreflight {
-    const PROBE: &str = "RETURN fn::anc_u64(type::thing('pe','__finalize_preflight__'));\
-                         RETURN fn::find_ancestor_type(type::thing('pe','__finalize_preflight__'),'ZONE');";
+    const PROBE: &str = "RETURN fn::anc_u64(type::thing('pe','__finalize_preflight__'));";
     match aios_core::SUL_DB.query(PROBE).await {
         Err(error) => FinalizePreflight::Unverified(format!("探针查询未送达持久层（{error}）")),
         Ok(response) => match response.check() {
             Ok(_) => FinalizePreflight::Ready,
             Err(error) => FinalizePreflight::Missing(format!(
-                "调用 fn::anc_u64 / fn::find_ancestor_type 失败（{error}）。它们是收口\
-                 事务里 OWNER 搬迁重算的硬前置，定义在 resource/surreal/common.surql\
+                "调用 fn::anc_u64 失败（{error}）。它是收口事务里 OWNER 搬迁重算的\
+                 硬前置，定义在 resource/surreal/common.surql\
                  ——脚本没灌进当前库或版本太旧（缺 P1 新增的 fn::anc_u64）"
             )),
         },
@@ -1150,7 +1151,7 @@ impl IncrementPipeline {
             Self::datacenter_statements(&range_eles, db_type),
         )
         .await?;
-        // OWNER 搬迁的定点 anc/zone_refno 重算先于水位提交、失败即拦住水位
+        // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
         // （窗口重放时随窗口语句批重算，幂等收敛）。
         window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
 
@@ -1222,7 +1223,7 @@ impl IncrementPipeline {
         ))
     }
 
-    /// 本窗口的 OWNER 搬迁 anc/zone_refno 定点重算语句（随收口窗口语句批提交）。
+    /// 本窗口的 OWNER 搬迁 anc 定点重算语句（随收口窗口语句批提交）。
     ///
     /// **只对 DESI 窗口渲染**（与 [`Self::datacenter_statements`] 同门，
     /// 2026-08-07 审核 P2）：`anc` 物化的是设计元素祖先链，CATA/SYST 元素的
@@ -1243,7 +1244,7 @@ impl IncrementPipeline {
             return Vec::new();
         }
         println!(
-            "IncrementPipeline: {} 个元素发生 OWNER 搬迁，提交尾重算其子树 anc/zone_refno",
+            "IncrementPipeline: {} 个元素发生 OWNER 搬迁，提交尾重算其子树 anc",
             moved.len()
         );
         Self::render_anc_repair_statements(&moved)
@@ -1253,7 +1254,7 @@ impl IncrementPipeline {
     ///
     /// 交付单元自己搬家会走重生成、实例行随之整体重写；这份名单主要治「单元层级
     /// 之上的容器搬家」（PIPE/ZONE 改挂 OWNER）——那种变更不产生任何模型工作项，
-    /// 子树 inst_relate/tubi_relate 行上物化的 `anc`/`zone_refno` 却已陈旧。
+    /// 子树 inst_relate/tubi_relate 行上物化的 `anc` 却已陈旧。
     /// 名单不按 noun 过滤：单元根多修一次是幂等空转，漏修是静默陈旧。
     fn moved_refnos(range_eles: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<RefU64> {
         use crate::data_interface::model_impact::{ChangeBucket, user_change_buckets};
@@ -1271,8 +1272,9 @@ impl IncrementPipeline {
     /// 单条 CONTAINSANY 语句最多携带的搬家元素数（语句体积上界 ~几 KB）。
     const ANC_REPAIR_CHUNK: usize = 200;
 
-    /// 渲染搬家元素子树的 `anc`/`zone_refno` 定点重算语句（随收口窗口语句批
-    /// 提交、先于水位；层级查询优化方案 P1 的搬家维护）。
+    /// 渲染搬家元素子树的 `anc` 定点重算语句（随收口窗口语句批
+    /// 提交、先于水位；层级查询优化方案 P1 的搬家维护，P3 起不再连带
+    /// `zone_refno`——列已退役）。
     ///
     /// `anc CONTAINSANY [搬家元素…]`：搬家把整棵子树一起带走，受影响行的 anc
     /// 无论新旧算法都含着搬家元素，所以这一个条件恰好圈出全部受影响行；重算
@@ -1295,11 +1297,11 @@ impl IncrementPipeline {
                 [
                     format!(
                         "UPDATE (SELECT VALUE id FROM inst_relate WHERE anc CONTAINSANY [{list}]) SET \
-                         anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
+                         anc = fn::anc_u64(in) RETURN NONE;"
                     ),
                     format!(
                         "UPDATE (SELECT VALUE id FROM tubi_relate WHERE anc CONTAINSANY [{list}]) SET \
-                         anc = fn::anc_u64(in), zone_refno = fn::find_ancestor_type(in, 'ZONE') RETURN NONE;"
+                         anc = fn::anc_u64(in) RETURN NONE;"
                     ),
                 ]
             })
@@ -3068,8 +3070,9 @@ mod datacenter_tests {
     }
 
     /// 层级查询优化 P1 的搬家维护：OWNER 变化的元素（Moved 桶）必须渲出
-    /// inst_relate / tubi_relate 各一条 anc/zone_refno 定点重算语句进 finalize
+    /// inst_relate / tubi_relate 各一条 anc 定点重算语句进 finalize
     /// 事务；普通属性变化、新建、删除不产生重算（它们各自的重生成路径已自洽）。
+    /// P3 之后重算不再带 `zone_refno`（列已退役）——回退即红。
     #[test]
     fn owner_moves_render_anc_repair_statements_and_others_do_not() {
         use aios_core::NamedAttrValue;
@@ -3099,9 +3102,12 @@ mod datacenter_tests {
                 "受影响行由旧 anc 含搬家元素这一个条件圈出: {statement}"
             );
             assert!(
-                statement.contains("anc = fn::anc_u64(in)")
-                    && statement.contains("zone_refno = fn::find_ancestor_type(in, 'ZONE')"),
-                "anc 与 zone_refno 必须一起重算（zone_refno 的陈旧是既有隐性 bug）: {statement}"
+                statement.contains("anc = fn::anc_u64(in)"),
+                "anc 必须按提交后的活 owner 链重算: {statement}"
+            );
+            assert!(
+                !statement.contains("zone_refno"),
+                "zone_refno 已退役，重算语句不得再写它（P3 回退即红）: {statement}"
             );
             assert!(
                 statement.ends_with(';'),

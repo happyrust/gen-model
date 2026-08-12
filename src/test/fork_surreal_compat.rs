@@ -615,6 +615,11 @@ async fn dual_schemaless_bare_objects_agree() {
 /// 3. 数组索引绝对断言（主路线 Go/No-Go）：`anc CONTAINS n` 的 EXPLAIN 走
 ///    `idx_ir_anc`。第 3 步失败即 No-Go，方案切固定标量列备选，第 2 步已证明
 ///    备选可行。
+///
+/// 追加钉 P3 迁移语句：`REMOVE INDEX IF EXISTS` 在「索引不存在」「表都不存在」
+/// 「定义过再摘除、重复摘除」三种情况下都是双引擎一致的安全 no-op——生产启动
+/// 与暂存建库共用的 `INST_RELATE_INDEX_SQL` 首行靠它退役 zone_refno 索引
+/// （fork 侧已实测；这里连 mem 一起钉住，防升级回归）。
 #[tokio::test(flavor = "multi_thread")]
 async fn dual_inst_relate_anc_u64_contains_index_agrees() {
     let Some((mem, fork, _guard)) = dual_dbs("anc_u64_index").await else {
@@ -684,6 +689,13 @@ async fn dual_inst_relate_anc_u64_contains_index_agrees() {
             &q_multi,
             &seed_boundary,
             &q_boundary,
+            // P3 迁移语句（REMOVE INDEX IF EXISTS）的三种 no-op 情况 + INFO 终态对拍。
+            "REMOVE INDEX IF EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate;",
+            "REMOVE INDEX IF EXISTS idx_gone ON TABLE table_never_created;",
+            "DEFINE INDEX IF NOT EXISTS idx_ir_tmp ON TABLE inst_relate COLUMNS generic;",
+            "REMOVE INDEX IF EXISTS idx_ir_tmp ON TABLE inst_relate;",
+            "REMOVE INDEX IF EXISTS idx_ir_tmp ON TABLE inst_relate;",
+            "INFO FOR TABLE inst_relate;",
         ],
     )
     .await;
@@ -722,6 +734,12 @@ async fn dual_inst_relate_anc_u64_contains_index_agrees() {
 /// 哨兵过滤）、悬空 record 的空数组兜底，最后按生产字面量形态
 /// （`save_instance_data` 的 INSERT RELATION、`gen_cata_geos` 的 RELATE SET）
 /// 端到端落值并绝对断言打包值与链序。
+///
+/// 一并钉 P3 读侧便捷层 `fn::zone_u64` / `fn::site_u64`（anc 尾部定位，
+/// 链尾 ref1==0 即 WORL 的自适应偏移）：本用例的两族种子恰好覆盖两种尾形——
+/// 24383 族 SITE.owner→pe:0_0 哨兵被滤、链止于 SITE（无 WORL 形），24384 族
+/// SITE.owner 悬空指向 ref1=0 的 WORL（生产形，WORL 行不入库）。函数体里的
+/// `array::at` 负下标与 `%` 若在 2.1.4 不合法，同样靠在场断言防假绿。
 #[tokio::test(flavor = "multi_thread")]
 async fn dual_anc_u64_functions_execute_and_agree() {
     let Some((mem, fork, _guard)) = dual_dbs("anc_u64_fns").await else {
@@ -732,7 +750,12 @@ async fn dual_anc_u64_functions_execute_and_agree() {
             .await
             .unwrap_or_else(|e| panic!("[{engine}] 启动 DEFINE 重放失败: {e}"));
         let info = info_for_db(db).await;
-        for function in ["fn::refno_u64", "fn::anc_u64"] {
+        for function in [
+            "fn::refno_u64",
+            "fn::anc_u64",
+            "fn::zone_u64",
+            "fn::site_u64",
+        ] {
             assert!(
                 info.contains(function),
                 "[{engine}] 启动重放后 {function} 必须在场——define_common_functions \
@@ -748,18 +771,23 @@ async fn dual_anc_u64_functions_execute_and_agree() {
 
     // owner 链：SITE.owner → pe:0_0（null 哨兵）；链顶之上的多余跳是 NONE——
     // 两种哨兵都必须被滤掉。历史数组 id 行与最新行并存（F4 的现实形制）。
+    // 24384 族是生产形：WORL（pe:24384_0，ref1=0）行不入库、owner 悬空指向它，
+    // 链尾收着真实打包值——zone_u64/site_u64 的自适应偏移在这一形态下取 1。
     let seed = "CREATE pe:0_0; \
          CREATE pe:24383_1 SET noun='SITE', dbnum=7997, owner=pe:0_0; \
          CREATE pe:24383_66457 SET noun='ZONE', dbnum=7997, owner=pe:24383_1; \
          CREATE pe:24383_66458 SET noun='PIPE', dbnum=7997, owner=pe:24383_66457; \
          CREATE pe:24383_66459 SET noun='BRAN', dbnum=7997, owner=pe:24383_66458; \
          CREATE pe:['24383_66459', 5] SET noun='BRAN'; \
+         CREATE pe:24384_2 SET noun='SITE', dbnum=7998, owner=pe:24384_0; \
+         CREATE pe:24384_3 SET noun='ZONE', dbnum=7998, owner=pe:24384_2; \
+         CREATE pe:24384_4 SET noun='EQUI', dbnum=7998, owner=pe:24384_3; \
          CREATE inst_info:h1; CREATE inst_geo:g1;";
-    // 生产字面量形态 1:1（pdms_inst.rs 的 INSERT RELATION 对象、cata_model.rs 的
-    // RELATE SET）——函数调用与 `pe:x.dbnum` 字段访问都出现在字面量值位。
+    // 函数调用与 `pe:x.dbnum` 字段访问出现在字面量值位的形态 1:1——这是
+    // 回填（backfill_inst_relate_anc）与搬家重算（render_anc_repair_statements）
+    // 在持久层现场求值的同款构造（生成主路径 W4 起已是纯数据字面量）。
     let insert_inst_relate = "insert relation into inst_relate [{id: inst_relate:⟨24383_66459⟩, \
          in: pe:24383_66459, out: inst_info:h1, generic: 'BOX', \
-         zone_refno: fn::find_ancestor_type(pe:24383_66459, 'ZONE'), \
          anc: fn::anc_u64(pe:24383_66459), dbnum: pe:24383_66459.dbnum, \
          has_cata_neg: false, solid: true}];";
     let relate_tubi = "relate pe:24383_66459->tubi_relate:[pe:24383_66459, 0]->inst_geo:g1 \
@@ -777,9 +805,17 @@ async fn dual_anc_u64_functions_execute_and_agree() {
             "RETURN fn::anc_u64(pe:24383_66459);",
             // 悬空 record（行不存在）→ 空数组，不报错。
             "RETURN fn::anc_u64(pe:24383_99999);",
+            // P3 读侧便捷层：两种尾形的取位 + 列上投影 + 空链兜底。
+            "RETURN fn::zone_u64(fn::anc_u64(pe:24383_66459));",
+            "RETURN fn::site_u64(fn::anc_u64(pe:24383_66459));",
+            "RETURN fn::anc_u64(pe:24384_4);",
+            "RETURN fn::zone_u64(fn::anc_u64(pe:24384_4));",
+            "RETURN fn::site_u64(fn::anc_u64(pe:24384_4));",
+            "RETURN fn::zone_u64([]);",
             insert_inst_relate,
             "SELECT VALUE anc FROM inst_relate;",
             "SELECT VALUE dbnum FROM inst_relate;",
+            "SELECT VALUE fn::zone_u64(anc) FROM inst_relate;",
             relate_tubi,
             "SELECT VALUE anc FROM tubi_relate;",
         ],
@@ -795,6 +831,8 @@ async fn dual_anc_u64_functions_execute_and_agree() {
         packed(zone),
         packed(site)
     );
+    let site_worl = RefU64((24384u64 << 32) | 2).0;
+    let zone_worl = RefU64((24384u64 << 32) | 3).0;
     for (engine, db) in [("mem", &mem), ("fork", &fork)] {
         let out = exec_capture(db, "RETURN fn::refno_u64(pe:24383_66459);").await;
         assert_eq!(
@@ -819,6 +857,32 @@ async fn dual_anc_u64_functions_execute_and_agree() {
             out[0].as_deref(),
             Ok(r#"{"Array":[{"Number":{"Int":7997}}]}"#),
             "[{engine}] 生产 INSERT 字面量写出的 dbnum 必须取自 pe 行"
+        );
+        // P3 便捷层的绝对取位：无 WORL 尾形（0_0 哨兵被滤、链止于 SITE）偏移 0。
+        let out = exec_capture(db, "RETURN fn::zone_u64(fn::anc_u64(pe:24383_66459));").await;
+        assert_eq!(
+            out[0].as_deref(),
+            Ok(packed(zone).as_str()),
+            "[{engine}] 链止于 SITE 的尾形下 zone_u64 必须取到倒数第 2 的 ZONE"
+        );
+        let out = exec_capture(db, "RETURN fn::site_u64(fn::anc_u64(pe:24383_66459));").await;
+        assert_eq!(
+            out[0].as_deref(),
+            Ok(packed(site).as_str()),
+            "[{engine}] 链止于 SITE 的尾形下 site_u64 必须取到链尾 SITE"
+        );
+        // 生产形（链尾是 ref1=0 的 WORL 悬空链接）偏移 1。
+        let out = exec_capture(db, "RETURN fn::zone_u64(fn::anc_u64(pe:24384_4));").await;
+        assert_eq!(
+            out[0].as_deref(),
+            Ok(packed(zone_worl).as_str()),
+            "[{engine}] 含 WORL 尾形下 zone_u64 必须取到倒数第 3 的 ZONE"
+        );
+        let out = exec_capture(db, "RETURN fn::site_u64(fn::anc_u64(pe:24384_4));").await;
+        assert_eq!(
+            out[0].as_deref(),
+            Ok(packed(site_worl).as_str()),
+            "[{engine}] 含 WORL 尾形下 site_u64 必须取到倒数第 2 的 SITE"
         );
     }
 }
@@ -875,12 +939,12 @@ async fn dual_inst_relate_flat_materialization_agrees() {
     let create_normal = format!(
         "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_100⟩, in: pe:24383_1, \
          out: inst_info:i1, world_trans: trans:t1, world_trans_d: {wt_a}, generic: 'BOX', \
-         zone_refno: NONE, anc: [42], dbnum: 7997, dt: NONE, has_cata_neg: false, solid: true}}];"
+         anc: [42], dbnum: 7997, dt: NONE, has_cata_neg: false, solid: true}}];"
     );
     let create_tubi = format!(
         "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_101⟩, in: pe:24383_1, \
          out: inst_info:i2, world_trans: trans:t1, world_trans_d: {wt_a}, aabb: aabb:a1, \
-         aabb_d: {aabb_a}, generic: 'TUBI', zone_refno: NONE, anc: [42], dbnum: 7997, \
+         aabb_d: {aabb_a}, generic: 'TUBI', anc: [42], dbnum: 7997, \
          has_cata_neg: false, solid: true}}];"
     );
     // aabb 刷新与 transform 便宜路径：指针+副本同语句。
@@ -1148,12 +1212,11 @@ async fn bench_anc_contains_vs_deep_traversal() {
                 format!(
                     "{{id: inst_relate:⟨{REF0}_{r}⟩, in: pe:{REF0}_{r}, out: inst_info:⟨h{h}⟩, \
                       generic: '{g}', aabb: aabb:⟨a{a}⟩, world_trans: trans:⟨t{a}⟩, \
-                      anc: [{anc}], dbnum: {DBNUM}, zone_refno: pe:{REF0}_{z}, solid: true}}",
+                      anc: [{anc}], dbnum: {DBNUM}, solid: true}}",
                     r = e.ref1,
                     h = idx % SHARED_HASHES,
                     g = e.noun,
                     a = idx % SHARED_BOXES,
-                    z = e.anc_ref1s[e.anc_ref1s.len() - 2],
                 )
             })
             .join(",");

@@ -82,9 +82,12 @@ async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::R
 /// 初始化数据库的 inst_relate / tubi_relate 表的索引。
 ///
 /// F1（`docs/2026-08-05_fork-surreal-compat-findings.md`）：旧语法带 `TYPE BTREE`，
-/// 在 fork 2.1.4 上是解析错误，又被 `let _ =` 吞掉——索引在生产从未建成，
-/// `zone_refno` 过滤一直全表扫。现在用合法语法建普通索引并显式上抛错误；
-/// `IF NOT EXISTS` 保证每次启动重放幂等。
+/// 在 fork 2.1.4 上是解析错误，又被 `let _ =` 吞掉——索引在生产从未建成。
+/// 现在用合法语法建普通索引并显式上抛错误；`IF NOT EXISTS` 保证每次启动重放幂等。
+///
+/// P3（层级查询优化收尾）：`zone_refno` 已退役——读侧全部切到 `anc CONTAINS`，
+/// 该列不再写入、其索引由常量里的 `REMOVE INDEX IF EXISTS` 迁移语句在启动时
+/// 摘除（存量行的旧值保留不动，只是不再被索引与维护）。
 pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
     println!("正在初始化 inst_relate/tubi_relate 索引（首次构建需全表扫描，可能较久）...");
     let started = std::time::Instant::now();
@@ -103,8 +106,16 @@ pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
 /// （`docs/plans/2026-08-07-inst-relate-anc-u64-hierarchy-query-plan.md`）：
 /// 任意根的子树实例 = `WHERE anc CONTAINS $root` 一条索引查询。
 /// 2.1.4 上数组列普通索引 + CONTAINS 走索引已由双跑套件钉住（P0，Go）。
+///
+/// 前两行的 `REMOVE INDEX IF EXISTS` 是 P3 的一次性迁移：摘掉已退役的
+/// zone_refno 索引的**两个历史名字**——`idx_inst_relate_zone_refno`（本仓
+/// F1 修复后建的）与 `inst_relate_zone_refno_index`（plant-ui rs-core
+/// `define_pe_index` 历史上建的，AMS 实库两者并存实测在案）。旧库有、
+/// 新库/暂存库没有——`IF EXISTS` 各种情况都是安全 no-op，含表尚不存在的
+/// 全新库，2.1.4 双引擎语义由双跑套件钉住。
 pub const INST_RELATE_INDEX_SQL: &str = "\
-    DEFINE INDEX IF NOT EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate COLUMNS zone_refno;\n\
+    REMOVE INDEX IF EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate;\n\
+    REMOVE INDEX IF EXISTS inst_relate_zone_refno_index ON TABLE inst_relate;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_dbnum ON TABLE inst_relate COLUMNS dbnum;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
@@ -113,8 +124,11 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
 /// 存量 `inst_relate` / `tubi_relate` 行的 `anc` + `dbnum` 回填（幂等，自愈式）。
 ///
 /// 每轮圈 `anc = NONE` 的一批行、按 `in` 端 pe 的活 owner 链重算，直到无行可补。
-/// 分批是为了限住单事务体量；顺序无所谓，中断重跑无害。TUBI 行历史上连
-/// `zone_refno` 都没有，这里一并补上。返回 (inst_relate 补行数, tubi_relate 补行数)。
+/// 分批是为了限住单事务体量；顺序无所谓，中断重跑无害。
+/// 返回 (inst_relate 补行数, tubi_relate 补行数)。
+///
+/// P3 之后这里不再顺手补 `zone_refno`（该列已退役，读侧无消费者）——每行一次的
+/// `fn::find_ancestor_type`（9 跳 owner 上溯）从回填成本里整个消失。
 pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
     async fn drain_table(table: &str) -> anyhow::Result<usize> {
         const BATCH: usize = 2000;
@@ -124,8 +138,7 @@ pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
         loop {
             let sql = format!(
                 "LET $rows = SELECT VALUE id FROM {table} WHERE anc = NONE LIMIT {BATCH};\n\
-                 UPDATE $rows SET anc = fn::anc_u64(in), dbnum = in.dbnum, \
-                 zone_refno = zone_refno ?? fn::find_ancestor_type(in, 'ZONE') RETURN NONE;\n\
+                 UPDATE $rows SET anc = fn::anc_u64(in), dbnum = in.dbnum RETURN NONE;\n\
                  RETURN array::len($rows);"
             );
             let mut response = SUL_DB.query(sql).await?.check()?;
@@ -226,10 +239,10 @@ pub async fn sweep_inst_relate_flat_if_dirty() -> anyhow::Result<usize> {
 /// issue #16 同族的故障面）。现在渲染时解一次、写死固定值，journal 变成纯数据。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolvedInstMeta {
-    /// 最近的 ZONE（含自身），无则 NONE——与 `fn::find_ancestor_type(pe,'ZONE')` 同义。
-    pub zone_refno: Option<RefU64>,
     /// 自身 → 顶的祖先链 RefU64 打包值（含自身）——与 `fn::anc_u64(pe)` 同义，
     /// 但走 Rust 链不吃函数展开层数的静默截断。
+    /// （最近 ZONE 从前是独立的 `zone_refno` 字段，P3 已随该列退役——语义上
+    /// 它就是链上第一个 ZONE，读侧要用直接查 `anc`。）
     pub anc: Vec<u64>,
     /// `pe.dbnum`。
     pub dbnum: Option<i64>,
@@ -238,12 +251,6 @@ pub(crate) struct ResolvedInstMeta {
 }
 
 impl ResolvedInstMeta {
-    pub(crate) fn zone_literal(&self) -> String {
-        self.zone_refno
-            .map(|refno| refno.to_pe_key())
-            .unwrap_or_else(|| "NONE".into())
-    }
-
     pub(crate) fn anc_literal(&self) -> String {
         format!(
             "[{}]",
@@ -294,13 +301,12 @@ pub(crate) async fn resolve_inst_meta_on(
         #[serde(default)]
         owner: Option<RefnoEnum>,
         #[serde(default)]
-        noun: Option<String>,
-        #[serde(default)]
         dbnum: Option<i64>,
         #[serde(default)]
         sesno: Option<i64>,
     }
-    type PeMeta = (Option<RefU64>, Option<String>, Option<i64>, Option<i64>);
+    /// (owner, dbnum, sesno)。
+    type PeMeta = (Option<RefU64>, Option<i64>, Option<i64>);
 
     let mut seeds: Vec<RefU64> = refnos
         .iter()
@@ -332,7 +338,7 @@ pub(crate) async fn resolve_inst_meta_on(
                 .join(",");
             let mut response = db
                 .query(format!(
-                    "SELECT id, owner, noun, dbnum, sesno FROM [{keys}] WHERE record::exists(id);"
+                    "SELECT id, owner, dbnum, sesno FROM [{keys}] WHERE record::exists(id);"
                 ))
                 .await?
                 .check()?;
@@ -350,7 +356,7 @@ pub(crate) async fn resolve_inst_meta_on(
                 {
                     next.push(owner);
                 }
-                cache.insert(refno, Some((owner, row.noun, row.dbnum, row.sesno)));
+                cache.insert(refno, Some((owner, row.dbnum, row.sesno)));
             }
             for refno in chunk {
                 if !found.contains(refno) {
@@ -364,21 +370,20 @@ pub(crate) async fn resolve_inst_meta_on(
         frontier = next;
     }
 
-    // 2) 逐 seed 出链：zone / anc / dbnum / sesno。
+    // 2) 逐 seed 出链：anc / dbnum / sesno。
     let mut out: HashMap<RefU64, ResolvedInstMeta> = HashMap::new();
     let mut ses_pairs: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
     for &seed in &seeds {
         let Some(Some(seed_meta)) = cache.get(&seed).cloned() else {
             // 行不在：与旧字面量对缺行的求值语义一致（fn:: 全 NONE / 空数组）。
             println!(
-                "生成行元数据解析：{} 的 pe 行不在当前世界，zone/anc/dbnum/dt 按空态渲染",
+                "生成行元数据解析：{} 的 pe 行不在当前世界，anc/dbnum/dt 按空态渲染",
                 seed.to_pe_key()
             );
             out.insert(seed, ResolvedInstMeta::default());
             continue;
         };
         let mut chain = Vec::new();
-        let mut zone = None;
         let mut cursor = seed;
         loop {
             let Some(Some(meta)) = cache.get(&cursor).cloned() else {
@@ -410,23 +415,19 @@ pub(crate) async fn resolve_inst_meta_on(
                 seed.to_pe_key()
             );
             chain.push(cursor.0);
-            if zone.is_none() && meta.1.as_deref() == Some("ZONE") {
-                zone = Some(cursor);
-            }
             match meta.0 {
                 Some(owner) => cursor = owner,
                 None => break,
             }
         }
-        if let (Some(dbnum), Some(sesno)) = (seed_meta.2, seed_meta.3) {
+        if let (Some(dbnum), Some(sesno)) = (seed_meta.1, seed_meta.2) {
             ses_pairs.insert((dbnum, sesno));
         }
         out.insert(
             seed,
             ResolvedInstMeta {
-                zone_refno: zone,
                 anc: chain,
-                dbnum: seed_meta.2,
+                dbnum: seed_meta.1,
                 dt_literal: None, // 下面按 (dbnum, sesno) 批量补
             },
         );
@@ -497,7 +498,7 @@ pub(crate) async fn resolve_inst_meta_on(
     }
     for &seed in &seeds {
         if let Some(Some(seed_meta)) = cache.get(&seed)
-            && let (Some(dbnum), Some(sesno)) = (seed_meta.2, seed_meta.3)
+            && let (Some(dbnum), Some(sesno)) = (seed_meta.1, seed_meta.2)
             && let Some(date) = ses_dates.get(&(dbnum, sesno))
             && let Some(meta) = out.get_mut(&seed)
         {
@@ -532,7 +533,7 @@ pub async fn save_instance_data(
         delete_inst_relate_cascade(&keys, chunk_size).await?;
     }
 
-    // W4（D6）：zone_refno / anc / dbnum / dt 在渲染时解一次、写死进字面量——
+    // W4（D6）：anc / dbnum / dt 在渲染时解一次、写死进字面量——
     // journal 纯数据化，写回重放不再对持久层求值任何 fn::。
     let inst_meta = {
         let mut meta_refnos: Vec<RefnoEnum> = inst_mgr.inst_info_map.keys().copied().collect();
@@ -647,19 +648,18 @@ pub async fn save_instance_data(
                 );
             }
 
-            // 为TUBI创建inst_relate记录（zone_refno/anc/dbnum 为渲染期已解值，W4）。
+            // 为TUBI创建inst_relate记录（anc/dbnum 为渲染期已解值，W4）。
             // aabb_d/world_trans_d 是指针目标 `d` 值的行内副本（P4 写时物化）：值
             // 就在内存里，渲染成纯字面量与指针同语句落行，journal 维持纯数据。
             let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
             let tubi_relate_sql = format!(
-                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {11}, aabb: aabb:⟨{4}⟩, aabb_d: {12}, generic: '{5}', zone_refno: {6}, anc: {7}, dbnum: {8}, has_cata_neg: {9}, solid: {10}}}",
+                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, aabb: aabb:⟨{4}⟩, aabb_d: {11}, generic: '{5}', anc: {6}, dbnum: {7}, has_cata_neg: {8}, solid: {9}}}",
                 k.to_inst_relate_key(),
                 k.to_pe_key(),
                 v.id_str(),
                 transform_hash,
                 aabb_hash,
                 v.generic_type.to_string(),
-                meta.zone_literal(),
                 meta.anc_literal(),
                 meta.dbnum_literal(),
                 v.has_cata_neg,
@@ -746,18 +746,17 @@ pub async fn save_instance_data(
             );
         }
 
-        // zone_refno/anc/dbnum/dt 为渲染期已解值（W4）：journal 纯数据化。
+        // anc/dbnum/dt 为渲染期已解值（W4）：journal 纯数据化。
         // world_trans_d 为指针目标 `d` 值的行内副本（P4 写时物化，值在内存渲染
         // 纯字面量）；aabb 建行时尚不存在，aabb_d 随 aabb 刷新同语句写入。
         let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
         let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {11}, generic: '{4}', zone_refno: {5}, anc: {6}, dbnum: {7}, dt: {8}, has_cata_neg: {9}, solid: {10}}}",
+            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, generic: '{4}', anc: {5}, dbnum: {6}, dt: {7}, has_cata_neg: {8}, solid: {9}}}",
             k.to_inst_relate_key(),
             k.to_pe_key(),
             v.id_str(),
             transform_hash,
             v.generic_type.to_string(),
-            meta.zone_literal(),
             meta.anc_literal(),
             meta.dbnum_literal(),
             meta.dt_literal(),
@@ -1174,11 +1173,9 @@ mod inst_meta_tests {
         let pe = equi.to_pe_key();
         let mut response = db
             .query(format!(
-                "RETURN {} == fn::find_ancestor_type({pe}, 'ZONE');\
-                 RETURN {} == fn::anc_u64({pe});\
+                "RETURN {} == fn::anc_u64({pe});\
                  RETURN {} == {pe}.dbnum;\
                  RETURN {} == fn::ses_date({pe});",
-                meta.zone_literal(),
                 meta.anc_literal(),
                 meta.dbnum_literal(),
                 meta.dt_literal(),
@@ -1187,7 +1184,7 @@ mod inst_meta_tests {
             .expect("parity transport")
             .check()
             .expect("parity query");
-        for (index, field) in ["zone_refno", "anc", "dbnum", "dt"].iter().enumerate() {
+        for (index, field) in ["anc", "dbnum", "dt"].iter().enumerate() {
             let equal: Option<bool> = response.take(index).expect("take flag");
             assert_eq!(
                 equal,
@@ -1195,7 +1192,6 @@ mod inst_meta_tests {
                 "{field} 的已解值必须与被退役的 fn:: 求值逐值相等: {meta:?}"
             );
         }
-        assert_eq!(meta.zone_refno, Some(refu(786003)));
         assert_eq!(
             meta.anc,
             vec![
@@ -1207,6 +1203,87 @@ mod inst_meta_tests {
             "anc = 自身 → 顶（含自身）"
         );
         assert_eq!(meta.dt_literal(), "d'2026-08-07T00:00:00Z'");
+    }
+
+    /// P3 读侧便捷层：`fn::zone_u64` / `fn::site_u64` 从 anc 尾部定位，判据与
+    /// Rust 解析器同源（链尾打包值 ref1==0 即 WORL，偏移 1）。世界按生产形制
+    /// 搭建：WORL 行不入库（database.rs 的 ignore_world_refno），SITE.owner
+    /// 悬空指向 ref1=0 的 WORL——两个生产者（resolve_inst_meta_on /
+    /// fn::anc_u64）必须产出同一条含 WORL 的链，helpers 在其上取出 ZONE/SITE；
+    /// 「含自身」语义与空链 NONE 一并钉住。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zone_and_site_helpers_locate_from_the_anc_tail() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta")
+            .use_db("anc_tail_helpers")
+            .await
+            .expect("use db");
+        crate::data_interface::staging::lifecycle::init_staging_schema(&db)
+            .await
+            .expect("schema + fn definitions");
+        db.query(
+            "UPSERT pe:24379_786021 CONTENT { noun: 'SITE', owner: pe:24379_0 };\
+             UPSERT pe:24379_786022 CONTENT { noun: 'ZONE', owner: pe:24379_786021 };\
+             UPSERT pe:24379_786023 CONTENT { noun: 'EQUI', owner: pe:24379_786022, dbnum: 7997, sesno: 43 };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seeded");
+
+        let worl = 24379u64 << 32;
+        let site = refu(786021).0;
+        let zone = refu(786022).0;
+        let equi = refu(786023).0;
+
+        let metas = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786023))])
+            .await
+            .expect("resolve");
+        let meta = metas.get(&refu(786023)).expect("meta for equi");
+        assert_eq!(
+            meta.anc,
+            vec![equi, zone, site, worl],
+            "生产形制的链尾必须收着 ref1=0 的 WORL"
+        );
+
+        let mut response = db
+            .query(format!(
+                "RETURN fn::anc_u64(pe:24379_786023) == {};\
+                 RETURN fn::zone_u64(fn::anc_u64(pe:24379_786023));\
+                 RETURN fn::site_u64(fn::anc_u64(pe:24379_786023));\
+                 RETURN fn::zone_u64({});\
+                 RETURN fn::zone_u64(fn::anc_u64(pe:24379_786022));\
+                 RETURN fn::site_u64(fn::anc_u64(pe:24379_786021));\
+                 RETURN fn::zone_u64(fn::anc_u64(pe:24379_786021));\
+                 RETURN fn::zone_u64([]);\
+                 RETURN fn::site_u64([]);",
+                meta.anc_literal(),
+                meta.anc_literal(),
+            ))
+            .await
+            .expect("helper transport")
+            .check()
+            .expect("helper queries");
+        let agree: Option<bool> = response.take(0).expect("take parity");
+        assert_eq!(
+            agree,
+            Some(true),
+            "fn::anc_u64 必须与 Rust 解析器产出同一条链"
+        );
+        let checks: [(usize, Option<u64>, &str); 8] = [
+            (1, Some(zone), "zone = 倒数第 3（链尾 WORL 偏移 1）"),
+            (2, Some(site), "site = 倒数第 2（链尾 WORL 偏移 1）"),
+            (3, Some(zone), "字面量入参与函数值入参同一取位"),
+            (4, Some(zone), "ZONE 自身按「含自身」语义返回自己"),
+            (5, Some(site), "SITE 自身按「含自身」语义返回自己"),
+            (6, None, "SITE 之上没有 ZONE → NONE"),
+            (7, None, "空链 zone → NONE 不误报"),
+            (8, None, "空链 site → NONE 不误报"),
+        ];
+        for (index, expected, why) in checks {
+            let got: Option<i64> = response.take(index).expect("take helper value");
+            assert_eq!(got, expected.map(|v| v as i64), "{why}");
+        }
     }
 
     /// `ses` 行是 append-only 历史：当前世界（暂存）miss 时回落持久层——
@@ -1254,7 +1331,7 @@ mod inst_meta_tests {
     }
 
     /// 断链（owner 指向的行不存在）→ 响亮失败：宁可生成任务进重试，也不烘一个
-    /// 错误的 zone/anc 进 journal。
+    /// 错误的 anc 进 journal。
     #[tokio::test(flavor = "multi_thread")]
     async fn a_broken_owner_chain_fails_loudly() {
         let db = connect("mem://").await.expect("mem boots");
@@ -1301,7 +1378,7 @@ mod inst_meta_tests {
     }
 
     /// 与旧 fn:: 对缺行的语义一致：seed 自己的行不在 → 空态渲染
-    /// （zone NONE / anc [] / dbnum NONE / dt NONE），不报错。
+    /// （anc [] / dbnum NONE / dt NONE），不报错。
     #[tokio::test(flavor = "multi_thread")]
     async fn a_missing_seed_renders_the_empty_shapes_the_fns_produced() {
         let db = connect("mem://").await.expect("mem boots");
@@ -1314,7 +1391,6 @@ mod inst_meta_tests {
             .await
             .expect("resolve");
         let meta = metas.get(&refu(786031)).expect("meta");
-        assert_eq!(meta.zone_literal(), "NONE");
         assert_eq!(meta.anc_literal(), "[]");
         assert_eq!(meta.dbnum_literal(), "NONE");
         assert_eq!(meta.dt_literal(), "NONE");

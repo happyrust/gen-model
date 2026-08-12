@@ -68,3 +68,27 @@
    的新机制；在那之前它是预检探针存在的理由。
 3. 双跑套件里仍在排练旧字面量形态的用例（`dual_anc_u64_functions_execute_and_agree`
    的字面量段）可在 P1 读侧切换完成后改为排练已解值形态。
+
+## 4. 2026-08-11 增补：P3 退役 `zone_refno` 后的收窄（as-built）
+
+层级查询优化 P3 的 gen-model 份额落地，本审计的口径随之收窄：
+
+- **收口硬依赖只剩 `fn::anc_u64`**：`render_anc_repair_statements` 不再连带重算
+  `zone_refno`，`fn::find_ancestor_type` 彻底离开收口链（§2.2 行随之过时）；
+  `desi_finalize_preflight` / `selfcheck_surreal_functions` 探针同步收窄为只探
+  `fn::anc_u64`。函数定义本身保留在 common.surql（材料表 `fn::get_flan_bolt_list`
+  等读侧仍消费）。
+- **启动自愈回填**（§2.3 首行）不再顺手补 `zone_refno`——每行一次的 9 跳
+  `fn::find_ancestor_type` 从回填成本中消失。
+- **写入字面量**（§2.1 的 inst_relate 两行）不再含 `zone_refno` 字段；
+  `ResolvedInstMeta` 的 zone 槽位与 `resolve_inst_meta` 的 noun 预取一并移除。
+- **索引迁移**：`INST_RELATE_INDEX_SQL` 前两行 `REMOVE INDEX IF EXISTS` 在
+  启动/建窗时摘除旧索引的**两个历史名字**——`idx_inst_relate_zone_refno`
+  （本仓建的）与 `inst_relate_zone_refno_index`（plant-ui rs-core
+  `define_pe_index` 建的；AMS 实库两者并存实测在案）。三种 no-op 情况由双跑
+  用例 `dual_inst_relate_anc_u64_contains_index_agrees` 钉住。存量行的
+  `zone_refno` 旧值保留不删，只是不再写入、不再被索引。
+- **读侧交代**：本仓与 python 绑定零消费者；plant-ui 默认 anc 路径不受影响，
+  其 legacy 回退（`PLANT_UI_LEGACY_MODEL_QUERY=1` 走 `query_insts_by_zone`）
+  对**此后新写的行**将失明（新行无 zone_refno）——按 P3 原计划该路径应随
+  开关一并删除，属 plant-ui 仓的后续动作。

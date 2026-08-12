@@ -306,7 +306,27 @@ world_trans_d, insts_flat`（零解引用零子查询）→ 客户端三分法�
 
 ### P3 清理与衔接（半天）
 
-- [ ] 删旧深遍历路径与开关；`fn::find_ancestor_type` 在 inst 写入链上的调用退役；
+- [x] **gen-model 份额已落地（2026-08-11）**：`zone_refno` 退役——建行字面量
+      （普通行 + TUBI 行）不再写该字段，`ResolvedInstMeta` 的 zone 槽位与
+      `resolve_inst_meta` 的 noun 预取移除；回填 `backfill_inst_relate_anc` 与
+      搬家重算 `render_anc_repair_statements` 不再连带 `zone_refno = fn::
+      find_ancestor_type(...)`（`fn::find_ancestor_type` 自此离开 inst 写入链，
+      函数定义保留给材料表等读侧）；`desi_finalize_preflight` 探针收窄为只探
+      `fn::anc_u64`；`INST_RELATE_INDEX_SQL` 前两行 `REMOVE INDEX IF EXISTS`
+      摘除旧索引的两个历史名字（`idx_inst_relate_zone_refno` 与 plant-ui
+      rs-core 建的 `inst_relate_zone_refno_index`，AMS 实库并存实测在案；
+      存量行旧值保留，双跑用例钉住迁移语句三种 no-op 情况）。
+      详见 `docs/2026-08-07_journal-fn-dependency-audit.md` §4 增补。
+- [x] **plant-ui 份额已落地（2026-08-11）**：删除 `model_instances_legacy`
+      深遍历路径、`PLANT_UI_LEGACY_MODEL_QUERY` 开关与 `BranchQuery` 辨名词
+      分派；anc 未回填从静默降级改为响亮失败（带自愈指引）。vendor rs-core
+      删除 `query_insts_by_zone` / `query_inst_refnos_by_zone`（zone_refno
+      的最后两个查询消费者）、`update_missing_zone_refno` 维护工具与
+      `update_zone_refno` bin；`define_pe_index` 的 zone 索引 DEFINE 换成
+      `REMOVE INDEX IF EXISTS`（停止重建 + 老库自清）。对拍验收用例随基线
+      退役删除（验收记录见 P2/P4 节），timing 探针保留。
+      `query_deep_visible_inst_refnos` 本体保留——它不消费 zone_refno，
+      仍是 bran 几何诊断 live 测试的工具。
 - [ ] 策略层衔接（独立小改动，不阻塞本方案）：
   - plant-ui 按 `dbnum` 补丁式刷新：数据批次终态只重查该库的模型
     （`WHERE dbnum = $n`），替代整场替换；

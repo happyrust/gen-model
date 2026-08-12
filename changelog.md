@@ -32,6 +32,38 @@
     语义无害（判据只比相等），代价是这些路径跑过之后，下次启动的全量房间重建
     对账凭据（`room_build:main`）会判为「空间状态已变」而照跑一次。
 
+## 2026-08-11
+
+### 变更
+
+- **层级查询优化 P3（gen-model 份额）：退役 `inst_relate`/`tubi_relate` 的
+  `zone_refno` 列**（方案 `docs/plans/2026-08-07-inst-relate-anc-u64-hierarchy-query-plan.md`
+  P3，as-built 记录 `docs/2026-08-07_journal-fn-dependency-audit.md` §4）：
+  - 写侧全退：建行字面量（普通行 + TUBI 行）不再写 `zone_refno`，
+    `ResolvedInstMeta` 的 zone 槽位与 `resolve_inst_meta` 的 noun 预取移除；
+    回填 `backfill_inst_relate_anc` 与 OWNER 搬迁重算
+    `render_anc_repair_statements` 不再连带 `zone_refno = fn::find_ancestor_type(...)`
+    ——每行一次的 9 跳 owner 上溯从回填成本中整个消失，`fn::find_ancestor_type`
+    自此离开 inst 写入链（函数定义保留给材料表等读侧）。
+  - 收口探针收窄：`desi_finalize_preflight` / `selfcheck_surreal_functions`
+    只探剩余的收口硬依赖 `fn::anc_u64`。
+  - 索引迁移：`INST_RELATE_INDEX_SQL` 前两行 `REMOVE INDEX IF EXISTS` 在启动/建窗时
+    摘除旧 zone_refno 索引的两个历史名字（`idx_inst_relate_zone_refno` 本仓 F1
+    修复后建的、`inst_relate_zone_refno_index` plant-ui rs-core `define_pe_index`
+    建的，AMS 实库两者并存实测在案）。存量行旧值保留不删，只是不再写入、不再被
+    索引；「索引不存在 / 表都不存在 / 重复摘除」三种 no-op 情况由双跑用例
+    `dual_inst_relate_anc_u64_contains_index_agrees` 连 INFO 终态一起钉住。
+
+### 新增
+
+- **`fn::zone_u64` / `fn::site_u64`（common.surql，P3 读侧便捷层）**：从 `anc`
+  链尾 O(1) 定位 ZONE/SITE，与元素深度无关——链尾打包值 ref1==0 即 WORL 的
+  自适应偏移，判据与 Rust 解析器同源；「含自身」语义与退役的
+  `fn::find_ancestor_type` 口径一致，短链/空链返回 NONE。反向圈行（某 ZONE 下
+  全部实例）仍走 `anc CONTAINS` 索引查询，不用它。两种链尾真实形态（悬空 WORL
+  收尾 / 0_0 哨兵被滤止于 SITE）由 `zone_and_site_helpers_locate_from_the_anc_tail`
+  与双跑用例 `dual_anc_u64_functions_execute_and_agree` 双引擎钉住。
+
 ## 0.1.18 - 2026-08-11
 
 ### 变更

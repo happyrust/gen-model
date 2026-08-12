@@ -332,7 +332,7 @@ async fn preload_existing_generation_products_for_refnos(
         .collect::<Vec<_>>()
         .join(",");
     // 边从起点走图拿，**不要**写成 `WHERE in IN [...]`：`inst_relate` 上没有 `in` 的
-    // 索引（只有 anc / dbnum / zone_refno），那个谓词是 11.3 万行的全表扫，取 1 条边
+    // 索引（只有 anc / dbnum），那个谓词是 11.3 万行的全表扫，取 1 条边
     // 实测 1.57s，走 `->inst_relate` 是 3.1ms。`geo_relate` 更彻底——它一个索引都没有。
     let inst_edges = format!("array::flatten(SELECT VALUE ->inst_relate FROM [{pe_keys}])");
     let inst_query = format!("SELECT * FROM {inst_edges}");

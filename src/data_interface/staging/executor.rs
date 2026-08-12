@@ -305,7 +305,7 @@ mod tests {
             .expect("StagingOnly");
         executor
             .execute(
-                "UPDATE inst_relate SET zone_refno = pe:a WHERE zone_refno = NONE",
+                "UPDATE inst_relate SET anc = [1] WHERE anc = NONE",
                 ExecMode::CommitOnly,
             )
             .await
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(journal[0].mode, ExecMode::Both);
         assert!(journal[0].sql.contains("pe:a"));
         assert_eq!(journal[1].mode, ExecMode::CommitOnly);
-        assert!(journal[1].sql.contains("zone_refno"));
+        assert!(journal[1].sql.contains("anc = [1]"));
     }
 
     /// T0.5 验收（源头拒绝）：不合规语句既不进暂存也不进日志。
