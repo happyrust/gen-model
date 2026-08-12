@@ -113,6 +113,9 @@ cargo test --lib -- --list          # 末行 "N tests"；--ignored 加上去只�
 | `data_interface::batch_worker::tests::aabb_room_changes_only_become_durable_work_when_the_spatial_tree_is_on` | `gen_spatial_tree` 关闭时不落房间任务 |
 | `fast_model::occ_generate::aabb_write_order_tests::*`（2 条） | AABB 记录先于指针持久化；关树时不进暂存窗口 |
 | `fast_model::aabb_tree::tests::persist_failure_keeps_the_dirty_flag` / `marking_dirty_is_observable` | 树文件持久化失败保脏标记 |
+| `data_interface::side_effect_pending::tests::spatial_reconcile_status_keeps_its_four_key_shape_in_both_branches` | /health `spatial_reconcile` 四键契约（pending/retries/last_error/stalled），成功与读库降级同键（G-02 收口，2026-08-12） |
+| `fast_model::aabb_tree::tests::spatial_tree_status_keeps_its_nine_key_shape_in_both_branches` | /health `spatial_tree` 九键契约、指纹双字段漂移判定、降级不缩键（G-02 收口，2026-08-12） |
+| `web_service::handlers::tests::health_routes_spatial_status_through_the_shared_renderers`（需 `http_api`） | health 接线纪律：两字段必须在、降级必须走共享渲染器而非 handler 手搓 JSON |
 
 ### 缺陷 3（I8）：Transform / DeleteCleanup / 按需生成统一根锁
 
@@ -234,7 +237,7 @@ Remove-Item Env:DB_OPTION_FILE
 | # | 缺口 | 出处 | 建议落点 |
 |---|---|---|---|
 | G-01 | `SideEffectCompensator::reconcile_spatial_pending` 的**跨行合并语义**（多条未完成任务合并 refresh/remove、同 refno 以较晚净变化为准）无进程内专测；W1.3 验收三条里「暂停时收敛照跑」「收敛失败不出队（行为级）」也只有源码顺序断言 | 五缺陷方案 §W1.3 验收 | `side_effect_pending.rs::tests`（合并语义）+ `batch_worker.rs::tests`（pause/失败行为） |
-| G-02 | `/health` 的 `spatial_reconcile: {pending,retries,last_error,stalled}` JSON 形状无专测（W1.4 验收明写「单测断言 JSON 形状；既有字段不变」；`web_service` 现只有 4 条测试，无 health 形状） | 五缺陷方案 §W1.4 验收 | `web_service/handlers.rs` 或 `web_service/mod.rs` 的 `#[cfg(test)]`，需 `http_api` |
+| ~~G-02~~ | **已收口（2026-08-12）**：~~`/health` 的 `spatial_reconcile` JSON 形状无专测~~ → 形状拼装抽成纯渲染函数（`render_spatial_reconcile_status` / `spatial_reconcile_error_status` / `render_spatial_tree_status`），handler 降级分支改走共享渲染器；四键/九键/接线三条测试已入 §4 缺陷 2 映射表，前两条默认特性即跑（CI 特性集可见） | 五缺陷方案 §W1.4 验收 | 已落 `side_effect_pending.rs` + `aabb_tree.rs` + `web_service/handlers.rs` |
 | G-03 | `src/test/` 下 `test_spatial`（含 test_room 25 条）、`test_api`、`test_query`、`test_incr_update`、`test_data_state` 等模块在 `src/test/mod.rs` 被**注释掉**，不编译——它们不构成任何覆盖，别把 grep 到的 `#[test]` 当现役资产 | `src/test/mod.rs` 现状 | 定夺：恢复编译（挑有价值的）或删除死代码 |
 | G-04 | W5 门禁的三类故障注入只有 live 半边（§5 末），未纳入常规轮换；崩溃类用例杀进程，需专用剧本与记录 | 五缺陷方案 §W5 | 按 §5 剧本每次合并前跑，结果记 §8 |
 
@@ -244,6 +247,8 @@ Remove-Item Env:DB_OPTION_FILE
 |---|---|---|---|---|
 | 2026-08-06 | 建台账基线（工作树含五缺陷闭环 WIP） | `cargo test --lib` | 439/0/67 | `output/logs/2026-08-06_unit-baseline-default.log` |
 | 2026-08-06 | 同上 | `cargo test --lib --features http_api` | 443/0/67 | `output/logs/2026-08-06_unit-baseline-http.log` |
+| 2026-08-12 | 关缺口 G-02（/health 形状单测 ×3；spatial_reconcile 降级改走共享渲染器） | `cargo test --lib` | **648/0/79** | `output/logs/2026-08-12_unit-g02-default.log`；总数自 §2 基线 506 漂移到 727（08-09 房间轮重构 `4ed921c3` 起 §3/§4 部分口径已过期，待整体校准） |
+| 2026-08-12 | 同上 | `cargo test --lib --features http_api` | **657/0/79** | `output/logs/2026-08-12_unit-g02-http.log`；web_service 现 9 条（本文 U13 记 4 条已过期） |
 |  |  |  |  |  |
 
 回写规则：

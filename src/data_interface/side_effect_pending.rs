@@ -329,12 +329,34 @@ impl SideEffectCompensator {
             .await?
             .check()?;
         let jobs: Vec<PendingJob> = response.take(0)?;
-        Ok(serde_json::json!({
+        Ok(Self::render_spatial_reconcile_status(&jobs))
+    }
+
+    /// /health `spatial_reconcile` 的纯渲染半边。
+    ///
+    /// 四个键（pending / retries / last_error / stalled）是对外承诺（五缺陷方案
+    /// W1.4）：运维按键取值，缺一个都是破坏性修改。形状由单测钉住，读库只负责
+    /// 供货 `jobs`（按 updated_at DESC，`last_error` 因此取的是最近一条）。
+    pub(crate) fn render_spatial_reconcile_status(jobs: &[PendingJob]) -> serde_json::Value {
+        serde_json::json!({
             "pending": jobs.len(),
             "retries": jobs.iter().map(|job| job.attempts as u64).sum::<u64>(),
             "last_error": jobs.iter().find_map(|job| job.last_error.as_deref()),
             "stalled": jobs.iter().any(|job| job.attempts >= MAX_ATTEMPTS),
-        }))
+        })
+    }
+
+    /// 读库失败时 /health 的降级形状：与成功形状**同键**，`stalled` 保守置真。
+    ///
+    /// 这个降级此前手搓在 handler 里，与成功形状只靠肉眼保持一致——现在同源于
+    /// 本模块，形状测试把两个分支一起钉住。
+    pub fn spatial_reconcile_error_status(error: &anyhow::Error) -> serde_json::Value {
+        serde_json::json!({
+            "pending": 0,
+            "retries": 0,
+            "last_error": format!("读取空间收敛状态失败: {error:#}"),
+            "stalled": true,
+        })
     }
 
     async fn mark_abandoned(id: &Thing, reason: &str) -> anyhow::Result<()> {
@@ -490,6 +512,67 @@ mod tests {
         )
         .expect_err("same refno cannot be refreshed and removed");
         assert!(error.to_string().contains("同时 refresh/remove"));
+    }
+
+    /// /health `spatial_reconcile` 的四键契约（台账缺口 G-02，W1.4 验收）。
+    ///
+    /// 成功与读库降级两个分支必须同键；`stalled` 只在重试预算打满时立起；
+    /// `last_error` 取最近一条（查询按 updated_at DESC 供货，渲染取第一个非空）。
+    #[test]
+    fn spatial_reconcile_status_keeps_its_four_key_shape_in_both_branches() {
+        use super::{MAX_ATTEMPTS, PendingJob, TABLE};
+
+        let keys = ["pending", "retries", "last_error", "stalled"];
+        let empty = SideEffectCompensator::render_spatial_reconcile_status(&[]);
+        let object = empty.as_object().expect("形状必须是对象");
+        assert_eq!(object.len(), keys.len(), "键数漂移: {empty}");
+        for key in keys {
+            assert!(object.contains_key(key), "缺键 {key}: {empty}");
+        }
+        assert_eq!(empty["pending"], 0);
+        assert_eq!(empty["retries"], 0);
+        assert_eq!(empty["last_error"], serde_json::Value::Null);
+        assert_eq!(empty["stalled"], false);
+
+        let job = |attempts: u32, last_error: Option<&str>| PendingJob {
+            id: surrealdb::sql::Thing::from((TABLE, "spatial_reconcile_8000_26")),
+            kind: "spatial_reconcile".into(),
+            dbnum: 8000,
+            end_sesno: 26,
+            db_type: "DESI".into(),
+            changed_refnos: vec![],
+            refresh_refnos: vec![],
+            remove_refnos: vec![],
+            status: "failed".into(),
+            attempts,
+            last_error: last_error.map(str::to_owned),
+        };
+        let stalled = SideEffectCompensator::render_spatial_reconcile_status(&[
+            job(2, Some("空间树落盘失败")),
+            job(MAX_ATTEMPTS, None),
+        ]);
+        assert_eq!(stalled["pending"], 2);
+        assert_eq!(stalled["retries"], u64::from(2 + MAX_ATTEMPTS));
+        assert_eq!(stalled["last_error"], "空间树落盘失败");
+        assert_eq!(stalled["stalled"], true, "重试打满必须报 stalled: {stalled}");
+
+        let retrying = SideEffectCompensator::render_spatial_reconcile_status(&[job(1, None)]);
+        assert_eq!(retrying["stalled"], false, "预算未打满不算 stalled: {retrying}");
+
+        let degraded =
+            SideEffectCompensator::spatial_reconcile_error_status(&anyhow::anyhow!("boom"));
+        let degraded_object = degraded.as_object().expect("降级形状必须是对象");
+        assert_eq!(degraded_object.len(), keys.len(), "降级分支不许缩键: {degraded}");
+        for key in keys {
+            assert!(degraded_object.contains_key(key), "缺键 {key}: {degraded}");
+        }
+        assert_eq!(degraded["stalled"], true);
+        assert!(
+            degraded["last_error"]
+                .as_str()
+                .expect("降级必须报出错误原因")
+                .contains("boom")
+        );
     }
 
     /// 收敛只许在树真的动过时落盘。

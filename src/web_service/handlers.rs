@@ -108,14 +108,13 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
         .await
         .unwrap_or_default();
+    // 读库失败的降级形状与成功形状同源（side_effect_pending 里同键渲染，
+    // 形状由那边的单测钉住），不在这里手搓 JSON。
     let spatial_reconcile = crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status()
         .await
-        .unwrap_or_else(|error| json!({
-            "pending": 0,
-            "retries": 0,
-            "last_error": format!("读取空间收敛状态失败: {error:#}"),
-            "stalled": true,
-        }));
+        .unwrap_or_else(|error| {
+            crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error)
+        });
     Json(json!({
         "status": "ok",
         "project": state.identity.project,
@@ -708,6 +707,36 @@ mod tests {
         ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
+    }
+
+    /// `/health` 的 `spatial_reconcile` / `spatial_tree` 字段（台账缺口 G-02）。
+    ///
+    /// 值级形状由渲染器旁边的单测钉住（side_effect_pending 四键 / aabb_tree
+    /// 九键），这里钉的是接线纪律：两个键必须在、读库失败的降级必须走共享的
+    /// 同键渲染器而不是在 handler 里手搓 JSON——手搓正是这两个形状此前
+    /// 靠肉眼保持一致的原因。
+    #[test]
+    fn health_routes_spatial_status_through_the_shared_renderers() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health 之后是 update_preview")
+            .0;
+
+        for key in ["\"spatial_reconcile\"", "\"spatial_tree\""] {
+            assert!(body.contains(key), "health 必须暴露 {key}: {body}");
+        }
+        assert!(
+            body.contains("spatial_reconcile_error_status"),
+            "降级形状必须与成功形状同源: {body}"
+        );
+        assert!(
+            body.contains("spatial_tree_status()"),
+            "spatial_tree 必须来自 aabb_tree 的共享渲染器: {body}"
+        );
     }
 
     #[test]

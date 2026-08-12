@@ -120,10 +120,11 @@ async fn sync_tree_from_committed_pointers(refnos: &[RefnoEnum]) -> anyhow::Resu
 
 /// 空间树自上次写回项目树文件以来是否有未持久化的增量变更。
 ///
-/// 增量路径（AABB 刷新、删除清理）只更新内存树；已提交的空间意图
-/// （`spatial_reconcile` 行）保证崩溃后能从库里重放，这个标记决定的只是
-/// 「这一轮要不要真的写文件」。落盘时机归 worker 空闲轮（ADR-010 落盘时机，
-/// 2026-07-28 已决）。
+/// 增量路径（AABB 刷新、删除清理）只更新内存树，这个标记决定的只是「这一轮要不要
+/// 真的写文件」；落盘时机归 worker 空闲轮（ADR-010 落盘时机，2026-07-28 已决）。
+/// 它跨不过重启，所以不承担正确性——崩溃后丢掉的内存树变更由库侧痕迹兜底：暂存
+/// 路径靠 `spatial_reconcile` 意图行重放，直写路径靠同事务的 epoch bump 让启动
+/// 判据落到指针重建。
 static AABB_TREE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// 增量路径动过内存树之后调用：标记「有变更待落盘」。
@@ -214,15 +215,19 @@ fn read_tree_meta() -> anyhow::Result<TreeFileMeta> {
 
 /// 库侧空间版本号所在的固定记录。
 ///
-/// 每条携带空间意图（refresh / remove）的尾事务顺带把它 +1
-/// （[`render_spatial_epoch_bump`]）——水位、意图、版本号同一个事务里同生同死。
-/// 启动时 sidecar 的 epoch 与它不相等，就说明「树文件之后还有过没被镜像进文件
-/// 的空间提交」，文件不可信。
+/// 不变量：**凡是改变了「树应有内容」的已提交变更，都在同一事务内把它 +1**
+/// （[`render_spatial_epoch_bump`]）。暂存路径由携带空间意图（refresh / remove）的
+/// 尾事务顺带 bump——水位、意图、版本号同一个事务里同生同死；直写路径（包围盒刷新、
+/// 删除清理）没有意图行，epoch 就是它留在库侧的唯一痕迹。启动时 sidecar 的 epoch
+/// 与它不相等，就说明「树文件之后还有过没被镜像进文件的空间提交」，文件不可信。
 const SPATIAL_EPOCH_ID: &str = "spatial_epoch:current";
 
-/// 渲染尾事务里的空间版本号递增语句（与 `spatial_reconcile` 意图同一事务使用）。
+/// 渲染空间版本号的递增语句，与产生该变更的写入放进同一个事务。
 ///
-/// 窗口重试导致的多次递增无害：版本号只与 sidecar 比相等、不表达次数，多 bump
+/// 三处调用：窗口尾事务（与 `spatial_reconcile` 意图同事务）、直写包围盒刷新
+/// （与指针 UPDATE 同事务）、直写删除清理（与房间边 DELETE 同事务）。
+///
+/// 重试或分块导致的多次递增无害：版本号只与 sidecar 比相等、不表达次数，多 bump
 /// 一次至多让下次启动多做一次指针重建。
 pub(crate) fn render_spatial_epoch_bump() -> String {
     format!("UPSERT {SPATIAL_EPOCH_ID} SET value = (value?:0) + 1, updated_at = time::now();")
@@ -498,12 +503,31 @@ pub async fn spatial_tree_status() -> serde_json::Value {
     let entries = GLOBAL_AABB_TREE.read().await.size();
     let meta = read_tree_meta();
     let db = read_db_spatial_epoch_stamp().await;
+    render_spatial_tree_status(
+        entries,
+        &meta,
+        &db,
+        STARTUP_VERDICT.get().copied().unwrap_or("unknown"),
+    )
+}
+
+/// /health `spatial_tree` 的纯渲染半边。
+///
+/// 九个键是对外承诺（台账缺口 G-02 同批钉住）：指纹**双字段都相等**才算无漂移
+/// （防「快照回滚撞回同一计数」）；任何一侧读不出来都如实报 null、`drift` 置
+/// true 并单列 `error`——降级分支不许缩键，健康端点不许因诊断失败而挂。
+fn render_spatial_tree_status(
+    entries: usize,
+    meta: &anyhow::Result<TreeFileMeta>,
+    db: &anyhow::Result<(u64, String)>,
+    startup_verdict: &'static str,
+) -> serde_json::Value {
     let drift = !matches!(
-        (&meta, &db),
+        (meta, db),
         (Ok(meta), Ok((db_epoch, db_updated_at)))
             if meta.epoch == *db_epoch && meta.db_epoch_updated_at == *db_updated_at
     );
-    let error = match (&meta, &db) {
+    let error = match (meta, db) {
         (Err(error), _) => Some(format!("{error:#}")),
         (_, Err(error)) => Some(format!("{error:#}")),
         _ => None,
@@ -516,7 +540,7 @@ pub async fn spatial_tree_status() -> serde_json::Value {
         "db_epoch": db.as_ref().ok().map(|(epoch, _)| *epoch),
         "db_epoch_updated_at": db.as_ref().ok().map(|(_, updated_at)| updated_at.clone()),
         "drift": drift,
-        "startup_verdict": STARTUP_VERDICT.get().copied().unwrap_or("unknown"),
+        "startup_verdict": startup_verdict,
         "error": error,
     })
 }
@@ -720,6 +744,70 @@ mod tests {
         AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
         mark_aabb_tree_dirty();
         assert!(AABB_TREE_DIRTY.swap(false, Ordering::SeqCst));
+    }
+
+    /// /health `spatial_tree` 的九键契约（台账缺口 G-02 同批钉住）。
+    ///
+    /// 指纹双字段（epoch + 库侧 bump 时刻）都相等才算无漂移——计数撞值的
+    /// 快照回滚必须按漂移报；诊断失败的降级分支键一个不少、file_* 如实为
+    /// null、error 说得出原因。
+    #[test]
+    fn spatial_tree_status_keeps_its_nine_key_shape_in_both_branches() {
+        let meta = Ok(TreeFileMeta {
+            epoch: 7,
+            db_epoch_updated_at: "d'2026-08-12T00:00:00Z'".into(),
+            entries: 42,
+            saved_at_unix: 1_755_000_000,
+        });
+        let db = Ok((7u64, "d'2026-08-12T00:00:00Z'".to_string()));
+
+        let keys = [
+            "entries",
+            "file_epoch",
+            "file_epoch_updated_at",
+            "file_saved_at_unix",
+            "db_epoch",
+            "db_epoch_updated_at",
+            "drift",
+            "startup_verdict",
+            "error",
+        ];
+        let healthy = render_spatial_tree_status(42, &meta, &db, "reused");
+        let object = healthy.as_object().expect("形状必须是对象");
+        assert_eq!(object.len(), keys.len(), "键数漂移: {healthy}");
+        for key in keys {
+            assert!(object.contains_key(key), "缺键 {key}: {healthy}");
+        }
+        assert_eq!(healthy["drift"], false);
+        assert_eq!(healthy["error"], serde_json::Value::Null);
+        assert_eq!(healthy["startup_verdict"], "reused");
+        assert_eq!(healthy["file_epoch"], 7);
+        assert_eq!(healthy["db_epoch"], 7);
+
+        // 计数相等而库侧时刻不同 = 快照回滚撞回同一计数，必须按漂移报。
+        let rolled_back = Ok((7u64, "d'2026-08-11T00:00:00Z'".to_string()));
+        let drifted = render_spatial_tree_status(42, &meta, &rolled_back, "reused");
+        assert_eq!(drifted["drift"], true, "指纹双字段必须都相等: {drifted}");
+
+        // 诊断失败：键一个不少，file_* 如实为 null，error 报得出原因。
+        let broken = render_spatial_tree_status(
+            0,
+            &Err(anyhow::anyhow!("读取 sidecar 失败")),
+            &db,
+            "unknown",
+        );
+        let broken_object = broken.as_object().expect("降级形状必须是对象");
+        assert_eq!(broken_object.len(), keys.len(), "降级分支不许缩键: {broken}");
+        assert_eq!(broken["file_epoch"], serde_json::Value::Null);
+        assert_eq!(broken["file_epoch_updated_at"], serde_json::Value::Null);
+        assert_eq!(broken["file_saved_at_unix"], serde_json::Value::Null);
+        assert_eq!(broken["drift"], true, "读不出指纹必须按漂移报: {broken}");
+        assert!(
+            broken["error"]
+                .as_str()
+                .expect("降级必须报出错误原因")
+                .contains("读取 sidecar 失败")
+        );
     }
 
     /// 提交后收敛不得重算几何、不得写库：窗口 journal 重放已经把刷新层的计算结果

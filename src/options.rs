@@ -250,6 +250,17 @@ pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
 /// 它的节拍器，模型生成侧的问题反倒被日志淹掉。先关掉它，让模型增量的正确性能被
 /// 单独看清楚。
 ///
+/// **关闭期间错过的变更靠重启时的启动全量重建回补，这个闭环不需要额外人工动作**：
+/// 开关取值进程内固定（配置经 `load_ext_fields` 的 `OnceLock` 只读一次，环境变量
+/// 随进程出生定死），改开关必然伴随重启；而增量链的两条空间提交（暂存尾事务、
+/// 直写 durable 事务）无论开关都递增 spatial epoch——关着开关只摘 `room_recalc`
+/// 语句，epoch 照 bump（见 `occ_generate` 直写分支的注释）——于是「关闭期间发生过
+/// 任何空间提交」⇒ 启动的 `reconcile_startup_room_build` stamp 对账必失配 ⇒ 全量
+/// 重建必跑；对账相等则说明关闭期间真的无可回补。全量/手动生成路径不递增 epoch，
+/// 但本就以整体房间重建收尾，不在此闭环内。唯一要盯的：启动全量重建失败只降级
+/// 告警、不阻断启动（房间是可事后重建的派生数据，ADR-010 第 8 条落地口径），那种
+/// 情况下关闭期间的陈旧会留到下一次成功的全量重建——看启动日志的房间重建行。
+///
 /// 环境变量 [`ROOM_INCREMENTAL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn room_incremental() -> bool {
     #[cfg(test)]
