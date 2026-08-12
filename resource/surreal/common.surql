@@ -585,6 +585,10 @@ DEFINE FUNCTION OVERWRITE fn::anc_u64($r: record) {
 -- 判据与 Rust 解析器同源：打包值 ref1==0（% 2^32 == 0）即 WORL，据此定偏移。
 -- 短链/空链由 array::at 越界返回 NONE；ZONE/SITE 自身的链按「含自身」语义
 -- 返回自己（与退役的 fn::find_ancestor_type 口径一致）。
+-- 【位置语义免责】取位是位置判定不是名词判定，前提是链尾恒为
+-- […, ZONE, SITE, (WORL)]。元素不经 ZONE 直挂 SITE 之类的非标准层级下，
+-- 返回值不保证真是 ZONE/SITE（find_ancestor_type 按 noun 判定，两者在这类
+-- 数据上口径不同）；需要名词保证的读者应拿返回值 join pe 验 noun。
 -- 反向圈行（某 ZONE 下全部实例）不要用它：那是 `anc CONTAINS $u64` 的索引查询。
 DEFINE FUNCTION OVERWRITE fn::site_u64($anc: array) {
     if array::len($anc) == 0 { return NONE; };

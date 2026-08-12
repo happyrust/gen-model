@@ -740,6 +740,11 @@ async fn dual_inst_relate_anc_u64_contains_index_agrees() {
 /// 24383 族 SITE.owner→pe:0_0 哨兵被滤、链止于 SITE（无 WORL 形），24384 族
 /// SITE.owner 悬空指向 ref1=0 的 WORL（生产形，WORL 行不入库）。函数体里的
 /// `array::at` 负下标与 `%` 若在 2.1.4 不合法，同样靠在场断言防假绿。
+///
+/// 注意两个 helper 是**位置**判定不是名词判定（免责口径见 common.surql 定义处
+/// 注释）：本用例种子全部符合「链尾恒 […, ZONE, SITE, (WORL)]」的标准层级前提，
+/// 不经 ZONE 直挂 SITE 的非标准数据不在钉住范围内，那类数据上返回值不保证是
+/// ZONE/SITE。
 #[tokio::test(flavor = "multi_thread")]
 async fn dual_anc_u64_functions_execute_and_agree() {
     let Some((mem, fork, _guard)) = dual_dbs("anc_u64_fns").await else {
