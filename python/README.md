@@ -39,8 +39,10 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
   拿的是与服务同一把项目锁，服务在跑时会直接失败——这是防线不是缺陷。
 - 锁只按「项目根」隔离，**挡不住两个部署包写同一个工程**（各持各的锁）。所以
   `full_init` 拿锁后还会探本机 `http_api_addr` / 8022 / 9099 的
-  `/api/v1/health`，响应是合法 health JSON 且 `project` 与本配置一致就拒绝；
-  确认无害时用 `full_init(..., force=True)` 跳过。
+  `/api/v1/health`：`project` 相同且**同一个 SurrealDB**（`sul_db.endpoint`
+  + `namespace` 都对上，localhost↔127.0.0.1 归一）才拒绝——同名工程各写各的库
+  （比如 pytest 的一次性内存实例）会被放行。老版本服务端（≤0.1.18）的 /health
+  不报端点，分不清就按最坏情况拦；确认无害时用 `full_init(..., force=True)` 跳过。
 - refno 输出统一 `a_b` 形态（与库内 `pe:` record id 一致，拿到即可拼 SurrealQL）；
   输入宽容 `a/b` / `a_b` / `pe:a_b` / `=a/b`。
 

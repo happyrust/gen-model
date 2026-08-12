@@ -154,9 +154,10 @@ def binding(surreal, configured):
     try:
         # force=True：沙箱与在跑服务只是**工程重名**，不是真冲突——库是本
         # conftest 自起的 8071 内存实例、锁在 testbed 项目副本根、mesh 在
-        # tests/.meshes，三条资源全独立。而 full_init 的活服务探测只能按
-        # /health 的 project 字段比对（响应里没有「它连的是哪个 SurrealDB」），
-        # 同名即判冲突，对沙箱是误伤，所以这里显式跳过。
+        # tests/.meshes，三条资源全独立。full_init 的活服务探测在服务端报
+        # sul_db.endpoint（0.1.19+ 的 /health）时能自己分清「同工程、不同库」，
+        # 但本机 9099 还跑着 0.1.13 的老部署包，不报端点 → 探测按最坏情况拦，
+        # 沙箱仍被误伤。等同机部署全部升到带 endpoint 的版本，这个 force 可撤。
         configured.full_init(cwd=str(REPO_ROOT), force=True)
         yield configured
     finally:

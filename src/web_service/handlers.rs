@@ -105,6 +105,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     sul_db["disconnects_total"] = json!(disconnects_total);
     sul_db["last_disconnect_at"] = json!(last_disconnect_at);
     sul_db["last_disconnect_error"] = json!(last_disconnect_error);
+    // 本服务连的是哪个 SurrealDB（配置的 v_ip:v_port，原样、不解析）。给跨部署
+    // 互踩防护用：`aios_db.full_init` 的活服务探测此前只能按 project 一刀切
+    // （/health 不报库端点），同名工程的隔离沙箱一律被误伤；有了这个键，探测端
+    // 能放行「同工程、不同库」，只拦真共享一个库的（探测端做 localhost↔127.0.0.1
+    // 归一，这里不做）。
+    {
+        let db_option = aios_core::get_db_option();
+        sul_db["endpoint"] = json!(format!("{}:{}", db_option.v_ip, db_option.v_port));
+    }
     let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
         .await
         .unwrap_or_default();
@@ -678,8 +687,10 @@ mod tests {
     ///
     /// `connected` 必须来自**带超时**的现场探活——WS 死连接上的查询会无限挂起，
     /// 不包 timeout 的话持久层一断 /health 自己先失联，而运维恰恰在那种时刻查它。
-    /// 五个键（connected / ping_ms / disconnects_total / last_disconnect_at /
-    /// last_disconnect_error）是对外承诺，掉一个都是破坏性修改。
+    /// 六个键（connected / ping_ms / disconnects_total / last_disconnect_at /
+    /// last_disconnect_error / endpoint）是对外承诺，掉一个都是破坏性修改——
+    /// `endpoint` 尤其是 `aios_db.full_init` 跨部署互踩探测的判据，掉了它探测
+    /// 就退回「同名工程一刀切」。
     #[test]
     fn health_exposes_sul_db_probe_and_disconnect_ledger() {
         let source = include_str!("handlers.rs");
@@ -704,6 +715,7 @@ mod tests {
             "disconnects_total",
             "last_disconnect_at",
             "last_disconnect_error",
+            "\"endpoint\"",
         ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }

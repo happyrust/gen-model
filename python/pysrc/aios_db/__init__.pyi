@@ -18,6 +18,7 @@ def full_init(
 ) -> None:
     """执行层初始化：拿项目单实例锁 + run_cli 前置段；须先停服务。
 
-    拿锁后还会探本机 http_api_addr / 8022 / 9099 的 /api/v1/health，发现同工程
-    的活服务就拒绝（锁按项目根隔离，挡不住跨部署互踩）。force=True 跳过探测。
+    拿锁后还会探本机 http_api_addr / 8022 / 9099 的 /api/v1/health（锁按项目根
+    隔离，挡不住跨部署互踩）：project 相同且 sul_db.endpoint + namespace 都对上
+    才判冲突；老版本服务端不报端点时按最坏情况拦。force=True 跳过探测。
     """

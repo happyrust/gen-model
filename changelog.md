@@ -57,6 +57,19 @@
   哪个 SurrealDB」，所以隔离沙箱若与生产**重名**会被误伤，用 `force=True` 放行
   （`python/tests/conftest.py` 就是这么做的，并在注释里写明三条资源如何独立）。
 
+- **互踩探测精确化：/health 补报库端点，探测端按「同库」而不是「同名」判**
+  （上一条落地当天就被自己的测试沙箱误伤，这是补上的另一半）：
+  - `/health` 的 `sul_db` 新增第六键 `endpoint`（配置的 `v_ip:v_port` 原样
+    字符串），形状钉与 spec §4.1 同步；`sul_db` 其余五键语义不变。
+  - `full_init` 的探测升级为三层判据：`project` 不同 → 无关；服务端报了
+    `sul_db.endpoint` → 端点（localhost↔127.0.0.1 归一后）或 `namespace`
+    不同都放行——同名工程各写各的库不构成互踩；老版本服务端（≤0.1.18）不报
+    端点 → 分不清仍按最坏情况拦，拒绝文案会写明是哪种判法。判定函数是纯函数，
+    8 条单元测试钉住（`cargo test -p aios-py --lib`，含对实测 9099@0.1.13
+    响应形态的老服务端分支）。
+  - `python/tests/conftest.py` 的 `force=True` 暂留：本机 9099 还跑着 0.1.13，
+    等同机部署升到带 `endpoint` 的版本即可撤。
+
 - **`aios_db.spatial.tree_status` 的文档与存根不再复述键面**：改为「原样透出
   /health `spatial_tree` 那份渲染，键面以 Rust 侧渲染半边为唯一权威」。此前注释
   与 `.pyi` 各抄了一份九键清单，而 G-02 契约迁移正把它往十五键上带——两处各说

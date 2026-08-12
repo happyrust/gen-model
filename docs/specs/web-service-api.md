@@ -92,6 +92,11 @@
   不降低 REST/WS 与增量 worker 的健康状态。
 - `ref0_affiliation_conflicts`：locator 构建时发现的冲突 Ref0 数量；非零时只阻断命中这些
   Ref0 的工作，不代表整个项目停止服务。
+- `sul_db.endpoint`（2026-08-12 新增）：本服务连接的 SurrealDB 端点（配置的
+  `v_ip:v_port` 原样字符串）。`aios_db.full_init` 的跨部署互踩探测靠它区分
+  「同名工程、不同库」的隔离沙箱与真共享一个库的部署——老版本服务端没有该键时，
+  探测端退回只按 `project` 保守判。`sul_db` 其余五键（connected / ping_ms /
+  disconnects_total / last_disconnect_at / last_disconnect_error）语义不变。
 
 ### 4.2 `POST /api/v1/update/preview` — 手动更新预览
 - 映射：`AiosDBManager::preview_manual_update(project)`（只读，可能刷新扫描观察字段，故用 POST）。

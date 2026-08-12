@@ -43,13 +43,13 @@ async fn db_option() -> anyhow::Result<aios_core::options::DbOption> {
     Ok(crate::db_api::manager().await?.db_option.clone())
 }
 
-/// 问一个本地端口的 `/api/v1/health` 要 `project`；不是活的 gen-model 服务就
-/// 返回 None（连不上、超时、不是 JSON、没有 project 字段，一律不算数）。
+/// 问一个本地端口的 `/api/v1/health`，返回整份 health JSON；不是活的 gen-model
+/// 服务就返回 None（连不上、超时、不是 JSON、没有 project 字段，一律不算数）。
 ///
 /// 刻意用裸 TCP 而不是引第三方 HTTP 客户端：绑定 crate 的依赖与主 crate 逐字
 /// 对齐才能共享 `[patch]` 与 Cargo.lock，为一次探测加一棵 reqwest 依赖树不值。
 /// `Connection: close` 让服务端答完即关，`read_to_end` 自然收尾。
-fn health_project(port: u16, timeout: std::time::Duration) -> Option<String> {
+fn health_snapshot(port: u16, timeout: std::time::Duration) -> Option<serde_json::Value> {
     use std::io::{Read, Write};
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -70,17 +70,77 @@ fn health_project(port: u16, timeout: std::time::Duration) -> Option<String> {
     let text = String::from_utf8_lossy(&raw);
     let body = text.split("\r\n\r\n").nth(1)?;
     let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
-    value.get("project")?.as_str().map(str::to_string)
+    // 合法 health 的最低门槛；端口上蹲着别的 HTTP 程序时在这里出局。
+    value.get("project")?.as_str()?;
+    Some(value)
 }
 
-/// 找出正在伺候**同一个工程**的活服务，返回 `(端口, 工程名)`。
+/// SurrealDB 端点归一：小写 + `localhost` → `127.0.0.1`。
+///
+/// 只做这一步：探测双方都在本机，配置里写 localhost 还是回环地址纯属习惯差异；
+/// 「一边写 LAN IP 一边写 localhost 指同一台库」这种形态不展开（要可靠区分得
+/// 枚举本机全部地址，收益配不上），漏判的兜底仍是单实例锁与人。
+fn normalize_endpoint(raw: &str) -> String {
+    let raw = raw.trim().to_ascii_lowercase();
+    match raw.split_once(':') {
+        Some((host, port)) => {
+            let host = match host {
+                "localhost" | "" => "127.0.0.1",
+                other => other,
+            };
+            format!("{host}:{port}")
+        }
+        None => raw,
+    }
+}
+
+/// 判一份 health 是否与本配置构成互踩，是则给出说得出口的理由。
+///
+/// 判据从宽到严三层：`project` 不同 → 无关；服务端报了 `sul_db.endpoint`
+/// （2026-08-12 起）→ 库端点不同或 namespace 不同都放行（同名工程各写各的库，
+/// 不构成互踩）；老版本服务端不报端点 → 分不清就按最坏情况拦（保守），误伤面
+/// 即「同名工程的隔离沙箱」，调用方用 `force=True` 放行。
+fn conflict_reason(
+    our_project: &str,
+    our_namespace: &str,
+    our_endpoint: &str,
+    health: &serde_json::Value,
+) -> Option<String> {
+    let project = health.get("project")?.as_str()?;
+    if project != our_project {
+        return None;
+    }
+    let Some(endpoint) = health
+        .pointer("/sul_db/endpoint")
+        .and_then(|value| value.as_str())
+    else {
+        return Some(format!(
+            "工程 {project}；服务端未报 SurrealDB 端点（0.1.18 及更早），按最坏情况判"
+        ));
+    };
+    if normalize_endpoint(endpoint) != our_endpoint {
+        return None;
+    }
+    if let Some(namespace) = health.get("namespace") {
+        // identity.namespace 历史上有过数字与字符串两种序列化形态，都按字符串比。
+        let namespace = namespace
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| namespace.to_string());
+        if namespace != our_namespace {
+            return None;
+        }
+    }
+    Some(format!("工程 {project} 且同库 {endpoint}"))
+}
+
+/// 找出真会与本进程互踩的活服务，返回 `(端口, 理由)`。
 ///
 /// 存在的理由：单实例锁按「项目根」隔离，而两个部署包（各自的仓库/发布目录）
 /// 各持各的锁，却可以写同一个 SurrealDB、同一个工程——锁根本挡不住这种互踩。
 /// 实测踩过：`test-worklspace` 的部署包在 9099，本仓库在 8022，两把锁互不相干。
 ///
-/// 判据严格：响应必须是合法 health JSON **且** `project` 与本配置一致。端口被
-/// 别的程序占用不算冲突——误伤比漏报更烦人。
+/// 端口被别的程序占用不算冲突——误伤比漏报更烦人。
 fn conflicting_services(db_option: &aios_core::options::DbOption) -> Vec<(u16, String)> {
     let mut ports: Vec<u16> = Vec::new();
     // 本配置声明的端口优先，再加两个常用部署口。`http_api_addr` 挂在扩展配置上
@@ -98,12 +158,19 @@ fn conflicting_services(db_option: &aios_core::options::DbOption) -> Vec<(u16, S
             ports.push(port);
         }
     }
+    let our_endpoint = normalize_endpoint(&format!("{}:{}", db_option.v_ip, db_option.v_port));
     let timeout = std::time::Duration::from_millis(400);
     ports
         .into_iter()
         .filter_map(|port| {
-            let project = health_project(port, timeout)?;
-            (project == db_option.project_name).then_some((port, project))
+            let health = health_snapshot(port, timeout)?;
+            let reason = conflict_reason(
+                &db_option.project_name,
+                &db_option.surreal_ns,
+                &our_endpoint,
+                &health,
+            )?;
+            Some((port, reason))
         })
         .collect()
 }
@@ -151,7 +218,7 @@ pub fn full_init(
                 if !conflicts.is_empty() {
                     let who = conflicts
                         .iter()
-                        .map(|(port, project)| format!("127.0.0.1:{port}（工程 {project}）"))
+                        .map(|(port, reason)| format!("127.0.0.1:{port}（{reason}）"))
                         .collect::<Vec<_>>()
                         .join("、");
                     anyhow::bail!(
@@ -1182,4 +1249,95 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("aios_db.fixture", &fixture)?;
     modules.set_item("aios_db.sync", &sync)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{conflict_reason, normalize_endpoint};
+    use serde_json::json;
+
+    const OURS: (&str, &str, &str) = ("AvevaMarineSample", "1516", "127.0.0.1:8071");
+
+    fn reason(health: serde_json::Value) -> Option<String> {
+        conflict_reason(OURS.0, OURS.1, OURS.2, &health)
+    }
+
+    #[test]
+    fn endpoint_normalization_folds_localhost_and_case() {
+        assert_eq!(normalize_endpoint("localhost:8009"), "127.0.0.1:8009");
+        assert_eq!(normalize_endpoint("LOCALHOST:8009"), "127.0.0.1:8009");
+        assert_eq!(normalize_endpoint(" 127.0.0.1:8009 "), "127.0.0.1:8009");
+        // 非回环主机名原样保留（只归一习惯差异，不做地址簿枚举）。
+        assert_eq!(normalize_endpoint("192.168.31.58:8009"), "192.168.31.58:8009");
+    }
+
+    #[test]
+    fn different_project_is_unrelated() {
+        assert_eq!(reason(json!({ "project": "ZDJ" })), None);
+    }
+
+    #[test]
+    fn old_server_without_endpoint_is_conservatively_flagged() {
+        // 0.1.18 及更早的 /health 不报 sul_db.endpoint：分不清就按最坏情况拦。
+        let flagged = reason(json!({ "project": "AvevaMarineSample", "namespace": "1516" }));
+        assert!(flagged.is_some());
+        assert!(flagged.unwrap().contains("未报 SurrealDB 端点"));
+    }
+
+    #[test]
+    fn same_project_on_a_different_database_is_cleared() {
+        // 正是房间增量沙箱的形态：工程重名，但库是自己的一次性实例。
+        assert_eq!(
+            reason(json!({
+                "project": "AvevaMarineSample",
+                "namespace": "1516",
+                "sul_db": { "endpoint": "localhost:8009" },
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn same_project_same_database_is_flagged_with_reason() {
+        let flagged = reason(json!({
+            "project": "AvevaMarineSample",
+            "namespace": "1516",
+            "sul_db": { "endpoint": "localhost:8071" },
+        }));
+        assert!(flagged.is_some());
+        assert!(flagged.unwrap().contains("同库"));
+    }
+
+    #[test]
+    fn different_namespace_on_same_database_is_cleared() {
+        assert_eq!(
+            reason(json!({
+                "project": "AvevaMarineSample",
+                "namespace": "9999",
+                "sul_db": { "endpoint": "127.0.0.1:8071" },
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn numeric_namespace_serialization_still_matches() {
+        // identity.namespace 历史上有过数字形态；按字符串比不受序列化形态牵连。
+        let flagged = reason(json!({
+            "project": "AvevaMarineSample",
+            "namespace": 1516,
+            "sul_db": { "endpoint": "127.0.0.1:8071" },
+        }));
+        assert!(flagged.is_some());
+    }
+
+    #[test]
+    fn missing_namespace_is_conservatively_flagged() {
+        // 端点已对上、namespace 读不到：按相同处理（保守），不放行。
+        let flagged = reason(json!({
+            "project": "AvevaMarineSample",
+            "sul_db": { "endpoint": "localhost:8071" },
+        }));
+        assert!(flagged.is_some());
+    }
 }
