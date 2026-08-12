@@ -267,10 +267,9 @@ pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
 
 /// 序列化当前内存树到项目文件并盖 sidecar 章。
 ///
-/// 指纹（epoch 值 + 库侧 updated_at）在写文件**之前**读：并发的尾事务若在读章与
+/// 指纹（epoch 值 + 库侧 updated_at）在写文件**之前**读：并发的写入方若在读章与
 /// 写盘之间又推高了版本号，sidecar 只会偏旧 → 下次启动宁可多做一次指针重建，
-/// 方向安全；反过来先写后读会把新章盖在旧内容上。全量生成路径不递增 epoch，
-/// 但它改完树同样走到这里落盘，章一样盖得上。
+/// 方向安全；反过来先写后读会把新章盖在旧内容上。
 async fn persist_project_tree_now() -> anyhow::Result<()> {
     let (epoch, db_epoch_updated_at) = read_db_spatial_epoch_stamp().await?;
     let entries = {

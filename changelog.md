@@ -1,5 +1,37 @@
 # 变更记录
 
+## 2026-08-12
+
+### 修复
+
+- **直写路径的空间树变更补上 epoch 痕迹，消除崩溃后的静默漂移**（方案
+  `docs/plans/2026-08-12-spatial-tree-direct-mutation-epoch-trace-plan.md`，
+  ADR-010 2026-08-12 增补）：
+  - 钉死不变量——**凡是改变了「树应有内容」的已提交变更，都在同一事务内 bump
+    `spatial_epoch:current`**。此前只有 durable 增量与暂存窗口尾事务 bump，
+    全量生成 / `manual_update_aabbs` 的普通直写刷新与删除清理两条路既不写
+    `spatial_reconcile` 意图行、也不 bump：树同步完、空闲轮落盘前崩溃，重启时
+    sidecar 与库指纹相等，启动判据按 Reuse 复用一棵陈旧的树，而 /health 的
+    `drift` 恒为 false，无人可见。删除路径的后果尤其重——启动全量房间重建会把
+    被删构件按旧包围盒重新收编进 `room_relate`（ADR-010 D4 借崩溃复活，而
+    `DeleteCleanup` 任务早已 done，没有重放会再清一次）。
+  - `update_inst_relate_aabbs_by_refnos_mode` 的直写事务门控从
+    `durable_room_trigger && !chunk_changes.is_empty()` 放宽为
+    `!chunk_changes.is_empty()`；`durable_room_trigger` 从此只决定「要不要随事务
+    发布 `room_recalc` 任务」，不再决定「要不要事务与 bump」。重算值与树上旧值
+    逐位相等的重刷仍走普通写、不 bump——没动树的提交不该作废别人的树文件。
+  - `delete_room_membership` 的窗口外分支改为按块「取写锁 → 锁下探测这些 refno
+    在不在树上 → 在则把房间边删除与 bump 包成一个事务、不在则照旧普通写 →
+    摘树 → 标脏」。探测在锁下做，「要不要 bump」与「树到底动没动」由同一个快照
+    裁决。暂存分支不变（意图行 + bump 仍由窗口尾事务收口）。
+  - 普通直写分支补上写锁，跨度 [变更判定 → 事务 → 树同步]（durable 增量的全跨度
+    锁不变）。顺带关掉一个此前没盘到的交错窗口：并发的删除清理挤在事务与同步
+    之间时，刚摘掉的条目会被这里同步回树上，成为要等下次指针重建才自愈的幽灵。
+  - 行为变化：全量生成、`manual_update_aabbs`、删除清理的直写提交现在会推进
+    spatial epoch（按块，一次全量生成约产生「条目数/100」次 bump）。多次 bump
+    语义无害（判据只比相等），代价是这些路径跑过之后，下次启动的全量房间重建
+    对账凭据（`room_build:main`）会判为「空间状态已变」而照跑一次。
+
 ## 0.1.18 - 2026-08-11
 
 ### 变更

@@ -983,9 +983,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
 
 /// 定向增量刷新入口。
 ///
-/// 与普通刷新唯一的差别在直写路径：先以旧空间树判定房间目标，再把 AABB 指针、
-/// `model_update_pending` 房间任务和 spatial epoch 放进一个事务；事务成功后才推进
-/// `GLOBAL_AABB_TREE`。暂存路径不提前发布控制面任务，仍由窗口尾事务统一收口。
+/// 与普通刷新的差别只剩两点。其一，直写路径把 `model_update_pending` 房间任务也放进
+/// 那个事务——全量生成本来就以 `build_room_relations` 的整体重建收尾，逐元素排房间
+/// 任务等于给每个元素排一次重算。其二，写锁从**读输入之前**就取：本入口的调用方
+/// （定向 regen 与 TransformOnly）会对同一个 refno 反复刷新，锁只跨事务的话，两次
+/// 刷新可以先后算出 A、B 再按 B、A 的顺序落树，把陈旧的 A 发布在最后。
+///
+/// 两条路径共有的部分（指针写与 spatial epoch bump 同事务、事务成功后才推进
+/// `GLOBAL_AABB_TREE`、锁跨 [判定 → 事务 → 同步]）不因入口而异。暂存路径一律不提前
+/// 发布控制面任务，仍由窗口尾事务统一收口。
 pub async fn update_inst_relate_aabbs_by_refnos_incremental(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -1008,7 +1014,9 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         // The durable direct path must serialize before it reads the geometry /
         // transform inputs. Taking the lock only after `new_boxes` was computed
         // allowed two refreshes of the same refno to calculate A then B, acquire
-        // the lock in reverse order, and publish stale A last.
+        // the lock in reverse order, and publish stale A last. The plain direct
+        // path takes the same lock further down, once the expensive input read is
+        // behind it.
         let mut direct_tree = if staged_writes.is_none() && durable_room_trigger {
             Some(GLOBAL_AABB_TREE.write().await)
         } else {
@@ -1092,9 +1100,15 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             .iter()
             .map(|(refno, _, _)| refno.refno())
             .collect::<HashSet<_>>();
-        // direct 增量从读取本块输入一直到事务提交、内存树同步都持有写锁。否则空闲轮
-        // 可能在「DB epoch 已递增、树尚未同步」的极窄窗口把旧树盖上新 epoch sidecar，
-        // 或并发刷新把较旧的输入快照后写覆盖掉较新的结果。
+        // 普通直写分支在这里补上写锁，跨度是 [变更判定 → 事务 → 树同步]。空闲轮否则
+        // 可能在「DB epoch 已递增、树尚未同步」的极窄窗口把旧树盖上新 epoch sidecar；
+        // 并发的删除清理也会挤进事务与同步之间，让刚摘掉的条目又被同步回树上。刻意
+        // 不把它提前到读输入段——那一段含几何 join，是全量生成里最贵的部分，而镜像
+        // 一致性只要求「要不要 bump」与「树到底动没动」由同一个加锁快照裁决。
+        // durable 增量的锁更早（读输入之前就取，见上），这里只接管普通直写分支。
+        if staged_writes.is_none() && direct_tree.is_none() {
+            direct_tree = Some(GLOBAL_AABB_TREE.write().await);
+        }
         let stale_by_refno = if let Some(tree) = direct_tree.as_ref() {
             let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
@@ -1102,6 +1116,8 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             }
             stale
         } else {
+            // 暂存窗口这一轮不动树，读一次持久主库的旧基线就够：窗口内的变化寄存进
+            // 上下文，提交后由 `sync_tree_from_committed_pointers` 按已提交指针收敛。
             let tree = GLOBAL_AABB_TREE.read().await;
             let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
@@ -1144,15 +1160,18 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             continue;
         }
 
-        if durable_room_trigger && !chunk_changes.is_empty() {
-            // 关掉房间增量只摘掉 room_recalc 这一条语句，指针写与 epoch bump 照旧：
-            // 空间树确实动了，少 bump 一次会让重启后「文件之后还有空间提交」的判定
-            // 看错，而那与房间开不开无关。
-            let room_upserts = crate::options::room_incremental().then(|| {
-                crate::data_interface::model_update_pending::render_room_recalc_upserts(
-                    &chunk_changes,
-                )
-            });
+        if !chunk_changes.is_empty() {
+            // 本块确有包围盒变化 → 指针写与 epoch bump 必须同事务，无论是不是定向增量。
+            // 直写路径不产生 `spatial_reconcile` 意图行，epoch 是它在库侧留下的**唯一**
+            // 痕迹：少 bump 一次，落盘前崩溃的重启就会看到 sidecar 与库指纹相等、按
+            // Reuse 复用一棵陈旧的树，而 /health 的 drift 恒为 false，没有人看得见。
+            // 关掉房间增量、或走非定向的全量生成，都只摘掉 room_recalc 这一条语句。
+            let room_upserts = (durable_room_trigger && crate::options::room_incremental())
+                .then(|| {
+                    crate::data_interface::model_update_pending::render_room_recalc_upserts(
+                        &chunk_changes,
+                    )
+                });
             let mut statements = Vec::with_capacity(3);
             if !update_sql.is_empty() {
                 statements.push(update_sql.clone());
@@ -1163,13 +1182,15 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
             let transaction =
                 crate::data_interface::increment_pipeline::wrap_in_transaction(&statements)
-                    .expect("增量 AABB 房间事务至少包含 pending 与 epoch");
+                    .expect("直写 AABB 事务至少包含 epoch bump");
             crate::surreal_retry::execute_surreal_checked(
                 &transaction,
-                "update inst_relate aabb pointers with durable room triggers",
+                "update inst_relate aabb pointers with spatial epoch bump",
             )
             .await?;
         } else if !update_sql.is_empty() {
+            // 重算值与树上旧值逐位相等：库侧「树应有内容」没变，不 bump——没动树的
+            // 提交不该作废别人已经落好的树文件。
             crate::surreal_retry::execute_model_write(
                 &update_sql,
                 "update inst_relate aabb pointers",
@@ -1179,15 +1200,14 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
 
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
         // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入新值。
-        if let Some(tree) = direct_tree.as_mut() {
-            tree.sync_refnos(rstar_objs.clone());
-        } else {
-            let mut tree = GLOBAL_AABB_TREE.write().await;
-            tree.sync_refnos(rstar_objs.clone());
-        }
+        let tree = direct_tree
+            .as_mut()
+            .expect("直写分支必须持有写锁直到树同步结束");
+        tree.sync_refnos(rstar_objs.clone());
         if !rstar_objs.is_empty() || !stale_by_refno.is_empty() {
             crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
         }
+        drop(direct_tree);
         changes.extend(chunk_changes);
     }
 
@@ -1819,6 +1839,90 @@ mod aabb_write_order_tests {
             "事务成功之前不得推进内存树"
         );
         assert!(body.contains("wrap_in_transaction(&statements)"));
+    }
+
+    /// 直写路径凡使「树应有内容」发生变化的已提交变更，必在同一事务内 bump spatial
+    /// epoch（2026-08-12 方案 G1）。
+    ///
+    /// 门控一旦退回 `durable_room_trigger && ...`，全量生成与 `manual_update_aabbs`
+    /// 的提交又会变成无痕迹变更：它们不产生 `spatial_reconcile` 意图行，落盘前崩溃
+    /// 的重启于是看到 sidecar 与库指纹相等、按 Reuse 复用一棵陈旧的树，而 /health
+    /// 的 drift 恒为 false，没有人看得见。回退即红。
+    #[test]
+    fn every_direct_box_change_bumps_the_spatial_epoch_in_the_same_transaction() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
+            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
+            .1
+            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        assert!(
+            !body.contains("durable_room_trigger && !chunk_changes.is_empty()"),
+            "事务与 bump 不得再由 durable_room_trigger 门控: {body}"
+        );
+        assert!(
+            body.contains("if !chunk_changes.is_empty() {"),
+            "本块确有包围盒变化就必须走事务 + bump: {body}"
+        );
+        // durable_room_trigger 从此只决定「要不要随事务发布房间任务」。
+        assert!(
+            body.contains("durable_room_trigger && crate::options::room_incremental()"),
+            "room_upserts 的门控漂移: {body}"
+        );
+
+        let bump_at = body
+            .find("render_spatial_epoch_bump")
+            .expect("spatial epoch bump missing");
+        let plain_at = body
+            .find("} else if !update_sql.is_empty() {")
+            .expect("无变化的普通写分支必须存在");
+        assert!(
+            bump_at < plain_at,
+            "唯一允许不 bump 的直写是「重算值与树上旧值逐位相等」那一支: {body}"
+        );
+    }
+
+    /// 普通直写分支必须在「变更判定 → 事务 → 树同步」之前拿到写锁并一直持有。
+    ///
+    /// 只在同步那一瞬取锁有两个交错窗口：空闲轮可以在「epoch 已递增、树尚未同步」
+    /// 之间把旧树盖上新章；并发的删除清理可以挤在事务与同步之间，让刚摘掉的条目又
+    /// 被这里同步回树上，成为要等下次指针重建才自愈的幽灵。回退即红。
+    #[test]
+    fn the_plain_direct_branch_holds_the_tree_lock_across_its_transaction() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
+            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
+            .1
+            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        let lock_at = body
+            .find("direct_tree = Some(GLOBAL_AABB_TREE.write().await)")
+            .expect("普通直写分支必须补上写锁");
+        let classify_at = body
+            .find("let chunk_changes =")
+            .expect("old-tree change classification missing");
+        let commit_at = body
+            .find("execute_surreal_checked(")
+            .expect("direct transaction execution missing");
+        let sync_at = body
+            .find("tree.sync_refnos(rstar_objs.clone())")
+            .expect("tree sync missing");
+
+        assert!(lock_at < classify_at, "变更判定必须在锁下: {body}");
+        assert!(
+            classify_at < commit_at && commit_at < sync_at,
+            "判定 / 事务 / 同步的次序漂移: {body}"
+        );
+        assert!(
+            !body.contains("let mut tree = GLOBAL_AABB_TREE.write().await;"),
+            "同步时才临时取锁等于把锁纪律退回原样: {body}"
+        );
     }
 
     #[test]

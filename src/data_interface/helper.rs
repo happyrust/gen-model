@@ -338,6 +338,21 @@ fn render_room_membership_delete(pe_keys: &[String]) -> String {
     )
 }
 
+/// 同上，但把 spatial epoch 的递增并进同一个事务——本块确实要从空间树上摘条目时用。
+///
+/// 直写删除不产生 `spatial_reconcile` 意图行，epoch 是它在库侧留下的**唯一**痕迹。
+/// 少 bump 一次，「摘完树、落盘前崩溃」的重启就会看到 sidecar 与库指纹相等、按 Reuse
+/// 复用一棵还留着被删构件的树，启动全量房间重建随即把幽灵构件按旧包围盒重新收编进
+/// `room_relate`——ADR-010 D4 修掉的缺陷借崩溃复活，而 `DeleteCleanup` 任务早已 done，
+/// 没有任何重放会再清一次。
+fn render_room_membership_delete_transaction(pe_keys: &[String]) -> String {
+    crate::data_interface::increment_pipeline::wrap_in_transaction(&[
+        render_room_membership_delete(pe_keys),
+        crate::fast_model::aabb_tree::render_spatial_epoch_bump(),
+    ])
+    .expect("删除事务至少包含边删除与 epoch bump")
+}
+
 /// 清掉被删元素在房间归属里留下的一切，并把它们从空间树上摘掉（ADR-010 §4）。
 ///
 /// 删除是房间增量里唯一不走队列的分支：被删元素没有新的包围盒，「AABB 变了」这个触发源
@@ -347,28 +362,56 @@ fn render_room_membership_delete(pe_keys: &[String]) -> String {
 /// 刻意不与 [`delete_inst_relate_cascade`] 合成一个事务：那个函数同时服务于重生成时的
 /// 「先删旧几何再写新几何」，而那条路径上元素还活着，房间边不该被动。两段各自幂等，
 /// 中间崩了 `DeleteCleanup` 任务会重试，从头再走一遍即可收敛。
+///
+/// 窗口外分支按块走「锁下探测 → 边删除与 epoch bump 同事务 → 摘树 → 标脏」
+/// （见 [`render_room_membership_delete_transaction`]）：直写路径的变更必须在库里留下
+/// 痕迹，崩溃后启动判据才认得出「树文件之后还有过空间提交」。
 async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyhow::Result<()> {
-    for chunk in refnos.chunks(chunk_size) {
-        let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
-        execute_model_write(
-            &render_room_membership_delete(&pe_keys),
-            "delete room membership",
-        )
-        .await?;
-    }
-
     // 树上留着已删元素的包围盒，`locate_intersecting_bounds` 会继续把它当候选返回，
     // 于是重算时一个已经不存在的构件仍会被算进某间房（缺陷 D4）。
     if let Some(context) = crate::data_interface::staging::active_staging_writes() {
+        for chunk in refnos.chunks(chunk_size) {
+            let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
+            execute_model_write(
+                &render_room_membership_delete(&pe_keys),
+                "delete room membership",
+            )
+            .await?;
+        }
+        // 窗口内不动树：摘除意图寄存进上下文，随尾事务连同 epoch bump 一起提交，
+        // 提交后由 `apply_deferred_spatial_mutations` 收敛。
         context.defer_spatial_remove(refnos).await;
         return Ok(());
     }
-    let stale: HashSet<aios_core::RefU64> = refnos.iter().map(RefnoEnum::refno).collect();
-    let removed = GLOBAL_AABB_TREE.write().await.remove_by_refnos(&stale);
-    if removed > 0 {
-        // 摘除同样是「内存树相对项目树文件的未持久化变更」：不标脏的话，
-        // 重启读回旧文件，被删构件会重新以候选身份出现在房间重算里。
-        crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+
+    for chunk in refnos.chunks(chunk_size) {
+        let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
+        let stale: HashSet<aios_core::RefU64> = chunk.iter().map(RefnoEnum::refno).collect();
+
+        // 写锁跨「探测 → 提交 → 摘除」：探测放在锁下，「要不要 bump」与「树到底动
+        // 没动」才由同一个快照裁决，不会出现 bump 了却无人落盘追平（白白触发下次
+        // 重建）、或动了树却没 bump（回到静默漂移）的错位。
+        let mut tree = GLOBAL_AABB_TREE.write().await;
+        let present = tree.iter().any(|bbox| stale.contains(&bbox.refno));
+        if present {
+            execute_surreal_checked(
+                &render_room_membership_delete_transaction(&pe_keys),
+                "delete room membership with spatial epoch bump",
+            )
+            .await?;
+        } else {
+            // 树上本来就没有这些条目，删边不改变「树应有内容」，不作废别人的树文件。
+            execute_model_write(
+                &render_room_membership_delete(&pe_keys),
+                "delete room membership",
+            )
+            .await?;
+        }
+        if tree.remove_by_refnos(&stale) > 0 {
+            // 摘除同样是「内存树相对项目树文件的未持久化变更」：不标脏的话，
+            // 重启读回旧文件，被删构件会重新以候选身份出现在房间重算里。
+            crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+        }
     }
     Ok(())
 }
@@ -398,6 +441,79 @@ mod tests {
             body.contains("delete_room_membership(&candidates, chunk_size).await?"),
             "房间/空间树必须始终按原始候选补完: {body}"
         );
+    }
+
+    /// 直写删除必须把两个方向的房间边删除与 spatial epoch bump 放进同一个事务。
+    ///
+    /// 直写路径不产生 `spatial_reconcile` 意图行，epoch 是它在库侧留下的唯一痕迹：
+    /// 少 bump 一次，「摘完树、落盘前崩溃」的重启就会按指纹相等复用一棵还留着被删
+    /// 构件的树，启动全量房间重建随即把幽灵构件按旧包围盒重新收编（ADR-010 D4 借
+    /// 崩溃复活，而 DeleteCleanup 任务早已 done，没有重放会再清一次）。
+    #[test]
+    fn direct_delete_pairs_the_room_edge_removal_with_the_spatial_epoch_bump() {
+        let sql = render_room_membership_delete_transaction(&["pe:7997_1".to_string()]);
+
+        assert!(sql.starts_with("BEGIN TRANSACTION;"), "{sql}");
+        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+        let member_at = sql
+            .find("pe:7997_1<->room_relate")
+            .expect("成员边（两个方向）必须删");
+        let panel_at = sql
+            .find("pe:7997_1<->room_panel_relate")
+            .expect("面板边必须删");
+        let bump_at = sql.find("spatial_epoch:current").expect("epoch bump 缺失");
+        assert!(
+            member_at < bump_at && panel_at < bump_at,
+            "bump 必须与两个方向的边删除同处一个事务: {sql}"
+        );
+    }
+
+    /// 窗口外删除的次序纪律：写锁 → 锁下探测 → 提交 → 摘树 → 标脏。
+    ///
+    /// 探测放在锁下，「要不要 bump」与「树到底动没动」才由同一个快照裁决，不会出现
+    /// bump 了却无人落盘追平、或动了树却没 bump 的错位；bump 必须先于
+    /// `remove_by_refnos`，崩溃时才只会多做一次指针重建而不是静默漂移。暂存分支反过来
+    /// 一条 bump 都不许有——那条路的 epoch 由窗口尾事务与意图行统一收口，在这里提前
+    /// 递增等于拿未提交的窗口变更去作废别人已经落好的树文件。回退即红。
+    #[test]
+    fn direct_delete_bumps_under_the_tree_lock_before_it_evicts() {
+        let source = include_str!("helper.rs");
+        let body = source
+            .split_once("async fn delete_room_membership(")
+            .expect("delete_room_membership must exist")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        let staged = body
+            .split_once("defer_spatial_remove")
+            .expect("暂存分支必须把摘除寄存进窗口")
+            .0;
+        assert!(
+            !staged.contains("render_room_membership_delete_transaction"),
+            "暂存分支不得自行 bump，epoch 归窗口尾事务: {staged}"
+        );
+
+        let lock_at = body
+            .find("GLOBAL_AABB_TREE.write().await")
+            .expect("窗口外分支必须持写锁");
+        let probe_at = body
+            .find("tree.iter().any(")
+            .expect("present 探测必须在锁下进行");
+        let bump_at = body
+            .find("render_room_membership_delete_transaction")
+            .expect("确有条目时必须走带 bump 的事务");
+        let evict_at = body.find("remove_by_refnos").expect("摘树缺失");
+        let dirty_at = body.find("mark_aabb_tree_dirty").expect("标脏缺失");
+
+        assert!(lock_at < probe_at, "探测必须在锁下: {body}");
+        assert!(probe_at < bump_at, "bump 与否由锁下那一个快照裁决: {body}");
+        assert!(
+            bump_at < evict_at,
+            "bump 必须先于摘树，否则崩溃即静默漂移: {body}"
+        );
+        assert!(evict_at < dirty_at, "标脏在摘树之后: {body}");
     }
 
     #[test]
