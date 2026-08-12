@@ -2104,6 +2104,64 @@ mod cache_tests {
             "采信判定必须只有一个入口"
         );
     }
+
+    /// IU-S8-05 / IU-S12-02（L1 源码钉）：直写路径的缓存失效必须在**每次尝试
+    /// 落库之后**执行——包括部分失败的批次。persist 的结果被捕获成
+    /// `persist_result`、失效跑完才 `?` 上抛：部分失败时前面的 Surreal 语句可能
+    /// 已经改了数据而水位保持不动，此刻不清缓存，preview / 模型刷新这些后继者
+    /// 读到的就是旧值。回退成落库当场 `?` 直接上抛即红。
+    #[test]
+    fn cache_invalidation_survives_a_partially_failed_persist() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once(concat!("async fn ", "apply_one("))
+            .expect("apply_one must exist")
+            .1
+            .split_once(concat!("async fn ", "invalidate_caches("))
+            .expect("invalidate_caches follows apply_one")
+            .0;
+        let capture_at = body
+            .find("let persist_result = ")
+            .expect("persist 结果必须被捕获而不是当场上抛");
+        let invalidate_at = body
+            .find("Self::invalidate_caches(cache_refnos)")
+            .expect("直写路径必须执行缓存失效");
+        let propagate_at = body
+            .find("persist_result?")
+            .expect("persist 失败最终要上抛（水位不推进）");
+        assert!(
+            capture_at < invalidate_at && invalidate_at < propagate_at,
+            "顺序必须是 捕获 persist 结果 → 缓存失效 → 才上抛失败: {body}"
+        );
+    }
+
+    /// IU-S0-05 的 warning 半边（名字白名单本身由 increment_manager 的真实
+    /// 正反例表钉住）：名字不合 AVEVA 形态的文件在 apply 入口被跳过时必须留下
+    /// warning 再 continue——无声跳过表现为「无错也无果」，正是 apply_file
+    /// 透出 warnings（2026-08-12）要消灭的那类现象。
+    #[test]
+    fn skipped_copy_files_leave_a_warning_behind() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once(concat!("pub async fn ", "apply_with_precollected("))
+            .expect("apply_with_precollected must exist")
+            .1
+            .split_once(concat!("async fn ", "apply_one("))
+            .expect("apply_one follows")
+            .0;
+        let gate_at = body
+            .find("is_pdms_db_file_name(file_name)")
+            .expect("入口必须有名字白名单门");
+        let warn_at = body.find("skip copy file").expect("跳过必须留 warning");
+        let continue_at = body[gate_at..]
+            .find("continue")
+            .map(|at| gate_at + at)
+            .expect("跳过分支必须 continue 而不是漏进 apply_one");
+        assert!(
+            gate_at < warn_at && warn_at < continue_at,
+            "顺序必须是 白名单门 → warnings.push → continue: {body}"
+        );
+    }
 }
 
 #[cfg(test)]
