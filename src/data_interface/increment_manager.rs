@@ -409,8 +409,11 @@ mod tests {
         let fixture =
             std::env::temp_dir().join(format!("aios-duplicate-dbnum-{}", std::process::id()));
         fs::create_dir_all(&fixture).expect("create duplicate directory");
-        fs::write(fixture.join("first"), header).expect("write first header");
-        fs::write(fixture.join("second"), header).expect("write second header");
+        // 副本必须取合 AVEVA 形态的名字：候选门先过 `is_pdms_db_file_name` 白名单，
+        // 叫 first/second 根本进不了判重（本用例曾因此腐化——写于白名单落地之前，
+        // 判重集合恒为空。dbnum 来自文件头，两个不同序号映射到同一个库号）。
+        fs::write(fixture.join("ams9990_0001"), header).expect("write first header");
+        fs::write(fixture.join("ams9990_0002"), header).expect("write second header");
         manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
 
         // 判重键是 (归属项目, dbnum)；夹具目录不在任何监控目录的归属登记里，

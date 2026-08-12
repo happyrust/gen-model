@@ -2059,6 +2059,10 @@ mod aabb_write_order_tests {
         use aios_core::room::room::GLOBAL_AABB_TREE;
 
         aios_core::init_test_surreal().await.expect("connect surreal");
+        // 本用例经直写刷新自己喂树、不走启动装载：按状态机的测试装载模式显式
+        // 声明，否则进程态停在 Uninitialized，基线 persist 会被发布门拒绝
+        // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
+        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
         let pending =
             crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
                 .await

@@ -1,0 +1,27 @@
+{
+  "comment": [
+    "房间夹具 live 用例专用批次：这些用例（或其内部的全量重建）会做「进程树条数 vs 库指针条数」",
+    "覆盖率对账，必须跑在一次性空库实例上——batch1 在 testbed 8019（真实基线 1.3 万条指针）上",
+    "跑它们必然撞覆盖率闸门（树里只有夹具那 7 条），2026-08-12 实测 9/11 红即此因，非回归。",
+    "跑前：bin\\surreal.exe start --user root --pass root --bind 127.0.0.1:8071 memory；跑完杀掉。",
+    "两条纪律（与 python/tests/conftest.py 同款）：仓库根的 accel_tree_AvevaMarineSample.snapshot",
+    "先挪走、跑完还原（对内存库算出的指纹会顶掉真项目快照）；期间勿并行 pytest 房间档（同端口）。",
+    "顺序有讲究：parity 先于 probe（probe 诊断的是 parity 留下的夹具）。"
+  ],
+  "config": "python/tests/DbOption-roomlive",
+  "features": "http_api",
+  "default_timeout_secs": 900,
+  "tests": [
+    { "name": "live_room_fixture_parity" },
+    { "name": "live_room_fixture_probe" },
+    { "name": "live_room_structural_triggers_enqueue_panel_recalc" },
+    { "name": "live_room_rename_into_compliance_recomputes_membership" },
+    { "name": "live_room_panel_move_parity" },
+    { "name": "live_room_panel_task_absorbs_element_task_in_the_same_round" },
+    { "name": "live_room_cross_panel_move_defeats_absorption" },
+    { "name": "live_room_delete_clears_membership" },
+    { "name": "live_room_incremental_parity" },
+    { "name": "live_room_deleted_edges_come_back_after_a_move" },
+    { "name": "live_room_tubi_row_enters_tree_and_tracks_regen" }
+  ]
+}

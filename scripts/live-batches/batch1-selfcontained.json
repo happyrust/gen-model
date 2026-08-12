@@ -1,0 +1,29 @@
+{
+  "comment": [
+    "批次 1：自建夹具类（台账 docs/2026-08-12_live-test-ledger.md 的 A 组）。",
+    "数据自造自清，只要配置的 Surreal 可达 + schema 在位，testbed 8019 可反复跑。",
+    "例外（2026-08-12 实测）：room_fixture 系 11 条已挪去 room-fixture-8071.json——",
+    "它们的全量重建做「进程树 vs 库指针」覆盖率对账，在有真实基线的 8019 上必撞闸门，",
+    "只能跑一次性空库实例。破坏性最强的 aabb 全量重写放最后。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 900,
+  "tests": [
+    { "name": "live_record_scan_never_moves_the_applied_watermark" },
+    { "name": "live_blocked_observation_keeps_the_verdict_evidence_intact" },
+    { "name": "live_finalize_is_crash_safe_and_idempotent" },
+    { "name": "live_os_kill_preserves_prepared_attempt" },
+    { "name": "live_non_regen_drain_consumes_the_whole_queue" },
+    { "name": "live_failed_queue_cleanup_does_not_stall_the_rest" },
+    { "name": "live_generation_failure_keeps_pending_and_watermark", "timeout_secs": 2700 },
+    { "name": "live_incomplete_room_panels_enqueue_targeted_repairs" },
+    { "name": "live_finalize_capacity_is_atomic_and_idempotent", "timeout_secs": 1800 },
+    { "name": "resolves_the_real_mdb_declaration" },
+    { "name": "an_unparsed_project_bootstraps_instead_of_deadlocking" },
+    { "name": "live_watch_directory_blocks_duplicate_dbnum_files" },
+    { "name": "live_direct_delete_crash_before_persist_recovers_by_rebuild" },
+    { "name": "live_direct_refresh_crash_before_persist_recovers_by_rebuild" },
+    { "name": "live_sync_aabb_tree_fills_tree_from_db", "timeout_secs": 1800 }
+  ]
+}
