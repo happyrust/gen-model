@@ -187,6 +187,12 @@ async fn staged_transform_follows_a_pure_pose_move() {
     );
     connect_live().await;
 
+    // 与服务启动同一条装载路径：空间状态机进入可消费态，窗口内的 scoped 房间轮
+    // 与收尾的 drain_rooms 兜底才不会被 SPATIAL_TREE_NOT_READY 门禁拦下。
+    aios_database::fast_model::aabb_tree::load_project_tree_verified()
+        .await
+        .expect("load spatial tree (production startup parity)");
+
     let dbnum: u32 = std::env::var("AIOS_STAGED_E2E_DBNUM")
         .ok()
         .and_then(|value| value.parse().ok())

@@ -2191,6 +2191,11 @@ async fn drain_rooms_selected(
     db_option: &aios_core::options::DbOption,
     scope: Option<&RoomDrainScope>,
 ) -> anyhow::Result<DrainReport> {
+    // 状态机门禁（一致性闭环方案 §6）：房间重算的整间分支候选取自
+    // GLOBAL_AABB_TREE，树不在可消费状态就消费任务 = 拿不可信的树改写归属。
+    // 被拒时错误带 SPATIAL_TREE_NOT_READY 码，durable 行原样保留，
+    // 状态收敛后由空闲轮/scoped 重试收走。
+    crate::fast_model::spatial_state::ensure_spatial_ready()?;
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
     let panels = match scope {
@@ -2663,6 +2668,37 @@ mod tests {
         assert!(
             !room_drain.contains("return Ok(report);"),
             "缺陷面板不得让整轮 drain 早退: {room_drain}"
+        );
+    }
+
+    /// 空间状态机门禁（一致性闭环方案 §6）：房间消费在加载任何任务之前必须过
+    /// `ensure_spatial_ready`——树不可信时消费任务 = 拿错树改写归属；被拒的
+    /// durable 行保留待重试。空 scope 的连接自由早退不受影响（在门之前）。
+    #[test]
+    fn room_drain_is_gated_by_the_spatial_state_machine() {
+        let source = include_str!("model_update_pending.rs");
+        let head = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("room drain must exist")
+            .1
+            .split_once("let panels = ")
+            .expect("面板任务加载必须存在")
+            .0;
+        assert!(
+            head.contains("ensure_spatial_ready()"),
+            "消费任何房间任务之前必须过状态机门: {head}"
+        );
+        // 空 scope 早退在门之前：无房间变更的批次不受门禁牵连。
+        let scoped = source
+            .split_once("pub(crate) async fn drain_rooms_scoped(")
+            .expect("scoped drain must exist")
+            .1
+            .split_once("async fn drain_rooms_selected(")
+            .expect("selected follows")
+            .0;
+        assert!(
+            scoped.contains("if scope.is_empty()"),
+            "空 scope 必须在进门前早退: {scoped}"
         );
     }
 
@@ -4779,6 +4815,11 @@ mod tests {
         aios_core::init_test_surreal()
             .await
             .expect("connect surreal");
+        // 状态机门禁下房间消费要求空间树就绪；重建同时避免旧行为里「空树算出
+        // 空成员集」被写回 live 库的破坏面。
+        crate::fast_model::aabb_tree::rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild spatial tree before room drain");
 
         // 缺陷面板不再阻断整轮，所以这里不再断言 `done == 0`：其余目标本就该跑完。
         // 要钉的是「缺陷被登记下来，且修复根真的进了 durable 队列」。

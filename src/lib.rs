@@ -472,9 +472,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             fmt_elapsed(step_started.elapsed())
         ),
         Err(error) => {
-            eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+            eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
         }
     }
+    // 降级复检后台任务（一致性闭环方案 §6）：DegradedReuse/DegradedBlocked 两态
+    // 由它退避重试收敛，恢复 Ready 后唤醒调度器；健康状态下它只是每 30s 一次的
+    // 状态读取。
+    crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
@@ -657,10 +661,11 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     }
 
     // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
-    // 重建的派生数据，加载失败告警降级空树，不阻断启动。
+    // 重建的派生数据，加载失败告警降级空树，不阻断启动；降级两态交给后台复检。
     if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
-        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待修复后重建");
+        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
     }
+    crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await
 }

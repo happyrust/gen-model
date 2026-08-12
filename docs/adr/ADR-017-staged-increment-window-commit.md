@@ -88,3 +88,14 @@ T5.1 精简版窗口中途持久层快照 diff 探针（`staging/parity.rs`）�
 - **收口 fn:: 依赖台账（W6）**：`docs/2026-08-07_journal-fn-dependency-audit.md`。
   剩余唯一收口硬依赖 = OWNER 搬迁的 anc/zone_refno 定点重算
   （`fn::anc_u64` + `fn::find_ancestor_type`）；DESI 批次预检探针已对准它们。
+
+## 2026-08-12 补记：空间串行锁与提交临界段的关系（一致性闭环方案 D6）
+
+方案 `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md` 引入
+`SPATIAL_STATE_SERIAL`（锁序 `STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL →
+GLOBAL_AABB_TREE`）。对本 ADR 临界段的影响精确到：**提交后空间收敛
+（`reconcile_spatial_pending`）在既有 `STAGED_COMMIT_SERIAL` 内再持空间串行锁**
+——把 direct 写路径、指针重建换树段、快照发布与 Python `spatial.*` 一并串进同一
+条线；journal 写回与窗口尾事务**不**持空间锁（尾事务不动树，崩溃安全靠 pending
+意图行，串行段长度不因此增加）。派发门的收敛同理。指针重建的分页读刻意在锁外
+（读-换-发布协议见该方案 §4），staged 提交尾不再被全表扫描顶住。

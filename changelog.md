@@ -2,6 +2,41 @@
 
 ## 2026-08-12
 
+### 新增
+
+- **空间树一致性闭环：V2 单文件快照、进程状态机、空间串行锁与降级自愈**（方案
+  `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md`，D1–D8 已定；
+  ADR-010 2026-08-12 增补（二）、ADR-017 2026-08-12 补记）：
+  - 快照介质：`accel_tree_{project}.bin` + `.meta.json` 退役，改为单文件
+    `accel_tree_{project}.snapshot`（V2：树载荷 + SHA-256 自校验 + project/namespace
+    身份 + 双字段指纹，原子 rename 发布）。读侧全套校验任一失败即指针重建，不回落
+    旧格式；旧文件仅作一次性迁移候选（双指纹匹配且无 pending → verdict=`migrated`），
+    首次 V2 发布成功后**删除**——旧二进制对 bin 缺失是无条件重建，任何回退自动安全。
+  - 状态机 `spatial_state.rs`：8 态；房间消费者（启动全量重建、RoomRecalc、空闲
+    房间轮）仅 Ready/ReadyEmpty 放行（`SPATIAL_TREE_NOT_READY`，durable 行保留），
+    解析/生成/重放/重建/`model.spatial.bounds` 不受门禁。启动判据修正：pending
+    优先仅对可读快照成立、进入 ReplayRequired 立即重放（不等派发门）、
+    「树非空即 preloaded」收窄为显式夹具标记。
+  - 空间串行锁 `SPATIAL_STATE_SERIAL`（`STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL
+    → GLOBAL_AABB_TREE`）：staged 提交后收敛、direct 写路径、重建换树/发布、快照
+    落盘、Python `spatial.*` 同一串行线（修掉 Python reconcile/persist 与 worker
+    并发动树的竞态）；journal 写回与尾事务不持锁。
+  - 指针重建：record-range 分页（fork 兼容套件双跑钉住页间无漏无重）；口径
+    current-only（排除版本化数组 id 行、`in.deleted` 软删行，Rust 侧排除
+    NaN/Inf/反向 AABB 并计数采样）；分页读锁外、stamp 前后比对 + 换树 + 发布锁内，
+    三连漂移/查询失败进 DegradedBlocked。房间覆盖率分母同口径。
+  - 降级自愈：后台 revalidator（30s 指数退避至 5min）只管 DegradedReuse/
+    DegradedBlocked，恢复 Ready 唤醒调度器。
+  - 崩溃注入：`AIOS_FAILPOINT=<name>` 五个注入点覆盖方案 §8 崩溃窗口。
+  - **对外契约变化**：/health `spatial_tree` 九键作废换十五键（台账 G-02 契约
+    迁移，形状钉随迁）；`startup_verdict` 枚举改
+    reused/replayed/rebuilt/migrated/degraded/preloaded；Python
+    `spatial.persist(force=True)` 在非 Ready/ReadyEmpty 拒绝。
+  - 沙箱验收（testbed @8019，六场景：首启重建/快路径复用/截断/删除/rename 前
+    崩溃注入/崩后收敛）全过，证据
+    `docs/2026-08-12_spatial-tree-consistency-acceptance.md`；E3D 侧场景
+    （TTY 复制恢复对拍、伪造旧 epoch、房间边对拍）留 runbook 待跑。
+
 ### 修复
 
 - **直写路径的空间树变更补上 epoch 痕迹，消除崩溃后的静默漂移**（方案

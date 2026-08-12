@@ -5,8 +5,10 @@
 models/
 watcher.json
 /all_attr_info.json
-# 空间树时点快照：aabb_tree.rs::project_tree_file() 现在按项目名生成
-# （accel_tree_<project>.bin + 同名 .meta.json），随时可从库指针重建。
+# 空间树时点快照：V2 单文件 accel_tree_<project>.snapshot（2026-08-12 方案），
+# 旧格式 bin + meta.json 仅剩迁移候选；全部随时可从库指针重建。
+accel_tree*.snapshot
+accel_tree*.snapshot.tmp
 accel_tree*.bin
 accel_tree*.meta.json
 /pdms-io/

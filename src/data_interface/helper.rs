@@ -388,9 +388,12 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
         let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
         let stale: HashSet<aios_core::RefU64> = chunk.iter().map(RefnoEnum::refno).collect();
 
+        // 锁序（一致性闭环方案 D6）：SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE，
+        // 与 staged 提交后收敛、指针重建换树段、快照发布同一条串行线。
         // 写锁跨「探测 → 提交 → 摘除」：探测放在锁下，「要不要 bump」与「树到底动
         // 没动」才由同一个快照裁决，不会出现 bump 了却无人落盘追平（白白触发下次
         // 重建）、或动了树却没 bump（回到静默漂移）的错位。
+        let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
         let mut tree = GLOBAL_AABB_TREE.write().await;
         let present = tree.iter().any(|bbox| stale.contains(&bbox.refno));
         if present {
@@ -399,6 +402,9 @@ async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyh
                 "delete room membership with spatial epoch bump",
             )
             .await?;
+            // 崩溃窗口 ①（direct 删除侧，一致性闭环方案 §8）：事务已提交
+            // （epoch 已 bump）、树未摘除——重启判据必然认出失配并重建。
+            crate::fast_model::spatial_state::failpoint("spatial_direct_after_db_commit");
         } else {
             // 树上本来就没有这些条目，删边不改变「树应有内容」，不作废别人的树文件。
             execute_model_write(
@@ -495,6 +501,9 @@ mod tests {
             "暂存分支不得自行 bump，epoch 归窗口尾事务: {staged}"
         );
 
+        let serial_at = body
+            .find("lock_spatial_serial().await")
+            .expect("窗口外分支必须先取空间串行锁（锁序 D6）");
         let lock_at = body
             .find("GLOBAL_AABB_TREE.write().await")
             .expect("窗口外分支必须持写锁");
@@ -507,6 +516,10 @@ mod tests {
         let evict_at = body.find("remove_by_refnos").expect("摘树缺失");
         let dirty_at = body.find("mark_aabb_tree_dirty").expect("标脏缺失");
 
+        assert!(
+            serial_at < lock_at,
+            "锁序必须 SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE: {body}"
+        );
         assert!(lock_at < probe_at, "探测必须在锁下: {body}");
         assert!(probe_at < bump_at, "bump 与否由锁下那一个快照裁决: {body}");
         assert!(

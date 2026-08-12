@@ -1,6 +1,9 @@
 # 方案：直写路径空间树变更的 epoch 痕迹补齐——消除崩溃后静默漂移
 
-状态：**已落地**（2026-08-12；as-built 见文末 §8）
+状态：**已落地，后续演进被吸收取代**（2026-08-12；as-built 见文末 §8。
+superseded by `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md` D7：
+空间串行锁 `SPATIAL_STATE_SERIAL`、状态机门禁、V2 单文件快照、record-range 指针
+重建在该方案落地，本文的锁纪律与 bump 协议自此以那份方案为唯一事实来源）
 日期：2026-08-12
 关联：`docs/2026-08-11_spatial-tree-startup-init-plan.md`（启动分层判据，已实施）、
 ADR-010 §4（删除分支）/ 增补 4（epoch 校验）/ 增补 2026-08-12（本方案的 ADR 记录）

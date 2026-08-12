@@ -176,6 +176,10 @@ P2 加固根因，P3/P4 独立收尾（P3 完成后再提 P0 的提交 4）。P2
   epoch trace 方案）的 §5 统一空间修改协议 + D6 锁序承接；仓级钉作为其落地前的
   过渡防线。**九键 /health 契约将随该方案作废换新形状**——G-02 形状钉（提交 3）
   的历史使命到那时移交，属预期内的契约演进而非回退。
+  **→ 已发生（2026-08-12 同日）**：一致性闭环方案落地，`spatial_tree` 换十五键
+  （`state`/`ready`/`format_version`/`snapshot_sha256` 等，形状钉随迁
+  `spatial_tree_status_keeps_its_fifteen_key_shape_in_both_branches`），
+  G-02 的旧九键钉正式移交退役。
 - **P3 / P4**：按计划落地，无偏差。`cargo check`（主库 + python 绑定 crate）与
   `cargo test --lib --features http_api` 全绿。
 - **P3 的同门缺陷补记**（`d75d9820`，python 绑定线的收尾提交）：审查只盘到

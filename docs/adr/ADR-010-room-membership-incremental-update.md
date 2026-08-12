@@ -691,3 +691,46 @@ AABB 八顶点，跨界的落第二轮逐点兜底且被两室同时收录。增
   live 验证：`live_room_structural_triggers_enqueue_panel_recalc`（一次性内存实例
   实跑，含真库子 + 孙面板查询），夹具 pe 行随之补齐 `name` 字段（计划层 OWNER 图
   加载的非 Option 坑，与 `pe.owner` / `generic` 同构）。
+
+## 2026-08-12 增补（二）：空间一致性闭环——V2 单文件快照、状态机与空间串行锁
+
+方案 `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md`（吸收同日
+epoch trace 方案，决策 D1–D8）。要点与对本 ADR 既有决策的影响：
+
+- **快照介质换代**：`accel_tree_{project}.bin` + `.meta.json` 双文件退役，改为
+  `accel_tree_{project}.snapshot` **单文件 V2**（树载荷 bincode 段 + SHA-256 自校验
+  + project/namespace 身份 + 双字段指纹），tmp+sync+rename 原子发布。读侧全套校验
+  （反序列化/版本/身份/哈希/条目数）任何一环失败一律指针重建，**不回落旧格式**。
+  旧文件在首次 V2 发布成功后删除（D3）：旧二进制对 bin 缺失是无条件重建，回退自动
+  安全；留着旧文件反而给「回退 + 恰有 pending → HealByReplay 复用冻结文件」开静默
+  陈旧窗口。
+- **进程态状态机**（`spatial_state.rs`）：Uninitialized/Loading/Ready/ReadyEmpty/
+  ReplayRequired/Rebuilding/DegradedReuse/DegradedBlocked。空间消费者（启动全量
+  房间重建、RoomRecalc 消费、空闲房间轮）仅在 Ready/ReadyEmpty 放行，错误码
+  `SPATIAL_TREE_NOT_READY`，durable 行保留待重试；解析/生成/durable 重放/指针重建/
+  `model.spatial.bounds` 直查不受门禁。覆盖率闸门（第 9 条验收口径的运行时前哨）
+  第一道换成状态门，`ReadyEmpty`（已验证空库）不再被 `>0` 判据误报。
+- **启动判据修正**（取代 2026-08-11 分层判据的两处边界）：pending 优先仅在快照可读
+  且校验通过时成立，快照不可用一律重建（完备集论证只对可读快照成立）；进入
+  ReplayRequired 时**立即**重放一次，不等 worker 派发门（queue_paused 部署下 Ready
+  否则永远不来）；「内存树非空即 preloaded」的盲信短路删除，收窄为显式夹具标记。
+- **空间串行锁** `SPATIAL_STATE_SERIAL`（锁序
+  `STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE`）：staged 提交后
+  收敛、direct 指针事务→树同步、重建换树/发布、快照落盘、Python `spatial.*` 全部
+  纳入同一串行线——顺带修掉 Python reconcile/persist 与 worker 并发动树的既有竞态。
+  journal 写回与窗口尾事务**不**持此锁（尾事务不动树，崩溃安全靠 pending 行）。
+- **指针重建协议**：LIMIT/START 分页退役，改 record-range 分页（页间无漏无重由
+  fork 兼容套件双跑钉住）；口径 current-only（排除版本化数组 id 行与 `in.deleted`
+  软删行，Rust 侧排除 NaN/Inf/反向 AABB）；分页读在锁外，stamp 前后比对 + 换树 +
+  发布在锁内，三连漂移/查询失败进 DegradedBlocked；房间覆盖率分母同口径。
+- **降级自愈**：后台 revalidator 只管 DegradedReuse（重跑启动装载）与
+  DegradedBlocked（重试重建），30s 指数退避至 5min，恢复 Ready 唤醒调度器。
+- **可观测性契约迁移**：/health `spatial_tree` 九键作废，换十五键
+  （state/ready/startup_verdict/format_version/entries/usable_pointer_rows/
+  invalid_pointer_rows/pending/file_epoch/db_epoch/drift/snapshot_sha256/
+  last_verified_at/last_rebuild_attempts/last_error）；`startup_verdict` 枚举改为
+  reused/replayed/rebuilt/migrated/degraded/preloaded。
+- **既知边界**：快照 `tree_sha256` 只护单文件完整性；跨进程「同一集合」对拍不能
+  比载荷字节（`AccelerationTree` 序列化含 HashMap 段，迭代序随每进程 SipHash 种子
+  变化），走 entries/usable 口径与逐边对拍（沙箱实测见
+  `docs/2026-08-12_spatial-tree-consistency-acceptance.md`）。

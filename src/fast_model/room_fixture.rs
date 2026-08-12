@@ -923,6 +923,8 @@ mod tests {
         // 夹具构件要先进 R 树，cal_room_refnos 的候选集就是从树里捞的。
         // 刻意**不**调 `load_aabb_tree`：一次性实例上树应当只装夹具，
         // 免得把 `accel_tree.bin` 里几万条真实包围盒带进来干扰断言。
+        // 显式测试装载模式：夹具自己灌树，消费者门按 Ready 放行。
+        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
         let fixture_refnos: Vec<RefnoEnum> = bodies()
             .iter()
             .map(|b| RefnoEnum::from(refno(b.seq).as_str()))
@@ -981,6 +983,9 @@ mod tests {
 
     /// 建夹具 + 灌树 + 全量基线，返回夹具用的 `DbOption`（房间关键字已指向夹具那一间）。
     async fn fixture_baseline() -> aios_core::options::DbOption {
+        // 夹具自己灌树、不走启动校验：显式声明测试装载模式，消费者门与
+        // 覆盖率闸门按 Ready 放行（一致性闭环方案 §2 步骤 0）。
+        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
         let mut db_option = get_db_option().clone();
         // 只匹配夹具那一间，避免把库里的真实房间一起卷进来。
         db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);

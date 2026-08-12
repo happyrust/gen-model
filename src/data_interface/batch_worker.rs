@@ -2434,6 +2434,29 @@ async fn room_round(
         });
         return IdleOutcome::Settled;
     }
+    // 状态机门禁（一致性闭环方案 §6）：空间树不在可消费状态（重放/重建/复检中、
+    // 降级）时不收房间。与下面的 pending 检查相比，状态门多挡住「pending 为零但
+    // 树不可信」的情形（重建失败的 DegradedBlocked、指纹读不到的 DegradedReuse）。
+    // 状态变化时只播报一次——30 秒一趟的空闲轮不许把同一句话刷成噪音。
+    {
+        use crate::fast_model::spatial_state::{self, SpatialTreeState};
+        let state = spatial_state::current_state();
+        if !state.is_ready() {
+            static LAST_ANNOUNCED: std::sync::Mutex<Option<SpatialTreeState>> =
+                std::sync::Mutex::new(None);
+            let mut last = LAST_ANNOUNCED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *last != Some(state) {
+                println!(
+                    "空间树状态 {}：本轮不收房间（等重放/重建/复检收敛）",
+                    state.as_str()
+                );
+                *last = Some(state);
+            }
+            return IdleOutcome::Settled;
+        }
+    }
     // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
     // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
     // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
@@ -2968,6 +2991,16 @@ mod tests {
             .expect("房间轮必须统计目标");
         let drain_at = body.find("drain_rooms").expect("房间轮必须消化房间任务");
         assert!(spatial_at < count_at && spatial_at < drain_at, "{body}");
+
+        // 状态机门（一致性闭环方案 §6）在 pending 检查之前：它多挡住「pending
+        // 为零但树不可信」的情形（DegradedBlocked / DegradedReuse / 重放重建中）。
+        let gate_at = body
+            .find(".is_ready()")
+            .expect("房间轮必须先问空间状态机");
+        assert!(
+            gate_at < spatial_at,
+            "状态门必须在 pending 检查之前: {body}"
+        );
     }
 
     #[test]

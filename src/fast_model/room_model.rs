@@ -245,7 +245,9 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
 /// 判据不取「相等」正是因为树与库是两次独立读取，卡死会把正常抖动误判成故障。
 const MIN_TREE_COVERAGE_PERCENT: usize = 90;
 
-/// 库里有多少条包围盒指针**能**进空间树——与 `rebuild_tree_from_pointers` 同一个口径。
+/// 库里有多少条包围盒指针**能**进空间树——与 `rebuild_tree_from_pointers` 的扫描
+/// 同一个口径（current-only：排除版本化数组 id 行与软删元素；NaN 校验只在 Rust 侧
+/// 做不进 SQL，量级极小、由 10% 容差吸收）。
 ///
 /// 只数指针，不数几何：几何在而 `aabb` 从没算过的行（8000 / 1112 现场就有几千条）本来
 /// 就进不了树，把它们算进分母会让这道门对着一个永远够不到的目标常态误报。
@@ -260,7 +262,8 @@ async fn usable_aabb_pointer_count() -> anyhow::Result<usize> {
     let mut response = SUL_DB
         .query(
             "SELECT count() FROM inst_relate \
-             WHERE world_trans.d != none AND aabb.d != none GROUP ALL;",
+             WHERE !type::is::array(record::id(id)) AND in.deleted != true \
+             AND world_trans.d != none AND aabb.d != none GROUP ALL;",
         )
         .await
         .map_err(|error| anyhow::anyhow!("查询可用包围盒指针数失败: {error}"))?
@@ -292,8 +295,20 @@ fn validate_room_tree_coverage(tree_entries: usize, db_pointers: usize) -> anyho
 }
 
 /// 读取当前树/库覆盖率并 fail-closed 校验。
+///
+/// 第一道是状态机门（一致性闭环方案 §6）：空间树不在可消费状态时直接拒绝，
+/// 错误带 `SPATIAL_TREE_NOT_READY` 码。`ReadyEmpty` 是**已验证**的空库
+/// （usable 指针为 0），覆盖率无从谈起也无需谈——此时面板都不会有几何，
+/// 整间分支自然算不出成员；旧的 `>0` 判据在这里让位于状态机，不再把
+/// 验证过的空库误报成故障。
 async fn ensure_room_tree_coverage() -> anyhow::Result<(usize, usize)> {
+    crate::fast_model::spatial_state::ensure_spatial_ready()?;
     let tree_entries = GLOBAL_AABB_TREE.read().await.tree.size();
+    if crate::fast_model::spatial_state::current_state()
+        == crate::fast_model::spatial_state::SpatialTreeState::ReadyEmpty
+    {
+        return Ok((tree_entries, 0));
+    }
     let db_pointers = usable_aabb_pointer_count().await?;
     validate_room_tree_coverage(tree_entries, db_pointers)?;
     Ok((tree_entries, db_pointers))
@@ -2336,6 +2351,34 @@ mod tests {
         assert!(validate_room_tree_coverage(100, 100).is_ok());
         // 计数查询失败不会再折成 0 后放行；0 个库指针同样没有正面证据可做破坏性重写。
         assert!(validate_room_tree_coverage(100, 0).is_err());
+    }
+
+    /// 覆盖率闸门的第一道是空间状态机（一致性闭环方案 §6）：状态门在计数查询
+    /// 之前；`ReadyEmpty`（已验证的空库）直接放行而不是被 `>0` 判据误报成故障
+    /// ——旧判据会把「验证过的空库」与「树整库缺失」混为一谈。
+    #[test]
+    fn coverage_gate_asks_the_state_machine_before_counting() {
+        let source = include_str!("room_model.rs");
+        let body = source
+            .split_once("async fn ensure_room_tree_coverage(")
+            .expect("coverage gate must exist")
+            .1
+            .split_once("\n/// 上一次**成功**")
+            .expect("stamp doc follows")
+            .0;
+        let gate_at = body
+            .find("ensure_spatial_ready()")
+            .expect("状态门必须存在");
+        let empty_at = body
+            .find("SpatialTreeState::ReadyEmpty")
+            .expect("ReadyEmpty 必须显式放行");
+        let count_at = body
+            .find("usable_aabb_pointer_count()")
+            .expect("计数查询必须存在");
+        assert!(
+            gate_at < empty_at && empty_at < count_at,
+            "顺序必须是 状态门 → ReadyEmpty 放行 → 计数校验: {body}"
+        );
     }
 
     fn stamp(spatial_epoch: u64, tree_entries: u64) -> RoomBuildStamp {

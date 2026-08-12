@@ -32,6 +32,8 @@ pub mod utils;
 
 pub mod aabb_tree;
 
+pub mod spatial_state;
+
 pub mod coverage_audit;
 
 use aios_core::RefU64;

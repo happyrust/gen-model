@@ -1412,3 +1412,106 @@ async fn dual_startup_define_replay_info_parity() {
     )
     .await;
 }
+
+/// 指针重建的 record-range 分页（一致性闭环方案 D8）：页间无漏无重、版本化数组 id
+/// 行与软删元素行被谓词排除、区间起点重复行由调用方剔重——mem 与 fork 两引擎行为
+/// 一致，且与「单页扫完整表」的结果集完全相等。生产渲染器
+/// （`aabb_tree::render_pointer_scan_page`）与本用例共用同一份 SQL。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_pointer_scan_pagination_agrees() {
+    let Some((mem, fork, _guard)) = dual_dbs("pointer_scan").await else {
+        return;
+    };
+
+    // 种子：4 个 dbnum 段 × 10 行 current；穿插三类必须被排除的行——版本化历史行
+    // （数组 id）、软删元素行、无指针行。elem 序号 1..=10 刻意让字典序与数值序
+    // 不一致（x_10 排在 x_2 之前）：分页正确性只依赖「区间扫描顺序稳定且与整表
+    // 一致」，不依赖任何特定排序。
+    let mut seed = String::new();
+    let mut expected: Vec<String> = Vec::new();
+    for dbnum in [7997u32, 8000, 16777, 24381] {
+        for elem in 1..=10u32 {
+            let id = format!("{dbnum}_{elem}");
+            seed.push_str(&format!(
+                "UPSERT pe:{id} SET noun = 'BOX', deleted = false;\n\
+                 INSERT RELATION INTO inst_relate {{ id: inst_relate:{id}, in: pe:{id}, out: inst_info:{id}, \
+                 world_trans: {{ d: {{ t: 1 }} }}, aabb: {{ d: {{ mins: [0.0, 0.0, 0.0], maxs: [1.0, 1.0, 1.0] }} }} }};\n"
+            ));
+            expected.push(id);
+        }
+    }
+    // 版本化历史行（数组 id，fn::backup_data 遗产形制）：字段齐全也不许进扫描。
+    seed.push_str(
+        "INSERT RELATION INTO inst_relate { id: inst_relate:['7997_1', 5], in: pe:7997_1, out: inst_info:7997_1, \
+         world_trans: { d: { t: 1 } }, aabb: { d: { mins: [0.0, 0.0, 0.0], maxs: [1.0, 1.0, 1.0] } } };\n",
+    );
+    // 软删元素：inst_relate 行还在（DeleteCleanup 未跑），必须被 in.deleted 谓词排除。
+    seed.push_str(
+        "UPSERT pe:8000_99 SET noun = 'BOX', deleted = true;\n\
+         INSERT RELATION INTO inst_relate { id: inst_relate:8000_99, in: pe:8000_99, out: inst_info:8000_99, \
+         world_trans: { d: { t: 1 } }, aabb: { d: { mins: [0.0, 0.0, 0.0], maxs: [1.0, 1.0, 1.0] } } };\n",
+    );
+    // 无指针行：从未刷新过的元素，不进树也不进覆盖率分母。
+    seed.push_str(
+        "UPSERT pe:8000_98 SET noun = 'BOX', deleted = false;\n\
+         INSERT RELATION INTO inst_relate { id: inst_relate:8000_98, in: pe:8000_98, out: inst_info:8000_98, \
+         world_trans: { d: { t: 1 } } };\n",
+    );
+    assert_dual_same("pointer_scan", &mem, &fork, &[seed.as_str()]).await;
+
+    #[derive(serde::Deserialize)]
+    struct WalkRow {
+        row_id: String,
+    }
+    async fn walk(db: &Surreal<Any>, page: usize) -> Vec<String> {
+        let mut cursor: Option<String> = None;
+        let mut ids = Vec::new();
+        loop {
+            let sql =
+                crate::fast_model::aabb_tree::render_pointer_scan_page(cursor.as_deref(), page);
+            let mut response = db
+                .query(&sql)
+                .await
+                .expect("scan page")
+                .check()
+                .expect("scan page ok");
+            let rows: Vec<WalkRow> = response.take(0).expect("decode scan page");
+            let fetched = rows.len();
+            let mut last = None;
+            for row in rows {
+                let repeat = cursor.as_deref() == Some(row.row_id.as_str());
+                last = Some(row.row_id.clone());
+                if !repeat {
+                    ids.push(row.row_id);
+                }
+            }
+            if fetched < page {
+                break;
+            }
+            cursor = last;
+        }
+        ids
+    }
+
+    // 页长 7 不整除 40：每页都有区间起点重复要剔。
+    let mem_ids = walk(&mem, 7).await;
+    let fork_ids = walk(&fork, 7).await;
+    assert_eq!(mem_ids, fork_ids, "两引擎分页轨迹必须一致");
+
+    let mut unique = mem_ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), mem_ids.len(), "分页不得产出重复行: {mem_ids:?}");
+
+    let mut want = expected.clone();
+    want.sort();
+    assert_eq!(
+        unique, want,
+        "分页结果必须与 current 行集合完全相等（无漏无重、排除行不在场）"
+    );
+
+    // 单页扫完整表（page 大于总量）与多页扫描必须同集合。
+    let mut single = walk(&mem, 1000).await;
+    single.sort();
+    assert_eq!(single, want, "单页与多页扫描必须同集合");
+}

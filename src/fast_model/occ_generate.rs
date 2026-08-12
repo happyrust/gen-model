@@ -1015,13 +1015,19 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         // transform inputs. Taking the lock only after `new_boxes` was computed
         // allowed two refreshes of the same refno to calculate A then B, acquire
         // the lock in reverse order, and publish stale A last. The plain direct
-        // path takes the same lock further down, once the expensive input read is
-        // behind it.
-        let mut direct_tree = if staged_writes.is_none() && durable_room_trigger {
-            Some(GLOBAL_AABB_TREE.write().await)
-        } else {
-            None
-        };
+        // path takes the same locks further down, once the expensive input read
+        // is behind it.
+        //
+        // 锁序（一致性闭环方案 D6）：SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE。
+        // 空间串行锁把直写路径与 staged 提交后收敛、指针重建换树段、快照发布
+        // 串成一条线；声明顺序保证释放顺序相反（先还树锁再还串行锁）。
+        let mut _direct_serial = None;
+        let mut direct_tree = None;
+        if staged_writes.is_none() && durable_room_trigger {
+            _direct_serial =
+                Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
+            direct_tree = Some(GLOBAL_AABB_TREE.write().await);
+        }
         let mut rstar_objs = Vec::new();
         let inst_keys = get_inst_relate_keys(chunk);
         let mut sql = format!(
@@ -1106,7 +1112,10 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         // 不把它提前到读输入段——那一段含几何 join，是全量生成里最贵的部分，而镜像
         // 一致性只要求「要不要 bump」与「树到底动没动」由同一个加锁快照裁决。
         // durable 增量的锁更早（读输入之前就取，见上），这里只接管普通直写分支。
+        // 锁序同上：先空间串行锁、后树写锁。
         if staged_writes.is_none() && direct_tree.is_none() {
+            _direct_serial =
+                Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
             direct_tree = Some(GLOBAL_AABB_TREE.write().await);
         }
         let stale_by_refno = if let Some(tree) = direct_tree.as_ref() {
@@ -1197,6 +1206,10 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             )
             .await?;
         }
+
+        // 崩溃窗口 ①（一致性闭环方案 §8）：DB 事务已提交、内存树未同步。epoch 已
+        // 随事务 bump，重启判据必然认出指纹失配并走指针重建。
+        crate::fast_model::spatial_state::failpoint("spatial_direct_after_db_commit");
 
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
         // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入新值。
@@ -1922,6 +1935,55 @@ mod aabb_write_order_tests {
         assert!(
             !body.contains("let mut tree = GLOBAL_AABB_TREE.write().await;"),
             "同步时才临时取锁等于把锁纪律退回原样: {body}"
+        );
+    }
+
+    /// 锁序（一致性闭环方案 D6）：`SPATIAL_STATE_SERIAL` 必须先于 `GLOBAL_AABB_TREE`
+    /// 写锁取得——durable 与普通直写两个获取点都是。次序反过来会与「持串行锁再取
+    /// 树锁」的收敛/重建/落盘路径互相等待，形成死锁。崩溃窗口 ① 的注入点必须落在
+    /// 「事务提交后、树同步前」。回退即红。
+    #[test]
+    fn direct_paths_take_the_spatial_serial_lock_before_the_tree_lock() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
+            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
+            .1
+            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
+            .map(|(body, _)| body)
+            .unwrap_or(source);
+
+        let mut cursor = 0usize;
+        let mut lock_pairs = 0usize;
+        while let Some(offset) =
+            body[cursor..].find("direct_tree = Some(GLOBAL_AABB_TREE.write().await)")
+        {
+            let tree_at = cursor + offset;
+            assert!(
+                body[cursor..tree_at].contains("lock_spatial_serial().await"),
+                "第 {} 个树写锁获取点之前必须先取空间串行锁: {body}",
+                lock_pairs + 1
+            );
+            lock_pairs += 1;
+            cursor = tree_at + 1;
+        }
+        assert_eq!(
+            lock_pairs, 2,
+            "durable 与普通直写应各有一个取锁点: {body}"
+        );
+
+        let commit_at = body
+            .find("execute_surreal_checked(")
+            .expect("direct transaction execution missing");
+        let fail_at = body
+            .find("failpoint(\"spatial_direct_after_db_commit\")")
+            .expect("崩溃窗口 ① 注入点缺失");
+        let sync_at = body
+            .find("tree.sync_refnos(rstar_objs.clone())")
+            .expect("tree sync missing");
+        assert!(
+            commit_at < fail_at && fail_at < sync_at,
+            "崩溃注入点必须落在事务提交后、树同步前: {body}"
         );
     }
 

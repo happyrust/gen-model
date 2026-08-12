@@ -268,11 +268,13 @@ pub fn full_init(
             }
 
             // 5. 空间树（可重建的派生数据；加载失败以空树继续，与 run_cli 一致）。
+            //    降级两态由后台复检收敛（runtime 全局常驻，随进程退出）。
             if let Err(error) =
                 aios_database::fast_model::aabb_tree::load_project_tree_verified().await
             {
                 eprintln!("空间树加载失败（{error:#}），以空树继续");
             }
+            aios_database::fast_model::spatial_state::spawn_spatial_revalidator();
 
             // 6. manager（监控目录解析；后续 enqueue / drain / 生成都用它）。
             crate::db_api::manager().await?;

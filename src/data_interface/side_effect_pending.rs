@@ -233,7 +233,17 @@ impl SideEffectCompensator {
     /// Complete every committed spatial intent before the worker admits another data batch.
     /// Spatial jobs deliberately ignore [`MAX_ATTEMPTS`]: abandoning one would publish a
     /// watermark whose global spatial state can never catch up.
+    ///
+    /// 公开入口负责取空间串行锁（锁序 `STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL
+    /// → GLOBAL_AABB_TREE`：worker 提交路径与派发门先持前者再进来，Python
+    /// `spatial.reconcile` 直接进来——这把锁把此前不设防的 Python 并发收敛也串行化了）。
     pub async fn reconcile_spatial_pending(_mgr: &AiosDBManager) -> anyhow::Result<usize> {
+        let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
+        Self::reconcile_spatial_pending_locked().await
+    }
+
+    /// 已持空间串行锁的收敛主体（启动装载的立即重放、revalidator 复检等持锁方用）。
+    pub(crate) async fn reconcile_spatial_pending_locked() -> anyhow::Result<usize> {
         let query = format!(
             "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
              AND status IN ['pending', 'failed'] ORDER BY updated_at ASC;"
@@ -248,6 +258,7 @@ impl SideEffectCompensator {
             })
             .await?;
         if jobs.is_empty() {
+            Self::promote_state_after_replay().await;
             return Ok(0);
         }
 
@@ -273,11 +284,14 @@ impl SideEffectCompensator {
                 }
             }
             crate::fast_model::aabb_tree::apply_deferred_spatial_mutations(deferred).await?;
-            // 只在树真的动过时落盘（脏位由 remove/refresh 两个变更入口维护）。
-            // 无条件全量序列化有一个销毁性的边界：树加载失败以空树启动的进程若在
-            // 无变更收敛轮里照样序列化，会把**空树**写过 `accel_tree_{project}.bin`，
-            // 覆盖上一次攒下的全量成果。脏位门控同时省掉无变更收敛轮的整树序列化。
-            crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty()
+            // 崩溃窗口 ②（一致性闭环方案 §8）：树已更新、快照未发布。pending 行
+            // 还在（销账在发布之后），重启按 ReplayRequired 重放收敛。
+            crate::fast_model::spatial_state::failpoint("spatial_after_tree_sync");
+            // 只在树真的动过时落盘（脏位由 remove/refresh 两个变更入口维护），
+            // 且落盘走发布门：树内容不可信的状态（DegradedBlocked 等）不许把
+            // 残缺内容写过好文件——旧的「空树覆盖项目树文件」销毁性边界现在由
+            // 状态门 + 脏位双重挡住。脏位门控同时省掉无变更收敛轮的整树序列化。
+            crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty_locked()
                 .await
                 .map(|_| ())
         }
@@ -296,13 +310,30 @@ impl SideEffectCompensator {
             return Err(error);
         }
 
+        // 崩溃窗口 ④（一致性闭环方案 §8）：快照已发布、pending 未销账。重启时
+        // 指纹相等 + pending 在场 → ReplayRequired，重放幂等追认后销账。
+        crate::fast_model::spatial_state::failpoint("spatial_after_publish_before_ack");
         for job in &jobs {
             crate::surreal_retry::retry_sul_db_transport("确认空间收敛任务完成", || {
                 Self::mark_done(SideEffectKind::SpatialReconcile, job.dbnum, job.end_sesno)
             })
             .await?;
         }
+        Self::promote_state_after_replay().await;
         Ok(jobs.len())
+    }
+
+    /// 重放收敛成功后的状态晋升（方案 D5）：启动把状态置为 `ReplayRequired` 时，
+    /// 一次成功的收敛意味着「树已追平全部已提交意图」，按树条目数晋升
+    /// Ready / ReadyEmpty。其他状态不动——重建/复检各自管理自己的迁移，
+    /// 常态 Ready 下的收敛也无需反复改写状态。
+    async fn promote_state_after_replay() {
+        use crate::fast_model::spatial_state::{self, SpatialTreeState};
+        if spatial_state::current_state() == SpatialTreeState::ReplayRequired {
+            let entries = aios_core::room::room::GLOBAL_AABB_TREE.read().await.size();
+            spatial_state::set_ready_by_entries(entries);
+            println!("空间意图重放收敛完成，空间树进入可消费状态（{entries} 条）");
+        }
     }
 
     /// 还有没有已提交、但空间树尚未收敛的意图。
@@ -318,6 +349,27 @@ impl SideEffectCompensator {
             .await?
             .check()?;
         Ok(!response.take::<Vec<Thing>>(0)?.is_empty())
+    }
+
+    /// 待收敛空间意图的条数（/health `spatial_tree.pending` 的同源镜像；
+    /// 权威口径仍是 `spatial_reconcile.pending`，两处同一查询谓词）。
+    pub async fn count_pending_spatial_work() -> anyhow::Result<usize> {
+        #[derive(Deserialize)]
+        struct Row {
+            count: i64,
+        }
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT count() FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND status IN ['pending', 'failed'] GROUP ALL;"
+            ))
+            .await?
+            .check()?;
+        Ok(response
+            .take::<Vec<Row>>(0)?
+            .first()
+            .map(|row| row.count.max(0) as usize)
+            .unwrap_or(0))
     }
 
     pub async fn spatial_reconcile_status() -> anyhow::Result<serde_json::Value> {
@@ -575,31 +627,51 @@ mod tests {
         );
     }
 
-    /// 收敛只许在树真的动过时落盘。
+    /// 收敛只许在树真的动过时落盘，且全程持空间串行锁。
     ///
     /// 无条件 `persist_aabb_tree()` 的销毁性边界：树加载失败以空树启动的进程里，
     /// 删除清理照样寄存 remove 意图、尾事务照写 spatial 行——收敛轮对空树摘除
     /// 零条之后，会把**空树**序列化覆盖 `accel_tree_{project}.bin`，销毁上一次
-    /// 攒下的全量成果。脏位门控的 `persist_aabb_tree_if_dirty` 在两个变更入口
-    /// （摘除 > 0、刷新换过条目）之外不落盘，正好挡住这条路。真实落盘写 cwd
-    /// 文件，单测不能实跑，只能钉源码。
+    /// 攒下的全量成果。脏位门控 + 快照发布门（状态机）双重挡住这条路。真实落盘
+    /// 写 cwd 文件，单测不能实跑，只能钉源码。
     #[test]
     fn reconcile_persists_only_a_mutated_tree() {
         let source = include_str!("side_effect_pending.rs");
-        let body = source
+        let wrapper = source
             .split_once("pub async fn reconcile_spatial_pending(")
             .expect("reconcile_spatial_pending must exist")
+            .1
+            .split_once("pub(crate) async fn reconcile_spatial_pending_locked(")
+            .expect("locked variant must follow")
+            .0;
+        assert!(
+            wrapper.contains("lock_spatial_serial().await"),
+            "公开收敛入口必须先取空间串行锁: {wrapper}"
+        );
+        let body = source
+            .split_once("pub(crate) async fn reconcile_spatial_pending_locked(")
+            .expect("reconcile body must exist")
             .1
             .split_once("pub async fn has_pending_spatial_work(")
             .expect("reconcile 之后是 pending 探针")
             .0;
         assert!(
-            body.contains("persist_aabb_tree_if_dirty("),
-            "收敛必须走脏位门控的落盘: {body}"
+            body.contains("persist_aabb_tree_if_dirty_locked("),
+            "收敛必须走脏位门控的持锁落盘: {body}"
         );
         assert!(
             !body.contains(concat!("persist_aabb_tree", "()")),
             "无条件全量落盘会让空树覆盖项目树文件: {body}"
+        );
+        // 状态晋升必须发生在销账（mark_done）之后：pending 还没销就把消费者放行，
+        // 门禁窗口内的房间轮会拿「已知陈旧」的树改写归属。
+        let done_at = body.rfind("mark_done").expect("必须销账");
+        let promote_at = body
+            .rfind("promote_state_after_replay()")
+            .expect("成功路径必须晋升状态");
+        assert!(
+            done_at < promote_at,
+            "状态晋升必须在销账之后: {body}"
         );
     }
 }
