@@ -178,3 +178,12 @@ P2 加固根因，P3/P4 独立收尾（P3 完成后再提 P0 的提交 4）。P2
   的历史使命到那时移交，属预期内的契约演进而非回退。
 - **P3 / P4**：按计划落地，无偏差。`cargo check`（主库 + python 绑定 crate）与
   `cargo test --lib --features http_api` 全绿。
+- **P3 的同门缺陷补记**（`d75d9820`，python 绑定线的收尾提交）：审查只盘到
+  `export_obj`，但 `aios_db.db.inst` 有**一模一样**的
+  `in = … OR anc CONTAINS …` 全表扫谓词与 `unwrap_or_default()` 静默 0 —— 同一
+  条索引纪律，两个入口，只治一个等于没治。已一并改掉，形态上多一段：`anc` 索引
+  → `->inst_relate` 图跳回落 → 两条都空且库里还有未回填行时才报错。多这一段是
+  因为 `db.inst` 的空结果是**合法答案**（元素真没几何），而 `export_obj` 的空
+  结果本就是错误条件。P3 缺的「行为测试」也在该提交补上：
+  `python/tests/test_connection_layer.py` 覆盖三段式的每一段，跑在 conftest 自起
+  的一次性内存 SurrealDB 上。
