@@ -876,4 +876,90 @@ mod tests {
         expected.extend([true; 3]);
         assert_eq!(state, expected);
     }
+
+    /// 2026-08-12 epoch 痕迹方案 §6 场景 1 的 live 验收：直写删除 → 落盘前
+    /// 「崩溃」→ 重启按指针重建，幽灵条目消失、指纹追平、/health 全程说得出话。
+    ///
+    /// 崩溃用「清空内存树 + 重新走启动加载」模拟：崩溃真正丢失的只有进程态
+    /// （内存树与脏标记），磁盘文件的陈旧与库侧 epoch 的痕迹与真实崩溃逐字节
+    /// 相同，恢复判据走的又是同一个 `load_project_tree_verified`——语义等价，
+    /// 差的只是没真的 kill 进程。真杀进程的剧本仍归 W5 门禁的故障注入轮。
+    ///
+    /// 注意：本用例会推进沙箱库的 spatial epoch、并以「按库指针重建」的结果
+    /// 覆盖项目树文件（终态自洽）。用 testbed 沙箱跑（`DB_OPTION_FILE` 指向
+    /// `python/testbed/DbOption-pytest`），别对着正式库。单独 `--exact` 跑最
+    /// 可靠：`startup_verdict` 是进程内一次性记录，与其它会触发启动加载的
+    /// 用例同进程会互相占位（本用例族期望值相同，混跑不误判，但别依赖）。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: 用 testbed 沙箱库跑（见 python/testbed/README.md）；会推进 epoch 并重建项目树文件"]
+    async fn live_direct_delete_crash_before_persist_recovers_by_rebuild() {
+        use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+
+        aios_core::init_test_surreal().await.expect("connect surreal");
+        let pending =
+            crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
+                .await
+                .expect("query pending spatial work");
+        assert!(
+            !pending,
+            "沙箱库还有未收敛的空间意图（会走 HealByReplay 而不是本用例要验的 Rebuild）：\
+             先起服务把收敛跑完，或清掉 incr_side_effect_pending 的 spatial_reconcile 行"
+        );
+
+        // 幽灵构件：只存在于内存树与树文件里，库中没有它的任何指针行——
+        // 正是「已删元素的旧包围盒」在崩溃窗口里的形态。
+        let ghost = RefnoEnum::from("4009999901/77");
+        let ghost_box = parry3d::bounding_volume::Aabb::new(
+            [0.0f32, 0.0, 0.0].into(),
+            [1000.0f32, 1000.0, 1000.0].into(),
+        );
+        GLOBAL_AABB_TREE
+            .write()
+            .await
+            .sync_refnos(vec![RStarBoundingBox::new(ghost_box, ghost, "BOX".to_string())]);
+        crate::fast_model::aabb_tree::persist_aabb_tree()
+            .await
+            .expect("baseline persist");
+        let baseline = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(baseline["drift"], false, "基线必须自洽: {baseline}");
+        let epoch_before = baseline["db_epoch"].as_u64().expect("baseline db epoch");
+
+        // 直写删除：树上有它 → 房间边删除与 epoch bump 同事务，随后摘树。
+        delete_room_membership(&[ghost], 16)
+            .await
+            .expect("direct delete");
+        let after_delete = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(
+            after_delete["db_epoch"].as_u64(),
+            Some(epoch_before + 1),
+            "在树上的直写删除必须恰好 bump 一次: {after_delete}"
+        );
+        assert_eq!(
+            after_delete["drift"], true,
+            "落盘前的漂移必须在 /health 可见（修复前这里恒 false）: {after_delete}"
+        );
+
+        // 模拟崩溃重启：进程态（内存树、脏标记）丢失，磁盘上是陈旧文件。
+        *GLOBAL_AABB_TREE.write().await = AccelerationTree::load(Vec::new());
+        crate::fast_model::aabb_tree::load_project_tree_verified()
+            .await
+            .expect("startup load");
+        let recovered = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(
+            recovered["startup_verdict"], "rebuilt",
+            "指纹失配且无意图必须走指针重建: {recovered}"
+        );
+        assert!(
+            !GLOBAL_AABB_TREE
+                .read()
+                .await
+                .iter()
+                .any(|entry| entry.refno == ghost.refno()),
+            "重建后的树不得再含幽灵条目（库里本没有它的指针）"
+        );
+        assert_eq!(
+            recovered["drift"], false,
+            "重建落盘后指纹必须追平: {recovered}"
+        );
+    }
 }

@@ -1094,6 +1094,63 @@ mod tests {
         assert!(sql.contains("(value?:0) + 1"), "必须缺省 0 自增一: {sql}");
     }
 
+    /// 仓级钉（2026-08-12 审查修复计划 P2）：`GLOBAL_AABB_TREE` 的写入点必须
+    /// 恰好落在下面这份**已审计**的白名单里。每个写入点自己的源码钉只护得住
+    /// 所在文件；新文件里冒出来的新写点没有任何测试会红——而「动树却不留库侧
+    /// 痕迹」正是直写路径静默漂移（H1/H2，2026-08-12 修复）的根因。
+    ///
+    /// 这条红了怎么办：新写入点要么满足不变量「变更与 epoch bump / 意图行同
+    /// 事务提交，事务成功后才动树、动完标脏」（ADR-010 2026-08-12 增补）并配上
+    /// 自己的源码钉，然后把文件加进白名单；要么改走既有入口（暂存 defer /
+    /// durable 事务 / 提交后收敛）。白名单文件不再写树时把它摘掉，保持名单诚实。
+    #[test]
+    fn tree_write_sites_stay_on_the_audited_whitelist() {
+        fn collect(dir: &std::path::Path, root: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read src dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    collect(&path, root, hits);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && std::fs::read_to_string(&path)
+                        .expect("read source file")
+                        .contains("GLOBAL_AABB_TREE.write()")
+                {
+                    hits.push(
+                        path.strip_prefix(root)
+                            .expect("under src")
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        collect(&root, &root, &mut hits);
+        hits.sort();
+
+        let whitelist = [
+            // 直写删除：锁下探测 → 边删除+bump 同事务 → 摘树 → 标脏。
+            "data_interface/helper.rs",
+            // 启动加载/指针重建与提交后收敛：本身即自愈动作，落盘自带盖章。
+            "fast_model/aabb_tree.rs",
+            // 直写/durable 刷新：指针+bump 同事务，锁跨 [判定 → 事务 → 同步]。
+            "fast_model/occ_generate.rs",
+            // 房间测试夹具（#[cfg(test)]，不在生产路径）。
+            "fast_model/room_fixture.rs",
+        ]
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            hits, whitelist,
+            "GLOBAL_AABB_TREE 的写入点集合变了。新增写点：先满足「变更与 epoch bump/\
+             意图行同事务、成功后才动树、动完标脏」并配源码钉，再进白名单；移除写点：\
+             把文件从白名单摘掉"
+        );
+    }
+
     /// D8（ADR-010）：`accel_tree.bin` 里只要残留几条，旧的 `is_empty()` 判断就不会触发
     /// 重建，树永久停在残留状态——实测历史日志里它最多只到 45 条，而库里有 906 个包围盒。
     /// 本用例连真库，对比重建前后的条目数。

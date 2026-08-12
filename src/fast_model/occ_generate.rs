@@ -1980,6 +1980,124 @@ mod aabb_write_order_tests {
             .expect("targeted generation must refresh after boolean relations");
         assert!(boolean_at < final_refresh_at, "{body}");
     }
+
+    /// 2026-08-12 epoch 痕迹方案 §6 场景 2/5 的 live 验收：普通直写刷新
+    /// （全量生成 / `manual_update_aabbs` 走的 H2 分支）的三段语义——
+    /// 树上缺该条目时刷新必 bump、逐位相等的重刷不 bump、落盘前「崩溃」后
+    /// 重启按指针重建且树追上库。
+    ///
+    /// 崩溃用「清空内存树 + 重新走启动加载」模拟，语义等价性与
+    /// `helper.rs::live_direct_delete_crash_before_persist_recovers_by_rebuild`
+    /// 的注释同一论证；真杀进程的剧本归 W5 门禁故障注入轮。用 testbed 沙箱跑
+    /// （先 `run_full_loop.py` 完成基线+生成），会推进 epoch 并重建项目树文件。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: 用已跑过基线+生成的 testbed 沙箱库（见 python/testbed/README.md）"]
+    async fn live_direct_refresh_crash_before_persist_recovers_by_rebuild() {
+        use aios_core::accel_tree::acceleration_tree::AccelerationTree;
+        use aios_core::room::room::GLOBAL_AABB_TREE;
+
+        aios_core::init_test_surreal().await.expect("connect surreal");
+        let pending =
+            crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
+                .await
+                .expect("query pending spatial work");
+        assert!(
+            !pending,
+            "沙箱库还有未收敛的空间意图（会走 HealByReplay 而不是本用例要验的 Rebuild）"
+        );
+
+        // 采一个已生成、带双指针的普通实例（TUBI 走指针回退分支，不在本用例口径）。
+        let mut response = aios_core::SUL_DB
+            .query(
+                "SELECT VALUE in FROM inst_relate \
+                 WHERE generic != 'TUBI' AND aabb.d != none AND world_trans.d != none LIMIT 1;",
+            )
+            .await
+            .expect("sample query transport")
+            .check()
+            .expect("sample query");
+        let sample: Option<aios_core::RefnoEnum> = response
+            .take::<Vec<aios_core::RefnoEnum>>(0)
+            .expect("decode sample refno")
+            .into_iter()
+            .next();
+        let refno =
+            sample.expect("沙箱库里没有带指针的实例——先跑 python/testbed/run_full_loop.py");
+
+        // 基线：树上还没有它 → 第一次刷新必须 bump（first sighting counts as changed），
+        // 随后落盘，文件与库指纹自洽。
+        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
+            .await
+            .expect("baseline refresh");
+        assert!(
+            GLOBAL_AABB_TREE
+                .read()
+                .await
+                .iter()
+                .any(|entry| entry.refno == refno.refno()),
+            "样本元素必须能算出包围盒并进树——换个样本或先跑生成"
+        );
+        crate::fast_model::aabb_tree::persist_aabb_tree()
+            .await
+            .expect("baseline persist");
+        let baseline = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(baseline["drift"], false, "基线必须自洽: {baseline}");
+        let epoch_baseline = baseline["db_epoch"].as_u64().expect("baseline db epoch");
+
+        // 逐位相等的重刷：库侧「树应有内容」没变，不得 bump、不得作废树文件。
+        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
+            .await
+            .expect("no-op refresh");
+        let unchanged = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(
+            unchanged["db_epoch"].as_u64(),
+            Some(epoch_baseline),
+            "逐位相等的重刷不得 bump: {unchanged}"
+        );
+        assert_eq!(unchanged["drift"], false, "无变化重刷不得制造漂移: {unchanged}");
+
+        // 树落后于库（全量生成中途的形态）：刷新必须 bump 并把树追上。
+        GLOBAL_AABB_TREE
+            .write()
+            .await
+            .remove_by_refnos(&std::collections::HashSet::from([refno.refno()]));
+        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
+            .await
+            .expect("catch-up refresh");
+        let bumped = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(
+            bumped["db_epoch"].as_u64(),
+            Some(epoch_baseline + 1),
+            "树上缺条目的刷新必须恰好 bump 一次: {bumped}"
+        );
+        assert_eq!(
+            bumped["drift"], true,
+            "落盘前的漂移必须在 /health 可见: {bumped}"
+        );
+
+        // 模拟崩溃重启：进程态丢失，文件陈旧 → 指纹失配且无意图 → 指针重建。
+        *GLOBAL_AABB_TREE.write().await = AccelerationTree::load(Vec::new());
+        crate::fast_model::aabb_tree::load_project_tree_verified()
+            .await
+            .expect("startup load");
+        let recovered = crate::fast_model::aabb_tree::spatial_tree_status().await;
+        assert_eq!(
+            recovered["startup_verdict"], "rebuilt",
+            "指纹失配且无意图必须走指针重建: {recovered}"
+        );
+        assert!(
+            GLOBAL_AABB_TREE
+                .read()
+                .await
+                .iter()
+                .any(|entry| entry.refno == refno.refno()),
+            "重建后的树必须追上库指针（样本元素回到树上）"
+        );
+        assert_eq!(
+            recovered["drift"], false,
+            "重建落盘后指纹必须追平: {recovered}"
+        );
+    }
 }
 
 #[cfg(test)]
