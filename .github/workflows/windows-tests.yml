@@ -197,17 +197,21 @@ jobs:
             throw 'OpenCASCADE archive checksum mismatch'
           }
           New-Item -ItemType Directory -Force $extract, "$root\include\opencascade", "$root\lib", "$root\bin" | Out-Null
+          # 三方 bin 全量取，不再逐个点名：windows-binary.yml 只点了 tbb12 与
+          # jemalloc，那边够用是因为它只编译打包、从不真的加载；这里要 import
+          # 扩展，TK*.dll 的**传递**依赖（tbbmalloc / freetype 等）少一个就是
+          # "DLL load failed"，而错误信息不会告诉你少的是哪个。
           tar -xf $archive -C $extract `
             "opencascade-$env:OCC_VERSION-vc14-64/inc/*" `
             "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/lib/*" `
             "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/bin/*" `
-            '3rdparty-vc14-64/tbb-2021.13.0-x64/bin/tbb12.dll' `
-            '3rdparty-vc14-64/jemalloc-vc14-64/bin/jemalloc.dll'
+            '3rdparty-vc14-64/*/bin/*'
           Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
           Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
           Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
-          Copy-Item "$extract\3rdparty-vc14-64\tbb-2021.13.0-x64\bin\tbb12.dll" "$root\bin"
-          Copy-Item "$extract\3rdparty-vc14-64\jemalloc-vc14-64\bin\jemalloc.dll" "$root\bin"
+          Get-ChildItem "$extract\3rdparty-vc14-64" -Recurse -Filter *.dll |
+            Where-Object { $_.DirectoryName -like '*\bin' } |
+            Copy-Item -Destination "$root\bin" -Force
           "OCC_ROOT=$root" >> $env:GITHUB_ENV
           # 运行期也要找得到 TK*.dll：包装层按 PATH 逐目录 os.add_dll_directory。
           "$root\bin" >> $env:GITHUB_PATH
@@ -263,6 +267,20 @@ jobs:
           $wheel = Get-ChildItem "$env:CARGO_TARGET_DIR\wheels\*.whl" | Select-Object -First 1
           if (-not $wheel) { throw 'maturin 没有产出 wheel' }
           python -m pip install --force-reinstall $wheel.FullName
+
+      # 先单独试一次 import：DLL 缺失会让整档 60+ 条用例一起变成同一条
+      # "DLL load failed"，噪声盖过信号。这一步失败就直接把 OCC bin 的清单打出来，
+      # 下一轮不用靠猜。
+      - name: Smoke-import the extension
+        shell: pwsh
+        run: |
+          Write-Host "OCC bin DLL 数: $((Get-ChildItem "$env:OCC_ROOT\bin\*.dll").Count)"
+          python -c "import aios_db; print('import ok:', ' '.join(sorted(aios_db.__all__)))"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '== OCC_ROOT\bin 内容 =='
+            Get-ChildItem "$env:OCC_ROOT\bin" -Name
+            throw "import aios_db failed ($LASTEXITCODE)"
+          }
 
       - name: Run offline binding tests
         shell: pwsh
