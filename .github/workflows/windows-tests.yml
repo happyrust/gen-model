@@ -274,13 +274,102 @@ jobs:
       - name: Smoke-import the extension
         shell: pwsh
         run: |
+          # "DLL load failed" 不说是哪个 DLL，所以逐个点名地试：先确认 OCC bin
+          # 在 PATH 上（包装层按 PATH 注册 DLL 目录），再按 pyd 的直接依赖清单
+          # （dumpbin 实测的 16 个 TK）逐个裸名加载，第一个失败的就是缺口。
+          $probe = @'
+          import os, struct, sys, sysconfig
+
+
+          def pe_imports(path):
+              """读 PE 导入表，列出这个模块直接依赖哪些 DLL（不依赖 dumpbin）。"""
+              data = open(path, "rb").read()
+              pe = struct.unpack_from("<I", data, 0x3C)[0]
+              coff = pe + 4
+              sections, = struct.unpack_from("<H", data, coff + 2)
+              opt_size, = struct.unpack_from("<H", data, coff + 16)
+              opt = coff + 20
+              magic, = struct.unpack_from("<H", data, opt)
+              imp_rva, = struct.unpack_from("<I", data, opt + (112 if magic == 0x20B else 96) + 8)
+              table = []
+              for i in range(sections):
+                  base = opt + opt_size + i * 40
+                  vsz, va, _sz, raw = struct.unpack_from("<IIII", data, base + 8)
+                  table.append((va, max(vsz, 1), raw))
+
+              def at(rva):
+                  for va, vsz, raw in table:
+                      if va <= rva < va + vsz:
+                          return raw + (rva - va)
+                  return None
+
+              names, off = [], at(imp_rva)
+              while off is not None:
+                  desc = data[off:off + 20]
+                  if len(desc) < 20 or not any(desc):
+                      break
+                  name_rva, = struct.unpack_from("<I", desc, 12)
+                  if not name_rva:
+                      break
+                  start = at(name_rva)
+                  names.append(data[start:data.index(b"\x00", start)].decode("ascii"))
+                  off += 20
+              return names
+
+
+          # wheel 安装在 purelib 下；本地 `maturin develop` 是 editable，包在源码树里。
+          # find_spec 只定位不执行 __init__，所以 import 失败时它依然给得出路径。
+          pyd = os.path.join(sysconfig.get_paths()["purelib"], "aios_db", "_aios_db.pyd")
+          if not os.path.isfile(pyd):
+              import importlib.util
+              spec = importlib.util.find_spec("aios_db")
+              for root in (spec.submodule_search_locations if spec else []) or []:
+                  candidate = os.path.join(root, "_aios_db.pyd")
+                  if os.path.isfile(candidate):
+                      pyd = candidate
+                      break
+          print("pyd exists    =", os.path.isfile(pyd), pyd)
+          occ_bin = os.path.join(os.environ.get("OCC_ROOT", ""), "bin")
+          print("OCC bin       =", occ_bin, os.path.isdir(occ_bin))
+          print("occt on PATH  =", [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                                    if "occt" in p.lower()])
+
+          # 与 aios_db/__init__.py 的 _add_native_dll_dirs 同款：注册 PATH 上每个目录。
+          # 只注册 OCC bin 是不够的——TK*.dll 自己还要三方 DLL，本机上它们散在别处，
+          # 那样探针会在能正常 import 的机器上也误报。
+          search = []
+          for entry in os.environ.get("PATH", "").split(os.pathsep):
+              entry = entry.strip().strip('"')
+              if entry and os.path.isdir(entry):
+                  try:
+                      os.add_dll_directory(entry)
+                      search.append(entry)
+                  except OSError:
+                      pass
+          search += [os.path.dirname(sys.executable), os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")]
+
+          if os.path.isfile(pyd):
+              missing = []
+              for dll in pe_imports(pyd):
+                  if dll.lower().startswith("api-ms-win"):
+                      continue  # API set，由系统转发，不落地成文件
+                  if not any(os.path.isfile(os.path.join(d, dll)) for d in search):
+                      missing.append(dll)
+              print("direct imports:", len(pe_imports(pyd)))
+              print("NOT FOUND     :", missing or "<none>")
+
+          try:
+              import aios_db
+              print("import ok:", " ".join(sorted(aios_db.__all__)))
+          except Exception as error:
+              print("import failed:", error)
+              sys.exit(1)
+          '@
+          $probePath = Join-Path $env:RUNNER_TEMP 'dll_probe.py'
+          Set-Content -LiteralPath $probePath -Value $probe -Encoding utf8
           Write-Host "OCC bin DLL 数: $((Get-ChildItem "$env:OCC_ROOT\bin\*.dll").Count)"
-          python -c "import aios_db; print('import ok:', ' '.join(sorted(aios_db.__all__)))"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host '== OCC_ROOT\bin 内容 =='
-            Get-ChildItem "$env:OCC_ROOT\bin" -Name
-            throw "import aios_db failed ($LASTEXITCODE)"
-          }
+          python $probePath
+          if ($LASTEXITCODE -ne 0) { throw "import aios_db failed ($LASTEXITCODE)" }
 
       - name: Run offline binding tests
         shell: pwsh
