@@ -87,6 +87,16 @@ __pycache__/
 # 会话草稿工作区（仓库根与 python/ 下都会出现，只在本机有意义）
 .scratch/
 
+# Python 绑定测试沙箱的重型/可再生数据（配置与脚本入库；数据用
+# python/testbed/Sync-TestbedProjects.ps1 重灌，SurrealDB 数据目录可随时重基线）
+/python/testbed/projects/
+/python/testbed/.surreal/
+/python/testbed/meshes/
+/python/testbed/out/
+
+# 房间增量 pytest 的夹具 mesh 产物（conftest 自建，随时可重造）
+/python/tests/.meshes/
+
 # output/ 是运行产物目录（截图、跑批日志、控制台抓取、E3D 插件 DLL、一次性 SurrealQL、
 # 逆向中间快照、按场次归档的演练目录），默认全忽略；只放行下列仓库资产：
 #   - 探针脚本

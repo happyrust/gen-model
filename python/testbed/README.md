@@ -1,0 +1,57 @@
+# Python 绑定测试沙箱（testbed）
+
+专门给 `aios_db`（PyO3 绑定）做**隔离测试**的独立环境：不用停 9099/8022 的在跑
+服务、不碰 8009 正式库，就能放心测执行层的 mutating 链路（基线 / 增量 / 生成 /
+房间）。
+
+## 隔离原理（三条独立，谁也踩不到谁）
+
+| 资源 | 生产 | 沙箱 |
+|---|---|---|
+| E3D 项目文件 | `D:/AVEVA/Projects/E3D3.1`（9099 服务监控中） | `testbed/projects` 副本（只镜像 `*000` 库文件目录） |
+| 单实例锁 | 真实项目根下 `.gen-model.instance.lock` | 项目**副本**根下的锁——`full_init` 拿的是自己的锁 |
+| SurrealDB | 8009（`.surreal/ams-8009`） | 8019（`testbed/.surreal/pytest-ams`），可与 8009 同时跑 |
+| mesh 产物 | 仓库 assets | `testbed/meshes` |
+
+`projects/`、`.surreal/`、`meshes/`、`out/` 都被 .gitignore 排除——坏了、想从头
+再来，删掉重灌即可，零心理负担。
+
+## 使用步骤
+
+```powershell
+# ① 灌项目副本（一次性；想刷新/还原也是它，/MIR 镜像语义）
+.\python\testbed\Sync-TestbedProjects.ps1
+
+# ② 起沙箱 SurrealDB（独立终端常驻；用仓库自带 fork 2.1.x，版本守卫继承 8009 脚本）
+.\python\testbed\Start-TestSurreal.ps1
+
+# ③ 跑全链路冒烟：解析 → 基线(按需CATA) → 单根生成 → 导出OBJ → 房间/收尾
+cd python
+.venv\Scripts\python.exe testbed\run_full_loop.py
+```
+
+首跑会做 7997 的全量基线（分钟级）；之后水位在位，重复跑只走生成与收尾
+（`--force-baseline` 可强制重基线，`--parse-only` 只测解析层）。
+
+## 常用变体
+
+```powershell
+# 换库/换样本构件
+.venv\Scripts\python.exe testbed\run_full_loop.py --dbnum 7998 --name /SOME-EQUI
+
+# 交互调试：所有 aios_db API 直接对着沙箱用
+.venv\Scripts\python.exe -i -c "import aios_db; aios_db.set_config(r'testbed\DbOption-pytest')"
+```
+
+现有 `scripts/smoke_m1..m5.py` 仍指向真实项目与 8009（历史验收基线），沙箱
+不动它们；要在沙箱里复跑，把脚本里的 `set_config` 指到 `testbed/DbOption-pytest`
+即可。
+
+## 注意
+
+- SurrealDB 必须用仓库自带 fork 2.1.x（`Start-TestSurreal.ps1` 已带版本守卫），
+  PATH 上的 3.x 会把 RocksDB 数据目录写坏（见 `Start-Surreal8009.ps1` 头注释）。
+- 沙箱数据目录若被写坏：停库 → 删 `testbed/.surreal` → 重起重基线，几分钟的事。
+- `DbOption-pytest.toml` 的键面与仓库根 `DbOption.toml` 保持同步（差异只有
+  project_path / v_port / meshes_path / http_api_addr 四处），根配置增删必填键
+  时这里要跟着改，否则 config 反序列化报 missing field。

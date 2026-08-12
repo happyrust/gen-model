@@ -32,6 +32,22 @@
     语义无害（判据只比相等），代价是这些路径跑过之后，下次启动的全量房间重建
     对账凭据（`room_build:main`）会判为「空间状态已变」而照跑一次。
 
+### 变更
+
+- **`aios_db.model.export_obj` 改为整树单文件导出，子树收集走 anc 索引**
+  （2026-08-12 增量审查修复计划 P3）：
+  - 对外契约变化：此前每个实例根一个 `{refno}.obj`，现在整棵子树合成一个
+    `{refno}.obj`、内部按「实例_geo_hash」分 `o` 组，`files` 恒为单元素数组；
+    交付单元根（EQUI/BRAN…）自身没有直接实例行也能导出整树。
+  - 子树实例收集只走 `anc CONTAINS`（`idx_inst_relate_anc` 索引查询，anc 含
+    自身故根自己的实例行同谓词圈住），不再 OR 无索引的 `in = …` 臂——那会把
+    整条谓词退化回全表扫（preload.rs 实测账：1.57s vs 3.1ms）。
+  - 响亮失败取代静默空集：refno 解析失败直接报错（此前静默成 0、谓词永不命中）；
+    空结果时按 rs-core `inst_relate_anc_ready` 同口径探一次 `anc = NONE`，
+    存量未回填的库给自愈指引（启动一次 gen-model 回填）而不是谎报「没有实例」。
+  - testbed 全链路（`python/testbed/run_full_loop.py`）导出步骤补形状断言：
+    单文件、`o` 组数 == 导出实例数、triangles > 0、无缺失 mesh。
+
 ## 2026-08-11
 
 ### 变更

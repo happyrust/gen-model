@@ -494,28 +494,90 @@ pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<Py
     let value = py
         .detach(|| {
             runtime().block_on(async {
-                let refno_enum = parse_refno(&refno);
+                // 交付单元根（EQUI/BRAN…）自身通常没有直接 inst_relate——实例挂在
+                // 具体图元上。先按 `db.inst` 同款 anc 谓词把整棵子树的实例 refno
+                // 收齐，再喂给生产同源的 query_valid_insts（有效实例口径的唯一权威，
+                // 只按 key 直取、不做子树展开）。
+                let normalized = crate::db_api::normalize_refno(&refno);
+                let refno_u64 = {
+                    use std::str::FromStr;
+                    aios_core::RefU64::from_str(&normalized)
+                        .map(|r| ((r.get_0() as u64) << 32) | r.get_1() as u64)
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "refno {refno} 解析失败（{error}）——期待 =a/b、a/b 或 a_b 形制。\
+                                 打包值解析不出来时 anc 谓词永不命中，宁可报错也不静默导出空集"
+                            )
+                        })?
+                };
+                // 只走 `anc CONTAINS`（idx_inst_relate_anc 索引查询）。anc 含自身，
+                // 元素自己的实例行也被同一谓词圈住——不要再 OR 一个 `in = …` 臂：
+                // `in` 上没有索引（preload.rs 的实测账：in 谓词全表扫 1.57s，
+                // 图跳/索引 3.1ms），OR 会把整条谓词退化回全表扫。
+                let ids = crate::db_api::take_json(
+                    "SELECT VALUE record::id(id) FROM inst_relate WHERE anc CONTAINS $refno_u64;"
+                        .into(),
+                    vec![("refno_u64", json!(refno_u64))],
+                )
+                .await?;
+                let inst_refnos: Vec<RefnoEnum> = ids
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row.as_str())
+                            .map(parse_refno)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if inst_refnos.is_empty() {
+                    // 空结果分两种，必须说得出是哪种（plant-ui P3 同款纪律：anc 未
+                    // 回填响亮失败带自愈指引，不静默降级）。存量行 anc 未回填的库上
+                    // 子树收集会漏行；gen-model 启动序列的 backfill_inst_relate_anc
+                    // 幂等自愈，只连库不启服务的调试进程才看得到未回填态。探针与
+                    // rs-core `inst_relate_anc_ready` 同口径（LIMIT 1，全回填库扫
+                    // 不到即通过；只在空结果分支付这一次扫描成本）。
+                    let unfilled = crate::db_api::take_json(
+                        "SELECT VALUE record::id(id) FROM inst_relate WHERE anc = NONE LIMIT 1;"
+                            .into(),
+                        vec![],
+                    )
+                    .await?;
+                    if unfilled.as_array().is_some_and(|rows| !rows.is_empty()) {
+                        anyhow::bail!(
+                            "库里还有 anc 未回填的 inst_relate 行，子树收集不可信——\
+                             先启动一次 gen-model（启动回填幂等自愈）再导"
+                        );
+                    }
+                    anyhow::bail!(
+                        "元素 {refno} 及其子树没有任何几何实例（模型没生成过？\
+                         先 model.ensure 再导）"
+                    );
+                }
                 let insts =
-                    aios_database::data_interface::staging::query_valid_insts(&[refno_enum])
+                    aios_database::data_interface::staging::query_valid_insts(&inst_refnos)
                         .await?;
                 if insts.is_empty() {
                     anyhow::bail!(
-                        "元素 {refno} 没有可用几何实例（模型没生成过，或 aabb/world_trans 缺失；\
-                         先 model.ensure 再导）"
+                        "元素 {refno} 有 {} 个实例但全部缺 aabb/world_trans（生成没收口？\
+                         先 model.ensure(force=True) 再导）",
+                        inst_refnos.len()
                     );
                 }
                 let mesh_dir = db_option().await?.get_meshes_path();
                 std::fs::create_dir_all(&dir)
                     .with_context(|| format!("创建输出目录 {} 失败", dir.display()))?;
 
-                let mut files = Vec::new();
+                // 整棵子树合成一个 {refno}.obj，内部按「实例_geo_hash」分 `o` 组；
+                // 顶点/法线用各实例自己的 world_trans × inst.transform 变换到世界坐标。
+                let mut obj = String::new();
+                let mut vertex_base = 1usize;
+                let mut triangles = 0usize;
+                let mut exported = 0usize;
+                let mut total_insts = 0usize;
                 let mut missing = Vec::new();
                 for geom_inst in &insts {
-                    let mut obj = String::new();
-                    let mut vertex_base = 1usize;
-                    let mut triangles = 0usize;
-                    let mut exported = 0usize;
                     for inst in &geom_inst.insts {
+                        total_insts += 1;
                         let mesh_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
                         let Ok(mesh) =
                             aios_core::shape::pdms_shape::PlantMesh::des_mesh_file(&mesh_path)
@@ -525,7 +587,11 @@ pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<Py
                         };
                         let matrix = (geom_inst.world_trans * inst.transform).compute_matrix();
                         let with_normals = mesh.normals.len() == mesh.vertices.len();
-                        obj.push_str(&format!("o {}\n", inst.geo_hash));
+                        obj.push_str(&format!(
+                            "o {}_{}\n",
+                            geom_inst.refno.to_string().replace('/', "_"),
+                            inst.geo_hash
+                        ));
                         for vertex in &mesh.vertices {
                             let p = matrix.transform_point3(*vertex);
                             obj.push_str(&format!("v {} {} {}\n", p.x, p.y, p.z));
@@ -552,17 +618,17 @@ pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<Py
                         vertex_base += mesh.vertices.len();
                         exported += 1;
                     }
-                    let file = dir.join(format!("{}.obj", geom_inst.refno));
-                    std::fs::write(&file, obj)
-                        .with_context(|| format!("写 {} 失败", file.display()))?;
-                    files.push(json!({
-                        "refno": geom_inst.refno.to_string(),
-                        "path": file.display().to_string(),
-                        "insts": geom_inst.insts.len(),
-                        "exported_insts": exported,
-                        "triangles": triangles,
-                    }));
                 }
+                let file = dir.join(format!("{normalized}.obj"));
+                std::fs::write(&file, obj)
+                    .with_context(|| format!("写 {} 失败", file.display()))?;
+                let files = vec![json!({
+                    "refno": normalized,
+                    "path": file.display().to_string(),
+                    "insts": total_insts,
+                    "exported_insts": exported,
+                    "triangles": triangles,
+                })];
                 anyhow::Ok(json!({ "files": files, "missing_meshes": missing }))
             })
         })
