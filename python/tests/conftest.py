@@ -68,8 +68,14 @@ def configured():
     aios_db.set_config(str(_SESSION_CONFIG))
     return aios_db
 
-# 与 DbOption-roomtest.toml 的 project_name 对应的空间树文件（写在仓库根 = cwd）。
+# 与 DbOption-roomtest.toml 的 project_name 对应的空间树产物（写在仓库根 = cwd）。
+#
+# 三个都要列：V2 单文件快照 `.snapshot` 是现行介质，`.bin` + `.meta.json` 是
+# 一次性迁移候选（旧格式，读侧仍认）。漏掉 `.snapshot` 的后果最重——测试对着
+# 一次性内存库算出的快照会**顶掉真项目的快照**；漏掉旧两件只是留下过期文件
+# （对不上指纹即重建），代价小得多。介质再演进时这张表要跟着加。
 TREE_ARTIFACTS = [
+    REPO_ROOT / "accel_tree_AvevaMarineSample.snapshot",
     REPO_ROOT / "accel_tree_AvevaMarineSample.bin",
     REPO_ROOT / "accel_tree_AvevaMarineSample.meta.json",
 ]

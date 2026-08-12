@@ -109,20 +109,49 @@ def test_room_lookups_after_full_build(binding, room_fixture, cwall):
     assert code is None or isinstance(code, str)
 
 
-def test_spatial_tree_status_shape(binding, room_fixture):
-    """只钉「跨形状都在」的稳定核。
+def test_spatial_tree_status_is_passed_through_key_for_key(binding, room_fixture):
+    """绑定必须把 /health `spatial_tree` 那份渲染**一个键不少**地透出来。
 
-    完整键面是 /health `spatial_tree` 渲染半边的对外承诺，权威的形状钉在 Rust
-    侧（G-02 契约迁移期间它正从九键走向十五键）。Python 面跟着钉全集只会在迁移
-    途中两头打架，所以这里只保证绑定确实把那份渲染原样透出来了、且判漂移要用的
-    几个键在场。等迁移落定再收紧成全集。
+    契约本身钉在 Rust 侧渲染半边旁（一致性闭环落地后稳定在十五键），这里钉的是
+    另一件事：透传没有掉键。最容易掉的是取值为 null 的那几个（`snapshot_sha256`
+    在旧格式下恒 null、`pending` 读库失败时 null）——序列化链上任何一环把 null
+    当「没有」处理，Python 看到的形状就与 /health 分家了，而这种差异不会报错，
+    只会让照着 /health 写的脚本在绑定上取到 KeyError。
     """
     status = binding.spatial.tree_status()
-    assert {"entries", "file_epoch", "db_epoch", "drift", "startup_verdict"} <= set(
-        status
-    ), sorted(status)
+    assert set(status) == {
+        "state",
+        "ready",
+        "startup_verdict",
+        "format_version",
+        "entries",
+        "usable_pointer_rows",
+        "invalid_pointer_rows",
+        "pending",
+        "file_epoch",
+        "db_epoch",
+        "drift",
+        "snapshot_sha256",
+        "last_verified_at",
+        "last_rebuild_attempts",
+        "last_error",
+    }, sorted(status)
     assert isinstance(status["entries"], int)
     assert isinstance(status["drift"], bool)
+
+
+def test_python_fixture_path_clears_the_consumer_gate(binding, room_fixture):
+    """房间消费者只在 Ready/ReadyEmpty 放行（`SPATIAL_TREE_NOT_READY`）。
+
+    Rust 的 live 夹具靠 `mark_spatial_tree_fixture_preloaded()` 显式声明装载模式；
+    Python 这条路**不需要**——`full_init` 走的是正经装载器，空库上从指针重建出
+    一棵空树即进 ready 态，夹具随后自己灌树。钉住这个结论，省得下次门禁收紧时
+    对着一堆 `SPATIAL_TREE_NOT_READY` 猜是不是缺了那个标记。
+    """
+    status = binding.spatial.tree_status()
+    assert status["ready"] is True, f"夹具路径应免标记通过消费者门: {status}"
+    # 真跑一次被门禁管着的消费者，证明放行不只是状态位好看。
+    binding.room.build_all()
 
 
 def test_queue_status_shape(binding, room_fixture):

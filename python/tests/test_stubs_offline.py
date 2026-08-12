@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
-"""类型存根与运行时的一致性：`py.typed` 是对外契约，漂了就得红。
+"""「两处声明必须一致」的看守档：对不上就红，别等运行时才发现。
 
-包里声明了 `py.typed`，IDE 与类型检查器只信 `.pyi`。绑定新增一个 pyfunction
-而忘了补存根时，运行时能用、静态面却报「没有这个属性」——2026-08-12 的
-`aios_db.fixture` 就是这么漏的。这一档把两边的名字集合逐个对齐。
+- 类型存根 vs 运行时：包里声明了 `py.typed`，IDE 与类型检查器只信 `.pyi`。绑定
+  新增一个 pyfunction 而忘了补存根时，运行时能用、静态面却报「没有这个属性」
+  ——2026-08-12 的 `aios_db.fixture` 就是这么漏的。
+- conftest 的树产物清单 vs Rust 侧的文件名：漏一个就会拿测试产物顶掉真项目的
+  空间树快照（V2 迁移时差点发生）。
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.offline
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG = Path(__file__).resolve().parents[1] / "pysrc" / "aios_db"
 SUBMODULES = ["db", "fixture", "incr", "model", "parse", "room", "spatial", "sync"]
 
@@ -72,3 +76,30 @@ def test_stub_reexports_every_submodule(configured):
         f"运行时导出的子模块与本文件的清单不符: {sorted(exported)}"
     )
     assert exported <= reexported, f"存根漏了子模块 {sorted(exported - reexported)}"
+
+
+def test_conftest_shelves_every_tree_artifact_rust_can_write():
+    """conftest 的搬挪清单必须盖住 Rust 侧会写出的每一种空间树产物。
+
+    房间档跑在一次性内存库上，但空间树落盘写的是**仓库根**、文件名与真项目
+    同款。conftest 会在 session 前后把它们挪开再还原——清单漏一项，那一项就会
+    被测试产物顶掉。V2 迁移（`.bin` + `.meta.json` → `.snapshot`）时这张表差点
+    没跟上，所以改成从源码反查而不是靠人记。
+    """
+    source = (REPO_ROOT / "src" / "fast_model" / "aabb_tree.rs").read_text(
+        encoding="utf-8"
+    )
+    written = set(re.findall(r'accel_tree_\{\}(\.[A-Za-z0-9.]+)"', source))
+    assert written, "源码里找不到 accel_tree_{} 文件名——正则或文件名约定变了"
+
+    from conftest import TREE_ARTIFACTS
+
+    shelved = {
+        # `.meta.json` 是双段后缀，`Path.suffix` 只给 `.json`。
+        name[name.index(".") :]
+        for name in (path.name for path in TREE_ARTIFACTS)
+    }
+    assert written <= shelved, (
+        f"conftest 的 TREE_ARTIFACTS 漏了 {sorted(written - shelved)}"
+        "——不补的话测试会把它写在仓库根、顶掉真项目的同名产物"
+    )
