@@ -51,9 +51,17 @@ try {
     # 副本时不批跑，避免两个写者互踩。锁文件存在即视为占用（进程死了会留渣，
     # 但"宁可误停，不可互踩"）。
     if ($configText -match 'project_path\s*=\s*"([^"]+)"') {
-        $lock = Join-Path $Matches[1] '.gen-model.instance.lock'
+        $projectsRoot = $Matches[1]
+        $projectName = if ($configText -match 'project_name\s*=\s*"([^"]+)"') { $Matches[1] } else { '' }
+        # 锁在项目**子目录**下（full_init 的单实例锁协议），不在 projects 根。
+        $lock = Join-Path (Join-Path $projectsRoot $projectName) '.gen-model.instance.lock'
         if (Test-Path -LiteralPath $lock) {
-            throw "项目副本锁在: $lock ——testbed 正被别的进程使用（或残留，确认后手动删）"
+            $owner = [IO.File]::ReadAllText($lock)
+            if ($owner -match 'pid=(\d+)' -and (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {
+                throw "项目副本锁属主存活: $lock ——testbed 正被别的进程使用"
+            }
+            # 属主已死的残留锁：full_init 自己也会覆盖，这里只提示不拦。
+            Write-Host "发现残留项目锁（属主已死），full_init 会接管: $lock"
         }
     }
 
@@ -84,6 +92,13 @@ try {
         $index++
         $name = $entry.name
         $timeout = if ($entry.timeout_secs) { [int]$entry.timeout_secs } else { [int]$spec.default_timeout_secs }
+        # 条目级环境变量（如 AIOS_EXPECT_DESI_COUNT / AIOS_GEOM_COVERAGE_ROOTS）：
+        # 跑前设、跑完清，避免串到下一条。
+        $entryEnv = @{}
+        if ($entry.env) {
+            foreach ($prop in $entry.env.PSObject.Properties) { $entryEnv[$prop.Name] = [string]$prop.Value }
+        }
+        foreach ($key in $entryEnv.Keys) { Set-Item -Path "Env:$key" -Value $entryEnv[$key] }
         $log = Join-Path $out ("{0:d2}-{1}.log" -f $index, $name)
         Write-Host ("[{0}/{1}] {2}" -f $index, $entries.Count, $name) -NoNewline
 
@@ -121,6 +136,7 @@ try {
             name = $name; status = $status; seconds = $seconds; log = $log; tail = $tail
         })
         Write-Host ("  {0}（{1}s）" -f $status, $seconds)
+        foreach ($key in $entryEnv.Keys) { Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue }
     }
 
     # ── 汇总 ─────────────────────────────────────────────────────────────────

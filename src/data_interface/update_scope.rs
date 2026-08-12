@@ -351,17 +351,41 @@ mod tests {
 
     /// 真库一跑：上面三个纯函数测不到 SurrealQL 那一趟，而 `resolve` 是整条链
     /// 的命门——`take(0)` 解不出 `Vec<u32>` 的话它会一路 bail 成「范围为空」，
-    /// 预览对所有人直接失败。要连 8009 上的 AvevaMarineSample，故 `ignore`：
-    /// `cargo test -- --ignored resolves_the_real_mdb`。
+    /// 预览对所有人直接失败。连**配置的**已解析 AMS 库（8009 或 testbed），
+    /// `--ignored resolves_the_real_mdb` 单跑。
+    ///
+    /// 断言分两层（批次 2 决策 4）：结构断言对任何解析过 /ALL 的靶成立；
+    /// 「恰好 29 个 DESI」是 8009 生产库的快照语义，写死会让一切别的靶必红
+    /// （批次 1 实测），改由 `AIOS_EXPECT_DESI_COUNT` 门控——8009 批次清单里
+    /// 带上它即恢复原断言力。
     #[tokio::test]
-    #[ignore = "需要本地 SurrealDB（8009 / ns 1516 / AvevaMarineSample）"]
+    #[ignore = "需要本地已解析 AMS 的 SurrealDB（配置目标；精确数断言由 AIOS_EXPECT_DESI_COUNT 门控）"]
     async fn resolves_the_real_mdb_declaration() {
         aios_core::init_test_surreal().await;
         let scope = UpdateScope::resolve("ALL").await.expect("解出 /ALL 的范围");
 
         assert_eq!(scope.mdb(), "/ALL", "名字要补上前导斜杠");
         let declared: Vec<u32> = scope.declared_desi().collect();
-        assert_eq!(declared.len(), 29, "/ALL 的 CURD 里有 29 个 DESI 库号");
+        assert!(
+            !declared.is_empty(),
+            "/ALL 的 CURD 里必须解出至少一个 DESI 库号"
+        );
+        if let Ok(expected) = std::env::var("AIOS_EXPECT_DESI_COUNT") {
+            let expected: usize = expected.parse().expect("AIOS_EXPECT_DESI_COUNT 要是数字");
+            assert_eq!(
+                declared.len(),
+                expected,
+                "/ALL 的 CURD DESI 库号数与靶声明不符"
+            );
+        }
+        // 配置声明的手动库号必须都在范围内——这是「范围来自 MDB 声明」与部署
+        // 配置互证的结构断言，不依赖具体靶的库数。
+        for dbnum in aios_core::get_db_option().manual_db_nums.iter().flatten() {
+            assert!(
+                scope.admits("DESI", *dbnum),
+                "配置的 manual_db_nums 成员 {dbnum} 应在 /ALL 范围内"
+            );
+        }
         // 8000 是 AMS 的主设计库；3001 在项目目录里有文件却不属于这个 MDB
         // ——它正是过去被算进范围的那 258 个之一。
         assert!(scope.admits("DESI", 8000));

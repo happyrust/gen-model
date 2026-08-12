@@ -1,0 +1,25 @@
+{
+  "comment": [
+    "批次 2 · B1（基线即可）：只读或自足写、不依赖既有生成产物。",
+    "前置：B0 四库基线完成（7997/7998/7999/8000 applied_sesno 就位）。",
+    "只读件在前；写库的 anc 回填与 ref_rev 自检殿后。",
+    "resolves_the_real_mdb_declaration 已拆两层断言：这里不带 AIOS_EXPECT_DESI_COUNT，",
+    "跑结构层；8009 专属批次再带精确数恢复原断言力。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 900,
+  "tests": [
+    { "name": "live_database_uncovered_noun_histogram" },
+    { "name": "live_database_uncovered_nouns_resolve_to_modeled_roots" },
+    { "name": "live_issue5_moving_the_reported_cap_plans_a_branch_regeneration" },
+    { "name": "live_issue5_moving_a_container_regenerates_the_branches_beneath_it" },
+    { "name": "scom_geometry_resolves_from_stored_reference_attributes" },
+    { "name": "both_catalogue_shapes_resolve_geometry_from_the_scom" },
+    { "name": "test_ancestor" },
+    { "name": "resolves_the_real_mdb_declaration" },
+    { "name": "live_add_pe_owner_replay_is_idempotent" },
+    { "name": "live_ref_rev_roundtrip_selfcheck" },
+    { "name": "live_backfill_anc_on_configured_db", "timeout_secs": 1800 }
+  ]
+}

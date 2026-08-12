@@ -1,0 +1,40 @@
+{
+  "comment": [
+    "批次 2 · B2（需生成产物在位）：前置 = B0 出清完成（7997 全库生成结论就绪，",
+    "其余三库按各自基线积压出清）。破坏性/执行型殿后。",
+    "live_generate_roots_with_coverage_audit 需要 AIOS_GEOM_COVERAGE_ROOTS 指定根，",
+    "离线定不了好根——先裸跑记录其失败形态，按结论回填台账（预期：阻塞）。",
+    "live_manual_update_project：testbed 副本无新会话，预期走「无事可做」分支，",
+    "结论按实测记录。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 1200,
+  "tests": [
+    { "name": "live_deleted_branch_subtree_includes_known_damp_child" },
+    { "name": "live_transform_branch_includes_known_model_child" },
+    { "name": "live_projams_direct_transform_and_data_only_actions_are_distinct" },
+    { "name": "live_projams_real_attribute_sessions_plan_and_execute_distinctly" },
+    { "name": "live_projams_nested_created_routes_and_generates_delivery_roots" },
+    { "name": "live_projams_negative_geometry_change_regenerates_owning_equi" },
+    { "name": "live_shared_spco_expands_to_generation_roots" },
+    { "name": "live_rebuild_ref_rev_covers_shared_spco_consumers" },
+    { "name": "live_bran_pending_is_actually_regenerated" },
+    { "name": "live_hang_pending_is_actually_regenerated" },
+    { "name": "live_suppo_pending_is_actually_regenerated" },
+    { "name": "live_zone_owned_equi_pending_is_actually_regenerated" },
+    { "name": "live_shared_spco_cascade_regenerates_every_consumer", "timeout_secs": 2400 },
+    { "name": "live_generates_a_missing_model" },
+    { "name": "test_boolean_refno_parse_error" },
+    { "name": "test_gen_geos", "timeout_secs": 2400 },
+    { "name": "live_sweep_inst_relate_flat_on_configured_db", "timeout_secs": 1800 },
+    { "name": "live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling" },
+    { "name": "live_soft_deleted_subtree_removes_all_model_nodes" },
+    { "name": "live_shared_inst_info_is_deleted_only_after_last_reference" },
+    { "name": "live_inst_info_without_geo_relate_is_reclaimed" },
+    { "name": "live_generate_roots_with_coverage_audit" },
+    { "name": "force_init_watcher_incr_once", "timeout_secs": 1800 },
+    { "name": "live_manual_update_project", "timeout_secs": 1800,
+      "env": { "AIOS_MANUAL_UPDATE_PROJECT": "AvevaMarineSample" } }
+  ]
+}

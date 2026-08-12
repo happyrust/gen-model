@@ -1,0 +1,16 @@
+{
+  "comment": [
+    "批次 2 · B0 环境建设（docs/plans/2026-08-12-live-batch2-b-group-plan.md §2）。",
+    "两项不连跑：baseline 之后要先做一次性出清（python 绑定驱动循环 drain）与冷备，",
+    "generation_failure 必须跑在队列稳态之后（它要的就是无积压库）。",
+    "用 -Only 分两次调用：先 manual_baseline，出清+冷备后再 generation_failure。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 900,
+  "tests": [
+    { "name": "live_manual_baseline_all_design_dbnums", "timeout_secs": 7200,
+      "env": { "AIOS_MANUAL_UPDATE_PROJECT": "AvevaMarineSample" } },
+    { "name": "live_generation_failure_keeps_pending_and_watermark", "timeout_secs": 1200 }
+  ]
+}
