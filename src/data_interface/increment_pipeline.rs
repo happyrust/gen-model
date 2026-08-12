@@ -445,6 +445,21 @@ fn should_rebuild_stale_staged_attempt(
     in_staged_window && attempt_end_sesno.is_some_and(|end| end < requested_end_sesno)
 }
 
+/// 交入窗口的采信判定（纯函数）：调用方交出的预收集结果只有与本次要应用的区间
+/// **完全一致**才复用；错位区间（重叠、错一格、方向反了）与没交都回退自行收集。
+/// 部分重叠也拒绝——增量窗口是按「水位+1..=文件最新」整体应用的，掐头去尾的
+/// 子集会让折叠与影响判定漏看会话。崩溃重放分支根本不询问本函数：它按持久化的
+/// 固定区间重新收集（见 `apply_one` 的 prepared 分支）。
+fn accept_handed_in_window(
+    precollected: Option<(RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>)>,
+    requested_range: &RangeInclusive<i32>,
+) -> Option<BTreeMap<u32, Vec<EleOperationData>>> {
+    match precollected {
+        Some((range, eles)) if &range == requested_range => Some(eles),
+        _ => None,
+    }
+}
+
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
 ///
 /// 历史背景：datacenter 语句曾渲出 `fn::find_ancestor_types(...)` 在收口事务里
@@ -998,11 +1013,11 @@ impl IncrementPipeline {
             ));
             (attempt.start_sesno..=attempt.end_sesno, attempt.plan, None)
         } else {
-            // 调用方交出的窗口必须与本次要应用的区间完全一致才复用；复用时
-            // `timings.collect` 自然为 0，收集成本记在调用方那一侧。
-            let range_eles = match precollected {
-                Some((range, eles)) if range == requested_range => eles,
-                _ => {
+            // 采信判定见 `accept_handed_in_window`；复用时 `timings.collect`
+            // 自然为 0，收集成本记在调用方那一侧。
+            let range_eles = match accept_handed_in_window(precollected, &requested_range) {
+                Some(eles) => eles,
+                None => {
                     let start = Instant::now();
                     let eles = Self::collect_changes(path, requested_range.clone())?;
                     timings.collect += start.elapsed();
@@ -2023,6 +2038,71 @@ mod cache_tests {
         assert!(!should_rebuild_stale_staged_attempt(Some(27), 26, true));
         // 压根没有恢复记录：这是一次全新的窗口。
         assert!(!should_rebuild_stale_staged_attempt(None, 26, true));
+    }
+
+    /// IU-S3-04：交入窗口只有与请求区间**完全一致**才被采信，其余一律回退
+    /// 自行收集。掐头/去尾/整体错位的窗口混进来，折叠与影响判定就会漏看会话。
+    #[test]
+    fn handed_in_window_is_only_accepted_on_an_exact_range_match() {
+        let eles = || BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]);
+
+        assert!(
+            accept_handed_in_window(Some((25..=26, eles())), &(25..=26)).is_some(),
+            "区间逐位相等必须复用（这正是双跑修复省下的那一遍解析）"
+        );
+        // 右端多一格 / 左端少一格 / 完全错开 / 反向，全部拒绝。
+        assert!(accept_handed_in_window(Some((25..=27, eles())), &(25..=26)).is_none());
+        assert!(accept_handed_in_window(Some((24..=26, eles())), &(25..=26)).is_none());
+        assert!(accept_handed_in_window(Some((27..=30, eles())), &(25..=26)).is_none());
+        #[allow(clippy::reversed_empty_ranges)]
+        {
+            assert!(accept_handed_in_window(Some((26..=25, eles())), &(25..=26)).is_none());
+        }
+        // 没交就是没交。
+        assert!(accept_handed_in_window(None, &(25..=26)).is_none());
+    }
+
+    /// IU-S3-03（L1 源码钉）：崩溃重放分支**永远重新收集**——prepared 命中时
+    /// 三元组的 collected 位恒为 None，交入窗口只在 prepared 落空的 fresh 分支
+    /// 被询问。把交入结果喂给重放分支，就是把「按持久化固定区间重放」偷换成
+    /// 「按调用方本次窗口重放」，`validate_prepared_attempt` 挡的正是这种错位。
+    /// 回退即红。
+    #[test]
+    fn crash_replay_never_consumes_the_handed_in_window() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once(concat!("async fn ", "apply_one("))
+            .expect("apply_one must exist")
+            .1
+            .split_once(concat!("async fn ", "invalidate_caches("))
+            .expect("invalidate_caches follows apply_one in this file")
+            .0;
+
+        // prepared 分支的产物：固定区间 + 持久化计划 + **None**（不带收集结果）。
+        assert!(
+            body.contains(concat!("attempt.plan, ", "None)")),
+            "重放分支必须以 None 进入收集阶段: {body}"
+        );
+        // 交入窗口的唯一询问点在 prepared 校验之后（即 fresh 分支里）。
+        let replay_at = body
+            .find(concat!("validate_prepared_attempt", "(&attempt"))
+            .expect("重放校验缺失");
+        let handed_at = body
+            .find(concat!(
+                "accept_handed_in_window",
+                "(precollected, &requested_range)"
+            ))
+            .expect("交入窗口采信点缺失");
+        assert!(
+            replay_at < handed_at,
+            "交入窗口只能在 prepared 落空之后询问: {body}"
+        );
+        // 反空转：采信点恰好一处——多出第二处就说明有人绕开了统一判定。
+        assert_eq!(
+            body.matches(concat!("accept_handed_in_window", "(")).count(),
+            1,
+            "采信判定必须只有一个入口"
+        );
     }
 }
 
