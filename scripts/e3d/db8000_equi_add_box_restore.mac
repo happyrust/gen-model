@@ -1,0 +1,14 @@
+-- Remove the named BOX created by db8000_equi_add_box_apply.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_equi_add_box_restore.log" OVER
+$P CODEX-DB8000-EQUI-ADDBOX-RESTORE-ALIVE
+/CODEX_DB8000_EQ_ADD_BOX
+Q CE
+Q REF
+Q NAME
+Q OWNE
+DELETE BOX
+Q CE
+SAVEWORK 'CODEX db8000 remove added BOX /CODEX_DB8000_EQ_ADD_BOX'
+$P CODEX-DB8000-EQUI-ADDBOX-RESTORE-DONE
+ALPHA LOG END

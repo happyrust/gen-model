@@ -84,6 +84,27 @@ jobs:
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
 
+      # Reuses the issue-019 archive: the generic cutter must reproduce its
+      # recorded history byte for byte, so a regression in the shared session
+      # tooling fails here instead of surfacing later as a bad new fixture.
+      - name: Replay issue-019 history with the generic session cutter
+        shell: pwsh
+        run: >-
+          cargo test --locked
+          --test db_session_fixture_selfcheck
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
+
+      - name: Check PDMS record-boundary parsing
+        shell: pwsh
+        run: >-
+          cargo test --locked
+          --test pdms_record_boundary
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
+
       - name: Verify topmost model delete cleanup
         shell: pwsh
         run: >-

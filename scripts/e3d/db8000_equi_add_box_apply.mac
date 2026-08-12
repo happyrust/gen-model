@@ -1,0 +1,25 @@
+-- TTY smoke: add a named BOX under the db8000 EQUI /1-LNR-Q005-PJ.
+-- The stable name makes the fixture independently removable after verification;
+-- restore partner: db8000_equi_add_box_restore.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_equi_add_box_apply.log" OVER
+$P CODEX-DB8000-EQUI-ADDBOX-APPLY-ALIVE
+/1-LNR-Q005-PJ
+Q CE
+Q REF
+Q NAME
+NEW BOX /CODEX_DB8000_EQ_ADD_BOX
+XLEN 500
+YLEN 400
+ZLEN 300
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+Q XLEN
+Q YLEN
+Q ZLEN
+SAVEWORK 'CODEX db8000 add BOX under EQUI /1-LNR-Q005-PJ'
+$P CODEX-DB8000-EQUI-ADDBOX-APPLY-DONE
+ALPHA LOG END

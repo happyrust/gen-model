@@ -37,6 +37,24 @@
     `docs/2026-08-12_spatial-tree-consistency-acceptance.md`；E3D 侧场景
     （TTY 复制恢复对拍、伪造旧 epoch、房间边对拍）留 runbook 待跑。
 
+- **db8000 会话快照夹具通用管线阶段一**（方案
+  `docs/plans/2026-08-12-db8000-session-snapshot-fixture-test-plan.md` §1）：
+  切割（`session_cut`）/格式（`aios-session-fixture-v1`）/打包（`archive_util`）
+  /管线（`pipeline`）四个模块接上 `db_session_fixture` bin——`pack` 把
+  「recording.json + 源 DB 文件」打成只入库最终文件的夹具（台账 sesno 逐切过
+  sesno+存在性验证闸、散列入 manifest、6 MiB 预算、收尾即复验），`verify` 对
+  夹具目录零外部依赖离线复验（解 zip → 逐台账**现切** → SHA256/大小对账 +
+  验证闸，与阶段三回归同一套裁决）。阶段一验收由
+  `tests/db_session_fixture_selfcheck.rs` 钉住：用通用模块从 issue-019 zip 的
+  final（sesno 26）现切 24/25/26，字节散列与该夹具 manifest 台账逐一相等——
+  「任意历史可从最终文件精确还原」在真实 db8000 会话链上成立。同一测试还覆盖
+  **pack 往返**（真实源文件 → 夹具 → 复验全绿；台账散列与 issue-019 独立录制
+  的那份相等；台账改一位后复验必须变红），因为阶段二的 E3D 录制是一次性的、
+  pack 出错要再占一个生产空窗重录。issue-019 专用实现保持冻结不动。该测试已
+  接进 CI（`windows-tests.yml` 的 `db8000-model-increment` job，参数与
+  issue-019 步骤逐字同款），同批把一直漏在门外的离线解析边界用例
+  `--test pdms_record_boundary` 也接了进来。
+
 ### 修复
 
 - **直写路径的空间树变更补上 epoch 痕迹，消除崩溃后的静默漂移**（方案
