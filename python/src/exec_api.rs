@@ -372,6 +372,9 @@ pub fn apply_file(
                     "window": [start, end],
                     "successes": successes,
                     "errors": errors,
+                    // 静默跳过（如文件名不合 AVEVA 形态被当 copy 文件）只出现在
+                    // warnings 里——丢掉它，调用方看到的就是「无错也无果」。
+                    "warnings": result.warnings,
                 }))
             })
         })
@@ -1025,6 +1028,36 @@ pub fn tree_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
     pythonized(py, &value)
 }
 
+/// 导出内存空间树全部条目（连接层只读）：
+/// `[{refno, noun, mins: [x,y,z], maxs: [x,y,z]}, ...]`，refno 为 `a_b` 形态。
+///
+/// `tree_status` 只给计数；「树 == 已提交指针」这条口径不变量此前在 Python 侧
+/// 只能比条数，值级校验（逐条对 `inst_relate.aabb.d`）要靠这里。条目量级 ==
+/// 库内可用指针数，一次性返回；筛选归调用方。**不做状态门**：诊断通道要在
+/// 降级/重建中也能看到树的真实内容。
+#[pyfunction]
+pub fn tree_dump(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let value = py.detach(|| {
+        runtime().block_on(async {
+            let tree = aios_core::room::room::GLOBAL_AABB_TREE.read().await;
+            serde_json::Value::Array(
+                tree.iter()
+                    .map(|entry| {
+                        json!({
+                            "refno": format!("{}_{}", entry.refno.get_0(), entry.refno.get_1()),
+                            "noun": entry.noun,
+                            "mins": [entry.aabb.mins.x, entry.aabb.mins.y, entry.aabb.mins.z],
+                            "maxs": [entry.aabb.maxs.x, entry.aabb.maxs.y, entry.aabb.maxs.z],
+                        })
+                    })
+                    .collect(),
+            )
+        })
+    });
+    pythonized(py, &value)
+}
+
 /// 消化待收敛的空间意图（树刷新/删除 + 文件持久化），返回收敛条数。
 ///
 /// 与 batch worker 出队门同一实现——零售组合（`apply_file` / `drain_data` /
@@ -1227,6 +1260,7 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let spatial = PyModule::new(py, "spatial")?;
     spatial.add_function(wrap_pyfunction!(status, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(tree_status, &spatial)?)?;
+    spatial.add_function(wrap_pyfunction!(tree_dump, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(reconcile, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(persist, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(rebuild, &spatial)?)?;

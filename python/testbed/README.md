@@ -47,6 +47,27 @@ cd python
 不动它们；要在沙箱里复跑，把脚本里的 `set_config` 指到 `testbed/DbOption-pytest`
 即可。
 
+## ams8000 空间树启动初始化 + 增量回放（spatial_tree_8000.py）
+
+用真实 ams8000 数据测两件事：**增量部署下空间树的启动初始化裁决**（快照新鲜
+reused / 缺失 rebuilt / 库侧 epoch 漂移 rebuilt / 携带待重放意图 replayed /
+字节损坏 rebuilt——每种现场一个新进程，因为 `full_init` 每进程只能一次），以及
+**逐会话窗口的增量回放**（以 issue-019 夹具的 db8000 sesno-24 快照为基线，拿
+真实文件逐窗 `apply_file`，sesno 25/26 是已知的两次真实删除，每窗之后再重启
+断言 reused）。自起自杀一次性内存 SurrealDB @8072，全程不碰 8009/8019/8071。
+
+```powershell
+# 主 crate 变过要先重建 pyd（cd python; $env:VIRTUAL_ENV=...; maturin develop）
+.venv\Scripts\python.exe testbed\spatial_tree_8000.py                  # 默认 6 个窗口
+.venv\Scripts\python.exe testbed\spatial_tree_8000.py --skip-windows   # 只跑启动矩阵
+.venv\Scripts\python.exe testbed\spatial_tree_8000.py --max-windows 4 --gen-roots 2
+```
+
+报告在 `testbed/.spatial8000/report.json`，逐阶段日志在 `.spatial8000/logs/`。
+驱动会临时把项目副本里的 `ams000/ams8000_0001` 换成基线快照（结束后逐字节
+还原，异常退出后下次启动自动补还原）——**跑它期间勿并行跑 run_full_loop.py
+或 pytest 房间档**（同一把项目锁 + 同一个库文件）。
+
 ## 注意
 
 - SurrealDB 必须用仓库自带 fork 2.1.x（`Start-TestSurreal.ps1` 已带版本守卫），

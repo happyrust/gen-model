@@ -96,6 +96,12 @@ __pycache__/
 /python/testbed/meshes/
 /python/testbed/out/
 
+# ams8000 空间树增量回放驱动（spatial_tree_8000.py）的运行产物
+/python/testbed/meshes-spatial8000/
+/python/testbed/.spatial8000/
+# 从 python/ 目录跑 `surreal sql` 留下的 CLI 交互历史（根级 /history.txt 盖不住这层）
+/python/history.txt
+
 # 房间增量 pytest 的夹具 mesh 产物（conftest 自建，随时可重造）
 /python/tests/.meshes/
 

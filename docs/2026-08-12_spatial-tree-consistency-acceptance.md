@@ -63,6 +63,33 @@ F 崩溃后重启      verdict=rebuilt，收敛到同一规范化集合（17 条
 `tree_sha256` 的职责是**单文件完整性自校验**（写入什么、读出什么，C 场景验证的
 正是它）；跨进程集合对拍走 entries/usable 口径与 Rust 侧 e2e 的逐边比对。
 
+## 2b. 真实 ams8000 数据实测：启动矩阵 + 增量回放（testbed @8072，15/15）
+
+`python/testbed/spatial_tree_8000.py`（配置 `DbOption-spatial8000.toml`，一次性内存
+SurrealDB @8072，项目库文件临时换成 issue-019 的 sesno-24 基线快照、结束逐字节
+还原）。与 §2 的探针互补：§2 验 V2 快照文件生命周期，本轮在**真实 db8000 会话
+链**上验启动裁决矩阵与「真实删除 → 摘树 → epoch 留痕」，每窗之后再重启断言
+reused。2026-08-12 14:25 实跑 `--max-windows 4`，**15/15 全过**
+（`.spatial8000/report.json`，逐阶段日志同目录）：
+
+| 阶段 | 断言要点 | 实测 |
+|---|---|---|
+| probe | 真实文件血统含 sesno 24..26 及两次已知删除 | latest 209，链自 sesno 2 起连续 |
+| P0 prepare | 基线水位=24、样本生成、树=指针、落 V2 | entries=3，epoch=3 |
+| S1 快照新鲜 | verdict=reused，条目不变 | ✅ |
+| S2 快照缺失 | verdict=rebuilt | ✅ |
+| S3 库侧 epoch 漂移 | verdict=rebuilt | ✅（epoch 3→4 后重启认出失配） |
+| S4 携带待重放意图 | verdict=replayed，重放后 pending=0 | ✅（伪造 pending 行与 Rust `record_id`/字段面逐项同构） |
+| S5 快照字节损坏 | verdict=rebuilt | ✅ |
+| W25 删 BOX（真实会话） | 水位=25、pe 软删、几何清零、**epoch 严格递增** | entries 3→2，epoch 5→6 |
+| W26 删 EQUI | 水位=26；EQUI 树上本无条目，「树应有内容」未变**不 bump** | entries=2，epoch=6 ✅ |
+| W27/W28 | 无空间变更窗口：水位推进、epoch 单调不减 | ✅ |
+| 每窗之后重启 | verdict=reused（快路径，无重建） | 4/4 ✅ |
+
+补充：`_pointer_count` 谓词已对齐重建/覆盖率的 current-only 口径（排除版本化
+数组 id 行与软删行），对齐后 `--skip-windows` 快档复跑 7/7 通过
+（`.spatial8000/report-scope-recheck.json`）。
+
 ## 3. 全链路冒烟的现状
 
 `python/testbed/run_full_loop.py` 解析层通过（7997 副本 103..104 窗口
@@ -90,6 +117,8 @@ collect_changes 正常）；`full_init` 被**活服务探测**按设计拒绝—
 5. **伪造旧 epoch**：改库 `spatial_epoch:current`（`UPSERT spatial_epoch:current
    SET value += 1, updated_at = time::now()`）后不动快照重启 →
    `verdict == "rebuilt"`（失配无 pending）。
+   **沙箱档已覆盖**（§2b S3，真实 ams8000 数据实测 rebuilt）；生产侧本条降为
+   对 62k 条级库的复核，顺带记录重建耗时。
 6. **E3D TTY 复制恢复对拍**（`scripts/e3d/db8000_equi_copy_apply.mac` /
    `db8000_equi_copy_restore.mac`，`=24384/24776`）：增量收敛后
    `aios_db.spatial.rebuild()` 强制重建，对比重建前后 health `entries` 精确相等；
