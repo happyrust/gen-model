@@ -1,0 +1,53 @@
+{
+  "dbnum": 8000,
+  "comment": [
+    "Record-Db8000SessionChain.ps1 的输入：按执行顺序排列的案例。",
+    "每个案例一条 apply 腿（必需）、一条 restore 腿（可选，破坏性案例可省）。",
+    "宏纪律：每条腿恰好一个 SAVEWORK、不得自带 QUIT/FINISH（会话由 driver 拥有）、",
+    "对每个要登记的元素先 Q REF 再 Q NAME（脚本按这对相邻输出把名字解析成 refno）。",
+    "elements 的 present 三态是给阶段一 pack 的验证闸用的，录完原样进 recording.json。",
+    "db8000 的 TTY 会话里按 refno 导航不成立，宏一律按名字导航（见 db8000_zone_members_probe.mac 头注）。"
+  ],
+  "cases": [
+    {
+      "id": "equi-add-box",
+      "apply_macro": "scripts/e3d/db8000_equi_add_box_apply.mac",
+      "restore_macro": "scripts/e3d/db8000_equi_add_box_restore.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_EQ_ADD_BOX",
+          "noun": "BOX",
+          "before_apply": false,
+          "after_apply": true,
+          "after_restore": false
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_EQ_ADD_BOX",
+          "net": "cancelled"
+        }
+      ]
+    },
+    {
+      "id": "equi-copy",
+      "apply_macro": "scripts/e3d/db8000_equi_copy_apply.mac",
+      "restore_macro": "scripts/e3d/db8000_equi_copy_restore.mac",
+      "elements": [
+        {
+          "name": "/CODEX_DB8000_EQ_COPY",
+          "noun": "EQUI",
+          "before_apply": false,
+          "after_apply": true,
+          "after_restore": false
+        }
+      ],
+      "expected_net": [
+        {
+          "element": "/CODEX_DB8000_EQ_COPY",
+          "net": "cancelled"
+        }
+      ]
+    }
+  ]
+}

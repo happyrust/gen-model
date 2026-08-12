@@ -55,6 +55,16 @@
   issue-019 步骤逐字同款），同批把一直漏在门外的离线解析边界用例
   `--test pdms_record_boundary` 也接了进来。
 
+- **阶段二录制工具**（同方案 §2，待生产空窗执行）：
+  `scripts/e3d/Record-Db8000SessionChain.ps1` + 清单驱动的
+  `scripts/e3d/db8000_recording_cases.json`（加案例 = 加一对宏 + 一行），投递走
+  ADR-019 的 `l3_suite --check-driver`。录制一次性且占生产空窗，所以三道闸都当场
+  验：触碰 E3D 前静态审宏（恰好一个 `SAVEWORK`、无 `QUIT`/`FINISH`/`MERGE`/
+  `PURGE`、`ALPHA LOG` 成对、`Q REF`+`Q NAME` 齐全）、每条腿后要求 sesno 恰好 +1、
+  refno 从宏日志的 `Ref`/`Name` 相邻对回读。配套给 `db_session_fixture` 加
+  `inspect` 子命令（只读打印会话链 JSON，与切割同一份解析）。`-CheckOnly` 只读档
+  已对真实 `ams8000_0001` 实跑通过（baseline_sesno=210），检查器的拒绝面亦验过。
+
 ### 修复
 
 - **直写路径的空间树变更补上 epoch 痕迹，消除崩溃后的静默漂移**（方案

@@ -20,6 +20,25 @@ use crate::format::{
 };
 use crate::session_cut::{session_chain, write_snapshot};
 
+/// 一个 DB 文件的会话链概览（录制脚本按它取 baseline 与逐步核对水位推进）。
+#[derive(Debug, serde::Serialize)]
+pub struct ChainReport {
+    pub latest_sesno: u32,
+    pub sesnos: Vec<u32>,
+}
+
+/// 只读探查会话链。录制期间每执行一个宏就调一次，用「sesno 恰好 +1」把
+/// 「每阶段恰好一个 SAVEWORK」的宏纪律当场验掉——事后再发现错位就得重录。
+pub fn inspect(source: &Path) -> anyhow::Result<ChainReport> {
+    let bytes =
+        fs::read(source).with_context(|| format!("read source {}", source.display()))?;
+    let chain = session_chain(&bytes)?;
+    Ok(ChainReport {
+        latest_sesno: chain.latest_sesno,
+        sesnos: chain.cuts.keys().copied().collect(),
+    })
+}
+
 pub fn pack(
     cli_source: Option<&Path>,
     recording_path: &Path,

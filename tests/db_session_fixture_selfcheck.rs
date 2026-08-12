@@ -215,6 +215,40 @@ fn pack_builds_a_verifiable_fixture_matching_the_recorded_ledger() {
     );
 }
 
+/// `inspect` 是录制脚本判「这个宏是不是恰好推进了一个会话」的唯一依据，
+/// 所以它报的链必须与切割用的同一份解析一致。
+#[test]
+fn inspect_reports_the_whole_session_chain() {
+    let fixture = issue019::verify_and_extract(&fixture_root()).expect("verify issue-019 fixture");
+    let final_path = fixture
+        .path_for_role("parent_deleted")
+        .expect("final snapshot path");
+
+    let report = pipeline::inspect(&final_path).expect("inspect final snapshot");
+    assert_eq!(report.latest_sesno, 26);
+    for sesno in [24, 25, 26] {
+        assert!(
+            report.sesnos.contains(&sesno),
+            "会话链应含 sesno {sesno}: {:?}",
+            report.sesnos
+        );
+    }
+    assert!(
+        report.sesnos.windows(2).all(|pair| pair[0] < pair[1]),
+        "sesno 必须升序，录制脚本按相邻差判进度: {:?}",
+        report.sesnos
+    );
+
+    // 早于窗口的历史快照自然只报到自己那一站。
+    let baseline = fixture.path_for_role("baseline").expect("baseline path");
+    assert_eq!(
+        pipeline::inspect(&baseline)
+            .expect("inspect baseline")
+            .latest_sesno,
+        24
+    );
+}
+
 fn read_manifest(root: &Path) -> format::SessionFixtureManifest {
     serde_json::from_slice(&fs::read(root.join("manifest.json")).expect("read manifest"))
         .expect("parse manifest")

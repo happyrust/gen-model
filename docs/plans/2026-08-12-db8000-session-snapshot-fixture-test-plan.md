@@ -118,6 +118,31 @@
 **验收**：`recording.json` + fixture 目录生成完毕，所有案例 sesno 验证闸通过，
 zip ≤ 6 MiB。
 
+> **录制工具已就绪（2026-08-12），只差生产空窗**：
+> `scripts/e3d/Record-Db8000SessionChain.ps1` + 清单
+> `scripts/e3d/db8000_recording_cases.json`（清单驱动：加案例 = 加一对宏 + 一行）。
+> 投递走 ADR-019 采纳的 `l3_suite --check-driver`，本脚本不直接起 `des.exe`。
+> 三道当场验的闸，都是为了不把错误留到事后（录错要重占一个空窗）：
+>
+> 1. **触碰 E3D 之前**静态审全部宏——恰好一个 `SAVEWORK`、无 `QUIT`/`FINISH`、
+>    无 `MERGE`/`PURGE`/`COMPACT`、`ALPHA LOG` 成对、`Q REF` 与 `Q NAME` 齐全；
+> 2. 每执行一条腿读一次会话链（`db_session_fixture inspect`，与切割同一份解析），
+>    要求 sesno **恰好 +1**——多一个 SAVEWORK 会让后续案例窗口整体错位，事后从
+>    sesno 反推只能靠猜；
+> 3. refno 从宏日志的 `Ref =` / `Name /` 相邻对回读，不靠人抄。
+>
+> `-CheckOnly` 档（只读，不登录 E3D、不改库）已在本机对真实
+> `ams000\ams8000_0001` 实跑通过：宏纪律 4 条腿 / 2 案例全过，
+> **实测 `baseline_sesno = 210`**（issue-019 录制时是 24–26，该库此后推进很多，
+> 首批案例将落在 211 起）。检查器的拒绝面也验过：故意塞两个 `SAVEWORK` 的宏
+> 会在 cargo build 之前就整轮中止。
+>
+> 待补：清单目前只含已有的 `equi-add-box` / `equi-copy` 两对宏；
+> `data-rename` / `transform-move` / `geometry-resize` / `delete-box` 四对需从
+> `increment_fixture/cases/*.mac` 移植到 db8000 靶元素（ZONE `/1RX03-CASE-DQ`、
+> EQUI `/1-LNR-Q005-PJ`）。移植时注意该 TTY 会话**按 refno 导航不成立，只能按
+> 名字**（`db8000_zone_members_probe.mac` 头注记录了这条实测结论）。
+
 ## 3. 阶段三 · 离线回归测试（`tests/db8000_session_pairs.rs`，CI 主体）
 
 对 manifest 里每个案例，数据驱动地跑七类性质断言（a–d 平移自

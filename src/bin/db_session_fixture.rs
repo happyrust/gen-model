@@ -57,6 +57,11 @@ enum Command {
         #[arg(long)]
         fixture: PathBuf,
     },
+    /// 只读打印 DB 文件的会话链（录制脚本取 baseline、逐宏核对水位用）
+    Inspect {
+        #[arg(long)]
+        source: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -74,6 +79,11 @@ fn main() -> anyhow::Result<()> {
         Command::Verify { fixture } => {
             let report = pipeline::verify_fixture(&fixture)?;
             report.print(&fixture);
+        }
+        // JSON 到 stdout：录制脚本按机器可读口径解析，不靠人眼读日志。
+        Command::Inspect { source } => {
+            let report = pipeline::inspect(&source)?;
+            println!("{}", serde_json::to_string(&report)?);
         }
     }
     Ok(())
