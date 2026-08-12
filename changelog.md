@@ -28,6 +28,12 @@
   - job 更名 `db8000-model-increment` → `offline-increment-regression`：它现在
     跑五步离线回归，早已不止 db8000 的模型增量。**配了分支保护必需检查项的话
     需要同步旧名字。**
+  - 远程首跑（run 31572427572，2026-08-12 15:03 dispatch）：
+    `offline-increment-regression` **首跑即绿，28m58s**——五步（issue-019 夹具、
+    通用切割自检、session-pairs 回归、记录边界解析、删除清理 lib 用例）在
+    GitHub Actions 上全过。同 run 的 `python-bindings` 在 wheel 冒烟一步红
+    （runner 侧 DLL 解析，与离线回归无关），修复走 `4ddf32b9` 的 DLL 探针
+    传递闭包，验证 run 另行跟进。
 
 - **db8000 录制清单补齐到 6 类变更形态，并加了一道离线闸**（方案阶段二的离线前置；
   录制本身仍等生产空窗）：
