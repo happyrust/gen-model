@@ -102,6 +102,26 @@ collect_changes 正常）；`full_init` 被**活服务探测**按设计拒绝—
 前置：停 9099/8022 在跑服务；用**新二进制**起服务（或 testbed 沙箱 +
 `run_full_loop.py`）；E3D 打开 AMS 样例工程。
 
+### 执行顺序：与 db8000 会话链录制共用一个空窗
+
+db8000 夹具录制（`docs/plans/2026-08-12-db8000-session-snapshot-fixture-test-plan.md`
+阶段二）与本 runbook 用同一批前置（空窗 + E3D + 停服务），一次开窗按序做完：
+
+1. **录制排最前，期间 db8000 独占**：`scripts/e3d/Record-Db8000SessionChain.ps1`
+   逐腿断言 sesno **恰好 +1**，任何并发写者当场判死整轮——所以先录制，本文
+   第 6 条（TTY 复制恢复对拍，同样写 db8000）必须排在它之后。7 案例 12 条腿，
+   预计窗口 211..约 222（宏纪律与 `-CheckOnly` 已过，baseline 复测 210）。
+2. **当场打包**（离开 E3D 即可做）：`db_session_fixture pack --recording
+   <输出目录>/recording.json --dbnum 8000 --out
+   tests/fixtures/issues/issue-021-db8000-session-pair-suite`。zip 预算预估：
+   final ≈17 MB 原始 × 同族文件实测压缩比 0.14 ≈ **2.4 MiB**，在 6 MiB 预算内
+   （pack 有硬闸，超了会当场拒绝而不是入库超大文件）。
+3. **断言零改动换数据**：`AIOS_SESSION_FIXTURE` 指向新夹具重跑
+   `cargo test --test db8000_session_pairs`——七类断言一行不动、只换数据源，
+   全绿即阶段二→三交棒完成（这是该设计成立的最终判据）。
+4. 随后按下列 1–8 条跑本 runbook 其余场景（第 5 条已降为复核）。录制使 db8000
+   前进约 12 个会话，对第 6 条的对拍无影响（对拍是重建前后相对断言）。
+
 1. **全链路冒烟**：`python/testbed/run_full_loop.py`（解析 → 基线 → 生成 →
    房间/收尾），确认房间门禁不阻断 Ready 态的正常管线；`/api/v1/health` 的
    `spatial_tree.state == "ready"`、`pending == 0`。
