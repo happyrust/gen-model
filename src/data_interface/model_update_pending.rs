@@ -4736,6 +4736,13 @@ mod tests {
     }
 
     async fn assert_live_delivery_unit_regenerates(job_dbnum: u32, root: &str, noun: &str) {
+        // 状态机门禁下 drain 途中的房间副作用要求空间树就绪；与
+        // live_incomplete_room_panels 同款前置，顺带避免「空树算出空成员集」
+        // 被写回 live 库的破坏面。
+        crate::fast_model::aabb_tree::rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild spatial tree before delivery-unit drain");
+
         let root = RefU64::from_str(root).expect("valid delivery-unit fixture refno");
         let cleanup = format!("DELETE {TABLE} WHERE dbnum = {job_dbnum};");
 
@@ -4876,6 +4883,10 @@ mod tests {
         aios_core::init_test_surreal()
             .await
             .expect("connect surreal");
+        // 同 assert_live_delivery_unit_regenerates 的前置：房间副作用过空间门。
+        crate::fast_model::aabb_tree::rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild spatial tree before EQUI drain");
         SUL_DB
             .query(&cleanup)
             .await
@@ -4962,6 +4973,10 @@ mod tests {
         aios_core::init_test_surreal()
             .await
             .expect("connect surreal");
+        // 同 assert_live_delivery_unit_regenerates 的前置：房间副作用过空间门。
+        crate::fast_model::aabb_tree::rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild spatial tree before SPCO cascade drain");
         SUL_DB
             .query(&cleanup)
             .await
