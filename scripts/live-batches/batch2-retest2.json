@@ -1,0 +1,15 @@
+{
+  "comment": [
+    "批次 2 · 空间门前置修复后的复跑（2026-08-13 晨）。三项靶元素都在 testbed 店：",
+    "bran 24381/100817、hang 24381/177947、zone-EQUI 24381/100677。",
+    "suppo/spco-cascade 靶不在 testbed（8009 专属）；manual_update 二遍是长跑专项——均不在此批。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 1200,
+  "tests": [
+    { "name": "live_bran_pending_is_actually_regenerated" },
+    { "name": "live_hang_pending_is_actually_regenerated" },
+    { "name": "live_zone_owned_equi_pending_is_actually_regenerated" }
+  ]
+}

@@ -19,6 +19,37 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 （白名单前的夹具命名、状态机前的发布门缺声明 ×2），并确认 room_fixture 系
 需要专用空库清单。报告与逐项日志在 `output/live-batch/`。
 
+**批次 2 战果（2026-08-12 夜 ～ 08-13 晨，B0/B1/B2 @ testbed 8019）**：
+
+- **B0 环境建设**：`live_manual_baseline_all_design_dbnums` 通过（4 库全量基线）；
+  一次性出清 regen 积压 **30,416 根 / 321 分钟**，稳态残留 48 行全是真实几何缺陷
+  （见下）；冷备 `python/testbed/.surreal/pytest-ams.bak-b0-20260813`（812MB）；
+  批次 1 阻塞的 `live_generation_failure_keeps_pending_and_watermark` 出清后点亮。
+- **B 组 39 项：19 项首次通过**，16 项定性（CATA 前置 6 / 8009 数据绑定 2 /
+  店态与夹具期望漂移 5 / 清理路径待查 1 / 溢出缺陷 1 / 长跑专项 1），4 项未跑
+  （room mesh / 空 8009 前置，见各行）。批次 1 记阻塞的
+  `resolves_the_real_mdb_declaration` 在 SYS meta 解析后连 29 库精确计数一起通过。
+- **测试腐化修复（第 4 处）**：`model_update_pending.rs` 的 4 个 drain 型 live 用例
+  写于空间状态机之前，房间副作用撞就绪门（`SPATIAL_TREE_NOT_READY`）——照
+  `live_incomplete_room_panels` 的先例补 `rebuild_tree_from_pointers()` 前置
+  （共享 helper + zone/spco-cascade 用例体），`zone_owned_equi` 随即点亮。
+- **testbed 店准备动作**（复跑他批前须在位，均分钟级）：SYS meta 引导
+  （`aios_db.incr.execute_manual` 第一遍，需 `RUST_MIN_STACK=16777216`）、
+  空间树重建落盘（`aios_db.spatial.rebuild()` + `persist(force=True)`，43k 条 ready）、
+  清除 48 行已立档 failed 残留。
+- **新发现缺陷 3 个**（均真实数据暴露，非队列机制）：
+  1. **NCYL/NREV/NRTO/RTOR/PYRA/CTOR 负几何/回转体 BREP 生成缺陷**：48 根顽固
+     失败（45 invalid / 3 no shape），清单在出清日志 `.scratch/b0-drain-console2.log`
+     与首轮报告；复现根样例 `24381/36946`（NREV no shape）、`24381/116383`（NCYL invalid）。
+  2. **`live_backfill_anc_on_configured_db` i64 打包溢出**：批次 1 魔术 refno 残留
+     （ref0=4000000001）在回填 SQL `ref0 * 2^32` 处溢出——生产 ref0 不会到 2^31，
+     但回填工具对超界行应跳过并告警而非中断。
+  3. **SYS/DICT 解析链默认栈溢出**：`execute_manual` 首遍解析 SYST 8191（169 会话）
+     默认线程栈下 0xC00000FD；`RUST_MIN_STACK=16MB` 稳定通过，解析深递归待收敛。
+- **`live_manual_update_project` 语义确认**：第二遍会把 /ALL 里 25 个从未导入的库
+  拉**首建基线**（观测 1800s 超时中断后留 5,027 pending，靠冷备回滚）——testbed
+  常规批不点亮，归专项窗口；跑它前必须先冷备。
+
 类别口径：
 
 - **A 自建夹具**：数据自造自清（fixture 记录 / 魔术大 dbnum / 一次性目录），只要
@@ -58,59 +89,67 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `live_os_kill_preserves_prepared_attempt` | model_update_pending.rs:4410 | 魔术 dbnum + 杀助手进程 | 2026-08-12 批次1 @8019 | **通过**（5.8s） |
 | `live_non_regen_drain_consumes_the_whole_queue` | model_update_pending.rs:4525 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（11s） |
 | `live_failed_queue_cleanup_does_not_stall_the_rest` | model_update_pending.rs:4590 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（4.1s） |
-| `live_generation_failure_keeps_pending_and_watermark` | model_update_pending.rs:4661 | 魔术 dbnum；**前置：目标库 regen 积压已出清**（drain 会先消化整个存量队列） | 2026-08-12 批次1 @8019 | 阻塞：900s 与 2700s 两轮均超时——testbed 存量 regen 积压按 ~600ms/根是小时级；先把积压出清（起服务放它跑完或清 `model_update_pending`）再跑 |
+| `live_generation_failure_keeps_pending_and_watermark` | model_update_pending.rs:4661 | 魔术 dbnum；**前置：目标库 regen 积压已出清**（drain 会先消化整个存量队列） | 2026-08-13 B0 @8019 | **通过**（145.2s，B0 出清后；先消化了 48 个顽固重试再跑自身场景） |
 | `live_incomplete_room_panels_enqueue_targeted_repairs` | model_update_pending.rs:4814 | **数据依赖：库里须有缺陷面板**（探针型，改归 B 组口径） | 2026-08-12 批次1 @8019 | 阻塞：testbed 无缺陷面板，`record::exists` 断言 false（非回归） |
 | `live_finalize_capacity_is_atomic_and_idempotent` | model_update_pending.rs:5038 | 5k+5k 容量验证 | 2026-08-12 批次1 @8019 | **通过**（12.2s） |
-| `resolves_the_real_mdb_declaration` | update_scope.rs:358 | **断言写死生产语义**（/ALL CURD=29 个 DESI 库号，只对 8009 成立） | 2026-08-12 批次1 @8019 | 阻塞：testbed 的 CURD 口径不同（非回归）；参数化断言或只对 8009 跑 |
+| `resolves_the_real_mdb_declaration` | update_scope.rs:358 | SYS meta 已解析（`execute_manual` 引导一遍）；精确计数走 `AIOS_EXPECT_DESI_COUNT` | 2026-08-13 B1重测 @8019 | **通过**（3.2s；断言已拆结构层+计数层，testbed /ALL 同样解出 29 个 DESI，`AIOS_EXPECT_DESI_COUNT=29` 全绿） |
 | `an_unparsed_project_bootstraps_instead_of_deadlocking` | update_scope.rs:387 | 空 NS | 2026-08-12 批次1 @8019 | **通过**（3.2s） |
 | `live_watch_directory_blocks_duplicate_dbnum_files` | increment_manager.rs:383 | E3D 文件头 + 一次性副本目录 | 2026-08-12 批次1 @8019 | **修复后通过**（9.6s）——夹具文件名 first/second 不过 AVEVA 白名单（用例写于白名单之前，已腐化），改成 `ams9990_0001/_0002` |
+| `live_watermark_realign_rebaselines_a_rolled_back_dbnum` | manual_update.rs:5234 | 魔术 dbnum + 保留段 ref0（空库即可） | 2026-08-13 @8019 | **通过**（4.7s；2026-08-12 随 watermark_realign 参数新增） |
 | `live_direct_delete_crash_before_persist_recovers_by_rebuild` | helper.rs:908 | testbed 指定（推进 epoch、重建树文件） | 2026-08-12 批次1 @8019 | **修复后通过**（5.5s）——用例写于状态机之前，自灌树后 persist 被发布门拒（Uninitialized），补 `mark_spatial_tree_fixture_preloaded()` |
 | `live_direct_refresh_crash_before_persist_recovers_by_rebuild` | occ_generate.rs:2057 | testbed 指定（需基线+生成在位） | 2026-08-12 批次1 @8019 | **修复后通过**（5.8s）——同上，补测试装载模式声明 |
 | `live_sync_aabb_tree_fills_tree_from_db` | aabb_tree.rs:2072 | 重写 inst_relate.aabb + 树文件（走 AIOS_LIVE_WS 三件套） | 2026-08-12 批次1 @8019 | **通过**（1.2s，工具补齐 AIOS_LIVE_* 派生后） |
 
-## B 需生成基线（待 testbed 全量生成后另立批次）
+## B 需生成基线（批次 2，2026-08-12/13 执行 @ testbed 8019）
 
-| 测试 | 位置 | 依赖 |
-|---|---|---|
-| `live_deleted_branch_subtree_includes_known_damp_child` | helper.rs:641 | AMS 7997 已知 DAMP 子树 |
-| `live_shared_inst_info_is_deleted_only_after_last_reference` | helper.rs:656 | 共享 inst_info 在位 |
-| `live_inst_info_without_geo_relate_is_reclaimed` | helper.rs:759 | 生成产物在位 |
-| `live_soft_deleted_subtree_removes_all_model_nodes` | helper.rs:815 | 生成产物在位 |
-| `live_transform_branch_includes_known_model_child` | increment_manager.rs:2415 | AMS 已知 BRAN 模型 |
-| `live_manual_baseline_all_design_dbnums` | manual_update.rs:6826 | 全量基线（重活，本身就是建基线工具） |
-| `live_manual_update_project` | manual_update.rs:6871 | 基线在位 + 有新会话 |
-| `live_ref_rev_roundtrip_selfcheck` | manual_update.rs:6935 | ref_rev 数据在位 |
-| `live_rebuild_ref_rev_covers_shared_spco_consumers` | manual_update.rs:6991 | 共享 SPCO 数据 |
-| `live_shared_spco_expands_to_generation_roots` | manual_update.rs:7036 | 共享 SPCO 数据 |
-| `force_init_watcher_incr_once` | increment_pipeline.rs:3330 | 基线 + 监控目录 |
-| `live_add_pe_owner_replay_is_idempotent` | increment_pipeline.rs:3351 | 基线在位 |
-| `live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling` | model_refresh.rs:162 | 生成产物在位 |
-| `live_generate_roots_with_coverage_audit` | model_refresh.rs:240 | `AIOS_GEOM_COVERAGE_ROOTS` + 基线 |
-| `live_projams_direct_transform_and_data_only_actions_are_distinct` | model_update_plan.rs:1756 | ProjAMS EQUI 在位 |
-| `live_issue5_moving_the_reported_cap_plans_a_branch_regeneration` | model_update_plan.rs:1835 | `/1WCC1135/B1` owner 链（7999） |
-| `live_issue5_moving_a_container_regenerates_the_branches_beneath_it` | model_update_plan.rs:1872 | `/1WCC-PIPE-RX` zone（7999） |
-| `live_projams_real_attribute_sessions_plan_and_execute_distinctly` | model_update_plan.rs:1945 | 真实属性会话在文件里 |
-| `live_projams_nested_created_routes_and_generates_delivery_roots` | model_update_plan.rs:2119 | 真实 Created 会话 |
-| `live_projams_negative_geometry_change_regenerates_owning_equi` | model_update_plan.rs:2205 | NCYL 负几何 EQUI |
-| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN 生成产物 |
-| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG |
-| `live_suppo_pending_is_actually_regenerated` | model_update_pending.rs:4861 | 既有 SUPPO |
-| `live_zone_owned_equi_pending_is_actually_regenerated` | model_update_pending.rs:4870 | 既有 ZONE-owned EQUI |
-| `live_shared_spco_cascade_regenerates_every_consumer` | model_update_pending.rs:4957 | 共享 SPCO 67 BRAN |
-| `live_generates_a_missing_model` | on_demand_model.rs:447 | 已解析项目 + CATA |
-| `test_cal_rooms` | room_model.rs:33 | 房间 mesh 在位 |
-| `test_cal_distance` | room_model.rs:78 | mesh 在位 |
-| `test_build_room_panels_relate_common` | room_model.rs:1925 | 改写配置库房间关系 |
-| `live_database_uncovered_noun_histogram` | coverage_audit.rs:236 | 只读，基线在位 |
-| `live_database_uncovered_nouns_resolve_to_modeled_roots` | coverage_audit.rs:267 | 只读，基线在位 |
-| `scom_geometry_resolves_from_stored_reference_attributes` | resolve.rs:112 | CATA 解析在位 |
-| `both_catalogue_shapes_resolve_geometry_from_the_scom` | resolve.rs:132 | CATA 解析在位 |
-| `live_backfill_anc_on_configured_db` | pdms_inst.rs:947 | 基线在位（写 fn/索引/回填） |
-| `live_sweep_inst_relate_flat_on_configured_db` | pdms_inst.rs:992 | 生成产物在位 |
-| `test_boolean_refno_parse_error` | manifold_bool.rs:670 | mesh 在位 |
-| `test_gen_geos` | occ_generate.rs:37 | 基线 + mesh 目录 |
-| `test_ancestor`（team_data.rs:166） | team_data.rs:166 | 项目数据在位 |
-| `a_reparse_lands_exactly_one_site_per_name` | member_prune.rs:441 | 空 8009 + 本地 AMS 文件 |
+清单：`batch2-b0.json`（环境建设）、`batch2-b1-baseline.json`（基线即可批）、
+`batch2-b2-generated.json`（生成产物批）、`batch2-retest.json` / `batch2-retest2.json`
+（缺口修复后的定向重测）。**19/39 首次通过**；阻塞根因集中在四类——
+**CATA 前置**（testbed 无已解析目录行，且按需闭包在分支组件上 parsed=0，
+待专项）、**8009 数据绑定**（夹具靶元素只在生产店）、**店态漂移**（30k 出清改变
+了拓扑/会话态，夹具常量需刷新）、**长跑专项**（首建基线级别的耗时）。
+
+| 测试 | 位置 | 前置 | 最近通过 | 结论 |
+|---|---|---|---|---|
+| `live_deleted_branch_subtree_includes_known_damp_child` | helper.rs:641 | AMS 7997 已知 DAMP 子树 | 2026-08-13 B2 @8019 | **通过**（3.1s） |
+| `live_shared_inst_info_is_deleted_only_after_last_reference` | helper.rs:656 | 共享 inst_info 在位 | 2026-08-13 B2 @8019 | **通过**（3.2s） |
+| `live_inst_info_without_geo_relate_is_reclaimed` | helper.rs:759 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（3.2s） |
+| `live_soft_deleted_subtree_removes_all_model_nodes` | helper.rs:815 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（3.3s） |
+| `live_transform_branch_includes_known_model_child` | increment_manager.rs:2415 | AMS 已知 BRAN 模型 | — | 失败：`nodes.contains(&damp)` 不成立——出清后店态与夹具期望漂移，需专项核对期望常量 |
+| `live_manual_baseline_all_design_dbnums` | manual_update.rs:6826 | 全量基线工具本体 | 2026-08-12 B0 @8019 | **通过**（4 库基线，小时级；`AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample`） |
+| `live_manual_update_project` | manual_update.rs:6871 | 基线在位 + SYS meta；**先冷备** | — | 长跑专项：二遍会把 /ALL 未导入 25 库拉首建基线（1800s 超时中断留 5k pending，冷备回滚）。一遍（SYS meta 引导）已验证可用，需 `RUST_MIN_STACK=16M` |
+| `live_ref_rev_roundtrip_selfcheck` | manual_update.rs:6935 | ref_rev 数据在位 | 2026-08-13 B1 @8019 | **通过**（3.1s） |
+| `live_rebuild_ref_rev_covers_shared_spco_consumers` | manual_update.rs:6991 | 共享 SPCO 数据（7997） | — | 失败：消费者数 75 ≠ 夹具常量——30k 出清改变 ref_rev 拓扑，期望需按新店态刷新 |
+| `live_shared_spco_expands_to_generation_roots` | manual_update.rs:7036 | 共享 SPCO 数据 + ref_rev 已重建 | — | 失败：左值 0——需先跑 ref_rev 重建（与上一条成对核对） |
+| `force_init_watcher_incr_once` | increment_pipeline.rs:3330 | 基线 + 监控目录 | 2026-08-13 B2 @8019 | **通过**（4.3s） |
+| `live_add_pe_owner_replay_is_idempotent` | increment_pipeline.rs:3351 | 基线在位 | 2026-08-13 B1 @8019 | **通过**（3.9s） |
+| `live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling` | model_refresh.rs:162 | 生成产物在位 | — | 失败：被删子树未清空（[false×4, true×5]）——清理路径或夹具前置待专项排查 |
+| `live_generate_roots_with_coverage_audit` | model_refresh.rs:240 | `AIOS_GEOM_COVERAGE_ROOTS`（如 `24384/24776`） | 2026-08-13 重测 @8019 | **通过**（4.1s） |
+| `live_projams_direct_transform_and_data_only_actions_are_distinct` | model_update_plan.rs:1756 | ProjAMS EQUI 在位 | 2026-08-13 B2 @8019 | **通过**（4.6s） |
+| `live_issue5_moving_the_reported_cap_plans_a_branch_regeneration` | model_update_plan.rs:1835 | `/1WCC1135/B1`（7999）+ **CATA 前置** | — | 阻塞：计划走了便宜路径——隐含直管段（INTUBE）判定需 SPCO/CATA 数据，testbed 无已解析目录 |
+| `live_issue5_moving_a_container_regenerates_the_branches_beneath_it` | model_update_plan.rs:1872 | `/1WCC-PIPE-RX` zone（7999）+ **CATA 前置** | — | 阻塞：同上 |
+| `live_projams_real_attribute_sessions_plan_and_execute_distinctly` | model_update_plan.rs:1945 | 真实属性会话在文件里 | — | 失败：执行计划对不上断言（DeleteCleanup 对）——店会话态与夹具期望漂移，需专项核对 |
+| `live_projams_nested_created_routes_and_generates_delivery_roots` | model_update_plan.rs:2119 | 真实 Created 会话 | — | 失败：`sesno 21 missing real Add`——同上一类漂移 |
+| `live_projams_negative_geometry_change_regenerates_owning_equi` | model_update_plan.rs:2205 | NCYL 负几何 EQUI | 2026-08-13 B2 @8019 | **通过**（5.1s；BREP 缺陷不影响其目标 EQUI） |
+| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN + **CATA 前置** | — | 阻塞：空间门前置修复后进到生成，但分支组件靠目录出几何——按需闭包 `parsed=0 missing=0`，子树无模型（闭包依赖发现待专项） |
+| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG + **CATA 前置** | — | 阻塞：同上 |
+| `live_suppo_pending_is_actually_regenerated` | model_update_pending.rs:4861 | SUPPO `24384/25725` | — | 阻塞：靶元素不在 testbed 店（8009 数据绑定），归 8009 批 |
+| `live_zone_owned_equi_pending_is_actually_regenerated` | model_update_pending.rs:4870 | 既有 ZONE-owned EQUI；空间树就绪 | 2026-08-13 重测2 @8019 | **通过**（10.5s，空间门前置修复后点亮） |
+| `live_shared_spco_cascade_regenerates_every_consumer` | model_update_pending.rs:4957 | SPCO `23274/295504` | — | 阻塞：靶元素不在 testbed 店（8009 数据绑定）；空间门前置已随本批补上 |
+| `live_generates_a_missing_model` | on_demand_model.rs:447 | `AIOS_ON_DEMAND_TEST_REFNO=24384/24777`（先删该行 `inst_relate` 走真缺失恢复） | 2026-08-13 重测 @8019 | **通过**（4.2s，BOX 按需再生） |
+| `test_cal_rooms` | room_model.rs:33 | 房间 mesh 在位 | — | 未跑：mesh 前置未建，待房间批 |
+| `test_cal_distance` | room_model.rs:78 | mesh 在位 | — | 未跑：同上 |
+| `test_build_room_panels_relate_common` | room_model.rs:1925 | 改写配置库房间关系 | — | 未跑：写配置库，待专门窗口 |
+| `live_database_uncovered_noun_histogram` | coverage_audit.rs:236 | 只读，基线在位 | 2026-08-13 B1 @8019 | **通过**（9s） |
+| `live_database_uncovered_nouns_resolve_to_modeled_roots` | coverage_audit.rs:267 | 只读，基线在位 | 2026-08-13 B1 @8019 | **通过**（75.9s） |
+| `scom_geometry_resolves_from_stored_reference_attributes` | resolve.rs:112 | **CATA 解析在位** | — | 阻塞：`SCOM.GMRE did not resolve`——testbed 无已解析目录行，归 CATA 专项 |
+| `both_catalogue_shapes_resolve_geometry_from_the_scom` | resolve.rs:132 | **CATA 解析在位** | — | 阻塞：同上 |
+| `live_backfill_anc_on_configured_db` | pdms_inst.rs:947 | 基线在位；**店里不得有 ref0>2^31 的魔术残留** | — | 失败=缺陷已立档：魔术 ref0=4000000001 在回填 SQL `ref0*2^32` 处 i64 溢出；回填工具应跳过超界行并告警 |
+| `live_sweep_inst_relate_flat_on_configured_db` | pdms_inst.rs:992 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（32.7s） |
+| `test_boolean_refno_parse_error` | manifold_bool.rs:670 | mesh 在位 | 2026-08-13 B2 @8019 | **通过**（3.1s） |
+| `test_gen_geos` | occ_generate.rs:37 | 基线 + mesh 目录 | 2026-08-13 B2 @8019 | **通过**（3.4s） |
+| `test_ancestor`（team_data.rs:166） | team_data.rs:166 | 项目数据在位 | 2026-08-13 B1 @8019 | **通过**（3.2s） |
+| `a_reparse_lands_exactly_one_site_per_name` | member_prune.rs:441 | 空 8009 + 本地 AMS 文件 | — | 未跑：需空 8009 专项窗口 |
 
 ## C 需真实 E3D（生产空窗 runbook）
 
@@ -139,4 +178,4 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `test_model_generation_24383_66456` | test_performance.rs:652 | 生成性能基准 |
 | `probe_live_sql` | helper.rs:737 | `AIOS_PROBE_SQL` ad-hoc 探针（工具非测试） |
 
-合计 82 项：A 26 / B 39 / C 9 / D 8。
+合计 83 项：A 27 / B 39 / C 9 / D 8。

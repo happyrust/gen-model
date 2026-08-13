@@ -1,11 +1,11 @@
 {
   "comment": [
-    "批次 2 · B2（需生成产物在位）：前置 = B0 出清完成（7997 全库生成结论就绪，",
-    "其余三库按各自基线积压出清）。破坏性/执行型殿后。",
-    "live_generate_roots_with_coverage_audit 需要 AIOS_GEOM_COVERAGE_ROOTS 指定根，",
-    "离线定不了好根——先裸跑记录其失败形态，按结论回填台账（预期：阻塞）。",
-    "live_manual_update_project：testbed 副本无新会话，预期走「无事可做」分支，",
-    "结论按实测记录。"
+    "批次 2 · B2（需生成产物在位）：前置 = B0 出清完成 + 空间树重建落盘 +",
+    "SYS meta 引导（见台账批次 2 战果的店准备动作）。破坏性/执行型殿后。",
+    "coverage_audit 的根 24384/24776 = on-demand 探针 BOX(24384/24777) 的属主 EQUI。",
+    "missing_model 跑真缺失恢复需先 DELETE inst_relate:24384_24777。",
+    "manual_update 二遍会给 /ALL 未导入 25 库做首建基线（数小时）——只在专项窗口",
+    "并先冷备后再跑（2026-08-13 实测 1800s 超时中断，靠冷备回滚）。"
   ],
   "config": "python/testbed/DbOption-pytest",
   "features": "http_api",
@@ -24,7 +24,8 @@
     { "name": "live_suppo_pending_is_actually_regenerated" },
     { "name": "live_zone_owned_equi_pending_is_actually_regenerated" },
     { "name": "live_shared_spco_cascade_regenerates_every_consumer", "timeout_secs": 2400 },
-    { "name": "live_generates_a_missing_model" },
+    { "name": "live_generates_a_missing_model",
+      "env": { "AIOS_ON_DEMAND_TEST_REFNO": "24384/24777" } },
     { "name": "test_boolean_refno_parse_error" },
     { "name": "test_gen_geos", "timeout_secs": 2400 },
     { "name": "live_sweep_inst_relate_flat_on_configured_db", "timeout_secs": 1800 },
@@ -32,7 +33,8 @@
     { "name": "live_soft_deleted_subtree_removes_all_model_nodes" },
     { "name": "live_shared_inst_info_is_deleted_only_after_last_reference" },
     { "name": "live_inst_info_without_geo_relate_is_reclaimed" },
-    { "name": "live_generate_roots_with_coverage_audit" },
+    { "name": "live_generate_roots_with_coverage_audit",
+      "env": { "AIOS_GEOM_COVERAGE_ROOTS": "24384/24776" } },
     { "name": "force_init_watcher_incr_once", "timeout_secs": 1800 },
     { "name": "live_manual_update_project", "timeout_secs": 1800,
       "env": { "AIOS_MANUAL_UPDATE_PROJECT": "AvevaMarineSample" } }
