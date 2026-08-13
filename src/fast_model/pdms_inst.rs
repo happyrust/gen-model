@@ -130,14 +130,39 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
 /// P3 之后这里不再顺手补 `zone_refno`（该列已退役，读侧无消费者）——每行一次的
 /// `fn::find_ancestor_type`（9 跳 owner 上溯）从回填成本里整个消失。
 pub async fn backfill_inst_relate_anc() -> anyhow::Result<(usize, usize)> {
+    /// `RefU64` 把 ref0 放高 32 位，而 Surreal 数值是 i64——ref0 超过 `i32::MAX`
+    /// 的行（live 夹具的魔术 dbnum 残留是唯一已知来源）在 `fn::anc_u64` 里必然
+    /// 乘法溢出，且一行就能炸掉整批 UPDATE 事务（2026-08-13 testbed 实测）。
+    /// 回填按此上限跳过它们并告警，不让外来行阻断整表自愈。
+    const PACKABLE_REF0_MAX: u32 = i32::MAX as u32;
+
     async fn drain_table(table: &str) -> anyhow::Result<usize> {
         const BATCH: usize = 2000;
         println!("正在回填 {table} 的存量 anc/dbnum（老库首次启动需全表回填）...");
         let started = std::time::Instant::now();
+
+        let skip_sql = format!(
+            "RETURN array::len(SELECT VALUE id FROM {table} WHERE anc = NONE \
+             AND type::number(string::split(record::id(id), '_')[0]) > {PACKABLE_REF0_MAX});"
+        );
+        let mut response = SUL_DB.query(skip_sql).await?.check()?;
+        let skipped: Option<usize> = response.take(0)?;
+        let skipped = skipped.unwrap_or(0);
+        if skipped > 0 {
+            let msg = format!(
+                "{table}: {skipped} 行 ref0 超出 u64 打包上限（fixture 魔术 dbnum 残留？），\
+                 anc 回填跳过它们"
+            );
+            log::warn!("{msg}");
+            eprintln!("{msg}");
+        }
+
         let mut total = 0usize;
         loop {
             let sql = format!(
-                "LET $rows = SELECT VALUE id FROM {table} WHERE anc = NONE LIMIT {BATCH};\n\
+                "LET $rows = SELECT VALUE id FROM {table} WHERE anc = NONE \
+                 AND type::number(string::split(record::id(id), '_')[0]) <= {PACKABLE_REF0_MAX} \
+                 LIMIT {BATCH};\n\
                  UPDATE $rows SET anc = fn::anc_u64(in), dbnum = in.dbnum RETURN NONE;\n\
                  RETURN array::len($rows);"
             );
@@ -962,11 +987,15 @@ mod tests {
             started.elapsed()
         );
 
+        // 复核范围与回填一致：ref0 超出 u64 打包上限的行（fixture 魔术 dbnum
+        // 残留）本就不可打包，回填按设计跳过，不算残留。
         let mut response = SUL_DB
             .query(
                 "RETURN [array::len((SELECT VALUE id FROM inst_relate WHERE anc != NONE LIMIT 1)), \
-                         array::len((SELECT VALUE id FROM inst_relate WHERE anc = NONE LIMIT 1)), \
-                         array::len((SELECT VALUE id FROM tubi_relate WHERE anc = NONE LIMIT 1))];",
+                         array::len((SELECT VALUE id FROM inst_relate WHERE anc = NONE \
+                            AND type::number(string::split(record::id(id), '_')[0]) <= 2147483647 LIMIT 1)), \
+                         array::len((SELECT VALUE id FROM tubi_relate WHERE anc = NONE \
+                            AND type::number(string::split(record::id(id), '_')[0]) <= 2147483647 LIMIT 1))];",
             )
             .await
             .expect("覆盖复核查询")
@@ -978,9 +1007,9 @@ mod tests {
             .try_into()
             .expect("三元组");
         assert_eq!(has_anc, 1, "回填后 inst_relate 应存在带 anc 的行");
-        assert_eq!(inst_none, 0, "inst_relate 不应残留 anc = NONE 行");
-        assert_eq!(tubi_none, 0, "tubi_relate 不应残留 anc = NONE 行");
-        println!("[live] 覆盖复核通过：两表 anc 无残留 NONE");
+        assert_eq!(inst_none, 0, "inst_relate 不应残留可打包的 anc = NONE 行");
+        assert_eq!(tubi_none, 0, "tubi_relate 不应残留可打包的 anc = NONE 行");
+        println!("[live] 覆盖复核通过：两表可打包范围内 anc 无残留 NONE");
     }
 
     /// 手动 live（P4 写时物化部署步）：对**配置库**跑一轮平表副本清扫——

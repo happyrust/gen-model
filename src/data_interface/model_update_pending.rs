@@ -4977,6 +4977,19 @@ mod tests {
         crate::fast_model::aabb_tree::rebuild_tree_from_pointers()
             .await
             .expect("rebuild spatial tree before SPCO cascade drain");
+        // 级联展开读 ref_rev（重建产物，不是基线副产品）——自足重建；随后用
+        // 同一个展开器算出本店切面的期望根数，drain 口径不再钉死（旧 1+67）。
+        crate::data_interface::manual_update::rebuild_reverse_index()
+            .await
+            .expect("rebuild reverse index before cascade");
+        let expected_roots =
+            crate::data_interface::manual_update::expand_live_reverse_cascade(RefnoEnum::from(
+                SPCO,
+            ))
+            .await
+            .expect("pre-expand shared SPCO cascade")
+            .len();
+        assert!(expected_roots > 0, "shared SPCO expanded to zero roots");
         SUL_DB
             .query(&cleanup)
             .await
@@ -5002,8 +5015,8 @@ mod tests {
             .expect("init manager");
         assert_eq!(
             drain(&manager).await.expect("drain shared SPCO cascade"),
-            68,
-            "one cascade task plus 67 BRAN roots must complete in one drain"
+            1 + expected_roots,
+            "one cascade task plus every BRAN root must complete in one drain"
         );
 
         let mut response = SUL_DB
@@ -5019,7 +5032,19 @@ mod tests {
             response.take(0).expect("decode remaining SPCO work");
         assert!(remaining.is_empty(), "{remaining:?}");
         let consumers: Vec<RefnoEnum> = response.take(1).expect("decode SPCO consumers");
-        assert_eq!(consumers.len(), 72, "shared SPCO fixture changed");
+        // 消费者总数随店切面走（旧 72 钉的是当年切面），结构断言 + env 钉，
+        // 与 live_rebuild_ref_rev_covers_shared_spco_consumers 同款拆层。
+        assert!(
+            consumers.len() >= 2,
+            "shared SPCO must have multiple live consumers, got {}",
+            consumers.len()
+        );
+        if let Ok(expected) = std::env::var("AIOS_EXPECT_SPCO_CONSUMERS") {
+            let expected: usize = expected
+                .parse()
+                .expect("AIOS_EXPECT_SPCO_CONSUMERS must be a number");
+            assert_eq!(consumers.len(), expected, "shared-SPCO consumer count drifted");
+        }
 
         let pe_keys = consumers
             .iter()
@@ -5038,7 +5063,11 @@ mod tests {
         let generated: Vec<surrealdb::sql::Thing> = response
             .take(0)
             .expect("decode shared SPCO consumer models");
-        assert_eq!(generated.len(), 72, "not every shared consumer regenerated");
+        assert_eq!(
+            generated.len(),
+            consumers.len(),
+            "not every shared consumer regenerated"
+        );
 
         SUL_DB
             .query(&cleanup)

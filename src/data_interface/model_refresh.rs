@@ -157,6 +157,11 @@ mod tests {
     /// `inst_relate → inst_info → geo_relate → inst_geo`；`/20` 是同批未删除的兄弟，
     /// 代表「同 ZONE 其它交付单元」。把三者一起传进去，验证删除集只按 `deleted = true`
     /// 过滤，且子树遍历能跨过 `pe_owner` 找到 `/11`。
+    ///
+    /// `inst_geo` **按设计幸存**：它是内容寻址的共享节点，级联删除的引用计数守卫
+    /// 数不到还有谁指着那块几何，跟着删是跨生成根的数据损坏（见
+    /// `render_cascade_delete` 的理由段）；回收归全库引用计数的后台 sweep
+    /// （`live_inst_info_without_geo_relate_is_reclaimed` 钉的那条路径）。
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling() {
@@ -230,8 +235,9 @@ mod tests {
 
         assert_eq!(
             state,
-            vec![false, false, false, false, false, false, true, true, true],
-            "被删子树（含后代）应清空，未删除的兄弟必须原样保留"
+            vec![false, false, false, false, true, true, true, true, true],
+            "被删子树的 inst_relate/inst_info 应清空（inst_geo 是共享内容寻址节点，\
+             按设计留给后台 sweep 回收），未删除的兄弟必须原样保留"
         );
     }
 
