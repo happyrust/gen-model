@@ -1,0 +1,18 @@
+{
+  "comment": [
+    "批次 2 · CATA 家族复测（2026-08-13）：库侧闭包收集器 object::values 修复后，",
+    "bran/hang 已点亮、23274 规格行（含 spco-cascade 靶 SPCO）已按需入店。",
+    "本批验证其余 CATA 前置项：scom×2（读已入店的引用属性）、issue5×2（隐含直管段",
+    "判定）、spco_cascade（67 BRAN 级联）。suppo 靶（24384/25725）仍不在店，不含。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 1200,
+  "tests": [
+    { "name": "scom_geometry_resolves_from_stored_reference_attributes" },
+    { "name": "both_catalogue_shapes_resolve_geometry_from_the_scom" },
+    { "name": "live_issue5_moving_the_reported_cap_plans_a_branch_regeneration" },
+    { "name": "live_issue5_moving_a_container_regenerates_the_branches_beneath_it" },
+    { "name": "live_shared_spco_cascade_regenerates_every_consumer", "timeout_secs": 2400 }
+  ]
+}

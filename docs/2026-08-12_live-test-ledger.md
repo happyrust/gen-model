@@ -50,6 +50,32 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
   拉**首建基线**（观测 1800s 超时中断后留 5,027 pending，靠冷备回滚）——testbed
   常规批不点亮，归专项窗口；跑它前必须先冷备。
 
+**批次 2 补测（2026-08-13 上午，CATA 闭包修复后）**：库侧闭包收集器的
+`refno.*[WHERE …]` 对记录链接形状静默返回空（真 schema 里 `refno` 是指向类型化
+属性表的记录链接），修为 `object::values` 展开后按需 CATA 端到端打通——
+**再点亮 12 项**（B 组 19→31/39）：
+
+- **CATA 家族 7 项**：`bran`/`hang` pending 重生成（SPRE→23274 规格行按需入店）、
+  `issue5` ×2（隐含直管段判定拿到规格数据后走整根重生成）、`scom` ×2（先
+  `aios_db.model.ensure('24384/22456')` 让 ams5052 目录 1,727 行按需入店；合跑
+  一进程时有跨测试缓存干扰，批跑工具本就单测试单进程，无碍）、
+  `transform_branch`（DAMP 模型随 bran 重生成落位，本质是 CATA 下游非漂移）。
+- **共享 SPCO 三件套**：钉死常量拆层（72/67/68 → 结构断言 + `AIOS_EXPECT_SPCO_*`
+  env 钉；本店切面消费者=75），expands/cascade 自足重建 ref_rev 不再依赖兄弟用例
+  顺序。两个并行实例同时跑三件套互扰下仍全绿。
+- **`backfill_anc`**：回填改为跳过 ref0 超出 u64 打包上限的行并告警（testbed 实测
+  7 行批次 1 魔术残留，一行即可炸整批 UPDATE 事务），复核口径同步收窄到可打包
+  范围。溢出缺陷就此闭环。
+- **`cleanup_by_pe_state`**：第 5 处测试腐化——期望向量要求删 `inst_geo`，与
+  `render_cascade_delete` 的设计（内容寻址共享节点不做写路径单边回收，防跨根
+  数据损坏）矛盾；期望修正为 inst_geo 幸存、归后台 sweep。
+- **数据绑定定性收口**：`projams_real_attribute` / `projams_nested_created` 与
+  `suppo` 同族——期望钉在一份**本机不存在的 ams8000 世代**上（testbed 与
+  D:\AVEVA 两份文件会话链完整 1–209，sesno 21 均无 GENSEC Add，25725/25743
+  家族元素在文件与解析到位的店里都不存在）。需持有那份历史文件或在 E3D 重录
+  后重钉期望（`AIOS_PROJAMS_GEOMETRY_FILE`/`AIOS_PROJAMS_DATA_ONLY_FILE`
+  可指向任意副本）。
+
 类别口径：
 
 - **A 自建夹具**：数据自造自清（fixture 记录 / 魔术大 dbnum / 一次性目录），只要
@@ -103,11 +129,11 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 ## B 需生成基线（批次 2，2026-08-12/13 执行 @ testbed 8019）
 
 清单：`batch2-b0.json`（环境建设）、`batch2-b1-baseline.json`（基线即可批）、
-`batch2-b2-generated.json`（生成产物批）、`batch2-retest.json` / `batch2-retest2.json`
-（缺口修复后的定向重测）。**19/39 首次通过**；阻塞根因集中在四类——
-**CATA 前置**（testbed 无已解析目录行，且按需闭包在分支组件上 parsed=0，
-待专项）、**8009 数据绑定**（夹具靶元素只在生产店）、**店态漂移**（30k 出清改变
-了拓扑/会话态，夹具常量需刷新）、**长跑专项**（首建基线级别的耗时）。
+`batch2-b2-generated.json`（生成产物批）、`batch2-retest2.json` /
+`batch2-retest-cata.json` / `batch2-retest-spco.json`（缺口修复后的定向重测）。
+首日 19/39，CATA 闭包修复补测后 **31/39 通过**；余 8 项=数据绑定 3（消失的
+ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mesh / 空 8009
+前置）。
 
 | 测试 | 位置 | 前置 | 最近通过 | 结论 |
 |---|---|---|---|---|
@@ -115,36 +141,36 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `live_shared_inst_info_is_deleted_only_after_last_reference` | helper.rs:656 | 共享 inst_info 在位 | 2026-08-13 B2 @8019 | **通过**（3.2s） |
 | `live_inst_info_without_geo_relate_is_reclaimed` | helper.rs:759 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（3.2s） |
 | `live_soft_deleted_subtree_removes_all_model_nodes` | helper.rs:815 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（3.3s） |
-| `live_transform_branch_includes_known_model_child` | increment_manager.rs:2415 | AMS 已知 BRAN 模型 | — | 失败：`nodes.contains(&damp)` 不成立——出清后店态与夹具期望漂移，需专项核对期望常量 |
+| `live_transform_branch_includes_known_model_child` | increment_manager.rs:2415 | BRAN `24381/100817` 已生成（CATA 闭包在位） | 2026-08-13 补测 @8019 | **通过**（2.9s；此前失败是 CATA 下游——DAMP 无模型，闭包修复 + bran 重生成后落位） |
 | `live_manual_baseline_all_design_dbnums` | manual_update.rs:6826 | 全量基线工具本体 | 2026-08-12 B0 @8019 | **通过**（4 库基线，小时级；`AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample`） |
 | `live_manual_update_project` | manual_update.rs:6871 | 基线在位 + SYS meta；**先冷备** | — | 长跑专项：二遍会把 /ALL 未导入 25 库拉首建基线（1800s 超时中断留 5k pending，冷备回滚）。一遍（SYS meta 引导）已验证可用，需 `RUST_MIN_STACK=16M` |
 | `live_ref_rev_roundtrip_selfcheck` | manual_update.rs:6935 | ref_rev 数据在位 | 2026-08-13 B1 @8019 | **通过**（3.1s） |
-| `live_rebuild_ref_rev_covers_shared_spco_consumers` | manual_update.rs:6991 | 共享 SPCO 数据（7997） | — | 失败：消费者数 75 ≠ 夹具常量——30k 出清改变 ref_rev 拓扑，期望需按新店态刷新 |
-| `live_shared_spco_expands_to_generation_roots` | manual_update.rs:7036 | 共享 SPCO 数据 + ref_rev 已重建 | — | 失败：左值 0——需先跑 ref_rev 重建（与上一条成对核对） |
+| `live_rebuild_ref_rev_covers_shared_spco_consumers` | manual_update.rs:6991 | 共享 SPCO 数据（23274 规格行已按需入店）；精确数走 `AIOS_EXPECT_SPCO_CONSUMERS` | 2026-08-13 补测 @8019 | **通过**（钉死 72 拆层为结构断言+env 钉；本店切面=75） |
+| `live_shared_spco_expands_to_generation_roots` | manual_update.rs:7036 | 同上；自足重建 ref_rev | 2026-08-13 补测 @8019 | **通过**（不再依赖兄弟用例顺序；归并断言改「非零且 ≤ 消费者数」+ `AIOS_EXPECT_SPCO_ROOTS` env 钉） |
 | `force_init_watcher_incr_once` | increment_pipeline.rs:3330 | 基线 + 监控目录 | 2026-08-13 B2 @8019 | **通过**（4.3s） |
 | `live_add_pe_owner_replay_is_idempotent` | increment_pipeline.rs:3351 | 基线在位 | 2026-08-13 B1 @8019 | **通过**（3.9s） |
-| `live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling` | model_refresh.rs:162 | 生成产物在位 | — | 失败：被删子树未清空（[false×4, true×5]）——清理路径或夹具前置待专项排查 |
+| `live_cleanup_by_pe_state_clears_subtree_and_spares_live_sibling` | model_refresh.rs:162 | 自建夹具（4000000001 保留段） | 2026-08-13 补测 @8019 | **修复后通过**（2.4s）——期望向量写于 inst_geo 共享化决策之前（第 5 处测试腐化）：级联删除按设计不回收内容寻址的 inst_geo，归后台 sweep |
 | `live_generate_roots_with_coverage_audit` | model_refresh.rs:240 | `AIOS_GEOM_COVERAGE_ROOTS`（如 `24384/24776`） | 2026-08-13 重测 @8019 | **通过**（4.1s） |
 | `live_projams_direct_transform_and_data_only_actions_are_distinct` | model_update_plan.rs:1756 | ProjAMS EQUI 在位 | 2026-08-13 B2 @8019 | **通过**（4.6s） |
-| `live_issue5_moving_the_reported_cap_plans_a_branch_regeneration` | model_update_plan.rs:1835 | `/1WCC1135/B1`（7999）+ **CATA 前置** | — | 阻塞：计划走了便宜路径——隐含直管段（INTUBE）判定需 SPCO/CATA 数据，testbed 无已解析目录 |
-| `live_issue5_moving_a_container_regenerates_the_branches_beneath_it` | model_update_plan.rs:1872 | `/1WCC-PIPE-RX` zone（7999）+ **CATA 前置** | — | 阻塞：同上 |
-| `live_projams_real_attribute_sessions_plan_and_execute_distinctly` | model_update_plan.rs:1945 | 真实属性会话在文件里 | — | 失败：执行计划对不上断言（DeleteCleanup 对）——店会话态与夹具期望漂移，需专项核对 |
-| `live_projams_nested_created_routes_and_generates_delivery_roots` | model_update_plan.rs:2119 | 真实 Created 会话 | — | 失败：`sesno 21 missing real Add`——同上一类漂移 |
+| `live_issue5_moving_the_reported_cap_plans_a_branch_regeneration` | model_update_plan.rs:1835 | `/1WCC1135/B1`（7999）+ CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（3.5s；规格行入店后隐含直管段判定走整根重生成） |
+| `live_issue5_moving_a_container_regenerates_the_branches_beneath_it` | model_update_plan.rs:1872 | `/1WCC-PIPE-RX` zone（7999）+ CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（4.1s） |
+| `live_projams_real_attribute_sessions_plan_and_execute_distinctly` | model_update_plan.rs:1945 | **一份本机不存在的 ams8000 世代**（见批次 2 补测段） | — | 阻塞·数据绑定：本机两份 ams8000（sesno 1–209）均无期望会话内容；重录后经 `AIOS_PROJAMS_*_FILE` 重钉 |
+| `live_projams_nested_created_routes_and_generates_delivery_roots` | model_update_plan.rs:2119 | 同上 | — | 阻塞·数据绑定：sesno 21 无 GENSEC Add，25743/25725 家族元素不存在于文件与店 |
 | `live_projams_negative_geometry_change_regenerates_owning_equi` | model_update_plan.rs:2205 | NCYL 负几何 EQUI | 2026-08-13 B2 @8019 | **通过**（5.1s；BREP 缺陷不影响其目标 EQUI） |
-| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN + **CATA 前置** | — | 阻塞：空间门前置修复后进到生成，但分支组件靠目录出几何——按需闭包 `parsed=0 missing=0`，子树无模型（闭包依赖发现待专项） |
-| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG + **CATA 前置** | — | 阻塞：同上 |
-| `live_suppo_pending_is_actually_regenerated` | model_update_pending.rs:4861 | SUPPO `24384/25725` | — | 阻塞：靶元素不在 testbed 店（8009 数据绑定），归 8009 批 |
+| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN + CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（15.9s；闭包收集器 object::values 修复后 SPRE→23274 规格按需入店，子树出模型） |
+| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG + CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（10.9s） |
+| `live_suppo_pending_is_actually_regenerated` | model_update_pending.rs:4861 | SUPPO `24384/25725` | — | 阻塞·数据绑定：与 projams_nested 同族——该 SUPPO 属于本机不存在的 ams8000 世代，文件与店里均无此元素 |
 | `live_zone_owned_equi_pending_is_actually_regenerated` | model_update_pending.rs:4870 | 既有 ZONE-owned EQUI；空间树就绪 | 2026-08-13 重测2 @8019 | **通过**（10.5s，空间门前置修复后点亮） |
-| `live_shared_spco_cascade_regenerates_every_consumer` | model_update_pending.rs:4957 | SPCO `23274/295504` | — | 阻塞：靶元素不在 testbed 店（8009 数据绑定）；空间门前置已随本批补上 |
+| `live_shared_spco_cascade_regenerates_every_consumer` | model_update_pending.rs:4957 | SPCO `23274/295504`（规格行按需入店）；自足重建 ref_rev | 2026-08-13 补测 @8019 | **通过**（钉死 1+67 拆为动态口径：先用同一展开器算本店切面根数再对 drain；两个并行实例互扰下仍全绿） |
 | `live_generates_a_missing_model` | on_demand_model.rs:447 | `AIOS_ON_DEMAND_TEST_REFNO=24384/24777`（先删该行 `inst_relate` 走真缺失恢复） | 2026-08-13 重测 @8019 | **通过**（4.2s，BOX 按需再生） |
 | `test_cal_rooms` | room_model.rs:33 | 房间 mesh 在位 | — | 未跑：mesh 前置未建，待房间批 |
 | `test_cal_distance` | room_model.rs:78 | mesh 在位 | — | 未跑：同上 |
 | `test_build_room_panels_relate_common` | room_model.rs:1925 | 改写配置库房间关系 | — | 未跑：写配置库，待专门窗口 |
 | `live_database_uncovered_noun_histogram` | coverage_audit.rs:236 | 只读，基线在位 | 2026-08-13 B1 @8019 | **通过**（9s） |
 | `live_database_uncovered_nouns_resolve_to_modeled_roots` | coverage_audit.rs:267 | 只读，基线在位 | 2026-08-13 B1 @8019 | **通过**（75.9s） |
-| `scom_geometry_resolves_from_stored_reference_attributes` | resolve.rs:112 | **CATA 解析在位** | — | 阻塞：`SCOM.GMRE did not resolve`——testbed 无已解析目录行，归 CATA 专项 |
-| `both_catalogue_shapes_resolve_geometry_from_the_scom` | resolve.rs:132 | **CATA 解析在位** | — | 阻塞：同上 |
-| `live_backfill_anc_on_configured_db` | pdms_inst.rs:947 | 基线在位；**店里不得有 ref0>2^31 的魔术残留** | — | 失败=缺陷已立档：魔术 ref0=4000000001 在回填 SQL `ref0*2^32` 处 i64 溢出；回填工具应跳过超界行并告警 |
+| `scom_geometry_resolves_from_stored_reference_attributes` | resolve.rs:112 | 13244（ams5052）SCOM 已入店（`aios_db.model.ensure('24384/22456')` 一次即可） | 2026-08-13 补测 @8019 | **通过**（3.4s） |
+| `both_catalogue_shapes_resolve_geometry_from_the_scom` | resolve.rs:132 | 同上 | 2026-08-13 补测 @8019 | **通过**（8.1s，六种形态全解出；与 scom_geometry 合进一个测试进程时有缓存干扰，批跑工具单进程无碍） |
+| `live_backfill_anc_on_configured_db` | pdms_inst.rs:947 | 基线在位 | 2026-08-13 补测 @8019 | **修复后通过**（3.6s）——回填跳过 ref0 超出 u64 打包上限的行并告警（7 行批次 1 魔术残留），复核口径同步收窄；溢出缺陷闭环 |
 | `live_sweep_inst_relate_flat_on_configured_db` | pdms_inst.rs:992 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（32.7s） |
 | `test_boolean_refno_parse_error` | manifold_bool.rs:670 | mesh 在位 | 2026-08-13 B2 @8019 | **通过**（3.1s） |
 | `test_gen_geos` | occ_generate.rs:37 | 基线 + mesh 目录 | 2026-08-13 B2 @8019 | **通过**（3.4s） |

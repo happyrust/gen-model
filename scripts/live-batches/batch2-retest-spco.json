@@ -1,0 +1,18 @@
+{
+  "comment": [
+    "批次 2 · 共享 SPCO 三件套复测（2026-08-13）：钉死常量已拆层",
+    "（72/67/68 → 结构断言 + AIOS_EXPECT_SPCO_CONSUMERS/ROOTS env 钉），",
+    "expands/cascade 自足重建 ref_rev。本店切面（出清+bran 重生成后）消费者=75。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 1200,
+  "tests": [
+    { "name": "live_rebuild_ref_rev_covers_shared_spco_consumers",
+      "env": { "AIOS_EXPECT_SPCO_CONSUMERS": "75" } },
+    { "name": "live_shared_spco_expands_to_generation_roots",
+      "env": { "AIOS_EXPECT_SPCO_CONSUMERS": "75" } },
+    { "name": "live_shared_spco_cascade_regenerates_every_consumer", "timeout_secs": 2400,
+      "env": { "AIOS_EXPECT_SPCO_CONSUMERS": "75" } }
+  ]
+}
