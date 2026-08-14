@@ -623,14 +623,20 @@ async fn batch_reroutes_to_initial_load(
     job: &FrozenBatch,
     cand: &crate::data_interface::manual_update::FileCandidate,
 ) -> bool {
-    match crate::data_interface::dbnum_state::DbnumState::applied_sesno(job.dbnum).await {
-        Ok(0) => true,
-        Ok(applied) => {
+    match crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await {
+        Ok(None) => true,
+        Ok(Some(state)) if state.applied_sesno == 0 => true,
+        Ok(Some(state)) => {
+            let applied = state.applied_sesno;
             if cand.file_latest_sesno < applied {
                 return true;
             }
             match crate::data_interface::manual_update::dbnum_has_any_pe_row(job.dbnum).await {
-                Ok(has_any_data) => !has_any_data,
+                Ok(has_any_data) => !crate::data_interface::manual_update::has_data_backing(
+                    applied,
+                    has_any_data,
+                    state.confirmed_empty_baseline_sesno,
+                ),
                 Err(error) => {
                     let message = format!(
                         "dbnum={} 冻结点数据支撑预判失败（按暂存窗口继续，执行体会复核）: {error:#}",

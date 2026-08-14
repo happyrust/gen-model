@@ -167,7 +167,7 @@ pub const SKIP_STARTUP_ROOM_BUILD_ENV: &str = "AIOS_SKIP_STARTUP_ROOM_BUILD";
 /// 1. [`SKIP_STARTUP_ROOM_BUILD_ENV`] —— 永不重建。它比自动执行开关更强，因为
 ///    「跑增量」与「跑 2 万面板级的全量重建」是两件事：L3 夹具、增量演练这类
 ///    场景要前者不要后者。
-/// 2. `startup_autorun`（默认 false）—— 本次启动不自动干活。
+/// 2. `startup_autorun=false`（默认 true）—— 本次启动显式要求不自动干活。
 /// 3. 两道门都放行，才与库侧凭据对账：只有空间状态真的变过才重建。
 ///
 /// 第三道门是这次改动的要点。此前这一步是无条件的，于是每次重启都要为一件

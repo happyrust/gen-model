@@ -92,6 +92,10 @@ pub struct DbnumState {
     /// 兜底**。它跟着 `applied_sesno` 同一条单调条件走，两者永远指同一条保存。
     #[serde(default)]
     pub applied_sesno_time: Option<String>,
+    /// 最近一次成功基线明确确认“没有业务元素”时建立的应用水位。
+    /// 只有它与当前 `applied_sesno` 相等，`pe` 零行才是合法空基线（ADR-023）。
+    #[serde(default)]
+    pub confirmed_empty_baseline_sesno: Option<i32>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
@@ -123,6 +127,8 @@ struct StateRow {
     /// 与本结构「只选非 datetime 字段」的前提一致；旧行没有这一列，读出来就是 `None`。
     #[serde(default)]
     applied_sesno_time: Option<String>,
+    #[serde(default)]
+    confirmed_empty_baseline_sesno: Option<i32>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -297,6 +303,12 @@ impl ScanVerdict {
     /// 权威水位（未登记时为 0）。
     pub fn applied_sesno(&self) -> i32 {
         self.prior.as_ref().map(|s| s.applied_sesno).unwrap_or(0)
+    }
+
+    pub fn confirmed_empty_baseline_sesno(&self) -> Option<i32> {
+        self.prior
+            .as_ref()
+            .and_then(|state| state.confirmed_empty_baseline_sesno)
     }
 
     /// 上一次观察到的文件最新会话号（未登记时为 0）。
@@ -744,7 +756,8 @@ impl DbnumState {
     pub async fn list_registered() -> anyhow::Result<Vec<DbnumState>> {
         let sql = format!(
             "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, applied_sesno_time, sesno FROM {WATERMARK_TABLE};"
+             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, sesno \
+             FROM {WATERMARK_TABLE};"
         );
         let mut response = SUL_DB
             .query(sql)
@@ -771,6 +784,7 @@ impl DbnumState {
                     file_latest_sesno: row.file_latest_sesno.unwrap_or_default(),
                     applied_sesno: effective.unwrap_or_default(),
                     applied_sesno_time,
+                    confirmed_empty_baseline_sesno: row.confirmed_empty_baseline_sesno,
                     initialized: effective.is_some(),
                 })
             })
@@ -784,7 +798,8 @@ impl DbnumState {
         // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
         let sql = format!(
             "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, applied_sesno_time, sesno FROM {WATERMARK_TABLE}:{dbnum};\
+             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, sesno \
+             FROM {WATERMARK_TABLE}:{dbnum};\
              RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} \
              WHERE dbnum = {dbnum} AND sesno != NONE));"
         );
@@ -831,6 +846,7 @@ impl DbnumState {
             file_latest_sesno: row.file_latest_sesno.unwrap_or_default(),
             applied_sesno: applied.unwrap_or_default(),
             applied_sesno_time,
+            confirmed_empty_baseline_sesno: row.confirmed_empty_baseline_sesno,
             initialized: applied.is_some(),
         }))
     }

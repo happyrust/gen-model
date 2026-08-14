@@ -19,7 +19,7 @@
 | `http_api_cors` | `["*"]` | 2026-07-27 | Web 服务 CORS 允许来源列表，`["*"]` 全放行（局域网前端联调）。与 `http_api_addr` 同批引入 |
 | `delivery_unit_types` | 未启用（注释） | 2026-07-25 | 最小交付单元类型——增量 / 手动 / 按需生成共用的“生成根”口径；配置后**完全取代**默认集合 `["BRAN","HANG","SUPPO","EQUI"]`，`[]` 表示不使用交付单元。trim + 大写 + 去重，拒绝 WORL/WORLD/SITE/ZONE 与 FTUB。随批量根重生成能力引入（ADR-012、`docs/specs/manual-model-update.md`）。消费方：`data_interface/generation_root.rs` |
 | `append_delivery_unit_types` | 未启用（注释） | 2026-07-25 | 在默认交付单元集合之外**追加**类型，仅当未配置 `delivery_unit_types` 时生效。规则同上 |
-| `startup_autorun` | `false` | 2026-08-10 | 启动是否自动干活。`false`（默认）时启动重扫照常发现并入队，但排出来的行**挂起**（`/queue` 上状态为 `held`）不派发，持久积压也不消化，启动全量房间重建不跑；某个 dbnum 真的来了增量（watch 事件 / 人工执行）才放行它那一条，并与新会话合并成一条一起跑。`true` 是历史行为。环境变量 `AIOS_STARTUP_AUTORUN` 压过本键（认 `1/true/yes/on` 与 `0/false/no/off`，认不出的值退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），非 rs-core `DbOption` 字段，缺键不会起不来。消费方：`options.rs::startup_autorun`、`lib.rs::skip_startup_room_build`、`batch_queue.rs::DataBatch::held`、`batch_scheduler.rs::arm_auto_work` |
+| `startup_autorun` | `true`（2026-08-10 引入时为 `false`，08-14 翻正） | 2026-08-10 | 启动是否自动干活。`true`（当前默认）时启动重扫发现的未解析库、回退库与追平幽灵水位库会直接交给 worker；`false` 时这些行仍入队但以 `held` 形态等待 watch 事件或人工执行按 dbnum 放行，持久积压与启动全量房间重建也保持原挂起契约。环境变量 `AIOS_STARTUP_AUTORUN` 压过本键（认 `1/true/yes/on` 与 `0/false/no/off`，认不出的值退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），非 rs-core `DbOption` 字段，缺键采用 `true`。消费方：`options.rs::startup_autorun`、`lib.rs::skip_startup_room_build`、`batch_queue.rs::DataBatch::held`、`batch_scheduler.rs::arm_auto_work` |
 | `room_incremental` | `true`（2026-08-10 引入时为 `false`，08-12 翻正） | 2026-08-10 | 房间归属的**增量**重算开不开。`false` 时两个写入点都不再排 `room_recalc` 目标（位姿/删除刷新包围盒后的直写事务、暂存窗口收口的 `merge_room_recalc_changes`），空闲轮也不再收房间轮；已排在 `model_update_pending` 里的目标原样留着，开关一开照常收。只管增量这一条链——启动全量重建、人工重建、`drain_rooms` 直调（房间对拍夹具走的就是它）都不看本键。环境变量 `AIOS_ROOM_INCREMENTAL` 压过本键（取值规则同 `AIOS_STARTUP_AUTORUN`）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::room_incremental`、`batch_worker.rs::room_round`、`model_update_pending.rs::merge_room_recalc_changes`、`occ_generate.rs` 直写事务 |
 | `room_key_word` | `["-RM"]` | 2026-07-29 | 房间名关键词**列表**，用于房间-面板关系匹配（`fast_model/room_model.rs::get_room_key_word`）。**替代旧键 `room_keyword`（单字符串，已废弃删除）**：一次支持多关键词，且 AMS 房间名（如 `/1RX-RM03-R301`）末段由 `project_hd` 规则校验 |
 | `watermark_realign` | **已移除**（2026-08-13，ADR-021） | 2026-08-12 | ~~水位不对齐（F6 回退）的检查与处置档位~~。**2026-08-13 随 ADR-021 整键退役**：回退的默认且唯一处置改为「扫描只入队重建批次，worker 冻结点复核仍判回退才整库清空（`wipe_dbnum_for_reinit`）并按首次导入重新解析」；档位、`AIOS_WATERMARK_REALIGN` 环境变量与单库端点 `POST /dbnums/{dbnum}/realign` 一并移除，「先别动我看看」由 `startup_autorun` / 队列暂停承担。以下为历史记录：水位不对齐（F6 回退：文件被还原/替换，`file_latest_sesno < applied_sesno`）的检查与处置档位。`off`=现状只阻断；`check`=扫描时逐库输出 `[水位审计]` 行（不动数据）；`rebaseline`=检测到回退自动对齐——`prune_above_watermark` 清掉高于文件水位的行与队列残留、`applied_sesno` 写 0（写值不删行）、由基线路径按首次导入全量重建，**只对回退生效**，其余异常照旧阻断（ADR-001 2026-08-12 修订的唯一 opt-in 例外）。环境变量 `AIOS_WATERMARK_REALIGN` 压过本键（认 `off/check/rebaseline`，认不出退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::watermark_realign`、`increment_manager.rs::scan_and_check_file`、`manual_update.rs::realign_rolled_back_dbnum`；另有单库端点 `POST /api/v1/dbnums/{dbnum}/realign`（spec §4.9）**不看本键** |
@@ -87,6 +87,11 @@
   INSERT IGNORE 补洞）依赖「幸存行与新文件同史」假设，被整库重建取代。下一条为
   引入时的历史记录。
 
+- **2026-08-14（启动默认修复未解析库与追平幽灵水位，ADR-023）**：`startup_autorun`
+  缺省值与根配置翻为 **`true`**。启动重扫在 `file_latest_sesno == applied_sesno > 0`
+  时先查数据支撑；`pe` 零行且没有匹配的空基线凭据，就按首次导入窗口入队并由
+  worker 建立基线。显式配置或环境变量 `false` 仍保持 held，供测试和运维窗口使用。
+
 - **2026-08-12（watermark_realign 引入）**：新增扩展键 `watermark_realign`（默认 `"off"`，配置文件中为注释示例）。
 
   起因是 test-workspace 现场的 F6 阻断：`ams7999_0001` 被还原后 `file_latest=114 < applied=120`，该库从此增量停摆，唯一出路是手工 SQL（改水位行、删 attempt/pending）加人工重建。这个档位把那套手工配方自动化：`check` 只审计（逐库一行 `[水位审计]`，启动重扫正好构成全量对齐清单）；`rebaseline` 对**回退**自动对齐——复用 `prune_above_watermark`（自持暂存收口与水位两把写闸）物理清掉高于文件水位的残留，水位写 0 落进现成的 `needs_initial_load` → `initialize_dbnum_baseline` 基线分支，同一条批次队列内完成全量重建。只对回退生效；类型变更/同号多文件/归属不符/文件缺失照旧阻断（自动处理等于替人拍板挑文件）。文件若被换成完全不同的历史，基线完整性校验会拒绝收口并持续报错——响亮失败，不静默缝合两段历史。这是 ADR-001「水位只进不退」的唯一 opt-in 例外（见该 ADR 2026-08-12 修订注记）；同批新增单库端点 `POST /api/v1/dbnums/{dbnum}/realign`（spec §4.9，不看本键，生产 `off` 也能修单个库）。
@@ -100,12 +105,11 @@
 - `gen_spatial_tree` 自 2026-08-07 起为**死键**：代码零读取，空间/房间计算恒开启。
   键仍必须留在 toml（必填 bool，删键起不来），取值不再有任何效果；快速重启可用
   `AIOS_SKIP_STARTUP_ROOM_BUILD` 环境变量跳过启动全量房间重建（增量照常）。
-- 自 2026-08-10 起，**服务默认起来什么都不执行**（`startup_autorun = false`）。升级后若
-  发现「服务活着、队列里有货、就是不动」，先看 `/health` 的 `startup_autorun` 与
-  `auto_work_armed`，以及 `/queue` 里那些行是不是 `held`：都对上就是这个默认在起作用，
-  不是故障。正常用法是**什么都不用做**——在 E3D 里存一次盘，那个 dbnum 的挂起行会连同
-  积压一起跑掉。要它启动就自动干活，把键置 `true` 或设 `AIOS_STARTUP_AUTORUN=1`；
-  要立刻推一把而不改配置，`POST /api/v1/update/execute`（人工触发同样放行挂起行）。
+- 自 2026-08-14 起，**服务默认启动即消费重扫发现的工作**（`startup_autorun = true`），
+  包括未解析库、回退重建和追平幽灵水位。显式写成 `false` 后，若出现「服务活着、
+  队列里有货、就是不动」，看 `/health` 的 `startup_autorun` / `auto_work_armed` 与
+  `/queue` 的 `held`：在 E3D 里存一次盘或调用 `POST /api/v1/update/execute` 会按 dbnum
+  放行该行；也可用 `AIOS_STARTUP_AUTORUN=1` 临时恢复启动自动执行。
 - `POST /api/v1/queue/resume` 解的是**持久化暂停**，不是冷启动挂起：挂起行由各自 dbnum
   的真实增量放行，resume 放不动它们。两者是正交的两道门，排查时别混。
 - 三个启动开关各管一段，别混用：`startup_autorun` 管「这次启动要不要自动干活」，

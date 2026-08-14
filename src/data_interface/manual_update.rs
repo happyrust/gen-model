@@ -109,12 +109,26 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
 /// 2026-08-13 现场 7350 / 7353 / 7741 实测）——增量窗口只会从 `applied + 1` 往后接，
 /// `1..applied` 永远缺失且无人发现，唯一正确的处置是按首次导入重建。
 ///
-/// 本谓词只做**路由**（这一批走基线还是走增量），不做入队判定：`discover_batch` 的
-/// 入队门**不得**咨询它——「基线过的空库」（`applied == file_latest` 且 pe 零行）是
-/// 合法状态（[`baseline_parse_confirmed_empty`]），入队门若也问数据支撑，这种库每一轮
-/// 对账重扫都会被重新全量解析（守护见 `the_enqueue_gate_never_consults_data_backing`）。
-fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32, has_any_data: bool) -> bool {
-    file_latest_sesno > 0 && (applied_sesno == 0 || !has_any_data)
+/// 本谓词是执行路由；ADR-023 只把它依赖的同一份数据支撑/空基线凭据扩到
+/// `applied == file_latest` 的启动入队裁决。合法空库凭据与当前水位相等时仍然覆盖，
+/// 不会在每轮对账重扫里重新解析。
+pub(crate) fn has_data_backing(
+    applied_sesno: i32,
+    has_any_data: bool,
+    confirmed_empty_baseline_sesno: Option<i32>,
+) -> bool {
+    has_any_data || confirmed_empty_baseline_sesno == Some(applied_sesno)
+}
+
+fn needs_initial_load(
+    applied_sesno: i32,
+    file_latest_sesno: i32,
+    has_any_data: bool,
+    confirmed_empty_baseline_sesno: Option<i32>,
+) -> bool {
+    file_latest_sesno > 0
+        && (applied_sesno == 0
+            || !has_data_backing(applied_sesno, has_any_data, confirmed_empty_baseline_sesno))
 }
 
 /// 数据支撑探针（ADR-021）：该 dbnum 在 `pe` 里是否存在**任何**一行。
@@ -3252,6 +3266,7 @@ impl AiosDBManager {
                 file_latest_sesno,
                 applied_sesno_time.as_deref(),
                 &ModelUpdatePlan::default(),
+                true,
             )
             .await?;
             return Ok(0);
@@ -3281,6 +3296,7 @@ impl AiosDBManager {
             file_latest_sesno,
             applied_sesno_time.as_deref(),
             &plan,
+            false,
         )
         .await?;
         if roots > 0 {
@@ -3841,11 +3857,12 @@ impl AiosDBManager {
         // 判定口径与执行体完全一致（见 `execute_one_dbnum`），预览说增量、执行做
         // 基线的错位在这里堵死。
         let has_any_data =
-            if applied > 0 && cand.file_latest_sesno > applied && verdict.anomaly.is_none() {
+            if applied > 0 && cand.file_latest_sesno >= applied && verdict.anomaly.is_none() {
                 dbnum_has_any_pe_row(cand.db_num).await?
             } else {
                 true
             };
+        let confirmed_empty_baseline_sesno = verdict.confirmed_empty_baseline_sesno();
 
         let mut preview = DbnumPreview {
             dbnum: cand.db_num,
@@ -3857,7 +3874,12 @@ impl AiosDBManager {
             anomaly: verdict.anomaly,
             blocked,
             initialization_required: reinit
-                || needs_initial_load(applied, cand.file_latest_sesno, has_any_data),
+                || needs_initial_load(
+                    applied,
+                    cand.file_latest_sesno,
+                    has_any_data,
+                    confirmed_empty_baseline_sesno,
+                ),
             ..Default::default()
         };
 
@@ -4132,10 +4154,35 @@ impl AiosDBManager {
                 intent = BatchIntent::Reinitialize;
             }
             if intent == BatchIntent::ApplyWindow && cand.file_latest_sesno == applied {
-                receipt.up_to_date += 1;
-                continue;
+                if applied == 0 {
+                    receipt.up_to_date += 1;
+                    continue;
+                }
+                match dbnum_has_any_pe_row(dbnum).await {
+                    Ok(has_any_data)
+                        if has_data_backing(
+                            applied,
+                            has_any_data,
+                            verdict.confirmed_empty_baseline_sesno(),
+                        ) =>
+                    {
+                        receipt.up_to_date += 1;
+                        continue;
+                    }
+                    Ok(_) => {
+                        receipt.warnings.push(format!(
+                            "dbnum={dbnum}: 应用水位已追平文件但没有数据支撑，已按首次导入入队"
+                        ));
+                        applied = 0;
+                    }
+                    Err(error) => {
+                        receipt.warnings.push(format!(
+                            "dbnum={dbnum}: 读取数据支撑失败，本次未入队: {error:#}"
+                        ));
+                        continue;
+                    }
+                }
             }
-
             // 从未解析（applied=0）与增量窗口在这里不分家：worker 执行体里的
             // `needs_initial_load` 会把基线接管过去，两条路径同口径。
             let (first_pending_sesno_time, file_latest_sesno_time) = window_times_rfc3339(
@@ -4342,7 +4389,7 @@ impl AiosDBManager {
         // `1..applied` 永远漏掉——按首次导入重建。只在「真有增量窗口要跑」时
         // 才付这一次存在性查询；读失败必须 Failed，不许猜（吞成「没有」会整库
         // 重建一个正常大库，吞成「有」会让缺口继续静默）。
-        let has_any_data = if applied > 0 && cand.file_latest_sesno > applied {
+        let has_any_data = if applied > 0 && cand.file_latest_sesno >= applied {
             match dbnum_has_any_pe_row(dbnum).await {
                 Ok(has_any_data) => has_any_data,
                 Err(error) => {
@@ -4377,7 +4424,12 @@ impl AiosDBManager {
             warnings.push(note);
         }
 
-        if needs_initial_load(applied, cand.file_latest_sesno, has_any_data) {
+        if needs_initial_load(
+            applied,
+            cand.file_latest_sesno,
+            has_any_data,
+            verdict.confirmed_empty_baseline_sesno(),
+        ) {
             return match self
                 .initialize_dbnum_baseline(
                     project,
@@ -5195,11 +5247,11 @@ mod tests {
     /// 解析修复。
     #[test]
     fn uninitialized_files_are_detected_for_on_demand_baseline() {
-        assert!(needs_initial_load(0, 76, true));
-        assert!(needs_initial_load(0, 12, true));
-        assert!(!needs_initial_load(76, 76, true));
+        assert!(needs_initial_load(0, 76, true, None));
+        assert!(needs_initial_load(0, 12, true, None));
+        assert!(!needs_initial_load(76, 76, true, None));
         // 空文件不是「没解析过」，没有会话可解析，别派一次白跑的基线。
-        assert!(!needs_initial_load(0, 0, true));
+        assert!(!needs_initial_load(0, 0, true, None));
     }
 
     /// ADR-021 数据支撑维度的真值表：水位非零而库里零行 = 水位在撒谎，按首次导入
@@ -5208,24 +5260,23 @@ mod tests {
     fn a_lying_watermark_routes_to_the_baseline() {
         // 2026-08-13 现场形态：7350 applied=208、pe 零行、文件涨到 300 的话
         // 旧判据会走增量 209..300，1..208 永远缺失。
-        assert!(needs_initial_load(208, 300, false));
+        assert!(needs_initial_load(208, 300, false, None));
         // 有数据支撑的正常增量：照旧走窗口。
-        assert!(!needs_initial_load(208, 300, true));
+        assert!(!needs_initial_load(208, 300, true, None));
         // 空文件仍然不派基线（没有会话可解析），数据支撑维度不改变这条。
-        assert!(!needs_initial_load(208, 0, false));
-        // 「基线过的空库」（applied == file_latest 且零行）不许被本谓词的调用方
-        // 撞见：入队门的 `file_latest <= applied` 早退把它挡在队列外（见
-        // `the_enqueue_gate_never_consults_data_backing`）。谓词本身对这一格返回
-        // true 是刻意的——真被路由进来（说明有活要干）就该重建，不许静默增量。
-        assert!(needs_initial_load(50, 50, false));
+        assert!(!needs_initial_load(208, 0, false, None));
+        // 追平且零行、没有凭据就是 ADR-023 要在启动重扫检出的幽灵水位。
+        assert!(needs_initial_load(50, 50, false, None));
+        // 与当前水位绑定的凭据只豁免一次确实成功的合法空基线。
+        assert!(!needs_initial_load(50, 50, false, Some(50)));
+        // 水位后来推进，旧凭据自动失效。
+        assert!(needs_initial_load(51, 51, false, Some(50)));
     }
 
-    /// ADR-021 边界：数据支撑判定只做**路由**，不做入队判定。`discover_batch` 若
-    /// 咨询数据支撑或初始导入谓词，「基线过的空库」（applied == file_latest 且 pe
-    /// 零行，`baseline_parse_confirmed_empty` 承认的合法状态）会在每一轮对账重扫
-    /// 被重新全量解析——无限循环。入队门的判定只许是「文件会话号 vs 水位」。
+    /// ADR-023 修订 ADR-021：追平候选必须在数值早退里查数据支撑，同时咨询与当前
+    /// 水位绑定的空基线凭据；否则幽灵水位永远没有批次，或合法空库无限重解析。
     #[test]
-    fn the_enqueue_gate_never_consults_data_backing() {
+    fn the_caught_up_enqueue_gate_requires_data_backing_and_the_empty_credential() {
         let source = include_str!("increment_manager.rs");
         let body = source
             .split_once("async fn discover_batch(")
@@ -5239,8 +5290,16 @@ mod tests {
             "入队门必须保留「水位已覆盖」早退: {body}"
         );
         assert!(
-            !body.contains("needs_initial_load") && !body.contains("dbnum_has_any_pe_row"),
-            "入队门不得咨询初始导入路由或数据支撑（空库会无限重解析）: {body}"
+            body.contains("dbnum_has_any_pe_row"),
+            "追平门必须探测数据支撑: {body}"
+        );
+        assert!(
+            body.contains("confirmed_empty_baseline_sesno") && body.contains("has_data_backing"),
+            "追平门必须用当前水位的空基线凭据豁免合法空库: {body}"
+        );
+        assert!(
+            !body.contains("needs_initial_load"),
+            "扫描不应复制执行路由: {body}"
         );
     }
 
@@ -7523,7 +7582,7 @@ mod live_tests {
         }
     }
 
-    /// 回退与幽灵水位的端到端（live，ADR-021）：两幕都必须落到**首次导入基线**，
+    /// 回退与幽灵水位的端到端（live，ADR-021 / ADR-023）：三幕都必须落到**首次导入基线**，
     /// 而不是增量窗口。
     ///
     /// 幕一（回退默认整库重建）：把库侧水位抬到文件之上 → 手动入队。断言三件事：
@@ -7535,6 +7594,10 @@ mod live_tests {
     /// 幕二（水位非零而库里零行）：删光该库 pe 行、把水位压到文件之下（有增量窗口
     /// 可走的形状）→ 旧判据会走增量把 `1..applied` 永远漏掉；新判据（数据支撑）
     /// 必须路由到基线，批次 warnings 带「水位与数据不一致」。
+    ///
+    /// 幕三把水位设为**恰好等于**文件水位后删光 `pe`，钉住 ADR-023 的启动形态：
+    /// 数值上没有增量窗口，仍必须以 applied=0 的普通窗口入队并完成基线；只有
+    /// Rollback 使用 `reinitialize` 控制意图。
     ///
     /// 环境：configured Surreal（指 pytest 沙箱即可）+ `AIOS_MANUAL_UPDATE_PROJECT`；
     /// 靶库 `AIOS_MANUAL_UPDATE_DBNUM`（默认 7998，最小设计库）。**本用例会物理
@@ -7681,6 +7744,39 @@ mod live_tests {
             receipt.blocked
         );
         assert_eq!(receipt.enqueued.len(), 1, "恰好一条批次");
+        drain_and_assert(
+            &mgr,
+            dbnum,
+            file_latest,
+            &receipt.enqueued[0].task_id,
+            &["水位与数据不一致", "首次按需初始化完成"],
+        )
+        .await;
+
+        // ── 幕三：追平幽灵水位（file == applied、pe 零行）──────────────────
+        SUL_DB
+            .query(format!(
+                "DELETE pe WHERE dbnum = {dbnum}; \
+                 UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {file_latest}, \
+                 sesno = {file_latest}, confirmed_empty_baseline_sesno = NONE;"
+            ))
+            .await
+            .expect("seed caught-up ghost watermark")
+            .check()
+            .expect("valid caught-up ghost seed");
+        let receipt = mgr
+            .enqueue_manual_update(&project, None, Some(&[dbnum]))
+            .await;
+        assert!(receipt.blocked.is_empty(), "追平幽灵水位不得阻断");
+        assert_eq!(
+            receipt.enqueued.len(),
+            1,
+            "追平幽灵水位必须形成一条重建批次"
+        );
+        assert_eq!(
+            receipt.enqueued[0].intent, "apply_window",
+            "幽灵水位按首次导入窗口入队，不能冒充 Rollback 控制意图"
+        );
         drain_and_assert(
             &mgr,
             dbnum,

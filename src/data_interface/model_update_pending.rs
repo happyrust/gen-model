@@ -909,6 +909,7 @@ fn render_baseline_transaction(
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
+    confirmed_empty: bool,
 ) -> String {
     let mut statements: Vec<String> = plan
         .work_items
@@ -916,6 +917,11 @@ fn render_baseline_transaction(
         .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
         .collect();
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
+    statements.push(if confirmed_empty {
+        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
+    } else {
+        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
+    });
     format!(
         "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
         statements.join("\n")
@@ -1003,6 +1009,7 @@ pub async fn finalize_baseline(
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
+    confirmed_empty: bool,
 ) -> anyhow::Result<()> {
     SUL_DB
         .query(render_baseline_transaction(
@@ -1010,6 +1017,7 @@ pub async fn finalize_baseline(
             end_sesno,
             end_sesno_time,
             plan,
+            confirmed_empty,
         ))
         .await
         .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
@@ -4280,7 +4288,8 @@ mod tests {
             ..Default::default()
         };
 
-        let sql = render_baseline_transaction(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan);
+        let sql =
+            render_baseline_transaction(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan, false);
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
         let work_at = sql
@@ -4290,7 +4299,17 @@ mod tests {
             .find("applied_sesno = math::max([applied_sesno?:0, 76])")
             .unwrap_or_else(|| panic!("baseline watermark advance missing: {sql}"));
         assert!(work_at < watermark_at, "{sql}");
+        assert!(
+            sql.contains("confirmed_empty_baseline_sesno = NONE"),
+            "非空基线必须清除空基线凭据: {sql}"
+        );
         assert!(!sql.contains(ATTEMPT_TABLE), "{sql}");
+
+        let empty = render_baseline_transaction(7997, 76, None, &ModelUpdatePlan::default(), true);
+        assert!(
+            empty.contains("confirmed_empty_baseline_sesno = 76"),
+            "合法空基线必须与同一水位原子记录凭据: {empty}"
+        );
     }
 
     #[test]

@@ -124,7 +124,8 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `an_unparsed_project_bootstraps_instead_of_deadlocking` | update_scope.rs:387 | 空 NS | 2026-08-12 批次1 @8019 | **通过**（3.2s） |
 | `live_watch_directory_blocks_duplicate_dbnum_files` | increment_manager.rs:383 | E3D 文件头 + 一次性副本目录 | 2026-08-12 批次1 @8019 | **修复后通过**（9.6s）——夹具文件名 first/second 不过 AVEVA 白名单（用例写于白名单之前，已腐化），改成 `ams9990_0001/_0002` |
 | `live_rollback_wipe_clears_the_dbnum_for_reinit` | manual_update.rs（tests） | 魔术 dbnum + 保留段 ref0（空库即可） | 2026-08-13 @8019 | **通过**（4.7s）。前身 `live_watermark_realign_rebaselines_a_rolled_back_dbnum`（2026-08-12 随档位新增，08-13 同参数通过 4.7s）随 ADR-021 重写：缝合式对齐（prune + 补洞）改为整库清空 `wipe_dbnum_for_reinit`，断言改为全删（幸存行也不留）+ 统计清空 + 水位清值不删行 + spatial epoch 递增 |
-| `live_rollback_and_ghost_watermark_reinit_end_to_end` | manual_update.rs（live_tests） | testbed 沙箱 + `AIOS_MANUAL_UPDATE_PROJECT`；靶库默认 7998（**会物理清空重建**）；debug 构建需 `RUST_MIN_STACK=16777216` | 2026-08-13 @8019 | **通过**（22.3s，两幕）。幕一回退：入队不删数据 → worker 复核 → 整库清空 → 首次导入基线 → 水位对齐文件；幕二幽灵水位（applied>0 且 pe 零行）：路由到基线而非增量。首跑抓出真缺陷：增量形状批次先开暂存窗口、执行体改道基线后窗口缺 finalize plan 而 failed——修复为冻结点开窗前过 `batch_reroutes_to_initial_load` 预判 |
+| `live_rollback_and_ghost_watermark_reinit_end_to_end` | manual_update.rs（live_tests） | testbed 沙箱 + `AIOS_MANUAL_UPDATE_PROJECT`；靶库默认 7998（**会物理清空重建**）；debug 构建需 `RUST_MIN_STACK=16777216` | 2026-08-14 @8019 | **通过**（33.92s，三幕）。幕一回退：入队不删数据 → worker 复核 → 整库清空 → 首次导入基线 → 水位对齐文件；幕二幽灵水位（file_latest>applied>0 且 pe 零行）：路由到基线而非增量；幕三追平幽灵水位（file_latest=applied>0 且 pe 零行、空基线凭据为空）：人工入队形成首次导入并恢复 PE/水位。首跑曾抓出增量窗口开在基线路由之前的缺陷，现由 `batch_reroutes_to_initial_load` 在冻结点开窗前预判 |
+| `live_startup_sweep_repairs_a_caught_up_ghost_watermark` | increment_manager.rs（tests） | testbed 沙箱 + `AIOS_MANUAL_UPDATE_PROJECT`；靶库默认 7998（**会删除 PE 后重建**）；debug 构建需 `RUST_MIN_STACK=16777216` | 2026-08-14 @8019 | **通过**（19.26s，测试体；命令总耗时 31.7s）。真实启动重扫检出 `file_latest=applied=12`、PE 零行且无匹配空基线凭据，排成 held 的 `apply_window` 首次导入窗口；同 dbnum 人工触发放行后 worker 复核、清理并建基线，任务 Succeeded，PE 恢复且应用水位回到 12 |
 | `live_direct_delete_crash_before_persist_recovers_by_rebuild` | helper.rs:908 | testbed 指定（推进 epoch、重建树文件） | 2026-08-12 批次1 @8019 | **修复后通过**（5.5s）——用例写于状态机之前，自灌树后 persist 被发布门拒（Uninitialized），补 `mark_spatial_tree_fixture_preloaded()` |
 | `live_direct_refresh_crash_before_persist_recovers_by_rebuild` | occ_generate.rs:2057 | testbed 指定（需基线+生成在位） | 2026-08-12 批次1 @8019 | **修复后通过**（5.8s）——同上，补测试装载模式声明 |
 | `live_sync_aabb_tree_fills_tree_from_db` | aabb_tree.rs:2072 | 重写 inst_relate.aabb + 树文件（走 AIOS_LIVE_WS 三件套） | 2026-08-12 批次1 @8019 | **通过**（1.2s，工具补齐 AIOS_LIVE_* 派生后） |
@@ -228,6 +229,7 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `rebuild_room_membership_on_the_live_project` | tests/room_rebuild_repair.rs:80 | 真实项目库；`AIOS_ROOM_KEYWORD` 可选过滤 | — | 待跑（修复工具型：按面板先清后写） |
 | `generating_one_root_fills_geometry_aabb_and_tree` | tests/gen_one_root_probe.rs:90 | 真实项目库；`AIOS_PROBE_DBNUM` / `AIOS_PROBE_ROOT` 可配 | — | 待跑（探针：单根生成全链路） |
 
-合计 93 项：A 28 / B 39 / C 10 / D 11 / E 5（2026-08-13：D 增会话索引差分对拍、诊断探针、
-净窗口收集器负载对拍；A 计数修正 27→28——08-13 新增的
+合计 94 项：A 29 / B 39 / C 10 / D 11 / E 5（2026-08-14：A 新增并通过
+`live_startup_sweep_repairs_a_caught_up_ghost_watermark`；2026-08-13：D 增会话索引差分
+对拍、诊断探针、净窗口收集器负载对拍；A 曾修正 27→28——08-13 新增的
 `live_rollback_and_ghost_watermark_reinit_end_to_end` 此前漏计；E 组为 tests/ 集成用例补录）。

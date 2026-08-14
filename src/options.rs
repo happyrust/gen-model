@@ -216,14 +216,13 @@ fn effective_data_batch_workers(configured: Option<usize>) -> usize {
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
-/// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 false**）。
+/// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 true**）。
 ///
 /// 关着时启动只做「让库能用」的那些幂等自愈，不消费队列、不做全量房间重建：
 /// 发现照常（重扫入队，队列是准的），执行等人点头。开着时是历史行为。
 ///
-/// 默认取假是刻意的：这套服务的两条重活（增量执行、2 万面板级的房间全量重建）
-/// 都是分钟级且会改数据，而重启的常见动机恰恰是「先别动，我要看看」。想自动
-/// 干活的部署把配置写成 `true` 即可，运行中随时可 `POST /queue/resume` 放开。
+/// 默认取真（ADR-023）：启动重扫检出的未解析库与幽灵水位必须直接进入初始化解析。
+/// 需要「起来先看看」的部署仍可显式配置或用环境变量写 `false`。
 ///
 /// 环境变量 [`STARTUP_AUTORUN_ENV`] 压过配置，认 `1/true/yes/on` 与
 /// `0/false/no/off`（大小写不敏感）；认不出的值一律当没设，退回配置值——
@@ -239,7 +238,7 @@ fn effective_startup_autorun(configured: Option<bool>, env_override: Option<&str
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
@@ -412,10 +411,10 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
     }
 
-    /// 缺配置就是「不自动干活」——这条默认值是本开关的全部意义所在。
+    /// ADR-023：缺配置按自动执行；显式 false 仍保留冷启动检查能力。
     #[test]
-    fn startup_autorun_is_off_unless_someone_asks_for_it() {
-        assert!(!effective_startup_autorun(None, None));
+    fn startup_autorun_is_on_unless_someone_turns_it_off() {
+        assert!(effective_startup_autorun(None, None));
         assert!(!effective_startup_autorun(Some(false), None));
         assert!(effective_startup_autorun(Some(true), None));
     }
@@ -437,7 +436,7 @@ mod tests {
     fn an_unrecognised_env_value_falls_back_to_the_configured_value() {
         assert!(effective_startup_autorun(Some(true), Some("ture")));
         assert!(!effective_startup_autorun(Some(false), Some("ture")));
-        assert!(!effective_startup_autorun(None, Some("")));
+        assert!(effective_startup_autorun(None, Some("")));
     }
 
     /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被

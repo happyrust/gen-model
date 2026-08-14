@@ -47,6 +47,7 @@ use crate::consts::PDMS_ELEMENTS_TABLE;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SUL_DB;
     use std::path::Path;
 
     #[test]
@@ -525,6 +526,89 @@ mod tests {
         fs::remove_dir_all(&fixture).expect("remove duplicate directory");
     }
 
+    /// ADR-023 live：真正从启动重扫入口检出“水位已追平、pe 零行”的幽灵水位。
+    /// testbed 显式 `startup_autorun=false`，所以先断言首次导入窗口以 held 形态出现；再用
+    /// 同 dbnum 的人工触发放行并消费，证明启动发现与 worker 基线闭环接得上。
+    #[tokio::test]
+    #[ignore = "manual live: wipes and rebuilds AIOS_MANUAL_UPDATE_DBNUM (default 7998)"]
+    async fn live_startup_sweep_repairs_a_caught_up_ghost_watermark() {
+        use crate::data_interface::batch_scheduler::BatchScheduler;
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::data_interface::manual_update::dbnum_has_any_pe_row;
+        use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let dbnum = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
+            .map(|value| value.parse::<u32>().expect("dbnum must be u32"))
+            .unwrap_or(7998);
+        let mgr = Arc::new(
+            AiosDBManager::init_form_config()
+                .await
+                .expect("init manager"),
+        );
+        if DbnumState::applied_sesno(dbnum)
+            .await
+            .expect("read applied")
+            == 0
+        {
+            mgr.initialize_project_dbnum_baseline(&project, dbnum)
+                .await
+                .expect("establish baseline");
+        }
+        let file_latest = DbnumState::read(dbnum)
+            .await
+            .expect("read state")
+            .expect("registered state")
+            .file_latest_sesno;
+        SUL_DB
+            .query(format!(
+                "DELETE pe WHERE dbnum = {dbnum}; \
+                 UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {file_latest}, \
+                 sesno = {file_latest}, confirmed_empty_baseline_sesno = NONE;"
+            ))
+            .await
+            .expect("seed caught-up ghost")
+            .check()
+            .expect("valid fixture");
+
+        mgr.sweep_watch_dirs("live-startup-ghost", false)
+            .await
+            .expect("startup sweep");
+        let row = BatchScheduler::global()
+            .snapshot()
+            .into_iter()
+            .find(|row| row.dbnum == dbnum)
+            .expect("startup sweep must enqueue target");
+        assert_eq!(row.intent, "apply_window");
+        assert_eq!(row.state, "held", "testbed 明确关闭启动自动执行");
+
+        let receipt = mgr
+            .enqueue_manual_update(&project, None, Some(&[dbnum]))
+            .await;
+        assert!(receipt.blocked.is_empty(), "放行不得转成阻断");
+        let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+        assert!(ran >= 1, "启动发现的重建批次必须被消费");
+        let task = TaskRegistry::global()
+            .get(&row.task_id)
+            .expect("task exists");
+        assert_eq!(
+            task.state,
+            TaskState::Succeeded,
+            "task result: {:?}",
+            task.result
+        );
+        assert_eq!(
+            DbnumState::applied_sesno(dbnum)
+                .await
+                .expect("read applied"),
+            file_latest
+        );
+        assert!(dbnum_has_any_pe_row(dbnum).await.expect("probe backing"));
+    }
+
     /// 黑名单那一道门。直接调被生产路径用的那个函数——这里过去是一份手抄的副本，
     /// 抄件永远绿着，改坏真函数也发现不了。
     #[test]
@@ -761,6 +845,40 @@ mod tests {
         assert!(
             body.contains("转整库重建"),
             "回退处置（转整库重建）必须仍然喊出来"
+        );
+    }
+
+    /// ADR-023：水位已追平时不能在数值早退处漏掉幽灵水位。自动重扫必须先读
+    /// 数据支撑，以共享空基线凭据裁决，并把异常形状提升为首次导入窗口；只有
+    /// Rollback 才使用 Reinitialize 控制意图。
+    #[test]
+    fn a_caught_up_ghost_watermark_becomes_an_initial_load_apply_window() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once(concat!("async fn ", "discover_batch("))
+            .expect("discover_batch 未找到")
+            .1
+            .split_once(concat!("fn ", "enqueue_discovered("))
+            .expect("discover_batch 之后应当是 enqueue_discovered")
+            .0;
+        let read = body
+            .find("DbnumState::read(")
+            .expect("必须读取完整水位状态");
+        let backing = body
+            .find("dbnum_has_any_pe_row(")
+            .expect("追平候选必须检查数据支撑");
+        let credential = body
+            .find("has_data_backing(")
+            .expect("必须咨询共享空基线凭据");
+        let promote = body
+            .find("queued_applied = 0")
+            .expect("幽灵水位必须提升为首次导入形状");
+        let intent = body
+            .find("BatchIntent::ApplyWindow")
+            .expect("幽灵水位按首次导入窗口入队");
+        assert!(
+            read < backing && backing < credential && credential < promote && promote < intent,
+            "启动发现顺序必须是状态→数据支撑→凭据→首次导入形状→普通窗口意图: {body}"
         );
     }
 
@@ -1745,17 +1863,44 @@ impl AiosDBManager {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        let applied = match DbnumState::applied_sesno(db_num).await {
-            Ok(applied) => applied,
+        let state = match DbnumState::read(db_num).await {
+            Ok(state) => state,
             Err(error) => {
                 eprintln!("dbnum={db_num} 读取水位失败，本轮跳过: {error:#}");
                 return None;
             }
         };
+        let applied = state.as_ref().map(|state| state.applied_sesno).unwrap_or(0);
+        let confirmed_empty_baseline_sesno = state
+            .as_ref()
+            .and_then(|state| state.confirmed_empty_baseline_sesno);
+        let mut queued_applied = applied;
         if file_latest_sesno <= applied {
-            return None;
+            if file_latest_sesno != applied || applied == 0 {
+                return None;
+            }
+            let has_any_data =
+                match crate::data_interface::manual_update::dbnum_has_any_pe_row(db_num).await {
+                    Ok(has_any_data) => has_any_data,
+                    Err(error) => {
+                        eprintln!("dbnum={db_num} 启动重扫读取数据支撑失败，本轮跳过: {error:#}");
+                        return None;
+                    }
+                };
+            if crate::data_interface::manual_update::has_data_backing(
+                applied,
+                has_any_data,
+                confirmed_empty_baseline_sesno,
+            ) {
+                return None;
+            }
+            println!(
+                "发现追平幽灵水位: {file_name}, db_type={db_type}, applied_sesno={applied}，\
+                 pe 零行且没有匹配的空基线凭据（按首次导入入队）"
+            );
+            queued_applied = 0;
         }
-        if applied == 0 {
+        if queued_applied == 0 {
             println!(
                 "发现从未解析过的文件: {file_name}, db_type={db_type}, 文件最新sesno: {file_latest_sesno}（入队后由基线接管）"
             );
@@ -1771,7 +1916,7 @@ impl AiosDBManager {
             crate::data_interface::manual_update::window_times_rfc3339(
                 project,
                 path,
-                applied + 1,
+                queued_applied + 1,
                 file_latest_sesno,
             );
         Some(crate::data_interface::batch_scheduler::DiscoveredBatch {
@@ -1781,7 +1926,7 @@ impl AiosDBManager {
             intent: crate::data_interface::batch_queue::BatchIntent::ApplyWindow,
             path: path.to_path_buf(),
             file_name: file_name.to_string(),
-            applied_sesno: applied,
+            applied_sesno: queued_applied,
             file_latest_sesno,
             first_pending_sesno_time,
             file_latest_sesno_time,

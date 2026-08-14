@@ -125,7 +125,7 @@ http_api_addr = "0.0.0.0:8022"
 http_api_cors = ["*"]
 
 #【新增 2026-08-10】startup_autorun
-# 启动即自动干活；默认 false = 起来先什么都不执行。
+# 启动即自动干活；默认 true = 重扫发现后立即消费。
 #   false：启动重扫照常发现并入队（队列是准的、看得见停机期间攒了多少活），
 #          但排出来的行「挂起」（/queue 上状态是 held）不派发，持久积压也不消化，
 #          启动全量房间重建不跑。某个 dbnum 真的来了增量（在 E3D 里存一次盘，
@@ -137,7 +137,7 @@ http_api_cors = ["*"]
 # 注意 POST /api/v1/queue/resume 解的是持久化暂停，不是这里的挂起，两者正交。
 # 另有 AIOS_SKIP_STARTUP_ROOM_BUILD：无论本键取值都不做启动全量房间重建，
 # 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
-startup_autorun = false
+startup_autorun = true
 
 #【新增 2026-08-10，默认值 2026-08-12 改为 true】room_incremental
 # 房间归属的「增量」重算；默认 true = 照排照收。
