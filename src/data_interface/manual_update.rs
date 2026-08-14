@@ -59,7 +59,7 @@ use crate::data_interface::dbnum_state::{
 };
 use crate::data_interface::helper::pe_thing_to_refno;
 use crate::data_interface::increment_manager::{
-    INGEST_MAX_DEPTH, in_scope_with, is_candidate_db_file,
+    INGEST_MAX_DEPTH, ScanGate, duplicate_dbnums, in_scope_with, is_candidate_db_file,
 };
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
@@ -2820,6 +2820,7 @@ pub struct DbnumStatusReport {
 ///
 /// `pub(crate)`：数据批次 worker 在冻结点重扫时也要构造它（rollout 第九节第 6 条，
 /// worker 执行体复用 [`AiosDBManager::execute_one_dbnum`]）。
+#[derive(Clone)]
 pub(crate) struct FileCandidate {
     pub(crate) path: PathBuf,
     pub(crate) file_name: String,
@@ -2828,6 +2829,35 @@ pub(crate) struct FileCandidate {
     pub(crate) file_latest_sesno: i32,
     pub(crate) file_size: u64,
     pub(crate) file_modified_at: Option<String>,
+}
+
+/// 对扫描所得的全部身份候选运行 watcher 的同一判重权威，并保留稳定路径清单。
+/// scope 分流只决定执行资格，不能把范围外 CATA 从身份冲突全集里删掉。
+fn duplicate_candidate_groups(
+    project: &str,
+    by_dbnum: &IndexMap<u32, Vec<FileCandidate>>,
+    out_of_scope_cata: &[FileCandidate],
+) -> BTreeMap<u32, Vec<String>> {
+    let candidates = by_dbnum.values().flatten().chain(out_of_scope_cata.iter());
+    let duplicate_keys = duplicate_dbnums(
+        candidates
+            .clone()
+            .map(|cand| (project.to_string(), cand.db_num, cand.path.clone())),
+    );
+    let mut groups = BTreeMap::<u32, Vec<String>>::new();
+    for cand in candidates {
+        if duplicate_keys.contains(&(project.to_string(), cand.db_num)) {
+            groups
+                .entry(cand.db_num)
+                .or_default()
+                .push(cand.path.display().to_string());
+        }
+    }
+    for paths in groups.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
+    groups
 }
 
 fn baseline_sync_options(
@@ -3130,6 +3160,7 @@ impl AiosDBManager {
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
+        let mut duplicate_paths = BTreeMap::new();
         // 按 dbnum 点名的入口不设范围门：调用方已经自己决定了要哪个库，
         // 再套一层 MDB 门只会把点名挡掉。
         let candidates = self
@@ -3140,6 +3171,7 @@ impl AiosDBManager {
                 &mut warnings,
                 // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
                 &mut Vec::new(),
+                &mut duplicate_paths,
             )
             .shift_remove(&dbnum)
             .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
@@ -3210,10 +3242,9 @@ impl AiosDBManager {
         // 定位器的寻址依据（`cata_closure::load_dbnum_files_from_watermark`）。
         // 过去这条路径只靠 `advance_applied` 建水位，「只跑过基线、没有常驻
         // 服务重扫」的库（testbed 沙箱即是）设计库行永远缺身份，闭包连生成根
-        // 都定位不到（2026-08-13）。裁决照走正门（record_observation），但
-        // 不拦点名基线：从未解析的库不会产生回退/类型异常，重复文件已在
-        // 候选层拦下。
-        let _ = self
+        // 都定位不到（2026-08-13）。身份裁决仍是基线的硬门：阻断异常不得借
+        // 基线覆盖旧身份，回退必须经共享队列进入 worker 冻结点复核和清库。
+        match self
             .scan_and_check_file(
                 project,
                 file_path,
@@ -3222,7 +3253,16 @@ impl AiosDBManager {
                 dbnum,
                 file_latest_sesno,
             )
-            .await;
+            .await
+        {
+            ScanGate::Proceed => {}
+            ScanGate::Blocked => {
+                anyhow::bail!("dbnum={dbnum} 基线被身份异常阻断；未读取计数、未解析、未推进水位")
+            }
+            ScanGate::Reinit => anyhow::bail!(
+                "dbnum={dbnum} 已裁决为回退重建；必须经共享数据批次进入 worker，禁止基线直接覆盖旧数据"
+            ),
+        }
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
         let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
@@ -3329,15 +3369,17 @@ impl AiosDBManager {
 
         let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
         let mut out_of_scope_cata = Vec::new();
+        let mut duplicate_paths = BTreeMap::new();
         let by_dbnum = self.scan_project_candidates(
             project,
             &project_dir,
             &scope,
             &mut warnings,
             &mut out_of_scope_cata,
+            &mut duplicate_paths,
         );
         // 预览本就允许刷新扫描观察字段（ADR-001）；CATA 登记行是按需闭包的寻址依据。
-        self.record_out_of_scope_cata(project, &out_of_scope_cata)
+        self.record_out_of_scope_cata(project, &out_of_scope_cata, &duplicate_paths, &mut warnings)
             .await;
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
@@ -3467,6 +3509,7 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
         report.warnings.extend(scope.warning().map(str::to_owned));
 
+        let mut duplicate_paths = BTreeMap::new();
         let by_dbnum = self.scan_project_candidates(
             project,
             &project_dir,
@@ -3474,6 +3517,7 @@ impl AiosDBManager {
             &mut report.warnings,
             // 状态报告保持只读：范围外 CATA 不在这里落库（预览/入队两条路径会做）。
             &mut Vec::new(),
+            &mut duplicate_paths,
         );
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
@@ -3678,6 +3722,7 @@ impl AiosDBManager {
         scope: &UpdateScope,
         warnings: &mut Vec<String>,
         out_of_scope_cata: &mut Vec<FileCandidate>,
+        duplicate_paths: &mut BTreeMap<u32, Vec<String>>,
     ) -> IndexMap<u32, Vec<FileCandidate>> {
         let mut by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
 
@@ -3733,11 +3778,10 @@ impl AiosDBManager {
             }
             let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
             if !self.in_scope(scope, project, &db_type, db_no) {
-                // 范围外 CATA：收进登记清单（首见为准，同号第二个文件不覆盖——
-                // 与自动路径的 B3 纪律同向），照旧不进候选。
-                if db_type.eq_ignore_ascii_case("CATA")
-                    && !out_of_scope_cata.iter().any(|c| c.db_num == db_no)
-                {
+                // 范围外 CATA：先收齐全部候选，扫描完成后再复用 watcher 的同项目
+                // duplicate_dbnums 权威判定。不能在这里首见取一，否则第二份同号
+                // 文件会被静默抹掉，手动路径反而登记任意一份。
+                if db_type.eq_ignore_ascii_case("CATA") {
                     match PdmsIO::new(
                         project_dir.to_string_lossy().as_ref(),
                         path.to_path_buf(),
@@ -3793,23 +3837,80 @@ impl AiosDBManager {
             });
         }
 
+        *duplicate_paths = duplicate_candidate_groups(project, &by_dbnum, out_of_scope_cata);
+        // 跨 scope 冲突也要进入既有的候选数量阻断：只在已有执行候选时补入范围外
+        // CATA；纯范围外组仍只由 record_out_of_scope_cata 发 warning、零登记。
+        for (&dbnum, paths) in duplicate_paths.iter() {
+            let Some(candidates) = by_dbnum.get_mut(&dbnum) else {
+                continue;
+            };
+            for cand in out_of_scope_cata.iter().filter(|cand| {
+                cand.db_num == dbnum && paths.contains(&cand.path.display().to_string())
+            }) {
+                if !candidates.iter().any(|existing| existing.path == cand.path) {
+                    candidates.push(cand.clone());
+                }
+            }
+        }
+
         by_dbnum
     }
 
     /// 范围外 CATA 的观察落库（`scan_project_candidates` 的 `out_of_scope_cata`
-    /// 出参），复用自动路径的 [`AiosDBManager::scan_and_check_file`]
-    /// （classify → record_observation → 异常出声），登记口径只有一份。
-    async fn record_out_of_scope_cata(&self, project: &str, files: &[FileCandidate]) {
+    /// 出参）。先复用 watcher 的 [`duplicate_dbnums`] 权威判定；同号多文件整组
+    /// 阻断且任何一份都不触及 observation，唯一候选才进入统一扫描裁决。
+    async fn record_out_of_scope_cata(
+        &self,
+        project: &str,
+        files: &[FileCandidate],
+        duplicate_paths: &BTreeMap<u32, Vec<String>>,
+        warnings: &mut Vec<String>,
+    ) {
+        let mut reported = HashSet::new();
         for cand in files {
-            self.scan_and_check_file(
-                project,
-                &cand.path,
-                &cand.file_name,
-                &cand.db_type,
-                cand.db_num,
-                cand.file_latest_sesno,
-            )
-            .await;
+            if let Some(paths) = duplicate_paths.get(&cand.db_num) {
+                if reported.insert(cand.db_num) {
+                    if let Err(error) =
+                        DbnumState::block_duplicate_file_identity(cand.db_num, project).await
+                    {
+                        warnings.push(format!(
+                            "dbnum={}: 范围外 CATA 重复身份阻断落库失败: {error:#}",
+                            cand.db_num
+                        ));
+                    }
+                    crate::data_interface::cata_closure::invalidate_project_locator(project).await;
+                    warnings.push(format!(
+                        "dbnum={}: 范围外 CATA 同号多文件，整组阻断且未登记任何观察值: {}",
+                        cand.db_num,
+                        paths.join(", ")
+                    ));
+                }
+                continue;
+            }
+
+            match self
+                .scan_and_check_file(
+                    project,
+                    &cand.path,
+                    &cand.file_name,
+                    &cand.db_type,
+                    cand.db_num,
+                    cand.file_latest_sesno,
+                )
+                .await
+            {
+                ScanGate::Proceed => {}
+                ScanGate::Blocked => warnings.push(format!(
+                    "dbnum={}: 范围外 CATA 身份异常，观察登记已阻断: {}",
+                    cand.db_num,
+                    cand.path.display()
+                )),
+                ScanGate::Reinit => warnings.push(format!(
+                    "dbnum={}: 范围外 CATA 已裁决为回退重建，未从手动旁路执行: {}",
+                    cand.db_num,
+                    cand.path.display()
+                )),
+            }
         }
     }
 
@@ -3907,10 +4008,10 @@ impl AiosDBManager {
                     // 解析器定下的窗口才是执行真正会走的那个。同样读一页会话页。
                     preview.first_pending_sesno_time =
                         session_time_rfc3339(project, &cand.path, *plan.range.start());
-                    let (range_eles, collect_warnings) =
-                        IncrementPipeline::collect_window(&cand.path, plan.range)?;
-                    warnings.extend(collect_warnings);
-                    let details = fill_change_summary(&mut preview, &range_eles);
+                    let collected = IncrementPipeline::collect_window(&cand.path, plan.range)?;
+                    warnings.extend(collected.warnings.iter().cloned());
+                    let range_eles = &collected.range_eles;
+                    let details = fill_change_summary(&mut preview, range_eles);
                     // Delivery units are a model-delivery concept: only DESI dbs
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
@@ -4037,15 +4138,22 @@ impl AiosDBManager {
         receipt.mdb = scope.mdb().to_owned();
 
         let mut out_of_scope_cata = Vec::new();
+        let mut duplicate_paths = BTreeMap::new();
         let by_dbnum = self.scan_project_candidates(
             project,
             &project_dir,
             &scope,
             &mut receipt.warnings,
             &mut out_of_scope_cata,
+            &mut duplicate_paths,
         );
-        self.record_out_of_scope_cata(project, &out_of_scope_cata)
-            .await;
+        self.record_out_of_scope_cata(
+            project,
+            &out_of_scope_cata,
+            &duplicate_paths,
+            &mut receipt.warnings,
+        )
+        .await;
         receipt.scanned = by_dbnum.len();
 
         // ADR-020 第 3 项：子集选择先过统一范围门。范围外的请求当场拒（警告 +
@@ -4558,14 +4666,7 @@ impl AiosDBManager {
             start_sesno, end_sesno
         );
         let collected = match IncrementPipeline::collect_window(&cand.path, plan.range.clone()) {
-            Ok((range_eles, collect_warnings)) => {
-                warnings.extend(
-                    collect_warnings
-                        .into_iter()
-                        .map(|warning| format!("dbnum={dbnum}: {warning}")),
-                );
-                range_eles
-            }
+            Ok(collected) => collected,
             Err(e) => {
                 batch.message = Some(format!("读取增量数据失败: {e}"));
                 emit(
@@ -4584,12 +4685,9 @@ impl AiosDBManager {
             &mut batch,
             project,
             &cand.path,
-            sessions_merged_after(
-                &collected.keys().copied().collect::<Vec<_>>(),
-                previous_observed,
-            ),
+            sessions_merged_after(&collected.session_sesnos, previous_observed),
         );
-        batch.changed_elements = collected.values().map(|v| v.len()).sum();
+        batch.changed_elements = collected.range_eles.values().map(|v| v.len()).sum();
 
         // Apply through the shared pipeline: persist + datacenter side meta +
         // watermark advance on ITS success path only (per-file isolation).
@@ -4631,10 +4729,7 @@ impl AiosDBManager {
             // a newer right edge. Report the range that actually succeeded;
             // the next queue pass will pick up the remaining sessions.
             if let Some(success) = incr.successes.first() {
-                let merged = sessions_merged_after(
-                    &success.range_eles.keys().copied().collect::<Vec<_>>(),
-                    previous_observed,
-                );
+                let merged = sessions_merged_after(&success.session_sesnos, previous_observed);
                 // 报的窗口一旦不是收集时那个，时刻必须跟着重读：重放把窗口挪回
                 // 更早的一段，留着原来那对时刻等于把另一段保存的时刻贴在这一行上。
                 // 没挪动就不再开一次文件——号和名单都没变，时刻自然也没变。
@@ -4915,6 +5010,145 @@ mod tests {
             body.contains("apply_with_precollected("),
             "收集结果必须交给 apply_with_precollected，否则 pipeline 会把同一文件重新解析一遍"
         );
+    }
+
+    /// 批次保存清单必须来自文件会话页清单，而不是操作 key；后一种写法会丢掉
+    /// 空保存与净窗口内自抵消的会话。fresh 与 crash replay 两条成功路径都读取
+    /// `session_sesnos`，并继续经过 previous_observed 过滤。
+    #[test]
+    fn execute_receipt_uses_the_collected_session_manifest() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once(concat!("async fn ", "execute_one_dbnum"))
+            .expect("execute_one_dbnum 未找到")
+            .1
+            .split_once(concat!("\n#[cfg", "(test)]"))
+            .map(|(head, _)| head)
+            .unwrap_or(source);
+
+        assert!(
+            body.contains("sessions_merged_after(&collected.session_sesnos, previous_observed)"),
+            "预收集回执必须使用完整会话清单: {body}"
+        );
+        assert!(
+            body.contains("sessions_merged_after(&success.session_sesnos, previous_observed)"),
+            "崩溃重放后的最终回执必须使用实际成功窗口的完整会话清单: {body}"
+        );
+        assert!(
+            !body.contains("range_eles.keys().copied()"),
+            "不得从操作 key 伪造保存清单: {body}"
+        );
+    }
+
+    /// 基线身份裁决是硬门，且必须发生在任何计数读取、解析和水位收口之前。
+    #[test]
+    fn baseline_consumes_all_three_scan_gate_outcomes_before_data_work() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .expect("initialize_dbnum_baseline 必须存在")
+            .1
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview follows baseline")
+            .0;
+
+        let scan = body
+            .find("match self")
+            .expect("基线必须消费扫描裁决而不是丢弃返回值");
+        let proceed = body.find("ScanGate::Proceed").expect("Proceed 分支");
+        let blocked = body.find("ScanGate::Blocked").expect("Blocked 分支");
+        let reinit = body.find("ScanGate::Reinit").expect("Reinit 分支");
+        let applied = body
+            .find("DbnumState::applied_sesno")
+            .expect("裁决后才读水位");
+        let counts = body.find("baseline_counts(dbnum)").expect("基线计数");
+        assert!(
+            scan < proceed
+                && proceed < applied
+                && blocked < applied
+                && reinit < applied
+                && applied < counts,
+            "顺序必须是 scan gate 三态 -> 水位/计数/解析: {body}"
+        );
+    }
+
+    /// 范围外 CATA 必须收齐候选后先走 watcher 的同一 duplicate 权威；重复组在
+    /// `continue` 之前报路径，因此任何成员都到不了 `scan_and_check_file`。
+    #[test]
+    fn out_of_scope_cata_duplicates_are_blocked_before_any_observation() {
+        let source = include_str!("manual_update.rs");
+        let scan_body = source
+            .split_once("fn scan_project_candidates(")
+            .expect("candidate scan")
+            .1
+            .split_once("async fn record_out_of_scope_cata(")
+            .expect("record follows scan")
+            .0;
+        assert!(
+            !scan_body.contains("out_of_scope_cata.iter().any"),
+            "候选扫描不得首见取一: {scan_body}"
+        );
+
+        let authority = source
+            .split_once("fn duplicate_candidate_groups(")
+            .expect("全候选判重辅助")
+            .1
+            .split_once("fn baseline_sync_options(")
+            .expect("helper boundary")
+            .0;
+        assert!(
+            authority.contains("duplicate_dbnums("),
+            "必须复用 watcher 的判重权威: {authority}"
+        );
+
+        let record = source
+            .split_once("async fn record_out_of_scope_cata(")
+            .expect("record function")
+            .1
+            .split_once("async fn preview_one_dbnum(")
+            .expect("preview follows record")
+            .0;
+        let duplicate_gate = record.find("duplicate_paths.get").expect("重复组阻断门");
+        let revoke = record
+            .find("block_duplicate_file_identity")
+            .expect("旧 locator 身份必须撤销");
+        let skip = record[duplicate_gate..]
+            .find("continue;")
+            .map(|at| duplicate_gate + at)
+            .expect("重复组必须整组跳过登记");
+        let observation = record
+            .find(".scan_and_check_file(")
+            .expect("唯一候选进入统一扫描裁决");
+        assert!(
+            duplicate_gate < revoke && revoke < skip && skip < observation,
+            "顺序必须是全候选判重结果 -> 整组 warning/continue -> 唯一候选登记: {record}"
+        );
+    }
+
+    #[test]
+    fn out_of_scope_cata_collides_with_an_in_scope_candidate() {
+        let candidate = |path: &str, db_type: &str| FileCandidate {
+            path: PathBuf::from(path),
+            file_name: PathBuf::from(path)
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .into_owned(),
+            db_type: db_type.to_string(),
+            db_num: 7997,
+            file_latest_sesno: 7,
+            file_size: 60,
+            file_modified_at: None,
+        };
+        let by_dbnum =
+            IndexMap::from([(7997, vec![candidate("project/desi/ams7997_0001", "DESI")])]);
+        let out_of_scope = vec![candidate("project/cata/ams7997_0002", "CATA")];
+
+        let groups = duplicate_candidate_groups("AMS", &by_dbnum, &out_of_scope);
+        let paths = groups.get(&7997).expect("跨 scope 同号组");
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|path| path.ends_with("ams7997_0001")));
+        assert!(paths.iter().any(|path| path.ends_with("ams7997_0002")));
     }
 
     /// 同一个窗口的交付单元归并也只能算一次。`execute_one_dbnum` 曾在落库前自己

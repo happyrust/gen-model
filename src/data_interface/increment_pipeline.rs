@@ -24,6 +24,26 @@ const DATACENTER_VERSION: &str = "datacenter_version";
 /// Same set as cold-start eligibility ([`COLD_START_DB_TYPES`]).
 pub const SYS_META_DB_TYPES: &[&str] = COLD_START_DB_TYPES;
 
+/// 实际采用的窗口收集口径。该值随 [`CollectedWindow`] 一起贯穿预收集、崩溃重放
+/// 与成功回执，调用方无需再从 warning 文本猜测口径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionMode {
+    Replay,
+    Net,
+}
+
+/// 一个冻结窗口的完整收集结果。
+///
+/// `range_eles` 是净操作，不足以表达空保存或窗口内自抵消的会话；
+/// `session_sesnos` 因此直接来自文件会话页映射，是批次保存清单的唯一事实源。
+#[derive(Debug, Clone)]
+pub struct CollectedWindow {
+    pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
+    pub session_sesnos: Vec<u32>,
+    pub warnings: Vec<String>,
+    pub mode: CollectionMode,
+}
+
 /// One file that completed Surreal persist + watermark advance.
 #[derive(Debug, Clone)]
 pub struct IncrFileSuccess {
@@ -38,6 +58,8 @@ pub struct IncrFileSuccess {
     /// resolves a generation root per entry, so a refno repeated once per
     /// session in the window was paying for that lookup once per session.
     pub changed_refnos: Vec<RefU64>,
+    /// 冻结窗口内实际存在的完整会话清单；包含空保存与净结果自抵消的会话。
+    pub session_sesnos: Vec<u32>,
     /// Full delta payload (MySQL / classified refresh). Kept for callers that need detail.
     pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
     /// The model work this window established, with the delivery-unit rollup
@@ -451,13 +473,27 @@ fn should_rebuild_stale_staged_attempt(
 /// 子集会让折叠与影响判定漏看会话。崩溃重放分支根本不询问本函数：它按持久化的
 /// 固定区间重新收集（见 `apply_one` 的 prepared 分支）。
 fn accept_handed_in_window(
-    precollected: Option<(RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>)>,
+    precollected: Option<(RangeInclusive<i32>, CollectedWindow)>,
     requested_range: &RangeInclusive<i32>,
-) -> Option<BTreeMap<u32, Vec<EleOperationData>>> {
+) -> Option<CollectedWindow> {
     match precollected {
-        Some((range, eles)) if &range == requested_range => Some(eles),
+        Some((range, collected)) if &range == requested_range => Some(collected),
         _ => None,
     }
+}
+
+/// 从文件权威会话页映射中截取冻结窗口，天然升序、去重。
+///
+/// 不能看 `range_eles.keys()`：一次 Save Work 即便没有元素变化、或多次操作在净窗口
+/// 内互相抵消，它的会话页仍然存在，也必须进入批次回执。
+fn session_sesnos_in_range(
+    sesno_pgno_map: &BTreeMap<i32, u32>,
+    sesno_range: &RangeInclusive<i32>,
+) -> Vec<u32> {
+    sesno_pgno_map
+        .range(sesno_range.clone())
+        .filter_map(|(&sesno, _)| u32::try_from(sesno).ok())
+        .collect()
 }
 
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
@@ -770,10 +806,20 @@ impl IncrementPipeline {
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
     ) -> anyhow::Result<BTreeMap<u32, Vec<EleOperationData>>> {
-        let fixed_end_sesno = *sesno_range.end();
         let mut io = PdmsIO::new("", path.to_path_buf(), true);
         io.open()
             .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {}", e))?;
+        Self::collect_changes_from_open_io(path, &mut io, sesno_range)
+    }
+
+    /// Replay 内层：调用方持有同一个已打开的 [`PdmsIO`]，使会话页清单和操作流
+    /// 来自同一文件快照。公开诊断入口仍由 [`Self::collect_changes`] 负责打开文件。
+    fn collect_changes_from_open_io(
+        path: &std::path::Path,
+        io: &mut PdmsIO,
+        sesno_range: RangeInclusive<i32>,
+    ) -> anyhow::Result<BTreeMap<u32, Vec<EleOperationData>>> {
+        let fixed_end_sesno = *sesno_range.end();
         let mut range_eles = io.collect_increment_eles(Some(sesno_range))?;
         let add_refnos = range_eles
             .values()
@@ -900,19 +946,28 @@ impl IncrementPipeline {
     /// 净窗口（会话索引差分 + 两端版本合成，
     /// [`crate::data_interface::net_window::collect_net_window`]）。
     ///
-    /// 返回 `(窗口, 收集警告)`，警告必须随预览 / 批次回执透出。净口径下第一条
-    /// 警告固定是口径标注（净三态计数 + 差分耗时）——灰度期每一次收集都自报
-    /// 口径，出问题不用猜当时走的哪条路。
+    /// 返回完整 [`CollectedWindow`]；两种口径的第一条 warning 都固定为口径标注，
+    /// `session_sesnos` 则始终从冻结区间内的会话页映射提取，不能从操作 key 反推。
     pub fn collect_window(
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
-    ) -> anyhow::Result<(BTreeMap<u32, Vec<EleOperationData>>, Vec<String>)> {
+    ) -> anyhow::Result<CollectedWindow> {
         if !crate::options::net_window_collection() {
-            return Ok((Self::collect_changes(path, sesno_range)?, Vec::new()));
+            let mut io = PdmsIO::new("", path.to_path_buf(), true);
+            io.open()
+                .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
+            let session_sesnos = session_sesnos_in_range(&io.sesno_pgno_map, &sesno_range);
+            return Ok(CollectedWindow {
+                range_eles: Self::collect_changes_from_open_io(path, &mut io, sesno_range)?,
+                session_sesnos,
+                warnings: vec!["收集口径：逐会话回放（Replay）".to_string()],
+                mode: CollectionMode::Replay,
+            });
         }
         let mut io = PdmsIO::new("", path.to_path_buf(), true);
         io.open()
             .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
+        let session_sesnos = session_sesnos_in_range(&io.sesno_pgno_map, &sesno_range);
         let outcome = crate::data_interface::net_window::collect_net_window(&mut io, sesno_range)?;
         let (mut added, mut deleted, mut modified) = (0usize, 0usize, 0usize);
         for operation in outcome.window.values().flatten() {
@@ -932,7 +987,12 @@ impl IncrementPipeline {
             outcome.stats.elapsed_ms
         )];
         warnings.extend(outcome.warnings);
-        Ok((outcome.window, warnings))
+        Ok(CollectedWindow {
+            range_eles: outcome.window,
+            session_sesnos,
+            warnings,
+            mode: CollectionMode::Net,
+        })
     }
 
     /// Apply incremental updates for the given sesno ranges.
@@ -964,10 +1024,7 @@ impl IncrementPipeline {
     pub async fn apply_with_precollected(
         &self,
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
-        mut precollected: IndexMap<
-            PathBuf,
-            (RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>),
-        >,
+        mut precollected: IndexMap<PathBuf, (RangeInclusive<i32>, CollectedWindow)>,
     ) -> IncrResult {
         let mut result = IncrResult::default();
 
@@ -986,14 +1043,12 @@ impl IncrementPipeline {
 
             let handed_in = precollected.shift_remove(&path);
 
-            match self
+            let (outcome, warnings) = self
                 .apply_one(&path, &basic_info, sesno_range, &db_type, handed_in)
-                .await
-            {
-                Ok((success, warnings)) => {
-                    result.warnings.extend(warnings);
-                    result.successes.push(success);
-                }
+                .await;
+            result.warnings.extend(warnings);
+            match outcome {
+                Ok(success) => result.successes.push(success),
                 Err(e) => {
                     result.errors.push(IncrFileError {
                         path,
@@ -1012,9 +1067,10 @@ impl IncrementPipeline {
         basic_info: &DbPageBasicInfo,
         requested_range: RangeInclusive<i32>,
         db_type: &str,
-        precollected: Option<(RangeInclusive<i32>, BTreeMap<u32, Vec<EleOperationData>>)>,
-    ) -> anyhow::Result<(IncrFileSuccess, Vec<String>)> {
+        precollected: Option<(RangeInclusive<i32>, CollectedWindow)>,
+    ) -> (anyhow::Result<IncrFileSuccess>, Vec<String>) {
         let mut warnings = Vec::new();
+        let outcome = async {
         let mut timings = StageTimings::default();
         let dbnum = basic_info.pdms_header.db_num as u32;
         let path_text = path.to_string_lossy().into_owned();
@@ -1056,17 +1112,18 @@ impl IncrementPipeline {
         } else {
             // 采信判定见 `accept_handed_in_window`；复用时 `timings.collect`
             // 自然为 0，收集成本记在调用方那一侧。
-            let range_eles = match accept_handed_in_window(precollected, &requested_range) {
-                Some(eles) => eles,
+            let collected = match accept_handed_in_window(precollected, &requested_range) {
+                Some(collected) => collected,
                 None => {
                     let start = Instant::now();
-                    let (eles, collect_warnings) =
-                        Self::collect_window(path, requested_range.clone())?;
-                    warnings.extend(collect_warnings);
+                    let collected = Self::collect_window(path, requested_range.clone())?;
                     timings.collect += start.elapsed();
-                    eles
+                    collected
                 }
             };
+            // 口径 warning 必须先于任何可能失败的计划/attempt I/O 进入旁路；
+            // `apply_one` 即使随后返回 Err，也会把这份 warnings 交给调用方。
+            warnings.extend(collected.warnings.iter().cloned());
 
             let end_sesno = *requested_range.end();
             let model_plan = StageTimings::measure(
@@ -1075,7 +1132,7 @@ impl IncrementPipeline {
                     dbnum,
                     end_sesno,
                     db_type,
-                    &range_eles,
+                    &collected.range_eles,
                 ),
             )
             .await?;
@@ -1093,7 +1150,7 @@ impl IncrementPipeline {
                 ),
             )
             .await?;
-            (requested_range, model_plan, Some(range_eles))
+            (requested_range, model_plan, Some(collected))
         };
         let start_sesno = *sesno_range.start();
         let end_sesno = *sesno_range.end();
@@ -1105,16 +1162,18 @@ impl IncrementPipeline {
 
         // Recovery recollects the durable fixed range; a fresh attempt reuses
         // the collection that produced its pre-update model plan.
-        let range_eles = match collected {
-            Some(range_eles) => range_eles,
+        let collected = match collected {
+            Some(collected) => collected,
             None => {
                 let start = Instant::now();
-                let (range_eles, collect_warnings) = Self::collect_window(path, sesno_range)?;
-                warnings.extend(collect_warnings);
+                let collected = Self::collect_window(path, sesno_range)?;
                 timings.collect += start.elapsed();
-                range_eles
+                warnings.extend(collected.warnings.iter().cloned());
+                collected
             }
         };
+        let session_sesnos = collected.session_sesnos;
+        let range_eles = collected.range_eles;
         let removed_plan_refnos = reconcile_plan_final_presence(path, end_sesno, &mut model_plan)?;
         if removed_plan_refnos > 0 {
             warnings.push(format!(
@@ -1267,19 +1326,20 @@ impl IncrementPipeline {
 
         let changed_refnos = Self::changed_refnos(&range_eles);
 
-        Ok((
-            IncrFileSuccess {
+        Ok(IncrFileSuccess {
                 path: path.clone(),
                 dbnum,
                 start_sesno,
                 end_sesno,
                 db_type: db_type.to_string(),
                 changed_refnos,
+                session_sesnos,
                 range_eles,
                 model_plan,
-            },
-            warnings,
-        ))
+            })
+        }
+        .await;
+        (outcome, warnings)
     }
 
     /// 本窗口的 OWNER 搬迁 anc 定点重算语句（随收口窗口语句批提交）。
@@ -2088,22 +2148,109 @@ mod cache_tests {
     /// 自行收集。掐头/去尾/整体错位的窗口混进来，折叠与影响判定就会漏看会话。
     #[test]
     fn handed_in_window_is_only_accepted_on_an_exact_range_match() {
-        let eles = || BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]);
+        let collected = || CollectedWindow {
+            range_eles: BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]),
+            session_sesnos: vec![25, 26],
+            warnings: vec!["收集口径：逐会话回放（Replay）".to_string()],
+            mode: CollectionMode::Replay,
+        };
 
         assert!(
-            accept_handed_in_window(Some((25..=26, eles())), &(25..=26)).is_some(),
+            accept_handed_in_window(Some((25..=26, collected())), &(25..=26)).is_some(),
             "区间逐位相等必须复用（这正是双跑修复省下的那一遍解析）"
         );
         // 右端多一格 / 左端少一格 / 完全错开 / 反向，全部拒绝。
-        assert!(accept_handed_in_window(Some((25..=27, eles())), &(25..=26)).is_none());
-        assert!(accept_handed_in_window(Some((24..=26, eles())), &(25..=26)).is_none());
-        assert!(accept_handed_in_window(Some((27..=30, eles())), &(25..=26)).is_none());
+        assert!(accept_handed_in_window(Some((25..=27, collected())), &(25..=26)).is_none());
+        assert!(accept_handed_in_window(Some((24..=26, collected())), &(25..=26)).is_none());
+        assert!(accept_handed_in_window(Some((27..=30, collected())), &(25..=26)).is_none());
         #[allow(clippy::reversed_empty_ranges)]
         {
-            assert!(accept_handed_in_window(Some((26..=25, eles())), &(25..=26)).is_none());
+            assert!(accept_handed_in_window(Some((26..=25, collected())), &(25..=26)).is_none());
         }
         // 没交就是没交。
         assert!(accept_handed_in_window(None, &(25..=26)).is_none());
+    }
+
+    /// 空保存、自抵消和稀疏会话都由会话页映射决定，不能被操作 key 抹掉。
+    #[test]
+    fn session_manifest_comes_from_frozen_session_pages_not_operations() {
+        let pages = BTreeMap::from([(1, 11), (3, 13), (6, 16), (9, 19)]);
+        assert_eq!(session_sesnos_in_range(&pages, &(2..=8)), vec![3, 6]);
+
+        let collected = CollectedWindow {
+            // 会话 3 是空保存，会话 6 的操作在净窗口内自抵消：最终操作集为空。
+            range_eles: BTreeMap::new(),
+            session_sesnos: session_sesnos_in_range(&pages, &(2..=8)),
+            warnings: vec!["收集口径：净窗口（Net）".to_string()],
+            mode: CollectionMode::Net,
+        };
+        assert!(collected.range_eles.is_empty());
+        assert_eq!(collected.session_sesnos, vec![3, 6]);
+        assert_eq!(collected.mode, CollectionMode::Net);
+        assert!(collected.warnings[0].contains("净窗口"));
+    }
+
+    /// Replay 的会话页清单与操作流必须共用一次打开的 PdmsIO；双开会允许同路径
+    /// 在两次读取之间被替换，拼出 A 文件的会话清单 + B 文件的操作流。
+    #[test]
+    fn replay_manifest_and_operations_share_one_open_io() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once("pub fn collect_window(")
+            .expect("collect_window")
+            .1
+            .split_once("pub async fn apply(")
+            .expect("apply follows collector")
+            .0;
+        let replay = body
+            .split_once("if !crate::options::net_window_collection()")
+            .expect("replay arm")
+            .1
+            .split_once("mode: CollectionMode::Replay")
+            .expect("replay result")
+            .0;
+        assert!(replay.contains("session_sesnos_in_range(&io.sesno_pgno_map"));
+        assert!(replay.contains("collect_changes_from_open_io(path, &mut io"));
+        assert!(!replay.contains("collect_changes(path"));
+        assert!(!source.contains(concat!("fn collect_session", "_sesnos(")));
+    }
+
+    /// 收集口径是故障回执的一部分：fresh 收集后要先保存 warning 再做模型计划，
+    /// apply_with_precollected 也必须在匹配成功/失败之前接住 apply_one 的旁路。
+    #[test]
+    fn collection_mode_warning_survives_a_later_apply_error() {
+        let source = include_str!("increment_pipeline.rs");
+        let apply = source
+            .split_once("pub async fn apply_with_precollected(")
+            .expect("apply_with_precollected")
+            .1
+            .split_once("async fn apply_one(")
+            .expect("apply_one follows")
+            .0;
+        let call = apply.find("let (outcome, warnings)").expect("双通道返回");
+        let forward = apply
+            .find("result.warnings.extend(warnings)")
+            .expect("先转交 warnings");
+        let branch = apply.find("match outcome").expect("再分成功/失败");
+        assert!(call < forward && forward < branch, "{apply}");
+
+        let one = source
+            .split_once("async fn apply_one(")
+            .expect("apply_one")
+            .1
+            .split_once("async fn invalidate_caches(")
+            .expect("invalidate follows")
+            .0;
+        let collect_warning = one
+            .find("warnings.extend(collected.warnings.iter().cloned())")
+            .expect("收集后立即保存口径");
+        let plan = one
+            .find("build_model_update_plan(")
+            .expect("模型计划可能失败");
+        assert!(
+            collect_warning < plan,
+            "口径 warning 必须先于计划 I/O: {one}"
+        );
     }
 
     /// IU-S3-03（L1 源码钉）：崩溃重放分支**永远重新收集**——prepared 命中时

@@ -94,7 +94,7 @@ aios_db.spatial.persist()                      # 兜底：树脏了但没意图�
 
 # 观察面（连接层即可，服务在跑也能用）：
 aios_db.incr.resolve_window(f)                 # 预览下一增量窗口（不执行）
-aios_db.incr.queue_status()                    # 本进程队列 {paused, rows}
+aios_db.incr.queue_status()                    # 本进程队列 {paused, rows}；row.intent=apply_window|reinitialize
 aios_db.spatial.status()                       # 空间收敛积压 {pending, stalled}
 aios_db.room.code("24381_100677")              # 房间编码（无归属 None）
 aios_db.room.names("24381_100677")             # 穿越的房间号列表

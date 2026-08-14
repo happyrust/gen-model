@@ -65,17 +65,31 @@ impl SyncPublisher {
 
     /// After a successful incremental apply: compress each success file and MQTT-notify if new.
     pub async fn publish(&self, incr: &IncrResult) -> SyncOutcome {
-        let mut outcome = SyncOutcome::default();
+        self.publish_files(
+            incr.successes
+                .iter()
+                .map(|success| (&success.path, success.dbnum)),
+        )
+        .await
+    }
 
-        if !incr.had_work() {
-            return outcome;
-        }
+    /// Publish one already-applied file without fabricating an
+    /// [`IncrFileSuccess`](crate::data_interface::increment_pipeline::IncrFileSuccess).
+    /// Batch workers use this after their result DTO has already been assembled.
+    pub async fn publish_file(&self, path: &PathBuf, dbnum: u32) -> SyncOutcome {
+        self.publish_files(std::iter::once((path, dbnum))).await
+    }
+
+    async fn publish_files<'a>(
+        &self,
+        files: impl IntoIterator<Item = (&'a PathBuf, u32)>,
+    ) -> SyncOutcome {
+        let mut outcome = SyncOutcome::default();
 
         let mut notify_file_names = Vec::new();
         let mut notify_file_hashes = Vec::new();
 
-        for success in &incr.successes {
-            let path = &success.path;
+        for (path, dbno) in files {
             if path.is_dir() {
                 continue;
             }
@@ -88,8 +102,6 @@ impl SyncPublisher {
                     continue;
                 }
             };
-            let dbno = success.dbnum;
-
             println!("SyncPublisher: 处理同步 {}", file_name);
 
             let file_hash = match Self::ensure_archive(path).await {

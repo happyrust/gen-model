@@ -1307,16 +1307,15 @@ async fn roots_touched_since(
     // 丢弃是有意的：本辅助只取尾段的 RegenRoot 目标，净口径的保守降级（基版本
     // 解析失败按新增处理）只会**多算**根，不会少算，口径标注则由主批次收集时
     // 已经报过。
-    let (range_eles, _collect_warnings) =
-        crate::data_interface::increment_pipeline::IncrementPipeline::collect_window(
-            &job.path,
-            (blocked_end + 1)..=end_sesno,
-        )?;
+    let collected = crate::data_interface::increment_pipeline::IncrementPipeline::collect_window(
+        &job.path,
+        (blocked_end + 1)..=end_sesno,
+    )?;
     let plan = crate::data_interface::model_update_plan::build_model_update_plan(
         job.dbnum,
         end_sesno,
         &job.db_type,
-        &range_eles,
+        &collected.range_eles,
     )
     .await?;
     Ok(plan
@@ -2730,23 +2729,11 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
 
 /// 数据批次成功后的异地同步发布（与旧 `execute_incr_update` 成功路径对齐）。
 #[cfg(feature = "mqtt")]
-async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, end_sesno: i32) {
-    use crate::data_interface::increment_pipeline::{IncrFileSuccess, IncrResult};
+async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, _end_sesno: i32) {
     use crate::data_interface::sync_publisher::SyncPublisher;
 
-    let mut incr = IncrResult::default();
-    incr.successes.push(IncrFileSuccess {
-        path: job.path.clone(),
-        dbnum: job.dbnum,
-        start_sesno: job.start_sesno,
-        end_sesno,
-        db_type: job.db_type.clone(),
-        changed_refnos: Vec::new(),
-        range_eles: Default::default(),
-        model_plan: Default::default(),
-    });
     let publisher = SyncPublisher::new(mgr.mqtt_client.clone());
-    let outcome = publisher.publish(&incr).await;
+    let outcome = publisher.publish_file(&job.path, job.dbnum).await;
     for error in &outcome.errors {
         println!("SyncPublisher 错误: {error}");
     }

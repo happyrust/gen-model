@@ -84,6 +84,15 @@ fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
 
 「库里没有数据」（洞一）**不进** `FileAnomaly`：文件本身好好的，判据两端也没有冲突，它走 `needs_initial_load` 这条路由线，且不删任何东西（没东西可删）。
 
+基线入口本身也必须消费共享 `ScanGate`，不能把扫描结果丢掉后继续解析：只有
+`Proceed` 允许读取计数、解析并推进水位；`Blocked` 立即返回身份阻断；`Reinit`
+必须回到共享数据队列，由 worker 冻结点复核，禁止基线旁路直接覆盖旧数据。
+
+范围外 CATA 只提供 closure 寻址，不因此获得第二套身份规则：扫描必须收集同项目的
+全部候选并复用 watcher 的 `duplicate_dbnums` 权威判定。同号多文件整组阻断，任何
+一份都不写 observation，且撤销上一轮唯一候选留下的可寻址路径并失效 locator cache；
+预览/入队回执列出跨 scope 的全部路径，唯一候选才允许重新登记。
+
 ### 6. 检出必须发声
 
 - 回退重建：扫描日志点名「已按整库重建入队」，worker 清库时打出删除规模，批次回执写明「检测到回退，已整库清空并按首次导入重建」。

@@ -1228,7 +1228,7 @@ pub(crate) const INGEST_MAX_DEPTH: usize = 1;
 /// 键必须带归属项目：不同项目各自的 sys 库（amssys / acpsys / zdjsys）天然共用
 /// dbnum=8191，只按 dbnum 判重会把三个正常的库一起阻断。防人手副本
 /// （`ams1112_0001 copy`）靠的是「同项目内同号」，不受影响。
-fn duplicate_dbnums(
+pub(crate) fn duplicate_dbnums(
     entries: impl IntoIterator<Item = (String, u32, PathBuf)>,
 ) -> HashSet<(String, u32)> {
     let mut seen = HashSet::new();

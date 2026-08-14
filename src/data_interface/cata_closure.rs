@@ -75,6 +75,11 @@ pub struct InMemoryCataLocator {
 static LOCATOR_CACHE: Lazy<TokioMutex<HashMap<String, InMemoryCataLocator>>> =
     Lazy::new(|| TokioMutex::new(HashMap::new()));
 
+/// 文件身份门控改变后丢弃项目 locator；下一次按当前 watermark 身份重建。
+pub(crate) async fn invalidate_project_locator(project: &str) {
+    LOCATOR_CACHE.lock().await.remove(project);
+}
+
 impl InMemoryCataLocator {
     /// 直接注入（单测 / 自定义来源）。`dbnum_files`：dbnum -> (db_type, project, path)。
     pub fn from_parts(
@@ -350,13 +355,16 @@ async fn load_dbnum_files_from_watermark(
         let (Some(dbnum), Some(file_path)) = (row.dbnum, row.file_path) else {
             continue;
         };
-        if file_path.is_empty() {
+        let db_type = row.db_type.unwrap_or_default();
+        // 空路径是 Duplicate 身份阻断的无 schema tombstone：保留 CATA 类型可防止
+        // 后面的目录 fallback 在歧义尚未解除时又自行扫描并任选一份文件。
+        if file_path.is_empty() && !db_type.eq_ignore_ascii_case("CATA") {
             continue;
         }
         out.insert(
             dbnum,
             DbFileEntry {
-                db_type: row.db_type.unwrap_or_default(),
+                db_type,
                 project: project.to_string(),
                 path: PathBuf::from(file_path),
             },

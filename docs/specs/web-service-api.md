@@ -155,7 +155,8 @@
   "project": "HD",
   "scanned": 3,
   "enqueued": [{ "task_id": "db-20260727-210301-7f3a", "dbnum": 7997, "db_type": "DESI",
-                  "position": 1, "start_sesno": 85, "end_sesno": 92 }],
+                  "intent": "apply_window", "position": 1,
+                  "start_sesno": 85, "end_sesno": 92 }],
   "merged": [],
   "already_covered": [],
   "blocked": [{ "dbnum": 8004, "reason": "库类型变更（登记 DESI → 现场 SYST），已阻断" }],
@@ -174,6 +175,9 @@
   仍判回退才整库清空（`wipe_dbnum_for_reinit`）并按首次导入重新解析，清库失败该批次
   终态 `failed`（水位未动，下一轮幂等重放）。`type_changed` / `duplicate` / `missing` /
   归属不符照旧 `blocked`，形状与措辞不变。
+- `enqueued` / `merged` / `already_covered` 的每一行都带只读 `intent`：普通窗口为
+  `"apply_window"`，已裁决回退重建为 `"reinitialize"`。它只描述调度意图，不是新状态；
+  旧客户端忽略新增字段即可。`reinitialize` 在合并时占优，运行中同库则排一条后继行。
 - `dbnums` 子集语义（ADR-020）：每个请求的 dbnum 先过 `UpdateScope::admits`，不在当前
   MDB 声明名单里的**直接拒**（回执 `warnings`，不给绕过 ADR-0013 统一范围门的第二条路）；
   未勾选的常规库不扫描、不入队、水位不动（回执 `unselected`），预览之后新产生的会话不会
@@ -274,8 +278,10 @@
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "rows": [{ "task_id": "db-…", "dbnum": 7997,
-  "db_type": "DESI", "state": "running", "start_sesno": 85, "end_sesno": 92 }, …] }`：
+  "db_type": "DESI", "intent": "apply_window", "state": "running",
+  "start_sesno": 85, "end_sesno": 92 }, …] }`：
   队列快照，行按队列序（运行中在前），经 `task_id` 与 §4.4 的任务行对得上。
+  `intent` 取值同 §4.3；`reinitialize` 明示该行冻结点仍需复核回退后才清库。
 - `POST /queue/pause` → `{ "paused": true }`：**只挡出队与空闲轮**，正在跑的那条会
   跑完为止（服务端没有中止接口，界面文案只能说「不再出队」）。标志持久化在
   `queue_control:main`（与水位同库，不进队列表），**活过重启**：重启后 worker 起跑

@@ -30,6 +30,9 @@
   `batch_reroutes_to_initial_load` 预判（applied=0 / 回退 / 幽灵水位一律不开 ADR-017
   暂存窗口，直接走执行体），与执行体共用同一个数据支撑探针。
 - 预览与执行同谓词（`blocked` / `initialization_required`），回退行保留 `anomaly` 证据。
+- 基线入口显式匹配共享 `ScanGate`；`Blocked` / `Reinit` 在计数、解析、水位之前退出。
+- 范围外 CATA 收集全部候选，复用 `duplicate_dbnums`；重复组零 observation 并把路径
+  写进预览/入队 warnings，唯一候选才登记。
 
 ## Constitution Check
 
@@ -42,6 +45,7 @@
 - **II 一条规则只有一份实现**：符合——`ScanGate` 由手动 / 自动路径共用；
   `FileAnomaly::requires_reinit` 是「哪些异常转重建」的唯一裁决；预览与执行体共用路由
   谓词（FR-002）；数据支撑判据不进入队门（FR-003，守护测试钉住）。
+  基线入口同样消费该 gate，范围外 CATA Duplicate 复用 watcher 权威集合（FR-016/017）。
 - **III 静默失效是最高级别缺陷**：符合——幽灵水位与回退检出必须在日志与批次回执发声
   （FR-006 / FR-013，含删除规模）；存在性查询失败上浮，不吞任何默认值（FR-005）。
 - **IV 队列任务可消费、可收口、可复活**：符合——重建批次走同一条队列同一个派发器；

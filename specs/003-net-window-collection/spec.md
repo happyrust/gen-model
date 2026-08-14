@@ -118,8 +118,11 @@
 - **FR-4** 属性 diff 的实现与回放路径同源（单一权威）：优先 vendor 提取纯
   函数共用；复刻实现必须附逐字段对拍测试。
 - **FR-5** 收集器本体零数据库访问（源码断言），窗口起点仍由水位给出。
-- **FR-6** 批次回执与预览标注当前收集口径；`merged_sesnos` 与会话保存时刻
-  改由会话页清单给出，语义不变。
+- **FR-6** 收集器 MUST 统一返回 `CollectedWindow`（`range_eles` / `session_sesnos` /
+  `warnings` / `CollectionMode`）；两种模式的第一条 warning MUST 标注当前口径。
+  `session_sesnos` MUST 从冻结范围内会话页映射升序去重提取并贯穿预收集、崩溃重放与
+  `IncrFileSuccess`，`merged_sesnos` 与会话保存时刻 MUST 只由该清单过滤得到。Replay
+  的清单与操作 MUST 共用一次文件打开；后续计划阶段失败时口径 warning 仍 MUST 透出。
 - **FR-7** 逐会话回放保留为诊断工具入口（`parse.collect_changes` 与探针），
   退出执行主路径。
 - **FR-8** 净窗口 MUST 是完整性契约：不可读子页、层级不下降、终稿解析失败与

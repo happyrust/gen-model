@@ -127,6 +127,12 @@
 - **FR-013**：回退重建 MUST 在扫描日志、worker 日志与批次回执三处可见（含删除规模）；只出现在日志、回执里看不见的报告不满足本条。
 - **FR-014**：预览的 `blocked` / `initialization_required` MUST 与执行体的路由结论一致；回退行 MUST 保留 `anomaly` 证据（判据两端与保存时刻）。
 - **FR-015**：以上每条修复 MUST 附带一条回归测试，且该测试在回退到旧实现时 MUST 失败。
+- **FR-016**：`initialize_dbnum_baseline` MUST 消费共享 `ScanGate`：仅 `Proceed` 可继续；
+  `Blocked` MUST 返回身份阻断，`Reinit` MUST 经共享数据队列进入 worker，禁止直接基线覆盖。
+- **FR-017**：范围外 CATA MUST 收集同项目全部候选并复用 watcher 的
+  `duplicate_dbnums` 判定；同号多文件 MUST 整组阻断且零 observation，回执 MUST 列出路径；
+  判重全集 MUST 跨范围内/外分组，旧的唯一候选路径 MUST 立即退出 CATA closure 寻址；
+  仅唯一候选可重新登记。
 
 ### Key Entities
 

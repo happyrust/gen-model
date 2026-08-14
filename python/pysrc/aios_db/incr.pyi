@@ -28,4 +28,4 @@ def queue_resume() -> bool:
     """解除队列的持久化暂停。"""
 
 def queue_status() -> dict[str, Any]:
-    """队列状态快照（连接层只读）：{paused, rows}；rows 是本进程的调度器队列。"""
+    """队列状态快照（连接层只读）：{paused, rows}；row.intent 为 apply_window 或 reinitialize。"""

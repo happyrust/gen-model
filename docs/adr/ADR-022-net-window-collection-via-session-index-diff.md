@@ -163,6 +163,14 @@ refno 恰一条、挂在其 last-touch 会话下：
 MySQL 同步、渲染（`render_persist_statements`）的输入形状**零改动**；
 `fold_window` 在净路径上没有可折叠的输入，两个终态补丁构造性消失。
 
+收集器统一返回 `CollectedWindow`：除操作流外还携带冻结范围内从会话页映射读取的
+`session_sesnos`、`warnings` 与 `CollectionMode::{Replay, Net}`。会话清单升序去重，
+与有没有元素操作无关，因此空保存、自抵消与稀疏会话都保留；预收集、崩溃重放和
+`IncrFileSuccess` 必须原样传递。两种模式的第一条 warning 固定自报口径，
+`merged_sesnos` 只能由该会话清单经 `previous_observed` 过滤产生，保存时刻继续按
+同一序号清单平行写入。Replay 的会话映射与操作流必须由同一个已打开的 `PdmsIO`
+产生；口径 warning 即使在后续模型计划或 attempt 准备阶段失败也必须随错误回执透出。
+
 「两个 EleData → ModifiedElement」的 diff 逻辑目前内联在 vendor
 `get_refno_operation_status` 里。**优先方案**：在 pdms-io 提取为纯函数
 `diff_ele_data(prev, latest) -> ModifiedElement`，回放与净路径共用（判定只有

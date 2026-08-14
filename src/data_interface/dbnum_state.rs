@@ -963,6 +963,36 @@ impl DbnumState {
         }
     }
 
+    /// 同项目同 dbnum 出现多个文件时撤销旧的可寻址身份，但保留水位、类型与观察值。
+    ///
+    /// 这堵住“两轮扫描”漏洞：上一轮唯一候选留下的 `file_path` 不能在本轮已判
+    /// Duplicate 后继续被 CATA closure 消费。副本消失后，唯一候选的正常
+    /// [`Self::record_observation`] 会重新写回完整身份；无需新表或新字段。
+    pub(crate) async fn block_duplicate_file_identity(
+        dbnum: u32,
+        project: &str,
+    ) -> anyhow::Result<()> {
+        let _write_guard = DBNUM_STATE_WRITE_GATE.read().await;
+        let Some(state) = Self::read(dbnum).await? else {
+            return Ok(());
+        };
+        let owner = state.owner_project.trim();
+        if !owner.is_empty() && !owner.eq_ignore_ascii_case(project.trim()) {
+            anyhow::bail!(
+                "dbnum={dbnum} 的登记行属于项目 {}，拒绝由项目 {project} 清除重复身份",
+                state.owner_project
+            );
+        }
+        let sql = render_duplicate_identity_block(dbnum);
+        SUL_DB
+            .query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("阻断重复文件身份失败 dbnum={dbnum}: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("阻断重复文件身份语句失败 dbnum={dbnum}: {e}"))?;
+        Ok(())
+    }
+
     /// 测试夹具专用：无条件写入文件身份，绕开裁决。
     ///
     /// 只给「需要把某个身份摆进库里当前置条件」的 live 测试用（例如故意重放一个
@@ -1074,9 +1104,25 @@ impl DbnumState {
     }
 }
 
+fn render_duplicate_identity_block(dbnum: u32) -> String {
+    format!(
+        "UPDATE {WATERMARK_TABLE}:{dbnum} SET file_name = '', file_path = '', \
+         scanned_at = time::now(), updated_at = time::now();"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_identity_block_removes_only_the_locator_fields() {
+        let sql = render_duplicate_identity_block(7997);
+        assert!(sql.contains("file_name = ''"), "{sql}");
+        assert!(sql.contains("file_path = ''"), "{sql}");
+        assert!(!sql.contains("applied_sesno"), "{sql}");
+        assert!(!sql.contains("db_type ="), "{sql}");
+    }
 
     #[test]
     fn startup_schema_covers_every_increment_state_table() {

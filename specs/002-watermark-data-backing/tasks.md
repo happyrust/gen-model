@@ -50,3 +50,9 @@
   `manual_update.rs`
 - [x] T014 审查修复：`wipe_dbnum_for_reinit` 元数据阶段显式事务，水位置尾；附渲染顺序
   回归与故障注入入口——`src/data_interface/fast_delete.rs`
+- [x] T015 审查修复：基线入口消费 `ScanGate` 三态，阻断/重建在计数、解析、水位前退出
+  ——`src/data_interface/manual_update.rs`
+- [x] T016 审查修复：范围外 CATA 跨 scope 收集全部候选并复用 `duplicate_dbnums`，
+  重复组零 observation、撤销旧 locator 身份且 warnings 列全路径
+  ——`src/data_interface/manual_update.rs`、`increment_manager.rs`、`dbnum_state.rs`、
+  `cata_closure.rs`
