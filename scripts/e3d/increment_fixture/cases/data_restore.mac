@@ -2,6 +2,8 @@ ALPHA LOG "{{LOG_PATH}}" OVER
 ={{REF:data_eq}}
 NAME /AIOS-INC-DATA-EQ
 Q CE
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture data restore'
 ALPHA LOG END
 

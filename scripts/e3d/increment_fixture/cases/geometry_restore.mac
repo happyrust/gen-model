@@ -5,6 +5,8 @@ YLEN 1000
 ZLEN 1000
 Q CE
 Q XLEN
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture geometry restore'
 ALPHA LOG END
 

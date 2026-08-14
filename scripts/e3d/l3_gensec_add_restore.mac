@@ -6,6 +6,7 @@ $P L3-F5-RESTORE-ALIVE
 -- the macro (verified against a live TTY session).
 /CODEX_L3_GENSEC
 Q CE
+Q TYPE
 Q OWNE
 DELETE GENSEC
 SAVEWORK 'L3 F5 remove cloned GENSEC'

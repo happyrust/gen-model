@@ -4,6 +4,8 @@ POS E 0 N 5000 U 0
 ORI Y IS N AND Z IS U
 Q CE
 Q POS
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture transform restore'
 ALPHA LOG END
 

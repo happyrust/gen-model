@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+use pdms_io::io::PdmsIO;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct FixtureManifest {
     pub version: u32,
@@ -74,6 +76,31 @@ pub(super) struct ExpectedChanges {
     pub room_before: Vec<String>,
     #[serde(default)]
     pub room_after: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MutationOutcome {
+    Completed,
+    SavedButUnconfirmed,
+    FailedBeforeSave,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct MutationRunReport {
+    pub outcome: MutationOutcome,
+    pub before_sesno: i32,
+    pub after_sesno: i32,
+    pub attempts: Vec<E3dProcessEvidence>,
+}
+
+impl MutationRunReport {
+    pub(super) fn final_evidence(&self) -> &E3dProcessEvidence {
+        self.attempts
+            .last()
+            .expect("guarded mutation has an attempt")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -254,23 +281,95 @@ fn run_idempotent_macro(
     }
 }
 
-fn run_macro_with_startup_retry(
+fn file_latest_sesno(path: &Path, project: &str) -> Result<i32> {
+    i32::try_from(PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno()?)
+        .context("E3D file latest sesno exceeds i32")
+}
+
+fn classify_mutation(
+    evidence: &E3dProcessEvidence,
+    before_sesno: i32,
+    after_sesno: i32,
+) -> MutationOutcome {
+    if evidence.done_seen {
+        MutationOutcome::Completed
+    } else if after_sesno > before_sesno {
+        MutationOutcome::SavedButUnconfirmed
+    } else if !evidence.alive_seen
+        && !evidence.done_seen
+        && !evidence.timed_out
+        && evidence.exit_status == Some(0xC0000005)
+    {
+        MutationOutcome::FailedBeforeSave
+    } else {
+        MutationOutcome::Indeterminate
+    }
+}
+
+/// Stateful macro runner: the file header, not the process exit text, decides whether retrying
+/// would duplicate a committed mutation. Only a known pre-command-loop startup crash gets one retry.
+pub(super) fn run_guarded_mutation(
     driver: &E3dDriver,
     repo: &Path,
     path: &Path,
     label: &str,
-) -> Result<String> {
-    match driver.run_macro_file(repo, path, label) {
-        Ok(log) => Ok(log),
-        Err(first) if format!("{first:#}").contains("3221225477") => {
-            assert_no_e3d_session().context("clean E3D session before startup retry")?;
+    target_db_file: &Path,
+    project: &str,
+) -> Result<MutationRunReport> {
+    let (before_dbnum, before_type, before_world) = inspect_target_db(target_db_file, project)?;
+    let before_sesno = file_latest_sesno(target_db_file, project)?;
+    let mut attempts = Vec::new();
+
+    for attempt in 0..2 {
+        let evidence = driver.run_macro_file_evidence(repo, path, label)?;
+        let after_identity = inspect_target_db(target_db_file, project);
+        let after_sesno = file_latest_sesno(target_db_file, project);
+        let (after_sesno, outcome) = match (after_identity, after_sesno) {
+            (Ok((after_dbnum, after_type, after_world)), Ok(after_sesno))
+                if (after_dbnum, after_type.as_str(), after_world.as_str())
+                    == (before_dbnum, before_type.as_str(), before_world.as_str()) =>
+            {
+                (
+                    after_sesno,
+                    classify_mutation(&evidence, before_sesno, after_sesno),
+                )
+            }
+            // 宏已经进入之后，文件不可读或身份改变都没有足够事实支持重放。
+            // 保留进程证据并停在 Indeterminate，避免把一次可能已提交的操作做两遍。
+            _ => (before_sesno, MutationOutcome::Indeterminate),
+        };
+        attempts.push(evidence);
+        if outcome == MutationOutcome::FailedBeforeSave && attempt == 0 {
+            assert_no_e3d_session().context("clean E3D session before guarded startup retry")?;
             thread::sleep(Duration::from_secs(2));
-            driver
-                .run_macro_file(repo, path, label)
-                .with_context(|| format!("{label} startup retry failed; first failure: {first:#}"))
+            continue;
         }
-        Err(error) => Err(error),
+        return Ok(MutationRunReport {
+            outcome,
+            before_sesno,
+            after_sesno,
+            attempts,
+        });
     }
+    unreachable!("guarded mutation loop returns after at most two attempts")
+}
+
+pub(super) fn require_committed_mutation(report: &MutationRunReport, label: &str) -> Result<()> {
+    ensure!(
+        matches!(
+            report.outcome,
+            MutationOutcome::Completed | MutationOutcome::SavedButUnconfirmed
+        ),
+        "{label}: mutation outcome is {:?}; evidence retained, mutation chain stopped",
+        report.outcome
+    );
+    ensure!(
+        report.after_sesno > report.before_sesno,
+        "{label}: macro completed without advancing the target DB session ({} -> {})",
+        report.before_sesno,
+        report.after_sesno
+    );
+    Ok(())
 }
 
 fn run_fixture_cases(
@@ -512,13 +611,19 @@ fn start_fixture_stack(
             ui.is_file() && inspect.is_file(),
             "--fixture-ui requires plant-ui-app.exe and inspect.exe"
         );
-        let ui_dir = ui.parent().unwrap_or(repo).to_path_buf();
+        let plant_ui_root = env_path(
+            "L3_PLANT_UI_ROOT",
+            repo.parent().unwrap_or(repo).join("plant-ui"),
+        );
+        let ui_runtime = prepare_plant_ui_runtime(repo, &plant_ui_root, run_dir)?;
         stack.push(
             "plant-ui",
             spawn_logged(
                 Command::new(&ui)
-                    .current_dir(&ui_dir)
+                    .current_dir(repo)
                     .env("EGUI_INSPECTION", "1")
+                    .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
+                    .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
                     .env("PLANT_MODEL_API_URL", "http://127.0.0.1:8028"),
                 &run_dir.join("stack-plant-ui.log"),
             )?,
@@ -617,6 +722,7 @@ fn write_runtime_config(
     let values = BTreeMap::from([
         ("project_path", format!("\"{project_root}\"")),
         ("included_projects", format!("[\"{project}\"]")),
+        ("catalogue_project_priority", format!("[\"{project}\"]")),
         ("project_name", format!("\"{project}\"")),
         ("project_code", namespace.to_owned()),
         ("surreal_ns", namespace.to_owned()),
@@ -689,7 +795,7 @@ fn run_fixture_bin(
     Ok(())
 }
 
-fn inspect_target_db(path: &Path, project: &str) -> Result<(u32, String, String)> {
+pub(super) fn inspect_target_db(path: &Path, project: &str) -> Result<(u32, String, String)> {
     ensure!(
         path.is_file(),
         "target DB file is missing: {}",
@@ -838,11 +944,23 @@ fn run_case(
             .ui_target_before
             .as_deref()
             .context("ui_smoke scenario requires ui_target_before")?;
-        focus_target(paths, target, &dir, "before")?;
+        let refno = fixture_ui_refno(ns, project, target, map)?;
+        focus_target(paths, target, &refno, &dir, "before")?;
         inspect_shot(paths, &dir.join("ui-before.png"))?;
     }
     let before = fixture_snapshot(ns, project, dbnum, scenario, map)?;
     fs::write(dir.join("before.json"), serde_json::to_vec_pretty(&before)?)?;
+    // `merged_sesnos` means saves after the previous observation. Establish that observation
+    // before E3D mutates the file; previewing after SAVEWORK would correctly yield an empty list.
+    let preview = http_json(
+        "POST",
+        &format!("{API}/update/preview"),
+        Some(fixture_identity(project, &driver.mdb, ns)),
+    )?;
+    fs::write(
+        dir.join("preview.json"),
+        serde_json::to_vec_pretty(&preview)?,
+    )?;
     let mut apply_attempted = false;
     let mutation = (|| -> Result<Vec<AssertionRecord>> {
         let apply = render_case_macro(
@@ -853,42 +971,55 @@ fn run_case(
             map,
         )?;
         apply_attempted = true;
-        let log = run_macro_with_startup_retry(
+        let mutation_report = run_guarded_mutation(
             driver,
             repo,
             &apply,
             &format!("fixture-{}-apply", scenario.id),
+            live_target_db,
+            project,
         )?;
+        fs::write(
+            dir.join("mutation-evidence.json"),
+            serde_json::to_vec_pretty(&mutation_report)?,
+        )?;
+        require_committed_mutation(&mutation_report, &format!("{} apply", scenario.id))?;
+        let log = mutation_report
+            .final_evidence()
+            .scenario_log
+            .clone()
+            .unwrap_or_default();
         fs::write(dir.join("pml.log"), &log)?;
         ensure!(
             log.contains("AIOS-INC-"),
             "PML query log does not identify the fixture target"
         );
         copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
-        let preview = http_json(
-            "POST",
-            &format!("{API}/update/preview"),
-            Some(fixture_identity(project, &driver.mdb, ns)),
-        )?;
-        fs::write(
-            dir.join("preview.json"),
-            serde_json::to_vec_pretty(&preview)?,
-        )?;
         let pre_execute = fixture_snapshot(ns, project, dbnum, scenario, map)?;
         fs::write(
             dir.join("pre-execute.json"),
             serde_json::to_vec_pretty(&pre_execute)?,
         )?;
         ensure!(
-            pre_execute
-                .pointer("/payload/watermark/file_latest_sesno")
-                .and_then(Value::as_i64)
-                > pre_execute
-                    .pointer("/payload/watermark/applied_sesno")
-                    .and_then(Value::as_i64),
-            "preview did not expose an unapplied E3D session"
+            mutation_report.after_sesno > mutation_report.before_sesno,
+            "guarded E3D mutation did not expose a new file session"
         );
         let (_, tasks) = execute_fixture_and_wait(&dir, project, &driver.mdb, ns, dbnum)?;
+        ensure!(
+            tasks.iter().any(|task| {
+                task.get("kind").and_then(Value::as_str) == Some("data_batch")
+                    && task
+                        .pointer("/result/batch/merged_sesnos")
+                        .and_then(Value::as_array)
+                        .is_some_and(|sessions| {
+                            sessions.iter().any(|sesno| {
+                                sesno.as_i64() == Some(i64::from(mutation_report.after_sesno))
+                            })
+                        })
+            }),
+            "saved session {} is absent from data task merged_sesnos",
+            mutation_report.after_sesno
+        );
         wait_fixture_pending(&dir, ns, project, dbnum, "apply")?;
         fs::write(dir.join("tasks.json"), serde_json::to_vec_pretty(&tasks)?)?;
         let after = fixture_snapshot(ns, project, dbnum, scenario, map)?;
@@ -920,20 +1051,35 @@ fn run_case(
                 .ui_target_after
                 .as_deref()
                 .context("ui_smoke scenario requires ui_target_after")?;
-            focus_target(paths, target, &dir, "after")?;
+            let refno = fixture_ui_refno(ns, project, target, map)?;
+            focus_target(paths, target, &refno, &dir, "after")?;
             inspect_shot(paths, &dir.join("ui-after.png"))?;
         }
         Ok(assertions)
     })();
     if apply_attempted && let Some(restore) = &scenario.restore_macro {
         let restore = render_case_macro(repo, restore, &dir.join("restore.mac"), prefix, map)?;
-        let restore_log = run_macro_with_startup_retry(
+        let restore_report = run_guarded_mutation(
             driver,
             repo,
             &restore,
             &format!("fixture-{}-restore", scenario.id),
+            live_target_db,
+            project,
         )?;
-        fs::write(dir.join("restore-pml.log"), restore_log)?;
+        fs::write(
+            dir.join("restore-mutation-evidence.json"),
+            serde_json::to_vec_pretty(&restore_report)?,
+        )?;
+        require_committed_mutation(&restore_report, &format!("{} restore", scenario.id))?;
+        fs::write(
+            dir.join("restore-pml.log"),
+            restore_report
+                .final_evidence()
+                .scenario_log
+                .clone()
+                .unwrap_or_default(),
+        )?;
         copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
         execute_fixture_and_wait(&dir.join("restore"), project, &driver.mdb, ns, dbnum)
             .context("restore increment failed")?;
@@ -955,6 +1101,66 @@ fn run_case(
         error: None,
         assertions,
     })
+}
+
+fn fixture_ui_refno(
+    ns: &str,
+    project: &str,
+    target: &str,
+    map: &BTreeMap<String, ResolvedFixture>,
+) -> Result<String> {
+    let normalized = target.trim().trim_start_matches('=').replace('_', "/");
+    if normalized.split_once('/').is_some_and(|(dbnum, refno)| {
+        !dbnum.is_empty()
+            && !refno.is_empty()
+            && dbnum.chars().all(|ch| ch.is_ascii_digit())
+            && refno.chars().all(|ch| ch.is_ascii_digit())
+    }) {
+        return Ok(normalized);
+    }
+    if let Some(refno) = map
+        .get(target)
+        .or_else(|| {
+            map.values().find(|object| {
+                object.name.trim_start_matches('/') == target.trim_start_matches('/')
+            })
+        })
+        .and_then(|object| object.refno.as_deref())
+    {
+        return Ok(refno.replace('_', "/"));
+    }
+
+    let raw_name = map
+        .get(target)
+        .map(|object| object.name.as_str())
+        .unwrap_or(target);
+    let name = if raw_name.starts_with('/') {
+        raw_name.to_owned()
+    } else {
+        format!("/{raw_name}")
+    };
+    let escaped = aios_database::data_interface::dbnum_state::escape_surql_str(&name);
+    let response = fixture_surreal_sql(
+        ns,
+        project,
+        &format!(
+            "SELECT record::id(id) AS refno FROM pe WHERE name = '{escaped}' AND deleted != true LIMIT 2;"
+        ),
+    )?;
+    let rows = surreal_result(&response)?
+        .as_array()
+        .context("fixture UI refno lookup did not return rows")?;
+    ensure!(
+        rows.len() == 1,
+        "fixture UI target {target} resolved to {} rows",
+        rows.len()
+    );
+    record_id(
+        rows[0]
+            .get("refno")
+            .context("fixture UI refno row is empty")?,
+    )
+    .map(|value| value.replace('_', "/"))
 }
 
 fn fixture_restorable_payload(value: &Value) -> Value {
@@ -1214,13 +1420,27 @@ fn prime_room_structure_baselines(
                 &manifest.prefix,
                 map,
             )?;
-            let log = run_macro_with_startup_retry(
+            let report = run_guarded_mutation(
                 driver,
                 repo,
                 &rendered,
                 &format!("fixture-{}-baseline-{phase}", scenario.id),
+                live_target_db,
+                project,
             )?;
-            fs::write(dir.join(format!("{phase}.log")), log)?;
+            require_committed_mutation(&report, &format!("{} baseline {phase}", scenario.id))?;
+            fs::write(
+                dir.join(format!("{phase}-mutation-evidence.json")),
+                serde_json::to_vec_pretty(&report)?,
+            )?;
+            fs::write(
+                dir.join(format!("{phase}.log")),
+                report
+                    .final_evidence()
+                    .scenario_log
+                    .clone()
+                    .unwrap_or_default(),
+            )?;
             copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
             execute_fixture_and_wait(&dir.join(phase), project, &driver.mdb, ns, dbnum)?;
             wait_fixture_pending(&dir, ns, project, dbnum, phase)?;
@@ -1348,7 +1568,11 @@ fn assert_case(
             "unrelated fixture state changed in {key}"
         );
     }
-    let task_text = serde_json::to_string(tasks)?;
+    let model_tasks = tasks
+        .iter()
+        .filter(|task| task.get("kind").and_then(Value::as_str) == Some("model_drain"))
+        .collect::<Vec<_>>();
+    let task_text = serde_json::to_string(&model_tasks)?;
     for root in s
         .roots
         .iter()
@@ -1361,7 +1585,7 @@ fn assert_case(
         {
             ensure!(
                 task_text.contains(refno) || task_text.contains(&refno.replace('/', "_")),
-                "expected generation root {root} ({refno}) is absent from tasks"
+                "expected generation root {root} ({refno}) is absent from model_drain.detail.roots"
             );
         }
     }
@@ -1514,6 +1738,7 @@ fn execute_fixture_and_wait(
     dbnum: u32,
 ) -> Result<(Value, Vec<Value>)> {
     fs::create_dir_all(dir)?;
+    let model_before = model_drain_task_ids()?;
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
     loop {
         let preview = http_json(
@@ -1563,6 +1788,7 @@ fn execute_fixture_and_wait(
         "one or more fixture tasks failed: {}",
         serde_json::to_string(&tasks)?
     );
+    tasks.extend(wait_model_drain_settlement(&model_before)?);
     Ok((receipt, tasks))
 }
 
@@ -1823,7 +2049,7 @@ fn surreal_last_result(response: &Value) -> Result<&Value> {
     row.get("result")
         .context("Surreal fixture response has no result")
 }
-fn absolutize(repo: &Path, path: &Path) -> PathBuf {
+pub(super) fn absolutize(repo: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -2013,6 +2239,11 @@ mod tests {
                 .lines()
                 .any(|line| line == "gen_spatial_tree = true")
         );
+        assert!(
+            rendered
+                .lines()
+                .any(|line| { line == "catalogue_project_priority = [\"AvevaMarineSample\"]" })
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2088,5 +2319,84 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn every_fixture_mutation_records_ce_type_and_owner_before_savework() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = repo.join("scripts/e3d/increment_fixture/fixture-manifest.json");
+        let manifest: FixtureManifest = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        for path in manifest
+            .scenarios
+            .iter()
+            .flat_map(|case| [Some(&case.apply_macro), case.restore_macro.as_ref()])
+            .flatten()
+        {
+            let source = fs::read_to_string(absolutize(repo, path)).unwrap();
+            let before_save = source
+                .lines()
+                .take_while(|line| !line.trim().to_ascii_uppercase().starts_with("SAVEWORK"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_ascii_uppercase();
+            for query in ["Q CE", "Q TYPE", "Q OWNE"] {
+                assert!(
+                    before_save.lines().any(|line| line.trim() == query),
+                    "{} must record {query} before SAVEWORK",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    fn evidence(
+        alive_seen: bool,
+        done_seen: bool,
+        exit_status: Option<u32>,
+        timed_out: bool,
+    ) -> E3dProcessEvidence {
+        E3dProcessEvidence {
+            alive_seen,
+            done_seen,
+            exit_status,
+            timed_out,
+            log_path: "driver.log".into(),
+            scenario_log_path: "scenario.log".into(),
+            driver_log: String::new(),
+            scenario_log: None,
+        }
+    }
+
+    #[test]
+    fn mutation_outcome_uses_file_save_truth_before_retry_policy() {
+        assert_eq!(
+            classify_mutation(&evidence(true, true, Some(0xC0000005), false), 10, 11),
+            MutationOutcome::Completed,
+            "DONE wins even when DLL detach exits dirty"
+        );
+        assert_eq!(
+            classify_mutation(&evidence(false, true, None, true), 10, 10),
+            MutationOutcome::Completed,
+            "DONE is the completion fact even if another marker was unreadable"
+        );
+        assert_eq!(
+            classify_mutation(&evidence(true, false, Some(0xC0000005), false), 10, 11),
+            MutationOutcome::SavedButUnconfirmed,
+            "advanced file session forbids replay even without DONE"
+        );
+        assert_eq!(
+            classify_mutation(&evidence(false, false, Some(0xC0000005), false), 10, 10),
+            MutationOutcome::FailedBeforeSave,
+            "only a known crash before the command loop is retryable"
+        );
+        assert_eq!(
+            classify_mutation(&evidence(true, false, Some(0xC0000005), false), 10, 10),
+            MutationOutcome::Indeterminate
+        );
+        assert_eq!(
+            classify_mutation(&evidence(false, false, None, true), 10, 10),
+            MutationOutcome::Indeterminate,
+            "a timeout is not proof that replay is harmless"
+        );
     }
 }

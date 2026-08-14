@@ -26,6 +26,25 @@ pub struct E3dDriver {
     pub timeout: Duration,
 }
 
+/// 进程层只陈述可观察事实；是否已经保存由持有目标 DB 路径的变更执行器裁决。
+#[derive(Clone, Debug, Serialize)]
+pub struct E3dProcessEvidence {
+    pub alive_seen: bool,
+    pub done_seen: bool,
+    pub exit_status: Option<u32>,
+    pub timed_out: bool,
+    pub log_path: PathBuf,
+    pub scenario_log_path: PathBuf,
+    pub driver_log: String,
+    pub scenario_log: Option<String>,
+}
+
+impl E3dProcessEvidence {
+    pub fn completed(&self) -> bool {
+        self.alive_seen && self.done_seen && !self.timed_out
+    }
+}
+
 impl E3dDriver {
     pub fn from_env(repo: &Path) -> Result<Self> {
         // The E3D31-L3 work copy no longer exists on this host, so the default is
@@ -67,6 +86,17 @@ impl E3dDriver {
         self.run_file(repo, macro_path, label)
     }
 
+    /// Run a stateful macro without collapsing marker/exit evidence into a string error.
+    /// Callers that can mutate a DB must combine this with the file's before/after sesno.
+    pub fn run_macro_file_evidence(
+        &self,
+        repo: &Path,
+        macro_path: &Path,
+        label: &str,
+    ) -> Result<E3dProcessEvidence> {
+        self.run_file_evidence(repo, macro_path, label)
+    }
+
     pub fn run_source(&self, repo: &Path, label: &str, body: &str) -> Result<String> {
         ensure!(
             !label.is_empty()
@@ -101,6 +131,30 @@ impl E3dDriver {
     }
 
     fn run_file(&self, repo: &Path, macro_path: &Path, label: &str) -> Result<String> {
+        let evidence = self.run_file_evidence(repo, macro_path, label)?;
+        ensure!(
+            evidence.completed(),
+            "E3D TTY driver failed for {label}: exit_status={:?}, timed_out={}, reached command loop: {}, finished macro: {}; log: {}",
+            evidence.exit_status,
+            evidence.timed_out,
+            evidence.alive_seen,
+            evidence.done_seen,
+            evidence.driver_log
+        );
+        evidence.scenario_log.with_context(|| {
+            format!(
+                "read E3D query log {}",
+                evidence.scenario_log_path.display()
+            )
+        })
+    }
+
+    fn run_file_evidence(
+        &self,
+        repo: &Path,
+        macro_path: &Path,
+        label: &str,
+    ) -> Result<E3dProcessEvidence> {
         // ponytail: one process-wide session lock; split by project only if query throughput matters.
         let _session = E3D_SESSION
             .get_or_init(|| Mutex::new(()))
@@ -176,10 +230,6 @@ impl E3dDriver {
                 let finished_macro = contains(&done_log, "L3-DONE");
                 if !reached_command_loop || !finished_macro {
                     terminate_pid_file(&pid_file).context("clean E3D after launcher failure")?;
-                    bail!(
-                        "E3D TTY driver failed for {label}: {status}; reached command loop: \
-                         {reached_command_loop}, finished macro: {finished_macro}; log: {log}"
-                    );
                 }
                 if !status.success() {
                     eprintln!("E3D TTY {label} completed, then exited dirty: {status}");
@@ -192,18 +242,34 @@ impl E3dDriver {
                 // not just the launcher process lifetime.
                 wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
                     .with_context(|| format!("wait for E3D session shutdown after {label}"))?;
-                return fs::read_to_string(&scenario_log)
-                    .with_context(|| format!("read E3D query log {}", scenario_log.display()));
+                return Ok(E3dProcessEvidence {
+                    alive_seen: reached_command_loop,
+                    done_seen: finished_macro,
+                    exit_status: status.code().map(|code| code as u32),
+                    timed_out: false,
+                    log_path: driver_log,
+                    scenario_log_path: scenario_log.clone(),
+                    driver_log: log,
+                    scenario_log: fs::read_to_string(&scenario_log).ok(),
+                });
             }
             alive |= contains(&alive_log, "L3-ALIVE");
             let stalled_login = !alive && started.elapsed() >= self.alive_timeout;
             if stalled_login || Instant::now() >= deadline {
                 terminate_tree(launcher.id()).context("stop timed-out E3D launcher")?;
                 terminate_pid_file(&pid_file).context("stop timed-out E3D session")?;
-                bail!(
-                    "E3D TTY {} timeout for {label}",
-                    if stalled_login { "login" } else { "query" }
-                );
+                wait_for_e3d_session_exit(&baseline_sessions, Duration::from_secs(45))
+                    .with_context(|| format!("wait for timed-out E3D session after {label}"))?;
+                return Ok(E3dProcessEvidence {
+                    alive_seen: contains(&alive_log, "L3-ALIVE"),
+                    done_seen: contains(&done_log, "L3-DONE"),
+                    exit_status: None,
+                    timed_out: true,
+                    log_path: driver_log.clone(),
+                    scenario_log_path: scenario_log.clone(),
+                    driver_log: fs::read_to_string(&driver_log).unwrap_or_default(),
+                    scenario_log: fs::read_to_string(&scenario_log).ok(),
+                });
             }
             thread::sleep(Duration::from_millis(200));
         }

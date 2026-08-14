@@ -396,7 +396,7 @@ pub fn check_file_against_state(
 ///
 /// Windows paths carry backslashes, which are escape characters in SurrealQL
 /// strings; escape those and single quotes.
-pub(crate) fn escape_surql_str(raw: &str) -> String {
+pub fn escape_surql_str(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('\'', "\\'")
 }
 

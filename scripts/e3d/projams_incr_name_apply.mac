@@ -10,5 +10,7 @@ ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_apply.
 Q CE
 NAME /1CUP001VAR_CODEX
 Q CE
+Q TYPE
+Q OWNE
 SAVEWORK 'CODEX incremental NAME apply'
 ALPHA LOG END

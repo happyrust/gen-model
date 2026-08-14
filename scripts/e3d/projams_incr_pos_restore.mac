@@ -5,5 +5,7 @@ ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_pos_restore
 Q CE
 POS E -6154.58984375 N 2224.10009765625 D 2280
 Q POS
+Q TYPE
+Q OWNE
 SAVEWORK 'CODEX plant-ui model update restore: DAMP -100mm E'
 ALPHA LOG END

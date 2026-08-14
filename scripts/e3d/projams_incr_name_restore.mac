@@ -8,5 +8,7 @@ ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_name_restor
 Q CE
 NAME /1CUP001VAR
 Q CE
+Q TYPE
+Q OWNE
 SAVEWORK 'CODEX incremental NAME restore'
 ALPHA LOG END

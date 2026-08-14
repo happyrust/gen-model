@@ -5,6 +5,8 @@ ORI Y IS N AND Z IS U
 Q CE
 Q POS
 Q ORI
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture transform apply'
 ALPHA LOG END
 

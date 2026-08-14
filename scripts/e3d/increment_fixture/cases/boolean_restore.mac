@@ -3,6 +3,8 @@ ALPHA LOG "{{LOG_PATH}}" OVER
 XLEN 500
 Q CE
 Q XLEN
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture boolean restore'
 ALPHA LOG END
 

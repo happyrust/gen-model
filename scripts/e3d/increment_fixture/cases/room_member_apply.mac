@@ -3,6 +3,8 @@ ALPHA LOG "{{LOG_PATH}}" OVER
 POS E 10000 N 0 U 1000
 Q CE
 Q POS
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture room member apply'
 ALPHA LOG END
 

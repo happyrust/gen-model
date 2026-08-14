@@ -4,6 +4,7 @@ INCLUDE ={{REF:owner_box}}
 ={{REF:owner_box}}
 Q CE
 Q REF
+Q TYPE
 Q OWNE
 SAVEWORK 'AIOS fixture owner restore'
 ALPHA LOG END

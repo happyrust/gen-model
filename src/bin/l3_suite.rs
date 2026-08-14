@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aios_database::e3d_query::{E3dDriver, e3d_path};
+use aios_database::e3d_query::{E3dDriver, E3dProcessEvidence, e3d_path};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Local;
 use clap::Parser;
@@ -191,7 +191,7 @@ struct Cli {
     /// Run the portable, manifest-driven fixture suite instead of the AMS golden suite.
     #[arg(long)]
     fixture_manifest: Option<PathBuf>,
-    /// Explicit writable DESI database file used by fixture mode.
+    /// Explicit writable DESI database file used by fixture mode or a stateful --check-driver.
     #[arg(long)]
     target_db_file: Option<PathBuf>,
     /// Database number expected in `target-db-file`.
@@ -243,6 +243,7 @@ struct Paths {
     surreal_golden: PathBuf,
     surreal_exe: PathBuf,
     service_exe: PathBuf,
+    plant_ui_root: PathBuf,
     plant_ui_exe: PathBuf,
     inspect_exe: PathBuf,
     e3d_driver: PathBuf,
@@ -258,7 +259,7 @@ impl Paths {
             project_work: project_dir.unwrap_or_else(|| {
                 env_path(
                     "L3_PROJECT_WORK",
-                    r"D:\AVEVA\Projects\E3D31-L3\AvevaMarineSample",
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample",
                 )
             }),
             project_golden: env_path(
@@ -269,6 +270,10 @@ impl Paths {
             surreal_golden: env_path("L3_SURREAL_GOLDEN", repo.join(".surreal/l3-golden-v1")),
             surreal_exe: env_path("L3_SURREAL_EXE", repo.join("bin/surreal.exe")),
             service_exe: env_path("L3_SERVICE_EXE", target.join("debug/aios-database.exe")),
+            plant_ui_root: env_path(
+                "L3_PLANT_UI_ROOT",
+                repo.parent().unwrap_or(&repo).join("plant-ui"),
+            ),
             plant_ui_exe: env_path("L3_PLANT_UI_EXE", target.join("debug/plant-ui-app.exe")),
             inspect_exe: env_path("L3_INSPECT_EXE", target.join("debug/inspect.exe")),
             e3d_driver: env_path(
@@ -293,6 +298,17 @@ impl Paths {
                 path.is_file(),
                 "required file is missing: {}",
                 path.display()
+            );
+        }
+        for dir in [
+            self.plant_ui_root.join("assets"),
+            self.plant_ui_root.join("assets/meshes"),
+            self.repo.join("resource/surreal"),
+        ] {
+            ensure!(
+                dir.is_dir(),
+                "required runtime directory is missing: {}",
+                dir.display()
             );
         }
         if restore {
@@ -417,13 +433,56 @@ fn main() -> Result<()> {
         if std::env::var("L3_ALLOW_EXISTING_E3D_SESSION").as_deref() != Ok("1") {
             assert_no_e3d_session()?;
         }
-        let log = driver.run(&paths.repo, probe)?;
+        let probe_path = fixture::absolutize(&paths.repo, Path::new(probe));
+        let source = fs::read_to_string(&probe_path)
+            .with_context(|| format!("read check-driver macro {}", probe_path.display()))?;
+        let stateful = source.lines().any(|line| {
+            matches!(
+                line.trim().to_ascii_uppercase().as_str(),
+                "SAVEWORK" | "SAVE WORK"
+            )
+        });
+        let (log, outcome) = if stateful {
+            let target_db_file = cli
+                .target_db_file
+                .as_deref()
+                .context("stateful --check-driver requires --target-db-file")?;
+            let project = cli
+                .aios_project
+                .as_deref()
+                .context("stateful --check-driver requires --aios-project")?;
+            let target_db_file = fixture::absolutize(&paths.repo, target_db_file);
+            let report = fixture::run_guarded_mutation(
+                &driver,
+                &paths.repo,
+                &probe_path,
+                "check-driver",
+                &target_db_file,
+                project,
+            )?;
+            fs::write(
+                run_dir.join("check-driver-evidence.json"),
+                serde_json::to_vec_pretty(&report)?,
+            )?;
+            fixture::require_committed_mutation(&report, "check-driver")?;
+            (
+                report
+                    .final_evidence()
+                    .scenario_log
+                    .clone()
+                    .unwrap_or_default(),
+                format!("{:?}", report.outcome),
+            )
+        } else {
+            (driver.run(&paths.repo, probe)?, "read_only".to_string())
+        };
         fs::write(run_dir.join("check-driver.log"), &log)?;
         println!(
-            "E3D driver OK: project={} mdb={} projects_dir={}\n{log}",
+            "E3D driver OK: project={} mdb={} projects_dir={} outcome={}\n{log}",
             driver.project,
             driver.mdb,
-            driver.projects_dir.display()
+            driver.projects_dir.display(),
+            outcome
         );
         return Ok(());
     }
@@ -517,7 +576,7 @@ fn select_scenarios(csv: &str) -> Result<Vec<&'static Scenario>> {
 fn task_terminal(task: &Value) -> Result<Option<bool>> {
     match task.get("state").and_then(Value::as_str) {
         Some("queued" | "running") => Ok(None),
-        Some("succeeded") => Ok(Some(true)),
+        Some("succeeded" | "yielded") => Ok(Some(true)),
         Some("partial" | "failed") => Ok(Some(false)),
         Some(other) => bail!("unknown task state: {other}"),
         None => bail!("task response has no state: {task}"),
@@ -658,19 +717,67 @@ fn start_stack(paths: &Paths, out: &Path, keep: bool) -> Result<Stack> {
     );
     wait_http(&format!("{API}/health"), Duration::from_secs(180))?;
 
-    let plant_dir = paths.plant_ui_exe.parent().unwrap_or(&paths.repo);
+    let ui_runtime = prepare_plant_ui_runtime(&paths.repo, &paths.plant_ui_root, out)?;
     stack.push(
         "plant-ui",
         spawn_logged(
             Command::new(&paths.plant_ui_exe)
-                .current_dir(plant_dir)
+                .current_dir(&paths.repo)
                 .env("EGUI_INSPECTION", "1")
+                .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
+                .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
                 .env("PLANT_MODEL_API_URL", "http://127.0.0.1:8028"),
             &out.join("stack-plant-ui.log"),
         )?,
     );
     wait_inspect(&paths.inspect_exe, Duration::from_secs(120))?;
     Ok(stack)
+}
+
+struct PlantUiRuntime {
+    settings_file: PathBuf,
+    asset_root: PathBuf,
+}
+
+fn prepare_plant_ui_runtime(
+    repo: &Path,
+    plant_ui_root: &Path,
+    out: &Path,
+) -> Result<PlantUiRuntime> {
+    let asset_root = plant_ui_root.join("assets");
+    let mesh_dir = asset_root.join("meshes");
+    let surreal_assets = repo.join("resource/surreal");
+    ensure!(
+        asset_root.is_dir(),
+        "Plant UI assets missing: {}",
+        asset_root.display()
+    );
+    ensure!(
+        mesh_dir.is_dir(),
+        "Plant UI mesh directory missing: {}",
+        mesh_dir.display()
+    );
+    ensure!(
+        surreal_assets.is_dir(),
+        "runtime SurrealQL directory missing: {}",
+        surreal_assets.display()
+    );
+    let settings_file = out.join("plant-ui-settings.ron");
+    let mesh = serde_json::to_string(&mesh_dir.to_string_lossy().replace('\\', "/"))?;
+    fs::write(
+        &settings_file,
+        format!(
+            "(theme: Dark, density: Compact, model_api_url: \"http://127.0.0.1:8028\", data_api_url: \"http://127.0.0.1:8028\", mesh_dir: {mesh})\n"
+        ),
+    )?;
+    ensure!(
+        settings_file.is_file(),
+        "Plant UI test settings were not created"
+    );
+    Ok(PlantUiRuntime {
+        settings_file,
+        asset_root,
+    })
 }
 
 fn spawn_logged(command: &mut Command, log: &Path) -> Result<Child> {
@@ -788,7 +895,7 @@ fn run_scenario(
     let dir = run_dir.join(s.id);
     fs::create_dir_all(&dir)?;
     match s.focus_before {
-        Some(target) => focus_target(paths, target, &dir, "before")?,
+        Some(target) => focus_target(paths, target, &s.refno.replace('_', "/"), &dir, "before")?,
         None => notes.push("V: target does not exist yet, before.png is unfocused".into()),
     }
     inspect_shot(paths, &dir.join(format!("{}-before.png", s.id)))?;
@@ -800,26 +907,66 @@ fn run_scenario(
     } else {
         HashSet::new()
     };
-    let macro_log = driver.run(&paths.repo, s.apply_macro.unwrap())?;
-    fs::write(dir.join("apply-macro.log"), &macro_log)?;
-    let preview = http_json("POST", &format!("{API}/update/preview"), Some(identity()))?;
+    let target_db_file = standard_target_db_file(paths, s.dbnum)?;
+    // Establish the observation boundary before SAVEWORK. Calling preview after the save
+    // would consume the observation and make execute correctly report no merged saves.
+    let observation = http_json("POST", &format!("{API}/update/preview"), Some(identity()))?;
     fs::write(
-        dir.join("preview.json"),
-        serde_json::to_vec_pretty(&preview)?,
+        dir.join("preview-before-save.json"),
+        serde_json::to_vec_pretty(&observation)?,
     )?;
-    assert_preview(s, &preview)?;
+    let apply_report = fixture::run_guarded_mutation(
+        driver,
+        &paths.repo,
+        &paths.repo.join(s.apply_macro.unwrap()),
+        &format!("{}-apply", s.id),
+        &target_db_file,
+        PROJECT,
+    )?;
+    fs::write(
+        dir.join("apply-mutation.json"),
+        serde_json::to_vec_pretty(&apply_report)?,
+    )?;
+    fixture::require_committed_mutation(&apply_report, &format!("{} apply", s.id))?;
+    let macro_log = apply_report
+        .final_evidence()
+        .scenario_log
+        .clone()
+        .unwrap_or_else(|| apply_report.final_evidence().driver_log.clone());
+    fs::write(dir.join("apply-macro.log"), &macro_log)?;
     let (receipt, tasks) = execute_and_wait(&dir, paths, Some(s.id))?;
+    ensure!(
+        tasks.iter().any(|task| {
+            task.get("kind").and_then(Value::as_str) == Some("data_batch")
+                && task
+                    .pointer("/result/batch/merged_sesnos")
+                    .and_then(Value::as_array)
+                    .is_some_and(|sessions| {
+                        sessions.iter().any(|sesno| {
+                            sesno.as_i64() == Some(i64::from(apply_report.after_sesno))
+                        })
+                    })
+        }),
+        "saved session {} is absent from data task merged_sesnos",
+        apply_report.after_sesno
+    );
     if matches!(s.expect, Expect::Room) {
         wait_room(&dir, &room_before)?;
     }
     // V 级判据的一半在这里：树上还找不找得到那个节点。删除场景要求找不到，
     // 新增/改名场景要求按**新**名字找得到——四张图只采不判的话，这两件事没人管。
     match s.focus_after {
-        Some(target) => focus_target(paths, target, &dir, "after")?,
+        Some(target) => {
+            let refno = if s.refno.is_empty() {
+                resolve_ui_refno_by_name(target)?
+            } else {
+                s.refno.replace('_', "/")
+            };
+            focus_target(paths, target, &refno, &dir, "after")?;
+        }
         None => {
-            let stale = s
-                .focus_before
-                .map(|target| tree_locates(paths, target))
+            let stale = (!s.refno.is_empty())
+                .then(|| tree_locates(paths, &s.refno.replace('_', "/")))
                 .transpose()?
                 .unwrap_or(false);
             ensure!(
@@ -861,7 +1008,24 @@ fn run_scenario(
         notes.push(run_rvm(s, paths)?);
     }
     if let Some(restore) = s.restore_macro {
-        let restore_log = driver.run(&paths.repo, restore)?;
+        let restore_report = fixture::run_guarded_mutation(
+            driver,
+            &paths.repo,
+            &paths.repo.join(restore),
+            &format!("{}-restore", s.id),
+            &target_db_file,
+            PROJECT,
+        )?;
+        fs::write(
+            dir.join("restore-mutation.json"),
+            serde_json::to_vec_pretty(&restore_report)?,
+        )?;
+        fixture::require_committed_mutation(&restore_report, &format!("{} restore", s.id))?;
+        let restore_log = restore_report
+            .final_evidence()
+            .scenario_log
+            .clone()
+            .unwrap_or_else(|| restore_report.final_evidence().driver_log.clone());
         fs::write(dir.join("restore-macro.log"), restore_log)?;
         let (_, restore_tasks) = execute_and_wait(&dir.join("restore"), paths, None)?;
         ensure!(
@@ -884,11 +1048,35 @@ fn run_scenario(
     Ok(notes)
 }
 
-fn focus_target(paths: &Paths, target: &str, dir: &Path, phase: &str) -> Result<()> {
+fn standard_target_db_file(paths: &Paths, dbnum: u32) -> Result<PathBuf> {
+    let path = paths
+        .project_work
+        .join("ams000")
+        .join(format!("ams{dbnum}_0001"));
+    let (actual_dbnum, db_type, _) = fixture::inspect_target_db(&path, PROJECT)?;
+    ensure!(
+        actual_dbnum == dbnum && db_type.eq_ignore_ascii_case("DESI"),
+        "standard scenario target {} is {db_type} dbnum {actual_dbnum}, expected DESI {dbnum}",
+        path.display()
+    );
+    Ok(path)
+}
+
+fn focus_target(
+    paths: &Paths,
+    locate_target: &str,
+    expected_refno: &str,
+    dir: &Path,
+    phase: &str,
+) -> Result<()> {
+    ensure!(
+        !expected_refno.trim().is_empty(),
+        "UI tree assertion requires a refno"
+    );
     let evidence = dir.join(format!("inspect-tree-{phase}.txt"));
-    let mut output = inspect(paths, &["tree", target])?;
+    let mut output = inspect(paths, &["tree", expected_refno])?;
     fs::write(&evidence, &output)?;
-    let mut center = first_rect_center(&output);
+    let mut center = tree_item_rect_center(&output, expected_refno);
 
     // The model tree is lazy: a deep EQUI is absent from AccessKit until its
     // SITE/ZONE ancestors have been loaded and expanded.  Drive plant-ui's own
@@ -903,22 +1091,22 @@ fn focus_target(paths: &Paths, target: &str, dir: &Path, phase: &str) -> Result<
             &input,
         )?;
         let (input_x, input_y) = role_rect_center(&input, "TextInput").ok_or_else(|| {
-            anyhow!("plant-ui command input is not visible while locating {target}")
+            anyhow!("plant-ui command input is not visible while locating {locate_target}")
         })?;
         inspect(
             paths,
             &["click", &input_x.to_string(), &input_y.to_string()],
         )?;
         inspect(paths, &["key", "ctrl+a"])?;
-        let command = locate_command(target);
+        let command = locate_command(locate_target);
         inspect(paths, &["type", &command])?;
         inspect(paths, &["key", "enter"])?;
 
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            output = inspect(paths, &["tree", target])?;
+            output = inspect(paths, &["tree", expected_refno])?;
             fs::write(&evidence, &output)?;
-            center = first_rect_center(&output);
+            center = tree_item_rect_center(&output, expected_refno);
             if center.is_some() {
                 break;
             }
@@ -927,7 +1115,9 @@ fn focus_target(paths: &Paths, target: &str, dir: &Path, phase: &str) -> Result<
     }
 
     let (x, y) = center.ok_or_else(|| {
-        anyhow!("inspect tree could not locate {phase} target {target} after command-line locate")
+        anyhow!(
+            "inspect tree could not locate {phase} TreeItem refno={expected_refno} after command-line locate {locate_target}"
+        )
     })?;
     inspect(paths, &["click", &x.to_string(), &y.to_string()])?;
     Ok(())
@@ -943,15 +1133,47 @@ fn locate_command(target: &str) -> String {
 }
 
 /// 树上还找不找得到这个节点。删除场景的 V 级判据靠它。
-fn tree_locates(paths: &Paths, target: &str) -> Result<bool> {
-    Ok(first_rect_center(&inspect(paths, &["tree", target])?).is_some())
+fn tree_locates(paths: &Paths, expected_refno: &str) -> Result<bool> {
+    Ok(
+        tree_item_rect_center(&inspect(paths, &["tree", expected_refno])?, expected_refno)
+            .is_some(),
+    )
 }
 
-fn first_rect_center(tree: &str) -> Option<(i32, i32)> {
+fn tree_item_rect_center(tree: &str, expected_refno: &str) -> Option<(i32, i32)> {
+    let identity = format!("refno={expected_refno};");
     tree.lines()
         .skip(1)
+        .filter(|line| {
+            line.split_whitespace().nth(1) == Some("TreeItem") && line.contains(&identity)
+        })
         .filter_map(accesskit_rect)
         .min_by_key(|(_, y)| *y)
+}
+
+fn resolve_ui_refno_by_name(name: &str) -> Result<String> {
+    let canonical_name = if name.starts_with('/') {
+        name.to_owned()
+    } else {
+        format!("/{name}")
+    };
+    let escaped = aios_database::data_interface::dbnum_state::escape_surql_str(&canonical_name);
+    let result = surreal_sql(&format!(
+        "SELECT record::id(id) AS refno FROM pe WHERE name = '{escaped}' AND deleted != true LIMIT 2;"
+    ))?;
+    let rows = surreal_result(&result)?
+        .as_array()
+        .context("UI refno lookup did not return rows")?;
+    ensure!(
+        rows.len() == 1,
+        "UI name {canonical_name} resolved to {} rows",
+        rows.len()
+    );
+    rows[0]
+        .get("refno")
+        .and_then(Value::as_str)
+        .map(|value| value.replace('_', "/"))
+        .context("UI refno lookup row has no refno")
 }
 
 fn role_rect_center(tree: &str, role: &str) -> Option<(i32, i32)> {
@@ -980,6 +1202,7 @@ fn execute_and_wait(
     queue_scenario: Option<&str>,
 ) -> Result<(Value, Vec<Value>)> {
     fs::create_dir_all(dir)?;
+    let model_before = model_drain_task_ids()?;
     let receipt = http_json("POST", &format!("{API}/update/execute"), Some(identity()))?;
     fs::write(
         dir.join("execute-receipt.json"),
@@ -1008,8 +1231,76 @@ fn execute_and_wait(
             }
         }
     }
+    tasks.extend(wait_model_drain_settlement(&model_before)?);
     fs::write(dir.join("tasks.json"), serde_json::to_vec_pretty(&tasks)?)?;
     Ok((receipt, tasks))
+}
+
+fn model_drain_task_ids() -> Result<HashSet<String>> {
+    Ok(model_drain_tasks()?
+        .into_iter()
+        .filter_map(|task| {
+            task.get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect())
+}
+
+fn model_drain_tasks() -> Result<Vec<Value>> {
+    let response = http_json(
+        "GET",
+        &format!("{API}/tasks?kind=model_drain&limit=200"),
+        None,
+    )?;
+    response
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .context("model_drain task response has no tasks array")
+}
+
+fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        let pending = http_json("GET", &format!("{API}/update/pending-units"), None)?;
+        let queue = http_json("GET", &format!("{API}/queue"), None)?;
+        let tasks = model_drain_tasks()?;
+        let fresh = tasks
+            .into_iter()
+            .filter(|task| {
+                task.get("task_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !before.contains(id))
+            })
+            .collect::<Vec<_>>();
+        let pending_empty = pending
+            .get("units")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        let queue_empty = queue
+            .get("rows")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        let drains_terminal = fresh
+            .iter()
+            .all(|task| task_terminal(task).ok().flatten().is_some());
+        if pending_empty && queue_empty && drains_terminal {
+            ensure!(
+                fresh
+                    .iter()
+                    .all(|task| task_terminal(task).ok() == Some(Some(true))),
+                "model_drain failed: {}",
+                serde_json::to_string(&fresh)?
+            );
+            return Ok(fresh);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "model drain did not settle: pending={pending} queue={queue} tasks={fresh:?}"
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
 }
 
 fn receipt_task_ids(receipt: &Value) -> Vec<String> {
@@ -1028,63 +1319,6 @@ fn receipt_task_ids(receipt: &Value) -> Vec<String> {
                 .map(str::to_owned)
         })
         .collect()
-}
-
-fn assert_preview(s: &Scenario, preview: &Value) -> Result<()> {
-    let row = preview
-        .get("dbnums")
-        .and_then(Value::as_array)
-        .and_then(|rows| {
-            rows.iter()
-                .find(|row| row.get("dbnum").and_then(Value::as_u64) == Some(s.dbnum as u64))
-        })
-        .ok_or_else(|| anyhow!("preview has no dbnum {} row", s.dbnum))?;
-    ensure!(
-        row.get("blocked").and_then(Value::as_bool) == Some(false),
-        "preview is blocked: {row}"
-    );
-    let text = serde_json::to_string(row)?;
-    match s.expect {
-        Expect::Regen { roots } => {
-            for root in roots {
-                ensure!(
-                    text.contains(root),
-                    "preview does not contain regeneration root {root}"
-                );
-            }
-        }
-        Expect::Deleted { root } => ensure!(
-            text.contains(root),
-            "preview does not contain deletion root {root}"
-        ),
-        Expect::TransformOnly { root } => {
-            let target = s.refno.replace('_', "/");
-            ensure!(
-                text.contains(&target),
-                "preview does not contain transform target {target} for root {root}"
-            );
-        }
-        Expect::DataOnly => {
-            ensure!(
-                row.get("model_affecting").and_then(Value::as_u64) == Some(0),
-                "DataOnly preview contains model-affecting work: {row}"
-            );
-            ensure!(
-                row.get("units")
-                    .and_then(Value::as_array)
-                    .is_some_and(Vec::is_empty),
-                "DataOnly preview contains regeneration units: {row}"
-            );
-        }
-        Expect::Room => {
-            let target = s.refno.replace('_', "/");
-            ensure!(
-                text.contains(&target),
-                "room preview does not contain transform target {target}"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn room_task_ids() -> Result<HashSet<String>> {
@@ -1183,19 +1417,23 @@ fn assert_scenario(
             .all(|t| task_terminal(t).ok() == Some(Some(true))),
         "I-2 task not succeeded"
     );
-    let text = serde_json::to_string(tasks)?;
+    let model_tasks = tasks
+        .iter()
+        .filter(|task| task.get("kind").and_then(Value::as_str) == Some("model_drain"))
+        .collect::<Vec<_>>();
+    let text = serde_json::to_string(&model_tasks)?;
     match s.expect {
         Expect::Regen { roots } => {
             for root in roots {
                 ensure!(
                     text.contains(root),
-                    "I-3 expected root {root} absent from tasks"
+                    "I-3 expected root {root} absent from model_drain.detail.roots"
                 );
             }
         }
         Expect::Deleted { root } => ensure!(
             text.contains(root),
-            "I-3 expected root {root} absent from tasks"
+            "I-3 expected root {root} absent from model_drain.detail.roots"
         ),
         Expect::TransformOnly { .. } => ensure!(
             after.pointer("/payload/inst") != before.pointer("/payload/inst"),
@@ -1673,6 +1911,25 @@ mod tests {
         assert!(surreal_result(&json!([{"status":"ERR","detail":"bad sql"}])).is_err());
     }
 
+    #[test]
+    fn plant_ui_runtime_uses_an_isolated_absolute_settings_file() {
+        let root = std::env::temp_dir().join(format!("l3-ui-runtime-{}", std::process::id()));
+        let repo = root.join("gen-model");
+        let ui = root.join("plant-ui");
+        let out = root.join("evidence");
+        fs::create_dir_all(repo.join("resource/surreal")).unwrap();
+        fs::create_dir_all(ui.join("assets/meshes")).unwrap();
+        fs::create_dir_all(&out).unwrap();
+
+        let runtime = prepare_plant_ui_runtime(&repo, &ui, &out).unwrap();
+        assert!(runtime.settings_file.is_absolute());
+        assert!(runtime.settings_file.starts_with(&out));
+        assert_eq!(runtime.asset_root, ui.join("assets"));
+        let settings = fs::read_to_string(runtime.settings_file).unwrap();
+        assert!(settings.contains("http://127.0.0.1:8028"));
+        assert!(settings.contains("assets/meshes"));
+    }
+
     /// 场景表是数据，但它得是**自洽**的数据：V 级判据整个押在这两列上，而写错
     /// 一列的代价是「跑到一半才发现 before 图定位的是个还不存在的节点」。
     #[test]
@@ -1717,14 +1974,27 @@ mod tests {
                     .any(|line| line.trim().eq_ignore_ascii_case("QUIT")),
                 "{relative} exits before the wrapper can write L3-DONE"
             );
+            let before_save = source
+                .lines()
+                .take_while(|line| !line.trim().to_ascii_uppercase().starts_with("SAVEWORK"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_ascii_uppercase();
+            for query in ["Q CE", "Q TYPE", "Q OWNE"] {
+                assert!(
+                    before_save.lines().any(|line| line.trim() == query),
+                    "{relative} must record {query} before SAVEWORK"
+                );
+            }
         }
     }
 
     #[test]
     fn inspect_tree_rect_uses_logical_center() {
-        let tree =
-            "step=1 ppp=1 nodes=2\n       123 Button           10,20 30x40 target\nmatched 1\n";
-        assert_eq!(first_rect_center(tree), Some((25, 40)));
+        assert_eq!(
+            accesskit_rect("123 Button 10,20 30x40 target"),
+            Some((25, 40))
+        );
     }
 
     #[test]
@@ -1739,10 +2009,11 @@ mod tests {
     #[test]
     fn inspect_tree_prefers_topmost_matching_row_over_command_history() {
         let tree = "step=1 ppp=1 nodes=2\n\
-                    123 TreeItem         10,120 30x40 AIOS-INC-DATA-EQ\n\
-                    456 Label            20,500 300x30 /AIOS-INC-DATA-EQ\n\
+                    123 TreeItem         10,120 30x40 refno=24384/25734; name=AIOS-INC-DATA-EQ\n\
+                    456 Label            20,500 300x30 refno=24384/25734; name=/AIOS-INC-DATA-EQ\n\
                     matched 2\n";
-        assert_eq!(first_rect_center(tree), Some((25, 140)));
+        assert_eq!(tree_item_rect_center(tree, "24384/25734"), Some((25, 140)));
+        assert_eq!(tree_item_rect_center(tree, "24384/99999"), None);
     }
 
     #[test]

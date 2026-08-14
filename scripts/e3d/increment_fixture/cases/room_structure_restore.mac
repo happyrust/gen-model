@@ -2,6 +2,8 @@ ALPHA LOG "{{LOG_PATH}}" OVER
 ={{REF:room_frame}}
 NAME /AIOS-INC-RM-R101
 Q CE
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture room structure restore'
 ALPHA LOG END
 

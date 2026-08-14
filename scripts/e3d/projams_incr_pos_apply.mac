@@ -6,5 +6,7 @@ ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/projams_incr_pos_apply.l
 Q CE
 POS E -6054.58984375 N 2224.10009765625 D 2280
 Q POS
+Q TYPE
+Q OWNE
 SAVEWORK 'CODEX plant-ui model update apply: DAMP +100mm E'
 ALPHA LOG END

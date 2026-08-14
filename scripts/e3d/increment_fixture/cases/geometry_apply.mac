@@ -7,6 +7,8 @@ Q CE
 Q XLEN
 Q YLEN
 Q ZLEN
+Q TYPE
+Q OWNE
 SAVEWORK 'AIOS fixture geometry apply'
 ALPHA LOG END
 
