@@ -88,10 +88,36 @@ pub(super) enum MutationOutcome {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(super) struct TargetDbEvidence {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub world_refno: String,
+}
+
+impl TargetDbEvidence {
+    fn from_parts(dbnum: u32, db_type: String, world_refno: String) -> Self {
+        Self {
+            dbnum,
+            db_type,
+            world_refno,
+        }
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        self.dbnum == other.dbnum
+            && self.db_type.eq_ignore_ascii_case(&other.db_type)
+            && self.world_refno == other.world_refno
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(super) struct MutationRunReport {
     pub outcome: MutationOutcome,
+    pub before_identity: TargetDbEvidence,
+    pub after_identity: Option<TargetDbEvidence>,
     pub before_sesno: i32,
     pub after_sesno: i32,
+    pub classification_error: Option<String>,
     pub attempts: Vec<E3dProcessEvidence>,
 }
 
@@ -306,6 +332,10 @@ fn classify_mutation(
     }
 }
 
+fn preserve_readable_after_sesno(before_sesno: i32, after_sesno: &Result<i32>) -> i32 {
+    after_sesno.as_ref().copied().unwrap_or(before_sesno)
+}
+
 /// Stateful macro runner: the file header, not the process exit text, decides whether retrying
 /// would duplicate a committed mutation. Only a known pre-command-loop startup crash gets one retry.
 pub(super) fn run_guarded_mutation(
@@ -317,26 +347,46 @@ pub(super) fn run_guarded_mutation(
     project: &str,
 ) -> Result<MutationRunReport> {
     let (before_dbnum, before_type, before_world) = inspect_target_db(target_db_file, project)?;
+    let before_identity = TargetDbEvidence::from_parts(before_dbnum, before_type, before_world);
     let before_sesno = file_latest_sesno(target_db_file, project)?;
     let mut attempts = Vec::new();
 
     for attempt in 0..2 {
         let evidence = driver.run_macro_file_evidence(repo, path, label)?;
-        let after_identity = inspect_target_db(target_db_file, project);
-        let after_sesno = file_latest_sesno(target_db_file, project);
-        let (after_sesno, outcome) = match (after_identity, after_sesno) {
-            (Ok((after_dbnum, after_type, after_world)), Ok(after_sesno))
-                if (after_dbnum, after_type.as_str(), after_world.as_str())
-                    == (before_dbnum, before_type.as_str(), before_world.as_str()) =>
-            {
-                (
-                    after_sesno,
-                    classify_mutation(&evidence, before_sesno, after_sesno),
-                )
+        let after_identity_result = inspect_target_db(target_db_file, project);
+        let after_sesno_result = file_latest_sesno(target_db_file, project);
+        let after_identity = after_identity_result
+            .as_ref()
+            .ok()
+            .map(|(dbnum, ty, world)| {
+                TargetDbEvidence::from_parts(*dbnum, ty.clone(), world.clone())
+            });
+        let after_sesno = preserve_readable_after_sesno(before_sesno, &after_sesno_result);
+        let classification_error = match (&after_identity_result, &after_sesno_result) {
+            (Err(identity_error), Err(sesno_error)) => Some(format!(
+                "post-mutation identity unreadable: {identity_error:#}; session unreadable: {sesno_error:#}"
+            )),
+            (Err(identity_error), _) => Some(format!(
+                "post-mutation identity unreadable: {identity_error:#}"
+            )),
+            (_, Err(sesno_error)) => {
+                Some(format!("post-mutation session unreadable: {sesno_error:#}"))
             }
+            (Ok(_), Ok(_))
+                if !after_identity
+                    .as_ref()
+                    .is_some_and(|identity| before_identity.same_identity(identity)) =>
+            {
+                Some("post-mutation database identity changed".to_owned())
+            }
+            _ => None,
+        };
+        let outcome = if classification_error.is_none() {
+            classify_mutation(&evidence, before_sesno, after_sesno)
+        } else {
             // 宏已经进入之后，文件不可读或身份改变都没有足够事实支持重放。
-            // 保留进程证据并停在 Indeterminate，避免把一次可能已提交的操作做两遍。
-            _ => (before_sesno, MutationOutcome::Indeterminate),
+            // 可读取的会话号仍保留在报告里；只把最终裁决停在 Indeterminate。
+            MutationOutcome::Indeterminate
         };
         attempts.push(evidence);
         if outcome == MutationOutcome::FailedBeforeSave && attempt == 0 {
@@ -346,8 +396,11 @@ pub(super) fn run_guarded_mutation(
         }
         return Ok(MutationRunReport {
             outcome,
+            before_identity,
+            after_identity,
             before_sesno,
             after_sesno,
+            classification_error,
             attempts,
         });
     }
@@ -1428,11 +1481,11 @@ fn prime_room_structure_baselines(
                 live_target_db,
                 project,
             )?;
-            require_committed_mutation(&report, &format!("{} baseline {phase}", scenario.id))?;
             fs::write(
                 dir.join(format!("{phase}-mutation-evidence.json")),
                 serde_json::to_vec_pretty(&report)?,
             )?;
+            require_committed_mutation(&report, &format!("{} baseline {phase}", scenario.id))?;
             fs::write(
                 dir.join(format!("{phase}.log")),
                 report
@@ -2398,5 +2451,13 @@ mod tests {
             MutationOutcome::Indeterminate,
             "a timeout is not proof that replay is harmless"
         );
+    }
+
+    #[test]
+    fn an_identity_anomaly_does_not_erase_a_readable_post_save_session() {
+        let readable = Ok(11);
+        assert_eq!(preserve_readable_after_sesno(10, &readable), 11);
+        let unreadable = Err(anyhow!("header unavailable"));
+        assert_eq!(preserve_readable_after_sesno(10, &unreadable), 10);
     }
 }

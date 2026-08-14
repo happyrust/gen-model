@@ -1960,6 +1960,71 @@ fn finish_model_drain_task(
     );
 }
 
+fn model_drain_failure_message(report: &DrainReport) -> String {
+    format!(
+        "{} pending model task(s) failed after {} completed: {}",
+        report.failures.len(),
+        report.done,
+        report.failures.join("; ")
+    )
+}
+
+fn cooperative_yield_task_state(
+    report: &DrainReport,
+) -> crate::data_interface::task_registry::TaskState {
+    if report.failures.is_empty() {
+        crate::data_interface::task_registry::TaskState::Yielded
+    } else if report.done == 0 {
+        crate::data_interface::task_registry::TaskState::Failed
+    } else {
+        crate::data_interface::task_registry::TaskState::Partial
+    }
+}
+
+fn finish_cooperative_yield(
+    task_id: &str,
+    report: &DrainReport,
+    unstarted: usize,
+    claimed_epoch: u64,
+    current_epoch: u64,
+    reason: ModelDrainYieldReason,
+    data_wait_ms: Option<u64>,
+) -> ModelDrainDisposition {
+    finish_model_drain_task(
+        task_id,
+        cooperative_yield_task_state(report),
+        report,
+        unstarted,
+        claimed_epoch,
+        current_epoch,
+        Some(reason),
+    );
+    let mut telemetry = model_drain_telemetry();
+    telemetry.total_yields += 1;
+    telemetry.last_yield_reason = Some(reason.as_str());
+    telemetry.last_claimed_epoch = Some(claimed_epoch);
+    telemetry.last_current_epoch = Some(current_epoch);
+    if reason == ModelDrainYieldReason::DataQueued {
+        telemetry.last_data_wait_ms = data_wait_ms;
+    }
+    debug_assert_eq!(telemetry.attempts_consumed_on_yield, 0);
+    drop(telemetry);
+
+    if report.failures.is_empty() {
+        ModelDrainDisposition::YieldedForData {
+            done: report.done,
+            claimed_epoch,
+            current_epoch,
+            reason,
+        }
+    } else {
+        ModelDrainDisposition::Failed {
+            done: report.done,
+            message: model_drain_failure_message(report),
+        }
+    }
+}
+
 /// 空闲模型页的可抢占消费。持久行仍按原查询顺序认领，但昂贵工作逐根执行；初始化
 /// 门关闭是调度结果，不写 `last_error`，也不烧掉 attempts。
 async fn drain_where_cooperative(
@@ -2001,29 +2066,15 @@ async fn drain_where_cooperative(
     for (index, job) in jobs.iter().enumerate() {
         if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
             let unstarted = jobs.len() - index;
-            finish_model_drain_task(
+            return Ok(finish_cooperative_yield(
                 &task_id,
-                crate::data_interface::task_registry::TaskState::Yielded,
                 &report,
                 unstarted,
                 claimed_epoch,
                 current_epoch,
-                Some(reason),
-            );
-            let mut telemetry = model_drain_telemetry();
-            telemetry.total_yields += 1;
-            telemetry.last_yield_reason = Some(reason.as_str());
-            telemetry.last_claimed_epoch = Some(claimed_epoch);
-            telemetry.last_current_epoch = Some(current_epoch);
-            if reason == ModelDrainYieldReason::DataQueued {
-                telemetry.last_data_wait_ms = Some(0);
-            }
-            return Ok(ModelDrainDisposition::YieldedForData {
-                done: report.done,
-                claimed_epoch,
-                current_epoch,
                 reason,
-            });
+                Some(0),
+            ));
         }
 
         let started = Instant::now();
@@ -2039,56 +2090,29 @@ async fn drain_where_cooperative(
                     .snapshot()
                     .epoch_id;
                 let reason = ModelDrainYieldReason::InitializationNotReady;
-                finish_model_drain_task(
+                return Ok(finish_cooperative_yield(
                     &task_id,
-                    crate::data_interface::task_registry::TaskState::Yielded,
                     &report,
                     jobs.len() - index,
                     claimed_epoch,
                     current_epoch,
-                    Some(reason),
-                );
-                let mut telemetry = model_drain_telemetry();
-                telemetry.total_yields += 1;
-                telemetry.last_yield_reason = Some(reason.as_str());
-                telemetry.last_claimed_epoch = Some(claimed_epoch);
-                telemetry.last_current_epoch = Some(current_epoch);
-                return Ok(ModelDrainDisposition::YieldedForData {
-                    done: report.done,
-                    claimed_epoch,
-                    current_epoch,
                     reason,
-                });
+                    None,
+                ));
             }
         }
 
         if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
             let unstarted = jobs.len() - index - 1;
-            finish_model_drain_task(
+            return Ok(finish_cooperative_yield(
                 &task_id,
-                crate::data_interface::task_registry::TaskState::Yielded,
                 &report,
                 unstarted,
                 claimed_epoch,
                 current_epoch,
-                Some(reason),
-            );
-            let mut telemetry = model_drain_telemetry();
-            telemetry.total_yields += 1;
-            telemetry.last_yield_reason = Some(reason.as_str());
-            telemetry.last_claimed_epoch = Some(claimed_epoch);
-            telemetry.last_current_epoch = Some(current_epoch);
-            // 本页可能先遇到真实失败、随后才因数据到达而让位；这里保留已经实际
-            // 记入 pending 的失败次数，不把“让位本身”算成重试。
-            if reason == ModelDrainYieldReason::DataQueued {
-                telemetry.last_data_wait_ms = Some(root_duration_ms);
-            }
-            return Ok(ModelDrainDisposition::YieldedForData {
-                done: report.done,
-                claimed_epoch,
-                current_epoch,
                 reason,
-            });
+                Some(root_duration_ms),
+            ));
         }
     }
 
@@ -2108,12 +2132,7 @@ async fn drain_where_cooperative(
         );
         Ok(ModelDrainDisposition::Completed { done: report.done })
     } else {
-        let message = format!(
-            "{} pending model task(s) failed after {} completed: {}",
-            report.failures.len(),
-            report.done,
-            report.failures.join("; ")
-        );
+        let message = model_drain_failure_message(&report);
         let state = if report.done == 0 {
             crate::data_interface::task_registry::TaskState::Failed
         } else {
@@ -5712,6 +5731,66 @@ mod tests {
         assert!(!is_initialization_not_ready(&anyhow::anyhow!(
             "mesh generation failed"
         )));
+
+        let source = include_str!("model_update_pending.rs");
+        let yield_body = source
+            .split_once("fn finish_cooperative_yield(")
+            .expect("cooperative yield settlement exists")
+            .1
+            .split_once("/// 空闲模型页")
+            .expect("cooperative yield settlement has a bounded body")
+            .0;
+        assert!(!yield_body.contains("mark_failed("));
+        assert!(!yield_body.contains("record_failure("));
+        assert!(!yield_body.contains("last_attempts_delta +="));
+
+        let run_one_body = source
+            .split_once("async fn run_one(")
+            .expect("single-root runner exists")
+            .1
+            .split_once("/// Render the drain SELECT")
+            .expect("single-root runner has a bounded body")
+            .0;
+        let not_ready = run_one_body
+            .find("Err(error) if is_initialization_not_ready(&error)")
+            .expect("initialization-not-ready has an explicit match arm");
+        let yielded = run_one_body[not_ready..]
+            .find("return RunOneOutcome::YieldedForData")
+            .expect("initialization-not-ready returns yield")
+            + not_ready;
+        let failure_ledger = run_one_body
+            .find("record_failure(job, &error, report)")
+            .expect("real errors still reach the durable failure ledger");
+        assert!(not_ready < yielded && yielded < failure_ledger);
+    }
+
+    #[test]
+    fn a_real_root_failure_stays_failed_when_the_remaining_page_yields() {
+        let clean = DrainReport {
+            done: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            cooperative_yield_task_state(&clean),
+            crate::data_interface::task_registry::TaskState::Yielded
+        );
+
+        let mut failed = DrainReport {
+            done: 0,
+            ..Default::default()
+        };
+        failed.record(7999, "regen 1/2: broken mesh".to_owned());
+        assert_eq!(
+            cooperative_yield_task_state(&failed),
+            crate::data_interface::task_registry::TaskState::Failed
+        );
+        assert!(model_drain_failure_message(&failed).contains("broken mesh"));
+
+        failed.done = 1;
+        assert_eq!(
+            cooperative_yield_task_state(&failed),
+            crate::data_interface::task_registry::TaskState::Partial
+        );
     }
 
     #[test]
