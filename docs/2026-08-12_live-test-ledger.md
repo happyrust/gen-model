@@ -229,6 +229,8 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `live_issue7_probe` | room_live_issue7.rs:708 | 只读探针（真实项目） | — |
 | `the_deleted_site_is_pruned_from_a_real_parse` | member_prune.rs:369 | 真实 E3D 库文件 | — |
 | `live_identity_query` | e3d_mcp.rs:240 | AMS E3D 装机 + TTY | **2026-08-13 通过**（D: AMS、只读 TTY，3.82s；`output/e3d-mcp/query-66444-20260813152439638629/identity.log`） |
+| Plant UI + db8000 FTUB OWNER 搬移/恢复（手工 live 场景） | `l3_ftub_move_apply.mac` / `l3_ftub_move_restore.mac` | 8009 测试库 + 隔离项目镜像 + Plant UI | **2026-08-14 通过并发现回执缺陷**：223→224 数据批次成功，`changed_elements=6`，最终 OWNER 与 UI 模型树恢复；两会话回执仍错误返回 `merged_sesnos=[]`。设备夹具另发现 5 类模型任务漏根及 UI 夹具树定位失败。证据：`docs/evidence/2026-08-14-plant-ui-e3d-crud.md`。 |
+| Plant UI + db7999 设备九场景修复复验 | `l3_suite --fixture-ui` | E3D 空窗 + 7999 DESI + 隔离 Plant UI 设置 | **2026-08-14 预检通过、完整运行未开始**：夹具识别 `WORLD=16191/0` 与 9 场景；运行在任何宏执行前因既有 `des.exe` 会话触发互斥门（exit 1），未改文件、未推进水位。证据：`docs/evidence/2026-08-14-increment-closure-rerun.md`。 |
 | `issue7_e2e_room_comes_back_after_e3d_save` | tests/issue7_e2e_increment.rs:353 | `Run-RoomE3DE2E.ps1` + AMS E3D TTY + 隔离 Surreal | **2026-08-13 基线阻断，未执行 SAVEWORK**：FIXING 在目录 manifold 旧格式解码失败；BOX 命中回退门 `file=104 < applied=238`。证据：`output/room-e3d-e2e/20260813-{fixing,box}-first/report.md`。**（旧语义现场：ADR-021 后回退不再阻断而是排整库重建批次——重跑前须按新语义重估基线恢复步骤并重新定性）** |
 
 ## D 专用夹具 / bench / 探针（按需手跑）
