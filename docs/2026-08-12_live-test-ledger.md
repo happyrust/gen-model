@@ -31,7 +31,7 @@
 
 **2026-08-14 C-OR 整条 BRANCH 端到端 union 对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_full_branch_union_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_full_branch -- --ignored --nocapture`）。**2026-08-14 通过**（带断言 `p95≤10 / max≤30mm`）。整条 C-OR BRANCH 9 构件（FTUBE 1–7 + BEND 1–2）合成 union：gen vs E3D 双向 **mean=0.69 / p95=1.50 / hausdorff=18.67mm**（gen→rvm max=11.7 在 BEND 2、rvm→gen max=18.67，均 tessellation 量级）。逐元素的弯头腿归属差在整条 union 里自洽抵消——**整条管路 gen 几何在装配层与 E3D 逐点吻合到 ~1.5mm(95%)**，端到端验证 gen 正确。
 
-**mesh 批次收编**：上述 4 条 mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009 生产验证库，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过，标准 runner 为 `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json`。
+**mesh 批次收编**：上述 4 条 mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009 生产验证库，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。
 
 **2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与
 `fast_model::pdms_inst::tests` 15 项通过（其中 staged mem 覆盖有序 journal、两次重放
