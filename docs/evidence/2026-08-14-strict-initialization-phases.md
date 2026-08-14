@@ -61,3 +61,26 @@
 
 测试后已暂停队列，快删 7351（删除 252500 行 PE，水位恢复 0），并恢复原二进制、
 配置和重复文件；运行端口 9099 已关闭。
+
+## E3D TTY 增量闭环
+
+使用 L3 TTY 驱动对 db8000 的 FTUB `24384/22403` 执行 OWNER 搬迁及恢复：
+
+- apply 会话 221：owner `24384/22402 -> 24384/22404`；TTY 与离线 fold 均成功。
+- restore 会话 222：owner 恢复为 `24384/22402`。
+- watcher 把 221、222 合并为一个 Design 批次；任务
+  `db-20260814-172754-000000` 成功，`changed_elements=6`，最终水位 `222/222`。
+
+发现三项运行态问题：
+
+1. 成功结果的 `merged_sesnos`/`merged_sesno_times` 均为空，未传递冻结窗口的
+   `[221, 222]` 会话清单。
+2. Design epoch 到来时，已 claim 的模型页中剩余 15 行被记成
+   `initialization_not_ready` 失败且 attempts 从 1 升至 2；测试后已返还 attempts 并
+   恢复 pending。
+3. 数据批次等待已 claim 模型页约 317 秒，且同一逻辑变更的 epoch 从 2 反复推进到
+   4、6、7。
+
+完整字面证据及回滚记录：
+
+`D:\work\plant-code\old\test-worklspace\bin\.codex-deploy\e3d-tty-increment-c4865ea-20260814-172431\verification.md`
