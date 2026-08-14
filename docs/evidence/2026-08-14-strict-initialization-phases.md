@@ -40,3 +40,24 @@
 
 - Oracle 已完成 dry-run 文件与 token 报告；浏览器审查会话 `strict-init-core-review` 因 Chrome 连接中断结束，未产生可引用审查正文。
 - 六条计划中的破坏性 live 场景本轮未执行，也未写入 `docs/2026-08-12_live-test-ledger.md` 的“最近通过”栏；它们仍按仓库规则视为未验资产。
+
+## test-worklspace 运行验证
+
+在 `D:\work\plant-code\old\test-worklspace` 部署提交 `c4865ea5` 的 Release
+二进制并连接 SurrealDB 2.x 沙箱。完整命令、健康快照、队列快照、字面输出及回滚
+记录位于：
+
+`D:\work\plant-code\old\test-worklspace\bin\.codex-deploy\strict-init-c4865ea-20260814-165740\verification.md`
+
+已确认：
+
+- 同项目 CATA 重复文件使初始化停在 Catalogue；Design 和模型均未执行。
+- 解除重复后只派发 8 个 CATA，20 个 Design 保持未派发；首个 CATA 7351 完成后
+  水位为 `116/116`。
+- 发现运行态缺陷：周期 reconcile 在 7351 长批次运行期间把 manifest 从 epoch 2
+  推进到 5；队列仍有 `epoch=2 state=running`，健康状态却报告 Catalogue
+  `running=0, pending=8`，并把运行行显示为 `blocked_by_phase=catalogue`。无变化重扫
+  不应替换 epoch，旧 epoch 在飞行也应持续投影到健康状态。
+
+测试后已暂停队列，快删 7351（删除 252500 行 PE，水位恢复 0），并恢复原二进制、
+配置和重复文件；运行端口 9099 已关闭。
