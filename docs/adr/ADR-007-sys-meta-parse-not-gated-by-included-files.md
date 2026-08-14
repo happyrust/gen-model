@@ -42,3 +42,8 @@ if is_parse_sys
 - 死标志 `reset_mdb_project`（options 里定义、全仓从未使用）与本问题无关，不依赖它。
 - 遗留①：设计库与目录库的 SYS 若同时解析，二者的 `/ALL` 会并存（本轮见两行 `/ALL`）；`get_world_refno` 用 `LIMIT 1` 选其一，存在歧义——后续可让其优先选 CURD 非空的设计 MDB（另开 ADR）。
 - 遗留②：`get_world_refno` 取 CURD 中第一个 STYP=1 库的 WORL；该设计库的 DESI 数据须已加载，树才非空（属正常的数据加载前置，非本 ADR 范围）。
+# 2026-08-14 修订：纳入严格初始化 Meta 阶段
+
+ADR-025 将 SYS 元数据明确为初始化第一阶段：主项目的 SYST/GLB/GLOB 与依赖项目的 DICT
+必须在 Catalogue/Design 之前收口。非主项目运行态 SYS 仍不进入本库；DICT 跨项目同号由
+`catalogue_project_priority` 选主。

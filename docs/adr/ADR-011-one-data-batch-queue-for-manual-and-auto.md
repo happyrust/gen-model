@@ -170,3 +170,8 @@ WS 上只有一条 `incr_applied` 摘要——而 plant-ui 只订 tasks 主题�
   不再用「一次运行」指代一批工作；plant-ui 的 `CONTEXT.md` 已同步。
 - 本 ADR 的第 8、10 条依赖 `gen_spatial_tree`。该开关关着时 ADR-010 一条房间任务都不排，
   界面上要说的是「房间增量没开」，不是显示一条永远为 0 的泳道。
+# 2026-08-14 修订：阶段内 FIFO
+
+ADR-025 在“一个队列、一个派发器”内增加 Meta→Catalogue→Design 屏障。全局 FIFO 调整为
+当前阶段内 FIFO；后续阶段行可以先入队但不得冻结。Meta、Catalogue、基线和重建继续独占，
+只有同一 Design 阶段的稳态暂存窗口可并发。这不是第二条消费路径。

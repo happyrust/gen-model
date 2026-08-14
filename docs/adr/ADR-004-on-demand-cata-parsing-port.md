@@ -44,6 +44,13 @@
 
 ## 修订记录
 
+### 2026-08-14 · 初始化主路径改为全量 CATA 阶段
+
+ADR-025 将启动初始化、回退重建和同轮稳态更新统一为
+`Meta → Catalogue → Design → Model`。本 ADR 的“运行期按需、不做项目级 manifest”仍适用于
+模型解析漏边兜底，但不再描述初始化主路径：初始化 manifest 中经项目优先级选中的 CATA
+库会先走完整数据批次，全部收口后才允许 DESI 与模型阶段。
+
 ### 2026-07-27 · Q5a 默认值：Off → On
 
 **现状**：权威实现 `src/data_interface/cata_closure.rs::cata_closure_enabled()` 的默认值是 **On**——env `AIOS_CATA_CLOSURE_MODE` 未设置、或取值无法识别时，一律按开启处理；只有显式给 `off` / `false` / `no` / `0` 才关闭。也就是说本 ADR 正文 Q5a 描述的「默认 Off + opt-in」**从未作为落地形态存在过**：按需解析随 `d3caa290` 一起进仓时就已经是默认开启的。
