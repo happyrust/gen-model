@@ -39,6 +39,7 @@ impl ModelRefreshPolicy {
         if roots.is_empty() {
             return Ok(());
         }
+        crate::data_interface::initialization_phase::require_model_generation()?;
         #[cfg(test)]
         if FAIL_GENERATIONS
             .fetch_update(

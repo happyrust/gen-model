@@ -529,8 +529,18 @@ pub fn queue_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
                 let scheduler =
                     aios_database::data_interface::batch_scheduler::BatchScheduler::global();
                 scheduler.restore_persisted_pause().await?;
+                let initialization = aios_database::data_interface::initialization_phase::
+                    InitializationCoordinator::global()
+                    .snapshot();
                 anyhow::Ok(json!({
                     "paused": scheduler.is_paused(),
+                    "epoch_id": initialization.epoch_id,
+                    "blocked_by_phase": if initialization.data_ready {
+                        None
+                    } else {
+                        initialization.current_phase
+                    },
+                    "shadowed": initialization.shadowed,
                     "rows": serde_json::to_value(scheduler.snapshot())?,
                 }))
             })
@@ -594,6 +604,7 @@ pub fn gen_models(py: Python<'_>, refnos: Vec<String>) -> PyResult<()> {
     ensure_full()?;
     py.detach(|| {
         runtime().block_on(async {
+            aios_database::data_interface::initialization_phase::require_model_generation()?;
             let db_option = db_option().await?;
             aios_database::fast_model::occ_generate::process_meshes_update_db_deep(
                 &db_option,
@@ -611,6 +622,7 @@ pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
     ensure_full()?;
     py.detach(|| {
         runtime().block_on(async {
+            aios_database::data_interface::initialization_phase::require_model_generation()?;
             let db_option = db_option().await?;
             aios_database::fast_model::gen_model::process_meshes_by_dbnos(&[dbnum], &db_option)
                 .await
@@ -641,6 +653,7 @@ pub fn update_aabbs(
     let value = py
         .detach(|| {
             runtime().block_on(async {
+                aios_database::data_interface::initialization_phase::require_model_generation()?;
                 let refnos = parse_refnos(refnos);
                 let changes = if durable {
                     aios_database::fast_model::occ_generate::
@@ -679,6 +692,7 @@ pub fn delete_subtree(py: Python<'_>, refnos: Vec<String>, chunk_size: usize) ->
     ensure_full()?;
     py.detach(|| {
         runtime().block_on(async {
+            aios_database::data_interface::initialization_phase::require_model_generation()?;
             aios_database::data_interface::helper::delete_inst_relate_subtree(
                 &parse_refnos(refnos),
                 chunk_size,
@@ -882,6 +896,7 @@ pub fn build_all(py: Python<'_>) -> PyResult<()> {
     ensure_full()?;
     py.detach(|| {
         runtime().block_on(async {
+            aios_database::data_interface::initialization_phase::require_postprocess()?;
             let db_option = db_option().await?;
             aios_database::fast_model::room_model::build_room_relations(&db_option).await
         })
@@ -897,6 +912,7 @@ pub fn drain(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let value = py
         .detach(|| {
             runtime().block_on(async {
+                aios_database::data_interface::initialization_phase::require_postprocess()?;
                 let db_option = db_option().await?;
                 let report =
                     aios_database::data_interface::model_update_pending::drain_rooms(&db_option)
@@ -1297,6 +1313,41 @@ mod tests {
     use serde_json::json;
 
     const OURS: (&str, &str, &str) = ("AvevaMarineSample", "1516", "127.0.0.1:8071");
+
+    fn py_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let tail = source
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("missing Python entry point: {signature}"))
+            .1;
+        tail.split_once("\n///").map_or(tail, |(body, _)| body)
+    }
+
+    #[test]
+    fn python_model_writes_and_room_postprocessing_observe_initialization_gates() {
+        let source = include_str!("exec_api.rs");
+        for name in ["gen_models", "gen_dbnum", "update_aabbs", "delete_subtree"] {
+            let body = py_function_body(source, &format!("pub fn {name}("));
+            assert!(
+                body.contains("require_model_generation()?"),
+                "{name} bypasses the shared model gate: {body}"
+            );
+        }
+        for name in ["build_all", "drain"] {
+            let body = py_function_body(source, &format!("pub fn {name}("));
+            assert!(
+                body.contains("require_postprocess()?"),
+                "{name} bypasses the postprocess barrier: {body}"
+            );
+        }
+
+        let queue = py_function_body(source, "pub fn queue_status(");
+        for field in ["epoch_id", "blocked_by_phase", "shadowed"] {
+            assert!(
+                queue.contains(field),
+                "queue_status misses {field}: {queue}"
+            );
+        }
+    }
 
     fn reason(health: serde_json::Value) -> Option<String> {
         conflict_reason(OURS.0, OURS.1, OURS.2, &health)

@@ -83,7 +83,12 @@
 ```json
 { "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
   "started_at": "2026-07-27T21:02:11+08:00",
-  "queue_paused": false, "static_assets": false, "ref0_affiliation_conflicts": 0 }
+  "queue_paused": false, "static_assets": false,
+  "initialization": {
+    "status": "running", "epoch_id": 7, "current_phase": "catalogue",
+    "data_ready": false, "model_ready": false, "model_in_flight": false,
+    "phases": {}, "blockers": [], "shadowed": []
+  } }
 ```
 
 - `started_at`：进程启动时刻。队列不持久、重启由重扫重建（ADR-011 §4），界面靠它
@@ -91,6 +96,8 @@
 - `gen_spatial_tree` 字段已于 2026-08-07 退役：空间/房间计算恒开启，界面不再需要
   「房间增量没开」的降级文案（历史语义见 ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
+- `initialization`：ADR-025 的当前 epoch、严格数据阶段、数据/模型门、逐阶段计数、
+  blocker 与被项目优先级遮蔽的 DICT/CATA。`data_ready=false` 时模型写保持待处理。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
 - `ref0_affiliation_conflicts`：locator 构建时发现的冲突 Ref0 数量；非零时只阻断命中这些
@@ -128,6 +135,10 @@
     "revision": 4, "noun": "BRAN", "source_dbnum": 7997, "source_end_sesno": 81,
     "attempts": 2, "last_error": "..."
   }],
+  "shadowed": [{
+    "project": "ZDJ", "dbnum": 7001, "file_path": "...",
+    "selected_project": "AvevaCatalogue"
+  }],
   "warnings": [],
   "up_to_date": false
 }
@@ -155,11 +166,13 @@
   "project": "HD",
   "scanned": 3,
   "enqueued": [{ "task_id": "db-20260727-210301-7f3a", "dbnum": 7997, "db_type": "DESI",
+                  "phase": "design", "epoch_id": 7,
                   "intent": "apply_window", "position": 1,
                   "start_sesno": 85, "end_sesno": 92 }],
   "merged": [],
   "already_covered": [],
   "blocked": [{ "dbnum": 8004, "reason": "库类型变更（登记 DESI → 现场 SYST），已阻断" }],
+  "shadowed": [],
   "up_to_date": 2,
   "unselected": [],
   "warnings": ["dbnum=8003: 检测到文件回退（file_latest_sesno=812 < applied_sesno=1005），已按整库重建入队：worker 执行时将清空该库数据并按首次导入重新解析当前文件"]
@@ -204,6 +217,9 @@
 ```
 
 ### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
+- 数据清单或启动全量模型尚未收口时，已有稳定模型仍可只读返回；实际生成请求返回
+  `409 initialization_not_ready`，message 含当前 phase、epoch 与 blockers，且不会
+  创建新的模型 pending。
 - 映射：`AiosDBManager::ensure_model_generated(refno, force)`；短路未命中时先写入
   `(regen_root, generation_root)` durable pending，再同步等待共享生成执行器的结果。
   命中已有 pending 或正在执行的同根任务时等待同一份工作，不另开生成路径。
@@ -277,8 +293,10 @@
 - 旧字段是新形状的子集，既有消费者不受影响。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
-- `GET /queue` → `{ "paused": false, "rows": [{ "task_id": "db-…", "dbnum": 7997,
-  "db_type": "DESI", "intent": "apply_window", "state": "running",
+- `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
+  "shadowed": [], "rows": [{ "task_id": "db-…", "dbnum": 7997,
+  "db_type": "DESI", "phase": "design", "epoch_id": 7,
+  "blocked_by_phase": "catalogue", "intent": "apply_window", "state": "queued",
   "start_sesno": 85, "end_sesno": 92 }, …] }`：
   队列快照，行按队列序（运行中在前），经 `task_id` 与 §4.4 的任务行对得上。
   `intent` 取值同 §4.3；`reinitialize` 明示该行冻结点仍需复核回退后才清库。

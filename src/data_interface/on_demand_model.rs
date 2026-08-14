@@ -70,6 +70,11 @@ impl AiosDBManager {
             }
         }
 
+        // Existing stable geometry stays readable during initialization, but a
+        // miss must not create durable work or start generation before all data
+        // phases (and the configured startup-wide model pass) have settled.
+        crate::data_interface::initialization_phase::require_model_generation()?;
+
         // 先落 durable pending 再生成（spec §4.5 / 2026-07-30 审计 C1）。曾经这里只
         // 读现有行的 revision：表里本来没有这个根时收口是 no-op，进程在生成中途崩溃，
         // 这次工作就没有任何持久痕迹，没有 drain 会捡它，只能靠人再点一次。落行失败
@@ -469,5 +474,21 @@ mod tests {
         if let Ok(expected) = std::env::var("AIOS_ON_DEMAND_EXPECT_ROOT") {
             assert_eq!(result.generation_root, expected);
         }
+    }
+
+    #[test]
+    fn initialization_gate_precedes_pending_creation_but_follows_existing_model_reuse() {
+        let source = include_str!("on_demand_model.rs");
+        let body = source
+            .split_once("pub async fn ensure_model_generated(")
+            .expect("ensure_model_generated exists")
+            .1
+            .split_once("pub struct ModelGenerationInProgress")
+            .expect("ensure_model_generated end exists")
+            .0;
+        let reuse = body.find("settled_status(counts)").unwrap();
+        let gate = body.find("require_model_generation()").unwrap();
+        let pending = body.find("ensure_regen_pending(").unwrap();
+        assert!(reuse < gate && gate < pending);
     }
 }

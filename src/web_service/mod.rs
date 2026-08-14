@@ -121,6 +121,14 @@ impl ApiError {
         }
     }
 
+    pub fn initialization_not_ready(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "initialization_not_ready",
+            message: message.into(),
+        }
+    }
+
     pub fn timeout(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,

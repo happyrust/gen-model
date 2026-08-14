@@ -403,9 +403,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         let step_started = Instant::now();
         // println!("开始同步解析数据。");
         // tokio::spawn(async move {
-        if let Err(e) = sync_pdms(&db_option).await {
-            eprintln!("同步PDMS数据失败: {}", e);
-        }
+        sync_pdms(&db_option).await?;
         println!(
             "PDMS 数据同步解析阶段完成，耗时 {}",
             fmt_elapsed(step_started.elapsed())
@@ -433,6 +431,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     );
     /// 创建db manager
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
+    let full_model_requested = db_option.is_gen_mesh_or_model();
+    initialization.configure_model_bootstrap(full_model_requested);
+    if !sync_live {
+        initialization.mark_data_ready_without_manifest();
+    }
     let step_started = Instant::now();
     match scheduler.restore_persisted_pause().await {
         Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
@@ -459,6 +464,54 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         );
     }
 
+    // Worker is started as soon as the immutable manifest is installed.  The
+    // coordinator keeps it data-only until Meta -> Catalogue -> Design settles.
+    crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+
+    // Expose initialization progress before waiting for data/model readiness.
+    #[cfg(feature = "http_api")]
+    let web_task = {
+        let mgr = mgr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
+                eprintln!("Web 服务异常退出: {e:?}");
+            }
+        })
+    };
+
+    // Watcher events are dirtiness signals only; `async_watch` debounces them
+    // into the same full manifest scan used by startup and reconciliation.
+    let watch_task = if sync_live {
+        let mgr = mgr.clone();
+        Some(tokio::spawn(async move {
+            #[cfg(feature = "mqtt")]
+            {
+                let (watch_result, _) = tokio::join!(
+                    mgr.async_watch(),
+                    AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
+                );
+                if let Err(error) = watch_result {
+                    log::error!("async_watch 退出，增量看门狗已停止: {error:?}");
+                    eprintln!("async_watch 退出，增量看门狗已停止: {error:?}");
+                }
+            }
+            #[cfg(not(feature = "mqtt"))]
+            if let Err(error) = mgr.async_watch().await {
+                log::error!("async_watch 退出，增量看门狗已停止: {error:?}");
+                eprintln!("async_watch 退出，增量看门狗已停止: {error:?}");
+            }
+        }))
+    } else {
+        None
+    };
+
+    let startup_data_ready = !sync_live || scheduler.is_auto_work_armed();
+    if sync_live && startup_data_ready {
+        println!("等待 Meta → Catalogue → Design 数据清单完成...");
+        initialization.wait_for_data_ready().await;
+        println!("数据初始化完成，模型阶段可以开始");
+    }
+
     // 启动分层判据装载空间树（docs/2026-08-11_spatial-tree-startup-init-plan.md）：
     // 指纹（epoch 值 + 库侧时间戳）一致 → 直接复用；失配但有待重放空间意图 →
     // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
@@ -482,7 +535,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // progress_sender.send(10)?;
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
-    if db_option.is_gen_mesh_or_model() {
+    if full_model_requested && startup_data_ready {
         println!("正在生成模型");
         let mut time = Instant::now();
         fs::create_dir_all("assets/meshes")?;
@@ -504,13 +557,60 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         //         EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
         //     }
         // }
-        gen_all_geos_data(&db_option).await?;
+        if !initialization.begin_full_model() {
+            anyhow::bail!("全量模型启动时数据阶段未就绪");
+        }
+        let full_model_result = gen_all_geos_data(&db_option).await;
+        initialization.end_full_model();
+        scheduler.wake();
+        full_model_result?;
+        // A watcher event may have installed a newer data epoch while the full
+        // model pass was running.  Let that epoch settle before opening durable
+        // model work or any room post-processing.
+        initialization.wait_for_data_ready().await;
         //保存
         // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
+    } else if full_model_requested {
+        println!("数据初始化清单仍在 awaiting_trigger，保留全量模型工作直至真实触发释放清单");
+        let deferred_option = db_option.clone();
+        tokio::spawn(async move {
+            let initialization =
+                crate::data_interface::initialization_phase::InitializationCoordinator::global();
+            initialization.wait_for_data_ready().await;
+            println!("真实触发已完成全部数据前置阶段，开始延期的全量模型生成");
+            if !initialization.begin_full_model() {
+                return;
+            }
+            let result = gen_all_geos_data(&deferred_option).await;
+            initialization.end_full_model();
+            crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+            match result {
+                Ok(_) => {
+                    initialization.wait_for_data_ready().await;
+                    if initialization.open_model_phase() {
+                        crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+                    }
+                }
+                Err(error) => {
+                    log::error!("延期全量模型生成失败，模型门保持关闭: {error:#}");
+                    eprintln!("延期全量模型生成失败，模型门保持关闭: {error:#}");
+                }
+            }
+        });
+    }
+
+    if startup_data_ready {
+        if initialization.open_model_phase() {
+            scheduler.wake();
+            initialization.wait_for_model_ready().await;
+            println!("持久模型工作单与 AABB 阶段已收敛");
+        }
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
-    if let Some(reason) = skip_startup_room_build().await {
+    if !startup_data_ready {
+        println!("数据初始化尚未释放，跳过启动房间重建");
+    } else if let Some(reason) = skip_startup_room_build().await {
         println!("跳过启动全量房间重建（{reason}）：房间归属由增量队列收敛");
     } else {
         println!(
@@ -568,47 +668,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         futures::future::join_all(handles).await;
     }
 
-    // 数据批次队列的唯一消费者：无条件启动、不分 sync_live（ADR-011；rollout
-    // 第九节第 5 条）——合流后手动模式的执行也走队列，worker 若只活在自动分支，
-    // 手动模式的队列就没有消费者。刻意放在全量生成 / 房间重建**之后**：批次执行
-    // 与 `gen_all_geos_data` 并发会在同一批生成根上互踩；sync_live 启动重扫入队
-    // 的批次会等到这里才开始被消费。
-    crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
-
-    // Web 服务（REST + WebSocket）：配置了 http_api_addr 才真正监听；
-    // 与 async_watch 并行运行，未启用时零影响（docs/specs/web-service-api.md）。
-    #[cfg(feature = "http_api")]
-    let web_task = {
-        let mgr = mgr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
-                eprintln!("Web 服务异常退出: {e:?}");
-            }
-        })
-    };
-
-    if sync_live {
-        // cur_mgr.clone().unwrap().async_watch().await.unwrap();
-
-        //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
-        //是否需要重构下面的这行代码？
-        // 看门狗退出必须留下痕迹，不能把 Result 直接丢掉（T903）。
-        #[cfg(feature = "mqtt")]
-        {
-            let (watch_result, _) = tokio::join!(
-                mgr.async_watch(),
-                AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
-            );
-            if let Err(e) = watch_result {
-                log::error!("async_watch 退出，增量看门狗已停止: {e:?}");
-                eprintln!("async_watch 退出，增量看门狗已停止: {e:?}");
-            }
-        }
-        #[cfg(not(feature = "mqtt"))]
-        if let Err(e) = mgr.async_watch().await {
-            log::error!("async_watch 退出，增量看门狗已停止: {e:?}");
-            eprintln!("async_watch 退出，增量看门狗已停止: {e:?}");
-        }
+    if let Some(watch_task) = watch_task {
+        let _ = watch_task.await;
     }
 
     // 手动模式（sync_live=false）下若 Web 服务已启用，保持进程长驻对外服务，
@@ -742,5 +803,31 @@ mod startup_room_build_gate_tests {
             env_at < autorun_at && autorun_at < reconcile_at,
             "三道门的优先级是 止血口 → 冷启动开关 → 库侧对账: {body}"
         );
+    }
+
+    #[test]
+    fn startup_waits_for_data_then_models_before_rooms() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        let worker = body.find("ensure_batch_worker(mgr.clone())").unwrap();
+        assert!(
+            body.contains("sync_pdms(&db_option).await?"),
+            "任一全局数据阶段失败必须终止启动，不能继续打开模型门"
+        );
+        let web = body.find("serve_if_configured(mgr)").unwrap();
+        let data = body.find("wait_for_data_ready().await").unwrap();
+        let full_model = body.find("gen_all_geos_data(&db_option).await").unwrap();
+        let open_model = body.find("initialization.open_model_phase()").unwrap();
+        let model_ready = body.find("wait_for_model_ready().await").unwrap();
+        let room = body.find("build_room_relations(&db_option).await").unwrap();
+        assert!(worker < data && web < data);
+        assert!(data < full_model && full_model < open_model);
+        assert!(open_model < model_ready && model_ready < room);
     }
 }

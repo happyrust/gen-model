@@ -110,6 +110,11 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
     print(ev)
 ```
 
+`health()["initialization"]` 暴露当前 `meta/catalogue/design`、epoch、blockers、
+`data_ready` 与 `model_ready`；`queue()` 行增加 `phase`、`epoch_id`、
+`blocked_by_phase`，顶层增加 `shadowed`。初始化未就绪时需要实际生成的模型请求
+报 `initialization_not_ready`，错误文本同时带当前 phase、epoch 和 blockers，且不创建 pending。
+
 分工口径：**服务在跑 → `aios_client` 观察；服务停了 → `aios_db` 深入。**
 
 ## 脚本目录

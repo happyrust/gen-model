@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::data_interface::initialization_phase::InitializationNotReady;
 use crate::data_interface::manual_update::{
     PendingModelUnit, PendingRoomUnit, load_pending_model_units, load_pending_room_units,
 };
@@ -151,6 +152,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "room_incremental": crate::options::room_incremental(),
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
+        "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
         // 解析错误清单（表空是 null）。模型生成侧的失败有 pending 行的 last_error
@@ -373,6 +375,9 @@ pub async fn model_ensure(
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
+    if error.downcast_ref::<InitializationNotReady>().is_some() {
+        return ApiError::initialization_not_ready(message);
+    }
     if error.downcast_ref::<ModelGenerationInProgress>().is_some() {
         return ApiError::conflict(message);
     }
@@ -639,7 +644,15 @@ pub async fn dbnum_prune_above(
 /// 「队列已暂停 · 不再出队」横幅的数据源。
 pub async fn queue_snapshot(State(_state): State<AppState>) -> Json<serde_json::Value> {
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
-    Json(json!({ "paused": scheduler.is_paused(), "rows": scheduler.snapshot() }))
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot();
+    Json(json!({
+        "paused": scheduler.is_paused(),
+        "rows": scheduler.snapshot(),
+        "epoch_id": initialization.epoch_id,
+        "blocked_by_phase": initialization.current_phase,
+        "shadowed": initialization.shadowed,
+    }))
 }
 
 /// POST /api/v1/queue/pause — 暂停出队（ADR-011 §9）。
@@ -758,6 +771,30 @@ mod tests {
         ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
+    }
+
+    #[test]
+    fn health_and_model_ensure_expose_initialization_contract() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert!(health.contains("\"initialization\""));
+        assert!(health.contains("InitializationCoordinator::global().snapshot()"));
+
+        let ensure = source
+            .split_once("fn ensure_error(")
+            .expect("ensure_error exists")
+            .1
+            .split_once("pub async fn pending_units(")
+            .expect("ensure_error end exists")
+            .0;
+        assert!(ensure.contains("InitializationNotReady"));
+        assert!(ensure.contains("initialization_not_ready"));
     }
 
     /// `/health` 的 `spatial_reconcile` / `spatial_tree` 字段（台账缺口 G-02）。
