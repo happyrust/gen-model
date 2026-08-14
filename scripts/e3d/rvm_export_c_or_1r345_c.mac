@@ -1,0 +1,48 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：BRAN /C-OR-1R345-C   (dbnum 8000, pe:24384_23257)
+
+目的（2026-08-12 BRAN 增量测试的判定输入）：拿 E3D 自己的几何当真值，回答
+一个具体问题——**支管头点到第一个构件之间那约 1 米，E3D 到底画不画管？**
+
+背景：库里这条支管的 4 条 tubi 行的 leave 端分别是 23258/23259/23260/23261，
+没有一条从 BRAN 自身（23257）出发，即头段管没有生成；而源数据里
+FTUB 1（23258）的 POS 就在支管头点上、HEIG=1000，是一根一米长的管子，
+它的 inst_relate 行却只有 20×29×35mm、且逐位等于「从它离开的那截短管」的包围盒。
+
+命令序列与窄口径的理由见同目录 rvm_export_c_iy_1r330_b.mac 的头注（照搬，
+只换了元素、输出文件与备注）。窄口径（insu/obst off）是刻意的：预留净空与
+障碍体在 RVM 流里也是普通 box，成员级分桶筛不掉，会把判定搅成假阳性。
+
+导出是只读动作：本宏没有 SAVEWORK，不产生新会话号，不影响水位。
+不写 QUIT/FINISH——会话由 l3_suite 的 driver wrapper 拥有。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_c_or_1r345_c.log" OVER
+$P CODEX-DB8000-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何；管子照旧，隐含管段各自独立容器 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/C-OR-1R345-C.rvm"
+export filenote 'RVM baseline for BRAN /C-OR-1R345-C (dbnum 8000, head-tube ground truth)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：只导这一条 BRAN 及其成员 ----
+export /C-OR-1R345-C
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB8000-RVM-EXPORT-DONE
+ALPHA LOG END

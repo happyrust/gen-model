@@ -24,7 +24,7 @@ use itertools::Itertools;
 #[cfg(feature = "occ")]
 use opencascade::primitives::IntoShape;
 use parry3d::bounding_volume::*;
-use parry3d::math::{Isometry, Point};
+use parry3d::math::Point;
 use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -780,6 +780,12 @@ struct GeoAabbTrans {
     pub trans: Transform,
     #[serde(deserialize_with = "deserialize_aabb_flexible")]
     pub aabb: Aabb,
+    /// `PrimLoft` 圆弧扫掠角（弧度）。直线扫掠 / 非 loft 为 none，走盒子 8 角变换。
+    #[serde(default, deserialize_with = "deserialize_optional_f32_flexible")]
+    pub revolve_sweep: Option<f32>,
+    /// 直线扫掠时 Surreal 把缺失的 `SpineArc.clock_wise` 填成 null，不能当 `bool`。
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    pub revolve_cw: bool,
 }
 
 /// SurrealDB preserves the numeric kind of stored array members. Geometry
@@ -887,6 +893,21 @@ where
 {
     <Option<AabbWire> as serde::Deserialize>::deserialize(deserializer)
         .map(|value| value.map(AabbWire::into_aabb))
+}
+
+fn deserialize_optional_f32_flexible<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<FlexibleF32> as serde::Deserialize>::deserialize(deserializer)
+        .map(|value| value.map(|v| v.0))
+}
+
+fn deserialize_optional_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(<Option<bool> as serde::Deserialize>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 fn deserialize_transform_flexible<'de, D>(deserializer: D) -> Result<Transform, D::Error>
@@ -1031,7 +1052,10 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         let inst_keys = get_inst_relate_keys(chunk);
         let mut sql = format!(
             r#"select id, in as refno, world_trans.d as world_trans, in.noun as noun, aabb.d as old_aabb,
-            (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none and trans.d != none)
+            (select out.aabb.d as aabb, trans.d as trans,
+             out.param.PrimLoft.path.SpineArc.angle as revolve_sweep,
+             out.param.PrimLoft.path.SpineArc.clock_wise as revolve_cw
+             from out->geo_relate where out.aabb.d != none and trans.d != none)
             as geo_aabbs from {inst_keys} where world_trans.d != none"#,
         );
         //替换所有的aabb
@@ -1060,11 +1084,16 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             let mut computed = Aabb::new_invalid();
             for g in r.geo_aabbs {
                 let t = r.world_trans * g.trans;
-                let tmp_aabb = g.aabb.scaled(&t.scale.into());
-                let tmp_aabb = tmp_aabb.transform_by(&Isometry {
-                    rotation: t.rotation.into(),
-                    translation: t.translation.into(),
-                });
+                let tmp_aabb = if let Some(sweep) = g.revolve_sweep.filter(|s| s.abs() > 1e-6) {
+                    crate::fast_model::shared::aabb_z_revolve_apply_transform(
+                        &g.aabb,
+                        &t,
+                        sweep,
+                        g.revolve_cw,
+                    )
+                } else {
+                    crate::fast_model::shared::aabb_apply_transform(&g.aabb, &t)
+                };
                 computed.merge(&tmp_aabb);
             }
             let magnitude = computed.extents().magnitude();
@@ -1772,6 +1801,15 @@ mod aabb_write_order_tests {
             .map(|(body, _)| body)
             .unwrap_or(source);
 
+        assert!(
+            body.contains("aabb_z_revolve_apply_transform"),
+            "SpineArc 世界包围盒必须按环扇取样，不能退回盒子 8 角变换"
+        );
+        assert!(
+            body.contains("SpineArc.angle as revolve_sweep"),
+            "AABB 输入查询必须带上 PrimLoft SpineArc 扫掠角"
+        );
+
         let records_at = body
             .find("save_aabb_to_surreal(&chunk_aabbs)")
             .expect("per-chunk aabb record insert missing");
@@ -2240,5 +2278,55 @@ mod flexible_geometry_deserialize_tests {
         assert_eq!(row.aabb.maxs.y, -48340.0);
         assert_eq!(row.transform.translation.x, -16315.0);
         assert_eq!(row.transform.scale, glam::Vec3::ONE);
+    }
+
+    #[test]
+    fn geo_aabb_trans_treats_null_revolve_fields_as_linear() {
+        let row: super::GeoAabbTrans = serde_json::from_value(serde_json::json!({
+            "trans": {
+                "translation": [0, 0, 0],
+                "rotation": [0, 0, 0, 1],
+                "scale": [1, 1, 1]
+            },
+            "aabb": {
+                "mins": [0, 0, 0],
+                "maxs": [1, 1, 1]
+            },
+            "revolve_sweep": null,
+            "revolve_cw": null
+        }))
+        .expect("Line loft must deserialize with null SpineArc fields");
+        assert_eq!(row.revolve_sweep, None);
+        assert!(!row.revolve_cw);
+    }
+}
+
+#[cfg(test)]
+mod live_cwall_rr001_aabb_tests {
+    use super::update_inst_relate_aabbs_by_refnos;
+    use aios_core::RefnoEnum;
+
+    /// 刷新 AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 WALL/STWALL 世界包围盒。
+    /// 圆弧墙必须走环扇取样；随后用 Python `rvm_aabb_compare.py --fixture 1rs-wf03-w-c-rr001` 对拍。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live 8009: 刷新 1RS-WF03-W-C-RR001 WALL/STWALL aabb_d；需 DB_OPTION_FILE=DbOption"]
+    async fn live_8009_refresh_cwall_rr001_wall_aabbs() {
+        aios_core::init_surreal().await.expect("connect 8009");
+        let refnos: Vec<RefnoEnum> = [
+            "17496/105912",
+            "17496/105930",
+            "17496/105935",
+            "17496/105940",
+            "17496/105812",
+            "17496/105813",
+            "17496/105815",
+            "17496/105816",
+        ]
+        .into_iter()
+        .map(RefnoEnum::from)
+        .collect();
+        update_inst_relate_aabbs_by_refnos(&refnos, true)
+            .await
+            .expect("refresh WALL/STWALL aabb");
     }
 }

@@ -1,0 +1,754 @@
+{
+  "meta": {
+    "version": 1,
+    "dbnum": 8000,
+    "root_name": "/C-OR-1R345-C",
+    "rvm_file": "test_data/rvm/C-OR-1R345-C.rvm",
+    "att_files": [],
+    "imported_at": "2026-08-12 17:12:15",
+    "member_count": 13,
+    "geometry_count": 9,
+    "resolved": 1,
+    "unresolved": 12,
+    "export_scope": "narrow",
+    "geo_type_counts": {
+      "Primitive": 9
+    },
+    "degenerate_bbox_count": 0
+  },
+  "members": [
+    {
+      "path": "/AMS/1RX03-EQUI",
+      "name": "/1RX03-EQUI",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5773254448607027806,
+      "parent_stable_id": null,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT",
+      "name": "/1RX03-LCT",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17051028990361449643,
+      "parent_stable_id": 5773254448607027806,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345",
+      "name": "/1RX-345",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 4010204903457230126,
+      "parent_stable_id": 17051028990361449643,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C",
+      "name": "/C-OR-1R345-C",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": "24384/23257",
+      "identity_source": "cli_root",
+      "resolved": true,
+      "stable_id": 14571389458671685448,
+      "parent_stable_id": 4010204903457230126,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 1 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 1 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 2463947669628280833,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        8550.54,
+        14060.42,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        8536.56005859375,
+        13480.501174926758,
+        2899.9998569488525,
+        9393.556594848633,
+        14081.146240234375,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              1000.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              0.0008290375699289143,
+              -0.0005591929075308144,
+              0.0,
+              0.0005591929075308144,
+              0.0008290375699289143,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              8965.058326721191,
+              13780.823707580566,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            8536.56005859375,
+            13480.501174926758,
+            2899.9998569488525,
+            9393.556594848633,
+            14081.146240234375,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/BEND 1 of BRANCH /C-OR-1R345-C",
+      "name": "BEND 1 of BRANCH /C-OR-1R345-C",
+      "noun": "BEND",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5861319067369403124,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        9380.7,
+        13500.47,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        9355.870246887207,
+        13473.350524902344,
+        2900.0000953674316,
+        9406.883239746094,
+        13527.613639831543,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "FacetGroup",
+          "geo_type": "Primitive",
+          "detail": {
+            "polygons": 6,
+            "contours": 6,
+            "vertices": 24
+          },
+          "transform": {
+            "matrix3": [
+              0.0008290375699289143,
+              -0.0005591929075308144,
+              0.0,
+              0.0005591929075308144,
+              0.0008290375699289143,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              9380.70011138916,
+              13500.470161437988,
+              2900.0000953674316
+            ]
+          },
+          "bbox_world_mm": [
+            9355.870246887207,
+            13473.350524902344,
+            2900.0000953674316,
+            9406.883239746094,
+            13527.613639831543,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 2 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 2 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5348662015710642608,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        9381.77,
+        13499.66,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        9366.724967956543,
+        12637.152671813965,
+        2899.9998569488525,
+        10514.904975891113,
+        13519.625663757324,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              1400.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              0.0007986355340108275,
+              -0.0006018150015734136,
+              0.0,
+              0.0006018150015734136,
+              0.0007986355340108275,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              9940.814971923828,
+              13078.389167785645,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            9366.724967956543,
+            12637.152671813965,
+            2899.9998569488525,
+            10514.904975891113,
+            13519.625663757324,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 3 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 3 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11921142795791669803,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        10501.97,
+        12655.44,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        10485.90087890625,
+        12314.895629882812,
+        2899.9998569488525,
+        10901.06201171875,
+        12674.591064453125,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              500.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              0.0007660444243811071,
+              -0.000642787606921047,
+              0.0,
+              0.000642787606921047,
+              0.0007660444243811071,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              10693.4814453125,
+              12494.743347167969,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            10485.90087890625,
+            12314.895629882812,
+            2899.9998569488525,
+            10901.06201171875,
+            12674.591064453125,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 4 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 4 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 4223199334148052442,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        10887.0,
+        12332.0,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        10869.633674621582,
+        11980.58032989502,
+        2899.9998569488525,
+        11249.650001525879,
+        12349.984169006348,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              480.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              0.00071933981962502,
+              -0.0006946583744138479,
+              0.0,
+              0.0006946583744138479,
+              0.00071933981962502,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              11059.64183807373,
+              12165.282249450684,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            10869.633674621582,
+            11980.58032989502,
+            2899.9998569488525,
+            11249.650001525879,
+            12349.984169006348,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/BEND 2 of BRANCH /C-OR-1R345-C",
+      "name": "BEND 2 of BRANCH /C-OR-1R345-C",
+      "noun": "BEND",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8677560643466804741,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        11247.93,
+        11982.46,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        11194.99397277832,
+        11929.524421691895,
+        2900.0000953674316,
+        11300.865173339844,
+        12035.395622253418,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "FacetGroup",
+          "geo_type": "Primitive",
+          "detail": {
+            "polygons": 6,
+            "contours": 6,
+            "vertices": 24
+          },
+          "transform": {
+            "matrix3": [
+              0.0006819983827881515,
+              -0.000731353706214577,
+              0.0,
+              0.000731353706214577,
+              0.0006819983827881515,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              11247.929573059082,
+              11982.460021972656,
+              2900.0000953674316
+            ]
+          },
+          "bbox_world_mm": [
+            11194.99397277832,
+            11929.524421691895,
+            2900.0000953674316,
+            11300.865173339844,
+            12035.395622253418,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 5 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 5 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 5,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 1298426936656847949,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        11228.55,
+        11964.39,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        10904.33120727539,
+        11659.667015075684,
+        2899.9998569488525,
+        11245.599746704102,
+        11982.674598693848,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              420.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              -0.000731353706214577,
+              -0.0006819983827881515,
+              0.0,
+              0.0006819983827881515,
+              -0.000731353706214577,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              11074.965476989746,
+              11821.170806884766,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            10904.33120727539,
+            11659.667015075684,
+            2899.9998569488525,
+            11245.599746704102,
+            11982.674598693848,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 6 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 6 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 6,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13298925479943069724,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        10921.38,
+        11677.95,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        10172.97649383545,
+        10977.667808532715,
+        2899.9998569488525,
+        10938.429832458496,
+        11696.234703063965,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              1000.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              -0.000731353706214577,
+              -0.0006819983827881515,
+              0.0,
+              0.0006819983827881515,
+              -0.000731353706214577,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              10555.703163146973,
+              11336.95125579834,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            10172.97649383545,
+            10977.667808532715,
+            2899.9998569488525,
+            10938.429832458496,
+            11696.234703063965,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-EQUI/1RX03-LCT/1RX-345/C-OR-1R345-C/FTUBE 7 of BRANCH /C-OR-1R345-C",
+      "name": "FTUBE 7 of BRANCH /C-OR-1R345-C",
+      "noun": "FTUB",
+      "owner_desc": "BRANCH /C-OR-1R345-C",
+      "ordinal": 7,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 3363879028971135399,
+      "parent_stable_id": 14571389458671685448,
+      "translation_mm": [
+        10190.03,
+        10995.95,
+        2900.0
+      ],
+      "aabb_world_mm": [
+        9075.949668884277,
+        9954.668998718262,
+        2899.9998569488525,
+        10207.079887390137,
+        11014.233589172363,
+        2930.000066757202
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Box",
+          "geo_type": "Primitive",
+          "detail": {
+            "lengths": [
+              1500.0,
+              50.0,
+              30.0
+            ]
+          },
+          "transform": {
+            "matrix3": [
+              -0.000731353706214577,
+              -0.0006819983827881515,
+              0.0,
+              0.0006819983827881515,
+              -0.000731353706214577,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              9641.514778137207,
+              10484.451293945312,
+              2914.9999618530273
+            ]
+          },
+          "bbox_world_mm": [
+            9075.949668884277,
+            9954.668998718262,
+            2899.9998569488525,
+            10207.079887390137,
+            11014.233589172363,
+            2930.000066757202
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}

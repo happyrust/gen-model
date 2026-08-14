@@ -16,6 +16,7 @@ dev = ["pytest>=8"]
 testpaths = ["tests"]
 markers = [
     "offline: 不连 SurrealDB、不碰项目目录的离线用例（CI 只跑这一档：-m offline）",
+    "live_8009: 连 8009 生产验证库的 RVM/AABB 对拍；默认 skip，需 AIOS_RVM_LIVE=1 且单独跑",
 ]
 
 [tool.maturin]

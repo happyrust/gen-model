@@ -1,0 +1,43 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：CWALL /1RS-WF03-W-C-RR001
+  (dbnum 1112, pe:17496_105799)
+
+1112 是 AMS 结构/房间库。本 CE 下 SweepSolid 样本是 4 个 WALL + 4 个 STWALL
+（SCTN/STWALL/GENSEC/WALL 走同一套 profile / SweepSolid 路径）。同级 GWALL
+是挤出体，不在本期 SweepSolid 对拍里，但窄口径导出仍会带上它们——Python
+门只按 NOUN 序号收 WALL/STWALL。
+
+命令序列与窄口径理由见同目录 rvm_export_c_iy_1r330_b.mac。
+导出是只读：没有 SAVEWORK，不产生新会话号。
+不写 QUIT/FINISH——会话由 driver wrapper 拥有。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rs_wf03_w_c_rr001.log" OVER
+$P CODEX-DB1112-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RS-WF03-W-C-RR001.rvm"
+export filenote 'RVM baseline for CWALL /1RS-WF03-W-C-RR001 (dbnum 1112, SweepSolid WALL/STWALL)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：这一条 CWALL 及其成员 ----
+export /1RS-WF03-W-C-RR001
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB1112-RVM-EXPORT-DONE
+ALPHA LOG END
