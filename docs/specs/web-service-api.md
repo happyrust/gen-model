@@ -199,6 +199,12 @@
 - 每个数据批次是一条 `kind = "data_batch"` 的任务：`queued -> running -> succeeded|partial|failed`；
   进度经 WebSocket 推送（第 5 节），终态 result 为 `{ project, status, batch: DataBatchResult,
   units: [ModelUnitResult], warnings }`（一行任务一个批次，「一次运行」的复数形态随 ADR-011 退役）。
+- 模型持久工作由正式消费者 `kind = "model_drain"` 分页认领（每页至多 16 根）。状态为
+  `running -> succeeded|partial|failed|yielded`；`yielded` 表示初始化门或数据优先级要求让位，
+  是本次进程内任务的终态，但未执行的 durable pending 行、revision 与 attempts 均保持原值。
+  `detail` 带 `epoch_id` 和 `roots[] { dbnum, source_end_sesno, target_refno, action, revision }`，
+  `result` 带完成、失败、未执行数量及让位原因。重启恢复只认 `model_update_pending`，不恢复
+  瞬态 task 行。
 
 ### 4.4 `GET /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`
 - 列表支持 `?state=running&kind=data_batch&limit=50`（进程重启即清空——durable 状态以
@@ -356,12 +362,15 @@
   finished_at?, dbnum?, db_type?, start_sesno?, end_sesno?, units_done?, total_units?,
   events_seen, detail?, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
   「已排」与「已用」是两个起点。
-- 状态机：`queued -> running -> succeeded | partial | failed`。kind 三种：
+- 状态机：数据任务为 `queued -> running -> succeeded | partial | failed`；模型消费页为
+  `running -> succeeded | partial | failed | yielded`。kind 四种：
   `data_batch`（一行 = 一个数据批次；同一 dbnum 至多两行——运行中一行 + 排队中一行）、
   `room_recalc`（队列跑空时收的一轮房间收敛，创建即 running；`detail` 携带
   `{ panels, elements, dead_letters }` 分项计数，done/total 用 `units_done`/`total_units`，
-  ADR-011 §10）、`manual_update`（已退役，不再产生新行）。
-- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/ `room-…`（房间轮）。
+  ADR-011 §10）、`model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
+  不再产生新行）。
+- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/ `room-…`（房间轮）/
+  `model-…`（模型消费页）。
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。

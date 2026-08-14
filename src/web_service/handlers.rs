@@ -163,6 +163,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 连撞到上限、空闲轮已停跑，房间收敛与范围重扫一并暂停——旗子还立着、心跳
         // 也在跳，少了这个字段，外面看到的是一个「健康但什么都不收敛」的服务。
         "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
+        "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         "staging_window_blocks": window_blocks,

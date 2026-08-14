@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
 use serde::{Deserialize, Serialize};
@@ -23,10 +25,9 @@ pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 /// 记账、驱动修复、以及在清单变化时说一声。
 const ROOM_PANEL_DEFECTS: &str = "room_panel_coverage_barrier:current";
 const QUERY_CHUNK: usize = 500;
-// 空闲轮一页的上界（ADR-011 2026-08-09 修订）。页内 fresh 根合并成**一次**
-// `generate_roots` 调用（ADR-012）：解析 → 实例 → 网格的启动开销按页付而不是按根付；
-// 页与页之间让位，新入队的数据批次最多等一页。此前是 1——每个根独占一轮空闲轮，
-// 138 个修复根的积压要连刷十几分钟，每轮还各付一遍房间映射 / 面板索引 / 空间树写盘。
+// 空闲轮一页的读取上界。页内逐根生成并在每根前后重查数据门：批量调用曾让新数据
+// 最多等待整页（现场 16 根超过 200 秒），而初始化门中途关闭又会把调度让位记成失败。
+// 读取仍分页，昂贵生成则以单根为不可抢占的最小单位。
 const DRAIN_PAGE_SIZE: usize = 16;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
@@ -1664,6 +1665,82 @@ pub struct DrainReport {
     pub failed_dbnums: BTreeSet<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelDrainYieldReason {
+    EpochChanged,
+    ModelGateClosed,
+    DataQueued,
+    InitializationNotReady,
+}
+
+impl ModelDrainYieldReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EpochChanged => "epoch_changed",
+            Self::ModelGateClosed => "model_gate_closed",
+            Self::DataQueued => "data_queued",
+            Self::InitializationNotReady => "initialization_not_ready",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelDrainDisposition {
+    Completed {
+        done: usize,
+    },
+    YieldedForData {
+        done: usize,
+        claimed_epoch: u64,
+        current_epoch: u64,
+        reason: ModelDrainYieldReason,
+    },
+    Failed {
+        done: usize,
+        message: String,
+    },
+}
+
+impl ModelDrainDisposition {
+    pub const fn done(&self) -> usize {
+        match self {
+            Self::Completed { done }
+            | Self::YieldedForData { done, .. }
+            | Self::Failed { done, .. } => *done,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct ModelDrainTelemetry {
+    total_yields: u64,
+    last_yield_reason: Option<&'static str>,
+    last_claimed_epoch: Option<u64>,
+    last_current_epoch: Option<u64>,
+    last_root_duration_ms: Option<u64>,
+    /// 数据在单根生成期间到达时，它最多等了这一根的执行时长；认领前已排队则为 0。
+    last_data_wait_ms: Option<u64>,
+    /// 调度让位不得消费重试；单列出来让 health/live 直接断言。
+    attempts_consumed_on_yield: u64,
+    /// 最近一次模型页实际写入 pending 行的 attempts 增量。正常完成和让位为 0，
+    /// 真实失败且 `mark_failed` 成功时按根累计。
+    last_attempts_delta: u64,
+}
+
+static MODEL_DRAIN_TELEMETRY: OnceLock<Mutex<ModelDrainTelemetry>> = OnceLock::new();
+
+fn model_drain_telemetry() -> MutexGuard<'static, ModelDrainTelemetry> {
+    MODEL_DRAIN_TELEMETRY
+        .get_or_init(|| Mutex::new(ModelDrainTelemetry::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn model_drain_telemetry_snapshot() -> serde_json::Value {
+    serde_json::to_value(model_drain_telemetry().clone()).unwrap_or_default()
+}
+
 impl DrainReport {
     fn record(&mut self, dbnum: u32, message: String) {
         self.failed_dbnums.insert(dbnum);
@@ -1697,7 +1774,11 @@ impl DrainReport {
 /// Clearing the queue row counts the same as the work itself: a target whose row
 /// can never be removed keeps climbing towards [`MAX_ATTEMPTS`] instead of
 /// re-running a full generation every watcher cycle forever.
-async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &mut DrainReport) {
+async fn record_failure(
+    job: &PendingModelWork,
+    error: &anyhow::Error,
+    report: &mut DrainReport,
+) -> bool {
     let message = format!("{error:#}");
     if let Err(mark_error) = mark_failed(job, &message).await {
         report.record(
@@ -1708,11 +1789,13 @@ async fn record_failure(job: &PendingModelWork, error: &anyhow::Error, report: &
                 job.target_refno
             ),
         );
+        false
     } else {
         report.record(
             job.dbnum,
             format!("{} {}: {message}", job.action.as_str(), job.target_refno),
         );
+        true
     }
 }
 
@@ -1760,7 +1843,24 @@ async fn run_room_job_isolated(
     }
 }
 
-async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut DrainReport) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOneOutcome {
+    Completed,
+    Failed,
+    YieldedForData,
+}
+
+fn is_initialization_not_ready(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<crate::data_interface::initialization_phase::InitializationNotReady>()
+    })
+}
+
+async fn run_one(
+    mgr: &AiosDBManager,
+    job: &PendingModelWork,
+    report: &mut DrainReport,
+) -> RunOneOutcome {
     let root_lock = (job.action == ModelWorkAction::RegenRoot)
         .then(|| crate::data_interface::manual_update::generation_root_lock(&job.target_refno));
     let _root_guard = match &root_lock {
@@ -1769,11 +1869,22 @@ async fn run_one(mgr: &AiosDBManager, job: &PendingModelWork, report: &mut Drain
     };
     let outcome = match execute_item_isolated(mgr, job).await {
         Ok(()) => delete_work(job).await,
+        Err(error) if is_initialization_not_ready(&error) => {
+            return RunOneOutcome::YieldedForData;
+        }
         Err(error) => Err(error),
     };
     match outcome {
-        Ok(()) => report.done += 1,
-        Err(error) => record_failure(job, &error, report).await,
+        Ok(()) => {
+            report.done += 1;
+            RunOneOutcome::Completed
+        }
+        Err(error) => {
+            if record_failure(job, &error, report).await {
+                model_drain_telemetry().last_attempts_delta += 1;
+            }
+            RunOneOutcome::Failed
+        }
     }
 }
 
@@ -1790,6 +1901,238 @@ fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} \
          ORDER BY updated_at ASC{limit};"
     )
+}
+
+fn model_drain_yield_reason(claimed_epoch: u64) -> Option<(ModelDrainYieldReason, u64)> {
+    let coordinator =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
+    let snapshot = coordinator.snapshot();
+    if snapshot.epoch_id != claimed_epoch {
+        return Some((ModelDrainYieldReason::EpochChanged, snapshot.epoch_id));
+    }
+    if !coordinator.model_generation_allowed() {
+        return Some((ModelDrainYieldReason::ModelGateClosed, snapshot.epoch_id));
+    }
+    if crate::data_interface::batch_scheduler::BatchScheduler::global()
+        .snapshot()
+        .iter()
+        .any(|row| matches!(row.state, "queued" | "running"))
+    {
+        return Some((ModelDrainYieldReason::DataQueued, snapshot.epoch_id));
+    }
+    None
+}
+
+fn model_drain_detail(jobs: &[PendingModelWork], epoch_id: u64) -> serde_json::Value {
+    serde_json::json!({
+        "epoch_id": epoch_id,
+        "roots": jobs.iter().map(|job| serde_json::json!({
+            "dbnum": job.dbnum,
+            "source_end_sesno": job.source_end_sesno,
+            "target_refno": job.target_refno,
+            "action": job.action.as_str(),
+            "revision": job.revision,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn finish_model_drain_task(
+    task_id: &str,
+    state: crate::data_interface::task_registry::TaskState,
+    report: &DrainReport,
+    unstarted: usize,
+    claimed_epoch: u64,
+    current_epoch: u64,
+    yield_reason: Option<ModelDrainYieldReason>,
+) {
+    crate::data_interface::task_registry::TaskRegistry::global().finish(
+        task_id,
+        state,
+        serde_json::json!({
+            "completed": report.done,
+            "failed": report.failures.len(),
+            "unstarted": unstarted,
+            "claimed_epoch": claimed_epoch,
+            "current_epoch": current_epoch,
+            "yield_reason": yield_reason.map(ModelDrainYieldReason::as_str),
+            "failures": report.failures,
+        }),
+    );
+}
+
+/// 空闲模型页的可抢占消费。持久行仍按原查询顺序认领，但昂贵工作逐根执行；初始化
+/// 门关闭是调度结果，不写 `last_error`，也不烧掉 attempts。
+async fn drain_where_cooperative(
+    mgr: &AiosDBManager,
+    action_filter: &str,
+    limit: usize,
+) -> anyhow::Result<ModelDrainDisposition> {
+    let mut response = SUL_DB
+        .query(render_drain_select(action_filter, Some(limit)))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("load pending model work statement failed: {error}"))?;
+    let jobs: Vec<PendingModelWork> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode pending model work failed: {error}"))?;
+    if jobs.is_empty() {
+        return Ok(ModelDrainDisposition::Completed { done: 0 });
+    }
+
+    let claimed_epoch =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .epoch_id;
+    let task_id = crate::data_interface::task_registry::TaskRegistry::new_task_id("model");
+    let registry = crate::data_interface::task_registry::TaskRegistry::global();
+    registry.insert_running_model_drain(
+        &task_id,
+        &mgr.db_option.project_name,
+        jobs.len() as u32,
+        model_drain_detail(&jobs, claimed_epoch),
+    );
+
+    let mut report = DrainReport {
+        requested: jobs.len(),
+        loaded: jobs.len(),
+        ..Default::default()
+    };
+    model_drain_telemetry().last_attempts_delta = 0;
+    for (index, job) in jobs.iter().enumerate() {
+        if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
+            let unstarted = jobs.len() - index;
+            finish_model_drain_task(
+                &task_id,
+                crate::data_interface::task_registry::TaskState::Yielded,
+                &report,
+                unstarted,
+                claimed_epoch,
+                current_epoch,
+                Some(reason),
+            );
+            let mut telemetry = model_drain_telemetry();
+            telemetry.total_yields += 1;
+            telemetry.last_yield_reason = Some(reason.as_str());
+            telemetry.last_claimed_epoch = Some(claimed_epoch);
+            telemetry.last_current_epoch = Some(current_epoch);
+            if reason == ModelDrainYieldReason::DataQueued {
+                telemetry.last_data_wait_ms = Some(0);
+            }
+            return Ok(ModelDrainDisposition::YieldedForData {
+                done: report.done,
+                claimed_epoch,
+                current_epoch,
+                reason,
+            });
+        }
+
+        let started = Instant::now();
+        let outcome = run_one(mgr, job, &mut report).await;
+        let root_duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        model_drain_telemetry().last_root_duration_ms = Some(root_duration_ms);
+        match outcome {
+            RunOneOutcome::Completed | RunOneOutcome::Failed => registry.bump_units_done(&task_id),
+            RunOneOutcome::YieldedForData => {
+                let current_epoch =
+                    crate::data_interface::initialization_phase::InitializationCoordinator::global(
+                    )
+                    .snapshot()
+                    .epoch_id;
+                let reason = ModelDrainYieldReason::InitializationNotReady;
+                finish_model_drain_task(
+                    &task_id,
+                    crate::data_interface::task_registry::TaskState::Yielded,
+                    &report,
+                    jobs.len() - index,
+                    claimed_epoch,
+                    current_epoch,
+                    Some(reason),
+                );
+                let mut telemetry = model_drain_telemetry();
+                telemetry.total_yields += 1;
+                telemetry.last_yield_reason = Some(reason.as_str());
+                telemetry.last_claimed_epoch = Some(claimed_epoch);
+                telemetry.last_current_epoch = Some(current_epoch);
+                return Ok(ModelDrainDisposition::YieldedForData {
+                    done: report.done,
+                    claimed_epoch,
+                    current_epoch,
+                    reason,
+                });
+            }
+        }
+
+        if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
+            let unstarted = jobs.len() - index - 1;
+            finish_model_drain_task(
+                &task_id,
+                crate::data_interface::task_registry::TaskState::Yielded,
+                &report,
+                unstarted,
+                claimed_epoch,
+                current_epoch,
+                Some(reason),
+            );
+            let mut telemetry = model_drain_telemetry();
+            telemetry.total_yields += 1;
+            telemetry.last_yield_reason = Some(reason.as_str());
+            telemetry.last_claimed_epoch = Some(claimed_epoch);
+            telemetry.last_current_epoch = Some(current_epoch);
+            // 本页可能先遇到真实失败、随后才因数据到达而让位；这里保留已经实际
+            // 记入 pending 的失败次数，不把“让位本身”算成重试。
+            if reason == ModelDrainYieldReason::DataQueued {
+                telemetry.last_data_wait_ms = Some(root_duration_ms);
+            }
+            return Ok(ModelDrainDisposition::YieldedForData {
+                done: report.done,
+                claimed_epoch,
+                current_epoch,
+                reason,
+            });
+        }
+    }
+
+    let current_epoch =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .epoch_id;
+    if report.failures.is_empty() {
+        finish_model_drain_task(
+            &task_id,
+            crate::data_interface::task_registry::TaskState::Succeeded,
+            &report,
+            0,
+            claimed_epoch,
+            current_epoch,
+            None,
+        );
+        Ok(ModelDrainDisposition::Completed { done: report.done })
+    } else {
+        let message = format!(
+            "{} pending model task(s) failed after {} completed: {}",
+            report.failures.len(),
+            report.done,
+            report.failures.join("; ")
+        );
+        let state = if report.done == 0 {
+            crate::data_interface::task_registry::TaskState::Failed
+        } else {
+            crate::data_interface::task_registry::TaskState::Partial
+        };
+        finish_model_drain_task(
+            &task_id,
+            state,
+            &report,
+            0,
+            claimed_epoch,
+            current_epoch,
+            None,
+        );
+        Ok(ModelDrainDisposition::Failed {
+            done: report.done,
+            message,
+        })
+    }
 }
 
 fn render_scoped_room_select(keys: &[RoomWorkKey]) -> String {
@@ -2096,26 +2439,76 @@ pub async fn drain_post_regen_aabb_report(
 /// 数据批次 worker 的空闲轮用它消化积压：房间收敛按 ADR-011 §8 在队列跑空时
 /// 单独收一轮（包成 `room_recalc` 任务），不跟在积压消化后面顺手带走——那样
 /// 房间轮就没有自己的任务行了。
-pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+pub async fn drain_data_phases_disposition(
+    mgr: &AiosDBManager,
+) -> anyhow::Result<ModelDrainDisposition> {
     if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
         .model_generation_allowed()
     {
-        return Ok(0);
+        return Ok(ModelDrainDisposition::Completed { done: 0 });
     }
-    let non_regen = drain_where(mgr, NON_REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await;
-    let has_more = if non_regen.is_ok() {
-        has_pending_work(NON_REGEN_ACTION_FILTER).await?
-    } else {
-        false
-    };
-    if !data_phase_is_clear(non_regen.is_ok(), has_more) {
-        return non_regen;
+    let non_regen = drain_where_cooperative(mgr, NON_REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
+    let mut done = non_regen.done();
+    match non_regen {
+        ModelDrainDisposition::YieldedForData { .. } | ModelDrainDisposition::Failed { .. } => {
+            return Ok(non_regen);
+        }
+        ModelDrainDisposition::Completed { .. } => {}
+    }
+    if has_pending_work(NON_REGEN_ACTION_FILTER).await? {
+        return Ok(ModelDrainDisposition::Completed { done });
     }
 
-    let mut done = non_regen?;
-    done += drain_where(mgr, REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await?;
-    done += drain_where(mgr, POST_REGEN_AABB_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await?;
-    Ok(done)
+    let regen = drain_where_cooperative(mgr, REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
+    done += regen.done();
+    match regen {
+        ModelDrainDisposition::YieldedForData {
+            claimed_epoch,
+            current_epoch,
+            reason,
+            ..
+        } => {
+            return Ok(ModelDrainDisposition::YieldedForData {
+                done,
+                claimed_epoch,
+                current_epoch,
+                reason,
+            });
+        }
+        ModelDrainDisposition::Failed { message, .. } => {
+            return Ok(ModelDrainDisposition::Failed { done, message });
+        }
+        ModelDrainDisposition::Completed { .. } => {}
+    }
+
+    let aabb = drain_where_cooperative(mgr, POST_REGEN_AABB_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
+    done += aabb.done();
+    Ok(match aabb {
+        ModelDrainDisposition::Completed { .. } => ModelDrainDisposition::Completed { done },
+        ModelDrainDisposition::YieldedForData {
+            claimed_epoch,
+            current_epoch,
+            reason,
+            ..
+        } => ModelDrainDisposition::YieldedForData {
+            done,
+            claimed_epoch,
+            current_epoch,
+            reason,
+        },
+        ModelDrainDisposition::Failed { message, .. } => {
+            ModelDrainDisposition::Failed { done, message }
+        }
+    })
+}
+
+/// Compatibility wrapper for Python/debug callers that only need the completed count.
+pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+    match drain_data_phases_disposition(mgr).await? {
+        ModelDrainDisposition::Completed { done }
+        | ModelDrainDisposition::YieldedForData { done, .. } => Ok(done),
+        ModelDrainDisposition::Failed { message, .. } => anyhow::bail!(message),
+    }
 }
 
 async fn has_pending_work(action_filter: &str) -> anyhow::Result<bool> {
@@ -2313,10 +2706,14 @@ async fn drain_rooms_selected(
                 }
                 match delete_work(job).await {
                     Ok(()) => report.done += 1,
-                    Err(error) => record_failure(job, &error, &mut report).await,
+                    Err(error) => {
+                        let _ = record_failure(job, &error, &mut report).await;
+                    }
                 }
             }
-            Err(error) => record_failure(job, &error, &mut report).await,
+            Err(error) => {
+                let _ = record_failure(job, &error, &mut report).await;
+            }
         }
     }
 
@@ -2415,7 +2812,9 @@ async fn drain_room_element_page(
         };
         match outcome {
             Ok(()) => report.done += 1,
-            Err(error) => record_failure(job, &error, report).await,
+            Err(error) => {
+                let _ = record_failure(job, &error, report).await;
+            }
         }
     }
 }
@@ -2551,6 +2950,7 @@ async fn run_room_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -5255,7 +5655,7 @@ mod tests {
             "pub async fn drain_non_regen(",
             "pub async fn drain_non_regen_report(",
             "pub async fn drain_post_regen_aabb_report(",
-            "pub async fn drain_data_phases(",
+            "pub async fn drain_data_phases_disposition(",
         ] {
             let body = source
                 .split_once(marker)
@@ -5287,6 +5687,46 @@ mod tests {
             let claim = body.find("drain_rooms_selected").unwrap_or(usize::MAX);
             assert!(gate < claim, "{marker} may claim room work before the gate");
         }
+    }
+
+    #[test]
+    fn initialization_not_ready_is_a_yield_not_a_retryable_model_failure() {
+        let error = anyhow::Error::new(
+            crate::data_interface::initialization_phase::InitializationNotReady {
+                snapshot: crate::data_interface::initialization_phase::InitializationSnapshot {
+                    epoch_id: 9,
+                    status: "design_running",
+                    current_phase: Some("design"),
+                    data_ready: false,
+                    model_ready: false,
+                    model_in_flight: false,
+                    phases: Default::default(),
+                    blockers: Vec::new(),
+                    shadowed: Vec::new(),
+                },
+            },
+        )
+        .context("model generation gate closed");
+
+        assert!(is_initialization_not_ready(&error));
+        assert!(!is_initialization_not_ready(&anyhow::anyhow!(
+            "mesh generation failed"
+        )));
+    }
+
+    #[test]
+    fn yielded_disposition_preserves_completed_count_and_reason() {
+        let disposition = ModelDrainDisposition::YieldedForData {
+            done: 3,
+            claimed_epoch: 7,
+            current_epoch: 8,
+            reason: ModelDrainYieldReason::EpochChanged,
+        };
+        assert_eq!(disposition.done(), 3);
+        let ModelDrainDisposition::YieldedForData { reason, .. } = disposition else {
+            panic!("expected yielded disposition")
+        };
+        assert_eq!(reason.as_str(), "epoch_changed");
     }
 
     #[test]

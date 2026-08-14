@@ -2442,12 +2442,29 @@ async fn idle_round(
         }
     }
     let data_phase_failed = if model_phase_open {
-        match model_update_pending::drain_data_phases(mgr).await {
-            Ok(n) if n > 0 => {
-                println!("空闲模型积压消化完成 {n} 个任务");
+        match model_update_pending::drain_data_phases_disposition(mgr).await {
+            Ok(model_update_pending::ModelDrainDisposition::Completed { done }) => {
+                if done > 0 {
+                    println!("空闲模型积压消化完成 {done} 个任务");
+                }
                 false
             }
-            Ok(_) => false,
+            Ok(model_update_pending::ModelDrainDisposition::YieldedForData {
+                done,
+                claimed_epoch,
+                current_epoch,
+                reason,
+            }) => {
+                println!(
+                    "空闲模型积压完成 {done} 个后让位数据：reason={} claimed_epoch={claimed_epoch} current_epoch={current_epoch}",
+                    reason.as_str()
+                );
+                false
+            }
+            Ok(model_update_pending::ModelDrainDisposition::Failed { done, message }) => {
+                println!("空闲模型积压完成 {done} 个后失败（保留待重试）: {message}");
+                true
+            }
             Err(error) => {
                 println!("空闲模型积压消化失败（保留待重试）: {error:#}");
                 true
@@ -3742,7 +3759,7 @@ mod tests {
             .expect("idle_round end exists")
             .0;
         let gate = idle.find("let model_phase_open").unwrap();
-        let drain = idle.find("drain_data_phases(mgr)").unwrap();
+        let drain = idle.find("drain_data_phases_disposition(mgr)").unwrap();
         let probe = idle.find("has_pending_data_work()").unwrap();
         assert!(gate < drain && drain < probe);
         assert!(

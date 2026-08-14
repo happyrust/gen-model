@@ -102,7 +102,7 @@ def test_rest_methods_hit_documented_routes(stub):
     client.health()
     client.update_preview("AMS")
     client.update_execute("AMS", [7997, 7998])
-    client.tasks(state="running", limit=5)
+    client.tasks(state="yielded", kind="model_drain", limit=5)
     client.task("task-1")
     client.model_ensure("24381_100677", force=True)
     client.pending_units()
@@ -116,7 +116,7 @@ def test_rest_methods_hit_documented_routes(stub):
         ("GET", "/api/v1/health"),
         ("POST", "/api/v1/update/preview"),
         ("POST", "/api/v1/update/execute"),
-        ("GET", "/api/v1/tasks?state=running&limit=5"),
+        ("GET", "/api/v1/tasks?state=yielded&kind=model_drain&limit=5"),
         ("GET", "/api/v1/tasks/task-1"),
         ("POST", "/api/v1/model/ensure"),
         ("GET", "/api/v1/update/pending-units"),

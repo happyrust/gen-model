@@ -219,7 +219,13 @@ class GenModelClient:
         *,
         timeout: float = 120.0,
         interval: float = 0.5,
-        terminal_states: tuple[str, ...] = ("succeeded", "completed", "failed", "cancelled"),
+        terminal_states: tuple[str, ...] = (
+            "succeeded",
+            "completed",
+            "yielded",
+            "failed",
+            "cancelled",
+        ),
     ) -> Any:
         deadline = time.monotonic() + timeout
         last: Any = None

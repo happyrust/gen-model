@@ -17,6 +17,8 @@ use serde::Serialize;
 
 /// 一个数据批次（dbnum × 会话区间）的任务行。
 pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
+/// 一页持久模型工作单的消费尝试。真值仍在 `model_update_pending` 表；这行只供观察。
+pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
 /// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
 pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 
@@ -36,6 +38,8 @@ pub enum TaskState {
     Running,
     Succeeded,
     Partial,
+    /// 初始化门或数据优先级在本页中途关闭；未执行的持久行原样保留。
+    Yielded,
     Failed,
 }
 
@@ -46,13 +50,17 @@ impl TaskState {
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Partial => "partial",
+            Self::Yielded => "yielded",
             Self::Failed => "failed",
         }
     }
 
     /// 终态才可被容量剔除；queued / running 永不剔除（ADR-011 §11）。
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Partial | Self::Failed)
+        matches!(
+            self,
+            Self::Succeeded | Self::Partial | Self::Yielded | Self::Failed
+        )
     }
 }
 
@@ -221,6 +229,38 @@ impl TaskRegistry {
         self.insert_entry(TaskEntry {
             task_id: task_id.to_string(),
             kind: TASK_KIND_ROOM_RECALC,
+            state: TaskState::Running,
+            project: project.to_string(),
+            created_at: now.clone(),
+            started_at: Some(now),
+            finished_at: None,
+            dbnum: None,
+            db_type: None,
+            start_sesno: None,
+            end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
+            units_done: Some(0),
+            total_units: Some(total),
+            events_seen: 0,
+            detail: Some(detail),
+            result: None,
+        });
+    }
+
+    /// 建一条模型消费页。它不是第二份队列：重启恢复只看 durable pending，
+    /// TaskRegistry 仅把本次认领的 epoch、来源与根暴露给 REST/Python/Plant UI。
+    pub fn insert_running_model_drain(
+        &self,
+        task_id: &str,
+        project: &str,
+        total: u32,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        self.insert_entry(TaskEntry {
+            task_id: task_id.to_string(),
+            kind: TASK_KIND_MODEL_DRAIN,
             state: TaskState::Running,
             project: project.to_string(),
             created_at: now.clone(),
@@ -668,5 +708,38 @@ mod tests {
             entry.started_at.is_some(),
             "「已排」与「已用」是两个起点，开跑时刻不能缺"
         );
+    }
+
+    #[test]
+    fn yielded_model_drain_is_terminal_and_keeps_its_root_identity() {
+        let registry = TaskRegistry::default();
+        registry.insert_running_model_drain(
+            "model-1",
+            "P",
+            1,
+            serde_json::json!({
+                "epoch_id": 7,
+                "roots": [{
+                    "dbnum": 8000,
+                    "source_end_sesno": 224,
+                    "target_refno": "1/2",
+                    "action": "regen_root",
+                    "revision": 3
+                }]
+            }),
+        );
+        registry.finish(
+            "model-1",
+            TaskState::Yielded,
+            serde_json::json!({ "completed": 0, "unstarted": 1 }),
+        );
+
+        let entry = registry
+            .get("model-1")
+            .expect("model task must remain visible");
+        assert_eq!(entry.kind, TASK_KIND_MODEL_DRAIN);
+        assert_eq!(entry.state.as_str(), "yielded");
+        assert!(entry.state.is_terminal());
+        assert_eq!(entry.detail.unwrap()["roots"][0]["target_refno"], "1/2");
     }
 }
