@@ -1,0 +1,39 @@
+-- db8000 BRAN 增量测试 / 第二轮 apply：把支管里的一个显式管段抬高 500mm。
+--
+-- 目标构件：FTUBE 4 of BRANCH /C-OR-1R345-C（= 24384/23262，PIPE /1RX-345）。
+-- 挑它的理由：库里它的包围盒是 (10868.6,11979.8,2900)~(11250.7,12351.3,2930)
+-- ——U 方向只有 30mm 厚的一根水平管，抬 500mm 之后 U 必须整体变成 3400~3430，
+-- 是个一眼能判真假的位移信号。
+--
+-- 与第一轮（db8000_bran_hpos_apply.mac，改 BRAN 的 HPOS）的分工：
+--   * 第一轮证明了「BRAN 属性变更 → 交付单元重生成 → 写回 → 水位推进」这条链，
+--     但这条支管的管子是显式 FTUB 构件，头点一动并不改动任何已有构件的几何，
+--     所以包围盒纹丝不动（实测如此，不是缺陷）；
+--   * 这一轮动的是构件自身的 POS，几何必须跟着走——补上「位移真的传播到
+--     inst_relate 的 world_trans / aabb」这半边。
+--
+-- restore 值来自 db8000_bran_member_probe.mac 的实测基线（2026-08-12）：
+--   Position E 10887mm N 12332mm U 2900mm
+-- 顺带记一条与旧注释相反的事实：**按 refno 导航在 db8000 的 TTY 会话里是成立的**
+-- （db8000_zone_members_probe.mac 头注说不成立；那条结论至少不适用于本会话形态，
+-- 上面那次探针 `=24384/23262` 一次就中）。
+--
+-- 纪律：恰好一个 SAVEWORK；不写 QUIT/FINISH（会话归 l3_suite driver 的 wrapper）。
+--
+-- restore 搭档：db8000_bran_ftub_move_restore.mac
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_ftub_move_apply.log" OVER
+$P CODEX-DB8000-BRAN-FTUB-MOVE-APPLY-ALIVE
+=24384/23262
+Q CE
+Q TYPE
+Q REF
+Q OWNE
+Q POS
+POS E 10887mm N 12332mm U 3400mm
+Q CE
+Q REF
+Q POS
+SAVEWORK 'CODEX db8000 FTUBE 4 of /C-OR-1R345-C up 500mm (U2900 -> U3400)'
+$P CODEX-DB8000-BRAN-FTUB-MOVE-APPLY-DONE
+ALPHA LOG END

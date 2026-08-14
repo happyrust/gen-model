@@ -210,3 +210,29 @@ def test_net_changes_refuses_windows_beyond_the_latest_session(
         configured.parse.net_changes(
             str(snapshots["parent_deleted"]), 1, manifest["window"]["end_sesno"] + 10
         )
+
+
+def test_net_window_returns_semantic_operations_without_a_database(
+    configured, snapshots, manifest
+):
+    """公开语义入口必须接到生产净窗口合成器，而不是只回传记录位置触达集。"""
+    window = manifest["window"]
+    refs = manifest["refs"]
+    result = configured.parse.net_window(
+        str(snapshots["parent_deleted"]),
+        window["start_sesno"],
+        window["end_sesno"],
+        detail=True,
+    )
+
+    operations = [
+        operation
+        for session in result["window"].values()
+        for operation in session
+    ]
+    by_refno = {operation["refno"]: operation for operation in operations}
+    assert result["counts"] == {"added": 0, "deleted": 2, "modified": 1}
+    assert by_refno[refs["zone"]]["op"] == "modified"
+    assert by_refno[refs["parent_equi"]]["op"] == "deleted"
+    assert by_refno[refs["child"]]["op"] == "deleted"
+    assert result["unparseable_finals"] == 0

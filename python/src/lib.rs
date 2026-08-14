@@ -327,6 +327,61 @@ fn net_changes(
     Ok(pythonize(py, &value)?.unbind())
 }
 
+/// 解析器语义净窗口：会话索引差分先圈出两端记录位置，再在文件内解析 base / 终稿
+/// 并做一次属性 diff。与 [`net_changes`] 的索引触达三态不同，本入口会过滤“换页但
+/// 内容相同”的原样重写。E3D 自己推进的显式元数据（例如 BRAN.CACHID）仍会如实
+/// 返回，调用方可以据属性桶区分业务改动与保存期元数据。
+///
+/// 返回 `{requested_start/end, window: {sesno: [op, ...]}, counts,
+/// warnings, unchanged_rewrites, unparseable_finals}`。`detail=True` 时 Modified 携带
+/// 完整属性旧值/新值。全程只读 dabacon 文件，不连接 SurrealDB。
+#[pyfunction]
+#[pyo3(signature = (path, start, end, detail=false))]
+fn net_window(
+    py: Python<'_>,
+    path: PathBuf,
+    start: i32,
+    end: i32,
+    detail: bool,
+) -> PyResult<Py<PyAny>> {
+    let value = py
+        .detach(|| {
+            let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
+            io.open()
+                .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
+            let outcome = aios_database::data_interface::net_window::collect_net_window(
+                &mut io,
+                start..=end,
+            )?;
+            let mut counts = serde_json::Map::from_iter([
+                ("added".into(), serde_json::json!(0usize)),
+                ("deleted".into(), serde_json::json!(0usize)),
+                ("modified".into(), serde_json::json!(0usize)),
+            ]);
+            for operation in outcome.window.values().flatten() {
+                let key = match &operation.detail {
+                    pdms_io::io::EleOperationDetail::Add(_) => "added",
+                    pdms_io::io::EleOperationDetail::Deleted => "deleted",
+                    pdms_io::io::EleOperationDetail::Modified(_) => "modified",
+                    pdms_io::io::EleOperationDetail::None => continue,
+                };
+                let count = counts[key].as_u64().unwrap_or_default() + 1;
+                counts.insert(key.into(), serde_json::json!(count));
+            }
+            anyhow::Ok(serde_json::json!({
+                "requested_start": start,
+                "requested_end": end,
+                "window": convert::window_to_json(&outcome.window, detail),
+                "counts": counts,
+                "warnings": outcome.warnings,
+                "unchanged_rewrites": outcome.unchanged_rewrites,
+                "unparseable_finals": outcome.unparseable_finals,
+            }))
+        })
+        .map_err(anyhow_to_py)?;
+    Ok(pythonize(py, &value)?.unbind())
+}
+
 #[pymodule]
 fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_config, m)?)?;
@@ -338,6 +393,7 @@ fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     parse.add_function(wrap_pyfunction!(sessions, &parse)?)?;
     parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
     parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;
+    parse.add_function(wrap_pyfunction!(net_window, &parse)?)?;
     parse.add_function(wrap_pyfunction!(element, &parse)?)?;
     parse.add_function(wrap_pyfunction!(noun_dict, &parse)?)?;
     m.add_submodule(&parse)?;

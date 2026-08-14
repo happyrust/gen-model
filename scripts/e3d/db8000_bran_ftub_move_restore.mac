@@ -1,0 +1,24 @@
+-- db8000 BRAN 增量测试 / 第二轮 restore：把管段放回实测基线 U 2900mm。
+--
+-- 目标构件：FTUBE 4 of BRANCH /C-OR-1R345-C（= 24384/23262）。
+-- 基线来自 db8000_bran_member_probe.mac：Position E 10887mm N 12332mm U 2900mm。
+-- 三个分量全写，让这条腿自身就是完整的终态声明，不依赖「只改过 U」这个记忆。
+--
+-- 跑完这条腿，这轮测试对库的净变更为零（apply + restore 各自占一个会话号）：
+-- 增量侧应当把 inst_relate 的 world_trans / aabb 收敛回基线值。
+--
+-- 纪律同 apply 腿：恰好一个 SAVEWORK，不写 QUIT/FINISH。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_ftub_move_restore.log" OVER
+$P CODEX-DB8000-BRAN-FTUB-MOVE-RESTORE-ALIVE
+=24384/23262
+Q CE
+Q REF
+Q POS
+POS E 10887mm N 12332mm U 2900mm
+Q CE
+Q REF
+Q POS
+SAVEWORK 'CODEX db8000 FTUBE 4 of /C-OR-1R345-C back to U2900 (restore)'
+$P CODEX-DB8000-BRAN-FTUB-MOVE-RESTORE-DONE
+ALPHA LOG END

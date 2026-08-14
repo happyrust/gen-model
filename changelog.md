@@ -686,3 +686,15 @@
 ## 历史记录
 
 1、添加自动增量更新文件的修改，启动时会检查当前数据库和E3d数据库的一致性
+## 2026-08-14
+
+### 新增
+
+- Python 解析层新增 `aios_db.parse.net_window(path, start, end, detail=False)`：复用生产
+  `net_window::collect_net_window`，只读 dabacon 文件即可得到属性语义上的净增删改，
+  并透出 `unchanged_rewrites` / warnings。与原 `parse.net_changes`（索引记录位置触达
+  三态）分工明确：E3D TTY 的 apply + restore 合并窗口会过滤已恢复的业务属性，
+  同时如实保留 E3D 自增的 `CACHID` 等保存期元数据，不需要反查 SurrealDB。
+- 新增 `scripts/e3d/Test-TtyNetWindow.ps1`：自动执行 FTUB apply / 解析器断言 /
+  restore / 合并窗口断言，`finally` 保证恢复腿执行，并产出 baseline 副本、语义 diff、
+  命令退出状态与 rollback 验证记录。
