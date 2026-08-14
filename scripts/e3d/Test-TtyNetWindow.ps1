@@ -1,6 +1,7 @@
 param(
     [string]$DbFile = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001',
     [string]$ProjectDir = 'D:\AVEVA\Projects\E3D3.1\AvevaMarineSample',
+    [string]$AiosProject = 'AvevaMarineSample',
     [string]$Refno = '24384_23262',
     [string]$ApplyMacro = 'scripts/e3d/db8000_bran_ftub_move_apply.mac',
     [string]$RestoreMacro = 'scripts/e3d/db8000_bran_ftub_move_restore.mac',
@@ -29,8 +30,9 @@ from pathlib import Path
 
 repo, evidence, db_file, project_dir, l3, refno, apply_macro, restore_macro = map(Path, sys.argv[1:9])
 refno = str(sys.argv[6])
-expected_apply = [float(value) for value in sys.argv[9].split(",")]
-expected_restore = [float(value) for value in sys.argv[10].split(",")]
+aios_project = sys.argv[9]
+expected_apply = [float(value) for value in sys.argv[10].split(",")]
+expected_restore = [float(value) for value in sys.argv[11].split(",")]
 
 import aios_db
 aios_db.set_config(str(repo / "python/tests/DbOption-ci"))
@@ -62,7 +64,14 @@ def op_for(result: dict, wanted: str) -> dict | None:
 
 def run_macro(macro: Path, label: str) -> dict:
     output = evidence / f"{label}-driver"
-    command = [str(l3), "--check-driver", str(macro), "--project-dir", str(project_dir), "--output", str(output)]
+    command = [
+        str(l3),
+        "--check-driver", str(macro),
+        "--target-db-file", str(db_file),
+        "--aios-project", aios_project,
+        "--project-dir", str(project_dir),
+        "--output", str(output),
+    ]
     env = os.environ.copy()
     env["L3_ALLOW_EXISTING_E3D_SESSION"] = "1"
     completed = subprocess.run(command, cwd=repo, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True)
@@ -156,5 +165,5 @@ print(json.dumps({
 '@
 Set-Content -LiteralPath $runner -Value $template -Encoding utf8
 
-& $python $runner $repo (Resolve-Path $Output).Path (Resolve-Path $DbFile).Path (Resolve-Path $ProjectDir).Path $l3 $Refno (Resolve-Path (Join-Path $repo $ApplyMacro)).Path (Resolve-Path (Join-Path $repo $RestoreMacro)).Path $ExpectedApplyPos $ExpectedRestorePos
+& $python $runner $repo (Resolve-Path $Output).Path (Resolve-Path $DbFile).Path (Resolve-Path $ProjectDir).Path $l3 $Refno (Resolve-Path (Join-Path $repo $ApplyMacro)).Path (Resolve-Path (Join-Path $repo $RestoreMacro)).Path $AiosProject $ExpectedApplyPos $ExpectedRestorePos
 if ($LASTEXITCODE) { throw "TTY net-window test failed (exit $LASTEXITCODE); evidence: $Output" }

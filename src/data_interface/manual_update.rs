@@ -2888,6 +2888,14 @@ fn baseline_needs_full_parse(pe_count: usize, applied_sesno: i32) -> bool {
     pe_count == 0 || applied_sesno == 0
 }
 
+/// Rows written by an interrupted baseline have no committed watermark and
+/// therefore cannot be mixed into the next `INSERT IGNORE` replay.  Keeping
+/// them would make the completeness check fail forever when the old attempt
+/// left a stale refno behind.
+fn baseline_has_uncommitted_rows(pe_count: usize, applied_sesno: i32) -> bool {
+    pe_count > 0 && applied_sesno == 0
+}
+
 fn baseline_stats_need_rebuild(pe_count: usize, info_count: usize) -> bool {
     pe_count != info_count
 }
@@ -3271,6 +3279,14 @@ impl AiosDBManager {
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
         let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
+        if baseline_has_uncommitted_rows(count, applied_sesno) {
+            let wiped = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?;
+            println!(
+                "dbnum={dbnum} 清理未提交基线残留 PE={}，从水位 0 重新解析",
+                wiped.pe_rows
+            );
+            (count, info_count, root_count) = baseline_counts(dbnum).await?;
+        }
         let mut parsed_count = None;
         if baseline_needs_full_parse(count, applied_sesno) {
             let options = baseline_sync_options(&self.db_option, file_name, dbnum);
@@ -5874,10 +5890,22 @@ mod tests {
     #[test]
     fn partial_baseline_is_rebuilt_before_advancing_watermark() {
         assert!(baseline_needs_full_parse(21_000, 0));
+        assert!(baseline_has_uncommitted_rows(21_000, 0));
         assert!(baseline_needs_full_parse(0, 83));
+        assert!(!baseline_has_uncommitted_rows(0, 0));
+        assert!(!baseline_has_uncommitted_rows(21_000, 83));
         assert!(baseline_stats_need_rebuild(21_000, 55_653));
         assert!(!baseline_needs_full_parse(34_653, 83));
         assert!(!baseline_stats_need_rebuild(34_653, 34_653));
+
+        let source = include_str!("manual_update.rs");
+        let cleanup = source
+            .find("if baseline_has_uncommitted_rows(count, applied_sesno)")
+            .expect("baseline must detect uncommitted rows");
+        let parse = source
+            .find("sync_total_async_threaded(")
+            .expect("baseline must invoke the full parser");
+        assert!(cleanup < parse, "stale rows must be wiped before replay");
     }
 
     /// 回退整库重建（live，ADR-021）：`wipe_dbnum_for_reinit` 一次做对四件事——

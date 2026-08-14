@@ -436,12 +436,7 @@ fn main() -> Result<()> {
         let probe_path = fixture::absolutize(&paths.repo, Path::new(probe));
         let source = fs::read_to_string(&probe_path)
             .with_context(|| format!("read check-driver macro {}", probe_path.display()))?;
-        let stateful = source.lines().any(|line| {
-            matches!(
-                line.trim().to_ascii_uppercase().as_str(),
-                "SAVEWORK" | "SAVE WORK"
-            )
-        });
+        let stateful = macro_contains_savework(&source);
         let (log, outcome) = if stateful {
             let target_db_file = cli
                 .target_db_file
@@ -556,6 +551,20 @@ fn env_path(name: &str, default: impl Into<PathBuf>) -> PathBuf {
     std::env::var_os(name)
         .map(PathBuf::from)
         .unwrap_or_else(|| default.into())
+}
+
+fn macro_contains_savework(source: &str) -> bool {
+    source.lines().any(|line| {
+        let mut tokens = line.split_ascii_whitespace();
+        let Some(first) = tokens.next() else {
+            return false;
+        };
+        first.eq_ignore_ascii_case("SAVEWORK")
+            || (first.eq_ignore_ascii_case("SAVE")
+                && tokens
+                    .next()
+                    .is_some_and(|second| second.eq_ignore_ascii_case("WORK")))
+    })
 }
 
 fn select_scenarios(csv: &str) -> Result<Vec<&'static Scenario>> {
@@ -1987,6 +1996,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stateful_macro_detection_accepts_save_comments_and_rejects_lookalikes() {
+        assert!(macro_contains_savework("SAVEWORK 'pipe update'"));
+        assert!(macro_contains_savework("  save work 'pipe update'"));
+        assert!(!macro_contains_savework("-- SAVEWORK 'comment only'"));
+        assert!(!macro_contains_savework("SAVEWORKAROUND"));
+        assert!(!macro_contains_savework("Q CE\nQ TYPE\nQ OWNE"));
     }
 
     #[test]
