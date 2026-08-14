@@ -2035,6 +2035,11 @@ fn data_phase_is_clear(succeeded: bool, has_more: bool) -> bool {
 }
 
 pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        return Ok(0);
+    }
     // 四个阶段的先后是硬约束，不是习惯：
     // 1. 非 regen 先跑——`cascade_expand` 会反过来入队 regen 工作；
     // 2. regen 次之——房间归属要读几何与包围盒，在重生成之前算出来的结果本身就是错的；
@@ -2048,6 +2053,11 @@ pub async fn drain(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 }
 
 pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        return Ok(0);
+    }
     drain_where(mgr, NON_REGEN_ACTION_FILTER, None).await
 }
 
@@ -2056,6 +2066,11 @@ pub async fn drain_non_regen(mgr: &AiosDBManager) -> anyhow::Result<usize> {
 /// 批次执行前的那次前置消化用它：非 regen 积压是全局的，只有**本批这个库**的
 /// 前置失败才该拦下本批的模型生成。
 pub async fn drain_non_regen_report(mgr: &AiosDBManager) -> anyhow::Result<DrainReport> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        return Ok(DrainReport::default());
+    }
     drain_where_report(mgr, NON_REGEN_ACTION_FILTER, None).await
 }
 
@@ -2063,6 +2078,11 @@ pub async fn drain_post_regen_aabb_report(
     mgr: &AiosDBManager,
     dbnum: u32,
 ) -> anyhow::Result<DrainReport> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        return Ok(DrainReport::default());
+    }
     drain_where_report(
         mgr,
         &format!("{POST_REGEN_AABB_ACTION_FILTER} AND dbnum = {dbnum}"),
@@ -2077,6 +2097,11 @@ pub async fn drain_post_regen_aabb_report(
 /// 单独收一轮（包成 `room_recalc` 任务），不跟在积压消化后面顺手带走——那样
 /// 房间轮就没有自己的任务行了。
 pub async fn drain_data_phases(mgr: &AiosDBManager) -> anyhow::Result<usize> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        return Ok(0);
+    }
     let non_regen = drain_where(mgr, NON_REGEN_ACTION_FILTER, Some(DRAIN_PAGE_SIZE)).await;
     let has_more = if non_regen.is_ok() {
         has_pending_work(NON_REGEN_ACTION_FILTER).await?
@@ -2107,6 +2132,21 @@ async fn has_pending_work(action_filter: &str) -> anyhow::Result<bool> {
 
 pub async fn has_pending_data_work() -> anyhow::Result<bool> {
     has_pending_work(DATA_ACTION_FILTER).await
+}
+
+/// Terminal data/model work is still unsettled initialization work.  It is not
+/// retryable automatically, but it must keep `model_ready=false` rather than
+/// letting a dead letter masquerade as a completed model phase.
+pub async fn has_dead_data_work() -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query(format!(
+            "RETURN array::len((SELECT VALUE id FROM {TABLE} \
+             WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS} \
+             {DATA_ACTION_FILTER} LIMIT 1)) > 0;"
+        ))
+        .await?
+        .check()?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
 }
 
 /// 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
@@ -2179,6 +2219,11 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
 /// Global idle-room drain. It keeps the historical backlog behavior while the
 /// post-commit worker uses [`drain_rooms_scoped`] to address only its own rows.
 pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Result<DrainReport> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .postprocess_allowed()
+    {
+        return Ok(DrainReport::default());
+    }
     drain_rooms_selected(db_option, None).await
 }
 
@@ -2189,6 +2234,11 @@ pub(crate) async fn drain_rooms_scoped(
     db_option: &aios_core::options::DbOption,
     scope: &RoomDrainScope,
 ) -> anyhow::Result<DrainReport> {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .postprocess_allowed()
+    {
+        return Ok(DrainReport::default());
+    }
     if scope.is_empty() {
         return Ok(DrainReport::default());
     }
@@ -5195,5 +5245,62 @@ mod tests {
             .expect("cleanup finalize capacity fixture")
             .check()
             .expect("valid cleanup statements");
+    }
+
+    #[test]
+    fn initialization_gate_precedes_every_model_pending_claim() {
+        let source = include_str!("model_update_pending.rs");
+        for marker in [
+            "pub async fn drain(",
+            "pub async fn drain_non_regen(",
+            "pub async fn drain_non_regen_report(",
+            "pub async fn drain_post_regen_aabb_report(",
+            "pub async fn drain_data_phases(",
+        ] {
+            let body = source
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("missing {marker}"))
+                .1;
+            let gate = body
+                .find("model_generation_allowed()")
+                .unwrap_or_else(|| panic!("{marker} lacks initialization gate"));
+            let claim = body
+                .find("drain_")
+                .or_else(|| body.find("drain_where"))
+                .unwrap_or(usize::MAX);
+            assert!(
+                gate < claim,
+                "{marker} may claim/increment attempts before the gate"
+            );
+        }
+        for marker in [
+            "pub async fn drain_rooms(",
+            "pub(crate) async fn drain_rooms_scoped(",
+        ] {
+            let body = source
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("missing {marker}"))
+                .1;
+            let gate = body
+                .find("postprocess_allowed()")
+                .unwrap_or_else(|| panic!("{marker} lacks postprocess gate"));
+            let claim = body.find("drain_rooms_selected").unwrap_or(usize::MAX);
+            assert!(gate < claim, "{marker} may claim room work before the gate");
+        }
+    }
+
+    #[test]
+    fn model_dead_letters_are_unsettled_initialization_work() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub async fn has_dead_data_work()")
+            .expect("dead-work probe exists")
+            .1
+            .split_once("/// 待重算房间目标")
+            .expect("dead-work probe end exists")
+            .0;
+        assert!(body.contains("status IN ['pending', 'failed']"));
+        assert!(body.contains("(attempts?:0) >= {MAX_ATTEMPTS}"));
+        assert!(body.contains("{DATA_ACTION_FILTER}"));
     }
 }

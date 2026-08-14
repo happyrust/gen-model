@@ -450,6 +450,21 @@ impl SideEffectCompensator {
         Ok(Self::render_side_effect_status(&jobs))
     }
 
+    /// Dead non-spatial side effects are terminal for automatic retry but not
+    /// successful initialization.  The model-ready barrier uses this probe so
+    /// exhausted SYST/ref-reversal work remains visible as unsettled.
+    pub async fn has_dead_work() -> anyhow::Result<bool> {
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN array::len((SELECT VALUE id FROM {TABLE} \
+                 WHERE kind != 'spatial_reconcile' AND status IN ['pending', 'failed'] \
+                 AND (attempts?:0) >= {MAX_ATTEMPTS} LIMIT 1)) > 0;"
+            ))
+            .await?
+            .check()?;
+        Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+    }
+
     /// /health `side_effect_pending` 的纯渲染半边（形状由单测钉住）。
     ///
     /// `pending` = 仍在重试预算内（drain 会取）；`dead_letters` = attempts 到顶
@@ -926,6 +941,20 @@ mod tests {
                 .expect("降级必须报出错误原因")
                 .contains("boom")
         );
+    }
+
+    #[test]
+    fn side_effect_dead_letters_remain_unsettled_for_initialization() {
+        let source = include_str!("side_effect_pending.rs");
+        let body = source
+            .split_once("pub async fn has_dead_work()")
+            .expect("dead-work probe exists")
+            .1
+            .split_once("/// /health")
+            .expect("dead-work probe end exists")
+            .0;
+        assert!(body.contains("kind != 'spatial_reconcile'"));
+        assert!(body.contains("(attempts?:0) >= {MAX_ATTEMPTS}"));
     }
 
     /// P2-4「可复活」：复活只碰**可 drain 两类**的到顶死信，把 attempts 清零回到

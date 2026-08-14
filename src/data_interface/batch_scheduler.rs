@@ -14,10 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::data_interface::batch_queue::{self, BatchIntent, BatchState, DataBatch, Enqueued};
+use crate::data_interface::initialization_phase::{DataPhase, InitializationCoordinator};
 use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
 /// 一次发现（文件会话号超过水位）携带的全部入队信息。
@@ -26,6 +27,8 @@ pub struct DiscoveredBatch {
     pub project: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub phase: DataPhase,
+    pub epoch_id: u64,
     pub intent: BatchIntent,
     pub path: PathBuf,
     /// 完整文件名（含扩展名，由 `discover_batch` 从 path 现取；仅作展示与
@@ -72,6 +75,8 @@ pub struct FrozenBatch {
     pub project: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub phase: DataPhase,
+    pub epoch_id: u64,
     pub intent: BatchIntent,
     pub path: PathBuf,
     pub file_name: String,
@@ -85,6 +90,8 @@ pub struct EnqueuedBatchInfo {
     pub task_id: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub phase: &'static str,
+    pub epoch_id: u64,
     pub intent: &'static str,
     /// 在排队中的位置（1 起，含运行中的行不算）。
     pub position: usize,
@@ -133,6 +140,9 @@ pub struct ManualEnqueueReceipt {
     pub already_covered: Vec<u32>,
     /// 阻断的库（同号多文件 / 回退）——压根不入队（ADR-011 结果段）。
     pub blocked: Vec<BlockedDbnum>,
+    /// 跨项目裸 dbnum 冲突中被显式项目优先级遮蔽的候选。
+    #[serde(default)]
+    pub shadowed: Vec<ShadowedCandidate>,
     /// 水位已覆盖文件、无事可做的 dbnum 数。
     pub up_to_date: usize,
     /// 本次请求带了 `dbnums` 子集（ADR-020）而**没被勾选**的库：不扫描、不入队、
@@ -147,12 +157,23 @@ pub struct BlockedDbnum {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowedCandidate {
+    pub project: String,
+    pub dbnum: u32,
+    pub file_path: String,
+    pub selected_project: String,
+}
+
 /// 队列快照的一行（含运行中的），供面板/日志。
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueRow {
     pub task_id: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub phase: &'static str,
+    pub epoch_id: u64,
+    pub blocked_by_phase: Option<&'static str>,
     pub intent: &'static str,
     /// `running` / `queued` / `held`。`held` = 重扫排出来的积压，等这个 dbnum
     /// 真的来一次增量才会被派发（见 [`batch_queue::DataBatch::held`]）。
@@ -227,6 +248,7 @@ impl BatchScheduler {
     ) -> EnqueueOutcome {
         if !hold {
             self.arm_auto_work();
+            InitializationCoordinator::global().arm();
         }
         let outcome = {
             let mut state = self.queue();
@@ -238,6 +260,8 @@ impl BatchScheduler {
                 found.file_latest_sesno,
                 hold,
                 found.intent,
+                found.phase,
+                found.epoch_id,
             );
 
             let queued_row = state
@@ -283,6 +307,8 @@ impl BatchScheduler {
                         task_id,
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
+                        phase: found.phase.as_str(),
+                        epoch_id: found.epoch_id,
                         intent: found.intent.as_str(),
                         position,
                         start_sesno: found.applied_sesno + 1,
@@ -371,6 +397,8 @@ impl BatchScheduler {
                         task_id,
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
+                        phase: row.phase.as_str(),
+                        epoch_id: row.epoch_id,
                         intent: row.intent.as_str(),
                         position,
                         start_sesno: row.start_sesno,
@@ -410,6 +438,10 @@ impl BatchScheduler {
             paused,
             in_flight_empty,
             &is_exclusive,
+            |batch| {
+                batch.epoch_id == 0
+                    || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id)
+            },
         ) {
             batch_queue::NextDispatch::Freeze(index) => index,
             batch_queue::NextDispatch::HeadNeedsExclusive => {
@@ -428,12 +460,15 @@ impl BatchScheduler {
         };
         state.meta.insert((row.dbnum, true), meta.clone());
         registry.mark_started(&meta.task_id);
-        DispatchOutcome::Frozen {
+        let epoch_id = row.epoch_id;
+        let outcome = DispatchOutcome::Frozen {
             job: FrozenBatch {
                 task_id: meta.task_id,
                 project: meta.project,
                 dbnum: row.dbnum,
                 db_type: row.db_type,
+                phase: row.phase,
+                epoch_id: row.epoch_id,
                 intent: row.intent,
                 path: meta.path,
                 file_name: meta.file_name,
@@ -441,7 +476,16 @@ impl BatchScheduler {
                 end_sesno: row.end_sesno,
             },
             exclusive,
-        }
+        };
+        let pending = state
+            .queue
+            .iter()
+            .filter(|batch| batch.epoch_id == epoch_id)
+            .map(|batch| (batch.phase, batch.state == BatchState::Running))
+            .collect::<Vec<_>>();
+        drop(state);
+        InitializationCoordinator::global().reconcile_pending(epoch_id, pending);
+        outcome
     }
 
     /// 批次执行完毕：把运行中的那行从队列里摘掉（终态只留在注册表历史里）。
@@ -451,6 +495,15 @@ impl BatchScheduler {
             .queue
             .retain(|b| !(b.dbnum == dbnum && b.state == BatchState::Running));
         state.meta.remove(&(dbnum, true));
+        let epoch_id = InitializationCoordinator::global().snapshot().epoch_id;
+        let pending = state
+            .queue
+            .iter()
+            .filter(|batch| batch.epoch_id == epoch_id)
+            .map(|batch| (batch.phase, batch.state == BatchState::Running))
+            .collect::<Vec<_>>();
+        drop(state);
+        InitializationCoordinator::global().reconcile_pending(epoch_id, pending);
     }
 
     /// 冻结点重扫定下真实上界之后，把它回写到运行中的队列行与任务行。
@@ -631,6 +684,16 @@ impl BatchScheduler {
                     task_id,
                     dbnum: b.dbnum,
                     db_type: b.db_type.clone(),
+                    phase: b.phase.as_str(),
+                    epoch_id: b.epoch_id,
+                    blocked_by_phase: (b.epoch_id != 0
+                        && !InitializationCoordinator::global().allows(b.phase, b.epoch_id))
+                    .then(|| {
+                        InitializationCoordinator::global()
+                            .snapshot()
+                            .current_phase
+                            .unwrap_or("manifest")
+                    }),
                     intent: b.intent.as_str(),
                     // 挂起行单列一个状态，不混进 queued：它不会自己往前走，
                     // 显示成排队会让人以为消费者卡住了，而那是完全不同的故障。
@@ -666,6 +729,8 @@ mod tests {
             project: "P".into(),
             dbnum,
             db_type: "DESI".into(),
+            phase: DataPhase::Design,
+            epoch_id: 0,
             intent: BatchIntent::ApplyWindow,
             path: PathBuf::from(format!("D:/proj/db{dbnum}")),
             file_name: format!("db{dbnum}"),

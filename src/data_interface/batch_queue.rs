@@ -35,6 +35,8 @@ impl BatchIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataBatch {
     pub dbnum: u32,
+    pub phase: crate::data_interface::initialization_phase::DataPhase,
+    pub epoch_id: u64,
     pub db_type: String,
     pub intent: BatchIntent,
     /// 闭区间左端，等于入队时的水位 + 1。
@@ -105,6 +107,8 @@ pub fn enqueue(
     file_latest_sesno: i32,
     hold: bool,
     intent: BatchIntent,
+    phase: crate::data_interface::initialization_phase::DataPhase,
+    epoch_id: u64,
 ) -> Enqueued {
     if let Some(queued) = queue
         .iter_mut()
@@ -113,6 +117,8 @@ pub fn enqueue(
         if !hold {
             queued.held = false;
         }
+        queued.phase = phase;
+        queued.epoch_id = epoch_id;
         if intent == BatchIntent::Reinitialize {
             let start_sesno = reinitialize_start(file_latest_sesno);
             let changed = queued.intent != intent
@@ -163,6 +169,8 @@ pub fn enqueue(
     }
     queue.push(DataBatch {
         dbnum,
+        phase,
+        epoch_id,
         db_type: db_type.to_owned(),
         intent,
         start_sesno,
@@ -185,7 +193,7 @@ fn reinitialize_start(file_latest_sesno: i32) -> i32 {
 /// `paused` 只挡出队，**不碰正在跑的那条**：服务端没有中止接口，界面上那句
 /// 「不再出队，这一批会跑完为止」就是这条实现的兑现（ADR-011 §9）。
 pub fn freeze_next(queue: &mut [DataBatch], paused: bool) -> Option<usize> {
-    match freeze_next_concurrent(queue, paused, true, |_| false) {
+    match freeze_next_concurrent(queue, paused, true, |_| false, |_| true) {
         NextDispatch::Freeze(index) => Some(index),
         NextDispatch::HeadNeedsExclusive | NextDispatch::Idle => None,
     }
@@ -221,6 +229,7 @@ pub fn freeze_next_concurrent(
     paused: bool,
     in_flight_empty: bool,
     is_exclusive: impl Fn(&DataBatch) -> bool,
+    is_eligible: impl Fn(&DataBatch) -> bool,
 ) -> NextDispatch {
     if paused {
         return NextDispatch::Idle;
@@ -234,7 +243,7 @@ pub fn freeze_next_concurrent(
         if queue[index].state != BatchState::Queued {
             continue;
         }
-        if queue[index].held {
+        if queue[index].held || !is_eligible(&queue[index]) {
             continue;
         }
         if running_dbnums.contains(&queue[index].dbnum) {
@@ -258,6 +267,8 @@ mod tests {
     fn queued(dbnum: u32, start: i32, end: i32) -> DataBatch {
         DataBatch {
             dbnum,
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 1,
             db_type: "DESI".to_owned(),
             intent: BatchIntent::ApplyWindow,
             start_sesno: start,
@@ -272,6 +283,34 @@ mod tests {
             held: true,
             ..queued(dbnum, start, end)
         }
+    }
+
+    #[test]
+    fn phase_barrier_selects_meta_even_when_design_was_discovered_first() {
+        let mut design = queued(8000, 2, 4);
+        design.phase = crate::data_interface::initialization_phase::DataPhase::Design;
+        let mut catalogue = queued(7000, 1, 3);
+        catalogue.phase = crate::data_interface::initialization_phase::DataPhase::Catalogue;
+        catalogue.db_type = "CATA".into();
+        let mut meta = queued(8191, 1, 1);
+        meta.phase = crate::data_interface::initialization_phase::DataPhase::Meta;
+        meta.db_type = "SYST".into();
+        let mut queue = vec![design, catalogue, meta];
+
+        let dispatch = freeze_next_concurrent(
+            &mut queue,
+            false,
+            true,
+            &|batch: &DataBatch| {
+                batch.phase != crate::data_interface::initialization_phase::DataPhase::Design
+            },
+            |batch| batch.phase == crate::data_interface::initialization_phase::DataPhase::Meta,
+        );
+
+        assert_eq!(dispatch, NextDispatch::Freeze(2));
+        assert_eq!(queue[2].state, BatchState::Running);
+        assert_eq!(queue[0].state, BatchState::Queued);
+        assert_eq!(queue[1].state, BatchState::Queued);
     }
 
     /// 「有人真的动了这个库」那种触发：watch 事件与人工执行都走这条口径，
@@ -292,6 +331,8 @@ mod tests {
             file_latest_sesno,
             false,
             BatchIntent::ApplyWindow,
+            crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
+            1,
         )
     }
 
@@ -311,6 +352,8 @@ mod tests {
             file_latest_sesno,
             true,
             BatchIntent::ApplyWindow,
+            crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
+            1,
         )
     }
 
@@ -328,6 +371,8 @@ mod tests {
             file_latest_sesno,
             false,
             BatchIntent::Reinitialize,
+            crate::data_interface::initialization_phase::DataPhase::Design,
+            1,
         )
     }
 
@@ -501,18 +546,18 @@ mod tests {
     fn concurrent_dispatch_never_runs_one_dbnum_twice() {
         let mut queue = vec![queued(7997, 1024, 1038), queued(8000, 812, 830)];
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Freeze(0)
         );
         // 7997 在跑期间新保存排出 BehindRunning 行。
         live_trigger(&mut queue, 7997, "DESI", 1023, 1041);
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, false, |_| false),
+            freeze_next_concurrent(&mut queue, false, false, |_| false, |_| true),
             NextDispatch::Freeze(1),
             "7997 的后继行必须被跳过，8000 先走"
         );
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, false, |_| false),
+            freeze_next_concurrent(&mut queue, false, false, |_| false, |_| true),
             NextDispatch::Idle,
             "唯一剩下的排队行属于在跑的 dbnum，本轮无事可派"
         );
@@ -526,6 +571,8 @@ mod tests {
         let mut queue = vec![
             DataBatch {
                 dbnum: 8191,
+                phase: crate::data_interface::initialization_phase::DataPhase::Meta,
+                epoch_id: 1,
                 db_type: "SYST".to_owned(),
                 intent: BatchIntent::ApplyWindow,
                 start_sesno: 5,
@@ -536,14 +583,14 @@ mod tests {
             queued(7997, 1024, 1038),
         ];
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, false, is_syst),
+            freeze_next_concurrent(&mut queue, false, false, is_syst, |_| true),
             NextDispatch::HeadNeedsExclusive,
             "独占行在飞非空时既不冻结自己也不放行后面的 DESI 行"
         );
         assert_eq!(queue[0].state, BatchState::Queued, "独占行原地等待");
         assert_eq!(queue[1].state, BatchState::Queued, "后面的行不得越过它");
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, is_syst),
+            freeze_next_concurrent(&mut queue, false, true, is_syst, |_| true),
             NextDispatch::Freeze(0),
             "在飞排空后独占行按原 FIFO 位置出队"
         );
@@ -556,7 +603,7 @@ mod tests {
         let mut concurrent = serial.clone();
         assert_eq!(freeze_next(&mut serial, false), Some(0));
         assert_eq!(
-            freeze_next_concurrent(&mut concurrent, false, true, |_| false),
+            freeze_next_concurrent(&mut concurrent, false, true, |_| false, |_| true),
             NextDispatch::Freeze(0)
         );
         assert_eq!(serial, concurrent);
@@ -572,7 +619,7 @@ mod tests {
         assert_eq!(sweep(&mut queue, 7997, "DESI", 102, 132), Enqueued::New);
         assert_eq!(queue, vec![held(7997, 103, 132)]);
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Idle,
             "挂起行不出队"
         );
@@ -593,7 +640,7 @@ mod tests {
         );
         assert_eq!(queue, vec![queued(7997, 103, 133)]);
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Freeze(0)
         );
     }
@@ -623,12 +670,12 @@ mod tests {
         live_trigger(&mut queue, 7997, "DESI", 102, 133);
         assert_eq!(queue[1], held(8000, 35, 35), "8000 没人动，继续挂着");
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Freeze(0),
             "被放行的 7997 出队"
         );
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Idle,
             "只剩挂起的 8000，无事可派"
         );
@@ -645,7 +692,7 @@ mod tests {
         sweep(&mut queue, 7997, "DESI", 102, 132);
         live_trigger(&mut queue, 8000, "DESI", 34, 40);
         assert_eq!(
-            freeze_next_concurrent(&mut queue, false, true, |_| false),
+            freeze_next_concurrent(&mut queue, false, true, |_| false, |_| true),
             NextDispatch::Freeze(1),
             "队首挂着的 7997 要被跳过，8000 直接走"
         );

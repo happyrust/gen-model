@@ -78,6 +78,10 @@ pub struct DbOptionExt {
     /// 会话索引差分的净窗口收集（ADR-022 灰度开关）。详见 [`net_window_collection`]。
     #[serde(default)]
     pub net_window_collection: Option<bool>,
+
+    /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
+    #[serde(default)]
+    pub catalogue_project_priority: Option<Vec<String>>,
 }
 
 impl Deref for DbOptionExt {
@@ -110,6 +114,7 @@ impl From<DbOption> for DbOptionExt {
             startup_autorun: None,
             room_incremental: None,
             net_window_collection: None,
+            catalogue_project_priority: None,
         }
     }
 }
@@ -144,6 +149,8 @@ struct DbOptionExtFields {
     room_incremental: Option<bool>,
     #[serde(default)]
     net_window_collection: Option<bool>,
+    #[serde(default)]
+    catalogue_project_priority: Option<Vec<String>>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
@@ -197,7 +204,17 @@ pub fn get_db_option_ext() -> DbOptionExt {
         startup_autorun: ext.startup_autorun,
         room_incremental: ext.room_incremental,
         net_window_collection: ext.net_window_collection,
+        catalogue_project_priority: ext.catalogue_project_priority.clone(),
     }
+}
+
+/// 跨项目 DICT/CATA 同 dbnum 的选主顺序。空列表不猜优先级：只有实际发生冲突时
+/// 才由 manifest 裁决为 blocker。
+pub fn catalogue_project_priority() -> Vec<String> {
+    load_ext_fields()
+        .catalogue_project_priority
+        .clone()
+        .unwrap_or_default()
 }
 
 /// 数据批次并发在飞数（`DbOption.toml` 的 `data_batch_workers`，默认 1 = 串行）。
@@ -299,16 +316,24 @@ pub fn room_incremental() -> bool {
 #[cfg(test)]
 static ROOM_INCREMENTAL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+#[cfg(test)]
+static ROOM_INCREMENTAL_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 覆盖的作用域守卫：离开作用域即恢复「按配置来」，用例之间不会互相串。
 #[cfg(test)]
-pub(crate) struct RoomIncrementalOverride;
+pub(crate) struct RoomIncrementalOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl RoomIncrementalOverride {
     pub(crate) fn set(on: bool) -> Self {
+        let lock = ROOM_INCREMENTAL_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ROOM_INCREMENTAL_OVERRIDE
             .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
-        Self
+        Self { _lock: lock }
     }
 }
 

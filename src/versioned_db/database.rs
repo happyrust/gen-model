@@ -7,6 +7,7 @@ use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
+use anyhow::Context;
 use chrono::Local;
 use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
@@ -527,6 +528,77 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
 
 /// 初始化同步pdms数据到数据
 /// , progress_sender: Sender<i32>
+fn full_sync_catalogue_files(
+    db_option: &DbOption,
+    db_type: &str,
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let mut candidates = Vec::new();
+    for project in &db_option.included_projects {
+        let project_dir =
+            crate::data_interface::project_paths::resolve_project_root(db_option, project)
+                .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
+        for path in collect_project_db_files(&project_dir)? {
+            let mut header = [0u8; 60];
+            std::fs::File::open(&path)
+                .and_then(|mut file| file.read_exact(&mut header))
+                .with_context(|| format!("读取候选数据库头失败: {}", path.display()))?;
+            let info = parse_file_basic_info(&header);
+            if info.db_type.eq_ignore_ascii_case(db_type) {
+                candidates.push(
+                    crate::data_interface::initialization_phase::CatalogueCandidate {
+                        project: project.clone(),
+                        dbnum: info.db_no,
+                        path,
+                    },
+                );
+            }
+        }
+    }
+    let selection = crate::data_interface::initialization_phase::select_catalogue_candidates(
+        candidates,
+        &db_option.included_projects,
+        &crate::options::catalogue_project_priority(),
+    );
+    if !selection.blockers.is_empty() {
+        anyhow::bail!(
+            "{db_type} 全量清单身份阻断: {}",
+            selection.blockers.join("; ")
+        );
+    }
+    let selected_project_by_dbnum = selection
+        .selected
+        .iter()
+        .map(|candidate| (candidate.dbnum, candidate.project.clone()))
+        .collect::<HashMap<_, _>>();
+    for candidate in selection.shadowed {
+        println!(
+            "[full-sync] {db_type} dbnum={} 的 {} 被 {} 遮蔽: {}",
+            candidate.dbnum,
+            candidate.project,
+            selected_project_by_dbnum
+                .get(&candidate.dbnum)
+                .map(String::as_str)
+                .unwrap_or("<unknown>"),
+            candidate.path.display()
+        );
+    }
+    let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for candidate in selection.selected {
+        let file_name = candidate
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("数据库文件名不是 UTF-8: {}", candidate.path.display())
+            })?;
+        by_project
+            .entry(candidate.project)
+            .or_default()
+            .push(file_name.to_string());
+    }
+    Ok(by_project)
+}
+
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     if db_option.included_projects.is_empty() {
         return Err(anyhow::anyhow!("没有包含的项目"));
@@ -571,71 +643,137 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 执行多线程解析
     dbg!("执行多线程解析");
     let proj_progress_chunk = 80 / db_option.included_projects.len();
-    // 遍历所有包含的项目
-    for (proj_idx, project) in db_option.included_projects.iter().enumerate() {
-        // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/GLB/GLOB)只解析「主项目」——
-        // included_projects 的第一个即主项目。依赖项目(如 AvevaCatalogue)的 SYS 与主项目
-        // 共用 dbnum 8191，若也解析会经 check_and_clear_db(8191) 把主项目刚写的设计 MDB 清掉、
-        // 导致 get_world_refno 取不到设计库。故 SYS 仅在 proj_idx==0 解析；DESI/CATA 仍按各项目解析。
-        let is_main_project = proj_idx == 0;
-        let debug_refnos: Vec<RefU64> = db_option
-            .debug_root_refnos
-            .as_ref()
-            .map(|x| {
-                x.iter()
-                    .map(|x| RefU64::from_str(x).unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        //debug 不保存数据，只复杂查看属性值
-        let is_debug = !debug_refnos.is_empty();
-        let cur_dbno_set = dbno_set.clone();
-        if is_main_project && (is_debug || db_option.only_sync_sys || db_option.total_sync) {
-            // let progress_sender = progress_sender.clone();
-            match sync_total_async_threaded(
-                &db_option,
-                project,
-                cur_dbno_set,
-                &["DICT", "SYST", "GLB", "GLOB"],
-                // progress_sender,
-                proj_progress_chunk,
-            )
-            .await
-            {
-                Ok(_) => {
-                    // 同步数据成功
-                    println!("同步UDA和SYS数据成功。");
-                }
-                Err(e) => {
-                    // 只打印会让「一条数据都没入库」的运行看起来是成功的，后续的 DESI 解析
-                    // 又依赖这批 SYS 数据，必须直接失败。
-                    return Err(e.context(format!("同步 {project} 的 UDA/SYS 数据失败")));
-                }
-            }
-        }
-        //只同步"DICT", "SYST", "GLB", "GLOB" 这些信息
-        if db_option.only_sync_sys {
-            continue;
-        }
-        // let progress_sender = progress_sender.clone();
-        let cur_dbno_set = dbno_set.clone();
-        match sync_total_async_threaded(
-            &db_option,
-            project,
-            cur_dbno_set,
-            &["DESI", "CATA"],
-            // progress_sender,
+    // ADR-025: full synchronization is global-by-phase, never project-by-project.
+    let debug_refnos: Vec<RefU64> = db_option
+        .debug_root_refnos
+        .as_ref()
+        .map(|roots| {
+            roots
+                .iter()
+                .map(|root| RefU64::from_str(root).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let _is_debug = !debug_refnos.is_empty();
+    let main_project = &db_option.included_projects[0];
+    let dict_files = full_sync_catalogue_files(db_option, "DICT")?;
+    let cata_files = if db_option.only_sync_sys {
+        HashMap::new()
+    } else {
+        full_sync_catalogue_files(db_option, "CATA")?
+    };
+
+    {
+        sync_total_async_threaded(
+            db_option,
+            main_project,
+            dbno_set.clone(),
+            &["SYST", "GLB", "GLOB"],
             proj_progress_chunk,
         )
         .await
-        {
-            Ok(_) => {
-                // 同步数据成功
-                println!("同步数据成功。");
+        .with_context(|| format!("同步 {main_project} 的 SYST/GLB/GLOB 数据失败"))?;
+
+        // DICT belongs to Meta, including DICT supplied by dependency projects.
+        // Process projects in explicit priority order so the shared naked-dbnum
+        // guard deterministically keeps the authoritative file.
+        let priority = crate::options::catalogue_project_priority();
+        let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
+        let mut seen = std::collections::HashSet::new();
+        for project in &priority {
+            let Some(configured) = db_option
+                .included_projects
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(project))
+            else {
+                anyhow::bail!("catalogue_project_priority 含未知项目 {project}");
+            };
+            if !seen.insert(configured.to_ascii_lowercase()) {
+                anyhow::bail!("catalogue_project_priority 重复项目 {project}");
             }
-            Err(e) => {
-                return Err(e.context(format!("同步 {project} 的 DESI/CATA 数据失败")));
+            ordered_projects.push(configured.clone());
+        }
+        for project in &db_option.included_projects {
+            if seen.insert(project.to_ascii_lowercase()) {
+                ordered_projects.push(project.clone());
             }
+        }
+
+        for project in &ordered_projects {
+            let mut phase_option = db_option.clone();
+            phase_option.included_db_files =
+                Some(dict_files.get(project).cloned().unwrap_or_default());
+            sync_total_async_threaded(
+                &phase_option,
+                project,
+                dbno_set.clone(),
+                &["DICT"],
+                proj_progress_chunk,
+            )
+            .await
+            .with_context(|| format!("同步 {project} 的 DICT 数据失败"))?;
+        }
+
+        if db_option.only_sync_sys {
+            println!("全局 Meta 阶段完成（SYST/GLB/GLOB + included DICT）");
+        }
+    }
+
+    if !db_option.only_sync_sys {
+        let priority = crate::options::catalogue_project_priority();
+        let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
+        for project in &priority {
+            let configured = db_option
+                .included_projects
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(project))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("catalogue_project_priority 含未知项目 {project}")
+                })?;
+            if ordered_projects
+                .iter()
+                .any(|seen: &String| seen.eq_ignore_ascii_case(configured))
+            {
+                anyhow::bail!("catalogue_project_priority 重复项目 {project}");
+            }
+            ordered_projects.push(configured.clone());
+        }
+        for project in &db_option.included_projects {
+            if !ordered_projects
+                .iter()
+                .any(|seen| seen.eq_ignore_ascii_case(project))
+            {
+                ordered_projects.push(project.clone());
+            }
+        }
+
+        // Global Catalogue barrier. Fail-fast before any Design call begins.
+        for project in &ordered_projects {
+            let mut phase_option = db_option.clone();
+            phase_option.included_db_files =
+                Some(cata_files.get(project).cloned().unwrap_or_default());
+            sync_total_async_threaded(
+                &phase_option,
+                project,
+                dbno_set.clone(),
+                &["CATA"],
+                proj_progress_chunk,
+            )
+            .await
+            .with_context(|| format!("同步 {project} 的 CATA 数据失败"))?;
+        }
+
+        // Global Design barrier starts only after every selected CATA settles.
+        for project in &db_option.included_projects {
+            sync_total_async_threaded(
+                db_option,
+                project,
+                dbno_set.clone(),
+                &["DESI"],
+                proj_progress_chunk,
+            )
+            .await
+            .with_context(|| format!("同步 {project} 的 DESI 数据失败"))?;
         }
     }
 
@@ -1503,4 +1641,29 @@ async fn finish_write_pipeline_succeeds_when_parser_and_writers_are_clean() {
     finish_write_pipeline(sender, handles, Ok(()))
         .await
         .unwrap();
+}
+
+#[test]
+fn sync_pdms_awaits_global_meta_then_catalogue_then_design() {
+    let source = include_str!("database.rs");
+    let body = source
+        .split_once("pub async fn sync_pdms")
+        .expect("sync_pdms exists")
+        .1
+        .split_once("pub async fn define_dbnum_event")
+        .expect("sync_pdms end exists")
+        .0;
+    let syst = body.find("&[\"SYST\", \"GLB\", \"GLOB\"]").unwrap();
+    let dict = body.find("&[\"DICT\"]").unwrap();
+    let cata = body.find("&[\"CATA\"]").unwrap();
+    let desi = body.find("&[\"DESI\"]").unwrap();
+    assert!(syst < dict && dict < cata && cata < desi);
+    assert!(
+        body[dict..cata].contains(".await"),
+        "DICT must settle before Catalogue"
+    );
+    assert!(
+        body[cata..desi].contains(".await"),
+        "Catalogue must settle before Design"
+    );
 }

@@ -36,6 +36,7 @@ project_path = "D:/AVEVA/Projects/E3D3.1"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #【变更 2026-07-27】移除 SCB：E3D3.1 下未部署该工程，避免扫描报错。
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
 
 mdb_name = "ALL"

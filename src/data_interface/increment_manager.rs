@@ -15,6 +15,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use aios_core::version::{backup_data, backup_owner_relate};
 use aios_core::{RefU64Vec, RefnoEnum};
 use aios_core::{get_default_name, get_pe};
+use anyhow::Context;
 
 // 异步和工具库导入
 use futures::{SinkExt, StreamExt};
@@ -162,38 +163,25 @@ mod tests {
     /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
     /// （file_name / file_path / file_size / file_latest_sesno）。同一 dbnum 的第二个文件
     /// 若先走 `scan_and_check_file`，就会把首见文件的身份覆盖掉——此后即便阻断了该
-    /// dbnum，回退 / 迁移检测的基准也已经被污染。故 `sweep_watch_dirs`（启动重扫与
-    /// 范围刷新重扫共用）与 `async_watch` 两条自动路径都必须先做重复 dbnum 阻断、
-    /// 再落库观察。
+    /// dbnum，回退 / 迁移检测的基准也已经被污染。故共享完整扫描必须先做重复 dbnum
+    /// 阻断、再落库观察；`async_watch` 只触发该扫描，不再维护第二套路径。
     ///
     /// 这两步嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接在源码上钉顺序。
     /// marker 用 `concat!` 拼接，避免本测试自己的字符串字面量先于真函数被命中。
     #[test]
-    fn duplicate_dbnum_guard_precedes_scan_record_on_both_auto_paths() {
+    fn duplicate_dbnum_guard_precedes_scan_record_on_the_shared_sweep() {
         let src = include_str!("increment_manager.rs");
-        for (name, marker) in [
-            (
-                "sweep_watch_dirs",
-                concat!("async fn ", "sweep_watch_dirs("),
-            ),
-            ("async_watch", concat!("pub async fn ", "async_watch(")),
-        ] {
-            let body = src
-                .split_once(marker)
-                .unwrap_or_else(|| panic!("{name} 未找到"))
-                .1;
-            let guard_at = body
-                .find("seen_dbnums.insert(")
-                .unwrap_or_else(|| panic!("{name}: 缺少重复 dbnum 阻断"));
-            let scan_at = body
-                .find(".scan_and_check_file(")
-                .unwrap_or_else(|| panic!("{name}: 缺少 scan_and_check_file 调用"));
-            assert!(
-                guard_at < scan_at,
-                "{name}: 重复 dbnum 阻断必须先于 scan_and_check_file，\
-                 否则重复文件会覆盖 dbnum_watermark 里的文件身份字段"
-            );
-        }
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        let guard_at = body
+            .find("seen_dbnums.insert(")
+            .expect("缺少重复 dbnum 阻断");
+        let scan_at = body
+            .find(".scan_and_check_file(")
+            .expect("缺少 scan_and_check_file 调用");
+        assert!(guard_at < scan_at);
     }
 
     /// 手动与自动喂的是同一个队列，入队口径只能有一份。自动路径过去只过类型白名单
@@ -202,69 +190,38 @@ mod tests {
     ///
     /// 手法同上：这道门嵌在依赖实库的大函数里，没法用纯函数钉住，只能钉源码。
     #[test]
-    fn both_auto_paths_gate_on_the_shared_scope_predicate() {
-        let src = include_str!("increment_manager.rs");
-        for (name, marker) in [
-            (
-                "sweep_watch_dirs",
-                concat!("async fn ", "sweep_watch_dirs("),
-            ),
-            ("async_watch", concat!("pub async fn ", "async_watch(")),
-        ] {
-            let body = src
-                .split_once(marker)
-                .unwrap_or_else(|| panic!("{name} 未找到"))
-                .1;
-            let gate_at = body
-                .find(".in_scope(")
-                .unwrap_or_else(|| panic!("{name}: 缺少本期执行范围门控"));
-            let discover_at = body
-                .find(".discover_batch(")
-                .unwrap_or_else(|| panic!("{name}: 缺少 discover_batch 调用"));
-            assert!(
-                gate_at < discover_at,
-                "{name}: 入队前必须先过 in_scope，否则 MDB 外的库会被自动路径带进队列，\
-                 而手动预览还一口咬定它不在范围里"
-            );
-        }
-    }
-
-    /// CATA 永远不进执行范围（update_scope 决策 A），但按需 CATA 闭包的定位器
-    /// 从 `dbnum_watermark` 读目录文件身份（`cata_closure` 的登记契约）。全新库上
-    /// 若范围门直接跳过 CATA，登记行永远不出现，闭包对分支组件解不出任何依赖
-    /// （parsed=0），BRAN/HANG 的目录几何整体生成不出来——生产老库靠范围纪律
-    /// 之前的遗留登记行掩盖了这个坑（2026-08-13 testbed 首次暴露）。
-    ///
-    /// 钉两件事：范围外 CATA 的登记豁免分支在 `scan_and_check_file` 之前；
-    /// scan 之后、`discover_batch` 之前有一道 `in_scope` 收尾门（只登记不入队）。
-    #[test]
-    fn out_of_scope_cata_is_recorded_but_never_enqueued() {
+    fn the_shared_sweep_gates_on_the_scope_predicate() {
         let src = include_str!("increment_manager.rs");
         let body = src
             .split_once(concat!("async fn ", "sweep_dirs("))
             .expect("sweep_dirs 未找到")
             .1;
-        let cata_exempt_at = body
-            .find(concat!("eq_ignore_ascii_case(\"", "CATA\")"))
-            .expect("sweep_dirs: 缺少范围外 CATA 的登记豁免分支");
+        let gate_at = body.find(".in_scope(").expect("缺少本期执行范围门控");
+        let discover_at = body
+            .find(".discover_batch(")
+            .expect("缺少 discover_batch 调用");
+        assert!(gate_at < discover_at);
+    }
+
+    /// ADR-025：CATA 是正式 Catalogue 阶段，不再是只登记、不入队的旁路。
+    /// 优先级清单必须在任何 observation 写入之前安装。
+    #[test]
+    fn catalogue_manifest_is_selected_before_observation_and_discovery() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        let manifest_at = body
+            .find("catalogue_manifest_for_dirs(")
+            .expect("缺少 CATA/DICT 权威清单裁决");
         let scan_at = body
             .find(".scan_and_check_file(")
             .expect("sweep_dirs: 缺少 scan_and_check_file 调用");
-        let enqueue_gate_at = body[scan_at..]
-            .find("if !in_scope")
-            .expect("sweep_dirs: scan 之后缺少范围收尾门（范围外 CATA 只登记不入队）")
-            + scan_at;
         let discover_at = body
             .find(".discover_batch(")
             .expect("sweep_dirs: 缺少 discover_batch 调用");
-        assert!(
-            cata_exempt_at < scan_at,
-            "范围外 CATA 的豁免判定必须在观察落库之前，否则登记行仍然写不进去"
-        );
-        assert!(
-            enqueue_gate_at < discover_at,
-            "范围收尾门必须在 discover_batch 之前，否则范围外 CATA 会被带进队列"
-        );
+        assert!(manifest_at < scan_at && scan_at < discover_at);
     }
 
     /// 两条自动路径给批次定的「归属项目」必须来自文件所在的监控目录，不能是配置里
@@ -277,38 +234,19 @@ mod tests {
     ///
     /// 这一步嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接钉源码。
     #[test]
-    fn both_auto_paths_take_the_owning_project_from_the_watch_dir() {
+    fn shared_sweep_takes_the_owning_project_from_the_watch_dir() {
         let src = include_str!("increment_manager.rs");
-        for (name, marker) in [
-            (
-                "sweep_watch_dirs",
-                concat!("async fn ", "sweep_watch_dirs("),
-            ),
-            ("async_watch", concat!("pub async fn ", "async_watch(")),
-        ] {
-            let body = src
-                .split_once(marker)
-                .unwrap_or_else(|| panic!("{name} 未找到"))
-                .1;
-            let discover_at = body
-                .find(".discover_batch(")
-                .unwrap_or_else(|| panic!("{name}: 缺少 discover_batch 调用"));
-            let owning_at = body
-                .find(concat!("self.owning_", "project("))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{name}: 归属项目必须取自监控目录（owning_project），不能用 project_name"
-                    )
-                });
-            assert!(
-                owning_at < discover_at,
-                "{name}: 必须先定归属项目再 discover_batch，否则批次带着错的项目入队"
-            );
-            assert!(
-                !body[..discover_at].contains(concat!("db_option.project_", "name.clone()")),
-                "{name}: 发现阶段不得用配置里的主项目名当文件归属"
-            );
-        }
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        let discover_at = body
+            .find(".discover_batch(")
+            .expect("缺少 discover_batch 调用");
+        let owning_at = body
+            .find(concat!("self.owning_", "project("))
+            .expect("归属项目必须取自监控目录");
+        assert!(owning_at < discover_at);
     }
 
     /// 手动路径的候选目录必须与自动 watcher 的监控目录是同一份，否则手动执行能把
@@ -707,7 +645,8 @@ mod tests {
         }
     }
 
-    /// 三条自动路径必须都过同一道候选门，且都在读文件头之前过。
+    /// 两个实际扫描器必须过同一道候选门，且都在读文件头之前过。事件路径只做
+    /// 廉价候选过滤，然后委托共享完整扫描，不再自行读取文件头。
     ///
     /// 漏掉任何一处的代价不是「多解析几个杂项文件」：`duplicate_dbnums_across_watch_dirs`
     /// 漏掉，一个 `ams1112_0001 copy` 就让 dbnum 1112 拿到两个候选、被判同号重复而
@@ -716,14 +655,10 @@ mod tests {
     /// 这三道门嵌在依赖实库的大函数里，没法用纯函数钉住，所以直接钉源码。
     /// marker 用 `concat!` 拼接，避免本测试自己的字符串字面量先于真函数被命中。
     #[test]
-    fn every_auto_path_gates_on_the_shared_candidate_predicate() {
+    fn every_scanner_gates_on_the_shared_candidate_predicate() {
         let src = include_str!("increment_manager.rs");
         for (name, marker) in [
-            (
-                "sweep_watch_dirs",
-                concat!("async fn ", "sweep_watch_dirs("),
-            ),
-            ("async_watch", concat!("pub async fn ", "async_watch(")),
+            ("sweep_dirs", concat!("async fn ", "sweep_dirs(")),
             (
                 "duplicate_dbnums_across_watch_dirs",
                 concat!("fn ", "duplicate_dbnums_across_watch_dirs("),
@@ -745,6 +680,17 @@ mod tests {
                  dbnum 的第二个候选，把整个库判成「同号重复」而阻断"
             );
         }
+
+        let watch = src
+            .split_once(concat!("pub async fn ", "async_watch("))
+            .expect("async_watch 未找到")
+            .1;
+        assert!(watch.contains("is_candidate_db_file("));
+        assert!(watch.contains("self.sweep_watch_dirs(\"watch\", false).await"));
+        assert!(
+            !watch.contains("PdmsWatcher::scan_db_headers(&filtered_paths)"),
+            "watcher 事件不得重新长出一条局部清单消费路径"
+        );
     }
 
     /// 阻断裁决只能有一个权威，自动路径不许自己再列一份异常清单。
@@ -879,6 +825,36 @@ mod tests {
         assert!(
             read < backing && backing < credential && credential < promote && promote < intent,
             "启动发现顺序必须是状态→数据支撑→凭据→首次导入形状→普通窗口意图: {body}"
+        );
+    }
+
+    #[test]
+    fn watermark_or_data_backing_read_failure_becomes_a_phase_blocker() {
+        let source = include_str!("increment_manager.rs");
+        let sweep = source
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后应当是 reinit_batch")
+            .0;
+        assert!(
+            sweep.contains("Err(error) => phase_blockers.push(("),
+            "窗口判断失败必须进入阶段 blocker: {sweep}"
+        );
+
+        let discover = source
+            .split_once(concat!("async fn ", "discover_batch("))
+            .expect("discover_batch 未找到")
+            .1
+            .split_once(concat!("fn ", "enqueue_discovered("))
+            .expect("discover_batch 之后应当是 enqueue_discovered")
+            .0;
+        assert!(discover.contains("DbnumState::read(db_num)"));
+        assert!(discover.contains("dbnum_has_any_pe_row(db_num)"));
+        assert!(
+            discover.matches(".with_context(").count() >= 2,
+            "两项权威读取都必须上浮，不能 return None: {discover}"
         );
     }
 
@@ -1143,7 +1119,7 @@ pub(crate) fn out_of_scope_reason(scope: &UpdateScope, db_type: &str, db_num: u3
     if db_type != "DESI" {
         return format!(
             "不在本期执行范围，跳过数据库: 类型={db_type}, 编号={db_num}\
-             （只有 DESI 与 SYS meta 参与增量，{db_type} 不参与）"
+             （参与类型为 Meta、CATA 与 MDB 声明的 DESI，{db_type} 不参与）"
         );
     }
     format!(
@@ -1387,6 +1363,102 @@ impl AiosDBManager {
         }))
     }
 
+    /// Build the DICT/CATA ownership manifest before any observation write.
+    /// This is intentionally a lightweight second header pass: choosing after
+    /// `record_observation` would already have overwritten the naked-dbnum
+    /// identity with an arbitrary cross-project candidate.
+    fn catalogue_manifest_for_dirs(
+        &self,
+        watch_dirs: &[PathBuf],
+    ) -> (
+        HashSet<PathBuf>,
+        Vec<(
+            crate::data_interface::initialization_phase::DataPhase,
+            String,
+        )>,
+        Vec<String>,
+    ) {
+        use crate::data_interface::initialization_phase::{
+            CatalogueCandidate, DataPhase, select_catalogue_candidates,
+        };
+
+        let mut by_type: HashMap<&'static str, Vec<CatalogueCandidate>> = HashMap::new();
+        let mut blockers = Vec::new();
+        let mut shadowed = Vec::new();
+        for watch_dir in watch_dirs {
+            for entry in WalkDir::new(watch_dir).max_depth(INGEST_MAX_DEPTH) {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        blockers.push((
+                            DataPhase::Meta,
+                            format!("目录清单不可读 {}: {error}", watch_dir.display()),
+                        ));
+                        continue;
+                    }
+                };
+                if !entry.file_type().is_file() || !is_candidate_db_file(entry.path()) {
+                    continue;
+                }
+                let Some(info) = try_parse_db_basic_info(entry.path()) else {
+                    blockers.push((
+                        DataPhase::Meta,
+                        format!("候选数据库头不可读: {}", entry.path().display()),
+                    ));
+                    continue;
+                };
+                let db_type = if info.db_type.eq_ignore_ascii_case("DICT") {
+                    "DICT"
+                } else if info.db_type.eq_ignore_ascii_case("CATA") {
+                    "CATA"
+                } else {
+                    continue;
+                };
+                by_type
+                    .entry(db_type)
+                    .or_default()
+                    .push(CatalogueCandidate {
+                        project: self.owning_project(entry.path()),
+                        dbnum: info.db_no,
+                        path: entry.path().to_path_buf(),
+                    });
+            }
+        }
+
+        let mut selected = HashSet::new();
+        for (db_type, phase) in [("DICT", DataPhase::Meta), ("CATA", DataPhase::Catalogue)] {
+            let result = select_catalogue_candidates(
+                by_type.remove(db_type).unwrap_or_default(),
+                &self.db_option.included_projects,
+                &crate::options::catalogue_project_priority(),
+            );
+            if result.blockers.is_empty() {
+                selected.extend(
+                    result
+                        .selected
+                        .iter()
+                        .map(|candidate| candidate.path.clone()),
+                );
+            }
+            for candidate in result.shadowed {
+                shadowed.push(format!(
+                    "{db_type}:{}:{}:{}",
+                    candidate.dbnum,
+                    candidate.project,
+                    candidate.path.display()
+                ));
+                println!(
+                    "[manifest] {db_type} dbnum={} 的 {} 被项目优先级遮蔽: {}",
+                    candidate.dbnum,
+                    candidate.project,
+                    candidate.path.display()
+                );
+            }
+            blockers.extend(result.blockers.into_iter().map(|message| (phase, message)));
+        }
+        (selected, blockers, shadowed)
+    }
+
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
     ///
     /// 分类与落库都交给 [`DbnumState::classify_scan`] / [`DbnumState::record_observation`]
@@ -1430,6 +1502,7 @@ impl AiosDBManager {
         };
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             println!("F6 记录扫描观察失败 dbnum={db_num}: {e}");
+            return ScanGate::Blocked;
         }
 
         // 逐个变体点名，不留 `_ =>` 兜底：将来新增一种异常时这里编译不过，
@@ -1558,6 +1631,8 @@ impl AiosDBManager {
         if let Some(warning) = scope.warning() {
             println!("[{origin}] {warning}");
         }
+        let (selected_catalogue_paths, mut phase_blockers, shadowed) =
+            self.catalogue_manifest_for_dirs(&watch_dirs);
 
         let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
             IndexMap::new();
@@ -1567,6 +1642,7 @@ impl AiosDBManager {
         let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
         // 范围外的库：聚合成一句，别让 258 行「跳过」把重扫日志淹掉。
         let mut out_of_scope: Vec<String> = Vec::new();
+        let mut manifest_totals = Vec::new();
         let time = Instant::now();
         log::debug!("[{origin}] 监控目录: {watch_dirs:?}");
 
@@ -1623,6 +1699,11 @@ impl AiosDBManager {
                     println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
                     continue;
                 };
+                if (db_type.eq_ignore_ascii_case("DICT") || db_type.eq_ignore_ascii_case("CATA"))
+                    && !selected_catalogue_paths.contains(path)
+                {
+                    continue;
+                }
 
                 // 归属项目取自「文件落在哪个监控目录下」，不是配置里的主项目名。
                 // 后者是 SurrealDB 的库名，拿它当归属会让 acp000 / ZDJ000 下的库被送去
@@ -1642,20 +1723,16 @@ impl AiosDBManager {
                         );
                         continue;
                     }
-                    // CATA 永远不进执行范围（update_scope 决策 A），但**登记不能跟着跳**：
-                    // 按需 CATA 闭包的定位器从 dbnum_watermark 读目录文件身份
-                    // （`cata_closure::load_dbnum_files_from_watermark` 的契约），全新
-                    // 库上没有这些行时，闭包对分支组件解不出任何依赖（parsed=0），
-                    // BRAN/HANG 的目录几何整体生成不出来。生产老库靠范围纪律之前的
-                    // 遗留登记行掩盖了这一点。所以 CATA 走完 F6 判重与观察落库，
-                    // 只是不入队；其余范围外类型维持原跳过语义。
-                    if !db_type.eq_ignore_ascii_case("CATA") {
-                        // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
-                        // 287 个 DESI，MDB 只声明 29 个），聚合成一句收在循环外。
-                        out_of_scope.push(format!("{db_type}:{db_no}"));
-                        continue;
-                    }
+                    // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
+                    // 287 个 DESI，MDB 只声明 29 个），聚合成一句收在循环外。
+                    // CATA/DICT 已由共享清单选择器裁决并由 UpdateScope 放行，不会
+                    // 落入这里；因此所有真正范围外的文件都直接跳过。
+                    out_of_scope.push(format!("{db_type}:{db_no}"));
+                    continue;
                 }
+                manifest_totals.push(
+                    crate::data_interface::initialization_phase::DataPhase::of_db_type(&db_type),
+                );
                 // 读不出最新会话号就跳过本轮该文件，与手动路径同口径
                 // （`manual_update::scan_project_candidates` 的 warn+跳过）。老写法
                 // `.unwrap_or_default()` 把读失败吞成 0：对 applied > 0 的库伪造出
@@ -1714,13 +1791,12 @@ impl AiosDBManager {
                     )
                     .await;
                 if gate == ScanGate::Blocked {
-                    continue;
-                }
-
-                // 范围外的 CATA 到此为止：身份已登记（供按需闭包定位），不入队
-                // ——回退重建也一样（CATA 永远不进执行范围，重建批次没有 worker
-                // 会认领它）。
-                if !in_scope {
+                    phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                        format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
+                    ));
                     continue;
                 }
 
@@ -1757,10 +1833,19 @@ impl AiosDBManager {
                     .discover_batch(&project, path, &db_type, db_no, file_latest_sesno as i32)
                     .await
                 {
-                    Some(found) => {
+                    Ok(Some(found)) => {
                         params.insert(path.to_path_buf(), found);
                     }
-                    None => {}
+                    Ok(None) => {}
+                    Err(error) => phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                        format!(
+                            "dbnum={db_no} 判断初始化窗口失败（{}）: {error:#}",
+                            path.display()
+                        ),
+                    )),
                 }
             }
         }
@@ -1780,6 +1865,12 @@ impl AiosDBManager {
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
+            phase_blockers.extend(blocked_dupes.iter().map(|(project, dbnum)| {
+                (
+                    crate::data_interface::initialization_phase::DataPhase::Design,
+                    format!("项目 {project} 内 dbnum={dbnum} 同号多文件"),
+                )
+            }));
             params
                 .retain(|_p, found| !blocked_dupes.contains(&(found.project.clone(), found.dbnum)));
         }
@@ -1788,7 +1879,14 @@ impl AiosDBManager {
         if !params.is_empty() {
             log::info!("[{origin}] 重扫待入队批次数: {}", params.len());
         }
-        self.enqueue_discovered(origin, Self::sweep_holds_rows(), params);
+        self.enqueue_discovered(
+            origin,
+            Self::sweep_holds_rows(),
+            params,
+            phase_blockers,
+            shadowed,
+            manifest_totals,
+        );
 
         println!(
             "[{origin}] 重扫（重建队列）总耗时: {} 秒",
@@ -1830,6 +1928,8 @@ impl AiosDBManager {
             project: project.to_string(),
             dbnum: db_num,
             db_type: db_type.to_string(),
+            phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
+            epoch_id: 0,
             intent: crate::data_interface::batch_queue::BatchIntent::Reinitialize,
             path: path.to_path_buf(),
             file_name,
@@ -1844,7 +1944,8 @@ impl AiosDBManager {
     ///
     /// 基线（水位 0、文件有会话）与增量窗口在这里不分家——都只是「有活要干」，
     /// 具体怎么干由 worker 冻结点重扫时的 `execute_one_dbnum` 决定。
-    /// 返回 `None` 表示水位已覆盖或读取失败（失败已打印）。
+    /// 返回 `Ok(None)` 只表示水位已覆盖；水位/数据支撑读取失败必须上浮给 manifest
+    /// 记录为阶段 blocker，不能把未知状态伪装成 up-to-date。
     ///
     /// `file_name` 从 `path` 现取（完整文件名）：init 重扫与 watch 事件两个调用方
     /// 手里各是一种口径（一个全名一个去了扩展名的 stem），在这里统一。
@@ -1855,7 +1956,7 @@ impl AiosDBManager {
         db_type: &str,
         db_num: u32,
         file_latest_sesno: i32,
-    ) -> Option<crate::data_interface::batch_scheduler::DiscoveredBatch> {
+    ) -> anyhow::Result<Option<crate::data_interface::batch_scheduler::DiscoveredBatch>> {
         use crate::data_interface::dbnum_state::DbnumState;
 
         let file_name = path
@@ -1863,13 +1964,9 @@ impl AiosDBManager {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        let state = match DbnumState::read(db_num).await {
-            Ok(state) => state,
-            Err(error) => {
-                eprintln!("dbnum={db_num} 读取水位失败，本轮跳过: {error:#}");
-                return None;
-            }
-        };
+        let state = DbnumState::read(db_num)
+            .await
+            .with_context(|| format!("dbnum={db_num} 读取应用水位失败"))?;
         let applied = state.as_ref().map(|state| state.applied_sesno).unwrap_or(0);
         let confirmed_empty_baseline_sesno = state
             .as_ref()
@@ -1877,22 +1974,17 @@ impl AiosDBManager {
         let mut queued_applied = applied;
         if file_latest_sesno <= applied {
             if file_latest_sesno != applied || applied == 0 {
-                return None;
+                return Ok(None);
             }
-            let has_any_data =
-                match crate::data_interface::manual_update::dbnum_has_any_pe_row(db_num).await {
-                    Ok(has_any_data) => has_any_data,
-                    Err(error) => {
-                        eprintln!("dbnum={db_num} 启动重扫读取数据支撑失败，本轮跳过: {error:#}");
-                        return None;
-                    }
-                };
+            let has_any_data = crate::data_interface::manual_update::dbnum_has_any_pe_row(db_num)
+                .await
+                .with_context(|| format!("dbnum={db_num} 读取数据支撑失败"))?;
             if crate::data_interface::manual_update::has_data_backing(
                 applied,
                 has_any_data,
                 confirmed_empty_baseline_sesno,
             ) {
-                return None;
+                return Ok(None);
             }
             println!(
                 "发现追平幽灵水位: {file_name}, db_type={db_type}, applied_sesno={applied}，\
@@ -1919,18 +2011,22 @@ impl AiosDBManager {
                 queued_applied + 1,
                 file_latest_sesno,
             );
-        Some(crate::data_interface::batch_scheduler::DiscoveredBatch {
-            project: project.to_string(),
-            dbnum: db_num,
-            db_type: db_type.to_string(),
-            intent: crate::data_interface::batch_queue::BatchIntent::ApplyWindow,
-            path: path.to_path_buf(),
-            file_name: file_name.to_string(),
-            applied_sesno: queued_applied,
-            file_latest_sesno,
-            first_pending_sesno_time,
-            file_latest_sesno_time,
-        })
+        Ok(Some(
+            crate::data_interface::batch_scheduler::DiscoveredBatch {
+                project: project.to_string(),
+                dbnum: db_num,
+                db_type: db_type.to_string(),
+                phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
+                epoch_id: 0,
+                intent: crate::data_interface::batch_queue::BatchIntent::ApplyWindow,
+                path: path.to_path_buf(),
+                file_name: file_name.to_string(),
+                applied_sesno: queued_applied,
+                file_latest_sesno,
+                first_pending_sesno_time,
+                file_latest_sesno_time,
+            },
+        ))
     }
 
     /// 把一批发现逐条入队并打日志（init 重扫与 watch 事件两条路径共用）。
@@ -1943,7 +2039,13 @@ impl AiosDBManager {
         &self,
         origin: &str,
         hold: bool,
-        params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch>,
+        mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch>,
+        mut phase_blockers: Vec<(
+            crate::data_interface::initialization_phase::DataPhase,
+            String,
+        )>,
+        shadowed: Vec<String>,
+        manifest_totals: Vec<crate::data_interface::initialization_phase::DataPhase>,
     ) {
         use crate::data_interface::batch_queue::Enqueued;
         use crate::data_interface::batch_scheduler::BatchScheduler;
@@ -1951,7 +2053,71 @@ impl AiosDBManager {
 
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
-        for (_path, found) in params {
+        // A second guard covers manual/test callers that assemble a partial
+        // candidate map directly.  Full sweeps have already filtered before
+        // observation, so this is normally an identity-preserving no-op.
+        for (db_type, phase) in [
+            (
+                "DICT",
+                crate::data_interface::initialization_phase::DataPhase::Meta,
+            ),
+            (
+                "CATA",
+                crate::data_interface::initialization_phase::DataPhase::Catalogue,
+            ),
+        ] {
+            let candidates = params
+                .values()
+                .filter(|found| found.db_type.eq_ignore_ascii_case(db_type))
+                .map(
+                    |found| crate::data_interface::initialization_phase::CatalogueCandidate {
+                        project: found.project.clone(),
+                        dbnum: found.dbnum,
+                        path: found.path.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            let selection =
+                crate::data_interface::initialization_phase::select_catalogue_candidates(
+                    candidates,
+                    &self.db_option.included_projects,
+                    &crate::options::catalogue_project_priority(),
+                );
+            let selected = selection
+                .selected
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<HashSet<_>>();
+            params.retain(|path, found| {
+                !found.db_type.eq_ignore_ascii_case(db_type) || selected.contains(path)
+            });
+            for candidate in selection.shadowed {
+                println!(
+                    "[{origin}] {db_type} dbnum={} 的 {} 被项目优先级遮蔽，不写 observation/水位/队列: {}",
+                    candidate.dbnum,
+                    candidate.project,
+                    candidate.path.display()
+                );
+            }
+            phase_blockers.extend(
+                selection
+                    .blockers
+                    .into_iter()
+                    .map(|message| (phase, message)),
+            );
+        }
+        let coordinator =
+            crate::data_interface::initialization_phase::InitializationCoordinator::global();
+        let epoch_id = coordinator.begin_discovery();
+        let phases = params.values().map(|found| found.phase).collect::<Vec<_>>();
+        coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);
+        coordinator.set_phase_totals(epoch_id, manifest_totals);
+        coordinator.set_shadowed(epoch_id, shadowed);
+        for (_path, mut found) in params.drain(..) {
+            found.epoch_id = epoch_id;
             let outcome = scheduler.enqueue(registry, &found, hold);
             let verb = match outcome.outcome {
                 Enqueued::New => "新排",
@@ -1973,7 +2139,7 @@ impl AiosDBManager {
 
     /// 重扫排出来的行要不要挂起：`startup_autorun` 开着就是历史行为（不挂起）。
     fn sweep_holds_rows() -> bool {
-        !crate::options::startup_autorun()
+        !crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed()
     }
 
     /// 重挂轮：重新解析配置、补挂缺席的目录，挂上了就补一次重扫。
@@ -2238,173 +2404,24 @@ impl AiosDBManager {
                         continue;
                     }
 
-                    println!("开始扫描数据库头部信息，过滤后路径: {:?}", &filtered_paths);
-
-                    // 本期执行范围走缓存解析：名单只在 SYS meta 批次落库时才变（那一刻
-                    // 缓存被显式失效），SUL_DB 瞬时不可用时暖缓存放行——一次连接抖动
-                    // 不该把整批事件丢掉（2026-08-06 现场）。解不出来（冷缓存 + 故障，
-                    // 或配置错误）仍整批不入队，绝不退回「扫全项目」；丢掉的事件由
-                    // 周期对账重扫兜底追回（见本循环的 reconcile_tick）。
-                    let scope = match self.update_scope_cached().await {
-                        Ok(scope) => scope,
-                        Err(error) => {
-                            eprintln!("无法确定本期执行范围，本批文件事件不入队: {error:#}");
-                            continue;
-                        }
-                    };
-                    // 范围解不出名单时那句解释必须出现在**这条**路径上。少了它，
-                    // 「MDB 还没解析出来」在现场只表现为每 30 秒重复一遍的
-                    // 「不在本期执行范围」，没有任何线索指向 SYS meta 库。
-                    // 事件是轮询来的，同一句话每轮都会重算，故按内容去重。
-                    if let Some(warning) = scope.warning() {
-                        warn_scope_once(warning);
-                    }
-
-                    // 扫描变化文件的数据库头部信息（使用过滤后的路径）
-                    if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&filtered_paths) {
-                        println!("成功扫描到 {} 个数据库头部", new_headers.len());
-                        let mut params = IndexMap::new();
-                        // F6：本批次内同 dbnum 多文件检测（阻断不挑选），键含归属项目。
-                        let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
-                        let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
-
-                        // 处理每个扫描到的数据库头部信息
-                        for (path, new_header) in &new_headers {
-                            println!("正在处理路径: {:?}", path);
-
-                            // 复核一遍候选判定：`scan_db_headers` 的返回集合来自上面的
-                            // filtered_paths，但这道门便宜、且它是本函数体内出现在
-                            // try_parse_db_basic_info 之前的那一道，别让它退化掉。
-                            if !is_candidate_db_file(path) {
-                                println!("文件被排除规则过滤: {:?}", path);
-                                continue;
-                            }
-
-                            // 获取文件名用于后续处理
-                            let file_name = match path.file_stem().and_then(|s| s.to_str()) {
-                                Some(name) => name,
-                                None => {
-                                    println!("无法获取文件名: {:?}", path);
-                                    continue;
-                                }
-                            };
-
-                            // 解析数据库基本信息以获取数据库类型
-                            let Some(db_basic_info) = try_parse_db_basic_info(path) else {
-                                println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
-                                continue;
-                            };
-                            let db_type = &db_basic_info.db_type;
-                            let db_num = db_basic_info.db_no;
-
-                            // 归属项目取自文件所在的监控目录，与启动重扫同口径；
-                            // 必须先于范围门（范围门要用它判别的项目的运行态系统库）。
-                            let project = self.owning_project(path);
-
-                            // 本期 MDB 声明的设计库（SYS meta 例外），与启动重扫、
-                            // 手动触发共用同一个谓词。
-                            if !self.in_scope(&scope, &project, db_type, db_num) {
-                                if is_foreign_runtime_sys(&self.db_option, &project, db_type) {
-                                    println!(
-                                        "忽略非主项目的运行态系统库: project={project} \
-                                         db_type={db_type} dbnum={db_num}"
-                                    );
-                                } else {
-                                    println!("{}", out_of_scope_reason(&scope, db_type, db_num));
-                                }
-                                continue;
-                            }
-
-                            // F6：同一 dbnum 出现多个文件 → 阻断该 dbnum（不自动挑选）。
-                            // 与 init_watcher 同口径，必须先于 scan_and_check_file（审计 B3）。
-                            // 键含归属项目：跨项目同号的 sys 库不是重复。
-                            if let Some(prev) =
-                                seen_dbnums.insert((project.clone(), db_num), path.to_path_buf())
-                            {
-                                blocked_dupes.insert((project.clone(), db_num));
-                                println!(
-                                    "F6 发现项目 {} 内同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
-                                    project, db_num, prev, path
-                                );
-                                continue;
-                            }
-                            // F6：文件观察落库 + 回退/迁移检测；回退按整库重建
-                            // 入队（ADR-021），其余阻断类异常跳过（水位不回退）。
-                            match self
-                                .scan_and_check_file(
-                                    &project,
-                                    path,
-                                    file_name,
-                                    db_type,
-                                    db_num,
-                                    new_header.latest_ses_data.sesno as i32,
-                                )
-                                .await
-                            {
-                                ScanGate::Blocked => continue,
-                                ScanGate::Reinit => {
-                                    params.insert(
-                                        path.to_path_buf(),
-                                        self.reinit_batch(
-                                            &project,
-                                            path,
-                                            db_type,
-                                            db_num,
-                                            new_header.latest_ses_data.sesno as i32,
-                                        ),
-                                    );
-                                    continue;
-                                }
-                                ScanGate::Proceed => {}
-                            }
-
-                            println!(
-                                "检查文件: {}, 数据库编号: {}, 文件会话号: {}",
-                                file_name, db_num, new_header.latest_ses_data.sesno
-                            );
-
-                            // 水位对比即发现；基线与增量窗口都只是「有活要干」，
-                            // 由 worker 冻结点重扫时决定怎么干（与 init 同口径）。
-                            if let Some(found) = self
-                                .discover_batch(
-                                    &project,
-                                    path,
-                                    db_type,
-                                    db_num,
-                                    new_header.latest_ses_data.sesno as i32,
-                                )
-                                .await
-                            {
-                                params.insert(path.to_path_buf(), found);
-                            } else {
-                                println!("文件 {} 无需更新（水位已覆盖）", file_name);
-                            }
-                        }
-                        // Event batches are not a global file snapshot. Recheck all
-                        // non-recursively watched files so duplicates arriving in
-                        // separate poll events cannot bypass the dbnum guard.
-                        blocked_dupes.extend(self.duplicate_dbnums_across_watch_dirs());
-
-                        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，不入队）。
-                        if !blocked_dupes.is_empty() {
-                            println!("F6 阻断重复 dbnum: {blocked_dupes:?}");
-                            params.retain(|_p, found| {
-                                !blocked_dupes.contains(&(found.project.clone(), found.dbnum))
-                            });
-                        }
-
-                        // 如果没有需要入队的批次，跳过后续处理
-                        if params.is_empty() {
-                            continue;
-                        }
-
-                        // 发现即入队（ADR-011 §2）：执行、发布与补偿都归数据批次
-                        // worker，事件回调从此不再被一轮增量执行堵住。
-                        // 文件真的变了 = 有人在这个库上干活：不挂起，并放行该
-                        // dbnum 启动时挂起的积压，两段合成一条一起跑。
-                        self.enqueue_discovered("watch", false, params);
-                    } else {
-                        println!("扫描数据库头部信息失败，路径: {:?}", &event.paths);
+                    // 文件事件只负责标脏；处理必须回到与启动、重挂和周期对账相同的完整清单扫描。
+                    // 这样事件到达顺序不会变成数据阶段顺序，跨项目优先级也先于 observation 裁决。
+                    println!(
+                        "候选库文件发生变化，触发共享完整清单重扫: {:?}",
+                        filtered_paths
+                    );
+                    crate::data_interface::batch_scheduler::BatchScheduler::global()
+                        .arm_auto_work();
+                    crate::data_interface::initialization_phase::InitializationCoordinator::global(
+                    )
+                    .arm();
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if let Err(error) = self.sweep_watch_dirs("watch", false).await {
+                        let message = format!(
+                            "[watch] 完整清单重扫失败，等待下一次事件或对账重试: {error:#}"
+                        );
+                        log::warn!("{message}");
+                        eprintln!("{message}");
                     }
                 }
                 Err(e) => println!("文件监控错误: {:?}", e),

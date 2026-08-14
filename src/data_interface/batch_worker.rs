@@ -407,6 +407,8 @@ async fn run_one_batch_isolated(
 ) {
     let dbnum = job.dbnum;
     let task_id = job.task_id.clone();
+    let phase = job.phase;
+    let epoch_id = job.epoch_id;
     let Err(reason) = isolate_panic(run_one_batch(mgr, registry, scheduler, job)).await else {
         // 正常返回的那条路 `run_one_batch` 自己已经收过口了，别再 finish 一次
         // ——那会把它写好的终态结果覆盖掉。
@@ -418,6 +420,11 @@ async fn run_one_batch_isolated(
     );
     log::error!("{message}");
     eprintln!("{message}");
+    crate::data_interface::initialization_phase::InitializationCoordinator::global().mark_failed(
+        epoch_id,
+        phase,
+        message.clone(),
+    );
     scheduler.finish(dbnum);
     registry.finish(
         &task_id,
@@ -499,6 +506,15 @@ async fn run_one_batch(
         ManualUpdateStatus::Partial => TaskState::Partial,
         ManualUpdateStatus::Failed => TaskState::Failed,
     };
+    if matches!(state, TaskState::Failed | TaskState::Partial) {
+        let message = result
+            .warnings
+            .last()
+            .cloned()
+            .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .mark_failed(job.epoch_id, job.phase, message);
+    }
     let result_json = serde_json::to_value(&result).unwrap_or_default();
     scheduler.finish(job.dbnum);
     registry.finish(&task_id, state, result_json.clone());
@@ -1175,14 +1191,18 @@ async fn execute_frozen_batch(
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
-    match SideEffectCompensator::drain(mgr).await {
-        Ok(n) if n > 0 => println!("写回后副作用补偿完成 {n} 个任务"),
-        Ok(_) => {}
-        Err(error) => {
-            result
-                .warnings
-                .push(format!("写回后副作用补偿失败（保留待重试）: {error:#}"));
-            postcommit_failed = true;
+    if crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .model_generation_allowed()
+    {
+        match SideEffectCompensator::drain(mgr).await {
+            Ok(n) if n > 0 => println!("写回后副作用补偿完成 {n} 个任务"),
+            Ok(_) => {}
+            Err(error) => {
+                result
+                    .warnings
+                    .push(format!("写回后副作用补偿失败（保留待重试）: {error:#}"));
+                postcommit_failed = true;
+            }
         }
     }
 
@@ -1378,12 +1398,13 @@ async fn execute_frozen_batch_body(
     let applied = batch
         .as_ref()
         .is_some_and(|b| b.status == BatchStatus::Applied);
-    let defer_model_phase = initialization_defers_model_phase(
-        applied,
-        job.intent,
-        job.start_sesno,
-        batch.as_ref().map(|batch| batch.start_sesno),
-    );
+    let defer_model_phase = job.epoch_id > 0
+        || initialization_defers_model_phase(
+            applied,
+            job.intent,
+            job.start_sesno,
+            batch.as_ref().map(|batch| batch.start_sesno),
+        );
 
     // SYST 数据落库后，TEAM 等派生表要跟着刷。走持久补偿队列而不是就地同步：
     // 同一条重试通道、同一个 MAX_ATTEMPTS，崩了下一轮接着来。
@@ -1406,7 +1427,7 @@ async fn execute_frozen_batch_body(
     let staged = crate::data_interface::staging::active_staging_writes().is_some();
     let mut non_regen_failed = false;
     let mut post_regen_aabb_targets = Vec::new();
-    if staged && applied {
+    if staged && applied && !defer_model_phase {
         match crate::data_interface::staging::active_staged_finalize_plan().await {
             Some(plan) => {
                 println!(
@@ -1618,7 +1639,7 @@ async fn execute_frozen_batch_body(
     let mut side_effect_failed = non_regen_failed;
     // 暂存窗口内不跑全局持久层副作用/drain：只执行上面当前 plan 的前置，避免把
     // 别库或旧 pending 的写误记进本窗口 journal。
-    if !staged {
+    if !staged && !defer_model_phase {
         match SideEffectCompensator::drain(mgr).await {
             Ok(n) if n > 0 => println!("批次后副作用补偿完成 {n} 个任务"),
             Ok(_) => {}
@@ -2365,39 +2386,81 @@ async fn idle_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) {
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
     // 范围可能刚变宽（见 [`SCOPE_DIRTY`]）：先把新进范围的库找出来入队，它们没有
     // 自己的文件事件，错过这一轮就要等下次重启。入队会唤醒本 worker，下一圈就消费。
-    if SCOPE_DIRTY.swap(false, Ordering::SeqCst) {
+    let phase_rescan =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .take_rescan_requested();
+    if phase_rescan || SCOPE_DIRTY.swap(false, Ordering::SeqCst) {
         if let Err(error) = mgr.resweep_for_scope_change().await {
-            println!("范围刷新后重扫监控目录失败: {error:#}");
+            let message = format!("阶段/范围刷新后重扫监控目录失败: {error:#}");
+            println!("{message}");
+            let snapshot =
+                crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                    .snapshot();
+            if let Some(phase) = snapshot.current_phase.and_then(|phase| match phase {
+                "meta" => Some(crate::data_interface::initialization_phase::DataPhase::Meta),
+                "catalogue" => {
+                    Some(crate::data_interface::initialization_phase::DataPhase::Catalogue)
+                }
+                "design" => Some(crate::data_interface::initialization_phase::DataPhase::Design),
+                _ => None,
+            }) {
+                crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                    .mark_failed(snapshot.epoch_id, phase, message);
+            }
         }
     }
 
     // 副作用与模型积压：覆盖「水位已推、工作未完成」的重启/失败残留。
-    if let Err(error) = SideEffectCompensator::drain(mgr).await {
-        println!("空闲副作用补偿失败（保留待重试）: {error:#}");
-    }
-    // 队列三出路的「可收口」：drain 成功即 mark_done，但 done 行从不删。每轮顺手
-    // 清一次终态行（幂等；失败保留、下一轮重试），与 inst_relate 平表清扫同纪律。
-    match SideEffectCompensator::sweep_done().await {
-        Ok(0) => {}
-        Ok(swept) => println!("副作用补偿队列 done 行清扫：删 {swept} 行"),
-        Err(error) => println!("副作用补偿 done 行清扫失败（下一轮重试）: {error:#}"),
-    }
-    let data_phase_failed = match model_update_pending::drain_data_phases(mgr).await {
-        Ok(n) if n > 0 => {
-            println!("空闲模型积压消化完成 {n} 个任务");
-            false
+    let model_phase_open = initialization.model_generation_allowed();
+    let mut side_effect_failed = false;
+    if model_phase_open {
+        if let Err(error) = SideEffectCompensator::drain(mgr).await {
+            println!("空闲副作用补偿失败（保留待重试）: {error:#}");
+            side_effect_failed = true;
         }
-        Ok(_) => false,
-        Err(error) => {
-            println!("空闲模型积压消化失败（保留待重试）: {error:#}");
-            true
+        // 队列三出路的「可收口」：drain 成功即 mark_done，但 done 行从不删。每轮顺手
+        // 清一次终态行（幂等；失败保留、下一轮重试），与 inst_relate 平表清扫同纪律。
+        match SideEffectCompensator::sweep_done().await {
+            Ok(0) => {}
+            Ok(swept) => println!("副作用补偿队列 done 行清扫：删 {swept} 行"),
+            Err(error) => println!("副作用补偿 done 行清扫失败（下一轮重试）: {error:#}"),
         }
+        match SideEffectCompensator::has_dead_work().await {
+            Ok(true) => {
+                println!("副作用补偿存在死信，模型门保持未就绪，等待新触发复活或人工处置");
+                side_effect_failed = true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                println!("检查副作用死信失败（模型门保持未就绪）: {error:#}");
+                side_effect_failed = true;
+            }
+        }
+    }
+    let data_phase_failed = if model_phase_open {
+        match model_update_pending::drain_data_phases(mgr).await {
+            Ok(n) if n > 0 => {
+                println!("空闲模型积压消化完成 {n} 个任务");
+                false
+            }
+            Ok(_) => false,
+            Err(error) => {
+                println!("空闲模型积压消化失败（保留待重试）: {error:#}");
+                true
+            }
+        }
+    } else {
+        false
     };
 
     // 消化失败时不必再问「还有没有活」——这一轮已经在退避那条路上了。
-    let (has_backlog, backlog_check_failed) = if data_phase_failed {
+    let (has_backlog, backlog_check_failed) = if !model_phase_open {
+        (false, false)
+    } else if data_phase_failed {
         (false, false)
     } else {
         match model_update_pending::has_pending_data_work().await {
@@ -2408,7 +2471,25 @@ async fn idle_round(
             }
         }
     };
-    let failed = data_phase_failed || backlog_check_failed;
+    let (has_dead_work, dead_check_failed) = if !model_phase_open {
+        (false, false)
+    } else {
+        match model_update_pending::has_dead_data_work().await {
+            Ok(dead) => (dead, false),
+            Err(error) => {
+                println!("检查模型死信失败（模型门保持未就绪）: {error:#}");
+                (false, true)
+            }
+        }
+    };
+    if has_dead_work {
+        println!("模型工作存在死信，模型门保持未就绪，等待新触发复活或人工处置");
+    }
+    let failed = side_effect_failed
+        || data_phase_failed
+        || backlog_check_failed
+        || has_dead_work
+        || dead_check_failed;
     // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉，房间轮不能越过它。
     let claimed_batches = if failed || has_backlog {
         0
@@ -2417,6 +2498,17 @@ async fn idle_round(
     };
 
     let data_outcome = idle_outcome(failed, has_backlog, claimed_batches);
+    let spatial_pending = if data_outcome == IdleOutcome::Settled {
+        match SideEffectCompensator::has_pending_spatial_work().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                println!("检查模型阶段 AABB 积压失败（模型门保持关闭）: {error:#}");
+                true
+            }
+        }
+    } else {
+        true
+    };
     // 房间轮也是分页的（元素侧），一页吃不完就要立刻回来——否则积压会以每 30 秒
     // 一页的速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
     let room_outcome = if room_round_is_due(data_outcome) {
@@ -2427,15 +2519,6 @@ async fn idle_round(
     // 房间失败压过数据侧 MoreWork：失败行需要走 IDLE_WAKE 退避，不能因为另一侧还有
     // 工作就留下一个 Notify permit，把五次 attempts 在热循环里瞬间烧完。
     let outcome = combine_idle_outcomes(data_outcome, room_outcome);
-    // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
-    //
-    // 失败时**不**唤醒：`notify_one` 在无等待者时会存下一个 permit，主循环的
-    // `wait_for_work(IDLE_WAKE)` 于是立刻返回。持续性故障（SurrealDB 不可达之类）
-    // 下这会退化成只受查询延迟限制的热循环，每圈还打一行同样的错。这条路的退避
-    // 就是 `IDLE_WAKE` 那 30 秒。
-    if wakes_immediately(outcome) {
-        BatchScheduler::global().wake();
-    }
 
     // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
     // AABB 刷新与删除清理只动内存树，这里每轮最多写一次项目树文件。不落盘的话，
@@ -2443,10 +2526,37 @@ async fn idle_round(
     // 状态。这条闭环现在只负责「省掉一次重建」而不再背正确性：直写路径的变更也
     // 随事务 bump 了 epoch（2026-08-12 增补），落盘前崩溃时启动判据会认出指纹
     // 失配并从库指针重建。失败保留脏标记，下一空闲轮重试。
-    match crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty().await {
-        Ok(true) => println!("空间树增量变更已写回项目树文件"),
-        Ok(false) => {}
-        Err(error) => println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}"),
+    let aabb_persisted = match crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty().await {
+        Ok(true) => {
+            println!("空间树增量变更已写回项目树文件");
+            true
+        }
+        Ok(false) => true,
+        Err(error) => {
+            println!("空间树落盘失败（保留脏标记，下一轮重试）: {error:#}");
+            false
+        }
+    };
+    let model_became_ready = data_outcome == IdleOutcome::Settled
+        && !spatial_pending
+        && aabb_persisted
+        && initialization.data_ready()
+        && initialization.mark_model_ready();
+    let outcome = if model_became_ready && outcome == IdleOutcome::Settled {
+        IdleOutcome::MoreWork
+    } else {
+        outcome
+    };
+
+    // 下一圈主循环先取新数据批次；没有新批次时再消化下一页 durable 积压。
+    // 模型门首次打开也折成 MoreWork，以便下一圈立即执行房间阶段。
+    //
+    // 失败时**不**唤醒：`notify_one` 在无等待者时会存下一个 permit，主循环的
+    // `wait_for_work(IDLE_WAKE)` 于是立刻返回。持续性故障（SurrealDB 不可达之类）
+    // 下这会退化成只受查询延迟限制的热循环，每圈还打一行同样的错。这条路的退避
+    // 就是 `IDLE_WAKE` 那 30 秒。
+    if wakes_immediately(outcome) {
+        BatchScheduler::global().wake();
     }
 
     // inst_relate 平表副本清扫（P4 写时物化）：生成/刷新过才扫（脏位门控），
@@ -2516,6 +2626,12 @@ async fn room_round(
     registry: &'static TaskRegistry,
     after_batches: bool,
 ) -> IdleOutcome {
+    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
+        .snapshot()
+        .model_ready
+    {
+        return IdleOutcome::Settled;
+    }
     // 房间增量的总开关（`crate::options::room_incremental`，默认关）。关着时这一轮
     // 不建任务行、不消费任何目标——已经排在表里的原样留着，开关一开照常收。
     //
@@ -2750,6 +2866,7 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
         .map_err(|e| anyhow::anyhow!("读取数据库头失败 {}: {e}", job.path.display()))?;
     let db_type = parse_pdms_db::parse::parse_file_basic_info(&header).db_type;
     Ok(FileCandidate {
+        project: job.project.clone(),
         path: job.path.clone(),
         file_name,
         db_type,
@@ -3193,6 +3310,8 @@ mod tests {
         use std::path::PathBuf;
 
         let steady = FrozenBatch {
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 0,
             task_id: "t1".into(),
             project: "p".into(),
             dbnum: 7997,
@@ -3204,6 +3323,8 @@ mod tests {
             end_sesno: 15,
         };
         let baseline = FrozenBatch {
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 0,
             start_sesno: 1,
             end_sesno: 76,
             ..steady.clone()
@@ -3225,6 +3346,8 @@ mod tests {
         use std::path::PathBuf;
 
         let job = FrozenBatch {
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 0,
             task_id: "t-room-checkpoint".into(),
             project: "P".into(),
             dbnum: 7997,
@@ -3608,6 +3731,23 @@ mod tests {
         assert!(
             !initialization_defers_model_phase(false, BatchIntent::ApplyWindow, 1, Some(0)),
             "数据批次失败时不应伪报初始化第一阶段完成"
+        );
+
+        let source = include_str!("batch_worker.rs");
+        let idle = source
+            .split_once("async fn idle_round(")
+            .expect("idle_round exists")
+            .1
+            .split_once("/// 一个空闲轮消化完这一页之后的处置")
+            .expect("idle_round end exists")
+            .0;
+        let gate = idle.find("let model_phase_open").unwrap();
+        let drain = idle.find("drain_data_phases(mgr)").unwrap();
+        let probe = idle.find("has_pending_data_work()").unwrap();
+        assert!(gate < drain && drain < probe);
+        assert!(
+            idle.contains("if !model_phase_open"),
+            "模型门关闭时不得探测 backlog 并自唤醒形成热循环: {idle}"
         );
     }
 

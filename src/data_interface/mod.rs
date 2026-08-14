@@ -58,6 +58,8 @@ pub mod batch_queue;
 
 pub mod batch_scheduler;
 
+pub mod initialization_phase;
+
 pub mod batch_worker;
 
 pub mod task_registry;

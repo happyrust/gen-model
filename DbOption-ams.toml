@@ -16,6 +16,7 @@ project_path = "D:/AVEVA/Projects/E3D2.1"
 # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
 
 mdb_name = "ALL"

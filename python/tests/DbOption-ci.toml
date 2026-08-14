@@ -26,6 +26,7 @@ sync_chunk_size = 10_0000
 #项目设置：离线档不扫目录，指向一个不存在也无所谓的相对路径
 project_path = "./python/tests/.ci-scratch/projects"
 included_projects = ["AvevaMarineSample"]
+catalogue_project_priority = ["AvevaMarineSample"]
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"

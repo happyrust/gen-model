@@ -12,6 +12,7 @@ sync_chunk_size = 1_0000
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1"
 included_projects = ["GDP"]
+catalogue_project_priority = ["GDP"]
 #project_dirs = ["AvevaMarineSample"]
 
 mdb_name = "NI-MODEL"

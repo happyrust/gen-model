@@ -53,7 +53,7 @@ use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info, parse_file_db_bas
 use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 use surrealdb::sql::Thing;
 
-use crate::data_interface::batch_scheduler::ManualEnqueueReceipt;
+use crate::data_interface::batch_scheduler::{ManualEnqueueReceipt, ShadowedCandidate};
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
@@ -2772,6 +2772,9 @@ pub struct ManualUpdatePreview {
     /// 显示并允许重试).
     #[serde(default)]
     pub pending_model_retries: Vec<PendingModelUnit>,
+    /// Cross-project DICT/CATA candidates hidden by explicit project priority.
+    #[serde(default)]
+    pub shadowed: Vec<ShadowedCandidate>,
     /// Non-fatal per-file scan issues (unreadable header, collect error, …).
     pub warnings: Vec<String>,
     /// `true` when there is nothing pending to show (no sessions, no anomalies,
@@ -2822,6 +2825,7 @@ pub struct DbnumStatusReport {
 /// worker 执行体复用 [`AiosDBManager::execute_one_dbnum`]）。
 #[derive(Clone)]
 pub(crate) struct FileCandidate {
+    pub(crate) project: String,
     pub(crate) path: PathBuf,
     pub(crate) file_name: String,
     pub(crate) db_type: String,
@@ -3040,10 +3044,9 @@ fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
     })
 }
 
-/// ADR-020 第 3 项的子集判定（纯函数）：`None` = 全范围；`Some` 时只放行名单里的
-/// 常规库。SYS meta（SYST/DICT/GLB/GLOB）不是勾选对象——它们在范围门上就是无条件
-/// 放行的（[`UpdateScope::admits`]），承载着 MDB/CURD 等范围名单本身，漏掉一轮
-/// 会让后续每一轮的范围都陈旧——永远随批（S2-H「会一并处理」段）。
+/// ADR-020 第 3 项与 ADR-025 的子集判定（纯函数）：`None` = 全范围；`Some` 时只
+/// 约束 Design。Meta 与 Catalogue 都不是勾选对象：前者承载 MDB/CURD 范围，后者
+/// 是 Design 解析的字典/元件库前置条件，因此手动触发也必须释放完整前置阶段。
 fn subset_selects(
     selection: Option<&std::collections::BTreeSet<u32>>,
     db_type: &str,
@@ -3052,7 +3055,9 @@ fn subset_selects(
     let Some(selection) = selection else {
         return true;
     };
-    if COLD_START_DB_TYPES.contains(&db_type) {
+    if crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type)
+        != crate::data_interface::initialization_phase::DataPhase::Design
+    {
         return true;
     }
     selection.contains(&dbnum)
@@ -3352,9 +3357,8 @@ impl AiosDBManager {
     ///
     /// `sync_live = true` 时同样可用（ADR-011 §12：合流后手动与自动不再互斥）；
     /// 预览与数据批次并发时结果可能偏大——正在被应用的会话也会算进「待应用」，
-    /// 界面按快照里的运行中批次数标注即可。Scans ONLY the current project's
-    /// directory — it never walks other `included_projects`. Never writes element
-    /// data, models or `applied_sesno`; it may refresh scan-observation fields only.
+    /// 界面按快照里的运行中批次数标注即可。扫描与执行共享完整 included-project
+    /// manifest；从不写元素数据、模型或 `applied_sesno`，只刷新扫描观察字段。
     pub async fn preview_manual_update(
         &self,
         project: &str,
@@ -3368,19 +3372,13 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
 
         let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
-        let mut out_of_scope_cata = Vec::new();
-        let mut duplicate_paths = BTreeMap::new();
-        let by_dbnum = self.scan_project_candidates(
-            project,
-            &project_dir,
-            &scope,
-            &mut warnings,
-            &mut out_of_scope_cata,
-            &mut duplicate_paths,
+        let (by_dbnum, shadowed, phase_blockers) =
+            self.scan_initialization_candidates(project, &scope, &mut warnings);
+        warnings.extend(
+            phase_blockers
+                .iter()
+                .map(|(phase, message)| format!("{} 阶段阻断: {message}", phase.as_str())),
         );
-        // 预览本就允许刷新扫描观察字段（ADR-001）；CATA 登记行是按需闭包的寻址依据。
-        self.record_out_of_scope_cata(project, &out_of_scope_cata, &duplicate_paths, &mut warnings)
-            .await;
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
         let mut dbnums = Vec::new();
@@ -3458,7 +3456,10 @@ impl AiosDBManager {
             }
 
             let cand = &candidates[0];
-            match self.preview_one_dbnum(project, cand, &mut warnings).await {
+            match self
+                .preview_one_dbnum(&cand.project, cand, &mut warnings)
+                .await
+            {
                 Ok(Some(preview)) => dbnums.push(preview),
                 Ok(None) => {}
                 Err(e) => warnings.push(format!("预览 dbnum={} 失败: {e}", db_num)),
@@ -3483,6 +3484,7 @@ impl AiosDBManager {
             up_to_date: pending_rows == 0 && pending_model_retries.is_empty(),
             dbnums,
             pending_model_retries,
+            shadowed,
             warnings,
         })
     }
@@ -3698,6 +3700,136 @@ impl AiosDBManager {
         }
     }
 
+    /// Build one complete manual/preview initialization manifest across every
+    /// included project, then resolve DICT/CATA naked-dbnum ownership before
+    /// any caller writes observations or enqueues rows.
+    fn scan_initialization_candidates(
+        &self,
+        requested_project: &str,
+        scope: &UpdateScope,
+        warnings: &mut Vec<String>,
+    ) -> (
+        IndexMap<u32, Vec<FileCandidate>>,
+        Vec<ShadowedCandidate>,
+        Vec<(
+            crate::data_interface::initialization_phase::DataPhase,
+            String,
+        )>,
+    ) {
+        let mut projects = self.db_option.included_projects.clone();
+        if !projects
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(requested_project))
+        {
+            projects.insert(0, requested_project.to_string());
+        }
+        let mut by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
+        let mut blockers = Vec::new();
+        for candidate_project in projects {
+            let Some(candidate_dir) = resolve_project_root(&self.db_option, &candidate_project)
+            else {
+                let message = format!("无法解析 included project 目录: {candidate_project}");
+                warnings.push(message.clone());
+                blockers.push((
+                    crate::data_interface::initialization_phase::DataPhase::Meta,
+                    message,
+                ));
+                continue;
+            };
+            if !candidate_dir.exists() {
+                let message = format!("included project 目录不存在: {}", candidate_dir.display());
+                warnings.push(message.clone());
+                blockers.push((
+                    crate::data_interface::initialization_phase::DataPhase::Meta,
+                    message,
+                ));
+                continue;
+            }
+            let mut ignored_out_of_scope = Vec::new();
+            let mut project_duplicates = BTreeMap::new();
+            let scanned = self.scan_project_candidates(
+                &candidate_project,
+                &candidate_dir,
+                scope,
+                warnings,
+                &mut ignored_out_of_scope,
+                &mut project_duplicates,
+            );
+            for (dbnum, candidates) in scanned {
+                by_dbnum.entry(dbnum).or_default().extend(candidates);
+            }
+        }
+
+        let mut shadowed = Vec::new();
+        for (db_type, phase) in [
+            (
+                "DICT",
+                crate::data_interface::initialization_phase::DataPhase::Meta,
+            ),
+            (
+                "CATA",
+                crate::data_interface::initialization_phase::DataPhase::Catalogue,
+            ),
+        ] {
+            let candidates = by_dbnum
+                .values()
+                .flatten()
+                .filter(|candidate| candidate.db_type.eq_ignore_ascii_case(db_type))
+                .map(
+                    |candidate| crate::data_interface::initialization_phase::CatalogueCandidate {
+                        project: candidate.project.clone(),
+                        dbnum: candidate.db_num,
+                        path: candidate.path.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            let selection =
+                crate::data_interface::initialization_phase::select_catalogue_candidates(
+                    candidates,
+                    &self.db_option.included_projects,
+                    &crate::options::catalogue_project_priority(),
+                );
+            let selection_blocked = !selection.blockers.is_empty();
+            let winners = if selection_blocked {
+                HashSet::new()
+            } else {
+                selection
+                    .selected
+                    .iter()
+                    .map(|candidate| candidate.path.clone())
+                    .collect::<HashSet<_>>()
+            };
+            for candidate in selection.shadowed {
+                let selected_project = selection
+                    .selected
+                    .iter()
+                    .find(|selected| selected.dbnum == candidate.dbnum)
+                    .map(|selected| selected.project.clone())
+                    .unwrap_or_default();
+                shadowed.push(ShadowedCandidate {
+                    project: candidate.project,
+                    dbnum: candidate.dbnum,
+                    file_path: candidate.path.display().to_string(),
+                    selected_project,
+                });
+            }
+            blockers.extend(
+                selection
+                    .blockers
+                    .into_iter()
+                    .map(|message| (phase, message)),
+            );
+            by_dbnum.retain(|_, candidates| {
+                candidates.retain(|candidate| {
+                    !candidate.db_type.eq_ignore_ascii_case(db_type)
+                        || winners.contains(&candidate.path)
+                });
+                !candidates.is_empty()
+            });
+        }
+        (by_dbnum, shadowed, blockers)
+    }
+
     /// Pass 1: walk this project's ingestible DB directories and group candidate
     /// DB files by `dbnum`.
     ///
@@ -3782,14 +3914,9 @@ impl AiosDBManager {
                 // duplicate_dbnums 权威判定。不能在这里首见取一，否则第二份同号
                 // 文件会被静默抹掉，手动路径反而登记任意一份。
                 if db_type.eq_ignore_ascii_case("CATA") {
-                    match PdmsIO::new(
-                        project_dir.to_string_lossy().as_ref(),
-                        path.to_path_buf(),
-                        true,
-                    )
-                    .get_latest_sesno()
-                    {
+                    match PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno() {
                         Ok(sesno) => out_of_scope_cata.push(FileCandidate {
+                            project: project.to_string(),
                             path: path.to_path_buf(),
                             file_name: file_name.clone(),
                             db_type: db_type.clone(),
@@ -3807,26 +3934,22 @@ impl AiosDBManager {
                 continue;
             }
 
-            let file_latest_sesno = match PdmsIO::new(
-                project_dir.to_string_lossy().as_ref(),
-                path.to_path_buf(),
-                true,
-            )
-            .get_latest_sesno()
-            {
-                Ok(sesno) => sesno as i32,
-                Err(error) => {
-                    warnings.push(format!(
-                        "跳过无法读取最新会话的数据库文件 {}: {error}",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
+            let file_latest_sesno =
+                match PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno() {
+                    Ok(sesno) => sesno as i32,
+                    Err(error) => {
+                        warnings.push(format!(
+                            "跳过无法读取最新会话的数据库文件 {}: {error}",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
             let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or_default();
             let file_modified_at = metadata.as_ref().and_then(file_modified_rfc3339);
 
             by_dbnum.entry(db_no).or_default().push(FileCandidate {
+                project: project.to_string(),
                 path: path.to_path_buf(),
                 file_name,
                 db_type,
@@ -4137,23 +4260,14 @@ impl AiosDBManager {
         // 不报的话人只能假定它跟预览那次一样。
         receipt.mdb = scope.mdb().to_owned();
 
-        let mut out_of_scope_cata = Vec::new();
-        let mut duplicate_paths = BTreeMap::new();
-        let by_dbnum = self.scan_project_candidates(
-            project,
-            &project_dir,
-            &scope,
-            &mut receipt.warnings,
-            &mut out_of_scope_cata,
-            &mut duplicate_paths,
+        let (by_dbnum, shadowed, manifest_blockers) =
+            self.scan_initialization_candidates(project, &scope, &mut receipt.warnings);
+        receipt.shadowed = shadowed;
+        receipt.warnings.extend(
+            manifest_blockers
+                .iter()
+                .map(|(phase, message)| format!("{} 阶段阻断: {message}", phase.as_str())),
         );
-        self.record_out_of_scope_cata(
-            project,
-            &out_of_scope_cata,
-            &duplicate_paths,
-            &mut receipt.warnings,
-        )
-        .await;
         receipt.scanned = by_dbnum.len();
 
         // ADR-020 第 3 项：子集选择先过统一范围门。范围外的请求当场拒（警告 +
@@ -4179,6 +4293,20 @@ impl AiosDBManager {
 
         let scheduler = BatchScheduler::global();
         let registry = TaskRegistry::global();
+        let coordinator =
+            crate::data_interface::initialization_phase::InitializationCoordinator::global();
+        let epoch_id = coordinator.begin_discovery();
+        let manifest_totals = by_dbnum
+            .values()
+            .flatten()
+            .map(|candidate| {
+                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                    &candidate.db_type,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut manifest_phases = Vec::new();
+        let mut phase_blockers = manifest_blockers;
 
         let mut dbnums: Vec<u32> = by_dbnum.keys().copied().collect();
         dbnums.sort_unstable();
@@ -4205,6 +4333,12 @@ impl AiosDBManager {
                 .block_reason()
                 .expect("同号多文件是阻断类异常");
                 receipt.blocked.push(BlockedDbnum { dbnum, reason });
+                phase_blockers.push((
+                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                        &candidates[0].db_type,
+                    ),
+                    format!("dbnum={dbnum} 同号多文件"),
+                ));
                 continue;
             }
             let cand = &candidates[0];
@@ -4215,7 +4349,7 @@ impl AiosDBManager {
             // 去跑另一个库的会话，把 8000 的 applied_sesno 推到别人的会话号上。
             let obs = FileObservation {
                 dbnum,
-                project: project.to_string(),
+                project: cand.project.clone(),
                 db_type: cand.db_type.clone(),
                 file_name: cand.file_name.clone(),
                 file_path: cand.path.display().to_string(),
@@ -4229,6 +4363,12 @@ impl AiosDBManager {
                     receipt
                         .warnings
                         .push(format!("dbnum={dbnum}: 读取水位失败，本次跳过: {error:#}"));
+                    phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &cand.db_type,
+                        ),
+                        format!("dbnum={dbnum} 读取水位失败: {error:#}"),
+                    ));
                     continue;
                 }
             };
@@ -4236,6 +4376,13 @@ impl AiosDBManager {
                 receipt
                     .warnings
                     .push(format!("dbnum={dbnum}: 记录扫描观察失败: {error:#}"));
+                phase_blockers.push((
+                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                        &cand.db_type,
+                    ),
+                    format!("dbnum={dbnum} 记录扫描观察失败: {error:#}"),
+                ));
+                continue;
             }
             let mut applied = verdict.applied_sesno();
             let mut intent = BatchIntent::ApplyWindow;
@@ -4251,6 +4398,12 @@ impl AiosDBManager {
                     .is_some_and(FileAnomaly::requires_reinit)
                 {
                     receipt.blocked.push(BlockedDbnum { dbnum, reason });
+                    phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &cand.db_type,
+                        ),
+                        format!("dbnum={dbnum} 身份异常阻断"),
+                    ));
                     continue;
                 }
                 receipt.warnings.push(format!(
@@ -4294,7 +4447,7 @@ impl AiosDBManager {
             // 从未解析（applied=0）与增量窗口在这里不分家：worker 执行体里的
             // `needs_initial_load` 会把基线接管过去，两条路径同口径。
             let (first_pending_sesno_time, file_latest_sesno_time) = window_times_rfc3339(
-                project,
+                &cand.project,
                 &cand.path,
                 if intent == BatchIntent::Reinitialize && cand.file_latest_sesno == 0 {
                     0
@@ -4306,9 +4459,13 @@ impl AiosDBManager {
             let outcome = scheduler.enqueue(
                 registry,
                 &DiscoveredBatch {
-                    project: project.to_string(),
+                    project: cand.project.clone(),
                     dbnum,
                     db_type: cand.db_type.clone(),
+                    phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                        &cand.db_type,
+                    ),
+                    epoch_id,
                     intent,
                     path: cand.path.clone(),
                     file_name: cand.file_name.clone(),
@@ -4321,12 +4478,31 @@ impl AiosDBManager {
                 // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。
                 false,
             );
+            manifest_phases.push(
+                crate::data_interface::initialization_phase::DataPhase::of_db_type(&cand.db_type),
+            );
             match outcome.outcome {
                 Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
                 Enqueued::Merged => receipt.merged.push(outcome.info),
                 Enqueued::AlreadyCovered => receipt.already_covered.push(dbnum),
             }
         }
+        coordinator.install_manifest(epoch_id, manifest_phases, false, phase_blockers);
+        coordinator.set_phase_totals(epoch_id, manifest_totals);
+        coordinator.set_shadowed(
+            epoch_id,
+            receipt
+                .shadowed
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}:{}:{}->{}",
+                        item.dbnum, item.project, item.file_path, item.selected_project
+                    )
+                })
+                .collect(),
+        );
+        scheduler.wake();
         receipt
     }
 
@@ -5128,6 +5304,7 @@ mod tests {
     #[test]
     fn out_of_scope_cata_collides_with_an_in_scope_candidate() {
         let candidate = |path: &str, db_type: &str| FileCandidate {
+            project: "AvevaMarineSample".into(),
             path: PathBuf::from(path),
             file_name: PathBuf::from(path)
                 .file_name()
@@ -6017,10 +6194,10 @@ mod tests {
         assert_eq!(sites[0].modified, 1);
     }
 
-    /// ADR-020 第 3 项：`dbnums` 子集只约束可勾选的常规库；缺省 = 全范围；
-    /// SYS meta 永远随批（S2-H「会一并处理」段）。
+    /// ADR-020 第 3 项 + ADR-025：`dbnums` 子集只约束 Design；缺省 = 全范围；
+    /// Meta/Catalogue 前置阶段永远随批。
     #[test]
-    fn execute_subset_gates_regular_dbs_and_never_gates_sys_meta() {
+    fn execute_subset_gates_design_and_never_gates_prerequisite_phases() {
         use std::collections::BTreeSet;
 
         // 缺省（不带字段）= 全范围，行为与今天完全一致。
@@ -6031,12 +6208,10 @@ mod tests {
         // 勾选内的 DESI 放行，勾选外的 DESI 拦下（不入队、水位不动）。
         assert!(subset_selects(Some(&selection), "DESI", 8000));
         assert!(!subset_selects(Some(&selection), "DESI", 8005));
-        // SYS meta 不是勾选对象，子集再窄也随批。
-        for db_type in ["SYST", "DICT", "GLB", "GLOB"] {
+        // Meta/Catalogue 不是勾选对象，子集再窄也释放完整前置阶段。
+        for db_type in ["SYST", "DICT", "GLB", "GLOB", "CATA"] {
             assert!(subset_selects(Some(&selection), db_type, 7001));
         }
-        // CATA 是常规库：不在名单里就不放行。
-        assert!(!subset_selects(Some(&selection), "CATA", 8191));
     }
 
     /// `base_snap` plus a reverse-reference index (ADR-003): each

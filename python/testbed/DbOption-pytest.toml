@@ -30,6 +30,7 @@ sync_chunk_size = 10_0000
 #项目设置：testbed 项目副本（Sync-TestbedProjects.ps1 维护）
 project_path = "D:/work/plant-code/old/gen-model/python/testbed/projects"
 included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"

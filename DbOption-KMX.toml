@@ -13,6 +13,7 @@ sync_chunk_size = 1_0000
 project_path = "D:/downloads/Projects12.1.SP4"
 #included_projects = ["KMX", "sch", "REF", "PDM", "SPDM", "LCS", "MSPProject"]
 included_projects = ["MSP"]
+catalogue_project_priority = ["MSP"]
 project_dirs = ["MSPProject"]
 mdb_name = "MDBALL"
 project_name = "KMX"
