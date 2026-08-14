@@ -2170,20 +2170,23 @@ mod inst_meta_tests {
     }
 
     /// 「回退即红」源码钉（W4/D6）：生成写入路径的字面量必须是纯数据——
-    /// `save_instance_data` 与 `gen_cata_geos` 的函数体里不许再出现
+    /// `build_canonical_save_plan` 到 `execute_save_plan` 的生产保存路径，以及
+    /// `gen_cata_geos` 的函数体里不许再出现
     /// `fn::find_ancestor_type(` / `fn::ses_date(` / `fn::anc_u64(` 内联求值。
     /// （启动自愈回填 `backfill_inst_relate_anc` 是直打持久层的非 journal 路径，
     /// 允许继续用 fn::，不在本钉范围。）
     #[test]
     fn generation_literals_are_pure_data_with_no_inline_fn_calls() {
-        let inst_source = include_str!("pdms_inst.rs");
+        // `include_str!` preserves the checkout's line endings. Normalize them so this
+        // source-order guard behaves identically on Windows (CRLF) and CI (LF).
+        let inst_source = include_str!("pdms_inst.rs").replace("\r\n", "\n");
         let inst_body = inst_source
-            .split_once("pub async fn save_instance_data(")
-            .expect("save_instance_data 必须存在")
+            .split_once("fn build_canonical_save_plan(")
+            .expect("build_canonical_save_plan 必须存在")
             .1
-            .split_once("\n#[cfg(test)]")
+            .split_once("\n#[cfg(test)]\nmod tests")
             .map(|(head, _)| head)
-            .expect("函数体到测试模块为止");
+            .expect("生产保存路径到测试模块为止");
         let cata_source = include_str!("cata_model.rs");
         let cata_body = cata_source
             .split_once("pub async fn gen_cata_geos(")
@@ -2193,7 +2196,7 @@ mod inst_meta_tests {
         for marker in ["fn::find_ancestor_type(", "fn::ses_date(", "fn::anc_u64("] {
             assert!(
                 !inst_body.contains(marker),
-                "save_instance_data 的字面量必须是已解值（D6 回退即红）: {marker}"
+                "instance 保存计划的字面量必须是已解值（D6 回退即红）: {marker}"
             );
             assert!(
                 !cata_body.contains(marker),
