@@ -565,6 +565,8 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         project: PROJECT.to_string(),
         dbnum: case.dbnum,
         db_type: "DESI".to_string(),
+        phase: aios_database::data_interface::initialization_phase::DataPhase::Design,
+        epoch_id: 0,
         path: std::path::PathBuf::from(&case.db_file),
         file_name: std::path::Path::new(&case.db_file)
             .file_name()

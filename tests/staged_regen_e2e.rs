@@ -110,6 +110,8 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
         project,
         dbnum,
         db_type: "DESI".into(),
+        phase: aios_database::data_interface::initialization_phase::DataPhase::Design,
+        epoch_id: 0,
         path: db_file.clone().into(),
         file_name: std::path::Path::new(&db_file)
             .file_name()

@@ -276,6 +276,8 @@ async fn staged_transform_follows_a_pure_pose_move() {
         project: PROJECT.to_string(),
         dbnum,
         db_type: "DESI".to_string(),
+        phase: aios_database::data_interface::initialization_phase::DataPhase::Design,
+        epoch_id: 0,
         path: std::path::PathBuf::from(&db_file),
         file_name: std::path::Path::new(&db_file)
             .file_name()

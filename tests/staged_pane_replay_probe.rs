@@ -155,6 +155,8 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
         project: PROJECT.to_string(),
         dbnum: DBNUM,
         db_type: "DESI".to_string(),
+        phase: aios_database::data_interface::initialization_phase::DataPhase::Design,
+        epoch_id: 0,
         path: std::path::PathBuf::from(&db_file),
         file_name: std::path::Path::new(&db_file)
             .file_name()
