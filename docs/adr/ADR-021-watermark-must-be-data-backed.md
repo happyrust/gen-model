@@ -58,7 +58,7 @@ fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
 
 ### 3. 清库动作在 worker 执行体里做，不在扫描时做
 
-扫描（启动重扫 / 周期对账 / 文件事件 / 手动入队）检测到回退时**只分类 + 入队**一条重建批次（`applied_sesno: 0` 形状入队，队列上可见 `1..file_latest` 的窗口），不动任何数据。worker 出队后在冻结点**重新裁决**（`execute_one_dbnum` 现成的执行侧复核），仍判回退才调用 `wipe_dbnum_for_reinit` 清库，然后落进现成的 `needs_initial_load` → `initialize_dbnum_baseline`。
+扫描（启动重扫 / 周期对账 / 文件事件 / 手动入队）检测到回退时**只分类 + 入队**一条带显式 `Reinitialize` 意图的重建批次，不动任何数据。`Reinitialize` 不受普通 `applied + 1..=file_latest` 数值覆盖门支配：文件最新会话为 0 时用 `0..=0` 控制窗口，非零时显示 `1..=file_latest`；它到达已有排队行时占优，到达同 dbnum 运行中行时必须留下后继行。普通 `ApplyWindow` 在 `applied == file_latest == 0` 时仍不入队。worker 出队后在冻结点**重新裁决**（`execute_one_dbnum` 现成的执行侧复核），仍判回退才调用 `wipe_dbnum_for_reinit` 清库，然后落进现成的 `needs_initial_load` → `initialize_dbnum_baseline`；清库后当前文件没有任何会话时直接以 Applied 收口并保持水位 0，不进入基线或增量收集。
 
 理由：破坏性动作必须受 `startup_autorun` 与队列暂停约束。`startup_autorun = false` 的契约是「起来先什么都不执行」——若扫描时清库，一次重启就能在队列还挂着的时候删掉 42 万行。清库放进 worker，暂停/挂起对它就是真闸门，与本仓所有数据变更端点「先暂停队列」同一条纪律。
 
@@ -73,6 +73,7 @@ fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
 - `dbnum_watermark:{dbnum}` **清值不删行**（`applied_sesno = 0, sesno = 0, applied_sesno_time = NONE`，登记身份保留）——删行的话启动播种会从 `dbnum_info_table` 把水位回填成旧值（2026-08-04 播种审计第 5 条），且下一轮 classify 会把这个库误判成首次登记；
 - 该 dbnum 的 `dbnum_info_table` 统计、`model_update_pending`、`increment_update_attempt`、`incr_side_effect_pending` 全部清空；
 - 同一元数据阶段**递增 spatial epoch**：清库删掉了 `room_relate` / `inst_relate` 行却不 bump，崩溃重启会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 的幽灵形态）。
+- 元数据阶段（统计与持久队列清理、spatial epoch、水位清零）必须包在一个显式 SurrealDB 事务中，且水位更新位于事务末尾；任一语句失败时整组回滚。关系删除与大区间删除继续作为前置的独立幂等阶段，失败后由下一轮重放。
 - **（2026-08-13 补记，逆向核实确认漏删后修复）** Ref0 区间表清单补入 `room_panel_relate`，与 `room_relate` 成对清理：其 id 形态 `room_panel_relate:{room_refno}_{panel}`（`room_model.rs:698/724`）可按 Ref0 区间寻址；房间重算只对现存实体先清后写、从不整表清空，整库重建后的孤儿边无人回收，属 ADR-010 D4 幽灵同类。修复落点 `fast_delete.rs:25`（`RANGE_TABLES` 增表），回归测试 `the_wipe_deletes_room_panel_relate_alongside_room_relate` 钉住；跨 dbnum 边界与 `room_relate` 对称，未扩大也未缩小。
 
 ### 5. 只有回退这一种异常转重建

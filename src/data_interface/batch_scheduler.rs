@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::Notify;
 
-use crate::data_interface::batch_queue::{self, BatchState, DataBatch, Enqueued};
+use crate::data_interface::batch_queue::{self, BatchIntent, BatchState, DataBatch, Enqueued};
 use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
 /// 一次发现（文件会话号超过水位）携带的全部入队信息。
@@ -26,6 +26,7 @@ pub struct DiscoveredBatch {
     pub project: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub intent: BatchIntent,
     pub path: PathBuf,
     /// 完整文件名（含扩展名，由 `discover_batch` 从 path 现取；仅作展示与
     /// 冻结重扫失败时的 fallback，执行一律以 `path` 为准）。
@@ -71,6 +72,7 @@ pub struct FrozenBatch {
     pub project: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub intent: BatchIntent,
     pub path: PathBuf,
     pub file_name: String,
     pub start_sesno: i32,
@@ -83,6 +85,7 @@ pub struct EnqueuedBatchInfo {
     pub task_id: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub intent: &'static str,
     /// 在排队中的位置（1 起，含运行中的行不算）。
     pub position: usize,
     pub start_sesno: i32,
@@ -150,6 +153,7 @@ pub struct QueueRow {
     pub task_id: String,
     pub dbnum: u32,
     pub db_type: String,
+    pub intent: &'static str,
     /// `running` / `queued` / `held`。`held` = 重扫排出来的积压，等这个 dbnum
     /// 真的来一次增量才会被派发（见 [`batch_queue::DataBatch::held`]）。
     pub state: &'static str,
@@ -233,6 +237,7 @@ impl BatchScheduler {
                 found.applied_sesno,
                 found.file_latest_sesno,
                 hold,
+                found.intent,
             );
 
             let queued_row = state
@@ -278,6 +283,7 @@ impl BatchScheduler {
                         task_id,
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
+                        intent: found.intent.as_str(),
                         position,
                         start_sesno: found.applied_sesno + 1,
                         end_sesno: found.file_latest_sesno,
@@ -301,8 +307,18 @@ impl BatchScheduler {
                                 meta.file_name = found.file_name.clone();
                             }
                             if outcome == Enqueued::Merged {
-                                registry.update_queued_range(
+                                registry.replace_queued_range(
                                     &task_id,
+                                    row.start_sesno,
+                                    time_for(
+                                        row.start_sesno,
+                                        if found.intent == BatchIntent::Reinitialize {
+                                            if found.file_latest_sesno == 0 { 0 } else { 1 }
+                                        } else {
+                                            found.applied_sesno + 1
+                                        },
+                                        &found.first_pending_sesno_time,
+                                    ),
                                     row.end_sesno,
                                     time_for(
                                         row.end_sesno,
@@ -355,6 +371,7 @@ impl BatchScheduler {
                         task_id,
                         dbnum: found.dbnum,
                         db_type: found.db_type.clone(),
+                        intent: row.intent.as_str(),
                         position,
                         start_sesno: row.start_sesno,
                         end_sesno: row.end_sesno,
@@ -417,6 +434,7 @@ impl BatchScheduler {
                 project: meta.project,
                 dbnum: row.dbnum,
                 db_type: row.db_type,
+                intent: row.intent,
                 path: meta.path,
                 file_name: meta.file_name,
                 start_sesno: row.start_sesno,
@@ -474,7 +492,9 @@ impl BatchScheduler {
                 .iter()
                 .position(|b| b.dbnum == dbnum && b.state == BatchState::Queued)
             {
-                if state.queue[index].end_sesno <= end_sesno {
+                if state.queue[index].intent == BatchIntent::Reinitialize {
+                    // 控制意图必须真正到达下一冻结点；运行批次的数值覆盖不能销掉它。
+                } else if state.queue[index].end_sesno <= end_sesno {
                     state.queue.remove(index);
                     absorbed_task_id = state.meta.remove(&(dbnum, false)).map(|m| m.task_id);
                 } else if state.queue[index].start_sesno <= end_sesno {
@@ -611,6 +631,7 @@ impl BatchScheduler {
                     task_id,
                     dbnum: b.dbnum,
                     db_type: b.db_type.clone(),
+                    intent: b.intent.as_str(),
                     // 挂起行单列一个状态，不混进 queued：它不会自己往前走，
                     // 显示成排队会让人以为消费者卡住了，而那是完全不同的故障。
                     state: match (running, b.held) {
@@ -645,6 +666,7 @@ mod tests {
             project: "P".into(),
             dbnum,
             db_type: "DESI".into(),
+            intent: BatchIntent::ApplyWindow,
             path: PathBuf::from(format!("D:/proj/db{dbnum}")),
             file_name: format!("db{dbnum}"),
             applied_sesno: applied,
@@ -652,6 +674,28 @@ mod tests {
             first_pending_sesno_time: at(applied + 1),
             file_latest_sesno_time: at(latest),
         }
+    }
+
+    fn reinit_found(dbnum: u32, applied: i32, latest: i32) -> DiscoveredBatch {
+        DiscoveredBatch {
+            intent: BatchIntent::Reinitialize,
+            ..found(dbnum, applied, latest)
+        }
+    }
+
+    #[test]
+    fn reinitialize_intent_is_visible_and_not_absorbed_by_a_running_row() {
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue_live(&registry, &found(7997, 0, 10));
+        scheduler.freeze_next(&registry).expect("running row");
+        let successor = scheduler.enqueue_live(&registry, &reinit_found(7997, 42, 0));
+        assert_eq!(successor.outcome, Enqueued::BehindRunning);
+        assert_eq!(successor.info.intent, "reinitialize");
+        scheduler.record_frozen_end(&registry, 7997, 12, None);
+        let rows = scheduler.snapshot();
+        assert_eq!(rows.len(), 2, "重建后继不得按会话号被运行行吸收");
+        assert_eq!(rows[1].intent, "reinitialize");
+        assert_eq!((rows[1].start_sesno, rows[1].end_sesno), (0, 0));
     }
 
     fn fresh() -> (BatchScheduler, TaskRegistry) {

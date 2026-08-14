@@ -3974,7 +3974,7 @@ impl AiosDBManager {
         mdb: Option<&str>,
         selected_dbnums: Option<&[u32]>,
     ) -> ManualEnqueueReceipt {
-        use crate::data_interface::batch_queue::Enqueued;
+        use crate::data_interface::batch_queue::{BatchIntent, Enqueued};
         use crate::data_interface::batch_scheduler::{
             BatchScheduler, BlockedDbnum, DiscoveredBatch,
         };
@@ -4108,6 +4108,7 @@ impl AiosDBManager {
                     .push(format!("dbnum={dbnum}: 记录扫描观察失败: {error:#}"));
             }
             let mut applied = verdict.applied_sesno();
+            let mut intent = BatchIntent::ApplyWindow;
             if let Some(reason) = verdict.block_reason() {
                 // 回退默认整库重建（ADR-021）：不阻断，按首次导入形状（applied=0，
                 // 窗口 1..file_latest）入队；清库归 worker 执行体（冻结点复核仍判
@@ -4128,22 +4129,32 @@ impl AiosDBManager {
                     cand.file_latest_sesno
                 ));
                 applied = 0;
+                intent = BatchIntent::Reinitialize;
             }
-            if cand.file_latest_sesno == applied {
+            if intent == BatchIntent::ApplyWindow && cand.file_latest_sesno == applied {
                 receipt.up_to_date += 1;
                 continue;
             }
 
             // 从未解析（applied=0）与增量窗口在这里不分家：worker 执行体里的
             // `needs_initial_load` 会把基线接管过去，两条路径同口径。
-            let (first_pending_sesno_time, file_latest_sesno_time) =
-                window_times_rfc3339(project, &cand.path, applied + 1, cand.file_latest_sesno);
+            let (first_pending_sesno_time, file_latest_sesno_time) = window_times_rfc3339(
+                project,
+                &cand.path,
+                if intent == BatchIntent::Reinitialize && cand.file_latest_sesno == 0 {
+                    0
+                } else {
+                    applied + 1
+                },
+                cand.file_latest_sesno,
+            );
             let outcome = scheduler.enqueue(
                 registry,
                 &DiscoveredBatch {
                     project: project.to_string(),
                     dbnum,
                     db_type: cand.db_type.clone(),
+                    intent,
                     path: cand.path.clone(),
                     file_name: cand.file_name.clone(),
                     applied_sesno: applied,
@@ -4247,6 +4258,7 @@ impl AiosDBManager {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
         let mut applied = verdict.applied_sesno();
+        let mut reinitialized = false;
         if let Some(reason) = verdict.block_reason() {
             // 回退默认整库重建（ADR-021）：执行侧以冻结点的**新鲜裁决**为准（入队
             // 与执行之间文件可能被换掉，这里是最后一道复核），仍判回退才允许破坏
@@ -4274,6 +4286,7 @@ impl AiosDBManager {
                     println!("{note}");
                     warnings.push(note);
                     applied = 0;
+                    reinitialized = true;
                 }
                 Err(error) => {
                     return (
@@ -4299,6 +4312,31 @@ impl AiosDBManager {
             }
         }
         let previous_observed = verdict.previous_file_latest_sesno();
+
+        // 回退到一份没有任何会话的文件仍然需要完成清库，但清完没有基线或增量可收集。
+        // `0..=0` 是控制窗口，不是假造会话；以 Applied 收口让队列有明确出口，水位由
+        // wipe 的事务保持为 0。
+        if reinitialized && cand.file_latest_sesno == 0 {
+            return (
+                Some(DataBatchResult {
+                    dbnum,
+                    db_type: cand.db_type.clone(),
+                    file_path: cand.path.display().to_string(),
+                    start_sesno: 0,
+                    end_sesno: 0,
+                    start_sesno_time: None,
+                    end_sesno_time: None,
+                    status: BatchStatus::Applied,
+                    message: Some(
+                        "回退重建完成：当前文件没有会话，旧数据已清空，水位保持 0".to_string(),
+                    ),
+                    merged_sesnos: Vec::new(),
+                    merged_sesno_times: Vec::new(),
+                    changed_elements: 0,
+                }),
+                Vec::new(),
+            );
+        }
 
         // ADR-021 数据支撑：水位说应用过而库里一行都没有，增量窗口只会把
         // `1..applied` 永远漏掉——按首次导入重建。只在「真有增量窗口要跑」时
@@ -5239,6 +5277,28 @@ mod tests {
             classify < gate && gate < wipe && wipe < backing && backing < route,
             "order must be classify -> reinit gate -> wipe -> data backing -> route: {body}"
         );
+    }
+
+    #[test]
+    fn a_zero_session_reinitialize_finishes_before_baseline_or_window_collection() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum must exist")
+            .1;
+        let wipe = body.find("wipe_dbnum_for_reinit(").expect("wipe");
+        let empty = body
+            .find("reinitialized && cand.file_latest_sesno == 0")
+            .expect("zero-session exit");
+        let baseline = body.find("needs_initial_load(").expect("baseline route");
+        let collect = body
+            .find("IncrementPipeline::collect_window(")
+            .expect("collector");
+        assert!(
+            wipe < empty && empty < baseline && baseline < collect,
+            "{body}"
+        );
+        assert!(body[empty..baseline].contains("status: BatchStatus::Applied"));
     }
 
     /// ADR-021 顺序钉的另一半：扫描路径只分类 + 入队，破坏性清库不得回流——

@@ -279,8 +279,8 @@ fn walk_tree<P: IndexPages>(
 ) -> anyhow::Result<WalkOutcome> {
     let mut outcome = WalkOutcome::default();
     let mut visited: HashSet<u32> = HashSet::new();
-    // (页号, 父层级, 路由界, 是否根)：根用一个必然更大的父层级放行；根读不动是
-    // 硬错误，子页读不动按生产认领扫描的口径跳过（但记账，不许静默）。
+    // (页号, 父层级, 路由界, 是否根)：根用一个必然更大的父层级放行；任何参与
+    // 触达集证明的页读不动都是硬错误，残缺树不得继续提交。
     let mut stack: Vec<(u32, u32, KeyBounds, bool)> =
         vec![(root, u32::MAX, KeyBounds::default(), true)];
     while let Some((pgno, parent_level, bounds, is_root)) = stack.pop() {
@@ -292,15 +292,18 @@ fn walk_tree<P: IndexPages>(
             Err(error) if is_root => {
                 return Err(error.context(format!("读取索引根页 {pgno} 失败")));
             }
-            Err(_) => {
+            Err(error) => {
                 outcome.stats.unreadable_child_pages += 1;
-                continue;
+                return Err(error.context(format!("读取非根索引页 {pgno} 失败")));
             }
         };
         outcome.stats.pages_read += 1;
         if page.level >= parent_level {
             outcome.stats.level_anomalies += 1;
-            continue;
+            anyhow::bail!(
+                "索引页 {pgno} 层级 {} 未低于父层级 {parent_level}，无法证明触达集完整",
+                page.level
+            );
         }
 
         if page.level == 0 {
@@ -557,10 +560,15 @@ pub fn collect_net_changes(
     let mut enrich = |io: &mut PdmsIO,
                       list: Vec<(RefU64, RecordLoc, Option<RecordLoc>)>,
                       stats: &mut NetChangeStats|
-     -> Vec<NetEntry> {
+     -> anyhow::Result<Vec<NetEntry>> {
         list.into_iter()
             .map(|(refno, loc, base_loc)| {
-                let last_touch_sesno = io.get_sesno(loc.pgno).map(|sesno| sesno as i32);
+                let last_touch_sesno = io.get_sesno(loc.pgno).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "元素 {refno} 的记录页 {} 无法反查 last-touch 会话",
+                        loc.pgno
+                    )
+                })? as i32;
                 let noun = if with_noun {
                     match io.parse_raw_element(loc.att_offset()) {
                         Ok(mut data) => Some(data.att_map().get_type()),
@@ -572,13 +580,13 @@ pub fn collect_net_changes(
                 } else {
                     None
                 };
-                NetEntry {
+                Ok(NetEntry {
                     refno,
                     loc,
                     base_loc,
-                    last_touch_sesno,
+                    last_touch_sesno: Some(last_touch_sesno),
                     noun,
-                }
+                })
             })
             .collect()
     };
@@ -589,14 +597,14 @@ pub fn collect_net_changes(
                 .map(|(refno, loc)| (refno, loc, None))
                 .collect()
         };
-    let added = enrich(io, with_none(raw.added), &mut stats);
-    let deleted = enrich(io, with_none(raw.deleted), &mut stats);
+    let added = enrich(io, with_none(raw.added), &mut stats)?;
+    let deleted = enrich(io, with_none(raw.deleted), &mut stats)?;
     let modified_input: Vec<(RefU64, RecordLoc, Option<RecordLoc>)> = raw
         .modified
         .into_iter()
         .map(|(refno, loc, base_loc)| (refno, loc, Some(base_loc)))
         .collect();
-    let modified = enrich(io, modified_input, &mut stats);
+    let modified = enrich(io, modified_input, &mut stats)?;
     stats.elapsed_ms = started.elapsed().as_millis() as u64;
 
     Ok(NetChangeSet {
@@ -838,39 +846,25 @@ mod tests {
         assert_eq!(diff.stats.target.duplicate_leaf_entries, 1);
     }
 
-    /// 层级不下降的子页跳过并计数（与 `filter_index_data` 同款防环）；读不动的
-    /// 子页容忍但计数；路由与存在性都不看 flag（对齐生产点查）——可达的
-    /// flag != 1 叶条目照样算存在，只进观察计数。三处异常都不许静默。
+    /// 已验证的路由残留继续容忍计数；路由与存在性都不看 flag（对齐生产点查）。
     #[test]
-    fn level_regressions_and_routing_anomalies_are_counted_and_flags_stay_blind() {
+    fn routing_residuals_are_counted_and_flags_stay_blind() {
         let mut pages = MemPages::new(vec![
             (
                 50,
-                page(
-                    1,
-                    vec![
-                        loc(100, 1, 51, 0, 1),
-                        loc(100, 2, 52, 0, 1),
-                        // flag=2 的内层指针照样跟进（生产搜索不看 flag）；页 99
-                        // 不存在 → 按认领扫描口径跳过整枝但记账。
-                        loc(100, 3, 99, 0, 2),
-                    ],
-                ),
+                page(1, vec![loc(100, 2, 52, 0, 2), loc(100, 3, 53, 0, 1)]),
             ),
-            // 51 层级与父相同 → 防环守卫跳过。
-            (51, page(1, vec![loc(100, 1, 60, 0, 1)])),
             // 52 覆盖 [(100,2),(100,3))：一条 flag=3 的可达条目（算存在 + 观察
             // 计数）+ 一条键越界的回收页残留（不可达，剔除并计数）。
             (
                 52,
                 page(0, vec![loc(100, 2, 53, 0, 3), loc(100, 7, 53, 2, 1)]),
             ),
+            (53, page(0, vec![loc(100, 3, 54, 0, 1)])),
         ]);
 
         let diff = diff_roots(&mut pages, None, 0, 50).expect("diff");
 
-        assert_eq!(diff.stats.target.level_anomalies, 1);
-        assert_eq!(diff.stats.target.unreadable_child_pages, 1);
         assert_eq!(
             diff.stats.target.nonlive_leaf_entries, 1,
             "flag != 1 只是观察计数"
@@ -878,21 +872,28 @@ mod tests {
         assert_eq!(diff.stats.target.out_of_range_leaf_entries, 1);
         assert_eq!(
             refnos(&diff.added),
-            vec![r(2)],
+            vec![r(2), r(3)],
             "可达的 flag=3 条目算存在；越界残留不算"
         );
         assert_eq!(diff.stats.target.flag_histogram.get(&3), Some(&1));
         assert_eq!(diff.stats.target.flag_histogram.get(&2), Some(&1));
         assert!(
-            !pages.reads.contains(&60),
-            "层级异常的子树不得继续下降: {:?}",
+            pages.reads.contains(&52),
+            "内层路由不看 flag: {:?}",
             pages.reads
         );
-        assert!(
-            pages.reads.contains(&99),
-            "内层路由不看 flag，页 99 应该被尝试读取: {:?}",
-            pages.reads
-        );
+    }
+
+    #[test]
+    fn a_child_level_that_does_not_descend_fails_the_whole_diff() {
+        let mut pages = MemPages::new(vec![
+            (50, page(1, vec![loc(100, 1, 51, 0, 1)])),
+            (51, page(1, vec![loc(100, 1, 60, 0, 1)])),
+        ]);
+        let error = diff_roots(&mut pages, None, 0, 50)
+            .err()
+            .expect("层级异常必须整窗失败");
+        assert!(format!("{error:#}").contains("未低于父层级"));
     }
 
     /// 实测 ams8000 的第三种形状钉成回归：陈旧叶被回收复用后，键远超本叶路由
@@ -965,10 +966,9 @@ mod tests {
         );
     }
 
-    /// 子页读不动按认领扫描口径跳过整枝，但必须记账——静默失效是最高级别缺陷。
-    /// 根页读不动仍是硬错误。
+    /// 根页或子页读不动都无法证明触达集完整，必须硬错误。
     #[test]
-    fn unreadable_child_pages_are_skipped_with_a_count_and_a_bad_root_is_fatal() {
+    fn unreadable_child_pages_and_roots_are_fatal() {
         let mut pages = MemPages::new(vec![
             (
                 70,
@@ -978,9 +978,10 @@ mod tests {
             (72, page(0, vec![loc(100, 2, 73, 0, 1)])),
         ]);
 
-        let diff = diff_roots(&mut pages, None, 0, 70).expect("diff");
-        assert_eq!(diff.stats.target.unreadable_child_pages, 1);
-        assert_eq!(refnos(&diff.added), vec![r(2)]);
+        let error = diff_roots(&mut pages, None, 0, 70)
+            .err()
+            .expect("缺子页必须整窗失败");
+        assert!(format!("{error:#}").contains("非根索引页 71"));
 
         let mut missing_root = MemPages::new(vec![]);
         assert!(

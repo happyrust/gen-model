@@ -4,9 +4,9 @@
 
 ## Constitution Check
 
-- **静默失效**：收集降级（基版本解析失败按新增、终稿不可解析跳过）全部计数 +
-  警告随回执透出（`NetWindowOutcome::warnings` / `unparseable_finals` /
-  `unchanged_rewrites`）；净口径首条警告自报口径。无 `_ =>` 放行。
+- **静默失效**：不可读子页、层级不下降、终稿不可解析与 last-touch 缺失均为整窗
+  硬错误；仅基版本解析失败保守按新增并警告，重复/越界残留按已验证点查口径计数。
+  净口径首条警告自报口径。无 `_ =>` 放行。
 - **单一权威**：口径开关只在 `IncrementPipeline::collect_window` 一处生效
   （预览/执行/崩溃恢复/worker 尾段，源码实测 5 个调用点，源码断言禁直调回放）；
   `diff_ele_data` 是 vendor 内联 diff 的复刻分支，一致性由性质 i 逐桶对拍钉住，

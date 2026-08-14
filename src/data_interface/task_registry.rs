@@ -311,6 +311,27 @@ impl TaskRegistry {
         }
     }
 
+    /// 控制意图提升排队行时同时替换两端；与普通只抬高右端的合并不同，重建可能
+    /// 把 `43..=50` 改成 `1..=7`，甚至改成 `0..=0`。
+    pub fn replace_queued_range(
+        &self,
+        task_id: &str,
+        start_sesno: i32,
+        start_sesno_time: Option<String>,
+        end_sesno: i32,
+        end_sesno_time: Option<String>,
+    ) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            if entry.state == TaskState::Queued {
+                entry.start_sesno = Some(start_sesno);
+                entry.start_sesno_time = start_sesno_time;
+                entry.end_sesno = Some(end_sesno);
+                entry.end_sesno_time = end_sesno_time;
+            }
+        }
+    }
+
     pub fn set_queued_start(
         &self,
         task_id: &str,

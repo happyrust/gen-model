@@ -99,6 +99,12 @@
   **20 passed**（含性质 i；这是该目标的用例数，**不是**性质 i 覆盖的窗口数）；
   **5 处分支变异逐一准确变红**（变异代码不入库）；Python 离线档
   **66 passed / 20 deselected**。
+- ✅ T21 审查修复：子页不可读/层级不下降、终稿解析失败、last-touch 缺失改为
+  整窗 Err；保留 base 解析失败保守 Add 与已验证重复/越界残留计数。错误在预览按
+  dbnum 显示、执行批次 Failed，不自动回退 replay
+  ——`src/data_interface/session_index_diff.rs`、`net_window.rs`、`increment_pipeline.rs`
+- ✅ T22 审查修复：`ref_rev_maintain` 补偿载荷全量严格解析，非法或空列表进入
+  `mark_failed` 并保留行——`src/data_interface/side_effect_pending.rs`
 
 ## M1 / M2 状态（2026-08-13）
 

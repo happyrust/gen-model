@@ -37,9 +37,7 @@ pub struct NetWindowOutcome {
     /// 记录位置变了但内容逐字段相同（原样重写换页）的条目数：不发操作，
     /// 但账要看得见。
     pub unchanged_rewrites: usize,
-    /// 终稿记录解析失败而跳过的条目数（多为字典缺项的系统记录，如 MNUM 不在
-    /// 属性表——回放路径对同一批记录同样以 `None` 操作落空，从未入过库）。
-    /// 明细以聚合警告随回执透出。
+    /// 成功结果中恒为 0；终稿解析失败现在是整窗硬错误。字段保留给既有回执结构。
     pub unparseable_finals: usize,
     /// 差分统计（页读数/剪枝/耗时），随回执与日志透出。
     pub stats: session_index_diff::NetChangeStats,
@@ -49,10 +47,7 @@ pub struct NetWindowOutcome {
 ///
 /// 失败语义（与回放口径逐条对齐，不许静默）：
 ///
-/// * 净新增 / 净修改的**终稿**记录解析失败 → 跳过该条 + 计数 + 聚合警告。
-///   真实库里这是字典缺项的系统记录家族（如 `MNUM not exist in attr_info_map`，
-///   ams8000 的 `16192_1`）——回放路径对同一批记录以 `None` 操作落空、从未
-///   入库，硬失败会让每个含系统段的窗口整批打死，而跳过与回放行为等价。
+/// * 净新增 / 净修改的**终稿**记录解析失败 → 整窗硬错误，不提交残缺触达集。
 /// * 净修改的**基版本**解析失败（终稿可读）→ 按 spec §Edge Cases 保守处理：
 ///   当作新增全量覆盖（模型侧整根重生成），warnings 逐条点名。
 /// * 净修改条目缺 `base_loc` → **硬失败**：那是差分分类的不变量被破坏，不是
@@ -91,7 +86,6 @@ where
     let mut window: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut unchanged_rewrites = 0usize;
-    let mut unparseable: Vec<String> = Vec::new();
     let mut push = |window: &mut BTreeMap<u32, Vec<EleOperationData>>,
                     sesno: u32,
                     refno: RefU64,
@@ -103,19 +97,18 @@ where
     };
 
     for entry in added {
-        let sesno = entry
-            .last_touch_sesno
-            .map(|sesno| sesno as u32)
-            .unwrap_or(target_sesno);
-        match resolve_record(&mut resolve, entry.refno, entry.loc, "终稿") {
-            Ok(data) => push(
-                &mut window,
-                sesno,
-                entry.refno,
-                EleOperationDetail::Add(data),
-            ),
-            Err(error) => unparseable.push(format!("{}: {error:#}", entry.refno)),
-        }
+        let sesno = u32::try_from(
+            entry
+                .last_touch_sesno
+                .ok_or_else(|| anyhow::anyhow!("净新增 {} 缺 last-touch 会话", entry.refno))?,
+        )?;
+        let data = resolve_record(&mut resolve, entry.refno, entry.loc, "终稿")?;
+        push(
+            &mut window,
+            sesno,
+            entry.refno,
+            EleOperationDetail::Add(data),
+        );
     }
 
     for entry in deleted {
@@ -128,17 +121,12 @@ where
     }
 
     for entry in modified {
-        let sesno = entry
-            .last_touch_sesno
-            .map(|sesno| sesno as u32)
-            .unwrap_or(target_sesno);
-        let latest = match resolve_record(&mut resolve, entry.refno, entry.loc, "终稿") {
-            Ok(latest) => latest,
-            Err(error) => {
-                unparseable.push(format!("{}: {error:#}", entry.refno));
-                continue;
-            }
-        };
+        let sesno = u32::try_from(
+            entry
+                .last_touch_sesno
+                .ok_or_else(|| anyhow::anyhow!("净修改 {} 缺 last-touch 会话", entry.refno))?,
+        )?;
+        let latest = resolve_record(&mut resolve, entry.refno, entry.loc, "终稿")?;
         let base_loc = entry.base_loc.ok_or_else(|| {
             anyhow::anyhow!(
                 "净修改条目 {} 缺 base 位置——classify 的不变量被破坏",
@@ -170,25 +158,11 @@ where
         }
     }
 
-    if !unparseable.is_empty() {
-        let samples = unparseable
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("；");
-        warnings.push(format!(
-            "{} 条记录终稿解析失败，按回放同口径跳过（这些记录在回放路径同样以 None \
-             操作落空、从未入库，多为字典缺项的系统记录）。样例：{samples}",
-            unparseable.len()
-        ));
-    }
-
     Ok(NetWindowOutcome {
         window,
         warnings,
         unchanged_rewrites,
-        unparseable_finals: unparseable.len(),
+        unparseable_finals: 0,
         stats,
     })
 }
@@ -569,30 +543,35 @@ mod tests {
         assert_eq!(outcome.unparseable_finals, 0, "失败的是基版本不是终稿");
     }
 
-    /// 终稿解析不出来：跳过 + 计数 + **聚合**警告（回放路径对同一批记录同样以
-    /// `None` 落空、从未入库）。逐条刷屏会把回执淹掉，所以明细走样例。
+    /// 任一终稿解析不出来都使整窗失败，不留下残缺操作集。
     #[test]
-    fn an_unparseable_final_is_skipped_counted_and_aggregated() {
+    fn an_unparseable_final_fails_the_whole_window() {
         let mut net = change_set(30);
         net.added.push(net_entry(7, at(10, 0), None, Some(12)));
         net.modified
             .push(net_entry(9, at(20, 0), Some(at(19, 0)), Some(25)));
 
-        let outcome = synthesize_net_window(net, records(Vec::new())).expect("合成");
+        let error = synthesize_net_window(net, records(Vec::new()))
+            .err()
+            .expect("终稿解析失败必须整窗失败");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&RefU64(7).to_string()) && text.contains("终稿"),
+            "{text}"
+        );
+    }
 
-        assert!(
-            outcome.window.is_empty(),
-            "解析不出终稿的条目一条都不许入窗口: {:?}",
-            outcome.window.keys().collect::<Vec<_>>()
-        );
-        assert_eq!(outcome.unparseable_finals, 2);
-        assert_eq!(outcome.warnings.len(), 1, "明细走聚合警告，不逐条刷屏");
-        let warning = &outcome.warnings[0];
-        assert!(warning.contains("2 条"), "聚合警告要报条数: {warning}");
-        assert!(
-            warning.contains(&RefU64(7).to_string()) && warning.contains(&RefU64(9).to_string()),
-            "聚合警告要带样例 refno: {warning}"
-        );
+    #[test]
+    fn a_missing_last_touch_session_fails_instead_of_using_the_window_end() {
+        let mut net = change_set(30);
+        net.added.push(net_entry(7, at(10, 0), None, None));
+        let error = synthesize_net_window(
+            net,
+            records(vec![(at(10, 0), element(&[("TYPE", "BOX")], &[]))]),
+        )
+        .err()
+        .expect("last-touch 缺失必须整窗失败");
+        assert!(format!("{error:#}").contains("last-touch"));
     }
 
     /// `base_loc` 缺失是**差分分类的不变量被破坏**，不是现场异常：硬失败整批，

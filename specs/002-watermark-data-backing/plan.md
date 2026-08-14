@@ -20,11 +20,12 @@
 - 判定承载：`needs_initial_load`（扩入参增加数据支撑维度，不改位置）+
   `dbnum_has_any_pe_row` 存在性探针（只在 `applied_sesno > 0` 时查询、每批次一次，
   失败上浮为批次 Failed）——`src/data_interface/manual_update.rs`。
-- 扫描三态：`scan_and_check_file` 返回 `ScanGate`（放行 / 阻断 / 重建），sweep 与 watch
-  对回退构造重建批次（`applied_sesno: 0` 形状）入队；扫描路径不删任何数据
+- 扫描三态：`scan_and_check_file` 返回 `ScanGate`（放行 / 阻断 / 重建），sweep、watch
+  与手动路径对回退构造显式 `Reinitialize` 重建批次；零会话用 `0..=0` 控制窗口，
+  排队行被提升、运行中行追加后继；扫描路径不删任何数据
   ——`src/data_interface/increment_manager.rs`。
 - 清库：`fast_delete::wipe_dbnum_for_reinit`（与整库快删同源的三阶段删除；元数据阶段 =
-  统计与队列残留清空 + spatial epoch 递增 + 水位行清值不删行，置尾作提交点）。
+  统计与队列残留清空 + spatial epoch 递增 + 水位行清值不删行，整组显式事务且水位置尾）。
 - 执行体：`execute_one_dbnum` 冻结点复核仍判回退才清库；`batch_worker` 开窗前过
   `batch_reroutes_to_initial_load` 预判（applied=0 / 回退 / 幽灵水位一律不开 ADR-017
   暂存窗口，直接走执行体），与执行体共用同一个数据支撑探针。
@@ -44,7 +45,7 @@
 - **III 静默失效是最高级别缺陷**：符合——幽灵水位与回退检出必须在日志与批次回执发声
   （FR-006 / FR-013，含删除规模）；存在性查询失败上浮，不吞任何默认值（FR-005）。
 - **IV 队列任务可消费、可收口、可复活**：符合——重建批次走同一条队列同一个派发器；
-  入队按 dbnum 幂等合并（Edge Case）；清库失败批次 Failed、水位未动、下一轮幂等重放
+  排队时意图占优、运行中留后继；清库失败批次 Failed、元数据事务回滚、下一轮幂等重放
   （FR-010）。
 - **V 标识只用真值**：符合——拒绝以 `dbnum_info_table` 行数代证数据支撑（观察值不是
   权威值，「让嫌疑人给自己作证」）；存在性只问 `pe`。

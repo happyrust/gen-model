@@ -108,6 +108,8 @@ gen-model 直接吃 copy-on-write 会话页各自携带的索引根、并做**�
    两端 + old/new owner）。索引只负责选出「该 diff 谁」，不参与「diff 出什么」。
 4. **形状前提可证伪**：追加模型被破坏（ADMIN 压缩 / 回卷）时差分响亮拒绝，
    转 ADR-021 整库重建，不给静默错答案。
+   非根索引页不可读、子页层级不下降也属于无法证明触达集完整的硬错误，必须终止
+   整个窗口；重复指针、越界残留等已由点查口径验证的历史形状继续容忍并计数。
 5. **正确性据以成立的是三重对拍 + core.dll 机制背书，各自的独立性必须分清**——
    - **差分 ≡ 生产点查**（四窗口逐 refno 仲裁零分歧）：这是**同源**验证（点查与
      差分走同一棵索引、同样不看 flag），只证差分忠实复刻了点查遍历；flag / 存在性
@@ -151,6 +153,11 @@ refno 恰一条、挂在其 last-touch 会话下：
 - 净修改 → `Modified(ModifiedElement)`：base 版本由 `NetEntry::base_loc` 直读
   base 端旧记录页、终稿版本按 `loc` 解析，各一次，**一次 diff** 合成三命名空间
   属性差量 + `children_changed(old, new)` + old/new owner。
+
+终稿（Added / Modified 的目标版本）解析失败与页到 last-touch 会话反查失败都会使
+整窗失败，不产出残缺操作集；只有 Modified 的 base 版本解析失败保留现有保守降级
+为 Add 的口径并随回执警告。执行侧把错误收口为批次 Failed，预览按 dbnum 显示错误，
+两者都不自动切换回放收集；运维仍可显式关闭净收集开关后重试。
 
 于是模型计划（`build_model_update_plan` / 交付单元归并）、`ref_rev` 维护、
 MySQL 同步、渲染（`render_persist_statements`）的输入形状**零改动**；

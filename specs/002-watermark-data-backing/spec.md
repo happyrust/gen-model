@@ -102,9 +102,11 @@
 
 - 存在性判定要不要跨过软删除？`pe` 上有 `deleted` 标记，一个所有行都被软删除的库在语义上仍然「有数据」（存在性只问行在不在，不问 deleted 取值）。判定口径写死在探针注释里。
 - `applied_sesno == 0` 且库里**有**数据（刚被清库过、或播种失败）：这一格今天就走基线，`baseline_needs_full_parse` 会全量解析并用 INSERT IGNORE 补洞，行为不变，不得回归。
-- 清库执行到一半失败（关系边删了、区间行删了一半）：水位清值在元数据阶段最后，失败时水位未动 → 下一轮仍判回退 → 清库幂等重放，不会留下「半修但看起来正常」的库。
+- 清库执行到一半失败（关系边删了、区间行删了一半）：关系与区间阶段独立幂等；元数据阶段是单个显式事务且水位清值置尾，任一元数据语句失败则统计、队列、epoch 与水位整体回滚 → 下一轮仍判回退并幂等重放。
 - 一个库在批次执行途中被人清空（并发删除）：路由已经做完，本轮按增量跑。下一轮会检出并重建，不需要在批次内反复复查。
 - 回退批次在队列里等待期间，reconcile 重扫反复看到同一回退：入队按 dbnum 幂等合并，不得堆出第二行。
+- 回退文件最新会话为 0：以 `Reinitialize` 的 `0..=0` 控制批次进入 worker，清库后直接 Applied、水位保持 0；同形状的普通空基线不入队。
+- 同 dbnum 已有普通排队行时 `Reinitialize` 意图占优；已有运行中行时必须追加一个后继重建行，不能被数值覆盖判定吞掉。
 
 ## Requirements *(mandatory)*
 
@@ -116,10 +118,10 @@
 - **FR-004**：数据存在性 MUST 用存在性查询而不是全量计数获取，且 MUST 只在 `applied_sesno > 0` 时才需要查询。
 - **FR-005**：存在性查询失败 MUST 上浮为批次 Failed，MUST NOT 被吞成「有数据」或「没有数据」中的任何一种默认值。
 - **FR-006**：检出「水位非零而库里零行」时，系统 MUST 在日志与批次回执两处都报告它。
-- **FR-007**：判定为回退（`file_latest_sesno < applied_sesno`）的 dbnum，所有扫描路径 MUST 不阻断而是入队一条重建批次；扫描路径 MUST NOT 删除任何数据。
+- **FR-007**：判定为回退（`file_latest_sesno < applied_sesno`）的 dbnum，所有扫描路径 MUST 不阻断而是入队一条显式 `Reinitialize` 重建批次；该意图 MUST 能在 `file_latest_sesno == 0`、已有排队行和同 dbnum 运行中行三种状态到达 worker，扫描路径 MUST NOT 删除任何数据。
 - **FR-008**：回退的清库 MUST 只发生在数据批次 worker 执行体内，且 MUST 以冻结点的新鲜裁决（复核仍判回退）为前提；复核不判回退时 MUST NOT 清库。
 - **FR-009**：清库 MUST 覆盖该 dbnum 的全部 `pe` 行、派生行（属主边、inst/tubi/room/ref_rev/geo 关系）、noun 行、`dbnum_info_table` 统计与队列残留（`model_update_pending` / `increment_update_attempt` / `incr_side_effect_pending`），MUST 在同一元数据阶段递增 spatial epoch，且 `dbnum_watermark` 行 MUST 清值不删行（登记身份保留）。
-- **FR-010**：清库失败 MUST 记为批次 Failed 且水位不得已被推进或清零（元数据阶段在最后），下一轮 MUST 能幂等重放。
+- **FR-010**：清库关系与区间阶段 MUST 可独立幂等重放；统计/持久队列清理、spatial epoch 与水位清零 MUST 位于同一个显式 SurrealDB 事务，水位更新置尾。任一元数据语句失败 MUST 整体回滚、记批次 Failed，下一轮 MUST 能幂等重放。
 - **FR-011**：`TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` MUST 保持阻断语义，MUST NOT 触发自动清库；「哪些异常转重建」MUST 由 `FileAnomaly` 上的单一谓词（`requires_reinit`）裁决。
 - **FR-012**：`watermark_realign` 配置键、`AIOS_WATERMARK_REALIGN` 环境变量、`POST /api/v1/dbnums/{dbnum}/realign` 端点与 Python 绑定 `aios_db.sync.realign` MUST 移除；`DELETE /api/v1/dbnums/{dbnum}/data` 与 `…/data/above/{watermark}` 两个运维端点 MUST 保留且行为不变。
 - **FR-013**：回退重建 MUST 在扫描日志、worker 日志与批次回执三处可见（含删除规模）；只出现在日志、回执里看不见的报告不满足本条。
@@ -131,7 +133,7 @@
 - **水位（`applied_sesno`）**：ADR-001 定义的承诺——「数据确实落库了」。本特性给它加上可证伪性：承诺必须有数据支撑；文件回退时水位随整库重建归零再重建。
 - **数据支撑（data backing）**：该 dbnum 在 `pe` 里是否存在任何行。布尔判定，不是计数。
 - **初始导入路由（`needs_initial_load`）**：决定一个批次走基线还是走增量窗口的谓词。本特性扩大它的入参（数据支撑维度），不改它的位置。
-- **重建批次**：回退检出后入队的数据批次（窗口 `1..file_latest`）。与普通批次走同一条队列、同一个 worker（ADR-011），执行体按冻结点复核决定清不清库。
+- **重建批次**：回退检出后入队的显式 `Reinitialize` 数据批次（有会话时窗口 `1..file_latest`，零会话时控制窗口 `0..=0`）。与普通 `ApplyWindow` 走同一条队列、同一个 worker（ADR-011），执行体按冻结点复核决定清不清库。
 - **`wipe_dbnum_for_reinit`**：整库清空例程，复用 Ref0 区间快删机器；与整库快删端点的唯一差别是水位行清值不删行 + spatial epoch 递增。
 - **`FileAnomaly::requires_reinit`**：「哪些文件异常转重建」的唯一裁决（仅 Rollback）。
 

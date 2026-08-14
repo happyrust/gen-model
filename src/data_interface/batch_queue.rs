@@ -14,11 +14,29 @@ pub enum BatchState {
     Running,
 }
 
+/// 数据批次的执行意图。普通窗口由会话号覆盖关系合并；重建是控制意图，不能被
+/// `applied + 1 > file_latest` 这一数值门吞掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchIntent {
+    ApplyWindow,
+    Reinitialize,
+}
+
+impl BatchIntent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApplyWindow => "apply_window",
+            Self::Reinitialize => "reinitialize",
+        }
+    }
+}
+
 /// 一个 dbnum 在一个会话号区间上的一次数据应用——词表里的「数据批次」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataBatch {
     pub dbnum: u32,
     pub db_type: String,
+    pub intent: BatchIntent,
     /// 闭区间左端，等于入队时的水位 + 1。
     pub start_sesno: i32,
     /// 闭区间右端。**排队期间它是「入队时观察到的预期上界」，不是冻结值**——
@@ -86,6 +104,7 @@ pub fn enqueue(
     applied_sesno: i32,
     file_latest_sesno: i32,
     hold: bool,
+    intent: BatchIntent,
 ) -> Enqueued {
     if let Some(queued) = queue
         .iter_mut()
@@ -93,6 +112,30 @@ pub fn enqueue(
     {
         if !hold {
             queued.held = false;
+        }
+        if intent == BatchIntent::Reinitialize {
+            let start_sesno = reinitialize_start(file_latest_sesno);
+            let changed = queued.intent != intent
+                || queued.start_sesno != start_sesno
+                || queued.end_sesno != file_latest_sesno;
+            queued.intent = intent;
+            queued.start_sesno = start_sesno;
+            queued.end_sesno = file_latest_sesno;
+            return if changed {
+                Enqueued::Merged
+            } else {
+                Enqueued::AlreadyCovered
+            };
+        }
+        // 重建已经排队时，后来的普通保存只更新它观察到的文件右端，不得把控制
+        // 意图降回普通窗口；冻结点仍会按最新文件身份重新裁决。
+        if queued.intent == BatchIntent::Reinitialize {
+            if file_latest_sesno > queued.end_sesno {
+                queued.start_sesno = reinitialize_start(file_latest_sesno);
+                queued.end_sesno = file_latest_sesno;
+                return Enqueued::Merged;
+            }
+            return Enqueued::AlreadyCovered;
         }
         if file_latest_sesno > queued.end_sesno {
             queued.end_sesno = file_latest_sesno;
@@ -106,9 +149,14 @@ pub fn enqueue(
         .find(|b| b.dbnum == dbnum && b.state == BatchState::Running)
         .map(|b| b.end_sesno);
 
-    let (start_sesno, outcome) = match running_end {
-        Some(end) => (end + 1, Enqueued::BehindRunning),
-        None => (applied_sesno + 1, Enqueued::New),
+    let (start_sesno, outcome) = match (running_end, intent) {
+        (Some(_), BatchIntent::Reinitialize) => (
+            reinitialize_start(file_latest_sesno),
+            Enqueued::BehindRunning,
+        ),
+        (None, BatchIntent::Reinitialize) => (reinitialize_start(file_latest_sesno), Enqueued::New),
+        (Some(end), BatchIntent::ApplyWindow) => (end + 1, Enqueued::BehindRunning),
+        (None, BatchIntent::ApplyWindow) => (applied_sesno + 1, Enqueued::New),
     };
     if !covers(start_sesno, file_latest_sesno) {
         return Enqueued::AlreadyCovered;
@@ -116,12 +164,17 @@ pub fn enqueue(
     queue.push(DataBatch {
         dbnum,
         db_type: db_type.to_owned(),
+        intent,
         start_sesno,
         end_sesno: file_latest_sesno,
         state: BatchState::Queued,
         held: hold,
     });
     outcome
+}
+
+fn reinitialize_start(file_latest_sesno: i32) -> i32 {
+    if file_latest_sesno == 0 { 0 } else { 1 }
 }
 
 /// FIFO 出队并冻结：取最早入队的那条排队项，转 `Running`，返回它的下标。
@@ -206,6 +259,7 @@ mod tests {
         DataBatch {
             dbnum,
             db_type: "DESI".to_owned(),
+            intent: BatchIntent::ApplyWindow,
             start_sesno: start,
             end_sesno: end,
             state: BatchState::Queued,
@@ -237,6 +291,7 @@ mod tests {
             applied_sesno,
             file_latest_sesno,
             false,
+            BatchIntent::ApplyWindow,
         )
     }
 
@@ -255,7 +310,50 @@ mod tests {
             applied_sesno,
             file_latest_sesno,
             true,
+            BatchIntent::ApplyWindow,
         )
+    }
+
+    fn reinitialize(
+        queue: &mut Vec<DataBatch>,
+        dbnum: u32,
+        applied_sesno: i32,
+        file_latest_sesno: i32,
+    ) -> Enqueued {
+        enqueue(
+            queue,
+            dbnum,
+            "DESI",
+            applied_sesno,
+            file_latest_sesno,
+            false,
+            BatchIntent::Reinitialize,
+        )
+    }
+
+    #[test]
+    fn reinitialize_reaches_zero_promotes_queued_and_survives_running_coverage() {
+        let mut zero = Vec::new();
+        assert_eq!(reinitialize(&mut zero, 7997, 42, 0), Enqueued::New);
+        assert_eq!((zero[0].start_sesno, zero[0].end_sesno), (0, 0));
+        assert_eq!(zero[0].intent, BatchIntent::Reinitialize);
+
+        let mut promoted = vec![queued(7997, 43, 50)];
+        assert_eq!(reinitialize(&mut promoted, 7997, 42, 7), Enqueued::Merged);
+        assert_eq!((promoted[0].start_sesno, promoted[0].end_sesno), (1, 7));
+        assert_eq!(promoted[0].intent, BatchIntent::Reinitialize);
+
+        let mut behind = vec![DataBatch {
+            state: BatchState::Running,
+            ..queued(7997, 1, 50)
+        }];
+        assert_eq!(
+            reinitialize(&mut behind, 7997, 42, 0),
+            Enqueued::BehindRunning
+        );
+        assert_eq!(behind.len(), 2);
+        assert_eq!((behind[1].start_sesno, behind[1].end_sesno), (0, 0));
+        assert_eq!(behind[1].intent, BatchIntent::Reinitialize);
     }
 
     #[test]
@@ -429,6 +527,7 @@ mod tests {
             DataBatch {
                 dbnum: 8191,
                 db_type: "SYST".to_owned(),
+                intent: BatchIntent::ApplyWindow,
                 start_sesno: 5,
                 end_sesno: 9,
                 state: BatchState::Queued,

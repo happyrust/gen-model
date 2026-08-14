@@ -101,6 +101,10 @@
   一致。
 - 净修改元素的 base 版本记录解析失败 → 该 refno 保守按 Regen 处理并在回执
   警告里点名（宁多勿漏），不得静默跳过。
+- 非根索引页不可读或子页层级不下降 → 整窗失败；重复指针、越界残留等已验证点查
+  形状继续容忍并计数。
+- Added / Modified 的终稿解析失败，或索引页无法反查 last-touch 会话 → 整窗失败，
+  预览按 dbnum 显示错误、执行批次 Failed，且不自动回退 replay。
 
 ## Requirements *(mandatory)*
 
@@ -118,6 +122,9 @@
   改由会话页清单给出，语义不变。
 - **FR-7** 逐会话回放保留为诊断工具入口（`parse.collect_changes` 与探针），
   退出执行主路径。
+- **FR-8** 净窗口 MUST 是完整性契约：不可读子页、层级不下降、终稿解析失败与
+  last-touch 缺失 MUST 返回错误；只有已验证的重复/越界残留可容忍计数，Modified
+  的 base 解析失败 MAY 保守降级为 Add 并警告。
 
 ## Success Criteria *(mandatory)*
 

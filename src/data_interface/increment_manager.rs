@@ -1680,8 +1680,8 @@ impl AiosDBManager {
         anyhow::Ok(())
     }
 
-    /// 回退重建批次的入队形状（ADR-021）：按首次导入（applied=0，窗口
-    /// 1..file_latest）入队，数据一行不动——清库归 worker 执行体的冻结点复核
+    /// 回退重建批次的入队形状（ADR-021）：显式 Reinitialize（零会话时 0..=0，
+    /// 否则 1..file_latest）入队，数据一行不动——清库归 worker 执行体的冻结点复核
     /// （`execute_one_dbnum` 复核仍判回退才调 `wipe_dbnum_for_reinit`）。
     ///
     /// 与 [`Self::discover_batch`] 刻意分开：那道门按「文件会话号 vs 水位」判
@@ -1700,17 +1700,19 @@ impl AiosDBManager {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
+        let first_sesno = if file_latest_sesno == 0 { 0 } else { 1 };
         let (first_pending_sesno_time, file_latest_sesno_time) =
             crate::data_interface::manual_update::window_times_rfc3339(
                 project,
                 path,
-                1,
+                first_sesno,
                 file_latest_sesno,
             );
         crate::data_interface::batch_scheduler::DiscoveredBatch {
             project: project.to_string(),
             dbnum: db_num,
             db_type: db_type.to_string(),
+            intent: crate::data_interface::batch_queue::BatchIntent::Reinitialize,
             path: path.to_path_buf(),
             file_name,
             applied_sesno: 0,
@@ -1776,6 +1778,7 @@ impl AiosDBManager {
             project: project.to_string(),
             dbnum: db_num,
             db_type: db_type.to_string(),
+            intent: crate::data_interface::batch_queue::BatchIntent::ApplyWindow,
             path: path.to_path_buf(),
             file_name: file_name.to_string(),
             applied_sesno: applied,

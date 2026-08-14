@@ -106,6 +106,7 @@ async fn staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark(
     );
 
     let found = DiscoveredBatch {
+        intent: aios_database::data_interface::batch_queue::BatchIntent::ApplyWindow,
         project,
         dbnum,
         db_type: "DESI".into(),

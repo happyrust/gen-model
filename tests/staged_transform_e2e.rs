@@ -272,6 +272,7 @@ async fn staged_transform_follows_a_pure_pose_move() {
     );
 
     let found = DiscoveredBatch {
+        intent: aios_database::data_interface::batch_queue::BatchIntent::ApplyWindow,
         project: PROJECT.to_string(),
         dbnum,
         db_type: "DESI".to_string(),

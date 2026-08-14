@@ -320,7 +320,7 @@ fn render_delete_phases(
             // 归零，读侧迁移才不会把旧值当水位捞回来。
             metadata.push(format!(
                 "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = 0, sesno = 0, \
-                 applied_sesno_time = NONE;"
+                 applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE;"
             ));
         }
     }
@@ -333,6 +333,28 @@ async fn execute_phase(label: &str, statements: &[String]) -> anyhow::Result<()>
     }
     SUL_DB
         .query(statements.join("\n"))
+        .await
+        .with_context(|| format!("{label} transport failed"))?
+        .check()
+        .with_context(|| format!("{label} statement failed"))?;
+    Ok(())
+}
+
+fn render_transactional_phase(statements: &[String]) -> Option<String> {
+    (!statements.is_empty()).then(|| {
+        format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            statements.join("\n")
+        )
+    })
+}
+
+async fn execute_transactional_phase(label: &str, statements: &[String]) -> anyhow::Result<()> {
+    let Some(sql) = render_transactional_phase(statements) else {
+        return Ok(());
+    };
+    SUL_DB
+        .query(sql)
         .await
         .with_context(|| format!("{label} transport failed"))?
         .check()
@@ -425,7 +447,7 @@ async fn wipe_dbnum_rows(
         render_delete_phases(dbnum, &ref0s, &noun_tables, watermark);
     execute_phase("delete owner relations", &relations).await?;
     execute_phase("delete Ref0 ranges", &ranges).await?;
-    execute_phase("delete dbnum metadata", &metadata).await?;
+    execute_transactional_phase("delete dbnum metadata", &metadata).await?;
 
     let mut verify = SUL_DB
         .query(format!(
@@ -521,8 +543,36 @@ mod tests {
         assert_eq!(
             metadata.last().unwrap(),
             "UPDATE dbnum_watermark:7997 SET applied_sesno = 0, sesno = 0, \
-             applied_sesno_time = NONE;",
+             applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE;",
             "水位清值必须是元数据阶段的最后一句（清库的提交点）"
+        );
+    }
+
+    #[test]
+    fn metadata_is_one_explicit_transaction_with_the_watermark_last() {
+        let (_, _, metadata) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into()],
+            WatermarkDisposal::ResetForReinit,
+        );
+        let sql = render_transactional_phase(&metadata).expect("metadata transaction");
+        assert_eq!(sql.matches("BEGIN TRANSACTION;").count(), 1, "{sql}");
+        assert_eq!(sql.matches("COMMIT TRANSACTION;").count(), 1, "{sql}");
+        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
+        assert!(sql.ends_with("\nCOMMIT TRANSACTION;"), "{sql}");
+        let watermark = sql
+            .rfind("UPDATE dbnum_watermark:7997")
+            .expect("watermark update");
+        let commit = sql.rfind("COMMIT TRANSACTION;").expect("commit");
+        assert!(
+            watermark < commit,
+            "水位更新必须是事务内最后一条元数据语句: {sql}"
+        );
+        assert_eq!(
+            sql[watermark..commit].matches(';').count(),
+            1,
+            "水位之后不得再有元数据语句: {sql}"
         );
     }
 

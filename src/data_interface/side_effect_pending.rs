@@ -16,6 +16,26 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 const TABLE: &str = "incr_side_effect_pending";
 const MAX_ATTEMPTS: u32 = 5;
 
+fn parse_ref_rev_payload(changed_refnos: &[String]) -> anyhow::Result<Vec<RefnoEnum>> {
+    anyhow::ensure!(
+        !changed_refnos.is_empty(),
+        "ref_rev_maintain changed_refnos 为空"
+    );
+    changed_refnos
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let value = raw.trim();
+            anyhow::ensure!(!value.is_empty(), "changed_refnos[{index}] 为空");
+            let parsed = value.parse::<RefU64>().map_err(|error| {
+                anyhow::anyhow!("changed_refnos[{index}]={value:?} 非法: {error}")
+            })?;
+            anyhow::ensure!(parsed.0 != 0, "changed_refnos[{index}] 不得是零 refno");
+            Ok(RefnoEnum::from(parsed))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideEffectKind {
@@ -538,13 +558,15 @@ impl SideEffectCompensator {
 
             let result = match kind {
                 SideEffectKind::RefRevMaintain => {
-                    let referrers: Vec<RefnoEnum> = job
-                        .changed_refnos
-                        .iter()
-                        .filter_map(|refno| refno.parse::<RefU64>().ok())
-                        .map(RefnoEnum::from)
-                        .collect();
-                    crate::data_interface::manual_update::repair_reverse_index_for(&referrers).await
+                    match parse_ref_rev_payload(&job.changed_refnos) {
+                        Ok(referrers) => {
+                            crate::data_interface::manual_update::repair_reverse_index_for(
+                                &referrers,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 // 连不上 AiosDBMgr 是这个作业自己的失败，不是整轮的失败：
                 // 这里必须留在 async 块里，`?` 一旦逃出去就会掐掉后面所有作业。
@@ -664,7 +686,20 @@ impl SideEffectCompensator {
 
 #[cfg(test)]
 mod tests {
-    use super::{SideEffectCompensator, SideEffectKind};
+    use super::{SideEffectCompensator, SideEffectKind, parse_ref_rev_payload};
+
+    #[test]
+    fn ref_rev_payload_is_nonempty_and_all_or_nothing() {
+        assert!(parse_ref_rev_payload(&[]).is_err());
+        assert!(parse_ref_rev_payload(&["".into()]).is_err());
+        assert!(parse_ref_rev_payload(&["24381/1".into(), "broken".into()]).is_err());
+        assert_eq!(
+            parse_ref_rev_payload(&["24381/1".into(), "24381/2".into()])
+                .expect("valid payload")
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn spatial_reconcile_row_is_deterministic_and_keeps_final_net_mutation() {

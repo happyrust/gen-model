@@ -561,6 +561,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         "E3D SAVEWORK 后必须有待应用会话，file={file_latest_sesno} applied={applied_sesno}"
     );
     let found = DiscoveredBatch {
+        intent: aios_database::data_interface::batch_queue::BatchIntent::ApplyWindow,
         project: PROJECT.to_string(),
         dbnum: case.dbnum,
         db_type: "DESI".to_string(),

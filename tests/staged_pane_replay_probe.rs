@@ -151,6 +151,7 @@ async fn staged_pane_replay_goes_through_the_kvmem_window() {
     println!("[pane-replay] 基线 aabb={before_aabb}");
 
     let found = DiscoveredBatch {
+        intent: aios_database::data_interface::batch_queue::BatchIntent::ApplyWindow,
         project: PROJECT.to_string(),
         dbnum: DBNUM,
         db_type: "DESI".to_string(),

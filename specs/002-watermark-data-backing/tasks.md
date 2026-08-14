@@ -44,3 +44,9 @@
 - [ ] T012 后续项（单独一轮，ADR-021 已记录）：水位行「来源」字段（基线收口 / 增量收口 /
   播种回填，动 schema 与启动播种路径）；`applied_sesno_time` 交叉核验（停机窗口内回退
   又长回去的检出）
+- [x] T013 审查修复：引入 `BatchIntent::{ApplyWindow, Reinitialize}`，覆盖零会话、排队
+  提升、运行中后继与冻结点复核；空文件清库后 Applied 收口
+  ——`src/data_interface/batch_queue.rs`、`batch_scheduler.rs`、`increment_manager.rs`、
+  `manual_update.rs`
+- [x] T014 审查修复：`wipe_dbnum_for_reinit` 元数据阶段显式事务，水位置尾；附渲染顺序
+  回归与故障注入入口——`src/data_interface/fast_delete.rs`
