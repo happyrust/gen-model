@@ -1378,6 +1378,12 @@ async fn execute_frozen_batch_body(
     let applied = batch
         .as_ref()
         .is_some_and(|b| b.status == BatchStatus::Applied);
+    let defer_model_phase = initialization_defers_model_phase(
+        applied,
+        job.intent,
+        job.start_sesno,
+        batch.as_ref().map(|batch| batch.start_sesno),
+    );
 
     // SYST 数据落库后，TEAM 等派生表要跟着刷。走持久补偿队列而不是就地同步：
     // 同一条重试通道、同一个 MAX_ATTEMPTS，崩了下一轮接着来。
@@ -1629,7 +1635,7 @@ async fn execute_frozen_batch_body(
     // 这一轮消化是**全局**的（非 regen 积压不分库），所以「有失败」不等于「本批
     // 的前置没做完」：只有失败牵涉到 `job.dbnum` 时才拦下本批的生成，否则隔壁库
     // 的一条坏行会让每个库的每一批都一个交付单元都不生成。
-    if !staged {
+    if !staged && !defer_model_phase {
         match model_update_pending::drain_non_regen_report(mgr).await {
             Ok(report) => {
                 if !report.failures.is_empty() {
@@ -1654,7 +1660,18 @@ async fn execute_frozen_batch_body(
 
     // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
     // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
-    let (units, mut settlement_failed) = if batch_regen_is_allowed(non_regen_failed) {
+    let (units, mut settlement_failed) = if defer_model_phase {
+        // 冷启动/回退重建的第一阶段只负责把全部库的数据与水位收口。基线已经把
+        // 生成工作持久化进 model_update_pending；这里不按 dbnum 立刻领取，否则
+        // 第一个大库的几何生成会把后面所有尚未初始化的库堵在数据队列里。等数据
+        // 队列跑空后，worker 的 idle_round::drain_data_phases 再统一分页消费。
+        registry.set_unit_totals(&job.task_id, 0);
+        println!(
+            "dbnum={} 初始化数据与水位已收口；模型工作留待数据队列清空后统一执行",
+            job.dbnum
+        );
+        (Vec::new(), false)
+    } else if batch_regen_is_allowed(non_regen_failed) {
         if staged {
             let pending = match load_pending_model_units_for_retry(job.dbnum).await {
                 Ok(pending) => pending,
@@ -1796,6 +1813,7 @@ async fn execute_frozen_batch_body(
         }
     }
     if !staged
+        && !defer_model_phase
         && !settlement_failed
         && units
             .iter()
@@ -1846,6 +1864,21 @@ async fn execute_frozen_batch_body(
 
 fn batch_regen_is_allowed(non_regen_failed: bool) -> bool {
     !non_regen_failed
+}
+
+/// 冷启动/回退重建采用明确的两阶段顺序：先把所有数据批次（水位 + PE）跑完，
+/// 再由空闲轮统一消费持久模型工作。`batch_start_sesno == 0` 覆盖“入队时看似增量，
+/// 冻结点才发现幽灵水位而改走首次导入”的竞态；不能只看队列左端。
+fn initialization_defers_model_phase(
+    applied: bool,
+    intent: crate::data_interface::batch_queue::BatchIntent,
+    queued_start_sesno: i32,
+    batch_start_sesno: Option<i32>,
+) -> bool {
+    applied
+        && (intent == crate::data_interface::batch_queue::BatchIntent::Reinitialize
+            || queued_start_sesno <= 1
+            || batch_start_sesno == Some(0))
 }
 
 fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
@@ -3546,6 +3579,36 @@ mod tests {
     fn failed_non_regen_work_blocks_the_batch_regen_worklist() {
         assert!(batch_regen_is_allowed(false));
         assert!(!batch_regen_is_allowed(true));
+    }
+
+    #[test]
+    fn initialization_finishes_all_data_before_model_generation() {
+        use crate::data_interface::batch_queue::BatchIntent;
+
+        assert!(initialization_defers_model_phase(
+            true,
+            BatchIntent::ApplyWindow,
+            1,
+            Some(0),
+        ));
+        assert!(initialization_defers_model_phase(
+            true,
+            BatchIntent::Reinitialize,
+            51,
+            Some(0),
+        ));
+        assert!(
+            initialization_defers_model_phase(true, BatchIntent::ApplyWindow, 209, Some(0)),
+            "冻结点才发现幽灵水位时也必须切到两阶段初始化"
+        );
+        assert!(
+            !initialization_defers_model_phase(true, BatchIntent::ApplyWindow, 209, Some(209)),
+            "稳态增量仍保持窗口内模型处理纪律"
+        );
+        assert!(
+            !initialization_defers_model_phase(false, BatchIntent::ApplyWindow, 1, Some(0)),
+            "数据批次失败时不应伪报初始化第一阶段完成"
+        );
     }
 
     /// 前置阻断只认**本批这个库**的失败。

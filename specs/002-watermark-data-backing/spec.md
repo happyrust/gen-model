@@ -35,13 +35,16 @@
 2. **Given** 同上状态，
    **When** 批次完成，
    **Then** 日志与批次回执都明确说明「水位与数据不一致，已按首次导入重建」。
-3. **Given** dbnum 的 `applied_sesno = 208` 且 `pe` 表里**有**该库的数据，文件最新会话是 300，
+3. **Given** 启动扫描同时发现多个未解析库或幽灵水位库，
+   **When** worker 执行初始化队列，
+   **Then** 必须先逐库完成全部数据解析与水位收口；模型工作只持久登记，直到数据队列清空后才统一执行，任何一个库的模型生成不得阻塞后续库初始化。
+4. **Given** dbnum 的 `applied_sesno = 208` 且 `pe` 表里**有**该库的数据，文件最新会话是 300，
    **When** 该库的数据批次被执行，
    **Then** 它照常走 `209..300` 的增量窗口（现有行为不得回归）。
-4. **Given** 一个基线完成后确实解析不出任何元素的空库（`applied_sesno == file_latest_sesno`、`pe` 零行），
+5. **Given** 一个基线完成后确实解析不出任何元素的空库（`applied_sesno == file_latest_sesno`、`pe` 零行），
    **When** 周期对账重扫反复扫描它，
    **Then** 它**不**入队、**不**被反复全量重解析。
-5. **Given** 存在性判定所依赖的查询失败（库连接抖动），
+6. **Given** 存在性判定所依赖的查询失败（库连接抖动），
    **When** 路由决策需要它，
    **Then** 本轮不猜：既不当作「没有数据」（会误重建整个大库），也不当作「有数据」（会让缺口继续静默），按读失败处置（批次 Failed）并留下可见信息。
 
@@ -122,6 +125,7 @@
 - **FR-008**：回退的清库 MUST 只发生在数据批次 worker 执行体内，且 MUST 以冻结点的新鲜裁决（复核仍判回退）为前提；复核不判回退时 MUST NOT 清库。
 - **FR-009**：清库 MUST 覆盖该 dbnum 的全部 `pe` 行、派生行（属主边、inst/tubi/room/ref_rev/geo 关系）、noun 行、`dbnum_info_table` 统计与队列残留（`model_update_pending` / `increment_update_attempt` / `incr_side_effect_pending`），MUST 在同一元数据阶段递增 spatial epoch，且 `dbnum_watermark` 行 MUST 清值不删行（登记身份保留）。
 - **FR-010**：清库关系与区间阶段 MUST 可独立幂等重放；统计/持久队列清理、spatial epoch 与水位清零 MUST 位于同一个显式 SurrealDB 事务，水位更新置尾。任一元数据语句失败 MUST 整体回滚、记批次 Failed，下一轮 MUST 能幂等重放。
+- **FR-010a**：初始化批次 MUST 只完成数据、水位与 durable 模型工作登记；当数据队列仍有初始化任务时 MUST NOT 执行模型生成。数据队列清空后 MUST 由统一空闲轮分页消费模型工作；稳态增量窗口的模型提交语义保持不变。
 - **FR-011**：`TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` MUST 保持阻断语义，MUST NOT 触发自动清库；「哪些异常转重建」MUST 由 `FileAnomaly` 上的单一谓词（`requires_reinit`）裁决。
 - **FR-012**：`watermark_realign` 配置键、`AIOS_WATERMARK_REALIGN` 环境变量、`POST /api/v1/dbnums/{dbnum}/realign` 端点与 Python 绑定 `aios_db.sync.realign` MUST 移除；`DELETE /api/v1/dbnums/{dbnum}/data` 与 `…/data/above/{watermark}` 两个运维端点 MUST 保留且行为不变。
 - **FR-013**：回退重建 MUST 在扫描日志、worker 日志与批次回执三处可见（含删除规模）；只出现在日志、回执里看不见的报告不满足本条。

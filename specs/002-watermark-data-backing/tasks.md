@@ -56,3 +56,7 @@
   重复组零 observation、撤销旧 locator 身份且 warnings 列全路径
   ——`src/data_interface/manual_update.rs`、`increment_manager.rs`、`dbnum_state.rs`、
   `cata_closure.rs`
+- [x] T017 初始化两阶段：首次导入、回退重建与冻结点改道的幽灵水位批次只收口数据、
+  水位和 durable pending；模型工作在数据队列清空后由既有空闲轮分页消费。补纯函数
+  回归测试与 test-workspace 六库现场顺序验证
+  ——`src/data_interface/batch_worker.rs`、`docs/adr/ADR-011-one-data-batch-queue-for-manual-and-auto.md`
