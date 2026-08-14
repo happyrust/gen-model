@@ -132,6 +132,18 @@ _Avoid_: 批量生成、批处理生成、多根生成
 合批准入的二分：`attempts == 0` 且 refno 可解析的生成根是 fresh 根，可以进批；其余是重试根，只能单独跑。判据实现为纯谓词 `joins_regen_batch`。
 _Avoid_: 新根、干净根、失败根
 
+**模型实例保存合批 (Shape Save Coalescing)**：
+几何生产者连续发出的多个小 `ShapeInstancesData`，在固定实例数 / 几何 occurrence / 源批数 / 估算字节 / 等待时间上限内合成一次确定性保存。保留全部原始批，禁止调用 `ShapeInstancesData::merge`。与「合批重生成」（一次调用承载多个生成根）不是同一件事。
+_Avoid_: 批量保存、merge 合批、Save merge、合批写入（与合批重生成混用时）
+
+**保存计划 (SavePlan)**：
+第一次 scoped delete 或写入前完成的不可变计划：校验（NaN、normal/tubi 重叠、同 ID 内容冲突）、元数据解析、去重、排序和 SQL 分包。只有成功 `SaveOutcome` 里的 refno 才计入本轮产出。
+_Avoid_: 保存方案、写计划、保存脚本
+
+**保存模式 (SaveMode)**：
+实例保存的路径区分：`TargetedReplace` 保留定向 scoped cascade delete；`FullBuild` 不预删。定向与全量共用同一保存 receiver 与去重规则。
+_Avoid_: 保存策略、写模式、保存档位
+
 **revision 收口 (Revision-safe Settlement)**：
 以待重试单元行的队列内部单调 `revision` 为条件完成删除或标记失败。revision 对不上意味着该任务已因新工作重新入队，本次执行结果不足以清除它；来源 `dbnum/sesno` 只用于追踪，不参与 revision、跨库排序、去重或复活判断。
 _Avoid_: 收尾、结算、settle

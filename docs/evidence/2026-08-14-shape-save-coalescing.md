@@ -85,3 +85,27 @@ packet 从 48 降至 3，二者均下降 93.75%，超过 70% 门槛。
 最终质量命令的退出状态均为 `0`：`cargo fmt --all -- --check`、两个定向库测试、
 `cargo check`、release 构建以及 `git diff --cached --check`。配置在验证结束后已恢复，服务保持停止，
 避免测试配置继续影响后续人工启动。
+
+## 2026-08-14 收尾复核
+
+在 `codex/shape-save-coalescing`（HEAD `b2678224`）上重跑 CI 口径命令，结果与首轮一致：
+
+```text
+cargo test --locked --lib fast_model::shape_save::tests:: \
+  --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
+=> 6 passed
+
+cargo test --locked --lib fast_model::pdms_inst::tests:: \
+  --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
+=> 15 passed, 2 ignored
+
+cargo check --locked --no-default-features --features ws,gen_model,manifold,project_hd
+=> 0 errors
+
+cargo fmt --all -- --check
+=> 0
+```
+
+文档收尾：把 changelog 中落在「历史记录」之后的合批条目归入文首 `## 2026-08-14`；
+`CONTEXT.md` 增补「模型实例保存合批 / 保存计划 / 保存模式」，避免与「合批重生成」混用。
+本轮未重跑 test-workspace A/B 与 release 构建。
