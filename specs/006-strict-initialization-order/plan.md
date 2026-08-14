@@ -23,6 +23,10 @@
    受 `data_ready` 门控。
 5. `sync_pdms` 分拆 Meta/CATA/DESI 三段；启动全量生成、按需生成与房间入口接入模型门。
 6. REST/Python/health 增加只读阶段字段；配置增加 `catalogue_project_priority`。
+7. 模型空闲轮保留一页最多 16 根的读取上限，但逐根调用生成；初始化门关闭返回
+   `YieldedForData`，完成根按 revision 收口，未执行根原样保留。
+8. TaskRegistry 增加进程内 `model_drain` 任务和 `yielded` 状态；持久工作表不增加 epoch
+   字段，重启仍从 pending 行重建。
 
 ## Verification
 
@@ -30,4 +34,3 @@
 - CI 特性口径的目标库单测、四个集成测试、Python offline 测试。
 - SurrealDB 2.x 沙箱运行六条 live 场景，证据写入 `docs/evidence/` 和 live ledger。
 - `cargo fmt --all -- --check`、`cargo check`、`sigmap verify-plan`、`sigmap review-pr`。
-
