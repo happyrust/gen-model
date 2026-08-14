@@ -5,9 +5,11 @@
     "inst_geo.param + insts_flat 就地重建 gen 世界网格（param 空的复合几何回退 assets/meshes/*.mesh），",
     "与 test_data/rvm/*.rvm 的 E3D 三角化做双向采样表面距离。不写库、不动 testbed。",
     "features 用 rvm_verify（默认 feature 含 occ，gen_occ_shape/gen_occ_mesh 需要）。",
-    "两个带断言的回归守卫：",
+    "带断言的回归守卫：",
     "  * mesh_wall_surface_distance —— 1112 CWALL WALL 1/2/3 的 gen->rvm p95 ≤ 12mm（圆弧墙几何）。",
+    "  * mesh_stwall_surface_distance —— 1112 CWALL 4 堵直线 STWALL 双向 p95 ≤ 12mm。",
     "  * mesh_full_branch_union_surface_distance —— 整条 C-OR BRANCH union p95 ≤ 10 / max ≤ 30mm。",
+    "  * mesh_c_iy_full_branch_union_surface_distance —— 整条 C-IY BRANCH gen->rvm p95 ≤ 10 / max ≤ 30mm（槽盒外壳 rvm->gen 大，不判红）。",
     "另两条为取证诊断（无硬断言，跑通即过）。前置：8009 在听、对应 .rvm 在位、对应 dbnum 已生成。"
   ],
   "config": "DbOption",
@@ -15,8 +17,10 @@
   "default_timeout_secs": 600,
   "tests": [
     { "name": "mesh_wall_surface_distance" },
+    { "name": "mesh_stwall_surface_distance" },
     { "name": "mesh_pipe_surface_distance" },
     { "name": "mesh_branch_union_surface_distance" },
-    { "name": "mesh_full_branch_union_surface_distance" }
+    { "name": "mesh_full_branch_union_surface_distance" },
+    { "name": "mesh_c_iy_full_branch_union_surface_distance", "timeout_secs": 180 }
   ]
 }

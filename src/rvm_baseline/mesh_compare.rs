@@ -332,6 +332,32 @@ mod mesh_wall_live {
     use surrealdb::engine::any::connect;
     use surrealdb::opt::auth::Root;
 
+    async fn live_8009() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
+        db.signin(Root {
+            username: "root",
+            password: "root",
+        })
+        .await
+        .expect("signin");
+        db.use_ns("1516")
+            .use_db("AvevaMarineSample")
+            .await
+            .expect("use ns/db");
+        db
+    }
+
+    fn rvm_by_prefix<'a>(
+        meshes: &'a HashMap<String, TriMesh>,
+        prefix: &str,
+    ) -> Option<&'a TriMesh> {
+        let needle = format!("{prefix} ");
+        meshes
+            .iter()
+            .find(|(name, _)| name.as_str() == prefix || name.starts_with(&needle))
+            .map(|(_, m)| m)
+    }
+
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵 WALL，RVM FacetGroup vs gen OCC
     /// 网格，双向表面距离。
     ///
@@ -483,6 +509,59 @@ mod mesh_wall_live {
         assert!(
             guard_failures.is_empty(),
             "WALL 1/2/3 的 gen 表面必须贴 E3D（gen->rvm p95 ≤ {GEN_TO_RVM_P95_TOL}mm）：{guard_failures:?}"
+        );
+    }
+
+    /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵直线 STWALL。AABB 对拍已 8/8；
+    /// 这里钉 mesh：E3D FacetGroup 是 6 面盒（无内环），应双向贴合。
+    ///
+    /// 跑法：`cargo test --features rvm_verify --lib mesh_stwall_surface_distance -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "live 8009 + occ：1112 CWALL STWALL 的 mesh 级对拍（直线 SweepSolid）"]
+    async fn mesh_stwall_surface_distance() {
+        use crate::fast_model::shared::one_way_surface_distance;
+
+        let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
+        let db = live_8009().await;
+
+        let pairs = [
+            ("STWALL 1 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105812"),
+            ("STWALL 2 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105813"),
+            ("STWALL 3 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105815"),
+            ("STWALL 4 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105816"),
+        ];
+        const P95_TOL: f32 = 12.0;
+        let mut failures = Vec::new();
+        for (rvm_name, pe_key) in pairs {
+            let rvm = rvm_meshes
+                .get(rvm_name)
+                .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
+            let gen_mesh = gen_world_mesh(&db, pe_key, 3.0)
+                .await
+                .expect("gen mesh")
+                .unwrap_or_else(|| panic!("gen 缺网格 {pe_key}"));
+            let g2r = one_way_surface_distance(&gen_mesh, rvm, 4000).expect("g2r");
+            let r2g = one_way_surface_distance(rvm, &gen_mesh, 4000).expect("r2g");
+            println!(
+                "{rvm_name} ({pe_key}): rvm_tris={} gen_tris={}",
+                rvm.indices().len(),
+                gen_mesh.indices().len()
+            );
+            println!(
+                "    gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+                g2r.mean, g2r.p95, g2r.hausdorff, r2g.mean, r2g.p95, r2g.hausdorff
+            );
+            if g2r.p95 > P95_TOL {
+                failures.push(format!("{rvm_name}: gen->rvm p95={:.2}", g2r.p95));
+            }
+            if r2g.p95 > P95_TOL {
+                failures.push(format!("{rvm_name}: rvm->gen p95={:.2}", r2g.p95));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "STWALL 直线墙应双向贴合（p95 ≤ {P95_TOL}mm）：{failures:?}"
         );
     }
 
@@ -743,6 +822,132 @@ mod mesh_wall_live {
             d.mean,
             d.p95,
             d.hausdorff
+        );
+    }
+
+    /// 第二条管系：整条 `/C-IY-1R330-B`（ACP1000 槽盒/托盘，18 直管 + 18 弯头）union。
+    /// 确认 C-OR 的「gen 表面贴 E3D」在不同目录截面上仍成立；E3D RVM 含槽体外壳
+    /// （比 gen 管段大约 100mm 高），rvm→gen 大是范围差。FTUBE 6 是零长隐含直管，两侧都无表面。
+    ///
+    /// 跑法：`cargo test --features rvm_verify --lib mesh_c_iy_full_branch -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "live 8009 + occ：整条 C-IY BRANCH 的 union mesh 端到端对拍"]
+    async fn mesh_c_iy_full_branch_union_surface_distance() {
+        use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
+
+        let rvm_path = std::path::Path::new("test_data/rvm/C-IY-1R330-B.rvm");
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
+        let db = live_8009().await;
+
+        let members = [
+            ("FTUBE 1", "pe:24384_22405"),
+            ("BEND 1", "pe:24384_22406"),
+            ("FTUBE 2", "pe:24384_22407"),
+            ("BEND 2", "pe:24384_22408"),
+            ("FTUBE 3", "pe:24384_22409"),
+            ("BEND 3", "pe:24384_22410"),
+            ("FTUBE 4", "pe:24384_22411"),
+            ("BEND 4", "pe:24384_22412"),
+            ("BEND 5", "pe:24384_22413"),
+            ("BEND 6", "pe:24384_22414"),
+            ("FTUBE 5", "pe:24384_22415"),
+            ("FTUBE 6", "pe:24384_22416"),
+            ("BEND 7", "pe:24384_22417"),
+            ("BEND 8", "pe:24384_22418"),
+            ("BEND 9", "pe:24384_22419"),
+            ("FTUBE 7", "pe:24384_22420"),
+            ("BEND 10", "pe:24384_22421"),
+            ("FTUBE 8", "pe:24384_22422"),
+            ("BEND 11", "pe:24384_22423"),
+            ("FTUBE 9", "pe:24384_22424"),
+            ("BEND 12", "pe:24384_22425"),
+            ("FTUBE 10", "pe:24384_22426"),
+            ("BEND 13", "pe:24384_22427"),
+            ("FTUBE 11", "pe:24384_22428"),
+            ("BEND 14", "pe:24384_22429"),
+            ("FTUBE 12", "pe:24384_22430"),
+            ("BEND 15", "pe:24384_22431"),
+            ("FTUBE 13", "pe:24384_22432"),
+            ("BEND 16", "pe:24384_22433"),
+            ("FTUBE 14", "pe:24384_22434"),
+            ("FTUBE 15", "pe:24384_22435"),
+            ("FTUBE 16", "pe:24384_22436"),
+            ("BEND 17", "pe:24384_22437"),
+            ("FTUBE 17", "pe:24384_22438"),
+            ("BEND 18", "pe:24384_22439"),
+            ("FTUBE 18", "pe:24384_22440"),
+        ];
+
+        let mut gen_parts = Vec::new();
+        let mut rvm_parts = Vec::new();
+        let mut missing = Vec::new();
+        let mut skipped = Vec::new();
+        for (prefix, pe_key) in members {
+            let rvm = rvm_by_prefix(&rvm_meshes, prefix).cloned();
+            let generated = gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh");
+            match (rvm, generated) {
+                (Some(r), Some(g)) => {
+                    rvm_parts.push(r);
+                    gen_parts.push(g);
+                }
+                (None, None) => skipped.push(format!("{prefix} ({pe_key})")),
+                (None, Some(_)) => missing.push(format!("rvm:{prefix}")),
+                (Some(_), None) => missing.push(format!("gen:{pe_key}")),
+            }
+        }
+        println!("C-IY skipped zero-surface members: {skipped:?}");
+        assert_eq!(
+            skipped,
+            ["FTUBE 6 (pe:24384_22416)"],
+            "零长隐含直管只应跳过 FTUBE 6；多跳或少跳都要重审"
+        );
+        assert!(
+            missing.is_empty(),
+            "C-IY 有表面的构件必须两侧都有网格：missing={missing:?}"
+        );
+        let rvm_union = merge_trimeshes(&rvm_parts).expect("rvm union");
+        let gen_union = merge_trimeshes(&gen_parts).expect("gen union");
+
+        let d = two_sided_surface_distance(&rvm_union, &gen_union, 16000).expect("dist");
+        let g2r =
+            crate::fast_model::shared::one_way_surface_distance(&gen_union, &rvm_union, 16000)
+                .expect("g2r");
+        let r2g =
+            crate::fast_model::shared::one_way_surface_distance(&rvm_union, &gen_union, 16000)
+                .expect("r2g");
+        println!(
+            "FULL BRANCH C-IY ({} gen / {} rvm 构件)",
+            gen_parts.len(),
+            rvm_parts.len()
+        );
+        println!(
+            "    both mean={:.2} p95={:.2} hausdorff={:.2}",
+            d.mean, d.p95, d.hausdorff
+        );
+        println!(
+            "    gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+            g2r.mean, g2r.p95, g2r.hausdorff, r2g.mean, r2g.p95, r2g.hausdorff
+        );
+        for (p, dist) in farthest_from_surface(&gen_union, &rvm_union, 16000, 3) {
+            println!(
+                "    worst gen->rvm [{:.0},{:.0},{:.0}] d={:.1}",
+                p[0], p[1], p[2], dist
+            );
+        }
+        for (p, dist) in farthest_from_surface(&rvm_union, &gen_union, 16000, 3) {
+            println!(
+                "    worst rvm->gen [{:.0},{:.0},{:.0}] d={:.1}",
+                p[0], p[1], p[2], dist
+            );
+        }
+        // gen 表面贴在 E3D 里（ACP1000 槽盒/托盘：E3D RVM 多出约 100mm 高的槽体，
+        // gen 是 Ø50 管段；rvm→gen ~100mm 是表示范围差，不在本守卫内判红）。
+        assert!(
+            g2r.p95 <= 10.0 && g2r.hausdorff <= 30.0,
+            "整条 C-IY BRANCH 的 gen 表面应贴 E3D（gen->rvm p95≤10 / max≤30mm）：mean={:.2} p95={:.2} max={:.2}",
+            g2r.mean,
+            g2r.p95,
+            g2r.hausdorff
         );
     }
 }
