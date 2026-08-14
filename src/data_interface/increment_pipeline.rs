@@ -1285,10 +1285,13 @@ impl IncrementPipeline {
             crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
 
         if staged.is_some() {
-            let mut finalize_plan = model_plan.clone();
-            finalize_plan.work_items.retain(|item| {
-                item.action != crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot
-            });
+            // Register the complete durable plan, including RegenRoot. In the
+            // ordinary staged path, roots generated successfully before commit
+            // are removed by `settle_staged_plan_items`. During an initialization
+            // epoch the model phase is deliberately deferred, so stripping roots
+            // here would advance the data watermark while permanently losing the
+            // only durable request to generate them.
+            let finalize_plan = model_plan.clone();
             StageTimings::measure(
                 &mut timings.finalize,
                 crate::data_interface::staging::register_staged_finalize(
@@ -1556,6 +1559,23 @@ impl IncrementPipeline {
         let planned = fold_window(range_eles);
 
         let mut statements: Vec<String> = Vec::new();
+        // An Add may reuse a numeric refno from an older, now-absent element
+        // generation. Clear all incoming and outgoing ownership edges for every final Add
+        // before rendering any operation: the current owner edge is commonly
+        // installed by the owner's child-list update, whose refno may sort before
+        // or after the child. Embedding this cleanup in the child's own statement
+        // could therefore erase the freshly installed edge. The scoped id-range
+        // delete also removes child slots left by the old generation when the new
+        // element is a leaf. These deletes are in
+        // the same staged data transaction as the Add and are replay-safe.
+        for write in planned
+            .iter()
+            .filter(|write| matches!(&write.op.detail, EleOperationDetail::Add(_)))
+        {
+            let pe = format!("pe:{}", write.op.refno);
+            statements.push(format!("DELETE pe_owner WHERE in = {pe};"));
+            statements.push(format!("DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];"));
+        }
         for write in &planned {
             let id = write.op.refno.to_string();
             let surql = match &write.folded {
@@ -2397,6 +2417,72 @@ mod fold_tests {
             map.entry(op.sesno).or_default().push(op);
         }
         map
+    }
+
+    #[test]
+    fn added_refno_clears_every_previous_owner_edge_before_upsert() {
+        let added = refno(30);
+        let owner = refno(20);
+        let mut element = parse_pdms_db::parse::EleData {
+            refno: added,
+            owner,
+            ..Default::default()
+        };
+        element
+            .whole_attmap
+            .attmap
+            .insert("TYPE".into(), text("FTUB"));
+        element
+            .whole_attmap
+            .attmap
+            .insert("DBNUM".into(), NamedAttrValue::IntegerType(7997));
+
+        let statements = IncrementPipeline::render_persist_statements(
+            &window(vec![EleOperationData::new(
+                added,
+                47,
+                EleOperationDetail::Add(element),
+            )]),
+            7997,
+        );
+        let cleanup = "DELETE pe_owner WHERE in = pe:7997_30;";
+        assert_eq!(statements.first().map(String::as_str), Some(cleanup));
+        let children_cleanup = "DELETE pe_owner:[pe:7997_30, NONE]..=[pe:7997_30, ..];";
+        assert_eq!(
+            statements.get(1).map(String::as_str),
+            Some(children_cleanup)
+        );
+        let sql = statements.join("\n");
+        assert_eq!(
+            sql.matches(cleanup).count(),
+            1,
+            "one Add needs exactly one replay-safe incoming-edge cleanup: {sql}"
+        );
+        assert!(
+            sql.find(cleanup) < sql.find(children_cleanup)
+                && sql.find(children_cleanup) < sql.find("UPSERT pe:7997_30"),
+            "the old generation's owner and child edges must be gone before the current PE is installed: {sql}"
+        );
+    }
+
+    #[test]
+    fn staged_finalize_keeps_regen_roots_until_generation_settles_them() {
+        let source = include_str!("increment_pipeline.rs");
+        let block = source
+            .split_once("// Register the complete durable plan")
+            .expect("staged finalize registration must document durable roots")
+            .1
+            .split_once("} else {")
+            .expect("direct finalize branch must follow")
+            .0;
+        assert!(
+            block.contains("let finalize_plan = model_plan.clone();"),
+            "the full pre-persist plan must enter the staged finalize tail: {block}"
+        );
+        assert!(
+            !block.contains("ModelWorkAction::RegenRoot") && !block.contains("work_items.retain"),
+            "RegenRoot may only be removed after successful generation, never at registration: {block}"
+        );
     }
 
     fn folded_at<'a>(planned: &'a [PlannedWrite<'a>], id: u64) -> &'a ModifiedElement {

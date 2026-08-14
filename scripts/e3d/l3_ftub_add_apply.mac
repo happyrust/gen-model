@@ -1,0 +1,14 @@
+-- F5 / D-04: clone one known-good FTUB below a current-file BRAN.
+-- The owner and source refnos are validated by l3_suite before E3D is launched.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_ftub_add_apply.log" OVER
+$P L3-F5-ALIVE
+=24384/22402
+NEW FTUB /CODEX_L3_FTUB
+COPY =24384/22403
+Q CE
+Q TYPE
+Q OWNE
+SAVEWORK 'L3 F5 add cloned FTUB under BRAN 24384/22402'
+$P L3-F5-DONE
+ALPHA LOG END

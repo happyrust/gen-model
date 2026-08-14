@@ -1,0 +1,12 @@
+-- Restore F5 by deleting the named FTUB clone.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_ftub_add_restore.log" OVER
+$P L3-F5-RESTORE-ALIVE
+/CODEX_L3_FTUB
+Q CE
+Q TYPE
+Q OWNE
+DELETE FTUB
+SAVEWORK 'L3 F5 remove cloned FTUB'
+$P L3-F5-RESTORE-DONE
+ALPHA LOG END

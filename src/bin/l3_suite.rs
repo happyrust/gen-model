@@ -8,6 +8,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -46,6 +47,8 @@ struct Scenario {
     focus_before: Option<&'static str>,
     focus_after: Option<&'static str>,
     refno: &'static str,
+    /// Existing current-file elements that the apply macro navigates or copies.
+    required_refnos: &'static [&'static str],
     expect: Expect,
     rvm: bool,
 }
@@ -59,6 +62,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("1CUP001VAR"),
         focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
+        required_refnos: &["24381/100819"],
         expect: Expect::Regen {
             roots: &["24381/100817"],
         },
@@ -72,6 +76,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("1CUP001VAR"),
         focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
+        required_refnos: &["24381/100819"],
         expect: Expect::TransformOnly {
             root: "24381/100817",
         },
@@ -85,6 +90,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("24381/107146"),
         focus_after: None,
         refno: "24381_107146",
+        required_refnos: &["24381/107146"],
         expect: Expect::Deleted {
             root: "24381/107104",
         },
@@ -98,19 +104,21 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("1CUP001VAR"),
         focus_after: Some("1CUP001VAR_CODEX"),
         refno: "24381_100819",
+        required_refnos: &["24381/100819"],
         expect: Expect::DataOnly,
         rvm: false,
     },
     Scenario {
         id: "f5",
         dbnum: 8000,
-        apply_macro: Some("scripts/e3d/l3_gensec_add_apply.mac"),
-        restore_macro: Some("scripts/e3d/l3_gensec_add_restore.mac"),
+        apply_macro: Some("scripts/e3d/l3_ftub_add_apply.mac"),
+        restore_macro: Some("scripts/e3d/l3_ftub_add_restore.mac"),
         focus_before: None,
-        focus_after: Some("CODEX_L3_GENSEC"),
+        focus_after: Some("CODEX_L3_FTUB"),
         refno: "",
+        required_refnos: &["24384/22402", "24384/22403"],
         expect: Expect::Regen {
-            roots: &["24384/25872"],
+            roots: &["24384/22402"],
         },
         rvm: false,
     },
@@ -122,6 +130,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("24384/22403"),
         focus_after: Some("24384/22403"),
         refno: "24384_22403",
+        required_refnos: &["24384/22402", "24384/22403", "24384/22404"],
         expect: Expect::Regen {
             roots: &["24384/22402", "24384/22404"],
         },
@@ -136,6 +145,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: None,
         focus_after: None,
         refno: "",
+        required_refnos: &[],
         expect: Expect::DataOnly,
         rvm: false,
     },
@@ -147,6 +157,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_before: Some("24383/66460"),
         focus_after: Some("24383/66460"),
         refno: "24383_66460",
+        required_refnos: &["24383/66460"],
         expect: Expect::Room,
         rvm: false,
     },
@@ -311,6 +322,7 @@ impl Paths {
                 dir.display()
             );
         }
+        ensure_e3d_project_control_files(&self.project_work)?;
         if restore {
             ensure!(
                 self.project_golden.is_dir(),
@@ -325,6 +337,25 @@ impl Paths {
         }
         Ok(())
     }
+}
+
+fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
+    let required = [
+        project.join("evarsAvevaMarineSample.bat"),
+        project.join("ams000/amscom"),
+        project.join("ams000/amssys"),
+    ];
+    let missing = required
+        .iter()
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    ensure!(
+        missing.is_empty(),
+        "E3D project copy is incomplete; copy the project evars plus ams000/amscom and ams000/amssys before launching a TTY session: {}",
+        missing.join(", ")
+    );
+    Ok(())
 }
 
 struct Stack {
@@ -430,6 +461,7 @@ fn main() -> Result<()> {
             "E3D launcher is missing: {}",
             driver.launcher.display()
         );
+        ensure_e3d_project_control_files(&paths.project_work)?;
         if std::env::var("L3_ALLOW_EXISTING_E3D_SESSION").as_deref() != Ok("1") {
             assert_no_e3d_session()?;
         }
@@ -917,6 +949,7 @@ fn run_scenario(
         HashSet::new()
     };
     let target_db_file = standard_target_db_file(paths, s.dbnum)?;
+    ensure_current_scenario_refnos(&target_db_file, s.required_refnos)?;
     // Establish the observation boundary before SAVEWORK. Calling preview after the save
     // would consume the observation and make execute correctly report no merged saves.
     let observation = http_json("POST", &format!("{API}/update/preview"), Some(identity()))?;
@@ -1069,6 +1102,33 @@ fn standard_target_db_file(paths: &Paths, dbnum: u32) -> Result<PathBuf> {
         path.display()
     );
     Ok(path)
+}
+
+fn ensure_current_scenario_refnos(path: &Path, required: &[&str]) -> Result<()> {
+    if required.is_empty() {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("scenario target DB has no file name")?;
+    let path_buf = path.to_path_buf();
+    let index = parse_pdms_db::parse::parse_file_db_basic_data(&path_buf, file_name, PROJECT)?;
+    let mut missing = Vec::new();
+    for text in required {
+        let refno = aios_core::RefU64::from_str(text)
+            .map_err(|_| anyhow!("invalid required scenario refno {text}"))?;
+        if !index.refno_table_map.contains_key(&refno) {
+            missing.push(*text);
+        }
+    }
+    ensure!(
+        missing.is_empty(),
+        "scenario source refnos are absent from the current target-file index {}: {}",
+        path.display(),
+        missing.join(", ")
+    );
+    Ok(())
 }
 
 fn focus_target(
@@ -1548,8 +1608,8 @@ fn assert_macro_parity(s: &Scenario, log: &str, after: &Value) -> Result<()> {
             );
         }
         "f5" => ensure!(
-            log.contains("CODEX_L3_GENSEC"),
-            "F5 Q CE did not report the new GENSEC"
+            log.contains("CODEX_L3_FTUB"),
+            "F5 Q CE did not report the new FTUB"
         ),
         "f6" => {
             ensure!(
@@ -1965,7 +2025,84 @@ mod tests {
                     s.id
                 );
             }
+            if mutates {
+                assert!(
+                    !s.required_refnos.is_empty(),
+                    "{}: every mutation macro must declare the current-file elements it depends on",
+                    s.id
+                );
+            }
         }
+    }
+
+    #[test]
+    fn f5_adds_and_restores_a_current_pipeline_component() {
+        let scenario = SCENARIOS
+            .iter()
+            .find(|scenario| scenario.id == "f5")
+            .unwrap();
+        assert_eq!(
+            scenario.apply_macro,
+            Some("scripts/e3d/l3_ftub_add_apply.mac")
+        );
+        assert_eq!(
+            scenario.restore_macro,
+            Some("scripts/e3d/l3_ftub_add_restore.mac")
+        );
+        assert_eq!(scenario.required_refnos, ["24384/22402", "24384/22403"]);
+        assert_eq!(scenario_roots(scenario), ["24384/22402"]);
+
+        let apply = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(scenario.apply_macro.unwrap()),
+        )
+        .unwrap();
+        assert!(apply.contains("NEW FTUB /CODEX_L3_FTUB"), "{apply}");
+        assert!(apply.contains("COPY =24384/22403"), "{apply}");
+        assert!(
+            !apply.contains("GENSEC"),
+            "stale structural fixture leaked into F5: {apply}"
+        );
+    }
+
+    #[test]
+    fn isolated_e3d_project_requires_project_control_databases() {
+        let root = std::env::temp_dir().join(format!("l3-e3d-controls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("ams000")).unwrap();
+        fs::write(root.join("evarsAvevaMarineSample.bat"), b"@echo off\n").unwrap();
+
+        let error = ensure_e3d_project_control_files(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("amscom"), "{error}");
+        assert!(error.contains("amssys"), "{error}");
+
+        fs::write(root.join("ams000/amscom"), b"fixture").unwrap();
+        fs::write(root.join("ams000/amssys"), b"fixture").unwrap();
+        ensure_e3d_project_control_files(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_refno_preflight_precedes_any_e3d_mutation() {
+        let source = include_str!("l3_suite.rs");
+        let run_scenario = source
+            .split_once("fn run_scenario(")
+            .expect("run_scenario must exist")
+            .1
+            .split_once("fn standard_target_db_file")
+            .expect("run_scenario must end before standard_target_db_file")
+            .0;
+        let preflight = run_scenario
+            .find("ensure_current_scenario_refnos")
+            .expect("current-file preflight must exist");
+        let mutation = run_scenario
+            .find("fixture::run_guarded_mutation")
+            .expect("guarded mutation must exist");
+        assert!(
+            preflight < mutation,
+            "a stale fixture refno must stop before E3D can enter the mutation macro"
+        );
     }
 
     #[test]

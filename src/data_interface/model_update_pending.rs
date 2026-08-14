@@ -1897,9 +1897,12 @@ fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
         .map(|value| format!(" LIMIT {value}"))
         .unwrap_or_default();
     format!(
-        "SELECT * FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+        "SELECT *, source_end_sesno_time IS NONE AS legacy_source_time, \
+         updated_at IS NONE AS legacy_timestamp FROM {TABLE} \
+         WHERE status IN ['pending', 'failed'] \
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter} \
-         ORDER BY updated_at ASC{limit};"
+         ORDER BY legacy_source_time ASC, source_end_sesno_time DESC, \
+         legacy_timestamp ASC, updated_at DESC, id ASC{limit};"
     )
 }
 
@@ -4357,6 +4360,18 @@ mod tests {
         );
         assert!(sql.contains("status IN ['pending', 'failed']"), "{sql}");
         assert!(sql.contains("AND action = 'regen_root'"), "{sql}");
+        assert!(
+            sql.contains("source_end_sesno_time IS NONE AS legacy_source_time"),
+            "current saves need an explicit priority bucket: {sql}"
+        );
+        assert!(
+            sql.contains("updated_at IS NONE AS legacy_timestamp"),
+            "legacy rows need an explicit sort bucket: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY legacy_source_time ASC, source_end_sesno_time DESC, legacy_timestamp ASC, updated_at DESC, id ASC"),
+            "work from the newest actual save must run before old and legacy backlog, with deterministic tie-breaking: {sql}"
+        );
         assert!(
             sql.contains(&format!("LIMIT {DRAIN_PAGE_SIZE}")),
             "one idle drain must be bounded so newly queued batches get another turn: {sql}"
