@@ -950,4 +950,141 @@ mod mesh_wall_live {
             g2r.hausdorff
         );
     }
+
+    /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 20 堵 GWALL（挤出）合成 union。
+    /// 1:1 按 AABB 中心配对会撞在同一簇上，所以装配层对拍。盒状挤出（≤16 三角）
+    /// 钉 gen→rvm p95≤1mm；高面片墙的开洞与大体量范围差只打印。
+    ///
+    /// 跑法：`cargo test --features rvm_verify --lib mesh_gwall_union -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "live 8009 + occ：1112 CWALL 20 堵 GWALL 的 union mesh 对拍"]
+    async fn mesh_gwall_union_surface_distance() {
+        use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
+
+        let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
+        let db = live_8009().await;
+
+        let pe_keys = [
+            "pe:17496_105817",
+            "pe:17496_105823",
+            "pe:17496_105828",
+            "pe:17496_105880",
+            "pe:17496_105950",
+            "pe:17496_116530",
+            "pe:17496_116549",
+            "pe:17496_116569",
+            "pe:17496_116956",
+            "pe:17496_116970",
+            "pe:17496_116993",
+            "pe:17496_116999",
+            "pe:17496_117038",
+            "pe:17496_117043",
+            "pe:17496_117050",
+            "pe:17496_117202",
+            "pe:17496_118100",
+            "pe:17496_118130",
+            "pe:17496_118163",
+            "pe:17496_118174",
+        ];
+
+        let mut rvm_parts = Vec::new();
+        let mut missing_rvm = Vec::new();
+        for n in 1..=20 {
+            let prefix = format!("GWALL {n}");
+            match rvm_by_prefix(&rvm_meshes, &prefix) {
+                Some(m) => rvm_parts.push(m.clone()),
+                None => missing_rvm.push(prefix),
+            }
+        }
+        let mut gen_parts = Vec::new();
+        let mut missing_gen = Vec::new();
+        for pe_key in pe_keys {
+            match gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") {
+                Some(m) => gen_parts.push(m),
+                None => missing_gen.push(pe_key.to_string()),
+            }
+        }
+        println!(
+            "GWALL union: rvm={}/20 gen={}/20 missing_rvm={missing_rvm:?} missing_gen={missing_gen:?}",
+            rvm_parts.len(),
+            gen_parts.len()
+        );
+        assert!(
+            missing_rvm.is_empty() && missing_gen.is_empty(),
+            "20 堵 GWALL 必须两侧都有网格：rvm={missing_rvm:?} gen={missing_gen:?}"
+        );
+
+        let rvm_union = merge_trimeshes(&rvm_parts).expect("rvm union");
+        let gen_union = merge_trimeshes(&gen_parts).expect("gen union");
+        let d = two_sided_surface_distance(&rvm_union, &gen_union, 16000).expect("dist");
+        let g2r =
+            crate::fast_model::shared::one_way_surface_distance(&gen_union, &rvm_union, 16000)
+                .expect("g2r");
+        let r2g =
+            crate::fast_model::shared::one_way_surface_distance(&rvm_union, &gen_union, 16000)
+                .expect("r2g");
+        println!(
+            "    both mean={:.2} p95={:.2} hausdorff={:.2}",
+            d.mean, d.p95, d.hausdorff
+        );
+        println!(
+            "    gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+            g2r.mean, g2r.p95, g2r.hausdorff, r2g.mean, r2g.p95, r2g.hausdorff
+        );
+        for (pe_key, part) in pe_keys.iter().zip(&gen_parts) {
+            let one = crate::fast_model::shared::one_way_surface_distance(part, &rvm_union, 2000)
+                .expect("g2r part");
+            println!(
+                "    gen {pe_key} -> rvm_union mean={:.1} p95={:.1} max={:.1} tris={}",
+                one.mean,
+                one.p95,
+                one.hausdorff,
+                part.indices().len()
+            );
+        }
+        for n in 1..=20 {
+            let prefix = format!("GWALL {n}");
+            let Some(part) = rvm_by_prefix(&rvm_meshes, &prefix) else {
+                continue;
+            };
+            let one = crate::fast_model::shared::one_way_surface_distance(part, &gen_union, 2000)
+                .expect("r2g part");
+            println!(
+                "    rvm {prefix} -> gen_union mean={:.1} p95={:.1} max={:.1} tris={}",
+                one.mean,
+                one.p95,
+                one.hausdorff,
+                part.indices().len()
+            );
+        }
+        for (p, dist) in farthest_from_surface(&gen_union, &rvm_union, 16000, 3) {
+            println!(
+                "    worst gen->rvm [{:.0},{:.0},{:.0}] d={:.1}",
+                p[0], p[1], p[2], dist
+            );
+        }
+        for (p, dist) in farthest_from_surface(&rvm_union, &gen_union, 16000, 3) {
+            println!(
+                "    worst rvm->gen [{:.0},{:.0},{:.0}] d={:.1}",
+                p[0], p[1], p[2], dist
+            );
+        }
+        // 盒状挤出（≤16 三角）必须贴 E3D；大体量/开洞墙只取证。
+        let mut simple_failures = Vec::new();
+        for (pe_key, part) in pe_keys.iter().zip(&gen_parts) {
+            if part.indices().len() > 16 {
+                continue;
+            }
+            let one = crate::fast_model::shared::one_way_surface_distance(part, &rvm_union, 2000)
+                .expect("simple g2r");
+            if one.p95 > 1.0 {
+                simple_failures.push(format!("{pe_key}: p95={:.2}", one.p95));
+            }
+        }
+        assert!(
+            simple_failures.is_empty(),
+            "盒状 GWALL（≤16 三角）的 gen 表面必须贴 E3D union（p95≤1mm）：{simple_failures:?}"
+        );
+    }
 }

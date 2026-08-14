@@ -35,6 +35,8 @@
 
 **2026-08-14 AMS 8000 C-IY 槽盒 BRANCH union 对拍**：`mesh_c_iy_full_branch_union_surface_distance`（live 8009 + occ，`test_data/rvm/C-IY-1R330-B.rvm`）。**2026-08-14 通过**（守卫 `gen→rvm p95≤10 / max≤30mm`）。18 FTUB + 18 BEND 中 FTUBE 6 为零长隐含直管（HEIG=0、RVM `geometries=[]`、无 `inst_relate`），两侧无表面，跳过；其余 35 构件 union：gen→rvm **mean=0.85 / p95=4.14 / max=24.93mm**（gen 贴在 E3D 里），rvm→gen mean=21.3 / p95=100 / max=111.6mm。根因：目录 `LSTU=/ACP1000-Trough/ACP1000-TUBE:100`，E3D RVM 含约 150mm 高槽体外壳（FTUBE 1 aabb z=430–580），gen 管段 z=430–480（50mm）；worst rvm→gen 全在 z=580 槽顶。与 C-OR 圆管（insu off、双向 ~1.5mm）不同，是槽盒表示范围差，不是 gen 画错。
 
+**2026-08-14 AMS 1112 GWALL 挤出 union 对拍**：`mesh_gwall_union_surface_distance`（live 8009 + occ，同一份 `1RS-WF03-W-C-RR001.rvm`）。**2026-08-14 通过**（盒状 ≤16 三角的 gen→rvm p95≤1mm）。20/20 两侧都有网格。11 堵盒状 GWALL 贴合（p95=0）。3 堵大体量 gen 不在 E3D union 上：`17496_105828` p95=877/max=1275、`105880` 805/1210、`116569` 598/924。高面片 E3D 墙（GWALL 3/4/15/18/19，最多 908 三角）rvm→gen p95=180–378、max=450–650mm，与 WALL 开洞同量级。1:1 AABB 中心配对不可用（同簇多墙），故走 union。
+
 **mesh 批次收编**：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
 
 **2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与
