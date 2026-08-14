@@ -113,3 +113,36 @@ cargo test --locked --lib data_interface::manual_update::tests ...
 cargo build --locked --bin aios-database --no-default-features --features ws,gen_model,manifold,project_hd,http_api
                                                                 exit 0
 ```
+
+## 7. 提交后 F6 OWNER 搬移闭环
+
+提交 `ec0d6279` 后继续执行独立的 F6 管道场景。FTUB `24384/22403` 在两个 BRAN
+之间搬移并恢复，两个变更宏均由结构化驱动判为 `completed`：
+
+| 步骤 | 会话号 | OWNER |
+|---|---:|---|
+| 基线 | 228 | `24384/22402` |
+| apply | 229 | `24384/22404` |
+| restore | 230 | `24384/22402` |
+
+数据任务 `db-20260814-225755-000000` 成功应用 229..=230，`changed_elements=6`，
+最终 `applied_sesno=file_latest_sesno=230`；`pe` 与 `pe_owner` 均指回
+`24384/22402`。两个受影响 BRAN 的按需模型生成均成功：
+
+```text
+24384/22402: model_available=true, instances=4, generated=1
+24384/22404: model_available=true, instances=177, generated=35
+```
+
+FTUB 的 `inst_relate` 与 AABB 指针存在，关联 pending 已收口。Plant UI 使用精确命令
+`=24384_22403` 定位真实树行；属性面板显示 FTUB、refno `24384_22403`、owner
+`/C-IY-1R330-A`（即 `24384/22402`），与数据库一致。
+
+证据目录：
+
+- `D:\work\plant-code\old\test-worklspace\bin\.codex-deploy\pipeline-ftub-owner-20260814-225426`
+- 关键文件：`summary.json`、`data-task-230-final.json`、`surreal-final.json`、
+  `ensure-roots.json`、`ui-ftub-properties.txt`、`plant-ui-ftub-owner-restored.png`。
+
+本轮结束后已停止本轮启动的 Plant UI 与 aios-database；目标 E3D 文件保持恢复后的
+业务状态，会话号为 230。
