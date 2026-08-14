@@ -50,6 +50,30 @@ _Avoid_: 环容器
 自身不作为独立交付模型、但其数据参与父元素几何或坐标计算的子元素，例如 GENSEC 的 `SPINE / POINSP / JLDATU / PLDATU / ENDATU`；其变化归并到父级生成根。
 _Avoid_: 辅助几何、漏生成类型
 
+**扫掠体 (Sweep Solid)**：
+与 Core3D `DB_Gensec` 同一类几何：目录截面沿路径扫成的实体，对外几何参数是 PrimLoft。公开生成步骤用 `DB_Gensec` 方法的 Rust 蛇形命名。
+_Avoid_: loft 体、GENSEC 几何（GENSEC 是元素，扫掠体是它的几何）、单位 loft
+
+**单位几何 (Unit Geometry)**：
+去掉实例姿态后可被多个实例共享的规范内容。可复用直线扫掠的单位几何是目录截面；长度、BANG、PLAX、镜像属于实例变换。
+_Avoid_: 单位体（当指扫掠的可复用身份）、unit shape、单位 loft
+
+**实例变换 (Instance Transform)**：
+把单位几何放到世界里的位姿与缩放。不是元素子树的 world transform。
+_Avoid_: geo_relate 变换、world transform、单位缩放
+
+**单位网格身份 (Unit Mesh Identity)**：
+内容寻址键，标识一份可共享的单位几何。Core3D 没有持久化的这一层，是相对几何内核的唯一差别。
+_Avoid_: geo_hash、mesh hash、loft hash
+
+**规范挤出 (Canonical Extrusion)**：
+由目录截面沿单位轴挤出固定长度得到的三维网格，供多实例以缩放复用。它是单位几何（截面）的可绘制形式，不是单位几何本身。
+_Avoid_: 单位体、unit solid（当单位几何已定为截面时）
+
+**斜切平面 (Mitre Plane)**：
+由端面法向与该段切向推导出的工作平面；与切向垂直或平行则视为无斜切。不是元素上的 `DRNS`/`DRNE` 属性本身。
+_Avoid_: 斜切、is_sloped、端面方向（当指属性时）
+
 **模型影响 (Model Impact)**：
 一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。
 _Avoid_: 几何影响、is_geometry_update

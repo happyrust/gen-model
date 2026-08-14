@@ -1151,9 +1151,12 @@ pub(crate) async fn execute_save_plan(plan: SavePlan) -> anyhow::Result<SaveOutc
 mod tests {
     use super::*;
     use aios_core::geometry::{EleGeosInfo, EleInstGeosData, ShapeInstancesData};
-    use aios_core::prim_geo::SCylinder;
+    use aios_core::parsed_data::{CateProfileParam, SRectData};
+    use aios_core::prim_geo::spine::{Line3D, SweepPath3D};
+    use aios_core::prim_geo::{SCylinder, SweepSolid};
+    use aios_core::shape::pdms_shape::BrepShapeTrait;
     use futures::stream::FuturesUnordered;
-    use glam::Vec3;
+    use glam::{DVec3, Vec2, Vec3};
     use parry3d::bounding_volume::Aabb;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1293,6 +1296,106 @@ mod tests {
         assert!(sql.contains("PrimLCylinder"), "{sql}");
         assert!(!sql.contains("PrimSCylinder"), "{sql}");
         assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    fn reusable_linear_loft() -> SweepSolid {
+        SweepSolid {
+            profile: CateProfileParam::UNKOWN,
+            path: SweepPath3D::Line(Line3D {
+                start: Vec3::ZERO,
+                end: Vec3::X * 7.0,
+                is_spine: true,
+            }),
+            drns: Some(DVec3::NEG_X),
+            drne: Some(DVec3::X),
+            ..Default::default()
+        }
+    }
+
+    fn loft_batch(param: SweepSolid, geo_hash: u64, refno_text: &str) -> ShapeInstancesData {
+        let refno = RefnoEnum::from(refno_text);
+        let inst = EleInstGeo {
+            geo_hash,
+            refno,
+            geo_param: PdmsGeoParam::PrimLoft(param),
+            transform: Transform::IDENTITY,
+            visible: true,
+            ..Default::default()
+        };
+        let data = EleInstGeosData {
+            inst_key: refno_text.into(),
+            refno,
+            insts: vec![inst],
+            type_name: "PrimLoft".into(),
+            ..Default::default()
+        };
+        let mut batch = ShapeInstancesData::default();
+        batch.inst_geos_map.insert(refno_text.into(), data);
+        batch
+    }
+
+    #[test]
+    fn reusable_linear_loft_aliases_emit_one_canonical_inst_geo() {
+        let left = reusable_linear_loft();
+        let mut right = left.clone();
+        right.drns = Some(DVec3::NEG_X);
+        right.drne = Some(DVec3::X);
+        right.bangle = 37.0;
+        right.plax = Vec3::Y;
+        right.extrude_dir = DVec3::X;
+        right.height = 42.0;
+        right.lmirror = true;
+        right.path = SweepPath3D::Line(Line3D {
+            start: Vec3::ZERO,
+            end: Vec3::X * 11.0,
+            is_spine: false,
+        });
+        let geo_hash = left.hash_unit_mesh_params();
+        assert_eq!(geo_hash, right.hash_unit_mesh_params());
+
+        let plan = plan_for_test(vec![
+            loft_batch(left, geo_hash, "1/121"),
+            loft_batch(right, geo_hash, "1/122"),
+        ])
+        .expect("profile-identical reusable lofts share one canonical row");
+        let sql = plan
+            .packets
+            .iter()
+            .map(|packet| packet.sql.as_str())
+            .join("\n");
+        assert_eq!(
+            sql.matches(&format!("UPSERT inst_geo:⟨{geo_hash}⟩"))
+                .count(),
+            1,
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn forced_linear_loft_hash_collision_still_fails_closed() {
+        let left = reusable_linear_loft();
+        let mut right = left.clone();
+        right.profile = CateProfileParam::SREC(SRectData {
+            size: Vec2::new(2.0, 3.0),
+            ..Default::default()
+        });
+        let forced_hash = left.hash_unit_mesh_params();
+
+        let error = plan_for_test(vec![
+            loft_batch(left, forced_hash, "1/123"),
+            loft_batch(right, forced_hash, "1/124"),
+        ])
+        .expect_err("different canonical profiles sharing an id must fail");
+        assert!(
+            matches!(
+                error.downcast_ref::<SaveConflict>(),
+                Some(SaveConflict::RecordContent {
+                    kind: "inst_geo",
+                    ..
+                })
+            ),
+            "{error:#}"
+        );
     }
 
     #[test]

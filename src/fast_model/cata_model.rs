@@ -709,7 +709,7 @@ pub async fn gen_cata_geos(
                             let mut shape_trans = brep_shape.get_trans();
                             let is_neg = neg_own_pos_map.contains_key(&geom_refno);
                             let geo_hash = brep_shape.hash_unit_mesh_params();
-                            let rot = transform.rotation;
+                            let rot = transform.rotation * shape_trans.rotation;
                             let translation = transform.translation
                                 + transform.rotation * shape_trans.translation;
                             let scale = shape_trans.scale;
