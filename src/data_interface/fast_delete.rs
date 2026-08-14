@@ -44,6 +44,11 @@ struct Ref0Row {
 }
 
 #[derive(Debug, Deserialize)]
+struct InfoRef0Row {
+    ref0: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct NounRow {
     noun: String,
 }
@@ -94,6 +99,32 @@ fn valid_table_name(name: &str) -> bool {
 
 fn range_of(table: &str, ref0: &str) -> String {
     format!("{table}:{ref0}_0..{ref0}_{RANGE_END}")
+}
+
+fn collect_ref0s(
+    prefix_rows: Vec<Ref0Row>,
+    info_rows: Vec<InfoRef0Row>,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let pe_rows = prefix_rows.iter().map(|row| row.count).sum();
+    let mut ref0s = prefix_rows
+        .into_iter()
+        .map(|row| {
+            row.prefix
+                .strip_prefix("pe:")
+                .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                .map(str::to_owned)
+                .with_context(|| format!("unexpected PE id prefix: {}", row.prefix))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for row in info_rows {
+        if row.ref0.is_empty() || !row.ref0.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("unexpected dbnum_info_table Ref0: {}", row.ref0);
+        }
+        ref0s.push(row.ref0);
+    }
+    ref0s.sort_unstable();
+    ref0s.dedup();
+    Ok((pe_rows, ref0s))
 }
 
 fn pe_key(id: &Thing) -> anyhow::Result<String> {
@@ -404,7 +435,9 @@ async fn wipe_dbnum_rows(
         .query(format!(
             "SELECT string::split(<string>id, '_')[0] AS prefix, count() AS count \
              FROM pe WHERE dbnum = {dbnum} GROUP BY prefix;\n\
-             SELECT noun FROM pe WHERE dbnum = {dbnum} GROUP BY noun;"
+             SELECT noun FROM pe WHERE dbnum = {dbnum} GROUP BY noun;\n\
+             SELECT <string>record::id(id) AS ref0 FROM dbnum_info_table \
+             WHERE dbnum = {dbnum} GROUP BY ref0;"
         ))
         .await
         .context("inspect dbnum rows for fast delete")?
@@ -416,22 +449,16 @@ async fn wipe_dbnum_rows(
     let noun_rows = response
         .take::<Vec<NounRow>>(1)
         .context("decode noun groups")?;
+    let info_ref0_rows = response
+        .take::<Vec<InfoRef0Row>>(2)
+        .context("decode dbnum_info_table Ref0 groups")?;
 
-    let pe_rows = prefix_rows.iter().map(|row| row.count).sum();
-    let mut ref0s = prefix_rows
-        .into_iter()
-        .map(|row| {
-            row.prefix
-                .strip_prefix("pe:")
-                .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
-                .map(str::to_owned)
-                .with_context(|| {
-                    format!("unexpected PE id prefix for dbnum {dbnum}: {}", row.prefix)
-                })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    ref0s.sort_unstable();
-    ref0s.dedup();
+    // `dbnum_info_table` 的 record id 才是这个 dbnum 所属的 Ref0。不能把 dbnum
+    // 数值直接拼进 record range；例如 dbnum=7333 的真实 Ref0 是 23717/31909。
+    // 同时从 PE 与统计表取并集：正常库由 PE 覆盖，PE 零行的幽灵水位仍能依靠
+    // 启动播种所用的统计行找到 Ref0，继续走同一套 id-range 清理。
+    let (pe_rows, ref0s) = collect_ref0s(prefix_rows, info_ref0_rows)
+        .with_context(|| format!("resolve Ref0 ranges for dbnum {dbnum}"))?;
 
     let mut noun_tables = noun_rows
         .into_iter()
@@ -608,5 +635,31 @@ mod tests {
         assert!(valid_table_name("TYPE_2"));
         assert!(!valid_table_name("PANE; DELETE pe"));
         assert!(!valid_table_name("lower"));
+    }
+
+    /// PE 已空但旧统计仍在时，必须从 `dbnum_info_table` 的 record id 恢复真实
+    /// Ref0，不能把 dbnum 冒充 Ref0，也不能渲染出一组空的 range 删除。
+    #[test]
+    fn ghost_watermark_recovers_ref0_ranges_from_info_rows() {
+        let (pe_rows, ref0s) = collect_ref0s(
+            Vec::new(),
+            vec![
+                InfoRef0Row {
+                    ref0: "23717".into(),
+                },
+                InfoRef0Row {
+                    ref0: "31909".into(),
+                },
+            ],
+        )
+        .expect("valid Ref0 rows");
+
+        assert_eq!(pe_rows, 0);
+        assert_eq!(ref0s, vec!["23717", "31909"]);
+        assert!(!ref0s.contains(&"7333".to_string()));
+        let (_, ranges, _) =
+            render_delete_phases(7333, &ref0s, &[], WatermarkDisposal::ResetForReinit);
+        assert!(ranges.contains(&"DELETE pe:23717_0..23717_9999999999;".into()));
+        assert!(ranges.contains(&"DELETE pe:31909_0..31909_9999999999;".into()));
     }
 }

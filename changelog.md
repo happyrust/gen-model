@@ -13,6 +13,8 @@
   复核仍判 Rollback 才清库。空文件清库后直接 Applied 且水位保持 0。
 - `fast_delete` 的统计/持久队列、spatial epoch 与水位清零纳入同一显式事务；
   关系和 Ref0 区间删除继续独立幂等，水位更新保持事务末句。
+- 幽灵水位清库会从 `dbnum_info_table` 的 record id 恢复真实 Ref0，并与 PE 前缀
+  取并集后删除对应区间；不再把 dbnum 数值冒充 Ref0，PE 零行时也能清理派生行。
 - 净窗口把不可读子页、层级不下降、终稿解析失败和 last-touch 缺失升级为整窗
   错误，杜绝残缺触达集落库推进水位；Modified 基版本失败仍保守降级为 Add。
 - `ref_rev_maintain` 补偿载荷改为非空、全量严格解析，任一非法 refno 均进入失败
