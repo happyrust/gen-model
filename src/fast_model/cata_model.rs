@@ -1,5 +1,5 @@
 use crate::consts::*;
-use crate::data_interface::db_model::TUBI_TOL;
+use crate::data_interface::db_model::{TUBI_CONNECT_TOL, TUBI_TOL};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
@@ -1091,7 +1091,11 @@ pub async fn gen_cata_geos(
                         current_tubing.end_pt = a_pos;
                         current_tubing.desire_arrive_dir = a_dir;
                         let dist = actual_vec.length();
-                        if dist > TUBI_TOL && !same_dir {
+                        // 关节填充管:缝短于连接容差即视为建模余量、不产管(D2,
+                        // 2026-08-12)。TUBI_CONNECT_TOL 取代原来的 TUBI_TOL(0.1mm),
+                        // 后者太紧,会把 0.66~2.70mm 的关节余量当成需要填充的真实缝,
+                        // 合成薄饼管并覆盖构件几何。
+                        if dist > TUBI_CONNECT_TOL && !same_dir {
                             if !exclude {
                                 if current_tubing.is_dir_ok() {
                                     if current_tubing.leave_refno == branch_refno {
@@ -1227,7 +1231,8 @@ pub async fn gen_cata_geos(
             if index == len - 1 && !exclude {
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
 
-                if last_dist > TUBI_TOL {
+                // 尾段填充管同关节口径:短于连接容差不产管(D2,2026-08-12)。
+                if last_dist > TUBI_CONNECT_TOL {
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.arrive_refno = tref;
                     current_tubing.desire_arrive_dir = tdir;

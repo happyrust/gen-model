@@ -49,12 +49,16 @@ cd python
 
 ## ams8000 空间树启动初始化 + 增量回放（spatial_tree_8000.py）
 
-用真实 ams8000 数据测两件事：**增量部署下空间树的启动初始化裁决**（快照新鲜
+用真实 ams8000 数据测三件事：**增量部署下空间树的启动初始化裁决**（快照新鲜
 reused / 缺失 rebuilt / 库侧 epoch 漂移 rebuilt / 携带待重放意图 replayed /
-字节损坏 rebuilt——每种现场一个新进程，因为 `full_init` 每进程只能一次），以及
+字节损坏 rebuilt——每种现场一个新进程，因为 `full_init` 每进程只能一次）；
 **逐会话窗口的增量回放**（以 issue-019 夹具的 db8000 sesno-24 快照为基线，拿
-真实文件逐窗 `apply_file`，sesno 25/26 是已知的两次真实删除，每窗之后再重启
-断言 reused）。自起自杀一次性内存 SurrealDB @8072，全程不碰 8009/8019/8071。
+真实文件逐窗 `apply_file`，sesno 25/26 是已知的两次真实删除，每窗做**值级**
+树校验——`spatial.tree_dump()` 与库指针值逐条双向比对，之后再重启断言
+reused）；以及**双库对拍**（第二个内存实例 @8073 拿夹具 final-26 直接
+baseline@26 建库，与「基线@24 + 增量回放到 26」的产物比 `(refno, aabb哈希)`
+集合与树内容——增量 == 全量的空间树版本，`--skip-oracle` 可关）。
+自起自杀两个一次性内存 SurrealDB（8072/8073），全程不碰 8009/8019/8071。
 
 ```powershell
 # 主 crate 变过要先重建 pyd（cd python; $env:VIRTUAL_ENV=...; maturin develop）

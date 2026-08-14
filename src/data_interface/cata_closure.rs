@@ -329,8 +329,21 @@ async fn load_dbnum_files_from_watermark(
     project: &str,
 ) -> anyhow::Result<HashMap<u32, DbFileEntry>> {
     let sql = format!("SELECT dbnum, db_type, file_path FROM {WATERMARK_TABLE};");
-    let mut response = SUL_DB.query(sql).await?;
-    let rows: Vec<WatermarkFileRow> = response.take(0).unwrap_or_default();
+    // 读失败必须上浮，不得吞成空表（2026-08-13 审计 P2）：老写法
+    // `take(0).unwrap_or_default()` 把语句/解码失败静默降级成「一个登记行都没有」，
+    // 整轮闭包的每个 ref0 都会被解析成 missing——一次读表失败被伪装成「登记缺失」，
+    // 排障方向从持久层故障被带偏到扫描/登记链路上。
+    let mut response = SUL_DB
+        .query(sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("读取 dbnum_watermark 文件身份失败（CATA 定位器）: {e}"))?
+        .check()
+        .map_err(|e| {
+            anyhow::anyhow!("读取 dbnum_watermark 文件身份语句失败（CATA 定位器）: {e}")
+        })?;
+    let rows: Vec<WatermarkFileRow> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解码 dbnum_watermark 文件身份失败（CATA 定位器）: {e}"))?;
 
     let mut out = HashMap::new();
     for row in rows {
@@ -744,6 +757,8 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
         let mut by_dbnum: BTreeMap<u32, BTreeSet<RefU64>> = BTreeMap::new();
         let mut missing = 0usize;
         let mut rounds = 0usize;
+        // 缺 db_type 的登记行每库只告警一次（frontier 里同库引用成百上千）。
+        let mut warned_untyped: HashSet<u32> = HashSet::new();
 
         while !self.frontier.is_empty() && rounds < max_rounds {
             rounds += 1;
@@ -766,7 +781,23 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                 if excluded_dbnums.contains(&dbnum) {
                     continue;
                 }
-                let db_type = self.locator.db_type_of(dbnum).unwrap_or_default();
+                // 登记行缺 db_type（或为空）时判不出是不是 CATA。老写法吞成空串
+                // 被当「非 CATA」静默跳过（2026-08-13 审计 P3）；现在按 missing
+                // 记账并每库告警一次，与「无 dbnum 映射」走同一条出路，闭包
+                // manifest 的 missing 计数上看得见。
+                let db_type = match self.locator.db_type_of(dbnum) {
+                    Some(db_type) if !db_type.trim().is_empty() => db_type,
+                    _ => {
+                        if warned_untyped.insert(dbnum) {
+                            log::warn!(
+                                "[cata_closure] dbnum={dbnum} 的登记行缺 db_type，\
+                                 无法判定是否 CATA，其引用计入 missing（登记补全后自愈）"
+                            );
+                        }
+                        missing += 1;
+                        continue;
+                    }
+                };
                 if !cata_types.contains(&db_type.to_uppercase()) {
                     continue; // 非 CATA（回指 DESI/DICT 等）不下探
                 }
@@ -969,8 +1000,14 @@ async fn collect_database_subtree_outbound_on(
             .map(RefnoEnum::to_pe_key)
             .collect::<Vec<_>>()
             .join(",");
+        // `refno` 在真实 schema 里是指向类型化属性表的**记录链接**（如
+        // `BEND:24381_100818`），`refno.*` 取回整行对象；引用属性（SPRE/LSTU/
+        // ISPE/…）是其中的记录值字段。旧写法 `refno.*[WHERE …]` 把数组过滤
+        // 直接套在对象上，对链接形状静默返回空——按需闭包在库侧一颗种子都
+        // 收不到（2026-08-13 testbed 首次暴露；单测夹具当时是内联对象，
+        // 掩盖了形状差异）。先 `object::values` 展开成值数组再过滤。
         let sql = format!(
-            "SELECT VALUE (refno.*[WHERE type::is::record($this)] ?? []) \
+            "SELECT VALUE object::values(refno.* ?? {{}})[WHERE type::is::record($this)] \
              FROM [{keys}];"
         );
         let mut response = db.query(sql).await?.check()?;
@@ -1569,7 +1606,69 @@ mod tests {
             .split_once("fn scan_db_ref0s(")
             .expect("watermark locator boundary")
             .0;
-        assert!(locator.contains("SUL_DB.query"), "{locator}");
+        // 定位器读的是持久层（登记契约在 dbnum_watermark），不许被路由进暂存。
+        assert!(
+            locator.contains("SUL_DB") && locator.contains(".query("),
+            "{locator}"
+        );
+    }
+
+    /// 定位器读 dbnum_watermark 失败必须上浮，不得吞成空表（2026-08-13 审计 P2）。
+    ///
+    /// 老写法把 take 的语句/解码失败降级成空定位器，整轮闭包的每个 ref0 都假
+    /// missing——一次持久层读失败被伪装成「登记缺失」。
+    #[test]
+    fn a_failed_watermark_read_surfaces_instead_of_an_empty_locator() {
+        let source = include_str!("cata_closure.rs");
+        let body = source
+            .split_once("async fn load_dbnum_files_from_watermark(")
+            .expect("watermark locator exists")
+            .1
+            .split_once("fn scan_db_ref0s(")
+            .expect("watermark locator boundary")
+            .0;
+        assert!(
+            body.contains(".check()"),
+            "读表必须 check() 上浮语句级错误: {body}"
+        );
+        let take_at = body.find(".take(0)").expect("必须有 take(0) 读行集");
+        let rest = &body[take_at..];
+        // 200 字节窗口，向后走到字符边界（周边是中文注释，硬切会劈开多字节字符）。
+        let mut end = rest.len().min(200);
+        while !rest.is_char_boundary(end) {
+            end += 1;
+        }
+        let window = &rest[..end];
+        assert!(
+            !window.contains("unwrap_or_default"),
+            "take 失败不得吞成空表（空定位器 = 全部 ref0 假 missing）: {window}"
+        );
+        assert!(
+            window.contains("map_err"),
+            "take 失败必须带上下文上浮: {window}"
+        );
+    }
+
+    /// 登记行缺 db_type 时不许被静默当「非 CATA」跳过（2026-08-13 审计 P3）：
+    /// 判不出类型的库按 missing 记账，闭包 manifest 上看得见，而不是无声少解析。
+    #[tokio::test]
+    async fn an_untyped_dbnum_is_counted_missing_not_silently_skipped() {
+        let locator = InMemoryCataLocator::from_parts(
+            HashMap::from([(100u32, 7320u32)]),
+            HashMap::from([(
+                7320u32,
+                (String::new(), "P".to_string(), PathBuf::from("unused")),
+            )]),
+        );
+        let mut resolver = CataClosureResolver::new(&locator, CataClosureConfig::default());
+        resolver.seed([RefU64((100u64 << 32) | 1)]);
+        let manifest = resolver.resolve().await.expect("resolve");
+        assert_eq!(manifest.missing, 1, "缺 db_type 的引用必须计入 missing");
+        assert!(
+            manifest.by_dbnum.is_empty(),
+            "判不出类型的库不得被下探: {:?}",
+            manifest.by_dbnum
+        );
     }
 
     #[tokio::test]
@@ -1588,10 +1687,14 @@ mod tests {
             .use_db("window")
             .await
             .expect("window target");
+        // 夹具按真实 schema 造形：`refno` 是指向类型化属性表行的记录链接，
+        // 引用属性是该行里的记录值字段（内联对象形状在生产里不存在，
+        // 之前用它把 `refno.*[WHERE …]` 对链接失效的问题盖住了）。
         window
             .query(
                 "UPSERT pe:1_1 SET deleted = false, refno = NONE;\
-                 UPSERT pe:1_2 SET deleted = false, refno = { spre: pe:9_9 };\
+                 UPSERT BEND:1_2 SET SPRE = pe:9_9, ANGL = 9.5;\
+                 UPSERT pe:1_2 SET deleted = false, refno = BEND:1_2;\
                  INSERT RELATION INTO pe_owner [{ \
                     id: pe_owner:[pe:1_2, 0], in: pe:1_2, out: pe:1_1 \
                  }];",

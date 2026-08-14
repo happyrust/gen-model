@@ -5,6 +5,10 @@
 
 > **2026-08-05 修订（ADR-017）**：稳态增量窗口的 `applied_sesno` 推进条件增强为「窗口数据 + 全部模型生成作为一个提交单元写回成功」；失败不推进、幂等重放、文件身份 / 扫描 / 阻断规则均不变。基线路径维持原语义。
 
+> **2026-08-13 修订（ADR-021，取代 2026-08-12 修订）**：两处语义收窄。其一，本 ADR 的「只有对应数据批次成功持久化后才能推进 `applied_sesno`」管的是**写**的一侧，ADR-021 补上对偶的**读**侧约束：`applied_sesno > 0` 必须有数据支撑，该 dbnum 在 `pe` 里一行都没有时按首次导入重建基线，不得从水位往后接增量（判定落在「基线还是增量」的路由上，不落在入队门上；不进 `FileAnomaly`）。其二，「水位永不回拨」收窄为**增量路径内永不回拨**：判定为回退（`file_latest_sesno < applied_sesno`，文件被还原/替换）的 dbnum，默认处置是由数据批次 worker 在冻结点复核后**整库清空该 dbnum 的数据并按首次导入重建**（`wipe_dbnum_for_reinit`：水位行清值不删行、统计与队列残留清空、spatial epoch 同阶段递增）——水位随重建归零再重新建立，属于正常处置而非 opt-in 例外。`watermark_realign` 档位、`AIOS_WATERMARK_REALIGN` 与单库对齐端点随之移除；`TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` 等身份歧义异常仍阻断等人。本节「初始状态」描述的 `dbnum_info_table` 回填播种不变，但由它造出的水位从此受数据支撑校验约束。
+
+> **2026-08-12 修订（watermark_realign，已被 2026-08-13 修订取代）**：为「数据批次失败、文件异常或模型生成失败都不能回退或虚增 `applied_sesno`」增加**唯一的 opt-in 例外**——配置 `watermark_realign = "rebaseline"`（或对单库调用 `POST /api/v1/dbnums/{dbnum}/realign`）时，判定为**回退**（`file_latest_sesno < applied_sesno`，文件被还原/替换）的 dbnum 允许被显式对齐：先经 `prune_above_watermark` 在 `STAGED_COMMIT_SERIAL` 与 `DBNUM_STATE_WRITE_GATE` 两把写闸内物理清除会话号高于文件水位的行与队列残留，再把 `applied_sesno` **写 0（写值不删行，登记身份保留）**，交由基线路径按首次导入重建。例外仅此一条：人工开启（配置档位或单库端点）、只对回退（`FileAnomaly::auto_realignable`）；其余异常种类、默认档位（`off`）以及自动扫描/执行路径自身，均维持本 ADR 原语义——水位永不因失败或异常自行回拨。
+
 ## 背景
 
 现有后端同时使用两类记录判断一个 `dbnum` 的最新应用会话：

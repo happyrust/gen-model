@@ -270,3 +270,6 @@ P4 必须在 P6 前完成，否则全矩阵轮一个类型失败就丢整轮证�
 |---|---|---|---|---|---|
 | 2026-08-07 上午 | 单类型×12 | ATTA/ELCONN/FTUB/SNOU（`f0a71be1`）+ BATT/DAMP/FLOOR/GWALL/NOZZ/REVO/STRT/WALL（工作区） | PASS，转 verified | output/room-e3d-e2e/…（本机） | – |
 | 2026-08-07 下午 | 单类型（P4 验证轮） | WALL（新编排链路：失败隔离 + report.md + 幂等轮 T-OR-3 首验） | PASS（1/1，幂等轮零工作） | output/room-e3d-e2e/p4-live-wall | – |
+| 2026-08-13 15:24 | 通道健康 | T-CH-1、T-CH-7、`live_identity_query`；D: AMS 只读 TTY，与既有 E: 插桩会话按 PID 基线隔离 | PASS；宏无 `SAVEWORK`，ALIVE/DONE 齐，身份返回 DAMP `/1CUP001VAR`，本次 TTY 零残留，证据无登录密码 | `output/e3d-tty-smoke/20260813-152420/`；`output/e3d-mcp/query-66444-20260813152439638629/`；`output/l3-suite/driver-66444-20260813152439640441/` | – |
+| 2026-08-13 15:45 | 单类型 | FIXING | FAIL 于 `baseline-increment`；目录 manifold 旧格式不能反序列化为当前 `PdmsGeoParam`；driver 尚未执行，零 SAVEWORK | `output/room-e3d-e2e/20260813-fixing-first/` | `prepare model 24384_25748: decode catalogue manifold inputs failed` |
+| 2026-08-13 15:46 | 单类型 | BOX | FAIL 于 `baseline-increment`；回退门正确阻断 `file=104 < applied=238`；driver 尚未执行，零 SAVEWORK | `output/room-e3d-e2e/20260813-box-first/` | 测试库与 D: AMS 文件不在同一会话，必须重铸隔离基线，禁止强行推进 |

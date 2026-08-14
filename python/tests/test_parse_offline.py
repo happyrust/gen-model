@@ -143,3 +143,70 @@ def test_element_dump_and_history_replay(configured, snapshots, manifest):
 def test_element_rejects_unparsable_refno(configured, snapshots):
     with pytest.raises(RuntimeError):
         configured.parse.element(str(snapshots["baseline"]), "not-a-refno")
+
+
+def _net_classes(result: dict) -> dict[str, str]:
+    return {
+        entry["refno"]: kind
+        for kind in ("added", "deleted", "modified")
+        for entry in result[kind]
+    }
+
+
+def test_net_changes_reports_the_recorded_net_tristate(configured, snapshots, manifest):
+    """窗口 25..26 的净三态（会话索引差分，不逐会话解析）：ZONE=modified、
+    EQUI 与子件=deleted——与 Rust 侧 db8000_session_pairs 性质 h 同一份 ground
+    truth。with_noun 时删除条目从旧记录（不可变页）解出类型名。"""
+    window = manifest["window"]
+    refs = manifest["refs"]
+    result = configured.parse.net_changes(
+        str(snapshots["parent_deleted"]),
+        window["start_sesno"],
+        window["end_sesno"],
+        with_noun=True,
+    )
+
+    assert result["base_sesno"] == window["baseline_sesno"]
+    assert result["target_sesno"] == window["end_sesno"]
+    assert _net_classes(result) == {
+        refs["zone"]: "modified",
+        refs["parent_equi"]: "deleted",
+        refs["child"]: "deleted",
+    }
+
+    nouns = {
+        entry["refno"]: (entry["noun"] or "").strip().upper()
+        for kind in ("added", "deleted", "modified")
+        for entry in result[kind]
+    }
+    assert nouns[refs["zone"]] == "ZONE"
+    assert nouns[refs["parent_equi"]] == "EQUI"
+    assert nouns[refs["child"]] == "BOX"
+
+
+def test_net_changes_bases_each_window_on_the_previous_session(
+    configured, snapshots, manifest
+):
+    """单会话窗口 26..26：base 落在 25，子件（25 删、两端都不在场）不出现——
+    净口径「窗口内自我抵消不出现」的直接检验。"""
+    window = manifest["window"]
+    refs = manifest["refs"]
+    result = configured.parse.net_changes(
+        str(snapshots["parent_deleted"]), window["end_sesno"], window["end_sesno"]
+    )
+
+    assert result["base_sesno"] == window["start_sesno"]
+    assert _net_classes(result) == {
+        refs["zone"]: "modified",
+        refs["parent_equi"]: "deleted",
+    }
+
+
+def test_net_changes_refuses_windows_beyond_the_latest_session(
+    configured, snapshots, manifest
+):
+    """窗口终点超出文件最新会话必须响亮报错（窗口与文件对不上，不猜）。"""
+    with pytest.raises(RuntimeError):
+        configured.parse.net_changes(
+            str(snapshots["parent_deleted"]), 1, manifest["window"]["end_sesno"] + 10
+        )

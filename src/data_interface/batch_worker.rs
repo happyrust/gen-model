@@ -602,8 +602,56 @@ fn increment_mode_for(direct: bool) -> &'static str {
     if direct { "direct_emergency" } else { "staged" }
 }
 
+/// 入队形状那一半的暂存判定（纯函数）：稳态增量（start_sesno > 1）才走 kv-mem。
+/// 它只看队列行——冻结点的**权威**另一半在 [`batch_reroutes_to_initial_load`]，
+/// 两者都过了才开窗。
 fn use_staged_increment_window(job: &FrozenBatch) -> bool {
     job.start_sesno > 1 && !direct_increment_enabled()
+}
+
+/// 冻结点的「这一批会改走首次导入」预判（ADR-021）。
+///
+/// 暂存窗口只属于真正的增量重放：回退（`file_latest < applied`）会被执行体整库
+/// 清空后转基线；幽灵水位（`applied > 0` 而 pe 零行）与 applied 已归零的批次
+/// 直接走基线。这三种形状按入队窗口开了暂存窗口也等不来 finalize plan，只会以
+/// 「暂存窗口缺少 finalize plan」失败收场（2026-08-13 live 实测）——批次窗口是
+/// 入队时的观察值，冻结点的权威水位才决定怎么执行。
+///
+/// 预判读不出来就按入队形状开窗，不替执行体拍板：执行体自己还会复核一次并给出
+/// 响亮终态（读失败 = Failed），这里抢答只会把一次抖动放大成错误路由。
+async fn batch_reroutes_to_initial_load(
+    job: &FrozenBatch,
+    cand: &crate::data_interface::manual_update::FileCandidate,
+) -> bool {
+    match crate::data_interface::dbnum_state::DbnumState::applied_sesno(job.dbnum).await {
+        Ok(0) => true,
+        Ok(applied) => {
+            if cand.file_latest_sesno < applied {
+                return true;
+            }
+            match crate::data_interface::manual_update::dbnum_has_any_pe_row(job.dbnum).await {
+                Ok(has_any_data) => !has_any_data,
+                Err(error) => {
+                    let message = format!(
+                        "dbnum={} 冻结点数据支撑预判失败（按暂存窗口继续，执行体会复核）: {error:#}",
+                        job.dbnum
+                    );
+                    log::warn!("{message}");
+                    eprintln!("{message}");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!(
+                "dbnum={} 冻结点水位预判失败（按暂存窗口继续，执行体会复核）: {error:#}",
+                job.dbnum
+            );
+            log::warn!("{message}");
+            eprintln!("{message}");
+            false
+        }
+    }
 }
 
 /// The recovery row being extended with AABB-derived room targets must still
@@ -732,7 +780,7 @@ async fn execute_frozen_batch(
         }
     }
 
-    if !use_staged_increment_window(job) {
+    if !use_staged_increment_window(job) || batch_reroutes_to_initial_load(job, &cand).await {
         if job.start_sesno > 1 && direct_increment_enabled() {
             let warning = format!(
                 "应急直写已启用：dbnum={} 将跳过 kv-mem staging 直接写入持久库",
@@ -1249,10 +1297,15 @@ async fn roots_touched_since(
     blocked_end: i32,
     end_sesno: i32,
 ) -> anyhow::Result<std::collections::BTreeSet<String>> {
-    let range_eles = crate::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
-        &job.path,
-        (blocked_end + 1)..=end_sesno,
-    )?;
+    // 与执行体同口径（ADR-022 经 collect_window 的同一个开关）。收集警告在这里
+    // 丢弃是有意的：本辅助只取尾段的 RegenRoot 目标，净口径的保守降级（基版本
+    // 解析失败按新增处理）只会**多算**根，不会少算，口径标注则由主批次收集时
+    // 已经报过。
+    let (range_eles, _collect_warnings) =
+        crate::data_interface::increment_pipeline::IncrementPipeline::collect_window(
+            &job.path,
+            (blocked_end + 1)..=end_sesno,
+        )?;
     let plan = crate::data_interface::model_update_plan::build_model_update_plan(
         job.dbnum,
         end_sesno,
@@ -2286,6 +2339,13 @@ async fn idle_round(
     if let Err(error) = SideEffectCompensator::drain(mgr).await {
         println!("空闲副作用补偿失败（保留待重试）: {error:#}");
     }
+    // 队列三出路的「可收口」：drain 成功即 mark_done，但 done 行从不删。每轮顺手
+    // 清一次终态行（幂等；失败保留、下一轮重试），与 inst_relate 平表清扫同纪律。
+    match SideEffectCompensator::sweep_done().await {
+        Ok(0) => {}
+        Ok(swept) => println!("副作用补偿队列 done 行清扫：删 {swept} 行"),
+        Err(error) => println!("副作用补偿 done 行清扫失败（下一轮重试）: {error:#}"),
+    }
     let data_phase_failed = match model_update_pending::drain_data_phases(mgr).await {
         Ok(n) if n > 0 => {
             println!("空闲模型积压消化完成 {n} 个任务");
@@ -2994,9 +3054,7 @@ mod tests {
 
         // 状态机门（一致性闭环方案 §6）在 pending 检查之前：它多挡住「pending
         // 为零但树不可信」的情形（DegradedBlocked / DegradedReuse / 重放重建中）。
-        let gate_at = body
-            .find(".is_ready()")
-            .expect("房间轮必须先问空间状态机");
+        let gate_at = body.find(".is_ready()").expect("房间轮必须先问空间状态机");
         assert!(
             gate_at < spatial_at,
             "状态门必须在 pending 检查之前: {body}"

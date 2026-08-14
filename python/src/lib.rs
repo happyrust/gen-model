@@ -291,6 +291,42 @@ fn collect_changes(
     Ok(pythonize(py, &value)?.unbind())
 }
 
+/// 会话索引差分：给定 sesno 窗口，**只靠文件本身**判定窗口内的净增删改——
+/// 不查任何数据库、不逐会话解析记录，复杂度与窗口内会话数解耦。
+///
+/// 与 `parse.collect_changes`（逐会话回放）互为对拍：回放给出每会话操作明细，
+/// 差分给出净三态（窗口内加了又删不出现，删了又建判 modified）。实现见
+/// `data_interface::session_index_diff`（存在性口径与生产 B+ 树点查逐字对齐）。
+///
+/// 返回 `{requested_start, requested_end, base_sesno, target_sesno,
+/// added/deleted/modified: [{refno, record_pgno, record_offset,
+/// last_touch_sesno, noun}], counts, stats}`；`with_noun=True` 时按记录位置
+/// 解析记录头补类型名（Deleted 解析的是旧记录，每 refno 一次，显式付费）。
+#[pyfunction]
+#[pyo3(signature = (path, start, end, with_noun=false))]
+fn net_changes(
+    py: Python<'_>,
+    path: PathBuf,
+    start: i32,
+    end: i32,
+    with_noun: bool,
+) -> PyResult<Py<PyAny>> {
+    let value = py
+        .detach(|| {
+            let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
+            io.open()
+                .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
+            let set = aios_database::data_interface::session_index_diff::collect_net_changes(
+                &mut io,
+                start..=end,
+                with_noun,
+            )?;
+            anyhow::Ok(set.to_json())
+        })
+        .map_err(anyhow_to_py)?;
+    Ok(pythonize(py, &value)?.unbind())
+}
+
 #[pymodule]
 fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_config, m)?)?;
@@ -301,6 +337,7 @@ fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     parse.add_function(wrap_pyfunction!(is_db_file, &parse)?)?;
     parse.add_function(wrap_pyfunction!(sessions, &parse)?)?;
     parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
+    parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;
     parse.add_function(wrap_pyfunction!(element, &parse)?)?;
     parse.add_function(wrap_pyfunction!(noun_dict, &parse)?)?;
     m.add_submodule(&parse)?;

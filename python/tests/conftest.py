@@ -23,6 +23,7 @@ OnceCell、SUL_DB 是全局连接，所以 SurrealDB 实例与执行层初始化
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -30,6 +31,12 @@ import time
 from pathlib import Path
 
 import pytest
+
+# 执行链（execute_manual → worker → 解析/生成）在默认 2MB 的线程栈上会溢出
+# （2026-08-13 Rust live 同样现象），testbed 脚本的惯例就是先抬栈再 full_init。
+# 必须在 aios_db 首次初始化（创建 tokio 运行时线程）之前生效，所以放在
+# conftest 导入期而不是任何 fixture 里。
+os.environ.setdefault("RUST_MIN_STACK", "16777216")
 
 TESTS = Path(__file__).resolve().parent
 REPO_ROOT = TESTS.parents[1]

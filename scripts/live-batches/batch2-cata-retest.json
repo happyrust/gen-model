@@ -1,0 +1,17 @@
+{
+  "comment": [
+    "CATA 闭包链修复后的定向复跑（2026-08-13）。前置：dbnum_watermark 里",
+    "设计库身份行 + CATA 登记行齐备（execute_manual 一遍 + AvevaCatalogue 空选集一遍，",
+    "或直接由修复后的基线/扫描路径落行），空间树 ready，队列净。"
+  ],
+  "config": "python/testbed/DbOption-pytest",
+  "features": "http_api",
+  "default_timeout_secs": 1200,
+  "tests": [
+    { "name": "live_hang_pending_is_actually_regenerated" },
+    { "name": "live_issue5_moving_the_reported_cap_plans_a_branch_regeneration" },
+    { "name": "live_issue5_moving_a_container_regenerates_the_branches_beneath_it" },
+    { "name": "scom_geometry_resolves_from_stored_reference_attributes" },
+    { "name": "both_catalogue_shapes_resolve_geometry_from_the_scom" }
+  ]
+}

@@ -1501,7 +1501,11 @@ async fn dual_pointer_scan_pagination_agrees() {
     let mut unique = mem_ids.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), mem_ids.len(), "分页不得产出重复行: {mem_ids:?}");
+    assert_eq!(
+        unique.len(),
+        mem_ids.len(),
+        "分页不得产出重复行: {mem_ids:?}"
+    );
 
     let mut want = expected.clone();
     want.sort();

@@ -316,8 +316,7 @@ pub(crate) struct SnapshotHeaderInfo {
     pub saved_at_unix: u64,
 }
 
-static SNAPSHOT_HEADER: std::sync::Mutex<Option<SnapshotHeaderInfo>> =
-    std::sync::Mutex::new(None);
+static SNAPSHOT_HEADER: std::sync::Mutex<Option<SnapshotHeaderInfo>> = std::sync::Mutex::new(None);
 
 fn record_snapshot_header(header: SnapshotHeaderInfo) {
     *SNAPSHOT_HEADER
@@ -406,12 +405,14 @@ fn read_snapshot_for_startup(project: &str, namespace: &str) -> SnapshotReadOutc
                     tree,
                     meta: read_tree_meta().ok(),
                 },
-                Err(error) => SnapshotReadOutcome::Unusable(format!(
-                    "V2 快照缺失且旧格式不可用: {error:#}"
-                )),
+                Err(error) => {
+                    SnapshotReadOutcome::Unusable(format!("V2 快照缺失且旧格式不可用: {error:#}"))
+                }
             }
         }
-        Err(error) => SnapshotReadOutcome::Unusable(format!("读取 V2 快照 {v2_path} 失败: {error}")),
+        Err(error) => {
+            SnapshotReadOutcome::Unusable(format!("读取 V2 快照 {v2_path} 失败: {error}"))
+        }
     }
 }
 
@@ -734,9 +735,7 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
                     // （脏标记），旧文件保留到 V2 发布成功那一刻才删。
                     mark_aabb_tree_dirty();
                     spatial_state::record_error(&format!("V2 迁移发布失败: {error:#}"));
-                    eprintln!(
-                        "V2 迁移发布失败（{error:#}）：先按旧文件内容运行，空闲轮重试发布"
-                    );
+                    eprintln!("V2 迁移发布失败（{error:#}）：先按旧文件内容运行，空闲轮重试发布");
                 }
             }
             return Ok(());
@@ -798,7 +797,10 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
                  无法解释的漂移（直写崩溃 / 换文件 / 回滚库），从库指针重建",
                 header
                     .as_ref()
-                    .map(|header| format!("epoch {} @ {}", header.epoch, header.db_epoch_updated_at))
+                    .map(|header| format!(
+                        "epoch {} @ {}",
+                        header.epoch, header.db_epoch_updated_at
+                    ))
                     .unwrap_or_else(|| "头缺失".to_string())
             );
             return rebuild_at_startup_locked().await;
@@ -958,9 +960,7 @@ async fn rebuild_tree_from_pointers_driver(serial_already_held: bool) -> anyhow:
             // 入口的发布门不认它），不落的话下次启动还得再重建一遍。
             persist_project_tree_now().await?;
             AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
-            println!(
-                "空间树已从库指针重建并落盘: {entries} 条（排除无效指针 {invalid_rows} 条）"
-            );
+            println!("空间树已从库指针重建并落盘: {entries} 条（排除无效指针 {invalid_rows} 条）");
             return Ok(entries);
         }
         anyhow::bail!(
@@ -1024,10 +1024,7 @@ fn aabb_is_usable(aabb: &parry3d::bounding_volume::Aabb) -> bool {
         .iter()
         .chain(aabb.maxs.coords.iter())
         .all(|v| v.is_finite());
-    finite
-        && aabb.mins.x <= aabb.maxs.x
-        && aabb.mins.y <= aabb.maxs.y
-        && aabb.mins.z <= aabb.maxs.z
+    finite && aabb.mins.x <= aabb.maxs.x && aabb.mins.y <= aabb.maxs.y && aabb.mins.z <= aabb.maxs.z
 }
 
 const SCAN_PAGE: usize = 5000;
@@ -1044,9 +1041,7 @@ async fn scan_usable_pointers() -> anyhow::Result<PointerScan> {
             .await
             .map_err(|e| anyhow::anyhow!("分页读取包围盒指针失败（cursor {cursor:?}）: {e}"))?
             .check()
-            .map_err(|e| {
-                anyhow::anyhow!("分页读取包围盒指针语句失败（cursor {cursor:?}）: {e}")
-            })?;
+            .map_err(|e| anyhow::anyhow!("分页读取包围盒指针语句失败（cursor {cursor:?}）: {e}"))?;
         let rows: Vec<ScanRow> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解析包围盒指针失败（cursor {cursor:?}）: {e}"))?;
@@ -1248,7 +1243,10 @@ mod tests {
         let gate_restore_at = body
             .find("AABB_TREE_DIRTY.store(true")
             .expect("发布门拒绝必须恢复脏标记");
-        assert!(gate_at < gate_restore_at, "发布门在前，恢复脏标记在后: {body}");
+        assert!(
+            gate_at < gate_restore_at,
+            "发布门在前，恢复脏标记在后: {body}"
+        );
         // 失败分支：恢复脏标记必须在错误返回之前。
         let restore_at = body
             .rfind("AABB_TREE_DIRTY.store(true")
@@ -1351,14 +1349,8 @@ mod tests {
 
         // 计数相等而库侧时刻不同 = 快照回滚撞回同一计数，必须按漂移报。
         let rolled_back = Ok((7u64, "d'2026-08-11T00:00:00Z'".to_string()));
-        let drifted = render_spatial_tree_status(
-            42,
-            Some(&header),
-            &rolled_back,
-            &pending,
-            "reused",
-            &state,
-        );
+        let drifted =
+            render_spatial_tree_status(42, Some(&header), &rolled_back, &pending, "reused", &state);
         assert_eq!(drifted["drift"], true, "指纹双字段必须都相等: {drifted}");
 
         // 旧格式迁移前的头（format_version 1，无哈希）：sha 如实 null。
@@ -1391,7 +1383,11 @@ mod tests {
             &degraded_state,
         );
         let broken_object = broken.as_object().expect("降级形状必须是对象");
-        assert_eq!(broken_object.len(), keys.len(), "降级分支不许缩键: {broken}");
+        assert_eq!(
+            broken_object.len(),
+            keys.len(),
+            "降级分支不许缩键: {broken}"
+        );
         assert_eq!(broken["state"], "degraded_blocked");
         assert_eq!(broken["ready"], false);
         assert_eq!(broken["format_version"], serde_json::Value::Null);
@@ -1646,7 +1642,10 @@ mod tests {
             aabb_is_usable(&boxed([1.0, 1.0, 1.0], [1.0, 1.0, 1.0])),
             "零体积盒（点）合法"
         );
-        assert!(!aabb_is_usable(&boxed([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0])));
+        assert!(!aabb_is_usable(&boxed(
+            [f32::NAN, 0.0, 0.0],
+            [1.0, 1.0, 1.0]
+        )));
         assert!(!aabb_is_usable(&boxed(
             [0.0, 0.0, 0.0],
             [f32::INFINITY, 1.0, 1.0]
@@ -1663,19 +1662,14 @@ mod tests {
     fn rebuild_protocol_reads_outside_and_swaps_inside_the_serial_lock() {
         let source = include_str!("aabb_tree.rs");
         let body = source
-            .split_once(concat!(
-                "async fn ",
-                "rebuild_tree_from_pointers_driver("
-            ))
+            .split_once(concat!("async fn ", "rebuild_tree_from_pointers_driver("))
             .expect("rebuild driver must exist")
             .1
             .split_once(concat!("\n", "/// 一次全量指针扫描的产物"))
             .expect("scan struct doc follows")
             .0;
         let before_at = body.find("let stamp_before").expect("扫描前必须读 stamp");
-        let scan_at = body
-            .find("scan_usable_pointers()")
-            .expect("必须走统一扫描");
+        let scan_at = body.find("scan_usable_pointers()").expect("必须走统一扫描");
         let lock_at = body
             .find("lock_spatial_serial().await")
             .expect("换树段必须持串行锁");
@@ -1774,9 +1768,7 @@ mod tests {
         let stamp_at = body
             .find("read_db_spatial_epoch_stamp()")
             .expect("盖章前必须读库侧指纹");
-        let write_at = body
-            .find("write_file_atomic(")
-            .expect("必须原子写快照文件");
+        let write_at = body.find("write_file_atomic(").expect("必须原子写快照文件");
         assert!(stamp_at < write_at, "指纹必须在写文件之前读: {body}");
         // D3：发布成功后才清旧格式文件，顺序不能反。
         let legacy_cleanup_at = body
@@ -1873,13 +1865,15 @@ mod tests {
         );
         assert!(
             decode_snapshot_v2(&bytes, "OTHER", "1516")
-                .err().expect("错项目必须拒绝")
+                .err()
+                .expect("错项目必须拒绝")
                 .to_string()
                 .contains("项目"),
         );
         assert!(
             decode_snapshot_v2(&bytes, "AMS", "9999")
-                .err().expect("错 namespace 必须拒绝")
+                .err()
+                .expect("错 namespace 必须拒绝")
                 .to_string()
                 .contains("namespace"),
         );
@@ -1889,7 +1883,8 @@ mod tests {
         let tampered = encode_snapshot_v2(&hash_tamper).expect("encode tampered");
         assert!(
             decode_snapshot_v2(&tampered, "AMS", "1516")
-                .err().expect("哈希失配必须拒绝")
+                .err()
+                .expect("哈希失配必须拒绝")
                 .to_string()
                 .contains("哈希失配"),
         );
@@ -1907,7 +1902,8 @@ mod tests {
         let tampered = encode_snapshot_v2(&entries_tamper).expect("encode tampered");
         assert!(
             decode_snapshot_v2(&tampered, "AMS", "1516")
-                .err().expect("条目数失配必须拒绝")
+                .err()
+                .expect("条目数失配必须拒绝")
                 .to_string()
                 .contains("条目数"),
         );
@@ -1917,7 +1913,8 @@ mod tests {
         let tampered = encode_snapshot_v2(&version_tamper).expect("encode tampered");
         assert!(
             decode_snapshot_v2(&tampered, "AMS", "1516")
-                .err().expect("格式版本不符必须拒绝")
+                .err()
+                .expect("格式版本不符必须拒绝")
                 .to_string()
                 .contains("版本"),
         );

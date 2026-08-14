@@ -411,6 +411,79 @@ impl SideEffectCompensator {
         })
     }
 
+    /// 可 drain 的两类副作用（SystDerived / RefRevMaintain）的队列状态
+    /// （/health `side_effect_pending`，P2-4）。
+    ///
+    /// 与 spatial 分开：spatial 无视 [`MAX_ATTEMPTS`]、由 [`Self::reconcile_spatial_pending`]
+    /// 单独收敛，永远不会成死信；这两类走 [`Self::drain`]，attempts 到顶就被 drain 的
+    /// 上限（[`MAX_ATTEMPTS`]）挡在候选集之外成为死信。此前 /health 只报 spatial 四键，
+    /// 这两类死信在接口上无处可见、也没有复活出口（P2-4）。
+    pub async fn side_effect_status() -> anyhow::Result<serde_json::Value> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT * FROM {TABLE} WHERE kind != 'spatial_reconcile' \
+                 AND status IN ['pending', 'failed'] ORDER BY updated_at DESC;"
+            ))
+            .await?
+            .check()?;
+        let jobs: Vec<PendingJob> = response.take(0)?;
+        Ok(Self::render_side_effect_status(&jobs))
+    }
+
+    /// /health `side_effect_pending` 的纯渲染半边（形状由单测钉住）。
+    ///
+    /// `pending` = 仍在重试预算内（drain 会取）；`dead_letters` = attempts 到顶
+    /// （drain 取不到，需 [`Self::revive_dead_letters`] 人工复活）；`by_kind` 给出
+    /// 两类可 drain 副作用各自的计数。供货 `jobs` 按 updated_at DESC，`last_error`
+    /// 因此取最近一条。`stalled` 只在出现死信时立起。
+    pub(crate) fn render_side_effect_status(jobs: &[PendingJob]) -> serde_json::Value {
+        let kind_counts = |kind: &str| -> serde_json::Value {
+            let dead = jobs
+                .iter()
+                .filter(|job| job.kind == kind && job.attempts >= MAX_ATTEMPTS)
+                .count();
+            let pending = jobs
+                .iter()
+                .filter(|job| job.kind == kind && job.attempts < MAX_ATTEMPTS)
+                .count();
+            serde_json::json!({ "pending": pending, "dead_letters": dead })
+        };
+        let dead_letters = jobs
+            .iter()
+            .filter(|job| job.attempts >= MAX_ATTEMPTS)
+            .count();
+        let pending = jobs.len() - dead_letters;
+        serde_json::json!({
+            "pending": pending,
+            "dead_letters": dead_letters,
+            "retries": jobs.iter().map(|job| job.attempts as u64).sum::<u64>(),
+            "by_kind": {
+                "syst_derived": kind_counts(SideEffectKind::SystDerived.as_str()),
+                "ref_rev_maintain": kind_counts(SideEffectKind::RefRevMaintain.as_str()),
+            },
+            "last_error": jobs.iter().find_map(|job| job.last_error.as_deref()),
+            "stalled": dead_letters > 0,
+        })
+    }
+
+    /// 读库失败时 /health 的降级形状：与成功形状**同键**，`stalled` 保守置真。
+    ///
+    /// 与 spatial 同一纪律（形状测试把成功与降级两个分支一起钉住），不在 handler
+    /// 里手搓 JSON。
+    pub fn side_effect_error_status(error: &anyhow::Error) -> serde_json::Value {
+        serde_json::json!({
+            "pending": 0,
+            "dead_letters": 0,
+            "retries": 0,
+            "by_kind": {
+                "syst_derived": { "pending": 0, "dead_letters": 0 },
+                "ref_rev_maintain": { "pending": 0, "dead_letters": 0 },
+            },
+            "last_error": format!("读取副作用补偿状态失败: {error:#}"),
+            "stalled": true,
+        })
+    }
+
     async fn mark_abandoned(id: &Thing, reason: &str) -> anyhow::Result<()> {
         let sql = format!(
             "UPDATE {id} SET status = 'abandoned', last_error = '{}', updated_at = time::now();",
@@ -524,6 +597,66 @@ impl SideEffectCompensator {
         Ok(done)
     }
 
+    /// 人工复活 SystDerived / RefRevMaintain 死信（attempts 到顶被 [`Self::drain`]
+    /// 的上限挡在候选集之外）——队列三出路（ADR-011 队列纪律）里的「可复活」那一条。
+    ///
+    /// spatial 无视上限、永远不会死信，故不在此复活。复活 = attempts 清零 + 清
+    /// last_error + 回到 `pending`，下一轮 drain 重新取到；**唤醒 worker 由调用方负责**
+    /// （HTTP 端点里 `BatchScheduler::wake()`——复活绕过入队通道，worker 的 Notify
+    /// 没人碰过，不叫醒它这些行要等兜底轮询）。返回复活的行数。
+    pub async fn revive_dead_letters() -> anyhow::Result<usize> {
+        let mut response = SUL_DB
+            .query(Self::render_revive_dead_letters())
+            .await
+            .map_err(|e| anyhow::anyhow!("revive side-effect dead letters failed: {e}"))?
+            .check()
+            .map_err(|e| {
+                anyhow::anyhow!("revive side-effect dead letters statement failed: {e}")
+            })?;
+        let revived: Vec<PendingJob> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("decode revived side-effect dead letters failed: {e}"))?;
+        Ok(revived.len())
+    }
+
+    /// 复活死信的 UPDATE（纯渲染）：只碰**可 drain 的两类**到顶死信（attempts >=
+    /// [`MAX_ATTEMPTS`] 且 status ∈ pending/failed），spatial 不动（它无视上限、
+    /// 自有重放语义）。
+    fn render_revive_dead_letters() -> String {
+        format!(
+            "UPDATE {TABLE} SET attempts = 0, last_error = NONE, status = 'pending', \
+             updated_at = time::now() WHERE kind != 'spatial_reconcile' \
+             AND status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS} \
+             RETURN AFTER;"
+        )
+    }
+
+    /// 清扫已完成的非空间副作用行——队列三出路里的「可收口」终态清理。
+    ///
+    /// SystDerived / RefRevMaintain 成功后 [`Self::mark_done`] 置 `status = 'done'`
+    /// 却从不删行，日积月累。由空闲轮每轮调一次（幂等：删完再删是空操作）。
+    /// spatial 的 done 行**不在此清扫**——它的重放/销账语义（崩溃窗口 ②/④，pending
+    /// 在场即 ReplayRequired）自成一套，误删会掩盖重启该重放的意图。返回删除行数。
+    pub async fn sweep_done() -> anyhow::Result<usize> {
+        let mut response = SUL_DB
+            .query(Self::render_sweep_done())
+            .await
+            .map_err(|e| anyhow::anyhow!("sweep done side-effect rows failed: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("sweep done side-effect rows statement failed: {e}"))?;
+        let removed: Vec<serde_json::Value> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("decode swept side-effect rows failed: {e}"))?;
+        Ok(removed.len())
+    }
+
+    /// 清扫 done 行的 DELETE（纯渲染）：非空间、终态；`RETURN BEFORE` 回删掉的行以计数。
+    fn render_sweep_done() -> String {
+        format!(
+            "DELETE {TABLE} WHERE kind != 'spatial_reconcile' AND status = 'done' RETURN BEFORE;"
+        )
+    }
+
     // `complete_syst_jobs` / `fail_syst_jobs` 随 `execute_incr_update` 退役：
     // 合流后 SYST 派生只走本补偿队列（enqueue_syst → drain 逐作业 mark_done /
     // mark_failed），不再有「先同步跑一遍、成了再回头销行」的旁路。
@@ -606,15 +739,25 @@ mod tests {
         assert_eq!(stalled["pending"], 2);
         assert_eq!(stalled["retries"], u64::from(2 + MAX_ATTEMPTS));
         assert_eq!(stalled["last_error"], "空间树落盘失败");
-        assert_eq!(stalled["stalled"], true, "重试打满必须报 stalled: {stalled}");
+        assert_eq!(
+            stalled["stalled"], true,
+            "重试打满必须报 stalled: {stalled}"
+        );
 
         let retrying = SideEffectCompensator::render_spatial_reconcile_status(&[job(1, None)]);
-        assert_eq!(retrying["stalled"], false, "预算未打满不算 stalled: {retrying}");
+        assert_eq!(
+            retrying["stalled"], false,
+            "预算未打满不算 stalled: {retrying}"
+        );
 
         let degraded =
             SideEffectCompensator::spatial_reconcile_error_status(&anyhow::anyhow!("boom"));
         let degraded_object = degraded.as_object().expect("降级形状必须是对象");
-        assert_eq!(degraded_object.len(), keys.len(), "降级分支不许缩键: {degraded}");
+        assert_eq!(
+            degraded_object.len(),
+            keys.len(),
+            "降级分支不许缩键: {degraded}"
+        );
         for key in keys {
             assert!(degraded_object.contains_key(key), "缺键 {key}: {degraded}");
         }
@@ -669,9 +812,123 @@ mod tests {
         let promote_at = body
             .rfind("promote_state_after_replay()")
             .expect("成功路径必须晋升状态");
+        assert!(done_at < promote_at, "状态晋升必须在销账之后: {body}");
+    }
+
+    /// P2-4：/health `side_effect_pending` 必须报出 SystDerived / RefRevMaintain 的
+    /// 死信计数，且成功与读库降级两个分支同键。
+    ///
+    /// 此前 /health 只报 spatial 四键，这两类走 drain 的副作用一旦 attempts 到顶就
+    /// 被 drain 上限挡在候选集外成死信，接口上无处可见。这条钉住新增的可观测口径：
+    /// 回退（删 dead_letters/by_kind 键、或把 spatial 混进来）即红。
+    #[test]
+    fn side_effect_status_exposes_dead_letters_and_keeps_its_shape() {
+        use super::{MAX_ATTEMPTS, PendingJob, TABLE};
+
+        let keys = [
+            "pending",
+            "dead_letters",
+            "retries",
+            "by_kind",
+            "last_error",
+            "stalled",
+        ];
+        let empty = SideEffectCompensator::render_side_effect_status(&[]);
+        let object = empty.as_object().expect("形状必须是对象");
+        assert_eq!(object.len(), keys.len(), "键数漂移: {empty}");
+        for key in keys {
+            assert!(object.contains_key(key), "缺键 {key}: {empty}");
+        }
+        assert_eq!(empty["dead_letters"], 0);
+        assert_eq!(empty["stalled"], false);
+
+        let job = |kind: &str, attempts: u32, last_error: Option<&str>| PendingJob {
+            id: surrealdb::sql::Thing::from((TABLE, format!("{kind}_8000_26").as_str())),
+            kind: kind.into(),
+            dbnum: 8000,
+            end_sesno: 26,
+            db_type: "SYST".into(),
+            changed_refnos: vec![],
+            refresh_refnos: vec![],
+            remove_refnos: vec![],
+            status: "failed".into(),
+            attempts,
+            last_error: last_error.map(str::to_owned),
+        };
+        // syst_derived 到顶 = 死信；ref_rev_maintain 还在预算内 = pending。
+        let status = SideEffectCompensator::render_side_effect_status(&[
+            job("syst_derived", MAX_ATTEMPTS, Some("SYST 同步失败")),
+            job("ref_rev_maintain", 2, None),
+        ]);
+        assert_eq!(
+            status["dead_letters"], 1,
+            "到顶的 syst_derived 必须计死信: {status}"
+        );
+        assert_eq!(status["pending"], 1, "预算内的行仍是 pending: {status}");
+        assert_eq!(status["retries"], u64::from(MAX_ATTEMPTS + 2));
+        assert_eq!(status["stalled"], true, "有死信必须 stalled: {status}");
+        assert_eq!(status["last_error"], "SYST 同步失败");
+        assert_eq!(status["by_kind"]["syst_derived"]["dead_letters"], 1);
+        assert_eq!(status["by_kind"]["syst_derived"]["pending"], 0);
+        assert_eq!(status["by_kind"]["ref_rev_maintain"]["dead_letters"], 0);
+        assert_eq!(status["by_kind"]["ref_rev_maintain"]["pending"], 1);
+
+        // 读库降级分支必须同键，stalled 保守置真。
+        let degraded = SideEffectCompensator::side_effect_error_status(&anyhow::anyhow!("boom"));
+        let degraded_object = degraded.as_object().expect("降级形状必须是对象");
+        assert_eq!(
+            degraded_object.len(),
+            keys.len(),
+            "降级分支不许缩键: {degraded}"
+        );
+        for key in keys {
+            assert!(degraded_object.contains_key(key), "缺键 {key}: {degraded}");
+        }
+        assert_eq!(degraded["stalled"], true);
         assert!(
-            done_at < promote_at,
-            "状态晋升必须在销账之后: {body}"
+            degraded["last_error"]
+                .as_str()
+                .expect("降级必须报出错误原因")
+                .contains("boom")
+        );
+    }
+
+    /// P2-4「可复活」：复活只碰**可 drain 两类**的到顶死信，把 attempts 清零回到
+    /// pending，并放过 spatial（它无视上限、自有重放语义）。
+    #[test]
+    fn reviving_dead_letters_resets_attempts_and_spares_spatial() {
+        use super::MAX_ATTEMPTS;
+        let sql = SideEffectCompensator::render_revive_dead_letters();
+        assert!(sql.contains("attempts = 0"), "复活必须清零 attempts: {sql}");
+        assert!(
+            sql.contains("status = 'pending'"),
+            "复活必须回到 pending: {sql}"
+        );
+        assert!(
+            sql.contains("last_error = NONE"),
+            "复活必须清 last_error: {sql}"
+        );
+        assert!(
+            sql.contains("kind != 'spatial_reconcile'"),
+            "spatial 不走上限、不在复活范围: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("(attempts?:0) >= {MAX_ATTEMPTS}")),
+            "只复活到顶死信，不误动仍在重试预算内的行: {sql}"
+        );
+    }
+
+    /// P2-4「可收口」：done 行清扫只删非空间的终态行，且幂等。
+    ///
+    /// spatial 的 done 行不在此清扫——pending 在场是它崩溃重放的信号，混进来会误删。
+    #[test]
+    fn sweeping_done_removes_only_terminal_non_spatial_rows() {
+        let sql = SideEffectCompensator::render_sweep_done();
+        assert!(sql.starts_with("DELETE "), "必须是删除语句: {sql}");
+        assert!(sql.contains("status = 'done'"), "只删终态行: {sql}");
+        assert!(
+            sql.contains("kind != 'spatial_reconcile'"),
+            "空间收敛的 done 行有自己的重放/销账语义，不在此清扫: {sql}"
         );
     }
 }

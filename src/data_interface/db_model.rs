@@ -39,6 +39,23 @@ use crate::mqtt_service::{SyncE3dFileMsg, new_mqtt_inst};
 
 pub const TUBI_TOL: f32 = 0.1f32;
 
+/// 隐式直管段的连接容差(mm):相邻构件的 leave→arrive 缝隙短于它时视为「已连接的
+/// 建模余量」,不再合成一段填充直管——与 E3D 的行为对齐。
+///
+/// 背景(2026-08-12 db8000 BRAN 增量取证,RVM 真值对拍):gen-model 的构件坐标与
+/// E3D 逐一吻合(≤1mm),但相邻显式管件在源数据里本就带亚毫米~几毫米的关节余量
+/// (实测 `/C-OR-1R345-C`:FTUB2 `POS+HEIG` 距 FTUB3 `POS` 为 1403 vs HEIG 1400,
+/// ~3mm)。E3D 对这类缝**零产管**(RVM 导出零隐式管容器);而 `TUBI_TOL=0.1mm`
+/// 太紧,gen-model 给每个关节都合成一段 0.66~2.70mm 的「薄饼管」,再以 leave_refno
+/// 为键覆盖掉构件自身几何(见 ADR / 审查记录的 D1 覆盖缺陷)。
+///
+/// 取值 5.0mm 的依据(非拍脑袋):db8000 全部 91 条 tubi 的长度分布在 4.18mm 与
+/// 6.70mm 之间有一条干净断层——54 条 ≤4.18mm 是薄饼,6.70mm 起才是成片真实管段;
+/// 5.0mm 落在断层内,且 > 本支管实测被 E3D 容忍的最大缝 2.70mm,既滤掉薄饼又不误杀
+/// 真管。E3D 的连接容差本身不是分支属性(实测 BRAN 的 121 个属性里无 BTOL/CBTOLE),
+/// 是 core.dll 内部规则;此处按实证取值,若日后从 core.dll 逆出权威阈值再精化。
+pub const TUBI_CONNECT_TOL: f32 = 5.0f32;
+
 // project + mdb + module
 pub static GLOBAL_MDB_WORLD_MAP: Lazy<DashMap<String, PdmsElement>> = Lazy::new(DashMap::new);
 

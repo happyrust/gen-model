@@ -1,3 +1,10 @@
+# CLAUDE.md
+
+本仓库的 agent 指令统一维护在 `AGENTS.md`（Cursor / Codex / Claude Code 共用一份）。
+下面这行是 Claude Code 的 import 语法，会把 `AGENTS.md` 的内容整体拉进上下文：
+
+@AGENTS.md
+
 <!-- sigmap-creation-workflow:start -->
 ## Creation workflow (SigMap)
 

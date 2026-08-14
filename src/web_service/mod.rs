@@ -271,6 +271,10 @@ pub async fn serve(
             "/api/v1/update/pending-units/retry",
             post(handlers::pending_units_retry),
         )
+        .route(
+            "/api/v1/update/side-effects/retry",
+            post(handlers::side_effects_retry),
+        )
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
         .route("/api/v1/model/ensure", post(handlers::model_ensure))

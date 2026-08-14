@@ -20,8 +20,9 @@
 | `delivery_unit_types` | 未启用（注释） | 2026-07-25 | 最小交付单元类型——增量 / 手动 / 按需生成共用的“生成根”口径；配置后**完全取代**默认集合 `["BRAN","HANG","SUPPO","EQUI"]`，`[]` 表示不使用交付单元。trim + 大写 + 去重，拒绝 WORL/WORLD/SITE/ZONE 与 FTUB。随批量根重生成能力引入（ADR-012、`docs/specs/manual-model-update.md`）。消费方：`data_interface/generation_root.rs` |
 | `append_delivery_unit_types` | 未启用（注释） | 2026-07-25 | 在默认交付单元集合之外**追加**类型，仅当未配置 `delivery_unit_types` 时生效。规则同上 |
 | `startup_autorun` | `false` | 2026-08-10 | 启动是否自动干活。`false`（默认）时启动重扫照常发现并入队，但排出来的行**挂起**（`/queue` 上状态为 `held`）不派发，持久积压也不消化，启动全量房间重建不跑；某个 dbnum 真的来了增量（watch 事件 / 人工执行）才放行它那一条，并与新会话合并成一条一起跑。`true` 是历史行为。环境变量 `AIOS_STARTUP_AUTORUN` 压过本键（认 `1/true/yes/on` 与 `0/false/no/off`，认不出的值退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），非 rs-core `DbOption` 字段，缺键不会起不来。消费方：`options.rs::startup_autorun`、`lib.rs::skip_startup_room_build`、`batch_queue.rs::DataBatch::held`、`batch_scheduler.rs::arm_auto_work` |
-| `room_incremental` | `false` | 2026-08-10 | 房间归属的**增量**重算开不开。`false`（默认）时两个写入点都不再排 `room_recalc` 目标（位姿/删除刷新包围盒后的直写事务、暂存窗口收口的 `merge_room_recalc_changes`），空闲轮也不再收房间轮；已排在 `model_update_pending` 里的目标原样留着，开关一开照常收。只管增量这一条链——启动全量重建、人工重建、`drain_rooms` 直调（房间对拍夹具走的就是它）都不看本键。环境变量 `AIOS_ROOM_INCREMENTAL` 压过本键（取值规则同 `AIOS_STARTUP_AUTORUN`）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::room_incremental`、`batch_worker.rs::room_round`、`model_update_pending.rs::merge_room_recalc_changes`、`occ_generate.rs` 直写事务 |
+| `room_incremental` | `true`（2026-08-10 引入时为 `false`，08-12 翻正） | 2026-08-10 | 房间归属的**增量**重算开不开。`false` 时两个写入点都不再排 `room_recalc` 目标（位姿/删除刷新包围盒后的直写事务、暂存窗口收口的 `merge_room_recalc_changes`），空闲轮也不再收房间轮；已排在 `model_update_pending` 里的目标原样留着，开关一开照常收。只管增量这一条链——启动全量重建、人工重建、`drain_rooms` 直调（房间对拍夹具走的就是它）都不看本键。环境变量 `AIOS_ROOM_INCREMENTAL` 压过本键（取值规则同 `AIOS_STARTUP_AUTORUN`）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::room_incremental`、`batch_worker.rs::room_round`、`model_update_pending.rs::merge_room_recalc_changes`、`occ_generate.rs` 直写事务 |
 | `room_key_word` | `["-RM"]` | 2026-07-29 | 房间名关键词**列表**，用于房间-面板关系匹配（`fast_model/room_model.rs::get_room_key_word`）。**替代旧键 `room_keyword`（单字符串，已废弃删除）**：一次支持多关键词，且 AMS 房间名（如 `/1RX-RM03-R301`）末段由 `project_hd` 规则校验 |
+| `watermark_realign` | **已移除**（2026-08-13，ADR-021） | 2026-08-12 | ~~水位不对齐（F6 回退）的检查与处置档位~~。**2026-08-13 随 ADR-021 整键退役**：回退的默认且唯一处置改为「扫描只入队重建批次，worker 冻结点复核仍判回退才整库清空（`wipe_dbnum_for_reinit`）并按首次导入重新解析」；档位、`AIOS_WATERMARK_REALIGN` 环境变量与单库端点 `POST /dbnums/{dbnum}/realign` 一并移除，「先别动我看看」由 `startup_autorun` / 队列暂停承担。以下为历史记录：水位不对齐（F6 回退：文件被还原/替换，`file_latest_sesno < applied_sesno`）的检查与处置档位。`off`=现状只阻断；`check`=扫描时逐库输出 `[水位审计]` 行（不动数据）；`rebaseline`=检测到回退自动对齐——`prune_above_watermark` 清掉高于文件水位的行与队列残留、`applied_sesno` 写 0（写值不删行）、由基线路径按首次导入全量重建，**只对回退生效**，其余异常照旧阻断（ADR-001 2026-08-12 修订的唯一 opt-in 例外）。环境变量 `AIOS_WATERMARK_REALIGN` 压过本键（认 `off/check/rebaseline`，认不出退回本键）。属本仓扩展键（`options.rs::DbOptionExtFields`），缺键不会起不来。消费方：`options.rs::watermark_realign`、`increment_manager.rs::scan_and_check_file`、`manual_update.rs::realign_rolled_back_dbnum`；另有单库端点 `POST /api/v1/dbnums/{dbnum}/realign`（spec §4.9）**不看本键** |
 
 ## 二、取值变更（键在基线中已存在）
 
@@ -70,6 +71,25 @@
   根因不在房间侧：数据批次因祖先链断裂反复失败 → 暂存窗口提交不了 → `batch_regen_is_allowed` 为假 → 交付单元一个都不生成 → 几何永远不出现 → 房间轮每页继续写空集。两件事互为因果，而房间那半边的噪音让模型侧的问题看不见。先把它关掉，让模型增量的正确性能被单独看清楚。
 
   三个门：两个写入点（直写事务只摘 `room_recalc` 那一条语句，指针写与 epoch bump 照旧——空间树确实动了，少 bump 一次会让重启后「文件之后还有空间提交」的判定看错）、一个消费点（`room_round` 早退，用 `Once` 只播报一次，空闲轮 30 秒一趟，每趟复述同一个配置项就是把日志刷成噪音）。`/health` 相应新增 `room_incremental`：关着时房间泳道永远是空的，而「没活」与「开关关着」在外面长得一模一样。
+
+- **2026-08-12（房间增量默认打开）**：`room_incremental` 缺省值翻为 **`true`**，`DbOption.toml` 同步写成 `true`。三道门一处没改，翻的只是缺省值。
+
+  上一条的止血目标已经达成：那 2580 个查不到几何的目标已经收干净（现场 `/update/pending-units` 的 `room_units` 为空），模型增量侧的正确性也已经能被单独看清。继续维持关闭的代价此刻更贵——关着时房间归属**只有删除路径**还在维护（`helper.rs::delete_room_membership` 从不看这个开关，元素删了边照样两个方向清掉），而「搬家之后重算」整条链是冻的；按设计这部分应由下一次启动的全量重建回补，但那条兜底路径排在 `startup_autorun` 之后（`skip_startup_room_build` 的门序是 `AIOS_SKIP_STARTUP_ROOM_BUILD` → `startup_autorun` → 库侧对账），而它自己默认也是 `false`：默认部署两个开关都关着，`room_build:main` 的对账根本到不了，等于既不增量也不回补，材料表的房间号会一直停在旧值。
+
+  显式写了 `room_incremental = false` 的配置（`python/tests/DbOption-ci.toml`、`python/testbed/DbOption-*.toml`）行为不变——那几档是刻意只测别的链路。要临时关一次用 `AIOS_ROOM_INCREMENTAL=0`，不必改文件。打开之后要盯的仍是 08-10 那个形态：空闲轮日志里若再出现整页「按空集收敛」的房间目标，说明几何又没跟上，那是模型侧的信号，不是房间侧的。
+
+- **2026-08-13（watermark_realign 移除，ADR-021）**：该键与 `AIOS_WATERMARK_REALIGN`
+  环境变量、单库端点 `POST /dbnums/{dbnum}/realign` 一并退役。回退默认整库重建：
+  扫描路径（sweep / watch / 手动入队）检测到回退只入队一条重建批次（applied=0
+  形状，窗口 1..file_latest），worker 冻结点复核仍判回退才 `wipe_dbnum_for_reinit`
+  （整库清空 + 统计与队列残留清空 + 水位行清值不删行 + spatial epoch 递增），随后
+  落进现成基线路径按首次导入重新解析。缝合式对齐（只删高于文件水位的残留 +
+  INSERT IGNORE 补洞）依赖「幸存行与新文件同史」假设，被整库重建取代。下一条为
+  引入时的历史记录。
+
+- **2026-08-12（watermark_realign 引入）**：新增扩展键 `watermark_realign`（默认 `"off"`，配置文件中为注释示例）。
+
+  起因是 test-workspace 现场的 F6 阻断：`ams7999_0001` 被还原后 `file_latest=114 < applied=120`，该库从此增量停摆，唯一出路是手工 SQL（改水位行、删 attempt/pending）加人工重建。这个档位把那套手工配方自动化：`check` 只审计（逐库一行 `[水位审计]`，启动重扫正好构成全量对齐清单）；`rebaseline` 对**回退**自动对齐——复用 `prune_above_watermark`（自持暂存收口与水位两把写闸）物理清掉高于文件水位的残留，水位写 0 落进现成的 `needs_initial_load` → `initialize_dbnum_baseline` 基线分支，同一条批次队列内完成全量重建。只对回退生效；类型变更/同号多文件/归属不符/文件缺失照旧阻断（自动处理等于替人拍板挑文件）。文件若被换成完全不同的历史，基线完整性校验会拒绝收口并持续报错——响亮失败，不静默缝合两段历史。这是 ADR-001「水位只进不退」的唯一 opt-in 例外（见该 ADR 2026-08-12 修订注记）；同批新增单库端点 `POST /api/v1/dbnums/{dbnum}/realign`（spec §4.9，不看本键，生产 `off` 也能修单个库）。
 
 ## 四、注意事项
 

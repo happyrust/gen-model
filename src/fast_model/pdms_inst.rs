@@ -50,12 +50,18 @@ fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
 
 /// 刷新确定性 `inst_geo` 的几何参数，同时保留已经生成的 mesh 派生字段。
 ///
-/// `geo_hash` 相同意味着记录 id 相同。旧实现用 `INSERT IGNORE`，若一次中断留下了
-/// 只有 id 的半成品，重放会把新 `param` 静默丢掉，后续 `gen_inst_meshes` 的
-/// `WHERE param != NONE` 就永远选不中它。`UPSERT ... MERGE` 既能补齐半成品，也不会
-/// 清掉既有的 `meshed` / `aabb` / `pts`。
-fn render_inst_geo_merge(geo_hash: u64, unit_geo: &str, reset_bad: bool) -> String {
-    let mut sql = format!("UPSERT inst_geo:⟨{geo_hash}⟩ MERGE {unit_geo};");
+/// `geo_hash` 相同意味着记录 id 相同——而**不同的 `PdmsGeoParam` 变体可以合法地
+/// 共享同一个 id**：普通 LCylinder 与非切角 SCylinder 的单位网格同为单位圆柱，
+/// `hash_unit_mesh_params` 按设计都返回 `CYLINDER_GEO_HASH`。因此 `param` 绝不能
+/// 走对象深合并：`UPSERT … MERGE { param: … }`（第一版 `INSERT IGNORE` 的替换写法）
+/// 会把先后两个变体并成 `{ PrimLCylinder: …, PrimSCylinder: … }` 双键对象，enum
+/// 反序列化从此永久失败，**所有**引用该共享行的根一个都生成不出来（2026-08-13
+/// live A/B 全链路执行实测击中，`.scratch/net-ab-run4.log`：2,229 根批量重生成
+/// 全灭）。`UPSERT … SET param = …` 整值覆盖：行缺失时补齐、半成品被修复、已
+/// meshed 的派生字段（`meshed` / `aabb` / `pts`）原样保留；对已被旧写法打坏的
+/// 双键行也是自愈——下一次参数刷新整值盖掉即恢复可解。
+fn render_inst_geo_upsert(geo_hash: u64, unit_param_json: &str, reset_bad: bool) -> String {
+    let mut sql = format!("UPSERT inst_geo:⟨{geo_hash}⟩ SET param = {unit_param_json};");
     // 强制再生成代表调用方明确要求用当前解析/网格代码重试。旧 `bad=true` 若不清，
     // gen_inst_meshes 的入口过滤会在真正构形之前永久跳过这条记录。
     if reset_bad {
@@ -625,8 +631,13 @@ pub async fn save_instance_data(
             let id = gen_bytes_hash::<_, 64>(&relate_json);
             let final_json = format!("{{ {relate_json}, id: '{id}' }}");
             geo_relate_vec.push(final_json);
-            //保存 unit shape 的几何参数
-            inst_geo_vec.push((inst.geo_hash, inst.gen_unit_geo_sur_json()));
+            //保存 unit shape 的几何参数（只传 param 本体：整值 SET 覆盖，见
+            // render_inst_geo_upsert——共享单位行上两个变体深合并会毒化 param）
+            inst_geo_vec.push((
+                inst.geo_hash,
+                serde_json::to_string(&inst.geo_param.convert_to_unit_param())
+                    .expect("PdmsGeoParam 可序列化"),
+            ));
         }
     }
 
@@ -635,8 +646,8 @@ pub async fn save_instance_data(
         for chunk in inst_geo_vec.chunks(chunk_size) {
             let sql_string = chunk
                 .iter()
-                .map(|(geo_hash, unit_geo)| {
-                    render_inst_geo_merge(*geo_hash, unit_geo, replace_exist)
+                .map(|(geo_hash, unit_param)| {
+                    render_inst_geo_upsert(*geo_hash, unit_param, replace_exist)
                 })
                 .join("\n");
             db_futures.push(spawn_db_write(sql_string));
@@ -902,7 +913,7 @@ mod tests {
     /// 中断留下的半成品必须能被同一批生成重放修好；已有 mesh 派生字段不能被参数
     /// 刷新抹掉。执行两次还钉住了 journal/直写两条路径共同需要的幂等性。
     #[tokio::test(flavor = "multi_thread")]
-    async fn inst_geo_merge_repairs_partial_rows_and_preserves_mesh_fields() {
+    async fn inst_geo_upsert_repairs_partial_rows_and_preserves_mesh_fields() {
         let db = surrealdb::engine::any::connect("mem://")
             .await
             .expect("mem boots");
@@ -918,11 +929,7 @@ mod tests {
         .check()
         .expect("seed partial row");
 
-        let statement = render_inst_geo_merge(
-            42,
-            "{'id': inst_geo:⟨42⟩, 'param': { kind: 'box', size: [1, 2, 3] }}",
-            true,
-        );
+        let statement = render_inst_geo_upsert(42, "{ kind: 'box', size: [1, 2, 3] }", true);
         db.query(format!("{statement}\n{statement}"))
             .await
             .expect("replay transport")
@@ -945,8 +952,54 @@ mod tests {
         assert_eq!(flags, vec![true, true, true, true, true]);
     }
 
+    /// 同一个单位网格行被两个不同的 `PdmsGeoParam` 变体先后刷新——普通 LCylinder
+    /// 与非切角 SCylinder 共享 `CYLINDER_GEO_HASH`，这正是生产会天天发生的形状。
+    /// `param` 必须整值覆盖成后写的**单变体**对象：回退到 `MERGE { param: … }`
+    /// 的旧写法，两个变体被深合并成双键对象（enum 反序列化永久失败、所有引用该
+    /// 共享行的根全部生成失败——2026-08-13 live A/B 实测），本断言当场变红。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_variant_switch_on_a_shared_unit_row_replaces_param_wholesale() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("pdms_inst")
+            .use_db("inst_geo_variant_switch")
+            .await
+            .expect("use db");
+
+        let first = render_inst_geo_upsert(
+            7,
+            r#"{"PrimLCylinder":{"pdia":1.0,"pbdi":-0.5,"ptdi":0.5}}"#,
+            false,
+        );
+        let second =
+            render_inst_geo_upsert(7, r#"{"PrimSCylinder":{"pdia":1.0,"phei":1.0}}"#, false);
+        db.query(format!("{first}\n{second}"))
+            .await
+            .expect("variant switch transport")
+            .check()
+            .expect("variant switch statements");
+
+        let mut response = db
+            .query(
+                "RETURN [object::len(inst_geo:⟨7⟩.param) = 1, \
+                         inst_geo:⟨7⟩.param.PrimSCylinder != NONE, \
+                         inst_geo:⟨7⟩.param.PrimLCylinder = NONE];",
+            )
+            .await
+            .expect("verify transport")
+            .check()
+            .expect("verify query");
+        let flags: Vec<bool> = response.take(0).expect("take flags");
+        assert_eq!(
+            flags,
+            vec![true, true, true],
+            "param 必须是后写变体的单键对象，绝不能深合并出双键"
+        );
+    }
+
     #[test]
-    fn production_inst_geo_writes_are_replay_merges() {
+    fn production_inst_geo_writes_replace_param_wholesale() {
         let source = include_str!("pdms_inst.rs");
         let body = source
             .split_once("pub async fn save_instance_data(")
@@ -957,8 +1010,13 @@ mod tests {
             .expect("函数体到测试模块为止");
         assert!(!body.contains("insert ignore into inst_geo"), "{body}");
         assert!(
-            body.contains("render_inst_geo_merge(*geo_hash, unit_geo, replace_exist)"),
+            body.contains("render_inst_geo_upsert(*geo_hash, unit_param, replace_exist)"),
             "{body}"
+        );
+        // param 深合并禁令：见 render_inst_geo_upsert 文档（共享单位行双变体毒化）。
+        assert!(
+            !body.contains("MERGE"),
+            "save_instance_data 的 inst_geo 写入不得回退到对象深合并: {body}"
         );
     }
 

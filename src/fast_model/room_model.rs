@@ -605,6 +605,10 @@ impl RoomPanelMap {
 }
 
 /// 房间命名规则按项目在编译期选定。
+///
+/// 只在启用了某个 project 特性时才存在——无 project 构建下房间子系统的入口全部
+/// 响亮拒绝（见各 loader / builder 的 `cfg(not(any(...)))` 分支），永远走不到这里。
+#[cfg(any(feature = "project_hd", feature = "project_hh"))]
 fn configured_match_room_fn() -> fn(&str) -> bool {
     #[cfg(feature = "project_hd")]
     return match_room_name_hd;
@@ -621,38 +625,54 @@ fn configured_match_room_fn() -> fn(&str) -> bool {
 /// **调用方需按轮复用**：这是一次房间类型表的全表扫描外加逐行图遍历（本项目
 /// 2889 个 FRMW 里筛出 124 间），每个任务各扫一遍，一轮几十个任务就会被它拖垮。
 pub async fn load_room_panel_map(db_option: &DbOption) -> anyhow::Result<RoomPanelMap> {
-    load_room_panel_groups(&db_option.get_room_key_word(), configured_match_room_fn()).await
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    {
+        let _ = db_option;
+        anyhow::bail!("房间子系统需要 project_hd 或 project_hh 特性，当前构建两者皆未启用");
+    }
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    {
+        load_room_panel_groups(&db_option.get_room_key_word(), configured_match_room_fn()).await
+    }
 }
 
 /// Staged windows preload the canonical PE topology, not noun tables whose INSERT events would
 /// execute during preload. Read the same room grouping directly from `pe + pe_owner`.
 pub async fn load_room_panel_map_from_pe(db_option: &DbOption) -> anyhow::Result<RoomPanelMap> {
-    let filter = db_option
-        .get_room_key_word()
-        .iter()
-        .map(|word| format!("string::contains(name, '{}')", escape_surql_str(word)))
-        .join(" or ");
-    #[cfg(feature = "project_hd")]
-    let sql = format!(
-        "SELECT VALUE [id, array::last(string::split(name, '-')), \
-         array::flatten([id<-pe_owner<-pe, id<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']] \
-         FROM pe WHERE noun='FRMW' AND ({filter})"
-    );
-    #[cfg(feature = "project_hh")]
-    let sql = format!(
-        "SELECT VALUE [id, array::last(string::split(name, '-')), \
-         array::flatten([id<-pe_owner<-pe])[?noun='PANE']] \
-         FROM pe WHERE noun='SBFR' AND ({filter})"
-    );
-    let mut response = crate::data_interface::staging::active_data_db()
-        .query(sql)
-        .await?
-        .check()?;
-    let groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
-    Ok(room_panel_map_from_groups(
-        groups,
-        configured_match_room_fn(),
-    ))
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    {
+        let _ = db_option;
+        anyhow::bail!("房间子系统需要 project_hd 或 project_hh 特性，当前构建两者皆未启用");
+    }
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    {
+        let filter = db_option
+            .get_room_key_word()
+            .iter()
+            .map(|word| format!("string::contains(name, '{}')", escape_surql_str(word)))
+            .join(" or ");
+        #[cfg(feature = "project_hd")]
+        let sql = format!(
+            "SELECT VALUE [id, array::last(string::split(name, '-')), \
+             array::flatten([id<-pe_owner<-pe, id<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']] \
+             FROM pe WHERE noun='FRMW' AND ({filter})"
+        );
+        #[cfg(feature = "project_hh")]
+        let sql = format!(
+            "SELECT VALUE [id, array::last(string::split(name, '-')), \
+             array::flatten([id<-pe_owner<-pe])[?noun='PANE']] \
+             FROM pe WHERE noun='SBFR' AND ({filter})"
+        );
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(sql)
+            .await?
+            .check()?;
+        let groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
+        Ok(room_panel_map_from_groups(
+            groups,
+            configured_match_room_fn(),
+        ))
+    }
 }
 
 /// 构建房间和面板之间的关联关系
@@ -664,7 +684,15 @@ pub async fn load_room_panel_map_from_pe(db_option: &DbOption) -> anyhow::Result
 /// 根据不同的项目特性(project_hd或project_hh)调用对应的房间名称匹配函数,
 /// 通过 build_room_panels_relate_common 函数构建房间和面板的关联关系
 async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result<RoomPanelMap> {
-    build_room_panels_relate_common(room_key_word, configured_match_room_fn()).await
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    {
+        let _ = room_key_word;
+        anyhow::bail!("房间子系统需要 project_hd 或 project_hh 特性，当前构建两者皆未启用");
+    }
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    {
+        build_room_panels_relate_common(room_key_word, configured_match_room_fn()).await
+    }
 }
 
 /// hd 正则匹配是否满足房间命名规则
@@ -766,9 +794,17 @@ async fn build_room_panels_relate_common<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let map = load_room_panel_groups(room_key_word, match_room_fn).await?;
-    write_room_panel_relate(&map).await?;
-    Ok(map)
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    {
+        let _ = (room_key_word, match_room_fn);
+        anyhow::bail!("房间子系统需要 project_hd 或 project_hh 特性，当前构建两者皆未启用");
+    }
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    {
+        let map = load_room_panel_groups(room_key_word, match_room_fn).await?;
+        write_room_panel_relate(&map).await?;
+        Ok(map)
+    }
 }
 
 /// 从库里读出房间 → 面板的现状，不写任何东西。
@@ -779,38 +815,46 @@ async fn load_room_panel_groups<F>(
 where
     F: Fn(&str) -> bool,
 {
-    // 拼接判断条件
-    let filter = room_key_word
-        .iter()
-        .map(|x| format!("'{}' in NAME", x))
-        .join(" or ");
-    //属于room的panel
-    #[cfg(feature = "project_hd")]
-    let sql = format!(
-        r#"
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    {
+        let _ = (room_key_word, match_room_fn);
+        anyhow::bail!("房间子系统需要 project_hd 或 project_hh 特性，当前构建两者皆未启用");
+    }
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    {
+        // 拼接判断条件
+        let filter = room_key_word
+            .iter()
+            .map(|x| format!("'{}' in NAME", x))
+            .join(" or ");
+        //属于room的panel
+        #[cfg(feature = "project_hd")]
+        let sql = format!(
+            r#"
         select value [  id, 
                         array::last(string::split(NAME, '-')),
                         array::flatten([REFNO<-pe_owner<-pe, REFNO<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']
                     ] from FRMW where {filter}
     "#
-    );
-    #[cfg(feature = "project_hh")]
-    let sql = format!(
-        r#"
+        );
+        #[cfg(feature = "project_hh")]
+        let sql = format!(
+            r#"
         select value [  id, 
                         array::last(string::split(NAME, '-')),
                         array::flatten([REFNO<-pe_owner<-pe])[?noun='PANE']
                     ] from SBFR where {filter}
     "#
-    );
+        );
 
-    let mut response = crate::data_interface::staging::active_data_db()
-        .query(sql)
-        .await?
-        .check()?;
-    let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
+        let mut response = crate::data_interface::staging::active_data_db()
+            .query(sql)
+            .await?
+            .check()?;
+        let room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)> = response.take(0)?;
 
-    Ok(room_panel_map_from_groups(room_groups, match_room_fn))
+        Ok(room_panel_map_from_groups(room_groups, match_room_fn))
+    }
 }
 
 fn room_panel_map_from_groups<F>(
@@ -2001,6 +2045,29 @@ async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// 无 project 特性构建（CI 单测组合 `ws,gen_model,manifold`，两个 project 特性
+    /// 皆未开）下，房间子系统入口必须**响亮拒绝**——不发明命名规则与 FRMW/SBFR
+    /// 查询（宪法禁止填近似值）。谁把无-project 分支改回「静默走原实现」，这条立刻
+    /// 红：编译期该分支消失后未 gate 的 `sql` / `configured_match_room_fn` 重新报错，
+    /// 或运行期断言失败。开了任一 project 特性时整条测试不编译。
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    #[tokio::test]
+    async fn room_subsystem_loaders_loudly_refuse_without_a_project_feature() {
+        let db_option = DbOption::default();
+        let results = [
+            load_room_panel_map(&db_option).await,
+            load_room_panel_map_from_pe(&db_option).await,
+        ];
+        for result in results {
+            let error = result.expect_err("无 project 特性时房间 loader 必须返回 Err");
+            let message = error.to_string();
+            assert!(
+                message.contains("project_hd") && message.contains("特性"),
+                "拒绝信息必须点明需要 project 特性，实际: {message}"
+            );
+        }
+    }
+
     fn panel() -> RefnoEnum {
         RefnoEnum::from("4000000001_10")
     }
@@ -2366,9 +2433,7 @@ mod tests {
             .split_once("\n/// 上一次**成功**")
             .expect("stamp doc follows")
             .0;
-        let gate_at = body
-            .find("ensure_spatial_ready()")
-            .expect("状态门必须存在");
+        let gate_at = body.find("ensure_spatial_ready()").expect("状态门必须存在");
         let empty_at = body
             .find("SpatialTreeState::ReadyEmpty")
             .expect("ReadyEmpty 必须显式放行");

@@ -233,8 +233,7 @@ pub fn full_init(
             //    hd/hh 矫正；与 connect / run_cli 同款）。幂等；connect 层可能已做过。
             if !CONNECTED.load(Ordering::SeqCst) {
                 aios_core::init_surreal().await?;
-                aios_database::data_interface::embedded_surql::define_embedded_functions()
-                    .await?;
+                aios_database::data_interface::embedded_surql::define_embedded_functions().await?;
                 CONNECTED.store(true, Ordering::SeqCst);
             }
 
@@ -763,8 +762,7 @@ pub fn export_obj(py: Python<'_>, refno: String, dir: PathBuf) -> PyResult<Py<Py
                     );
                 }
                 let insts =
-                    aios_database::data_interface::staging::query_valid_insts(&inst_refnos)
-                        .await?;
+                    aios_database::data_interface::staging::query_valid_insts(&inst_refnos).await?;
                 if insts.is_empty() {
                     anyhow::bail!(
                         "元素 {refno} 有 {} 个实例但全部缺 aabb/world_trans（生成没收口？\
@@ -872,6 +870,10 @@ pub fn baseline(py: Python<'_>, dbnum: u32, project: Option<String>) -> PyResult
     pythonized(py, &value)
 }
 
+// `sync.realign`（单库回退对齐）随 ADR-021 移除：回退由服务/绑定的手动入队路径
+// 自动排成重建批次，worker 冻结点复核后整库清空重建（`wipe_dbnum_for_reinit`），
+// 绑定侧的闭环入口是现成的 `incr.execute_manual` + `incr.drain_data`。
+
 // ── room ────────────────────────────────────────────────────────────────────
 
 /// 房间归属全量重建（`build_room_relations`）。
@@ -931,10 +933,12 @@ pub fn enqueue(py: Python<'_>, changes: Bound<'_, PyAny>) -> PyResult<usize> {
     let changes: Vec<ChangeIn> = pythonize::depythonize(&changes)?;
     let changes: Vec<aios_database::fast_model::occ_generate::AabbChange> = changes
         .into_iter()
-        .map(|change| aios_database::fast_model::occ_generate::AabbChange {
-            refno: parse_refno(&change.refno),
-            noun: change.noun,
-        })
+        .map(
+            |change| aios_database::fast_model::occ_generate::AabbChange {
+                refno: parse_refno(&change.refno),
+                noun: change.noun,
+            },
+        )
         .collect();
     let count = changes.len();
     py.detach(|| {
@@ -1023,8 +1027,8 @@ pub fn status(py: Python<'_>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 pub fn tree_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
     ensure_connected()?;
-    let value =
-        py.detach(|| runtime().block_on(aios_database::fast_model::aabb_tree::spatial_tree_status()));
+    let value = py
+        .detach(|| runtime().block_on(aios_database::fast_model::aabb_tree::spatial_tree_status()));
     pythonized(py, &value)
 }
 
@@ -1304,7 +1308,10 @@ mod tests {
         assert_eq!(normalize_endpoint("LOCALHOST:8009"), "127.0.0.1:8009");
         assert_eq!(normalize_endpoint(" 127.0.0.1:8009 "), "127.0.0.1:8009");
         // 非回环主机名原样保留（只归一习惯差异，不做地址簿枚举）。
-        assert_eq!(normalize_endpoint("192.168.31.58:8009"), "192.168.31.58:8009");
+        assert_eq!(
+            normalize_endpoint("192.168.31.58:8009"),
+            "192.168.31.58:8009"
+        );
     }
 
     #[test]

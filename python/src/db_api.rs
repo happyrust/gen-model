@@ -257,8 +257,7 @@ pub fn inst(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
                 //    全」读成「没有」。探针与 export_obj / rs-core
                 //    `inst_relate_anc_ready` 同口径（LIMIT 1，只在空结果分支付）。
                 let unfilled = take_json(
-                    "SELECT VALUE record::id(id) FROM inst_relate WHERE anc = NONE LIMIT 1;"
-                        .into(),
+                    "SELECT VALUE record::id(id) FROM inst_relate WHERE anc = NONE LIMIT 1;".into(),
                     vec![],
                 )
                 .await?;

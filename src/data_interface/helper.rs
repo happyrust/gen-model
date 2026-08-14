@@ -908,7 +908,9 @@ mod tests {
     async fn live_direct_delete_crash_before_persist_recovers_by_rebuild() {
         use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 
-        aios_core::init_test_surreal().await.expect("connect surreal");
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
         // 本用例自己灌树（幽灵构件）、不走启动装载：按状态机的测试装载模式显式
         // 声明，否则进程态停在 Uninitialized，下面的基线 persist 会被发布门拒绝
         // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
@@ -933,7 +935,11 @@ mod tests {
         GLOBAL_AABB_TREE
             .write()
             .await
-            .sync_refnos(vec![RStarBoundingBox::new(ghost_box, ghost, "BOX".to_string())]);
+            .sync_refnos(vec![RStarBoundingBox::new(
+                ghost_box,
+                ghost,
+                "BOX".to_string(),
+            )]);
         crate::fast_model::aabb_tree::persist_aabb_tree()
             .await
             .expect("baseline persist");

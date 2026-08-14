@@ -1,5 +1,273 @@
 # 变更记录
 
+## 2026-08-13
+
+### 新增
+
+- **会话索引差分：db 文件 sesno 窗口净增删改秒级判定**
+  （`data_interface/session_index_diff` + `aios_db.parse.net_changes` +
+  `python/testbed/net_changes_probe.py`）。每个会话页都带当时的索引根
+  （copy-on-write B-tree），取窗口两端的根做双根差分：目标树只下降「页号 >
+  base 会话末页」的新页、共享子树整枝剪掉，base 树按共享根集合剪——IO 正比于
+  变更量，与窗口内会话数解耦。判定**纯文件**：不查库、不逐会话解析记录，窗口
+  由调用方显式给定（源码断言钉死零 `SUL_DB`）。存在性口径与生产 B+ 点查逐字
+  对齐，三条规则均由真实 ams8000 实测逼出并钉成回归单测：同键子指针首见者胜
+  （Save Work 重写子树留下的陈旧指针，跟进会捞出 1.9 万条已被发布抛弃的临时
+  记录）、路由不看 flag（flag=0 的首见指针才是发布后的子树）、键范围路由
+  （回收页残留条目键在本叶范围之外，点查不可达）。验收：模块纯单测 11 条 +
+  `db8000_session_pairs` 性质 h（差分 ≡ 回放折叠，台账腿由性质 e 闭环）+
+  Python 离线档 3 条（issue-019 夹具）+ live 对拍 4 窗口差分 ≡ 生产点查零分歧
+  （全窗口 695ms vs 回放 10.8s，debug 15–34×）；探针 `--verify` 全量窗口审计
+  154 条差异全部点查仲裁归因为回放旧口径盲区（漏报存在 67 / 孤儿腿误报 86 /
+  误判 1）。证据 `docs/evidence/2026-08-13-session-index-diff-net-changes.md`，
+  live 台账 D 组两条已登记。同日补测 amssys（SYST 8191，169 会话）：10.6×，
+  回放折叠净集 **43%（818 条）与生产点查仲裁的两端状态不符**（孤儿 Deleted 腿
+  653 为主）；点查是**同源判定基准**（列出/归类分歧，非独立证明全是旧口径盲区），
+  删除判据的独立性另由 core.dll 键集差佐证。
+- **ADR-022 + specs/003：增量窗口收集改用会话索引差分（净窗口；已接受，P0 已落地、默认 off 灰度中，核心机制层已由 live IDA 闭合，翻默认余下受验收 5 结果层门阻断）**。
+  工具层对拍收口后的引擎采纳决策：执行体与预览的收集阶段由
+  `collect_net_changes` 接管（逐会话回放退为诊断工具），输出形状兼容——每
+  refno 恰一条 `EleOperationData`，净修改由 base/终稿两端版本**一次 diff**
+  合成（属性差量 + children 两端 + old/new owner，diff 实现与回放同源单一
+  权威）；下游模型计划 / ref_rev / MySQL / 渲染零改动。灰度开关
+  `net_window_collection`（默认 off）+ `AIOS_NET_WINDOW`，预览与执行同谓词。
+  四条明示行为变化：改了又改回不再 regen、加了又删不留墓碑行、删了又建判净
+  修改、逐会话明细退出预览主口径。窗口起点仍由水位给出（ADR-001），回退/
+  幽灵水位仍走 ADR-021 整库重建，跨库级联仍走 ref_rev（ADR-003）。
+  - 实现落地（同日晚，P0 引擎接线）：`net_window::collect_net_window`（净三态 →
+    同形状操作流合成；`diff_ele_data` 忠实复刻 vendor 内联 diff，九桶 + children
+    两端 + noun）+ `IncrementPipeline::collect_window` 唯一派发点（预览、执行体、
+    崩溃恢复重收集、worker 尾段重收集四处接入，源码断言禁直调回放）；
+    `NetEntry::base_loc` 让净修改直读两端版本不付点查；净口径回执首条警告自报
+    口径与计数。真实文件逼出第三条口径对齐：字典缺项系统记录（ams8000 全窗口
+    64 条）终稿解析失败按回放同口径跳过 + 计数 + 聚合警告，不整批硬失败。
+    验收：`db8000_session_pairs` 性质 i（净收集 Modified 负载与回放**逐桶相等**，
+    全部案例窗口全绿·样本为各窗口实际 Modified 条目非 test binary 计数）+ live
+    负载对拍（6,499 条 Add 渲染逐字符相等，全窗口净收集 1.24s vs
+    回放 10.9s）+ lib 710 passed + 离线档 65 passed。已知偏差记 evidence
+    「引擎接线」节（`merged_sesnos` 会话页清单口径留待翻默认值前落地）。
+  - **live A/B 全链路执行（同日深夜，切默认值前的最后一道证据，已收口）**：
+    `python/tests/test_net_window_ab.py`（房间增量档，opt-in
+    `$env:AIOS_NET_AB='1'; .venv\Scripts\python.exe -m pytest
+    tests/test_net_window_ab.py -q -s`，@8071 一次性内存库）。testbed 8000
+    （基线 6,542 行）同一起点、同一窗口 105..=209（净三态 +6/-51/~16，其中原样
+    重写 7），off/on 各走一遍完整执行（暂存窗口 + 窗口内生成 + 提交 + 水位收口）：
+    **终态逐维等价**——水位 / 共同活行 6,543（逐字段）/ noun 属性表 / pe_owner
+    6,542 边 / pending / dbnum_info 记账恒等式全部相等；仅有的偏差全部归因：
+    净臂多持 2 个文件真值元素（回放连同旧基线的最终索引漏报，点查仲裁站净一边）、
+    13 条 ref_rev 边为回放对 7 个原样重写元素的顺手重建（§5.1 家族，重置后空
+    ref_rev 店放大）。窗口全链路耗时回放 35.0s vs 净 11.0s（3.2×），收集阶段
+    差分自报 154ms。连续两轮全绿（各 3 分 16 秒）；全量绑定档 83 passed +
+    1 skipped（36.4s）。证据同文件「live A/B 全链路执行」节。
+  - **M1 正确性闭环（同日，T20 / T11b / T19 / T18a 落地；T13 阻塞未闭）**：
+    - **T20 合成器纯单测**：`collect_net_window` 抽出纯合成内层
+      `synthesize_net_window(net, resolve)`（`NetChangeSet` 按值接收、resolver 收窄成
+      `FnMut(RecordLoc) -> Result<EleData>`、解析上下文错误文案留在合成器），**七条
+      纯单测**覆盖三形状 + 基版本失败按新增 + 终稿失败跳过计数聚合 + `base_loc`
+      缺失硬失败 + 原样重写计数（原样重写**不是降级**，是正常判定的正常结果）。
+      纯提取不伪称先红：安全网是性质 i + 既有 live 对拍，新测试有效性由**逐分支变异
+      抽检**证明（5 处准确红，变异代码不入库）。`net_window` lib 13 passed / 0 failed /
+      1 ignored（ignored 是需真实 ams8000 的 live，**本轮未跑**）+ `db8000_session_pairs`
+      集成目标 20 passed（含性质 i，是用例数不是覆盖窗口数）+ Python 离线
+      66 passed / 20 deselected。ADR-022 验收 1 就此满足。
+    - **T11b 存量库删除等价直证**：补上「起点早于删除会话、库内确有活行」的形态——
+      原 A/B 删除腿是空跑（被删元素在基线本就无行）。切点 K=24、窗口 25..=209，
+      文件层净删除 oracle 4 条，起点确为活行且净口径**真立碑 2 条**
+      （`24384_24778`/`24384_24779`，⊆ oracle），共同活行 6,536 逐字段一致、
+      **0 未归因**，live 118s 全绿；`AIOS_T11B_FORCE_EMPTYRUN=1` 强制空跑变异准确变红。
+      存量基线由 `python/tests/_session_snapshot.py`（`session_cut.rs` 的 Python 镜像，
+      与 Rust `db_session_fixture inspect` 双向对拍）切 @K 得到；文件换入换出走**同卷
+      临时文件 + fsync + `os.replace` 原子替换** + `pristine` 备份 + `finally` SHA 校验，
+      收尾源文件 16,504,832 字节无损恢复。**删除判据是纯文件**（core.dll
+      `elementsDeletedBetween` 键集差的复刻）；**DB 查询只验证窗口前活行与窗口后墓碑
+      两个状态，不作删除判据**，也不用 `search_latest_refno` 点查自证。
+    - **T19 qualifier 恢复对拍（非阻断，CLOSED）**：断言落 `db8000_session_pairs.rs`
+      性质 i 的 Modified 分支，两臂 `qualified_changes` 逐项相等，集成绿，**未扩公开
+      DTO**。强度如实标：当前 issue-019 夹具两案例都是删除、数组属性零变化，这条现在
+      是 **empty == empty**，**不是 qualifier 语义已覆盖的证据**，价值只在防回归。
+    - **T18a release 方向性单点测量（n=1，非性能门）**：高复触窗 104..=209（106 会话，
+      a/d/m = 6/51/16，回放 `ops_total` 215，复触率 2.95）完整净收集 3ms vs 回放 53ms
+      ≈ **17.7×**，该窗 raw 两臂发散 72 条全部归因回放旧口径盲区、点查零分歧；对照
+      Add 地板窗 1..=209（复触率 1.05）126ms vs 792ms ≈ 6.3×（形态决定，不作判定）。
+      **结论仅限**「在动机形状上 ADR-022 决策 4 不需修订」；T18 正式统计
+      （1 warmup + ≥5 次 / median·min·p95 / warm 判定 cold 另报）与 **250206 SYST
+      现场硬门仍未完成**。另：A/B probe 的 4.4× 已明确降级为「净差分 vs 回放完整收集
+      的混层下界参考，非门证据」。
+    - **T13 Added 夹具 BLOCKED（不得标完成）**：仓内**不存在**同时满足「Added > 0」
+      且「raw 净集 == 回放折叠集」的真实窗口——带 Added 的窗口都伴随回放旧口径盲区，
+      raw 两集不等，性质 h/i 指过去必红。须用受控 E3D 录 `scratch-create` 案例
+      （新建 SITE/ZONE → 建元素 → Save Work，窗口内无删除无临时态）；**不得**为点亮
+      它放宽 h/i 断言。**M1 Exit gate 因此仍未通过，M2（T17/T12/T18/T15）不得启动。**
+  - **决策澄清（同日，评审后最小补写，不改决策主体）**：ADR-022 新增「算法来源
+    与正确性边界」——会话索引差分**不是** core.dll `DB_DB::elementsChangedBetween`
+    的复刻，而是 gen-model 吃 dabacon 追加式 CoW B+ 树形状推出来的加速。证据边界
+    同时写死：core31-retrace 证据只显示其**外层语义**是元素 /（属性, qualifier）
+    级的三阶段六桶差分、外层未见索引根双根页差分，但
+    `attributesChangedBetween` / `elementsDeletedBetween` /
+    `elementsInsertedBetween` 的页级实现**未逆向**，故**不断言**内核内部绝不触及
+    索引根；core.dll 继续是属性/桶语义的唯一权威，本路径的索引差分不援引它作为
+    算法来源。正确性契约写明：端点存在性以生产 B+ 点查可达性为 oracle、净三态
+    由两端 leaf `(pgno, offset)` 集合差定义、净修改仍用两版本 `diff_ele_data` 对齐
+    core.dll 语义，正确性靠三重对拍而非「复刻内核」。同时记两条机制层未闭合风险
+    （叶 `flag` 的取值语义与取值全集未逆向、当前口径本就不依赖 flag；删除是移除
+    leaf 还是墓碑 flag；`is_start_page` 只是索引条目起始哨兵行为、底层位定义未知
+    ——三者均无 live IDA 证据，现有零分歧只证结果层，且**差分≡生产点查是同源**
+    （二者都不看 flag），不能当 flag 机制的独立证明），并把翻
+    `net_window_collection` 默认值的门写成验收 5：要么 (a) 在可达 core.dll/idb 上
+    闭合机制；要么 (b) **显式接受机制层未闭合的残余风险**并补一份**结果层**样本——
+    其独立 oracle 必须是**生产可见终态**（E3D/权威库侧对同一元素在删除/重建后的
+    在场与否），而非同源的点查仲裁或带旧口径盲区的回放，样本覆盖已观察 flag 取值/
+    删除重建/Added-Deleted-Modified 三态，走 (b) 机制层仍标未闭合。默认 off 的
+    诊断与灰度不受此门阻断。
+    **⚠ 本条的「机制层未闭合 / 无 live IDA 证据 / 只证结果层」口径已于同日晚被
+    live IDA 逆向推翻，以下一条为准。**
+  - **机制层闭合（同日晚，live IDA 逆向，推翻上条保守口径）**：
+    `docs/evidence/2026-08-13_reverse-core-dll-index-leaf-report.md`
+    （ida-bridge / idalib，core.dll 3.1，SHA `3c1f…417d`，符号系二进制自带 MSVC
+    修饰名、非猜名）证实 core.dll 会话变更枚举（`DB_DB::elementsChanged /
+    Deleted / InsertedBetween` → `DB_IndexTableCompare`，dabacon 比较引擎 opcode
+    266/270，主索引表 `13387743`）**本就是双根 B+ 索引归并差分**——与 gen-model
+    `session_index_diff` **同思想**（gen-model 是纯文件重实现 + 共享子树剪枝，
+    非逐指令复刻内核代码）。三处旧「机制未闭合」悬案就此闭合：① 删除 = 键在旧根
+    不在新根的**集差、非墓碑 flag**（kind=3）；② 变更检测**全链路**（页取 + begin +
+    双根归并）**不读 / 不按 flag 过滤**（flag 在链路外是否另有可见性门未闭合，不写
+    功能性否定，report §4.5/C3/C4）；③ `0x80000001` 是**页内键哨兵**（核内以
+    `-2147483647` 作键边界识别）。**残留（不阻断翻 on，仅登记）**：`flag` 自身位
+    编码（存在 / 偏移 / 位宽 / 枚举）与 **flag 在变更检测链路之外是否另有可见性 /
+    过滤门**均未逆向（report C3/C4，有意收口）——可断言的只是「权威变更检测链路
+    不以 flag 作门」，不写「flag 全无功能」。据此把 ADR-022 / spec / plan / tasks
+    的翻默认门从「(a) 闭合机制 / (b) 接受残余风险」改写为**结果层门**（存量库删除
+    A/B、Added 独立夹具、批次冻结快照、会话页清单、SYST 性能——性能门当前**未达**，
+    debug 完整收集仅 8.8× / probe 4.4×）。qualifier 维：core.dll 变更粒度含
+    `(attr, qualifier)`，gen-model `ModifiedElement` 按属性名聚合会丢 qualifier；
+    这是回放与净路径**共享的既有形状限制**、切臂不新增，翻 on 不阻断但**非无条件
+    安全**，待评估（tasks T19）。
+
+- **ADR-021 + specs/002：水位必须有数据支撑，回退默认整库重建（去档位）**。
+  ADR-001 的「失败不推进水位」管的是写的一侧；读的一侧有两个洞。其一，
+  `needs_initial_load` 只问水位不问数据，「水位非零、`pe` 零行」被判成正常
+  增量，从 `applied+1` 起重放，`1..applied` 静默缺失（看得见数据的
+  `baseline_needs_full_parse` 在 `initialize_dbnum_baseline` 内部，够不着
+  路由）。其二，文件回退默认只阻断等人，而阻断会静默消失——`file_latest`
+  一旦涨回 `applied` 之上，被替换的那段差异永久丢失。
+  - 现场实证：8009 上 dbnum 7350 / 7353 / 7741 的 `applied_sesno` 为
+    208 / 101 / 94 而 `pe` 零行；同日 8 个库因文件在 08-12 19:04 被整批换成
+    更旧副本而回退阻断。证据 `.scratch/realign-20260813-114321`。
+  - 决策要点（评审决议 2026-08-13）：回退**默认整库重建**——扫描只分类入队
+    重建批次，worker 冻结点复核仍判回退才 `wipe_dbnum_for_reinit`（整库清空 +
+    水位行清值不删行 + 统计与队列残留清空 + spatial epoch 递增），随后按首次
+    导入全量解析；`watermark_realign` 档位、`AIOS_WATERMARK_REALIGN`、
+    `POST /dbnums/{dbnum}/realign` 端点与 `aios_db.sync.realign` 绑定全部
+    移除。幽灵水位（`applied>0` 零数据）由 `needs_initial_load` 的数据支撑
+    维度路由到基线（判据落在路由、不落入队门——空库会无限重解析）。
+    `TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` 照旧阻断。
+  - 实现落地（同日）：`needs_initial_load` 增加数据支撑维度 +
+    `dbnum_has_any_pe_row` 存在性探针（只在有增量窗口要跑时付一次，读失败上浮为
+    批次 Failed）；`scan_and_check_file` 返回三态 `ScanGate`（放行/阻断/重建），
+    sweep 与 watch 对回退构造 `reinit_batch`（applied=0 形状）入队；
+    `fast_delete::wipe_dbnum_for_reinit`（与快删同源的三阶段删除，元数据阶段改为
+    统计清空 + epoch 递增 + 水位清值不删行且置尾作提交点）；执行体
+    `execute_one_dbnum` 冻结点复核仍判回退才清库，清库失败计 Failed 幂等重放；
+    预览 `blocked`/`initialization_required` 与执行体同谓词。
+    `FileAnomaly::auto_realignable` 更名 `requires_reinit`。拆除面：
+    `WatermarkRealign` 档位与环境变量、`realign_rolled_back_dbnum` /
+    `realign_dbnum_checked`、HTTP `POST /dbnums/{dbnum}/realign`、
+    `aios_db.sync.realign` 绑定、`AiosClient.realign_dbnum`、
+    `python/tests/test_watermark_realign.py`（由 `test_rollback_reinit.py` 接棒，
+    见下）。
+  - Python 闭环用例 `python/tests/test_rollback_reinit.py`（房间增量档，@8071
+    一次性内存库）：走与服务同一台机器（`incr.execute_manual` 子集），模块级
+    引导一次（SYS meta 解析撑起 MDB 范围 + 7998 首次基线），三条用例分别钉
+    回退整库重建（幸存位/幽灵位标记行都必须物理消失）、幽灵水位路由到基线
+    （行数回到完整基线，增量重放做不到）、类型变更照旧阻断（水位与数据纹丝
+    不动）。conftest 导入期补 `RUST_MIN_STACK=16777216`（执行链在默认线程栈
+    上溢出，与 testbed 脚本同一惯例）。全套 `pytest -q` 80 绿（36.5s）。
+  - live 首跑抓出并修复一个真缺陷：增量形状（start_sesno>1）的批次先开 ADR-017
+    暂存窗口、执行体改道基线后窗口缺 finalize plan 而 failed——`batch_worker`
+    开窗前新增冻结点预判 `batch_reroutes_to_initial_load`（applied=0 / 回退 /
+    幽灵水位一律不开窗），与执行体共用同一个数据支撑探针。
+  - 验证：CI 口径受影响模块单测 155 绿；live
+    `live_rollback_wipe_clears_the_dbnum_for_reinit`（4.7s @8019）与
+    `live_rollback_and_ghost_watermark_reinit_end_to_end`（22.3s @8019，两幕）
+    通过，台账与 `docs/evidence/2026-08-13-adr021-rollback-reinit-live.md` 留痕；
+    Python 离线档 62 绿。
+  - 「在水位行上记录来源（基线收口 / 增量收口 / info 表播种）」与
+    「`applied_sesno_time` 交叉核验（停机窗口内回退又长回去）」记为后续项。
+
+- **增量模型生成单元测试总纲**：重写
+  `docs/2026-08-06_model-increment-unit-test-plan.md`，把 S0–S13、U1–U13、
+  暂存窗口 I1–I9、房间 RI-1–RI-15、离线夹具与 live / E3D 边界收进同一入口；
+  明确 P0/P1/P2 待补项、具体文件落点、“回退即红”条件、Constitution Check
+  和分波次门禁。当前源码枚举快照为 765 项（82 ignored），`http_api` 为 776 项
+  （82 ignored）；长期状态仍以源码枚举和 live 台账为准，不再复制漂移总数。
+
+### 修复
+
+- **`inst_geo` 几何参数双变体深合并毒化共享单位行（live A/B 抓出的真缺陷）**：
+  `render_inst_geo_merge`（2026-08-13 `276aa5f6` 用 `UPSERT … MERGE` 替换
+  `INSERT IGNORE`）忽略了「不同 `PdmsGeoParam` 变体可以合法共享同一记录 id」——
+  普通 LCylinder 与非切角 SCylinder 的单位网格同为单位圆柱，
+  `hash_unit_mesh_params` 按设计同返 `CYLINDER_GEO_HASH`，两个变体先后 MERGE 把
+  `param` 深合并成 `{PrimLCylinder, PrimSCylinder}` 双键对象，enum 反序列化永久
+  失败，**所有**引用该共享行的根从此生成不出来（A/B run4 实测：2,229 根批量重
+  生成全灭 + 逐根重试全灭，`decode mesh parameters failed`）。改为
+  `render_inst_geo_upsert`：`param` 整值 `SET` 覆盖——行缺失补齐、半成品修复、
+  meshed/aabb/pts 派生字段保留，且对已被旧写法打坏的双键行**自愈**（下次参数
+  刷新整值盖掉即恢复可解，2026-08-13 后跑过生成的持久店无需手工修）。回归：
+  `a_variant_switch_on_a_shared_unit_row_replaces_param_wholesale`（回退 MERGE
+  写法当场红）+ 半成品修复用例改跟新入口 + 源码钉
+  `production_inst_geo_writes_replace_param_wholesale`（禁 MERGE 回潮）。受影响
+  面：lib 定向 12 条全绿、`db8000_session_pairs` 20/20 全绿、全量绑定档 83
+  passed + 1 skipped。
+- **`room_model` 无 project 特性构建编译修复（响亮拒绝）**：`configured_match_room_fn` /
+  `load_room_panel_map` / `load_room_panel_map_from_pe` / `build_room_panels_relate` /
+  `build_room_panels_relate_common` / `load_room_panel_groups` 此前只有 `project_hd` /
+  `project_hh` 两条 cfg 分支，两者皆未启用（CI 单测组合 `ws,gen_model,manifold`）时
+  `configured_match_room_fn` 无返回值（E0308）、`let sql` 门控外的取用点找不到 `sql`
+  （E0425×2），整个 lib 编译不过。按宪法「禁止填近似值」改为**响亮拒绝**：无 project
+  特性时各入口 `anyhow::bail!` 明示「需要 project_hd 或 project_hh」，原实现体整体入
+  `cfg(any(...))`；`configured_match_room_fn` 同样门控（无 project 时其调用方已全部
+  bail，不再被引用）。附回归单测
+  `room_subsystem_loaders_loudly_refuse_without_a_project_feature`（仅在无 project 组合
+  编译运行，断言两个 loader 返 Err 且提示特性名）。
+- **增量流程文档一致性修复（2026-08-13 流程审计定案，纯文档面）**：
+  - 宪法 v1.0.0 → **v1.1.0**（`.specify/memory/constitution.md`）：I 条回退语义按 ADR-021
+    改写（回退默认整库重建、仅 `TypeChanged`/`Duplicate`/`Missing`/`ForeignProject` 身份
+    歧义阻断、补「承诺必须有数据支撑」读侧对偶），附加约束「并发模型」按 ADR-011
+    2026-08-09 修订改写（一个派发器 + 至多 8 个在飞批次）；Governance 增修订记录
+    （动机 / 受影响 ADR / 迁移路径），Last Amended 2026-08-13。
+  - AGENTS.md 水位段与配置段对齐（消除「回退阻断」与「回退默认整库重建」同文矛盾，
+    补数据支撑一条），队列门控段的「同一个 worker」补派发器限定。
+  - ADR-021 状态「提议中」→「已接受（2026-08-13 评审决议）」。
+  - ADR-011 2026-08-09 修订下游同步：`docs/specs/web-service-api.md` §2/§4.3/§6、
+    `specs/002-watermark-data-backing/spec.md` Assumptions、ADR-021 引言——「单 worker /
+    一个消费者」措辞补「一个派发器、默认 1、可配至 8 在飞」限定，行为描述不变。
+  - `specs/002-watermark-data-backing/` 补 `plan.md`（含 Constitution Check：I 条冲突
+    处置 = 本次修宪）与 `tasks.md`（按已落地事实事后补记留痕，每条带文件路径）。
+  - live 台账（`docs/2026-08-12_live-test-ledger.md`）：合计修正 86→**92**——A 27→28
+    （08-13 新增的端到端用例漏计）；新增 E 组补录 tests/ 目录 5 条集成 `#[ignore]`
+    待验行（staged_regen / staged_transform / staged_pane_replay / room_rebuild_repair /
+    gen_one_root；`db8000_session_pairs` 的命中经复核是文档注释、无真实 ignore 用例），
+    口径行同步扩展到 `tests/**`；C 组 issue7_e2e 行加注「旧语义现场，ADR-021 后需按
+    新语义重估重跑」。
+  - 房间增量测试计划（`docs/plans/2026-08-12-room-incremental-live-test-plan.md`）§7
+    增 08-13 重估行：db1112 的 F6 阻断判词被 ADR-021 取代——部署新二进制后首轮重扫
+    将排整库重建批次，Phase C 前置需纳入重建时序、代价与重新定标。
+  - CONTEXT.md 增词条：数据支撑 / 幽灵水位 / 重建批次（各带 _Avoid_ 清单）。
+
+- **fix(incr)：副作用补偿队列补齐死信可观测 / 人工复活（`/update/side-effects/retry`）/
+  done 行清扫三出路，并将 `room_panel_relate` 纳入整库重建的 Ref0 区间清库（补
+  `room_relate` 漏删的姐妹边）**。逆向核实确认：`room_panel_relate` 的 id 形态
+  `{room_refno}_{panel}` 可按 Ref0 区间寻址，而房间重算只对现存实体先清后写、从不
+  整表清空，整库重建后的孤儿边无人回收（ADR-010 D4 幽灵同类）；修复为
+  `fast_delete.rs` `RANGE_TABLES` 增表 + 回归测试
+  `the_wipe_deletes_room_panel_relate_alongside_room_relate`，ADR-021 §4 口径同步补记。
+
+- **fix(incr)：重扫路径读不出文件最新会话号时不再吞成 0（消除假回退告警与失实的整库
+  重建播报）；CATA 定位器读登记表失败上浮、缺 `db_type` 的库计入 missing 并告警；
+  MySQL 镜像 NAME 改参数绑定、DBNO 缺失告警；MQTT 同步去重查询插值统一过
+  `escape_surql_str`；各附回归测试**。
+
 ## 2026-08-12
 
 ### 新增
@@ -62,6 +330,24 @@
   两个崩溃恢复用例缺测试装载模式声明。另补 IU-S8-05/S12-02 顺序钉（部分失败
   后缓存仍失效、水位不推进）与 IU-S0-05 的 warning 半边——7-27 矩阵点名的
   L0 缺口至此全部关闭或有台账去处。
+
+- **房间增量默认打开（`room_incremental` 缺省值 `false` → `true`）**：`options.rs`
+  的 `effective_room_incremental` 缺省翻真，`DbOption.toml` 同步写成 `true`，
+  单测由 `room_incremental_is_off_unless_someone_asks_for_it` 改成
+  `..._is_on_unless_someone_turns_it_off`，并补一条「认不出的环境变量值退回新
+  默认」。
+  - 2026-08-10 取假是为了压住现场那 2580 个查不到几何的房间目标（每页 256 个
+    付两次全量查询、约 88 秒，把模型侧真正的失败埋进日志）。那批目标已经收干净
+    （现场 `/update/pending-units` 的 `room_units` 为空），维持关闭的代价此刻更
+    贵：关着时房间归属**只在删除路径**还会被清理（`helper.rs` 的
+    `delete_room_membership` 从不看这个开关），搬家后的重算全靠启动全量重建
+    回补，而那条兜底路径排在 `startup_autorun` 之后（`skip_startup_room_build`
+    的三道门次序）——默认部署两个开关都关着，等于没有回补通道。
+  - 门本身一处没动：两个写入点（直写事务的 `room_recalc` 语句、暂存窗口收口的
+    `merge_room_recalc_changes`）与一个消费点（`room_round`）照旧读同一个函数，
+    翻的只是缺省值。显式写了 `room_incremental = false` 的配置（`python/tests/
+    DbOption-ci.toml`、`python/testbed/*`）行为不变；要临时关一次用
+    `AIOS_ROOM_INCREMENTAL=0`，不必改文件。
 
 - **空间树一致性闭环：V2 单文件快照、进程状态机、空间串行锁与降级自愈**（方案
   `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md`，D1–D8 已定；

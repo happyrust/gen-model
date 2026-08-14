@@ -27,7 +27,7 @@
 ## 2. 总体架构
 
 ```
-前端 --HTTP(JSON)--> axum Router ---> 数据批次调度器 ---> 单 worker
+前端 --HTTP(JSON)--> axum Router ---> 数据批次调度器 ---> 批次 worker
      <--WebSocket--  /api/v1/ws          |                 |
                           ^              v                 v
                           +-------- TaskRegistry   model_update_pending
@@ -40,8 +40,10 @@
 - 新增模块 `src/web_service/`，feature flag **`http_api`**（默认不启用，`console` feature 可包含它）。
 - 服务与 `async_watch` 在 `run_cli` 内并行：`tokio::join!(mgr.async_watch(), web_service::serve(state))`，互不阻塞；`http_api` 未启用时行为与现在完全一致。
 - **共享状态 `AppState`**：`Arc<AiosDBManager>` + `TaskRegistry` + `tokio::sync::broadcast::Sender<WsEvent>`（容量 1024，慢消费者掉线自补）。
-- 手动提交与自动 watcher 只负责把数据范围交给同一调度器；进度与终态统一由单 worker
-  更新 `TaskRegistry` 并广播 tasks 事件，不再保留 HTTP 直跑或 `incr_applied` 旁路。
+- 手动提交与自动 watcher 只负责把数据范围交给同一调度器；进度与终态统一由批次 worker
+  更新 `TaskRegistry` 并广播 tasks 事件（ADR-011 2026-08-09 修订：一个派发器 + 至多
+  `data_batch_workers` 个在飞批次，默认 1、上限 8，同 dbnum 恒串行、特殊批次独占），
+  不再保留 HTTP 直跑或 `incr_applied` 旁路。
 - 自动、手动、级联补偿与按需 ensure 产生的模型工作统一进入 durable pending，并由共享
   执行器完成加锁、生成、结果写入和 revision 收口。
 
@@ -68,7 +70,8 @@
 | 500 | `internal` | 未分类的服务端缺陷 |
 
 > 旧的通用 409 `conflict` 与「`sync_live=true` 拒手动」的 422 随 ADR-011 §12 退役：数据批次
-> 由单 worker 天然串行，执行请求一律 202 入队（见 §4.3）。`model/ensure` 的
+> 由派发器统一出队（默认单 worker 串行，ADR-011 2026-08-09 修订），执行请求一律 202 入队
+> （见 §4.3）。`model/ensure` 的
 > 422 `container` / `precondition` 以及归属不变量被破坏时的
 > `409 ref0_affiliation_conflict` 不受影响。
 
@@ -141,7 +144,8 @@
 
 ### 4.3 `POST /api/v1/update/execute` — 扫描 + 入队（ADR-011 合流后）
 - 映射：`AiosDBManager::enqueue_manual_update(project, mdb, dbnums)`；执行由进程内唯一的数据批次
-  worker 从队列取走（`batch_worker`，与 `async_watch` 自动发现共用同一条队列与冻结语义）。
+  派发器从队列取走并派给 worker（`batch_worker`，至多 `data_batch_workers` 个在飞、默认 1
+  ——ADR-011 2026-08-09 修订；与 `async_watch` 自动发现共用同一条队列与冻结语义）。
 - 请求：`{ "project": "HD" }`；可选 `"dbnums": [7997, 8000]`（ADR-020：**范围内的
   子集选择**，S2-G 勾选折算出的库号名单）。缺省（不带字段）= 全范围，行为不变。
 - 响应 202（入队回执，rollout 第八节第 7 条）：
@@ -154,16 +158,22 @@
                   "position": 1, "start_sesno": 85, "end_sesno": 92 }],
   "merged": [],
   "already_covered": [],
-  "blocked": [{ "dbnum": 8003, "reason": "文件回退或被替换（file_latest_sesno=812 < applied_sesno=1005），已阻断" }],
+  "blocked": [{ "dbnum": 8004, "reason": "库类型变更（登记 DESI → 现场 SYST），已阻断" }],
   "up_to_date": 2,
   "unselected": [],
-  "warnings": []
+  "warnings": ["dbnum=8003: 检测到文件回退（file_latest_sesno=812 < applied_sesno=1005），已按整库重建入队：worker 执行时将清空该库数据并按首次导入重新解析当前文件"]
 }
 ```
 
 - 语义：手动触发**不插队**（ADR-011 §6）——对已在队里的库只是并入会话（`merged`），
   它剩下的唯一新意义是「别等下一个 30s 轮询」。阻断与排除的库压根不入队（`blocked`）。
   `sync_live=true` 时同样可用（422 已退役）。
+- 回退默认整库重建（ADR-021，2026-08-13，取代 2026-08-12 的 watermark_realign 档位）：
+  判定为**回退**的库不进 `blocked`——按首次导入形状（窗口 `1..file_latest`）入队并经
+  `warnings` 报告（样例见上）。入队本身**不删任何数据**；worker 出队后在冻结点复核，
+  仍判回退才整库清空（`wipe_dbnum_for_reinit`）并按首次导入重新解析，清库失败该批次
+  终态 `failed`（水位未动，下一轮幂等重放）。`type_changed` / `duplicate` / `missing` /
+  归属不符照旧 `blocked`，形状与措辞不变。
 - `dbnums` 子集语义（ADR-020）：每个请求的 dbnum 先过 `UpdateScope::admits`，不在当前
   MDB 声明名单里的**直接拒**（回执 `warnings`，不给绕过 ADR-0013 统一范围门的第二条路）；
   未勾选的常规库不扫描、不入队、水位不动（回执 `unselected`），预览之后新产生的会话不会
@@ -246,15 +256,20 @@
   "file_size": 57948160, "file_latest_sesno": 812, "applied_sesno": 1005,
   "initialized": true,
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
-  "blocked": true, "excluded": false }
+  "blocked": false, "excluded": false }
 ```
 
 - `anomaly` 五种（spec §文件异常）：`rollback` / `path_migrated` / `type_changed` /
-  `duplicate`（带 `paths[]` 交给人挑）/ `missing`。**只有 `path_migrated` 不阻断**。
+  `duplicate`（带 `paths[]` 交给人挑）/ `missing`。`path_migrated` 不阻断；`rollback`
+  自 ADR-021（2026-08-13）起也不再表现为阻断——它转成整库重建（见下），`anomaly`
+  证据（判据两端与两端保存时刻）照带，界面据此把它与普通新库区分开。
 - `blocked`：阻断的库压根不入队，队列面板没有它们的行——这里是「这个库的水位为
   什么一直不动」的唯一出处。`excluded`：不在本期执行范围，即**当前 MDB 没有声明
   这个 DESI**（2026-08-06 起范围只由 MDB 定，`manual_db_nums` 一类手写名单不再参与），
   与阻断不是一回事，界面上不许合成一行。
+- `rollback` 的库在下一轮扫描/执行时按首次导入入队（窗口 `1..file_latest`），由 worker
+  冻结点复核后整库清空重建，不再长期停留在 `blocked: true`；其余四种异常照旧阻断。
+  原 `watermark_realign` 档位与单库对齐端点（曾为 §4.9）随 ADR-021 移除。
 - 旧字段是新形状的子集，既有消费者不受影响。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
@@ -268,6 +283,14 @@
 - `POST /queue/resume` → `{ "paused": false }`：恢复出队并立即唤醒 worker。
 - 没有单条取消：队列是派生态，从队里移掉一行不会推水位，下一轮轮询照样把它发现
   回来——那是个会自己撤销的按钮（ADR-011 §9）。
+
+### 4.9 `POST /api/v1/dbnums/{dbnum}/realign` — 已移除（2026-08-13，ADR-021）
+- 2026-08-12 引入、次日随 ADR-021 退役：回退的处置改为默认自动化——扫描/手动入队
+  把回退库排成整库重建批次，worker 冻结点复核后 `wipe_dbnum_for_reinit` 清库并按
+  首次导入重新解析，端点没有剩余职责（服役期间无对外消费者，plant-ui 未接入）。
+- 调用该路径现在返回 404。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`
+  （整库快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理），
+  操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
@@ -318,9 +341,10 @@
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。
-- 并发约束汇总：数据批次由**单 worker** 串行消费（互斥是调度器的性质，HTTP 层不再有
-  409 预检）；所有生成入口共享 durable pending、生成执行器和 per-生成根锁，同一根不会
-  由按需与批次路径并发生成。
+- 并发约束汇总：数据批次由**一个派发器**统一出队（默认单 worker 串行；ADR-011
+  2026-08-09 修订允许至多 `data_batch_workers` 个在飞批次、上限 8，同 dbnum 恒串行、
+  非 DESI 与基线批次独占；互斥是调度器的性质，HTTP 层不再有 409 预检）；所有生成入口
+  共享 durable pending、生成执行器和 per-生成根锁，同一根不会由按需与批次路径并发生成。
 
 ## 7. 配置与依赖
 

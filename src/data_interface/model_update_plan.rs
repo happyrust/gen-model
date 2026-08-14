@@ -1854,7 +1854,12 @@ mod tests {
                 .iter()
                 .map(|item| (item.action, item.target_refno.as_str(), item.noun.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(ModelWorkAction::RegenRoot, "24383/66459", "BRAN")],
+            vec![
+                (ModelWorkAction::RegenRoot, "24383/66459", "BRAN"),
+                // 被改判整根重生成的位姿目标（CAP 自己）在根生成后送回统一
+                // AABB 变更链——PostRegenAabb 伴随项，晚于本用例首写。
+                (ModelWorkAction::PostRegenAabb, "24383/66460", ""),
+            ],
             "挪 /1WCC1135/B1 的 CAP 必须整根重生成——便宜路径算不出隐含直管段: {:#?}",
             plan.work_items
         );
@@ -1890,7 +1895,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("build {noun} move plan: {error:#}"))
         };
 
-        // 挪一整条 PIPE：它名下只有 /1WCC1135/B1 一条分支。
+        // 挪一整条 PIPE：会话 120 基线下它名下有两条分支（/1WCC1135/B1 与
+        // 24383/101287，后者是首写本用例之后的会话里加的）。
         let moved_pipe = plan_for(pipe, zone, "PIPE").await;
         assert_eq!(
             moved_pipe
@@ -1899,10 +1905,11 @@ mod tests {
                 .map(|item| (item.action, item.target_refno.as_str(), item.noun.as_str()))
                 .collect::<Vec<_>>(),
             vec![
+                (ModelWorkAction::RegenRoot, "24383/101287", "BRAN"),
                 (ModelWorkAction::RegenRoot, bran, "BRAN"),
                 (ModelWorkAction::Transform, "24383/66458", ""),
             ],
-            "挪 PIPE：分支重生成推管段，PIPE 自己仍走便宜路径刷子树: {:#?}",
+            "挪 PIPE：脚下每条分支重生成推管段，PIPE 自己仍走便宜路径刷子树: {:#?}",
             moved_pipe.work_items
         );
 

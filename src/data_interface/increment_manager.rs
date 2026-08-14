@@ -97,6 +97,67 @@ mod tests {
         assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 1112)]));
     }
 
+    /// 扫描裁决到自动路径处置的映射是策略红线（ADR-021）：回退转重建、其余阻断
+    /// 类异常跳过、无异常与良性搬家放行。逐类点名（不留 `_ =>` 兜底）：新增异常
+    /// 种类时这里编译不过，作者必须显式选边。
+    #[test]
+    fn the_scan_gate_maps_every_verdict_shape() {
+        use crate::data_interface::dbnum_state::{FileAnomaly, ScanVerdict};
+
+        let gate = |anomaly: Option<FileAnomaly>| {
+            scan_gate_for(&ScanVerdict {
+                prior: None,
+                anomaly,
+            })
+        };
+        assert_eq!(gate(None), ScanGate::Proceed);
+        assert_eq!(
+            gate(Some(FileAnomaly::PathMigrated {
+                old_path: "/old".into(),
+                new_path: "/new".into(),
+            })),
+            ScanGate::Proceed,
+            "良性搬家照常放行"
+        );
+        assert_eq!(
+            gate(Some(FileAnomaly::Rollback {
+                file_latest_sesno: 114,
+                applied_sesno: 120,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
+            })),
+            ScanGate::Reinit,
+            "回退不阻断，转整库重建入队"
+        );
+        assert_eq!(
+            gate(Some(FileAnomaly::TypeChanged {
+                stored_db_type: "DESI".into(),
+                observed_db_type: "SYST".into(),
+            })),
+            ScanGate::Blocked
+        );
+        assert_eq!(
+            gate(Some(FileAnomaly::Duplicate {
+                paths: vec!["/a".into(), "/b".into()],
+            })),
+            ScanGate::Blocked
+        );
+        assert_eq!(
+            gate(Some(FileAnomaly::Missing {
+                path: "/gone".into()
+            })),
+            ScanGate::Blocked
+        );
+        assert_eq!(
+            gate(Some(FileAnomaly::ForeignProject {
+                stored_project: "AMS".into(),
+                observed_project: "ZDJ".into(),
+            })),
+            ScanGate::Blocked,
+            "身份歧义类异常照旧阻断，绝不自动清库"
+        );
+    }
+
     /// B3（2026-07-26 审计）：`DbnumState::record_scan` 按 dbnum UPSERT 文件身份字段
     /// （file_name / file_path / file_size / file_latest_sesno）。同一 dbnum 的第二个文件
     /// 若先走 `scan_and_check_file`，就会把首见文件的身份覆盖掉——此后即便阻断了该
@@ -165,6 +226,44 @@ mod tests {
                  而手动预览还一口咬定它不在范围里"
             );
         }
+    }
+
+    /// CATA 永远不进执行范围（update_scope 决策 A），但按需 CATA 闭包的定位器
+    /// 从 `dbnum_watermark` 读目录文件身份（`cata_closure` 的登记契约）。全新库上
+    /// 若范围门直接跳过 CATA，登记行永远不出现，闭包对分支组件解不出任何依赖
+    /// （parsed=0），BRAN/HANG 的目录几何整体生成不出来——生产老库靠范围纪律
+    /// 之前的遗留登记行掩盖了这个坑（2026-08-13 testbed 首次暴露）。
+    ///
+    /// 钉两件事：范围外 CATA 的登记豁免分支在 `scan_and_check_file` 之前；
+    /// scan 之后、`discover_batch` 之前有一道 `in_scope` 收尾门（只登记不入队）。
+    #[test]
+    fn out_of_scope_cata_is_recorded_but_never_enqueued() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        let cata_exempt_at = body
+            .find(concat!("eq_ignore_ascii_case(\"", "CATA\")"))
+            .expect("sweep_dirs: 缺少范围外 CATA 的登记豁免分支");
+        let scan_at = body
+            .find(".scan_and_check_file(")
+            .expect("sweep_dirs: 缺少 scan_and_check_file 调用");
+        let enqueue_gate_at = body[scan_at..]
+            .find("if !in_scope")
+            .expect("sweep_dirs: scan 之后缺少范围收尾门（范围外 CATA 只登记不入队）")
+            + scan_at;
+        let discover_at = body
+            .find(".discover_batch(")
+            .expect("sweep_dirs: 缺少 discover_batch 调用");
+        assert!(
+            cata_exempt_at < scan_at,
+            "范围外 CATA 的豁免判定必须在观察落库之前，否则登记行仍然写不进去"
+        );
+        assert!(
+            enqueue_gate_at < discover_at,
+            "范围收尾门必须在 discover_batch 之前，否则范围外 CATA 会被带进队列"
+        );
     }
 
     /// 两条自动路径给批次定的「归属项目」必须来自文件所在的监控目录，不能是配置里
@@ -601,6 +700,107 @@ mod tests {
              而它们正是 check_file_against_state 的判据"
         );
     }
+
+    /// 读不出最新会话号的文件必须跳过本轮，不得吞成 sesno=0（2026-08-13 审计 P1）。
+    ///
+    /// 0 会对 applied > 0 的库伪造「文件回退」：把假观察值（file_latest_sesno=0）
+    /// 写进登记行，控制台还播报一次实际不会发生的整库重建（reinit 形状 1..=0
+    /// 过不了入队的 covers 守卫）。三条扫描路径必须同口径：手动 warn+跳过、
+    /// watch 头部扫描失败跳过、sweep 曾是唯一吞错的那条。嵌在依赖实库的大函数里，
+    /// 钉源码（marker 用 `concat!` 拼接，避免本测试自己的字面量先被命中）。
+    #[test]
+    fn a_failed_sesno_read_is_skipped_not_zeroed_on_the_sweep_path() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后是 reinit_batch")
+            .0;
+        let read_at = body
+            .find(".get_latest_sesno()")
+            .expect("sweep_dirs 必须读文件最新会话号");
+        let rest = &body[read_at..];
+        // 600 字节窗口，向后走到字符边界（周边是中文注释，硬切会劈开多字节字符）。
+        let mut end = rest.len().min(600);
+        while !rest.is_char_boundary(end) {
+            end += 1;
+        }
+        let window = &rest[..end];
+        assert!(
+            !window.contains("unwrap_or_default"),
+            "读失败不得吞成 0（伪造回退 + 假观察值）: {window}"
+        );
+        assert!(
+            window.contains("continue"),
+            "读失败必须跳过本轮该文件（与手动路径同口径）: {window}"
+        );
+    }
+
+    /// 回退播报不许声称一次可能不会发生的入队（2026-08-13 审计 P1 附带项）。
+    ///
+    /// reinit 形状（1..=file_latest）仍要过 `batch_queue::enqueue` 的 covers 守卫
+    /// 与合并判定，实际落点由入队日志（`enqueue_discovered` 的 outcome 行）报告。
+    /// 这句话曾写死「已按整库重建入队」，在空文件（file_latest=0）等边界下与
+    /// 事实不符——日志说了一件没有发生的事。
+    #[test]
+    fn the_rollback_line_reports_disposition_not_a_presumed_enqueue() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("pub(crate) async fn ", "scan_and_check_file("))
+            .expect("scan_and_check_file 未找到")
+            .1
+            .split_once(concat!("pub async fn ", "init_watcher("))
+            .expect("scan_and_check_file 之后应当是 init_watcher")
+            .0;
+        assert!(
+            !body.contains(concat!("已按整库重建", "入队")),
+            "播报不得预设入队结果，实际落点归入队日志"
+        );
+        assert!(
+            body.contains("转整库重建"),
+            "回退处置（转整库重建）必须仍然喊出来"
+        );
+    }
+
+    /// MySQL 镜像（feature=sql）：NAME 必须参数绑定、DBNO 缺失必须出声
+    /// （2026-08-13 审计 P2）。
+    ///
+    /// 元素名可含引号/反斜杠，拼进单引号字面量会让该条 UPDATE 失败且只留
+    /// warning；DBNO 缺失静默取 0 则在镜像表里留下一个看着像真的库号。
+    /// 函数在 `#[cfg(feature = "sql")]` 门后，纯函数测不到，钉源码
+    /// （include_str 不受 feature 影响）。
+    #[test]
+    fn the_mysql_mirror_binds_name_and_reports_missing_dbno() {
+        let src = include_str!("increment_manager.rs");
+        let update = src
+            .split_once(concat!("async fn ", "process_mysql_update_elements("))
+            .expect("process_mysql_update_elements 未找到")
+            .1
+            .split_once(concat!("async fn ", "process_mysql_delete_elements("))
+            .expect("其后应当是 process_mysql_delete_elements")
+            .0;
+        assert!(
+            update.contains(".bind("),
+            "OWNER/NAME/ID 必须走 sqlx 参数绑定: {update}"
+        );
+        assert!(
+            !update.contains(concat!("NAME='", "{}'")),
+            "不得把元素名拼进单引号字面量"
+        );
+        let insert = src
+            .split_once(concat!("async fn ", "process_mysql_insert_elements("))
+            .expect("process_mysql_insert_elements 未找到")
+            .1
+            .split_once(concat!("async fn ", "process_mysql_update_elements("))
+            .expect("其后应当是 process_mysql_update_elements")
+            .0;
+        assert!(
+            insert.contains("缺 DBNO"),
+            "DBNO 缺失必须告警而不是静默取 0: {insert}"
+        );
+    }
 }
 
 /// 增量更新信息结构体
@@ -943,6 +1143,40 @@ fn try_parse_db_basic_info(path: &std::path::Path) -> Option<DbBasicInfo> {
     Some(parse_file_basic_info(&header))
 }
 
+/// 一次 F6 扫描裁决在自动路径上的处置（ADR-021）。
+///
+/// 过去 `scan_and_check_file` 返回 `bool`（放行 / 阻断），回退默认整库重建后
+/// 处置变成三种：回退既不放行（增量窗口不许接手）也不阻断（不等人），而是
+/// 由调用方按首次导入形状入队一条重建批次，清库归 worker 执行体的冻结点复核。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScanGate {
+    /// 无异常（或良性路径迁移）：照常走水位比对与增量发现。
+    Proceed,
+    /// 阻断类异常（类型变更 / 同号多文件 / 缺失 / 归属不符）或读状态失败：
+    /// 本轮跳过，水位不动，等人处理。
+    Blocked,
+    /// 回退：按整库重建入队（applied=0 形状，窗口 1..file_latest），
+    /// 扫描路径不删任何数据。
+    Reinit,
+}
+
+/// 裁决 → 处置的唯一映射（纯函数，好测）。逐类点名、不留 `_ =>` 兜底：新增
+/// 一种异常时这里编译不过，作者必须显式决定它放行、阻断还是重建。
+fn scan_gate_for(verdict: &crate::data_interface::dbnum_state::ScanVerdict) -> ScanGate {
+    use crate::data_interface::dbnum_state::FileAnomaly;
+
+    match &verdict.anomaly {
+        None | Some(FileAnomaly::PathMigrated { .. }) => ScanGate::Proceed,
+        Some(FileAnomaly::Rollback { .. }) => ScanGate::Reinit,
+        Some(
+            FileAnomaly::TypeChanged { .. }
+            | FileAnomaly::Duplicate { .. }
+            | FileAnomaly::Missing { .. }
+            | FileAnomaly::ForeignProject { .. },
+        ) => ScanGate::Blocked,
+    }
+}
+
 impl AiosDBManager {
     /// 简化的MySQL pdms_element表更新方法
     ///
@@ -1039,12 +1273,12 @@ impl AiosDBManager {
     ///
     /// 分类与落库都交给 [`DbnumState::classify_scan`] / [`DbnumState::record_observation`]
     /// ——手动预览、手动入队、worker 执行体走的是同两个函数，四条路径不可能再分叉。
-    /// 这里只剩下自动路径独有的那部分：把裁决翻成日志，把阻断翻成返回值。
+    /// 这里只剩下自动路径独有的那部分：把裁决翻成日志，把处置翻成 [`ScanGate`]。
     ///
-    /// 返回 `false` 表示该文件被阻断、调用方应跳过（水位不回退）。阻不阻断只由
-    /// [`FileAnomaly::blocks`] 说了算——这里过去只列举了 `Rollback` 与 `PathMigrated`，
-    /// 其余走 `_ => true` 放行，于是 `TypeChanged`（同号文件被换成另一类型的库）
-    /// 在自动路径上照常应用，而手动预览把它标成阻断。
+    /// 处置只由 [`scan_gate_for`] 说了算（它按 [`FileAnomaly`] 逐类点名）：回退
+    /// 返回 [`ScanGate::Reinit`]，调用方按首次导入形状入队重建批次（ADR-021，
+    /// 清库归 worker 执行体的冻结点复核，扫描路径不删任何数据）；其余阻断类
+    /// 异常返回 [`ScanGate::Blocked`]，调用方跳过（水位不回退）。
     pub(crate) async fn scan_and_check_file(
         &self,
         project: &str,
@@ -1053,7 +1287,7 @@ impl AiosDBManager {
         db_type: &str,
         db_num: u32,
         file_latest_sesno: i32,
-    ) -> bool {
+    ) -> ScanGate {
         use crate::data_interface::dbnum_state::{DbnumState, FileAnomaly, FileObservation};
 
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -1073,7 +1307,7 @@ impl AiosDBManager {
             Ok(verdict) => verdict,
             Err(e) => {
                 println!("F6 读取 DBNUM 状态失败，本轮跳过 dbnum={db_num}: {e:#}");
-                return false;
+                return ScanGate::Blocked;
             }
         };
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
@@ -1081,7 +1315,7 @@ impl AiosDBManager {
         }
 
         // 逐个变体点名，不留 `_ =>` 兜底：将来新增一种异常时这里编译不过，
-        // 作者必须显式决定它阻不阻断、怎么说。
+        // 作者必须显式决定它放行、阻断还是重建、怎么说。
         match &verdict.anomaly {
             None => {}
             Some(FileAnomaly::Rollback {
@@ -1089,7 +1323,9 @@ impl AiosDBManager {
                 applied_sesno: a,
                 ..
             }) => println!(
-                "F6 文件回退/替换，阻断 dbnum={db_num}（file_latest={f} < applied={a}），水位不回退"
+                "F6 文件回退/替换 dbnum={db_num}（file_latest={f} < applied={a}），\
+                 转整库重建：按首次导入形状交由入队，实际落点见入队日志\
+                 （worker 冻结点复核仍判回退才清空该库数据并重新解析，ADR-021）"
             ),
             Some(FileAnomaly::TypeChanged {
                 stored_db_type,
@@ -1116,7 +1352,7 @@ impl AiosDBManager {
             ),
         }
 
-        !verdict.blocked()
+        scan_gate_for(&verdict)
     }
 
     // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：
@@ -1277,7 +1513,8 @@ impl AiosDBManager {
                 let project = self.owning_project(path);
 
                 // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
-                if !self.in_scope(&scope, &project, &db_type, db_no) {
+                let in_scope = self.in_scope(&scope, &project, &db_type, db_no);
+                if !in_scope {
                     if is_foreign_runtime_sys(&self.db_option, &project, &db_type) {
                         println!(
                             "[{origin}] 忽略非主项目的运行态系统库: project={project} \
@@ -1285,16 +1522,41 @@ impl AiosDBManager {
                              （dbnum 只在项目内唯一，本库只承载主项目 {} 的系统库）",
                             self.db_option.project_name
                         );
-                    } else {
+                        continue;
+                    }
+                    // CATA 永远不进执行范围（update_scope 决策 A），但**登记不能跟着跳**：
+                    // 按需 CATA 闭包的定位器从 dbnum_watermark 读目录文件身份
+                    // （`cata_closure::load_dbnum_files_from_watermark` 的契约），全新
+                    // 库上没有这些行时，闭包对分支组件解不出任何依赖（parsed=0），
+                    // BRAN/HANG 的目录几何整体生成不出来。生产老库靠范围纪律之前的
+                    // 遗留登记行掩盖了这一点。所以 CATA 走完 F6 判重与观察落库，
+                    // 只是不入队；其余范围外类型维持原跳过语义。
+                    if !db_type.eq_ignore_ascii_case("CATA") {
                         // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
                         // 287 个 DESI，MDB 只声明 29 个），聚合成一句收在循环外。
                         out_of_scope.push(format!("{db_type}:{db_no}"));
+                        continue;
                     }
-                    continue;
                 }
-                let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
-                    .get_latest_sesno()
-                    .unwrap_or_default();
+                // 读不出最新会话号就跳过本轮该文件，与手动路径同口径
+                // （`manual_update::scan_project_candidates` 的 warn+跳过）。老写法
+                // `.unwrap_or_default()` 把读失败吞成 0：对 applied > 0 的库伪造出
+                // 「文件回退」，把假观察值（file_latest_sesno = 0）写进登记行，还让
+                // 控制台播报一次实际不会发生的整库重建——reinit 形状 1..=0 过不了
+                // 入队的 covers 守卫，日志与事实不符（2026-08-13 审计 P1）。
+                let file_latest_sesno =
+                    match PdmsIO::new(&project, path.to_path_buf(), true).get_latest_sesno() {
+                        Ok(sesno) => sesno,
+                        Err(error) => {
+                            let msg = format!(
+                                "[{origin}] 跳过无法读取最新会话的数据库文件 {}: {error}",
+                                path.display()
+                            );
+                            log::warn!("{msg}");
+                            eprintln!("{msg}");
+                            continue;
+                        }
+                    };
                 log::debug!("扫描 {path:?}: file_latest_sesno={file_latest_sesno}");
 
                 // 建立文件名到完整路径的映射
@@ -1321,8 +1583,9 @@ impl AiosDBManager {
                     );
                     continue;
                 }
-                // F6：文件观察落库 + 回退/迁移检测；回退（file_latest < applied）阻断该文件（水位不回退）。
-                if !self
+                // F6：文件观察落库 + 回退/迁移检测；回退按整库重建入队（ADR-021），
+                // 其余阻断类异常跳过（水位不回退）。
+                let gate = self
                     .scan_and_check_file(
                         &project,
                         path,
@@ -1331,8 +1594,15 @@ impl AiosDBManager {
                         db_no,
                         file_latest_sesno as i32,
                     )
-                    .await
-                {
+                    .await;
+                if gate == ScanGate::Blocked {
+                    continue;
+                }
+
+                // 范围外的 CATA 到此为止：身份已登记（供按需闭包定位），不入队
+                // ——回退重建也一样（CATA 永远不进执行范围，重建批次没有 worker
+                // 会认领它）。
+                if !in_scope {
                     continue;
                 }
 
@@ -1343,6 +1613,23 @@ impl AiosDBManager {
                     if let Err(e) = SyncPublisher::ensure_archive(&path.to_path_buf()).await {
                         eprintln!("初始化存档失败 {:?}: {}", file_name, e);
                     }
+                }
+
+                // 回退：按首次导入形状入队重建批次，绕过 discover_batch——那道门
+                // 的「水位已覆盖」早退（file_latest <= applied）对回退恒成立，而
+                // 这里的依据是 F6 裁决，不是水位比对。
+                if gate == ScanGate::Reinit {
+                    params.insert(
+                        path.to_path_buf(),
+                        self.reinit_batch(
+                            &project,
+                            path,
+                            &db_type,
+                            db_no,
+                            file_latest_sesno as i32,
+                        ),
+                    );
+                    continue;
                 }
 
                 // 需不需要更新只看「文件会话号 vs 水位」；从未解析（水位 0）的库
@@ -1391,6 +1678,46 @@ impl AiosDBManager {
         );
 
         anyhow::Ok(())
+    }
+
+    /// 回退重建批次的入队形状（ADR-021）：按首次导入（applied=0，窗口
+    /// 1..file_latest）入队，数据一行不动——清库归 worker 执行体的冻结点复核
+    /// （`execute_one_dbnum` 复核仍判回退才调 `wipe_dbnum_for_reinit`）。
+    ///
+    /// 与 [`Self::discover_batch`] 刻意分开：那道门按「文件会话号 vs 水位」判
+    /// 有没有活，对回退恒判「已覆盖」；这里的依据是 F6 裁决。窗口时刻按
+    /// `1..file_latest` 取——重建就是把整个文件当作待应用窗口。
+    fn reinit_batch(
+        &self,
+        project: &str,
+        path: &std::path::Path,
+        db_type: &str,
+        db_num: u32,
+        file_latest_sesno: i32,
+    ) -> crate::data_interface::batch_scheduler::DiscoveredBatch {
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let (first_pending_sesno_time, file_latest_sesno_time) =
+            crate::data_interface::manual_update::window_times_rfc3339(
+                project,
+                path,
+                1,
+                file_latest_sesno,
+            );
+        crate::data_interface::batch_scheduler::DiscoveredBatch {
+            project: project.to_string(),
+            dbnum: db_num,
+            db_type: db_type.to_string(),
+            path: path.to_path_buf(),
+            file_name,
+            applied_sesno: 0,
+            file_latest_sesno,
+            first_pending_sesno_time,
+            file_latest_sesno_time,
+        }
     }
 
     /// 一次发现的公共判定：读水位、比会话号，需要更新则给出待入队批次。
@@ -1853,8 +2180,9 @@ impl AiosDBManager {
                                 );
                                 continue;
                             }
-                            // F6：文件观察落库 + 回退/迁移检测；回退阻断该文件（水位不回退）。
-                            if !self
+                            // F6：文件观察落库 + 回退/迁移检测；回退按整库重建
+                            // 入队（ADR-021），其余阻断类异常跳过（水位不回退）。
+                            match self
                                 .scan_and_check_file(
                                     &project,
                                     path,
@@ -1865,7 +2193,21 @@ impl AiosDBManager {
                                 )
                                 .await
                             {
-                                continue;
+                                ScanGate::Blocked => continue,
+                                ScanGate::Reinit => {
+                                    params.insert(
+                                        path.to_path_buf(),
+                                        self.reinit_batch(
+                                            &project,
+                                            path,
+                                            db_type,
+                                            db_num,
+                                            new_header.latest_ses_data.sesno as i32,
+                                        ),
+                                    );
+                                    continue;
+                                }
+                                ScanGate::Proceed => {}
                             }
 
                             println!(
@@ -2049,8 +2391,15 @@ impl AiosDBManager {
                     let children_vec: Vec<RefU64> = add_data.children.iter().cloned().collect();
                     children_map.insert(*refno, children_vec);
                 }
-                // 从属性映射中获取数据库编号，如果没有则使用默认值0
-                let dbnum = attr_map.get_i32("DBNO").unwrap_or(0);
+                // 从属性映射中获取数据库编号；缺失以 0（未解析）写入并出声——
+                // 0 是「拿不到真值」的显式记号，不是可静默默认的正常值
+                // （2026-08-13 审计：镜像表里一个看着像真的库号比缺值更难排查）。
+                let dbnum = attr_map.get_i32("DBNO").unwrap_or_else(|| {
+                    log::warn!(
+                        "MySQL 镜像: 元素 {refno:?} 缺 DBNO 属性，NUMBDB 以 0（未解析）写入"
+                    );
+                    0
+                });
                 // 生成插入SQL片段
                 let sql_fragment = gen_pdms_element_insert_sql(attr_map, dbnum, &children_map);
                 if !sql_fragment.is_empty() {
@@ -2108,8 +2457,8 @@ impl AiosDBManager {
         println!("开始处理{}个修改元素", update_elements.len());
         // 分批处理
         for chunk in update_elements.chunks(BATCH_SIZE) {
-            let mut update_sqls = Vec::new();
-            for (refno, _sesno, modify_data) in chunk {
+            let mut updates = Vec::new();
+            for (refno, _sesno, _modify_data) in chunk {
                 // todo 暂时通过查询surreal来获取最终得值
                 if let Some(pe) = get_pe((*refno).into()).await? {
                     let name = if !pe.name.is_empty() {
@@ -2119,28 +2468,29 @@ impl AiosDBManager {
                             .await?
                             .unwrap_or("".to_string())
                     };
-                    // 构建UPDATE语句
-                    let update_sql = format!(
-                        "UPDATE {} SET OWNER={}, NAME='{}' WHERE ID={}",
-                        PDMS_ELEMENTS_TABLE,
-                        pe.owner.refno().0,
-                        name,
-                        pe.refno.refno().0
-                    );
-                    update_sqls.push(update_sql);
+                    updates.push((pe.owner.refno().0, name, pe.refno.refno().0));
                 }
             }
-            // 批量执行UPDATE语句
-            for sql in update_sqls {
-                match sqlx::query(&sql).execute(pool).await {
+            // 逐条参数绑定执行：NAME 是外部字符串（元素名可含引号/反斜杠），拼进
+            // 单引号字面量会破坏语句、让该条 UPDATE 失败且只留 warning
+            // （2026-08-13 审计 P2）。OWNER/ID 顺带一起绑定，语句文本从此恒定。
+            let update_sql = format!("UPDATE {PDMS_ELEMENTS_TABLE} SET OWNER=?, NAME=? WHERE ID=?");
+            for (owner, name, id) in updates {
+                match sqlx::query(&update_sql)
+                    .bind(owner)
+                    .bind(&name)
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                {
                     Ok(result) => {
                         if result.rows_affected() == 0 {
-                            println!("警告: MySQL 更新元素时未找到对应记录: {}", sql);
+                            println!("警告: MySQL 更新元素时未找到对应记录: ID={id} NAME={name}");
                         }
                     }
                     Err(e) => {
                         println!("更新元素失败: {}", e);
-                        println!("SQL: {}", sql);
+                        println!("SQL: {update_sql} (ID={id}, NAME={name})");
                         return Err(anyhow::anyhow!("更新元素失败: {}", e));
                     }
                 }

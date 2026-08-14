@@ -115,7 +115,9 @@ static STATE: Mutex<SpatialStateSnapshot> = Mutex::new(SpatialStateSnapshot {
 });
 
 fn with_state<T>(f: impl FnOnce(&mut SpatialStateSnapshot) -> T) -> T {
-    let mut cell = STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cell = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&mut cell)
 }
 
@@ -354,8 +356,14 @@ mod tests {
     /// failpoint 只认精确同名：别名/前缀/未配置都必须安然返回。
     #[test]
     fn failpoint_arms_only_on_exact_name() {
-        assert!(failpoint_armed(Some("spatial_after_tree_sync"), "spatial_after_tree_sync"));
-        assert!(!failpoint_armed(Some("spatial_after_tree_sync"), "spatial_snapshot_tmp_written"));
+        assert!(failpoint_armed(
+            Some("spatial_after_tree_sync"),
+            "spatial_after_tree_sync"
+        ));
+        assert!(!failpoint_armed(
+            Some("spatial_after_tree_sync"),
+            "spatial_snapshot_tmp_written"
+        ));
         assert!(!failpoint_armed(Some("spatial"), "spatial_after_tree_sync"));
         assert!(!failpoint_armed(None, "spatial_after_tree_sync"));
     }
@@ -383,8 +391,13 @@ mod tests {
         let ready_check_at = body
             .find("current_state().is_ready()")
             .expect("必须复核 Ready 才算恢复");
-        let wake_at = body.find("BatchScheduler::global().wake()").expect("恢复后唤醒调度器");
-        assert!(ready_check_at < wake_at, "唤醒必须在 Ready 复核之后: {body}");
+        let wake_at = body
+            .find("BatchScheduler::global().wake()")
+            .expect("恢复后唤醒调度器");
+        assert!(
+            ready_check_at < wake_at,
+            "唤醒必须在 Ready 复核之后: {body}"
+        );
         assert!(
             !body.contains("reconcile_spatial_pending"),
             "常态 pending 重放归派发门，revalidator 不掺和: {body}"

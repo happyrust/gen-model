@@ -650,6 +650,9 @@ mod tests {
             .expect("valid initial rename");
 
         // 夹具几何进树（与其余 live 用例同一手法；刻意不 load_aabb_tree）。
+        // 显式测试装载模式：本用例要走提交后的 scoped drain，消费者门
+        // （SPATIAL_TREE_NOT_READY）只对 Ready 放行——与 fixture_baseline 同一句。
+        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
         let fixture_refnos: Vec<RefnoEnum> = bodies()
             .iter()
             .map(|body| RefnoEnum::from(refno(body.seq).as_str()))

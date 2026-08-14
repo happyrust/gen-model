@@ -20,6 +20,10 @@ pub mod model_impact;
 
 pub mod sesno_range;
 
+pub mod net_window;
+
+pub mod session_index_diff;
+
 pub mod dbnum_state;
 
 pub mod fast_delete;

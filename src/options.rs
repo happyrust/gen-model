@@ -67,12 +67,17 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub startup_autorun: Option<bool>,
 
-    /// 房间归属的**增量**重算（默认 `false` = 不排、不收）。
+    /// 房间归属的**增量**重算（默认 `true` = 照排照收）。
     ///
     /// 只管增量这一条链，启动全量重建与人工重建不受它影响。详见
     /// [`room_incremental`]。
     #[serde(default)]
     pub room_incremental: Option<bool>,
+
+    /// 增量窗口收集口径（默认 `false` = 逐会话回放）。`true` 时预览与执行改用
+    /// 会话索引差分的净窗口收集（ADR-022 灰度开关）。详见 [`net_window_collection`]。
+    #[serde(default)]
+    pub net_window_collection: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -104,6 +109,7 @@ impl From<DbOption> for DbOptionExt {
             data_batch_workers: None,
             startup_autorun: None,
             room_incremental: None,
+            net_window_collection: None,
         }
     }
 }
@@ -136,6 +142,8 @@ struct DbOptionExtFields {
     startup_autorun: Option<bool>,
     #[serde(default)]
     room_incremental: Option<bool>,
+    #[serde(default)]
+    net_window_collection: Option<bool>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
@@ -188,6 +196,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
         room_incremental: ext.room_incremental,
+        net_window_collection: ext.net_window_collection,
     }
 }
 
@@ -236,7 +245,7 @@ fn effective_startup_autorun(configured: Option<bool>, env_override: Option<&str
 /// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
 pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
 
-/// 房间归属的**增量**重算开不开（`DbOption.toml` 的 `room_incremental`，**默认 false**）。
+/// 房间归属的**增量**重算开不开（`DbOption.toml` 的 `room_incremental`，**默认 true**）。
 ///
 /// 关着时增量链的两个写入点都不再排房间目标（位姿/删除刷新包围盒之后的直写事务、
 /// 暂存窗口的收口计划），空闲轮也不再收房间轮。**已经排在 `model_update_pending`
@@ -245,10 +254,18 @@ pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
 /// 管的只有增量这一条链：启动全量重建、人工重建、以及 `drain_rooms` 直调（房间
 /// 对拍夹具走的就是它）都不看这个开关。
 ///
-/// 默认取假是刻意的：增量房间与增量模型生成共用同一条空间树与同一批包围盒变更，
-/// 而房间那半边一旦在缺几何的构件上空转，每一页都要付两次全量查询、把空闲轮变成
-/// 它的节拍器，模型生成侧的问题反倒被日志淹掉。先关掉它，让模型增量的正确性能被
-/// 单独看清楚。
+/// 默认值的两次翻转都有据可查：
+///
+/// * 2026-08-10 取假——现场压着 2580 个房间目标，全是查不到几何实例的构件，每页
+///   256 个各付两次全量查询、约 88 秒，四轮下来把同期真正失败的那条模型增量整个
+///   埋在日志里。根因在模型侧（祖先链断裂 → 窗口提交不了 → 几何永远不出现），
+///   先关掉房间这半边，让模型增量的正确性能被单独看清楚。
+/// * 2026-08-12 取真——那批空转目标已经收干净（`/update/pending-units` 的
+///   `room_units` 为空），而关着的代价此刻更贵：房间归属只在删除时还会被清理，
+///   搬家后的重算全靠下一次启动全量重建回补，而那条兜底路径本身还排在
+///   `startup_autorun` 那道门之后（`lib.rs` 的 `skip_startup_room_build` 次序），
+///   默认部署里等于没有回补通道。要单独排查模型增量时，用
+///   `AIOS_ROOM_INCREMENTAL=0` 临时关掉一次即可。
 ///
 /// **关闭期间错过的变更靠重启时的启动全量重建回补，这个闭环不需要额外人工动作**：
 /// 开关取值进程内固定（配置经 `load_ext_fields` 的 `OnceLock` 只读一次，环境变量
@@ -307,8 +324,73 @@ fn effective_room_incremental(configured: Option<bool>, env_override: Option<&st
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
+        .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`net_window_collection`]，不必改配置文件。
+pub const NET_WINDOW_ENV: &str = "AIOS_NET_WINDOW";
+
+/// 增量窗口收集口径（`DbOption.toml` 的 `net_window_collection`，**默认 false**）。
+///
+/// `false`：现状——逐会话回放（`IncrementPipeline::collect_changes`）。
+/// `true`：净窗口——会话索引差分给出净三态，再按窗口两端记录版本合成同形状的
+/// 操作流（ADR-022；每 refno 恰一条，加了又删不出现、删了又建判净修改）。
+///
+/// 这是 ADR-022 的灰度开关：预览与执行读的都是本函数（经
+/// `IncrementPipeline::collect_window` 这一个入口，ADR-011 同谓词纪律），
+/// 不存在两条路径两个口径。默认 false 直到夹具 + live A/B 证据收口。
+///
+/// 环境变量 [`NET_WINDOW_ENV`] 压过配置，取值规则同 [`startup_autorun`]
+/// （认 1/true/yes/on 与 0/false/no/off，认不出回落配置——拼错一个词就静默
+/// 换收集口径比「按配置来」坏）。
+pub fn net_window_collection() -> bool {
+    #[cfg(test)]
+    match NET_WINDOW_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_net_window_collection(
+        load_ext_fields().net_window_collection,
+        std::env::var(NET_WINDOW_ENV).ok().as_deref(),
+    )
+}
+
+/// 单测里把 [`net_window_collection`] 摁成某个取值的进程内覆盖（0 = 按配置来），
+/// 形制与理由同 [`RoomIncrementalOverride`]（多线程测试进程不许 `set_var`）。
+#[cfg(test)]
+static NET_WINDOW_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 覆盖的作用域守卫：离开作用域即恢复「按配置来」。
+#[cfg(test)]
+pub(crate) struct NetWindowOverride;
+
+#[cfg(test)]
+impl NetWindowOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        NET_WINDOW_OVERRIDE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for NetWindowOverride {
+    fn drop(&mut self) {
+        NET_WINDOW_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn effective_net_window_collection(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
         .unwrap_or(false)
 }
+
+// `watermark_realign` 档位（off/check/rebaseline，2026-08-12 引入）随 ADR-021
+// 移除：回退的默认且唯一处置是「worker 冻结点复核后整库清空重建」，档位剩下的
+// 「先别动我看看」由 startup_autorun / 队列暂停承担（清库只发生在 worker 出队
+// 之后），同一件事不留两道闸门。环境变量 AIOS_WATERMARK_REALIGN 一并退役。
 
 fn parse_bool_flag(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -358,11 +440,12 @@ mod tests {
         assert!(!effective_startup_autorun(None, Some("")));
     }
 
-    /// 缺配置就是「不算增量房间」——与 `startup_autorun` 同一条纪律：这类会自己
-    /// 跑起来、又会改数据的链路，默认必须是关的。
+    /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被
+    /// 清理，搬家后的重算没有任何自动回补通道——兜底的启动全量重建排在
+    /// `startup_autorun` 之后，而它自己默认也是关的。要关得显式写出来。
     #[test]
-    fn room_incremental_is_off_unless_someone_asks_for_it() {
-        assert!(!effective_room_incremental(None, None));
+    fn room_incremental_is_on_unless_someone_turns_it_off() {
+        assert!(effective_room_incremental(None, None));
         assert!(!effective_room_incremental(Some(false), None));
         assert!(effective_room_incremental(Some(true), None));
     }
@@ -377,6 +460,28 @@ mod tests {
         assert!(effective_room_incremental(None, Some("yes")));
         assert!(effective_room_incremental(Some(true), Some("ture")));
         assert!(!effective_room_incremental(Some(false), Some("ture")));
+        assert!(effective_room_incremental(None, Some("ture")));
+    }
+
+    /// 缺配置就是回放：净窗口是收集口径的架构级切换（ADR-022），必须显式打开；
+    /// 灰度期证据没收口前，默认行为一个字节都不许变。
+    #[test]
+    fn net_window_collection_defaults_to_replay() {
+        assert!(!effective_net_window_collection(None, None));
+        assert!(effective_net_window_collection(Some(true), None));
+        assert!(!effective_net_window_collection(Some(false), None));
+    }
+
+    /// 环境变量两个方向都要压得住：配置写死 true 的部署得能临时退回回放口径，
+    /// 反过来也得能一次性试开而不改文件。认不出的取值回落配置——拼错一个词
+    /// 静默换收集口径比「按配置来」坏，与 [`effective_startup_autorun`] 同纪律。
+    #[test]
+    fn the_net_window_env_override_wins_in_both_directions() {
+        assert!(effective_net_window_collection(Some(false), Some("on")));
+        assert!(!effective_net_window_collection(Some(true), Some("off")));
+        assert!(effective_net_window_collection(None, Some("1")));
+        assert!(effective_net_window_collection(Some(true), Some("no?")));
+        assert!(!effective_net_window_collection(None, Some("no?")));
     }
 
     #[test]

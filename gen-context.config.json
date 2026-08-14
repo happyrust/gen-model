@@ -3,8 +3,9 @@
 
   "output": ".github/copilot-instructions.md",
 
-  "_outputs_comment": "Use the legacy `outputs` key, not `adapters`: sigmap 8.24 filters `adapters` down to copilot/claude/cursor/windsurf before writing, which silently drops codex (AGENTS.md).",
-  "outputs": ["copilot", "cursor", "codex"],
+  "_outputs_comment": "Use the legacy `outputs` key, not `adapters`: sigmap 8.24 filters `adapters` down to copilot/claude/cursor/windsurf before writing.",
+  "_outputs_comment2": "`codex` is deliberately omitted: it writes AGENTS.md, which is hand-maintained here as the single source of agent instructions for Cursor/Codex/Claude Code. Re-adding it overwrites that file with a signature dump.",
+  "outputs": ["copilot", "cursor"],
 
   "_srcDirs_comment": "Source directories to scan. OMIT this key to use auto-detection (recommended).",
   "_srcDirs_comment2": "Auto-detection reads package.json/go.mod/Cargo.toml and scans top-level dirs automatically.",

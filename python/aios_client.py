@@ -145,6 +145,9 @@ class AiosClient:
     def dbnums(self, project: str | None = None) -> dict:
         return self._request("GET", "/dbnums", query={"project": project})
 
+    # `realign_dbnum`（POST /dbnums/{dbnum}/realign）随 ADR-021 移除：回退由服务
+    # 自动入队重建批次并在 worker 复核后整库重建，无需客户端动作。
+
     def queue(self) -> dict:
         return self._request("GET", "/queue")
 

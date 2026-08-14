@@ -21,6 +21,23 @@ pub struct SyncOutcome {
     pub errors: Vec<String>,
 }
 
+/// e3d_sync 去重查询（纯渲染）。
+///
+/// 三个插值都是外部字符串——`location` 是自由文本配置，文件名/哈希虽分别受
+/// 候选白名单与十六进制约束，但进入 SurrealQL 单引号字面量的外部字符串必须
+/// 统一过 `escape_surql_str`（宪法「转义」条，2026-08-13 审计 P2）：一个带
+/// 引号或反斜杠的值会破坏字面量，让本次去重查询失败、文件被当作查询错误跳过。
+fn render_dedup_query(location: &str, file_name: &str, file_hash: &str) -> String {
+    use crate::data_interface::dbnum_state::escape_surql_str;
+    format!(
+        "select value <string>\
+        id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
+        escape_surql_str(location),
+        escape_surql_str(file_name),
+        escape_surql_str(file_hash)
+    )
+}
+
 /// Independent module: archive + dedup + MQTT notify.
 #[derive(Clone)]
 pub struct SyncPublisher {
@@ -93,13 +110,7 @@ impl SyncPublisher {
                 }
             }
 
-            let sql = format!(
-                "select value <string>\
-                id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
-                get_db_option().location.as_str(),
-                file_name,
-                &file_hash
-            );
+            let sql = render_dedup_query(get_db_option().location.as_str(), &file_name, &file_hash);
 
             let id = match SUL_DB.query(&sql).await {
                 Ok(mut response) => response.take::<Vec<String>>(0).unwrap_or_default(),
@@ -154,5 +165,31 @@ impl SyncPublisher {
         }
 
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// e3d_sync 去重查询的三个插值都是外部字符串，必须过 escape_surql_str
+    /// （2026-08-13 审计 P2）：带引号/反斜杠的值会破坏单引号字面量。回退成
+    /// 裸插值时本用例必红。
+    #[test]
+    fn the_dedup_query_escapes_every_external_string() {
+        let sql = render_dedup_query(r"loc'A\B", "ams1112_0001", "hash'X");
+        assert!(
+            sql.contains(r"location != 'loc\'A\\B'"),
+            "location 必须转义: {sql}"
+        );
+        assert!(sql.contains("'ams1112_0001' in file_names"), "{sql}");
+        assert!(
+            sql.contains(r"'hash\'X' in file_hashes"),
+            "hash 必须转义: {sql}"
+        );
+        assert!(
+            !sql.contains(r"'loc'A\B'"),
+            "裸插值的单引号会破坏字面量: {sql}"
+        );
     }
 }

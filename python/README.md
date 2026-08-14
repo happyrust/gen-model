@@ -31,7 +31,7 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 |---|---|---|---|---|
 | 解析层 | `aios_db.parse.*` | 纯文件解析 | 无 | ✔ 完全共存 |
 | 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.status|tree_status` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
-| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线 / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `room.enqueue` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
+| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线（`sync.baseline`） / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `room.enqueue` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
 
 - **`aios_db.set_config(path)` 必须最先调用**（解析层深处也读全局 DbOption，
   配置是进程级 OnceCell，第一次被读走后不可更换）。
@@ -59,7 +59,10 @@ aios_db.set_config(str(repo / "DbOption"))     # ① 永远第一句
 f = r"D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7997_0001"
 aios_db.parse.header(f)                        # 头/最新会话
 aios_db.parse.sessions(f)                      # 会话页列表
-aios_db.parse.collect_changes(f, 100, 102, detail=True)   # 增量窗口变更
+aios_db.parse.collect_changes(f, 100, 102, detail=True)   # 增量窗口变更（逐会话回放）
+aios_db.parse.net_changes(f, 100, 102, with_noun=True)    # 窗口净增删改（会话索引差分，
+                                               # 不逐会话解析、与会话数解耦；对拍脚本
+                                               # 见 testbed/net_changes_probe.py）
 aios_db.parse.element(f, "24381_100677")       # 单元素属性（文件直读）
 aios_db.parse.element(f, "24381_100677", sesno=97)        # 历史版本
 aios_db.parse.noun_dict(r"D:/AVEVA/Everything3D2.10/attlib.dat")  # noun 能力矩阵
@@ -78,6 +81,8 @@ aios_db.incr.apply_file(f)                     # 增量窗口（默认水位+1..
 aios_db.model.ensure("24381_100677", force=True)   # 单根重生成
 aios_db.room.drain()                           # 消化房间重算积压
 aios_db.sync.baseline(7999)                    # 从未解析过的库补全量基线
+# 文件被还原（F6 回退）不再需要手动动作（ADR-021）：扫描/手动入队会自动排一条
+# 整库重建批次，worker 复核后清空该库并按首次导入重新解析（sync.realign 已移除）。
 
 # 零售组合收工前的收尾三件套（批次闭环 execute_manual 内置这些，不用手调）：
 aios_db.incr.drain_side_effects()              # SystDerived / RefRevMaintain
@@ -148,7 +153,9 @@ DbOption 是进程级 OnceCell，一个进程只能有一份配置：conftest �
 - `room.enqueue(changes)`——按 `update_aabbs` 返回形态入队房间重算；
 - `model.delete_subtree(refnos)`——DeleteCleanup 同一入口的级联删除；
 - `model.update_aabbs(..., durable=True)`——生产直写事务路径（指针 + 房间任务 + epoch 同事务）；
-- `spatial.tree_status()`——空间树九键指纹（/health `spatial_tree` 同源）。
+- `spatial.tree_status()`——空间树九键指纹（/health `spatial_tree` 同源）；
+- `spatial.tree_dump()`——内存树逐条导出（refno/noun/mins/maxs），值级校验
+  「树 == 已提交指针」用（`testbed/spatial_tree_8000.py` 的每窗断言就是它）。
 
 conftest 用 `tests/DbOption-roomtest`（`room_key_word=["ZZ-R-"]` 只圈夹具房、
 v_port=8071）；`full_init` 拿的是 testbed 项目副本的锁，测试期间别并行跑

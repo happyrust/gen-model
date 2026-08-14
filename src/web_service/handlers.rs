@@ -124,6 +124,14 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         .unwrap_or_else(|error| {
             crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error)
         });
+    // 可 drain 副作用（SystDerived / RefRevMaintain）的死信/待处理计数（P2-4）。
+    // 读库失败的降级与成功形状同源（side_effect_pending 里同键渲染，形状由那边的
+    // 单测钉住），不在这里手搓 JSON。
+    let side_effect_pending = crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_status()
+        .await
+        .unwrap_or_else(|error| {
+            crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(&error)
+        });
     Json(json!({
         "status": "ok",
         "project": state.identity.project,
@@ -158,6 +166,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "staging_window_blocks": window_blocks,
         "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
         "spatial_reconcile": spatial_reconcile,
+        // 可 drain 副作用队列（SystDerived / RefRevMaintain）的待处理/死信计数
+        // （P2-4）。到顶死信此前只在库里、/health 看不见，也没有复活出口——现在
+        // dead_letters/by_kind 摆出来，复活走 POST /update/side-effects/retry。
+        "side_effect_pending": side_effect_pending,
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
         // （reused / replayed / rebuilt / migrated / degraded / preloaded）。
         // 十五键契约钉在 aabb_tree 的渲染器旁（台账 G-02 契约迁移）。
@@ -454,6 +466,27 @@ pub async fn pending_units_retry(
     ))
 }
 
+/// POST /api/v1/update/side-effects/retry — 人工复活副作用补偿队列的死信（P2-4）。
+///
+/// `SystDerived` / `RefRevMaintain` 到顶死信（attempts >= 上限）被 `drain` 的上限
+/// 挡在候选集外，此前除了直接改库没有复活路（spatial 无视上限、不走这里）。复活 =
+/// attempts 清零回到 `pending` + 唤醒 worker，与 `pending-units/retry` 同纪律。
+/// 返回 202 + 复活行数（0 也算成功，表示当前没有到顶死信）。
+pub async fn side_effects_retry(
+    State(state): State<AppState>,
+    body: Option<Json<ProjectReq>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    resolve_identity(&state, &req)?;
+    let revived =
+        crate::data_interface::side_effect_pending::SideEffectCompensator::revive_dead_letters()
+            .await
+            .map_err(ApiError::from_domain)?;
+    // 复活绕过入队通道，worker 的 Notify 没人碰过；不叫醒它，这些行要等兜底轮询。
+    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+    Ok((StatusCode::ACCEPTED, Json(json!({ "revived": revived }))))
+}
+
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
 ///
 /// 登记表 ∪ 项目扫描，每行带 `anomaly` / `blocked` / `excluded`：阻断与排除的库
@@ -594,6 +627,11 @@ pub async fn dbnum_prune_above(
         .map(Json)
         .map_err(|error| ApiError::from_domain(error.into()))
 }
+
+// `POST /dbnums/{dbnum}/realign`（单库回退对齐，2026-08-12 引入）随 ADR-021
+// 移除：回退由扫描路径自动入队重建批次、worker 冻结点复核后整库清空重建，
+// 端点没有剩余职责。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`（整库
+// 快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理）。
 
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
 ///
@@ -749,6 +787,34 @@ mod tests {
         assert!(
             body.contains("spatial_tree_status()"),
             "spatial_tree 必须来自 aabb_tree 的共享渲染器: {body}"
+        );
+    }
+
+    /// P2-4：/health 必须曝光可 drain 副作用队列（SystDerived / RefRevMaintain）的
+    /// 死信，且走共享的同键渲染器（成功 + 读库降级两分支同源，不在 handler 里手搓
+    /// JSON）。删掉 side_effect_pending 接线即红。
+    #[test]
+    fn health_exposes_side_effect_pending_dead_letters() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health 之后是 update_preview")
+            .0;
+
+        assert!(
+            body.contains("\"side_effect_pending\""),
+            "health 必须曝光 side_effect_pending 死信计数: {body}"
+        );
+        assert!(
+            body.contains("side_effect_status()"),
+            "side_effect_pending 必须走共享状态渲染器: {body}"
+        );
+        assert!(
+            body.contains("side_effect_error_status"),
+            "读库失败必须走同键降级渲染器，不许在 handler 手搓: {body}"
         );
     }
 

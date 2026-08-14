@@ -103,8 +103,44 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
 ///
 /// cold start 没有失效，只是让位：本函数在 `SesnoRangeResolver` 之前判，全新的 SYS 库走基线，
 /// 而水位记录被删、数据还在的情形仍由 cold start 兜住。
-fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
-    applied_sesno == 0 && file_latest_sesno > 0
+///
+/// `has_any_data` 是 ADR-021 补上的**数据支撑**维度：`applied_sesno > 0` 而库里连一行
+/// pe 都没有时，水位在撒谎（典型来源是 `dbnum_info_table` 播种回填了另一段历史的统计，
+/// 2026-08-13 现场 7350 / 7353 / 7741 实测）——增量窗口只会从 `applied + 1` 往后接，
+/// `1..applied` 永远缺失且无人发现，唯一正确的处置是按首次导入重建。
+///
+/// 本谓词只做**路由**（这一批走基线还是走增量），不做入队判定：`discover_batch` 的
+/// 入队门**不得**咨询它——「基线过的空库」（`applied == file_latest` 且 pe 零行）是
+/// 合法状态（[`baseline_parse_confirmed_empty`]），入队门若也问数据支撑，这种库每一轮
+/// 对账重扫都会被重新全量解析（守护见 `the_enqueue_gate_never_consults_data_backing`）。
+fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32, has_any_data: bool) -> bool {
+    file_latest_sesno > 0 && (applied_sesno == 0 || !has_any_data)
+}
+
+/// 数据支撑探针（ADR-021）：该 dbnum 在 `pe` 里是否存在**任何**一行。
+///
+/// 存在性而不是计数——`count()` 在百万行级的 `pe` 上要秒级（2026-08-13 实测 1–9 秒），
+/// 而这里要回答的只是「有没有」。软删除的行也算「有」：存在性问的是行在不在，不问
+/// `deleted` 取值（一个全被软删的库仍然有数据支撑，增量照常，墓碑归清理路径管）。
+///
+/// 读失败必须上浮，不许猜：吞成「没有数据」会把一个正常的大库整库重建，吞成
+/// 「有数据」会让缺口继续静默——与 [`DbnumState::classify_scan`] 同一条纪律。
+///
+/// `pub(crate)`：worker 的冻结点开窗预判（`batch_worker::batch_reroutes_to_initial_load`）
+/// 与执行体路由必须用同一个探针，否则「开不开暂存窗口」与「走不走基线」会各判各的。
+pub(crate) async fn dbnum_has_any_pe_row(dbnum: u32) -> anyhow::Result<bool> {
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT VALUE record::id(id) FROM pe WHERE dbnum = {dbnum} LIMIT 1;"
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("读取 dbnum={dbnum} 的数据支撑失败: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("读取 dbnum={dbnum} 的数据支撑语句失败: {e}"))?;
+    let rows: Vec<serde_json::Value> = response
+        .take(0)
+        .map_err(|e| anyhow::anyhow!("解析 dbnum={dbnum} 的数据支撑失败: {e}"))?;
+    Ok(!rows.is_empty())
 }
 
 /// One incoming element operation kind within a session (drops `None`).
@@ -2688,8 +2724,11 @@ pub struct DbnumPreview {
     /// When `true` this `dbnum` is blocked (e.g. rollback/duplicate) and no data
     /// batch will be applied for it.
     pub blocked: bool,
-    /// The selected DESI/CATA file has never been imported. Confirmed execution
-    /// initializes only this file, then establishes its authoritative watermark.
+    /// Confirmed execution rebuilds this file from scratch (first-import
+    /// baseline). Three shapes land here (ADR-021): a file never imported, a
+    /// rolled-back file (`anomaly` carries the rollback evidence; the worker
+    /// wipes the dbnum before re-parsing), and a lying watermark
+    /// (`applied_sesno > 0` with zero persisted rows).
     #[serde(default)]
     pub initialization_required: bool,
     /// 当前 MDB 声明了这个库，但当前项目目录里没有它的文件。
@@ -2791,6 +2830,11 @@ fn baseline_sync_options(
     options.gen_mesh = false;
     options
 }
+
+// `realign_rolled_back_dbnum` / `realign_dbnum_checked`（缝合式对齐：只删高于文件
+// 水位的残留 + INSERT IGNORE 补洞）随 ADR-021 退役：回退的默认处置改为 worker
+// 执行体内的整库重建（`fast_delete::wipe_dbnum_for_reinit` + 现成基线路径），
+// 不再依赖「幸存行与新文件同一段历史」的假设，单库对齐端点与 Python 绑定一并移除。
 
 fn baseline_needs_full_parse(pe_count: usize, applied_sesno: i32) -> bool {
     pe_count == 0 || applied_sesno == 0
@@ -3080,6 +3124,8 @@ impl AiosDBManager {
                 &project_dir,
                 &UpdateScope::unrestricted(),
                 &mut warnings,
+                // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
+                &mut Vec::new(),
             )
             .shift_remove(&dbnum)
             .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
@@ -3144,6 +3190,25 @@ impl AiosDBManager {
             .await?;
             Ok((pe_count, info_count, root_count))
         }
+
+        // 基线也要留下文件身份（file_path / db_type / file_name / 观察值）：
+        // `dbnum_watermark` 既是回退/迁移检测的登记基准，也是按需 CATA 闭包
+        // 定位器的寻址依据（`cata_closure::load_dbnum_files_from_watermark`）。
+        // 过去这条路径只靠 `advance_applied` 建水位，「只跑过基线、没有常驻
+        // 服务重扫」的库（testbed 沙箱即是）设计库行永远缺身份，闭包连生成根
+        // 都定位不到（2026-08-13）。裁决照走正门（record_observation），但
+        // 不拦点名基线：从未解析的库不会产生回退/类型异常，重复文件已在
+        // 候选层拦下。
+        let _ = self
+            .scan_and_check_file(
+                project,
+                file_path,
+                file_name,
+                db_type,
+                dbnum,
+                file_latest_sesno,
+            )
+            .await;
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
         let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
@@ -3247,7 +3312,17 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
 
         let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
-        let by_dbnum = self.scan_project_candidates(project, &project_dir, &scope, &mut warnings);
+        let mut out_of_scope_cata = Vec::new();
+        let by_dbnum = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &scope,
+            &mut warnings,
+            &mut out_of_scope_cata,
+        );
+        // 预览本就允许刷新扫描观察字段（ADR-001）；CATA 登记行是按需闭包的寻址依据。
+        self.record_out_of_scope_cata(project, &out_of_scope_cata)
+            .await;
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
         let mut dbnums = Vec::new();
@@ -3376,8 +3451,14 @@ impl AiosDBManager {
         let scope = self.update_scope(mdb).await?;
         report.warnings.extend(scope.warning().map(str::to_owned));
 
-        let by_dbnum =
-            self.scan_project_candidates(project, &project_dir, &scope, &mut report.warnings);
+        let by_dbnum = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &scope,
+            &mut report.warnings,
+            // 状态报告保持只读：范围外 CATA 不在这里落库（预览/入队两条路径会做）。
+            &mut Vec::new(),
+        );
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
         let project_prefix = format!(
@@ -3567,12 +3648,20 @@ impl AiosDBManager {
     ///
     /// `scope` 是第二道门，跟在类型白名单与 `manual_db_nums` 之后：前者管「这类
     /// 文件认不认」，它管「这个库在不在本期执行范围里」。
+    ///
+    /// `out_of_scope_cata`：范围外的 CATA 文件（永远不进执行范围，见 update_scope
+    /// 决策 A），**不**成为预览/入队候选，但要交还给异步调用方做观察落库——
+    /// 按需 CATA 闭包的定位器从 `dbnum_watermark` 读目录文件身份
+    /// （`cata_closure::load_dbnum_files_from_watermark` 的契约）。全新库上手动
+    /// 引导（SYS meta 第一遍）往往是唯一跑过的扫描，这里不交出观察记录，
+    /// 按需 CATA 就永远解不出依赖（parsed=0），BRAN/HANG 的目录几何生成不出来。
     fn scan_project_candidates(
         &self,
         project: &str,
         project_dir: &std::path::Path,
         scope: &UpdateScope,
         warnings: &mut Vec<String>,
+        out_of_scope_cata: &mut Vec<FileCandidate>,
     ) -> IndexMap<u32, Vec<FileCandidate>> {
         let mut by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
 
@@ -3628,6 +3717,33 @@ impl AiosDBManager {
             }
             let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
             if !self.in_scope(scope, project, &db_type, db_no) {
+                // 范围外 CATA：收进登记清单（首见为准，同号第二个文件不覆盖——
+                // 与自动路径的 B3 纪律同向），照旧不进候选。
+                if db_type.eq_ignore_ascii_case("CATA")
+                    && !out_of_scope_cata.iter().any(|c| c.db_num == db_no)
+                {
+                    match PdmsIO::new(
+                        project_dir.to_string_lossy().as_ref(),
+                        path.to_path_buf(),
+                        true,
+                    )
+                    .get_latest_sesno()
+                    {
+                        Ok(sesno) => out_of_scope_cata.push(FileCandidate {
+                            path: path.to_path_buf(),
+                            file_name: file_name.clone(),
+                            db_type: db_type.clone(),
+                            db_num: db_no,
+                            file_latest_sesno: sesno as i32,
+                            file_size: metadata.as_ref().map(|m| m.len()).unwrap_or_default(),
+                            file_modified_at: metadata.as_ref().and_then(file_modified_rfc3339),
+                        }),
+                        Err(error) => warnings.push(format!(
+                            "跳过无法读取最新会话的目录库文件 {}: {error}",
+                            path.display()
+                        )),
+                    }
+                }
                 continue;
             }
 
@@ -3664,6 +3780,23 @@ impl AiosDBManager {
         by_dbnum
     }
 
+    /// 范围外 CATA 的观察落库（`scan_project_candidates` 的 `out_of_scope_cata`
+    /// 出参），复用自动路径的 [`AiosDBManager::scan_and_check_file`]
+    /// （classify → record_observation → 异常出声），登记口径只有一份。
+    async fn record_out_of_scope_cata(&self, project: &str, files: &[FileCandidate]) {
+        for cand in files {
+            self.scan_and_check_file(
+                project,
+                &cand.path,
+                &cand.file_name,
+                &cand.db_type,
+                cand.db_num,
+                cand.file_latest_sesno,
+            )
+            .await;
+        }
+    }
+
     /// Pass 2: build a preview for a single (unique) candidate file.
     ///
     /// Returns `None` when the `dbnum` is fully up to date with no anomaly.
@@ -3695,7 +3828,24 @@ impl AiosDBManager {
             return Err(anyhow::anyhow!("记录扫描观察失败: {e}"));
         }
 
-        let blocked = verdict.blocked();
+        // 回退不再阻断（ADR-021）：预览与执行体同一份路由——回退行显示为「将
+        // 整库重建」（initialization_required = true），anomaly 照带（判据两端与
+        // 保存时刻是运维分辨「重建」与「普通新库」的证据）。其余阻断类异常照旧
+        // blocked。
+        let reinit = verdict
+            .anomaly
+            .as_ref()
+            .is_some_and(FileAnomaly::requires_reinit);
+        let blocked = verdict.blocked() && !reinit;
+        // 数据支撑（ADR-021）：只在「真有增量窗口要跑」时才付这一次存在性查询，
+        // 判定口径与执行体完全一致（见 `execute_one_dbnum`），预览说增量、执行做
+        // 基线的错位在这里堵死。
+        let has_any_data =
+            if applied > 0 && cand.file_latest_sesno > applied && verdict.anomaly.is_none() {
+                dbnum_has_any_pe_row(cand.db_num).await?
+            } else {
+                true
+            };
 
         let mut preview = DbnumPreview {
             dbnum: cand.db_num,
@@ -3706,7 +3856,8 @@ impl AiosDBManager {
             file_latest_sesno: cand.file_latest_sesno,
             anomaly: verdict.anomaly,
             blocked,
-            initialization_required: needs_initial_load(applied, cand.file_latest_sesno),
+            initialization_required: reinit
+                || needs_initial_load(applied, cand.file_latest_sesno, has_any_data),
             ..Default::default()
         };
 
@@ -3734,7 +3885,9 @@ impl AiosDBManager {
                     // 解析器定下的窗口才是执行真正会走的那个。同样读一页会话页。
                     preview.first_pending_sesno_time =
                         session_time_rfc3339(project, &cand.path, *plan.range.start());
-                    let range_eles = IncrementPipeline::collect_changes(&cand.path, plan.range)?;
+                    let (range_eles, collect_warnings) =
+                        IncrementPipeline::collect_window(&cand.path, plan.range)?;
+                    warnings.extend(collect_warnings);
                     let details = fill_change_summary(&mut preview, &range_eles);
                     // Delivery units are a model-delivery concept: only DESI dbs
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
@@ -3861,8 +4014,16 @@ impl AiosDBManager {
         // 不报的话人只能假定它跟预览那次一样。
         receipt.mdb = scope.mdb().to_owned();
 
-        let by_dbnum =
-            self.scan_project_candidates(project, &project_dir, &scope, &mut receipt.warnings);
+        let mut out_of_scope_cata = Vec::new();
+        let by_dbnum = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &scope,
+            &mut receipt.warnings,
+            &mut out_of_scope_cata,
+        );
+        self.record_out_of_scope_cata(project, &out_of_scope_cata)
+            .await;
         receipt.scanned = by_dbnum.len();
 
         // ADR-020 第 3 项：子集选择先过统一范围门。范围外的请求当场拒（警告 +
@@ -3946,11 +4107,28 @@ impl AiosDBManager {
                     .warnings
                     .push(format!("dbnum={dbnum}: 记录扫描观察失败: {error:#}"));
             }
+            let mut applied = verdict.applied_sesno();
             if let Some(reason) = verdict.block_reason() {
-                receipt.blocked.push(BlockedDbnum { dbnum, reason });
-                continue;
+                // 回退默认整库重建（ADR-021）：不阻断，按首次导入形状（applied=0，
+                // 窗口 1..file_latest）入队；清库归 worker 执行体（冻结点复核仍判
+                // 回退才动手），这里**不删任何数据**——入队与执行之间隔着队列暂停
+                // 与 startup_autorun 挂起，破坏性动作必须留在那道闸门之内。
+                // 其余异常照旧阻断（身份歧义不许机器替人挑文件）。
+                if !verdict
+                    .anomaly
+                    .as_ref()
+                    .is_some_and(FileAnomaly::requires_reinit)
+                {
+                    receipt.blocked.push(BlockedDbnum { dbnum, reason });
+                    continue;
+                }
+                receipt.warnings.push(format!(
+                    "dbnum={dbnum}: 检测到文件回退（file_latest_sesno={} < applied_sesno={applied}），\
+                     已按整库重建入队：worker 执行时将清空该库数据并按首次导入重新解析当前文件",
+                    cand.file_latest_sesno
+                ));
+                applied = 0;
             }
-            let applied = verdict.applied_sesno();
             if cand.file_latest_sesno == applied {
                 receipt.up_to_date += 1;
                 continue;
@@ -4068,13 +4246,100 @@ impl AiosDBManager {
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
+        let mut applied = verdict.applied_sesno();
         if let Some(reason) = verdict.block_reason() {
-            return skipped(reason);
+            // 回退默认整库重建（ADR-021）：执行侧以冻结点的**新鲜裁决**为准（入队
+            // 与执行之间文件可能被换掉，这里是最后一道复核），仍判回退才允许破坏
+            // 性的清库；复核不判回退时绝不动手。清库成功后 applied=0，恰好落进
+            // 下面现成的 needs_initial_load 分支——基线在同一个批次槽位里完成，
+            // 与其它批次保持串行。其余异常照旧 Skipped 等人（身份歧义不许机器替
+            // 人挑文件）；清库失败计 Failed 而不是 Skipped——半途而废的破坏性动作
+            // 不是「主动裁决」，好在水位清零排在清库的最后一个阶段，失败时水位未
+            // 动、下一轮仍判回退、清库幂等重放。
+            if !verdict
+                .anomaly
+                .as_ref()
+                .is_some_and(FileAnomaly::requires_reinit)
+            {
+                return skipped(reason);
+            }
+            println!("dbnum={dbnum} 执行阶段: 检测到回退（{reason}），按 ADR-021 整库清空重建");
+            match crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
+                Ok(report) => {
+                    let note = format!(
+                        "dbnum={dbnum} 回退重建：已整库清空 {} 行 PE（含派生行、统计与队列残留，\
+                         {}ms），水位已清零，按首次导入重新解析当前文件",
+                        report.pe_rows, report.elapsed_ms
+                    );
+                    println!("{note}");
+                    warnings.push(note);
+                    applied = 0;
+                }
+                Err(error) => {
+                    return (
+                        Some(DataBatchResult {
+                            dbnum,
+                            db_type: cand.db_type.clone(),
+                            file_path: cand.path.display().to_string(),
+                            start_sesno: 0,
+                            end_sesno: 0,
+                            start_sesno_time: None,
+                            end_sesno_time: None,
+                            status: BatchStatus::Failed,
+                            message: Some(format!(
+                                "{reason}；整库清空失败（水位未动，下一轮幂等重放）: {error:#}"
+                            )),
+                            merged_sesnos: Vec::new(),
+                            merged_sesno_times: Vec::new(),
+                            changed_elements: 0,
+                        }),
+                        Vec::new(),
+                    );
+                }
+            }
         }
-        let applied = verdict.applied_sesno();
         let previous_observed = verdict.previous_file_latest_sesno();
 
-        if needs_initial_load(applied, cand.file_latest_sesno) {
+        // ADR-021 数据支撑：水位说应用过而库里一行都没有，增量窗口只会把
+        // `1..applied` 永远漏掉——按首次导入重建。只在「真有增量窗口要跑」时
+        // 才付这一次存在性查询；读失败必须 Failed，不许猜（吞成「没有」会整库
+        // 重建一个正常大库，吞成「有」会让缺口继续静默）。
+        let has_any_data = if applied > 0 && cand.file_latest_sesno > applied {
+            match dbnum_has_any_pe_row(dbnum).await {
+                Ok(has_any_data) => has_any_data,
+                Err(error) => {
+                    return (
+                        Some(DataBatchResult {
+                            dbnum,
+                            db_type: cand.db_type.clone(),
+                            file_path: cand.path.display().to_string(),
+                            start_sesno: 0,
+                            end_sesno: 0,
+                            start_sesno_time: None,
+                            end_sesno_time: None,
+                            status: BatchStatus::Failed,
+                            message: Some(format!("读取数据支撑失败，本批次未执行: {error:#}")),
+                            merged_sesnos: Vec::new(),
+                            merged_sesno_times: Vec::new(),
+                            changed_elements: 0,
+                        }),
+                        Vec::new(),
+                    );
+                }
+            }
+        } else {
+            true
+        };
+        if applied > 0 && !has_any_data {
+            let note = format!(
+                "dbnum={dbnum} 水位与数据不一致（applied_sesno={applied} 而库里没有任何 pe 行，\
+                 典型来源是统计播种回填了另一段历史），已按首次导入重建"
+            );
+            println!("{note}");
+            warnings.push(note);
+        }
+
+        if needs_initial_load(applied, cand.file_latest_sesno, has_any_data) {
             return match self
                 .initialize_dbnum_baseline(
                     project,
@@ -4202,8 +4467,15 @@ impl AiosDBManager {
             "dbnum={dbnum} 执行阶段: 收集增量 {}..={}",
             start_sesno, end_sesno
         );
-        let collected = match IncrementPipeline::collect_changes(&cand.path, plan.range.clone()) {
-            Ok(range_eles) => range_eles,
+        let collected = match IncrementPipeline::collect_window(&cand.path, plan.range.clone()) {
+            Ok((range_eles, collect_warnings)) => {
+                warnings.extend(
+                    collect_warnings
+                        .into_iter()
+                        .map(|warning| format!("dbnum={dbnum}: {warning}")),
+                );
+                range_eles
+            }
             Err(e) => {
                 batch.message = Some(format!("读取增量数据失败: {e}"));
                 emit(
@@ -4538,10 +4810,16 @@ mod tests {
             .map(|(head, _)| head)
             .unwrap_or(body);
 
-        let collects = body.matches("collect_changes(").count();
+        let collects = body.matches("collect_window(").count();
         assert_eq!(
             collects, 1,
-            "execute_one_dbnum 只应收集一次增量窗口，实际 {collects} 次"
+            "execute_one_dbnum 只应收集一次增量窗口（经 collect_window 统一入口，\
+             ADR-022 口径开关只在这一处生效），实际 {collects} 次"
+        );
+        assert_eq!(
+            body.matches("collect_changes(").count(),
+            0,
+            "执行体不得绕过 collect_window 直调回放收集——那会造出第二个口径决定点"
         );
         assert!(
             body.contains("apply_with_precollected("),
@@ -4874,15 +5152,119 @@ mod tests {
         );
     }
 
-    /// 判据只看水位与文件会话号，**不再按 db_type 分叉**：SYS meta 曾被排除在外、改走
-    /// cold start 重放，而重放用的 `pdms_io` 没有 ADR-006 的跨块 `CURD` 解析修复。
+    /// 判据只看水位、文件会话号与数据支撑，**不按 db_type 分叉**：SYS meta 曾被排除
+    /// 在外、改走 cold start 重放，而重放用的 `pdms_io` 没有 ADR-006 的跨块 `CURD`
+    /// 解析修复。
     #[test]
     fn uninitialized_files_are_detected_for_on_demand_baseline() {
-        assert!(needs_initial_load(0, 76));
-        assert!(needs_initial_load(0, 12));
-        assert!(!needs_initial_load(76, 76));
+        assert!(needs_initial_load(0, 76, true));
+        assert!(needs_initial_load(0, 12, true));
+        assert!(!needs_initial_load(76, 76, true));
         // 空文件不是「没解析过」，没有会话可解析，别派一次白跑的基线。
-        assert!(!needs_initial_load(0, 0));
+        assert!(!needs_initial_load(0, 0, true));
+    }
+
+    /// ADR-021 数据支撑维度的真值表：水位非零而库里零行 = 水位在撒谎，按首次导入
+    /// 重建；有数据支撑的正常增量不受影响（回退到旧的两参判据时第一条会红）。
+    #[test]
+    fn a_lying_watermark_routes_to_the_baseline() {
+        // 2026-08-13 现场形态：7350 applied=208、pe 零行、文件涨到 300 的话
+        // 旧判据会走增量 209..300，1..208 永远缺失。
+        assert!(needs_initial_load(208, 300, false));
+        // 有数据支撑的正常增量：照旧走窗口。
+        assert!(!needs_initial_load(208, 300, true));
+        // 空文件仍然不派基线（没有会话可解析），数据支撑维度不改变这条。
+        assert!(!needs_initial_load(208, 0, false));
+        // 「基线过的空库」（applied == file_latest 且零行）不许被本谓词的调用方
+        // 撞见：入队门的 `file_latest <= applied` 早退把它挡在队列外（见
+        // `the_enqueue_gate_never_consults_data_backing`）。谓词本身对这一格返回
+        // true 是刻意的——真被路由进来（说明有活要干）就该重建，不许静默增量。
+        assert!(needs_initial_load(50, 50, false));
+    }
+
+    /// ADR-021 边界：数据支撑判定只做**路由**，不做入队判定。`discover_batch` 若
+    /// 咨询数据支撑或初始导入谓词，「基线过的空库」（applied == file_latest 且 pe
+    /// 零行，`baseline_parse_confirmed_empty` 承认的合法状态）会在每一轮对账重扫
+    /// 被重新全量解析——无限循环。入队门的判定只许是「文件会话号 vs 水位」。
+    #[test]
+    fn the_enqueue_gate_never_consults_data_backing() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once("async fn discover_batch(")
+            .expect("discover_batch must exist")
+            .1
+            .split_once("fn enqueue_discovered(")
+            .expect("enqueue_discovered follows discover_batch")
+            .0;
+        assert!(
+            body.contains("file_latest_sesno <= applied"),
+            "入队门必须保留「水位已覆盖」早退: {body}"
+        );
+        assert!(
+            !body.contains("needs_initial_load") && !body.contains("dbnum_has_any_pe_row"),
+            "入队门不得咨询初始导入路由或数据支撑（空库会无限重解析）: {body}"
+        );
+    }
+
+    /// ADR-021 顺序钉：回退的整库清空只许发生在执行体、且必须晚于冻结点的新鲜
+    /// 裁决（`classify_scan`）与 `requires_reinit` 闸门。清库挪到裁决之前，入队
+    /// 与执行之间被换回高水位版本的文件就会被误删整库。
+    #[test]
+    fn the_wipe_waits_for_a_fresh_verdict_inside_the_executor() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum must exist")
+            .1
+            .split_once("// Resolve and FIX this batch's window now")
+            .expect("window resolution follows the reinit gate")
+            .0;
+
+        let classify = body
+            .find("DbnumState::classify_scan(")
+            .expect("executor must re-classify at the freeze point");
+        let gate = body
+            .find("FileAnomaly::requires_reinit")
+            .expect("executor must gate the wipe on the reinit predicate");
+        let wipe = body
+            .find("wipe_dbnum_for_reinit(")
+            .expect("executor must wipe through the shared fast_delete routine");
+        let backing = body
+            .find("dbnum_has_any_pe_row(")
+            .expect("executor must probe data backing before routing");
+        let route = body
+            .find("needs_initial_load(")
+            .expect("executor must route through the shared predicate");
+        assert!(
+            classify < gate && gate < wipe && wipe < backing && backing < route,
+            "order must be classify -> reinit gate -> wipe -> data backing -> route: {body}"
+        );
+    }
+
+    /// ADR-021 顺序钉的另一半：扫描路径只分类 + 入队，破坏性清库不得回流——
+    /// `startup_autorun = false` 与队列暂停对清库是真闸门的前提，就是它只存在
+    /// 于 worker 执行体。
+    #[test]
+    fn scan_paths_never_wipe() {
+        // 钉调用形状（带左括号）而不是裸名：注释里允许提到这个例程指路，
+        // 但任何扫描路径出现对它的调用就是破坏性动作越过了队列闸门。
+        let scan_side = include_str!("increment_manager.rs");
+        assert!(
+            !scan_side.contains("wipe_dbnum_for_reinit("),
+            "自动扫描路径（sweep/watch）不得调用整库清空"
+        );
+        let source = include_str!("manual_update.rs");
+        let enqueue_body = source
+            .split_once("pub async fn enqueue_manual_update(")
+            .expect("enqueue_manual_update must exist")
+            .1
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum follows enqueue_manual_update")
+            .0;
+        assert!(
+            !enqueue_body.contains("wipe_dbnum_for_reinit("),
+            "手动入队路径不得清库（清库归 worker 执行体）: {enqueue_body}"
+        );
     }
 
     /// A baseline used to advance its watermark and queue nothing, so every root
@@ -4966,6 +5348,166 @@ mod tests {
         assert!(baseline_stats_need_rebuild(21_000, 55_653));
         assert!(!baseline_needs_full_parse(34_653, 83));
         assert!(!baseline_stats_need_rebuild(34_653, 34_653));
+    }
+
+    /// 回退整库重建（live，ADR-021）：`wipe_dbnum_for_reinit` 一次做对四件事——
+    /// 该 dbnum 的 pe 行**全部**物理消失（幸存行也不留）、队列残留与统计出清、
+    /// 水位**清值不删行**（登记身份原地不动）、spatial epoch 同批递增。
+    ///
+    /// 四个断言各钉一个失败模式：
+    ///
+    /// * **全删**而不是只删高于文件水位的行——留幸存行就要求「幸存行与新文件
+    ///   同一段历史」，文件被换成另一段历史时基线完整性校验会把库卡在半修状态
+    ///   （2026-08-12 的缝合式对齐正是被这一点淘汰的）；
+    /// * `applied_sesno` 必须是「写 0」而不是删行，且 `dbnum_info_table` 同批
+    ///   清空：行没了或统计还在，读侧迁移/启动播种会把旧水位捞回来
+    ///   （2026-08-04 播种审计第 5 条），首次导入分支就永远轮不到；
+    /// * 身份字段留在原地，下一轮 classify 才认得这个库（不会误判成首次登记或
+    ///   路径迁移）；
+    /// * epoch 不递增的话，清库删掉 room_relate / inst_relate 行之后崩溃重启，
+    ///   会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 幽灵形态）。
+    ///
+    /// 用 `999_999_021` 魔术 dbnum 与 `4000000021` 保留段 ref0 自建夹具，跑完即清。
+    /// 空库即可验证，不需要解析过的 E3D 工程。
+    #[tokio::test]
+    #[ignore = "manual live: requires the configured Surreal database"]
+    async fn live_rollback_wipe_clears_the_dbnum_for_reinit() {
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+
+        let dbnum = 999_999_021u32;
+        let ref0 = 4_000_000_021u64;
+        let cleanup = format!(
+            "DELETE pe:{ref0}_1; DELETE pe:{ref0}_2; \
+             DELETE ZZWM:{ref0}_1; DELETE ZZWM:{ref0}_2; \
+             DELETE inst_relate:{ref0}_2; \
+             DELETE dbnum_watermark:{dbnum}; \
+             DELETE dbnum_info_table WHERE dbnum = {dbnum}; \
+             DELETE model_update_pending WHERE dbnum = {dbnum}; \
+             DELETE increment_update_attempt:{dbnum};"
+        );
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("pre-clean fixture")
+            .check()
+            .expect("valid pre-clean");
+
+        // 库侧状态停在会话 60：sesno=40 的幸存元素 + sesno=60 的「未来」元素
+        // （文件回卷到 50 之后它就是幽灵），幽灵挂着 inst_relate 派生行；队列里
+        // 留一条低于目标水位（45）与一条高于目标水位（55）的 pending，外加一条
+        // 未收口的 attempt——realign 之后它们必须全部出清。
+        SUL_DB
+            .query(format!(
+                "CREATE pe:{ref0}_1 SET dbnum = {dbnum}, sesno = 40, noun = 'ZZWM', \
+                 name = '/zz-realign-keep'; \
+                 CREATE pe:{ref0}_2 SET dbnum = {dbnum}, sesno = 60, noun = 'ZZWM', \
+                 name = '/zz-realign-ghost'; \
+                 CREATE ZZWM:{ref0}_2 SET dbnum = {dbnum}; \
+                 CREATE inst_relate:{ref0}_2 SET dbnum = {dbnum}; \
+                 CREATE model_update_pending SET dbnum = {dbnum}, source_end_sesno = 45, \
+                 action = 'regen_root', target_refno = '{ref0}/1'; \
+                 CREATE model_update_pending SET dbnum = {dbnum}, source_end_sesno = 55, \
+                 action = 'regen_root', target_refno = '{ref0}/2'; \
+                 CREATE dbnum_info_table SET dbnum = {dbnum}, sesno = 40, count = 1; \
+                 UPSERT increment_update_attempt:{dbnum} SET dbnum = {dbnum}, \
+                 start_sesno = 51, end_sesno = 60;"
+            ))
+            .await
+            .expect("seed fixture")
+            .check()
+            .expect("valid fixture");
+
+        DbnumState::advance_applied(dbnum, 60, None)
+            .await
+            .expect("establish watermark");
+        DbnumState::force_scan_identity_for_test(&FileObservation {
+            dbnum,
+            project: "TestProject".to_string(),
+            db_type: "DESI".to_string(),
+            file_name: "zz_realign.dbnum".to_string(),
+            file_path: r"D:\zz_realign\desi_1".to_string(),
+            file_size: 4096,
+            file_latest_sesno: 60,
+            file_modified_at: None,
+        })
+        .await
+        .expect("register identity");
+
+        // 文件被还原到会话 50（回退形态）：整库清空重建。epoch 两端各读一次，
+        // 差值就是「清库在库侧留下痕迹」的证据。
+        let (epoch_before, _) = crate::fast_model::aabb_tree::read_db_spatial_epoch_stamp()
+            .await
+            .expect("read spatial epoch before wipe");
+        let report = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum)
+            .await
+            .expect("wipe rolled-back dbnum for reinit");
+        let (epoch_after, _) = crate::fast_model::aabb_tree::read_db_spatial_epoch_stamp()
+            .await
+            .expect("read spatial epoch after wipe");
+
+        let mut response = SUL_DB
+            .query(format!(
+                "RETURN [record::exists(pe:{ref0}_1), record::exists(pe:{ref0}_2), \
+                 record::exists(inst_relate:{ref0}_2), record::exists(ZZWM:{ref0}_2), \
+                 record::exists(increment_update_attempt:{dbnum})]; \
+                 SELECT count() AS count FROM model_update_pending \
+                 WHERE dbnum = {dbnum} GROUP ALL; \
+                 SELECT count() AS count FROM dbnum_info_table \
+                 WHERE dbnum = {dbnum} GROUP ALL;"
+            ))
+            .await
+            .expect("inspect state after wipe")
+            .check()
+            .expect("valid inspection");
+        let exists: Vec<bool> = response.take(0).expect("existence flags");
+        #[derive(serde::Deserialize)]
+        struct PendingCountRow {
+            count: usize,
+        }
+        let pending: Vec<PendingCountRow> = response.take(1).expect("pending count");
+        let info: Vec<PendingCountRow> = response.take(2).expect("info count");
+
+        let state = DbnumState::read(dbnum)
+            .await
+            .expect("read state after wipe")
+            .expect("watermark row must survive the wipe");
+
+        SUL_DB
+            .query(&cleanup)
+            .await
+            .expect("cleanup fixture")
+            .check()
+            .expect("valid cleanup");
+
+        assert_eq!(report.pe_rows, 2, "整库清空：幸存行与幽灵一并计入删除规模");
+        assert_eq!(
+            exists,
+            vec![false, false, false, false, false],
+            "整库清空：pe（幸存行也不留）/ 派生行 / noun 行 / attempt 必须全部物理消失"
+        );
+        assert_eq!(
+            pending.first().map(|row| row.count).unwrap_or_default(),
+            0,
+            "该库 model_update_pending 必须清空（基线会重排全量生成根）"
+        );
+        assert_eq!(
+            info.first().map(|row| row.count).unwrap_or_default(),
+            0,
+            "dbnum_info_table 必须同批清空，否则启动播种会把旧水位灌回来"
+        );
+        assert_eq!(
+            state.applied_sesno, 0,
+            "写 0 不删行：读侧迁移不得把旧水位捞回来"
+        );
+        assert_eq!(state.file_name, "zz_realign.dbnum", "登记身份原地不动");
+        assert_eq!(state.db_type, "DESI", "登记身份原地不动");
+        assert!(
+            epoch_after > epoch_before,
+            "清库必须在同批元数据阶段递增 spatial epoch（{epoch_before} -> {epoch_after}），\
+             否则崩溃重启会复用一棵还留着被删构件包围盒的树"
+        );
     }
 
     /// SYS 基线的 PE 统计包含 WORL 根，而解析器返回值不包含根；完整性比较必须
@@ -6921,6 +7463,174 @@ mod live_tests {
         }
     }
 
+    /// 回退与幽灵水位的端到端（live，ADR-021）：两幕都必须落到**首次导入基线**，
+    /// 而不是增量窗口。
+    ///
+    /// 幕一（回退默认整库重建）：把库侧水位抬到文件之上 → 手动入队。断言三件事：
+    /// 回执不 blocked、warnings 点名「整库重建」、**入队阶段不删数据**（清库归
+    /// worker）。随后 worker 消费：冻结点复核仍判回退 → `wipe_dbnum_for_reinit` →
+    /// 首次导入基线，终态水位 == 文件水位、批次 warnings 带「回退重建：已整库清空」、
+    /// batch.message 是「首次按需初始化完成」。
+    ///
+    /// 幕二（水位非零而库里零行）：删光该库 pe 行、把水位压到文件之下（有增量窗口
+    /// 可走的形状）→ 旧判据会走增量把 `1..applied` 永远漏掉；新判据（数据支撑）
+    /// 必须路由到基线，批次 warnings 带「水位与数据不一致」。
+    ///
+    /// 环境：configured Surreal（指 pytest 沙箱即可）+ `AIOS_MANUAL_UPDATE_PROJECT`；
+    /// 靶库 `AIOS_MANUAL_UPDATE_DBNUM`（默认 7998，最小设计库）。**本用例会物理
+    /// 清空并重建该库**，别指向在乎数据的库。
+    #[tokio::test]
+    #[ignore = "manual live: wipes and rebuilds AIOS_MANUAL_UPDATE_DBNUM (default 7998)"]
+    async fn live_rollback_and_ghost_watermark_reinit_end_to_end() {
+        use crate::data_interface::task_registry::{TASK_KIND_DATA_BATCH, TaskRegistry, TaskState};
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project =
+            std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set AIOS_MANUAL_UPDATE_PROJECT");
+        let dbnum: u32 = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
+            .map(|value| value.parse().expect("AIOS_MANUAL_UPDATE_DBNUM must be u32"))
+            .unwrap_or(7998);
+        let mgr = Arc::new(
+            AiosDBManager::init_form_config()
+                .await
+                .expect("init manager"),
+        );
+
+        // 前置：先有一份真实基线（第一次对全新沙箱跑时顺手建）。
+        if DbnumState::applied_sesno(dbnum)
+            .await
+            .expect("read applied")
+            == 0
+        {
+            mgr.initialize_project_dbnum_baseline(&project, dbnum)
+                .await
+                .unwrap_or_else(|error| panic!("establish baseline dbnum={dbnum}: {error:#}"));
+        }
+        let file_latest = DbnumState::read(dbnum)
+            .await
+            .expect("read state")
+            .expect("registered state")
+            .file_latest_sesno;
+        assert!(file_latest > 0, "前置基线必须留下文件观察");
+
+        // 收口一幕的公共断言：消费到终态、数据半边完成（水位对齐文件、库里有行）。
+        async fn drain_and_assert(
+            mgr: &Arc<AiosDBManager>,
+            dbnum: u32,
+            file_latest: i32,
+            task_id: &str,
+            wants: &[&str],
+        ) {
+            let ran = crate::data_interface::batch_worker::drain_queue_until_empty(mgr).await;
+            assert!(ran >= 1, "重建批次必须被消费");
+            let entry = TaskRegistry::global()
+                .get(task_id)
+                .expect("task entry exists");
+            assert_eq!(entry.kind, TASK_KIND_DATA_BATCH);
+            assert_ne!(
+                entry.state,
+                TaskState::Failed,
+                "重建批次不得失败: {:?}",
+                entry.result
+            );
+            let rendered = serde_json::to_string(&entry.result).expect("render result");
+            for want in wants {
+                assert!(
+                    rendered.contains(want),
+                    "任务终态必须带证据「{want}」: {rendered}"
+                );
+            }
+            assert_eq!(
+                DbnumState::applied_sesno(dbnum)
+                    .await
+                    .expect("read applied"),
+                file_latest,
+                "重建后水位必须对齐文件水位"
+            );
+            assert!(
+                dbnum_has_any_pe_row(dbnum).await.expect("probe"),
+                "重建后库里必须有数据"
+            );
+        }
+
+        // ── 幕一：回退 ──────────────────────────────────────────────────────
+        SUL_DB
+            .query(format!(
+                "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {0}, sesno = {0};",
+                file_latest + 7
+            ))
+            .await
+            .expect("seed rollback")
+            .check()
+            .expect("valid rollback seed");
+
+        let receipt = mgr
+            .enqueue_manual_update(&project, None, Some(&[dbnum]))
+            .await;
+        assert!(
+            receipt.blocked.is_empty(),
+            "回退不再阻断: {:?}",
+            receipt.blocked
+        );
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("整库重建")),
+            "入队回执必须点名重建: {:?}",
+            receipt.warnings
+        );
+        assert_eq!(receipt.enqueued.len(), 1, "恰好一条重建批次");
+        assert!(
+            dbnum_has_any_pe_row(dbnum).await.expect("probe"),
+            "入队阶段不得清库（清库归 worker 执行体）"
+        );
+        drain_and_assert(
+            &mgr,
+            dbnum,
+            file_latest,
+            &receipt.enqueued[0].task_id,
+            &["回退重建：已整库清空", "首次按需初始化完成"],
+        )
+        .await;
+
+        // ── 幕二：幽灵水位（applied>0、pe 零行、file>applied）──────────────
+        SUL_DB
+            .query(format!(
+                "DELETE pe WHERE dbnum = {dbnum}; \
+                 UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {0}, sesno = {0};",
+                (file_latest - 2).max(1)
+            ))
+            .await
+            .expect("seed ghost watermark")
+            .check()
+            .expect("valid ghost seed");
+        assert!(
+            !dbnum_has_any_pe_row(dbnum).await.expect("probe"),
+            "幽灵水位夹具要求 pe 零行"
+        );
+
+        let receipt = mgr
+            .enqueue_manual_update(&project, None, Some(&[dbnum]))
+            .await;
+        assert!(
+            receipt.blocked.is_empty(),
+            "幽灵水位不是异常，不得阻断: {:?}",
+            receipt.blocked
+        );
+        assert_eq!(receipt.enqueued.len(), 1, "恰好一条批次");
+        drain_and_assert(
+            &mgr,
+            dbnum,
+            file_latest,
+            &receipt.enqueued[0].task_id,
+            &["水位与数据不一致", "首次按需初始化完成"],
+        )
+        .await;
+    }
+
     /// Read-only live self-check for the ADR-003 reverse index (needs local Surreal).
     ///
     /// Validates the one thing the pure unit tests cannot: the real `ref_rev`
@@ -7010,7 +7720,24 @@ mod live_tests {
             .await
             .expect("query real DAMP consumers");
         let consumers: Vec<RefnoEnum> = response.take(0).expect("decode DAMP consumers");
-        assert_eq!(consumers.len(), 72, "7997 fixture consumer count changed");
+        // 消费者总数是店切面相关的（写死 72 钉的是当年那份切面；2026-08-13 testbed
+        // 出清 + bran 重生成把子树 DAMP 行补齐后是 75）。结构断言只要求「确实共享」，
+        // 精确数走 env 钉——与 resolves_the_real_mdb_declaration 同款拆层。
+        assert!(
+            consumers.len() >= 2,
+            "shared SPCO must have multiple live consumers, got {}",
+            consumers.len()
+        );
+        if let Ok(expected) = std::env::var("AIOS_EXPECT_SPCO_CONSUMERS") {
+            let expected: usize = expected
+                .parse()
+                .expect("AIOS_EXPECT_SPCO_CONSUMERS must be a number");
+            assert_eq!(
+                consumers.len(),
+                expected,
+                "shared-SPCO consumer count drifted"
+            );
+        }
 
         let reversal = load_ref_reversal(&HashSet::from([shared_spco]))
             .await
@@ -7038,6 +7765,26 @@ mod live_tests {
             .await
             .expect("connect surreal");
 
+        // ref_rev 是重建产物而非基线副产品——自足重建，不依赖兄弟用例的执行
+        // 顺序（B2 首轮本用例先跑，读到的是只有 2 行增量痕迹的 ref_rev，展开 0 根）。
+        rebuild_reverse_index()
+            .await
+            .expect("rebuild reverse index before expansion");
+
+        let mut response = SUL_DB
+            .query(
+                "SELECT VALUE REFNO FROM DAMP \
+                 WHERE SPRE = pe:23274_295504;",
+            )
+            .await
+            .expect("query live DAMP consumers");
+        let consumers: Vec<RefnoEnum> = response.take(0).expect("decode DAMP consumers");
+        assert!(
+            consumers.len() >= 2,
+            "shared SPCO must have multiple live consumers, got {}",
+            consumers.len()
+        );
+
         let roots = expand_live_reverse_cascade(RefnoEnum::from("23274/295504"))
             .await
             .expect("expand shared-SPCO cascade");
@@ -7048,11 +7795,21 @@ mod live_tests {
                 .map(|root| (root.root.to_pdms_str(), &root.noun, root.kind))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
+        // 展开的正文是「归并成交付根」：根数非零、不超过消费者数（多个 DAMP 同属
+        // 一根 BRAN 时归并掉）。精确根数与店切面绑定（旧 72→67），走 env 钉。
+        assert!(!roots.is_empty(), "shared SPCO expanded to zero roots");
+        assert!(
+            roots.len() <= consumers.len(),
+            "delivery roots ({}) must not exceed live consumers ({})",
             roots.len(),
-            67,
-            "72 shared-SPCO consumers must consolidate into 67 delivery roots"
+            consumers.len()
         );
+        if let Ok(expected) = std::env::var("AIOS_EXPECT_SPCO_ROOTS") {
+            let expected: usize = expected
+                .parse()
+                .expect("AIOS_EXPECT_SPCO_ROOTS must be a number");
+            assert_eq!(roots.len(), expected, "shared-SPCO root count drifted");
+        }
         assert!(
             roots.iter().all(|root| {
                 root.noun == "BRAN"

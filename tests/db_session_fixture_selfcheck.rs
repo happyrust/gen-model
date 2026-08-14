@@ -146,7 +146,10 @@ fn pack_builds_a_verifiable_fixture_matching_the_recorded_ledger() {
     assert!(out.join("SHA256SUMS").is_file());
     assert!(out.join("db8000-sesno24-26.zip").is_file());
     assert!(!out.join("cuts").exists(), "历史切割不得入库");
-    assert!(!out.join("final").exists(), "最终文件明文不得入库（只在 zip 里）");
+    assert!(
+        !out.join("final").exists(),
+        "最终文件明文不得入库（只在 zip 里）"
+    );
 
     // 交叉对账：pack 从 final 切出的台账散列，必须与 issue-019 当年从**源文件**
     // 逐个切出、独立入库的那三份逐一相等。两条录制路径产出同一批字节，

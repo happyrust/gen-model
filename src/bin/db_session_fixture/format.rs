@@ -235,7 +235,11 @@ pub fn plan_cases(baseline_sesno: u32, cases: &[CaseSpec]) -> anyhow::Result<Pac
 pub fn validate_relative_path(path: &str) -> anyhow::Result<()> {
     ensure!(!path.is_empty(), "档案路径为空");
     let path = Path::new(path);
-    ensure!(!path.is_absolute(), "档案路径不能是绝对路径：{}", path.display());
+    ensure!(
+        !path.is_absolute(),
+        "档案路径不能是绝对路径：{}",
+        path.display()
+    );
     for component in path.components() {
         ensure!(
             matches!(component, Component::Normal(_)),

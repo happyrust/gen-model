@@ -46,13 +46,17 @@ mod pipeline;
 #[allow(dead_code)]
 mod issue019_recording;
 
+use aios_core::NamedAttrValue;
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::RefU64;
 use aios_database::data_interface::increment_pipeline::IncrementPipeline;
 use aios_database::data_interface::manual_update::{NetOp, merge_net_changes};
+use aios_database::data_interface::model_impact::classify_operation_effects;
+use aios_database::data_interface::net_window;
+use aios_database::data_interface::session_index_diff;
 use format::{CaseSpec, SessionFixtureManifest};
 use parse_pdms_db::paged::PagedDbSession;
-use pdms_io::io::{EleOperationData, EleOperationDetail};
+use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -249,7 +253,9 @@ fn pdms_str(refno: RefU64) -> String {
 
 /// 台账里的 refno 文本（`a/b` 或 `a_b`）归一到 `merge_net_changes` 的输出形态。
 fn normalize(text: &str) -> String {
-    pdms_str(format::parse_refno(text).unwrap_or_else(|error| panic!("非法 refno {text}: {error:#}")))
+    pdms_str(
+        format::parse_refno(text).unwrap_or_else(|error| panic!("非法 refno {text}: {error:#}")),
+    )
 }
 
 // ── 快照差分 oracle（性质 f）──────────────────────────────────────────────
@@ -562,4 +568,304 @@ fn snapshot_diff_corroborates_the_net_result() {
     }
 
     assert!(checked > 0, "差分 oracle 一个 refno 都没核对到");
+}
+
+// ── 性质 h)：会话索引差分对拍 ───────────────────────────────────────────────
+
+/// 把逐会话回放折成「存在性净三态」，与会话索引差分同口径可比。
+///
+/// 规则：首 op 是 Add = 起点不在场，末 op 是 Deleted = 终点不在场；
+/// (不在场→在场)=added，(在场→不在场)=deleted，(在场→在场)=modified，
+/// (不在场→不在场)=窗口内自我抵消（不出现）。两处措辞差异在这一层归一：
+/// `fold_net_op` 把「删了又建」叫 `Added`、把「加了又删」留成 `Cancelled`，
+/// 而差分只知道两端状态——分别对应 modified 与不出现。
+fn replay_presence_net(window: &Window) -> BTreeMap<String, &'static str> {
+    struct Ends {
+        first_is_add: bool,
+        last_is_delete: bool,
+    }
+    let mut ends: BTreeMap<String, Ends> = BTreeMap::new();
+    // `Window` 是 BTreeMap<sesno, ops>，迭代天然按会话升序。
+    for operations in window.values() {
+        for operation in operations {
+            let (is_add, is_delete) = match operation.detail {
+                EleOperationDetail::Add(_) => (true, false),
+                EleOperationDetail::Modified(_) => (false, false),
+                EleOperationDetail::Deleted => (false, true),
+                EleOperationDetail::None => continue,
+            };
+            ends.entry(pdms_str(operation.refno))
+                .and_modify(|entry| entry.last_is_delete = is_delete)
+                .or_insert(Ends {
+                    first_is_add: is_add,
+                    last_is_delete: is_delete,
+                });
+        }
+    }
+    ends.into_iter()
+        .filter_map(|(refno, entry)| {
+            let class = match (!entry.first_is_add, !entry.last_is_delete) {
+                (false, true) => Some("added"),
+                (true, false) => Some("deleted"),
+                (true, true) => Some("modified"),
+                (false, false) => None,
+            };
+            class.map(|class| (refno, class))
+        })
+        .collect()
+}
+
+/// 会话索引差分（`session_index_diff`，不逐会话解析记录、不查库）在每个案例
+/// 窗口上必须与逐会话回放折叠给出**逐 refno 相同**的净三态。台账那一腿由
+/// 性质 e（回放折叠 ≡ 台账）闭环——e 与本条同时绿，三方即相等。
+///
+/// 与真实 ams8000 live 对拍（`session_index_diff` 模块里的 `#[ignore]` 用例，
+/// 仲裁人是生产 B+ 点查）互为补充：这里是 CI 里永远在跑的那一份。
+#[test]
+fn index_diff_matches_replay_folding_on_every_case_window() {
+    let fixture = fixture();
+    let mut windows: Vec<(String, u32, u32)> = fixture
+        .cases()
+        .iter()
+        .map(|case| {
+            let window = case_window(case);
+            (window.id, window.apply, window.end)
+        })
+        .collect();
+    // 整链宽窗口（最早案例起点..最终会话）：跨案例合并的形状也要对上。
+    if let Some(min_apply) = windows.iter().map(|(_, apply, _)| *apply).min() {
+        windows.push((
+            "whole-chain".to_owned(),
+            min_apply,
+            fixture.manifest.final_snapshot.sesno,
+        ));
+    }
+
+    let mut compared = 0usize;
+    for (id, apply, end) in windows {
+        let mut io = PdmsIO::new("", fixture.final_path.clone(), true);
+        let diff =
+            session_index_diff::collect_net_changes(&mut io, apply as i32..=end as i32, false)
+                .unwrap_or_else(|error| panic!("窗口 {id} 差分失败: {error:#}"));
+
+        let mut diff_classes: BTreeMap<String, &'static str> = BTreeMap::new();
+        for entry in &diff.added {
+            diff_classes.insert(pdms_str(entry.refno), "added");
+        }
+        for entry in &diff.deleted {
+            diff_classes.insert(pdms_str(entry.refno), "deleted");
+        }
+        for entry in &diff.modified {
+            diff_classes.insert(pdms_str(entry.refno), "modified");
+        }
+
+        let replayed = replay_presence_net(&fixture.collect(apply, end));
+        assert_eq!(
+            diff_classes, replayed,
+            "窗口 {id}（{apply}..={end}）：索引差分与回放折叠的净三态不一致"
+        );
+        compared += 1;
+    }
+    assert!(compared > 0, "一个窗口都没对拍到");
+}
+
+// ── 性质 i)：净窗口收集器对拍（ADR-022，引擎经 collect_window 切换的实现体）──
+
+/// `NamedAttrValue` 桶归一成可比较形态（HashMap → BTreeMap + JSON 值），
+/// 避开渲染路径里引用型条目的 HashMap 迭代顺序不确定性。
+fn normalized_bucket(
+    map: &std::collections::HashMap<String, NamedAttrValue>,
+) -> BTreeMap<String, String> {
+    map.iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                serde_json::to_string(value).expect("attr json"),
+            )
+        })
+        .collect()
+}
+
+fn normalized_pair_bucket(
+    map: &std::collections::HashMap<String, (NamedAttrValue, NamedAttrValue)>,
+) -> BTreeMap<String, (String, String)> {
+    map.iter()
+        .map(|(key, (old, new))| {
+            (
+                key.clone(),
+                (
+                    serde_json::to_string(old).expect("attr json"),
+                    serde_json::to_string(new).expect("attr json"),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// `ModifiedElement` 的九个差量桶 + children 两端 + noun 的规范形态。
+/// `current_data` 刻意不比：回放端的 current_data 来自「该会话的版本」，净端
+/// 来自终稿——单触达窗口两者同一，但比它等于比记录字节，交给性质 c/f 管。
+fn normalized_modified(modified: &ModifiedElement) -> Vec<String> {
+    let children = modified.children_changed.as_ref().map(|(old, new)| {
+        (
+            old.0.iter().copied().map(pdms_str).collect::<Vec<_>>(),
+            new.0.iter().copied().map(pdms_str).collect::<Vec<_>>(),
+        )
+    });
+    let uda = |map: &std::collections::HashMap<i32, NamedAttrValue>| -> BTreeMap<i32, String> {
+        map.iter()
+            .map(|(hash, value)| (*hash, serde_json::to_string(value).expect("uda json")))
+            .collect()
+    };
+    let uda_pairs = |map: &std::collections::HashMap<i32, (NamedAttrValue, NamedAttrValue)>| -> BTreeMap<i32, (String, String)> {
+        map.iter()
+            .map(|(hash, (old, new))| {
+                (
+                    *hash,
+                    (
+                        serde_json::to_string(old).expect("uda json"),
+                        serde_json::to_string(new).expect("uda json"),
+                    ),
+                )
+            })
+            .collect()
+    };
+    vec![
+        format!("noun={}", modified.noun),
+        format!("children={children:?}"),
+        format!("added={:?}", normalized_bucket(&modified.added_attrs)),
+        format!("deleted={:?}", normalized_bucket(&modified.deleted_attrs)),
+        format!(
+            "modified={:?}",
+            normalized_pair_bucket(&modified.modified_attrs)
+        ),
+        format!(
+            "added_explicit={:?}",
+            normalized_bucket(&modified.added_explicit_attrs)
+        ),
+        format!(
+            "deleted_explicit={:?}",
+            normalized_bucket(&modified.deleted_explicit_attrs)
+        ),
+        format!(
+            "modified_explicit={:?}",
+            normalized_pair_bucket(&modified.modified_explicit_attrs)
+        ),
+        format!("added_uda={:?}", uda(&modified.added_uda_attrs)),
+        format!("deleted_uda={:?}", uda(&modified.deleted_uda_attrs)),
+        format!("modified_uda={:?}", uda_pairs(&modified.modified_uda_attrs)),
+    ]
+}
+
+/// 净窗口收集器在每个案例窗口上：净三态 ≡ 回放折叠；单触达 refno 的 Modified
+/// 负载（九桶 + children + noun）与回放**逐桶相等**——这是 ADR-022 FR-4 的
+/// 复刻对拍：gen-model 侧 `diff_ele_data` 与 vendor 内联 diff 谁漂移了这里红。
+/// 同一批 refno 上再比一次经 `classify_operation_effects` 恢复出的 qualifier
+/// （非独立 oracle，理由见循环内注释）。
+/// 顺带钉住：真实会话链上净收集不出现降级警告。
+#[test]
+fn net_window_collector_matches_replay_ops_on_every_case_window() {
+    let fixture = fixture();
+    let mut payloads_compared = 0usize;
+    for case in fixture.cases() {
+        let window = case_window(case);
+        let mut io = PdmsIO::new("", fixture.final_path.clone(), true);
+        let outcome =
+            net_window::collect_net_window(&mut io, window.apply as i32..=window.end as i32)
+                .unwrap_or_else(|error| panic!("案例 {} 净收集失败: {error:#}", window.id));
+        assert!(
+            outcome.warnings.is_empty(),
+            "案例 {} 净收集出现降级警告: {:?}",
+            window.id,
+            outcome.warnings
+        );
+
+        let replay = fixture.collect(window.apply, window.end);
+
+        let mut net_classes: BTreeMap<String, &'static str> = BTreeMap::new();
+        let mut net_modified: BTreeMap<String, (u32, &ModifiedElement, &EleOperationData)> =
+            BTreeMap::new();
+        for operation in outcome.window.values().flatten() {
+            let key = pdms_str(operation.refno);
+            let class = match &operation.detail {
+                EleOperationDetail::Add(_) => "added",
+                EleOperationDetail::Deleted => "deleted",
+                EleOperationDetail::Modified(modified) => {
+                    net_modified.insert(key.clone(), (operation.sesno, modified, operation));
+                    "modified"
+                }
+                EleOperationDetail::None => continue,
+            };
+            net_classes.insert(key, class);
+        }
+        assert_eq!(
+            net_classes,
+            replay_presence_net(&replay),
+            "案例 {}：净收集与回放折叠的净三态不一致",
+            window.id
+        );
+
+        // 单触达 refno 的 Modified 负载逐桶对拍（多触达时回放是多条增量 diff、
+        // 净端是两端一次 diff，桶内容合法地不同，由存在性 + 性质 f 管）。
+        for (sesno, operations) in &replay {
+            for replay_op in operations {
+                let EleOperationDetail::Modified(replay_modified) = &replay_op.detail else {
+                    continue;
+                };
+                let touches = replay
+                    .values()
+                    .flatten()
+                    .filter(|op| {
+                        op.refno == replay_op.refno
+                            && !matches!(op.detail, EleOperationDetail::None)
+                    })
+                    .count();
+                if touches != 1 {
+                    continue;
+                }
+                let key = pdms_str(replay_op.refno);
+                let Some((net_sesno, net_payload, net_op)) = net_modified.get(&key) else {
+                    continue; // 类别差异已被上面的三态断言抓住
+                };
+                assert_eq!(
+                    *net_sesno, *sesno,
+                    "案例 {}：{key} 的 last-touch 会话与回放不一致",
+                    window.id
+                );
+                assert_eq!(
+                    normalized_modified(net_payload),
+                    normalized_modified(replay_modified),
+                    "案例 {}：{key} 的 Modified 负载与回放不一致（复刻 diff 漂移）",
+                    window.id
+                );
+                // qualifier 恢复对拍（ADR-022 qualifier 段）：`ModifiedElement` 按
+                // 属性名聚合会丢 qualifier，两臂靠 `qualified_attribute_changes()`
+                // 从差量桶里把 `(属性名, 一基 qualifier)` 恢复回来，恢复结果必须相同。
+                //
+                // **这不是独立 oracle，别当它是**：该 helper 当前只读 old/new 差量桶，
+                // 而上一条断言已经把九桶连值一起比过了——在当前实现下这条是由它
+                // **推出来的**，必然成立。留它的唯一价值是防回归：`normalized_modified`
+                // 刻意不比 `current_data`（见其文档注释：回放端取该会话版本、净端取
+                // 终稿），一旦有人把 helper 改成从 `current_data` 取 qualifier，两臂
+                // 来源不同，这条会先红。
+                //
+                // **强度实测（2026-08-13，issue-019 夹具）**：本夹具两个案例都是删除，
+                // 对拍到的 Modified 里数组属性零变化，两侧 `qualified_changes` 恒为
+                // 空——即这条现在是「空 == 空」。它要长出牙齿，得等录到带数组属性
+                // 变化（PARA/POS 一类）的 data-modify 案例。别把它当成 qualifier
+                // 语义已被覆盖的证据。
+                assert_eq!(
+                    classify_operation_effects(net_op).qualified_changes,
+                    classify_operation_effects(replay_op).qualified_changes,
+                    "案例 {}：{key} 的 qualifier 恢复结果与回放不一致",
+                    window.id
+                );
+                payloads_compared += 1;
+            }
+        }
+    }
+    assert!(
+        payloads_compared > 0,
+        "一个 Modified 负载都没对拍到——夹具形状变了？"
+    );
 }

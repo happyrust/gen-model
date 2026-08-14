@@ -14,6 +14,15 @@ const RANGE_TABLES: &[&str] = &[
     "inst_relate",
     "tubi_relate",
     "room_relate",
+    // `room_panel_relate` 是 `room_relate` 的同源姐妹边：两者由同一面板重算入口
+    // 先清后写维护（room_model 里从无全表清空，只按 in={room}/out={panel} 逐实体
+    // DELETE），且其 record id `{room_refno}_{panel}` 与 `room_relate` 同为 Ref0
+    // 前缀、可按 Ref0 区间寻址。少了它，回退整库重建（ResetForReinit）删掉了
+    // room_relate 却把 room_panel_relate 留下——回退是文件退回更旧会话，重建后
+    // 房间重算只对**当前存在**的房间/面板先清后写，此前存在、回退后不复存在的
+    // 房间/面板留下悬空 room_panel_relate 边，两表就此对不上（ADR-010 D4 幽灵
+    // 形态的同类）。
+    "room_panel_relate",
     "ref_rev",
     "geo_relate",
 ];
@@ -249,14 +258,29 @@ pub async fn prune_above_watermark(
     })
 }
 
+/// 元数据阶段对水位行的两种处置。
+///
+/// 快删端点（运维排障）删行——库从此回到「从未登记」；回退重建（ADR-021）
+/// **清值不删行**——登记身份必须原地留下，否则下一轮 classify 会把这个库误判
+/// 成首次登记，而且删行会让启动播种从 `dbnum_info_table` 把旧水位灌回来
+/// （2026-08-04 播种审计第 5 条；统计行本身也在同一阶段清空，双保险）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatermarkDisposal {
+    DropRow,
+    ResetForReinit,
+}
+
 /// Render separate checked phases. A giant optimistic transaction conflicts
 /// with the watcher's periodic observation write on large DBNUMs. Metadata is
 /// deliberately last, so a failed data phase never advertises an initialized
-/// database as cleanly deleted.
+/// database as cleanly deleted; within it the watermark disposal is the final
+/// statement — it is the wipe's commit point, so a half-done wipe keeps the
+/// old watermark and the next verdict retries idempotently.
 fn render_delete_phases(
     dbnum: u32,
     ref0s: &[String],
     noun_tables: &[String],
+    watermark: WatermarkDisposal,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut relations = Vec::new();
     let mut ranges = Vec::new();
@@ -276,13 +300,30 @@ fn render_delete_phases(
         }
         ranges.push(format!("DELETE {pe_range};"));
     }
-    let metadata = vec![
+    let mut metadata = vec![
         format!("DELETE model_update_pending WHERE dbnum = {dbnum};"),
         format!("DELETE increment_update_attempt WHERE dbnum = {dbnum};"),
         format!("DELETE incr_side_effect_pending WHERE dbnum = {dbnum};"),
         format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
-        format!("DELETE dbnum_watermark:{dbnum};"),
     ];
+    match watermark {
+        WatermarkDisposal::DropRow => {
+            metadata.push(format!("DELETE dbnum_watermark:{dbnum};"));
+        }
+        WatermarkDisposal::ResetForReinit => {
+            // 清库删掉了 room_relate / inst_relate 行：epoch 不递增的话，崩溃
+            // 重启会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 的
+            // 幽灵形态借崩溃复活）。放在水位处置之前、同一元数据阶段提交。
+            metadata.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
+            // 同时抹掉指向旧历史的 applied_sesno_time（那条保存在当前文件里已
+            // 不存在），基线收口会写上新的；legacy `sesno` 字段与 applied 同步
+            // 归零，读侧迁移才不会把旧值当水位捞回来。
+            metadata.push(format!(
+                "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = 0, sesno = 0, \
+                 applied_sesno_time = NONE;"
+            ));
+        }
+    }
     (relations, ranges, metadata)
 }
 
@@ -304,6 +345,28 @@ async fn execute_phase(label: &str, statements: &[String]) -> anyhow::Result<()>
 /// The HTTP caller stops dispatch first. These locks additionally serialize
 /// against staged commit and scan-observation writes for internal callers.
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
+    wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await
+}
+
+/// 回退整库重建的清库半边（ADR-021）：数据、派生行、noun 行、统计与队列残留
+/// 全删，但水位行**清值不删行**（登记身份保留、`applied_sesno = 0`）并在同一
+/// 元数据阶段递增 spatial epoch。清完恰好落进 worker 现成的
+/// `needs_initial_load` → `initialize_dbnum_baseline` 分支，由基线按首次导入
+/// 重新解析当前文件。
+///
+/// 调用方限定：只在冻结点复核仍判回退（`FileAnomaly::requires_reinit`）时由
+/// 数据批次 worker 执行体调用——扫描路径只分类入队，破坏性动作必须留在
+/// `startup_autorun` / 队列暂停这道闸门之内（源码钉 `scan_paths_never_wipe`）。
+/// 失败时水位处置尚未执行（它是元数据阶段的最后一句），下一轮仍判回退、
+/// 幂等重放。
+pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
+    wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await
+}
+
+async fn wipe_dbnum_rows(
+    dbnum: u32,
+    watermark: WatermarkDisposal,
+) -> anyhow::Result<FastDeleteDbnumResult> {
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
@@ -358,7 +421,8 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
         bail!("invalid noun table name for dbnum {dbnum}: {invalid}");
     }
 
-    let (relations, ranges, metadata) = render_delete_phases(dbnum, &ref0s, &noun_tables);
+    let (relations, ranges, metadata) =
+        render_delete_phases(dbnum, &ref0s, &noun_tables, watermark);
     execute_phase("delete owner relations", &relations).await?;
     execute_phase("delete Ref0 ranges", &ranges).await?;
     execute_phase("delete dbnum metadata", &metadata).await?;
@@ -397,8 +461,12 @@ mod tests {
 
     #[test]
     fn renders_ref0_ranges_and_keeps_metadata_last() {
-        let (relations, ranges, metadata) =
-            render_delete_phases(7997, &["24381".into()], &["EQUI".into(), "PANE".into()]);
+        let (relations, ranges, metadata) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into(), "PANE".into()],
+            WatermarkDisposal::DropRow,
+        );
         assert!(relations.iter().any(|sql| sql.contains("->pe_owner")));
         assert!(relations.iter().any(|sql| sql.contains("<-pe_owner")));
         assert!(ranges.contains(&"DELETE EQUI:24381_0..24381_9999999999;".into()));
@@ -408,6 +476,80 @@ mod tests {
             "DELETE pe:24381_0..24381_9999999999;"
         );
         assert_eq!(metadata.last().unwrap(), "DELETE dbnum_watermark:7997;");
+    }
+
+    /// 回退重建变体（ADR-021）：数据阶段与快删完全同源，元数据阶段的差别是
+    /// 承诺——水位行清值不删行（登记身份保留）、统计同批清空、spatial epoch
+    /// 同批递增，且水位处置是最后一句（清库的提交点：半途失败时水位未动，
+    /// 下一轮仍判回退、幂等重放）。
+    #[test]
+    fn the_reinit_wipe_keeps_the_identity_row_and_bumps_the_epoch() {
+        let (_, drop_ranges, _) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into()],
+            WatermarkDisposal::DropRow,
+        );
+        let (_, ranges, metadata) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into()],
+            WatermarkDisposal::ResetForReinit,
+        );
+        assert_eq!(
+            ranges, drop_ranges,
+            "数据阶段必须与快删同源，不许自己长一套"
+        );
+        assert!(
+            metadata
+                .iter()
+                .all(|sql| !sql.contains("DELETE dbnum_watermark")),
+            "登记身份必须原地留下: {metadata:?}"
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|sql| sql.contains("DELETE dbnum_info_table WHERE dbnum = 7997")),
+            "统计行必须同批清空，否则启动播种会把旧水位灌回来: {metadata:?}"
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|sql| sql.contains("spatial_epoch:current")),
+            "清库必须留下库侧空间痕迹（epoch bump）: {metadata:?}"
+        );
+        assert_eq!(
+            metadata.last().unwrap(),
+            "UPDATE dbnum_watermark:7997 SET applied_sesno = 0, sesno = 0, \
+             applied_sesno_time = NONE;",
+            "水位清值必须是元数据阶段的最后一句（清库的提交点）"
+        );
+    }
+
+    /// 待确认-8：`room_panel_relate` 必须与 `room_relate` 一起纳入 Ref0 区间清库。
+    ///
+    /// 两者是同源姐妹边（同一面板重算入口先清后写、都是 Ref0 前缀 record id）。
+    /// 只删 `room_relate` 而漏删 `room_panel_relate`，回退整库重建后会残留指向已删
+    /// 房间/面板的悬空边（房间重算只对当前存在的实体先清后写，够不到孤儿）。
+    /// 从 `RANGE_TABLES` 移除 `room_panel_relate` 即让本测试变红。
+    #[test]
+    fn the_wipe_deletes_room_panel_relate_alongside_room_relate() {
+        for disposal in [
+            WatermarkDisposal::DropRow,
+            WatermarkDisposal::ResetForReinit,
+        ] {
+            let (_, ranges, _) =
+                render_delete_phases(7997, &["24381".into()], &["PANE".into()], disposal);
+            assert!(
+                ranges.contains(&"DELETE room_relate:24381_0..24381_9999999999;".into()),
+                "room_relate 应在 Ref0 区间清库集内: {ranges:?}"
+            );
+            assert!(
+                ranges.contains(&"DELETE room_panel_relate:24381_0..24381_9999999999;".into()),
+                "room_panel_relate 是 room_relate 的同源姐妹边，必须一并纳入 Ref0 \
+                 区间清库，否则回退重建后残留孤儿边: {ranges:?}"
+            );
+        }
     }
 
     #[test]

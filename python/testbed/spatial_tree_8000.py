@@ -153,20 +153,6 @@ def _init_full(params: dict):
     return aios_db
 
 
-def _pointer_count(aios_db) -> int:
-    # 与重建/覆盖率的 current-only 口径同谓词（room_model::usable_aabb_pointer_count）：
-    # 排除版本化数组 id 行与软删元素行。在本驱动自建的一次性库上两者目前等价
-    # （无 fn::backup_data 遗产行、软删行在断言前已被 DeleteCleanup 清掉），
-    # 但「树条目 == 可用指针数」的裁决必须与主库口径同源——口径分叉留着，
-    # 哪天拿这套检查对存量库跑就会误报。
-    rows = aios_db.db.query(
-        "SELECT count() FROM inst_relate "
-        "WHERE !type::is::array(record::id(id)) AND in.deleted != true "
-        "AND world_trans.d != none AND aabb.d != none GROUP ALL;"
-    )[0]
-    return int(rows[0]["count"]) if rows else 0
-
-
 def _epoch(aios_db) -> int:
     rows = aios_db.db.query("SELECT `value` FROM spatial_epoch:current;")[0]
     return int(rows[0]["value"]) if rows else 0
@@ -194,11 +180,62 @@ def _tree_summary(aios_db) -> dict:
     }
 
 
+def _round_box(mins, maxs) -> tuple:
+    # 树条目与指针值同源于同一批 f32，f64 表示应逐位相等；取 3 位小数只为吸收
+    # 序列化通道的表示差异，不为掩盖真实偏差。
+    return tuple(round(float(v), 3) for v in list(mins) + list(maxs))
+
+
+def _pointer_rows(aios_db) -> list[dict]:
+    """库内可用包围盒指针：refno / 内容寻址哈希 / 值。
+
+    谓词与重建/覆盖率的 current-only 口径同源（room_model::usable_aabb_pointer_count）：
+    排除版本化数组 id 行与软删元素行。在本驱动自建的一次性库上与朴素谓词目前等价
+    （无 fn::backup_data 遗产行、软删行在断言前已被 DeleteCleanup 清掉），但
+    「树内容 == 指针值」的裁决必须与主库口径同源——口径分叉留着，哪天拿这套
+    检查对存量库跑就会误报。
+    """
+    return aios_db.db.query(
+        "SELECT record::id(in) AS refno, record::id(aabb) AS hash, aabb.d AS box "
+        "FROM inst_relate WHERE !type::is::array(record::id(id)) "
+        "AND in.deleted != true AND world_trans.d != none AND aabb.d != none;"
+    )[0]
+
+
+def _pointer_hash_set(rows: list[dict]) -> list:
+    return sorted(f"{row['refno']}#{row['hash']}" for row in rows)
+
+
+def _tree_value_set(aios_db) -> set[tuple]:
+    return {
+        (entry["refno"], _round_box(entry["mins"], entry["maxs"]))
+        for entry in aios_db.spatial.tree_dump()
+    }
+
+
+def _check_tree_matches_pointers(checks: Checks, aios_db) -> list[dict]:
+    """值级不变量：内存树内容 == 已提交指针值，双向逐条。返回指针行供 dump 复用。"""
+    rows = _pointer_rows(aios_db)
+    tree_set = _tree_value_set(aios_db)
+    pointer_set = {
+        (row["refno"], _round_box(row["box"]["mins"], row["box"]["maxs"])) for row in rows
+    }
+    only_tree = sorted(tree_set - pointer_set)[:5]
+    only_pointer = sorted(pointer_set - tree_set)[:5]
+    checks.add(
+        "树内容 == 指针值（逐条双向）",
+        not only_tree and not only_pointer,
+        f"tree={len(tree_set)} pointers={len(pointer_set)} "
+        f"树独有={only_tree} 指针独有={only_pointer}",
+    )
+    return rows
+
+
 def worker_probe(params: dict) -> dict:
-    """离线血统探针：不连库，纯 parse 层。"""
+    """离线血统探针：不连库，纯 parse 层。顺带给待回放窗口记 op 统计。"""
     import aios_db
 
-    aios_db.set_config(str(CONFIG))
+    aios_db.set_config(params.get("config") or str(CONFIG))
     source = params["file"]
     header = aios_db.parse.header(source)
     sessions = sorted(int(page["sesno"]) for page in aios_db.parse.sessions(source))
@@ -211,83 +248,124 @@ def worker_probe(params: dict) -> dict:
         deletes_ok = any(
             op.get("refno") == BOX_CHILD and op.get("op") == "deleted" for op in ses25
         ) and any(op.get("refno") == EQUI and op.get("op") == "deleted" for op in ses26)
+
+    # 待回放窗口的 op 统计（add/modified/deleted/none 各几条），让 E3D 追加的
+    # 会话在报告里不再是黑盒。
+    window_ops: dict[str, dict] = {}
+    stat_upto = int(params.get("stat_upto") or 0)
+    if lineage_ok and stat_upto > BASELINE_SESNO:
+        upto = min(stat_upto, max(sessions))
+        changes = aios_db.parse.collect_changes(source, BASELINE_SESNO + 1, upto)
+        for sesno, ops in changes.items():
+            counts: dict[str, int] = {}
+            for op in ops:
+                kind = op.get("op", "?")
+                counts[kind] = counts.get(kind, 0) + 1
+            window_ops[str(sesno)] = counts
     return {
         "ok": True,
         "latest_sesno": header.get("latest_sesno"),
         "dbnum": header.get("dbnum"),
         "sessions": sessions,
         "lineage_ok": bool(lineage_ok and deletes_ok),
+        "window_ops": window_ops,
     }
 
 
 def worker_prepare(params: dict) -> dict:
-    """P0：基线建库（watermark=24）→ 生成样本模型 → 落快照 → 记录基线口径。"""
+    """基线建库 → 生成 → 出清积压 → 落快照 → 值级校验。
+
+    A 侧（默认）：baseline@24，显式 ensure 目标 EQUI + 抽样根，断言 BOX 有实例。
+    B 侧（oracle）：baseline@26（final-26 文件），EQUI/BOX 已删不 ensure，
+    生成全靠 drain_data 出清基线登记的全部单元；dump=True 带回指针哈希集与树内容。
+    """
     checks = Checks()
-    aios_db = _init_full()
+    aios_db = _init_full(params)
+    expect_watermark = int(params.get("expect_watermark") or BASELINE_SESNO)
 
     baseline = aios_db.sync.baseline(8000, "AvevaMarineSample")
     watermark = aios_db.db.watermark(8000)
-    checks.add("baseline 水位 = 24", watermark == BASELINE_SESNO,
+    checks.add(f"baseline 水位 = {expect_watermark}", watermark == expect_watermark,
                f"watermark={watermark}, report={json.dumps(baseline, default=str)[:160]}")
 
-    for refno, label in ((EQUI, "EQUI"), (BOX_CHILD, "BOX child")):
-        row = aios_db.db.pe(refno)
-        checks.add(f"{label} pe:{refno} 在位且未删",
-                   bool(row) and not row.get("deleted"), json.dumps(row, default=str)[:160])
+    generated: list[str] = []
+    if params.get("ensure_equi", True):
+        for refno, label in ((EQUI, "EQUI"), (BOX_CHILD, "BOX child")):
+            row = aios_db.db.pe(refno)
+            checks.add(f"{label} pe:{refno} 在位且未删",
+                       bool(row) and not row.get("deleted"),
+                       json.dumps(row, default=str)[:160])
 
-    generated, gen_failures = [], []
-    targets = [EQUI]
-    extra = aios_db.db.query(
-        "SELECT record::id(id) AS refno FROM pe "
-        f"WHERE dbnum = 8000 AND noun = 'EQUI' AND deleted = false LIMIT {params['gen_roots'] + 1};"
-    )[0]
-    for row in extra:
-        refno = str(row["refno"])
-        if refno != EQUI and len(targets) < params["gen_roots"] + 1:
-            targets.append(refno)
-    for refno in targets:
-        try:
-            aios_db.model.ensure(refno, force=(refno == EQUI))
-            generated.append(refno)
-        except Exception as error:  # noqa: BLE001 —— 个别根缺 CATA 允许跳过，但要留痕
-            gen_failures.append(f"{refno}: {error}")
-    checks.add("样本模型生成（至少含目标 EQUI）", EQUI in generated,
-               f"generated={generated}, failures={gen_failures}")
+        gen_failures = []
+        targets = [EQUI]
+        gen_roots = int(params.get("gen_roots") or 0)
+        extra = aios_db.db.query(
+            "SELECT record::id(id) AS refno FROM pe "
+            f"WHERE dbnum = 8000 AND noun = 'EQUI' AND deleted = false LIMIT {gen_roots + 1};"
+        )[0]
+        for row in extra:
+            refno = str(row["refno"])
+            if refno != EQUI and len(targets) < gen_roots + 1:
+                targets.append(refno)
+        for refno in targets:
+            try:
+                aios_db.model.ensure(refno, force=(refno == EQUI))
+                generated.append(refno)
+            except Exception as error:  # noqa: BLE001 —— 个别根缺 CATA 允许跳过，但要留痕
+                gen_failures.append(f"{refno}: {error}")
+        checks.add("样本模型生成（至少含目标 EQUI）", EQUI in generated,
+                   f"generated={generated}, failures={gen_failures}")
 
-    box_rows = _inst_rows_of(aios_db, BOX_CHILD)
-    checks.add("BOX child 生成后有几何实例", box_rows > 0, f"inst_rows={box_rows}")
+        box_rows = _inst_rows_of(aios_db, BOX_CHILD)
+        checks.add("BOX child 生成后有几何实例", box_rows > 0, f"inst_rows={box_rows}")
+    elif params.get("ensure_refnos"):
+        # B 侧（oracle）：与 A 侧**逐根相同**的生成口径——驱动把 A 实际生成的样本
+        # 清单传进来（已剔除 26 上不存在的目标 EQUI）。基线积压有两千多个根，
+        # 全量出清不是本测试的开销预算；哈希对拍只要求两侧生成范围一致。
+        gen_failures = []
+        for refno in params["ensure_refnos"]:
+            try:
+                aios_db.model.ensure(refno)
+                generated.append(refno)
+            except Exception as error:  # noqa: BLE001
+                gen_failures.append(f"{refno}: {error}")
+        checks.add("对照库按 A 侧清单生成", not gen_failures,
+                   f"generated={generated}, failures={gen_failures}")
 
-    # 基线登记的 durable 模型积压在这里出清：不清的话第一个增量窗口的 drain_data
-    # 会连带重生成整个基线积压，窗口断言就混进了不属于该窗口的工作。
+    # 基线登记的 durable 模型积压在这里出清（两侧同一生成口径：全部单元）。
     backlog = aios_db.incr.drain_data()
     checks.add("基线模型积压出清", True, f"drain_data={backlog}")
 
     aios_db.spatial.persist(force=True)
     summary = _tree_summary(aios_db)
-    pointers = _pointer_count(aios_db)
     checks.add("state ∈ {ready, ready_empty}", summary["state"] in ("ready", "ready_empty"),
                str(summary))
     checks.add("树条目 > 0", (summary["entries"] or 0) > 0, str(summary))
-    checks.add("树条目 == 可用指针数", summary["entries"] == pointers,
-               f"entries={summary['entries']} pointers={pointers}")
+    rows = _check_tree_matches_pointers(checks, aios_db)
     checks.add("无待重放空间意图", (summary["pending"] or 0) == 0, str(summary))
+
+    extra_fields: dict = {}
+    if params.get("dump"):
+        extra_fields["pointer_hashes"] = _pointer_hash_set(rows)
+        extra_fields["tree"] = sorted(
+            [refno, *box] for refno, box in _tree_value_set(aios_db)
+        )
     return checks.result(entries=summary["entries"], epoch=_epoch(aios_db),
-                         watermark=watermark, startup=summary)
+                         watermark=watermark, startup=summary, generated=generated,
+                         **extra_fields)
 
 
 def worker_restart(params: dict) -> dict:
     """重启一次进程并对启动裁决断言（S1..S5 与窗间重启共用）。"""
     checks = Checks()
-    aios_db = _init_full()
+    aios_db = _init_full(params)
     summary = _tree_summary(aios_db)
-    pointers = _pointer_count(aios_db)
 
     checks.add(f"startup_verdict == {params['expect_verdict']}",
                summary["verdict"] == params["expect_verdict"], str(summary))
     checks.add("state == ready", summary["state"] == "ready", str(summary))
     checks.add("pending == 0", (summary["pending"] or 0) == 0, str(summary))
-    checks.add("树条目 == 可用指针数", summary["entries"] == pointers,
-               f"entries={summary['entries']} pointers={pointers}")
+    _check_tree_matches_pointers(checks, aios_db)
     if params.get("expect_entries") is not None:
         checks.add("树条目与上一阶段一致", summary["entries"] == params["expect_entries"],
                    f"entries={summary['entries']} expect={params['expect_entries']}")
@@ -295,9 +373,9 @@ def worker_restart(params: dict) -> dict:
 
 
 def worker_apply_window(params: dict) -> dict:
-    """一个增量窗口：apply → drain → 收尾三件套 → 断言。"""
+    """一个增量窗口：apply → drain → 收尾三件套 → 值级断言。"""
     checks = Checks()
-    aios_db = _init_full()
+    aios_db = _init_full(params)
 
     startup = _tree_summary(aios_db)
     checks.add("窗口开跑前启动裁决 == reused（中途重启复用快照）",
@@ -322,10 +400,8 @@ def worker_apply_window(params: dict) -> dict:
                f"drain_data={drained}, side_effects={side_effects}, reconciled={reconciled}")
 
     summary = _tree_summary(aios_db)
-    pointers = _pointer_count(aios_db)
     checks.add("state == ready", summary["state"] == "ready", str(summary))
-    checks.add("树条目 == 可用指针数", summary["entries"] == pointers,
-               f"entries={summary['entries']} pointers={pointers}")
+    rows = _check_tree_matches_pointers(checks, aios_db)
     checks.add("pending == 0（收尾后无滞留意图）", (summary["pending"] or 0) == 0, str(summary))
 
     epoch = _epoch(aios_db)
@@ -343,7 +419,14 @@ def worker_apply_window(params: dict) -> dict:
         checks.add("EQUI pe 已软删", _pe_deleted(aios_db, EQUI) is True, "")
         checks.add("EQUI 几何实例清零", _inst_rows_of(aios_db, EQUI) == 0, "")
 
-    return checks.result(entries=summary["entries"], epoch=epoch, watermark=watermark)
+    extra_fields: dict = {}
+    if params.get("dump"):
+        extra_fields["pointer_hashes"] = _pointer_hash_set(rows)
+        extra_fields["tree"] = sorted(
+            [refno, *box] for refno, box in _tree_value_set(aios_db)
+        )
+    return checks.result(entries=summary["entries"], epoch=epoch, watermark=watermark,
+                         **extra_fields)
 
 
 WORKERS = {
@@ -375,6 +458,7 @@ class Driver:
         self.report: list[dict] = []
         self.seq = 0
         self.surreal: subprocess.Popen | None = None
+        self.oracle_surreal: subprocess.Popen | None = None
         self.db_sha_before: str | None = None
         self.shelved: list[tuple[Path, Path]] = []
 
@@ -405,7 +489,8 @@ class Driver:
         log_path.write_text(output, encoding="utf-8")
         seconds = time.monotonic() - started
         entry = {"phase": name, "ok": result.get("ok", False), "seconds": round(seconds, 1),
-                 "result": {k: v for k, v in result.items() if k != "checks"},
+                 "result": {k: v for k, v in result.items()
+                            if k not in ("checks", "pointer_hashes", "tree")},
                  "failed_checks": [c for c in result.get("checks", []) if not c["ok"]],
                  "log": str(log_path)}
         self.report.append(entry)
@@ -416,6 +501,17 @@ class Driver:
         if not entry["ok"] and "error" in result:
             print(f"      x {result['error']}")
         return result
+
+    def record_synthetic(self, name: str, ok: bool, detail: str) -> None:
+        """驱动自己做的裁决（如双库对拍）也进报告，与 worker 阶段同一形状。"""
+        entry = {"phase": name, "ok": ok, "seconds": 0.0, "result": {},
+                 "failed_checks": [] if ok else [{"name": name, "ok": False,
+                                                  "detail": detail[:400]}],
+                 "log": ""}
+        self.report.append(entry)
+        print(f"[{'ok' if ok else 'FAIL'}] {name}" + (f" — {detail[:160]}" if ok and detail else ""))
+        if not ok:
+            print(f"      x {detail[:400]}")
 
     # -- 环境与残留 ------------------------------------------------------------
 
@@ -433,9 +529,10 @@ class Driver:
 
     def preflight(self) -> None:
         assert SURREAL_EXE.exists(), f"缺 {SURREAL_EXE}（仓库自带 fork 2.1.4 服务端）"
-        assert not port_in_use(SURREAL_PORT), (
-            f"127.0.0.1:{SURREAL_PORT} 已被占用——先停掉占用者再跑"
-        )
+        for port in (SURREAL_PORT, ORACLE_PORT):
+            assert not port_in_use(port), (
+                f"127.0.0.1:{port} 已被占用——先停掉占用者再跑"
+            )
         assert PROJECT_DB.exists(), (
             f"缺项目副本 {PROJECT_DB}；先跑 testbed\\Sync-TestbedProjects.ps1"
         )
@@ -497,21 +594,30 @@ class Driver:
             DB_BACKUP.unlink()
             print(f"{PROJECT_DB.name} 已逐字节还原")
 
-    def start_surreal(self) -> None:
-        log = open(WORK / "surreal-8072.log", "w", encoding="utf-8")
-        self.surreal = subprocess.Popen(
+    def _spawn_surreal(self, port: int, log_name: str) -> subprocess.Popen:
+        log = open(WORK / log_name, "w", encoding="utf-8")
+        proc = subprocess.Popen(
             [str(SURREAL_EXE), "start", "--user", "root", "--pass", "root",
-             "--bind", f"127.0.0.1:{SURREAL_PORT}", "memory"],
+             "--bind", f"127.0.0.1:{port}", "memory"],
             cwd=str(REPO_ROOT), stdout=log, stderr=subprocess.STDOUT,
         )
-        assert wait_port(SURREAL_PORT), "SurrealDB 没能在 30s 内起来（看 surreal-8072.log）"
-        print(f"一次性内存 SurrealDB 已就绪 @{SURREAL_PORT}")
+        assert wait_port(port), f"SurrealDB 没能在 30s 内起来 @{port}（看 {log_name}）"
+        print(f"一次性内存 SurrealDB 已就绪 @{port}")
+        return proc
+
+    def start_surreal(self) -> None:
+        self.surreal = self._spawn_surreal(SURREAL_PORT, "surreal-8072.log")
+
+    def start_oracle_surreal(self) -> None:
+        self.oracle_surreal = self._spawn_surreal(ORACLE_PORT, "surreal-8073.log")
 
     def stop_surreal(self) -> None:
-        if self.surreal is not None:
-            self.surreal.kill()
-            self.surreal.wait()
-            self.surreal = None
+        for attr in ("surreal", "oracle_surreal"):
+            proc = getattr(self, attr)
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+                setattr(self, attr, None)
 
     # -- 库状态篡改（启动矩阵用） ------------------------------------------------
 
@@ -548,6 +654,48 @@ class Driver:
         with open(snapshot, "r+b") as handle:
             handle.write(b"SPATIAL8000-CORRUPTED-ON-PURPOSE")
 
+    # -- 双库对拍（oracle） -------------------------------------------------------
+
+    def run_oracle(self, a26: dict, ensure_refnos: list[str]) -> None:
+        """B 侧：final-26 直接建基线 + 按 A 侧清单生成，与 A@26 逐条对拍。
+
+        `aabb` 是内容寻址记录（id = 值哈希）：两条路径若收敛到同一几何，
+        `(refno, aabb哈希)` 集合必须逐条相等——比数值容差更强的判据。
+        """
+        self.start_oracle_surreal()
+        # 原始文件仍在 DB_BACKUP 里；当前内容（snapshot-24）直接被 final-26 顶掉，
+        # finally 的 restore_project_db 统一还原。
+        shutil.copy2(self.snapshot_paths[26], PROJECT_DB)
+        print(f"项目库文件已换成 final-26（对照库基线用）；生成清单 {ensure_refnos}")
+
+        oracle = self.run_phase(
+            "ORACLE B：final-26 直接建基线 @8073", "prepare",
+            {"config": str(ORACLE_CONFIG), "expect_watermark": 26,
+             "ensure_equi": False, "ensure_refnos": ensure_refnos, "dump": True},
+            timeout=3600)
+        if not oracle.get("ok"):
+            self.record_synthetic("ORACLE 对拍 A@26 == B", False,
+                                  "B 侧建库失败，对拍未执行")
+            return
+
+        a_hashes = a26.get("pointer_hashes") or []
+        b_hashes = oracle.get("pointer_hashes") or []
+        only_a = sorted(set(a_hashes) - set(b_hashes))[:5]
+        only_b = sorted(set(b_hashes) - set(a_hashes))[:5]
+        self.record_synthetic(
+            "ORACLE 对拍：指针哈希集 A@26 == B",
+            a_hashes == b_hashes,
+            f"A={len(a_hashes)} B={len(b_hashes)} A独有={only_a} B独有={only_b}")
+
+        a_tree = [tuple(entry) for entry in (a26.get("tree") or [])]
+        b_tree = [tuple(entry) for entry in (oracle.get("tree") or [])]
+        only_a_tree = sorted(set(a_tree) - set(b_tree))[:5]
+        only_b_tree = sorted(set(b_tree) - set(a_tree))[:5]
+        self.record_synthetic(
+            "ORACLE 对拍：空间树内容 A@26 == B",
+            a_tree == b_tree,
+            f"A={len(a_tree)} B={len(b_tree)} A独有={only_a_tree} B独有={only_b_tree}")
+
     # -- 主流程 -----------------------------------------------------------------
 
     def run(self) -> int:
@@ -558,8 +706,11 @@ class Driver:
         self.extract_snapshots()
 
         # 血统探针在 swap 之前对真实文件做（离线 parse，不连库）。
-        probe = self.run_phase("probe（真实 ams8000 血统）", "probe",
-                               {"file": str(PROJECT_DB)}, timeout=300)
+        probe = self.run_phase(
+            "probe（真实 ams8000 血统）", "probe",
+            {"file": str(PROJECT_DB), "config": str(CONFIG),
+             "stat_upto": BASELINE_SESNO + self.args.max_windows},
+            timeout=300)
         if probe.get("lineage_ok"):
             # 保留 AVEVA 命名形态：增量管线按文件名判「是不是库文件」
             # （is_pdms_db_file_name），改名会被当 copy 文件静默跳过。
@@ -574,42 +725,56 @@ class Driver:
             windows = [25, 26]
             lineage_note = "真实文件历史与 issue-019 不吻合，降级用夹具 final（只有 25/26）"
         windows = windows[: self.args.max_windows]
-        print(f"增量源：{lineage_note}；回放窗口 {windows}")
+        window_ops = probe.get("window_ops") or {}
+
+        def ops_label(sesno: int) -> str:
+            counts = window_ops.get(str(sesno)) or {}
+            return "+".join(f"{kind}×{n}" for kind, n in sorted(counts.items())) or "无操作统计"
+
+        print(f"增量源：{lineage_note}；回放窗口 "
+              f"{[f'{w}({ops_label(w)})' for w in windows]}")
 
         self.shelve_tree_artifacts()
         self.swap_in_baseline()
         exit_code = 1
         try:
             self.start_surreal()
+            cfg = {"config": str(CONFIG)}
 
             prepare = self.run_phase("P0 prepare（基线 + 生成 + 落快照）", "prepare",
-                                     {"gen_roots": self.args.gen_roots}, timeout=3600)
+                                     {**cfg, "gen_roots": self.args.gen_roots,
+                                      "expect_watermark": BASELINE_SESNO,
+                                      "ensure_equi": True},
+                                     timeout=3600)
             if not prepare.get("ok"):
                 return 1
             entries, epoch = prepare["entries"], prepare["epoch"]
+            a_generated = [r for r in prepare.get("generated", []) if r != EQUI]
 
             restart = self.run_phase("S1 快照新鲜 → reused", "restart",
-                                     {"expect_verdict": "reused", "expect_entries": entries},
+                                     {**cfg, "expect_verdict": "reused",
+                                      "expect_entries": entries},
                                      timeout=900)
             self.delete_snapshot_files()
             restart = self.run_phase("S2 快照缺失 → rebuilt", "restart",
-                                     {"expect_verdict": "rebuilt"}, timeout=900)
+                                     {**cfg, "expect_verdict": "rebuilt"}, timeout=900)
             entries = restart.get("entries", entries)
 
             self.bump_epoch()
             restart = self.run_phase("S3 库侧 epoch 漂移 → rebuilt", "restart",
-                                     {"expect_verdict": "rebuilt"}, timeout=900)
+                                     {**cfg, "expect_verdict": "rebuilt"}, timeout=900)
 
             self.plant_pending_intent()
             restart = self.run_phase("S4 携带待重放意图 → replayed", "restart",
-                                     {"expect_verdict": "replayed"}, timeout=900)
+                                     {**cfg, "expect_verdict": "replayed"}, timeout=900)
 
             self.corrupt_snapshot()
             restart = self.run_phase("S5 快照损坏 → rebuilt", "restart",
-                                     {"expect_verdict": "rebuilt"}, timeout=900)
+                                     {**cfg, "expect_verdict": "rebuilt"}, timeout=900)
             entries = restart.get("entries", entries)
             epoch = restart.get("epoch", epoch)
 
+            a26: dict | None = None
             if not self.args.skip_windows:
                 for end in windows:
                     expect = {25: "box-deleted", 26: "equi-deleted"}.get(end)
@@ -618,20 +783,30 @@ class Driver:
                     # 「树应有内容」没变就不 bump 正是设计；其余窗口是否动树
                     # 取决于会话内容，只要求 epoch 单调不减。
                     window = self.run_phase(
-                        f"W{end} 增量窗口 apply(end={end})", "apply-window",
-                        {"source": str(source), "end": end, "prev_epoch": epoch,
-                         "expect": expect, "expect_epoch_bump": end == 25},
+                        f"W{end} 增量窗口 apply(end={end})（{ops_label(end)}）",
+                        "apply-window",
+                        {**cfg, "source": str(source), "end": end, "prev_epoch": epoch,
+                         "expect": expect, "expect_epoch_bump": end == 25,
+                         "dump": end == 26},
                         timeout=1800)
                     if not window.get("ok"):
                         print("窗口失败，中止后续窗口（水位未推进，续跑无意义）")
                         break
+                    if end == 26:
+                        a26 = window
                     entries, epoch = window["entries"], window["epoch"]
                     check = self.run_phase(
                         f"W{end} 之后重启 → reused", "restart",
-                        {"expect_verdict": "reused", "expect_entries": entries},
+                        {**cfg, "expect_verdict": "reused", "expect_entries": entries},
                         timeout=900)
                     if not check.get("ok"):
                         break
+
+            # ── 双库对拍：A（基线@24 + 回放到 26）vs B（final-26 直接建基线）。
+            # 必须排在 A 全部阶段之后：B 与 A 同项目名，B 的启动会用自己的指纹
+            # 覆盖仓库根同名快照文件，排前面会打翻 A 后续的 reused 断言。
+            if a26 is not None and not self.args.skip_oracle:
+                self.run_oracle(a26, a_generated)
 
             exit_code = 0 if all(entry["ok"] for entry in self.report) else 1
             return exit_code
@@ -661,6 +836,8 @@ def main() -> int:
     parser.add_argument("--gen-roots", type=int, default=3,
                         help="基线阶段额外生成多少个抽样 EQUI 根（默认 3）")
     parser.add_argument("--skip-windows", action="store_true", help="只跑启动裁决矩阵")
+    parser.add_argument("--skip-oracle", action="store_true",
+                        help="跳过双库对拍（B 侧 final-26 基线 @8073）")
     parser.add_argument("--json-report", help="报告 JSON 输出路径（默认 .spatial8000/report.json）")
     args = parser.parse_args()
 

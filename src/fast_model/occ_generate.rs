@@ -1024,8 +1024,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         let mut _direct_serial = None;
         let mut direct_tree = None;
         if staged_writes.is_none() && durable_room_trigger {
-            _direct_serial =
-                Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
+            _direct_serial = Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
             direct_tree = Some(GLOBAL_AABB_TREE.write().await);
         }
         let mut rstar_objs = Vec::new();
@@ -1114,8 +1113,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         // durable 增量的锁更早（读输入之前就取，见上），这里只接管普通直写分支。
         // 锁序同上：先空间串行锁、后树写锁。
         if staged_writes.is_none() && direct_tree.is_none() {
-            _direct_serial =
-                Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
+            _direct_serial = Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
             direct_tree = Some(GLOBAL_AABB_TREE.write().await);
         }
         let stale_by_refno = if let Some(tree) = direct_tree.as_ref() {
@@ -1175,8 +1173,8 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             // 痕迹：少 bump 一次，落盘前崩溃的重启就会看到 sidecar 与库指纹相等、按
             // Reuse 复用一棵陈旧的树，而 /health 的 drift 恒为 false，没有人看得见。
             // 关掉房间增量、或走非定向的全量生成，都只摘掉 room_recalc 这一条语句。
-            let room_upserts = (durable_room_trigger && crate::options::room_incremental())
-                .then(|| {
+            let room_upserts =
+                (durable_room_trigger && crate::options::room_incremental()).then(|| {
                     crate::data_interface::model_update_pending::render_room_recalc_upserts(
                         &chunk_changes,
                     )
@@ -1967,10 +1965,7 @@ mod aabb_write_order_tests {
             lock_pairs += 1;
             cursor = tree_at + 1;
         }
-        assert_eq!(
-            lock_pairs, 2,
-            "durable 与普通直写应各有一个取锁点: {body}"
-        );
+        assert_eq!(lock_pairs, 2, "durable 与普通直写应各有一个取锁点: {body}");
 
         let commit_at = body
             .find("execute_surreal_checked(")
@@ -2058,7 +2053,9 @@ mod aabb_write_order_tests {
         use aios_core::accel_tree::acceleration_tree::AccelerationTree;
         use aios_core::room::room::GLOBAL_AABB_TREE;
 
-        aios_core::init_test_surreal().await.expect("connect surreal");
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
         // 本用例经直写刷新自己喂树、不走启动装载：按状态机的测试装载模式显式
         // 声明，否则进程态停在 Uninitialized，基线 persist 会被发布门拒绝
         // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
@@ -2087,8 +2084,7 @@ mod aabb_write_order_tests {
             .expect("decode sample refno")
             .into_iter()
             .next();
-        let refno =
-            sample.expect("沙箱库里没有带指针的实例——先跑 python/testbed/run_full_loop.py");
+        let refno = sample.expect("沙箱库里没有带指针的实例——先跑 python/testbed/run_full_loop.py");
 
         // 基线：树上还没有它 → 第一次刷新必须 bump（first sighting counts as changed），
         // 随后落盘，文件与库指纹自洽。
@@ -2120,7 +2116,10 @@ mod aabb_write_order_tests {
             Some(epoch_baseline),
             "逐位相等的重刷不得 bump: {unchanged}"
         );
-        assert_eq!(unchanged["drift"], false, "无变化重刷不得制造漂移: {unchanged}");
+        assert_eq!(
+            unchanged["drift"], false,
+            "无变化重刷不得制造漂移: {unchanged}"
+        );
 
         // 树落后于库（全量生成中途的形态）：刷新必须 bump 并把树追上。
         GLOBAL_AABB_TREE

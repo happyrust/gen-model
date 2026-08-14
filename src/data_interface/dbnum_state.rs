@@ -156,7 +156,10 @@ fn applied_time_of(row: &StateRow, effective_applied: Option<i32>) -> Option<Str
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileAnomaly {
     /// `file_latest_sesno < applied_sesno`: the file rolled back or was replaced.
-    /// The `dbnum` must be blocked; the watermark must NOT regress.
+    /// The incremental path must never touch it (the watermark never regresses
+    /// inside that path); routing turns it into a reinit batch instead — the
+    /// worker wipes the dbnum's data and re-parses the current file as a first
+    /// import (ADR-021). Only when that wipe fails does the dbnum stay blocked.
     ///
     /// 两个序号是**判据**（比大小的那一对，也是日志与规格样例里的诊断证据）；
     /// 两个时刻是**给人看的那一对**（plant-ui ADR-0019 Q6：`最新保存 07-01 10:00
@@ -205,10 +208,13 @@ pub enum FileAnomaly {
 }
 
 impl FileAnomaly {
-    /// 该异常是否阻断执行（不入队、不应用）。
+    /// 该异常是否允许**按原样增量应用**（`false` = 不许）。
     ///
-    /// 五种异常里**只有路径迁移不阻断**——它是良性搬家，登记路径跟着更新即可
+    /// 只有路径迁移不阻断——它是良性搬家，登记路径跟着更新即可
     /// （QUEUE-FIELD-MAP §3「本期不执行」一格的判定，从预览里提出来复用）。
+    /// 注意回退（[`Self::requires_reinit`]）虽然 `blocks() == true`，但调用方
+    /// 在咨询本谓词**之前**就把它路由成整库重建批次（ADR-021）：`blocks()`
+    /// 对回退真正兜住的只剩「重建（清库）失败时保持阻断」这一条退路。
     pub fn blocks(&self) -> bool {
         !matches!(self, FileAnomaly::PathMigrated { .. })
     }
@@ -251,6 +257,22 @@ impl FileAnomaly {
     /// 是不是「这一行不归你」——这类异常连观察值都不许写。
     pub fn is_foreign_project(&self) -> bool {
         matches!(self, FileAnomaly::ForeignProject { .. })
+    }
+
+    /// 哪些异常转「整库重建」（ADR-021）——**只有回退**。
+    ///
+    /// 回退的语义是清楚的：登记身份没变、文件本体被还原到更旧的会话，磁盘上
+    /// 已经没有被丢弃的那段历史，重建动作（整库清空 + 按首次导入重新解析当前
+    /// 文件）有唯一正确答案，因此默认自动执行、不阻断等人。其余阻断类异常动的
+    /// 是「这个 dbnum 对应哪个文件」的根基（类型变更 / 同号多文件 / 归属不符 /
+    /// 文件缺失），自动清库等于替人拍板挑文件，照旧阻断；`PathMigrated` 本来
+    /// 就不阻断，轮不到这里。
+    ///
+    /// 清库动作只发生在数据批次 worker 的执行体（扫描路径只分类 + 入队重建
+    /// 批次，破坏性动作受 `startup_autorun` / 队列暂停约束），见
+    /// `manual_update::execute_one_dbnum` 与 `fast_delete::wipe_dbnum_for_reinit`。
+    pub fn requires_reinit(&self) -> bool {
+        matches!(self, FileAnomaly::Rollback { .. })
     }
 }
 
@@ -1289,6 +1311,55 @@ mod tests {
                 | FileAnomaly::ForeignProject { .. } => true,
             };
             assert_eq!(anomaly.blocks(), expected, "{anomaly:?} 的阻断口径不符");
+        }
+    }
+
+    /// 「哪些异常转整库重建」是策略红线（ADR-021）：自动路径、手动入队与
+    /// worker 执行体都拿 [`FileAnomaly::requires_reinit`] 当唯一裁决，这里
+    /// 逐变体点名（不留 `_ =>` 兜底，理由同 `blocks()` 那条）：只有回退转
+    /// 重建，其余异常自动清库等于替人拍板挑文件。
+    #[test]
+    fn only_a_rollback_requires_reinit() {
+        let cases = [
+            FileAnomaly::Rollback {
+                file_latest_sesno: 80,
+                applied_sesno: 120,
+                file_latest_sesno_time: None,
+                applied_sesno_time: None,
+            },
+            FileAnomaly::PathMigrated {
+                old_path: "/old".into(),
+                new_path: "/new".into(),
+            },
+            FileAnomaly::TypeChanged {
+                stored_db_type: "DESI".into(),
+                observed_db_type: "SYST".into(),
+            },
+            FileAnomaly::Duplicate {
+                paths: vec!["/a".into(), "/b".into()],
+            },
+            FileAnomaly::Missing {
+                path: "/gone".into(),
+            },
+            FileAnomaly::ForeignProject {
+                stored_project: "AMS".into(),
+                observed_project: "ZDJ".into(),
+            },
+        ];
+        for anomaly in &cases {
+            let expected = match anomaly {
+                FileAnomaly::Rollback { .. } => true,
+                FileAnomaly::PathMigrated { .. }
+                | FileAnomaly::TypeChanged { .. }
+                | FileAnomaly::Duplicate { .. }
+                | FileAnomaly::Missing { .. }
+                | FileAnomaly::ForeignProject { .. } => false,
+            };
+            assert_eq!(
+                anomaly.requires_reinit(),
+                expected,
+                "{anomaly:?} 的整库重建口径不符"
+            );
         }
     }
 

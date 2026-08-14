@@ -4982,13 +4982,12 @@ mod tests {
         crate::data_interface::manual_update::rebuild_reverse_index()
             .await
             .expect("rebuild reverse index before cascade");
-        let expected_roots =
-            crate::data_interface::manual_update::expand_live_reverse_cascade(RefnoEnum::from(
-                SPCO,
-            ))
-            .await
-            .expect("pre-expand shared SPCO cascade")
-            .len();
+        let expected_roots = crate::data_interface::manual_update::expand_live_reverse_cascade(
+            RefnoEnum::from(SPCO),
+        )
+        .await
+        .expect("pre-expand shared SPCO cascade")
+        .len();
         assert!(expected_roots > 0, "shared SPCO expanded to zero roots");
         SUL_DB
             .query(&cleanup)
@@ -5043,7 +5042,11 @@ mod tests {
             let expected: usize = expected
                 .parse()
                 .expect("AIOS_EXPECT_SPCO_CONSUMERS must be a number");
-            assert_eq!(consumers.len(), expected, "shared-SPCO consumer count drifted");
+            assert_eq!(
+                consumers.len(),
+                expected,
+                "shared-SPCO consumer count drifted"
+            );
         }
 
         let pe_keys = consumers

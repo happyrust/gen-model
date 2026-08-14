@@ -1,8 +1,10 @@
 # live / ignored 用例台账
 
 建账日期：2026-08-12（7-27 测试计划 Gate 3 的执行载体）
-口径：全仓 `src/**` 的 `#[ignore]` 用例逐项登记。**没有"最近通过"记录的用例视同
-未验资产**——本台账是唯一事实来源，动过 live 用例或点亮新批次必须同步更新。
+口径：全仓 `src/**` 与 `tests/**` 的 `#[ignore]` 用例逐项登记（2026-08-13 扩展：tests/
+集成测试此前仅 C 组收录 issue7_e2e 一条、其余游离在外，已补录为待验行，见 E 组）。
+**没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
+点亮新批次必须同步更新。
 
 跑法（Gate 0 能力，rs-core `DB_OPTION_FILE` 已落地）：
 
@@ -121,7 +123,8 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `resolves_the_real_mdb_declaration` | update_scope.rs:358 | SYS meta 已解析（`execute_manual` 引导一遍）；精确计数走 `AIOS_EXPECT_DESI_COUNT` | 2026-08-13 B1重测 @8019 | **通过**（3.2s；断言已拆结构层+计数层，testbed /ALL 同样解出 29 个 DESI，`AIOS_EXPECT_DESI_COUNT=29` 全绿） |
 | `an_unparsed_project_bootstraps_instead_of_deadlocking` | update_scope.rs:387 | 空 NS | 2026-08-12 批次1 @8019 | **通过**（3.2s） |
 | `live_watch_directory_blocks_duplicate_dbnum_files` | increment_manager.rs:383 | E3D 文件头 + 一次性副本目录 | 2026-08-12 批次1 @8019 | **修复后通过**（9.6s）——夹具文件名 first/second 不过 AVEVA 白名单（用例写于白名单之前，已腐化），改成 `ams9990_0001/_0002` |
-| `live_watermark_realign_rebaselines_a_rolled_back_dbnum` | manual_update.rs:5234 | 魔术 dbnum + 保留段 ref0（空库即可） | 2026-08-13 @8019 | **通过**（4.7s；2026-08-12 随 watermark_realign 参数新增） |
+| `live_rollback_wipe_clears_the_dbnum_for_reinit` | manual_update.rs（tests） | 魔术 dbnum + 保留段 ref0（空库即可） | 2026-08-13 @8019 | **通过**（4.7s）。前身 `live_watermark_realign_rebaselines_a_rolled_back_dbnum`（2026-08-12 随档位新增，08-13 同参数通过 4.7s）随 ADR-021 重写：缝合式对齐（prune + 补洞）改为整库清空 `wipe_dbnum_for_reinit`，断言改为全删（幸存行也不留）+ 统计清空 + 水位清值不删行 + spatial epoch 递增 |
+| `live_rollback_and_ghost_watermark_reinit_end_to_end` | manual_update.rs（live_tests） | testbed 沙箱 + `AIOS_MANUAL_UPDATE_PROJECT`；靶库默认 7998（**会物理清空重建**）；debug 构建需 `RUST_MIN_STACK=16777216` | 2026-08-13 @8019 | **通过**（22.3s，两幕）。幕一回退：入队不删数据 → worker 复核 → 整库清空 → 首次导入基线 → 水位对齐文件；幕二幽灵水位（applied>0 且 pe 零行）：路由到基线而非增量。首跑抓出真缺陷：增量形状批次先开暂存窗口、执行体改道基线后窗口缺 finalize plan 而 failed——修复为冻结点开窗前过 `batch_reroutes_to_initial_load` 预判 |
 | `live_direct_delete_crash_before_persist_recovers_by_rebuild` | helper.rs:908 | testbed 指定（推进 epoch、重建树文件） | 2026-08-12 批次1 @8019 | **修复后通过**（5.5s）——用例写于状态机之前，自灌树后 persist 被发布门拒（Uninitialized），补 `mark_spatial_tree_fixture_preloaded()` |
 | `live_direct_refresh_crash_before_persist_recovers_by_rebuild` | occ_generate.rs:2057 | testbed 指定（需基线+生成在位） | 2026-08-12 批次1 @8019 | **修复后通过**（5.8s）——同上，补测试装载模式声明 |
 | `live_sync_aabb_tree_fills_tree_from_db` | aabb_tree.rs:2072 | 重写 inst_relate.aabb + 树文件（走 AIOS_LIVE_WS 三件套） | 2026-08-12 批次1 @8019 | **通过**（1.2s，工具补齐 AIOS_LIVE_* 派生后） |
@@ -179,17 +182,18 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 
 ## C 需真实 E3D（生产空窗 runbook）
 
-| 测试 | 位置 | 依赖 |
-|---|---|---|
-| `live_real_ftub_delete_move_and_reorder` | increment_pipeline.rs:3437 | AMS 文件里的真实 FTUB 会话史 |
-| `live_real_delete_session_cleans_up_model_and_regenerates_branch` | increment_pipeline.rs:4290 | `projams_incr_delete_apply.mac` 造的删除会话 |
-| `live_issue7_real_db_deleted_edges_come_back` | room_live_issue7.rs:204 | 真实项目库（7999 房间） |
-| `live_issue13_c2_moving_out_of_the_room_clears_membership` | room_live_issue7.rs:356 | 真实项目库 |
-| `live_issue5_moving_the_fitting_moves_its_implicit_tubing` | room_live_issue7.rs:523 | 真实项目库 |
-| `live_issue13_c3_on_demand_pending_is_invisible_to_its_own_database` | room_live_issue7.rs:635 | 真实项目库 |
-| `live_issue7_probe` | room_live_issue7.rs:708 | 只读探针（真实项目） |
-| `the_deleted_site_is_pruned_from_a_real_parse` | member_prune.rs:369 | 真实 E3D 库文件 |
-| `live_identity_query` | e3d_mcp.rs:240 | AMS E3D 装机 + TTY |
+| 测试 | 位置 | 依赖 | 最近结果 |
+|---|---|---|---|
+| `live_real_ftub_delete_move_and_reorder` | increment_pipeline.rs:3437 | AMS 文件里的真实 FTUB 会话史 | — |
+| `live_real_delete_session_cleans_up_model_and_regenerates_branch` | increment_pipeline.rs:4290 | `projams_incr_delete_apply.mac` 造的删除会话 | — |
+| `live_issue7_real_db_deleted_edges_come_back` | room_live_issue7.rs:204 | 真实项目库（7999 房间） | — |
+| `live_issue13_c2_moving_out_of_the_room_clears_membership` | room_live_issue7.rs:356 | 真实项目库 | — |
+| `live_issue5_moving_the_fitting_moves_its_implicit_tubing` | room_live_issue7.rs:523 | 真实项目库 | — |
+| `live_issue13_c3_on_demand_pending_is_invisible_to_its_own_database` | room_live_issue7.rs:635 | 真实项目库 | — |
+| `live_issue7_probe` | room_live_issue7.rs:708 | 只读探针（真实项目） | — |
+| `the_deleted_site_is_pruned_from_a_real_parse` | member_prune.rs:369 | 真实 E3D 库文件 | — |
+| `live_identity_query` | e3d_mcp.rs:240 | AMS E3D 装机 + TTY | **2026-08-13 通过**（D: AMS、只读 TTY，3.82s；`output/e3d-mcp/query-66444-20260813152439638629/identity.log`） |
+| `issue7_e2e_room_comes_back_after_e3d_save` | tests/issue7_e2e_increment.rs:353 | `Run-RoomE3DE2E.ps1` + AMS E3D TTY + 隔离 Surreal | **2026-08-13 基线阻断，未执行 SAVEWORK**：FIXING 在目录 manifold 旧格式解码失败；BOX 命中回退门 `file=104 < applied=238`。证据：`output/room-e3d-e2e/20260813-{fixing,box}-first/report.md`。**（旧语义现场：ADR-021 后回退不再阻断而是排整库重建批次——重跑前须按新语义重估基线恢复步骤并重新定性）** |
 
 ## D 专用夹具 / bench / 探针（按需手跑）
 
@@ -199,9 +203,31 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `live_7324_parse_failure_is_preserved_as_pe_metadata` | database.rs:320 | AMS 7324 专用夹具 |
 | `production_cata_locator_is_identical_and_below_io_budget` | on_demand_db.rs:461 | 生产 ACP 7320 夹具（对拍模式） |
 | `folding_a_real_window_preserves_final_state` | increment_pipeline.rs:2602 | `AIOS_FOLD_TEST_FILE` 指定真实窗口 |
+| `live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay` | session_index_diff.rs（tests） | 真实 ams8000 文件（`AIOS_AMS8000_FILE` 可覆盖），纯文件不连库。**2026-08-14 复验通过**：`cargo test --locked --lib data_interface::session_index_diff::tests::live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay --no-default-features --features ws,gen_model,manifold,project_hd -- --ignored --exact --nocapture`，`1 passed`、exit 0（16.04s）。原始 4 窗口仲裁与性能明细见 **2026-08-13 通过**记录：差分 ≡ 生产 B+ 点查逐 refno 仲裁全一致，695/84/17/11ms vs 回放 10772/2169/471/376ms（debug）。证据 `docs/evidence/2026-08-13-session-index-diff-net-changes.md` |
+| `live_ams8000_diagnose_reachable_paths_for_one_refno` | session_index_diff.rs（tests） | 诊断探针（工具非测试）：`AIOS_DIAG_REFNO`/`AIOS_DIAG_SESNO` 指定目标，dump 索引树可达路径与同键重复条目——差分口径三条实测规则（同键首见、flag 盲、键范围路由）都是它挖出来的 |
+| `live_ams8000_net_window_payloads_match_replay_on_single_touch_refnos` | net_window.rs（tests） | 真实 ams8000 文件（`AIOS_AMS8000_FILE` 可覆盖），纯文件不连库。**2026-08-14 复验通过**：`cargo test --locked --lib data_interface::net_window::tests::live_ams8000_net_window_payloads_match_replay_on_single_touch_refnos --no-default-features --features ws,gen_model,manifold,project_hd -- --ignored --exact --nocapture`，`1 passed`、exit 0（18.60s）。原始载荷与性能明细见 **2026-08-13 通过**记录：净窗口收集器 6,499 条 Add 负载与回放渲染逐字符相等；全窗口净收集 1.24s vs 回放 10.9s；字典缺项系统记录 64 条按回放同口径跳过并聚合告警。证据 `docs/evidence/2026-08-13-session-index-diff-net-changes.md`「引擎接线」节。**ADR-022 验收 3 的 live A/B 全链路执行**由 Python 房间增量档承接（不是 `#[ignore]`，不计入本表合计）：`python/tests/test_net_window_ab.py`，跑法 `cd python; $env:AIOS_NET_AB='1'; .venv\Scripts\python.exe -m pytest tests/test_net_window_ab.py -q -s`（@8071 一次性内存库，~3 分 20 秒）。**2026-08-13 通过**（连续两轮）：testbed 8000 窗口 105..=209 两口径完整执行终态逐维等价（差异全部归因：净持真 2 元素 + §5.1 ref_rev 13 边），窗口执行回放 35.0s vs 净 11.0s；顺带抓出并修复 `inst_geo` param 双变体深合并毒化（见 changelog 修复条）。证据同上文件「live A/B 全链路执行」节 |
+| `test_net_and_replay_agree_on_a_stock_deletion`（T11b 存量库删除等价） | `python/tests/test_net_window_ab.py` | 同上档（`AIOS_NET_AB=1` opt-in，@8071 一次性内存库）+ testbed 8000 全量文件可写（用例会原子换入 @K 快照再无损换回）；`db_session_fixture` 可执行档在位（缺则硬失败，`AIOS_T11B_ALLOW_NO_RUST_CHECK=1` 才降级） | **2026-08-13 通过**（118s） | **通过**：切点 K=24、窗口 25..=209，文件层净删除 oracle 4 条；起点确为活行且净口径真立碑 2 条（`24384_24778`/`24384_24779`，⊆ oracle）；共同活行 6,536 逐字段一致、**0 未归因**。强制空跑变异（`AIOS_T11B_FORCE_EMPTYRUN=1`）准确变红。删除判据纯文件（core.dll `elementsDeletedBetween` 键集差的复刻），**DB 只验证窗口前活行/窗口后墓碑两个状态、不作判据**。收尾源文件 16,504,832 字节无损恢复。证据同文件「存量库删除等价直证」节 |
+| `T18a` release 方向性单点测量（**非性能门，n=1**） | 手跑，非 `#[ignore]` 用例 | release 构建 + testbed 8000 | **2026-08-13 测得** | **非门**：只为预判 ADR-022 决策 4 是否被推翻。高复触窗 104..=209（106 会话，a/d/m=6/51/16，`ops_total` 215，复触率 2.95）完整净收集 3ms vs 回放 53ms ≈17.7×；Add 地板窗 1..=209（复触率 1.05）126ms vs 792ms ≈6.3×（形态决定，不作判定）。**不构成 T18 性能门证据**——正式门要 1 warmup + ≥5 次、median/min/p95、warm 判定 cold 另报，且 250206 SYST 现场硬门未跑。证据同文件「release 方向性单点测量」节 |
 | `persist_ab_on_a_throwaway_instance` | increment_pipeline.rs:2747 | 一次性 8099 实例 A/B 基准 |
 | `bench_anc_contains_vs_deep_traversal` | fork_surreal_compat.rs:1048 | 170k 行 fork rocksdb 吞吐基准 |
 | `test_model_generation_24383_66456` | test_performance.rs:652 | 生成性能基准 |
 | `probe_live_sql` | helper.rs:737 | `AIOS_PROBE_SQL` ad-hoc 探针（工具非测试） |
 
-合计 83 项：A 27 / B 39 / C 9 / D 8。
+## E tests/ 集成 live（2026-08-13 补录，待验）
+
+台账原口径只扫 `src/**`，tests/ 目录的集成 `#[ignore]` 用例除 issue7_e2e（C 组）外一直
+游离在外——按「没有最近通过记录视同未验资产」补录如下（不伪造通过记录）。
+`db8000_session_pairs.rs` 无 `#[ignore]` 用例（此前审计的命中是文档注释字样），其 CI
+常跑对拍由 `index_diff_matches_replay_folding_on_every_case_window` 覆盖，不入本组。
+
+| 测试 | 位置 | 前置 | 最近通过 | 结论 |
+|---|---|---|---|---|
+| `staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark` | tests/staged_regen_e2e.rs:72 | 真实项目库 + 待应用 BRAN/HANG RegenRoot；不设 `GEN_MODEL_DIRECT_INCREMENT` | — | 待跑（暂存窗口端到端） |
+| `staged_transform_follows_a_pure_pose_move` | tests/staged_transform_e2e.rs:183 | 真实项目库 + 待应用位姿增量；不设 `GEN_MODEL_DIRECT_INCREMENT` | — | 待跑（暂存窗口端到端） |
+| `staged_pane_replay_goes_through_the_kvmem_window` | tests/staged_pane_replay_probe.rs:112 | 7997@194 会话在位（探针型） | — | 待跑（探针） |
+| `rebuild_room_membership_on_the_live_project` | tests/room_rebuild_repair.rs:80 | 真实项目库；`AIOS_ROOM_KEYWORD` 可选过滤 | — | 待跑（修复工具型：按面板先清后写） |
+| `generating_one_root_fills_geometry_aabb_and_tree` | tests/gen_one_root_probe.rs:90 | 真实项目库；`AIOS_PROBE_DBNUM` / `AIOS_PROBE_ROOT` 可配 | — | 待跑（探针：单根生成全链路） |
+
+合计 93 项：A 28 / B 39 / C 10 / D 11 / E 5（2026-08-13：D 增会话索引差分对拍、诊断探针、
+净窗口收集器负载对拍；A 计数修正 27→28——08-13 新增的
+`live_rollback_and_ghost_watermark_reinit_end_to_end` 此前漏计；E 组为 tests/ 集成用例补录）。

@@ -139,20 +139,40 @@ http_api_cors = ["*"]
 # 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
 startup_autorun = false
 
-#【新增 2026-08-10】room_incremental
-# 房间归属的「增量」重算；默认 false = 不排、不收。
-#   false：位姿/删除刷新包围盒之后不再排 room_recalc 目标（直写事务与暂存窗口
-#          收口两个写入点都不排），空闲轮也不再收房间轮。已经排在
-#          model_update_pending 里的目标原样留着，开关一开照常收——关掉不等于
-#          把那些活丢了。
-#   true ：历史行为。
+#【新增 2026-08-10，默认值 2026-08-12 改为 true】room_incremental
+# 房间归属的「增量」重算；默认 true = 照排照收。
+#   true ：位姿/删除刷新包围盒之后排 room_recalc 目标（直写事务与暂存窗口收口
+#          两个写入点），空闲轮收房间轮。
+#   false：两个写入点都不排，空闲轮也不收。已经排在 model_update_pending 里的
+#          目标原样留着，开关一开照常收——关掉不等于把那些活丢了。
 # 管的只有增量这一条链：启动全量重建、人工重建、以及 drain_rooms 直调（房间对拍
 # 夹具走的就是它）都不看本键。
-# 环境变量 AIOS_ROOM_INCREMENTAL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
-# 默认取假的理由：增量房间与增量模型生成共用同一条空间树和同一批包围盒变更，
-# 房间那半边一旦在缺几何的构件上空转，每页要付两次全量查询、把空闲轮变成它的
-# 节拍器，模型生成侧的问题反倒被日志淹掉。
-room_incremental = false
+# 环境变量 AIOS_ROOM_INCREMENTAL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），
+# 想单独排查模型增量时用 AIOS_ROOM_INCREMENTAL=0 临时关一次，不必改文件。
+# 2026-08-10 默认取假的理由是现场压着 2580 个查不到几何的房间目标，每页 256 个
+# 付两次全量查询、约 88 秒，把模型侧真正的失败埋进日志。那批目标已经收干净，
+# 而关着的代价更贵：房间归属只在删除时还会被清，搬家后的重算全靠启动全量重建
+# 回补，而那条兜底路径排在 startup_autorun 之后——默认部署里等于没有回补通道。
+room_incremental = true
+
+#【新增 2026-08-13】net_window_collection
+# 增量窗口收集口径（ADR-022 灰度开关）；默认 false。
+#   false：现状——逐会话回放（collect_changes），成本 O(会话数×每会话触达×3 次解析)。
+#   true ：净窗口——会话索引差分给出净三态，再按窗口两端记录版本合成同形状操作流：
+#          每 refno 恰一条，加了又删不出现（不再留墓碑行）、改了又改回不触发 regen、
+#          删了又建判净修改。收集耗时与窗口内会话数解耦（实测 ams8000 全窗口 1.2s
+#          vs 回放 11s，负载逐字符对拍一致，见 docs/evidence/2026-08-13-session-
+#          index-diff-net-changes.md）。预览与执行经 collect_window 唯一入口同口径，
+#          回执首条警告自报口径。
+# 环境变量 AIOS_NET_WINDOW 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+# 灰度期证据未收口前保持 false；夹具 + live A/B 全绿后翻默认值（ADR-022 §4）。
+# net_window_collection = false
+
+#【移除 2026-08-13】watermark_realign（2026-08-12 引入的 off/check/rebaseline 档位）
+# 随 ADR-021 退役：文件回退（file_latest_sesno < applied_sesno）的默认且唯一处置
+# 改为「扫描只入队重建批次，worker 冻结点复核仍判回退才整库清空并按首次导入重新
+# 解析」。「先别动我看看」由 startup_autorun / 队列暂停承担（清库只发生在 worker
+# 出队之后）。环境变量 AIOS_WATERMARK_REALIGN 一并退役，写了也没人读。
 
 
 #调试选项

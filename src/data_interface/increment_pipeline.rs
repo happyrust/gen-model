@@ -894,6 +894,47 @@ impl IncrementPipeline {
         Ok(range_eles)
     }
 
+    /// 收集一个增量窗口的操作流——预览与执行体共用的**唯一**入口（ADR-011 同
+    /// 谓词纪律），口径由 [`crate::options::net_window_collection`] 裁决
+    /// （ADR-022 灰度）：off = 逐会话回放（[`Self::collect_changes`]），on =
+    /// 净窗口（会话索引差分 + 两端版本合成，
+    /// [`crate::data_interface::net_window::collect_net_window`]）。
+    ///
+    /// 返回 `(窗口, 收集警告)`，警告必须随预览 / 批次回执透出。净口径下第一条
+    /// 警告固定是口径标注（净三态计数 + 差分耗时）——灰度期每一次收集都自报
+    /// 口径，出问题不用猜当时走的哪条路。
+    pub fn collect_window(
+        path: &std::path::Path,
+        sesno_range: RangeInclusive<i32>,
+    ) -> anyhow::Result<(BTreeMap<u32, Vec<EleOperationData>>, Vec<String>)> {
+        if !crate::options::net_window_collection() {
+            return Ok((Self::collect_changes(path, sesno_range)?, Vec::new()));
+        }
+        let mut io = PdmsIO::new("", path.to_path_buf(), true);
+        io.open()
+            .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
+        let outcome = crate::data_interface::net_window::collect_net_window(&mut io, sesno_range)?;
+        let (mut added, mut deleted, mut modified) = (0usize, 0usize, 0usize);
+        for operation in outcome.window.values().flatten() {
+            match &operation.detail {
+                EleOperationDetail::Add(_) => added += 1,
+                EleOperationDetail::Deleted => deleted += 1,
+                EleOperationDetail::Modified(_) => modified += 1,
+                EleOperationDetail::None => {}
+            }
+        }
+        let mut warnings = vec![format!(
+            "收集口径：净窗口（会话索引差分，ADR-022 灰度）——added={added} deleted={deleted} \
+             modified={modified} 原样重写跳过={} 终稿不可解析={} 目标侧读页={} 差分 {}ms",
+            outcome.unchanged_rewrites,
+            outcome.unparseable_finals,
+            outcome.stats.target.pages_read,
+            outcome.stats.elapsed_ms
+        )];
+        warnings.extend(outcome.warnings);
+        Ok((outcome.window, warnings))
+    }
+
     /// Apply incremental updates for the given sesno ranges.
     ///
     /// Map value: `(basic_info, sesno_range, db_type)`.
@@ -1019,7 +1060,9 @@ impl IncrementPipeline {
                 Some(eles) => eles,
                 None => {
                     let start = Instant::now();
-                    let eles = Self::collect_changes(path, requested_range.clone())?;
+                    let (eles, collect_warnings) =
+                        Self::collect_window(path, requested_range.clone())?;
+                    warnings.extend(collect_warnings);
                     timings.collect += start.elapsed();
                     eles
                 }
@@ -1066,7 +1109,8 @@ impl IncrementPipeline {
             Some(range_eles) => range_eles,
             None => {
                 let start = Instant::now();
-                let range_eles = Self::collect_changes(path, sesno_range)?;
+                let (range_eles, collect_warnings) = Self::collect_window(path, sesno_range)?;
+                warnings.extend(collect_warnings);
                 timings.collect += start.elapsed();
                 range_eles
             }
@@ -2099,7 +2143,8 @@ mod cache_tests {
         );
         // 反空转：采信点恰好一处——多出第二处就说明有人绕开了统一判定。
         assert_eq!(
-            body.matches(concat!("accept_handed_in_window", "(")).count(),
+            body.matches(concat!("accept_handed_in_window", "("))
+                .count(),
             1,
             "采信判定必须只有一个入口"
         );
