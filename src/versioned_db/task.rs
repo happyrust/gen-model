@@ -1,4 +1,7 @@
-use crate::{fast_model::pdms_inst::save_instance_data, versioned_db::database::SenderJsonsData};
+use crate::{
+    fast_model::shape_save::{SaveMode, run_shape_save_receiver},
+    versioned_db::database::SenderJsonsData,
+};
 use aios_core::{SUL_DB, geometry::ShapeInstancesData};
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -32,25 +35,11 @@ pub async fn initialize_global_db_sender() {
 // }
 
 async fn background_save_inst_task(receiver: flume::Receiver<ShapeInstancesData>) {
-    let mut all_handles = vec![];
-    for i in 0..4 {
-        let receiver = receiver.clone();
-        let insert_handle = tokio::task::spawn(async move {
-            while let Ok(shape_insts) = receiver.recv_async().await {
-                dbg!(shape_insts.inst_info_map.len());
-                // 后台 fire-and-forget worker：save_instance_data 现在会在写入失败时
-                // 返回 Err（不再静默吞错）。这里没有可上报的调用方，故记录并继续，
-                // 避免让整个后台任务 panic 退出。
-                if let Err(e) = save_instance_data(&shape_insts, false).await {
-                    eprintln!("background_save_inst_task: save_instance_data 失败: {e:?}");
-                }
-            }
-            // Ok::<_, anyhow::Error>(())
-        });
-        all_handles.push(insert_handle);
+    if let Err(error) = run_shape_save_receiver(receiver, SaveMode::FullBuild).await {
+        // 该 legacy 后台入口没有回执通道；仍只保留一个 consumer，并把失败留在日志。
+        log::error!("background_save_inst_task 保存失败: {error:#}");
+        eprintln!("background_save_inst_task 保存失败: {error:#}");
     }
-
-    futures::future::join_all(all_handles).await;
 }
 
 pub async fn get_global_db_sender() -> flume::Sender<SenderJsonsData> {

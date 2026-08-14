@@ -850,12 +850,14 @@ pub async fn gen_cata_geos(
                         "Sending batch data due to size limit"
                     );
 
-                    sender
-                        .send_async(std::mem::take(&mut shape_insts_data))
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!("send cata shape instances failed: {error}")
-                        })?;
+                    crate::fast_model::shape_save::send_shape_batch(
+                        &sender,
+                        std::mem::take(&mut shape_insts_data),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("send cata shape instances failed: {error}")
+                    })?;
                 }
             }
 
@@ -881,9 +883,11 @@ pub async fn gen_cata_geos(
             }
 
             if shape_insts_data.inst_cnt() > 0 {
-                sender.send_async(shape_insts_data).await.map_err(|error| {
-                    anyhow::anyhow!("send cata shape instances failed: {error}")
-                })?;
+                crate::fast_model::shape_save::send_shape_batch(&sender, shape_insts_data)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("send cata shape instances failed: {error}")
+                    })?;
             }
 
             #[cfg(feature = "profile")]
@@ -1303,8 +1307,7 @@ pub async fn gen_cata_geos(
 
     let t_send_data = Instant::now();
     if tubi_shape_insts_data.inst_cnt() > 0 {
-        sender
-            .send_async(tubi_shape_insts_data)
+        crate::fast_model::shape_save::send_shape_batch(&sender, tubi_shape_insts_data)
             .await
             .map_err(|error| anyhow::anyhow!("send tubi shape instances failed: {error}"))?;
     }
@@ -1830,7 +1833,9 @@ async fn process_cata_batch_optimized(
 
     // 发送结果
     if !shape_insts_data.inst_info_map.is_empty() {
-        if let Err(e) = sender.send_async(shape_insts_data).await {
+        if let Err(e) =
+            crate::fast_model::shape_save::send_shape_batch(&sender, shape_insts_data).await
+        {
             error!("发送批次 {} 结果失败: {}", batch_id, e);
             return Err(anyhow::anyhow!("发送结果失败: {}", e));
         }

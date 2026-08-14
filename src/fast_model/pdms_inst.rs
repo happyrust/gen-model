@@ -1,25 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
-use aios_core::geometry::ShapeInstancesData;
+use aios_core::SUL_DB;
+use aios_core::geometry::EleInstGeo;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
+use aios_core::prim_geo::LCylinder;
 use aios_core::types::*;
-use aios_core::{SUL_DB, get_db_option};
 use bevy_transform::prelude::Transform;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use itertools::Itertools;
 
 use crate::data_interface::helper::delete_inst_relate_cascade;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::shape_save::{
+    DIRECT_MAX_IN_FLIGHT, FlushReason, FrozenShapeBatch, SQL_PACKET_BYTES, SQL_PACKET_ROWS,
+    SaveConflict, SaveMode, SaveOutcome, SavePhase, SavePlan, SqlPacket,
+};
 // use crate::fast_model::EXIST_MESH_GEOS;
-
-type DbWriteTask = tokio::task::JoinHandle<anyhow::Result<()>>;
-
-fn spawn_db_write(sql: String) -> DbWriteTask {
-    crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-        crate::surreal_retry::execute_model_write(&sql, "save instance data").await
-    })
-}
 
 /// 渲染一批 `inst_relate` 行的**替换写入**：同一事务里先删同 id 的旧行，再整批插入。
 ///
@@ -37,7 +34,7 @@ fn spawn_db_write(sql: String) -> DbWriteTask {
 /// `UPSERT` 只用在普通表上（`pe` / `inst_info` / `aabb`），fork 对边表的 `UPSERT` 语义
 /// 没有实证。真做成 `UPSERT ... MERGE` 还多一个好处——`aabb` 这类本函数不写的字段会留存
 /// 下来，房间变更判定就能回到行内基线而不必抵押在空间树上；那要等有人在 fork 上验证过。
-fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
+pub(crate) fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
     let ids = rows.iter().map(|(id, _)| id.as_str()).join(", ");
     let values = rows.iter().map(|(_, json)| json.as_str()).join(",");
     format!(
@@ -60,7 +57,11 @@ fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
 /// 全灭）。`UPSERT … SET param = …` 整值覆盖：行缺失时补齐、半成品被修复、已
 /// meshed 的派生字段（`meshed` / `aabb` / `pts`）原样保留；对已被旧写法打坏的
 /// 双键行也是自愈——下一次参数刷新整值盖掉即恢复可解。
-fn render_inst_geo_upsert(geo_hash: u64, unit_param_json: &str, reset_bad: bool) -> String {
+pub(crate) fn render_inst_geo_upsert(
+    geo_hash: u64,
+    unit_param_json: &str,
+    reset_bad: bool,
+) -> String {
     let mut sql = format!("UPSERT inst_geo:⟨{geo_hash}⟩ SET param = {unit_param_json};");
     // 强制再生成代表调用方明确要求用当前解析/网格代码重试。旧 `bad=true` 若不清，
     // gen_inst_meshes 的入口过滤会在真正构形之前永久跳过这条记录。
@@ -70,7 +71,12 @@ fn render_inst_geo_upsert(geo_hash: u64, unit_param_json: &str, reset_bad: bool)
     sql
 }
 
-async fn finish_db_writes(mut tasks: FuturesUnordered<DbWriteTask>) -> anyhow::Result<()> {
+#[cfg(test)]
+async fn finish_db_writes(
+    mut tasks: futures::stream::FuturesUnordered<tokio::task::JoinHandle<anyhow::Result<()>>>,
+) -> anyhow::Result<()> {
+    use futures::StreamExt;
+
     let mut first_error = None;
     while let Some(result) = tasks.next().await {
         let error = match result {
@@ -540,375 +546,966 @@ pub(crate) async fn resolve_inst_meta_on(
     Ok(out)
 }
 
-///保存instance 数据到数据库（并行优化版本）
-pub async fn save_instance_data(
-    inst_mgr: &ShapeInstancesData,
-    replace_exist: bool,
+fn insert_unique_record(
+    records: &mut BTreeMap<String, String>,
+    kind: &'static str,
+    record_id: String,
+    rendered: String,
 ) -> anyhow::Result<()> {
-    let mut aabb_map: HashMap<u64, String> = HashMap::new();
-    let mut transform_map: HashMap<u64, String> = HashMap::new();
-    //标识单位矩阵
-    transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
-    let mut param_map = HashMap::new();
-    let mut vec3_map: HashMap<u64, String> = HashMap::new();
-    let test_refno = get_db_option().get_test_refno();
-
-    let chunk_size = 300;
-
-    // 创建一个任务集合来管理并发操作
-    let mut db_futures = FuturesUnordered::new();
-
-    //把delete 提前，因为后面的插入都是异步的执行
-    if replace_exist {
-        let keys = inst_mgr.inst_info_map.keys().copied().collect::<Vec<_>>();
-        delete_inst_relate_cascade(&keys, chunk_size).await?;
+    match records.get(&record_id) {
+        Some(existing) if existing == &rendered => Ok(()),
+        Some(_) => Err(SaveConflict::RecordContent { kind, record_id }.into()),
+        None => {
+            records.insert(record_id, rendered);
+            Ok(())
+        }
     }
+}
 
-    // W4（D6）：anc / dbnum / dt 在渲染时解一次、写死进字面量——
-    // journal 纯数据化，写回重放不再对持久层求值任何 fn::。
-    let inst_meta = {
-        let mut meta_refnos: Vec<RefnoEnum> = inst_mgr.inst_info_map.keys().copied().collect();
-        meta_refnos.extend(inst_mgr.inst_tubi_map.keys().copied());
-        resolve_inst_meta(&meta_refnos).await?
+fn push_array_packets(
+    packets: &mut Vec<SqlPacket>,
+    phase: SavePhase,
+    prefix: &str,
+    suffix: &str,
+    rows: &BTreeMap<String, String>,
+) {
+    let mut current: Vec<String> = Vec::new();
+    let mut current_bytes = prefix.len() + suffix.len();
+    let flush =
+        |current: &mut Vec<String>, current_bytes: &mut usize, packets: &mut Vec<SqlPacket>| {
+            if current.is_empty() {
+                return;
+            }
+            let sql = format!("{prefix}{}{suffix}", current.join(","));
+            packets.push(SqlPacket {
+                phase,
+                row_count: current.len(),
+                estimated_bytes: sql.len(),
+                sql,
+            });
+            current.clear();
+            *current_bytes = prefix.len() + suffix.len();
+        };
+
+    for row in rows.values() {
+        let next_bytes = row.len() + usize::from(!current.is_empty());
+        if !current.is_empty()
+            && (current.len() >= SQL_PACKET_ROWS
+                || current_bytes.saturating_add(next_bytes) > SQL_PACKET_BYTES)
+        {
+            flush(&mut current, &mut current_bytes, packets);
+        }
+        current_bytes = current_bytes.saturating_add(next_bytes);
+        current.push(row.clone());
+    }
+    flush(&mut current, &mut current_bytes, packets);
+}
+
+fn push_statement_packets(
+    packets: &mut Vec<SqlPacket>,
+    phase: SavePhase,
+    statements: &BTreeMap<String, String>,
+) {
+    let mut current: Vec<String> = Vec::new();
+    let mut current_bytes = 0usize;
+    let flush =
+        |current: &mut Vec<String>, current_bytes: &mut usize, packets: &mut Vec<SqlPacket>| {
+            if current.is_empty() {
+                return;
+            }
+            let sql = current.join("\n");
+            packets.push(SqlPacket {
+                phase,
+                row_count: current.len(),
+                estimated_bytes: sql.len(),
+                sql,
+            });
+            current.clear();
+            *current_bytes = 0;
+        };
+
+    for statement in statements.values() {
+        let next_bytes = statement.len() + usize::from(!current.is_empty());
+        if !current.is_empty()
+            && (current.len() >= SQL_PACKET_ROWS
+                || current_bytes.saturating_add(next_bytes) > SQL_PACKET_BYTES)
+        {
+            flush(&mut current, &mut current_bytes, packets);
+        }
+        current_bytes = current_bytes.saturating_add(next_bytes);
+        current.push(statement.clone());
+    }
+    flush(&mut current, &mut current_bytes, packets);
+}
+
+fn push_inst_relate_packets(packets: &mut Vec<SqlPacket>, rows: &BTreeMap<String, String>) {
+    let entries = rows
+        .iter()
+        .map(|(id, json)| (id.clone(), json.clone()))
+        .collect::<Vec<_>>();
+    let mut start = 0usize;
+    while start < entries.len() {
+        let mut end = start;
+        let mut best_sql = String::new();
+        while end < entries.len() && end - start < SQL_PACKET_ROWS {
+            let candidate = render_inst_relate_replace(&entries[start..=end]);
+            if end > start && candidate.len() > SQL_PACKET_BYTES {
+                break;
+            }
+            best_sql = candidate;
+            end += 1;
+        }
+        if end == start {
+            end += 1;
+            best_sql = render_inst_relate_replace(&entries[start..end]);
+        }
+        packets.push(SqlPacket {
+            phase: SavePhase::InstanceRelations,
+            row_count: end - start,
+            estimated_bytes: best_sql.len(),
+            sql: best_sql,
+        });
+        start = end;
+    }
+}
+
+fn canonical_unit_param_json(inst: &EleInstGeo) -> anyhow::Result<String> {
+    let param = if inst.geo_hash == aios_core::prim_geo::basic::CYLINDER_GEO_HASH {
+        // LCylinder 与非切角 SCylinder 共用单位圆柱 id；统一为一个单键 enum，
+        // 不能让先后顺序决定 `param` 的变体，更不能 MERGE 成双键对象。
+        PdmsGeoParam::PrimLCylinder(LCylinder::default())
+    } else {
+        inst.geo_param.convert_to_unit_param()
     };
+    serde_json::to_string(&param).map_err(Into::into)
+}
+
+fn build_canonical_save_plan(
+    frozen: &FrozenShapeBatch,
+    mode: SaveMode,
+    flush_reason: FlushReason,
+    coalesce_wait: Duration,
+    inst_meta: &HashMap<RefU64, ResolvedInstMeta>,
+    metadata_query_count: usize,
+) -> anyhow::Result<SavePlan> {
     let missing_meta = ResolvedInstMeta::default();
+    let mut transforms = BTreeMap::new();
+    let mut aabbs = BTreeMap::new();
+    let mut vec3s = BTreeMap::new();
+    let mut inst_geos = BTreeMap::new();
+    let mut inst_infos = BTreeMap::new();
+    let mut geo_relates = BTreeMap::new();
+    let mut neg_relates = BTreeMap::new();
+    let mut ngmr_relates = BTreeMap::new();
+    let mut normal_inst_relates = BTreeMap::new();
+    let mut tubi_inst_relates = BTreeMap::new();
+    let mut written_by_id: BTreeMap<String, RefnoEnum> = BTreeMap::new();
+    let mut canonical_neg_sequences: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
-    let mut inst_geo_vec = vec![];
-    let mut geo_relate_vec = vec![];
-
-    // 准备inst_geo和geo_relate数据
-    for k in keys {
-        let v = inst_mgr.inst_geos_map.get(k).unwrap();
-        for inst in &v.insts {
-            if inst.transform.is_nan() {
-                dbg!(&inst);
-                continue;
-            }
-            let transform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
-            if !transform_map.contains_key(&transform_hash) {
-                transform_map.insert(
-                    transform_hash,
-                    serde_json::to_string(&inst.transform).unwrap(),
-                );
-            }
-            let param_hash = gen_bytes_hash::<_, 64>(&inst.geo_param);
-            if !param_map.contains_key(&param_hash) {
-                param_map.insert(param_hash, serde_json::to_string(&inst.geo_param).unwrap());
-            }
-            let key_pts = inst.geo_param.key_points();
-            let mut pt_hashes = vec![];
-            for k in key_pts {
-                let pts_hash = k.gen_hash();
-                pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
-                if !vec3_map.contains_key(&pts_hash) {
-                    vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
+    for batch in frozen.batches() {
+        let mut geo_keys = batch.inst_geos_map.keys().collect::<Vec<_>>();
+        geo_keys.sort();
+        for key in geo_keys {
+            let data = &batch.inst_geos_map[key];
+            for inst in &data.insts {
+                if inst.transform.is_nan() {
+                    return Err(SaveConflict::NonFiniteTransform {
+                        kind: "geo_relate",
+                        record_id: format!("{}:{}", data.id(), inst.geo_hash),
+                    }
+                    .into());
                 }
-            }
-            //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
-            //使用cata_key -> inst_geos
-            let cat_negs_str = if !inst.cata_neg_refnos.is_empty() {
-                format!(
-                    ", cata_neg: [{}]",
-                    inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
-                )
-            } else {
-                "".to_string()
-            };
-            //如果是replace, 直接这里需要先删除之前的sql语句
-            let mut relate_json = format!(
-                r#"in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩, geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}"#,
-                v.id(),
-                inst.geo_hash,
-                transform_hash,
-                inst.refno,
-                pt_hashes.join(","),
-                inst.geo_type.to_string(),
-                inst.visible,
-                cat_negs_str
-            );
-            //将 string 转成一个 hash id
-            let id = gen_bytes_hash::<_, 64>(&relate_json);
-            let final_json = format!("{{ {relate_json}, id: '{id}' }}");
-            geo_relate_vec.push(final_json);
-            //保存 unit shape 的几何参数（只传 param 本体：整值 SET 覆盖，见
-            // render_inst_geo_upsert——共享单位行上两个变体深合并会毒化 param）
-            inst_geo_vec.push((
-                inst.geo_hash,
-                serde_json::to_string(&inst.geo_param.convert_to_unit_param())
-                    .expect("PdmsGeoParam 可序列化"),
-            ));
-        }
-    }
+                let transform_json = serde_json::to_string(&inst.transform)?;
+                let transform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
+                insert_unique_record(
+                    &mut transforms,
+                    "transform",
+                    format!("trans:⟨{transform_hash}⟩"),
+                    format!("{{'id':trans:⟨{transform_hash}⟩, 'd':{transform_json}}}"),
+                )?;
 
-    // 并发保存inst_geo数据
-    if !inst_geo_vec.is_empty() {
-        for chunk in inst_geo_vec.chunks(chunk_size) {
-            let sql_string = chunk
-                .iter()
-                .map(|(geo_hash, unit_param)| {
-                    render_inst_geo_upsert(*geo_hash, unit_param, replace_exist)
-                })
-                .join("\n");
-            db_futures.push(spawn_db_write(sql_string));
-        }
-    }
+                let mut point_ids = Vec::new();
+                for point in inst.geo_param.key_points() {
+                    let point_hash = point.gen_hash();
+                    let point_json = serde_json::to_string(&point)?;
+                    let point_id = format!("vec3:⟨{point_hash}⟩");
+                    insert_unique_record(
+                        &mut vec3s,
+                        "vec3",
+                        point_id.clone(),
+                        format!("{{'id':{point_id}, 'd':{point_json}}}"),
+                    )?;
+                    point_ids.push(point_id);
+                }
 
-    // 并发保存geo_relate数据
-    if !geo_relate_vec.is_empty() {
-        for chunk in geo_relate_vec.chunks(chunk_size) {
-            let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
-            db_futures.push(spawn_db_write(sql));
-        }
-    }
-
-    // 处理tubi数据 - 创建inst_relate记录
-    let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
-    let mut tubi_inst_relate_vec = vec![];
-
-    for chunk in keys.chunks(chunk_size) {
-        for &k in chunk {
-            let v = inst_mgr.inst_tubi_map.get(k).unwrap();
-            let aabb = v.aabb.unwrap();
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-            let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
-
-            // 保存aabb和transform到映射中
-            if !aabb_map.contains_key(&aabb_hash) {
-                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
-            }
-            if !transform_map.contains_key(&transform_hash) {
-                transform_map.insert(
+                let cat_negs = if inst.cata_neg_refnos.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", cata_neg: [{}]",
+                        inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                    )
+                };
+                let relate_body = format!(
+                    r#"in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩, geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}"#,
+                    data.id(),
+                    inst.geo_hash,
                     transform_hash,
-                    serde_json::to_string(&v.world_transform).unwrap(),
+                    inst.refno,
+                    point_ids.join(","),
+                    inst.geo_type,
+                    inst.visible,
+                    cat_negs,
                 );
-            }
+                let relate_id = gen_bytes_hash::<_, 64>(&relate_body);
+                insert_unique_record(
+                    &mut geo_relates,
+                    "geo_relate",
+                    format!("geo_relate:{relate_id}"),
+                    format!("{{ {relate_body}, id: '{relate_id}' }}"),
+                )?;
 
-            // 为TUBI创建inst_relate记录（anc/dbnum 为渲染期已解值，W4）。
-            // aabb_d/world_trans_d 是指针目标 `d` 值的行内副本（P4 写时物化）：值
-            // 就在内存里，渲染成纯字面量与指针同语句落行，journal 维持纯数据。
-            let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
-            let tubi_relate_sql = format!(
-                "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, aabb: aabb:⟨{4}⟩, aabb_d: {11}, generic: '{5}', anc: {6}, dbnum: {7}, has_cata_neg: {8}, solid: {9}}}",
-                k.to_inst_relate_key(),
-                k.to_pe_key(),
-                v.id_str(),
+                let unit_param = canonical_unit_param_json(inst)?;
+                insert_unique_record(
+                    &mut inst_geos,
+                    "inst_geo",
+                    format!("inst_geo:⟨{}⟩", inst.geo_hash),
+                    render_inst_geo_upsert(inst.geo_hash, &unit_param, mode.replaces_existing()),
+                )?;
+            }
+        }
+
+        let mut normal_keys = batch.inst_info_map.keys().collect::<Vec<_>>();
+        normal_keys.sort_by_key(|refno| refno.to_string());
+        for refno in normal_keys {
+            let info = &batch.inst_info_map[refno];
+            if info.world_transform.is_nan() {
+                return Err(SaveConflict::NonFiniteTransform {
+                    kind: "inst_relate",
+                    record_id: refno.to_inst_relate_key(),
+                }
+                .into());
+            }
+            let mut ignored_vec3_map = HashMap::new();
+            let info_json = info.gen_sur_json(&mut ignored_vec3_map);
+            insert_unique_record(
+                &mut inst_infos,
+                "inst_info",
+                format!("inst_info:⟨{}⟩", info.id_str()),
+                info_json,
+            )?;
+
+            let transform_json = serde_json::to_string(&info.world_transform)?;
+            let transform_hash = gen_bytes_hash::<_, 64>(&info.world_transform);
+            insert_unique_record(
+                &mut transforms,
+                "transform",
+                format!("trans:⟨{transform_hash}⟩"),
+                format!("{{'id':trans:⟨{transform_hash}⟩, 'd':{transform_json}}}"),
+            )?;
+            let meta = inst_meta.get(&refno.refno()).unwrap_or(&missing_meta);
+            let rendered = format!(
+                "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, generic: '{4}', anc: {5}, dbnum: {6}, dt: {7}, has_cata_neg: {8}, solid: {9}}}",
+                refno.to_inst_relate_key(),
+                refno.to_pe_key(),
+                info.id_str(),
                 transform_hash,
-                aabb_hash,
-                v.generic_type.to_string(),
+                info.generic_type,
                 meta.anc_literal(),
                 meta.dbnum_literal(),
-                v.has_cata_neg,
-                v.is_solid,
-                transform_map[&transform_hash],
-                aabb_map[&aabb_hash],
+                meta.dt_literal(),
+                info.has_cata_neg,
+                info.is_solid,
+                transform_json,
             );
+            let record_id = refno.to_inst_relate_key();
+            insert_unique_record(
+                &mut normal_inst_relates,
+                "normal inst_relate",
+                record_id.clone(),
+                rendered,
+            )?;
+            written_by_id.entry(record_id).or_insert(*refno);
+        }
 
-            if let Some(t_refno) = test_refno {
-                if *k == t_refno.into() {
-                    println!("TUBI inst relate sql: {}", &tubi_relate_sql);
+        let mut tubi_keys = batch.inst_tubi_map.keys().collect::<Vec<_>>();
+        tubi_keys.sort_by_key(|refno| refno.to_string());
+        for refno in tubi_keys {
+            let info = &batch.inst_tubi_map[refno];
+            if info.world_transform.is_nan() {
+                return Err(SaveConflict::NonFiniteTransform {
+                    kind: "tubi inst_relate",
+                    record_id: refno.to_inst_relate_key(),
+                }
+                .into());
+            }
+            let aabb = info.aabb.ok_or_else(|| SaveConflict::MissingTubiAabb {
+                record_id: refno.to_inst_relate_key(),
+            })?;
+            let aabb_json = serde_json::to_string(&aabb)?;
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            insert_unique_record(
+                &mut aabbs,
+                "aabb",
+                format!("aabb:⟨{aabb_hash}⟩"),
+                format!("{{'id':aabb:⟨{aabb_hash}⟩, 'd':{aabb_json}}}"),
+            )?;
+            let transform_json = serde_json::to_string(&info.world_transform)?;
+            let transform_hash = gen_bytes_hash::<_, 64>(&info.world_transform);
+            insert_unique_record(
+                &mut transforms,
+                "transform",
+                format!("trans:⟨{transform_hash}⟩"),
+                format!("{{'id':trans:⟨{transform_hash}⟩, 'd':{transform_json}}}"),
+            )?;
+            let meta = inst_meta.get(&refno.refno()).unwrap_or(&missing_meta);
+            let rendered = format!(
+                "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, aabb: aabb:⟨{4}⟩, aabb_d: {11}, generic: '{5}', anc: {6}, dbnum: {7}, has_cata_neg: {8}, solid: {9}}}",
+                refno.to_inst_relate_key(),
+                refno.to_pe_key(),
+                info.id_str(),
+                transform_hash,
+                aabb_hash,
+                info.generic_type,
+                meta.anc_literal(),
+                meta.dbnum_literal(),
+                info.has_cata_neg,
+                info.is_solid,
+                transform_json,
+                aabb_json,
+            );
+            let record_id = refno.to_inst_relate_key();
+            insert_unique_record(
+                &mut tubi_inst_relates,
+                "tubi inst_relate",
+                record_id.clone(),
+                rendered,
+            )?;
+            written_by_id.entry(record_id).or_insert(*refno);
+        }
+
+        let mut neg_keys = batch.neg_relate_map.keys().collect::<Vec<_>>();
+        neg_keys.sort_by_key(|refno| refno.to_string());
+        for owner in neg_keys {
+            let sequence = batch.neg_relate_map[owner]
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let owner_key = owner.to_string();
+            match canonical_neg_sequences.get(&owner_key) {
+                Some(existing) if existing != &sequence => {
+                    return Err(SaveConflict::RecordContent {
+                        kind: "neg relation sequence",
+                        record_id: owner_key,
+                    }
+                    .into());
+                }
+                Some(_) => continue,
+                None => {
+                    canonical_neg_sequences.insert(owner_key, sequence);
                 }
             }
-
-            tubi_inst_relate_vec.push((k.to_inst_relate_key(), tubi_relate_sql));
-        }
-    }
-
-    // TUBI 行的写入挪到下面与普通元素行一起发：两边的 id 都是 `inst_relate:{refno}`，
-    // 得先都算出来才能对一次重叠（见那里的说明）。
-
-    // 处理负关系数据并并发保存
-    if !inst_mgr.neg_relate_map.is_empty() {
-        let mut neg_relate_vec = vec![];
-        for (k, refnos) in &inst_mgr.neg_relate_map {
-            for (indx, r) in refnos.into_iter().enumerate() {
-                neg_relate_vec.push(format!(
-                    "{{ in: {}, id: [{}, {indx}], out: {} }}",
-                    r.to_pe_key(),
-                    r.to_string(),
-                    k.to_pe_key(),
-                ));
+            for (index, related) in batch.neg_relate_map[owner].iter().enumerate() {
+                let record_id = format!("neg_relate:[{related},{index}]");
+                insert_unique_record(
+                    &mut neg_relates,
+                    "neg_relate",
+                    record_id,
+                    format!(
+                        "{{ in: {}, id: [{}, {index}], out: {} }}",
+                        related.to_pe_key(),
+                        related,
+                        owner.to_pe_key()
+                    ),
+                )?;
             }
         }
-        if !neg_relate_vec.is_empty() {
-            for chunk in neg_relate_vec.chunks(chunk_size) {
-                let neg_relate_sql =
-                    format!("INSERT RELATION INTO neg_relate [{}];", chunk.join(","));
-                db_futures.push(spawn_db_write(neg_relate_sql));
-            }
-        }
-    }
 
-    // 处理ngmr负关系数据并并发保存
-    if !inst_mgr.ngmr_neg_relate_map.is_empty() {
-        let mut ngmr_relate_vec = vec![];
-        for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
-            let kpe = k.to_pe_key();
-            for (ele_refno, ngmr_geom_refno) in refnos {
-                let ele_pe = ele_refno.to_pe_key();
-                let ngmr_pe = ngmr_geom_refno.to_pe_key();
-                ngmr_relate_vec.push(format!(
-                    "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
-                    ele_pe, kpe, ngmr_pe
-                ));
-            }
-        }
-        if !ngmr_relate_vec.is_empty() {
-            for chunk in ngmr_relate_vec.chunks(chunk_size) {
-                let ngmr_relate_sql =
-                    format!("INSERT RELATION INTO ngmr_relate [{}];", chunk.join(","));
-                db_futures.push(spawn_db_write(ngmr_relate_sql));
+        let mut ngmr_keys = batch.ngmr_neg_relate_map.keys().collect::<Vec<_>>();
+        ngmr_keys.sort_by_key(|refno| refno.to_string());
+        for owner in ngmr_keys {
+            for (element, geometry) in &batch.ngmr_neg_relate_map[owner] {
+                let element_key = element.to_pe_key();
+                let owner_key = owner.to_pe_key();
+                let geometry_key = geometry.to_pe_key();
+                let record_id = format!("ngmr_relate:[{element_key},{owner_key},{geometry_key}]");
+                insert_unique_record(
+                    &mut ngmr_relates,
+                    "ngmr_relate",
+                    record_id,
+                    format!(
+                        "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
+                        element_key, owner_key, geometry_key
+                    ),
+                )?;
             }
         }
     }
 
-    // 处理inst_info数据
-    let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
-    let mut inst_info_vec = vec![];
-    let mut inst_relate_vec = vec![];
-
-    for k in keys.clone() {
-        let v = inst_mgr.inst_info_map.get(k).unwrap();
-        if v.world_transform.is_nan() {
-            continue;
+    if let Some(record_id) = normal_inst_relates
+        .keys()
+        .find(|record_id| tubi_inst_relates.contains_key(*record_id))
+    {
+        return Err(SaveConflict::NormalTubiOverlap {
+            record_id: record_id.clone(),
         }
-        inst_info_vec.push(v.gen_sur_json(&mut vec3_map));
-
-        let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
-        if !transform_map.contains_key(&transform_hash) {
-            transform_map.insert(
-                transform_hash,
-                serde_json::to_string(&v.world_transform).unwrap(),
-            );
-        }
-
-        // anc/dbnum/dt 为渲染期已解值（W4）：journal 纯数据化。
-        // world_trans_d 为指针目标 `d` 值的行内副本（P4 写时物化，值在内存渲染
-        // 纯字面量）；aabb 建行时尚不存在，aabb_d 随 aabb 刷新同语句写入。
-        let meta = inst_meta.get(&k.refno()).unwrap_or(&missing_meta);
-        let relate_sql = format!(
-            "{{id: {0},  in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, generic: '{4}', anc: {5}, dbnum: {6}, dt: {7}, has_cata_neg: {8}, solid: {9}}}",
-            k.to_inst_relate_key(),
-            k.to_pe_key(),
-            v.id_str(),
-            transform_hash,
-            v.generic_type.to_string(),
-            meta.anc_literal(),
-            meta.dbnum_literal(),
-            meta.dt_literal(),
-            v.has_cata_neg,
-            v.is_solid,
-            transform_map[&transform_hash],
-        );
-        if let Some(t_refno) = test_refno {
-            if *k == t_refno.into() {
-                dbg!(v);
-                println!("inst relate sql: {}", &relate_sql);
-            }
-        }
-        inst_relate_vec.push((k.to_inst_relate_key(), relate_sql));
+        .into());
     }
 
-    // 隐含直管段的行 id 与普通元素同样是 `inst_relate:{refno}`，而 `insert_tubi` 的键
-    // 除了 BRAN 自身还有「管段离开的那个元件」。两边真撞上的话，两条替换事务会各删各写
-    // 同一行，谁最后提交谁赢——那是数据错误，不是并发噪音。静态定不下来它在真实库上能否
-    // 发生，所以如实喊一声：无声地丢掉一行几何，比报出来难查得多。
-    let overlapping: Vec<&str> = {
-        let tubi_ids: HashSet<&str> = tubi_inst_relate_vec
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect();
-        inst_relate_vec
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .filter(|id| tubi_ids.contains(id))
-            .collect()
+    let has_persistent_rows = !transforms.is_empty()
+        || !aabbs.is_empty()
+        || !vec3s.is_empty()
+        || !inst_geos.is_empty()
+        || !inst_infos.is_empty()
+        || !geo_relates.is_empty()
+        || !neg_relates.is_empty()
+        || !ngmr_relates.is_empty()
+        || !normal_inst_relates.is_empty()
+        || !tubi_inst_relates.is_empty();
+    if has_persistent_rows {
+        let identity_json = serde_json::to_string(&Transform::IDENTITY)?;
+        insert_unique_record(
+            &mut transforms,
+            "transform",
+            "trans:⟨0⟩".into(),
+            format!("{{'id':trans:⟨0⟩, 'd':{identity_json}}}"),
+        )?;
+    }
+
+    let mut packets = Vec::new();
+    push_array_packets(
+        &mut packets,
+        SavePhase::SharedContent,
+        "INSERT IGNORE INTO trans [",
+        "];",
+        &transforms,
+    );
+    push_array_packets(
+        &mut packets,
+        SavePhase::SharedContent,
+        "INSERT IGNORE INTO aabb [",
+        "];",
+        &aabbs,
+    );
+    push_array_packets(
+        &mut packets,
+        SavePhase::SharedContent,
+        "INSERT IGNORE INTO vec3 [",
+        "];",
+        &vec3s,
+    );
+    push_statement_packets(&mut packets, SavePhase::SharedContent, &inst_geos);
+    push_array_packets(
+        &mut packets,
+        SavePhase::SharedContent,
+        "INSERT IGNORE INTO inst_info [",
+        "];",
+        &inst_infos,
+    );
+    push_array_packets(
+        &mut packets,
+        SavePhase::Relations,
+        "INSERT RELATION INTO geo_relate [",
+        "];",
+        &geo_relates,
+    );
+    push_array_packets(
+        &mut packets,
+        SavePhase::Relations,
+        "INSERT RELATION INTO neg_relate [",
+        "];",
+        &neg_relates,
+    );
+    push_array_packets(
+        &mut packets,
+        SavePhase::Relations,
+        "INSERT RELATION INTO ngmr_relate [",
+        "];",
+        &ngmr_relates,
+    );
+    push_inst_relate_packets(&mut packets, &normal_inst_relates);
+    push_inst_relate_packets(&mut packets, &tubi_inst_relates);
+
+    let written_refnos = written_by_id.values().copied().collect::<Vec<_>>();
+    let delete_refnos = if mode.replaces_existing() {
+        written_refnos.clone()
+    } else {
+        Vec::new()
     };
-    if !overlapping.is_empty() {
-        let msg = format!(
-            "同一个 inst_relate id 同时被普通元素与隐含直管段写入（{} 条，例如 {}）：\
-             两者只有一条能留在库里。请核对 insert_tubi 的键与 inst_info_map 的键为何重叠",
-            overlapping.len(),
-            overlapping.iter().take(3).join(", ")
-        );
-        log::error!("{msg}");
-        eprintln!("{msg}");
-    }
+    Ok(SavePlan {
+        mode,
+        flush_reason,
+        source_batch_count: frozen.source_batch_count(),
+        instance_rows: frozen.instance_rows(),
+        geo_occurrences: frozen.geo_occurrences(),
+        coalesce_wait,
+        delete_refnos,
+        written_refnos,
+        packets,
+        metadata_query_count,
+        conflict_count: 0,
+    })
+}
 
-    for rows in [&inst_relate_vec, &tubi_inst_relate_vec] {
-        for chunk in rows.chunks(chunk_size) {
-            db_futures.push(spawn_db_write(render_inst_relate_replace(chunk)));
+pub(crate) async fn build_save_plan(
+    frozen: &FrozenShapeBatch,
+    mode: SaveMode,
+    flush_reason: FlushReason,
+    coalesce_wait: Duration,
+) -> anyhow::Result<SavePlan> {
+    let mut refnos_by_id = BTreeMap::new();
+    for batch in frozen.batches() {
+        for refno in batch.inst_info_map.keys().chain(batch.inst_tubi_map.keys()) {
+            refnos_by_id.entry(refno.to_string()).or_insert(*refno);
         }
     }
+    let refnos = refnos_by_id.values().copied().collect::<Vec<_>>();
+    let metadata_query_count = usize::from(!refnos.is_empty());
+    let inst_meta = resolve_inst_meta(&refnos).await?;
+    build_canonical_save_plan(
+        frozen,
+        mode,
+        flush_reason,
+        coalesce_wait,
+        &inst_meta,
+        metadata_query_count,
+    )
+}
 
-    // 并发保存inst_info数据
-    if !inst_info_vec.is_empty() {
-        for chunk in inst_info_vec.chunks(chunk_size) {
-            let sql_string = format!(
-                "insert ignore into {} [{}];",
-                stringify!(inst_info),
-                chunk.join(",")
-            );
-            db_futures.push(spawn_db_write(sql_string));
-        }
+async fn execute_packet(packet: &SqlPacket) -> anyhow::Result<()> {
+    crate::surreal_retry::execute_model_write(&packet.sql, "save instance data").await
+}
+
+pub(crate) async fn execute_save_plan(plan: SavePlan) -> anyhow::Result<SaveOutcome> {
+    if plan.mode.replaces_existing() && !plan.delete_refnos.is_empty() {
+        delete_inst_relate_cascade(&plan.delete_refnos, SQL_PACKET_ROWS).await?;
     }
 
-    // 并发保存aabb数据
-    if !aabb_map.is_empty() {
-        let keys = aabb_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(chunk_size) {
-            let mut jsons = vec![];
-            for &&k in chunk {
-                let v = aabb_map.get(&k).unwrap();
-                let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+    if crate::data_interface::staging::active_staging_writes().is_some() {
+        for packet in &plan.packets {
+            execute_packet(packet).await?;
+        }
+    } else {
+        // 阶段之间严格有序；只在同一阶段内部放最多四个 packet 并发。
+        for phase in [
+            SavePhase::SharedContent,
+            SavePhase::Relations,
+            SavePhase::InstanceRelations,
+        ] {
+            let phase_packets = plan
+                .packets
+                .iter()
+                .filter(|packet| packet.phase == phase)
+                .collect::<Vec<_>>();
+            for packet_group in phase_packets.chunks(DIRECT_MAX_IN_FLIGHT) {
+                let mut handles = Vec::with_capacity(packet_group.len());
+                for packet in packet_group {
+                    let packet = (*packet).clone();
+                    handles.push(
+                        crate::data_interface::staging::write_context::spawn_with_staged_io(
+                            async move { execute_packet(&packet).await },
+                        ),
+                    );
+                }
+                let mut first_error = None;
+                for handle in handles {
+                    let error = match handle.await {
+                        Ok(Ok(())) => continue,
+                        Ok(Err(error)) => error,
+                        Err(error) => anyhow::anyhow!("instance write task failed: {error}"),
+                    };
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                if let Some(error) = first_error {
+                    return Err(error);
+                }
             }
-            let sql = format!("INSERT IGNORE INTO aabb [{}];", jsons.join(","));
-            db_futures.push(spawn_db_write(sql));
         }
     }
 
-    // 并发保存transform数据（优化批量插入语法）
-    if !transform_map.is_empty() {
-        let keys = transform_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(chunk_size) {
-            let mut jsons = vec![];
-            for &&k in chunk {
-                let v = transform_map.get(&k).unwrap();
-                jsons.push(format!("{{'id':trans:⟨{}⟩, 'd':{}}}", k, v));
-            }
-            let sql = format!("INSERT IGNORE INTO trans [{}];", jsons.join(","));
-            db_futures.push(spawn_db_write(sql));
-        }
+    if !plan.packets.is_empty() {
+        mark_insts_flat_dirty();
     }
-
-    // 并发保存vec3数据（优化批量插入语法）
-    if !vec3_map.is_empty() {
-        let keys = vec3_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(chunk_size) {
-            let mut jsons = vec![];
-            for &&k in chunk {
-                let v = vec3_map.get(&k).unwrap();
-                jsons.push(format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v));
-            }
-            let sql = format!("INSERT IGNORE INTO vec3 [{}];", jsons.join(","));
-            db_futures.push(spawn_db_write(sql));
-        }
-    }
-
-    finish_db_writes(db_futures).await?;
-
-    // 新行的 insts_flat 建行时留空（meshed 状态未知）：置脏，空闲轮清扫收口。
-    mark_insts_flat_dirty();
-
-    Ok(())
+    Ok(SaveOutcome {
+        written_refnos: plan.written_refnos,
+        source_batch_count: plan.source_batch_count,
+        flush_reason: plan.flush_reason,
+        instance_rows: plan.instance_rows,
+        geo_occurrences: plan.geo_occurrences,
+        coalesce_wait: plan.coalesce_wait,
+        metadata_query_count: plan.metadata_query_count,
+        sql_packet_count: plan.packets.len(),
+        sql_bytes: plan
+            .packets
+            .iter()
+            .map(|packet| packet.estimated_bytes)
+            .sum(),
+        scoped_delete_count: plan.delete_refnos.len(),
+        conflict_count: plan.conflict_count,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aios_core::geometry::{EleGeosInfo, EleInstGeosData, ShapeInstancesData};
+    use aios_core::prim_geo::SCylinder;
+    use futures::stream::FuturesUnordered;
+    use glam::Vec3;
+    use parry3d::bounding_volume::Aabb;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn normal_batch(refno_text: &str, visible: bool) -> ShapeInstancesData {
+        let refno = RefnoEnum::from(refno_text);
+        let mut info = EleGeosInfo::default();
+        info.refno = refno;
+        info.sesno = 1;
+        info.visible = visible;
+        info.world_transform = Transform::IDENTITY;
+        let mut batch = ShapeInstancesData::default();
+        batch.inst_info_map.insert(refno, info);
+        batch
+    }
+
+    fn plan_for_test(batches: Vec<ShapeInstancesData>) -> anyhow::Result<SavePlan> {
+        let frozen = FrozenShapeBatch::from_batches_for_test(batches)?;
+        build_canonical_save_plan(
+            &frozen,
+            SaveMode::TargetedReplace,
+            FlushReason::ChannelClosed,
+            Duration::ZERO,
+            &HashMap::new(),
+            0,
+        )
+    }
+
+    fn plan_sql(plan: &SavePlan) -> Vec<(SavePhase, String)> {
+        plan.packets
+            .iter()
+            .map(|packet| (packet.phase, packet.sql.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn equal_record_content_is_deduplicated_but_different_content_fails_closed() {
+        let equal = plan_for_test(vec![
+            normal_batch("1/101", true),
+            normal_batch("1/101", true),
+        ])
+        .expect("equal rows deduplicate");
+        assert_eq!(equal.written_refnos.len(), 1);
+
+        let error = plan_for_test(vec![
+            normal_batch("1/101", true),
+            normal_batch("1/101", false),
+        ])
+        .expect_err("same record id with different content must fail");
+        assert!(error.downcast_ref::<SaveConflict>().is_some(), "{error:#}");
+    }
+
+    #[test]
+    fn normal_tubi_overlap_and_nan_fail_before_a_plan_can_execute() {
+        let refno = RefnoEnum::from("1/102");
+        let mut overlap = normal_batch("1/102", true);
+        let mut tubi = EleGeosInfo::default();
+        tubi.refno = refno;
+        tubi.sesno = 1;
+        tubi.world_transform = Transform::IDENTITY;
+        tubi.aabb = Some(Aabb::new(Vec3::ZERO.into(), Vec3::ONE.into()));
+        overlap.inst_tubi_map.insert(refno, tubi);
+        let error = plan_for_test(vec![overlap]).expect_err("overlap must fail");
+        assert!(
+            matches!(
+                error.downcast_ref::<SaveConflict>(),
+                Some(SaveConflict::NormalTubiOverlap { .. })
+            ),
+            "{error:#}"
+        );
+
+        let mut nan = normal_batch("1/103", true);
+        nan.inst_info_map
+            .get_mut(&RefnoEnum::from("1/103"))
+            .expect("fixture row")
+            .world_transform
+            .translation
+            .x = f32::NAN;
+        let error = plan_for_test(vec![nan]).expect_err("NaN must fail");
+        assert!(
+            matches!(
+                error.downcast_ref::<SaveConflict>(),
+                Some(SaveConflict::NonFiniteTransform { .. })
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn negative_relation_sequence_is_not_sorted_or_last_wins() {
+        let owner = RefnoEnum::from("1/110");
+        let a = RefnoEnum::from("1/111");
+        let b = RefnoEnum::from("1/112");
+        let mut first = ShapeInstancesData::default();
+        first.neg_relate_map.insert(owner, vec![a, b]);
+        let mut second = ShapeInstancesData::default();
+        second.neg_relate_map.insert(owner, vec![b, a]);
+        let error = plan_for_test(vec![first, second]).expect_err("order conflict must fail");
+        assert!(error.downcast_ref::<SaveConflict>().is_some(), "{error:#}");
+    }
+
+    fn cylinder_batch(param: PdmsGeoParam) -> ShapeInstancesData {
+        let refno = RefnoEnum::from("1/120");
+        let inst = EleInstGeo {
+            geo_hash: aios_core::prim_geo::basic::CYLINDER_GEO_HASH,
+            refno,
+            geo_param: param,
+            transform: Transform::IDENTITY,
+            visible: true,
+            ..Default::default()
+        };
+        let data = EleInstGeosData {
+            inst_key: "shared-cylinder".into(),
+            refno,
+            insts: vec![inst],
+            type_name: "CYLI".into(),
+            ..Default::default()
+        };
+        let mut batch = ShapeInstancesData::default();
+        batch.inst_geos_map.insert("shared-cylinder".into(), data);
+        batch
+    }
+
+    #[test]
+    fn shared_cylinder_id_has_one_canonical_single_variant_param() {
+        let plan = plan_for_test(vec![
+            cylinder_batch(PdmsGeoParam::PrimLCylinder(LCylinder::default())),
+            cylinder_batch(PdmsGeoParam::PrimSCylinder(SCylinder::default())),
+        ])
+        .expect("shared unit cylinder variants normalize");
+        let sql = plan
+            .packets
+            .iter()
+            .map(|packet| packet.sql.as_str())
+            .join("\n");
+        assert_eq!(sql.matches("UPSERT inst_geo:⟨2⟩").count(), 1, "{sql}");
+        assert!(sql.contains("PrimLCylinder"), "{sql}");
+        assert!(!sql.contains("PrimSCylinder"), "{sql}");
+        assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    #[test]
+    fn input_permutations_produce_identical_plan_and_reduce_requests_by_seventy_percent() {
+        let ids = (1..=16)
+            .map(|i| format!("1/{}", 200 + i))
+            .collect::<Vec<_>>();
+        let baseline_packets = ids
+            .iter()
+            .map(|id| {
+                plan_for_test(vec![normal_batch(id, true)])
+                    .unwrap()
+                    .packets
+                    .len()
+            })
+            .sum::<usize>();
+        let canonical = plan_for_test(ids.iter().map(|id| normal_batch(id, true)).collect())
+            .expect("canonical plan");
+        let expected = plan_sql(&canonical);
+        assert_eq!(canonical.source_batch_count, 16);
+        assert!(
+            canonical.packets.len() * 10 <= baseline_packets * 3,
+            "combined={} baseline={baseline_packets}",
+            canonical.packets.len()
+        );
+
+        let mut seed = 0x5eed_u64;
+        for _ in 0..100 {
+            let mut order = ids.clone();
+            for i in (1..order.len()).rev() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                order.swap(i, seed as usize % (i + 1));
+            }
+            let actual = plan_for_test(order.iter().map(|id| normal_batch(id, true)).collect())
+                .expect("permutation plan");
+            assert_eq!(plan_sql(&actual), expected);
+        }
+    }
+
+    #[test]
+    fn sql_packets_obey_row_and_byte_limits_and_phase_order() {
+        let rows = (0..301)
+            .map(|index| (format!("row:{index:03}"), format!("{{id: row:{index:03}}}")))
+            .collect::<BTreeMap<_, _>>();
+        let mut packets = Vec::new();
+        push_array_packets(
+            &mut packets,
+            SavePhase::SharedContent,
+            "INSERT IGNORE INTO row [",
+            "];",
+            &rows,
+        );
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].row_count, SQL_PACKET_ROWS);
+        assert_eq!(packets[1].row_count, 1);
+
+        let large_rows = (0..3)
+            .map(|index| (format!("large:{index}"), "x".repeat(600 * 1024)))
+            .collect::<BTreeMap<_, _>>();
+        let mut byte_packets = Vec::new();
+        push_array_packets(
+            &mut byte_packets,
+            SavePhase::Relations,
+            "INSERT RELATION INTO large [",
+            "];",
+            &large_rows,
+        );
+        assert_eq!(byte_packets.len(), 3);
+        assert!(
+            byte_packets
+                .iter()
+                .all(|packet| packet.estimated_bytes <= SQL_PACKET_BYTES)
+        );
+
+        let plan = plan_for_test(vec![normal_batch("1/401", true)]).expect("plan");
+        let ranks = plan
+            .packets
+            .iter()
+            .map(|packet| match packet.phase {
+                SavePhase::SharedContent => 0,
+                SavePhase::Relations => 1,
+                SavePhase::InstanceRelations => 2,
+            })
+            .collect::<Vec<_>>();
+        assert!(ranks.windows(2).all(|pair| pair[0] <= pair[1]), "{ranks:?}");
+    }
+
+    fn execution_plan_for_test(packets: Vec<SqlPacket>) -> SavePlan {
+        SavePlan {
+            mode: SaveMode::FullBuild,
+            flush_reason: FlushReason::ChannelClosed,
+            source_batch_count: 1,
+            instance_rows: 0,
+            geo_occurrences: 0,
+            coalesce_wait: Duration::ZERO,
+            delete_refnos: Vec::new(),
+            written_refnos: Vec::new(),
+            packets,
+            metadata_query_count: 0,
+            conflict_count: 0,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_save_packets_execute_serially_and_replay_idempotently() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use crate::data_interface::staging::write_context::with_staging_writes;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7991, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let packets = || {
+            vec![
+                SqlPacket {
+                    phase: SavePhase::SharedContent,
+                    sql: "UPSERT trans:shape_save_serial SET d = 1;".into(),
+                    row_count: 1,
+                    estimated_bytes: 46,
+                },
+                SqlPacket {
+                    phase: SavePhase::Relations,
+                    sql: "UPDATE trans:shape_save_serial SET d = 2;".into(),
+                    row_count: 1,
+                    estimated_bytes: 46,
+                },
+            ]
+        };
+
+        with_staging_writes(window.write_context(), async {
+            execute_save_plan(execution_plan_for_test(packets())).await?;
+            execute_save_plan(execution_plan_for_test(packets())).await
+        })
+        .await
+        .expect("staged execution");
+
+        let journal = window.journal().await;
+        assert_eq!(journal.len(), 4);
+        assert!(journal[0].sql.starts_with("UPSERT"), "{journal:?}");
+        assert!(journal[1].sql.starts_with("UPDATE"), "{journal:?}");
+        assert!(journal[2].sql.starts_with("UPSERT"), "{journal:?}");
+        assert!(journal[3].sql.starts_with("UPDATE"), "{journal:?}");
+
+        let mut response = window
+            .staging_db()
+            .query("RETURN trans:shape_save_serial.d;")
+            .await
+            .expect("query staged row")
+            .check()
+            .expect("check staged row");
+        let value: Option<i64> = response.take(0).expect("take staged value");
+        assert_eq!(
+            value,
+            Some(2),
+            "replay twice must converge to the same final state"
+        );
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_save_failure_stops_later_packets_without_detaching_work() {
+        use crate::data_interface::staging::ResourceThresholds;
+        use crate::data_interface::staging::lifecycle::create_window_on;
+        use crate::data_interface::staging::write_context::with_staging_writes;
+        use surrealdb::engine::any::connect;
+
+        let instance = connect("mem://").await.expect("mem boots");
+        let window = create_window_on(&instance, 7990, 1, 1, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let packet = |phase, sql: &str| SqlPacket {
+            phase,
+            sql: sql.into(),
+            row_count: 1,
+            estimated_bytes: sql.len(),
+        };
+        let plan = execution_plan_for_test(vec![
+            packet(
+                SavePhase::SharedContent,
+                "UPSERT trans:shape_save_before_failure SET d = 1;",
+            ),
+            packet(SavePhase::Relations, "THIS IS NOT SURREALQL;"),
+            packet(
+                SavePhase::InstanceRelations,
+                "UPSERT trans:shape_save_after_failure SET d = 1;",
+            ),
+        ]);
+
+        let error = with_staging_writes(window.write_context(), execute_save_plan(plan))
+            .await
+            .expect_err("bad packet must fail the flush");
+        assert!(!error.to_string().is_empty());
+        assert_eq!(
+            window.journal().await.len(),
+            1,
+            "only the first packet committed"
+        );
+
+        let mut response = window
+            .staging_db()
+            .query("RETURN record::exists(trans:shape_save_after_failure);")
+            .await
+            .expect("query tail record")
+            .check()
+            .expect("check tail record");
+        let exists: Option<bool> = response.take(0).expect("take existence");
+        assert_eq!(exists, Some(false), "later packet must not be detached");
+        window.drop_database().await.expect("cleanup");
+    }
 
     /// 中断留下的半成品必须能被同一批生成重放修好；已有 mesh 派生字段不能被参数
     /// 刷新抹掉。执行两次还钉住了 journal/直写两条路径共同需要的幂等性。
@@ -1000,24 +1597,10 @@ mod tests {
 
     #[test]
     fn production_inst_geo_writes_replace_param_wholesale() {
-        let source = include_str!("pdms_inst.rs");
-        let body = source
-            .split_once("pub async fn save_instance_data(")
-            .expect("save_instance_data 必须存在")
-            .1
-            .split_once("\n#[cfg(test)]")
-            .map(|(head, _)| head)
-            .expect("函数体到测试模块为止");
-        assert!(!body.contains("insert ignore into inst_geo"), "{body}");
-        assert!(
-            body.contains("render_inst_geo_upsert(*geo_hash, unit_param, replace_exist)"),
-            "{body}"
-        );
-        // param 深合并禁令：见 render_inst_geo_upsert 文档（共享单位行双变体毒化）。
-        assert!(
-            !body.contains("MERGE"),
-            "save_instance_data 的 inst_geo 写入不得回退到对象深合并: {body}"
-        );
+        let sql = render_inst_geo_upsert(7, r#"{"PrimLCylinder":{}}"#, true);
+        assert!(sql.contains("UPSERT inst_geo:⟨7⟩ SET param ="), "{sql}");
+        assert!(!sql.to_ascii_lowercase().contains("insert ignore"), "{sql}");
+        assert!(!sql.contains("MERGE"), "{sql}");
     }
 
     /// 手动 live（层级查询优化 P1→P2 部署步）：对**配置库**执行 anc/dbnum
@@ -1192,19 +1775,19 @@ mod tests {
     fn the_write_path_never_inserts_inst_relate_without_replacing() {
         let source = include_str!("pdms_inst.rs");
         let body = source
-            .split_once("pub async fn save_instance_data(")
-            .expect("save_instance_data 必须存在")
+            .split_once("fn build_canonical_save_plan(")
+            .expect("canonical SavePlan builder 必须存在")
             .1
-            .split_once("\n#[cfg(test)]")
+            .split_once("\npub(crate) async fn build_save_plan(")
             .map(|(head, _)| head)
-            .expect("函数体到测试模块为止");
+            .expect("builder 边界");
 
         assert!(
             !body.contains("INSERT RELATION INTO inst_relate"),
             "inst_relate 必须走 render_inst_relate_replace 的替换写入: {body}"
         );
         assert!(
-            body.contains("render_inst_relate_replace(chunk)"),
+            body.matches("push_inst_relate_packets").count() == 2,
             "两处 inst_relate 写入都要走同一个渲染函数: {body}"
         );
     }

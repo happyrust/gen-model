@@ -24,6 +24,8 @@ pub mod cal_model;
 
 pub mod pdms_inst;
 
+pub(crate) mod shape_save;
+
 pub mod resolve;
 
 pub mod query;

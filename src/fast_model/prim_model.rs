@@ -281,20 +281,24 @@ pub async fn gen_prim_geos(
                     }
 
                     if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
-                        sender
-                            .send_async(std::mem::take(&mut shape_insts_data))
-                            .await
-                            .map_err(|error| {
-                                anyhow::anyhow!("send primitive shape instances failed: {error}")
-                            })?;
+                        crate::fast_model::shape_save::send_shape_batch(
+                            &sender,
+                            std::mem::take(&mut shape_insts_data),
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("send primitive shape instances failed: {error}")
+                        })?;
                         // dbg!("Send prim insts data");
                     }
                 }
 
                 if shape_insts_data.inst_cnt() > 0 {
-                    sender.send_async(shape_insts_data).await.map_err(|error| {
-                        anyhow::anyhow!("send primitive shape instances failed: {error}")
-                    })?;
+                    crate::fast_model::shape_save::send_shape_batch(&sender, shape_insts_data)
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("send primitive shape instances failed: {error}")
+                        })?;
                     // dbg!("Send last prim insts data");
                 }
                 Ok::<_, anyhow::Error>(())

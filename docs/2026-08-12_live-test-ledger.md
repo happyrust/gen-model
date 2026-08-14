@@ -6,6 +6,14 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与
+`fast_model::pdms_inst::tests` 15 项通过（其中 staged mem 覆盖有序 journal、两次重放
+幂等与失败停止后续 packet）；`test-worklspace` 对同一 16 个 BRAN 完成旧/新二进制 A/B，
+150 行 `inst_relate` canonical SHA-256 均为
+`c775a8dc5daa201e5ec219911740a39370f1a86f07e9a4e9597e5c59442c4d37`，候选
+41,036/41,722 ms 均落在旧版 40,827～42,054 ms 区间。固定 16 根/16 小批性能夹具 save 与非删除 SQL packet
+均下降 93.75%。证据：`docs/evidence/2026-08-14-shape-save-coalescing.md`。
+
 跑法（Gate 0 能力，rs-core `DB_OPTION_FILE` 已落地）：
 
 ```powershell

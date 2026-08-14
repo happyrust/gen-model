@@ -1,6 +1,6 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::pdms_inst::save_instance_data;
+use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, coverage_audit, gen_meshes_in_db, loop_model, prim_model,
     resolve_desi_comp, shared,
@@ -187,19 +187,10 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
                 // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
                 // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
                 // 写入只覆盖得到这次也生成了的那些。
-                let mut produced: HashSet<RefnoEnum> = HashSet::new();
-                while let Ok(shape_insts) = receiver.recv_async().await {
-                    let inst_cnt = shape_insts.inst_cnt();
-                    produced.extend(shape_insts.get_show_refnos());
-                    // 不再 unwrap：写入失败必须向上传播，让 ModelRefreshPolicy::generate_roots
-                    // 返回 Err；model_update_pending 会把根任务标记为 failed 并在后续 drain
-                    // 时重试（增量删旧/加新的错误传播链关键一环）。
-                    // replace_exist = true：定向重生成必须先删旧实例再写新的，否则改小的
-                    // 几何会留着上一版的行。
-                    save_instance_data(&shape_insts, true).await?;
-                    println!("Insert manual shape insts: {}", inst_cnt);
-                }
-                anyhow::Ok(produced)
+                // 只有保存成功的 outcome 才进入 produced；NaN、渲染或数据库失败会在此
+                // 上抛，因此下面的 stale prune 不会建立在“收到过但没写成”的假事实之上。
+                let outcome = run_shape_save_receiver(receiver, SaveMode::TargetedReplace).await?;
+                anyhow::Ok(outcome.written_refnos)
             });
         let generation_result =
             capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
@@ -248,14 +239,7 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
             let (sender, receiver) = flume::bounded(CHUNK_SIZE);
             let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
             let insert_task = tokio::task::spawn(async move {
-                while let Ok(shape_insts) = receiver.recv_async().await {
-                    let time = Instant::now();
-                    let inst_info_len = shape_insts.inst_info_map.len();
-                    // 不再 unwrap：写入失败向上传播，避免“整库生成成功”却漏插数据。
-                    save_instance_data(&shape_insts, false).await?;
-                    println!("save_instance_data time: {}ms", time.elapsed().as_millis());
-                    println!("Insert shape insts: {}", inst_info_len);
-                }
+                run_shape_save_receiver(receiver, SaveMode::FullBuild).await?;
                 anyhow::Ok(())
             });
             let generation_result = capture_generation(gen_geos_data_by_dbnum(
