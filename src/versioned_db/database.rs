@@ -88,8 +88,15 @@ fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
 /// 列出项目 `*000` 目录下需要解析的库文件。
 ///
 /// 只保留普通文件：目录名不含 `.` 时会混进来，而 Windows 上 `File::open` 打开目录
-/// 返回 PermissionDenied，会让整个解析任务 panic。同名时 `_0001` 抽取库优先于基础库。
-fn collect_project_db_files(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+/// 返回 PermissionDenied，会让整个解析任务 panic。抽取家族归并后只保留叶子
+/// （主库被遮蔽）；同号兄弟抽取拒绝静默挑选。
+/// `explicit_files`：调用方点名要解析的文件名（`included_db_files` 口径）。抽取家族
+/// 归并会把被叶子 shadow 的主库从清单里删掉；但父层补缺（ADR-028 第 6 条）恰恰要
+/// 点名解析主库——被点名的 shadow 文件必须回到清单，否则补缺同步静默空转。
+fn collect_project_db_files(
+    project_dir: &Path,
+    explicit_files: Option<&[String]>,
+) -> anyhow::Result<Vec<PathBuf>> {
     let target_dir = std::fs::read_dir(project_dir)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .find(|path| {
@@ -103,7 +110,8 @@ fn collect_project_db_files(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> 
             anyhow::anyhow!("项目目录下没有 *000 数据库目录: {}", project_dir.display())
         })?;
 
-    let mut file_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut numbered = Vec::new();
+    let mut passthrough = Vec::new();
     for path in std::fs::read_dir(target_dir)?.filter_map(|entry| entry.ok().map(|e| e.path())) {
         if !path.is_file() {
             continue;
@@ -114,16 +122,36 @@ fn collect_project_db_files(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> 
         if file_name.contains('.') {
             continue;
         }
-        match file_name.strip_suffix("_0001") {
-            Some(base_name) => {
-                file_map.insert(base_name.to_string(), path);
-            }
-            None => {
-                file_map.entry(file_name.to_string()).or_insert(path);
+        match crate::data_interface::extract_family::parse_extract_file_name(file_name) {
+            Some(parsed) => numbered.push((".".to_string(), parsed.dbnum, path)),
+            None => passthrough.push(path),
+        }
+    }
+    let collapsed = crate::data_interface::extract_family::collapse_extract_families(numbered);
+    if !collapsed.duplicate_keys.is_empty() {
+        anyhow::bail!(
+            "项目目录存在同号兄弟抽取，拒绝静默选一份: {:?}",
+            collapsed.duplicate_keys
+        );
+    }
+    let mut files: Vec<PathBuf> = collapsed
+        .selected
+        .into_iter()
+        .map(|family| family.leaf_path)
+        .collect();
+    if let Some(explicit) = explicit_files {
+        for parent in collapsed.shadowed_parents {
+            let named = parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| explicit.iter().any(|want| want == name));
+            if named {
+                files.push(parent);
             }
         }
     }
-    Ok(file_map.into_values().collect())
+    files.extend(passthrough);
+    Ok(files)
 }
 
 /// 收尾写入管线：先关闭 sender、排空 writer 任务，再决定这次同步的成败。
@@ -537,7 +565,7 @@ fn full_sync_catalogue_files(
         let project_dir =
             crate::data_interface::project_paths::resolve_project_root(db_option, project)
                 .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
-        for path in collect_project_db_files(&project_dir)? {
+        for path in collect_project_db_files(&project_dir, None)? {
             let mut header = [0u8; 60];
             std::fs::File::open(&path)
                 .and_then(|mut file| file.read_exact(&mut header))
@@ -941,7 +969,10 @@ pub async fn sync_total_async_threaded(
         // 如果项目目录不存在，则抛出错误
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
-    let children_files = collect_project_db_files(Path::new(&project_dir))?;
+    let children_files = collect_project_db_files(
+        Path::new(&project_dir),
+        db_option.included_db_files.as_deref(),
+    )?;
     // println!("需要处理的文件: {:?}", &children_files);
     // dbg!(children_files.len());
     // 先解析一遍uda
@@ -1547,7 +1578,7 @@ fn collect_project_db_files_skips_directories_and_prefers_extract_copy() {
         std::fs::write(db_dir.join(name), b"stub").unwrap();
     }
 
-    let mut files = collect_project_db_files(&root).unwrap();
+    let mut files = collect_project_db_files(&root, None).unwrap();
     files.sort();
     let names = files
         .iter()
@@ -1557,6 +1588,48 @@ fn collect_project_db_files_skips_directories_and_prefers_extract_copy() {
     assert_eq!(names, vec!["tes1002_0001", "tes1008"]);
     assert!(files.iter().all(|path| path.is_file()));
 
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// ADR-028 父层补缺回归：被叶子 shadow 的主库，若被 `included_db_files` 点名，
+/// 必须回到解析清单。回退到「无条件丢 shadow」的旧写法时这里会红——那正是
+/// 补缺同步静默空转（一个文件都不解析却返回 Ok）的根因。
+#[test]
+fn collect_project_db_files_keeps_explicitly_named_shadowed_master() {
+    let root = make_temp_dir("dbfiles-parent");
+    let db_dir = root.join("TES000");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    for name in ["tes1002", "tes1002_0001"] {
+        std::fs::write(db_dir.join(name), b"stub").unwrap();
+    }
+
+    let explicit = vec!["tes1002".to_string()];
+    let mut files = collect_project_db_files(&root, Some(&explicit)).unwrap();
+    files.sort();
+    let names = files
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["tes1002", "tes1002_0001"]);
+
+    // 没点名时维持 shadow 语义，不回灌主库。
+    let unnamed = collect_project_db_files(&root, Some(&["tes9999".to_string()])).unwrap();
+    assert_eq!(unnamed.len(), 1);
+    assert!(unnamed[0].ends_with("tes1002_0001"));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn collect_project_db_files_rejects_sibling_extracts() {
+    let root = make_temp_dir("dbfiles-sib");
+    let db_dir = root.join("TES000");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::write(db_dir.join("tes9990_0001"), b"stub").unwrap();
+    std::fs::write(db_dir.join("tes9990_0002"), b"stub").unwrap();
+    let error =
+        collect_project_db_files(&root, None).expect_err("sibling extracts must not be picked");
+    assert!(error.to_string().contains("兄弟抽取"), "{error}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -176,6 +176,45 @@ fn is_db_file(path: PathBuf) -> bool {
     aios_database::data_interface::increment_manager::is_candidate_db_file(&path)
 }
 
+/// 同项目抽取家族归并（ADR-028）：主库 + 唯一 `_NNNN` → 选叶子、父层进 shadowed；
+/// 兄弟抽取 / 文件名与头库号不一致 → duplicate。纯函数，不读文件内容。
+#[pyfunction]
+fn collapse_extract_files(
+    py: Python<'_>,
+    entries: Vec<(String, u32, PathBuf)>,
+) -> PyResult<Py<PyAny>> {
+    let result = aios_database::data_interface::extract_family::collapse_extract_families(entries);
+    let mut duplicate_keys: Vec<_> = result
+        .duplicate_keys
+        .into_iter()
+        .map(|(project, dbnum)| serde_json::json!([project, dbnum]))
+        .collect();
+    duplicate_keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    let value = serde_json::json!({
+        "selected": result.selected.iter().map(|family| serde_json::json!({
+            "project": family.project,
+            "dbnum": family.dbnum,
+            "leaf_path": family.leaf_path.to_string_lossy(),
+            "parent_path": family.parent_path.as_ref().map(|path| path.to_string_lossy().into_owned()),
+        })).collect::<Vec<_>>(),
+        "shadowed_parents": result.shadowed_parents.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        "duplicate_keys": duplicate_keys,
+        "mismatches": result.mismatches.iter().map(|row| serde_json::json!({
+            "path": row.path.to_string_lossy(),
+            "filename_dbnum": row.filename_dbnum,
+            "header_dbnum": row.header_dbnum,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(pythonize(py, &value)?.unbind())
+}
+
+/// 父层索引里有、叶子索引里没有的 refno 个数。基线只在 gap>0 时补缺。
+#[pyfunction]
+fn parent_gap_refno_count(leaf: PathBuf, parent: PathBuf) -> PyResult<usize> {
+    aios_database::data_interface::extract_family::parent_gap_refno_count(&leaf, &parent)
+        .map_err(anyhow_to_py)
+}
+
 /// 列出库文件的全部会话页（升序）：会话号 / 页号 / 索引根 / 机器名 / 注释 / 时刻。
 #[pyfunction]
 fn sessions(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
@@ -390,6 +429,8 @@ fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let parse = PyModule::new(py, "parse")?;
     parse.add_function(wrap_pyfunction!(header, &parse)?)?;
     parse.add_function(wrap_pyfunction!(is_db_file, &parse)?)?;
+    parse.add_function(wrap_pyfunction!(collapse_extract_files, &parse)?)?;
+    parse.add_function(wrap_pyfunction!(parent_gap_refno_count, &parse)?)?;
     parse.add_function(wrap_pyfunction!(sessions, &parse)?)?;
     parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
     parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;

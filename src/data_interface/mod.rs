@@ -10,6 +10,8 @@ pub mod db_manager;
 
 pub mod project_paths;
 
+pub mod extract_family;
+
 pub mod increment_manager;
 
 pub mod increment_pipeline;

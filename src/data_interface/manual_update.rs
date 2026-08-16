@@ -2833,10 +2833,13 @@ pub(crate) struct FileCandidate {
     pub(crate) file_latest_sesno: i32,
     pub(crate) file_size: u64,
     pub(crate) file_modified_at: Option<String>,
+    /// Unsuffixed master next to a `_NNNN` leaf (ADR-028). Overlay reads only.
+    pub(crate) extract_parent: Option<PathBuf>,
 }
 
 /// 对扫描所得的全部身份候选运行 watcher 的同一判重权威，并保留稳定路径清单。
 /// scope 分流只决定执行资格，不能把范围外 CATA 从身份冲突全集里删掉。
+/// 抽取家族先归并：主库 + 唯一叶子不算 Duplicate。
 fn duplicate_candidate_groups(
     project: &str,
     by_dbnum: &IndexMap<u32, Vec<FileCandidate>>,
@@ -2862,6 +2865,86 @@ fn duplicate_candidate_groups(
         paths.dedup();
     }
     groups
+}
+
+fn collapse_scanned_file_candidates(
+    project: &str,
+    by_dbnum: IndexMap<u32, Vec<FileCandidate>>,
+    out_of_scope_cata: &mut Vec<FileCandidate>,
+) -> (
+    IndexMap<u32, Vec<FileCandidate>>,
+    BTreeMap<u32, Vec<String>>,
+) {
+    let in_scope: HashSet<PathBuf> = by_dbnum
+        .values()
+        .flatten()
+        .map(|cand| cand.path.clone())
+        .collect();
+    let all: Vec<FileCandidate> = by_dbnum
+        .into_iter()
+        .flat_map(|(_, group)| group)
+        .chain(out_of_scope_cata.iter().cloned())
+        .collect();
+    let collapsed = crate::data_interface::extract_family::collapse_extract_families(
+        all.iter()
+            .map(|cand| (cand.project.clone(), cand.db_num, cand.path.clone())),
+    );
+    let mut by_path: HashMap<PathBuf, FileCandidate> = all
+        .into_iter()
+        .map(|cand| (cand.path.clone(), cand))
+        .collect();
+    let duplicate_paths = duplicate_candidate_groups(
+        project,
+        &{
+            let mut grouped: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
+            for cand in by_path.values() {
+                grouped.entry(cand.db_num).or_default().push(cand.clone());
+            }
+            grouped
+        },
+        &[],
+    );
+    let shadowed: HashSet<PathBuf> = collapsed.shadowed_parents.iter().cloned().collect();
+    let mut new_by_dbnum: IndexMap<u32, Vec<FileCandidate>> = IndexMap::new();
+    for (&dbnum, paths) in &duplicate_paths {
+        let mut group = Vec::new();
+        for path in paths {
+            if let Some(cand) = by_path
+                .values()
+                .find(|cand| cand.db_num == dbnum && cand.path.display().to_string() == *path)
+            {
+                group.push(cand.clone());
+            }
+        }
+        if !group.is_empty() {
+            new_by_dbnum.insert(dbnum, group);
+        }
+    }
+    for sel in &collapsed.selected {
+        if duplicate_paths.contains_key(&sel.dbnum) {
+            continue;
+        }
+        let Some(mut cand) = by_path.remove(&sel.leaf_path) else {
+            continue;
+        };
+        cand.extract_parent = sel.parent_path.clone();
+        if in_scope.contains(&sel.leaf_path) {
+            new_by_dbnum.entry(sel.dbnum).or_default().push(cand);
+        } else if let Some(out) = out_of_scope_cata
+            .iter_mut()
+            .find(|cand| cand.path == sel.leaf_path)
+        {
+            out.extract_parent = sel.parent_path.clone();
+        }
+    }
+    out_of_scope_cata.retain(|cand| {
+        !shadowed.contains(&cand.path)
+            && !duplicate_paths.contains_key(&cand.db_num)
+            && new_by_dbnum
+                .get(&cand.db_num)
+                .is_none_or(|group| !group.iter().any(|existing| existing.path == cand.path))
+    });
+    (new_by_dbnum, duplicate_paths)
 }
 
 fn baseline_sync_options(
@@ -3200,6 +3283,7 @@ impl AiosDBManager {
             cand.db_num,
             &cand.file_name,
             &cand.path,
+            cand.extract_parent.as_deref(),
             &cand.db_type,
             cand.file_latest_sesno,
         )
@@ -3219,6 +3303,7 @@ impl AiosDBManager {
         dbnum: u32,
         file_name: &str,
         file_path: &std::path::Path,
+        extract_parent: Option<&std::path::Path>,
         db_type: &str,
         file_latest_sesno: i32,
     ) -> anyhow::Result<usize> {
@@ -3305,6 +3390,59 @@ impl AiosDBManager {
                 )
             })?);
             (count, info_count, root_count) = baseline_counts(dbnum).await?;
+            let parent = extract_parent
+                .map(std::path::Path::to_path_buf)
+                .or_else(|| crate::data_interface::extract_family::parent_path_of(file_path))
+                .filter(|path| path.is_file() && path != file_path);
+            if let Some(parent) = parent {
+                match crate::data_interface::extract_family::parent_gap_refno_count(
+                    file_path, &parent,
+                ) {
+                    Ok(0) => {}
+                    Ok(gap) => {
+                        let parent_name = parent
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "dbnum={dbnum} 父层路径没有文件名: {}",
+                                    parent.display()
+                                )
+                            })?;
+                        println!(
+                            "dbnum={dbnum} 父层有 {gap} 个叶子缺号，补解析 {}",
+                            parent.display()
+                        );
+                        let parent_options =
+                            baseline_sync_options(&self.db_option, parent_name, dbnum);
+                        let parent_counts =
+                            crate::versioned_db::database::sync_total_async_threaded(
+                                &parent_options,
+                                project,
+                                Arc::new(dashmap::DashSet::new()),
+                                &[db_type],
+                                100,
+                            )
+                            .await?;
+                        // 补缺同步没解析到父层文件就是静默空转（历史上 collect 把
+                        // shadow 主库从清单里删掉过），必须显式失败而不是带着缺口
+                        // 推进水位。
+                        if !parent_counts.contains_key(&dbnum) {
+                            anyhow::bail!(
+                                "dbnum={dbnum} 父层补解析未命中 {}（同步清单里没有该文件）；\
+                                 不推进 applied_sesno",
+                                parent.display()
+                            );
+                        }
+                        (count, info_count, root_count) = baseline_counts(dbnum).await?;
+                        parsed_count = None;
+                    }
+                    Err(error) => anyhow::bail!(
+                        "dbnum={dbnum} 父层缺号探测失败 {}: {error:#}",
+                        parent.display()
+                    ),
+                }
+            }
         } else if baseline_stats_need_rebuild(count, info_count) {
             crate::versioned_db::database::rebuild_dbnum_info_from_pe(dbnum, file_name, db_type)
                 .await?;
@@ -3940,6 +4078,7 @@ impl AiosDBManager {
                             file_latest_sesno: sesno as i32,
                             file_size: metadata.as_ref().map(|m| m.len()).unwrap_or_default(),
                             file_modified_at: metadata.as_ref().and_then(file_modified_rfc3339),
+                            extract_parent: None,
                         }),
                         Err(error) => warnings.push(format!(
                             "跳过无法读取最新会话的目录库文件 {}: {error}",
@@ -3973,10 +4112,14 @@ impl AiosDBManager {
                 file_latest_sesno,
                 file_size,
                 file_modified_at,
+                extract_parent: None,
             });
         }
 
-        *duplicate_paths = duplicate_candidate_groups(project, &by_dbnum, out_of_scope_cata);
+        let (collapsed, collapsed_dups) =
+            collapse_scanned_file_candidates(project, by_dbnum, out_of_scope_cata);
+        by_dbnum = collapsed;
+        *duplicate_paths = collapsed_dups;
         // 跨 scope 冲突也要进入既有的候选数量阻断：只在已有执行候选时补入范围外
         // CATA；纯范围外组仍只由 record_out_of_scope_cata 发 warning、零登记。
         for (&dbnum, paths) in duplicate_paths.iter() {
@@ -4736,6 +4879,7 @@ impl AiosDBManager {
                     dbnum,
                     &cand.file_name,
                     &cand.path,
+                    cand.extract_parent.as_deref(),
                     &cand.db_type,
                     cand.file_latest_sesno,
                 )
@@ -5332,6 +5476,7 @@ mod tests {
             file_latest_sesno: 7,
             file_size: 60,
             file_modified_at: None,
+            extract_parent: None,
         };
         let by_dbnum =
             IndexMap::from([(7997, vec![candidate("project/desi/ams7997_0001", "DESI")])]);

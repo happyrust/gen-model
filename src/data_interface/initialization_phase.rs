@@ -546,15 +546,73 @@ pub fn select_catalogue_candidates(
 
     let mut by_dbnum: BTreeMap<u32, Vec<CatalogueCandidate>> = BTreeMap::new();
     let mut seen_project_dbnum: HashMap<(String, u32), PathBuf> = HashMap::new();
-    for candidate in candidates {
-        let project_key = candidate.project.trim().to_ascii_lowercase();
-        if !included.contains(&project_key) {
-            blockers.push(format!(
-                "元件库候选归属项目不在 included_projects: {} dbnum={}",
-                candidate.project, candidate.dbnum
-            ));
+    let mut extract_shadowed = Vec::new();
+    let included_candidates: Vec<CatalogueCandidate> = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let project_key = candidate.project.trim().to_ascii_lowercase();
+            if !included.contains(&project_key) {
+                blockers.push(format!(
+                    "元件库候选归属项目不在 included_projects: {} dbnum={}",
+                    candidate.project, candidate.dbnum
+                ));
+                return None;
+            }
+            Some(candidate)
+        })
+        .collect();
+    let collapsed = crate::data_interface::extract_family::collapse_extract_families(
+        included_candidates.iter().map(|candidate| {
+            (
+                candidate.project.clone(),
+                candidate.dbnum,
+                candidate.path.clone(),
+            )
+        }),
+    );
+    for mismatch in &collapsed.mismatches {
+        blockers.push(format!(
+            "CATA/DICT 文件名库号与文件头不一致: {} filename={} header={}",
+            mismatch.path.display(),
+            mismatch.filename_dbnum,
+            mismatch.header_dbnum
+        ));
+    }
+    let mut by_path: HashMap<PathBuf, CatalogueCandidate> = included_candidates
+        .into_iter()
+        .map(|candidate| (candidate.path.clone(), candidate))
+        .collect();
+    for parent in &collapsed.shadowed_parents {
+        if let Some(candidate) = by_path.remove(parent) {
+            extract_shadowed.push(candidate);
+        }
+    }
+    for key in &collapsed.duplicate_keys {
+        let paths: Vec<String> = by_path
+            .values()
+            .filter(|candidate| {
+                candidate.dbnum == key.1 && candidate.project.trim().eq_ignore_ascii_case(&key.0)
+            })
+            .map(|candidate| candidate.path.display().to_string())
+            .collect();
+        blockers.push(format!(
+            "项目 {} 内 CATA/DICT dbnum={} 有多个抽取或副本: {}",
+            key.0,
+            key.1,
+            paths.join(" / ")
+        ));
+    }
+    for sel in collapsed.selected {
+        if collapsed
+            .duplicate_keys
+            .contains(&(sel.project.clone(), sel.dbnum))
+        {
             continue;
         }
+        let Some(candidate) = by_path.remove(&sel.leaf_path) else {
+            continue;
+        };
+        let project_key = candidate.project.trim().to_ascii_lowercase();
         if let Some(previous) =
             seen_project_dbnum.insert((project_key, candidate.dbnum), candidate.path.clone())
         {
@@ -602,6 +660,7 @@ pub fn select_catalogue_candidates(
         selected.push(group.remove(0));
         shadowed.extend(group);
     }
+    shadowed.extend(extract_shadowed);
     selected.sort_by_key(|candidate| candidate.dbnum);
     shadowed.sort_by_key(|candidate| candidate.dbnum);
     CatalogueSelection {
@@ -762,6 +821,41 @@ mod tests {
                 candidate("Catalogue", 7000, "cat7000"),
             ],
             &["Main".into(), "Catalogue".into()],
+            &[],
+        );
+        assert!(result.selected.is_empty());
+        assert_eq!(result.blockers.len(), 1);
+    }
+
+    #[test]
+    fn same_project_extract_parent_and_leaf_are_not_blockers() {
+        let result = select_catalogue_candidates(
+            [
+                candidate("AMS", 7355, "ams000/ams7355"),
+                candidate("AMS", 7355, "ams000/ams7355_0001"),
+            ],
+            &["AMS".into()],
+            &[],
+        );
+        assert!(result.blockers.is_empty(), "{:?}", result.blockers);
+        assert_eq!(
+            result.selected,
+            vec![candidate("AMS", 7355, "ams000/ams7355_0001")]
+        );
+        assert_eq!(
+            result.shadowed,
+            vec![candidate("AMS", 7355, "ams000/ams7355")]
+        );
+    }
+
+    #[test]
+    fn sibling_extracts_still_block_catalogue_selection() {
+        let result = select_catalogue_candidates(
+            [
+                candidate("AMS", 9990, "ams000/ams9990_0001"),
+                candidate("AMS", 9990, "ams000/ams9990_0002"),
+            ],
+            &["AMS".into()],
             &[],
         );
         assert!(result.selected.is_empty());

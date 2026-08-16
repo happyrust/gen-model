@@ -2891,6 +2891,8 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
         file_latest_sesno,
         file_size: metadata.len(),
         file_modified_at: None,
+        extract_parent: crate::data_interface::extract_family::parent_path_of(&job.path)
+            .filter(|path| path.is_file()),
     })
 }
 

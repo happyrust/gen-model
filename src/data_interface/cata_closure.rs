@@ -131,7 +131,7 @@ impl InMemoryCataLocator {
         let mut dirty = false;
 
         for (dbnum, entry) in &dbnum_files {
-            let fp = file_fingerprint(&entry.path);
+            let fp = locator_fingerprint(&entry.path);
             let ref0s = if let Some(cached) = cache.get_if_fresh(*dbnum, &fp) {
                 cached.clone()
             } else {
@@ -245,8 +245,7 @@ impl InMemoryCataLocator {
         include_type: impl Fn(&str) -> bool,
         mut cache: Option<&mut Ref0IndexCache>,
     ) -> Self {
-        let mut ref0_to_dbnum: HashMap<u32, u32> = HashMap::new();
-        let mut dbnum_files: HashMap<u32, (String, String, PathBuf)> = HashMap::new();
+        let mut discovered = Vec::new();
         for entry in walkdir::WalkDir::new(root_dir)
             .max_depth(8)
             .into_iter()
@@ -273,26 +272,49 @@ impl InMemoryCataLocator {
             if !include_type(&header.db_type) {
                 continue;
             }
+            discovered.push((header, path.to_path_buf()));
+        }
+        let collapsed = crate::data_interface::extract_family::collapse_extract_families(
+            discovered
+                .iter()
+                .map(|(header, path)| (project.to_string(), header.db_no, path.clone())),
+        );
+        if !collapsed.duplicate_keys.is_empty() {
+            log::warn!(
+                "[cata_locator] skip sibling extract duplicates: {:?}",
+                collapsed.duplicate_keys
+            );
+        }
+        let by_path: HashMap<_, _> = discovered
+            .into_iter()
+            .map(|(header, path)| (path, header))
+            .collect();
+        let mut ref0_to_dbnum: HashMap<u32, u32> = HashMap::new();
+        let mut dbnum_files: HashMap<u32, (String, String, PathBuf)> = HashMap::new();
+        for sel in collapsed.selected {
+            let Some(header) = by_path.get(&sel.leaf_path) else {
+                continue;
+            };
             let dbnum = header.db_no;
-            let fingerprint = file_fingerprint(path);
+            let fingerprint = locator_fingerprint(&sel.leaf_path);
             let ref0s = match cache.as_deref_mut() {
                 Some(cache) => match cache.get_if_fresh(dbnum, &fingerprint) {
                     Some(ref0s) => ref0s.clone(),
                     None => {
-                        let ref0s = scan_db_ref0s(path, project);
+                        let ref0s = scan_db_ref0s(&sel.leaf_path, project);
                         cache.put(dbnum, fingerprint, ref0s.clone());
                         ref0s
                     }
                 },
-                None => scan_db_ref0s(path, project),
+                None => scan_db_ref0s(&sel.leaf_path, project),
             };
             for ref0 in ref0s {
                 ref0_to_dbnum.insert(ref0, dbnum);
             }
             dbnum_files.entry(dbnum).or_insert((
-                header.db_type,
+                header.db_type.clone(),
                 project.to_string(),
-                path.to_path_buf(),
+                sel.leaf_path,
             ));
         }
         Self::from_parts(ref0_to_dbnum, dbnum_files)
@@ -402,6 +424,16 @@ fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
     file.read_exact(&mut header).ok()?;
     let info = parse_pdms_db::parse::parse_file_basic_info(&header);
     (info.db_no != 0 && !info.db_type.is_empty()).then_some(info)
+}
+
+fn locator_fingerprint(path: &Path) -> String {
+    let leaf = file_fingerprint(path);
+    match crate::data_interface::extract_family::parent_path_of(path)
+        .filter(|parent| parent.is_file())
+    {
+        Some(parent) => format!("{leaf}|{}", file_fingerprint(&parent)),
+        None => leaf,
+    }
 }
 
 /// 文件指纹（size + mtime 毫秒）；无法取得时为空串（视为始终“脏”，强制重扫）。

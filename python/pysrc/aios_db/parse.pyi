@@ -6,6 +6,18 @@ def header(path: str) -> dict[str, Any]:
 def is_db_file(path: str) -> bool:
     """是不是候选 AVEVA 库文件（名字形态 + 文件头两道门）。"""
 
+def collapse_extract_files(
+    entries: list[tuple[str, int, str]],
+) -> dict[str, Any]:
+    """同项目抽取家族归并（ADR-028）。entries 为 (project, header_dbnum, path)。
+
+    返回 {selected: [{project, dbnum, leaf_path, parent_path}],
+    shadowed_parents, duplicate_keys: [[project, dbnum], ...],
+    mismatches: [{path, filename_dbnum, header_dbnum}]}。"""
+
+def parent_gap_refno_count(leaf: str, parent: str) -> int:
+    """父层索引独有、叶子没有的 refno 个数（基线只在 gap>0 时补缺）。"""
+
 def sessions(path: str) -> list[dict[str, Any]]:
     """全部会话页（升序）：sesno / pgno / computer_name / comments / date。"""
 

@@ -69,10 +69,21 @@ pub(crate) struct OnDemandDbSession {
     dbnum: u32,
     source: SessionSource,
     parsed_records: usize,
+    parent: Option<Box<OnDemandDbSession>>,
 }
 
 impl OnDemandDbSession {
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
+        let mut session = Self::open_single(path)?;
+        if let Some(parent) = crate::data_interface::extract_family::parent_path_of(path)
+            .filter(|parent| parent.is_file() && parent != path)
+        {
+            session.parent = Some(Box::new(Self::open_single(&parent)?));
+        }
+        Ok(session)
+    }
+
+    fn open_single(path: &Path) -> anyhow::Result<Self> {
         let configured = ReadMode::configured();
         let (mut mode, mut fallback_reason) = if let Some(extent) = first_extra_extent(path) {
             (
@@ -128,6 +139,7 @@ impl OnDemandDbSession {
             dbnum: read_dbnum(path).unwrap_or_default(),
             source,
             parsed_records: 0,
+            parent: None,
         })
     }
 
@@ -145,6 +157,16 @@ impl OnDemandDbSession {
     }
 
     pub(crate) async fn parse_element(&mut self, refno: RefU64) -> anyhow::Result<Option<EleData>> {
+        if let Some(found) = self.parse_element_here(refno).await? {
+            return Ok(Some(found));
+        }
+        if let Some(parent) = self.parent.as_mut() {
+            return parent.parse_element_here(refno).await;
+        }
+        Ok(None)
+    }
+
+    async fn parse_element_here(&mut self, refno: RefU64) -> anyhow::Result<Option<EleData>> {
         let db_info = aios_core::get_default_pdms_db_info();
         let result = match &mut self.source {
             SessionSource::Legacy(index) => parse_legacy_element(index, refno, &db_info).await,
@@ -192,6 +214,18 @@ impl Drop for OnDemandDbSession {
 }
 
 pub(crate) fn scan_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
+    let mut values = scan_ref0s_one(path, project)?;
+    if let Some(parent) = crate::data_interface::extract_family::parent_path_of(path)
+        .filter(|parent| parent.is_file() && parent != path)
+    {
+        values.extend(scan_ref0s_one(&parent, project)?);
+        values.sort_unstable();
+        values.dedup();
+    }
+    Ok(values)
+}
+
+fn scan_ref0s_one(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
     let configured = ReadMode::configured();
     let (mode, fallback_reason) = if let Some(extent) = first_extra_extent(path) {
         (

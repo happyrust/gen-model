@@ -1,15 +1,38 @@
 # 变更记录
 
+## 2026-08-16
+
+### 修复
+
+- ADR-028 父层补缺静默空转：`collect_project_db_files` 归并抽取家族时会把被叶子 shadow 的主库从解析清单里删掉，而基线的父层补缺（`included_db_files` 点名主库）恰恰要解析它——补缺同步一个文件都不解析却返回 Ok，缺口留在库里。现在被 `included_db_files` 显式点名的 shadow 主库回到清单；补缺同步返回值里若没有目标 dbnum 直接报错、不推进水位。附回归测试 `collect_project_db_files_keeps_explicitly_named_shadowed_master`。（同批核实：pe/属性批写入本就是 `INSERT IGNORE`，父层同步天然只补叶子缺号，不会用父层旧会话覆盖共享 refno。）
+- 订正三处与实现相反的默认值注释：`startup_autorun` 与 `room_incremental` 的缺省均已是 `true`（分别在 2026-08-14 与 2026-08-12 翻正），但 `options.rs` 的字段注释与 `/health` 的两条字段注释仍写着「默认 false」。同批把 `startup_autorun` 关闭时的机制描述改准：它挂起的是重扫排出的队列行与空闲轮的持久积压，不是「队列消费者启动即暂停」——那是另一道跨重启保留的暂停闸门。
+
+## 2026-08-15
+
+### 新增
+
+- ADR-029：设计/目录负体布尔改走本地 `manifold-csg`（path `../manifold-csg`），不再调用 aios-core 的 `ManifoldRust` / 旧 `manifold-sys`。OCC 只保留三角化（扫掠体尚无替代）；OCC 布尔不进生产。
+- ADR-030 据 Core3D.dll IDA 修订：三角化权威是 libgm `gm_Create*`（挤出/旋转/ruled + 目录原语），不是 OCC BRep；OCC 只是翻译层。
+- `specs/009-retire-occ/plan.md` / `tasks.md`：按 libgm 符号拆工作包与带路径任务（B 目录原语 / C 扫掠三支 / D CSG / E 离散）。
+- `manifold_tessellate`：单位箱/柱与挤出轮廓走 manifold-csg（对齐 `gm_CreateBox/Cylinder/Extrusion`）；空挤出 hard fail。aios-core 的 `gen_model` 不再捆绑旧 `manifold-sys`，避免与 manifold-csg 链接冲突（需本地 vendor patch）。
+- T005/T007：`gen_inst_meshes` 无 `occ`/`manifold` 时 `bail!`（禁止静默跳过）；箱/柱/挤出先 `tessellate_libgm_param`，斜端柱回退 OCC；libgm 路径 AABB/`pts` 取网格八角。
+
+### 修复
+
+- OCC 布尔若切出空网格，不再覆盖已有 `booled_id` 文件。`116569` 的空 60 字节结果已用 manifold 重切恢复（p95=137）。
+
 ## 2026-08-14
 
 ### 新增
 
+- 抽取树叠加（ADR-028）：同项目主库与唯一 `_NNNN` 归并为一个逻辑库，叶子为水位权威、父层只补缺号；兄弟抽取与人手副本仍 Duplicate。
+- Python 解析层暴露 `parse.collapse_extract_files` / `parse.parent_gap_refno_count`；`python/tests/test_extract_tree_offline.py` 离线钉住归并，本机 AMS 7355 实文件再钉头/会话/parent_only=0。
 - 新增 ADR-024 与 `specs/005-shape-save-coalescing`，定义模型实例保存的有界合批、先计划后修改、确定性分包和成功后计入产出约束。
 - 新增 ADR-026：扫掠体公开步骤按 `DB_Gensec` 蛇形命名；可复用直线无斜切时单位网格身份只键目录截面。
 - Python RVM AABB 对拍：`python/scripts/rvm_aabb_compare.py` 先打 AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 WALL/STWALL（SweepSolid），口径对齐 `rvm_gate_c_or_1r345_c.ps1`（3mm / 3%）。
 - Mesh 级对拍：`fast_model::shared::two_sided_surface_distance` 双向采样表面距离（mean/rms/p95/Hausdorff，parry3d，无新依赖、进 CI），三角化无关；`rvm_baseline::mesh_compare` 用 rvm-rs `Tessellate` 取 RVM 世界三角、gen 侧 `inst_geo.param` 就地 `gen_occ_shape`+`gen_occ_mesh`（param 为空的布尔/复合几何回退磁盘 `.mesh`）取世界三角。对 1112 CWALL 4 堵 WALL 与 8000 C-OR 管系（FTUB/BEND）做 mesh 对拍（live 8009+occ）：墙与 FTUB 几何忠实；BEND 逐元素多约 100mm，但 BEND+相邻 FTUB 的 union 与 E3D 只差 5.8mm——是元素边界拆分口径不同、装配无害。gen 几何经 mesh 级验证在装配层正确。
 - Mesh 对拍扩到 1112 直线 STWALL（双向 ≤0.06mm）与 8000 `/C-IY-1R330-B`（ACP1000 槽盒，35 构件 union 的 gen→rvm p95=4.14 / max=24.9mm）；E3D 槽体外壳比 gen 管段大约 100mm 高，rvm→gen 大是范围差。
-- Mesh 对拍扩到同一 CWALL 的 20 堵 GWALL 挤出：11 堵盒状（≤16 三角）gen→rvm p95=0；大体量 3 堵 gen 多出 0.6–1.3m，高面片墙 rvm→gen ~450–650mm 为开洞。
+- Mesh 对拍 `gen_world_mesh` 与生产 `query_valid_insts` 对齐：有 `booled_id` 时加载切洞后网格，不再回退未开洞正挤出。1112 三堵大体量 GWALL 重跑 NXTR 布尔后 gen→rvm p95 从 870/786/591 降到 0.1/9.3/137。
 
 ### 修复
 

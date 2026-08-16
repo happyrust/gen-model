@@ -99,6 +99,38 @@ mod tests {
         assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 1112)]));
     }
 
+    /// ADR-028：主库与唯一抽取叶子是同一逻辑库，不是 Duplicate。
+    #[test]
+    fn extract_parent_and_leaf_are_not_duplicates() {
+        let duplicates = duplicate_dbnums([
+            ("AMS".to_string(), 7355, PathBuf::from("ams000/ams7355")),
+            (
+                "AMS".to_string(),
+                7355,
+                PathBuf::from("ams000/ams7355_0001"),
+            ),
+        ]);
+        assert!(duplicates.is_empty(), "{duplicates:?}");
+    }
+
+    /// ADR-028：兄弟抽取仍按 Duplicate 阻断（现 live 夹具口径）。
+    #[test]
+    fn sibling_extracts_are_still_duplicates() {
+        let duplicates = duplicate_dbnums([
+            (
+                "AMS".to_string(),
+                9990,
+                PathBuf::from("ams000/ams9990_0001"),
+            ),
+            (
+                "AMS".to_string(),
+                9990,
+                PathBuf::from("ams000/ams9990_0002"),
+            ),
+        ]);
+        assert_eq!(duplicates, HashSet::from([("AMS".to_string(), 9990)]));
+    }
+
     /// 扫描裁决到自动路径处置的映射是策略红线（ADR-021）：回退转重建、其余阻断
     /// 类异常跳过、无异常与良性搬家放行。逐类点名（不留 `_ =>` 兜底）：新增异常
     /// 种类时这里编译不过，作者必须显式选边。
@@ -462,6 +494,73 @@ mod tests {
         );
 
         fs::remove_dir_all(&fixture).expect("remove duplicate directory");
+    }
+
+    #[tokio::test]
+    #[ignore = "manual live: copies one configured E3D header into a throwaway extract-tree directory"]
+    async fn live_watch_directory_collapses_master_and_extract() {
+        let mut manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let source = manager
+            .watcher
+            .watch_dirs
+            .iter()
+            .flat_map(|dir| {
+                WalkDir::new(dir)
+                    .max_depth(1)
+                    .into_iter()
+                    .filter_map(Result::ok)
+            })
+            .find_map(|entry| {
+                let path = entry.file_type().is_file().then(|| entry.into_path())?;
+                is_candidate_db_file(&path).then_some(())?;
+                Some((path.clone(), try_parse_db_basic_info(&path)?))
+            })
+            .expect("configured watch dirs contain an E3D database");
+        let mut source_file = fs::File::open(&source.0).expect("open source E3D header");
+        let mut header = [0u8; 60];
+        source_file
+            .read_exact(&mut header)
+            .expect("read source E3D header");
+        let fixture = std::env::temp_dir().join(format!(
+            "aios-extract-tree-{}-{}",
+            std::process::id(),
+            source.1.db_no
+        ));
+        fs::create_dir_all(&fixture).expect("create extract-tree directory");
+        let master_name = format!("ams{}", source.1.db_no);
+        let leaf_name = format!("ams{}_0001", source.1.db_no);
+        fs::write(fixture.join(&master_name), header).expect("write master header");
+        fs::write(fixture.join(&leaf_name), header).expect("write leaf header");
+        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+
+        assert!(
+            manager.duplicate_dbnums_across_watch_dirs().is_empty(),
+            "master + unique extract must not Duplicate-block"
+        );
+        let collapsed = crate::data_interface::extract_family::collapse_extract_families([
+            (
+                manager.db_option.project_name.clone(),
+                source.1.db_no,
+                fixture.join(&master_name),
+            ),
+            (
+                manager.db_option.project_name.clone(),
+                source.1.db_no,
+                fixture.join(&leaf_name),
+            ),
+        ]);
+        assert_eq!(collapsed.selected.len(), 1);
+        assert_eq!(
+            collapsed.selected[0]
+                .leaf_path
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some(leaf_name.as_str())
+        );
+
+        fs::remove_dir_all(&fixture).expect("remove extract-tree directory");
     }
 
     /// ADR-023 live：真正从启动重扫入口检出“水位已追平、pe 零行”的幽灵水位。
@@ -1207,14 +1306,7 @@ pub(crate) const INGEST_MAX_DEPTH: usize = 1;
 pub(crate) fn duplicate_dbnums(
     entries: impl IntoIterator<Item = (String, u32, PathBuf)>,
 ) -> HashSet<(String, u32)> {
-    let mut seen = HashSet::new();
-    entries
-        .into_iter()
-        .filter_map(|(project, dbnum, _)| {
-            let key = (project, dbnum);
-            (!seen.insert(key.clone())).then_some(key)
-        })
-        .collect()
+    crate::data_interface::extract_family::collapse_extract_families(entries).duplicate_keys
 }
 
 /// 监控目录里落在 `project_dir` 下的那些。
@@ -1347,6 +1439,25 @@ impl AiosDBManager {
     /// **不过范围门**：判重看的是磁盘上有几个候选文件，与这个库这一期跑不跑无关。
     /// 范围收窄时若连判重也跟着收窄，一个躺在目录里的 `ams1112_0001 copy` 会在范围
     /// 放开的那一天才第一次被发现，而那时它已经污染过一轮文件身份了。
+    /// 抽取家族先归并（ADR-028）：主库 + 唯一 `_NNNN` 不算重复。
+    fn collapse_watch_dir_families(&self) -> crate::data_interface::extract_family::CollapseResult {
+        crate::data_interface::extract_family::collapse_extract_families(
+            self.watch_dirs().into_iter().flat_map(|watch_dir| {
+                let project = self.owning_project(&watch_dir);
+                WalkDir::new(watch_dir)
+                    .max_depth(INGEST_MAX_DEPTH)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_file())
+                    .filter(|entry| is_candidate_db_file(entry.path()))
+                    .filter_map(move |entry| {
+                        let info = try_parse_db_basic_info(entry.path())?;
+                        Some((project.clone(), info.db_no, entry.path().to_path_buf()))
+                    })
+            }),
+        )
+    }
+
     fn duplicate_dbnums_across_watch_dirs(&self) -> HashSet<(String, u32)> {
         duplicate_dbnums(self.watch_dirs().into_iter().flat_map(|watch_dir| {
             let project = self.owning_project(&watch_dir);
@@ -1640,6 +1751,10 @@ impl AiosDBManager {
         // 判重，跨项目同号的 sys 库不算重复。
         let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
         let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
+        let extract_families = self.collapse_watch_dir_families();
+        let extract_parents: HashSet<PathBuf> =
+            extract_families.shadowed_parents.into_iter().collect();
+        let extract_dupes = extract_families.duplicate_keys;
         // 范围外的库：聚合成一句，别让 258 行「跳过」把重扫日志淹掉。
         let mut out_of_scope: Vec<String> = Vec::new();
         let mut manifest_totals = Vec::new();
@@ -1710,6 +1825,19 @@ impl AiosDBManager {
                 // 主项目目录里找，必然找不到、批次必然 failed（见 `project_of_path`）。
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
+                if extract_parents.contains(path) {
+                    continue;
+                }
+                if extract_dupes.contains(&(project.clone(), db_no)) {
+                    blocked_dupes.insert((project.clone(), db_no));
+                    println!(
+                        "F6 发现项目 {} 内同 dbnum={} 的多个抽取/副本，阻断该 dbnum：{}",
+                        project,
+                        db_no,
+                        path.display()
+                    );
+                    continue;
+                }
 
                 // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
                 let in_scope = self.in_scope(&scope, &project, &db_type, db_no);
