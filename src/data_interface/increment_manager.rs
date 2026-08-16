@@ -1755,6 +1755,11 @@ impl AiosDBManager {
         let extract_parents: HashSet<PathBuf> =
             extract_families.shadowed_parents.into_iter().collect();
         let extract_dupes = extract_families.duplicate_keys;
+        let extract_mismatches: HashMap<PathBuf, (u32, u32)> = extract_families
+            .mismatches
+            .into_iter()
+            .map(|row| (row.path, (row.filename_dbnum, row.header_dbnum)))
+            .collect();
         // 范围外的库：聚合成一句，别让 258 行「跳过」把重扫日志淹掉。
         let mut out_of_scope: Vec<String> = Vec::new();
         let mut manifest_totals = Vec::new();
@@ -1826,6 +1831,20 @@ impl AiosDBManager {
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
                 if extract_parents.contains(path) {
+                    println!(
+                        "[{origin}] 抽取树父层由叶子代表（dbnum={db_no}），本轮不单独登记: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+                if let Some((filename_dbnum, header_dbnum)) = extract_mismatches.get(path) {
+                    blocked_dupes.insert((project.clone(), db_no));
+                    println!(
+                        "F6 文件名库号与文件头不一致（filename={filename_dbnum} header={header_dbnum}），\
+                         阻断项目 {} 的 dbnum={db_no}：{}",
+                        project,
+                        path.display()
+                    );
                     continue;
                 }
                 if extract_dupes.contains(&(project.clone(), db_no)) {

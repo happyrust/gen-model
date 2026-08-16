@@ -180,6 +180,16 @@ pub fn collapse_extract_families(
             .iter()
             .any(|family| family.parent_path.as_ref() == Some(path))
     });
+    // families 是 HashMap，迭代序随机；下游会按 selected 顺序重建候选清单/入队，
+    // 排序钉住跨进程一致的扫描序。
+    selected.sort_by(|left, right| {
+        (&left.project, left.dbnum, &left.leaf_path).cmp(&(
+            &right.project,
+            right.dbnum,
+            &right.leaf_path,
+        ))
+    });
+    shadowed_parents.sort();
 
     CollapseResult {
         selected,
@@ -271,6 +281,32 @@ mod tests {
         ]);
         assert_eq!(result.duplicate_keys, HashSet::from([("AMS".into(), 9990)]));
         assert!(result.selected.is_empty());
+    }
+
+    /// 回退到「直接吐 HashMap 迭代序」的旧写法时这里会随机红：下游按 selected
+    /// 顺序重建候选清单与入队序，必须跨进程稳定。
+    #[test]
+    fn collapse_output_is_sorted_by_project_then_dbnum() {
+        let result = collapse_extract_families([
+            ("ZDJ".into(), 12, p("zdj000/zdj12")),
+            ("AMS".into(), 9, p("ams000/ams9_0001")),
+            ("AMS".into(), 9, p("ams000/ams9")),
+            ("AMS".into(), 2, p("ams000/ams2")),
+        ]);
+        let keys: Vec<(String, u32)> = result
+            .selected
+            .iter()
+            .map(|family| (family.project.clone(), family.dbnum))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("AMS".to_string(), 2),
+                ("AMS".to_string(), 9),
+                ("ZDJ".to_string(), 12)
+            ]
+        );
+        assert_eq!(result.shadowed_parents, vec![p("ams000/ams9")]);
     }
 
     #[test]

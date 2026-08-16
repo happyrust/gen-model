@@ -1038,8 +1038,11 @@ pub async fn sync_total_async_threaded(
                         }
                         SenderJsonsData::PERelateJson(relates) => {
                             if !relates.is_empty() {
+                                // IGNORE 与 pe 同语义：边 id 显式（`pe_owner:[owner, i]`），
+                                // 父层补缺重放叶子已写过的边时必须幂等，否则重复 id 报错
+                                // 会把整次补缺同步打成失败。
                                 let sql = format!(
-                                    "INSERT RELATION INTO pe_owner [{}]",
+                                    "INSERT RELATION IGNORE INTO pe_owner [{}]",
                                     relates.join(",")
                                 );
                                 if let Err(error) =

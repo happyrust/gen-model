@@ -4,6 +4,7 @@
 
 ### 修复
 
+- ADR-028 抽取树收尾三件：`pe_owner` 批写入补上 `INSERT RELATION IGNORE`（边 id 显式，父层补缺重放叶子已写过的边必须幂等，否则重复 id 会把整次补缺同步打成失败）；`collapse_extract_families` 输出按（项目, 库号）排序钉住跨进程扫描序（原 HashMap 迭代序随机）；F6 重扫给「抽取树父层被叶子代表」补日志、给「文件名库号与文件头不一致」单独文案（原先与多副本共用一句「多个抽取/副本」，单文件 mismatch 时误导）。
 - ADR-028 父层补缺静默空转：`collect_project_db_files` 归并抽取家族时会把被叶子 shadow 的主库从解析清单里删掉，而基线的父层补缺（`included_db_files` 点名主库）恰恰要解析它——补缺同步一个文件都不解析却返回 Ok，缺口留在库里。现在被 `included_db_files` 显式点名的 shadow 主库回到清单；补缺同步返回值里若没有目标 dbnum 直接报错、不推进水位。附回归测试 `collect_project_db_files_keeps_explicitly_named_shadowed_master`。（同批核实：pe/属性批写入本就是 `INSERT IGNORE`，父层同步天然只补叶子缺号，不会用父层旧会话覆盖共享 refno。）
 - 订正三处与实现相反的默认值注释：`startup_autorun` 与 `room_incremental` 的缺省均已是 `true`（分别在 2026-08-14 与 2026-08-12 翻正），但 `options.rs` 的字段注释与 `/health` 的两条字段注释仍写着「默认 false」。同批把 `startup_autorun` 关闭时的机制描述改准：它挂起的是重扫排出的队列行与空闲轮的持久积压，不是「队列消费者启动即暂停」——那是另一道跨重启保留的暂停闸门。
 
