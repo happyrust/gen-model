@@ -60,10 +60,12 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_batch_workers: Option<usize>,
 
-    /// 启动即自动干活（默认 `false` = 起来先什么都不执行）。
+    /// 启动即自动干活（默认 `true`，见 [`startup_autorun`]）。
     ///
-    /// 关着时：启动重扫照常发现并入队，但队列消费者启动即暂停，启动全量房间
-    /// 重建也不跑。开着时才是历史行为。详见 [`startup_autorun`]。
+    /// 显式关掉时：启动重扫照常发现并入队，但排出来的行挂起（`DataBatch::held`）、
+    /// 空闲轮那侧的持久积压也不消化，启动全量房间重建同样不跑；某个 dbnum 真的
+    /// 来了增量（watch 事件 / 人工执行）才放行它那一条。它与队列暂停是两道独立
+    /// 的门：暂停是跨重启保留的运维意图，这个开关只描述本次启动。
     #[serde(default)]
     pub startup_autorun: Option<bool>,
 

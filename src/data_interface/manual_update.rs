@@ -3352,6 +3352,7 @@ impl AiosDBManager {
                 file_latest_sesno,
             )
             .await
+            .gate
         {
             ScanGate::Proceed => {}
             ScanGate::Blocked => {
@@ -4180,6 +4181,7 @@ impl AiosDBManager {
                     cand.file_latest_sesno,
                 )
                 .await
+                .gate
             {
                 ScanGate::Proceed => {}
                 ScanGate::Blocked => warnings.push(format!(
@@ -4531,6 +4533,10 @@ impl AiosDBManager {
                     continue;
                 }
             };
+            // `merged_sesnos` 的基线在 record_observation 覆盖它之前冻结，随队列行
+            // 传给 worker（spec §确认与合并）。执行侧到冻结点再读观察值时，这里的
+            // 落库早已把 file_latest_sesno 推到窗口右端，并入名单就恒空了。
+            let previous_observed_sesno = verdict.previous_file_latest_sesno();
             if let Err(error) = DbnumState::record_observation(&obs, &verdict).await {
                 receipt
                     .warnings
@@ -4615,6 +4621,11 @@ impl AiosDBManager {
                 },
                 cand.file_latest_sesno,
             );
+            // 人工执行是显式的重试指令：清掉该库的连败账（batch_worker 的
+            // `BatchFailureLedger`），连败到上限被 park 的库立即恢复重试资格——
+            // 否则回执说「已入队」，跑完失败后重扫又把它按回 park，人只会看到
+            // 「我点了执行它还是不动」。
+            crate::data_interface::batch_worker::reset_batch_failure(dbnum);
             let outcome = scheduler.enqueue(
                 registry,
                 &DiscoveredBatch {
@@ -4630,6 +4641,7 @@ impl AiosDBManager {
                     file_name: cand.file_name.clone(),
                     applied_sesno: applied,
                     file_latest_sesno: cand.file_latest_sesno,
+                    previous_observed_sesno,
                     first_pending_sesno_time,
                     file_latest_sesno_time,
                 },
@@ -4674,10 +4686,17 @@ impl AiosDBManager {
     ///
     /// `pub(crate)`：这是数据批次 worker 的执行体（rollout 第九节第 6 条）——
     /// 手动与自动两条触发路径合流后，执行只发生在 `batch_worker` 的消费循环里。
+    ///
+    /// `previous_observed_sesno` 是入队时冻结、随 `FrozenBatch` 传进来的
+    /// `merged_sesnos` 基线（spec §确认与合并：相对预览新增合并的会话）。
+    /// **不得**在这里用执行时裁决的 `previous_file_latest_sesno()` 顶替——
+    /// 入队扫描早已把观察值推到本窗口右端，再现读只会得到「基线 = 右端」，
+    /// 并入名单恒空（2026-08-16 pipeline-f5 现场，回归测试钉着）。
     pub(crate) async fn execute_one_dbnum(
         &self,
         project: &str,
         cand: &FileCandidate,
+        previous_observed_sesno: i32,
         progress: &Option<ManualUpdateProgress>,
         warnings: &mut Vec<String>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
@@ -4801,8 +4820,6 @@ impl AiosDBManager {
                 }
             }
         }
-        let previous_observed = verdict.previous_file_latest_sesno();
-
         // 回退到一份没有任何会话的文件仍然需要完成清库，但清完没有基线或增量可收集。
         // `0..=0` 是控制窗口，不是假造会话；以 Applied 收口让队列有明确出口，水位由
         // wipe 的事务保持为 0。
@@ -5021,7 +5038,7 @@ impl AiosDBManager {
             &mut batch,
             project,
             &cand.path,
-            sessions_merged_after(&collected.session_sesnos, previous_observed),
+            sessions_merged_after(&collected.session_sesnos, previous_observed_sesno),
         );
         batch.changed_elements = collected.range_eles.values().map(|v| v.len()).sum();
 
@@ -5065,7 +5082,8 @@ impl AiosDBManager {
             // a newer right edge. Report the range that actually succeeded;
             // the next queue pass will pick up the remaining sessions.
             if let Some(success) = incr.successes.first() {
-                let merged = sessions_merged_after(&success.session_sesnos, previous_observed);
+                let merged =
+                    sessions_merged_after(&success.session_sesnos, previous_observed_sesno);
                 // 报的窗口一旦不是收集时那个，时刻必须跟着重读：重放把窗口挪回
                 // 更早的一段，留着原来那对时刻等于把另一段保存的时刻贴在这一行上。
                 // 没挪动就不再开一次文件——号和名单都没变，时刻自然也没变。
@@ -5350,7 +5368,7 @@ mod tests {
 
     /// 批次保存清单必须来自文件会话页清单，而不是操作 key；后一种写法会丢掉
     /// 空保存与净窗口内自抵消的会话。fresh 与 crash replay 两条成功路径都读取
-    /// `session_sesnos`，并继续经过 previous_observed 过滤。
+    /// `session_sesnos`，并继续经过入队时冻结的 `previous_observed_sesno` 过滤。
     #[test]
     fn execute_receipt_uses_the_collected_session_manifest() {
         let source = include_str!("manual_update.rs");
@@ -5363,11 +5381,15 @@ mod tests {
             .unwrap_or(source);
 
         assert!(
-            body.contains("sessions_merged_after(&collected.session_sesnos, previous_observed)"),
+            body.contains(
+                "sessions_merged_after(&collected.session_sesnos, previous_observed_sesno)"
+            ),
             "预收集回执必须使用完整会话清单: {body}"
         );
         assert!(
-            body.contains("sessions_merged_after(&success.session_sesnos, previous_observed)"),
+            body.contains(
+                "sessions_merged_after(&success.session_sesnos, previous_observed_sesno)"
+            ),
             "崩溃重放后的最终回执必须使用实际成功窗口的完整会话清单: {body}"
         );
         assert!(
@@ -7733,6 +7755,51 @@ mod tests {
         assert!(
             !match_block.contains("skipped("),
             "读失败不得复用 skipped 闭包: {match_block}"
+        );
+    }
+
+    /// `merged_sesnos` 的基线必须用入队时冻结、随 `FrozenBatch` 传进来的那份，
+    /// 执行体不得再现读观察值（2026-08-16 pipeline-f5 现场：入队扫描先把
+    /// `file_latest_sesno` 推到窗口右端，执行侧读回的「上一次观察」就是右端
+    /// 本身，相对预览新增合并的会话恒空）。
+    ///
+    /// 钉两半：①执行体内不得出现 `previous_file_latest_sesno`（回退到旧写法
+    /// 立刻红）；②入队扫描必须在 `record_observation` 之前冻结基线。
+    #[test]
+    fn the_merge_baseline_is_frozen_at_enqueue_not_reread_at_execution() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum 必须存在")
+            .1
+            .split_once(concat!("async fn ", "build_transform_target_summaries("))
+            .expect("execute_one_dbnum 之后应当是 build_transform_target_summaries")
+            .0;
+        assert!(
+            !body.contains(concat!("previous_file_latest", "_sesno")),
+            "执行体不得从执行时裁决再取基线，必须用 FrozenBatch 传入的冻结值"
+        );
+        assert!(
+            body.contains("sessions_merged_after(") && body.contains("previous_observed_sesno"),
+            "并入名单必须由冻结基线算出"
+        );
+
+        let enqueue_body = source
+            .split_once("pub async fn enqueue_manual_update(")
+            .expect("enqueue_manual_update 必须存在")
+            .1
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("enqueue_manual_update 之后应当是 execute_one_dbnum")
+            .0;
+        let capture_at = enqueue_body
+            .find(concat!("verdict.previous_file_latest", "_sesno()"))
+            .expect("入队扫描必须冻结 merged_sesnos 基线");
+        let record_at = enqueue_body
+            .find("DbnumState::record_observation(")
+            .expect("入队扫描必须登记观察");
+        assert!(
+            capture_at < record_at,
+            "基线必须在 record_observation 覆盖它之前冻结（先裁决，后落库）"
         );
     }
 

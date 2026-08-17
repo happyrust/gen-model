@@ -142,12 +142,12 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
-        // 冷启动开关（默认 false）与它此刻的姿态。「服务活着、队列有货、就是不动」
+        // 冷启动开关（默认 true）与它此刻的姿态。「服务活着、队列有货、就是不动」
         // 有三种完全不同的成因：运维按了暂停（queue_paused）、冷启动还没被真实增量
         // 上弦（auto_work_armed=false，队列里那些行在 /queue 上是 held）、或者 worker
         // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
         "startup_autorun": crate::options::startup_autorun(),
-        // 房间增量的总开关（默认 false）。关着时房间泳道永远是空的，而「没活」与
+        // 房间增量的总开关（默认 true）。关着时房间泳道永远是空的，而「没活」与
         // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
         "room_incremental": crate::options::room_incremental(),
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
@@ -163,6 +163,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 连撞到上限、空闲轮已停跑，房间收敛与范围重扫一并暂停——旗子还立着、心跳
         // 也在跳，少了这个字段，外面看到的是一个「健康但什么都不收敛」的服务。
         "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
+        // 数据批次连败账本（从没失败过是 null）。`parked: true` = 该 dbnum 同右端
+        // 连败到上限、重扫已停止自动重跑——水位差还在但没人再追，只有新会话或
+        // 人工执行会解开；不摆出来的话它与「一直没增量」在外面看不出区别。
+        "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
         "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),

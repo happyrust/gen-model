@@ -286,6 +286,8 @@ async fn staged_transform_follows_a_pure_pose_move() {
             .into_owned(),
         applied_sesno,
         file_latest_sesno,
+        // 探针没有预览步骤，基线取水位：整个待应用窗口都算新并入。
+        previous_observed_sesno: applied_sesno,
         // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,

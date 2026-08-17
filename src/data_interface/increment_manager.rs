@@ -834,9 +834,10 @@ mod tests {
     ///
     /// 0 会对 applied > 0 的库伪造「文件回退」：把假观察值（file_latest_sesno=0）
     /// 写进登记行，控制台还播报一次实际不会发生的整库重建（reinit 形状 1..=0
-    /// 过不了入队的 covers 守卫）。三条扫描路径必须同口径：手动 warn+跳过、
-    /// watch 头部扫描失败跳过、sweep 曾是唯一吞错的那条。嵌在依赖实库的大函数里，
-    /// 钉源码（marker 用 `concat!` 拼接，避免本测试自己的字面量先被命中）。
+    /// 过不了入队的 covers 守卫）。可见性各归各的通道：手动路径 warn 进回执、
+    /// sweep 记阶段 blocker（2026-08-17 审核 P1，钉在 `sweep_skip_blocker_pins`），
+    /// 两边都不许吞成 0。嵌在依赖实库的大函数里，钉源码（marker 用 `concat!`
+    /// 拼接，避免本测试自己的字面量先被命中）。
     #[test]
     fn a_failed_sesno_read_is_skipped_not_zeroed_on_the_sweep_path() {
         let src = include_str!("increment_manager.rs");
@@ -851,8 +852,9 @@ mod tests {
             .find(".get_latest_sesno()")
             .expect("sweep_dirs 必须读文件最新会话号");
         let rest = &body[read_at..];
-        // 600 字节窗口，向后走到字符边界（周边是中文注释，硬切会劈开多字节字符）。
-        let mut end = rest.len().min(600);
+        // 1200 字节窗口（Err 分支含 blocker 登记后变长了），向后走到字符边界
+        // （周边是中文注释，硬切会劈开多字节字符）。
+        let mut end = rest.len().min(1200);
         while !rest.is_char_boundary(end) {
             end += 1;
         }
@@ -863,7 +865,7 @@ mod tests {
         );
         assert!(
             window.contains("continue"),
-            "读失败必须跳过本轮该文件（与手动路径同口径）: {window}"
+            "读失败必须跳过本轮该文件: {window}"
         );
     }
 
@@ -1346,6 +1348,21 @@ pub(crate) enum ScanGate {
     Reinit,
 }
 
+/// [`AiosDBManager::scan_and_check_file`] 的完整回执：处置 + 本次观察登记之前的
+/// 上一次扫描观察值。
+///
+/// 基线必须在这里随裁决一起带出来：`scan_and_check_file` 内部已经
+/// `record_observation`，调用方事后再读 `dbnum_watermark` 拿到的只会是刚被
+/// 推上去的新观察值——那正是 `merged_sesnos` 恒空的成因（先裁决，后落库）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScanCheck {
+    pub gate: ScanGate,
+    /// `merged_sesnos` 的基线（`ScanVerdict::previous_file_latest_sesno`）。
+    /// 读状态失败的 `Blocked` 分支拿不到真值，按未登记口径填 0——阻断的库
+    /// 不入队，这个值不会被消费。
+    pub previous_observed_sesno: i32,
+}
+
 /// 裁决 → 处置的唯一映射（纯函数，好测）。逐类点名、不留 `_ =>` 兜底：新增
 /// 一种异常时这里编译不过，作者必须显式决定它放行、阻断还是重建。
 fn scan_gate_for(verdict: &crate::data_interface::dbnum_state::ScanVerdict) -> ScanGate {
@@ -1580,6 +1597,9 @@ impl AiosDBManager {
     /// 返回 [`ScanGate::Reinit`]，调用方按首次导入形状入队重建批次（ADR-021，
     /// 清库归 worker 执行体的冻结点复核，扫描路径不删任何数据）；其余阻断类
     /// 异常返回 [`ScanGate::Blocked`]，调用方跳过（水位不回退）。
+    ///
+    /// 回执同时带出 [`ScanCheck::previous_observed_sesno`]：要入队的调用方必须
+    /// 用它冻结 `merged_sesnos` 基线，事后重读观察值拿到的已是本次推上去的新值。
     pub(crate) async fn scan_and_check_file(
         &self,
         project: &str,
@@ -1588,7 +1608,7 @@ impl AiosDBManager {
         db_type: &str,
         db_num: u32,
         file_latest_sesno: i32,
-    ) -> ScanGate {
+    ) -> ScanCheck {
         use crate::data_interface::dbnum_state::{DbnumState, FileAnomaly, FileObservation};
 
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -1608,12 +1628,20 @@ impl AiosDBManager {
             Ok(verdict) => verdict,
             Err(e) => {
                 println!("F6 读取 DBNUM 状态失败，本轮跳过 dbnum={db_num}: {e:#}");
-                return ScanGate::Blocked;
+                return ScanCheck {
+                    gate: ScanGate::Blocked,
+                    previous_observed_sesno: 0,
+                };
             }
         };
+        // 基线在 record_observation 覆盖它之前冻结（merged_sesnos 的语义锚点）。
+        let previous_observed_sesno = verdict.previous_file_latest_sesno();
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             println!("F6 记录扫描观察失败 dbnum={db_num}: {e}");
-            return ScanGate::Blocked;
+            return ScanCheck {
+                gate: ScanGate::Blocked,
+                previous_observed_sesno,
+            };
         }
 
         // 逐个变体点名，不留 `_ =>` 兜底：将来新增一种异常时这里编译不过，
@@ -1654,7 +1682,10 @@ impl AiosDBManager {
             ),
         }
 
-        scan_gate_for(&verdict)
+        ScanCheck {
+            gate: scan_gate_for(&verdict),
+            previous_observed_sesno,
+        }
     }
 
     // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：
@@ -1880,22 +1911,32 @@ impl AiosDBManager {
                 manifest_totals.push(
                     crate::data_interface::initialization_phase::DataPhase::of_db_type(&db_type),
                 );
-                // 读不出最新会话号就跳过本轮该文件，与手动路径同口径
-                // （`manual_update::scan_project_candidates` 的 warn+跳过）。老写法
+                // 读不出最新会话号：跳过该文件**并记进阶段 blockers**。老写法
                 // `.unwrap_or_default()` 把读失败吞成 0：对 applied > 0 的库伪造出
                 // 「文件回退」，把假观察值（file_latest_sesno = 0）写进登记行，还让
                 // 控制台播报一次实际不会发生的整库重建——reinit 形状 1..=0 过不了
                 // 入队的 covers 守卫，日志与事实不符（2026-08-13 审计 P1）。
+                // 只 warn 不记 blocker 也不行（2026-08-17 审核 P1）：ADR-025 的清单
+                // 会在缺着这个库的情况下宣告 data_ready、模型门照开，而 DICT/CATA
+                // 头不可读是阻断 Meta 的（§6）——同一种「观察不完整」不能两副面孔。
+                // 读失败多为共享盘瞬态，周期对账重扫（默认 300s）恢复即解。
                 let file_latest_sesno =
                     match PdmsIO::new(&project, path.to_path_buf(), true).get_latest_sesno() {
                         Ok(sesno) => sesno,
                         Err(error) => {
                             let msg = format!(
-                                "[{origin}] 跳过无法读取最新会话的数据库文件 {}: {error}",
+                                "[{origin}] 无法读取最新会话的数据库文件 {}（本轮不入队，\
+                                 该阶段保持未就绪）: {error}",
                                 path.display()
                             );
                             log::warn!("{msg}");
                             eprintln!("{msg}");
+                            phase_blockers.push((
+                                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                    &db_type,
+                                ),
+                                format!("dbnum={db_no} 最新会话号读取失败: {}", path.display()),
+                            ));
                             continue;
                         }
                     };
@@ -1927,7 +1968,7 @@ impl AiosDBManager {
                 }
                 // F6：文件观察落库 + 回退/迁移检测；回退按整库重建入队（ADR-021），
                 // 其余阻断类异常跳过（水位不回退）。
-                let gate = self
+                let check = self
                     .scan_and_check_file(
                         &project,
                         path,
@@ -1937,12 +1978,37 @@ impl AiosDBManager {
                         file_latest_sesno as i32,
                     )
                     .await;
-                if gate == ScanGate::Blocked {
+                if check.gate == ScanGate::Blocked {
                     phase_blockers.push((
                         crate::data_interface::initialization_phase::DataPhase::of_db_type(
                             &db_type,
                         ),
                         format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
+                    ));
+                    continue;
+                }
+
+                // 连败到上限的库不再自动重跑（进程内账本，见 batch_worker 的
+                // `BatchFailureLedger`）：确定性失败会被周期对账重扫以每 300s 一次
+                // 的节奏无上限重跑，大库一跑几十分钟。park 不是放行——记 blocker
+                // 让该阶段可见地不就绪；文件长出新会话（查询内部顺带清账）或人工
+                // 执行（显式清零）即恢复自动重试。对 Reinit 与普通窗口一视同仁。
+                if let Some(streak) = crate::data_interface::batch_worker::batch_failure_parked(
+                    db_no,
+                    file_latest_sesno as i32,
+                ) {
+                    println!(
+                        "[{origin}] dbnum={db_no} 数据批次连续失败 {streak} 次且右端未前进，\
+                         本轮不自动重跑（保存新会话或人工执行恢复）"
+                    );
+                    phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                        format!(
+                            "dbnum={db_no} 数据批次连续失败 {streak} 次已暂停自动重试\
+                             （新会话或人工执行恢复）"
+                        ),
                     ));
                     continue;
                 }
@@ -1959,7 +2025,7 @@ impl AiosDBManager {
                 // 回退：按首次导入形状入队重建批次，绕过 discover_batch——那道门
                 // 的「水位已覆盖」早退（file_latest <= applied）对回退恒成立，而
                 // 这里的依据是 F6 裁决，不是水位比对。
-                if gate == ScanGate::Reinit {
+                if check.gate == ScanGate::Reinit {
                     params.insert(
                         path.to_path_buf(),
                         self.reinit_batch(
@@ -1968,6 +2034,7 @@ impl AiosDBManager {
                             &db_type,
                             db_no,
                             file_latest_sesno as i32,
+                            check.previous_observed_sesno,
                         ),
                     );
                     continue;
@@ -1977,7 +2044,14 @@ impl AiosDBManager {
                 // 同样入队，worker 执行体的 `needs_initial_load` 会把基线接管过去
                 // （与手动路径同口径——两条路径合流后只剩这一份判定）。
                 match self
-                    .discover_batch(&project, path, &db_type, db_no, file_latest_sesno as i32)
+                    .discover_batch(
+                        &project,
+                        path,
+                        &db_type,
+                        db_no,
+                        file_latest_sesno as i32,
+                        check.previous_observed_sesno,
+                    )
                     .await
                 {
                     Ok(Some(found)) => {
@@ -2057,6 +2131,7 @@ impl AiosDBManager {
         db_type: &str,
         db_num: u32,
         file_latest_sesno: i32,
+        previous_observed_sesno: i32,
     ) -> crate::data_interface::batch_scheduler::DiscoveredBatch {
         let file_name = path
             .file_name()
@@ -2082,6 +2157,7 @@ impl AiosDBManager {
             file_name,
             applied_sesno: 0,
             file_latest_sesno,
+            previous_observed_sesno,
             first_pending_sesno_time,
             file_latest_sesno_time,
         }
@@ -2103,6 +2179,7 @@ impl AiosDBManager {
         db_type: &str,
         db_num: u32,
         file_latest_sesno: i32,
+        previous_observed_sesno: i32,
     ) -> anyhow::Result<Option<crate::data_interface::batch_scheduler::DiscoveredBatch>> {
         use crate::data_interface::dbnum_state::DbnumState;
 
@@ -2170,6 +2247,7 @@ impl AiosDBManager {
                 file_name: file_name.to_string(),
                 applied_sesno: queued_applied,
                 file_latest_sesno,
+                previous_observed_sesno,
                 first_pending_sesno_time,
                 file_latest_sesno_time,
             },
@@ -3249,6 +3327,72 @@ mod staged_transform_write_routing_tests {
         assert!(
             body.contains("execute_model_write"),
             "world_trans 指针 UPDATE 必须经 execute_model_write 路由"
+        );
+    }
+}
+
+/// 重扫跳过分支的源码钉（2026-08-17 审核 P1/P2）。
+///
+/// marker 一律用 `concat!` 拼接：本模块自己的字面量不许先于真代码被
+/// `split_once` / `find` 命中（同文件 `transform_pointer_updates_...` 的手法）。
+#[cfg(test)]
+mod sweep_skip_blocker_pins {
+    /// 重扫路径上「跳过一个候选」必须留下阶段 blocker，不许无声。
+    ///
+    /// 会话号读失败若只 warn+continue，ADR-025 的清单会在缺着这个库的情况下
+    /// 宣告 data_ready、模型门照开，而库持续读不动时外面没有任何痕迹；连败
+    /// park 的跳过分支同理。回退到静默跳过就红。
+    #[test]
+    fn sweep_skips_always_leave_a_phase_blocker() {
+        let source = include_str!("increment_manager.rs");
+        let sweep = source
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 必须存在")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后是 reinit_batch")
+            .0;
+
+        let sesno_err = sweep
+            .split_once(concat!("无法读取最新会话", "的数据库文件"))
+            .expect("会话号读失败分支必须存在")
+            .1;
+        let blocker_at = sesno_err
+            .find(concat!("phase_blockers", ".push"))
+            .expect("会话号读失败必须记阶段 blocker");
+        let continue_at = sesno_err
+            .find(concat!("continue", ";"))
+            .expect("随后跳过该候选");
+        assert!(blocker_at < continue_at, "blocker 必须在 continue 之前");
+
+        let parked = sweep
+            .split_once(concat!("batch_failure", "_parked("))
+            .expect("连败 park 检查必须在重扫路径上")
+            .1;
+        let blocker_at = parked
+            .find(concat!("phase_blockers", ".push"))
+            .expect("park 的跳过必须记阶段 blocker");
+        let continue_at = parked
+            .find(concat!("continue", ";"))
+            .expect("随后跳过该候选");
+        assert!(
+            blocker_at < continue_at,
+            "park blocker 必须在 continue 之前"
+        );
+
+        // park 检查必须在两条入队分支（reinit / discover_batch）之前——
+        // 它拦的是「再跑一遍注定失败的批次」，放行后再拦等于没拦。
+        let park_at = sweep.find(concat!("batch_failure", "_parked(")).unwrap();
+        // 调用可能被 rustfmt 断行（`self\n.discover_batch(`），marker 不带接收者。
+        let reinit_at = sweep
+            .find(concat!(".reinit", "_batch("))
+            .expect("reinit 入队分支");
+        let discover_at = sweep
+            .find(concat!(".discover", "_batch("))
+            .expect("discover 入队分支");
+        assert!(
+            park_at < reinit_at && park_at < discover_at,
+            "park 检查必须先于任何入队分支"
         );
     }
 }

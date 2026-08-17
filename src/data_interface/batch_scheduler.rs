@@ -37,6 +37,11 @@ pub struct DiscoveredBatch {
     /// 当前水位（入队时定左端用；执行时 worker 会重新读）。
     pub applied_sesno: i32,
     pub file_latest_sesno: i32,
+    /// `merged_sesnos` 的基线：本次触发**登记观察之前**的上一次扫描观察值，
+    /// 由发现方从裁决（`ScanVerdict::previous_file_latest_sesno`）里取、在
+    /// `record_observation` 覆盖它之前冻结。执行侧不得再现读（见
+    /// [`batch_queue::DataBatch::previous_observed_sesno`]）。
+    pub previous_observed_sesno: i32,
     /// 第一条待应用保存（`applied_sesno + 1`）的 E3D 写入时刻（RFC3339）。
     /// 队列「保存窗口」列的左端（plant-ui ADR-0019）；读不到就是 `None`，那一格留空。
     pub first_pending_sesno_time: Option<String>,
@@ -82,6 +87,8 @@ pub struct FrozenBatch {
     pub file_name: String,
     pub start_sesno: i32,
     pub end_sesno: i32,
+    /// 入队时冻结的 `merged_sesnos` 基线（见 [`batch_queue::DataBatch::previous_observed_sesno`]）。
+    pub previous_observed_sesno: i32,
 }
 
 /// 入队回执的一行（HTTP 202 与日志共用；rollout 第九节第 7 条）。
@@ -258,6 +265,7 @@ impl BatchScheduler {
                 &found.db_type,
                 found.applied_sesno,
                 found.file_latest_sesno,
+                found.previous_observed_sesno,
                 hold,
                 found.intent,
                 found.phase,
@@ -474,6 +482,7 @@ impl BatchScheduler {
                 file_name: meta.file_name,
                 start_sesno: row.start_sesno,
                 end_sesno: row.end_sesno,
+                previous_observed_sesno: row.previous_observed_sesno,
             },
             exclusive,
         };
@@ -736,6 +745,8 @@ mod tests {
             file_name: format!("db{dbnum}"),
             applied_sesno: applied,
             file_latest_sesno: latest,
+            // 与 batch_queue 的测试助手同一约定：基线拿水位顶替。
+            previous_observed_sesno: applied,
             first_pending_sesno_time: at(applied + 1),
             file_latest_sesno_time: at(latest),
         }
@@ -789,6 +800,27 @@ mod tests {
         assert_eq!(entry.state.as_str(), "queued");
         assert_eq!(entry.dbnum, Some(7997));
         assert_eq!(entry.end_sesno, Some(1034));
+    }
+
+    /// 入队时冻结的基线要原样走完「发现 → 队列行 → 冻结快照」全程，合并只认最早
+    /// 那一次——worker 拿到的 `FrozenBatch` 就是它计算 `merged_sesnos` 的唯一依据。
+    #[test]
+    fn the_frozen_job_carries_the_earliest_enqueue_baseline() {
+        let (scheduler, registry) = fresh();
+        let mut first = found(7997, 1023, 1034);
+        first.previous_observed_sesno = 1030;
+        scheduler.enqueue_live(&registry, &first);
+        // 排队期间的第二次触发：它的「上一次观察」已被首次入队扫描推到 1034。
+        let mut second = found(7997, 1023, 1041);
+        second.previous_observed_sesno = 1034;
+        scheduler.enqueue_live(&registry, &second);
+
+        let job = scheduler.freeze_next(&registry).expect("有排队项");
+        assert_eq!((job.start_sesno, job.end_sesno), (1024, 1041));
+        assert_eq!(
+            job.previous_observed_sesno, 1030,
+            "冻结快照带的必须是最早那次观察，不是合并触发的"
+        );
     }
 
     #[test]

@@ -602,7 +602,26 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if startup_data_ready {
         if initialization.open_model_phase() {
             scheduler.wake();
-            initialization.wait_for_model_ready().await;
+            // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
+            // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
+            // 像挂死——每分钟报一次还在等什么，进展与失败原因在空闲轮日志与 /health。
+            let mut waited_secs = 0u64;
+            loop {
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    initialization.wait_for_model_ready(),
+                )
+                .await
+                .is_ok()
+                {
+                    break;
+                }
+                waited_secs += 60;
+                println!(
+                    "仍在等待持久模型工作单与 AABB 阶段收敛（已等 {waited_secs}s；\
+                     进展与失败原因见空闲轮日志与 /health 的 initialization / batch_failures）"
+                );
+            }
             println!("持久模型工作单与 AABB 阶段已收敛");
         }
     }
@@ -824,7 +843,8 @@ mod startup_room_build_gate_tests {
         let data = body.find("wait_for_data_ready().await").unwrap();
         let full_model = body.find("gen_all_geos_data(&db_option).await").unwrap();
         let open_model = body.find("initialization.open_model_phase()").unwrap();
-        let model_ready = body.find("wait_for_model_ready().await").unwrap();
+        // 等待包在带周期播报的 timeout 循环里，锚点只认调用本身，不认 `.await`。
+        let model_ready = body.find("wait_for_model_ready()").unwrap();
         let room = body.find("build_room_relations(&db_option).await").unwrap();
         assert!(worker < data && web < data);
         assert!(data < full_model && full_model < open_model);

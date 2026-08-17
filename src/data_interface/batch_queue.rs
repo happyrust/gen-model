@@ -46,6 +46,14 @@ pub struct DataBatch {
     /// 文件还在长。真冻结值由执行侧的重扫算出，再经
     /// `BatchScheduler::record_frozen_end` 回写到这里。
     pub end_sesno: i32,
+    /// `merged_sesnos` 的基线：本次触发**登记观察之前**的上一次扫描观察值
+    /// （spec §确认与合并：结果摘要列出相对预览新增合并的会话）。
+    ///
+    /// 必须在入队时冻结并随行传递——执行侧到冻结点再现读观察值时，入队扫描早已
+    /// 把 `file_latest_sesno` 推到本窗口右端，基线被自己的落库覆盖，并入名单
+    /// 恒空（先裁决，后落库）。合并时取最小值：排队期间的每次新触发都晚于首次
+    /// 观察，基线只认最早那一次。
+    pub previous_observed_sesno: i32,
     pub state: BatchState,
     /// 挂起：入了队、占着位、但**不派发**，等这个 dbnum 真的来一次增量再放行。
     ///
@@ -105,6 +113,7 @@ pub fn enqueue(
     db_type: &str,
     applied_sesno: i32,
     file_latest_sesno: i32,
+    previous_observed_sesno: i32,
     hold: bool,
     intent: BatchIntent,
     phase: crate::data_interface::initialization_phase::DataPhase,
@@ -119,6 +128,10 @@ pub fn enqueue(
         }
         queued.phase = phase;
         queued.epoch_id = epoch_id;
+        // 基线只认最早的那次观察：并入的触发都发生在首次入队之后，它们的
+        // 「上一次观察」已经包含首次触发要报的那几条保存。
+        queued.previous_observed_sesno =
+            queued.previous_observed_sesno.min(previous_observed_sesno);
         if intent == BatchIntent::Reinitialize {
             let start_sesno = reinitialize_start(file_latest_sesno);
             let changed = queued.intent != intent
@@ -175,6 +188,7 @@ pub fn enqueue(
         intent,
         start_sesno,
         end_sesno: file_latest_sesno,
+        previous_observed_sesno,
         state: BatchState::Queued,
         held: hold,
     });
@@ -264,6 +278,8 @@ pub fn freeze_next_concurrent(
 mod tests {
     use super::*;
 
+    /// 期望值构造器：基线取 `start - 1`——下面的触发助手都拿水位当基线传，
+    /// 新排一行时左端恰是水位 + 1，两边自然对上。
     fn queued(dbnum: u32, start: i32, end: i32) -> DataBatch {
         DataBatch {
             dbnum,
@@ -273,6 +289,7 @@ mod tests {
             intent: BatchIntent::ApplyWindow,
             start_sesno: start,
             end_sesno: end,
+            previous_observed_sesno: start - 1,
             state: BatchState::Queued,
             held: false,
         }
@@ -316,6 +333,10 @@ mod tests {
     /// 「有人真的动了这个库」那种触发：watch 事件与人工执行都走这条口径，
     /// 下面绝大多数性质与挂起无关，用它免得每处都拖一个 `false`。
     /// 重扫那条（挂起）由本模块末尾几个专门的测试覆盖。
+    ///
+    /// 基线拿水位顶替：这些性质测试不跟踪扫描观察史，真值语义由调用方
+    /// （`scan_and_check_file` / execute 端点）负责，基线自身的冻结与合并
+    /// 规则由下面 `the_baseline_freezes_at_the_earliest_observation` 单独钉。
     fn live_trigger(
         queue: &mut Vec<DataBatch>,
         dbnum: u32,
@@ -329,6 +350,7 @@ mod tests {
             db_type,
             applied_sesno,
             file_latest_sesno,
+            applied_sesno,
             false,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
@@ -350,6 +372,7 @@ mod tests {
             db_type,
             applied_sesno,
             file_latest_sesno,
+            applied_sesno,
             true,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
@@ -369,6 +392,7 @@ mod tests {
             "DESI",
             applied_sesno,
             file_latest_sesno,
+            applied_sesno,
             false,
             BatchIntent::Reinitialize,
             crate::data_interface::initialization_phase::DataPhase::Design,
@@ -411,6 +435,52 @@ mod tests {
         assert_eq!(queue, vec![queued(7997, 1024, 1034)]);
     }
 
+    /// `merged_sesnos` 的基线在入队时冻结、合并时只认最早的那次观察。
+    ///
+    /// 回退到「执行侧到冻结点再现读观察值」的旧写法就会红：入队扫描已把
+    /// `file_latest_sesno` 推到窗口右端，执行侧读回来的「上一次观察」就是
+    /// 右端本身，相对预览新增合并的会话恒为空（2026-08-16 pipeline-f5 现场）。
+    #[test]
+    fn the_baseline_freezes_at_the_earliest_observation() {
+        let mut queue = Vec::new();
+        // 预览后观察值停在 1030，之后 E3D 存了 1031..=1034，execute 扫描入队。
+        enqueue(
+            &mut queue,
+            7997,
+            "DESI",
+            1023,
+            1034,
+            1030,
+            false,
+            BatchIntent::ApplyWindow,
+            crate::data_interface::initialization_phase::DataPhase::Design,
+            1,
+        );
+        assert_eq!(queue[0].previous_observed_sesno, 1030, "入队时冻结基线");
+
+        // 排队期间又一次保存触发：它的「上一次观察」已是 1034（被首次入队
+        // 扫描推上去的），合并不得把基线抬高——否则首次要报的 1031..=1034
+        // 就从并入名单里消失了。
+        enqueue(
+            &mut queue,
+            7997,
+            "DESI",
+            1023,
+            1041,
+            1034,
+            false,
+            BatchIntent::ApplyWindow,
+            crate::data_interface::initialization_phase::DataPhase::Design,
+            1,
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].end_sesno, 1041, "右端照常推高");
+        assert_eq!(
+            queue[0].previous_observed_sesno, 1030,
+            "基线只认最早那一次观察"
+        );
+    }
+
     #[test]
     fn repeated_saves_merge_into_the_queued_row() {
         let mut queue = vec![queued(7997, 1024, 1034)];
@@ -448,7 +518,12 @@ mod tests {
         );
         assert_eq!(
             queue[1],
-            queued(7997, 1039, 1041),
+            DataBatch {
+                // 基线是触发方传什么存什么（这里的助手传水位 1023），
+                // 不因 BehindRunning 的左端后移而被改写。
+                previous_observed_sesno: 1023,
+                ..queued(7997, 1039, 1041)
+            },
             "新的一条从运行中那条的右端之后接上，不重叠"
         );
     }
@@ -577,6 +652,7 @@ mod tests {
                 intent: BatchIntent::ApplyWindow,
                 start_sesno: 5,
                 end_sesno: 9,
+                previous_observed_sesno: 4,
                 state: BatchState::Queued,
                 held: false,
             },

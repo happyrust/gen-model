@@ -159,6 +159,181 @@ pub fn idle_round_panic_snapshot() -> Option<serde_json::Value> {
     }))
 }
 
+/// 数据批次连续失败账本里的一个 dbnum。
+#[derive(Debug, Clone)]
+struct BatchFailureEntry {
+    /// 连续失败次数（成功 / 右端前进 / 人工执行清零）。
+    streak: u32,
+    /// 连败期间观察到的窗口右端。右端前进 = 有人保存了新会话，旧账作废。
+    end_sesno: i32,
+    last_reason: String,
+    first_at: String,
+    last_at: String,
+}
+
+impl BatchFailureEntry {
+    fn parked(&self) -> bool {
+        self.streak >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
+    }
+}
+
+/// 数据批次连续失败账本（进程内，dbnum → 连败详情）。
+///
+/// 为什么需要它：批次失败后 `mark_failed` 只把当前 epoch 拉 Blocked，而周期对账
+/// 重扫（`AIOS_WATCH_RECONCILE_SECS`，默认 300s）会装新 epoch 把水位没动的失败库
+/// 重新入队——瞬态故障（共享盘抖动、SUL_DB 重启）因此自愈；但一个**确定性**失败
+/// （坏文件、必现 panic）会以每个对账周期一次的节奏无上限重跑，大库一跑几十分钟，
+/// 正常批次全排在它后面。
+///
+/// 上限语义与队列行对齐（[`MAX_ATTEMPTS`]）：同一 dbnum 在**窗口右端没有前进**的
+/// 前提下连败到上限，重扫侧不再自动入队（park），改记 manifest blocker 让阶段
+/// 可见地不就绪。复活条件对齐「新触发到来时清零重试」：文件长出新会话（右端
+/// 前进，[`Self::parked_streak`] 顺带清账）或人工执行（POST /update/execute →
+/// [`reset_batch_failure`]）都从头再来；成功一次即清零。重启即清零——重启本身
+/// 就是一次人为的重试机会。
+///
+/// [`MAX_ATTEMPTS`]: crate::data_interface::model_update_pending::MAX_ATTEMPTS
+#[derive(Default)]
+struct BatchFailureLedger {
+    entries: std::collections::HashMap<u32, BatchFailureEntry>,
+}
+
+impl BatchFailureLedger {
+    /// 记一次失败，返回该 dbnum 连续第几次。右端比上次前进的按新一轮从 1 数起。
+    fn record(&mut self, dbnum: u32, end_sesno: i32, reason: &str, now: &str) -> u32 {
+        let entry = self
+            .entries
+            .entry(dbnum)
+            .and_modify(|entry| {
+                if end_sesno > entry.end_sesno {
+                    entry.streak = 0;
+                    entry.first_at = now.to_string();
+                }
+            })
+            .or_insert_with(|| BatchFailureEntry {
+                streak: 0,
+                end_sesno,
+                last_reason: String::new(),
+                first_at: now.to_string(),
+                last_at: now.to_string(),
+            });
+        entry.streak += 1;
+        entry.end_sesno = end_sesno;
+        entry.last_reason = reason.to_string();
+        entry.last_at = now.to_string();
+        entry.streak
+    }
+
+    fn clear(&mut self, dbnum: u32) {
+        self.entries.remove(&dbnum);
+    }
+
+    /// 该 dbnum 在这个观察右端下是否已停跑自动重试。
+    ///
+    /// 右端前进说明有人在动这个库——旧账当场作废并放行，这正是「新触发到来时
+    /// 清零重试」的兑现：watch 事件与对账重扫都汇入同一次整面扫描，能把 park
+    /// 解开的不是事件本身，而是文件里真的多了会话。
+    fn parked_streak(&mut self, dbnum: u32, file_latest_sesno: i32) -> Option<u32> {
+        let entry = self.entries.get(&dbnum)?;
+        if file_latest_sesno > entry.end_sesno {
+            self.entries.remove(&dbnum);
+            return None;
+        }
+        entry.parked().then_some(entry.streak)
+    }
+}
+
+static BATCH_FAILURES: std::sync::LazyLock<std::sync::Mutex<BatchFailureLedger>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BatchFailureLedger::default()));
+
+fn batch_failure_ledger() -> std::sync::MutexGuard<'static, BatchFailureLedger> {
+    BATCH_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 重扫侧的 park 查询（见 [`BatchFailureLedger`]）：返回 `Some(streak)` 表示该
+/// dbnum 连败到上限且文件右端没有前进，本轮不要再自动入队。
+pub(crate) fn batch_failure_parked(dbnum: u32, file_latest_sesno: i32) -> Option<u32> {
+    batch_failure_ledger().parked_streak(dbnum, file_latest_sesno)
+}
+
+/// 人工执行是显式的重试指令：清掉该库的连败账，park 立即解除。
+pub(crate) fn reset_batch_failure(dbnum: u32) {
+    batch_failure_ledger().clear(dbnum);
+}
+
+/// `/health` 用：从没失败过是 `null`，否则逐 dbnum 一本账。
+pub fn batch_failure_snapshot() -> Option<serde_json::Value> {
+    let ledger = batch_failure_ledger();
+    if ledger.entries.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Object(
+        ledger
+            .entries
+            .iter()
+            .map(|(dbnum, entry)| {
+                (
+                    dbnum.to_string(),
+                    serde_json::json!({
+                        "streak": entry.streak,
+                        "parked": entry.parked(),
+                        "end_sesno": entry.end_sesno,
+                        "reason": entry.last_reason,
+                        "first_at": entry.first_at,
+                        "last_at": entry.last_at,
+                    }),
+                )
+            })
+            .collect(),
+    ))
+}
+
+/// 这次批次终态要不要把当前 epoch 的数据阶段标记失败（`mark_failed` → Blocked）。
+///
+/// 判据是**数据窗口本身**，不是任务终态标签：`Partial` 的定义是「有成功也有失败」，
+/// 数据批次 Failed + 某个交付单元成功同样折成 Partial——那种 Partial 数据没收口，
+/// 必须照旧阻断。反过来，数据 Applied 而模型/副作用失败的 Partial，失败都已落在
+/// durable pending 的重试账与死信门槛里（空闲轮 `has_dead_work` 扣着模型门），
+/// 再把数据阶段拉 Blocked 只会让同阶段其余库连坐一个对账周期，数据侧却没有任何
+/// 要重放的东西。
+///
+/// - `Some(Failed)`：水位没推进，阻断。
+/// - `Some(Applied | Skipped)`：数据侧已收口 / 有意跳过（异常由入队与冻结点
+///   自己记账，下轮重扫会重新裁决），不阻断。
+/// - `None`：没跑到数据步（冻结重扫失败、收口预检失败），Failed/Partial 都阻断。
+fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchStatus>) -> bool {
+    match batch_status {
+        Some(BatchStatus::Failed) => true,
+        Some(BatchStatus::Applied) | Some(BatchStatus::Skipped) => false,
+        None => matches!(state, TaskState::Failed | TaskState::Partial),
+    }
+}
+
+/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来。
+///
+/// 停跑是有代价的（该库的水位差在下一个新会话/人工执行之前不再有人追），
+/// 所以必须在控制台与 `/health` 都看得见，而不是只留一行滚走的日志。
+fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) {
+    let streak =
+        batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
+    let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+    if streak >= cap {
+        let message = format!(
+            "dbnum={dbnum} 数据批次连续失败第 {streak} 次（右端 {end_sesno} 未前进，上限 {cap}），\
+             重扫不再自动重跑该库；保存新会话或人工执行即恢复，账本见 /health 的 batch_failures"
+        );
+        log::error!("{message}");
+        eprintln!("{message}");
+    } else {
+        println!(
+            "dbnum={dbnum} 数据批次失败记账：同右端连续第 {streak}/{cap} 次，\
+             达上限后重扫停止自动重跑（新会话或人工执行清零）"
+        );
+    }
+}
+
 struct WorkerLiveGuard;
 
 impl Drop for WorkerLiveGuard {
@@ -219,12 +394,10 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     let registry = TaskRegistry::global();
     // 暂停是持久化的操作意图（ADR-011 §9）：重启后必须原样恢复，
     // 否则「别再动数据」的用意会被重启抹掉且毫无提示。
-    match scheduler.restore_persisted_pause().await {
-        Ok(true) => {
-            println!("队列处于暂停状态（重启前设置），恢复前不出新批次；已提交数据的空间收敛继续")
-        }
-        Ok(false) => {}
-        Err(error) => println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}"),
+    // `run_cli` 在拉起 worker 之前已恢复并播报过一次；这里是给不经 run_cli 的
+    // 独立入口（测试、exec_watcher）兜底，成功恢复不再重复出声，失败必须喊。
+    if let Err(error) = scheduler.restore_persisted_pause().await {
+        println!("恢复队列暂停标志失败（按未暂停继续）: {error:#}");
     }
     if !scheduler.is_auto_work_armed() {
         println!(
@@ -409,6 +582,7 @@ async fn run_one_batch_isolated(
     let task_id = job.task_id.clone();
     let phase = job.phase;
     let epoch_id = job.epoch_id;
+    let end_sesno = job.end_sesno;
     let Err(reason) = isolate_panic(run_one_batch(mgr, registry, scheduler, job)).await else {
         // 正常返回的那条路 `run_one_batch` 自己已经收过口了，别再 finish 一次
         // ——那会把它写好的终态结果覆盖掉。
@@ -425,6 +599,10 @@ async fn run_one_batch_isolated(
         phase,
         message.clone(),
     );
+    // panic = 数据窗口没收口，与普通 Failed 记同一本连败账（park 判定见
+    // `BatchFailureLedger`）。右端用入队快照——冻结重扫后的真值这里已经拿不到，
+    // 偏小只会让「新会话解 park」更容易成立，方向保守。
+    note_batch_failure(dbnum, end_sesno, &message);
     scheduler.finish(dbnum);
     registry.finish(
         &task_id,
@@ -471,8 +649,10 @@ async fn run_one_batch(
     // 由执行时的水位与文件现状决定（merged_sesnos 兑现的正是这次重扫，ADR-011 §5）。
     // 算出来立刻回写，否则面板显示的区间比实际应用的窄，紧接着排在后面那条的
     // 左端（running_end + 1）也建在一个过时的数上。
+    let mut observed_end_sesno = job.end_sesno;
     let result = match refresh_candidate(&job) {
         Ok(cand) => {
+            observed_end_sesno = cand.file_latest_sesno;
             // 序号与时刻一起回写：冻结改了右端，入队时那个时刻立刻就是错的
             // （plant-ui ADR-0019）。读一页会话页，读不到就让那一格空着。
             let end_sesno_time = crate::data_interface::manual_update::session_time_rfc3339(
@@ -506,14 +686,22 @@ async fn run_one_batch(
         ManualUpdateStatus::Partial => TaskState::Partial,
         ManualUpdateStatus::Failed => TaskState::Failed,
     };
-    if matches!(state, TaskState::Failed | TaskState::Partial) {
+    let batch_status = result.batch.as_ref().map(|batch| batch.status.clone());
+    if matches!(state, TaskState::Failed | TaskState::Partial)
+        && batch_failure_blocks_data_phase(state, batch_status)
+    {
         let message = result
             .warnings
             .last()
             .cloned()
             .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
         crate::data_interface::initialization_phase::InitializationCoordinator::global()
-            .mark_failed(job.epoch_id, job.phase, message);
+            .mark_failed(job.epoch_id, job.phase, message.clone());
+        note_batch_failure(job.dbnum, observed_end_sesno, &message);
+    } else {
+        // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
+        // 连败账清零。模型失败自有 durable pending 的重试账与死信门槛。
+        batch_failure_ledger().clear(job.dbnum);
     }
     let result_json = serde_json::to_value(&result).unwrap_or_default();
     scheduler.finish(job.dbnum);
@@ -1393,7 +1581,13 @@ async fn execute_frozen_batch_body(
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
     let (batch, mut new_units) = mgr
-        .execute_one_dbnum(&job.project, &cand, progress, warnings)
+        .execute_one_dbnum(
+            &job.project,
+            &cand,
+            job.previous_observed_sesno,
+            progress,
+            warnings,
+        )
         .await;
     let applied = batch
         .as_ref()
@@ -3026,6 +3220,106 @@ mod tests {
         );
     }
 
+    /// 连败账本的三条出路（对齐队列纪律「可收口 / 可复活」）：
+    /// 同右端连败计数、达上限 park、右端前进 / 显式清零即复活。
+    #[test]
+    fn the_batch_failure_ledger_parks_at_the_cap_and_revives_on_new_sessions() {
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let mut ledger = BatchFailureLedger::default();
+
+        for attempt in 1..=cap {
+            assert_eq!(
+                ledger.record(7997, 1034, "injected failure", "t"),
+                attempt,
+                "同右端连败逐次计数"
+            );
+        }
+        assert_eq!(
+            ledger.parked_streak(7997, 1034),
+            Some(cap),
+            "达上限且右端未前进：park"
+        );
+        assert_eq!(
+            ledger.parked_streak(8000, 1034),
+            None,
+            "没失败过的库不受影响"
+        );
+
+        // 右端前进 = 有人保存了新会话：账当场作废，本轮放行。
+        assert_eq!(ledger.parked_streak(7997, 1035), None);
+        assert_eq!(
+            ledger.record(7997, 1035, "injected failure", "t"),
+            1,
+            "复活后从 1 重新数"
+        );
+
+        // 未达上限不 park：瞬态失败靠对账重扫自动重试。
+        assert_eq!(ledger.parked_streak(7997, 1035), None);
+
+        // 人工执行显式清零（POST /update/execute 的复活出口）。
+        for _ in 0..cap {
+            ledger.record(7997, 1035, "injected failure", "t");
+        }
+        assert!(ledger.parked_streak(7997, 1035).is_some());
+        ledger.clear(7997);
+        assert_eq!(ledger.parked_streak(7997, 1035), None);
+    }
+
+    /// 失败中途右端前进过一次：record 自己也要把旧账作废重数，
+    /// 不能把新窗口的第一次失败接在旧窗口的连败后面直接 park。
+    #[test]
+    fn a_failure_on_a_newer_end_restarts_the_streak() {
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let mut ledger = BatchFailureLedger::default();
+        for _ in 0..cap - 1 {
+            ledger.record(7997, 1034, "old window", "t");
+        }
+        assert_eq!(
+            ledger.record(7997, 1040, "new window", "t"),
+            1,
+            "右端前进的失败按新一轮从 1 数"
+        );
+        assert_eq!(ledger.parked_streak(7997, 1040), None);
+    }
+
+    /// mark_failed 的判据是数据窗口本身，不是任务终态标签（回退到旧写法
+    /// `matches!(state, Failed | Partial)` 就会红）：
+    /// 数据 Applied 而模型侧失败的 Partial 不得把数据阶段拉 Blocked——
+    /// 模型失败在 durable pending 的重试账里，数据侧没有要重放的东西；
+    /// 反过来数据批次 Failed 折成的 Partial（有单元成功）必须照旧阻断。
+    #[test]
+    fn only_an_unsettled_data_window_blocks_the_data_phase() {
+        use TaskState::*;
+
+        // 数据窗口失败：无论终态标签是什么都阻断。
+        assert!(batch_failure_blocks_data_phase(
+            Failed,
+            Some(BatchStatus::Failed)
+        ));
+        assert!(batch_failure_blocks_data_phase(
+            Partial,
+            Some(BatchStatus::Failed)
+        ));
+
+        // 数据已收口，失败在模型/副作用侧：不阻断。
+        assert!(!batch_failure_blocks_data_phase(
+            Partial,
+            Some(BatchStatus::Applied)
+        ));
+        assert!(!batch_failure_blocks_data_phase(
+            Failed,
+            Some(BatchStatus::Applied)
+        ));
+        assert!(!batch_failure_blocks_data_phase(
+            Partial,
+            Some(BatchStatus::Skipped)
+        ));
+
+        // 没跑到数据步（冻结重扫失败、收口预检失败）：保守阻断。
+        assert!(batch_failure_blocks_data_phase(Failed, None));
+        assert!(batch_failure_blocks_data_phase(Partial, None));
+    }
+
     #[test]
     fn emergency_direct_mode_is_visible_and_does_not_warn_for_baselines() {
         assert_eq!(increment_mode_for(false), "staged");
@@ -3340,6 +3634,7 @@ mod tests {
             file_name: "x".into(),
             start_sesno: 12,
             end_sesno: 15,
+            previous_observed_sesno: 11,
         };
         let baseline = FrozenBatch {
             phase: crate::data_interface::initialization_phase::DataPhase::Design,
@@ -3376,6 +3671,7 @@ mod tests {
             file_name: "desi".into(),
             start_sesno: 40,
             end_sesno: 45,
+            previous_observed_sesno: 39,
         };
         let attempt = IncrementUpdateAttempt {
             dbnum: 7997,

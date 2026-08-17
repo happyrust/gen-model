@@ -1,8 +1,31 @@
 # 变更记录
 
-## 2026-08-16
+## 2026-08-17
 
 ### 修复
+
+- 初始化执行过程审核（ADR-025 链路）四项收口：
+  1. F6 重扫读不出 DESI 最新会话号时此前只 warn 就跳过——清单缺着这个库照样宣告 `data_ready`、模型门照开，库持续读不动时外面毫无痕迹（DICT/CATA 头不可读却是阻断 Meta 的，同一种「观察不完整」两副面孔）。现在读失败记进对应阶段 blockers，该阶段保持可见地不就绪，共享盘瞬态靠周期对账重扫（默认 300s）恢复即解。源码钉 `sweep_skips_always_leave_a_phase_blocker`。
+  2. 批次终态阻断数据阶段的判据从任务标签改为数据窗口本身（`batch_failure_blocks_data_phase`）：数据 Applied 而模型/副作用失败的 Partial 不再 `mark_failed`——那些失败在 durable pending 的重试账与死信门槛里，再关数据门只会让同阶段其余库连坐一个对账周期；数据批次 Failed 折成的 Partial（有单元成功）照旧阻断。单测钉 `only_an_unsettled_data_window_blocks_the_data_phase`。
+  3. 新增数据批次连败账本（进程内，`/health` 的 `batch_failures`）：确定性失败此前会被周期对账重扫以每 300s 一次的节奏无上限重跑。同 dbnum 同右端连败到 `MAX_ATTEMPTS` 后重扫停止自动重跑（park，记阶段 blocker 可见），文件长出新会话或人工执行（POST /update/execute）清零复活，成功即清零；panic 路径记同一本账。单测钉 park/复活/重数三条出路。
+  4. 启动主线等待模型阶段收敛时每 60s 播报一次仍在等什么（收敛在空闲轮里，任一环失败按 30s 退避，此前主线干等像挂死）；worker 里与 `run_cli` 重复的队列暂停恢复播报静默化（独立入口兜底保留，失败仍出声）。并入名单的基线（上一次扫描观察值）过去由 worker 执行体到冻结点再现读，而入队扫描早已把 `file_latest_sesno` 推到本窗口右端，「相对预览新增合并的会话」于是永远算不出来（2026-08-16 pipeline-f5 现场，`restore-execute-receipt.json` 里 `merged_sesnos: []`）。改为在入队时冻结基线并随队列行传递：发现方（execute 端点 / F6 sweep）在 `record_observation` 覆盖之前从裁决取 `previous_file_latest_sesno`，经 `DiscoveredBatch → DataBatch → FrozenBatch` 一路带到 `execute_one_dbnum`；同 dbnum 排队合并时基线只认最早那一次观察（取最小值）。回归测试三层钉住：批次队列纯规则（`the_baseline_freezes_at_the_earliest_observation`）、调度器冻结快照（`the_frozen_job_carries_the_earliest_enqueue_baseline`）、执行体源码断言（`the_merge_baseline_is_frozen_at_enqueue_not_reread_at_execution`，执行体再出现 `previous_file_latest_sesno` 即红）。
+
+## 2026-08-16
+
+### 新增
+
+- 扫掠体自建网格器 `src/fast_model/sweep_mesh.rs`（WP-C 的 C0/C1/C2/C3 内核）：截面 → 2D 闭合环 → 三角网格，三支分派直接用 `SweepSolid::do_solid_segments()`（Core3D `DB_Gensec` 的权威判定，本模块不另立一套）。截面语义不重写——倒角与弧段复用 aios-core `wire::gen_polyline_original`（OCC 路径用的同一个函数），弧转折线用 cavalier_contours 的 `arcs_to_approx_lines`，端盖用 earcutr 做带孔多边形三角剖分（结构截面 L/C/I 是凹的，扇形三角化会填掉凹口）。摆放变换逐行对应 `gen_occ_spro_wire` / `gen_occ_sann_wire`，斜切端面沿用 `get_face_mat4`。360° SANN 按外环加内孔一次成形，两段半圆弧拼（`bulge = tan(θ/4)` 在 360° 处发散，单段圆表达不出来），另有一条测试与两个半环之和对拍以满足 FR-006。**尚未接进 `tessellate_libgm_param`**：生产接线要等直墙/斜切墙/弧墙的 RVM 门，本轮只到纯函数验证。
+- `src/fast_model/mesh_assert.rs`：网格体检断言抽成 test-only 共享模块，`mesh_primitives` 与 `sweep_mesh` 共用同一套判据。
+- 依赖新增 `cavalier_contours`（与 aios-core 同一 gitee fork）与 `earcutr`，两者本就在 `Cargo.lock` 里，只多了两条依赖边。
+- `mesh_primitives` 单测从「非空」升级为「可用于布尔的实体」：结构体检统一走 `assert_solid_mesh`（法线齐备且是单位向量、无零面积三角、随附 AABB 与顶点一致、顶点焊接后每条有向边正反各一次即闭合可定向、散度定理算出的有向体积为正即三角朝外），再逐个原语与解析包围盒和解析体积对拍（球冠 `πh²(3R−h)/3`、半椭球 `⅔πr²h`、圆环 `2π²Rr²`、棱台 prismatoid 公式等）。7 种原语共 22 条。
+
+### 修复
+
+- `gen_elliptical_dish` 母线参数写反：代码用了 `x=r·cos t, z=h(1−sin t)`，与自身注释相反，生成的碟上下颠倒——底圈半径落在 z=height，z=0 处只有一个点，而底面圆盘仍按半径 r 铺，网格既破洞又带零面积三角。改回 `x=r·sin t, z=h·cos t`，随之修正法线、三角绕向（母线自下而上，绕向与球体相反）与顶点处的退化三角。
+- `gen_rectangular_torus` 侧面法线全是 `Vec3::ZERO`（注释写着「后面按面片计算」但没有下文），着色会全黑。改为四个侧面各自持有顶点，法线按面给，硬边不再被平均。
+- 两个环面的端面 cap 绕向与外法线反了：起始端面本该朝 −φ、末端朝 +φ，实现把两者对调，切出来的扇环端盖朝内。同时补上负角度扫掠——`CTorus::check_valid` 只要求 `angle.abs() > 0`，负角沿 −φ 扫掠会让整体内外翻转，现在按扫掠方向翻转绕向。
+- `gen_pyramid` 顶面退化成一条棱（`xtop=0` 而 `ytop>0` 的楔形）时会留下零面积三角和破洞：改为四边形统一出三角、逐个丢弃退化面，点退化与线退化走同一条路径；亚微米级边长先归零，避免留下狭长三角。
+- `tessellate_libgm_param` 各分支加 `covered()` 收口：`check_valid()` 放行但仍然出空网格时报错而不是返回 `Ok(Some(空))`——空网格传下去只会表现为「模型悄悄少了一件」。
 
 - ADR-028 抽取树收尾三件：`pe_owner` 批写入补上 `INSERT RELATION IGNORE`（边 id 显式，父层补缺重放叶子已写过的边必须幂等，否则重复 id 会把整次补缺同步打成失败）；`collapse_extract_families` 输出按（项目, 库号）排序钉住跨进程扫描序（原 HashMap 迭代序随机）；F6 重扫给「抽取树父层被叶子代表」补日志、给「文件名库号与文件头不一致」单独文案（原先与多副本共用一句「多个抽取/副本」，单文件 mismatch 时误导）。
 - ADR-028 父层补缺静默空转：`collect_project_db_files` 归并抽取家族时会把被叶子 shadow 的主库从解析清单里删掉，而基线的父层补缺（`included_db_files` 点名主库）恰恰要解析它——补缺同步一个文件都不解析却返回 Ok，缺口留在库里。现在被 `included_db_files` 显式点名的 shadow 主库回到清单；补缺同步返回值里若没有目标 dbnum 直接报错、不推进水位。附回归测试 `collect_project_db_files_keeps_explicitly_named_shadowed_master`。（同批核实：pe/属性批写入本就是 `INSERT IGNORE`，父层同步天然只补叶子缺号，不会用父层旧会话覆盖共享 refno。）
