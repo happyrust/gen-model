@@ -2,6 +2,10 @@
 
 ## 2026-08-17
 
+### 新增
+
+- live 用例 `live_startup_sweep_baselines_a_never_parsed_db`（`increment_manager::tests`，live 8019）：钉住 ADR-023 §4 生产缺省形状——范围内**从未解析**的库（无水位行、无统计行、无 pe 行，`delete_dbnum_fast` DropRow 制造，对应「新库文件第一次进入监控目录」）被启动重扫自动发现入队（上弦后 queued 不挂起、窗口 `1..=file_latest`），worker 冻结点 `needs_initial_load(0, latest)` 路由进 `initialize_dbnum_baseline`，终态 succeeded 且回执含「首次按需初始化完成」，水位推到 `file_latest`、pe 有数据支撑。与既有幽灵水位用例的分界：那条留着撒谎的登记行，这条连登记行都没有。watcher 指向只含目标库副本的一次性目录以收窄清单（全目录重扫会把沙箱里其它未解析库一并入队，多相位清单要靠生产 worker 的相位重扫循环才能走完，`drain_queue_until_empty` 单独消化不了——首轮红跑实测确认）；结尾以正本路径补一次扫描裁决，`PathMigrated` 自动迁移还原登记路径。**2026-08-17 通过**（测试体 10.0s），证据 `docs/evidence/2026-08-17-never-parsed-auto-baseline-live.md`，台账已同步。
+
 ### 修复
 
 - 初始化执行过程审核（ADR-025 链路）四项收口：

@@ -6,6 +6,8 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-17 全新库自动基线（启动重扫入口）**：`data_interface::increment_manager::tests::live_startup_sweep_baselines_a_never_parsed_db`（live 8019，跑法同 Gate 0，另设 `AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample`、`AIOS_MANUAL_UPDATE_DBNUM=7998`、`RUST_MIN_STACK=16777216`）。**2026-08-17 通过**（测试体 10.0s）。钉 ADR-023 §4 生产缺省形状：范围内从未解析的库（`delete_dbnum_fast` DropRow 清成无水位行/统计行/pe 行）→ 启动重扫「发现从未解析过的文件」→ 上弦后 queued 不挂起（窗口 1..=12）→ worker `needs_initial_load` 路由基线 → succeeded、回执「首次按需初始化完成」、水位=12、pe 有支撑；结尾 `PathMigrated` 自动迁移还原登记路径。夹具手法：watcher 指向只含 7998 副本的一次性目录（首轮红跑实测：全目录清单含沙箱 50+ 未解析库，多相位屏障切换需生产 worker 的相位重扫循环，`drain_queue_until_empty` 单独消化不了）。证据：`docs/evidence/2026-08-17-never-parsed-auto-baseline-live.md`。
+
 **2026-08-14 AMS 1112 WALL RVM AABB**：根因是 `inst_relate` 把 `SpineArc` 局部包围盒当盒子做 8 角变换（64° 墙 X 跨度被撑到约 3 倍）。改为环扇取样后 `live_8009_refresh_cwall_rr001_wall_aabbs` 刷新 8009，Python `rvm_aabb_compare.py --fixture 1rs-wf03-w-c-rr001` **8/8 OK**（4 WALL + 4 STWALL）。
 
 **2026-08-14 AMS 1112 WALL mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_wall_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_wall_surface_distance -- --ignored --nocapture`；`--features rvm_verify` 已含 occ）。**2026-08-14 通过**。实测（双向采样表面距离，单位 mm）：

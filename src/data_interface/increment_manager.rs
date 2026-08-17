@@ -646,6 +646,149 @@ mod tests {
         assert!(dbnum_has_any_pe_row(dbnum).await.expect("probe backing"));
     }
 
+    /// 全新库（范围内、从未解析：无水位行、无统计行、无 pe 行）必须被启动重扫
+    /// 自动发现并走全量基线（`needs_initial_load` → `initialize_dbnum_baseline`），
+    /// 全程不需要人工放行——这是 ADR-023 §4 生产缺省 `startup_autorun=true` 的形状。
+    ///
+    /// 与上一条幽灵水位用例的分界：那条留着登记行（水位在撒谎），这条**连登记行
+    /// 都没有**（`delete_dbnum_fast` 按 DropRow 把 pe / 派生 / 统计 / 水位行全删），
+    /// 对应「新库文件第一次进入监控目录」。testbed 配置 `startup_autorun=false`，
+    /// 这里显式上弦模拟生产缺省，因此断言重扫行是 queued 而不是 held。
+    ///
+    /// watcher 换成只含目标库副本的一次性目录（与上面判重/抽取树用例同一手法）：
+    /// 全目录重扫会把沙箱里其它未解析库一并入队，多相位清单要靠生产 worker 的
+    /// 「相位切换后重扫」循环才能走完（ADR-025），`drain_queue_until_empty` 单独
+    /// 消化不了，本用例要钉的又只是这一个库的路由。基线解析按 `included_db_files`
+    /// 文件名在项目目录里定位，与发现路径无关，副本与正本同字节，解析结果一致。
+    /// 结尾用正本路径补一次扫描裁决，`PathMigrated` 自动迁移把登记路径还原。
+    #[tokio::test]
+    #[ignore = "manual live: wipes and rebuilds AIOS_MANUAL_UPDATE_DBNUM (default 7998) from scratch"]
+    async fn live_startup_sweep_baselines_a_never_parsed_db() {
+        use crate::data_interface::batch_scheduler::BatchScheduler;
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::data_interface::manual_update::dbnum_has_any_pe_row;
+        use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let dbnum = std::env::var("AIOS_MANUAL_UPDATE_DBNUM")
+            .map(|value| value.parse::<u32>().expect("dbnum must be u32"))
+            .unwrap_or(7998);
+        let mut manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+
+        // 目标正本与 file_latest 都从文件本体取：「从未解析」的库没有任何登记行
+        // 可读，这正是本用例要模拟的前提。
+        let real_path = manager
+            .watch_dirs()
+            .into_iter()
+            .flat_map(|dir| {
+                WalkDir::new(dir)
+                    .max_depth(INGEST_MAX_DEPTH)
+                    .into_iter()
+                    .filter_map(Result::ok)
+            })
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .filter(|path| is_candidate_db_file(path))
+            .find(|path| try_parse_db_basic_info(path).is_some_and(|info| info.db_no == dbnum))
+            .expect("watch dirs contain the target dbnum file");
+        let db_type = try_parse_db_basic_info(&real_path)
+            .expect("read target header")
+            .db_type;
+        let file_name = real_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("target file name")
+            .to_string();
+        let file_latest = PdmsIO::new(&project, real_path.clone(), true)
+            .get_latest_sesno()
+            .expect("read file latest sesno") as i32;
+        assert!(file_latest > 0, "fixture db must contain sessions");
+
+        let fixture =
+            std::env::temp_dir().join(format!("aios-never-parsed-{}", std::process::id()));
+        fs::create_dir_all(&fixture).expect("create fixture directory");
+        fs::copy(&real_path, fixture.join(&file_name)).expect("copy target db file");
+        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        let mgr = Arc::new(manager);
+
+        crate::data_interface::fast_delete::delete_dbnum_fast(dbnum)
+            .await
+            .expect("wipe dbnum to a never-parsed state");
+        assert!(
+            DbnumState::read(dbnum).await.expect("read state").is_none(),
+            "夹具必须回到「从未登记」：无水位行、无统计行"
+        );
+
+        // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起，worker 直接消费。
+        BatchScheduler::global().arm_auto_work();
+
+        mgr.sweep_watch_dirs("live-startup-never-parsed", false)
+            .await
+            .expect("startup sweep");
+        let row = BatchScheduler::global()
+            .snapshot()
+            .into_iter()
+            .find(|row| row.dbnum == dbnum)
+            .expect("startup sweep must enqueue the never-parsed dbnum");
+        assert_eq!(row.intent, "apply_window");
+        assert_eq!(row.start_sesno, 1, "水位 0 的首次导入窗口从 1 起");
+        assert_eq!(row.end_sesno, file_latest);
+        assert_eq!(row.state, "queued", "上弦后重扫行不得挂起");
+
+        let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+        assert!(ran >= 1, "从未解析的库必须被自动消费");
+        let task = TaskRegistry::global()
+            .get(&row.task_id)
+            .expect("task exists");
+        assert_eq!(
+            task.state,
+            TaskState::Succeeded,
+            "task result: {:?}",
+            task.result
+        );
+        let result_text = serde_json::to_string(&task.result).expect("serialize result");
+        assert!(
+            result_text.contains("首次按需初始化完成"),
+            "必须走基线分支而不是增量窗口: {result_text}"
+        );
+        assert_eq!(
+            DbnumState::applied_sesno(dbnum)
+                .await
+                .expect("read applied"),
+            file_latest
+        );
+        assert!(dbnum_has_any_pe_row(dbnum).await.expect("probe backing"));
+
+        // 还原登记路径：对正本补一次扫描裁决，PathMigrated 属良性搬家、自动迁移。
+        // 不还原的话，登记行会指着即将删除的临时目录，下一轮全目录扫描判 Missing。
+        let restore = mgr
+            .scan_and_check_file(
+                &project,
+                &real_path,
+                &file_name,
+                &db_type,
+                dbnum,
+                file_latest,
+            )
+            .await;
+        assert_eq!(restore.gate, ScanGate::Proceed, "正本回归不得阻断");
+        assert_eq!(
+            DbnumState::read(dbnum)
+                .await
+                .expect("read state")
+                .expect("registered state")
+                .file_path,
+            real_path.display().to_string(),
+            "登记路径必须还原到正本"
+        );
+        fs::remove_dir_all(&fixture).expect("remove fixture directory");
+    }
+
     /// 黑名单那一道门。直接调被生产路径用的那个函数——这里过去是一份手抄的副本，
     /// 抄件永远绿着，改坏真函数也发现不了。
     #[test]

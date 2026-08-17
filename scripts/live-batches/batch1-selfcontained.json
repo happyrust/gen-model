@@ -22,6 +22,8 @@
     { "name": "resolves_the_real_mdb_declaration" },
     { "name": "an_unparsed_project_bootstraps_instead_of_deadlocking" },
     { "name": "live_watch_directory_blocks_duplicate_dbnum_files" },
+    { "name": "live_startup_sweep_baselines_a_never_parsed_db",
+      "env": { "AIOS_MANUAL_UPDATE_PROJECT": "AvevaMarineSample", "AIOS_MANUAL_UPDATE_DBNUM": "7998" } },
     { "name": "live_direct_delete_crash_before_persist_recovers_by_rebuild" },
     { "name": "live_direct_refresh_crash_before_persist_recovers_by_rebuild" },
     { "name": "live_sync_aabb_tree_fills_tree_from_db", "timeout_secs": 1800 }
