@@ -279,8 +279,13 @@ fn walk_tree<P: IndexPages>(
 ) -> anyhow::Result<WalkOutcome> {
     let mut outcome = WalkOutcome::default();
     let mut visited: HashSet<u32> = HashSet::new();
-    // (页号, 父层级, 路由界, 是否根)：根用一个必然更大的父层级放行；任何参与
-    // 触达集证明的页读不动都是硬错误，残缺树不得继续提交。
+    // (页号, 父层级, 路由界, 是否根)：根用一个必然更大的父层级放行。根读不动是
+    // 硬错误；子页读不动、层级不下降则是回收页残留在真实 dabacon 文件上的**常态**
+    // （2026-08-17 实测：当前 ams8000 与 07-24 备份都必现），生产点查
+    // `filter_index_data` 对这两种形状同样静默跳过——点查到不了的分支不参与
+    // 触达集，跳过整枝不损完整性，但必须记账，不许静默。cea58087（08-14）曾把
+    // 这两处升为硬错误，代价是净口径在一切真实库文件上必现失败，已回退；
+    // 回归钉在下方两条单测里。
     let mut stack: Vec<(u32, u32, KeyBounds, bool)> =
         vec![(root, u32::MAX, KeyBounds::default(), true)];
     while let Some((pgno, parent_level, bounds, is_root)) = stack.pop() {
@@ -292,18 +297,15 @@ fn walk_tree<P: IndexPages>(
             Err(error) if is_root => {
                 return Err(error.context(format!("读取索引根页 {pgno} 失败")));
             }
-            Err(error) => {
+            Err(_) => {
                 outcome.stats.unreadable_child_pages += 1;
-                return Err(error.context(format!("读取非根索引页 {pgno} 失败")));
+                continue;
             }
         };
         outcome.stats.pages_read += 1;
         if page.level >= parent_level {
             outcome.stats.level_anomalies += 1;
-            anyhow::bail!(
-                "索引页 {pgno} 层级 {} 未低于父层级 {parent_level}，无法证明触达集完整",
-                page.level
-            );
+            continue;
         }
 
         if page.level == 0 {
@@ -846,25 +848,44 @@ mod tests {
         assert_eq!(diff.stats.target.duplicate_leaf_entries, 1);
     }
 
-    /// 已验证的路由残留继续容忍计数；路由与存在性都不看 flag（对齐生产点查）。
+    /// 层级不下降的子页跳过并计数（与 `filter_index_data` 同款防环）；读不动的
+    /// 子页容忍但计数；路由与存在性都不看 flag（对齐生产点查）——可达的
+    /// flag != 1 叶条目照样算存在，只进观察计数。三处异常都不许静默。
+    ///
+    /// 回归背景：cea58087（08-14）曾把前两种形状升为整窗硬错误，而它们是回收页
+    /// 残留在真实 dabacon 文件上的常态（2026-08-17 实测当前 ams8000 与 07-24
+    /// 备份都必现）——升硬错误等于净口径在一切真实库上失败。本测试若因
+    /// 「整窗失败」变红，说明容忍又被改掉了。
     #[test]
-    fn routing_residuals_are_counted_and_flags_stay_blind() {
+    fn level_regressions_and_routing_anomalies_are_counted_and_flags_stay_blind() {
         let mut pages = MemPages::new(vec![
             (
                 50,
-                page(1, vec![loc(100, 2, 52, 0, 2), loc(100, 3, 53, 0, 1)]),
+                page(
+                    1,
+                    vec![
+                        loc(100, 1, 51, 0, 1),
+                        loc(100, 2, 52, 0, 1),
+                        // flag=2 的内层指针照样跟进（生产搜索不看 flag）；页 99
+                        // 不存在 → 按认领扫描口径跳过整枝但记账。
+                        loc(100, 3, 99, 0, 2),
+                    ],
+                ),
             ),
+            // 51 层级与父相同 → 防环守卫跳过。
+            (51, page(1, vec![loc(100, 1, 60, 0, 1)])),
             // 52 覆盖 [(100,2),(100,3))：一条 flag=3 的可达条目（算存在 + 观察
             // 计数）+ 一条键越界的回收页残留（不可达，剔除并计数）。
             (
                 52,
                 page(0, vec![loc(100, 2, 53, 0, 3), loc(100, 7, 53, 2, 1)]),
             ),
-            (53, page(0, vec![loc(100, 3, 54, 0, 1)])),
         ]);
 
         let diff = diff_roots(&mut pages, None, 0, 50).expect("diff");
 
+        assert_eq!(diff.stats.target.level_anomalies, 1);
+        assert_eq!(diff.stats.target.unreadable_child_pages, 1);
         assert_eq!(
             diff.stats.target.nonlive_leaf_entries, 1,
             "flag != 1 只是观察计数"
@@ -872,28 +893,21 @@ mod tests {
         assert_eq!(diff.stats.target.out_of_range_leaf_entries, 1);
         assert_eq!(
             refnos(&diff.added),
-            vec![r(2), r(3)],
+            vec![r(2)],
             "可达的 flag=3 条目算存在；越界残留不算"
         );
         assert_eq!(diff.stats.target.flag_histogram.get(&3), Some(&1));
         assert_eq!(diff.stats.target.flag_histogram.get(&2), Some(&1));
         assert!(
-            pages.reads.contains(&52),
-            "内层路由不看 flag: {:?}",
+            !pages.reads.contains(&60),
+            "层级异常的子树不得继续下降: {:?}",
             pages.reads
         );
-    }
-
-    #[test]
-    fn a_child_level_that_does_not_descend_fails_the_whole_diff() {
-        let mut pages = MemPages::new(vec![
-            (50, page(1, vec![loc(100, 1, 51, 0, 1)])),
-            (51, page(1, vec![loc(100, 1, 60, 0, 1)])),
-        ]);
-        let error = diff_roots(&mut pages, None, 0, 50)
-            .err()
-            .expect("层级异常必须整窗失败");
-        assert!(format!("{error:#}").contains("未低于父层级"));
+        assert!(
+            pages.reads.contains(&99),
+            "内层路由不看 flag，页 99 应该被尝试读取: {:?}",
+            pages.reads
+        );
     }
 
     /// 实测 ams8000 的第三种形状钉成回归：陈旧叶被回收复用后，键远超本叶路由
@@ -966,9 +980,13 @@ mod tests {
         );
     }
 
-    /// 根页或子页读不动都无法证明触达集完整，必须硬错误。
+    /// 子页读不动按认领扫描口径跳过整枝，但必须记账——静默失效是最高级别缺陷。
+    /// 根页读不动仍是硬错误。
+    ///
+    /// 回归背景同 `level_regressions_and_routing_anomalies_are_counted_and_flags_stay_blind`：
+    /// cea58087 曾把缺子页升为整窗硬错误，真实文件上必现，已回退为容忍 + 记账。
     #[test]
-    fn unreadable_child_pages_and_roots_are_fatal() {
+    fn unreadable_child_pages_are_skipped_with_a_count_and_a_bad_root_is_fatal() {
         let mut pages = MemPages::new(vec![
             (
                 70,
@@ -978,10 +996,9 @@ mod tests {
             (72, page(0, vec![loc(100, 2, 73, 0, 1)])),
         ]);
 
-        let error = diff_roots(&mut pages, None, 0, 70)
-            .err()
-            .expect("缺子页必须整窗失败");
-        assert!(format!("{error:#}").contains("非根索引页 71"));
+        let diff = diff_roots(&mut pages, None, 0, 70).expect("diff");
+        assert_eq!(diff.stats.target.unreadable_child_pages, 1);
+        assert_eq!(refnos(&diff.added), vec![r(2)]);
 
         let mut missing_root = MemPages::new(vec![]);
         assert!(
@@ -1063,6 +1080,7 @@ mod tests {
     /// 生产点查仲裁一致，且回放触达的每个 refno 都被差分正确处置。
     /// 前置：本机存在 AvevaMarineSample 的 ams8000_0001（`AIOS_AMS8000_FILE`
     /// 可覆盖路径）；从仓库根运行（属性字典按 CWD 相对路径装载）。
+    #[cfg(feature = "legacy_session_replay")]
     #[test]
     #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
     fn live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay() {

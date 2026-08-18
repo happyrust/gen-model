@@ -24,7 +24,9 @@ def sessions(path: str) -> list[dict[str, Any]]:
 def collect_changes(
     path: str, start: int, end: int, detail: bool = False
 ) -> dict[str, list[dict[str, Any]]]:
-    """增量窗口变更收集（纯函数）：{sesno: [op, ...]}。"""
+    """LEGACY 逐会话回放（纯函数）：{sesno: [op, ...]}。
+
+    生产预览 / 执行不走这里；正式口径是 net_window。仅供对拍与逐会话取证。"""
 
 def net_changes(
     path: str, start: int, end: int, with_noun: bool = False
@@ -39,12 +41,12 @@ def net_changes(
 def net_window(
     path: str, start: int, end: int, detail: bool = False
 ) -> dict[str, Any]:
-    """解析器语义净窗口（纯文件）：过滤换页但内容相同的原样重写。
+    """正式口径：解析器语义净窗口（纯文件）。与增量管线 / 手动预览同实现。
 
-    返回 {requested_start/end, window: {sesno: [op, ...]}, counts,
-    warnings, unchanged_rewrites, unparseable_finals}；detail=True 时 Modified
-    携带属性旧值/新值。E3D 保存期元数据（如 CACHID）仍会如实返回，适合直接
-    验收 TTY apply/restore 的业务改动与伴随元数据。"""
+    过滤换页但内容相同的原样重写。返回 {requested_start/end,
+    window: {sesno: [op, ...]}, counts, warnings, unchanged_rewrites,
+    unparseable_finals}；detail=True 时 Modified 携带属性旧值/新值。
+    E3D 保存期元数据（如 CACHID）仍会如实返回。"""
 
 def element(path: str, refno: str, sesno: int | None = None) -> dict[str, Any]:
     """从文件直读单元素属性 dump；sesno 给定时读该会话或之前的最后版本。"""

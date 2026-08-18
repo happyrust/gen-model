@@ -14,9 +14,9 @@ name = "_aios_db"
 crate-type = ["cdylib"]
 
 [dependencies]
-aios-database = { path = ".." }
+aios-database = { path = "..", features = ["legacy_session_replay"] }
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "265d98e5", default-features = false }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "ccbc8ed8b30dcf0e0b094c86db06762e2fb4c59e" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "22476169342b0d684cf8445146e0ea39e30a6c47" }
 parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "1e67cacbcc0963ae31da5c4820baf959de6e1145" }
 
 anyhow = "1.0.57"

@@ -40,7 +40,7 @@ os.environ.setdefault("RUST_MIN_STACK", "16777216")
 
 TESTS = Path(__file__).resolve().parent
 REPO_ROOT = TESTS.parents[1]
-CONFIG = TESTS / "DbOption-roomtest"
+CONFIG = Path(os.environ.get("AIOS_ROOMTEST_CONFIG", TESTS / "DbOption-roomtest")).resolve()
 CI_CONFIG = TESTS / "DbOption-ci"
 SURREAL_EXE = REPO_ROOT / "bin" / "surreal.exe"
 SURREAL_PORT = 8071

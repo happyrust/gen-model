@@ -156,17 +156,12 @@ startup_autorun = true
 # 回补，而那条兜底路径排在 startup_autorun 之后——默认部署里等于没有回补通道。
 room_incremental = true
 
-#【新增 2026-08-13】net_window_collection
-# 增量窗口收集口径（ADR-022 灰度开关）；默认 false。
-#   false：现状——逐会话回放（collect_changes），成本 O(会话数×每会话触达×3 次解析)。
-#   true ：净窗口——会话索引差分给出净三态，再按窗口两端记录版本合成同形状操作流：
-#          每 refno 恰一条，加了又删不出现（不再留墓碑行）、改了又改回不触发 regen、
-#          删了又建判净修改。收集耗时与窗口内会话数解耦（实测 ams8000 全窗口 1.2s
-#          vs 回放 11s，负载逐字符对拍一致，见 docs/evidence/2026-08-13-session-
-#          index-diff-net-changes.md）。预览与执行经 collect_window 唯一入口同口径，
-#          回执首条警告自报口径。
-# 环境变量 AIOS_NET_WINDOW 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
-# 灰度期证据未收口前保持 false；夹具 + live A/B 全绿后翻默认值（ADR-022 §4）。
+#【退役 2026-08-18 / ADR-031】net_window_collection / AIOS_NET_WINDOW
+# 收集口径已统一为净窗口（collect_window → collect_net_window）。逐会话回放
+# 降级为 legacy 诊断入口，生产路径不可达。本键与环境变量不再改变行为；
+# 残留设置会在 run_cli / full_init 打显式告警（配置层没有 deny_unknown_fields，
+# 删字段会让 `net_window_collection = false` 被安静忽略，字面意思与实际相反）。
+# 回退手段是 git revert 单路径提交，不是解开下面这行。
 # net_window_collection = false
 
 #【移除 2026-08-13】watermark_realign（2026-08-12 引入的 off/check/rebaseline 档位）

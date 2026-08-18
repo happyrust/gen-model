@@ -79,13 +79,31 @@ jobs:
           restore-keys: |
             cargo-windows-tests-
 
+      # Compile-time reachability gate: the production feature set must build while
+      # both IncrementPipeline::collect_changes and pdms_io's replay APIs are absent.
+      - name: Check production build without legacy session replay
+        shell: pwsh
+        run: >-
+          cargo check --locked
+          --bin aios-database
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd,http_api
+
+      - name: Prove legacy replay API is absent from production docs build
+        shell: pwsh
+        run: >-
+          cargo test --locked --doc
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          LegacySessionReplayUnavailableInProduction
+
       - name: Run portable db8000 model-increment cases
         shell: pwsh
         run: >-
           cargo test --locked
           --test db8000_two_delete_fixture
           --no-default-features
-          --features ws,gen_model,manifold,project_hd
+          --features ws,gen_model,manifold,project_hd,legacy_session_replay
           -- --nocapture
 
       # Reuses the issue-019 archive: the generic cutter must reproduce its
@@ -112,7 +130,7 @@ jobs:
           cargo test --locked `
             --test db8000_session_pairs `
             --no-default-features `
-            --features ws,gen_model,manifold,project_hd `
+            --features ws,gen_model,manifold,project_hd,legacy_session_replay `
             -- --nocapture 2>&1 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\artifacts\session-pairs.log"
           if ($LASTEXITCODE -ne 0) { throw "db8000_session_pairs failed ($LASTEXITCODE)" }

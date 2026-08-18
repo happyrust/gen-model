@@ -152,6 +152,11 @@
   `file_latest_sesno_time`（**那个会话在 E3D 里被写入的时刻**，RFC3339，同一把尺子，
   相减 = 文件里没被吸收的时间跨度；从未应用 / 会话页读不到 → `null`）。
   预览请求**不变**：预览永远全范围扫描，勾选是 execute 的事。
+- ADR-031（2026-08-18）统一净窗口口径：`sessions[]` 来自本次冻结范围内的会话页
+  清单，按 sesno 升序去重，不能从净操作 key 反推（所以空保存/自我抵消会话仍可见）；
+  `warnings[0]` 固定自报“ADR-031 单一口径”的净窗口，并携带终稿不可解析、不可读
+  子页与层级异常等全部容忍计数。索引根页不可读或 last-touch 缺失则该 dbnum 预览
+  失败，不伪造空窗口。
 
 ### 4.3 `POST /api/v1/update/execute` — 扫描 + 入队（ADR-011 合流后）
 - 映射：`AiosDBManager::enqueue_manual_update(project, mdb, dbnums)`；执行由进程内唯一的数据批次

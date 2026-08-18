@@ -14,13 +14,14 @@
 //! 详见 `plant-model-gen/docs/reverse/core_dll_noun_att_model_update.md` §13/§14。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use aios_core::pdms_types::{DbAttributeType, TOTAL_LOOP_NOUN_NAMES, TOTAL_VERT_NOUN_NAMES};
 use aios_core::{NamedAttrValue, RefU64Vec, RefnoEnum};
 use pdms_io::io::{
     ChildrenDelta, EleOperationData, EleOperationDetail, ModifiedElement, classify_children_delta,
 };
+use serde::Deserialize;
 
 /// 属性对模型生成输入的影响（三态，保留作向后兼容 / 粗判）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,17 +598,38 @@ pub fn user_change_buckets(op: &EleOperationData) -> Vec<(ChangeBucket, RefnoEnu
     out
 }
 
+const CORE_PRIMARY_LIST_SNAPSHOT_JSON: &str =
+    include_str!("../../tests/fixtures/core-primary-list-e3d31.json");
+
+#[derive(Deserialize)]
+struct CorePrimaryListSnapshot {
+    nouns: HashMap<String, bool>,
+}
+
+static CORE_PRIMARY_LIST_SNAPSHOT: LazyLock<CorePrimaryListSnapshot> = LazyLock::new(|| {
+    serde_json::from_str(CORE_PRIMARY_LIST_SNAPSHOT_JSON)
+        .unwrap_or_else(|error| panic!("embedded core primaryList snapshot is invalid: {error}"))
+});
+
+fn primary_list_snapshot_value(noun: &str) -> Option<bool> {
+    let normalized = noun.trim().to_ascii_uppercase();
+    CORE_PRIMARY_LIST_SNAPSHOT.nouns.get(&normalized).copied()
+}
+
 /// `DB_Noun::primaryList(noun)` 的离线提示（G3 门控数据源）。
 ///
-/// core.dll 只对 `primaryList == true` 的类型做成员表差分。**但 `primaryList` 不在
-/// dabacon 字典里**（走 `db_get_element_info(hash, 297853135)`，已由 A-DICT-01 断言确认
-/// 字典不可得），离线无法取值。故本提示当前对所有 noun 返回保守值 `true`——宁多勿漏，
-/// 绝不因门控丢掉成员变化；待将来接入活 E3D 的 primaryList 名单（P8 一类）后可数据驱动。
+/// core.dll 只对 `primaryList == true` 的类型做成员表差分。字段不在普通 dabacon
+/// 属性字典中；本实现使用 live E3D 内直接调用
+/// `db_get_element_info(noun_hash, 297853135)` 冻结的 E3D 3.1 快照。core 的判定是
+/// 严格 `value == 1`，因此快照里的已解析 `false` 会真正关掉成员差分。
 ///
-/// 门控**机制**本身由 [`classify_children_delta_gated`] 提供并可显式传入 `false` 验证
-/// （见 B-EVT-03），不受本保守默认影响。
-pub fn primary_list_hint(_noun: &str) -> bool {
-    true
+/// 当前 core 对 52 个 noun 未返回字段值；这些**已显式列在快照**而非混进 false，生产
+/// 对未知 noun 继续保守返回 `true`，保持「宁多勿漏」。
+pub fn primary_list_hint(noun: &str) -> bool {
+    match primary_list_snapshot_value(noun) {
+        Some(value) => value,
+        None => true,
+    }
 }
 
 /// 成员/顺序差分，按 `primaryList` **显式**门控（纯函数）：非 primaryList 类型
@@ -1030,12 +1052,84 @@ mod tests {
         );
         // 非 primaryList 类型：children 差异不产生成员/顺序事件。
         assert_eq!(classify_children_delta_gated(&old, &reordered, false), None);
-        // 离线 primaryList 提示当前保守为真（不丢事件；数据源见 ADR-009）。
+        // 生产提示来自 core.dll 快照：DAMP=true，TP=false；未知 ROD 保守为 true。
         assert!(primary_list_hint("DAMP"));
+        assert!(primary_list_hint(" damp "));
+        assert!(!primary_list_hint("TP"));
+        assert!(primary_list_hint("ROD"));
         assert_eq!(
             gated_children_delta("DAMP", &old, &reordered),
             Some(ChildrenDelta::Reordered)
         );
+        assert_eq!(gated_children_delta("TP", &old, &reordered), None);
+
+        // 不是只测显式 gate：生产 user_change_buckets 也必须真的抑制 TP 的成员桶。
+        let mut non_primary = modified_operation("NAME");
+        set_operation_noun(&mut non_primary, "TP");
+        if let EleOperationDetail::Modified(modified) = &mut non_primary.detail {
+            modified.children_changed = Some((old.clone(), reordered.clone()));
+        }
+        assert!(
+            user_change_buckets(&non_primary)
+                .iter()
+                .all(|(bucket, _)| *bucket != ChangeBucket::MemberChanged)
+        );
+
+        let mut primary = non_primary;
+        set_operation_noun(&mut primary, "DAMP");
+        assert!(
+            user_change_buckets(&primary)
+                .iter()
+                .any(|(bucket, _)| *bucket == ChangeBucket::MemberChanged)
+        );
+    }
+
+    #[test]
+    fn core_primary_list_snapshot_is_complete_and_self_consistent() {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(CORE_PRIMARY_LIST_SNAPSHOT_JSON).unwrap();
+        assert_eq!(snapshot["schema"], 1);
+        assert_eq!(snapshot["field_id"], 297853135);
+        assert_eq!(
+            snapshot["core_sha256"],
+            "e4600d050a908f281d207bad52507dcbb82d4d8036c8d4d71e6e72eb290476d8"
+        );
+        assert_eq!(snapshot["count"], 1931);
+        assert_eq!(snapshot["resolved_count"], 1879);
+        assert_eq!(snapshot["unknown_count"], 52);
+        assert_eq!(snapshot["true_count"], 1142);
+        assert_eq!(snapshot["false_count"], 737);
+
+        let nouns = snapshot["nouns"].as_object().unwrap();
+        let unknown = snapshot["unknown"].as_array().unwrap();
+        assert_eq!(nouns.len(), 1879);
+        assert_eq!(unknown.len(), 52);
+        assert_eq!(
+            nouns
+                .values()
+                .filter(|value| value.as_bool() == Some(true))
+                .count(),
+            1142
+        );
+        assert_eq!(
+            nouns
+                .values()
+                .filter(|value| value.as_bool() == Some(false))
+                .count(),
+            737
+        );
+        for row in unknown {
+            let noun = row["noun"].as_str().unwrap();
+            assert!(
+                !nouns.contains_key(noun),
+                "unknown noun leaked into resolved map: {noun}"
+            );
+            assert_eq!(primary_list_snapshot_value(noun), None);
+            assert!(
+                primary_list_hint(noun),
+                "unknown noun must remain conservative: {noun}"
+            );
+        }
     }
 
     /// B-EVT-04：「同集合换顺序」判为 Reordered、「集合增删」判为 MemberChanged

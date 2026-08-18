@@ -59,13 +59,13 @@ aios_db.set_config(str(repo / "DbOption"))     # ① 永远第一句
 f = r"D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7997_0001"
 aios_db.parse.header(f)                        # 头/最新会话
 aios_db.parse.sessions(f)                      # 会话页列表
-aios_db.parse.collect_changes(f, 100, 102, detail=True)   # 增量窗口变更（逐会话回放）
+aios_db.parse.collect_changes(f, 100, 102, detail=True)   # LEGACY 逐会话回放（aios-py 显式 feature；对拍/取证）
 aios_db.parse.net_changes(f, 100, 102, with_noun=True)    # 窗口净增删改（会话索引差分，
                                                # 不逐会话解析、与会话数解耦；对拍脚本
                                                # 见 testbed/net_changes_probe.py）
-aios_db.parse.net_window(f, 100, 102, detail=True)        # 语义净窗口：两端属性 diff，
-                                               # 过滤换页但内容相同的原样重写；E3D
-                                               # 保存期元数据（如 CACHID）仍如实返回
+aios_db.parse.net_window(f, 100, 102, detail=True)        # 正式口径：语义净窗口（两端
+                                               # 属性 diff，过滤原样重写；生产预览/
+                                               # 执行同实现）
 aios_db.parse.element(f, "24381_100677")       # 单元素属性（文件直读）
 aios_db.parse.element(f, "24381_100677", sesno=97)        # 历史版本
 aios_db.parse.noun_dict(r"D:/AVEVA/Everything3D2.10/attlib.dat")  # noun 能力矩阵

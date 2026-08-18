@@ -20,10 +20,8 @@ use std::ops::RangeInclusive;
 
 use aios_core::pdms_types::RefU64;
 use parse_pdms_db::parse::EleData;
-use pdms_io::io::{
-    ChildrenDelta, EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO,
-    classify_children_delta,
-};
+pub use pdms_io::io::diff_ele_data;
+use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 
 use crate::data_interface::session_index_diff::{self, RecordLoc};
 
@@ -37,7 +35,11 @@ pub struct NetWindowOutcome {
     /// 记录位置变了但内容逐字段相同（原样重写换页）的条目数：不发操作，
     /// 但账要看得见。
     pub unchanged_rewrites: usize,
-    /// 成功结果中恒为 0；终稿解析失败现在是整窗硬错误。字段保留给既有回执结构。
+    /// 终稿记录解析失败而跳过的条目数（多为字典缺项的系统记录，如 MNUM 不在
+    /// 属性表——回放路径对同一批记录同样以 `None` 操作落空，从未入过库）。
+    /// 明细以聚合警告随回执透出。cea58087（08-14）曾把它升为整窗硬错误，
+    /// 真实文件上每个含系统段的窗口整批打死（08-17 实测 ams8000 的 `16192_1`
+    /// 必现），已回退为与回放等价的跳过 + 记账。
     pub unparseable_finals: usize,
     /// 差分统计（页读数/剪枝/耗时），随回执与日志透出。
     pub stats: session_index_diff::NetChangeStats,
@@ -47,7 +49,10 @@ pub struct NetWindowOutcome {
 ///
 /// 失败语义（与回放口径逐条对齐，不许静默）：
 ///
-/// * 净新增 / 净修改的**终稿**记录解析失败 → 整窗硬错误，不提交残缺触达集。
+/// * 净新增 / 净修改的**终稿**记录解析失败 → 跳过该条 + 计数 + 聚合警告。
+///   真实库里这是字典缺项的系统记录家族（如 `MNUM not exist in attr_info_map`，
+///   ams8000 的 `16192_1`）——回放路径对同一批记录以 `None` 操作落空、从未
+///   入库，硬失败会让每个含系统段的窗口整批打死，而跳过与回放行为等价。
 /// * 净修改的**基版本**解析失败（终稿可读）→ 按 spec §Edge Cases 保守处理：
 ///   当作新增全量覆盖（模型侧整根重生成），warnings 逐条点名。
 /// * 净修改条目缺 `base_loc` → **硬失败**：那是差分分类的不变量被破坏，不是
@@ -86,6 +91,7 @@ where
     let mut window: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut unchanged_rewrites = 0usize;
+    let mut unparseable: Vec<String> = Vec::new();
     let mut push = |window: &mut BTreeMap<u32, Vec<EleOperationData>>,
                     sesno: u32,
                     refno: RefU64,
@@ -102,13 +108,15 @@ where
                 .last_touch_sesno
                 .ok_or_else(|| anyhow::anyhow!("净新增 {} 缺 last-touch 会话", entry.refno))?,
         )?;
-        let data = resolve_record(&mut resolve, entry.refno, entry.loc, "终稿")?;
-        push(
-            &mut window,
-            sesno,
-            entry.refno,
-            EleOperationDetail::Add(data),
-        );
+        match resolve_record(&mut resolve, entry.refno, entry.loc, "终稿") {
+            Ok(data) => push(
+                &mut window,
+                sesno,
+                entry.refno,
+                EleOperationDetail::Add(data),
+            ),
+            Err(error) => unparseable.push(format!("{}: {error:#}", entry.refno)),
+        }
     }
 
     for entry in deleted {
@@ -126,7 +134,13 @@ where
                 .last_touch_sesno
                 .ok_or_else(|| anyhow::anyhow!("净修改 {} 缺 last-touch 会话", entry.refno))?,
         )?;
-        let latest = resolve_record(&mut resolve, entry.refno, entry.loc, "终稿")?;
+        let latest = match resolve_record(&mut resolve, entry.refno, entry.loc, "终稿") {
+            Ok(latest) => latest,
+            Err(error) => {
+                unparseable.push(format!("{}: {error:#}", entry.refno));
+                continue;
+            }
+        };
         let base_loc = entry.base_loc.ok_or_else(|| {
             anyhow::anyhow!(
                 "净修改条目 {} 缺 base 位置——classify 的不变量被破坏",
@@ -158,11 +172,25 @@ where
         }
     }
 
+    if !unparseable.is_empty() {
+        let samples = unparseable
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("；");
+        warnings.push(format!(
+            "{} 条记录终稿解析失败，按回放同口径跳过（这些记录在回放路径同样以 None \
+             操作落空、从未入库，多为字典缺项的系统记录）。样例：{samples}",
+            unparseable.len()
+        ));
+    }
+
     Ok(NetWindowOutcome {
         window,
         warnings,
         unchanged_rewrites,
-        unparseable_finals: 0,
+        unparseable_finals: unparseable.len(),
         stats,
     })
 }
@@ -187,121 +215,36 @@ where
     })
 }
 
-/// 两个元素版本的一次性 diff → `ModifiedElement`；两端逐字段相同返回 `None`。
-///
-/// **与回放路径同口径**：这是 vendor `get_refno_operation_status` 内联 diff 的
-/// 忠实复刻（三命名空间按键比对、UDA 按 hash_val、children 走
-/// [`classify_children_delta`]、`noun`/`current_data` 取终稿端），差异只有实现
-/// 形态——那边一边 diff 一边排空两个 map，这边纯读。一致性由
-/// `db8000_session_pairs` 的「净收集 Modified 渲染 ≡ 回放 Modified 渲染」对拍
-/// 钉住（ADR-022 FR-4 的复刻分支）；vendor 侧提取纯函数共用是后续合并项。
-pub fn diff_ele_data(prev: &EleData, latest: &EleData) -> Option<ModifiedElement> {
-    let children_changed = (!matches!(
-        classify_children_delta(&prev.children, &latest.children),
-        ChildrenDelta::None
-    ))
-    .then(|| (prev.children.clone(), latest.children.clone()));
-
-    let mut added_attrs = HashMap::new();
-    let mut deleted_attrs = HashMap::new();
-    let mut modified_attrs = HashMap::new();
-    for (name, value) in &latest.att_map().map {
-        match prev.att_map().map.get(name) {
-            Some(prev_value) if prev_value != value => {
-                modified_attrs.insert(name.clone(), (prev_value.clone(), value.clone()));
-            }
-            Some(_) => {}
-            None => {
-                added_attrs.insert(name.clone(), value.clone());
-            }
-        }
-    }
-    for (name, value) in &prev.att_map().map {
-        if !latest.att_map().map.contains_key(name) {
-            deleted_attrs.insert(name.clone(), value.clone());
-        }
-    }
-
-    let mut added_explicit_attrs = HashMap::new();
-    let mut deleted_explicit_attrs = HashMap::new();
-    let mut modified_explicit_attrs = HashMap::new();
-    for (name, value) in &latest.explicit_attmap().map {
-        match prev.explicit_attmap().map.get(name) {
-            Some(prev_value) if prev_value != value => {
-                modified_explicit_attrs.insert(name.clone(), (prev_value.clone(), value.clone()));
-            }
-            Some(_) => {}
-            None => {
-                added_explicit_attrs.insert(name.clone(), value.clone());
-            }
-        }
-    }
-    for (name, value) in &prev.explicit_attmap().map {
-        if !latest.explicit_attmap().map.contains_key(name) {
-            deleted_explicit_attrs.insert(name.clone(), value.clone());
-        }
-    }
-
-    let mut added_uda_attrs = HashMap::new();
-    let mut deleted_uda_attrs = HashMap::new();
-    let mut modified_uda_attrs = HashMap::new();
-    for uda in latest.uda_atts() {
-        match prev
-            .uda_atts()
-            .iter()
-            .find(|prev_uda| prev_uda.hash_val == uda.hash_val)
-        {
-            Some(prev_uda) if prev_uda.value != uda.value => {
-                modified_uda_attrs
-                    .insert(uda.hash_val, (prev_uda.value.clone(), uda.value.clone()));
-            }
-            Some(_) => {}
-            None => {
-                added_uda_attrs.insert(uda.hash_val, uda.value.clone());
-            }
-        }
-    }
-    for prev_uda in prev.uda_atts() {
-        if !latest
-            .uda_atts()
-            .iter()
-            .any(|uda| uda.hash_val == prev_uda.hash_val)
-        {
-            deleted_uda_attrs.insert(prev_uda.hash_val, prev_uda.value.clone());
-        }
-    }
-
-    let changed = children_changed.is_some()
-        || !added_attrs.is_empty()
-        || !deleted_attrs.is_empty()
-        || !modified_attrs.is_empty()
-        || !added_explicit_attrs.is_empty()
-        || !deleted_explicit_attrs.is_empty()
-        || !modified_explicit_attrs.is_empty()
-        || !added_uda_attrs.is_empty()
-        || !deleted_uda_attrs.is_empty()
-        || !modified_uda_attrs.is_empty();
-
-    changed.then(|| ModifiedElement {
-        noun: latest.att_map().get_type(),
-        current_data: latest.clone(),
-        added_attrs,
-        deleted_attrs,
-        modified_attrs,
-        added_explicit_attrs,
-        deleted_explicit_attrs,
-        modified_explicit_attrs,
-        added_uda_attrs,
-        deleted_uda_attrs,
-        modified_uda_attrs,
-        children_changed,
-    })
-}
+/// The two-version element comparison is owned by `pdms_io::io::diff_ele_data` and
+/// re-exported above. Net-window synthesis and legacy session replay therefore share
+/// one attribute / explicit-attribute / UDA / ordered-child diff implementation.
+/// The cross-collector property tests below pin the rendered payload equivalence.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use aios_core::NamedAttrValue;
+
+    /// T14：净窗口不得再长出一份属性/成员 diff；编译期 import 保证共享函数存在，
+    /// 源码断言保证这里没有悄悄复制回来一份同名实现。
+    #[test]
+    fn net_window_uses_the_vendor_element_diff_single_source() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/data_interface/net_window.rs"
+        ));
+        let shared_import = concat!("pub use pdms_io::io::", "diff_ele_data;");
+        let local_definition = concat!("pub fn diff_", "ele_data(");
+        assert!(
+            source.contains(shared_import),
+            "净窗口必须直接复用 pdms-io 的共享元素 diff"
+        );
+        assert_eq!(
+            source.matches(local_definition).count(),
+            0,
+            "net_window.rs 不得重新定义第二份 diff_ele_data"
+        );
+    }
 
     fn element(pairs: &[(&str, &str)], children: &[u64]) -> EleData {
         let mut data = EleData::default();
@@ -543,21 +486,34 @@ mod tests {
         assert_eq!(outcome.unparseable_finals, 0, "失败的是基版本不是终稿");
     }
 
-    /// 任一终稿解析不出来都使整窗失败，不留下残缺操作集。
+    /// 终稿解析不出来：跳过 + 计数 + **聚合**警告（回放路径对同一批记录同样以
+    /// `None` 落空、从未入库）。逐条刷屏会把回执淹掉，所以明细走样例。
+    ///
+    /// 回归背景：cea58087（08-14）曾把它升为整窗硬错误，而字典缺项的系统记录在
+    /// 真实文件上必现（08-17 实测 ams8000 的 `16192_1` 报 `MNUM not exist in
+    /// attr_info_map`），升硬错误等于每个含系统段的窗口整批打死。本测试若因
+    /// 「整窗失败」变红，说明容忍又被改掉了。
     #[test]
-    fn an_unparseable_final_fails_the_whole_window() {
+    fn an_unparseable_final_is_skipped_counted_and_aggregated() {
         let mut net = change_set(30);
         net.added.push(net_entry(7, at(10, 0), None, Some(12)));
         net.modified
             .push(net_entry(9, at(20, 0), Some(at(19, 0)), Some(25)));
 
-        let error = synthesize_net_window(net, records(Vec::new()))
-            .err()
-            .expect("终稿解析失败必须整窗失败");
-        let text = format!("{error:#}");
+        let outcome = synthesize_net_window(net, records(Vec::new())).expect("合成");
+
         assert!(
-            text.contains(&RefU64(7).to_string()) && text.contains("终稿"),
-            "{text}"
+            outcome.window.is_empty(),
+            "解析不出终稿的条目一条都不许入窗口: {:?}",
+            outcome.window.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(outcome.unparseable_finals, 2);
+        assert_eq!(outcome.warnings.len(), 1, "明细走聚合警告，不逐条刷屏");
+        let warning = &outcome.warnings[0];
+        assert!(warning.contains("2 条"), "聚合警告要报条数: {warning}");
+        assert!(
+            warning.contains(&RefU64(7).to_string()) && warning.contains(&RefU64(9).to_string()),
+            "聚合警告要带样例 refno: {warning}"
         );
     }
 
@@ -625,6 +581,7 @@ mod tests {
     /// refno 的 Add 渲染逐字符相等（Add 无引用型条目乱序问题，`to_surql` 全程
     /// 确定性），Modified 三桶键集 + children 两端 + noun 相等。
     /// 前置：本机存在 ams8000_0001（`AIOS_AMS8000_FILE` 可覆盖）；仓库根运行。
+    #[cfg(feature = "legacy_session_replay")]
     #[test]
     #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
     fn live_ams8000_net_window_payloads_match_replay_on_single_touch_refnos() {
@@ -770,6 +727,124 @@ mod tests {
         // 逐会话 diff 与净端两端 diff 合法不同，不可逐桶比对）；Modified 负载
         // 等价由 db8000_session_pairs 性质 i 在 CI 常驻钉住。
         println!("[live] 合计负载对拍：Add {add_compared} / Modified {modified_compared}");
+    }
+
+    /// T18 记录项（ADR-031，非门）：release 下按协议计时完整收集。
+    /// 1 warmup + 5 次，报 median / min / p95；冷启动另报；两类窗口。
+    #[cfg(feature = "legacy_session_replay")]
+    #[test]
+    #[ignore = "manual live: release timing for the single-caliber collector"]
+    fn live_ams8000_single_caliber_release_timing() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let path = std::env::var_os("AIOS_AMS8000_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let testbed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("python/testbed/projects/AvevaMarineSample/ams000/ams8000_0001");
+                if testbed.is_file() {
+                    testbed
+                } else {
+                    PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
+                }
+            });
+        assert!(path.is_file(), "找不到计时文件: {}", path.display());
+
+        let latest = {
+            let mut io = PdmsIO::new("", path.clone(), true);
+            io.open().expect("open");
+            io.get_latest_sesno().expect("latest") as i32
+        };
+        let windows = [
+            ("high-retouch", (latest / 2).max(1)..=latest),
+            ("add-floor", 1..=latest),
+        ];
+
+        fn stats(samples: &[u128]) -> (u128, u128, u128) {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let n = sorted.len();
+            let median = sorted[n / 2];
+            let min = sorted[0];
+            let p95_idx = ((n as f64) * 0.95).ceil() as usize - 1;
+            (median, min, sorted[p95_idx.min(n - 1)])
+        }
+
+        println!(
+            "[T18] file={} sha-skipped latest={latest} cfg={}",
+            path.display(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+        for (name, window) in windows {
+            let mut net_samples = Vec::new();
+            let mut replay_samples = Vec::new();
+            let cold_net = Instant::now();
+            let net0 =
+                crate::data_interface::increment_pipeline::IncrementPipeline::collect_window(
+                    &path,
+                    window.clone(),
+                )
+                .expect("net cold");
+            let cold_net_ms = cold_net.elapsed().as_millis();
+            let cold_replay = Instant::now();
+            let replay0 =
+                crate::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
+                    &path,
+                    window.clone(),
+                )
+                .expect("replay cold");
+            let cold_replay_ms = cold_replay.elapsed().as_millis();
+
+            for _ in 0..5 {
+                let started = Instant::now();
+                let _ =
+                    crate::data_interface::increment_pipeline::IncrementPipeline::collect_window(
+                        &path,
+                        window.clone(),
+                    )
+                    .expect("net warm");
+                net_samples.push(started.elapsed().as_millis());
+                let started = Instant::now();
+                let _ =
+                    crate::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
+                        &path,
+                        window.clone(),
+                    )
+                    .expect("replay warm");
+                replay_samples.push(started.elapsed().as_millis());
+            }
+
+            let net_ops = net0.range_eles.values().flatten().count();
+            let replay_ops = replay0
+                .values()
+                .flatten()
+                .filter(|op| !matches!(op.detail, EleOperationDetail::None))
+                .count();
+            let retouch = if net_ops == 0 {
+                0.0
+            } else {
+                replay_ops as f64 / net_ops as f64
+            };
+            let (n_med, n_min, n_p95) = stats(&net_samples);
+            let (r_med, r_min, r_p95) = stats(&replay_samples);
+            let ratio = if n_med == 0 {
+                f64::INFINITY
+            } else {
+                r_med as f64 / n_med as f64
+            };
+            println!(
+                "[T18] {name} {window:?} sessions~{} net_ops={net_ops} replay_ops={replay_ops} \
+                 retouch={retouch:.2} cold_net={cold_net_ms}ms cold_replay={cold_replay_ms}ms \
+                 net median/min/p95={n_med}/{n_min}/{n_p95}ms \
+                 replay median/min/p95={r_med}/{r_min}/{r_p95}ms ratio≈{ratio:.1}×",
+                *window.end() - *window.start() + 1
+            );
+        }
     }
 
     /// 纯文件纪律钉死（与 session_index_diff 同款）：净窗口收集不许出现任何

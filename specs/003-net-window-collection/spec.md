@@ -4,11 +4,17 @@
 
 **Created**: 2026-08-13
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: ADR-022（净窗口收集）；工具层验收证据
 `docs/evidence/2026-08-13-session-index-diff-net-changes.md`；术语见
 `CONTEXT.md`「会话索引差分」「净变化」。
+
+> **2026-08-18 修订（ADR-031 单一口径）**：净窗口成为**唯一**收集口径，
+> `net_window_collection` / `AIOS_NET_WINDOW` 退役，逐会话回放降级为不可达生产
+> 路径的 legacy 诊断入口。受影响条目：US3 场景 2（关开关回退）、FR-1（可配置切换）、
+> FR-6（`CollectionMode`）、Success Criteria 2（性能门）与 3（开关双向可用），
+> 各自就地标注。US1 / US2 的价值主张与 FR-2~FR-5、FR-7、FR-8 不变。
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -16,8 +22,8 @@
 
 - **现场工程师**：在 E3D 里改模型、存盘，期待改动分钟级出现在三维视图；库
   停机重启后攒下的大积压窗口，期待服务在可感知的时间内追平。
-- **运维/排查人员**：需要判断「预览/回执里报的变更是不是真的」，以及在两套
-  口径并存的灰度期能现场审计分歧。
+- **运维/排查人员**：需要判断「预览/回执里报的变更是不是真的」，并用 legacy
+  回放与净窗口离线入口交叉审计分歧。
 
 ---
 
@@ -72,7 +78,7 @@
 
 ---
 
-### User Story 3 - 灰度期两套口径可现场审计 (Priority: P2)
+### User Story 3 - 现场可审计两套口径的分歧 (Priority: P2)
 
 切换期出现「净收集报 X、有人怀疑漏了 Y」时，运维要能在现场对任意文件任意
 窗口一条命令得到两套口径的逐 refno 分歧与点查归因，而不是靠人肉比日志。
@@ -83,11 +89,15 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 灰度开关任一取值，**When** 预览与执行处理同一窗口，
-   **Then** 两者使用同一收集器（同谓词），回执可辨认当前口径。
-2. **Given** 对拍发现未归因分歧，**When** 运维关闭 `net_window_collection`
-   （或 `AIOS_NET_WINDOW=off`），**Then** 下一批次回到回放收集，无需重启
-   以外的操作。
+1. **Given** 任一窗口，**When** 预览与执行处理它，**Then** 两者使用同一收集器
+   （ADR-031 之后是结构上的唯一收集器），回执首条警告自报口径与容忍计数。
+2. **Given** 对拍发现未归因分歧，**When** 运维要复核，**Then** 用纯文件离线入口
+   （`net_changes_probe.py --verify`、`aios_db.parse.collect_changes` 与
+   `parse.net_changes`）在不影响生产的前提下逐 refno 归因。
+   > **2026-08-18（ADR-031）**：原场景 2 是「关掉 `net_window_collection` /
+   > `AIOS_NET_WINDOW=off` 让下一批次回到回放收集」。单路径之后该开关退役，
+   > 生产回退手段改为 `git revert` 单路径提交；**离线审计能力不受影响**，
+   > 上述探针与绑定都是纯文件入口、不读开关。
 
 ---
 
@@ -101,16 +111,25 @@
   一致。
 - 净修改元素的 base 版本记录解析失败 → 该 refno 保守按 Regen 处理并在回执
   警告里点名（宁多勿漏），不得静默跳过。
-- 非根索引页不可读或子页层级不下降 → 整窗失败；重复指针、越界残留等已验证点查
-  形状继续容忍并计数。
-- Added / Modified 的终稿解析失败，或索引页无法反查 last-touch 会话 → 整窗失败，
-  预览按 dbnum 显示错误、执行批次 Failed，且不自动回退 replay。
+- 非根索引页不可读或子页层级不下降 → 与重复指针、越界残留同属点查不可达的
+  回收页残留形状（真实文件常态），跳过整枝并计入 stats（`unreadable_child_pages`
+  / `level_anomalies`），不许静默；索引根页不可读仍整窗失败。
+  （2026-08-18 修订：08-14 曾升整窗硬错误，实测在一切真实库文件必现失败，回退。）
+- Added / Modified 的终稿解析失败 → 与回放同口径跳过该条 + 计数
+  （`unparseable_finals`）+ 聚合警告：回放路径对同一批记录同样以 `None` 操作
+  落空、从未入库。（2026-08-18 修订：08-14 曾升整窗硬错误，实测 ams8000 的
+  `16192_1` 必现字典缺项，含系统段的窗口会整批打死，回退。）
+- 索引页无法反查 last-touch 会话 → 整窗失败，预览按 dbnum 显示错误、执行批次
+  Failed，且不自动回退 replay。
 
 ## Requirements *(mandatory)*
 
-- **FR-1** 增量批次执行体与手动预览的收集阶段可由配置切换为会话索引差分
-  （`net_window_collection`，默认 off；`AIOS_NET_WINDOW` 一次性覆盖，取值
-  不认识回落配置）。两条路径永远同口径。
+- **FR-1** 增量批次执行体与手动预览的收集阶段 MUST 使用会话索引差分的净窗口收集，
+  且 MUST 只有一处收集入口（`IncrementPipeline::collect_window`）。**不得**存在
+  可在运行期切换收集算法的配置或环境变量。
+  > **2026-08-18（ADR-031）**：原文是「可由配置切换（`net_window_collection`，
+  > 默认 off；`AIOS_NET_WINDOW` 一次性覆盖）」。开关退役后「两条路径永远同口径」
+  > 由结构保证；残留配置键 MUST 触发显式退役告警，不得静默忽略。
 - **FR-2** 净收集产出与回放收集**相同的数据形状**（每 refno 恰一条操作，挂
   last-touch 会话），下游模型计划 / ref_rev / MySQL / 渲染 / 暂存收口零改动。
 - **FR-3** 净修改必须携带：三命名空间属性差量、children 两端、old/new
@@ -119,27 +138,47 @@
   函数共用；复刻实现必须附逐字段对拍测试。
 - **FR-5** 收集器本体零数据库访问（源码断言），窗口起点仍由水位给出。
 - **FR-6** 收集器 MUST 统一返回 `CollectedWindow`（`range_eles` / `session_sesnos` /
-  `warnings` / `CollectionMode`）；两种模式的第一条 warning MUST 标注当前口径。
+  `warnings`）；第一条 warning MUST 标注口径与全部容忍计数。
   `session_sesnos` MUST 从冻结范围内会话页映射升序去重提取并贯穿预收集、崩溃重放与
-  `IncrFileSuccess`，`merged_sesnos` 与会话保存时刻 MUST 只由该清单过滤得到。Replay
-  的清单与操作 MUST 共用一次文件打开；后续计划阶段失败时口径 warning 仍 MUST 透出。
-- **FR-7** 逐会话回放保留为诊断工具入口（`parse.collect_changes` 与探针），
-  退出执行主路径。
-- **FR-8** 净窗口 MUST 是完整性契约：不可读子页、层级不下降、终稿解析失败与
-  last-touch 缺失 MUST 返回错误；只有已验证的重复/越界残留可容忍计数，Modified
-  的 base 解析失败 MAY 保守降级为 Add 并警告。
+  `IncrFileSuccess`，`merged_sesnos` 与会话保存时刻 MUST 只由该清单过滤得到；
+  后续计划阶段失败时口径 warning 仍 MUST 透出。
+  > **2026-08-18（ADR-031）**：`CollectionMode` 字段随开关一并删除（单路径下恒为
+  > `Net`，留着是假选择）。「Replay 的清单与操作共用一次文件打开」随回放进 legacy
+  > 诊断入口，不再是生产不变量。
+- **FR-7** 逐会话回放保留为诊断工具入口（`parse.collect_changes`、探针与 oracle），
+  退出执行主路径。默认生产构建 MUST 不编译主仓与 `pdms_io` 的回放 API；诊断、
+  Python 与 oracle 测试 MUST 显式启用 `legacy_session_replay`。无 feature 构建必须以
+  compile-fail 证明 API 缺席，有 feature 构建必须以正向类型检查证明 API 存在。
+- **FR-8** 净窗口 MUST 是完整性契约：索引根页不可读与 last-touch 缺失 MUST
+  返回错误；点查同样到不了的回收页残留形状（重复指针、越界残留、不可读子页、
+  层级不下降）MAY 跳过整枝但 MUST 计入 stats；终稿解析失败 MAY 跳过但 MUST
+  计入 `unparseable_finals` 并出聚合警告；Modified 的 base 解析失败 MAY 保守
+  降级为 Add 并警告。任何一种容忍都不许静默。
+- **FR-9** 下游按 core.dll `DB_UserChanges` 解释 `children_changed` 时，成员/顺序事件
+  MUST 使用 `DB_Noun::primaryList` 的权威值门控。离线值 MUST 来自 live core.dll
+  的 `db_get_element_info(noun_hash, 297853135)` 快照；已解析的 false 不得继续按 true
+  处理，读取失败的 noun MUST 显式列为 unknown 并保守按 true，不得猜成 false。
+  该门不得改写净窗口 Added / Modified / Deleted 三态或 children 两端数据。
 
 ## Success Criteria *(mandatory)*
 
-1. **正确性**：live A/B——同库同窗口两种收集器各走完整执行，库终态等价、
-   模型计划等价（差异全部落在 ADR-022 §5 的四条明示行为变化内，逐条归因）；
-   `db8000_session_pairs` 全部性质 + 新增「引擎净收集 ≡ 回放（存在性归一）≡
-   台账」断言全绿；探针对拍「差分缺陷」类为零。
-2. **性能**（门不降级，但当前证据未达须如实标）：≥20 会话**完整收集**阶段 ≥10×
-   （实测记 evidence——**纯差分** 15–34× 已达，但**含终稿合成的引擎级净收集** debug
-   仅 8.8× / A/B probe 4.4×，**尚未达门**，见 tasks T18）；250206 收集 <30s（未实测）；
-   单会话小窗口不劣化超过 2×。
-3. **可运维**：开关双向可用；回执可辨认口径；对拍工具一条命令出归因。
+1. **正确性**（**2026-08-18 ADR-031**：执行层双臂 A/B 退役为历史证据，
+   2026-08-13 两轮全绿已入档）：收集层交叉验证——性质 h / i、
+   `db8000_session_pairs` 全部性质、「引擎净收集 ≡ 回放（存在性归一）≡
+   台账」断言全绿；探针对拍「差分缺陷」类为零。生产执行只走净窗口，
+   终态签名回归见 `test_net_window_full_execution_lands_a_stable_signature`；
+   primaryList 快照的 resolved/unknown 分区、true/false 计数和生产 gate 由
+   `core_primary_list_snapshot_is_complete_and_self_consistent` / B-EVT-03 钉住。
+2. **性能**（**2026-08-18 起为记录项，非门**，ADR-031「门的重定级」）：按原测量
+   协议跑 release 实测并如实入 evidence——已知 **纯差分** 15–34×、**含终稿合成的
+   引擎级净收集** debug 8.8× / release 高复触窗单点 17.7×（n=1）/ Add 地板窗 6.3×；
+   `A/B probe 4.4×` 仍标注为混层比较、只作下界参考。250206（SYST）收集 <30s
+   改为**上线后现场复测项**（该库在客户现场）。单路径下没有备选臂，倍数不再决定
+   走哪条路。
+3. **可运维**：回执首条警告自报口径与容忍计数；对拍工具一条命令出归因；退役的
+   配置键与环境变量被设置时有显式告警。
+   > **2026-08-18（ADR-031）**：原文「开关双向可用」随开关退役；生产回退手段是
+   > `git revert` 单路径提交。
 4. **纪律**：live 用例记台账；evidence 留痕；changelog 登记；预览 spec
   （`docs/specs/web-service-api.md` 相关小节）随口径变化更新。
 

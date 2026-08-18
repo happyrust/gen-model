@@ -3,13 +3,32 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-13（终审修订版） |
-| 状态 | 执行中（P0 已落地，本计划覆盖 P1 收口 → P2 翻默认） |
+| 状态 | **已被取代（2026-08-18）**——M2「运行闭环与翻默认」由 [ADR-031](../adr/ADR-031-single-net-window-collection-caliber.md) 的一次性单路径切换取代；M1 已完成项与全部执行卡内容保留为历史记录 |
 | 决策来源 | [ADR-022](../adr/ADR-022-net-window-collection-via-session-index-diff.md)、[specs/003](../../specs/003-net-window-collection/spec.md) + [plan](../../specs/003-net-window-collection/plan.md) + [tasks](../../specs/003-net-window-collection/tasks.md) |
 | 证据基线 | [净窗口验收证据](../evidence/2026-08-13-session-index-diff-net-changes.md)、[core.dll live 逆向报告](../evidence/2026-08-13_reverse-core-dll-index-leaf-report.md) |
 | 台账 | [live 测试台账](../2026-08-12_live-test-ledger.md)（live 用例唯一事实来源） |
 | 覆盖任务 | T11b · T12 · T13 · T15 · T17 · T18 · T19 · T20 |
 
 ---
+
+> **2026-08-18 取代说明**（读本计划前先读这段）
+>
+> 推行方式已改为一次性单路径切换（ADR-031）：`net_window_collection` /
+> `AIOS_NET_WINDOW` 退役，`collect_window` 只走净窗口，回放降级为 legacy 诊断入口。
+> 对本计划的影响：
+>
+> - **M2 整体取消**。其中 T12 已完成；**T17 CANCELLED**（无开关即无口径可冻，
+>   `collection_verdict.rs` 不再实现）；**T18 降为记录项**，SYST `250206` 改为上线后
+>   现场复测；**T15 并入单路径提交**（没有默认值可翻）。
+> - **前提 2 / 3 / 4 / 5 随之作废**：前提 2 是倍数门与 SYST 硬门的纪律（已由 ADR-031
+>   显式修订并独立提交）；前提 3/4/5 全部是为 T17 的 `task_local` 口径快照而设，
+>   没有口径要传就没有栈预算、跨 spawn 与 `OnceLock` 这三个坑。
+> - **前提 1 仍然有效且更硬**：运行时只解析 dabacon 文件、不查库；core.dll / IDA
+>   只作判据层机制背书，不得进任何运行时或 CI 必需路径。
+> - **M1 执行卡（T20 / T13 / T11b / T19 / T18a）保留**为历史记录；T13 的阻塞事实
+>   与「绝不放宽性质 h/i」的纪律不变，只是不再是切换门。
+>
+> 下文原样保留，不回填改写——它是当时决策的记录。
 
 ## 先读：五条会让计划作废的前提
 

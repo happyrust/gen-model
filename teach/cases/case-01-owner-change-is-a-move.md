@@ -65,9 +65,10 @@ v1 的测试计划把 `OWNER` 归进 `StructuralMembership` 这类普通属性�
      否则新建在非交付单元 owner 下时父根不刷新。
    - 成员 / 顺序差分经 `classify_children_delta_gated` 按 `primaryList` 门控（缺口 G3）：
      同集合换序 → `Reordered`，集合增删 → `MemberChanged`；两者都触发父根重生成，但事件类型必须可区分。
-2. `primaryList` **不在** dabacon 字典里（走 `db_get_element_info(hash, 297853135)`，批次 A 的
-   A-DICT-01 已断言字典不可得）。`primary_list_hint` 因此对所有 noun 返回保守值 `true`——
-   宁多勿漏，绝不因门控丢成员变化；门控**机制**保留并可显式传 `false` 验证。
+2. `primaryList` **不在**普通 dabacon 属性字典里；core 走
+   `db_get_element_info(hash, 297853135)` 并以 `value == 1` 判真。2026-08-18 已从 live
+   core.dll 同一入口冻结 1931 noun：1879 resolved 使用真值，52 unknown 显式列账并
+   保守为 true。B-EVT-03 同时验证 resolved true / false 与 unknown 三种路径。
 3. 「本窗口内新建后又搬迁 = 净 Created 而非 Moved」（对齐 `elementIncluded` 的 `isElementCreated` 分支）
    放在窗口层的 `manual_update::fold_net_op` 处理，不在单操作层。
 

@@ -208,6 +208,10 @@ pub fn full_init(
             let db_option = aios_core::get_db_option().clone();
             aios_database::acquire_process_instance_lock(&db_option)
                 .context("获取项目单实例锁失败（服务是不是还在跑？）")?;
+            // 与 run_cli 同款：退役的收集口径开关必须出声，不能只在二进制路径报警。
+            if let Some(notice) = aios_database::options::retired_net_window_notice() {
+                eprintln!("{notice}");
+            }
 
             // 1b. 锁挡不住跨部署互踩（锁按项目根隔离，两个部署包各持各的锁却写
             //     同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡的

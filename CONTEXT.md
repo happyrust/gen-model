@@ -249,8 +249,12 @@ E3D db 文件「最新会话」内置的一棵 B-tree，把 `refno` 映射到其
 _Avoid_: refno 索引树、btree、索引区
 
 **会话索引差分 (Session Index Diff)**：
-每个会话页都带当时的索引根（copy-on-write），取窗口两端的根做双根差分即得窗口**净变化**三态（`session_index_diff::collect_net_changes` / `aios_db.parse.net_changes`）：只靠文件判定、不查库、不逐会话解析记录，耗时与窗口内会话数解耦。存在性口径与生产 B+ 点查逐字对齐：同键子指针首见者胜、路由不看 flag、键范围路由（范围外的回收页残留不可达）。
+每个会话页都带当时的索引根（copy-on-write）；取窗口两端的根做双根差分，得到窗口两端的 refno 存在性净三态。
 _Avoid_: 索引对比、index diff、净窗口差分
+
+**逐会话回放 (Session Replay Collection)**：
+按窗口内每个会话认领该会话新写记录，再逐 refno 对相邻版本与属主做属性差分的收集方式。
+_Avoid_: 回放收集（当指生产口径时）、逐会话 collect
 
 **索引优先建表 (Index-first Table Build)**：
 构建 `refno→文件偏移`表时优先走会话索引、解码失败才回退全缓冲扫描（`gen_ref_type_pos_table_scan`）；干净库两者相等，编辑库索引得最新会话存活集、更小且更权威（scan 会多收已删、漏活元素、指旧副本），是「部分解析 / 按需解析」定位的底座。

@@ -1,5 +1,25 @@
 # 变更记录
 
+## 2026-08-19
+
+### 新增
+
+- 增量窗口收集统一为 `collect_window → collect_net_window` 单一路径（ADR-031），
+  逐会话实体回放由默认关闭的 `legacy_session_replay` feature 隔离；生产构建不再编译
+  回放 API，Python 调试绑定、诊断探针与 replay oracle 显式启用。
+- core.dll `DB_Noun::primaryList` 门控改为已跟踪的 E3D 3.1 权威快照：1931 个
+  noun 中 1879 个使用真值，52 个 unknown 保守为 true；净窗口三态与 DTO 不变。
+
+### 修复
+
+- 退役配置探测改为独立读取原始 TOML，并覆盖非布尔值、配置错误、空值与非 Unicode
+  环境变量；issue-019 固定窗口严格钉住 changed=3、a/m/d=0/1/2、会话和水位 26、
+  两个精确墓碑，强制空跑红证与原文件 SHA 恢复均已复验。
+- `diff_ele_data` 收敛到 `old-pdms-io` 单一实现，净窗口与 legacy 对拍共享同一属性/
+  UDA/children diff；不可读子页、层级异常和终稿不可解析按规格跳过并计数。
+- 去除构建对宿主 `protoc` 的依赖：`dpcsync` 检入等价生成文件并移除
+  `prost-build`，主仓删除未使用的直接依赖并钉住新 vendor 提交。
+
 ## 2026-08-17
 
 ### 新增

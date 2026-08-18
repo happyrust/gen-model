@@ -1947,6 +1947,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "legacy_session_replay")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: verifies real ProjAMS direct, transform and data-only sessions"]
     async fn live_projams_real_attribute_sessions_plan_and_execute_distinctly() {
@@ -2121,6 +2122,7 @@ mod tests {
             .expect("regenerate CWALL for real WALL.JUSL session");
     }
 
+    #[cfg(feature = "legacy_session_replay")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: verifies real nested Created operations regenerate their SUPPO roots"]
     async fn live_projams_nested_created_routes_and_generates_delivery_roots() {

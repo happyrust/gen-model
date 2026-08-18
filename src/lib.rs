@@ -280,6 +280,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // room write. A second process exits here instead of becoming another
     // consumer of the same durable pending table.
     acquire_process_instance_lock(&db_option)?;
+    // 退役的收集口径开关（ADR-031）：留着它的部署以为自己关着净收集，实际相反。
+    // 配置层吃掉未知键是静默的，这里把它变成有声的。
+    if let Some(notice) = crate::options::retired_net_window_notice() {
+        eprintln!("{notice}");
+    }
     // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {

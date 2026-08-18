@@ -24,25 +24,28 @@ const DATACENTER_VERSION: &str = "datacenter_version";
 /// Same set as cold-start eligibility ([`COLD_START_DB_TYPES`]).
 pub const SYS_META_DB_TYPES: &[&str] = COLD_START_DB_TYPES;
 
-/// 实际采用的窗口收集口径。该值随 [`CollectedWindow`] 一起贯穿预收集、崩溃重放
-/// 与成功回执，调用方无需再从 warning 文本猜测口径。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollectionMode {
-    Replay,
-    Net,
-}
-
 /// 一个冻结窗口的完整收集结果。
 ///
 /// `range_eles` 是净操作，不足以表达空保存或窗口内自抵消的会话；
 /// `session_sesnos` 因此直接来自文件会话页映射，是批次保存清单的唯一事实源。
+///
+/// 没有「口径」字段：ADR-031 之后收集只有净窗口一种，恒为同一取值的字段是假选择。
+/// 口径与全部容忍计数由 `warnings` 首条（[`net_caliber_warning`]）自报。
 #[derive(Debug, Clone)]
 pub struct CollectedWindow {
     pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
     pub session_sesnos: Vec<u32>,
     pub warnings: Vec<String>,
-    pub mode: CollectionMode,
 }
+
+/// 生产构建中 legacy 逐会话实体回放入口必须在类型层面不存在。
+///
+/// ```compile_fail
+/// use aios_database::data_interface::increment_pipeline::IncrementPipeline;
+/// let _ = IncrementPipeline::collect_changes;
+/// ```
+#[cfg(not(feature = "legacy_session_replay"))]
+pub struct LegacySessionReplayUnavailableInProduction;
 
 /// One file that completed Surreal persist + watermark advance.
 #[derive(Debug, Clone)]
@@ -496,6 +499,34 @@ fn session_sesnos_in_range(
         .collect()
 }
 
+/// 净口径标注——第一条 warning 的固定形状（预览断言与证据文档都认这个前缀）。
+///
+/// 三种容忍形状的计数**必须在这里露面**：`unreadable_child_pages` / `level_anomalies`
+/// 只活在 `NetChangeStats` 里，而 stats 在 `collect_window` 拼完这条 warning 之后
+/// 即被丢弃——不并进回执，批次路径上「跳过整枝」就是静默的，只有 python 探针的
+/// `to_json` 能看见（spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
+/// t/b = target/base 两端各自的计数，与台账叙述口径一致。
+fn net_caliber_warning(
+    added: usize,
+    deleted: usize,
+    modified: usize,
+    outcome: &crate::data_interface::net_window::NetWindowOutcome,
+) -> String {
+    format!(
+        "收集口径：净窗口（会话索引差分，ADR-031 单一口径）——added={added} deleted={deleted} \
+         modified={modified} 原样重写跳过={} 终稿不可解析={} 不可读子页(t/b)={}/{} \
+         层级异常(t/b)={}/{} 目标侧读页={} 差分 {}ms",
+        outcome.unchanged_rewrites,
+        outcome.unparseable_finals,
+        outcome.stats.target.unreadable_child_pages,
+        outcome.stats.base.unreadable_child_pages,
+        outcome.stats.target.level_anomalies,
+        outcome.stats.base.level_anomalies,
+        outcome.stats.target.pages_read,
+        outcome.stats.elapsed_ms
+    )
+}
+
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
 ///
 /// 历史背景：datacenter 语句曾渲出 `fn::find_ancestor_types(...)` 在收口事务里
@@ -609,6 +640,11 @@ fn dedup_statements_keep_last(statements: Vec<String>) -> Vec<String> {
 /// no longer present when Save Work publishes the final file. Treating those
 /// entries as live creates phantom PE rows and makes file-backed ancestor
 /// preload chase refnos which the final record index cannot resolve.
+///
+/// **LEGACY 终态补丁**（ADR-031）：只有回放会造出这种临时 Add，净路径两端都不在场
+/// 时什么都不发，构造性地没有这里要修的输入。随 [`IncrementPipeline::collect_changes`]
+/// 一起留在诊断路径上。
+#[cfg(any(test, feature = "legacy_session_replay"))]
 fn retain_finally_live_adds(
     range_eles: &mut BTreeMap<u32, Vec<EleOperationData>>,
     mut is_live: impl FnMut(RefU64) -> bool,
@@ -626,6 +662,11 @@ fn retain_finally_live_adds(
 /// OWNER.  Replace only those exact-window, finally-live deletes with a full
 /// final-record upsert; genuine deletes (absent from the final index) remain
 /// untouched.
+///
+/// **LEGACY 终态补丁**（ADR-031）：同 [`retain_finally_live_adds`]——孤儿 Deleted 腿
+/// 是逐会话回放的产物（它按 owner.children 包含性推断删除），净路径按两端索引键集差
+/// 判删（与 core.dll `elementsDeletedBetween` 同判据），根本不产生这种腿。
+#[cfg(any(test, feature = "legacy_session_replay"))]
 fn restore_finally_live_deletes(
     range_eles: &mut BTreeMap<u32, Vec<EleOperationData>>,
     final_elements: &HashMap<RefU64, parse_pdms_db::parse::EleData>,
@@ -650,6 +691,7 @@ fn restore_finally_live_deletes(
 /// start with page padding/continuation words.  The element parser expects the
 /// declared implicit-length word.  Keep this boundary check equivalent to the
 /// paged parser instead of handing it an unbounded file tail.
+#[cfg(any(test, feature = "legacy_session_replay"))]
 fn final_record_payload(raw: &[u8]) -> anyhow::Result<&[u8]> {
     let mut prefix = 0usize;
     while prefix + 4 <= raw.len() {
@@ -796,12 +838,27 @@ impl IncrementPipeline {
         Ok(statements.len())
     }
 
-    /// Side-effect-free change collection for one file over a sesno range.
+    /// **LEGACY 诊断入口**（ADR-031）：逐会话回放收集，**生产路径不得调用**。
     ///
-    /// Opens the E3D file and returns the per-`sesno` element operations WITHOUT
-    /// persisting anything (no `pe` writes, no datacenter meta, no watermark
-    /// advance). Shared by the apply path ([`Self::apply_one`]) and the read-only
-    /// manual-update preview so the two cannot diverge.
+    /// 它逐个会话认领本会话新写的记录，再对每个 refno 付
+    /// 「latest + prev + owner 三场解析 + 一次全属性 diff」
+    /// （`pdms_io::collect_increment_eles` → `get_refno_operation_status`，那些
+    /// `collect sesno: N` 日志就是它打的）。成本 O(会话数 × 每会话触达 × 3 次解析)，
+    /// 与净变更量无关；口径上也不是 core.dll 的算法——核内
+    /// `elementsChangedBetween` 对整个区间只做一次双根 B+ 归并。
+    ///
+    /// 生产收集一律走 [`Self::collect_window`]（净窗口，与核内同思想）。这里保留
+    /// 它只为两件事：
+    ///
+    /// 1. **跨结构交叉验证**——净路径唯一的独立参照臂。`db8000_session_pairs` 的
+    ///    性质 h / i、`net_window` 与 `session_index_diff` 的 live 负载对拍都直接
+    ///    调它；删了它，等价性验证就退化成自证。
+    /// 2. **逐会话取证**——净口径每 refno 只给一条，要看「哪个会话动的」时用它
+    ///    （`aios_db.parse.collect_changes`、`incr_fold_probe`）。
+    ///
+    /// 该入口只在 `legacy_session_replay` feature 下存在；默认生产依赖图不编译它。
+    /// 无副作用：不写 `pe`、不动 datacenter meta、不推水位。
+    #[cfg(feature = "legacy_session_replay")]
     pub fn collect_changes(
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
@@ -812,8 +869,10 @@ impl IncrementPipeline {
         Self::collect_changes_from_open_io(path, &mut io, sesno_range)
     }
 
-    /// Replay 内层：调用方持有同一个已打开的 [`PdmsIO`]，使会话页清单和操作流
-    /// 来自同一文件快照。公开诊断入口仍由 [`Self::collect_changes`] 负责打开文件。
+    /// LEGACY 回放内层：调用方持有已打开的 [`PdmsIO`]，操作流与调用方的其余读取
+    /// 来自同一文件快照。唯一调用方是 [`Self::collect_changes`]（ADR-031 之前
+    /// `collect_window` 的回放臂也走这里）。
+    #[cfg(feature = "legacy_session_replay")]
     fn collect_changes_from_open_io(
         path: &std::path::Path,
         io: &mut PdmsIO,
@@ -941,29 +1000,20 @@ impl IncrementPipeline {
     }
 
     /// 收集一个增量窗口的操作流——预览与执行体共用的**唯一**入口（ADR-011 同
-    /// 谓词纪律），口径由 [`crate::options::net_window_collection`] 裁决
-    /// （ADR-022 灰度）：off = 逐会话回放（[`Self::collect_changes`]），on =
-    /// 净窗口（会话索引差分 + 两端版本合成，
-    /// [`crate::data_interface::net_window::collect_net_window`]）。
+    /// 谓词纪律）。
     ///
-    /// 返回完整 [`CollectedWindow`]；两种口径的第一条 warning 都固定为口径标注，
+    /// 口径只有一种：净窗口（会话索引双根差分 + 两端版本合成，
+    /// [`crate::data_interface::net_window::collect_net_window`]），与 core.dll
+    /// `DB_IndexTableCompare` 同思想。ADR-031 之后**没有分支**——逐会话回放
+    /// （[`Self::collect_changes`]）已退出生产路径，只作 legacy 诊断，并由默认关闭的
+    /// `legacy_session_replay` feature 挡在生产依赖图之外。
+    ///
+    /// 返回完整 [`CollectedWindow`]；第一条 warning 固定为口径标注 + 全部容忍计数，
     /// `session_sesnos` 则始终从冻结区间内的会话页映射提取，不能从操作 key 反推。
     pub fn collect_window(
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
     ) -> anyhow::Result<CollectedWindow> {
-        if !crate::options::net_window_collection() {
-            let mut io = PdmsIO::new("", path.to_path_buf(), true);
-            io.open()
-                .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
-            let session_sesnos = session_sesnos_in_range(&io.sesno_pgno_map, &sesno_range);
-            return Ok(CollectedWindow {
-                range_eles: Self::collect_changes_from_open_io(path, &mut io, sesno_range)?,
-                session_sesnos,
-                warnings: vec!["收集口径：逐会话回放（Replay）".to_string()],
-                mode: CollectionMode::Replay,
-            });
-        }
         let mut io = PdmsIO::new("", path.to_path_buf(), true);
         io.open()
             .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
@@ -978,20 +1028,12 @@ impl IncrementPipeline {
                 EleOperationDetail::None => {}
             }
         }
-        let mut warnings = vec![format!(
-            "收集口径：净窗口（会话索引差分，ADR-022 灰度）——added={added} deleted={deleted} \
-             modified={modified} 原样重写跳过={} 终稿不可解析={} 目标侧读页={} 差分 {}ms",
-            outcome.unchanged_rewrites,
-            outcome.unparseable_finals,
-            outcome.stats.target.pages_read,
-            outcome.stats.elapsed_ms
-        )];
+        let mut warnings = vec![net_caliber_warning(added, deleted, modified, &outcome)];
         warnings.extend(outcome.warnings);
         Ok(CollectedWindow {
             range_eles: outcome.window,
             session_sesnos,
             warnings,
-            mode: CollectionMode::Net,
         })
     }
 
@@ -1015,7 +1057,7 @@ impl IncrementPipeline {
     /// 被完整解析两次。
     ///
     /// 背景：`manual_update::execute_one_dbnum` 为了算 `changed_elements` 和 DESI 的
-    /// 单元归并，会先 `collect_changes` 一次；随后 `apply_one` 在 fresh 分支里又收集
+    /// 单元归并，会先 `collect_window` 一次；随后 `apply_one` 在 fresh 分支里又收集
     /// 了一遍同一文件、同一窗口。非 DESI 库（SYST/CATA/DICT）尤其亏——第一趟的整份
     /// 结果只被用来算两个标量。实测 dbnum=250206 单趟就要 5 分多钟。
     ///
@@ -2171,8 +2213,7 @@ mod cache_tests {
         let collected = || CollectedWindow {
             range_eles: BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]),
             session_sesnos: vec![25, 26],
-            warnings: vec!["收集口径：逐会话回放（Replay）".to_string()],
-            mode: CollectionMode::Replay,
+            warnings: vec!["收集口径：净窗口（Net）".to_string()],
         };
 
         assert!(
@@ -2202,18 +2243,57 @@ mod cache_tests {
             range_eles: BTreeMap::new(),
             session_sesnos: session_sesnos_in_range(&pages, &(2..=8)),
             warnings: vec!["收集口径：净窗口（Net）".to_string()],
-            mode: CollectionMode::Net,
         };
         assert!(collected.range_eles.is_empty());
         assert_eq!(collected.session_sesnos, vec![3, 6]);
-        assert_eq!(collected.mode, CollectionMode::Net);
         assert!(collected.warnings[0].contains("净窗口"));
     }
 
-    /// Replay 的会话页清单与操作流必须共用一次打开的 PdmsIO；双开会允许同路径
-    /// 在两次读取之间被替换，拼出 A 文件的会话清单 + B 文件的操作流。
+    /// 净口径标注必须携带全部三种容忍形状的计数。`unreadable_child_pages` /
+    /// `level_anomalies` 只活在 stats 里，而 stats 在 `collect_window` 之后即被
+    /// 丢弃——从这条 warning 里删掉它们，批次回执上「跳过整枝」就退回静默
+    /// （spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
     #[test]
-    fn replay_manifest_and_operations_share_one_open_io() {
+    fn the_net_caliber_warning_carries_the_tolerated_shape_counts() {
+        let mut outcome = crate::data_interface::net_window::NetWindowOutcome {
+            window: BTreeMap::new(),
+            warnings: Vec::new(),
+            unchanged_rewrites: 4,
+            unparseable_finals: 3,
+            stats: crate::data_interface::session_index_diff::NetChangeStats::default(),
+        };
+        outcome.stats.target.unreadable_child_pages = 2;
+        outcome.stats.base.unreadable_child_pages = 1;
+        outcome.stats.target.level_anomalies = 5;
+        outcome.stats.target.pages_read = 40;
+        outcome.stats.elapsed_ms = 12;
+
+        let line = net_caliber_warning(7, 8, 9, &outcome);
+
+        assert!(
+            line.starts_with("收集口径：净窗口"),
+            "第一条 warning 的口径前缀不许变（预览断言认它）: {line}"
+        );
+        for needle in [
+            "added=7",
+            "deleted=8",
+            "modified=9",
+            "原样重写跳过=4",
+            "终稿不可解析=3",
+            "不可读子页(t/b)=2/1",
+            "层级异常(t/b)=5/0",
+            "目标侧读页=40",
+        ] {
+            assert!(line.contains(needle), "{needle} 不在口径标注里: {line}");
+        }
+    }
+
+    /// 收集入口不许再长出第二个口径（ADR-031）：`collect_window` 只走净窗口——
+    /// 没有开关、没有分支、不碰 legacy 回放。会话页清单仍与操作流共用**同一次**
+    /// 打开的 `PdmsIO`：双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话
+    /// 清单 + B 文件的操作流。
+    #[test]
+    fn the_collector_has_no_caliber_branch() {
         let source = include_str!("increment_pipeline.rs");
         let body = source
             .split_once("pub fn collect_window(")
@@ -2222,23 +2302,49 @@ mod cache_tests {
             .split_once("pub async fn apply(")
             .expect("apply follows collector")
             .0;
-        let replay = body
-            .split_once("if !crate::options::net_window_collection()")
-            .expect("replay arm")
-            .1
-            .split_once("mode: CollectionMode::Replay")
-            .expect("replay result")
-            .0;
-        assert!(replay.contains("session_sesnos_in_range(&io.sesno_pgno_map"));
-        assert!(replay.contains("collect_changes_from_open_io(path, &mut io"));
-        assert!(!replay.contains("collect_changes(path"));
+
+        assert!(
+            body.contains("net_window::collect_net_window(&mut io"),
+            "唯一口径必须是净窗口收集器: {body}"
+        );
+        assert!(
+            body.contains("session_sesnos_in_range(&io.sesno_pgno_map"),
+            "会话页清单必须来自同一次打开的 PdmsIO: {body}"
+        );
+        assert_eq!(
+            body.matches("PdmsIO::new(").count(),
+            1,
+            "收集入口只许打开一次文件: {body}"
+        );
+        // 三个曾经的口径符号：开关、legacy 收集器、口径枚举。任一回到这个函数体，
+        // 「同谓词」就重新退回约定而不是结构。
+        for banned in ["net_window_collection", "collect_changes", "CollectionMode"] {
+            assert!(
+                !body.contains(banned),
+                "`{banned}` 回到收集入口就是第二个口径决定点（ADR-031）: {body}"
+            );
+        }
         assert!(!source.contains(concat!("fn collect_session", "_sesnos(")));
+    }
+
+    /// feature 打开时，legacy 回放诊断入口必须保持可用（ADR-031 决策 2）。
+    ///
+    /// 回放留着是为了给净路径当独立参照臂（性质 h/i、两条 live 负载对拍）和逐会话
+    /// 取证，不是为了给执行体当后备口径。它一旦爬回执行链，就同时带回两样东西：
+    /// 第二个口径决定点，和 O(会话数 × 每会话触达 × 3 次解析) 的成本。
+    ///
+    /// 反向证明由模块顶层的 compile-fail doctest 和无 feature 生产 check 承担；
+    /// 不再扫描几个函数体的字面文本，因为 helper 间接调用可绕过字符串护栏。
+    #[cfg(feature = "legacy_session_replay")]
+    #[test]
+    fn legacy_session_replay_feature_exports_the_diagnostic_collector() {
+        let _ = IncrementPipeline::collect_changes;
     }
 
     /// 收集口径是故障回执的一部分：fresh 收集后要先保存 warning 再做模型计划，
     /// apply_with_precollected 也必须在匹配成功/失败之前接住 apply_one 的旁路。
     #[test]
-    fn collection_mode_warning_survives_a_later_apply_error() {
+    fn the_caliber_warning_survives_a_later_apply_error() {
         let source = include_str!("increment_pipeline.rs");
         let apply = source
             .split_once("pub async fn apply_with_precollected(")
@@ -2933,6 +3039,7 @@ mod fold_tests {
     /// $env:AIOS_FOLD_TEST_FILE = "D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys"
     /// cargo test --release --lib -- folding_a_real_window_preserves_final_state --ignored --nocapture
     /// ```
+    #[cfg(feature = "legacy_session_replay")]
     #[test]
     #[ignore = "manual: folds a real E3D window and checks it against an unfolded replay"]
     fn folding_a_real_window_preserves_final_state() {
@@ -3078,6 +3185,7 @@ mod bench_tests {
     ///
     /// An empty in-memory instance has no existing rows and no indexes, so read
     /// the ratio between the two runs, not the absolute milliseconds.
+    #[cfg(feature = "legacy_session_replay")]
     #[tokio::test]
     #[ignore = "manual bench: needs a throwaway SurrealDB on 127.0.0.1:8099"]
     async fn persist_ab_on_a_throwaway_instance() {
@@ -3768,6 +3876,7 @@ mod live_tests {
     /// Real-file E2E: load the backup baseline, apply the current file's real
     /// FTUB + transient Add→Deleted window, skip the net-zero model work, then
     /// generate every affected root. The E3D source files are read-only.
+    #[cfg(feature = "legacy_session_replay")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: requires isolated Surreal on :8009 and local AMS files"]
     async fn live_real_ftub_delete_move_and_reorder() {
@@ -4621,6 +4730,7 @@ mod live_tests {
     /// 被重新发放，回滚只能靠删除前的文件备份
     /// `ams7997_0001.codex-before-d03-delete-20260727`。
     /// 执行前基线见 `docs/evidence/2026-07-27-d03-delete-session-baseline.md`。
+    #[cfg(feature = "legacy_session_replay")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: needs the real delete session from scripts/e3d/projams_incr_delete_apply.mac"]
     async fn live_real_delete_session_cleans_up_model_and_regenerates_branch() {

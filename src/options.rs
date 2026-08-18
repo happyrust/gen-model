@@ -1,8 +1,9 @@
 use aios_core::options::DbOption;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// 扩展DbOption，添加异地部署相关的配置
@@ -76,11 +77,6 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_incremental: Option<bool>,
 
-    /// 增量窗口收集口径（默认 `false` = 逐会话回放）。`true` 时预览与执行改用
-    /// 会话索引差分的净窗口收集（ADR-022 灰度开关）。详见 [`net_window_collection`]。
-    #[serde(default)]
-    pub net_window_collection: Option<bool>,
-
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
@@ -115,7 +111,6 @@ impl From<DbOption> for DbOptionExt {
             data_batch_workers: None,
             startup_autorun: None,
             room_incremental: None,
-            net_window_collection: None,
             catalogue_project_priority: None,
         }
     }
@@ -149,8 +144,6 @@ struct DbOptionExtFields {
     startup_autorun: Option<bool>,
     #[serde(default)]
     room_incremental: Option<bool>,
-    #[serde(default)]
-    net_window_collection: Option<bool>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
 }
@@ -205,7 +198,6 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
         room_incremental: ext.room_incremental,
-        net_window_collection: ext.net_window_collection,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
     }
 }
@@ -353,64 +345,97 @@ fn effective_room_incremental(configured: Option<bool>, env_override: Option<&st
         .unwrap_or(true)
 }
 
-/// 环境变量名：一次性覆盖 [`net_window_collection`]，不必改配置文件。
-pub const NET_WINDOW_ENV: &str = "AIOS_NET_WINDOW";
+/// 已退役的环境变量名（ADR-031）。曾经一次性覆盖收集口径，现在没有口径可覆盖。
+pub const RETIRED_NET_WINDOW_ENV: &str = "AIOS_NET_WINDOW";
 
-/// 增量窗口收集口径（`DbOption.toml` 的 `net_window_collection`，**默认 false**）。
+/// 退役开关探测（ADR-031）：`net_window_collection` 与 [`RETIRED_NET_WINDOW_ENV`]
+/// 随「收集口径唯一」一并退役——增量窗口只走净窗口（会话索引双根差分），逐会话
+/// 回放只剩 legacy 诊断入口。
 ///
-/// `false`：现状——逐会话回放（`IncrementPipeline::collect_changes`）。
-/// `true`：净窗口——会话索引差分给出净三态，再按窗口两端记录版本合成同形状的
-/// 操作流（ADR-022；每 refno 恰一条，加了又删不出现、删了又建判净修改）。
+/// **为什么不是一删了之**：`DbOptionExtFields` 没有 `deny_unknown_fields`，删掉
+/// 字段后配置里残留的 `net_window_collection = false` 会被安静吃掉——那句话的
+/// 字面意思（关掉净收集）与实际行为（跑的正是净收集）恰好相反，是教科书式的静默
+/// 失效。所以它由独立的原始 TOML 探针读取，不与扩展字段反序列化共命运。
 ///
-/// 这是 ADR-022 的灰度开关：预览与执行读的都是本函数（经
-/// `IncrementPipeline::collect_window` 这一个入口，ADR-011 同谓词纪律），
-/// 不存在两条路径两个口径。默认 false 直到夹具 + live A/B 证据收口。
-///
-/// 环境变量 [`NET_WINDOW_ENV`] 压过配置，取值规则同 [`startup_autorun`]
-/// （认 1/true/yes/on 与 0/false/no/off，认不出回落配置——拼错一个词就静默
-/// 换收集口径比「按配置来」坏）。
-pub fn net_window_collection() -> bool {
-    #[cfg(test)]
-    match NET_WINDOW_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
-        1 => return true,
-        2 => return false,
-        _ => {}
-    }
-    effective_net_window_collection(
-        load_ext_fields().net_window_collection,
-        std::env::var(NET_WINDOW_ENV).ok().as_deref(),
+/// 返回 `Some(告警文本)` 时调用方**必须**把它打出来；`None` 表示配置干净。
+pub fn retired_net_window_notice() -> Option<String> {
+    retired_net_window_notice_for(
+        std::env::var_os("DB_OPTION_FILE"),
+        std::env::var_os(RETIRED_NET_WINDOW_ENV).as_deref(),
     )
 }
 
-/// 单测里把 [`net_window_collection`] 摁成某个取值的进程内覆盖（0 = 按配置来），
-/// 形制与理由同 [`RoomIncrementalOverride`]（多线程测试进程不许 `set_var`）。
-#[cfg(test)]
-static NET_WINDOW_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// 覆盖的作用域守卫：离开作用域即恢复「按配置来」。
-#[cfg(test)]
-pub(crate) struct NetWindowOverride;
-
-#[cfg(test)]
-impl NetWindowOverride {
-    pub(crate) fn set(on: bool) -> Self {
-        NET_WINDOW_OVERRIDE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
-        Self
+fn retired_net_window_notice_for(
+    configured_path: Option<OsString>,
+    env_override: Option<&OsStr>,
+) -> Option<String> {
+    let (configured, probe_error) = match probe_retired_net_window_config(configured_path) {
+        Ok(configured) => (configured, None),
+        Err(error) => (None, Some(error)),
+    };
+    let mut found = Vec::new();
+    if let Some(value) = configured {
+        found.push(format!("DbOption 的 net_window_collection = {value}"));
+    }
+    if let Some(value) = env_override {
+        found.push(format!("环境变量 {RETIRED_NET_WINDOW_ENV} = {value:?}"));
+    }
+    match (found.is_empty(), probe_error) {
+        (true, None) => None,
+        (false, None) => Some(format!(
+            "⚠ 收集口径开关已退役（ADR-031），但仍被设置：{}。\
+             增量窗口现在只有净窗口一种口径（会话索引双根差分），该设置不起任何作用；\
+             逐会话回放只保留为 legacy 诊断入口。请从配置与环境中移除它。",
+            found.join("；")
+        )),
+        (true, Some(error)) => Some(format!(
+            "⚠ 退役收集口径开关探测失败（ADR-031）：{error}。\
+             不能确认 DbOption 中是否残留 net_window_collection；请修复配置读取/语法错误。"
+        )),
+        (false, Some(error)) => Some(format!(
+            "⚠ 收集口径开关已退役（ADR-031），但仍被设置：{}；同时配置探测失败：{error}。\
+             增量窗口现在只有净窗口一种口径，该设置不起任何作用；请移除环境变量并修复配置。",
+            found.join("；")
+        )),
     }
 }
 
-#[cfg(test)]
-impl Drop for NetWindowOverride {
-    fn drop(&mut self) {
-        NET_WINDOW_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
-    }
+/// 独立读取 DbOption 的原始 TOML。这里故意不复用 [`load_ext_fields`]：任一扩展字段
+/// 类型漂移都不应把退役键的告警一起吞掉。
+fn probe_retired_net_window_config(configured: Option<OsString>) -> Result<Option<String>, String> {
+    let candidates = config_path_candidates(configured);
+    let path = candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            format!(
+                "找不到配置文件（依次尝试：{}）",
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("，")
+            )
+        })?;
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+    let document = toml::from_str::<toml::Value>(&text)
+        .map_err(|error| format!("解析 {} 失败：{error}", path.display()))?;
+    let table = document
+        .as_table()
+        .ok_or_else(|| format!("解析 {} 失败：TOML 顶层不是 table", path.display()))?;
+    Ok(table
+        .get("net_window_collection")
+        .map(std::string::ToString::to_string))
 }
 
-fn effective_net_window_collection(configured: Option<bool>, env_override: Option<&str>) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(false)
+fn config_path_candidates(configured: Option<OsString>) -> Vec<PathBuf> {
+    let literal = PathBuf::from(ext_config_name(configured));
+    let mut candidates = vec![literal.clone()];
+    if literal.extension().is_none() {
+        candidates.push(Path::new(&literal).with_extension("toml"));
+    }
+    candidates
 }
 
 // `watermark_realign` 档位（off/check/rebaseline，2026-08-12 引入）随 ADR-021
@@ -489,25 +514,135 @@ mod tests {
         assert!(effective_room_incremental(None, Some("ture")));
     }
 
-    /// 缺配置就是回放：净窗口是收集口径的架构级切换（ADR-022），必须显式打开；
-    /// 灰度期证据没收口前，默认行为一个字节都不许变。
-    #[test]
-    fn net_window_collection_defaults_to_replay() {
-        assert!(!effective_net_window_collection(None, None));
-        assert!(effective_net_window_collection(Some(true), None));
-        assert!(!effective_net_window_collection(Some(false), None));
+    fn write_probe_config(name: &str, contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let path = dir.path().join(name);
+        fs::write(&path, contents).expect("write temp config");
+        (dir, path)
     }
 
-    /// 环境变量两个方向都要压得住：配置写死 true 的部署得能临时退回回放口径，
-    /// 反过来也得能一次性试开而不改文件。认不出的取值回落配置——拼错一个词
-    /// 静默换收集口径比「按配置来」坏，与 [`effective_startup_autorun`] 同纪律。
+    /// 配置干净时一个字都不该多说——退役告警只在真有人设了它时出现。
     #[test]
-    fn the_net_window_env_override_wins_in_both_directions() {
-        assert!(effective_net_window_collection(Some(false), Some("on")));
-        assert!(!effective_net_window_collection(Some(true), Some("off")));
-        assert!(effective_net_window_collection(None, Some("1")));
-        assert!(effective_net_window_collection(Some(true), Some("no?")));
-        assert!(!effective_net_window_collection(None, Some("no?")));
+    fn a_clean_config_says_nothing_about_the_retired_switch() {
+        let (_dir, path) = write_probe_config("clean.toml", "startup_autorun = true\n");
+        assert_eq!(retired_net_window_notice_for(Some(path.into()), None), None);
+    }
+
+    /// 退役键不许静默吃掉（ADR-031）；探针认键存在，不把值类型绑死为 bool。
+    #[test]
+    fn retired_switch_probe_reports_boolean_and_string_values() {
+        for (name, value) in [("boolean.toml", "false"), ("string.toml", "\"false\"")] {
+            let (_dir, path) =
+                write_probe_config(name, &format!("net_window_collection = {value}\n"));
+            let notice =
+                retired_net_window_notice_for(Some(path.into()), None).expect("退役配置键要出声");
+            assert!(notice.contains("net_window_collection"), "{notice}");
+            assert!(notice.contains(value), "{notice}");
+            assert!(notice.contains("ADR-031"), "{notice}");
+        }
+    }
+
+    /// 其他扩展字段坏掉时，原始 TOML 仍可独立探出退役键。
+    #[test]
+    fn retired_switch_probe_survives_other_extension_type_errors() {
+        let (_dir, path) = write_probe_config(
+            "wrong-extension-type.toml",
+            "data_batch_workers = \"many\"\nnet_window_collection = 7\n",
+        );
+        let notice = retired_net_window_notice_for(Some(path.into()), None)
+            .expect("其他字段类型错误不能吞掉退役键");
+        assert!(notice.contains("net_window_collection = 7"), "{notice}");
+    }
+
+    #[test]
+    fn retired_switch_probe_reports_invalid_toml_instead_of_calling_it_clean() {
+        let (_dir, path) = write_probe_config("invalid.toml", "net_window_collection = [\n");
+        let notice = retired_net_window_notice_for(Some(path.into()), None)
+            .expect("非法 TOML 必须显式报告探测失败");
+        assert!(notice.contains("探测失败"), "{notice}");
+        assert!(notice.contains("解析"), "{notice}");
+    }
+
+    #[test]
+    fn retired_switch_probe_reports_a_missing_config_instead_of_calling_it_clean() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let missing = dir.path().join("missing-DbOption");
+        let notice = retired_net_window_notice_for(Some(missing.into()), None)
+            .expect("配置不存在必须显式报告探测失败");
+        assert!(notice.contains("探测失败"), "{notice}");
+        assert!(notice.contains("找不到配置文件"), "{notice}");
+    }
+
+    #[test]
+    fn retired_switch_probe_tries_the_literal_path_then_toml_suffix() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let stem = dir.path().join("DbOption-probe");
+        fs::write(
+            stem.with_extension("toml"),
+            "net_window_collection = true\n",
+        )
+        .expect("write suffixed temp config");
+        let notice = retired_net_window_notice_for(Some(stem.into()), None)
+            .expect("无后缀配置名必须回落 .toml");
+        assert!(notice.contains("net_window_collection = true"), "{notice}");
+    }
+
+    #[test]
+    fn retired_switch_probe_reports_environment_and_config_together() {
+        let (_dir, path) = write_probe_config("both.toml", "net_window_collection = false\n");
+        let notice = retired_net_window_notice_for(Some(path.into()), Some(OsStr::new("")))
+            .expect("配置与空环境变量都要出声");
+        assert!(notice.contains("net_window_collection = false"), "{notice}");
+        assert!(notice.contains(RETIRED_NET_WINDOW_ENV), "{notice}");
+        assert!(notice.contains("\"\""), "空环境变量也算已设置: {notice}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retired_switch_probe_reports_a_non_unicode_environment_value() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let (_dir, path) = write_probe_config("clean.toml", "startup_autorun = true\n");
+        let raw = OsString::from_wide(&[0xD800]);
+        let notice = retired_net_window_notice_for(Some(path.into()), Some(raw.as_os_str()))
+            .expect("非 Unicode 环境变量也算已设置");
+        assert!(notice.contains(RETIRED_NET_WINDOW_ENV), "{notice}");
+        assert!(notice.contains("环境变量"), "{notice}");
+    }
+
+    /// 退役告警必须同时挂在二进制 `run_cli` 和 Python `full_init` 上——后者自称
+    /// 对齐前者前置段，live A/B / testbed 走的就是它。只钉 `retired_net_window_message`
+    /// 钉不住接线。
+    #[test]
+    fn both_startup_paths_report_the_retired_net_window_switch() {
+        let cli = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+        let py = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/python/src/exec_api.rs"
+        ));
+        let needle = concat!("retired_net_", "window_notice");
+        let run_cli = cli
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli 必须存在")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli 结束边界必须存在")
+            .0;
+        let full_init = py
+            .split_once("pub fn full_init(")
+            .expect("full_init 必须存在")
+            .1
+            .split_once("\n#[pyfunction]")
+            .expect("full_init 结束边界必须存在")
+            .0;
+        assert!(
+            run_cli.contains(needle),
+            "run_cli 必须把退役开关打成有声告警"
+        );
+        assert!(
+            full_init.contains(needle),
+            "full_init 不得把退役开关静默吃掉"
+        );
     }
 
     #[test]

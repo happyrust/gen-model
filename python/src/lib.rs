@@ -304,10 +304,14 @@ fn noun_dict(py: Python<'_>, attlib_path: PathBuf) -> PyResult<Py<PyAny>> {
     Ok(pythonize(py, &value)?.unbind())
 }
 
-/// 收集一个增量窗口（`start..=end`）的变更，纯函数、不写库、不动水位。
+/// **LEGACY** 逐会话回放收集（ADR-031）：按窗口内每个会话认领本会话新写记录再
+/// 做属性 diff。纯函数、不写库、不动水位。
+///
+/// 生产预览 / 执行走的是 [`net_window`]（`IncrementPipeline::collect_window`），
+/// **不是**本入口。这里只给跨结构对拍和「哪个会话动的」取证用。
 ///
 /// 返回 `{sesno: [op, ...]}`；`detail=False` 时属性只给名字列表，`detail=True`
-/// 给完整旧值/新值。与增量管线 / 手动预览共用同一实现（`IncrementPipeline::collect_changes`）。
+/// 给完整旧值/新值。
 #[pyfunction]
 #[pyo3(signature = (path, start, end, detail=false))]
 fn collect_changes(
@@ -366,10 +370,12 @@ fn net_changes(
     Ok(pythonize(py, &value)?.unbind())
 }
 
-/// 解析器语义净窗口：会话索引差分先圈出两端记录位置，再在文件内解析 base / 终稿
-/// 并做一次属性 diff。与 [`net_changes`] 的索引触达三态不同，本入口会过滤“换页但
-/// 内容相同”的原样重写。E3D 自己推进的显式元数据（例如 BRAN.CACHID）仍会如实
-/// 返回，调用方可以据属性桶区分业务改动与保存期元数据。
+/// **正式口径**（ADR-031）：解析器语义净窗口。会话索引差分先圈出两端记录位置，
+/// 再在文件内解析 base / 终稿并做一次属性 diff。与增量管线 / 手动预览共用同一
+/// 实现（`IncrementPipeline::collect_window` → `collect_net_window`）。
+///
+/// 与 [`net_changes`] 的索引触达三态不同，本入口会过滤“换页但内容相同”的原样
+/// 重写。E3D 自己推进的显式元数据（例如 BRAN.CACHID）仍会如实返回。
 ///
 /// 返回 `{requested_start/end, window: {sesno: [op, ...]}, counts,
 /// warnings, unchanged_rewrites, unparseable_finals}`。`detail=True` 时 Modified 携带
