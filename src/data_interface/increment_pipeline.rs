@@ -510,7 +510,7 @@ fn net_caliber_warning(
     added: usize,
     deleted: usize,
     modified: usize,
-    outcome: &crate::data_interface::net_window::NetWindowOutcome,
+    outcome: &pdms_io::net_window::NetWindowOutcome,
 ) -> String {
     format!(
         "收集口径：净窗口（会话索引差分，ADR-031 单一口径）——added={added} deleted={deleted} \
@@ -1003,7 +1003,7 @@ impl IncrementPipeline {
     /// 谓词纪律）。
     ///
     /// 口径只有一种：净窗口（会话索引双根差分 + 两端版本合成，
-    /// [`crate::data_interface::net_window::collect_net_window`]），与 core.dll
+    /// [`pdms_io::net_window::collect_net_window`]），与 core.dll
     /// `DB_IndexTableCompare` 同思想。ADR-031 之后**没有分支**——逐会话回放
     /// （[`Self::collect_changes`]）已退出生产路径，只作 legacy 诊断，并由默认关闭的
     /// `legacy_session_replay` feature 挡在生产依赖图之外。
@@ -1018,7 +1018,7 @@ impl IncrementPipeline {
         io.open()
             .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
         let session_sesnos = session_sesnos_in_range(&io.sesno_pgno_map, &sesno_range);
-        let outcome = crate::data_interface::net_window::collect_net_window(&mut io, sesno_range)?;
+        let outcome = pdms_io::net_window::collect_net_window(&mut io, sesno_range)?;
         let (mut added, mut deleted, mut modified) = (0usize, 0usize, 0usize);
         for operation in outcome.window.values().flatten() {
             match &operation.detail {
@@ -2255,12 +2255,12 @@ mod cache_tests {
     /// （spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
     #[test]
     fn the_net_caliber_warning_carries_the_tolerated_shape_counts() {
-        let mut outcome = crate::data_interface::net_window::NetWindowOutcome {
+        let mut outcome = pdms_io::net_window::NetWindowOutcome {
             window: BTreeMap::new(),
             warnings: Vec::new(),
             unchanged_rewrites: 4,
             unparseable_finals: 3,
-            stats: crate::data_interface::session_index_diff::NetChangeStats::default(),
+            stats: pdms_io::session_index_diff::NetChangeStats::default(),
         };
         outcome.stats.target.unreadable_child_pages = 2;
         outcome.stats.base.unreadable_child_pages = 1;
@@ -2479,6 +2479,370 @@ mod cache_tests {
             gate_at < warn_at && warn_at < continue_at,
             "顺序必须是 白名单门 → warnings.push → continue: {body}"
         );
+    }
+
+    // ── 跨结构 live 对拍（2026-08-19 收集器下沉时迁入）────────────────────
+    //
+    // 收集器本身已下沉 pdms-io，纯单测跟着走了；下面三条留在这一层，因为它们的
+    // 参照臂 / 计时对象都在这一层：`collect_changes` 是 legacy 回放外加两个
+    // Save Work 终稿补丁的包装，`collect_window` 含批次口径拼装。放到 pdms-io
+    // 里够不着，放在这里才是「对拍的两臂在同一处可见」。
+
+    /// live 对拍的独立仲裁：对同一 refno 用**生产 B+ 树点查**在窗口两端各查一次，
+    /// 由「在场与否 + 记录位置」推出期望三态。刻意不用 `fold_net_op` 当 oracle——
+    /// 回放折叠与净差分在「删了又建 → Added vs Modified」「临时删除」上有已知的
+    /// 措辞差异，拿它仲裁会把两套口径的措辞差异误判成缺陷。
+    #[cfg(feature = "legacy_session_replay")]
+    fn expected_class(start_loc: Option<u64>, end_loc: Option<u64>) -> Option<&'static str> {
+        match (start_loc, end_loc) {
+            (None, Some(_)) => Some("added"),
+            (Some(_), None) => Some("deleted"),
+            (Some(start), Some(end)) if start != end => Some("modified"),
+            _ => None, // 位置未变 = 未动；两端都不在场 = 窗口内自我抵消
+        }
+    }
+
+    /// live：真实 ams8000 上，净差分对「回放触达集 ∪ 差分结果集」逐 refno 与
+    /// 生产点查仲裁一致，且回放触达的每个 refno 都被差分正确处置。
+    /// 前置：本机存在 AvevaMarineSample 的 ams8000_0001（`AIOS_AMS8000_FILE`
+    /// 可覆盖路径）；从仓库根运行（属性字典按 CWD 相对路径装载）。
+    #[cfg(feature = "legacy_session_replay")]
+    #[test]
+    #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
+    fn live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay() {
+        use std::path::PathBuf;
+
+        let path = std::env::var_os("AIOS_AMS8000_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
+            });
+        assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
+
+        let mut io = PdmsIO::new("", path.clone(), true);
+        io.open().expect("open ams8000");
+        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
+        let starts: Vec<i32> = {
+            let mut list = vec![1, latest / 2, (latest - 5).max(1), latest];
+            list.dedup();
+            list
+        };
+
+        for start in starts {
+            let window = start..=latest;
+            let diff_started = Instant::now();
+            let diff =
+                pdms_io::session_index_diff::collect_net_changes(&mut io, window.clone(), false)
+                    .expect("net diff");
+            let diff_ms = diff_started.elapsed().as_millis();
+
+            let replay_started = Instant::now();
+            let replay =
+                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay collect");
+            let replay_ms = replay_started.elapsed().as_millis();
+
+            let mut diff_class: HashMap<RefU64, &'static str> = HashMap::new();
+            for entry in &diff.added {
+                diff_class.insert(entry.refno, "added");
+            }
+            for entry in &diff.deleted {
+                diff_class.insert(entry.refno, "deleted");
+            }
+            for entry in &diff.modified {
+                diff_class.insert(entry.refno, "modified");
+            }
+
+            let mut union: HashSet<RefU64> = diff_class.keys().copied().collect();
+            let mut replay_touched = 0usize;
+            for ops in replay.values() {
+                for op in ops {
+                    if !matches!(op.detail, EleOperationDetail::None) {
+                        union.insert(op.refno);
+                        replay_touched += 1;
+                    }
+                }
+            }
+
+            for refno in &union {
+                let start_loc = diff
+                    .base_sesno
+                    .and_then(|base| io.search_latest_refno(*refno, Some(base as u32)))
+                    .map(|(_, offset)| offset);
+                let end_loc = io
+                    .search_latest_refno(*refno, Some(diff.target_sesno as u32))
+                    .map(|(_, offset)| offset);
+                let expected = expected_class(start_loc, end_loc);
+                let got = diff_class.get(refno).copied();
+                assert_eq!(
+                    got, expected,
+                    "refno {refno} 在窗口 {start}..={latest} 的净判定与生产点查仲裁不一致\
+                     （start_loc={start_loc:?} end_loc={end_loc:?}）"
+                );
+            }
+
+            println!(
+                "[live] 窗口 {start}..={latest}: diff {}ms（added={} deleted={} modified={} \
+                 目标侧读页 {} / 剪枝 {}） vs 回放 {}ms（触达 {} 条 op）；仲裁 {} 个 refno 全一致",
+                diff_ms,
+                diff.added.len(),
+                diff.deleted.len(),
+                diff.modified.len(),
+                diff.stats.target.pages_read,
+                diff.stats.shared_subtree_prunes,
+                replay_ms,
+                replay_touched,
+                union.len()
+            );
+        }
+    }
+
+    /// live：真实 ams8000 上净窗口收集器与逐会话回放对拍。三态在差分层已由点查
+    /// 仲裁（上一条），这里验的是**负载合成**：单触达 refno 的 Add 渲染逐字符相等
+    /// （Add 无引用型条目乱序问题，`to_surql` 全程确定性），Modified 三桶键集 +
+    /// children 两端 + noun 相等。
+    /// 前置：本机存在 ams8000_0001（`AIOS_AMS8000_FILE` 可覆盖）；仓库根运行。
+    #[cfg(feature = "legacy_session_replay")]
+    #[test]
+    #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
+    fn live_ams8000_net_window_payloads_match_replay_on_single_touch_refnos() {
+        use std::collections::BTreeSet;
+        use std::path::PathBuf;
+
+        let path = std::env::var_os("AIOS_AMS8000_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
+            });
+        assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
+
+        let mut io = PdmsIO::new("", path.clone(), true);
+        io.open().expect("open ams8000");
+        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
+
+        let mut add_compared = 0usize;
+        let mut modified_compared = 0usize;
+        for start in [1, latest / 2, (latest - 5).max(1)] {
+            let window = start..=latest;
+            let net_started = Instant::now();
+            let outcome = pdms_io::net_window::collect_net_window(&mut io, window.clone())
+                .expect("net window");
+            let net_ms = net_started.elapsed().as_millis();
+
+            let replay_started = Instant::now();
+            let replay =
+                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay collect");
+            let replay_ms = replay_started.elapsed().as_millis();
+
+            let mut net_ops: HashMap<RefU64, &EleOperationData> = HashMap::new();
+            for operation in outcome.window.values().flatten() {
+                net_ops.insert(operation.refno, operation);
+            }
+            let mut touch_counts: HashMap<RefU64, usize> = HashMap::new();
+            for operation in replay.values().flatten() {
+                if !matches!(operation.detail, EleOperationDetail::None) {
+                    *touch_counts.entry(operation.refno).or_default() += 1;
+                }
+            }
+
+            let mut window_adds = 0usize;
+            let mut window_modified = 0usize;
+            for (sesno, operations) in &replay {
+                for replay_op in operations {
+                    if touch_counts.get(&replay_op.refno) != Some(&1) {
+                        continue;
+                    }
+                    let Some(net_op) = net_ops.get(&replay_op.refno) else {
+                        continue; // 类别分歧属回放盲区，由上一条差分层仲裁用例管
+                    };
+                    if net_op.sesno != *sesno {
+                        continue;
+                    }
+                    match (&replay_op.detail, &net_op.detail) {
+                        (EleOperationDetail::Add(_), EleOperationDetail::Add(_)) => {
+                            let id = replay_op.refno.to_string();
+                            assert_eq!(
+                                net_op.to_surql(&id, 8000, *sesno),
+                                replay_op.to_surql(&id, 8000, *sesno),
+                                "Add {} 的渲染不一致（终稿合成漂移）",
+                                replay_op.refno
+                            );
+                            window_adds += 1;
+                        }
+                        (
+                            EleOperationDetail::Modified(replay_modified),
+                            EleOperationDetail::Modified(net_modified),
+                        ) => {
+                            let keys = |map: &HashMap<String, aios_core::NamedAttrValue>| {
+                                map.keys().cloned().collect::<BTreeSet<_>>()
+                            };
+                            let pair_keys = |map: &HashMap<
+                                String,
+                                (aios_core::NamedAttrValue, aios_core::NamedAttrValue),
+                            >| {
+                                map.keys().cloned().collect::<BTreeSet<_>>()
+                            };
+                            assert_eq!(
+                                keys(&net_modified.added_attrs),
+                                keys(&replay_modified.added_attrs),
+                                "Modified {} 的 added 键集不一致",
+                                replay_op.refno
+                            );
+                            assert_eq!(
+                                pair_keys(&net_modified.modified_attrs),
+                                pair_keys(&replay_modified.modified_attrs),
+                                "Modified {} 的 modified 键集不一致",
+                                replay_op.refno
+                            );
+                            assert_eq!(
+                                keys(&net_modified.deleted_attrs),
+                                keys(&replay_modified.deleted_attrs),
+                                "Modified {} 的 deleted 键集不一致",
+                                replay_op.refno
+                            );
+                            assert_eq!(
+                                net_modified.noun, replay_modified.noun,
+                                "Modified {} 的 noun 不一致",
+                                replay_op.refno
+                            );
+                            assert_eq!(
+                                net_modified
+                                    .children_changed
+                                    .as_ref()
+                                    .map(|(old, new)| (old.0.clone(), new.0.clone())),
+                                replay_modified
+                                    .children_changed
+                                    .as_ref()
+                                    .map(|(old, new)| (old.0.clone(), new.0.clone())),
+                                "Modified {} 的 children 两端不一致",
+                                replay_op.refno
+                            );
+                            window_modified += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            add_compared += window_adds;
+            modified_compared += window_modified;
+            println!(
+                "[live] 窗口 {start}..={latest}: 净收集 {net_ms}ms vs 回放 {replay_ms}ms；\
+                 负载对拍 Add {window_adds} / Modified {window_modified}，原样重写跳过 {}，\
+                 收集警告 {} 条",
+                outcome.unchanged_rewrites,
+                outcome.warnings.len()
+            );
+            for warning in &outcome.warnings {
+                println!("[live]   收集警告: {warning}");
+            }
+        }
+        assert!(
+            add_compared > 1000,
+            "Add 负载对拍样本太少（{add_compared}），窗口选择失效"
+        );
+        // Modified 允许为 0：真实文件当前形状下单触达修改稀少（多触达的回放
+        // 逐会话 diff 与净端两端 diff 合法不同，不可逐桶比对）；Modified 负载
+        // 等价由 db8000_session_pairs 性质 i 在 CI 常驻钉住。
+        println!("[live] 合计负载对拍：Add {add_compared} / Modified {modified_compared}");
+    }
+
+    /// T18 记录项（ADR-031，非门）：release 下按协议计时完整收集。
+    /// 1 warmup + 5 次，报 median / min / p95；冷启动另报；两类窗口。
+    /// 计时对象刻意是生产入口 `collect_window`（含打开文件），不是内层合成器。
+    #[cfg(feature = "legacy_session_replay")]
+    #[test]
+    #[ignore = "manual live: release timing for the single-caliber collector"]
+    fn live_ams8000_single_caliber_release_timing() {
+        use std::path::PathBuf;
+
+        let path = std::env::var_os("AIOS_AMS8000_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let testbed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("python/testbed/projects/AvevaMarineSample/ams000/ams8000_0001");
+                if testbed.is_file() {
+                    testbed
+                } else {
+                    PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
+                }
+            });
+        assert!(path.is_file(), "找不到计时文件: {}", path.display());
+
+        let latest = {
+            let mut io = PdmsIO::new("", path.clone(), true);
+            io.open().expect("open");
+            io.get_latest_sesno().expect("latest") as i32
+        };
+        let windows = [
+            ("high-retouch", (latest / 2).max(1)..=latest),
+            ("add-floor", 1..=latest),
+        ];
+
+        fn stats(samples: &[u128]) -> (u128, u128, u128) {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let n = sorted.len();
+            let median = sorted[n / 2];
+            let min = sorted[0];
+            let p95_idx = ((n as f64) * 0.95).ceil() as usize - 1;
+            (median, min, sorted[p95_idx.min(n - 1)])
+        }
+
+        println!(
+            "[T18] file={} sha-skipped latest={latest} cfg={}",
+            path.display(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+        for (name, window) in windows {
+            let mut net_samples = Vec::new();
+            let mut replay_samples = Vec::new();
+            let cold_net = Instant::now();
+            let net0 = IncrementPipeline::collect_window(&path, window.clone()).expect("net cold");
+            let cold_net_ms = cold_net.elapsed().as_millis();
+            let cold_replay = Instant::now();
+            let replay0 =
+                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay cold");
+            let cold_replay_ms = cold_replay.elapsed().as_millis();
+
+            for _ in 0..5 {
+                let started = Instant::now();
+                let _ = IncrementPipeline::collect_window(&path, window.clone()).expect("net warm");
+                net_samples.push(started.elapsed().as_millis());
+                let started = Instant::now();
+                let _ =
+                    IncrementPipeline::collect_changes(&path, window.clone()).expect("replay warm");
+                replay_samples.push(started.elapsed().as_millis());
+            }
+
+            let net_ops = net0.range_eles.values().flatten().count();
+            let replay_ops = replay0
+                .values()
+                .flatten()
+                .filter(|op| !matches!(op.detail, EleOperationDetail::None))
+                .count();
+            let retouch = if net_ops == 0 {
+                0.0
+            } else {
+                replay_ops as f64 / net_ops as f64
+            };
+            let (n_med, n_min, n_p95) = stats(&net_samples);
+            let (r_med, r_min, r_p95) = stats(&replay_samples);
+            let ratio = if n_med == 0 {
+                f64::INFINITY
+            } else {
+                r_med as f64 / n_med as f64
+            };
+            println!(
+                "[T18] {name} {window:?} sessions~{} net_ops={net_ops} replay_ops={replay_ops} \
+                 retouch={retouch:.2} cold_net={cold_net_ms}ms cold_replay={cold_replay_ms}ms \
+                 net median/min/p95={n_med}/{n_min}/{n_p95}ms \
+                 replay median/min/p95={r_med}/{r_min}/{r_p95}ms ratio≈{ratio:.1}×",
+                *window.end() - *window.start() + 1
+            );
+        }
     }
 }
 

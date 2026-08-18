@@ -47,11 +47,17 @@
    显式启用。生产构建以类型缺席取代源码字符串禁调。`dpcsync` 检入 prost 生成物并
    删除 dpcsync 的构建脚本与 prost-build 构建依赖，跨仓构建不再要求宿主安装 protoc。
 
+8. **P6 收集器下沉**（2026-08-19）：`session_index_diff` 与 `net_window` 整体迁入
+   pdms-io，与它们替代的 legacy 逐会话回放同层；`walk_tree` 与
+   `btree_search_optimized_recursive` 的路由复刻不再跨 crate 边界。上层只留批次口径
+   （`collect_window`）与三条需要回放参照臂的 live 对拍。纯平移，行为零改动，验收面
+   是性质 h/i。
+
 ## 关键文件
 
-- [src/data_interface/session_index_diff.rs](../../src/data_interface/session_index_diff.rs)：双根差分（`NetEntry::base_loc` 为合成器供两端位置）
-- [src/data_interface/net_window.rs](../../src/data_interface/net_window.rs)：净操作合成 + `diff_ele_data`
-- [src/data_interface/increment_pipeline.rs](../../src/data_interface/increment_pipeline.rs)：`collect_window` 唯一收集入口；`collect_changes` legacy 诊断入口
+- **pdms-io** `src/session_index_diff.rs`：双根差分（`NetEntry::base_loc` 为合成器供两端位置）
+- **pdms-io** `src/net_window.rs`：净操作合成 + `diff_ele_data`
+- [src/data_interface/increment_pipeline.rs](../../src/data_interface/increment_pipeline.rs)：`collect_window` 唯一收集入口；`collect_changes` legacy 诊断入口；三条跨结构 live 对拍
 - [src/options.rs](../../src/options.rs)：`net_window_collection` 退役探测（残留键告警）
 - [src/data_interface/model_impact.rs](../../src/data_interface/model_impact.rs)：primaryList 快照门控（ADR-009）
 - [tests/fixtures/core-primary-list-e3d31.json](../../tests/fixtures/core-primary-list-e3d31.json)：core.dll 字段快照与 unknown 清单

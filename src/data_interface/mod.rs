@@ -22,9 +22,10 @@ pub mod model_impact;
 
 pub mod sesno_range;
 
-pub mod net_window;
-
-pub mod session_index_diff;
+// 净窗口收集（`net_window`）与会话索引差分（`session_index_diff`）已下沉到
+// pdms-io（2026-08-19）：它们的输入是「库文件 + sesno 窗口」，产出是 pdms-io 自己
+// 的操作流类型，中间不碰库——与被它替代的 legacy 逐会话回放同层。上层按
+// `pdms_io::net_window` / `pdms_io::session_index_diff` 直接引用，本模块不做转发。
 
 pub mod dbnum_state;
 

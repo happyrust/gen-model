@@ -339,7 +339,7 @@ fn collect_changes(
 ///
 /// 与 `parse.collect_changes`（逐会话回放）互为对拍：回放给出每会话操作明细，
 /// 差分给出净三态（窗口内加了又删不出现，删了又建判 modified）。实现见
-/// `data_interface::session_index_diff`（存在性口径与生产 B+ 树点查逐字对齐）。
+/// `pdms_io::session_index_diff`（存在性口径与生产 B+ 树点查逐字对齐）。
 ///
 /// 返回 `{requested_start, requested_end, base_sesno, target_sesno,
 /// added/deleted/modified: [{refno, record_pgno, record_offset,
@@ -359,11 +359,8 @@ fn net_changes(
             let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
             io.open()
                 .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-            let set = aios_database::data_interface::session_index_diff::collect_net_changes(
-                &mut io,
-                start..=end,
-                with_noun,
-            )?;
+            let set =
+                pdms_io::session_index_diff::collect_net_changes(&mut io, start..=end, with_noun)?;
             anyhow::Ok(set.to_json())
         })
         .map_err(anyhow_to_py)?;
@@ -394,10 +391,7 @@ fn net_window(
             let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
             io.open()
                 .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-            let outcome = aios_database::data_interface::net_window::collect_net_window(
-                &mut io,
-                start..=end,
-            )?;
+            let outcome = pdms_io::net_window::collect_net_window(&mut io, start..=end)?;
             let mut counts = serde_json::Map::from_iter([
                 ("added".into(), serde_json::json!(0usize)),
                 ("deleted".into(), serde_json::json!(0usize)),
