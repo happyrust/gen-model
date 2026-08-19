@@ -7,14 +7,20 @@ param(
     [string]$RestoreMacro = 'scripts/e3d/db8000_bran_ftub_move_restore.mac',
     [string]$ExpectedApplyPos = '10887,12332,3400',
     [string]$ExpectedRestorePos = '10887,12332,2900',
-    [string]$Output
+    [string]$Output,
+    # 隔离环境（test-increment）按自己的 BuildProfile 解析 l3_suite 后传进来。
+    # 不给时保持原来的「兄弟 target\debug 优先、回落 D:\Rust\target\debug」。
+    [string]$L3Exe
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $python = Join-Path $repo 'python\.venv\Scripts\python.exe'
-$l3 = Join-Path (Split-Path $repo -Parent) 'target\debug\l3_suite.exe'
-if (-not (Test-Path -LiteralPath $l3)) { $l3 = 'D:\Rust\target\debug\l3_suite.exe' }
+$l3 = $L3Exe
+if (-not $l3) {
+    $l3 = Join-Path (Split-Path $repo -Parent) 'target\debug\l3_suite.exe'
+    if (-not (Test-Path -LiteralPath $l3)) { $l3 = 'D:\Rust\target\debug\l3_suite.exe' }
+}
 if (-not $Output) { $Output = Join-Path $repo ('output\e3d-tty-net-window\' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 
