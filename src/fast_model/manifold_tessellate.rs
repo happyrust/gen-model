@@ -281,6 +281,27 @@ mod tests {
     }
 
     #[test]
+    fn db8000_chevron_extrusion_has_renderable_flat_normals() {
+        let verts = vec![vec![
+            Vec3::new(-100.0, -200.0, 0.0),
+            Vec3::new(-3.59, -200.0, 0.0),
+            Vec3::new(-62.0, -25.0, 0.0),
+            Vec3::new(-3.59, 150.0, 0.0),
+            Vec3::new(-100.0, 150.0, 0.0),
+        ]];
+        let mesh = tessellate_extrusion(&verts, 100.0, 0.35).expect("db8000 chevron extrusion");
+
+        crate::fast_model::mesh_assert::assert_solid_mesh(&mesh, "db8000 chevron");
+        for face in mesh.indices.chunks_exact(3) {
+            let normal = mesh.normals[face[0] as usize];
+            assert!(
+                face.iter()
+                    .all(|&index| mesh.normals[index as usize].abs_diff_eq(normal, 1e-6))
+            );
+        }
+    }
+
+    #[test]
     fn empty_extrusion_is_hard_fail() {
         let err = tessellate_extrusion(&[], 10.0, 1.0).unwrap_err();
         assert!(err.to_string().contains("empty extrusion"), "{err}");
