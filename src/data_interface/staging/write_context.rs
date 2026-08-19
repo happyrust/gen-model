@@ -209,6 +209,17 @@ pub(crate) async fn active_staged_finalize_plan()
     active_staging_writes()?.finalize_plan().await
 }
 
+/// Return the source watermark identity registered for the active staged window.
+/// Dependency-cache publication must use this authority instead of inferring it
+/// from model work items, because a valid window may have an empty model plan.
+pub(crate) async fn active_staged_finalize_context() -> Option<(u32, i32)> {
+    let context = active_staging_writes()?;
+    let finalize = context.finalize.lock().await;
+    finalize
+        .as_ref()
+        .map(|finalize| (finalize.dbnum, finalize.end_sesno))
+}
+
 pub(crate) async fn settle_staged_plan_items(
     succeeded: &std::collections::BTreeSet<(
         crate::data_interface::model_update_plan::ModelWorkAction,
@@ -402,6 +413,7 @@ mod tests {
                 })
                 .await
                 .expect("register finalize");
+                assert_eq!(active_staged_finalize_context().await, Some((7994, 9)));
                 assert_eq!(active_staged_finalize_plan().await.unwrap().work_items.len(), 2);
                 settle_staged_plan_items(&std::collections::BTreeSet::from([(
                     crate::data_interface::model_update_plan::ModelWorkAction::Transform,

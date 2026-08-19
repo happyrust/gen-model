@@ -189,6 +189,7 @@ pub async fn gen_meshes_in_db(
 pub async fn booleans_meshes_in_db(
     option: Option<Arc<DbOption>>,
     refnos: &[RefnoEnum],
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     if refnos.is_empty() {
         return Ok(());
@@ -204,10 +205,8 @@ pub async fn booleans_meshes_in_db(
             .unwrap_or(false);
         let time = std::time::Instant::now();
         //生成元件库内部几何体的负实体运算
-        apply_cata_neg_boolean_manifold(chunk, replace_exist, dir.clone())
-            .await
-            .unwrap();
-        apply_insts_boolean_manifold(chunk, replace_exist, dir.clone()).await?;
+        apply_cata_neg_boolean_manifold(chunk, replace_exist, dir.clone(), failure_policy).await?;
+        apply_insts_boolean_manifold(chunk, replace_exist, dir.clone(), failure_policy).await?;
         //有一些布尔运算要精确计算，不然会有薄片出现
         //生成负实体的布尔运算
         // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
@@ -256,10 +255,10 @@ pub async fn process_meshes_update_db(
 
     let time = std::time::Instant::now();
     //生成元件库内部几何体的负实体运算
-    apply_cata_neg_boolean_manifold(&refnos, replace_exist, dir.clone())
-        .await
-        .unwrap();
-    apply_insts_boolean_manifold(&refnos, replace_exist, dir.clone()).await?;
+    let failure_policy =
+        crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
+    apply_cata_neg_boolean_manifold(&refnos, replace_exist, dir.clone(), failure_policy).await?;
+    apply_insts_boolean_manifold(&refnos, replace_exist, dir.clone(), failure_policy).await?;
     //有一些布尔运算要精确计算，不然会有薄片出现
     //生成负实体的布尔运算
     // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
@@ -295,6 +294,19 @@ pub async fn process_meshes_update_db_deep_default(refnos: &[RefnoEnum]) -> anyh
 pub async fn process_meshes_update_db_deep(
     dboption: &DbOption,
     refnos: &[RefnoEnum],
+) -> anyhow::Result<()> {
+    process_meshes_update_db_deep_with_policy(
+        dboption,
+        refnos,
+        crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+    )
+    .await
+}
+
+pub(crate) async fn process_meshes_update_db_deep_with_policy(
+    dboption: &DbOption,
+    refnos: &[RefnoEnum],
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     if !refnos.is_empty() {
         let dir = dboption.get_meshes_path();
@@ -368,10 +380,20 @@ pub async fn process_meshes_update_db_deep(
                 // dbg!(target_visible_refnos.len());
                 let t_bool = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
-                apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
-                    .await?;
-                apply_insts_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
-                    .await?;
+                apply_cata_neg_boolean_manifold(
+                    &target_visible_refnos,
+                    replace_exist,
+                    dir.clone(),
+                    failure_policy,
+                )
+                .await?;
+                apply_insts_boolean_manifold(
+                    &target_visible_refnos,
+                    replace_exist,
+                    dir.clone(),
+                    failure_policy,
+                )
+                .await?;
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
                 // apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;

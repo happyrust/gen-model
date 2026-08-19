@@ -17,7 +17,7 @@ use aios_core::pdms_types::*;
 use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::gen_all_geos_data;
+use crate::fast_model::gen_model::gen_all_geos_data_with_policy;
 
 fn dependency_stall_message() -> String {
     let seconds = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT.as_secs();
@@ -104,6 +104,7 @@ impl ModelRefreshPolicy {
     pub(crate) async fn prepare_required_dependencies(
         mgr: &AiosDBManager,
         roots: &[String],
+        cache_context: crate::data_interface::cata_closure::DependencyCacheContext,
     ) -> anyhow::Result<()> {
         if roots.is_empty() {
             return Ok(());
@@ -152,10 +153,13 @@ impl ModelRefreshPolicy {
             if !crate::data_interface::cata_closure::cata_closure_enabled() {
                 return Ok(());
             }
-            let outcome =
-                crate::data_interface::cata_closure::preload_cata_for_roots(&project, &root_refus)
-                    .await
-                    .context("暂存 DESI 窗口的 CATA 必需依赖准备失败")?;
+            let outcome = crate::data_interface::cata_closure::preload_cata_for_roots(
+                &project,
+                &root_refus,
+                Some(cache_context),
+            )
+            .await
+            .context("暂存 DESI 窗口的 CATA 必需依赖准备失败")?;
             if outcome.missing > 0 {
                 anyhow::bail!(
                     "CATA 必需依赖未收口：parsed={} missing={}",
@@ -213,7 +217,21 @@ impl ModelRefreshPolicy {
         // 祖先正确性。窗口外（直写/手动/补偿路径）读的是持久层，祖先本就在场。
         let required = crate::data_interface::staging::active_staging_writes().is_some();
         if required {
-            Self::prepare_required_dependencies(mgr, roots).await?;
+            let (source_dbnum, effective_end_sesno) =
+                crate::data_interface::staging::active_staged_finalize_context()
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("staged model generation missing finalize context")
+                    })?;
+            Self::prepare_required_dependencies(
+                mgr,
+                roots,
+                crate::data_interface::cata_closure::DependencyCacheContext {
+                    source_dbnum,
+                    effective_end_sesno,
+                },
+            )
+            .await?;
         } else {
             crate::data_interface::staging::preload::preload_generation_root_closure(
                 &db_option.project_name,
@@ -234,6 +252,7 @@ impl ModelRefreshPolicy {
             let preload = crate::data_interface::cata_closure::preload_cata_for_roots(
                 &db_option.project_name,
                 &root_refus,
+                None,
             );
             let preload = preload.await;
             match preload {
@@ -268,7 +287,12 @@ impl ModelRefreshPolicy {
             "ModelRefreshPolicy: 生成模型，根数量: {}",
             db_option.debug_root_refnos.as_ref().unwrap().len()
         );
-        gen_all_geos_data(&db_option).await?;
+        let failure_policy = if required {
+            crate::data_interface::geom_error::GeometryFailurePolicy::Required
+        } else {
+            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback
+        };
+        gen_all_geos_data_with_policy(&db_option, failure_policy).await?;
         Ok(())
     }
 

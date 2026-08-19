@@ -30,7 +30,9 @@ pub(crate) use write_context::defer_staged_regen_settlement;
 pub(crate) use write_context::hold_staged_generation_root;
 pub(crate) use write_context::staged_spatial_removals;
 pub(crate) use write_context::{StagedFinalize, register_staged_finalize};
-pub(crate) use write_context::{active_staged_finalize_plan, settle_staged_plan_items};
+pub(crate) use write_context::{
+    active_staged_finalize_context, active_staged_finalize_plan, settle_staged_plan_items,
+};
 pub(crate) use write_context::{active_staging_writes, with_staging_writes};
 
 /// 模型数据面的当前读库。窗口上下文在场时只读暂存，否则读持久层。

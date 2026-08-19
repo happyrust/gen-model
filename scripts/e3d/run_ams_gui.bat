@@ -23,9 +23,13 @@ set "E3D_LAUNCHER=%REPAIRED_ROOT%\launch_e3d_sample_repaired.ps1"
 set "AMS_GRAPHICS_FINISHER=%REPAIRED_ROOT%\finish_ams_graphics_document.ps1"
 set "AMS_RUNTIME_VERIFIER=%REPAIRED_ROOT%\verify_ams_runtime_health.ps1"
 set "SHADOW_INSTALL=%REPAIRED_ROOT%\shadow_e3d31_aps_all"
+set "ACTIVE_PMLLIB=%REPAIRED_ROOT%\PMLLIB"
 set "SAFE_COPY_DLL=%REPAIRED_ROOT%\artifacts\design_edit_runtime_fix_20260811\Aveva.Core.Explorer.safe_copy.dll"
 set "SELF_PASTE_GUARD_DLL=%REPAIRED_ROOT%\artifacts\copy_paste_self_guard_20260809\ExplorerControl.patched.dll"
 set "DRAWLIST_MENU_FIX_DLL=%REPAIRED_ROOT%\artifacts\model_explorer_nested_add_remove_fix_20260815\DrawListAddin.active_empty_routing_fixed.dll"
+set "STEELWORK_GLOBAL_REPAIR=%~dp0Repair-E3dSteelworkGlobals.ps1"
+set "STEELWORK_GLOBAL_INIT=%~dp0Initialize-E3dSteelworkGlobals.ps1"
+set "LIMITS_CE_REPAIR=%~dp0Repair-E3dLimitsCe.ps1"
 set "AMS_USER_DIR=%REPAIRED_ROOT%\aveva_user_ams_d_project"
 set "AMS_WORK_DIR=%REPAIRED_ROOT%\aveva_work_ams_d_project"
 
@@ -39,9 +43,13 @@ for %%F in (
   "%AMS_RUNTIME_VERIFIER%"
   "%PROJECT_EVARS%"
   "%SHADOW_INSTALL%\des.exe"
+  "%ACTIVE_PMLLIB%\common\commands\designviewLimits.pmlcmd"
   "%SAFE_COPY_DLL%"
   "%SELF_PASTE_GUARD_DLL%"
   "%DRAWLIST_MENU_FIX_DLL%"
+  "%STEELWORK_GLOBAL_REPAIR%"
+  "%STEELWORK_GLOBAL_INIT%"
+  "%LIMITS_CE_REPAIR%"
 ) do if not exist "%%~F" (
   echo [FAIL] Missing required file: %%~F
   exit /b 1
@@ -69,6 +77,19 @@ fc /b "%DRAWLIST_MENU_FIX_DLL%" "%SHADOW_INSTALL%\DrawListAddin.dll" >nul 2>&1
 if errorlevel 1 copy /y "%DRAWLIST_MENU_FIX_DLL%" "%SHADOW_INSTALL%\DrawListAddin.dll" >nul || exit /b 1
 echo [EDIT] Copy/paste/delete and Model Explorer DrawList fixes ready.
 
+rem Steelwork grid-plane commands register CE/FORM refresh callbacks during
+rem startup.  Their command manager must create the shared settings object
+rem before registration, otherwise every selection change emits PML (2,751).
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%STEELWORK_GLOBAL_REPAIR%" ^
+  -PmlLibRoot "%ACTIVE_PMLLIB%"
+if errorlevel 1 exit /b 1
+
+rem Limits CE normally only changes the camera.  This direct AMS profile starts
+rem with an empty local drawlist, so ensure CE is present before applying limits.
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%LIMITS_CE_REPAIR%" ^
+  -PmlLibRoot "%ACTIVE_PMLLIB%"
+if errorlevel 1 exit /b 1
+
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" ^
   -UseShadowInstall ^
   -NoCleanup ^
@@ -90,6 +111,10 @@ pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" ^
   -Login "%E3D_LOGIN%" ^
   -Mdb "%MDB%"
 
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if not "%LAUNCH_EXIT%"=="0" goto launch_failed
+
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%STEELWORK_GLOBAL_INIT%"
 set "LAUNCH_EXIT=%ERRORLEVEL%"
 if not "%LAUNCH_EXIT%"=="0" goto launch_failed
 

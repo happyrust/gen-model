@@ -48,6 +48,8 @@ pub struct StagingWindowMeta {
     pub dbnum: u32,
     pub window_id: u64,
     pub label: String,
+    /// Stable for the lifetime of this window and used to make the tail receipt idempotent.
+    pub commit_token: String,
     /// 逻辑会话区间（含吸收扩窗后的最新值）。
     pub start_sesno: i32,
     pub end_sesno: i32,
@@ -116,18 +118,36 @@ pub async fn create_window(
     start_sesno: i32,
     end_sesno: i32,
 ) -> anyhow::Result<ActiveStagedWindow> {
+    create_window_with_commit_token(dbnum, start_sesno, end_sesno, None).await
+}
+
+/// Open a production window and, during crash recovery, restore the durable
+/// commit token before any staged work can reach the commit tail.
+pub async fn create_window_with_commit_token(
+    dbnum: u32,
+    start_sesno: i32,
+    end_sesno: i32,
+    recovered_commit_token: Option<&str>,
+) -> anyhow::Result<ActiveStagedWindow> {
     ensure_writeback_schema_compatible().await?;
     let instance = connect("mem://")
         .await
         .context("连接窗口独立暂存实例（mem://）失败")?;
-    create_window_on(
+    let mut window = create_window_on(
         &instance,
         dbnum,
         start_sesno,
         end_sesno,
         ResourceThresholds::default(),
     )
-    .await
+    .await?;
+    if let Some(commit_token) = recovered_commit_token {
+        if let Err(error) = window.adopt_commit_token(commit_token) {
+            let _ = window.drop_database().await;
+            return Err(error);
+        }
+    }
+    Ok(window)
 }
 
 /// 在显式实例上开窗口（测试与一致性套件用）。调用方若并发执行多个窗口，必须
@@ -155,6 +175,7 @@ pub async fn create_window_on(
         dbnum,
         window_id,
         label: label.clone(),
+        commit_token: format!("{:032x}", rand::random::<u128>()),
         start_sesno,
         end_sesno,
     };
@@ -237,6 +258,22 @@ impl ActiveStagedWindow {
         &self.meta.label
     }
 
+    fn adopt_commit_token(&mut self, commit_token: &str) -> anyhow::Result<()> {
+        let commit_token = commit_token.trim();
+        if commit_token.is_empty() {
+            bail!("staged window commit token must not be empty");
+        }
+        self.meta.commit_token = commit_token.to_string();
+        if let Some(registered) = REGISTRY
+            .lock()
+            .expect("registry lock")
+            .get_mut(&self.meta.label)
+        {
+            registered.meta.commit_token = self.meta.commit_token.clone();
+        }
+        Ok(())
+    }
+
     pub fn gauge(&self) -> &Arc<ResourceGauge> {
         &self.gauge
     }
@@ -265,11 +302,36 @@ impl ActiveStagedWindow {
         pre_tail_transactions: &[String],
         tail_transaction: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.executor
+        let guarded_tail = tail_transaction.map(|tail| {
+            format!(
+                "LET $commit_receipt = (SELECT VALUE last_commit_token FROM ONLY dbnum_watermark:{});\n\
+                 IF $commit_receipt != '{}' {{\n{}\n\
+                 UPSERT dbnum_watermark:{} SET last_commit_token = '{}';\n}};",
+                self.meta.dbnum,
+                self.meta.commit_token,
+                tail,
+                self.meta.dbnum,
+                self.meta.commit_token,
+            )
+        });
+        let result = self
+            .executor
             .lock()
             .await
-            .commit_to(target, pre_tail_transactions, tail_transaction)
-            .await
+            .commit_to(target, pre_tail_transactions, guarded_tail.as_deref())
+            .await;
+        if let Err(error) = &result
+            && error.to_string().contains("commit outcome unknown")
+        {
+            crate::data_interface::model_update_pending::mark_attempt_commit_state_on(
+                target,
+                self.meta.dbnum,
+                &self.meta.commit_token,
+                "outcome_unknown",
+            )
+            .await?;
+        }
+        result
     }
 
     pub fn staging_db(&self) -> &Surreal<Any> {
@@ -636,6 +698,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn recovered_commit_token_replaces_random_window_token_and_registry_copy() {
+        let instance = own_instance().await;
+        let mut window = create_window_on(&instance, 7909, 4, 7, ResourceThresholds::default())
+            .await
+            .unwrap();
+        window.adopt_commit_token("recovered-token").unwrap();
+        assert_eq!(window.meta().commit_token, "recovered-token");
+        let registered = registered_windows()
+            .into_iter()
+            .find(|meta| meta.label == window.label())
+            .unwrap();
+        assert_eq!(registered.commit_token, "recovered-token");
+        window.drop_database().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn registered_finalize_commits_journal_and_watermark_together() {
         let instance = own_instance().await;
         let mut window = create_window_on(&instance, 7905, 3, 7, ResourceThresholds::default())
@@ -680,6 +758,41 @@ mod tests {
             Some("PIPE".into())
         );
         assert_eq!(response.take::<Option<i32>>(1).expect("watermark"), Some(7));
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_token_makes_tail_replay_exactly_once() {
+        let instance = own_instance().await;
+        let window = create_window_on(&instance, 7910, 7, 7, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        let target = own_instance().await;
+        target
+            .use_ns("test")
+            .use_db("commit_receipt")
+            .await
+            .expect("target db");
+        let tail = "UPSERT commit_counter:one SET value = (value?:0) + 1; \
+                    UPSERT dbnum_watermark:7910 SET applied_sesno = 7;";
+
+        window.commit_to(&target, &[], Some(tail)).await.unwrap();
+        window.commit_to(&target, &[], Some(tail)).await.unwrap();
+
+        let mut response = target
+            .query(
+                "RETURN commit_counter:one.value; \
+                 RETURN dbnum_watermark:7910.last_commit_token;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(response.take::<Option<i64>>(0).unwrap(), Some(1));
+        assert_eq!(
+            response.take::<Option<String>>(1).unwrap().as_deref(),
+            Some(window.meta().commit_token.as_str())
+        );
         window.drop_database().await.expect("cleanup");
     }
 

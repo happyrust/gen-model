@@ -16,7 +16,9 @@ ADR-036（成员删除对账）；`specs/013-dabacon-snapshot-completeness/`
 ## 决策
 
 1. `pdms_io` 是顶层 dabacon reader authority；`parse_pdms_db` 保留为内部 decoder。
-   一次读取由 `DabaconSnapshot` 绑定稳定文件身份、头、会话映射与目标锚点。
+   一次读取由 `DabaconSnapshot` 绑定稳定文件身份、头、会话映射与目标锚点；初次捕获
+   必须用同一头字节样本解码，并用前后长度/头复核包围会话映射构造。捕获期间发生 append
+   时重试，不得把旧长度与新 target 拼成 token。
 2. 净窗口只有完整结果才能返回。Added/Modified 终稿完整解析失败时，先用不依赖
    属性字典的最小身份解析 noun；仅代码内白名单 `MNUM` 可作为非持久系统记录跳过，
    其余失败阻断窗口。白名单不是配置项。
@@ -26,8 +28,9 @@ ADR-036（成员删除对账）；`specs/013-dabacon-snapshot-completeness/`
 5. 模型计划最终存在性查询使用同一文件身份与目标会话锚点；同 sesno 换文件也拒绝。
 6. 基线任一 chunk 失败时停止调度、等待已派发写入结束、清理该 dbnum，且不登记成功、
    不建立水位。失败后的空库优于部分基线。
-7. CATA 扫描失败不缓存空集；任一闭包 `missing > 0` 不缓存依赖清单。required 路径继续
-   阻断，best-effort 路径可返回错误账本但不能把不完整结果固化为成功缓存。
+7. CATA 扫描失败不缓存空集；旧格式或空 Ref0 缓存不算 fresh；任一闭包 `missing > 0`
+   不缓存依赖清单。required 路径的未解析根显式阻断，best-effort 路径计入 missing，
+   两者都不得把不完整结果固化为成功缓存。
 
 ## 对 ADR-031 的修订
 
@@ -40,3 +43,7 @@ ADR-031 / spec-003 中“任意非根子页不可读可跳过”与“任意终�
 - 某些以前会带 warning 推进的窗口现在会 Failed 并保留水位，直到 reader/字典修复。
 - 同一路径的 append 仍可继续；路径原子替换为另一文件会被稳定身份识别。
 - `parse_pdms_db` 不需要消失，但主仓不再让多个 decoder 各自拍板同一个水位。
+
+## 2026-08-19 Oracle 审核修订
+
+维护纠正必须从 `CollectedWindow.snapshot_token` 重开验证快照，成员存活和删除子树展开不得另建 `PdmsIO`，以避免同一纠正混读两个文件身份。

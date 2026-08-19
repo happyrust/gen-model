@@ -74,6 +74,10 @@ pub(crate) fn is_valid_ref0(ref0: u32) -> bool {
 pub trait CataDbLocator {
     /// `ref0`（`RefU64::get_0()`）-> 所属 dbnum。
     fn dbnum_of_ref0(&self, ref0: u32) -> Option<u32>;
+    /// Resolve an affiliation without hiding an ambiguous Ref0 behind iteration order.
+    fn resolve_ref0(&self, ref0: u32) -> anyhow::Result<Option<u32>> {
+        Ok(self.dbnum_of_ref0(ref0))
+    }
     /// dbnum -> db_type（如 "CATA" / "DESI"）。
     fn db_type_of(&self, dbnum: u32) -> Option<String>;
     /// dbnum -> (project, db 文件路径)。
@@ -95,7 +99,56 @@ struct DbFileEntry {
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryCataLocator {
     ref0_to_dbnum: HashMap<u32, u32>,
+    ref0_conflicts: HashMap<u32, BTreeSet<u32>>,
     dbnum_files: HashMap<u32, DbFileEntry>,
+}
+
+fn insert_ref0_affiliation(
+    resolved: &mut HashMap<u32, u32>,
+    conflicts: &mut HashMap<u32, BTreeSet<u32>>,
+    ref0: u32,
+    dbnum: u32,
+) {
+    if let Some(set) = conflicts.get_mut(&ref0) {
+        set.insert(dbnum);
+        return;
+    }
+    match resolved.get(&ref0).copied() {
+        None => {
+            resolved.insert(ref0, dbnum);
+        }
+        Some(existing) if existing == dbnum => {}
+        Some(existing) => {
+            resolved.remove(&ref0);
+            conflicts.insert(ref0, BTreeSet::from([existing, dbnum]));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyCacheContext {
+    pub source_dbnum: u32,
+    pub effective_end_sesno: i32,
+}
+
+fn explicit_cache_sesno(
+    staged_window: bool,
+    context: Option<DependencyCacheContext>,
+    source_dbnum: u32,
+) -> anyhow::Result<Option<i32>> {
+    match context {
+        Some(context) if context.source_dbnum == source_dbnum => {
+            Ok(Some(context.effective_end_sesno))
+        }
+        Some(context) => anyhow::bail!(
+            "CATA dependency cache context source mismatch: expected dbnum={source_dbnum}, got dbnum={}",
+            context.source_dbnum
+        ),
+        None if staged_window => anyhow::bail!(
+            "staged CATA dependency missing effective cache context for source dbnum={source_dbnum}"
+        ),
+        None => Ok(None),
+    }
 }
 
 /// 完整候选扫描经过项目优先级裁决后的 CATA 文件。它只提供身份与定位，部分解析
@@ -186,6 +239,7 @@ impl InMemoryCataLocator {
             .collect();
         Self {
             ref0_to_dbnum,
+            ref0_conflicts: HashMap::new(),
             dbnum_files,
         }
     }
@@ -246,6 +300,7 @@ impl InMemoryCataLocator {
         // ref0 扫描（磁盘指纹缓存：文件未变则复用上次结果）。
         let mut cache = Ref0IndexCache::load(project);
         let mut ref0_to_dbnum: HashMap<u32, u32> = HashMap::new();
+        let mut ref0_conflicts: HashMap<u32, BTreeSet<u32>> = HashMap::new();
         let mut dirty = false;
 
         for (dbnum, entry) in &dbnum_files {
@@ -265,7 +320,7 @@ impl InMemoryCataLocator {
                 scanned
             };
             for ref0 in ref0s {
-                ref0_to_dbnum.insert(ref0, *dbnum);
+                insert_ref0_affiliation(&mut ref0_to_dbnum, &mut ref0_conflicts, ref0, *dbnum);
             }
             crate::data_interface::batch_worker::note_dependency_progress(
                 "dependency_index",
@@ -293,6 +348,7 @@ impl InMemoryCataLocator {
                 .map(|(dbnum, e)| (dbnum, (e.db_type, e.project, e.path)))
                 .collect(),
         );
+        locator.ref0_conflicts = ref0_conflicts;
 
         // A project may have only its DESI dbnum parsed. In that state the
         // watermark cannot locate catalogue references yet, so discover CATA
@@ -342,7 +398,24 @@ impl InMemoryCataLocator {
             .collect();
         for (ref0, dbnum) in other.ref0_to_dbnum {
             if cata_dbnums.contains(&dbnum) {
-                self.ref0_to_dbnum.insert(ref0, dbnum);
+                insert_ref0_affiliation(
+                    &mut self.ref0_to_dbnum,
+                    &mut self.ref0_conflicts,
+                    ref0,
+                    dbnum,
+                );
+            }
+        }
+        for (ref0, dbnums) in other.ref0_conflicts {
+            for dbnum in dbnums {
+                if cata_dbnums.contains(&dbnum) {
+                    insert_ref0_affiliation(
+                        &mut self.ref0_to_dbnum,
+                        &mut self.ref0_conflicts,
+                        ref0,
+                        dbnum,
+                    );
+                }
             }
         }
         for (dbnum, entry) in other.dbnum_files {
@@ -428,6 +501,7 @@ impl InMemoryCataLocator {
             .map(|(header, path)| (path, header))
             .collect();
         let mut ref0_to_dbnum: HashMap<u32, u32> = HashMap::new();
+        let mut ref0_conflicts: HashMap<u32, BTreeSet<u32>> = HashMap::new();
         let mut dbnum_files: HashMap<u32, (String, String, PathBuf)> = HashMap::new();
         for sel in collapsed.selected {
             let Some(header) = by_path.get(&sel.leaf_path) else {
@@ -447,7 +521,7 @@ impl InMemoryCataLocator {
                 None => scan_db_ref0s(&sel.leaf_path, project)?,
             };
             for ref0 in ref0s {
-                ref0_to_dbnum.insert(ref0, dbnum);
+                insert_ref0_affiliation(&mut ref0_to_dbnum, &mut ref0_conflicts, ref0, dbnum);
             }
             dbnum_files.entry(dbnum).or_insert((
                 header.db_type.clone(),
@@ -455,13 +529,22 @@ impl InMemoryCataLocator {
                 sel.leaf_path,
             ));
         }
-        Ok(Self::from_parts(ref0_to_dbnum, dbnum_files))
+        let mut locator = Self::from_parts(ref0_to_dbnum, dbnum_files);
+        locator.ref0_conflicts = ref0_conflicts;
+        Ok(locator)
     }
 }
 
 impl CataDbLocator for InMemoryCataLocator {
     fn dbnum_of_ref0(&self, ref0: u32) -> Option<u32> {
         self.ref0_to_dbnum.get(&ref0).copied()
+    }
+
+    fn resolve_ref0(&self, ref0: u32) -> anyhow::Result<Option<u32>> {
+        if let Some(dbnums) = self.ref0_conflicts.get(&ref0) {
+            anyhow::bail!("Ref0 affiliation conflict: ref0={ref0} dbnums={dbnums:?}");
+        }
+        Ok(self.dbnum_of_ref0(ref0))
     }
 
     fn db_type_of(&self, dbnum: u32) -> Option<String> {
@@ -536,14 +619,22 @@ async fn load_dbnum_files_from_watermark(
 /// 扫描单个 db 文件的 `ref0` 集（供 `ref0→dbnum` 反查）。
 ///
 /// paged 模式流式遍历快照索引键并只保留去重后的 `ref0`；legacy/compare 保留旧
-/// `children_map` 基线作灰度与回滚。失败返回空集（该库暂不可定位，由上层日志覆盖）。
+/// `children_map` 基线作灰度与回滚。失败或成功空扫描均上浮（该库暂不可定位，且不发布缓存）。
 /// 失败只攒进解析错误账本、不落库：本函数是同步的，而三个调用点里有一个也在
 /// 同步路径上。落库交给 [`CataLocator::build_for_project`] 那个 async 收口点。
 fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
     match crate::data_interface::on_demand_db::scan_ref0s(path, project) {
-        Ok(ref0s) => {
+        Ok(ref0s) if !ref0s.is_empty() => {
             crate::data_interface::parse_error::note_file_success(path);
             Ok(ref0s)
+        }
+        Ok(_) => {
+            let error = anyhow::anyhow!(
+                "CATA Ref0 权威扫描返回空集合，拒绝发布空缓存: {}",
+                path.display()
+            );
+            crate::data_interface::parse_error::note_file_failure(path, &format!("{error:#}"));
+            Err(error)
         }
         Err(error) => {
             log::warn!(
@@ -599,9 +690,22 @@ struct Ref0CacheEntry {
 }
 
 /// `ref0` 扫描的磁盘指纹缓存（json；best-effort，出错即忽略）。
-#[derive(Debug, Default, Serialize, Deserialize)]
+const REF0_INDEX_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Ref0IndexCache {
+    #[serde(default)]
+    version: u32,
     by_dbnum: HashMap<u32, Ref0CacheEntry>,
+}
+
+impl Default for Ref0IndexCache {
+    fn default() -> Self {
+        Self {
+            version: REF0_INDEX_CACHE_VERSION,
+            by_dbnum: HashMap::new(),
+        }
+    }
 }
 
 impl Ref0IndexCache {
@@ -612,17 +716,28 @@ impl Ref0IndexCache {
     fn load(project: &str) -> Self {
         std::fs::read_to_string(Self::cache_path(project))
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| Self::decode(&s))
             .unwrap_or_default()
+    }
+
+    fn decode(json: &str) -> Option<Self> {
+        serde_json::from_str::<Self>(json)
+            .ok()
+            .filter(|cache| cache.version == REF0_INDEX_CACHE_VERSION)
     }
 
     fn get_if_fresh(&self, dbnum: u32, fingerprint: &str) -> Option<&Vec<u32>> {
         self.by_dbnum.get(&dbnum).and_then(|e| {
-            (!fingerprint.is_empty() && e.fingerprint == fingerprint).then_some(&e.ref0s)
+            (!fingerprint.is_empty() && e.fingerprint == fingerprint && !e.ref0s.is_empty())
+                .then_some(&e.ref0s)
         })
     }
 
     fn put(&mut self, dbnum: u32, fingerprint: String, ref0s: Vec<u32>) {
+        if ref0s.is_empty() {
+            self.by_dbnum.remove(&dbnum);
+            return;
+        }
         self.by_dbnum
             .insert(dbnum, Ref0CacheEntry { fingerprint, ref0s });
     }
@@ -954,7 +1069,7 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                 if !is_valid_ref0(ref0) {
                     continue;
                 }
-                let Some(dbnum) = self.locator.dbnum_of_ref0(ref0) else {
+                let Some(dbnum) = self.locator.resolve_ref0(ref0)? else {
                     missing += 1;
                     continue;
                 };
@@ -1121,7 +1236,7 @@ pub async fn collect_design_subtree_outbound<L: CataDbLocator>(
             if !visited.insert(r) {
                 continue;
             }
-            match locator.dbnum_of_ref0(r.get_0()) {
+            match locator.resolve_ref0(r.get_0())? {
                 Some(dbnum) => by_db.entry(dbnum).or_default().push(r),
                 None => {
                     log::warn!(
@@ -1232,10 +1347,12 @@ pub async fn run_cata_closure_pass_for_refnos<L: CataDbLocator>(
         seeds.len()
     );
     let seed_count = seeds.len();
-    let exclude_dbnums = seed_roots
-        .iter()
-        .filter_map(|root| locator.dbnum_of_ref0(root.get_0()))
-        .collect::<HashSet<_>>();
+    let mut exclude_dbnums = HashSet::new();
+    for root in seed_roots {
+        if let Some(dbnum) = locator.resolve_ref0(root.get_0())? {
+            exclude_dbnums.insert(dbnum);
+        }
+    }
     let mut resolver = CataClosureResolver::new(locator, cfg.excluding_dbnums(exclude_dbnums));
     resolver.seed(seeds);
     let mut manifest = resolver.resolve().await?;
@@ -1388,6 +1505,17 @@ static LAZY_CATA_FALLBACK_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::
 pub struct LazyFallbackOutcome {
     pub parsed: usize,
     pub missing: usize,
+}
+
+fn require_all_roots_resolved(required: bool, unresolved: &[RefU64]) -> anyhow::Result<()> {
+    if required && !unresolved.is_empty() {
+        anyhow::bail!(
+            "Required CATA dependency roots unresolved: count={} sample={:?}",
+            unresolved.len(),
+            unresolved.iter().take(8).collect::<Vec<_>>()
+        );
+    }
+    Ok(())
 }
 
 /// 是否启用按需解析。**默认 On**（按需解析 CATA 为默认行为）；env `AIOS_CATA_CLOSURE_MODE`
@@ -1790,32 +1918,36 @@ pub(crate) async fn discard_deferred_cache(dbnum: u32) {
 pub async fn preload_cata_for_roots(
     project: &str,
     roots: &[RefU64],
+    cache_context: Option<DependencyCacheContext>,
 ) -> anyhow::Result<LazyFallbackOutcome> {
     if roots.is_empty() || !cata_closure_enabled() {
         return Ok(LazyFallbackOutcome::default());
     }
     let locator = InMemoryCataLocator::build_for_project(project).await?;
+    let staged_window = crate::data_interface::staging::active_staging_writes().is_some();
+    let required = staged_window || cache_context.is_some();
 
     // 按源 dbnum 分组生成根。
     let mut by_src: HashMap<u32, Vec<RefU64>> = HashMap::new();
+    let mut unresolved_roots = Vec::new();
     for &r in roots {
-        if let Some(d) = locator.dbnum_of_ref0(r.get_0()) {
-            by_src.entry(d).or_default().push(r);
+        match locator.resolve_ref0(r.get_0())? {
+            Some(d) => by_src.entry(d).or_default().push(r),
+            None => unresolved_roots.push(r),
         }
     }
+    require_all_roots_resolved(required, &unresolved_roots)?;
 
     let mut cache = CataDepCache::load(project);
     let mut seeds: HashSet<RefU64> = HashSet::new();
     let mut dirty = false;
-    let mut closure_missing = 0usize;
+    let mut closure_missing = unresolved_roots.len();
     let manifest_fingerprint = dependency_manifest_fingerprint();
-    let active_window = crate::data_interface::batch_worker::active_data_window();
-    let staged_window = crate::data_interface::staging::active_staging_writes().is_some();
 
     for (src_dbnum, src_roots) in by_src {
-        let sesno = match (staged_window, active_window) {
-            (true, Some((window_dbnum, end_sesno))) if window_dbnum == src_dbnum => end_sesno,
-            _ => crate::data_interface::dbnum_state::DbnumState::applied_sesno(src_dbnum)
+        let sesno = match explicit_cache_sesno(staged_window, cache_context, src_dbnum)? {
+            Some(sesno) => sesno,
+            None => crate::data_interface::dbnum_state::DbnumState::applied_sesno(src_dbnum)
                 .await
                 .unwrap_or(0),
         };
@@ -1843,16 +1975,16 @@ pub async fn preload_cata_for_roots(
                     .flat_map(|s| s.iter().map(|r| r.0))
                     .collect();
                 let database_outbound = collect_database_subtree_outbound(&[root]).await?;
-                let database_seeds = database_outbound
-                    .iter()
-                    .copied()
-                    .filter(|seed| {
-                        locator
-                            .dbnum_of_ref0(seed.get_0())
-                            .and_then(|dbnum| locator.db_type_of(dbnum))
+                let mut database_seeds = Vec::new();
+                for seed in database_outbound.iter().copied() {
+                    if let Some(dbnum) = locator.resolve_ref0(seed.get_0())?
+                        && locator
+                            .db_type_of(dbnum)
                             .is_some_and(|db_type| db_type.eq_ignore_ascii_case("CATA"))
-                    })
-                    .collect::<Vec<_>>();
+                    {
+                        database_seeds.push(seed);
+                    }
+                }
                 log::info!(
                     "[cata_closure] 数据库子树引用: total={} cata={} sample={:?}",
                     database_outbound.len(),
@@ -1903,11 +2035,11 @@ pub async fn preload_cata_for_roots(
         }
     }
     if dirty {
-        if let (true, Some((window_dbnum, _))) = (staged_window, active_window) {
+        if let Some(context) = cache_context {
             DEFERRED_CATA_CACHE
                 .lock()
                 .await
-                .insert(window_dbnum, (project.to_string(), cache));
+                .insert(context.source_dbnum, (project.to_string(), cache));
         } else {
             cache.save(project);
         }
@@ -1997,6 +2129,20 @@ mod tests {
     }
 
     #[test]
+    fn explicit_cache_context_is_authoritative_without_ambient_staging() {
+        let context = DependencyCacheContext {
+            source_dbnum: 8000,
+            effective_end_sesno: 232,
+        };
+        assert_eq!(
+            explicit_cache_sesno(false, Some(context), 8000).unwrap(),
+            Some(232)
+        );
+        assert!(explicit_cache_sesno(true, None, 8000).is_err());
+        assert!(explicit_cache_sesno(false, Some(context), 7997).is_err());
+    }
+
+    #[test]
     fn dependency_cache_does_not_publish_an_incomplete_closure() {
         let root = RefU64((8000u64 << 32) | 42);
         let mut cache = CataDepCache::default();
@@ -2032,6 +2178,22 @@ mod tests {
         assert!(scan.contains("anyhow::Result<Vec<u32>>"));
         assert!(scan.contains("Err(error)"));
         assert!(!scan.contains("Vec::new()"));
+        assert!(
+            scan.contains("Ok(ref0s) if !ref0s.is_empty()") && scan.contains("拒绝发布空缓存"),
+            "成功空扫描也必须保持不可缓存并触发下次重试: {scan}"
+        );
+
+        let preload = source
+            .split_once("pub async fn preload_cata_for_roots(")
+            .expect("preload function")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("preload boundary")
+            .0;
+        assert!(
+            preload.contains("require_all_roots_resolved(required, &unresolved_roots)?"),
+            "Required 路径的未解析根必须显式阻断，不能从 by_src 消失: {preload}"
+        );
     }
 
     #[test]
@@ -2533,6 +2695,20 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_ref0_blocks_only_that_reference() {
+        let mut loc = locator();
+        insert_ref0_affiliation(&mut loc.ref0_to_dbnum, &mut loc.ref0_conflicts, 100, 7355);
+
+        let error = loc
+            .resolve_ref0(100)
+            .expect_err("the ambiguous Ref0 must be rejected");
+        assert!(error.to_string().contains("7320"));
+        assert!(error.to_string().contains("7355"));
+        assert_eq!(loc.resolve_ref0(200).unwrap(), Some(8001));
+        assert_eq!(loc.resolve_ref0(999).unwrap(), None);
+    }
+
+    #[test]
     fn db_type_and_file_resolve_by_dbnum() {
         let loc = locator();
         assert_eq!(loc.db_type_of(7320).as_deref(), Some("CATA"));
@@ -2559,6 +2735,27 @@ mod tests {
 
         assert_eq!(cache.get_if_fresh(7320, "100:200"), Some(&vec![13244]));
         assert_eq!(cache.get_if_fresh(7320, "100:201"), None);
+    }
+
+    #[test]
+    fn legacy_or_empty_ref0_cache_entries_are_never_fresh() {
+        let legacy = r#"{"by_dbnum":{"7320":{"fingerprint":"100:200","ref0s":[]}}}"#;
+        assert!(
+            Ref0IndexCache::decode(legacy).is_none(),
+            "pre-ADR-037 cache format must be invalidated"
+        );
+
+        let mut cache = Ref0IndexCache::default();
+        cache.put(7320, "100:200".into(), Vec::new());
+        assert_eq!(cache.get_if_fresh(7320, "100:200"), None);
+        assert!(!cache.by_dbnum.contains_key(&7320));
+    }
+
+    #[test]
+    fn required_unresolved_roots_block_while_best_effort_reports_missing() {
+        let unresolved = [RefU64((7320u64 << 32) | 1)];
+        assert!(require_all_roots_resolved(true, &unresolved).is_err());
+        assert!(require_all_roots_resolved(false, &unresolved).is_ok());
     }
 
     #[test]

@@ -175,6 +175,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
+source = "git+https://github.com/happyrust/old-aios-core.git?rev=29c91f48ce230814a26466d2150d51385417fab8#29c91f48ce230814a26466d2150d51385417fab8"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -4186,6 +4187,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "manifold-csg"
 version = "0.4.0"
+source = "git+https://github.com/zmerlynn/manifold-csg?rev=2233c5a1162eba981e3f43efcd39a6bc25581335#2233c5a1162eba981e3f43efcd39a6bc25581335"
 dependencies = [
  "log",
  "manifold-csg-sys",
@@ -4195,6 +4197,7 @@ dependencies = [
 [[package]]
 name = "manifold-csg-sys"
 version = "3.5.104"
+source = "git+https://github.com/zmerlynn/manifold-csg?rev=2233c5a1162eba981e3f43efcd39a6bc25581335#2233c5a1162eba981e3f43efcd39a6bc25581335"
 dependencies = [
  "cmake",
 ]
@@ -4919,6 +4922,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
+source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=f3537dae21f64feb3880e5340320ee1db3bd9176#f3537dae21f64feb3880e5340320ee1db3bd9176"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -5008,6 +5012,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
+source = "git+https://github.com/happyrust/old-pdms-io.git?rev=99094048fe309ea272048b1c7d28cee2b3e383cb#99094048fe309ea272048b1c7d28cee2b3e383cb"
 dependencies = [
  "aios_core",
  "anyhow",

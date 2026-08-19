@@ -1290,19 +1290,28 @@ async fn execute_frozen_batch(
         return execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await;
     }
 
-    let mut window = match crate::data_interface::staging::lifecycle::create_window(
-        job.dbnum,
-        job.start_sesno,
-        cand.file_latest_sesno,
-    )
-    .await
-    {
-        Ok(window) => window,
+    let recovered_commit_token = match model_update_pending::load_attempt(job.dbnum).await {
+        Ok(attempt) => attempt.and_then(|attempt| attempt.commit_token),
         Err(error) => {
-            warnings.push(format!("创建增量暂存窗口失败: {error:#}"));
-            return failed_window_result(job, warnings, "创建增量暂存窗口失败");
+            warnings.push(format!("读取增量提交恢复记录失败: {error:#}"));
+            return failed_window_result(job, warnings, "读取增量提交恢复记录失败");
         }
     };
+    let mut window =
+        match crate::data_interface::staging::lifecycle::create_window_with_commit_token(
+            job.dbnum,
+            job.start_sesno,
+            cand.file_latest_sesno,
+            recovered_commit_token.as_deref(),
+        )
+        .await
+        {
+            Ok(window) => window,
+            Err(error) => {
+                warnings.push(format!("创建增量暂存窗口失败: {error:#}"));
+                return failed_window_result(job, warnings, "创建增量暂存窗口失败");
+            }
+        };
     let window_started = std::time::Instant::now();
     // 会话预算可能把本批截短，而 `cand` 稍后会被移进执行体：右端在这里留一份，
     // 提交后靠它判断「这一段追平了没有」。
@@ -1489,6 +1498,19 @@ async fn execute_frozen_batch(
             finalize.start_sesno,
             finalize.end_sesno,
         )?;
+        match attempt.commit_token.as_deref() {
+            Some(token) if token != window.meta().commit_token => anyhow::bail!(
+                "dbnum={} staged commit token mismatch: attempt={} window={}",
+                job.dbnum,
+                token,
+                window.meta().commit_token
+            ),
+            Some(_) => {}
+            None => attempt.commit_token = Some(window.meta().commit_token.clone()),
+        }
+        if attempt.status != "outcome_unknown" {
+            attempt.status = "prepared".into();
+        }
         model_update_pending::merge_room_recalc_changes(
             &mut attempt.plan,
             job.dbnum,
@@ -1521,11 +1543,6 @@ async fn execute_frozen_batch(
     // spatial reconciliation and kv-mem teardown.
     let room_scope = model_update_pending::RoomDrainScope::from_plan(&finalize.plan);
 
-    // 写回 + 提交后收敛全程独占（ADR-011 2026-08-09 修订，见 STAGED_COMMIT_SERIAL）：
-    // 从 journal 重放、水位尾事务，到空间收敛、本任务房间与全局补偿，期间不允许
-    // 第二个窗口提交，也不允许派发门并发跑空间收敛。锁持到本函数返回。
-    let _commit_serial = STAGED_COMMIT_SERIAL.lock().await;
-
     let gauge = window.gauge().snapshot();
     println!(
         "开始写回 dbnum={} 窗口={} journal={} 条 / {} 字节，暂存语句={} 条 / {} 字节，预计写入行={}，资源档位={:?}",
@@ -1538,7 +1555,7 @@ async fn execute_frozen_batch(
         gauge.estimated_write_rows,
         gauge.band
     );
-    set_active_task_stage("commit");
+    set_active_task_stage("commit_tail");
     let commit_started = std::time::Instant::now();
     let commit_label = window.label().to_string();
     let commit_save_time = result
@@ -1565,7 +1582,13 @@ async fn execute_frozen_batch(
             log::error!("{message}");
             eprintln!("{message}");
         },
-        || window.commit_registered_to(&aios_core::SUL_DB),
+        || async {
+            // 每次确认尝试独占；结果未知时 guard 随 Err 释放，让其他 dbnum 继续。
+            // 只有确认成功的那次把 guard 带回调用方，并一直持有到提交后空间收敛完成。
+            let guard = STAGED_COMMIT_SERIAL.lock().await;
+            let committed = window.commit_registered_to(&aios_core::SUL_DB).await?;
+            Ok((committed, guard))
+        },
     );
     let commit_outcome = await_commit_with_console_heartbeat(
         commit_future,
@@ -1577,7 +1600,7 @@ async fn execute_frozen_batch(
     )
     .await;
     window.clear_writeback_stalled();
-    let (committed, commit_attempts) = match commit_outcome {
+    let ((committed, _commit_serial), commit_attempts) = match commit_outcome {
         Ok(success) => success,
         Err((error, attempts)) => {
             // 确定性拒绝：重放多少次都是同一个错。抱着 STAGED_COMMIT_SERIAL 空转
@@ -1914,7 +1937,8 @@ where
 /// `fast_delete`、提交后空间收敛和其余 dbnum 一起拖停。
 fn staged_writeback_failure_is_transient(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}");
-    crate::surreal_retry::is_retryable_sul_db_transport_error(&message)
+    message.contains("commit outcome unknown")
+        || crate::surreal_retry::is_retryable_sul_db_transport_error(&message)
         || crate::surreal_retry::is_retryable_surreal_write_error(&message)
 }
 
@@ -2198,6 +2222,12 @@ async fn execute_frozen_batch_body(
                 if let Err(error) = crate::data_interface::model_refresh::ModelRefreshPolicy::prepare_required_dependencies(
                     mgr,
                     &roots,
+                    crate::data_interface::cata_closure::DependencyCacheContext {
+                        source_dbnum: job.dbnum,
+                        effective_end_sesno: batch
+                            .as_ref()
+                            .map_or(job.end_sesno, |batch| batch.end_sesno),
+                    },
                 )
                 .await
                 {
@@ -3687,6 +3717,7 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
         .unwrap_or(&job.file_name)
         .to_string();
     let db_type = snapshot.token().db_type().to_owned();
+    let snapshot_token = snapshot.token().clone();
     Ok(FileCandidate {
         project: job.project.clone(),
         path: job.path.clone(),
@@ -3696,9 +3727,25 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
         file_latest_sesno,
         file_size: snapshot.token().opened_len(),
         file_modified_at: None,
+        snapshot_token: Some(snapshot_token),
         extract_parent: crate::data_interface::extract_family::parent_path_of(&job.path)
             .filter(|path| path.is_file()),
     })
+}
+
+#[cfg(test)]
+#[test]
+fn assert_refresh_candidate_snapshot_contract() {
+    let source = include_str!("batch_worker.rs");
+    let body = source
+        .split_once("fn refresh_candidate(")
+        .expect("refresh_candidate")
+        .1
+        .split_once("pub(crate) async fn publish_success")
+        .map(|(body, _)| body)
+        .unwrap_or(source);
+    assert!(body.contains("DabaconSnapshot::open"));
+    assert!(body.contains("snapshot_token: Some(snapshot_token)"));
 }
 
 /// 数据批次成功后的异地同步发布（与旧 `execute_incr_update` 成功路径对齐）。
@@ -4171,7 +4218,7 @@ mod tests {
             .find("if window_model_failed")
             .expect("window failure gate");
         let commit = outer
-            .find("set_active_task_stage(\"commit\")")
+            .find("set_active_task_stage(\"commit_tail\")")
             .expect("commit stage");
         assert!(
             failure_gate < commit,
@@ -4678,6 +4725,8 @@ mod tests {
             start_sesno: 40,
             end_sesno: 42,
             plan: Default::default(),
+            commit_token: None,
+            status: "prepared".into(),
         };
         validate_attempt_matches_staged_window(&attempt, &job, 40, 42)
             .expect("same staged window even when the enqueue-time end differs");
@@ -5130,7 +5179,7 @@ mod tests {
             .find("use_staged_increment_window(")
             .expect("暂存/直写分流必须存在");
         let window_at = body
-            .find("lifecycle::create_window(")
+            .find("lifecycle::create_window_with_commit_token(")
             .expect("开窗调用必须存在");
         assert!(
             preflight_at < staged_split_at && preflight_at < window_at,

@@ -27,6 +27,12 @@ pub const TX_MAX_BYTES: usize = 64 * 1024;
 pub const TX_MAX_WRITE_ROWS: u64 = 250;
 pub const COMMIT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitQueryOutcome {
+    Applied,
+    OutcomeUnknown,
+}
+
 /// 一次 `execute` 调用的路由模式（ADR-017 §3 读路由四则的写侧对偶）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
@@ -206,9 +212,17 @@ impl StagedExecutor {
         self.replay_journal_to(target, TX_CHUNK, None).await?;
         for (index, transaction) in pre_tail_transactions.iter().enumerate() {
             let context = format!("[{}] 写回窗口语句批 {index}", self.label);
-            let rows = replay_safe::estimate_write_rows(transaction)
-                .with_context(|| format!("{context} 资源估算失败"))?;
-            execute_commit_query(target, transaction, &context, transaction.len(), rows).await?;
+            let rows = validate_commit_query_limits(transaction, &context)?;
+            let outcome = execute_commit_query(
+                target,
+                transaction,
+                &context,
+                transaction.len(),
+                rows,
+                false,
+            )
+            .await?;
+            debug_assert_eq!(outcome, CommitQueryOutcome::Applied);
             crate::data_interface::batch_worker::note_commit_progress(
                 &self.label,
                 "窗口语句批",
@@ -219,17 +233,28 @@ impl StagedExecutor {
             );
         }
         if let Some(tail) = tail_transaction {
+            if replay_safe::is_explicit_transaction(tail) {
+                bail!(
+                    "[{}] tail must contain bare statements so receipt and watermark share one outer transaction; fingerprint={:016x}",
+                    self.label,
+                    sql_fingerprint(tail)
+                );
+            }
             let tail_tx = wrap_in_transaction(&[tail.to_string()]).expect("非空尾事务必然可包装");
-            let rows = replay_safe::estimate_write_rows(&tail_tx)
-                .with_context(|| format!("[{}] 写回尾事务资源估算失败", self.label))?;
-            execute_commit_query(
+            let rows =
+                validate_commit_query_limits(&tail_tx, &format!("[{}] 写回尾事务", self.label))?;
+            let outcome = execute_commit_query(
                 target,
                 &tail_tx,
                 &format!("[{}] 写回尾事务", self.label),
                 tail_tx.len(),
                 rows,
+                true,
             )
             .await?;
+            if outcome == CommitQueryOutcome::OutcomeUnknown {
+                bail!("commit outcome unknown; 将按提交回执幂等重放");
+            }
             crate::data_interface::batch_worker::note_commit_progress(
                 &self.label,
                 "尾事务",
@@ -265,7 +290,7 @@ impl StagedExecutor {
             chunk_size.max(1),
             TX_MAX_BYTES,
             TX_MAX_WRITE_ROWS,
-        );
+        )?;
         let total_batches = batches.len();
 
         let mut replayed = 0usize;
@@ -284,14 +309,16 @@ impl StagedExecutor {
                 batch.explicit_transaction,
                 sql_fingerprint(&batch.sql),
             );
-            execute_commit_query(
+            let outcome = execute_commit_query(
                 target,
                 &batch.sql,
                 &format!("[{}] 写回块 {}/{}", self.label, index + 1, total_batches),
                 batch.sql_bytes,
                 batch.estimated_rows,
+                false,
             )
             .await?;
+            debug_assert_eq!(outcome, CommitQueryOutcome::Applied);
             replayed += 1;
             crate::data_interface::batch_worker::note_commit_progress(
                 &self.label,
@@ -306,12 +333,28 @@ impl StagedExecutor {
     }
 }
 
+fn validate_commit_query_limits(sql: &str, context: &str) -> anyhow::Result<u64> {
+    let rows =
+        replay_safe::estimate_write_rows(sql).with_context(|| format!("{context} 资源估算失败"))?;
+    if sql.len() > TX_MAX_BYTES || rows > TX_MAX_WRITE_ROWS {
+        bail!(
+            "{context} exceeds hard commit limit: bytes={} rows={} byte_limit={} row_limit={} fingerprint={:016x}",
+            sql.len(),
+            rows,
+            TX_MAX_BYTES,
+            TX_MAX_WRITE_ROWS,
+            sql_fingerprint(sql)
+        );
+    }
+    Ok(rows)
+}
+
 fn plan_replay_batches(
     journal: &[JournalEntry],
     max_entries: usize,
     max_bytes: usize,
     max_rows: u64,
-) -> Vec<ReplayBatch> {
+) -> anyhow::Result<Vec<ReplayBatch>> {
     let mut batches = Vec::new();
     let mut plain = Vec::new();
     let mut plain_bytes = 0usize;
@@ -319,12 +362,20 @@ fn plan_replay_batches(
     let flush_plain = |plain: &mut Vec<String>,
                        plain_bytes: &mut usize,
                        plain_rows: &mut u64,
-                       batches: &mut Vec<ReplayBatch>| {
+                       batches: &mut Vec<ReplayBatch>|
+     -> anyhow::Result<()> {
         if let Some(sql) = wrap_in_transaction(plain) {
+            anyhow::ensure!(
+                sql.len() <= max_bytes.max(1),
+                "wrapped replay batch exceeds byte limit: bytes={} limit={} fingerprint={:016x}",
+                sql.len(),
+                max_bytes.max(1),
+                sql_fingerprint(&sql)
+            );
             batches.push(ReplayBatch {
+                sql_bytes: sql.len(),
                 sql,
                 entries: plain.len(),
-                sql_bytes: *plain_bytes,
                 estimated_rows: *plain_rows,
                 explicit_transaction: false,
             });
@@ -332,11 +383,21 @@ fn plan_replay_batches(
             *plain_bytes = 0;
             *plain_rows = 0;
         }
+        Ok(())
     };
 
     for entry in journal {
         if replay_safe::is_explicit_transaction(&entry.sql) {
-            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
+            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches)?;
+            anyhow::ensure!(
+                entry.sql.len() <= max_bytes.max(1) && entry.estimated_rows <= max_rows.max(1),
+                "indivisible explicit transaction exceeds replay limit: bytes={} rows={} byte_limit={} row_limit={} fingerprint={:016x}",
+                entry.sql.len(),
+                entry.estimated_rows,
+                max_bytes.max(1),
+                max_rows.max(1),
+                sql_fingerprint(&entry.sql)
+            );
             batches.push(ReplayBatch {
                 sql: entry.sql.clone(),
                 entries: 1,
@@ -348,21 +409,39 @@ fn plan_replay_batches(
         }
 
         let projected_entries = plain.len() + 1;
-        let projected_bytes = plain_bytes.saturating_add(entry.sql.len());
+        let projected_sql = {
+            let mut candidate = plain.clone();
+            candidate.push(entry.sql.clone());
+            wrap_in_transaction(&candidate).expect("candidate is non-empty")
+        };
+        let projected_bytes = projected_sql.len();
         let projected_rows = plain_rows.saturating_add(entry.estimated_rows);
         if !plain.is_empty()
             && (projected_entries > max_entries.max(1)
                 || projected_bytes > max_bytes.max(1)
                 || projected_rows > max_rows.max(1))
         {
-            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
+            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches)?;
+        }
+        if plain.is_empty() {
+            let wrapped = wrap_in_transaction(std::slice::from_ref(&entry.sql))
+                .expect("single entry is non-empty");
+            anyhow::ensure!(
+                wrapped.len() <= max_bytes.max(1) && entry.estimated_rows <= max_rows.max(1),
+                "single replay statement exceeds limit: bytes={} rows={} byte_limit={} row_limit={} fingerprint={:016x}",
+                wrapped.len(),
+                entry.estimated_rows,
+                max_bytes.max(1),
+                max_rows.max(1),
+                sql_fingerprint(&entry.sql)
+            );
         }
         plain_bytes = plain_bytes.saturating_add(entry.sql.len());
         plain_rows = plain_rows.saturating_add(entry.estimated_rows);
         plain.push(entry.sql.clone());
     }
-    flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
-    batches
+    flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches)?;
+    Ok(batches)
 }
 
 async fn execute_commit_query(
@@ -371,19 +450,33 @@ async fn execute_commit_query(
     context: &str,
     sql_bytes: usize,
     estimated_rows: u64,
-) -> anyhow::Result<()> {
-    tokio::time::timeout(
+    outcome_sensitive: bool,
+) -> anyhow::Result<CommitQueryOutcome> {
+    match tokio::time::timeout(
         COMMIT_QUERY_TIMEOUT,
         execute_surreal_checked_on(target, sql, context),
     )
     .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "{context} 连续 {}s 未返回，终止本窗口；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
+    {
+        Ok(result) => {
+            result?;
+            Ok(CommitQueryOutcome::Applied)
+        }
+        Err(_) if outcome_sensitive => {
+            crate::data_interface::batch_worker::set_active_task_stage("commit_reconcile");
+            eprintln!(
+                "{context} 连续 {}s 未返回，commit outcome unknown；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
+                COMMIT_QUERY_TIMEOUT.as_secs(),
+                sql_fingerprint(sql),
+            );
+            Ok(CommitQueryOutcome::OutcomeUnknown)
+        }
+        Err(_) => Err(anyhow::anyhow!(
+            "{context} 连续 {}s 未返回，终止本查询；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
             COMMIT_QUERY_TIMEOUT.as_secs(),
             sql_fingerprint(sql),
-        )
-    })?
+        )),
+    }
 }
 
 fn sql_fingerprint(sql: &str) -> u64 {
@@ -441,7 +534,7 @@ mod tests {
         let journal = (0..70)
             .map(|index| journal_entry(index, 1))
             .collect::<Vec<_>>();
-        let by_entries = plan_replay_batches(&journal, 32, usize::MAX, u64::MAX);
+        let by_entries = plan_replay_batches(&journal, 32, usize::MAX, u64::MAX).unwrap();
         assert_eq!(
             by_entries
                 .iter()
@@ -450,7 +543,7 @@ mod tests {
             vec![32, 32, 6]
         );
 
-        let by_rows = plan_replay_batches(&journal[..5], usize::MAX, usize::MAX, 2);
+        let by_rows = plan_replay_batches(&journal[..5], usize::MAX, usize::MAX, 2).unwrap();
         assert_eq!(
             by_rows
                 .iter()
@@ -460,7 +553,8 @@ mod tests {
         );
 
         let one_len = journal[0].sql.len();
-        let by_bytes = plan_replay_batches(&journal[..3], usize::MAX, one_len * 2, u64::MAX);
+        let by_bytes =
+            plan_replay_batches(&journal[..3], usize::MAX, one_len * 2 + 64, u64::MAX).unwrap();
         assert_eq!(
             by_bytes
                 .iter()
@@ -481,12 +575,60 @@ mod tests {
         });
         journal.push(journal_entry(2, 1));
 
-        let batches = plan_replay_batches(&journal, 32, TX_MAX_BYTES, TX_MAX_WRITE_ROWS);
+        let batches = plan_replay_batches(&journal, 32, TX_MAX_BYTES, TX_MAX_WRITE_ROWS).unwrap();
         assert_eq!(batches.len(), 3);
         assert!(!batches[0].explicit_transaction);
         assert!(batches[1].explicit_transaction);
         assert!(!batches[2].explicit_transaction);
         assert_eq!(batches.iter().map(|batch| batch.entries).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn replay_planner_rejects_an_indivisible_oversized_entry() {
+        let too_many_rows = vec![journal_entry(1, 251)];
+        assert!(plan_replay_batches(&too_many_rows, 32, TX_MAX_BYTES, 250).is_err());
+
+        let wrapper = wrap_in_transaction(&[journal_entry(1, 1).sql.clone()]).unwrap();
+        assert!(plan_replay_batches(&[journal_entry(1, 1)], 32, wrapper.len() - 1, 250).is_err());
+
+        let explicit = JournalEntry {
+            sql: "BEGIN TRANSACTION; UPSERT pe:x SET noun = 'PIPE'; COMMIT TRANSACTION;".into(),
+            mode: ExecMode::Both,
+            estimated_rows: 251,
+        };
+        let error = plan_replay_batches(&[explicit], 32, TX_MAX_BYTES, 250)
+            .expect_err("an oversized explicit transaction is indivisible");
+        assert!(error.to_string().contains("explicit transaction"));
+        assert!(error.to_string().contains("fingerprint="));
+    }
+
+    #[test]
+    fn direct_commit_queries_obey_the_same_hard_limits() {
+        let oversized = format!("UPSERT pe:x SET payload = '{}';", "x".repeat(TX_MAX_BYTES));
+        let error = validate_commit_query_limits(&oversized, "tail")
+            .expect_err("wrapped tail bytes must be bounded");
+        assert!(error.to_string().contains("fingerprint="));
+
+        let too_many_rows = (0..=TX_MAX_WRITE_ROWS)
+            .map(|index| format!("UPSERT pe:r{index} SET noun = 'PIPE';"))
+            .collect::<String>();
+        assert!(validate_commit_query_limits(&too_many_rows, "pre-tail").is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tail_rejects_an_inner_transaction_so_receipt_stays_atomic() {
+        let staging = staging_handle("staging_atomic_tail").await;
+        let executor = StagedExecutor::new(staging, "staging_atomic_tail");
+        let target = persistent_handle().await;
+        let error = executor
+            .commit_to(
+                &target,
+                &[],
+                Some("BEGIN TRANSACTION; UPSERT pe:x SET noun='PIPE'; COMMIT TRANSACTION;"),
+            )
+            .await
+            .expect_err("nested tail would split the receipt from the protected commit");
+        assert!(error.to_string().contains("bare statements"));
     }
 
     /// T0.2 验收：三种模式对「暂存生效」「进日志」的路由各自正确，

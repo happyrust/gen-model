@@ -1,5 +1,6 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::occ_generate::process_meshes_update_db_deep_with_policy;
 use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, coverage_audit, gen_meshes_in_db, loop_model, prim_model,
@@ -110,6 +111,7 @@ impl DbModelInstRefnos {
     pub async fn execute_boolean_meshes(
         &self,
         db_option_arc: Option<Arc<DbOption>>,
+        failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
     ) -> anyhow::Result<()> {
         let mut handles = FuturesUnordered::new();
         let prim_refnos = self.prim_refnos.clone();
@@ -119,7 +121,7 @@ impl DbModelInstRefnos {
         let db_option = db_option_arc.clone();
         handles.push(
             crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                booleans_meshes_in_db(db_option, &prim_refnos)
+                booleans_meshes_in_db(db_option, &prim_refnos, failure_policy)
                     .await
                     .map_err(|error| anyhow::anyhow!("boolean prim meshes failed: {error:#}"))
             }),
@@ -127,7 +129,7 @@ impl DbModelInstRefnos {
         let db_option = db_option_arc.clone();
         handles.push(
             crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                booleans_meshes_in_db(db_option, &loop_owner_refnos)
+                booleans_meshes_in_db(db_option, &loop_owner_refnos, failure_policy)
                     .await
                     .map_err(|error| anyhow::anyhow!("boolean loop meshes failed: {error:#}"))
             }),
@@ -135,7 +137,7 @@ impl DbModelInstRefnos {
         let db_option = db_option_arc.clone();
         handles.push(
             crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                booleans_meshes_in_db(db_option, &use_cate_refnos)
+                booleans_meshes_in_db(db_option, &use_cate_refnos, failure_policy)
                     .await
                     .map_err(|error| anyhow::anyhow!("boolean use-cata meshes failed: {error:#}"))
             }),
@@ -149,7 +151,7 @@ impl DbModelInstRefnos {
                         query_multi_children_refnos(&chunk).await.map_err(|error| {
                             anyhow::anyhow!("query BRAN/HANG boolean children failed: {error:#}")
                         })?;
-                    booleans_meshes_in_db(db_option_clone, &target_refnos)
+                    booleans_meshes_in_db(db_option_clone, &target_refnos, failure_policy)
                         .await
                         .map_err(|error| {
                             anyhow::anyhow!("boolean BRAN/HANG meshes failed: {error:#}")
@@ -173,6 +175,17 @@ impl DbModelInstRefnos {
 /// # 返回值
 /// * `anyhow::Result<bool>` - 返回生成结果，成功返回true，失败返回错误
 pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
+    gen_all_geos_data_with_policy(
+        db_option,
+        crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+    )
+    .await
+}
+
+pub(crate) async fn gen_all_geos_data_with_policy(
+    db_option: &DbOption,
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
+) -> anyhow::Result<bool> {
     const CHUNK_SIZE: usize = 100;
     // 定向生成（`debug_root_refnos` 选定的一批生成根）与整库全量生成的分界。
     let targeted = db_option.debug_root_refnos.is_some();
@@ -210,7 +223,12 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
             // ModelRefreshPolicy::generate_roots 返回 Err，从而保留 model_update_pending
             // 根任务待重试，而不是把 async_watch 看门狗任务 panic 掉。
-            process_meshes_update_db_deep(db_option, &target_root_refnos).await?;
+            process_meshes_update_db_deep_with_policy(
+                db_option,
+                &target_root_refnos,
+                failure_policy,
+            )
+            .await?;
         }
     } else {
         let dbnos = if db_option.manual_db_nums.is_some() {
@@ -259,7 +277,7 @@ pub async fn gen_all_geos_data(db_option: &DbOption) -> anyhow::Result<bool> {
                 println!("生成insts三角模型时间: {}ms", time.elapsed().as_millis());
                 let time = Instant::now();
                 db_refnos
-                    .execute_boolean_meshes(Some(db_option_arc.clone()))
+                    .execute_boolean_meshes(Some(db_option_arc.clone()), failure_policy)
                     .await?;
                 println!("布尔运算时间: {}ms", time.elapsed().as_millis());
             }

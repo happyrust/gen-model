@@ -181,3 +181,7 @@ ADR-025 要求同一 observation epoch 的全部数据阶段完成后才消费�
    每段子窗口仍是全成才落盘，「降级提交」不存在。
 
 提交侧一行未改：`applied_sesno` 的部分推进与 `align_end_sesno` 本来就容纳更窄的右端。
+
+## 2026-08-19 Oracle 审核修订
+
+尾事务由窗口稳定 `commit_token` 保护，并与水位一起写入 `dbnum_watermark.last_commit_token`。尾事务客户端超时不再立即 DROP；任务进入 `commit_reconcile`，按同一令牌确认或重放。

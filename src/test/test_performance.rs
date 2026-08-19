@@ -444,7 +444,10 @@ async fn analyze_boolean_operations(
     // 执行布尔运算
     let db_option_arc = std::sync::Arc::new(db_option.clone());
     db_refnos
-        .execute_boolean_meshes(Some(db_option_arc))
+        .execute_boolean_meshes(
+            Some(db_option_arc),
+            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+        )
         .await?;
 
     analysis.boolean_exec_time_ms = exec_start.elapsed().as_millis();

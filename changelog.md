@@ -53,10 +53,23 @@
 
 ### 修复
 
+- 修复 D: AMS 直接图形文档中 `Limits CE` 无响应：该文档暴露的视图类型为 `G3D`，
+  原命令只接受 `GM3D` 并静默返回；启动修复现在同时接受两种 3D 视图，并在本地
+  Drawlist 为空时先加入、更新当前元素，再执行 limits 与刷新。修复脚本带原件备份、
+  幂等标记和启动前验证，避免 E3D 补丁漂移被静默跳过。
+
+- 修复 D: AMS 启动后 Steelwork 命令刷新反复报告 PML `(2,751)`：shadow
+  `PMLCOMMANDMANAGER` 先创建 `STEELWORKGSETTINGS`，并将自动命令事件注册移到支持命令
+  装载之后；Design 完全就绪后再运行带 trace 的全局初始化宏，启动失败时直接阻断而非
+  把缺失变量留给每次 CE 刷新重复报告。
+
 - 非白名单终稿解析失败、已选中索引 child 读取失败和层级未下降现在硬失败，不再构造
   可推进水位的不完整窗口；MNUM 仅按代码白名单记录结构化诊断。基线 chunk 失败会
-  停止后续调度、等待 writer 收口并清空该 dbnum；CATA 扫描失败或 closure `missing`
-  不再写空/不完整缓存，下一次触发会重新扫描。
+  停止后续调度、等待 writer 收口并清空本轮全部已调度 dbnum；冻结 token 跨队列传递，
+  同文件 append 仍只读冻结长度与 target，同 sesno 路径换代和空模型计划旁路均在提交前
+  拒绝；初次捕获用前后 length/header 复核阻止 append 期间混合世代。CATA 扫描失败、
+  空扫描、旧格式空缓存、Required 未解析根或 closure `missing` 均不再形成成功缓存，
+  下一次触发会重新扫描。
 
 - 修复复制大量节点后暂存写回把 167 条 journal/869 行合成单事务而永久停在
   `commit`：改为按条数、字节和预计行多维分块，增加块级进展、SQL 指纹和 120 秒
@@ -77,14 +90,11 @@
   跳过串入 YCYK 的通用修复宏，并以 graphics finisher 与 runtime health probe 验证
   MDB、模型树、3D 文档和编辑运行时。
 
-- 载不进 manifold 的输入网格不再拖垮整个生成根：目录与设计两条布尔路径遇到
-  `manifold-csg ingest failed`（`NotManifold` 等）时跳过该元素、标 `bad_bool` 并把
-  refno 与原因打到控制台，不再 `?` 出去。坏几何是确定性失败，抛出去只会让
-  `regen_root` 连撞 `MAX_ATTEMPTS` 判死信，同批其它根做完也没用——2026-08-19 现场
-  BEND `24384/23259` 的正实体 `NotManifold` 就把 BRAN `/C-OR-1R345-C` 卡成死信，
-  10 个根里 9 个成功，`model_ready` 仍永远停在 false。跳过的件保留未切洞的正实体
-  几何（与「没找到正实体」「差集为空」同一档降级），负实体只要有一个载不进就整件
-  跳过——少减一个洞比整件不切更难发现。
+- 收口 Oracle 二次审核缺陷：CATA 缓存使用实际分窗右端并按 Ref0 冲突精确阻断；
+  维护纠正复用冻结快照；epoch 激活与任务冻结共用激活门；尾事务使用稳定 commit token
+  幂等确认并区分 `commit_tail/commit_reconcile`；planner 对包装后 SQL、行数和条目数执行
+  硬上限。manifold 失败改为双策略：暂存窗口 `Required` 阻断水位，窗口外
+  `BestEffortFallback` 保留诊断与旧几何。三个依赖仓库和 manifold-csg 均固定已发布 revision。
 
 - 新增布尔降级账本 `geom_error` 表：跳过之后 `model_update_pending` 那一行不再产生，
   控制台那句也会滚走，于是「哪些件的洞没切」事后无从查起。现在每次跳过按

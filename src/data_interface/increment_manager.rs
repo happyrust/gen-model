@@ -3366,6 +3366,7 @@ impl AiosDBManager {
                     .map(|message| (phase, message)),
             );
         }
+        let _activation = crate::data_interface::batch_scheduler::epoch_activation_guard();
         let coordinator =
             crate::data_interface::initialization_phase::InitializationCoordinator::global();
         let active_rows = scheduler.snapshot();

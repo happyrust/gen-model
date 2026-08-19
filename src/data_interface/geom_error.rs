@@ -3,8 +3,8 @@
 //! 起因：2026-08-19 现场，BEND `24384/23259` 的正实体网格进不了 manifold
 //! （`manifold3d status: NotManifold`），这一句错抛上去把 BRAN `/C-OR-1R345-C` 的
 //! `regen_root` 连撞 5 次撞成死信——同一批里另外 9 个根做完了也没用，
-//! `model_ready` 就此永远停在 false。坏几何是确定性的，重试不会变好，所以布尔
-//! 路径改成跳过这一件、标 `bad_bool`、继续往下跑。
+//! `model_ready` 就此永远停在 false。窗口外的确定性坏几何采用可观察降级；活动
+//! 暂存窗口是正确性边界，采用 `Required` 并阻断水位。
 //!
 //! 跳过之后这件事就没有落脚点了：`model_update_pending` 那一行不再产生（不失败
 //! 也就没有 `last_error` 与死信计数），控制台那句 `println!` 会滚走。这张表补的
@@ -41,11 +41,16 @@ use crate::data_interface::dbnum_state::escape_surql_str;
 
 pub const TABLE: &str = "geom_error";
 
-/// 正实体网格载不进 manifold：这一件整个跳过，保留未切洞的几何。
+/// 正实体网格载不进 manifold 的诊断类型。
 pub(crate) const BOOL_POS: &str = "bool_pos";
-/// 负实体网格载不进 manifold：同样整件跳过——只减掉一部分负实体等于悄悄发一件
-/// 少切了洞的几何，比整件不切更难发现。
+/// 负实体网格载不进 manifold 的诊断类型。
 pub(crate) const BOOL_NEG: &str = "bool_neg";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryFailurePolicy {
+    Required,
+    BestEffortFallback,
+}
 
 const KINDS: [&str; 2] = [BOOL_POS, BOOL_NEG];
 

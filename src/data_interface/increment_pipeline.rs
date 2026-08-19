@@ -790,6 +790,18 @@ fn reconcile_plan_final_presence(
 ) -> anyhow::Result<usize> {
     use crate::data_interface::model_update_plan::ModelWorkAction;
 
+    anyhow::ensure!(end_sesno >= 0, "模型计划复核会话非法: {end_sesno}");
+    anyhow::ensure!(
+        snapshot_token.target_sesno() == end_sesno as u32,
+        "模型计划复核 target={} 与冻结 token target={} 不一致",
+        end_sesno,
+        snapshot_token.target_sesno()
+    );
+    // This is a commit-generation gate, not a model-only optimization. Even a
+    // data-only window with no model candidates must reject path replacement.
+    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified("", snapshot_token)
+        .map_err(|error| anyhow::anyhow!("重开 Save Work 冻结快照失败: {error:#}"))?;
+
     let mut candidates = plan
         .design_refnos
         .iter()
@@ -822,15 +834,6 @@ fn reconcile_plan_final_presence(
     if candidates.is_empty() {
         return Ok(retain_finally_live_design_refnos(plan, |_| false));
     }
-    anyhow::ensure!(end_sesno >= 0, "模型计划复核会话非法: {end_sesno}");
-    anyhow::ensure!(
-        snapshot_token.target_sesno() == end_sesno as u32,
-        "模型计划复核 target={} 与冻结 token target={} 不一致",
-        end_sesno,
-        snapshot_token.target_sesno()
-    );
-    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified("", snapshot_token)
-        .map_err(|error| anyhow::anyhow!("重开 Save Work 冻结快照失败: {error:#}"))?;
     let live = snapshot
         .contains_refnos_at(end_sesno as u32, &candidates)
         .map_err(|error| anyhow::anyhow!("读取模型计划冻结目标 root 失败: {error:#}"))?
@@ -1040,8 +1043,29 @@ impl IncrementPipeline {
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
     ) -> anyhow::Result<CollectedWindow> {
-        let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path)
-            .map_err(|e| anyhow::anyhow!("打开 dabacon 冻结快照失败: {e}"))?;
+        Self::collect_window_for_candidate("", path, sesno_range, None)
+    }
+
+    pub(crate) fn collect_window_for_candidate(
+        project: &str,
+        path: &std::path::Path,
+        sesno_range: RangeInclusive<i32>,
+        frozen: Option<&pdms_io::snapshot::SnapshotToken>,
+    ) -> anyhow::Result<CollectedWindow> {
+        let target = u32::try_from(*sesno_range.end())
+            .map_err(|_| anyhow::anyhow!("dabacon 窗口终点非法: {}", sesno_range.end()))?;
+        let mut snapshot = if let Some(token) = frozen {
+            anyhow::ensure!(
+                token.path() == path,
+                "候选路径 {} 与冻结 token 路径 {} 不一致",
+                path.display(),
+                token.path().display()
+            );
+            pdms_io::snapshot::DabaconSnapshot::open_verified_at(project, token, target)
+        } else {
+            pdms_io::snapshot::DabaconSnapshot::open_at(project, path, target)
+        }
+        .map_err(|e| anyhow::anyhow!("打开 dabacon 冻结快照失败: {e}"))?;
         let session_sesnos = snapshot.session_sesnos_in_range(sesno_range.clone());
         let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, sesno_range)?;
         ensure_unique_terminal_operations(&outcome.window)?;
@@ -1216,7 +1240,9 @@ impl IncrementPipeline {
                         start_sesno: *requested_range.start(),
                         end_sesno,
                         plan: model_plan.clone(),
-                    },
+                                            commit_token: None,
+                        status: "prepared".into(),
+},
                 ),
             )
             .await?;
@@ -1357,6 +1383,12 @@ impl IncrementPipeline {
         // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
         let end_sesno_time =
             crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
+
+        // Recheck the stable file generation immediately before publishing the
+        // staged finalize / watermark tail. Same-file append is accepted;
+        // atomic path replacement is not.
+        pdms_io::snapshot::DabaconSnapshot::open_verified("", &snapshot_token)
+            .map_err(|error| anyhow::anyhow!("提交前冻结快照身份复核失败: {error:#}"))?;
 
         if staged.is_some() {
             // Register the complete durable plan, including RegenRoot. In the
@@ -2184,6 +2216,8 @@ mod cache_tests {
             start_sesno: 40,
             end_sesno: 42,
             plan: Default::default(),
+            commit_token: None,
+            status: "prepared".into(),
         };
         let error = validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 41)
             .expect_err("rollback must be rejected");
@@ -2203,6 +2237,8 @@ mod cache_tests {
             start_sesno: 196,
             end_sesno: 196,
             plan: Default::default(),
+            commit_token: None,
+            status: "prepared".into(),
         };
 
         validate_prepared_attempt(
@@ -2360,8 +2396,8 @@ mod cache_tests {
     fn the_collector_has_no_caliber_branch() {
         let source = include_str!("increment_pipeline.rs");
         let body = source
-            .split_once("pub fn collect_window(")
-            .expect("collect_window")
+            .split_once("pub(crate) fn collect_window_for_candidate(")
+            .expect("collect_window_for_candidate")
             .1
             .split_once("pub async fn apply(")
             .expect("apply follows collector")
@@ -2375,10 +2411,15 @@ mod cache_tests {
             body.contains("snapshot.session_sesnos_in_range"),
             "会话页清单必须来自同一次打开的 DabaconSnapshot: {body}"
         );
+        assert!(
+            body.contains("DabaconSnapshot::open_verified")
+                && body.contains("DabaconSnapshot::open_at"),
+            "候选冻结 token 与普通预览都必须汇入同一 snapshot collector: {body}"
+        );
         assert_eq!(
             body.matches("DabaconSnapshot::open(").count(),
-            1,
-            "收集入口只许打开一次文件: {body}"
+            0,
+            "收集入口必须选择 open_at/open_verified，不能绕回无目标冻结的 direct open: {body}"
         );
         // 三个曾经的口径符号：开关、legacy 收集器、口径枚举。任一回到这个函数体，
         // 「同谓词」就重新退回约定而不是结构。
@@ -3256,6 +3297,28 @@ mod fold_tests {
         assert_eq!(
             plan.design_refnos,
             [RefnoEnum::from(refno(2)).to_pdms_str()]
+        );
+    }
+
+    #[test]
+    fn empty_model_plan_cannot_bypass_snapshot_generation_verification() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once("fn reconcile_plan_final_presence(")
+            .expect("reconcile function")
+            .1
+            .split_once("impl IncrementPipeline")
+            .expect("reconcile boundary")
+            .0;
+        let verify = body
+            .find("DabaconSnapshot::open_verified")
+            .expect("stable generation gate");
+        let empty = body
+            .find("if candidates.is_empty()")
+            .expect("empty candidate branch");
+        assert!(
+            verify < empty,
+            "data-only/空模型计划也必须先验证冻结文件世代: {body}"
         );
     }
 
@@ -4477,6 +4540,8 @@ mod live_tests {
                 start_sesno: baseline_sesno + 1,
                 end_sesno: current_sesno,
                 plan: recovery_plan,
+                commit_token: None,
+                status: "prepared".into(),
             },
         )
         .await

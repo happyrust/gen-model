@@ -66,7 +66,7 @@ pub async fn save_pes(
         output
             .send_async(SenderJsonsData::PEJson(insert_jsons))
             .await
-            .expect("send pes error");
+            .map_err(|error| anyhow::anyhow!("send pes error: {error}"))?;
         chunk_index += 1;
     }
 
@@ -154,7 +154,10 @@ pub async fn save_pes_mysql(
 }
 
 //使用insert relations 去保存图数据关联关系
-pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<SenderJsonsData>) {
+pub async fn save_pe_relates(
+    db_basic: &DbBasicData,
+    output: flume::Sender<SenderJsonsData>,
+) -> anyhow::Result<()> {
     let mut all_relate_jsons = vec![];
     for kv in &db_basic.children_map {
         let owner = kv.0;
@@ -178,7 +181,7 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Sende
                     &mut all_relate_jsons,
                 )))
                 .await
-                .expect("send pe_relates error");
+                .map_err(|error| anyhow::anyhow!("send pe_relates error: {error}"))?;
         }
     }
     if !all_relate_jsons.is_empty() {
@@ -187,6 +190,7 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Sende
                 &mut all_relate_jsons,
             )))
             .await
-            .expect("send pe_relates error");
+            .map_err(|error| anyhow::anyhow!("send pe_relates error: {error}"))?;
     }
+    Ok(())
 }

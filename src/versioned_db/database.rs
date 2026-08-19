@@ -24,7 +24,7 @@ use sqlx::{Connection, MySql, MySqlPool, Pool};
 #[cfg(feature = "sql")]
 use sqlx::{Error, Executor};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::Read;
@@ -192,6 +192,20 @@ async fn finish_write_pipeline(
         );
     }
     Ok(())
+}
+
+fn baseline_cleanup_targets(
+    failed_dbnums: impl IntoIterator<Item = u32>,
+    scheduled_dbnums: impl IntoIterator<Item = u32>,
+    pipeline_failed: bool,
+) -> BTreeSet<u32> {
+    let mut targets = failed_dbnums.into_iter().collect::<BTreeSet<_>>();
+    if pipeline_failed {
+        // writer 错误来自共享通道，当前消息没有可靠 dbnum 归因。为防止任一库留下
+        // 部分基线，失败时保守清理本批所有已经开始调度写入的库。
+        targets.extend(scheduled_dbnums);
+    }
+    targets
 }
 
 async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result<()> {
@@ -1273,6 +1287,8 @@ pub async fn sync_total_async_threaded(
     let parsed_db_infos_for_parser = parsed_db_infos.clone();
     let failed_baseline_dbnums = Arc::new(DashSet::<u32>::new());
     let failed_baseline_dbnums_for_parser = failed_baseline_dbnums.clone();
+    let scheduled_baseline_dbnums = Arc::new(DashSet::<u32>::new());
+    let scheduled_baseline_dbnums_for_parser = scheduled_baseline_dbnums.clone();
     let children_files_len = children_files.len();
     let db_file_progress_chunk = (proj_progress_chunk as f32 / children_files_len as f32) as usize;
     // let progress_sender_clone = progress_sender.clone();
@@ -1387,7 +1403,14 @@ pub async fn sync_total_async_threaded(
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
-                    save_pe_relates(&db_basic, sender_clone.clone()).await;
+                    scheduled_baseline_dbnums_for_parser.insert(db_no);
+                    if let Err(error) = save_pe_relates(&db_basic, sender_clone.clone()).await {
+                        log::error!(
+                            "baseline relation dispatch failed: file={file_name} dbnum={db_no}: {error:#}"
+                        );
+                        failed_baseline_dbnums_for_parser.insert(db_no);
+                        continue;
+                    }
                 }
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
@@ -1410,7 +1433,9 @@ pub async fn sync_total_async_threaded(
                 //按照SITE划分？
                 let mut total_cnt = 0;
                 let mut chunk_failed = false;
-                for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
+                'chunks: for (chunk_index, chunk) in
+                    all_refnos.chunks(chunk_size).enumerate()
+                {
                     let db_option_clone = db_option_arc.clone();
                     let file_name_clone = file_name.clone();
                     let chunk_refnos = chunk.to_vec();
@@ -1538,24 +1563,38 @@ pub async fn sync_total_async_threaded(
                                     }
                                     if is_save_db {
                                         if !json_vec.is_empty() {
-                                            sender_clone
+                                            if let Err(error) = sender_clone
                                                 .send_async(SenderJsonsData::AttJson((
                                                     type_name.clone(),
                                                     json_vec,
                                                 )))
                                                 .await
-                                                .expect("send attmap sql failed");
+                                            {
+                                                log::error!(
+                                                    "baseline chunk attribute dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error}"
+                                                );
+                                                failed_baseline_dbnums_for_parser.insert(db_no);
+                                                chunk_failed = true;
+                                                break 'chunks;
+                                            }
                                         }
 
                                         if !uda_json_vec.is_empty() {
                                             // dbg!(&uda_json_vec);
-                                            sender_clone
+                                            if let Err(error) = sender_clone
                                                 .send_async(SenderJsonsData::AttJson((
                                                     "ATT_UDA".to_string(),
                                                     uda_json_vec,
                                                 )))
                                                 .await
-                                                .expect("send attmap sql failed");
+                                            {
+                                                log::error!(
+                                                    "baseline chunk UDA dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error}"
+                                                );
+                                                failed_baseline_dbnums_for_parser.insert(db_no);
+                                                chunk_failed = true;
+                                                break 'chunks;
+                                            }
                                         }
                                     }
                                 }
@@ -1616,11 +1655,12 @@ pub async fn sync_total_async_threaded(
     }
     let pipeline_result = finish_write_pipeline(sender, insert_handles, parser_outcome).await;
     let mut cleanup_errors = Vec::new();
-    for dbnum in failed_baseline_dbnums
-        .iter()
-        .map(|entry| *entry)
-        .collect::<Vec<_>>()
-    {
+    let cleanup_dbnums = baseline_cleanup_targets(
+        failed_baseline_dbnums.iter().map(|entry| *entry),
+        scheduled_baseline_dbnums.iter().map(|entry| *entry),
+        pipeline_result.is_err(),
+    );
+    for dbnum in cleanup_dbnums {
         if let Err(error) = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
             cleanup_errors.push(format!("dbnum={dbnum}: {error:#}"));
         }
@@ -1903,6 +1943,20 @@ async fn finish_write_pipeline_succeeds_when_parser_and_writers_are_clean() {
 }
 
 #[test]
+fn baseline_writer_failure_cleans_every_scheduled_dbnum() {
+    assert_eq!(
+        baseline_cleanup_targets([8000], [7997, 8000, 7999], false),
+        BTreeSet::from([8000]),
+        "局部 chunk 失败只清理已知失败库"
+    );
+    assert_eq!(
+        baseline_cleanup_targets([], [7997, 8000, 7999], true),
+        BTreeSet::from([7997, 8000, 7999]),
+        "共享 writer 失败无法可靠归因，必须清理本批全部已调度库"
+    );
+}
+
+#[test]
 fn baseline_chunk_failure_stops_scheduling_and_wipes_only_after_writers_finish() {
     let source = include_str!("database.rs");
     let parser = source
@@ -1914,6 +1968,15 @@ fn baseline_chunk_failure_stops_scheduling_and_wipes_only_after_writers_finish()
         .0;
     assert!(parser.contains("chunk_failed = true;"));
     assert!(parser.contains("break;"), "失败后必须停止后续 chunk 调度");
+    assert!(
+        !parser.contains("expect(\"send attmap sql failed\")"),
+        "属性发送失败也必须进入 chunk 硬门，不能 panic 后绕过失败库登记"
+    );
+    assert!(
+        !include_str!("pe.rs").contains("expect(\"send pes error\")")
+            && !include_str!("pe.rs").contains("expect(\"send pe_relates error\")"),
+        "PE 与关系发送失败必须返回 Result 给基线清理路径"
+    );
     assert!(
         parser.contains("if chunk_failed") && parser.contains("continue;"),
         "失败文件不得登记 parsed result"

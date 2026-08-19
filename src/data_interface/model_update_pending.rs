@@ -51,6 +51,14 @@ pub struct IncrementUpdateAttempt {
     pub start_sesno: i32,
     pub end_sesno: i32,
     pub plan: ModelUpdatePlan,
+    #[serde(default)]
+    pub commit_token: Option<String>,
+    #[serde(default = "prepared_attempt_status")]
+    pub status: String,
+}
+
+fn prepared_attempt_status() -> String {
+    "prepared".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +69,10 @@ struct AttemptRow {
     start_sesno: i32,
     end_sesno: i32,
     plan_json: String,
+    #[serde(default)]
+    commit_token: Option<String>,
+    #[serde(default = "prepared_attempt_status")]
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -658,7 +670,8 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
 pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAttempt>> {
     let mut response = SUL_DB
         .query(format!(
-            "SELECT dbnum, db_type, file_path, start_sesno, end_sesno, plan_json \
+            "SELECT dbnum, db_type, file_path, start_sesno, end_sesno, plan_json, \
+                    commit_token, status \
              FROM {ATTEMPT_TABLE}:{dbnum};"
         ))
         .await
@@ -683,6 +696,8 @@ pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAt
                 start_sesno: row.start_sesno,
                 end_sesno: row.end_sesno,
                 plan,
+                commit_token: row.commit_token,
+                status: row.status,
             })
         })
         .transpose()
@@ -692,11 +707,18 @@ pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result
     let plan_json = escape_surql_str(&serde_json::to_string(&attempt.plan)?);
     let db_type = escape_surql_str(&attempt.db_type);
     let file_path = escape_surql_str(&attempt.file_path);
+    let commit_token = attempt
+        .commit_token
+        .as_deref()
+        .map(escape_surql_str)
+        .map(|value| format!("'{value}'"))
+        .unwrap_or_else(|| "NONE".to_string());
+    let status = escape_surql_str(&attempt.status);
     let sql = format!(
         "UPSERT {ATTEMPT_TABLE}:{dbnum} SET dbnum = {dbnum}, \
          db_type = '{db_type}', file_path = '{file_path}', \
          start_sesno = {start_sesno}, end_sesno = {end_sesno}, \
-         plan_json = '{plan_json}', status = 'prepared', \
+         plan_json = '{plan_json}', commit_token = {commit_token}, status = '{status}', \
          created_at = created_at?:time::now(), updated_at = time::now();",
         dbnum = attempt.dbnum,
         start_sesno = attempt.start_sesno,
@@ -718,6 +740,27 @@ pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result
                 attempt.dbnum
             )
         })?;
+    Ok(())
+}
+
+pub async fn mark_attempt_commit_state_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    commit_token: &str,
+    status: &str,
+) -> anyhow::Result<()> {
+    let commit_token = escape_surql_str(commit_token);
+    let status = escape_surql_str(status);
+    db.query(format!(
+        "UPDATE {ATTEMPT_TABLE}:{dbnum} SET commit_token = '{commit_token}', \
+         status = '{status}', updated_at = time::now();"
+    ))
+    .await
+    .map_err(|error| anyhow::anyhow!("mark increment attempt dbnum={dbnum} failed: {error}"))?
+    .check()
+    .map_err(|error| {
+        anyhow::anyhow!("mark increment attempt dbnum={dbnum} statement failed: {error}")
+    })?;
     Ok(())
 }
 
@@ -4816,6 +4859,8 @@ mod tests {
                 warnings: vec!["kept across restart".into()],
                 ..Default::default()
             },
+            commit_token: None,
+            status: "prepared".into(),
         };
 
         let json = serde_json::to_string(&attempt).expect("serialize attempt");
@@ -4847,6 +4892,8 @@ mod tests {
             start_sesno: 40,
             end_sesno: 42,
             plan: plan.clone(),
+            commit_token: None,
+            status: "prepared".into(),
         };
         let work_id = record_id(&plan.work_items[0]);
         let cleanup = format!(
@@ -4936,6 +4983,8 @@ mod tests {
             start_sesno: 50,
             end_sesno: 52,
             plan: plan.clone(),
+            commit_token: None,
+            status: "prepared".into(),
         };
 
         if std::env::var_os(HELPER_ENV).is_some() {
@@ -5634,6 +5683,8 @@ mod tests {
             start_sesno: 42,
             end_sesno: 42,
             plan: plan.clone(),
+            commit_token: None,
+            status: "prepared".into(),
         };
 
         for _ in 0..2 {

@@ -47,6 +47,7 @@ pub async fn apply_cata_neg_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
+    failure_policy: geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     let inst_keys = get_inst_relate_keys(refnos);
 
@@ -110,6 +111,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                     let mut update_sql = String::new();
                     'group: for bg in g.boolean_group {
                         let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
+                            if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                return Err(anyhow!(
+                                    "required catalogue positive geometry missing for {} geom={}",
+                                    g.refno,
+                                    bg[0]
+                                ));
+                            }
                             update_sql.push_str(&format!(
                                 "update {}<-inst_relate set bad_bool=true;",
                                 &g.inst_info_id,
@@ -143,6 +151,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                                     &format!("{error:#}"),
                                 )
                                 .await;
+                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                    return Err(anyhow!(
+                                        "required catalogue positive manifold failed for {} geom={}: {error:#}",
+                                        g.refno,
+                                        pos.id
+                                    ));
+                                }
                                 update_sql.push_str(&format!(
                                     "update {}<-inst_relate set bad_bool=true;",
                                     &g.inst_info_id,
@@ -156,6 +171,12 @@ pub async fn apply_cata_neg_boolean_manifold(
                         //负实体的精度要比正实体大
                         for &neg in bg.iter().skip(1) {
                             let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                    return Err(anyhow!(
+                                        "required catalogue negative geometry missing for {} geom={neg}",
+                                        g.refno
+                                    ));
+                                }
                                 continue;
                             };
                             let m = neg_geo.trans.compute_matrix().as_dmat4();
@@ -175,6 +196,14 @@ pub async fn apply_cata_neg_boolean_manifold(
                                         &format!("{error:#}"),
                                     )
                                     .await;
+                                    if failure_policy == geom_error::GeometryFailurePolicy::Required
+                                    {
+                                        return Err(anyhow!(
+                                            "required catalogue negative manifold failed for {} geom={}: {error:#}",
+                                            g.refno,
+                                            neg_geo.id
+                                        ));
+                                    }
                                     update_sql.push_str(&format!(
                                         "update {}<-inst_relate set bad_bool=true;",
                                         &g.inst_info_id,
@@ -199,6 +228,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                                     &g.refno,
                                     bg[0]
                                 );
+                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                    return Err(anyhow!(
+                                        "required catalogue boolean difference is empty for {} geom={}",
+                                        g.refno,
+                                        bg[0]
+                                    ));
+                                }
                                 update_sql.push_str(&format!(
                                     "update {}<-inst_relate set bad_bool=true;",
                                     &g.inst_info_id,
@@ -270,9 +306,11 @@ pub async fn apply_insts_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
     dir: PathBuf,
+    failure_policy: geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     for refno in refnos {
-        apply_insts_boolean_manifold_single(*refno, replace_exist, dir.clone()).await?;
+        apply_insts_boolean_manifold_single(*refno, replace_exist, dir.clone(), failure_policy)
+            .await?;
     }
     Ok(())
 }
@@ -292,6 +330,7 @@ pub async fn apply_insts_boolean_manifold_single(
     refno: RefnoEnum,
     replace_exist: bool,
     dir: PathBuf,
+    failure_policy: geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     //筛选出来 "Neg", "CataCrossNeg" 的关联
     //排除不在这个范围内的ngrm geom refno
@@ -363,6 +402,14 @@ pub async fn apply_insts_boolean_manifold_single(
                                                 &format!("{error:#}"),
                                             )
                                             .await;
+                                            if failure_policy
+                                                == geom_error::GeometryFailurePolicy::Required
+                                            {
+                                                return Err(anyhow!(
+                                                    "required design positive manifold failed for {} geom={pos_id}: {error:#}",
+                                                    b.refno
+                                                ));
+                                            }
                                             update_sql.push_str(&format!(
                                                 "update {} set bad_bool=true;",
                                                 &inst_relate_id
@@ -377,6 +424,13 @@ pub async fn apply_insts_boolean_manifold_single(
                                         "布尔运算失败: 没有找到正实体 manifold, refno: {}",
                                         &b.refno
                                     );
+                                    if failure_policy == geom_error::GeometryFailurePolicy::Required
+                                    {
+                                        return Err(anyhow!(
+                                            "required design positive manifold set is empty for {}",
+                                            b.refno
+                                        ));
+                                    }
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id
@@ -394,6 +448,13 @@ pub async fn apply_insts_boolean_manifold_single(
                                         "布尔运算失败: 正实体 manifold 没有三角形, refno: {}",
                                         &b.refno
                                     );
+                                    if failure_policy == geom_error::GeometryFailurePolicy::Required
+                                    {
+                                        return Err(anyhow!(
+                                            "required design positive manifold has no triangles for {}",
+                                            b.refno
+                                        ));
+                                    }
                                     update_sql.push_str(&format!(
                                         "update {} set bad_bool=true;",
                                         &inst_relate_id
@@ -435,6 +496,14 @@ pub async fn apply_insts_boolean_manifold_single(
                                                     &format!("{error:#}"),
                                                 )
                                                 .await;
+                                                if failure_policy
+                                                    == geom_error::GeometryFailurePolicy::Required
+                                                {
+                                                    return Err(anyhow!(
+                                                        "required design negative manifold failed for {} geom={id}: {error:#}",
+                                                        b.refno
+                                                    ));
+                                                }
                                                 update_sql.push_str(&format!(
                                                     "update {} set bad_bool=true;",
                                                     &inst_relate_id
@@ -467,6 +536,14 @@ pub async fn apply_insts_boolean_manifold_single(
                                             mesh.indices.len(),
                                             &b.refno
                                         );
+                                        if failure_policy
+                                            == geom_error::GeometryFailurePolicy::Required
+                                        {
+                                            return Err(anyhow!(
+                                                "required design boolean difference is empty for {}",
+                                                b.refno
+                                            ));
+                                        }
                                         update_sql.push_str(&format!(
                                             "update {} set bad_bool=true;",
                                             &inst_relate_id
@@ -683,18 +760,28 @@ fn empty_difference_is_bad_bool_not_a_silent_swallow() {
         .expect("catalogue manifold boundary")
         .0;
     assert!(catalogue.contains("差集为空"), "目录路径同样不得静默吞件");
+    for body in [design, catalogue] {
+        let empty = body
+            .split_once("差集为空")
+            .expect("empty-difference gate")
+            .1;
+        assert!(
+            empty.contains("GeometryFailurePolicy::Required"),
+            "Required must reject an empty boolean result: {empty}"
+        );
+    }
 }
 
-/// 载不进 manifold 的网格必须跳过这一件，不许把整个生成根拖下水。
+/// 载不进 manifold 的网格必须服从调用入口显式选择的失败策略。
 ///
 /// 2026-08-19 现场：BEND `24384/23259` 的正实体报 `manifold3d status: NotManifold`，
 /// 这一句 `?` 出去之后 BRAN `/C-OR-1R345-C` 的 `regen_root` 连撞 5 次到死信，同一
 /// 批里另外 9 个根做完了也没用——`model_ready` 就此永远停在 false。坏几何是确定性
-/// 的，重试不会变好，所以两条生产路径都只跳过这一件、标 `bad_bool` 并把原因打出来。
+/// 的，窗口外只跳过这一件并记账；暂存窗口则必须把错误上浮，阻断水位。
 ///
 /// 与上面几个切片断言同理，本测试必须放在切片边界之后。
 #[test]
-fn a_mesh_that_cannot_be_ingested_is_skipped_instead_of_killing_the_root() {
+fn manifold_ingest_failure_has_required_and_best_effort_paths() {
     let source = include_str!("manifold_bool.rs");
     let catalogue = source
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
@@ -712,14 +799,17 @@ fn a_mesh_that_cannot_be_ingested_is_skipped_instead_of_killing_the_root() {
         .0;
 
     for body in [catalogue, design] {
-        assert!(
-            !body.contains("load positive manifold for")
-                && !body.contains("load negative manifold for"),
-            "载入失败不得再向上抛: {body}"
-        );
         assert!(body.contains("正实体载入失败"), "{body}");
         assert!(body.contains("负实体载入失败"), "{body}");
         assert!(body.contains("set bad_bool=true"), "{body}");
+        assert!(
+            body.contains("GeometryFailurePolicy::Required"),
+            "暂存必需策略必须显式上浮: {body}"
+        );
+        assert!(
+            body.contains("required catalogue") || body.contains("required design"),
+            "必需策略错误要保留路径语义: {body}"
+        );
         // 控制台那句会滚走。跳过必须同时落一行可查的账，否则「这个件的洞没切」
         // 事后没有任何查询能说得出来。
         assert!(body.contains("geom_error::note_skip("), "{body}");
@@ -814,7 +904,12 @@ async fn test_boolean_refno_parse_error() {
 
     let refno: RefnoEnum = "17496_172792".into();
     let path: PathBuf = "assets/meshes".into();
-    apply_insts_boolean_manifold_single(refno, false, path)
-        .await
-        .unwrap();
+    apply_insts_boolean_manifold_single(
+        refno,
+        false,
+        path,
+        geom_error::GeometryFailurePolicy::BestEffortFallback,
+    )
+    .await
+    .unwrap();
 }

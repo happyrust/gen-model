@@ -352,3 +352,24 @@ _Avoid_: 扫描批次、队列轮次。
 Meta、Catalogue、Design 均完成最终复查的状态。只有数据就绪后才能产生新的模型写入。
 
 _Avoid_: 队列空、初始化尝试完成。
+
+# 提交回执 (Commit Receipt)
+
+暂存窗口稳定生成的 `commit_token`。尾事务以它为幂等保护，并与水位写入同一事务；客户端
+超时时用该值区分“服务端已提交”和“尚未提交”。
+
+_Avoid_: 请求 ID、重试 ID。
+
+# 依赖缓存上下文 (Dependency Cache Context)
+
+暂存 CATA 闭包缓存的显式来源边界：源 dbnum 与本窗口实际 `effective_end_sesno`。不得以文件
+最新会话或活动窗口全局状态代替。
+
+_Avoid_: 最新会话缓存、活动窗口缓存。
+
+# 纪元激活门 (Epoch Activation Gate)
+
+manifest/epoch 安装与任务冻结共用的短临界区；固定锁序为 activation gate → scheduler queue →
+coordinator，保证旧纪元任务不会越过新纪元激活边界。
+
+_Avoid_: 初始化锁、队列锁（泛指时）。

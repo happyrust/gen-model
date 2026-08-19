@@ -45,3 +45,7 @@ manifold 的 3588 字节结果。
 - 一次从 default/release 删除 `occ`：没有 SweepSolid 网格器，生成会停。
 - 继续用 OCC 布尔补 manifold 薄片：已被 116569 空网格证伪。
 - 先改 aios-core 再改本仓：本仓布尔是唯一生产调用点，先换调用点即可验证。
+
+## 2026-08-19 Oracle 审核修订
+
+布尔失败采用显式 `GeometryFailurePolicy`：活动暂存窗口为 `Required` 并阻断水位；窗口外按需、延迟及基线后补为 `BestEffortFallback`，保留诊断和旧几何而不形成永久死信。

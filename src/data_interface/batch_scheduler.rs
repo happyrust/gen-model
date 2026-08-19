@@ -21,6 +21,16 @@ use crate::data_interface::batch_queue::{self, BatchIntent, BatchState, DataBatc
 use crate::data_interface::initialization_phase::{DataPhase, InitializationCoordinator};
 use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
+/// Serializes queue claiming with manifest/epoch activation. Lock order is
+/// activation gate -> scheduler queue -> initialization coordinator.
+static EPOCH_ACTIVATION_GATE: Mutex<()> = Mutex::new(());
+
+pub(crate) fn epoch_activation_guard() -> MutexGuard<'static, ()> {
+    EPOCH_ACTIVATION_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 一次发现（文件会话号超过水位）携带的全部入队信息。
 #[derive(Debug, Clone)]
 pub struct DiscoveredBatch {
@@ -470,6 +480,7 @@ impl BatchScheduler {
         in_flight_empty: bool,
         is_exclusive: impl Fn(&batch_queue::DataBatch) -> bool,
     ) -> DispatchOutcome {
+        let _activation = epoch_activation_guard();
         let mut state = self.queue();
         let paused = self.paused.load(Ordering::SeqCst);
         let index = match batch_queue::freeze_next_concurrent(
@@ -817,6 +828,46 @@ mod tests {
             },
             TaskRegistry::default(),
         )
+    }
+
+    #[test]
+    fn epoch_activation_gate_blocks_task_freeze_until_install_finishes() {
+        use std::sync::{Arc, Barrier, mpsc};
+
+        let (scheduler, registry) = fresh();
+        scheduler.enqueue_live(&registry, &found(7997, 0, 1));
+        let scheduler = Arc::new(scheduler);
+        let registry = Arc::new(registry);
+        let gate_held = Arc::new(Barrier::new(2));
+        let release_gate = Arc::new(Barrier::new(2));
+
+        let holder = {
+            let gate_held = gate_held.clone();
+            let release_gate = release_gate.clone();
+            std::thread::spawn(move || {
+                let _guard = epoch_activation_guard();
+                gate_held.wait();
+                release_gate.wait();
+            })
+        };
+        gate_held.wait();
+
+        let (tx, rx) = mpsc::channel();
+        let freezer = {
+            let scheduler = scheduler.clone();
+            let registry = registry.clone();
+            std::thread::spawn(move || {
+                tx.send(scheduler.freeze_next(&registry).is_some()).unwrap();
+            })
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(30)).is_err(),
+            "freezing must wait behind manifest/epoch activation"
+        );
+        release_gate.wait();
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        holder.join().unwrap();
+        freezer.join().unwrap();
     }
 
     #[test]

@@ -52,3 +52,7 @@ ADR-017（暂存窗口提交）、ADR-021（水位数据支撑）；`specs/006-s
 - 让 CATA 继续只做 locator 登记：无法兑现完整 CATA 数据先于 DESI。
 - 将状态表改成 `(project, dbnum)`：改动水位、队列、PE 聚合和清库语义，本期用显式优先级
   解决跨项目同号。
+
+## 2026-08-19 Oracle 审核修订
+
+manifest/epoch 安装与任务冻结共用 activation gate；锁序固定为 activation gate → scheduler queue → coordinator，下一 epoch 不得越过旧 epoch 的冻结边界。

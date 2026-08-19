@@ -40,6 +40,13 @@ staging=0、空间树指纹一致。证据：
 写回仍停在既有 `staging_8000_1` 提交点，水位未推进，因此只记“阶段隔离通过”，不记数据
 提交通过。证据：`docs/evidence/2026-08-19-increment-stage-data-only-live.md`。
 
+**2026-08-19 ADR-037 完整窗口复验**：`db8000_session_pairs` 在严格冻结快照入口下
+21/21 通过，`db_session_fixture_selfcheck` 15/15、`db8000_two_delete_fixture` 6/6、
+`pdms_record_boundary` 3/3 通过；issue-019/020 固定窗口未出现假删除或非 MNUM 终稿降级。
+本轮修改了 `increment_pipeline.rs` 中既有 ignored live 探针的 API 接线，但未对 8009 再做
+写入型复跑：上一段记录的 `staging_8000_1` 仍是现场未收口前置，故不新增“数据提交通过”结论。
+离线命令、vendor 门禁和该限制见 `docs/evidence/2026-08-19-dabacon-snapshot-completeness.md`。
+
 **2026-08-18 已解析库旁新增一个库（启动检查两条入口）**：`data_interface::increment_manager::tests::live_startup_sweep_routes_a_new_db_to_baseline_beside_an_applied_one` 与 `..::live_scope_refresh_baselines_a_db_the_mdb_just_declared`（live 8019，跑法同 Gate 0，另设 `AIOS_MANUAL_UPDATE_PROJECT=AvevaMarineSample`、`RUST_MIN_STACK=16777216`；库号可配 `AIOS_STARTUP_APPLIED_DBNUM` 默认 8000 / `AIOS_STARTUP_NEW_DBNUM` 默认 7998）。**2026-08-18 四轮全通过**：默认 7998 靶 13.13s / 13.23s（命令总耗时各 25.4s），**现场口径 7999 靶**（`AIOS_STARTUP_NEW_DBNUM=7999`，56 MB / 120 会话）75.86s / 72.37s（命令总耗时 88.0s / 84.5s），窗口均为 `1..=120`。补的是 08-17 那条单库用例够不着的两件事：① **两条路由在同一份清单里不串味**——存量库 8000（`applied=file_latest=209` 且 pe 有支撑）与从未解析的 7998 同处一个一次性目录，重扫日志证实 8000 被评估过（`PathMigrated` 登记进临时目录、收尾又迁回）却一行都不排，只有 7998 走「发现从未解析过的文件」→ `新排：sesno 1..=12` → worker 基线 → 回执「首次按需初始化完成」，收尾断言 8000 水位一格未动；② **MDB 才是范围的定义**——库文件全程躺在目录里，把 7998 从 `/ALL` 的 `CURD` 摘掉后重扫报 `1 个库不在 MDB /ALL 的声明名单里（本期声明 28 个 DESI）：DESI:7998`、`DbnumState::read` 仍为 `None`（范围门排在 `record_observation` 之前，连观察值都不写），装回 CURD 后 `resweep_for_scope_change` 的 `[scope-refresh]` 重扫立刻 `新排：sesno 1..=12` 并走基线。MDB 夹具只动 `CURD`（`DBLS` 不碰），原样 CURD 存进 `queue_control:test_mdb_curd_backup` 再按原样写回；主体断言包在 `isolate_panic` 壳里保证无论红绿都先扶正 MDB，用例开头另无条件还原一次以自愈上一轮的中断。跑完实测沙箱完全还原：CURD 71 项且 7998/7999 各声明一次、备份行 0、7998 水位 12 与 7999 水位 120 且 pe 均有支撑、8000 停在 209 未动、三库登记路径均回到项目目录。跑法：
 
 ```powershell
@@ -353,3 +360,9 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 `live_startup_sweep_repairs_a_caught_up_ghost_watermark`；2026-08-13：D 增会话索引差分
 对拍、诊断探针、净窗口收集器负载对拍；A 曾修正 27→28——08-13 新增的
 `live_rollback_and_ghost_watermark_reinit_end_to_end` 此前漏计；E 组为 tests/ 集成用例补录）。
+
+**2026-08-19 Oracle 二次审核正确性收口（离线门禁）**：CATA/Watch Scope、提交回执、
+epoch barrier、几何双策略和硬分块单测通过；四个 CI 集成目标为 6/6、15/15、21/21、
+3/3，Release 构建通过。三个依赖仓库已发布固定 revision，工作区本地 `[patch]` 已关闭。
+本条只登记离线与构建结果；E3D 保存、tail 延迟注入和 staged NotManifold 尚未形成新的 live
+通过结论。命令、字面输出与退出码见 `docs/evidence/2026-08-19-oracle-review-correctness-closure.md`。

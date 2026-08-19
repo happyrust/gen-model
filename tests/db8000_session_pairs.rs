@@ -61,7 +61,7 @@ use pdms_io::snapshot::DabaconSnapshot;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 /// 差分 oracle 的噪声属性白名单。
@@ -95,6 +95,8 @@ struct SessionPairsFixture {
     chain: session_cut::SessionChain,
     /// 现切快照的落脚处，也持有解出的最终文件。
     scratch: TempDir,
+    /// `cargo test` 会并行请求同一个会话切片；序列化首次落盘，避免读到半文件。
+    cut_lock: Mutex<()>,
     /// 合成夹具时持有它的临时目录（外部夹具时为 None）。
     _packed: Option<TempDir>,
     /// issue-019 解压产物；合成路径下 pack 读它当源。
@@ -161,6 +163,7 @@ impl SessionPairsFixture {
             final_bytes,
             chain,
             scratch,
+            cut_lock: Mutex::new(()),
             _packed: packed,
             _issue019: extracted,
         }
@@ -168,6 +171,7 @@ impl SessionPairsFixture {
 
     /// 从最终文件现切某个 sesno（已切过就复用），返回快照路径。
     fn cut(&self, sesno: u32) -> PathBuf {
+        let _guard = self.cut_lock.lock().expect("session cut lock poisoned");
         let path = self.scratch.path().join(format!("sesno-{sesno:03}"));
         if !path.exists() {
             session_cut::write_snapshot(
@@ -870,4 +874,53 @@ fn net_window_collector_matches_replay_ops_on_every_case_window() {
         payloads_compared > 0,
         "一个 Modified 负载都没对拍到——夹具形状变了？"
     );
+}
+
+#[test]
+fn frozen_snapshot_accepts_same_file_growth_and_rejects_same_sesno_replacement() {
+    let fixture = fixture();
+    let work = tempfile::Builder::new()
+        .prefix("snapshot-generation-")
+        .tempdir()
+        .expect("snapshot tempdir");
+
+    let append_path = work.path().join("append-db");
+    fs::copy(fixture.cut(25), &append_path).expect("seed sesno 25");
+    let append_token = {
+        let snapshot = DabaconSnapshot::open("", &append_path).expect("freeze sesno 25");
+        assert_eq!(snapshot.token().target_sesno(), 25);
+        snapshot.token().clone()
+    };
+    // E3D append updates the header in place and extends the same file object.
+    // Rewriting the final fixture into the existing path preserves the stable
+    // file identity while advancing the authoritative session to 26.
+    fs::write(
+        &append_path,
+        fs::read(fixture.cut(26)).expect("read sesno 26"),
+    )
+    .expect("advance same file to sesno 26");
+    let mut reopened =
+        DabaconSnapshot::open_verified("", &append_token).expect("same file generation may grow");
+    assert_eq!(
+        reopened.token().target_sesno(),
+        25,
+        "verified reopen must preserve the frozen target instead of adopting latest"
+    );
+    net_window::collect_net_window(&mut reopened, 25..=25)
+        .expect("collect the frozen target after same-file growth");
+
+    let replace_path = work.path().join("replace-db");
+    let replacement = work.path().join("replacement-db");
+    fs::copy(fixture.cut(25), &replace_path).expect("seed original sesno 25");
+    fs::copy(fixture.cut(25), &replacement).expect("seed replacement with same sesno");
+    let replace_token = {
+        let snapshot = DabaconSnapshot::open("", &replace_path).expect("freeze original");
+        snapshot.token().clone()
+    };
+    fs::remove_file(&replace_path).expect("unlink original path");
+    fs::rename(&replacement, &replace_path).expect("install same-sesno replacement");
+    let error = DabaconSnapshot::open_verified("", &replace_token)
+        .err()
+        .expect("same sesno replacement must fail stable identity verification");
+    assert!(error.to_string().contains("文件身份"), "{error:#}");
 }

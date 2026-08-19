@@ -1,0 +1,24 @@
+$(H
+Initialise the Steelwork settings object after Design command objects are loaded.
+$)
+!traceFile = object FILE('E:/reverse/e3d/ams_steelwork_globals_trace.txt')
+!trace = ARRAY()
+!trace.append('begin')
+!traceFile.writeFile('OVERWRITE', !trace)
+
+if undefined(!!steelworkgsettings) then
+  !settings = object STEELWORKOSETTINGS()
+  !settings.globalInstance()
+  handle any
+    !trace.append('FAIL create STEELWORKGSETTINGS: ' & !!error.text)
+    !traceFile.writeFile('OVERWRITE', !trace)
+    return
+  endhandle
+endif
+
+if undefined(!!steelworkgsettings) then
+  !trace.append('FAIL STEELWORKGSETTINGS remains undefined')
+else
+  !trace.append('PASS STEELWORKGSETTINGS ready')
+endif
+!traceFile.writeFile('OVERWRITE', !trace)

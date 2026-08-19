@@ -6,7 +6,7 @@ use std::path::Path;
 use aios_core::pdms_types::RefU64;
 use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::Context;
-use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
+use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::Serialize;
 
 use super::dbnum_state::DbnumState;
@@ -158,12 +158,19 @@ pub async fn repair_committed_window(
 
     let mut collected = IncrementPipeline::collect_window(file, from_sesno..=to_sesno)?;
     let original_membership_deleted = collected.membership_deleted;
+    let snapshot_token = collected
+        .snapshot_token
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("纠正窗口缺少冻结 SnapshotToken"))?;
+    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified_at(
+        "",
+        &snapshot_token,
+        u32::try_from(to_sesno).context("纠正目标会话非法")?,
+    )
+    .context("纠正成员审计重开冻结快照失败")?;
 
     // 只对持久层已经没有 OWNER 入边的活行做文件成员复核；
     // 普通索引记录不会被这个审计面扩大成删除。
-    let mut io = PdmsIO::new("", file.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("审计打开 PDMS IO 失败: {error}"))?;
     let already_deleted = collected
         .range_eles
         .values()
@@ -185,21 +192,14 @@ pub async fn repair_committed_window(
         .collect::<BTreeSet<_>>();
     let mut unreachable_roots = BTreeSet::new();
     for refno in orphan_candidates(dbnum, &affected_owners).await? {
-        if !already_deleted.contains(&refno)
-            && !pdms_io::net_window::member_alive_at(&mut io, refno, to_sesno)?
-        {
+        if !already_deleted.contains(&refno) && !snapshot.member_alive_at(refno, to_sesno)? {
             unreachable_roots.insert(refno);
         }
     }
     let audit_deleted = if unreachable_roots.is_empty() {
         BTreeSet::new()
     } else {
-        pdms_io::net_window::expand_deleted_membership_roots(
-            &mut io,
-            &unreachable_roots,
-            from_sesno - 1,
-            to_sesno,
-        )?
+        snapshot.expand_deleted_membership_roots(&unreachable_roots, from_sesno - 1, to_sesno)?
     };
     merge_deleted(&mut collected.range_eles, to_sesno, &audit_deleted)?;
 

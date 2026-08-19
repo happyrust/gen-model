@@ -2868,6 +2868,9 @@ pub(crate) struct FileCandidate {
     pub(crate) file_latest_sesno: i32,
     pub(crate) file_size: u64,
     pub(crate) file_modified_at: Option<String>,
+    /// Worker freeze point. Manual/preview scans leave this empty and freeze at
+    /// the shared collector entry instead.
+    pub(crate) snapshot_token: Option<pdms_io::snapshot::SnapshotToken>,
     /// Unsuffixed master next to a `_NNNN` leaf (ADR-028). Overlay reads only.
     pub(crate) extract_parent: Option<PathBuf>,
 }
@@ -4120,6 +4123,7 @@ impl AiosDBManager {
                             file_latest_sesno: sesno as i32,
                             file_size: metadata.as_ref().map(|m| m.len()).unwrap_or_default(),
                             file_modified_at: metadata.as_ref().and_then(file_modified_rfc3339),
+                            snapshot_token: None,
                             extract_parent: None,
                         }),
                         Err(error) => warnings.push(format!(
@@ -4154,6 +4158,7 @@ impl AiosDBManager {
                 file_latest_sesno,
                 file_size,
                 file_modified_at,
+                snapshot_token: None,
                 extract_parent: None,
             });
         }
@@ -5136,7 +5141,12 @@ impl AiosDBManager {
             "dbnum={dbnum} 执行阶段: 收集增量 {}..={}",
             start_sesno, end_sesno
         );
-        let collected = match IncrementPipeline::collect_window(&cand.path, plan.range.clone()) {
+        let collected = match IncrementPipeline::collect_window_for_candidate(
+            &cand.project,
+            &cand.path,
+            plan.range.clone(),
+            cand.snapshot_token.as_ref(),
+        ) {
             Ok(collected) => collected,
             Err(e) => {
                 batch.message = Some(format!("读取增量数据失败: {e}"));
@@ -5541,10 +5551,10 @@ mod tests {
             .map(|(head, _)| head)
             .unwrap_or(body);
 
-        let collects = body.matches("collect_window(").count();
+        let collects = body.matches("collect_window_for_candidate(").count();
         assert_eq!(
             collects, 1,
-            "execute_one_dbnum 只应收集一次增量窗口（经 collect_window 统一入口），\
+            "execute_one_dbnum 只应收集一次增量窗口（经 collect_window_for_candidate 统一入口），\
              实际 {collects} 次"
         );
         assert_eq!(
@@ -5769,6 +5779,7 @@ mod tests {
             file_latest_sesno: 7,
             file_size: 60,
             file_modified_at: None,
+            snapshot_token: None,
             extract_parent: None,
         };
         let by_dbnum =

@@ -1045,9 +1045,14 @@ mod mesh_wall_live {
         crate::fast_model::occ_generate::gen_inst_meshes(&mesh_refnos, true, dir.clone())
             .await
             .expect("gen_inst_meshes");
-        crate::fast_model::manifold_bool::apply_insts_boolean_manifold(&bool_refnos, true, dir)
-            .await
-            .expect("apply_insts_boolean_manifold");
+        crate::fast_model::manifold_bool::apply_insts_boolean_manifold(
+            &bool_refnos,
+            true,
+            dir,
+            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+        )
+        .await
+        .expect("apply_insts_boolean_manifold");
     }
 
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 20 堵 GWALL（挤出）合成 union。

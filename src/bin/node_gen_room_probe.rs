@@ -377,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
                 let cata = aios_database::data_interface::cata_closure::preload_cata_for_roots(
                     &project,
                     &[refno.refno()],
+                    None,
                 )
                 .await?;
                 println!(
