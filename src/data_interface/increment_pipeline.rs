@@ -518,9 +518,10 @@ fn net_caliber_warning(
 ) -> String {
     format!(
         "收集口径：净窗口（会话索引差分，ADR-031/036 单一口径）——added={added} deleted={deleted} \
-         modified={modified} 成员补删={} 原样重写跳过={} 终稿不可解析={} 不可读子页(t/b)={}/{} \
-         层级异常(t/b)={}/{} 目标侧读页={} 差分 {}ms",
+         modified={modified} 成员补删={} 幽灵新增丢弃={} 原样重写跳过={} 终稿不可解析={} \
+         不可读子页(t/b)={}/{} 层级异常(t/b)={}/{} 目标侧读页={} 差分 {}ms",
         outcome.membership_deleted,
+        outcome.dropped_phantom_adds,
         outcome.unchanged_rewrites,
         outcome.unparseable_finals,
         outcome.stats.target.unreadable_child_pages,
@@ -2335,6 +2336,7 @@ mod cache_tests {
             unparseable_finals: 3,
             ignored_finals: Vec::new(),
             membership_deleted: 6,
+            dropped_phantom_adds: 2,
             stats: pdms_io::session_index_diff::NetChangeStats::default(),
         };
         outcome.stats.target.unreadable_child_pages = 2;
@@ -2354,6 +2356,7 @@ mod cache_tests {
             "deleted=8",
             "modified=9",
             "成员补删=6",
+            "幽灵新增丢弃=2",
             "原样重写跳过=4",
             "终稿不可解析=3",
             "不可读子页(t/b)=2/1",
